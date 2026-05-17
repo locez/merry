@@ -4,5 +4,13 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
+[dev-dependencies]
+futures-executor.workspace = true
+futures-util.workspace = true
+merry-core = { path = "../merry-core" }
+merry-llm = { path = "../merry-llm", features = ["test-utils"] }
+schemars.workspace = true
+serde_json.workspace = true
+
 [lints]
 workspace = true
