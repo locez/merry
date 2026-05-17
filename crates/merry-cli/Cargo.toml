@@ -1,0 +1,12 @@
+[package]
+name = "merry-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "merry"
+path = "src/main.rs"
+
+[lints]
+workspace = true
