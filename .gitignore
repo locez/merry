@@ -1,0 +1,25 @@
+# Private product/design notes. Keep local only unless explicitly sanitized.
+docs/
+
+# Local agent/tool metadata.
+.agents/
+.codex/
+
+# Rust build outputs.
+target/
+
+# Python packaging/build outputs.
+.venv/
+__pycache__/
+*.py[cod]
+*.so
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Editor and OS noise.
+.DS_Store
+*.swp
+*.swo
+
