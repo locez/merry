@@ -1,0 +1,405 @@
+use merry_core::{
+    ArtifactId, ArtifactKind, ArtifactRef, CoreError, ErrorInfo, EvidenceLocator, EvidenceRef,
+    ProviderName, RuntimeEvent, RuntimeEventKind, SessionId, SkillId, ToolInputSchema, ToolName,
+    ToolSpec,
+};
+use schemars::{JsonSchema, Schema};
+use serde::{Serialize, de::DeserializeOwned};
+use serde_json::{Value, json};
+use std::str::FromStr;
+
+fn assert_json_round_trip<T>(value: &T)
+where
+    T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug,
+{
+    let encoded = serde_json::to_string(value).expect("value should serialize");
+    let decoded = serde_json::from_str::<T>(&encoded).expect("value should deserialize");
+    assert_eq!(&decoded, value);
+}
+
+fn assert_schema_compiles<T: JsonSchema>() {
+    let _schema = schemars::schema_for!(T);
+}
+
+fn json_schema(value: Value) -> Schema {
+    Schema::try_from(value).expect("test schema should be JSON schema")
+}
+
+#[test]
+fn ids_validate_and_round_trip_as_json_strings() {
+    let session = SessionId::new("session-1").expect("valid session id");
+    let artifact = ArtifactId::from_str("artifact_1").expect("valid artifact id");
+    let skill = SkillId::try_from("skill.alpha").expect("valid skill id");
+    let provider =
+        ProviderName::try_from(String::from("openai-compatible")).expect("valid provider name");
+
+    assert_eq!(session.as_str(), "session-1");
+    assert_eq!(artifact.to_string(), "artifact_1");
+    assert_eq!(skill.as_str(), "skill.alpha");
+    assert_eq!(provider.as_str(), "openai-compatible");
+
+    assert_eq!(
+        serde_json::to_value(&session).expect("session serializes"),
+        json!("session-1")
+    );
+
+    assert_json_round_trip(&session);
+    assert_json_round_trip(&artifact);
+    assert_json_round_trip(&skill);
+    assert_json_round_trip(&provider);
+
+    for invalid in ["", "   ", " has-leading", "has-trailing ", "has\nnewline"] {
+        assert!(
+            SessionId::new(invalid).is_err(),
+            "{invalid:?} should reject"
+        );
+        assert!(serde_json::from_value::<SessionId>(json!(invalid)).is_err());
+        assert!(serde_json::from_value::<SkillId>(json!(invalid)).is_err());
+        assert!(serde_json::from_value::<ProviderName>(json!(invalid)).is_err());
+    }
+
+    let overlong = "a".repeat(129);
+    assert!(ArtifactId::new(&overlong).is_err());
+    assert!(serde_json::from_value::<ArtifactId>(json!(overlong)).is_err());
+}
+
+#[test]
+fn tool_name_uses_provider_portable_validation() {
+    for valid in ["tool", "tool_1", "_internal", "Tool-Name_99"] {
+        let name = ToolName::new(valid).expect("valid portable tool name");
+        assert_eq!(name.as_str(), valid);
+        assert_json_round_trip(&name);
+    }
+
+    for invalid in [
+        "",
+        "-starts-with-dash",
+        "1starts_with_digit",
+        "contains.dot",
+        "contains space",
+        "contains/slash",
+        "contains:colon",
+        "tool\nname",
+    ] {
+        assert!(ToolName::new(invalid).is_err(), "{invalid:?} should reject");
+        assert!(serde_json::from_value::<ToolName>(json!(invalid)).is_err());
+    }
+
+    let max_len = "a".repeat(64);
+    assert!(ToolName::new(&max_len).is_ok());
+    let overlong = "a".repeat(65);
+    assert!(ToolName::new(&overlong).is_err());
+}
+
+#[test]
+fn artifact_and_evidence_references_round_trip_with_stable_json_shapes() {
+    let artifact = ArtifactRef::new(
+        ArtifactId::new("artifact-1").expect("valid artifact id"),
+        ArtifactKind::Json,
+    )
+    .with_label("Result payload")
+    .expect("valid artifact label");
+
+    let artifact_json = serde_json::to_value(&artifact).expect("artifact serializes");
+    assert_eq!(
+        artifact_json,
+        json!({
+            "id": "artifact-1",
+            "kind": "json",
+            "label": "Result payload"
+        })
+    );
+    assert_eq!(artifact.id().as_str(), "artifact-1");
+    assert_eq!(artifact.kind(), &ArtifactKind::Json);
+    assert_eq!(artifact.label(), Some("Result payload"));
+    assert_json_round_trip(&artifact);
+    assert!(
+        serde_json::from_value::<ArtifactRef>(json!({
+            "id": "artifact-1",
+            "kind": "json",
+            "label": " invalid label "
+        }))
+        .is_err()
+    );
+
+    let whole = EvidenceRef::new(
+        ArtifactId::new("artifact-1").expect("valid artifact id"),
+        EvidenceLocator::whole_artifact(),
+    );
+    assert_eq!(
+        serde_json::to_value(&whole).expect("evidence serializes"),
+        json!({
+            "artifact_id": "artifact-1",
+            "locator": { "type": "whole_artifact" }
+        })
+    );
+    assert_json_round_trip(&whole);
+
+    let locators = [
+        EvidenceLocator::line_range(3, 8).expect("valid line range"),
+        EvidenceLocator::byte_range(10, 42).expect("valid byte range"),
+        EvidenceLocator::json_pointer("/items/0/name").expect("valid json pointer"),
+        EvidenceLocator::named_section("Findings").expect("valid named section"),
+    ];
+
+    for locator in locators {
+        assert_json_round_trip(&locator);
+    }
+
+    let line_range = EvidenceLocator::line_range(3, 8).expect("valid line range");
+    assert_eq!(line_range.as_line_range(), Some((3, 8)));
+    assert_eq!(line_range.as_byte_range(), None);
+    assert_eq!(line_range.as_json_pointer(), None);
+    assert_eq!(line_range.as_named_section(), None);
+    assert!(!line_range.is_whole_artifact());
+
+    let byte_range = EvidenceLocator::byte_range(10, 42).expect("valid byte range");
+    assert_eq!(byte_range.as_byte_range(), Some((10, 42)));
+
+    let pointer = EvidenceLocator::json_pointer("/items/0/name").expect("valid json pointer");
+    assert_eq!(pointer.as_json_pointer(), Some("/items/0/name"));
+
+    let section = EvidenceLocator::named_section("Findings").expect("valid named section");
+    assert_eq!(section.as_named_section(), Some("Findings"));
+
+    assert!(EvidenceLocator::whole_artifact().is_whole_artifact());
+    assert_eq!(EvidenceLocator::whole_artifact().as_line_range(), None);
+}
+
+#[test]
+fn evidence_locators_reject_invalid_ranges_and_json_pointers() {
+    assert!(EvidenceLocator::line_range(0, 1).is_err());
+    assert!(EvidenceLocator::line_range(4, 3).is_err());
+    assert!(EvidenceLocator::byte_range(7, 7).is_err());
+    assert!(EvidenceLocator::byte_range(8, 7).is_err());
+
+    for invalid in [
+        "items/0",
+        "/bad~escape",
+        "/bad~2escape",
+        "/has/control\nchar",
+    ] {
+        assert!(
+            EvidenceLocator::json_pointer(invalid).is_err(),
+            "{invalid:?} should reject"
+        );
+    }
+
+    assert!(EvidenceLocator::named_section("").is_err());
+    assert!(EvidenceLocator::named_section(" section ").is_err());
+
+    assert!(
+        serde_json::from_value::<EvidenceLocator>(json!({
+            "type": "line_range",
+            "start": 0,
+            "end": 1
+        }))
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<EvidenceLocator>(json!({
+            "type": "byte_range",
+            "start": 8,
+            "end": 7
+        }))
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<EvidenceLocator>(json!({
+            "type": "named_section",
+            "name": " section "
+        }))
+        .is_err()
+    );
+}
+
+#[test]
+fn empty_json_pointer_policy_uses_whole_artifact_locator() {
+    assert!(
+        EvidenceLocator::json_pointer("").is_err(),
+        "empty JSON Pointer is reserved for EvidenceLocator::WholeArtifact"
+    );
+    assert!(
+        serde_json::from_value::<EvidenceLocator>(json!({
+            "type": "json_pointer",
+            "pointer": ""
+        }))
+        .is_err()
+    );
+
+    assert_json_round_trip(&EvidenceLocator::whole_artifact());
+}
+
+#[test]
+fn tool_spec_validates_names_descriptions_and_object_schemas() {
+    let schema = ToolInputSchema::new(json_schema(json!({
+        "type": "object",
+        "properties": {
+            "path": { "type": "string" }
+        },
+        "required": ["path"]
+    })))
+    .expect("object schema is valid");
+
+    let spec = ToolSpec::new(
+        ToolName::new("read_file").expect("valid name"),
+        "Read a file from the workspace",
+        schema,
+    )
+    .expect("valid tool spec");
+
+    assert_eq!(spec.name().as_str(), "read_file");
+    assert_eq!(spec.description(), "Read a file from the workspace");
+    assert!(spec.input_schema().as_schema().as_object().is_some());
+    assert_json_round_trip(&spec);
+
+    assert!(ToolName::new("bad.name").is_err());
+    assert!(
+        serde_json::from_value::<ToolSpec>(json!({
+            "name": "bad.name",
+            "description": "Bad tool name",
+            "input_schema": { "type": "object" }
+        }))
+        .is_err()
+    );
+    assert!(
+        ToolSpec::new(
+            ToolName::new("read_file").expect("valid name"),
+            "  ",
+            ToolInputSchema::new(json_schema(json!({ "type": "object" }))).expect("valid schema"),
+        )
+        .is_err()
+    );
+    assert!(ToolInputSchema::new(Schema::try_from(json!(true)).expect("boolean schema")).is_err());
+    assert!(Schema::try_from(json!([])).is_err());
+
+    assert!(
+        serde_json::from_value::<ToolSpec>(json!({
+            "name": "read_file",
+            "description": "bad\ndescription",
+            "input_schema": { "type": "object" }
+        }))
+        .is_err()
+    );
+}
+
+#[test]
+fn runtime_event_uses_stable_snake_case_tags_and_round_trips() {
+    let event = RuntimeEvent::new(
+        SessionId::new("session-1").expect("valid session id"),
+        7,
+        RuntimeEventKind::ArtifactRecorded {
+            artifact: ArtifactRef::new(
+                ArtifactId::new("artifact-1").expect("valid artifact id"),
+                ArtifactKind::Text,
+            ),
+        },
+    );
+
+    assert_eq!(
+        serde_json::to_value(&event).expect("event serializes"),
+        json!({
+            "session_id": "session-1",
+            "sequence": 7,
+            "kind": {
+                "type": "artifact_recorded",
+                "artifact": {
+                    "id": "artifact-1",
+                    "kind": "text",
+                    "label": null
+                }
+            }
+        })
+    );
+    assert_json_round_trip(&event);
+
+    let failed = RuntimeEvent::new(
+        SessionId::new("session-1").expect("valid session id"),
+        8,
+        RuntimeEventKind::Failed {
+            diagnostic: ErrorInfo::new("validation", "Tool spec was invalid")
+                .expect("valid diagnostic"),
+        },
+    );
+    let failed_json = serde_json::to_value(&failed).expect("failed event serializes");
+    assert!(failed_json.get("provider").is_none());
+    assert_json_round_trip(&failed);
+
+    let diagnostic =
+        ErrorInfo::new("validation", "Tool spec was invalid").expect("valid diagnostic");
+    assert_eq!(diagnostic.code(), "validation");
+    assert_eq!(diagnostic.message(), "Tool spec was invalid");
+
+    assert!(ErrorInfo::new("", "message").is_err());
+    assert!(ErrorInfo::new("kind", " ").is_err());
+    assert!(
+        serde_json::from_value::<ErrorInfo>(json!({
+            "code": " validation",
+            "message": "Tool spec was invalid"
+        }))
+        .is_err()
+    );
+}
+
+#[test]
+fn core_error_display_messages_include_actionable_context() {
+    let id_error = SessionId::new("bad\nid").expect_err("control character should reject");
+    assert!(matches!(id_error, CoreError::InvalidIdentifier { .. }));
+    assert!(
+        id_error
+            .to_string()
+            .contains("SessionId must not contain control characters")
+    );
+
+    let schema_error = ToolInputSchema::new(Schema::try_from(json!(true)).expect("boolean schema"))
+        .expect_err("boolean schema should reject");
+    assert!(matches!(schema_error, CoreError::InvalidSchema { .. }));
+    assert!(
+        schema_error
+            .to_string()
+            .contains("ToolInputSchema must be a JSON object")
+    );
+
+    let evidence_error =
+        EvidenceLocator::line_range(9, 2).expect_err("descending line range should reject");
+    assert!(matches!(
+        evidence_error,
+        CoreError::InvalidEvidenceLocator { .. }
+    ));
+    assert!(
+        evidence_error
+            .to_string()
+            .contains("line range start must be less than or equal to end")
+    );
+
+    let tool_error = ToolSpec::new(
+        ToolName::new("valid_tool").expect("valid name"),
+        "",
+        ToolInputSchema::new(json_schema(json!({}))).expect("valid schema"),
+    )
+    .expect_err("blank description should reject");
+    assert!(matches!(tool_error, CoreError::InvalidToolSpec { .. }));
+    assert!(
+        tool_error
+            .to_string()
+            .contains("ToolSpec description must not be blank")
+    );
+}
+
+#[test]
+fn schemars_generation_compiles_for_public_protocol_types() {
+    assert_schema_compiles::<SessionId>();
+    assert_schema_compiles::<ArtifactId>();
+    assert_schema_compiles::<ToolName>();
+    assert_schema_compiles::<SkillId>();
+    assert_schema_compiles::<ProviderName>();
+    assert_schema_compiles::<ArtifactKind>();
+    assert_schema_compiles::<ArtifactRef>();
+    assert_schema_compiles::<EvidenceLocator>();
+    assert_schema_compiles::<EvidenceRef>();
+    assert_schema_compiles::<ToolInputSchema>();
+    assert_schema_compiles::<ToolSpec>();
+    assert_schema_compiles::<ErrorInfo>();
+    assert_schema_compiles::<RuntimeEvent>();
+    assert_schema_compiles::<RuntimeEventKind>();
+}

@@ -1,1 +1,17 @@
 //! Shared Merry protocol types and runtime contracts.
+
+pub mod artifact;
+pub mod error;
+pub mod event;
+pub mod evidence;
+pub mod id;
+pub mod schema;
+pub mod tool;
+
+pub use artifact::{ArtifactKind, ArtifactRef};
+pub use error::CoreError;
+pub use event::{ErrorInfo, RuntimeEvent, RuntimeEventKind};
+pub use evidence::{EvidenceLocator, EvidenceRef};
+pub use id::{ArtifactId, ProviderName, SessionId, SkillId, ToolName};
+pub use schema::ToolInputSchema;
+pub use tool::ToolSpec;
