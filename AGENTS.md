@@ -24,6 +24,24 @@ Merry is runtime-first. Keep these ownership boundaries clear:
 
 Do not leak provider-specific response formats into runtime, memory, artifact, skill, or compiler code.
 
+## Initial Workspace Decisions
+
+- Use a Cargo virtual workspace.
+- Start with these implementation crates:
+  - `merry-core`
+  - `merry-llm`
+  - `merry-runtime`
+  - `merry-provider-openai`
+  - `merry-cli`
+- Defer these crates until the event protocol and runtime builder are stable:
+  - `merry-macros`
+  - `merry-py`
+  - a Rust facade crate named `merry`
+- Use Rust 2024 edition and workspace resolver 3 unless a concrete toolchain issue forces a revision.
+- Keep features additive. Do not use mutually exclusive feature sets unless there is no practical alternative.
+- Provider integrations belong in provider crates, not runtime feature flags.
+- Forbid unsafe at the workspace lint level.
+
 ## Context And Evidence Rules
 
 - Runtime state is structured. Do not make raw chat history the source of truth.
@@ -58,6 +76,19 @@ Future subagent support should use explicit task contracts, artifact references,
 - Keep async boundaries explicit and avoid blocking inside async code.
 - Avoid global mutable state.
 - Avoid hidden registration side effects in macros.
+
+## Async Runtime Rules
+
+- Use Tokio for the MVP runtime surface. Do not introduce a runtime-agnostic executor abstraction yet.
+- Runtime and provider event APIs should be stream-first.
+- Public dyn/plugin async boundaries should use explicit `BoxFuture` or `BoxStream` rather than bare `async fn` in public traits.
+- Internal/private traits may use native async syntax when dyn compatibility is not required.
+- Use bounded `tokio::sync::mpsc` channels for event production unless a design explicitly justifies another stream source.
+- Dropping an event stream or cancelling its token must stop producers and avoid new side effects.
+- Long-running loops must include documented cancellation checkpoints.
+- No observable `RuntimeEvent` may claim an artifact, ledger update, or checkpoint before that state is durably written.
+- Use cooperative cancellation with cancellation tokens and `tokio::select!` where appropriate.
+- `spawn_blocking` is only for bounded blocking work; do not use it as a general escape hatch.
 
 ## Rust Code Quality Rules
 
@@ -115,6 +146,7 @@ These rules are intentionally concrete. Passing the compiler is not enough; code
 - Avoid `Arc<Mutex<Everything>>`. If it appears, split the state or define a narrower synchronization boundary.
 - Cancellation, checkpoint, and retry boundaries should be explicit in long-running runtime code.
 - Spawned tasks must have clear ownership, error propagation, and shutdown behavior.
+- Async tests should avoid wall-clock sleeps. Prefer fake streams, paused Tokio time, cancellation/drop tests, and deterministic artifact/ledger assertions.
 
 ### Traits And Dynamic Dispatch
 
@@ -181,6 +213,22 @@ Use this checklist before reporting a Rust change as complete:
 - Python APIs should be ergonomic wrappers around Rust-owned behavior.
 - Do not call arbitrary Python callbacks from deep runtime code in early implementations.
 - Prefer event bridging for Python tools: Rust emits a tool call, Python executes it, Python returns the result.
+- When Python bindings are added, use a mixed maturin layout with Rust exposed as `merry._merry` and ergonomic Python wrappers in `python/merry`.
+- PyO3 and `pyo3-async-runtimes` dependencies are allowed only in `merry-py`.
+- PyO3 types such as `Python<'py>` and `Py<PyAny>` must not cross into core, runtime, llm, or provider traits.
+- Python should expose async event iteration as the primary API, such as `async for event in runtime.step(...)`.
+- Rust code must not hold the GIL while awaiting, blocking, or locking Rust mutexes.
+
+## Provider Integration Rules
+
+- Merry-owned provider traits and normalized event/request/response types live in `merry-llm`.
+- Provider wire structs must remain private to provider crates.
+- Tool schemas are generated from Merry-owned types; provider crates render those schemas into provider-specific request formats.
+- MVP OpenAI-compatible support should use direct `reqwest` in the provider crate unless a later implementation plan justifies wrapping another crate.
+- Do not wrap multiprovider abstraction crates in MVP if they compete with Merry's own provider boundary.
+- Do not use provider conversation state as Merry runtime state.
+- If an OpenAI Responses adapter is added later, set `store = false` by default and do not use `previous_response_id` as the Merry task ledger.
+- Disable parallel tool calls by default until runtime policy explicitly supports more than one pending tool call.
 
 ## Testing And Verification
 
