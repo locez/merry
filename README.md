@@ -7,5 +7,7 @@ The repository is currently in setup and design-lock stage. Implementation detai
 ## Repository Notes
 
 - Engineering rules for agents and contributors live in [AGENTS.md](AGENTS.md).
+- Project lead operating rules live in [PROJECT_LEAD.md](PROJECT_LEAD.md).
+- Development subagent workflow lives in [SUBAGENT_WORKFLOW.md](SUBAGENT_WORKFLOW.md).
 - Local product and design notes are intentionally ignored by git.
 - Do not commit private planning documents unless they have been explicitly reviewed for public exposure.
