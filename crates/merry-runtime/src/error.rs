@@ -1,5 +1,6 @@
 //! Runtime error types.
 
+use crate::artifact::ArtifactError;
 use merry_core::{CoreError, SessionId};
 use thiserror::Error;
 
@@ -26,5 +27,13 @@ pub enum RuntimeError {
         /// Source core validation error.
         #[from]
         source: CoreError,
+    },
+
+    /// Artifact state could not be recorded or read.
+    #[error("artifact state error: {source}")]
+    Artifact {
+        /// Source artifact error.
+        #[from]
+        source: ArtifactError,
     },
 }

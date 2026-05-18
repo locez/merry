@@ -165,7 +165,7 @@ pub enum ArtifactError {
 ///
 /// Recording returns an [`ArtifactRef`] only after metadata and exact content
 /// have been stored, keeping state-before-reference usage natural for callers.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ArtifactRegistry {
     records: BTreeMap<ArtifactId, ArtifactRecord>,
 }
