@@ -96,6 +96,10 @@ impl SessionState {
         self.ledger.project()
     }
 
+    pub(crate) fn pending_tool_calls(&self) -> Vec<PendingToolCall> {
+        self.pending_tool_calls.clone()
+    }
+
     pub(crate) fn record_session_started_if_needed(&mut self) -> Option<RuntimeEvent> {
         if self.session_started {
             return None;

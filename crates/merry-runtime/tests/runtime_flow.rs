@@ -78,6 +78,15 @@ async fn runtime_records_context_state_and_builds_compilable_snapshot() {
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn new_runtime_has_no_pending_tool_calls() {
+    let runtime = Runtime::builder(session_id())
+        .build()
+        .expect("runtime should build");
+
+    assert!(runtime.pending_tool_calls().await.is_empty());
+}
+
 #[track_caller]
 fn assert_sequences(events: &[RuntimeEvent], expected: &[u64]) {
     assert_eq!(

@@ -135,6 +135,12 @@ impl Runtime {
         let session = self.inner.session.lock().await;
         session.ledger_projection()
     }
+
+    /// Returns a snapshot of provider-neutral tool calls currently awaiting results.
+    pub async fn pending_tool_calls(&self) -> Vec<PendingToolCall> {
+        let session = self.inner.session.lock().await;
+        session.pending_tool_calls()
+    }
 }
 
 /// Builder for a Merry runtime.
