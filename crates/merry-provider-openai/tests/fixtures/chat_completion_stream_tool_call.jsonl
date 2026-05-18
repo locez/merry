@@ -1,0 +1,5 @@
+data: {"id":"chatcmpl-stream-tool","object":"chat.completion.chunk","created":1730000004,"model":"gpt-4.1-mini","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_stream_123","type":"function","function":{"name":"lookup_weather","arguments":"{\"city\""}}]},"finish_reason":null}],"usage":null}
+data: {"id":"chatcmpl-stream-tool","object":"chat.completion.chunk","created":1730000004,"model":"gpt-4.1-mini","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":":\"Shanghai\"}"}}]},"finish_reason":null}],"usage":null}
+data: {"id":"chatcmpl-stream-tool","object":"chat.completion.chunk","created":1730000004,"model":"gpt-4.1-mini","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":null}
+data: {"id":"chatcmpl-stream-tool","object":"chat.completion.chunk","created":1730000004,"model":"gpt-4.1-mini","choices":[],"usage":{"prompt_tokens":14,"completion_tokens":6,"total_tokens":20}}
+data: [DONE]
