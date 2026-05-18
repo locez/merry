@@ -43,25 +43,52 @@ fn parse_chat_completion_stream_events_inner(
     jsonl: &str,
 ) -> Result<Vec<ModelEvent>, OpenAiProviderError> {
     let mut events = vec![ModelEvent::Started];
-    let mut aggregate_text = String::new();
-    let mut tool_call_buffers = BTreeMap::new();
-    let mut tool_calls = Vec::new();
-    let mut finish_reason = None;
-    let mut completed = false;
+    let mut parser = ChatCompletionStreamParser::new();
 
     for raw_line in jsonl.lines() {
+        events.extend(parser.parse_sse_line(raw_line)?);
+    }
+
+    parser.finish()?;
+
+    Ok(events)
+}
+
+pub(crate) struct ChatCompletionStreamParser {
+    aggregate_text: String,
+    tool_call_buffers: BTreeMap<u64, StreamToolCallBuffer>,
+    tool_calls: Vec<ModelToolCall>,
+    finish_reason: Option<FinishReason>,
+    completed: bool,
+}
+
+impl ChatCompletionStreamParser {
+    pub(crate) fn new() -> Self {
+        Self {
+            aggregate_text: String::new(),
+            tool_call_buffers: BTreeMap::new(),
+            tool_calls: Vec::new(),
+            finish_reason: None,
+            completed: false,
+        }
+    }
+
+    pub(crate) fn parse_sse_line(
+        &mut self,
+        raw_line: &str,
+    ) -> Result<Vec<ModelEvent>, OpenAiProviderError> {
         let line = raw_line.trim();
         if line.is_empty() {
-            continue;
+            return Ok(Vec::new());
         }
 
         let data = line
             .strip_prefix("data: ")
             .ok_or_else(|| OpenAiProviderError::protocol("stream line must start with `data: `"))?;
         if data == "[DONE]" {
-            continue;
+            return Ok(Vec::new());
         }
-        if completed {
+        if self.completed {
             return Err(OpenAiProviderError::protocol(
                 "stream emitted a chunk after completion",
             ));
@@ -71,6 +98,23 @@ fn parse_chat_completion_stream_events_inner(
             OpenAiProviderError::protocol(format!("failed to parse stream chunk: {error}"))
         })?;
 
+        self.parse_chunk(chunk)
+    }
+
+    pub(crate) fn finish(&self) -> Result<(), OpenAiProviderError> {
+        if self.completed {
+            return Ok(());
+        }
+
+        Err(OpenAiProviderError::protocol(
+            "stream ended before completion usage chunk",
+        ))
+    }
+
+    fn parse_chunk(
+        &mut self,
+        chunk: ChatCompletionStreamChunk,
+    ) -> Result<Vec<ModelEvent>, OpenAiProviderError> {
         if chunk.choices.is_empty() {
             if chunk.usage.is_none() {
                 return Err(OpenAiProviderError::protocol(
@@ -79,18 +123,17 @@ fn parse_chat_completion_stream_events_inner(
             }
 
             let usage = chunk.usage.map(usage_from_wire);
-            let finish_reason = finish_reason.ok_or_else(|| {
+            let finish_reason = self.finish_reason.ok_or_else(|| {
                 OpenAiProviderError::protocol("usage chunk arrived before finish reason")
             })?;
-            events.push(ModelEvent::Completed {
+            self.completed = true;
+            return Ok(vec![ModelEvent::Completed {
                 response: ModelResponse::new(
-                    stream_outputs(&aggregate_text, &tool_calls),
+                    stream_outputs(&self.aggregate_text, &self.tool_calls),
                     finish_reason,
                     usage,
                 ),
-            });
-            completed = true;
-            continue;
+            }]);
         }
 
         if chunk.choices.len() != 1 {
@@ -104,23 +147,17 @@ fn parse_chat_completion_stream_events_inner(
             .into_iter()
             .next()
             .expect("length checked above");
+        let mut events = Vec::new();
         parse_stream_choice(
             choice,
             &mut events,
-            &mut aggregate_text,
-            &mut tool_call_buffers,
-            &mut tool_calls,
-            &mut finish_reason,
+            &mut self.aggregate_text,
+            &mut self.tool_call_buffers,
+            &mut self.tool_calls,
+            &mut self.finish_reason,
         )?;
+        Ok(events)
     }
-
-    if !completed {
-        return Err(OpenAiProviderError::protocol(
-            "stream ended before completion usage chunk",
-        ));
-    }
-
-    Ok(events)
 }
 
 fn parse_completion_response(

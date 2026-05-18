@@ -44,6 +44,10 @@ impl OpenAiProviderConfig {
         redact_secret(&self.api_key)
     }
 
+    pub(crate) fn api_key(&self) -> &str {
+        &self.api_key
+    }
+
     /// Returns the base URL used for Chat Completions-compatible requests.
     #[must_use]
     pub fn base_url(&self) -> &str {
