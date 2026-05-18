@@ -6,8 +6,8 @@ use crate::{
     ledger::{LedgerFactKind, TaskLedger},
 };
 use merry_core::{
-    ArtifactId, ArtifactKind, ArtifactRef, ErrorInfo, EvidenceLocator, EvidenceRef, RuntimeEvent,
-    RuntimeEventKind, SessionId,
+    ArtifactId, ArtifactKind, ArtifactRef, ErrorInfo, EvidenceLocator, EvidenceRef,
+    PendingToolCall, RuntimeEvent, RuntimeEventKind, SessionId,
 };
 
 /// Mutable runtime state for one session.
@@ -19,6 +19,7 @@ pub(crate) struct SessionState {
     ledger: TaskLedger,
     artifacts: ArtifactRegistry,
     context_entries: Vec<ContextEntry>,
+    pending_tool_calls: Vec<PendingToolCall>,
 }
 
 impl SessionState {
@@ -30,6 +31,7 @@ impl SessionState {
             ledger: TaskLedger::default(),
             artifacts: ArtifactRegistry::default(),
             context_entries: Vec::new(),
+            pending_tool_calls: Vec::new(),
         }
     }
 
@@ -114,6 +116,14 @@ impl SessionState {
         self.record_event(
             RuntimeEventKind::StepCompleted,
             LedgerFactKind::StepCompleted,
+        )
+    }
+
+    pub(crate) fn record_tool_call_pending(&mut self, call: PendingToolCall) -> RuntimeEvent {
+        self.pending_tool_calls.push(call.clone());
+        self.record_event(
+            RuntimeEventKind::ToolCallPending { call },
+            LedgerFactKind::ToolCallPending,
         )
     }
 

@@ -85,6 +85,7 @@ fn records_existing_event_lifecycle_facts() {
     ledger.record_lifecycle(1, LedgerFactKind::ArtifactRecorded);
     ledger.record_lifecycle(2, LedgerFactKind::StepStarted);
     ledger.record_lifecycle(3, LedgerFactKind::StepCompleted);
+    ledger.record_lifecycle(4, LedgerFactKind::ToolCallPending);
 
     let lifecycle: Vec<_> = ledger
         .lifecycle_facts()
@@ -99,6 +100,7 @@ fn records_existing_event_lifecycle_facts() {
             (1, LedgerFactKind::ArtifactRecorded),
             (2, LedgerFactKind::StepStarted),
             (3, LedgerFactKind::StepCompleted),
+            (4, LedgerFactKind::ToolCallPending),
         ]
     );
 }

@@ -9,11 +9,12 @@ use crate::{
 };
 use futures_util::StreamExt;
 use merry_core::{
-    ArtifactId, ArtifactRef, ErrorInfo, EvidenceLocator, EvidenceRef, RuntimeEvent, SessionId,
+    ArtifactId, ArtifactRef, CoreError, ErrorInfo, EvidenceLocator, EvidenceRef, PendingToolCall,
+    RuntimeEvent, SessionId, ToolCallArguments, ToolCallId,
 };
 use merry_llm::{
     FinishReason, GenerationConfig, ModelError, ModelEvent, ModelName, ModelOutput, ModelProvider,
-    ModelStreamContext, ProviderErrorKind,
+    ModelStreamContext, ModelToolCall, ProviderErrorKind,
 };
 use std::{
     num::NonZeroUsize,
@@ -24,6 +25,11 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 
 const DEFAULT_EVENT_BUFFER_SIZE: usize = 16;
+const DIAGNOSTIC_MODEL_TOOL_CALL_INVALID: &str = "model_tool_call_invalid";
+const DIAGNOSTIC_MODEL_TOOL_CALL_MISSING: &str = "model_tool_call_missing";
+const DIAGNOSTIC_MODEL_TOOL_CALL_MIXED_OUTPUT: &str = "model_tool_call_mixed_output";
+const DIAGNOSTIC_MODEL_PARALLEL_TOOL_CALLS_UNSUPPORTED: &str =
+    "model_parallel_tool_calls_unsupported";
 
 /// Merry runtime handle for one session.
 #[derive(Clone)]
@@ -313,6 +319,9 @@ async fn run_provider_step(
         }
     };
 
+    let mut saw_non_empty_text_delta = false;
+    let mut streamed_tool_call: Option<PendingToolCall> = None;
+
     loop {
         let item = tokio::select! {
             biased;
@@ -324,9 +333,23 @@ async fn run_provider_step(
         };
 
         match item {
-            Some(Ok(ModelEvent::Started | ModelEvent::OutputTextDelta { .. })) => {}
+            Some(Ok(ModelEvent::Started)) => {}
+            Some(Ok(ModelEvent::OutputTextDelta { delta })) => {
+                if !delta.is_empty() {
+                    saw_non_empty_text_delta = true;
+                }
+            }
             Some(Ok(ModelEvent::Completed { response })) => match response.finish_reason() {
                 FinishReason::Stop => {
+                    if streamed_tool_call.is_some() {
+                        let diagnostic = diagnostic_from_text(
+                            DIAGNOSTIC_MODEL_TOOL_CALL_MIXED_OUTPUT,
+                            "model requested a tool call before completing with text output",
+                        );
+                        let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                        return;
+                    }
+
                     let [ModelOutput::Text { text }] = response.outputs() else {
                         let diagnostic = diagnostic_from_text(
                             "model_output_unsupported",
@@ -349,11 +372,28 @@ async fn run_provider_step(
                     return;
                 }
                 FinishReason::ToolCalls => {
-                    let diagnostic = diagnostic_from_text(
-                        "model_tool_call_requested",
-                        "model completed with tool calls, but runtime tool execution is not supported yet",
-                    );
-                    let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                    if saw_non_empty_text_delta {
+                        let diagnostic = diagnostic_from_text(
+                            DIAGNOSTIC_MODEL_TOOL_CALL_MIXED_OUTPUT,
+                            "model emitted text before requesting a tool call",
+                        );
+                        let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                        return;
+                    }
+
+                    match pending_tool_call_from_outputs(
+                        response.outputs(),
+                        streamed_tool_call.as_ref(),
+                    ) {
+                        Ok(call) => {
+                            if !send_tool_call_pending_event(inner, sender, token, call).await {
+                                let _ = send_cancelled_if_requested(inner, sender, token).await;
+                            }
+                        }
+                        Err(diagnostic) => {
+                            let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                        }
+                    }
                     return;
                 }
                 FinishReason::Length => {
@@ -377,13 +417,27 @@ async fn run_provider_step(
                     return;
                 }
             },
-            Some(Ok(ModelEvent::ToolCallRequested { .. })) => {
-                let diagnostic = diagnostic_from_text(
-                    "model_tool_call_requested",
-                    "model requested a tool call, but runtime tool execution is not supported yet",
-                );
-                let _ = send_failed_event(inner, sender, token, diagnostic).await;
-                return;
+            Some(Ok(ModelEvent::ToolCallRequested { call })) => {
+                if saw_non_empty_text_delta {
+                    let diagnostic = diagnostic_from_text(
+                        DIAGNOSTIC_MODEL_TOOL_CALL_MIXED_OUTPUT,
+                        "model emitted text before requesting a tool call",
+                    );
+                    let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                    return;
+                }
+
+                match pending_tool_call_from_model(&call)
+                    .and_then(|call| record_streamed_tool_call(&mut streamed_tool_call, call))
+                {
+                    Ok(call) => {
+                        streamed_tool_call = Some(call);
+                    }
+                    Err(diagnostic) => {
+                        let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                        return;
+                    }
+                }
             }
             Some(Err(error)) => {
                 if is_cancelled_model_error(&error) {
@@ -464,6 +518,32 @@ async fn send_assistant_text_output_completed_events(
     true
 }
 
+async fn send_tool_call_pending_event(
+    inner: &RuntimeInner,
+    sender: &mpsc::Sender<RuntimeEvent>,
+    token: &CancellationToken,
+    call: PendingToolCall,
+) -> bool {
+    if token.is_cancelled() {
+        return false;
+    }
+
+    let Some(permit) = reserve_normal_event_slot(sender, token).await else {
+        return false;
+    };
+
+    let event = {
+        let mut session = inner.session.lock().await;
+        if token.is_cancelled() {
+            return false;
+        }
+        session.record_tool_call_pending(call)
+    };
+
+    permit.send(event);
+    true
+}
+
 async fn send_failed_event(
     inner: &RuntimeInner,
     sender: &mpsc::Sender<RuntimeEvent>,
@@ -478,6 +558,92 @@ async fn send_failed_event(
         Some(session.record_failed(diagnostic))
     })
     .await
+}
+
+fn record_streamed_tool_call(
+    streamed_tool_call: &mut Option<PendingToolCall>,
+    call: PendingToolCall,
+) -> Result<PendingToolCall, ErrorInfo> {
+    match streamed_tool_call.as_ref() {
+        Some(existing) if existing == &call => Ok(existing.clone()),
+        Some(_) => Err(diagnostic_from_text(
+            DIAGNOSTIC_MODEL_PARALLEL_TOOL_CALLS_UNSUPPORTED,
+            "model requested multiple streamed tool calls, but runtime policy only supports one pending tool call",
+        )),
+        None => Ok(call),
+    }
+}
+
+fn pending_tool_call_from_outputs(
+    outputs: &[ModelOutput],
+    streamed_tool_call: Option<&PendingToolCall>,
+) -> Result<PendingToolCall, ErrorInfo> {
+    if outputs.is_empty() {
+        return Err(diagnostic_from_text(
+            DIAGNOSTIC_MODEL_TOOL_CALL_MISSING,
+            "model finished with tool calls but returned no tool call output",
+        ));
+    }
+
+    let tool_call_count = outputs
+        .iter()
+        .filter(|output| matches!(output, ModelOutput::ToolCall { .. }))
+        .count();
+    let text_output_count = outputs
+        .iter()
+        .filter(|output| matches!(output, ModelOutput::Text { .. }))
+        .count();
+
+    if tool_call_count == 0 {
+        return Err(diagnostic_from_text(
+            DIAGNOSTIC_MODEL_TOOL_CALL_MISSING,
+            "model finished with tool calls but returned no tool call output",
+        ));
+    }
+
+    if tool_call_count > 1 {
+        return Err(diagnostic_from_text(
+            DIAGNOSTIC_MODEL_PARALLEL_TOOL_CALLS_UNSUPPORTED,
+            "model returned multiple tool calls, but runtime policy only supports one pending tool call",
+        ));
+    }
+
+    if text_output_count > 0 || outputs.len() != 1 {
+        return Err(diagnostic_from_text(
+            DIAGNOSTIC_MODEL_TOOL_CALL_MIXED_OUTPUT,
+            "model returned text and a tool call in the same response",
+        ));
+    }
+
+    let [ModelOutput::ToolCall { call }] = outputs else {
+        return Err(diagnostic_from_text(
+            DIAGNOSTIC_MODEL_TOOL_CALL_MISSING,
+            "model finished with tool calls but returned no tool call output",
+        ));
+    };
+
+    let completed_call = pending_tool_call_from_model(call)?;
+    match streamed_tool_call {
+        Some(streamed_call) if streamed_call == &completed_call => Ok(streamed_call.clone()),
+        Some(_) => Err(diagnostic_from_text(
+            DIAGNOSTIC_MODEL_PARALLEL_TOOL_CALLS_UNSUPPORTED,
+            "model completed with a different tool call than the streamed pending call",
+        )),
+        None => Ok(completed_call),
+    }
+}
+
+fn pending_tool_call_from_model(call: &ModelToolCall) -> Result<PendingToolCall, ErrorInfo> {
+    let id = ToolCallId::new(call.id().as_str()).map_err(tool_call_conversion_diagnostic)?;
+    let arguments = ToolCallArguments::new(call.arguments().as_object().clone());
+    Ok(PendingToolCall::new(id, call.name().clone(), arguments))
+}
+
+fn tool_call_conversion_diagnostic(error: CoreError) -> ErrorInfo {
+    diagnostic_from_text(
+        DIAGNOSTIC_MODEL_TOOL_CALL_INVALID,
+        format!("model tool call could not be normalized: {error}"),
+    )
 }
 
 fn is_cancelled_model_error(error: &ModelError) -> bool {

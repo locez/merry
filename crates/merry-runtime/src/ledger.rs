@@ -242,6 +242,8 @@ pub enum LedgerFactKind {
     StepStarted,
     /// Step completion has been recorded.
     StepCompleted,
+    /// A model-requested tool call has been recorded as pending.
+    ToolCallPending,
     /// Step cancellation has been recorded.
     Cancelled,
     /// Step failure has been recorded.
