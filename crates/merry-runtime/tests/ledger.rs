@@ -82,8 +82,9 @@ fn records_existing_event_lifecycle_facts() {
     let mut ledger = TaskLedger::default();
 
     ledger.record_lifecycle(0, LedgerFactKind::SessionStarted);
-    ledger.record_lifecycle(1, LedgerFactKind::StepStarted);
-    ledger.record_lifecycle(2, LedgerFactKind::StepCompleted);
+    ledger.record_lifecycle(1, LedgerFactKind::ArtifactRecorded);
+    ledger.record_lifecycle(2, LedgerFactKind::StepStarted);
+    ledger.record_lifecycle(3, LedgerFactKind::StepCompleted);
 
     let lifecycle: Vec<_> = ledger
         .lifecycle_facts()
@@ -95,8 +96,9 @@ fn records_existing_event_lifecycle_facts() {
         lifecycle,
         [
             (0, LedgerFactKind::SessionStarted),
-            (1, LedgerFactKind::StepStarted),
-            (2, LedgerFactKind::StepCompleted),
+            (1, LedgerFactKind::ArtifactRecorded),
+            (2, LedgerFactKind::StepStarted),
+            (3, LedgerFactKind::StepCompleted),
         ]
     );
 }

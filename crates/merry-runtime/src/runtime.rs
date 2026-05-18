@@ -1,14 +1,19 @@
 //! Runtime builder and step execution skeleton.
 
 use crate::{
-    ArtifactContent, ContextEntry, ContextSummary, RuntimeError, RuntimeEventStream,
-    SessionContextSnapshot,
+    ArtifactContent, ContextCompiler, ContextEntry, ContextSummary, LedgerProjectionSnapshot,
+    RuntimeError, RuntimeEventStream, SessionContextSnapshot,
     event_stream::ActiveStepPermit,
     session::SessionState,
-    step::{StepContext, StepInput},
+    step::{StepContext, StepInput, compile_step_model_request},
 };
+use futures_util::StreamExt;
 use merry_core::{
     ArtifactId, ArtifactRef, ErrorInfo, EvidenceLocator, EvidenceRef, RuntimeEvent, SessionId,
+};
+use merry_llm::{
+    FinishReason, ModelError, ModelEvent, ModelName, ModelProvider, ModelStreamContext,
+    ProviderErrorKind,
 };
 use std::{
     num::NonZeroUsize,
@@ -36,7 +41,7 @@ impl Runtime {
     /// Starts a runtime step and returns its event stream.
     pub fn step(
         &self,
-        _input: StepInput,
+        input: StepInput,
         context: StepContext,
     ) -> Result<RuntimeEventStream, RuntimeError> {
         let active_permit = ActiveStepPermit::acquire(Arc::clone(&self.inner.active_step))
@@ -51,7 +56,7 @@ impl Runtime {
         let inner = Arc::clone(&self.inner);
 
         let producer_handle = tokio::spawn(async move {
-            run_step(inner, sender, producer_token, active_permit).await;
+            run_step(inner, sender, producer_token, input, active_permit).await;
         });
 
         Ok(RuntimeEventStream::new(
@@ -61,15 +66,23 @@ impl Runtime {
         ))
     }
 
-    /// Records exact artifact state into the owning session.
+    /// Records exact artifact state into the owning session and returns observable events.
+    ///
+    /// When this is the first observable action in the session, `SessionStarted`
+    /// is returned before `ArtifactRecorded`.
     pub async fn record_artifact(
         &self,
         artifact: ArtifactRef,
         content: ArtifactContent,
-    ) -> Result<ArtifactRef, RuntimeError> {
+    ) -> Result<Vec<RuntimeEvent>, RuntimeError> {
+        let _active_permit = ActiveStepPermit::acquire(Arc::clone(&self.inner.active_step))
+            .ok_or_else(|| RuntimeError::StepAlreadyActive {
+                session_id: self.inner.session_id.clone(),
+            })?;
+
         let mut session = self.inner.session.lock().await;
         session
-            .record_artifact(artifact, content)
+            .record_artifact_events(artifact, content)
             .map_err(Into::into)
     }
 
@@ -102,12 +115,19 @@ impl Runtime {
         let session = self.inner.session.lock().await;
         session.context_snapshot()
     }
+
+    /// Builds a read-only deterministic projection of the task ledger.
+    pub async fn ledger_projection(&self) -> LedgerProjectionSnapshot {
+        let session = self.inner.session.lock().await;
+        session.ledger_projection()
+    }
 }
 
 /// Builder for a Merry runtime.
 pub struct RuntimeBuilder {
     session_id: SessionId,
     event_buffer_size: NonZeroUsize,
+    model_provider: Option<ModelProviderConfig>,
 }
 
 impl RuntimeBuilder {
@@ -116,6 +136,7 @@ impl RuntimeBuilder {
             session_id,
             event_buffer_size: NonZeroUsize::new(DEFAULT_EVENT_BUFFER_SIZE)
                 .expect("default event buffer size is non-zero"),
+            model_provider: None,
         }
     }
 
@@ -123,6 +144,13 @@ impl RuntimeBuilder {
     #[must_use]
     pub fn event_buffer_size(mut self, event_buffer_size: NonZeroUsize) -> Self {
         self.event_buffer_size = event_buffer_size;
+        self
+    }
+
+    /// Sets the provider and model used by runtime steps.
+    #[must_use]
+    pub fn model_provider(mut self, provider: Arc<dyn ModelProvider>, model: ModelName) -> Self {
+        self.model_provider = Some(ModelProviderConfig { provider, model });
         self
     }
 
@@ -134,9 +162,16 @@ impl RuntimeBuilder {
                 session: Mutex::new(SessionState::new(self.session_id)),
                 active_step: Arc::new(AtomicBool::new(false)),
                 event_buffer_size: self.event_buffer_size,
+                model_provider: self.model_provider,
             }),
         })
     }
+}
+
+#[derive(Clone)]
+struct ModelProviderConfig {
+    provider: Arc<dyn ModelProvider>,
+    model: ModelName,
 }
 
 struct RuntimeInner {
@@ -144,12 +179,14 @@ struct RuntimeInner {
     session: Mutex<SessionState>,
     active_step: Arc<AtomicBool>,
     event_buffer_size: NonZeroUsize,
+    model_provider: Option<ModelProviderConfig>,
 }
 
 async fn run_step(
     inner: Arc<RuntimeInner>,
     sender: mpsc::Sender<RuntimeEvent>,
     token: CancellationToken,
+    input: StepInput,
     _active_permit: ActiveStepPermit,
 ) {
     if token.is_cancelled() {
@@ -183,10 +220,210 @@ async fn run_step(
         return;
     }
 
-    let _ = send_normal_event(&inner, &sender, &token, |session| {
-        Some(session.record_step_completed())
+    let Some(provider_config) = inner.model_provider.clone() else {
+        let _ = send_normal_event(&inner, &sender, &token, |session| {
+            Some(session.record_step_completed())
+        })
+        .await;
+        return;
+    };
+
+    run_provider_step(&inner, &sender, &token, input, provider_config).await;
+}
+
+async fn run_provider_step(
+    inner: &RuntimeInner,
+    sender: &mpsc::Sender<RuntimeEvent>,
+    token: &CancellationToken,
+    input: StepInput,
+    provider_config: ModelProviderConfig,
+) {
+    let snapshot = {
+        let session = inner.session.lock().await;
+        session.context_snapshot()
+    };
+
+    let compiled_context = match ContextCompiler::new().compile(&snapshot) {
+        Ok(context) => context,
+        Err(error) => {
+            let diagnostic = diagnostic_from_text("context_compile", error.to_string());
+            let _ = send_failed_event(inner, sender, token, diagnostic).await;
+            return;
+        }
+    };
+
+    let request =
+        match compile_step_model_request(&input, &provider_config.model, &compiled_context) {
+            Ok(request) => request,
+            Err(error) => {
+                let diagnostic = diagnostic_from_text("model_request", error.to_string());
+                let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                return;
+            }
+        };
+
+    let stream_context = ModelStreamContext::new(token.clone());
+    let stream_result = tokio::select! {
+        biased;
+        () = token.cancelled() => {
+            let _ = send_cancelled_event(inner, sender).await;
+            return;
+        }
+        result = provider_config.provider.stream_model(request, stream_context) => result,
+    };
+
+    let mut stream = match stream_result {
+        Ok(stream) => stream,
+        Err(error) => {
+            if is_cancelled_model_error(&error) {
+                let _ = send_cancelled_event(inner, sender).await;
+                return;
+            }
+
+            let diagnostic = diagnostic_from_model_error(error);
+            let _ = send_failed_event(inner, sender, token, diagnostic).await;
+            return;
+        }
+    };
+
+    loop {
+        let item = tokio::select! {
+            biased;
+            () = token.cancelled() => {
+                let _ = send_cancelled_event(inner, sender).await;
+                return;
+            }
+            item = stream.next() => item,
+        };
+
+        match item {
+            Some(Ok(ModelEvent::Started | ModelEvent::OutputTextDelta { .. })) => {}
+            Some(Ok(ModelEvent::Completed { response })) => match response.finish_reason() {
+                FinishReason::Stop => {
+                    let _ = send_normal_event(inner, sender, token, |session| {
+                        Some(session.record_step_completed())
+                    })
+                    .await;
+                    return;
+                }
+                FinishReason::ToolCalls => {
+                    let diagnostic = diagnostic_from_text(
+                        "model_tool_call_requested",
+                        "model completed with tool calls, but runtime tool execution is not supported yet",
+                    );
+                    let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                    return;
+                }
+                FinishReason::Length => {
+                    let diagnostic = diagnostic_from_text(
+                        "model_length",
+                        "model output stopped because it reached a length limit",
+                    );
+                    let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                    return;
+                }
+                FinishReason::Cancelled => {
+                    let _ = send_cancelled_event(inner, sender).await;
+                    return;
+                }
+                FinishReason::Error => {
+                    let diagnostic = diagnostic_from_text(
+                        "model_finish_error",
+                        "model output stopped because the provider reported a finish error",
+                    );
+                    let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                    return;
+                }
+            },
+            Some(Ok(ModelEvent::ToolCallRequested { .. })) => {
+                let diagnostic = diagnostic_from_text(
+                    "model_tool_call_requested",
+                    "model requested a tool call, but runtime tool execution is not supported yet",
+                );
+                let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                return;
+            }
+            Some(Err(error)) => {
+                if is_cancelled_model_error(&error) {
+                    let _ = send_cancelled_event(inner, sender).await;
+                    return;
+                }
+
+                let diagnostic = diagnostic_from_model_error(error);
+                let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                return;
+            }
+            None => {
+                let diagnostic = diagnostic_from_text(
+                    "model_stream_eof",
+                    "model stream ended before completion",
+                );
+                let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                return;
+            }
+        }
+    }
+}
+
+async fn send_failed_event(
+    inner: &RuntimeInner,
+    sender: &mpsc::Sender<RuntimeEvent>,
+    token: &CancellationToken,
+    diagnostic: ErrorInfo,
+) -> bool {
+    if token.is_cancelled() {
+        return false;
+    }
+
+    send_normal_event(inner, sender, token, |session| {
+        Some(session.record_failed(diagnostic))
     })
-    .await;
+    .await
+}
+
+fn is_cancelled_model_error(error: &ModelError) -> bool {
+    error.kind() == ProviderErrorKind::Cancelled
+}
+
+fn diagnostic_from_model_error(error: ModelError) -> ErrorInfo {
+    let code = match error.kind() {
+        ProviderErrorKind::InvalidRequest => "model_invalid_request",
+        ProviderErrorKind::Cancelled => "cancelled",
+        ProviderErrorKind::Authentication => "model_authentication",
+        ProviderErrorKind::RateLimited => "model_rate_limited",
+        ProviderErrorKind::Unavailable => "model_unavailable",
+        ProviderErrorKind::Protocol => "model_protocol",
+        ProviderErrorKind::Other => "model_other",
+    };
+
+    diagnostic_from_text(code, error.to_string())
+}
+
+fn diagnostic_from_text(code: &'static str, message: impl AsRef<str>) -> ErrorInfo {
+    let message = sanitize_diagnostic_message(message.as_ref());
+    ErrorInfo::new(code, &message).expect("runtime diagnostic is sanitized and uses static code")
+}
+
+fn sanitize_diagnostic_message(message: &str) -> String {
+    let sanitized: String = message
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect();
+    let trimmed = sanitized.trim();
+
+    let source = if trimmed.is_empty() {
+        "provider returned an empty error message"
+    } else {
+        trimmed
+    };
+
+    source.chars().take(4096).collect()
 }
 
 async fn send_normal_event(
@@ -275,6 +512,7 @@ mod tests {
             session: Mutex::new(SessionState::new(session_id)),
             active_step: Arc::new(AtomicBool::new(false)),
             event_buffer_size: NonZeroUsize::new(1).expect("non-zero buffer"),
+            model_provider: None,
         }
     }
 
