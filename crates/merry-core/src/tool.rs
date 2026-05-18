@@ -1,6 +1,6 @@
 //! Tool specification and invocation vocabulary.
 
-use crate::{CoreError, ToolCallId, ToolInputSchema, ToolName};
+use crate::{ArtifactRef, CoreError, ErrorInfo, ToolCallId, ToolInputSchema, ToolName};
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_json::{Map, Value};
@@ -118,6 +118,129 @@ impl<'de> Deserialize<'de> for PendingToolCall {
     {
         let wire = PendingToolCallWire::deserialize(deserializer)?;
         Ok(Self::new(wire.id, wire.name, wire.arguments))
+    }
+}
+
+/// Result status for a resolved tool call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCallResultStatus {
+    /// Tool execution completed successfully.
+    Succeeded,
+    /// Tool execution failed and returned failure details as an artifact.
+    Failed,
+}
+
+/// Provider-neutral result for a previously pending tool call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ToolCallResult {
+    /// Provider/model-originated call identifier being resolved.
+    call_id: ToolCallId,
+    /// Runtime-owned success/failure status for this tool result.
+    status: ToolCallResultStatus,
+    /// Artifact reference for the exact tool result payload.
+    artifact: ArtifactRef,
+    /// Small failure diagnostic. Exact payload must live in the artifact.
+    diagnostic: Option<ErrorInfo>,
+}
+
+impl ToolCallResult {
+    /// Creates a validated tool call result.
+    pub fn new(
+        call_id: ToolCallId,
+        status: ToolCallResultStatus,
+        artifact: ArtifactRef,
+        diagnostic: Option<ErrorInfo>,
+    ) -> Result<Self, CoreError> {
+        validate_result_diagnostic(status, diagnostic.as_ref())?;
+        Ok(Self {
+            call_id,
+            status,
+            artifact,
+            diagnostic,
+        })
+    }
+
+    /// Creates a successful tool call result.
+    #[must_use]
+    pub fn succeeded(call_id: ToolCallId, artifact: ArtifactRef) -> Self {
+        Self {
+            call_id,
+            status: ToolCallResultStatus::Succeeded,
+            artifact,
+            diagnostic: None,
+        }
+    }
+
+    /// Creates a failed tool call result with a small diagnostic.
+    #[must_use]
+    pub fn failed(call_id: ToolCallId, artifact: ArtifactRef, diagnostic: ErrorInfo) -> Self {
+        Self {
+            call_id,
+            status: ToolCallResultStatus::Failed,
+            artifact,
+            diagnostic: Some(diagnostic),
+        }
+    }
+
+    /// Borrows the provider/model-originated call id.
+    #[must_use]
+    pub fn call_id(&self) -> &ToolCallId {
+        &self.call_id
+    }
+
+    /// Returns the tool call result status.
+    #[must_use]
+    pub fn status(&self) -> ToolCallResultStatus {
+        self.status
+    }
+
+    /// Borrows the exact result artifact reference.
+    #[must_use]
+    pub fn artifact(&self) -> &ArtifactRef {
+        &self.artifact
+    }
+
+    /// Borrows the optional failure diagnostic.
+    #[must_use]
+    pub fn diagnostic(&self) -> Option<&ErrorInfo> {
+        self.diagnostic.as_ref()
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ToolCallResultWire {
+    call_id: ToolCallId,
+    status: ToolCallResultStatus,
+    artifact: ArtifactRef,
+    diagnostic: Option<ErrorInfo>,
+}
+
+impl<'de> Deserialize<'de> for ToolCallResult {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = ToolCallResultWire::deserialize(deserializer)?;
+        Self::new(wire.call_id, wire.status, wire.artifact, wire.diagnostic)
+            .map_err(de::Error::custom)
+    }
+}
+
+fn validate_result_diagnostic(
+    status: ToolCallResultStatus,
+    diagnostic: Option<&ErrorInfo>,
+) -> Result<(), CoreError> {
+    match (status, diagnostic) {
+        (ToolCallResultStatus::Succeeded, None) | (ToolCallResultStatus::Failed, Some(_)) => Ok(()),
+        (ToolCallResultStatus::Succeeded, Some(_)) => Err(CoreError::InvalidToolCallResult {
+            reason: "succeeded tool call result must not include a diagnostic",
+        }),
+        (ToolCallResultStatus::Failed, None) => Err(CoreError::InvalidToolCallResult {
+            reason: "failed tool call result must include a diagnostic",
+        }),
     }
 }
 

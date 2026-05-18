@@ -1,7 +1,7 @@
 use futures_util::StreamExt;
 use merry_core::{
     ArtifactId, ArtifactKind, ArtifactRef, EvidenceLocator, PendingToolCall, RuntimeEvent,
-    RuntimeEventKind, SessionId, ToolName,
+    RuntimeEventKind, SessionId, ToolCallId, ToolCallResult, ToolCallResultStatus, ToolName,
 };
 use merry_llm::{
     FinishReason, GenerationConfig, ModelError, ModelEvent, ModelMessageRole, ModelName,
@@ -112,6 +112,7 @@ fn event_kind_names(events: &[RuntimeEvent]) -> Vec<&'static str> {
             RuntimeEventKind::ArtifactRecorded { .. } => "ArtifactRecorded",
             RuntimeEventKind::EvidenceReferenced { .. } => "EvidenceReferenced",
             RuntimeEventKind::ToolCallPending { .. } => "ToolCallPending",
+            RuntimeEventKind::ToolCallResolved { .. } => "ToolCallResolved",
             _ => "Unknown",
         })
         .collect()
@@ -743,6 +744,458 @@ async fn provider_tool_call_pending_preserves_id_name_arguments_and_ledger_fact(
             },
         ]
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn repeated_provider_tool_call_id_after_pending_fails_without_second_pending() {
+    let provider = FakeModelProvider::new(vec![Ok(completed_outputs_event(
+        vec![ModelOutput::tool_call(model_tool_call())],
+        FinishReason::ToolCalls,
+    ))]);
+    let runtime = runtime_with_provider("provider-tool-call-duplicate-id", provider);
+
+    let first_events = collect_step(&runtime, "Request a tool.").await;
+    let second_events = collect_step(&runtime, "Request the same tool id again.").await;
+
+    assert_eq!(
+        event_kind_names(&first_events),
+        ["SessionStarted", "StepStarted", "ToolCallPending"]
+    );
+    assert_eq!(event_kind_names(&second_events), ["StepStarted", "Failed"]);
+    assert_eq!(failed_code(&second_events), Some("tool_call_duplicate"));
+    assert_eq!(
+        runtime
+            .pending_tool_calls()
+            .await
+            .iter()
+            .map(|call| call.id().as_str().to_owned())
+            .collect::<Vec<_>>(),
+        vec!["call-1".to_owned()]
+    );
+
+    let projection = runtime.ledger_projection().await;
+    assert_eq!(
+        projection.entries(),
+        [
+            LedgerProjection::Lifecycle {
+                sequence: 0,
+                order: 0,
+                kind: LedgerFactKind::SessionStarted,
+            },
+            LedgerProjection::Lifecycle {
+                sequence: 1,
+                order: 1,
+                kind: LedgerFactKind::StepStarted,
+            },
+            LedgerProjection::Lifecycle {
+                sequence: 2,
+                order: 2,
+                kind: LedgerFactKind::ToolCallPending,
+            },
+            LedgerProjection::Lifecycle {
+                sequence: 3,
+                order: 3,
+                kind: LedgerFactKind::StepStarted,
+            },
+            LedgerProjection::Lifecycle {
+                sequence: 4,
+                order: 4,
+                kind: LedgerFactKind::Failed,
+            },
+        ]
+    );
+
+    let result_artifact = ArtifactRef::new(
+        artifact_id("tool-result-after-duplicate-pending"),
+        ArtifactKind::Text,
+    );
+    let result = ToolCallResult::succeeded(
+        ToolCallId::new("call-1").expect("valid call id"),
+        result_artifact.clone(),
+    );
+    let resolved_events = runtime
+        .submit_tool_result(
+            result.clone(),
+            ArtifactContent::text("only accepted once\n"),
+        )
+        .await
+        .expect("single pending call should resolve");
+    let duplicate_result = ToolCallResult::succeeded(
+        ToolCallId::new("call-1").expect("valid call id"),
+        ArtifactRef::new(
+            artifact_id("tool-result-after-duplicate-second"),
+            ArtifactKind::Text,
+        ),
+    );
+    let duplicate_err = runtime
+        .submit_tool_result(
+            duplicate_result,
+            ArtifactContent::text("must not resolve twice\n"),
+        )
+        .await
+        .expect_err("resolved call id should reject duplicate result");
+
+    assert_eq!(
+        event_kind_names(&resolved_events),
+        ["ArtifactRecorded", "ToolCallResolved"]
+    );
+    assert!(matches!(
+        duplicate_err,
+        merry_runtime::RuntimeError::ToolCallAlreadyResolved { call_id, .. }
+            if call_id == ToolCallId::new("call-1").expect("valid call id")
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn submit_tool_result_records_success_artifact_resolves_pending_and_updates_ledger() {
+    let provider = FakeModelProvider::new(vec![Ok(completed_outputs_event(
+        vec![ModelOutput::tool_call(model_tool_call())],
+        FinishReason::ToolCalls,
+    ))]);
+    let runtime = runtime_with_provider("provider-tool-result-success", provider);
+    let pending_events = collect_step(&runtime, "Request a tool.").await;
+    let call = pending_tool_call(&pending_events).clone();
+    let result_artifact = ArtifactRef::new(artifact_id("tool-result-success"), ArtifactKind::Text);
+    let result = ToolCallResult::succeeded(call.id().clone(), result_artifact.clone());
+
+    let events = runtime
+        .submit_tool_result(result.clone(), ArtifactContent::text("exact tool output\n"))
+        .await
+        .expect("tool result should resolve");
+
+    assert_eq!(
+        event_kind_names(&events),
+        ["ArtifactRecorded", "ToolCallResolved"]
+    );
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        vec![3, 4]
+    );
+    assert!(matches!(
+        &events[0].kind,
+        RuntimeEventKind::ArtifactRecorded { artifact } if artifact == &result_artifact
+    ));
+    assert!(matches!(
+        &events[1].kind,
+        RuntimeEventKind::ToolCallResolved { result: resolved } if resolved == &result
+    ));
+    assert!(runtime.pending_tool_calls().await.is_empty());
+    let evidence = runtime
+        .evidence_ref(result_artifact.id(), EvidenceLocator::whole_artifact())
+        .await
+        .expect("tool result artifact should be readable");
+    assert_eq!(evidence.artifact_id, *result_artifact.id());
+
+    let projection = runtime.ledger_projection().await;
+    assert_eq!(
+        projection.entries(),
+        [
+            LedgerProjection::Lifecycle {
+                sequence: 0,
+                order: 0,
+                kind: LedgerFactKind::SessionStarted,
+            },
+            LedgerProjection::Lifecycle {
+                sequence: 1,
+                order: 1,
+                kind: LedgerFactKind::StepStarted,
+            },
+            LedgerProjection::Lifecycle {
+                sequence: 2,
+                order: 2,
+                kind: LedgerFactKind::ToolCallPending,
+            },
+            LedgerProjection::Lifecycle {
+                sequence: 3,
+                order: 3,
+                kind: LedgerFactKind::ArtifactRecorded,
+            },
+            LedgerProjection::Lifecycle {
+                sequence: 4,
+                order: 4,
+                kind: LedgerFactKind::ToolCallResolved,
+            },
+        ]
+    );
+
+    let next_events = collect_step(&runtime, "after tool result").await;
+    assert_eq!(
+        next_events
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        vec![5, 6]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn submit_failed_tool_result_preserves_diagnostic_and_failure_artifact_without_failed_event()
+{
+    let provider = FakeModelProvider::new(vec![Ok(completed_outputs_event(
+        vec![ModelOutput::tool_call(model_tool_call())],
+        FinishReason::ToolCalls,
+    ))]);
+    let runtime = runtime_with_provider("provider-tool-result-failed", provider);
+    let pending_events = collect_step(&runtime, "Request a failing tool.").await;
+    let call = pending_tool_call(&pending_events).clone();
+    let diagnostic = merry_core::ErrorInfo::new("tool_failed", "Tool exited with status 2")
+        .expect("valid diagnostic");
+    let result_artifact = ArtifactRef::new(artifact_id("tool-result-failed"), ArtifactKind::Json);
+    let result = ToolCallResult::failed(call.id().clone(), result_artifact.clone(), diagnostic);
+
+    let events = runtime
+        .submit_tool_result(
+            result.clone(),
+            ArtifactContent::json(r#"{"stderr":"permission denied"}"#),
+        )
+        .await
+        .expect("failed tool result should resolve");
+
+    assert_eq!(
+        event_kind_names(&events),
+        ["ArtifactRecorded", "ToolCallResolved"]
+    );
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        vec![3, 4]
+    );
+    assert!(matches!(
+        &events[0].kind,
+        RuntimeEventKind::ArtifactRecorded { artifact } if artifact == &result_artifact
+    ));
+    assert!(matches!(
+        &events[1].kind,
+        RuntimeEventKind::ToolCallResolved { result: resolved }
+            if resolved.status() == ToolCallResultStatus::Failed
+                && resolved.diagnostic().map(merry_core::ErrorInfo::code) == Some("tool_failed")
+                && resolved == &result
+    ));
+    assert!(
+        pending_events
+            .iter()
+            .chain(events.iter())
+            .all(|event| !matches!(event.kind, RuntimeEventKind::Failed { .. })),
+        "tool execution failure must be represented as ToolCallResolved, not RuntimeEventKind::Failed"
+    );
+    let evidence = runtime
+        .evidence_ref(result_artifact.id(), EvidenceLocator::whole_artifact())
+        .await
+        .expect("failure artifact should be readable");
+    assert_eq!(evidence.artifact_id, *result_artifact.id());
+
+    let projection = runtime.ledger_projection().await;
+    assert_eq!(
+        projection.entries(),
+        [
+            LedgerProjection::Lifecycle {
+                sequence: 0,
+                order: 0,
+                kind: LedgerFactKind::SessionStarted,
+            },
+            LedgerProjection::Lifecycle {
+                sequence: 1,
+                order: 1,
+                kind: LedgerFactKind::StepStarted,
+            },
+            LedgerProjection::Lifecycle {
+                sequence: 2,
+                order: 2,
+                kind: LedgerFactKind::ToolCallPending,
+            },
+            LedgerProjection::Lifecycle {
+                sequence: 3,
+                order: 3,
+                kind: LedgerFactKind::ArtifactRecorded,
+            },
+            LedgerProjection::Lifecycle {
+                sequence: 4,
+                order: 4,
+                kind: LedgerFactKind::ToolCallResolved,
+            },
+        ]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn duplicate_tool_result_after_resolved_does_not_mutate_session() {
+    let provider = FakeModelProvider::new(vec![Ok(completed_outputs_event(
+        vec![ModelOutput::tool_call(model_tool_call())],
+        FinishReason::ToolCalls,
+    ))]);
+    let runtime = runtime_with_provider("provider-tool-result-duplicate", provider);
+    let pending_events = collect_step(&runtime, "Request a tool.").await;
+    let call = pending_tool_call(&pending_events).clone();
+    let first_artifact = ArtifactRef::new(artifact_id("tool-result-first"), ArtifactKind::Text);
+    let first = ToolCallResult::succeeded(call.id().clone(), first_artifact.clone());
+    runtime
+        .submit_tool_result(first, ArtifactContent::text("first result\n"))
+        .await
+        .expect("first result should resolve");
+    let projection_before_duplicate = runtime.ledger_projection().await;
+    let duplicate_artifact =
+        ArtifactRef::new(artifact_id("tool-result-duplicate"), ArtifactKind::Text);
+    let duplicate = ToolCallResult::succeeded(call.id().clone(), duplicate_artifact.clone());
+
+    let err = runtime
+        .submit_tool_result(duplicate, ArtifactContent::text("duplicate result\n"))
+        .await
+        .expect_err("duplicate result should be rejected");
+    let projection_after_duplicate = runtime.ledger_projection().await;
+
+    assert!(matches!(
+        err,
+        merry_runtime::RuntimeError::ToolCallAlreadyResolved {
+            session_id: rejected_session,
+            call_id
+        } if rejected_session == session_id("provider-tool-result-duplicate")
+            && call_id == ToolCallId::new("call-1").expect("valid call id")
+    ));
+    assert_eq!(projection_before_duplicate, projection_after_duplicate);
+    assert!(runtime.pending_tool_calls().await.is_empty());
+    let evidence_err = runtime
+        .evidence_ref(duplicate_artifact.id(), EvidenceLocator::whole_artifact())
+        .await
+        .expect_err("duplicate artifact must not be recorded");
+    assert!(matches!(
+        evidence_err,
+        merry_runtime::RuntimeError::Artifact {
+            source: merry_runtime::ArtifactError::MissingArtifact { id }
+        } if id == *duplicate_artifact.id()
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn artifact_error_while_submitting_tool_result_keeps_call_pending_and_sequence_stable() {
+    let provider = FakeModelProvider::new(vec![Ok(completed_outputs_event(
+        vec![ModelOutput::tool_call(model_tool_call())],
+        FinishReason::ToolCalls,
+    ))]);
+    let runtime = runtime_with_provider("provider-tool-result-artifact-error", provider);
+    let pending_events = collect_step(&runtime, "Request a tool.").await;
+    let call = pending_tool_call(&pending_events).clone();
+    let duplicate_artifact =
+        ArtifactRef::new(artifact_id("tool-result-conflict"), ArtifactKind::Text);
+    runtime
+        .record_artifact(
+            duplicate_artifact.clone(),
+            ArtifactContent::text("existing artifact\n"),
+        )
+        .await
+        .expect("conflicting artifact should record before submit");
+    let projection_before_error = runtime.ledger_projection().await;
+    let result = ToolCallResult::succeeded(call.id().clone(), duplicate_artifact.clone());
+
+    let err = runtime
+        .submit_tool_result(result, ArtifactContent::text("replacement\n"))
+        .await
+        .expect_err("duplicate artifact id should reject submit");
+    let projection_after_error = runtime.ledger_projection().await;
+
+    assert!(matches!(
+        err,
+        merry_runtime::RuntimeError::Artifact {
+            source: merry_runtime::ArtifactError::DuplicateId { id }
+        } if id == *duplicate_artifact.id()
+    ));
+    assert_eq!(projection_before_error, projection_after_error);
+    assert_eq!(runtime.pending_tool_calls().await, vec![call]);
+
+    let next_events = collect_step(&runtime, "after duplicate artifact submit").await;
+    assert_eq!(
+        next_events
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        vec![4, 5]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn incompatible_tool_result_content_keeps_call_pending_and_sequence_stable() {
+    let provider = FakeModelProvider::new(vec![Ok(completed_outputs_event(
+        vec![ModelOutput::tool_call(model_tool_call())],
+        FinishReason::ToolCalls,
+    ))]);
+    let runtime = runtime_with_provider("provider-tool-result-incompatible", provider);
+    let pending_events = collect_step(&runtime, "Request a tool.").await;
+    let call = pending_tool_call(&pending_events).clone();
+    let projection_before_error = runtime.ledger_projection().await;
+    let result = ToolCallResult::succeeded(
+        call.id().clone(),
+        ArtifactRef::new(artifact_id("tool-result-json-mismatch"), ArtifactKind::Json),
+    );
+
+    let err = runtime
+        .submit_tool_result(
+            result.clone(),
+            ArtifactContent::text("not json content kind\n"),
+        )
+        .await
+        .expect_err("content kind mismatch should reject submit");
+    let projection_after_error = runtime.ledger_projection().await;
+
+    assert!(matches!(
+        err,
+        merry_runtime::RuntimeError::Artifact {
+            source: merry_runtime::ArtifactError::IncompatibleContent {
+                id,
+                artifact_kind,
+                content_kind
+            }
+        } if id == *result.artifact().id()
+            && artifact_kind == ArtifactKind::Json
+            && content_kind == merry_runtime::ArtifactContentKind::Text
+    ));
+    assert_eq!(projection_before_error, projection_after_error);
+    assert_eq!(runtime.pending_tool_calls().await, vec![call]);
+    let evidence_err = runtime
+        .evidence_ref(result.artifact().id(), EvidenceLocator::whole_artifact())
+        .await
+        .expect_err("incompatible result artifact must not be recorded");
+    assert!(matches!(
+        evidence_err,
+        merry_runtime::RuntimeError::Artifact {
+            source: merry_runtime::ArtifactError::MissingArtifact { id }
+        } if id == *result.artifact().id()
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn submit_tool_result_rejects_unsupported_content_kind_without_mutation() {
+    let provider = FakeModelProvider::new(vec![Ok(completed_outputs_event(
+        vec![ModelOutput::tool_call(model_tool_call())],
+        FinishReason::ToolCalls,
+    ))]);
+    let runtime = runtime_with_provider("provider-tool-result-unsupported", provider);
+    let pending_events = collect_step(&runtime, "Request a tool.").await;
+    let call = pending_tool_call(&pending_events).clone();
+    let projection_before_error = runtime.ledger_projection().await;
+    let result = ToolCallResult::succeeded(
+        call.id().clone(),
+        ArtifactRef::new(artifact_id("tool-result-binary"), ArtifactKind::Binary),
+    );
+
+    let err = runtime
+        .submit_tool_result(result.clone(), ArtifactContent::binary([1, 2, 3]))
+        .await
+        .expect_err("binary tool result content is not accepted in MVP");
+    let projection_after_error = runtime.ledger_projection().await;
+
+    assert!(matches!(
+        err,
+        merry_runtime::RuntimeError::UnsupportedToolResultContent {
+            artifact_id,
+            content_kind: merry_runtime::ArtifactContentKind::Binary
+        } if artifact_id == *result.artifact().id()
+    ));
+    assert_eq!(projection_before_error, projection_after_error);
+    assert_eq!(runtime.pending_tool_calls().await, vec![call]);
 }
 
 #[tokio::test(flavor = "current_thread")]

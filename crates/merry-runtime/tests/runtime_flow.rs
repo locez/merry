@@ -1,7 +1,7 @@
 use futures_util::StreamExt;
 use merry_core::{
     ArtifactId, ArtifactKind, ArtifactRef, EvidenceLocator, RuntimeEvent, RuntimeEventKind,
-    SessionId,
+    SessionId, ToolCallId, ToolCallResult,
 };
 use merry_runtime::{
     ArtifactContent, ArtifactContentKind, ArtifactError, ContextCompiler, ContextSummary,
@@ -18,6 +18,17 @@ fn artifact_id(value: &str) -> ArtifactId {
     ArtifactId::new(value).expect("valid artifact id")
 }
 
+fn tool_call_id(value: &str) -> ToolCallId {
+    ToolCallId::new(value).expect("valid tool call id")
+}
+
+fn tool_result(call_id: &str, artifact: &str, kind: ArtifactKind) -> ToolCallResult {
+    ToolCallResult::succeeded(
+        tool_call_id(call_id),
+        ArtifactRef::new(artifact_id(artifact), kind),
+    )
+}
+
 async fn collect_step(runtime: &Runtime, text: &str) -> Vec<RuntimeEvent> {
     runtime
         .step(
@@ -27,6 +38,14 @@ async fn collect_step(runtime: &Runtime, text: &str) -> Vec<RuntimeEvent> {
         .expect("step should start")
         .collect()
         .await
+}
+
+#[track_caller]
+fn assert_projection_unchanged(
+    before: &merry_runtime::LedgerProjectionSnapshot,
+    after: &merry_runtime::LedgerProjectionSnapshot,
+) {
+    assert_eq!(before, after);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -85,6 +104,88 @@ async fn new_runtime_has_no_pending_tool_calls() {
         .expect("runtime should build");
 
     assert!(runtime.pending_tool_calls().await.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn submit_tool_result_for_unknown_call_does_not_mutate_session() {
+    let runtime = Runtime::builder(session_id())
+        .build()
+        .expect("runtime should build");
+    let result = tool_result("unknown-call", "unknown-tool-result", ArtifactKind::Text);
+    let before = runtime.ledger_projection().await;
+
+    let err = runtime
+        .submit_tool_result(result.clone(), ArtifactContent::text("not recorded\n"))
+        .await
+        .expect_err("unknown tool call should be rejected");
+    let after = runtime.ledger_projection().await;
+
+    assert!(matches!(
+        err,
+        RuntimeError::UnknownToolCall {
+            session_id: rejected_session,
+            call_id
+        } if rejected_session == session_id() && call_id == tool_call_id("unknown-call")
+    ));
+    assert_projection_unchanged(&before, &after);
+    assert!(runtime.pending_tool_calls().await.is_empty());
+    let evidence_err = runtime
+        .evidence_ref(result.artifact().id(), EvidenceLocator::whole_artifact())
+        .await
+        .expect_err("unknown result artifact must not be recorded");
+    assert!(matches!(
+        evidence_err,
+        RuntimeError::Artifact {
+            source: ArtifactError::MissingArtifact { id }
+        } if id == *result.artifact().id()
+    ));
+
+    let events = collect_step(&runtime, "after unknown submit").await;
+    assert_sequences(&events, &[0, 1, 2]);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn submit_tool_result_is_rejected_while_step_is_active() {
+    let runtime = Runtime::builder(session_id())
+        .event_buffer_size(NonZeroUsize::new(1).expect("non-zero buffer"))
+        .build()
+        .expect("runtime should build");
+    let stream = runtime
+        .step(
+            StepInput::user_text("hold the stream open").expect("valid step input"),
+            StepContext::new(CancellationToken::new()),
+        )
+        .expect("step should start");
+    tokio::task::yield_now().await;
+
+    let result = tool_result(
+        "call-while-active",
+        "active-step-result",
+        ArtifactKind::Text,
+    );
+    let err = runtime
+        .submit_tool_result(result.clone(), ArtifactContent::text("should not record\n"))
+        .await
+        .expect_err("tool result submission should be rejected during active step");
+
+    assert!(matches!(
+        err,
+        RuntimeError::StepAlreadyActive {
+            session_id: active_session
+        } if active_session == session_id()
+    ));
+    let evidence_err = runtime
+        .evidence_ref(result.artifact().id(), EvidenceLocator::whole_artifact())
+        .await
+        .expect_err("rejected result artifact must not be readable");
+    assert!(matches!(
+        evidence_err,
+        RuntimeError::Artifact {
+            source: ArtifactError::MissingArtifact { id }
+        } if id == *result.artifact().id()
+    ));
+
+    drop(stream);
 }
 
 #[track_caller]

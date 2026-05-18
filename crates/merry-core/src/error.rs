@@ -49,4 +49,11 @@ pub enum CoreError {
         /// Actionable validation detail.
         reason: &'static str,
     },
+
+    /// A tool call result failed validation.
+    #[error("invalid tool call result: {reason}")]
+    InvalidToolCallResult {
+        /// Actionable validation detail.
+        reason: &'static str,
+    },
 }

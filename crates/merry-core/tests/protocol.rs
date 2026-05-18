@@ -1,7 +1,8 @@
 use merry_core::{
     ArtifactId, ArtifactKind, ArtifactRef, CoreError, ErrorInfo, EvidenceLocator, EvidenceRef,
     PendingToolCall, ProviderName, RuntimeEvent, RuntimeEventKind, SessionId, SkillId,
-    ToolCallArguments, ToolCallId, ToolInputSchema, ToolName, ToolSpec,
+    ToolCallArguments, ToolCallId, ToolCallResult, ToolCallResultStatus, ToolInputSchema, ToolName,
+    ToolSpec,
 };
 use schemars::{JsonSchema, Schema};
 use serde::{Serialize, de::DeserializeOwned};
@@ -388,6 +389,136 @@ fn pending_tool_call_validates_call_id_tool_name_and_object_arguments() {
 }
 
 #[test]
+fn tool_call_result_uses_status_constraints_and_artifact_reference_only() {
+    let call_id = ToolCallId::new("call-1").expect("valid call id");
+    let artifact = ArtifactRef::new(
+        ArtifactId::new("tool-result-1").expect("valid artifact id"),
+        ArtifactKind::Json,
+    );
+    let success = ToolCallResult::succeeded(call_id.clone(), artifact.clone());
+
+    assert_eq!(success.call_id(), &call_id);
+    assert_eq!(success.status(), ToolCallResultStatus::Succeeded);
+    assert_eq!(success.artifact(), &artifact);
+    assert!(success.diagnostic().is_none());
+    assert_eq!(
+        serde_json::to_value(&success).expect("success result serializes"),
+        json!({
+            "call_id": "call-1",
+            "status": "succeeded",
+            "artifact": {
+                "id": "tool-result-1",
+                "kind": "json",
+                "label": null
+            },
+            "diagnostic": null
+        })
+    );
+    assert_json_round_trip(&success);
+
+    let diagnostic =
+        ErrorInfo::new("tool_failed", "Tool exited with status 2").expect("valid diagnostic");
+    let failed = ToolCallResult::failed(call_id.clone(), artifact.clone(), diagnostic.clone());
+    assert_eq!(failed.status(), ToolCallResultStatus::Failed);
+    assert_eq!(failed.diagnostic(), Some(&diagnostic));
+    assert_eq!(
+        serde_json::to_value(&failed).expect("failed result serializes"),
+        json!({
+            "call_id": "call-1",
+            "status": "failed",
+            "artifact": {
+                "id": "tool-result-1",
+                "kind": "json",
+                "label": null
+            },
+            "diagnostic": {
+                "code": "tool_failed",
+                "message": "Tool exited with status 2"
+            }
+        })
+    );
+    assert_json_round_trip(&failed);
+
+    assert!(
+        ToolCallResult::new(
+            call_id.clone(),
+            ToolCallResultStatus::Succeeded,
+            artifact.clone(),
+            Some(diagnostic.clone())
+        )
+        .is_err()
+    );
+    assert!(ToolCallResult::new(call_id, ToolCallResultStatus::Failed, artifact, None).is_err());
+    assert!(
+        serde_json::from_value::<ToolCallResult>(json!({
+            "call_id": "call-1",
+            "status": "succeeded",
+            "artifact": {
+                "id": "tool-result-1",
+                "kind": "json",
+                "label": null
+            },
+            "diagnostic": {
+                "code": "unexpected",
+                "message": "success must not carry diagnostics"
+            }
+        }))
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<ToolCallResult>(json!({
+            "call_id": "call-1",
+            "status": "failed",
+            "artifact": {
+                "id": "tool-result-1",
+                "kind": "json",
+                "label": null
+            },
+            "diagnostic": null
+        }))
+        .is_err()
+    );
+}
+
+#[test]
+fn tool_call_resolved_event_uses_snake_case_and_no_inline_payload() {
+    let result = ToolCallResult::succeeded(
+        ToolCallId::new("call-1").expect("valid call id"),
+        ArtifactRef::new(
+            ArtifactId::new("tool-result-1").expect("valid artifact id"),
+            ArtifactKind::Text,
+        ),
+    );
+    let event = RuntimeEvent::new(
+        SessionId::new("session-1").expect("valid session id"),
+        10,
+        RuntimeEventKind::ToolCallResolved { result },
+    );
+
+    assert_eq!(
+        serde_json::to_value(&event).expect("event serializes"),
+        json!({
+            "session_id": "session-1",
+            "sequence": 10,
+            "kind": {
+                "type": "tool_call_resolved",
+                "result": {
+                    "call_id": "call-1",
+                    "status": "succeeded",
+                    "artifact": {
+                        "id": "tool-result-1",
+                        "kind": "text",
+                        "label": null
+                    },
+                    "diagnostic": null
+                }
+            }
+        })
+    );
+    assert_json_round_trip(&event);
+}
+
+#[test]
 fn runtime_event_uses_stable_snake_case_tags_and_round_trips() {
     let event = RuntimeEvent::new(
         SessionId::new("session-1").expect("valid session id"),
@@ -504,6 +635,8 @@ fn schemars_generation_compiles_for_public_protocol_types() {
     assert_schema_compiles::<ToolCallId>();
     assert_schema_compiles::<ToolCallArguments>();
     assert_schema_compiles::<PendingToolCall>();
+    assert_schema_compiles::<ToolCallResultStatus>();
+    assert_schema_compiles::<ToolCallResult>();
     assert_schema_compiles::<ToolInputSchema>();
     assert_schema_compiles::<ToolSpec>();
     assert_schema_compiles::<ErrorInfo>();

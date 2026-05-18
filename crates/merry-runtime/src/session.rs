@@ -1,14 +1,16 @@
 //! Runtime session state and state-before-event helpers.
 
 use crate::{
+    RuntimeError,
     artifact::{ArtifactContent, ArtifactError, ArtifactRegistry},
     context::{ContextEntry, SessionContextSnapshot},
     ledger::{LedgerFactKind, TaskLedger},
 };
 use merry_core::{
     ArtifactId, ArtifactKind, ArtifactRef, ErrorInfo, EvidenceLocator, EvidenceRef,
-    PendingToolCall, RuntimeEvent, RuntimeEventKind, SessionId,
+    PendingToolCall, RuntimeEvent, RuntimeEventKind, SessionId, ToolCallId, ToolCallResult,
 };
+use std::collections::BTreeSet;
 
 /// Mutable runtime state for one session.
 #[derive(Debug)]
@@ -20,6 +22,7 @@ pub(crate) struct SessionState {
     artifacts: ArtifactRegistry,
     context_entries: Vec<ContextEntry>,
     pending_tool_calls: Vec<PendingToolCall>,
+    resolved_tool_calls: BTreeSet<ToolCallId>,
 }
 
 impl SessionState {
@@ -32,6 +35,7 @@ impl SessionState {
             artifacts: ArtifactRegistry::default(),
             context_entries: Vec::new(),
             pending_tool_calls: Vec::new(),
+            resolved_tool_calls: BTreeSet::new(),
         }
     }
 
@@ -100,6 +104,14 @@ impl SessionState {
         self.pending_tool_calls.clone()
     }
 
+    #[cfg(test)]
+    pub(crate) fn read_artifact_content(
+        &self,
+        artifact_id: &ArtifactId,
+    ) -> Result<ArtifactContent, ArtifactError> {
+        self.artifacts.read_content(artifact_id).cloned()
+    }
+
     pub(crate) fn record_session_started_if_needed(&mut self) -> Option<RuntimeEvent> {
         if self.session_started {
             return None;
@@ -123,12 +135,77 @@ impl SessionState {
         )
     }
 
-    pub(crate) fn record_tool_call_pending(&mut self, call: PendingToolCall) -> RuntimeEvent {
+    pub(crate) fn record_tool_call_pending(
+        &mut self,
+        call: PendingToolCall,
+    ) -> Result<RuntimeEvent, ErrorInfo> {
+        if self
+            .pending_tool_calls
+            .iter()
+            .any(|pending| pending.id() == call.id())
+        {
+            return Err(duplicate_tool_call_diagnostic(call.id(), "already pending"));
+        }
+
+        if self.resolved_tool_calls.contains(call.id()) {
+            return Err(duplicate_tool_call_diagnostic(
+                call.id(),
+                "already resolved",
+            ));
+        }
+
         self.pending_tool_calls.push(call.clone());
-        self.record_event(
+        Ok(self.record_event(
             RuntimeEventKind::ToolCallPending { call },
             LedgerFactKind::ToolCallPending,
-        )
+        ))
+    }
+
+    pub(crate) fn submit_tool_result(
+        &mut self,
+        result: ToolCallResult,
+        content: ArtifactContent,
+    ) -> Result<Vec<RuntimeEvent>, RuntimeError> {
+        let Some(pending_index) = self
+            .pending_tool_calls
+            .iter()
+            .position(|call| call.id() == result.call_id())
+        else {
+            return if self.resolved_tool_calls.contains(result.call_id()) {
+                Err(RuntimeError::ToolCallAlreadyResolved {
+                    session_id: self.session_id.clone(),
+                    call_id: result.call_id().clone(),
+                })
+            } else {
+                Err(RuntimeError::UnknownToolCall {
+                    session_id: self.session_id.clone(),
+                    call_id: result.call_id().clone(),
+                })
+            };
+        };
+
+        self.validate_tool_result_content(&result, &content)?;
+        let recorded = self.record_artifact_state(result.artifact().clone(), content)?;
+        debug_assert_eq!(&recorded, result.artifact());
+
+        self.pending_tool_calls.remove(pending_index);
+        self.resolved_tool_calls.insert(result.call_id().clone());
+
+        let mut events = Vec::with_capacity(if self.session_started { 2 } else { 3 });
+        if let Some(started) = self.record_session_started_if_needed() {
+            events.push(started);
+        }
+
+        events.push(self.record_event(
+            RuntimeEventKind::ArtifactRecorded { artifact: recorded },
+            LedgerFactKind::ArtifactRecorded,
+        ));
+        events.push(self.record_event(
+            RuntimeEventKind::ToolCallResolved { result },
+            LedgerFactKind::ToolCallResolved,
+        ));
+
+        Ok(events)
     }
 
     pub(crate) fn record_cancelled(&mut self, diagnostic: ErrorInfo) -> RuntimeEvent {
@@ -155,6 +232,37 @@ impl SessionState {
     fn next_sequence(&self) -> u64 {
         self.next_sequence
     }
+
+    fn validate_tool_result_content(
+        &self,
+        result: &ToolCallResult,
+        content: &ArtifactContent,
+    ) -> Result<(), RuntimeError> {
+        let supported = matches!(content, ArtifactContent::Text(_) | ArtifactContent::Json(_));
+        let compatible = matches!(
+            (result.artifact().kind(), content),
+            (ArtifactKind::Text, ArtifactContent::Text(_))
+                | (ArtifactKind::Json, ArtifactContent::Json(_))
+        );
+
+        if supported && compatible {
+            return Ok(());
+        }
+
+        if !supported {
+            return Err(RuntimeError::UnsupportedToolResultContent {
+                artifact_id: result.artifact().id().clone(),
+                content_kind: content.kind(),
+            });
+        }
+
+        Err(ArtifactError::IncompatibleContent {
+            id: result.artifact().id().clone(),
+            artifact_kind: result.artifact().kind().clone(),
+            content_kind: content.kind(),
+        }
+        .into())
+    }
 }
 
 fn assistant_output_id(sequence: u64) -> ArtifactId {
@@ -162,13 +270,43 @@ fn assistant_output_id(sequence: u64) -> ArtifactId {
         .expect("assistant output artifact id uses a valid static prefix and sequence")
 }
 
+fn duplicate_tool_call_diagnostic(call_id: &ToolCallId, state: &'static str) -> ErrorInfo {
+    ErrorInfo::new(
+        "tool_call_duplicate",
+        &format!("tool call {call_id} is {state}; duplicate pending admission rejected"),
+    )
+    .expect("duplicate tool call diagnostic uses static code and validated call id")
+}
+
 #[cfg(test)]
 mod tests {
     use super::SessionState;
-    use merry_core::{ArtifactKind, RuntimeEventKind, SessionId};
+    use crate::artifact::ArtifactContent;
+    use merry_core::{
+        ArtifactId, ArtifactKind, ArtifactRef, PendingToolCall, RuntimeEventKind, SessionId,
+        ToolCallArguments, ToolCallId, ToolCallResult, ToolName,
+    };
+    use serde_json::json;
 
     fn session_id() -> SessionId {
         SessionId::new("session-state-test").expect("valid session id")
+    }
+
+    fn artifact_id(value: &str) -> ArtifactId {
+        ArtifactId::new(value).expect("valid artifact id")
+    }
+
+    fn tool_call_id(value: &str) -> ToolCallId {
+        ToolCallId::new(value).expect("valid tool call id")
+    }
+
+    fn pending_tool_call(id: &str) -> PendingToolCall {
+        PendingToolCall::new(
+            tool_call_id(id),
+            ToolName::new("lookup").expect("valid tool name"),
+            ToolCallArguments::try_from(json!({ "query": "value" }))
+                .expect("object arguments are valid"),
+        )
     }
 
     #[test]
@@ -210,5 +348,91 @@ mod tests {
         }
         assert_eq!(artifact.sequence, 2);
         assert_eq!(completed.sequence, 3);
+    }
+
+    #[test]
+    fn submit_tool_result_stores_exact_content_before_resolved_event() {
+        let mut session = SessionState::new(session_id());
+        let call = pending_tool_call("call-1");
+        session
+            .record_tool_call_pending(call.clone())
+            .expect("pending call should record");
+        let artifact = ArtifactRef::new(artifact_id("tool-result-exact"), ArtifactKind::Text);
+        let result = ToolCallResult::succeeded(call.id().clone(), artifact.clone());
+
+        let events = session
+            .submit_tool_result(result.clone(), ArtifactContent::text("exact result\n"))
+            .expect("tool result should submit");
+
+        assert_eq!(
+            session
+                .read_artifact_content(artifact.id())
+                .expect("recorded content should be readable"),
+            ArtifactContent::text("exact result\n")
+        );
+        assert!(matches!(
+            events.last().map(|event| &event.kind),
+            Some(RuntimeEventKind::ToolCallResolved { result: resolved }) if resolved == &result
+        ));
+    }
+
+    #[test]
+    fn submit_tool_result_starts_session_before_artifact_and_resolution_when_needed() {
+        let mut session = SessionState::new(session_id());
+        session
+            .pending_tool_calls
+            .push(pending_tool_call("pre-start-call"));
+        let artifact = ArtifactRef::new(artifact_id("pre-start-result"), ArtifactKind::Json);
+        let result = ToolCallResult::succeeded(tool_call_id("pre-start-call"), artifact.clone());
+
+        let events = session
+            .submit_tool_result(result.clone(), ArtifactContent::json(r#"{"ok":true}"#))
+            .expect("tool result should submit");
+
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.sequence)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert!(matches!(events[0].kind, RuntimeEventKind::SessionStarted));
+        assert!(matches!(
+            &events[1].kind,
+            RuntimeEventKind::ArtifactRecorded { artifact: recorded } if recorded == &artifact
+        ));
+        assert!(matches!(
+            &events[2].kind,
+            RuntimeEventKind::ToolCallResolved { result: resolved } if resolved == &result
+        ));
+    }
+
+    #[test]
+    fn duplicate_tool_call_pending_is_rejected_without_second_pending_or_sequence() {
+        let mut session = SessionState::new(session_id());
+        let call = pending_tool_call("duplicate-call");
+        let first = session
+            .record_tool_call_pending(call.clone())
+            .expect("first pending call should record");
+
+        let err = session
+            .record_tool_call_pending(call.clone())
+            .expect_err("duplicate pending call id should be rejected");
+
+        assert_eq!(err.code(), "tool_call_duplicate");
+        assert_eq!(session.pending_tool_calls(), vec![call]);
+        assert_eq!(first.sequence, 0);
+        assert_eq!(
+            session
+                .ledger_projection()
+                .entries()
+                .iter()
+                .map(|entry| match entry {
+                    crate::ledger::LedgerProjection::Lifecycle { sequence, .. } => *sequence,
+                    crate::ledger::LedgerProjection::Fact { sequence, .. } => *sequence,
+                })
+                .collect::<Vec<_>>(),
+            vec![0]
+        );
     }
 }
