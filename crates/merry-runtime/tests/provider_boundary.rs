@@ -712,6 +712,15 @@ async fn provider_tool_call_pending_preserves_id_name_arguments_and_ledger_fact(
     assert_eq!(call.id().as_str(), "call.provider/opaque.id:42");
     assert_eq!(call.name().as_str(), "search_notes");
     assert_eq!(call.arguments().as_object(), &arguments);
+    let mut pending = runtime.pending_tool_calls().await;
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].id().as_str(), "call.provider/opaque.id:42");
+    assert_eq!(pending[0].name().as_str(), "search_notes");
+    assert_eq!(pending[0].arguments().as_object(), &arguments);
+
+    pending.clear();
+    let pending_after_caller_mutation = runtime.pending_tool_calls().await;
+    assert_eq!(pending_after_caller_mutation, vec![call.clone()]);
 
     let projection = runtime.ledger_projection().await;
     assert_eq!(
