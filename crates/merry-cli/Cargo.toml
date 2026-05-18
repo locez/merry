@@ -7,6 +7,8 @@ rust-version.workspace = true
 [dependencies]
 futures-util.workspace = true
 merry-core = { path = "../merry-core" }
+merry-llm = { path = "../merry-llm" }
+merry-provider-openai = { path = "../merry-provider-openai" }
 merry-runtime = { path = "../merry-runtime" }
 serde_json.workspace = true
 tokio = { workspace = true, features = ["io-std", "io-util"] }
