@@ -1,12 +1,15 @@
 //! Runtime builder and step execution skeleton.
 
 use crate::{
-    RuntimeError, RuntimeEventStream,
+    ArtifactContent, ContextEntry, ContextSummary, RuntimeError, RuntimeEventStream,
+    SessionContextSnapshot,
     event_stream::ActiveStepPermit,
     session::SessionState,
     step::{StepContext, StepInput},
 };
-use merry_core::{ErrorInfo, RuntimeEvent, SessionId};
+use merry_core::{
+    ArtifactId, ArtifactRef, ErrorInfo, EvidenceLocator, EvidenceRef, RuntimeEvent, SessionId,
+};
 use std::{
     num::NonZeroUsize,
     sync::{Arc, atomic::AtomicBool},
@@ -56,6 +59,48 @@ impl Runtime {
             step_token,
             producer_handle,
         ))
+    }
+
+    /// Records exact artifact state into the owning session.
+    pub async fn record_artifact(
+        &self,
+        artifact: ArtifactRef,
+        content: ArtifactContent,
+    ) -> Result<ArtifactRef, RuntimeError> {
+        let mut session = self.inner.session.lock().await;
+        session
+            .record_artifact(artifact, content)
+            .map_err(Into::into)
+    }
+
+    /// Creates an exact evidence reference from artifact state owned by this session.
+    pub async fn evidence_ref(
+        &self,
+        artifact_id: &ArtifactId,
+        locator: EvidenceLocator,
+    ) -> Result<EvidenceRef, RuntimeError> {
+        let session = self.inner.session.lock().await;
+        session
+            .evidence_ref(artifact_id, locator)
+            .map_err(Into::into)
+    }
+
+    /// Records a structured context entry into the owning session.
+    pub async fn record_context_entry(&self, entry: ContextEntry) {
+        let mut session = self.inner.session.lock().await;
+        session.record_context_entry(entry);
+    }
+
+    /// Records a summary context entry into the owning session.
+    pub async fn record_context_summary(&self, summary: ContextSummary) {
+        self.record_context_entry(ContextEntry::summary(summary))
+            .await
+    }
+
+    /// Builds a sealed context snapshot from session-owned context and artifacts.
+    pub async fn context_snapshot(&self) -> SessionContextSnapshot {
+        let session = self.inner.session.lock().await;
+        session.context_snapshot()
     }
 }
 

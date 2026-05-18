@@ -1,10 +1,14 @@
 //! Runtime session state and state-before-event helpers.
 
 use crate::{
-    artifact::ArtifactRegistry,
+    artifact::{ArtifactContent, ArtifactError, ArtifactRegistry},
+    context::{ContextEntry, SessionContextSnapshot},
     ledger::{LedgerFactKind, TaskLedger},
 };
-use merry_core::{ErrorInfo, RuntimeEvent, RuntimeEventKind, SessionId};
+use merry_core::{
+    ArtifactId, ArtifactRef, ErrorInfo, EvidenceLocator, EvidenceRef, RuntimeEvent,
+    RuntimeEventKind, SessionId,
+};
 
 /// Mutable runtime state for one session.
 #[derive(Debug)]
@@ -14,6 +18,7 @@ pub(crate) struct SessionState {
     session_started: bool,
     ledger: TaskLedger,
     artifacts: ArtifactRegistry,
+    context_entries: Vec<ContextEntry>,
 }
 
 impl SessionState {
@@ -24,11 +29,35 @@ impl SessionState {
             session_started: false,
             ledger: TaskLedger::default(),
             artifacts: ArtifactRegistry::default(),
+            context_entries: Vec::new(),
         }
     }
 
+    pub(crate) fn record_artifact(
+        &mut self,
+        artifact: ArtifactRef,
+        content: ArtifactContent,
+    ) -> Result<ArtifactRef, ArtifactError> {
+        self.artifacts.record(artifact, content)
+    }
+
+    pub(crate) fn evidence_ref(
+        &self,
+        artifact_id: &ArtifactId,
+        locator: EvidenceLocator,
+    ) -> Result<EvidenceRef, ArtifactError> {
+        self.artifacts.evidence_ref(artifact_id, locator)
+    }
+
+    pub(crate) fn record_context_entry(&mut self, entry: ContextEntry) {
+        self.context_entries.push(entry);
+    }
+
+    pub(crate) fn context_snapshot(&self) -> SessionContextSnapshot {
+        SessionContextSnapshot::new(self.context_entries.clone(), self.artifacts.clone())
+    }
+
     pub(crate) fn record_session_started_if_needed(&mut self) -> Option<RuntimeEvent> {
-        debug_assert!(self.artifacts.is_empty());
         if self.session_started {
             return None;
         }
@@ -41,12 +70,10 @@ impl SessionState {
     }
 
     pub(crate) fn record_step_started(&mut self) -> RuntimeEvent {
-        debug_assert!(self.artifacts.is_empty());
         self.record_event(RuntimeEventKind::StepStarted, LedgerFactKind::StepStarted)
     }
 
     pub(crate) fn record_step_completed(&mut self) -> RuntimeEvent {
-        debug_assert!(self.artifacts.is_empty());
         self.record_event(
             RuntimeEventKind::StepCompleted,
             LedgerFactKind::StepCompleted,
@@ -54,7 +81,6 @@ impl SessionState {
     }
 
     pub(crate) fn record_cancelled(&mut self, diagnostic: ErrorInfo) -> RuntimeEvent {
-        debug_assert!(self.artifacts.is_empty());
         self.record_event(
             RuntimeEventKind::Cancelled { diagnostic },
             LedgerFactKind::Cancelled,

@@ -1,8 +1,12 @@
-use merry_core::{ArtifactId, ArtifactKind, ArtifactRef, EvidenceLocator, EvidenceRef};
+use merry_core::{ArtifactId, ArtifactKind, ArtifactRef, EvidenceLocator, EvidenceRef, SessionId};
 use merry_runtime::{
-    ArtifactContent, ArtifactRegistry, CompiledContextSection, ContextCompiler, ContextEntry,
-    ContextEvidence, ContextSummary,
+    ArtifactContent, CompiledContextSection, ContextCompiler, ContextEntry, ContextEvidence,
+    ContextSummary, Runtime,
 };
+
+fn session_id(value: &str) -> SessionId {
+    SessionId::new(value).expect("valid session id")
+}
 
 fn artifact_id(value: &str) -> ArtifactId {
     ArtifactId::new(value).expect("valid artifact id")
@@ -23,42 +27,50 @@ fn evidence(label: &str, reference: EvidenceRef) -> ContextEvidence {
     ContextEvidence::new(label, reference).expect("valid context evidence")
 }
 
-fn registry_with_text_artifact(id: &str, content: &str) -> ArtifactRegistry {
-    let mut registry = ArtifactRegistry::default();
-    registry
-        .record(
+fn runtime(value: &str) -> Runtime {
+    Runtime::builder(session_id(value))
+        .build()
+        .expect("runtime should build")
+}
+
+async fn record_text_artifact(runtime: &Runtime, id: &str, content: &str) {
+    runtime
+        .record_artifact(
             ArtifactRef::new(artifact_id(id), ArtifactKind::Text),
             ArtifactContent::text(content),
         )
+        .await
         .expect("valid artifact record");
-    registry
 }
 
-fn registry_with_text_artifacts(artifacts: &[(&str, &str)]) -> ArtifactRegistry {
-    let mut registry = ArtifactRegistry::default();
+async fn record_text_artifacts(runtime: &Runtime, artifacts: &[(&str, &str)]) {
     for (id, content) in artifacts {
-        registry
-            .record(
-                ArtifactRef::new(artifact_id(id), ArtifactKind::Text),
-                ArtifactContent::text(*content),
-            )
-            .expect("valid artifact record");
+        record_text_artifact(runtime, id, content).await;
     }
-    registry
 }
 
-#[test]
-fn compiled_context_is_deterministic_from_structured_state() {
+async fn record_summary(runtime: &Runtime, summary: ContextEntry) {
+    runtime.record_context_entry(summary).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn compiled_context_is_deterministic_from_session_snapshot() {
     let compiler = ContextCompiler::new();
-    let registry = registry_with_text_artifacts(&[
-        ("artifact-a", "a1\na2\na3\n"),
-        ("artifact-b", "b1\nb2\nb3\nb4\nb5\nb6\n"),
-        (
-            "artifact-z",
-            "z1\nz2\nz3\nz4\nz5\nz6\nz7\nz8\nz9\nz10\nz11\nz12\n",
-        ),
-    ]);
-    let input = vec![
+    let runtime = runtime("context-determinism");
+    record_text_artifacts(
+        &runtime,
+        &[
+            ("artifact-a", "a1\na2\na3\n"),
+            ("artifact-b", "b1\nb2\nb3\nb4\nb5\nb6\n"),
+            (
+                "artifact-z",
+                "z1\nz2\nz3\nz4\nz5\nz6\nz7\nz8\nz9\nz10\nz11\nz12\n",
+            ),
+        ],
+    )
+    .await;
+    record_summary(
+        &runtime,
         summary(
             "summary-z",
             "Later finding.",
@@ -67,6 +79,10 @@ fn compiled_context_is_deterministic_from_structured_state() {
                 line_evidence("artifact-z", 9, 12),
             )],
         ),
+    )
+    .await;
+    record_summary(
+        &runtime,
         summary(
             "summary-a",
             "Earlier finding.",
@@ -75,13 +91,14 @@ fn compiled_context_is_deterministic_from_structured_state() {
                 evidence("first artifact", line_evidence("artifact-a", 1, 3)),
             ],
         ),
-    ];
+    )
+    .await;
 
     let first = compiler
-        .compile(input.clone(), &registry)
+        .compile(&runtime.context_snapshot().await)
         .expect("context compiles");
     let second = compiler
-        .compile(input, &registry)
+        .compile(&runtime.context_snapshot().await)
         .expect("context compiles again");
 
     assert_eq!(first, second);
@@ -108,21 +125,65 @@ fn compiled_context_is_deterministic_from_structured_state() {
     );
 }
 
-#[test]
-fn registry_compilation_rejects_missing_evidence_artifacts() {
+#[tokio::test(flavor = "current_thread")]
+async fn registry_mismatch_is_not_expressible_through_public_context_compiler_api() {
     let compiler = ContextCompiler::new();
-    let registry = ArtifactRegistry::default();
-    let input = vec![summary(
-        "summary-with-missing-artifact",
-        "Navigation must not outrun exact evidence.",
-        vec![evidence(
-            "missing build output",
-            line_evidence("artifact-missing", 1, 1),
-        )],
-    )];
+    let evidence_ref = line_evidence("artifact-same-id", 3, 3);
+
+    let matching_runtime = runtime("context-matching-registry");
+    record_text_artifact(&matching_runtime, "artifact-same-id", "m1\nm2\nm3\n").await;
+    record_summary(
+        &matching_runtime,
+        summary(
+            "summary-matching",
+            "Summary and registry came from the same session.",
+            vec![evidence("matching evidence", evidence_ref.clone())],
+        ),
+    )
+    .await;
+
+    let mismatched_runtime = runtime("context-wrong-registry");
+    record_text_artifact(
+        &mismatched_runtime,
+        "artifact-same-id",
+        "wrong-only-one-line\n",
+    )
+    .await;
+
+    let compiled = compiler
+        .compile(&matching_runtime.context_snapshot().await)
+        .expect("matching snapshot compiles");
+
+    assert_eq!(
+        compiled.to_snapshot(),
+        [
+            "summary:summary-matching",
+            "text:Summary and registry came from the same session.",
+            "evidence:matching evidence:artifact-same-id:line:3-3",
+        ]
+        .join("\n")
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn session_snapshot_compilation_rejects_missing_evidence_artifacts() {
+    let compiler = ContextCompiler::new();
+    let runtime = runtime("context-missing-evidence");
+    record_summary(
+        &runtime,
+        summary(
+            "summary-with-missing-artifact",
+            "Navigation must not outrun exact evidence.",
+            vec![evidence(
+                "missing build output",
+                line_evidence("artifact-missing", 1, 1),
+            )],
+        ),
+    )
+    .await;
 
     let error = compiler
-        .compile(input, &registry)
+        .compile(&runtime.context_snapshot().await)
         .expect_err("missing evidence artifact must be rejected");
 
     assert_eq!(
@@ -131,18 +192,18 @@ fn registry_compilation_rejects_missing_evidence_artifacts() {
     );
 }
 
-#[test]
-fn summary_text_requires_linked_exact_evidence_metadata() {
+#[tokio::test(flavor = "current_thread")]
+async fn summary_text_requires_linked_exact_evidence_metadata() {
     let compiler = ContextCompiler::new();
-    let registry = ArtifactRegistry::default();
-    let input = vec![summary(
-        "summary-without-evidence",
-        "Navigation only.",
-        vec![],
-    )];
+    let runtime = runtime("context-summary-without-evidence");
+    record_summary(
+        &runtime,
+        summary("summary-without-evidence", "Navigation only.", vec![]),
+    )
+    .await;
 
     let error = compiler
-        .compile(input, &registry)
+        .compile(&runtime.context_snapshot().await)
         .expect_err("summary without evidence must be rejected");
 
     assert_eq!(
@@ -151,25 +212,59 @@ fn summary_text_requires_linked_exact_evidence_metadata() {
     );
 }
 
-#[test]
-fn compiled_snapshot_includes_summary_and_exact_evidence_refs() {
+#[tokio::test(flavor = "current_thread")]
+async fn session_snapshot_compilation_rejects_unreadable_evidence_locators() {
     let compiler = ContextCompiler::new();
-    let registry = registry_with_text_artifact(
+    let runtime = runtime("context-unreadable-evidence");
+    record_text_artifact(&runtime, "artifact-short-log", "01\n02\n").await;
+    record_summary(
+        &runtime,
+        summary(
+            "summary-with-unreadable-evidence",
+            "Navigation must point at readable content.",
+            vec![evidence(
+                "short compiler output",
+                line_evidence("artifact-short-log", 42, 47),
+            )],
+        ),
+    )
+    .await;
+
+    let error = compiler
+        .compile(&runtime.context_snapshot().await)
+        .expect_err("unreadable evidence locator must be rejected");
+
+    assert_eq!(
+        error.to_string(),
+        "context summary summary-with-unreadable-evidence references unreadable evidence artifact-short-log: artifact id artifact-short-log has invalid evidence locator: line range is outside artifact content"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn compiled_snapshot_includes_summary_and_exact_evidence_refs() {
+    let compiler = ContextCompiler::new();
+    let runtime = runtime("context-snapshot-text");
+    record_text_artifact(
+        &runtime,
         "artifact-build-log",
         "01\n02\n03\n04\n05\n06\n07\n08\n09\n10\n11\n12\n13\n14\n15\n16\n17\n18\n19\n20\n21\n22\n23\n24\n25\n26\n27\n28\n29\n30\n31\n32\n33\n34\n35\n36\n37\n38\n39\n40\n41\n42\n43\n44\n45\n46\n47\n",
-    );
-    let context = compiler
-        .compile(
-            vec![summary(
-                "summary-a",
-                "Build errors point at context ownership.",
-                vec![evidence(
-                    "compiler output",
-                    line_evidence("artifact-build-log", 42, 47),
-                )],
+    )
+    .await;
+    record_summary(
+        &runtime,
+        summary(
+            "summary-a",
+            "Build errors point at context ownership.",
+            vec![evidence(
+                "compiler output",
+                line_evidence("artifact-build-log", 42, 47),
             )],
-            &registry,
-        )
+        ),
+    )
+    .await;
+
+    let context = compiler
+        .compile(&runtime.context_snapshot().await)
         .expect("context compiles");
 
     let snapshot = context.to_snapshot();

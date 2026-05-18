@@ -5,6 +5,19 @@ use merry_core::{ArtifactId, EvidenceLocator, EvidenceRef};
 use thiserror::Error;
 
 /// Compiles structured runtime state into a deterministic context snapshot.
+///
+/// Public callers must compile from a session-owned snapshot, not from an
+/// arbitrary entry list paired with an arbitrary artifact registry.
+///
+/// ```compile_fail
+/// use merry_runtime::{ArtifactRegistry, ContextCompiler, ContextEntry};
+///
+/// let compiler = ContextCompiler::new();
+/// let entries: Vec<ContextEntry> = Vec::new();
+/// let artifacts = ArtifactRegistry::default();
+///
+/// let _ = compiler.compile(entries, &artifacts);
+/// ```
 #[derive(Debug, Default)]
 pub struct ContextCompiler;
 
@@ -22,35 +35,76 @@ impl ContextCompiler {
     /// artifact content before summary text enters the compiled context.
     pub fn compile(
         &self,
-        entries: Vec<ContextEntry>,
-        artifacts: &ArtifactRegistry,
+        snapshot: &SessionContextSnapshot,
     ) -> Result<CompiledContext, ContextError> {
-        let mut sections = Vec::with_capacity(entries.len());
+        compile_entries(snapshot.entries(), snapshot.artifacts())
+    }
+}
 
-        for entry in entries {
-            match entry {
-                ContextEntry::Summary(summary) => {
-                    if summary.evidence.is_empty() {
-                        return Err(ContextError::SummaryWithoutEvidence { id: summary.id });
-                    }
+fn compile_entries(
+    entries: &[ContextEntry],
+    artifacts: &ArtifactRegistry,
+) -> Result<CompiledContext, ContextError> {
+    let mut sections = Vec::with_capacity(entries.len());
 
-                    let mut evidence = summary.evidence;
-                    evidence.sort_by(|left, right| left.sort_key().cmp(&right.sort_key()));
-
-                    validate_evidence(&summary.id, &evidence, artifacts)?;
-
-                    sections.push(CompiledContextSection::Summary {
-                        id: summary.id,
-                        text: summary.text,
-                        evidence,
+    for entry in entries {
+        match entry {
+            ContextEntry::Summary(summary) => {
+                if summary.evidence.is_empty() {
+                    return Err(ContextError::SummaryWithoutEvidence {
+                        id: summary.id.clone(),
                     });
                 }
+
+                let mut evidence = summary.evidence.clone();
+                evidence.sort_by(|left, right| left.sort_key().cmp(&right.sort_key()));
+
+                validate_evidence(&summary.id, &evidence, artifacts)?;
+
+                sections.push(CompiledContextSection::Summary {
+                    id: summary.id.clone(),
+                    text: summary.text.clone(),
+                    evidence,
+                });
             }
         }
+    }
 
-        sections.sort_by(|left, right| left.sort_key().cmp(&right.sort_key()));
+    sections.sort_by(|left, right| left.sort_key().cmp(&right.sort_key()));
 
-        Ok(CompiledContext { sections })
+    Ok(CompiledContext { sections })
+}
+
+/// Session-owned context state and matching artifact view.
+///
+/// The fields are private so public callers can compile only snapshots created
+/// by the runtime session that owns both summaries and artifact state.
+///
+/// ```compile_fail
+/// use merry_runtime::{ArtifactRegistry, ContextEntry, SessionContextSnapshot};
+///
+/// let entries: Vec<ContextEntry> = Vec::new();
+/// let artifacts = ArtifactRegistry::default();
+///
+/// let _ = SessionContextSnapshot { entries, artifacts };
+/// ```
+#[derive(Debug, Clone)]
+pub struct SessionContextSnapshot {
+    entries: Vec<ContextEntry>,
+    artifacts: ArtifactRegistry,
+}
+
+impl SessionContextSnapshot {
+    pub(crate) fn new(entries: Vec<ContextEntry>, artifacts: ArtifactRegistry) -> Self {
+        Self { entries, artifacts }
+    }
+
+    fn entries(&self) -> &[ContextEntry] {
+        &self.entries
+    }
+
+    fn artifacts(&self) -> &ArtifactRegistry {
+        &self.artifacts
     }
 }
 
