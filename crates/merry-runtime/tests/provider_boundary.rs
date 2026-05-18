@@ -1,7 +1,7 @@
 use futures_util::StreamExt;
 use merry_core::{
-    ArtifactId, ArtifactKind, ArtifactRef, EvidenceLocator, RuntimeEvent, RuntimeEventKind,
-    SessionId, ToolName,
+    ArtifactId, ArtifactKind, ArtifactRef, EvidenceLocator, PendingToolCall, RuntimeEvent,
+    RuntimeEventKind, SessionId, ToolName,
 };
 use merry_llm::{
     FinishReason, GenerationConfig, ModelError, ModelEvent, ModelMessageRole, ModelName,
@@ -12,7 +12,7 @@ use merry_runtime::{
     ArtifactContent, ContextCompiler, ContextEvidence, ContextSummary, LedgerFactKind,
     LedgerProjection, Runtime, StepContext, StepInput,
 };
-use serde_json::Map;
+use serde_json::{Map, Value, json};
 use std::{num::NonZeroUsize, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
@@ -47,10 +47,18 @@ fn completed_outputs_event(outputs: Vec<ModelOutput>, finish_reason: FinishReaso
 }
 
 fn model_tool_call() -> ModelToolCall {
+    model_tool_call_with_args("call-1", "search_notes", Map::new())
+}
+
+fn model_tool_call_with_id(id: &str) -> ModelToolCall {
+    model_tool_call_with_args(id, "search_notes", Map::new())
+}
+
+fn model_tool_call_with_args(id: &str, name: &str, arguments: Map<String, Value>) -> ModelToolCall {
     ModelToolCall::new(
-        ModelToolCallId::new("call-1").expect("valid tool call id"),
-        ToolName::new("search_notes").expect("valid tool name"),
-        ToolArguments::new(Map::new()),
+        ModelToolCallId::new(id).expect("valid tool call id"),
+        ToolName::new(name).expect("valid tool name"),
+        ToolArguments::new(arguments),
     )
 }
 
@@ -103,6 +111,7 @@ fn event_kind_names(events: &[RuntimeEvent]) -> Vec<&'static str> {
             RuntimeEventKind::Failed { .. } => "Failed",
             RuntimeEventKind::ArtifactRecorded { .. } => "ArtifactRecorded",
             RuntimeEventKind::EvidenceReferenced { .. } => "EvidenceReferenced",
+            RuntimeEventKind::ToolCallPending { .. } => "ToolCallPending",
             _ => "Unknown",
         })
         .collect()
@@ -140,6 +149,15 @@ fn assert_no_artifact_recorded(events: &[RuntimeEvent]) {
             .iter()
             .all(|event| !matches!(event.kind, RuntimeEventKind::ArtifactRecorded { .. })),
         "terminal failure/cancellation must not record artifacts: {events:?}"
+    );
+}
+
+fn assert_no_tool_call_pending(events: &[RuntimeEvent]) {
+    assert!(
+        events
+            .iter()
+            .all(|event| !matches!(event.kind, RuntimeEventKind::ToolCallPending { .. })),
+        "terminal failure/cancellation must not record pending tool calls: {events:?}"
     );
 }
 
@@ -200,6 +218,16 @@ fn assistant_output_artifact(events: &[RuntimeEvent]) -> &ArtifactRef {
             _ => None,
         })
         .expect("assistant output artifact should be recorded")
+}
+
+fn pending_tool_call(events: &[RuntimeEvent]) -> &PendingToolCall {
+    events
+        .iter()
+        .find_map(|event| match &event.kind {
+            RuntimeEventKind::ToolCallPending { call } => Some(call),
+            _ => None,
+        })
+        .expect("pending tool call should be emitted")
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -504,18 +532,114 @@ async fn provider_stream_eof_before_completed_emits_failed() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn provider_tool_call_requested_emits_unsupported_failed() {
+async fn provider_streamed_tool_call_requested_emits_pending_without_completion() {
     let call = model_tool_call();
-    let provider = FakeModelProvider::new(vec![Ok(ModelEvent::ToolCallRequested { call })]);
-    let runtime = runtime_with_provider("provider-tool-call", provider);
+    let provider = FakeModelProvider::new(vec![
+        Ok(ModelEvent::Started),
+        Ok(ModelEvent::ToolCallRequested { call: call.clone() }),
+        Ok(completed_outputs_event(
+            vec![ModelOutput::tool_call(call)],
+            FinishReason::ToolCalls,
+        )),
+    ]);
+    let runtime = runtime_with_provider("provider-tool-call-streamed", provider);
 
     let events = collect_step(&runtime, "Request a tool.").await;
 
     assert_eq!(
         event_kind_names(&events),
+        ["SessionStarted", "StepStarted", "ToolCallPending"]
+    );
+    assert_eq!(pending_tool_call(&events).id().as_str(), "call-1");
+    assert_no_artifact_recorded(&events);
+    assert_no_completion(&events);
+    assert!(failed_code(&events).is_none());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn provider_streamed_multiple_tool_call_requests_fail_without_partial_pending() {
+    let provider = FakeModelProvider::new(vec![
+        Ok(ModelEvent::Started),
+        Ok(ModelEvent::ToolCallRequested {
+            call: model_tool_call_with_id("call-1"),
+        }),
+        Ok(ModelEvent::ToolCallRequested {
+            call: model_tool_call_with_id("call-2"),
+        }),
+        Ok(completed_outputs_event(
+            vec![ModelOutput::tool_call(model_tool_call_with_id("call-1"))],
+            FinishReason::ToolCalls,
+        )),
+    ]);
+    let runtime = runtime_with_provider("provider-tool-call-streamed-multiple", provider);
+
+    let events = collect_step(&runtime, "Request multiple streamed tools.").await;
+
+    assert_eq!(
+        event_kind_names(&events),
         ["SessionStarted", "StepStarted", "Failed"]
     );
-    assert_eq!(failed_code(&events), Some("model_tool_call_requested"));
+    assert_eq!(
+        failed_code(&events),
+        Some("model_parallel_tool_calls_unsupported")
+    );
+    assert_no_tool_call_pending(&events);
+    assert_no_artifact_recorded(&events);
+    assert_no_completion(&events);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn provider_streamed_tool_call_then_stop_text_fails_without_artifact_or_pending() {
+    let provider = FakeModelProvider::new(vec![
+        Ok(ModelEvent::Started),
+        Ok(ModelEvent::ToolCallRequested {
+            call: model_tool_call_with_id("call-1"),
+        }),
+        Ok(completed_outputs_event(
+            vec![ModelOutput::text("fallback text")],
+            FinishReason::Stop,
+        )),
+    ]);
+    let runtime = runtime_with_provider("provider-tool-call-then-stop-text", provider);
+
+    let events = collect_step(&runtime, "Request tool then stop with text.").await;
+
+    assert_eq!(
+        event_kind_names(&events),
+        ["SessionStarted", "StepStarted", "Failed"]
+    );
+    assert_eq!(failed_code(&events), Some("model_tool_call_mixed_output"));
+    assert_no_tool_call_pending(&events);
+    assert_no_artifact_recorded(&events);
+    assert_no_completion(&events);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn provider_streamed_tool_call_then_completed_different_tool_call_fails_without_partial_pending()
+ {
+    let provider = FakeModelProvider::new(vec![
+        Ok(ModelEvent::Started),
+        Ok(ModelEvent::ToolCallRequested {
+            call: model_tool_call_with_id("call-1"),
+        }),
+        Ok(completed_outputs_event(
+            vec![ModelOutput::tool_call(model_tool_call_with_id("call-2"))],
+            FinishReason::ToolCalls,
+        )),
+    ]);
+    let runtime = runtime_with_provider("provider-tool-call-completed-different", provider);
+
+    let events = collect_step(&runtime, "Request one tool and complete another.").await;
+
+    assert_eq!(
+        event_kind_names(&events),
+        ["SessionStarted", "StepStarted", "Failed"]
+    );
+    assert_eq!(
+        failed_code(&events),
+        Some("model_parallel_tool_calls_unsupported")
+    );
+    assert_no_tool_call_pending(&events);
     assert_no_artifact_recorded(&events);
     assert_no_completion(&events);
 }
@@ -542,8 +666,9 @@ async fn provider_cancelled_stream_emits_cancelled_without_completion() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn provider_completed_with_tool_calls_finish_emits_failed_without_step_completed() {
-    let provider = FakeModelProvider::new(vec![Ok(completed_event_with_finish(
+async fn provider_completed_with_single_tool_call_emits_pending_without_completion() {
+    let provider = FakeModelProvider::new(vec![Ok(completed_outputs_event(
+        vec![ModelOutput::tool_call(model_tool_call())],
         FinishReason::ToolCalls,
     ))]);
     let runtime = runtime_with_provider("provider-finish-tool-calls", provider);
@@ -552,9 +677,177 @@ async fn provider_completed_with_tool_calls_finish_emits_failed_without_step_com
 
     assert_eq!(
         event_kind_names(&events),
+        ["SessionStarted", "StepStarted", "ToolCallPending"]
+    );
+    assert_eq!(pending_tool_call(&events).id().as_str(), "call-1");
+    assert_no_artifact_recorded(&events);
+    assert_no_completion(&events);
+    assert!(failed_code(&events).is_none());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn provider_tool_call_pending_preserves_id_name_arguments_and_ledger_fact() {
+    let arguments = Map::from_iter([
+        ("query".to_owned(), json!("runtime tool calls")),
+        ("limit".to_owned(), json!(3)),
+        ("include_archived".to_owned(), json!(false)),
+    ]);
+    let provider = FakeModelProvider::new(vec![Ok(completed_outputs_event(
+        vec![ModelOutput::tool_call(model_tool_call_with_args(
+            "call.provider/opaque.id:42",
+            "search_notes",
+            arguments.clone(),
+        ))],
+        FinishReason::ToolCalls,
+    ))]);
+    let runtime = runtime_with_provider("provider-tool-call-payload", provider);
+
+    let events = collect_step(&runtime, "Search notes.").await;
+
+    assert_eq!(
+        event_kind_names(&events),
+        ["SessionStarted", "StepStarted", "ToolCallPending"]
+    );
+    let call = pending_tool_call(&events);
+    assert_eq!(call.id().as_str(), "call.provider/opaque.id:42");
+    assert_eq!(call.name().as_str(), "search_notes");
+    assert_eq!(call.arguments().as_object(), &arguments);
+
+    let projection = runtime.ledger_projection().await;
+    assert_eq!(
+        projection.entries(),
+        [
+            LedgerProjection::Lifecycle {
+                sequence: 0,
+                order: 0,
+                kind: LedgerFactKind::SessionStarted,
+            },
+            LedgerProjection::Lifecycle {
+                sequence: 1,
+                order: 1,
+                kind: LedgerFactKind::StepStarted,
+            },
+            LedgerProjection::Lifecycle {
+                sequence: 2,
+                order: 2,
+                kind: LedgerFactKind::ToolCallPending,
+            },
+        ]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn provider_completed_with_empty_tool_call_args_succeeds() {
+    let provider = FakeModelProvider::new(vec![Ok(completed_outputs_event(
+        vec![ModelOutput::tool_call(model_tool_call())],
+        FinishReason::ToolCalls,
+    ))]);
+    let runtime = runtime_with_provider("provider-tool-call-empty-args", provider);
+
+    let events = collect_step(&runtime, "Call with empty args.").await;
+
+    assert_eq!(
+        event_kind_names(&events),
+        ["SessionStarted", "StepStarted", "ToolCallPending"]
+    );
+    assert!(
+        pending_tool_call(&events)
+            .arguments()
+            .as_object()
+            .is_empty()
+    );
+    assert_no_completion(&events);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn provider_completed_with_multiple_tool_calls_fails_without_partial_pending() {
+    let provider = FakeModelProvider::new(vec![Ok(completed_outputs_event(
+        vec![
+            ModelOutput::tool_call(model_tool_call_with_id("call-1")),
+            ModelOutput::tool_call(model_tool_call_with_id("call-2")),
+        ],
+        FinishReason::ToolCalls,
+    ))]);
+    let runtime = runtime_with_provider("provider-tool-call-multiple", provider);
+
+    let events = collect_step(&runtime, "Return multiple tool calls.").await;
+
+    assert_eq!(
+        event_kind_names(&events),
         ["SessionStarted", "StepStarted", "Failed"]
     );
-    assert_eq!(failed_code(&events), Some("model_tool_call_requested"));
+    assert_eq!(
+        failed_code(&events),
+        Some("model_parallel_tool_calls_unsupported")
+    );
+    assert_no_tool_call_pending(&events);
+    assert_no_artifact_recorded(&events);
+    assert_no_completion(&events);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn provider_completed_with_tool_calls_finish_but_no_tool_call_fails() {
+    let provider = FakeModelProvider::new(vec![Ok(completed_outputs_event(
+        Vec::new(),
+        FinishReason::ToolCalls,
+    ))]);
+    let runtime = runtime_with_provider("provider-tool-call-missing", provider);
+
+    let events = collect_step(&runtime, "Finish without tool call payload.").await;
+
+    assert_eq!(
+        event_kind_names(&events),
+        ["SessionStarted", "StepStarted", "Failed"]
+    );
+    assert_eq!(failed_code(&events), Some("model_tool_call_missing"));
+    assert_no_tool_call_pending(&events);
+    assert_no_artifact_recorded(&events);
+    assert_no_completion(&events);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn provider_completed_with_mixed_text_and_tool_call_fails_without_partial_pending() {
+    let provider = FakeModelProvider::new(vec![Ok(completed_outputs_event(
+        vec![
+            ModelOutput::text("partial answer"),
+            ModelOutput::tool_call(model_tool_call()),
+        ],
+        FinishReason::ToolCalls,
+    ))]);
+    let runtime = runtime_with_provider("provider-tool-call-mixed-output", provider);
+
+    let events = collect_step(&runtime, "Mix text and tool call.").await;
+
+    assert_eq!(
+        event_kind_names(&events),
+        ["SessionStarted", "StepStarted", "Failed"]
+    );
+    assert_eq!(failed_code(&events), Some("model_tool_call_mixed_output"));
+    assert_no_tool_call_pending(&events);
+    assert_no_artifact_recorded(&events);
+    assert_no_completion(&events);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn provider_tool_call_after_non_empty_text_delta_fails_without_partial_pending() {
+    let provider = FakeModelProvider::new(vec![
+        Ok(ModelEvent::OutputTextDelta {
+            delta: "thinking aloud".to_owned(),
+        }),
+        Ok(ModelEvent::ToolCallRequested {
+            call: model_tool_call(),
+        }),
+    ]);
+    let runtime = runtime_with_provider("provider-tool-call-after-text-delta", provider);
+
+    let events = collect_step(&runtime, "Emit text before tool call.").await;
+
+    assert_eq!(
+        event_kind_names(&events),
+        ["SessionStarted", "StepStarted", "Failed"]
+    );
+    assert_eq!(failed_code(&events), Some("model_tool_call_mixed_output"));
+    assert_no_tool_call_pending(&events);
     assert_no_artifact_recorded(&events);
     assert_no_completion(&events);
 }
