@@ -88,10 +88,14 @@ async fn cancelling_full_stream_releases_active_step_after_producer_stops() {
 
     token.cancel();
     let old_events = first_stream.by_ref().collect::<Vec<_>>().await;
-    assert_eq!(old_events.len(), 1);
+    assert_eq!(old_events.len(), 2);
     assert!(matches!(
         old_events[0].kind,
         RuntimeEventKind::SessionStarted
+    ));
+    assert!(matches!(
+        old_events[1].kind,
+        RuntimeEventKind::Cancelled { .. }
     ));
 
     let second_events = runtime
@@ -108,7 +112,7 @@ async fn cancelling_full_stream_releases_active_step_after_producer_stops() {
             .iter()
             .map(|event| event.sequence)
             .collect::<Vec<_>>(),
-        vec![1, 2]
+        vec![2, 3]
     );
     assert!(matches!(
         second_events[0].kind,
@@ -118,6 +122,37 @@ async fn cancelling_full_stream_releases_active_step_after_producer_stops() {
         second_events[1].kind,
         RuntimeEventKind::StepCompleted
     ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cancelling_full_stream_eventually_emits_cancelled() {
+    let runtime = Runtime::builder(session_id())
+        .event_buffer_size(NonZeroUsize::new(1).expect("non-zero buffer"))
+        .build()
+        .expect("runtime should build");
+    let token = CancellationToken::new();
+
+    let mut stream = runtime
+        .step(
+            StepInput::user_text("cancel with full stream").expect("valid step input"),
+            StepContext::new(token.clone()),
+        )
+        .expect("step should start");
+    tokio::task::yield_now().await;
+
+    token.cancel();
+
+    let events = stream.by_ref().collect::<Vec<_>>().await;
+
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+    assert!(matches!(events[0].kind, RuntimeEventKind::SessionStarted));
+    assert!(matches!(events[1].kind, RuntimeEventKind::Cancelled { .. }));
 }
 
 async fn start_step_after_cleanup(runtime: &Runtime, text: &str) -> Vec<merry_core::RuntimeEvent> {
