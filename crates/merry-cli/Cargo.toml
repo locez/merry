@@ -4,6 +4,13 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
+[dependencies]
+futures-util.workspace = true
+merry-core = { path = "../merry-core" }
+merry-runtime = { path = "../merry-runtime" }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["io-std", "io-util"] }
+
 [[bin]]
 name = "merry"
 path = "src/main.rs"

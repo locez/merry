@@ -82,6 +82,13 @@ checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 [[package]]
 name = "merry-cli"
 version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "merry-core",
+ "merry-runtime",
+ "serde_json",
+ "tokio",
+]
 
 [[package]]
 name = "merry-core"
@@ -295,6 +302,7 @@ version = "1.52.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fc7f01b389ac15039e4dc9531aa973a135d7a4135281b12d7c1bc79fd57fffe"
 dependencies = [
+ "bytes",
  "pin-project-lite",
  "tokio-macros",
 ]
