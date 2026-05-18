@@ -1,7 +1,7 @@
 use merry_core::{
     ArtifactId, ArtifactKind, ArtifactRef, CoreError, ErrorInfo, EvidenceLocator, EvidenceRef,
-    ProviderName, RuntimeEvent, RuntimeEventKind, SessionId, SkillId, ToolInputSchema, ToolName,
-    ToolSpec,
+    PendingToolCall, ProviderName, RuntimeEvent, RuntimeEventKind, SessionId, SkillId,
+    ToolCallArguments, ToolCallId, ToolInputSchema, ToolName, ToolSpec,
 };
 use schemars::{JsonSchema, Schema};
 use serde::{Serialize, de::DeserializeOwned};
@@ -284,6 +284,110 @@ fn tool_spec_validates_names_descriptions_and_object_schemas() {
 }
 
 #[test]
+fn pending_tool_call_event_uses_provider_neutral_payload_shape() {
+    let arguments = ToolCallArguments::try_from(json!({
+        "city": "Shanghai",
+        "options": {
+            "units": "metric",
+            "days": [1, 2, 3]
+        }
+    }))
+    .expect("object arguments are valid");
+
+    let call = PendingToolCall::new(
+        ToolCallId::new("call.provider/opaque.id:42").expect("valid call id"),
+        ToolName::new("lookup_weather").expect("valid tool name"),
+        arguments,
+    );
+
+    assert_eq!(call.id().as_str(), "call.provider/opaque.id:42");
+    assert_eq!(call.name().as_str(), "lookup_weather");
+    assert_eq!(
+        call.arguments().as_object().get("options"),
+        Some(&json!({
+            "units": "metric",
+            "days": [1, 2, 3]
+        }))
+    );
+
+    let event = RuntimeEvent::new(
+        SessionId::new("session-1").expect("valid session id"),
+        9,
+        RuntimeEventKind::ToolCallPending { call },
+    );
+
+    assert_eq!(
+        serde_json::to_value(&event).expect("event serializes"),
+        json!({
+            "session_id": "session-1",
+            "sequence": 9,
+            "kind": {
+                "type": "tool_call_pending",
+                "call": {
+                    "id": "call.provider/opaque.id:42",
+                    "name": "lookup_weather",
+                    "arguments": {
+                        "city": "Shanghai",
+                        "options": {
+                            "units": "metric",
+                            "days": [1, 2, 3]
+                        }
+                    }
+                }
+            }
+        })
+    );
+    assert_json_round_trip(&event);
+}
+
+#[test]
+fn pending_tool_call_validates_call_id_tool_name_and_object_arguments() {
+    for valid in ["call-1", "call.provider/opaque.id:42", "openai_call_123"] {
+        let id = ToolCallId::new(valid).expect("valid provider-originated call id");
+        assert_eq!(id.as_str(), valid);
+        assert_json_round_trip(&id);
+    }
+
+    for invalid in ["", "   ", " leading", "trailing ", "has\nnewline"] {
+        assert!(
+            ToolCallId::new(invalid).is_err(),
+            "{invalid:?} should reject"
+        );
+        assert!(serde_json::from_value::<ToolCallId>(json!(invalid)).is_err());
+    }
+
+    let max_len = "c".repeat(256);
+    assert!(ToolCallId::new(&max_len).is_ok());
+    let overlong = "c".repeat(257);
+    assert!(ToolCallId::new(&overlong).is_err());
+
+    assert!(ToolCallArguments::try_from(json!({ "path": "README.md" })).is_ok());
+    for invalid in [json!(null), json!(true), json!("text"), json!([["path"]])] {
+        assert!(
+            ToolCallArguments::try_from(invalid).is_err(),
+            "non-object arguments should reject"
+        );
+    }
+
+    assert!(
+        serde_json::from_value::<PendingToolCall>(json!({
+            "id": "call-1",
+            "name": "bad.name",
+            "arguments": {}
+        }))
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<PendingToolCall>(json!({
+            "id": "call-1",
+            "name": "lookup_weather",
+            "arguments": "not an object"
+        }))
+        .is_err()
+    );
+}
+
+#[test]
 fn runtime_event_uses_stable_snake_case_tags_and_round_trips() {
     let event = RuntimeEvent::new(
         SessionId::new("session-1").expect("valid session id"),
@@ -397,6 +501,9 @@ fn schemars_generation_compiles_for_public_protocol_types() {
     assert_schema_compiles::<ArtifactRef>();
     assert_schema_compiles::<EvidenceLocator>();
     assert_schema_compiles::<EvidenceRef>();
+    assert_schema_compiles::<ToolCallId>();
+    assert_schema_compiles::<ToolCallArguments>();
+    assert_schema_compiles::<PendingToolCall>();
     assert_schema_compiles::<ToolInputSchema>();
     assert_schema_compiles::<ToolSpec>();
     assert_schema_compiles::<ErrorInfo>();

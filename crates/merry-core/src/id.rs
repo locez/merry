@@ -7,6 +7,7 @@ use std::{fmt, str::FromStr};
 
 const MAX_IDENTIFIER_LEN: usize = 128;
 const MAX_TOOL_NAME_LEN: usize = 64;
+const MAX_TOOL_CALL_ID_LEN: usize = 256;
 
 fn validate_common_identifier(
     kind: &'static str,
@@ -91,6 +92,9 @@ fn invalid_identifier(kind: &'static str, value: &str, reason: &'static str) -> 
 
 macro_rules! define_id {
     ($type:ident, $kind:literal) => {
+        define_id!($type, $kind, MAX_IDENTIFIER_LEN);
+    };
+    ($type:ident, $kind:literal, $max_len:expr) => {
         #[doc = concat!("Validated ", $kind, " newtype.")]
         #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, JsonSchema)]
         #[serde(transparent)]
@@ -99,7 +103,7 @@ macro_rules! define_id {
         impl $type {
             /// Creates a validated identifier from a borrowed string.
             pub fn new(value: &str) -> Result<Self, CoreError> {
-                validate_common_identifier($kind, value, MAX_IDENTIFIER_LEN)?;
+                validate_common_identifier($kind, value, $max_len)?;
                 Ok(Self(value.to_owned()))
             }
 
@@ -136,7 +140,7 @@ macro_rules! define_id {
             type Error = CoreError;
 
             fn try_from(value: String) -> Result<Self, Self::Error> {
-                validate_common_identifier($kind, &value, MAX_IDENTIFIER_LEN)?;
+                validate_common_identifier($kind, &value, $max_len)?;
                 Ok(Self(value))
             }
         }
@@ -157,6 +161,7 @@ define_id!(SessionId, "SessionId");
 define_id!(ArtifactId, "ArtifactId");
 define_id!(SkillId, "SkillId");
 define_id!(ProviderName, "ProviderName");
+define_id!(ToolCallId, "ToolCallId", MAX_TOOL_CALL_ID_LEN);
 
 /// Provider-portable tool name.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, JsonSchema)]

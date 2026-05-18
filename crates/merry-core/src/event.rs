@@ -1,6 +1,6 @@
 //! Runtime event protocol vocabulary.
 
-use crate::{ArtifactRef, CoreError, EvidenceRef, SessionId};
+use crate::{ArtifactRef, CoreError, EvidenceRef, PendingToolCall, SessionId};
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, de};
 
@@ -104,6 +104,8 @@ pub enum RuntimeEventKind {
     ArtifactRecorded { artifact: ArtifactRef },
     /// Exact evidence was referenced.
     EvidenceReferenced { evidence: EvidenceRef },
+    /// A model requested a tool call that is waiting for runtime policy/execution.
+    ToolCallPending { call: PendingToolCall },
     /// The runtime was cancelled.
     Cancelled { diagnostic: ErrorInfo },
     /// The runtime failed.

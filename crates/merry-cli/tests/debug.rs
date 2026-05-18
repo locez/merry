@@ -199,6 +199,8 @@ fn debug_openai_help_writes_usage_to_stdout() {
     assert!(stdout.contains("--input <TEXT>"));
     assert!(stdout.contains("--model <MODEL>"));
     assert!(stdout.contains("--max-output-tokens <N>"));
+    assert!(stdout.contains("Optional maximum output tokens"));
+    assert!(!stdout.contains("Rejected until"));
     assert!(stdout.contains("MERRY_OPENAI_DEBUG=1"));
 }
 
@@ -336,33 +338,4 @@ fn debug_openai_rejects_zero_or_invalid_max_output_tokens() {
         assert!(stderr.contains("--max-output-tokens"));
         assert!(stderr.contains("Usage: merry debug openai"));
     }
-}
-
-#[test]
-fn debug_openai_rejects_max_output_tokens_until_runtime_generation_config_exists() {
-    let output = merry_without_openai_env()
-        .env("MERRY_OPENAI_DEBUG", "1")
-        .env("OPENAI_API_KEY", "sk-test")
-        .args([
-            "debug",
-            "openai",
-            "--input",
-            "hello",
-            "--model",
-            "gpt-test",
-            "--max-output-tokens",
-            "16",
-        ])
-        .output()
-        .expect("merry debug openai should run");
-
-    assert_eq!(output.status.code(), Some(2));
-    assert!(
-        output.stdout.is_empty(),
-        "usage errors should not write stdout"
-    );
-    let stderr = std::str::from_utf8(&output.stderr).expect("stderr should be utf-8");
-    assert!(stderr.contains("--max-output-tokens is not supported"));
-    assert!(stderr.contains("Runtime::step generation config"));
-    assert!(stderr.contains("Usage: merry debug openai"));
 }
