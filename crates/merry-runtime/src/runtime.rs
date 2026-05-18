@@ -12,7 +12,7 @@ use merry_core::{
     ArtifactId, ArtifactRef, ErrorInfo, EvidenceLocator, EvidenceRef, RuntimeEvent, SessionId,
 };
 use merry_llm::{
-    FinishReason, ModelError, ModelEvent, ModelName, ModelOutput, ModelProvider,
+    FinishReason, GenerationConfig, ModelError, ModelEvent, ModelName, ModelOutput, ModelProvider,
     ModelStreamContext, ProviderErrorKind,
 };
 use std::{
@@ -49,14 +49,22 @@ impl Runtime {
                 session_id: self.inner.session_id.clone(),
             })?;
 
-        let parent_token = context.into_cancellation_token();
+        let (parent_token, generation_config) = context.into_parts();
         let step_token = parent_token.child_token();
         let producer_token = step_token.clone();
         let (sender, receiver) = mpsc::channel(self.inner.event_buffer_size.get());
         let inner = Arc::clone(&self.inner);
 
         let producer_handle = tokio::spawn(async move {
-            run_step(inner, sender, producer_token, input, active_permit).await;
+            run_step(
+                inner,
+                sender,
+                producer_token,
+                input,
+                generation_config,
+                active_permit,
+            )
+            .await;
         });
 
         Ok(RuntimeEventStream::new(
@@ -187,6 +195,7 @@ async fn run_step(
     sender: mpsc::Sender<RuntimeEvent>,
     token: CancellationToken,
     input: StepInput,
+    generation_config: GenerationConfig,
     _active_permit: ActiveStepPermit,
 ) {
     if token.is_cancelled() {
@@ -233,7 +242,15 @@ async fn run_step(
         return;
     };
 
-    run_provider_step(&inner, &sender, &token, input, provider_config).await;
+    run_provider_step(
+        &inner,
+        &sender,
+        &token,
+        input,
+        generation_config,
+        provider_config,
+    )
+    .await;
 }
 
 async fn run_provider_step(
@@ -241,6 +258,7 @@ async fn run_provider_step(
     sender: &mpsc::Sender<RuntimeEvent>,
     token: &CancellationToken,
     input: StepInput,
+    generation_config: GenerationConfig,
     provider_config: ModelProviderConfig,
 ) {
     let snapshot = {
@@ -257,15 +275,19 @@ async fn run_provider_step(
         }
     };
 
-    let request =
-        match compile_step_model_request(&input, &provider_config.model, &compiled_context) {
-            Ok(request) => request,
-            Err(error) => {
-                let diagnostic = diagnostic_from_text("model_request", error.to_string());
-                let _ = send_failed_event(inner, sender, token, diagnostic).await;
-                return;
-            }
-        };
+    let request = match compile_step_model_request(
+        &input,
+        &provider_config.model,
+        &compiled_context,
+        generation_config,
+    ) {
+        Ok(request) => request,
+        Err(error) => {
+            let diagnostic = diagnostic_from_text("model_request", error.to_string());
+            let _ = send_failed_event(inner, sender, token, diagnostic).await;
+            return;
+        }
+    };
 
     let stream_context = ModelStreamContext::new(token.clone());
     let stream_result = tokio::select! {

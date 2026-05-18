@@ -74,10 +74,18 @@ fn runtime_with_provider_event_buffer(
 }
 
 async fn collect_step(runtime: &Runtime, text: &str) -> Vec<RuntimeEvent> {
+    collect_step_with_context(runtime, text, StepContext::new(CancellationToken::new())).await
+}
+
+async fn collect_step_with_context(
+    runtime: &Runtime,
+    text: &str,
+    context: StepContext,
+) -> Vec<RuntimeEvent> {
     runtime
         .step(
             StepInput::user_text(text).expect("valid step input"),
-            StepContext::new(CancellationToken::new()),
+            context,
         )
         .expect("step should start")
         .collect()
@@ -273,6 +281,31 @@ async fn runtime_step_with_provider_compiles_user_text_request_and_records_assis
     assert!(request.tools().is_empty());
     assert_eq!(request.generation(), &GenerationConfig::default());
     assert!(!request.generation().allow_parallel_tool_calls());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_step_with_provider_uses_step_generation_config() {
+    let provider = FakeModelProvider::new(vec![Ok(completed_event())]);
+    let runtime = runtime_with_provider("provider-generation-config", provider.clone());
+    let context = StepContext::new(CancellationToken::new()).with_generation_config(
+        GenerationConfig::new(Some(16), false).expect("valid generation config"),
+    );
+
+    let events = collect_step_with_context(&runtime, "Limit the output.", context).await;
+
+    assert_eq!(
+        event_kind_names(&events),
+        [
+            "SessionStarted",
+            "StepStarted",
+            "ArtifactRecorded",
+            "StepCompleted"
+        ]
+    );
+    let requests = provider.recorded_requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].generation().max_output_tokens(), Some(16));
+    assert!(!requests[0].generation().allow_parallel_tool_calls());
 }
 
 #[tokio::test(flavor = "current_thread")]

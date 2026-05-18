@@ -12,6 +12,6 @@ pub use artifact::{ArtifactKind, ArtifactRef};
 pub use error::CoreError;
 pub use event::{ErrorInfo, RuntimeEvent, RuntimeEventKind};
 pub use evidence::{EvidenceLocator, EvidenceRef};
-pub use id::{ArtifactId, ProviderName, SessionId, SkillId, ToolName};
+pub use id::{ArtifactId, ProviderName, SessionId, SkillId, ToolCallId, ToolName};
 pub use schema::ToolInputSchema;
-pub use tool::ToolSpec;
+pub use tool::{PendingToolCall, ToolCallArguments, ToolSpec};

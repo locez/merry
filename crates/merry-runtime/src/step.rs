@@ -32,13 +32,17 @@ impl StepInput {
 #[derive(Debug, Clone)]
 pub struct StepContext {
     cancellation_token: CancellationToken,
+    generation_config: GenerationConfig,
 }
 
 impl StepContext {
     /// Creates a step context with the provided cancellation token.
     #[must_use]
     pub fn new(cancellation_token: CancellationToken) -> Self {
-        Self { cancellation_token }
+        Self {
+            cancellation_token,
+            generation_config: GenerationConfig::default(),
+        }
     }
 
     /// Returns the cancellation token for this step.
@@ -47,8 +51,21 @@ impl StepContext {
         &self.cancellation_token
     }
 
-    pub(crate) fn into_cancellation_token(self) -> CancellationToken {
-        self.cancellation_token
+    /// Sets provider-neutral generation controls for this step.
+    #[must_use]
+    pub fn with_generation_config(mut self, generation_config: GenerationConfig) -> Self {
+        self.generation_config = generation_config;
+        self
+    }
+
+    /// Returns provider-neutral generation controls for this step.
+    #[must_use]
+    pub fn generation_config(&self) -> &GenerationConfig {
+        &self.generation_config
+    }
+
+    pub(crate) fn into_parts(self) -> (CancellationToken, GenerationConfig) {
+        (self.cancellation_token, self.generation_config)
     }
 }
 
@@ -56,6 +73,7 @@ impl Default for StepContext {
     fn default() -> Self {
         Self {
             cancellation_token: CancellationToken::new(),
+            generation_config: GenerationConfig::default(),
         }
     }
 }
@@ -83,6 +101,7 @@ pub(crate) fn compile_step_model_request(
     input: &StepInput,
     model: &ModelName,
     context: &CompiledContext,
+    generation_config: GenerationConfig,
 ) -> Result<ModelRequest, merry_llm::ModelError> {
     let context_snapshot = context.to_snapshot();
     let mut messages = Vec::with_capacity(if context_snapshot.is_empty() { 1 } else { 2 });
@@ -99,18 +118,15 @@ pub(crate) fn compile_step_model_request(
         ModelContent::text(input.text())?,
     )?);
 
-    ModelRequest::new(
-        model.clone(),
-        messages,
-        Vec::new(),
-        GenerationConfig::default(),
-    )
+    ModelRequest::new(model.clone(), messages, Vec::new(), generation_config)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::StepInput;
+    use super::{StepContext, StepInput};
     use crate::RuntimeError;
+    use merry_llm::GenerationConfig;
+    use tokio_util::sync::CancellationToken;
 
     #[test]
     fn user_text_rejects_blank_text() {
@@ -132,5 +148,23 @@ mod tests {
         let err = StepInput::user_text("hello\u{7}").expect_err("bell should be rejected");
 
         assert!(matches!(err, RuntimeError::InvalidStepInput { .. }));
+    }
+
+    #[test]
+    fn step_context_uses_default_generation_config() {
+        let context = StepContext::new(CancellationToken::new());
+
+        assert_eq!(context.generation_config(), &GenerationConfig::default());
+    }
+
+    #[test]
+    fn step_context_allows_step_scoped_generation_config_override() {
+        let generation_config =
+            GenerationConfig::new(Some(16), false).expect("valid generation config");
+        let context =
+            StepContext::new(CancellationToken::new()).with_generation_config(generation_config);
+
+        assert_eq!(context.generation_config().max_output_tokens(), Some(16));
+        assert!(!context.generation_config().allow_parallel_tool_calls());
     }
 }

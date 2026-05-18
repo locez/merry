@@ -2,7 +2,7 @@
 
 use futures_util::StreamExt;
 use merry_core::SessionId;
-use merry_llm::ModelName;
+use merry_llm::{GenerationConfig, ModelName};
 use merry_provider_openai::{OpenAiProvider, OpenAiProviderConfig};
 use merry_runtime::{Runtime, StepContext, StepInput};
 use std::{
@@ -254,12 +254,6 @@ async fn run_debug_openai(
 ) -> Result<(), CliError> {
     let config = debug_openai_config(model)?;
 
-    if max_output_tokens.is_some() {
-        return Err(debug_openai_usage_error(
-            "--max-output-tokens is not supported until Runtime::step generation config exists",
-        ));
-    }
-
     let session_id = SessionId::new(DEFAULT_SESSION_ID).map_err(debug_openai_usage_error)?;
     let model = ModelName::new(&config.model).map_err(debug_openai_usage_error)?;
     let provider = OpenAiProvider::new(config.provider);
@@ -268,14 +262,11 @@ async fn run_debug_openai(
         .build()
         .map_err(unexpected)?;
     let input = StepInput::user_text(input).map_err(debug_openai_usage_error)?;
+    let generation_config =
+        GenerationConfig::new(max_output_tokens, false).map_err(debug_openai_usage_error)?;
+    let context = StepContext::new(Default::default()).with_generation_config(generation_config);
 
-    write_runtime_step_events(
-        &runtime,
-        input,
-        StepContext::new(Default::default()),
-        tokio::io::stdout(),
-    )
-    .await
+    write_runtime_step_events(&runtime, input, context, tokio::io::stdout()).await
 }
 
 async fn write_runtime_step_events<W>(
@@ -373,7 +364,7 @@ fn debug_usage() -> &'static str {
 }
 
 fn debug_openai_usage() -> &'static str {
-    "Usage: merry debug openai --input <TEXT> [--model <MODEL>] [--max-output-tokens <N>]\n\nOptions:\n  --input <TEXT>             User text input to send through Runtime::step\n  --model <MODEL>            Model name; falls back to MERRY_OPENAI_MODEL\n  --max-output-tokens <N>    Rejected until Runtime::step generation config exists\n  --help                     Print help\n\nEnvironment:\n  MERRY_OPENAI_DEBUG=1       Required opt-in before any network attempt\n  OPENAI_API_KEY             Required after opt-in\n  MERRY_OPENAI_MODEL         Required when --model is omitted\n  MERRY_OPENAI_BASE_URL      Optional OpenAI-compatible base URL\n  OPENAI_ORG_ID              Optional organization header\n  OPENAI_PROJECT_ID          Optional project header\n"
+    "Usage: merry debug openai --input <TEXT> [--model <MODEL>] [--max-output-tokens <N>]\n\nOptions:\n  --input <TEXT>             User text input to send through Runtime::step\n  --model <MODEL>            Model name; falls back to MERRY_OPENAI_MODEL\n  --max-output-tokens <N>    Optional maximum output tokens for this step\n  --help                     Print help\n\nEnvironment:\n  MERRY_OPENAI_DEBUG=1       Required opt-in before any network attempt\n  OPENAI_API_KEY             Required after opt-in\n  MERRY_OPENAI_MODEL         Required when --model is omitted\n  MERRY_OPENAI_BASE_URL      Optional OpenAI-compatible base URL\n  OPENAI_ORG_ID              Optional organization header\n  OPENAI_PROJECT_ID          Optional project header\n"
 }
 
 fn unexpected(err: impl fmt::Display) -> CliError {
@@ -440,13 +431,13 @@ mod tests {
     use futures_util::stream;
     use merry_core::ProviderName;
     use merry_llm::{
-        FinishReason, ModelCapabilities, ModelError, ModelEvent, ModelEventStream, ModelName,
-        ModelOutput, ModelProvider, ModelProviderFuture, ModelRequest, ModelResponse,
-        ModelStreamContext,
+        FinishReason, GenerationConfig, ModelCapabilities, ModelError, ModelEvent,
+        ModelEventStream, ModelName, ModelOutput, ModelProvider, ModelProviderFuture, ModelRequest,
+        ModelResponse, ModelStreamContext,
     };
     use merry_runtime::{Runtime, StepContext, StepInput};
     use serde_json::Value;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     struct CompletingProvider {
         name: ProviderName,
@@ -495,6 +486,42 @@ mod tests {
         }
     }
 
+    struct RecordingProvider {
+        inner: CompletingProvider,
+        requests: Arc<Mutex<Vec<ModelRequest>>>,
+    }
+
+    impl RecordingProvider {
+        fn new() -> Self {
+            Self {
+                inner: CompletingProvider::new(),
+                requests: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+    }
+
+    impl ModelProvider for RecordingProvider {
+        fn name(&self) -> &ProviderName {
+            self.inner.name()
+        }
+
+        fn capabilities(&self) -> &ModelCapabilities {
+            self.inner.capabilities()
+        }
+
+        fn stream_model<'a>(
+            &'a self,
+            request: ModelRequest,
+            context: ModelStreamContext,
+        ) -> ModelProviderFuture<'a, Result<ModelEventStream, ModelError>> {
+            self.requests
+                .lock()
+                .expect("request mutex should not be poisoned")
+                .push(request.clone());
+            self.inner.stream_model(request, context)
+        }
+    }
+
     #[tokio::test]
     async fn debug_openai_runtime_helper_writes_runtime_lifecycle_jsonl_without_model_events() {
         let runtime = Runtime::builder(merry_core::SessionId::new("debug-openai-test").unwrap())
@@ -532,5 +559,32 @@ mod tests {
             ]
         );
         assert!(!text.contains("hidden"));
+    }
+
+    #[tokio::test]
+    async fn debug_openai_runtime_helper_passes_generation_config_to_runtime_step() {
+        let provider = RecordingProvider::new();
+        let requests = Arc::clone(&provider.requests);
+        let runtime = Runtime::builder(merry_core::SessionId::new("debug-openai-config").unwrap())
+            .model_provider(Arc::new(provider), ModelName::new("debug-model").unwrap())
+            .build()
+            .expect("runtime should build");
+        let input = StepInput::user_text("hello").expect("valid input");
+        let context = StepContext::default().with_generation_config(
+            GenerationConfig::new(Some(16), false).expect("valid generation config"),
+        );
+        let mut output = Vec::new();
+
+        write_runtime_step_events(&runtime, input, context, &mut output)
+            .await
+            .unwrap_or_else(|_| panic!("runtime events should write"));
+
+        let requests = requests
+            .lock()
+            .expect("request mutex should not be poisoned")
+            .clone();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].generation().max_output_tokens(), Some(16));
+        assert!(!requests[0].generation().allow_parallel_tool_calls());
     }
 }
