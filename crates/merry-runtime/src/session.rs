@@ -6,7 +6,7 @@ use crate::{
     ledger::{LedgerFactKind, TaskLedger},
 };
 use merry_core::{
-    ArtifactId, ArtifactRef, ErrorInfo, EvidenceLocator, EvidenceRef, RuntimeEvent,
+    ArtifactId, ArtifactKind, ArtifactRef, ErrorInfo, EvidenceLocator, EvidenceRef, RuntimeEvent,
     RuntimeEventKind, SessionId,
 };
 
@@ -59,6 +59,19 @@ impl SessionState {
         ));
 
         Ok(events)
+    }
+
+    pub(crate) fn record_assistant_text_output(
+        &mut self,
+        text: String,
+    ) -> Result<RuntimeEvent, ArtifactError> {
+        let artifact_sequence = self.next_sequence();
+        let artifact = ArtifactRef::new(assistant_output_id(artifact_sequence), ArtifactKind::Text);
+        let recorded = self.record_artifact_state(artifact, ArtifactContent::text(text))?;
+        Ok(self.record_event(
+            RuntimeEventKind::ArtifactRecorded { artifact: recorded },
+            LedgerFactKind::ArtifactRecorded,
+        ))
     }
 
     pub(crate) fn evidence_ref(
@@ -124,12 +137,21 @@ impl SessionState {
         self.next_sequence += 1;
         RuntimeEvent::new(self.session_id.clone(), sequence, kind)
     }
+
+    fn next_sequence(&self) -> u64 {
+        self.next_sequence
+    }
+}
+
+fn assistant_output_id(sequence: u64) -> ArtifactId {
+    ArtifactId::new(&format!("assistant-output-{sequence}"))
+        .expect("assistant output artifact id uses a valid static prefix and sequence")
 }
 
 #[cfg(test)]
 mod tests {
     use super::SessionState;
-    use merry_core::{RuntimeEventKind, SessionId};
+    use merry_core::{ArtifactKind, RuntimeEventKind, SessionId};
 
     fn session_id() -> SessionId {
         SessionId::new("session-state-test").expect("valid session id")
@@ -150,5 +172,29 @@ mod tests {
         assert!(second.is_none());
         assert_eq!(started.sequence, 1);
         assert_eq!(completed.sequence, 2);
+    }
+
+    #[test]
+    fn assistant_output_artifact_id_uses_artifact_event_sequence() {
+        let mut session = SessionState::new(session_id());
+        let _started = session
+            .record_session_started_if_needed()
+            .expect("start should emit");
+        let _step_started = session.record_step_started();
+
+        let artifact = session
+            .record_assistant_text_output("hello".to_owned())
+            .expect("assistant output should record");
+        let completed = session.record_step_completed();
+
+        match artifact.kind {
+            RuntimeEventKind::ArtifactRecorded { artifact } => {
+                assert_eq!(artifact.id().as_str(), "assistant-output-2");
+                assert_eq!(artifact.kind(), &ArtifactKind::Text);
+            }
+            other => panic!("expected artifact event, got {other:?}"),
+        }
+        assert_eq!(artifact.sequence, 2);
+        assert_eq!(completed.sequence, 3);
     }
 }

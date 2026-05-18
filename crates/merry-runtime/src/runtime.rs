@@ -12,8 +12,8 @@ use merry_core::{
     ArtifactId, ArtifactRef, ErrorInfo, EvidenceLocator, EvidenceRef, RuntimeEvent, SessionId,
 };
 use merry_llm::{
-    FinishReason, ModelError, ModelEvent, ModelName, ModelProvider, ModelStreamContext,
-    ProviderErrorKind,
+    FinishReason, ModelError, ModelEvent, ModelName, ModelOutput, ModelProvider,
+    ModelStreamContext, ProviderErrorKind,
 };
 use std::{
     num::NonZeroUsize,
@@ -199,6 +199,7 @@ async fn run_step(
     })
     .await
     {
+        let _ = send_cancelled_if_requested(&inner, &sender, &token).await;
         return;
     }
 
@@ -212,6 +213,7 @@ async fn run_step(
     })
     .await
     {
+        let _ = send_cancelled_if_requested(&inner, &sender, &token).await;
         return;
     }
 
@@ -221,10 +223,13 @@ async fn run_step(
     }
 
     let Some(provider_config) = inner.model_provider.clone() else {
-        let _ = send_normal_event(&inner, &sender, &token, |session| {
+        if !send_normal_event(&inner, &sender, &token, |session| {
             Some(session.record_step_completed())
         })
-        .await;
+        .await
+        {
+            let _ = send_cancelled_if_requested(&inner, &sender, &token).await;
+        }
         return;
     };
 
@@ -300,10 +305,25 @@ async fn run_provider_step(
             Some(Ok(ModelEvent::Started | ModelEvent::OutputTextDelta { .. })) => {}
             Some(Ok(ModelEvent::Completed { response })) => match response.finish_reason() {
                 FinishReason::Stop => {
-                    let _ = send_normal_event(inner, sender, token, |session| {
-                        Some(session.record_step_completed())
-                    })
-                    .await;
+                    let [ModelOutput::Text { text }] = response.outputs() else {
+                        let diagnostic = diagnostic_from_text(
+                            "model_output_unsupported",
+                            "model stop output must contain exactly one text item",
+                        );
+                        let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                        return;
+                    };
+
+                    if !send_assistant_text_output_completed_events(
+                        inner,
+                        sender,
+                        token,
+                        text.clone(),
+                    )
+                    .await
+                    {
+                        let _ = send_cancelled_if_requested(inner, sender, token).await;
+                    }
                     return;
                 }
                 FinishReason::ToolCalls => {
@@ -363,6 +383,63 @@ async fn run_provider_step(
             }
         }
     }
+}
+
+async fn send_assistant_text_output_completed_events(
+    inner: &RuntimeInner,
+    sender: &mpsc::Sender<RuntimeEvent>,
+    token: &CancellationToken,
+    text: String,
+) -> bool {
+    if token.is_cancelled() {
+        return false;
+    }
+
+    let Some(artifact_permit) = reserve_normal_event_slot(sender, token).await else {
+        return false;
+    };
+
+    let artifact_event = {
+        let mut session = inner.session.lock().await;
+        if token.is_cancelled() {
+            return false;
+        }
+        session.record_assistant_text_output(text)
+    };
+
+    let Ok(artifact_event) = artifact_event else {
+        drop(artifact_permit);
+        let diagnostic = diagnostic_from_text(
+            "assistant_output_artifact",
+            "assistant output artifact could not be recorded",
+        );
+        let _ = send_failed_event(inner, sender, token, diagnostic).await;
+        return false;
+    };
+
+    artifact_permit.send(artifact_event);
+
+    if token.is_cancelled() {
+        let _ = send_cancelled_event(inner, sender).await;
+        return false;
+    }
+
+    let Some(completed_permit) = reserve_normal_event_slot(sender, token).await else {
+        return false;
+    };
+
+    let completed_event = {
+        let mut session = inner.session.lock().await;
+        if token.is_cancelled() {
+            drop(completed_permit);
+            let _ = send_cancelled_event(inner, sender).await;
+            return false;
+        }
+        session.record_step_completed()
+    };
+
+    completed_permit.send(completed_event);
+    true
 }
 
 async fn send_failed_event(
@@ -471,12 +548,20 @@ async fn reserve_normal_event_slot<'a>(
     }
 }
 
-async fn send_cancelled_event(inner: &RuntimeInner, sender: &mpsc::Sender<RuntimeEvent>) -> bool {
-    if sender.is_closed() {
+async fn send_cancelled_if_requested(
+    inner: &RuntimeInner,
+    sender: &mpsc::Sender<RuntimeEvent>,
+    token: &CancellationToken,
+) -> bool {
+    if !token.is_cancelled() {
         return false;
     }
 
-    let Ok(permit) = sender.try_reserve() else {
+    send_cancelled_event(inner, sender).await
+}
+
+async fn send_cancelled_event(inner: &RuntimeInner, sender: &mpsc::Sender<RuntimeEvent>) -> bool {
+    let Some(permit) = reserve_cancelled_event_slot(sender).await else {
         return false;
     };
 
@@ -494,11 +579,25 @@ async fn send_cancelled_event(inner: &RuntimeInner, sender: &mpsc::Sender<Runtim
     true
 }
 
+async fn reserve_cancelled_event_slot<'a>(
+    sender: &'a mpsc::Sender<RuntimeEvent>,
+) -> Option<Permit<'a, RuntimeEvent>> {
+    if sender.is_closed() {
+        return None;
+    }
+
+    tokio::select! {
+        biased;
+        () = sender.closed() => None,
+        permit = sender.reserve() => permit.ok(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{RuntimeInner, send_cancelled_event};
     use crate::session::SessionState;
-    use merry_core::{RuntimeEvent, RuntimeEventKind, SessionId};
+    use merry_core::SessionId;
     use std::{
         num::NonZeroUsize,
         sync::{Arc, atomic::AtomicBool},
@@ -517,20 +616,18 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn cancelled_event_send_returns_false_when_channel_is_full() {
+    async fn cancelled_event_send_returns_false_when_channel_is_closed() {
         let inner = runtime_inner();
-        let (sender, _receiver) = mpsc::channel(1);
-        sender
-            .send(RuntimeEvent::new(
-                inner.session_id.clone(),
-                0,
-                RuntimeEventKind::StepStarted,
-            ))
-            .await
-            .expect("receiver remains open");
+        let (sender, receiver) = mpsc::channel(1);
+        drop(receiver);
 
         let sent = send_cancelled_event(&inner, &sender).await;
+        let projection = {
+            let session = inner.session.lock().await;
+            session.ledger_projection()
+        };
 
         assert!(!sent);
+        assert!(projection.entries().is_empty());
     }
 }
