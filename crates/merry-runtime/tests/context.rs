@@ -1,7 +1,7 @@
 use merry_core::{ArtifactId, ArtifactKind, ArtifactRef, EvidenceLocator, EvidenceRef, SessionId};
 use merry_runtime::{
-    ArtifactContent, CompiledContextSection, ContextCompiler, ContextEntry, ContextEvidence,
-    ContextSummary, Runtime,
+    ArtifactContent, ArtifactError, CompiledContextSection, ContextCompiler, ContextEntry,
+    ContextError, ContextEvidence, ContextSummary, Runtime,
 };
 
 fn session_id(value: &str) -> SessionId {
@@ -189,6 +189,55 @@ async fn session_snapshot_compilation_rejects_missing_evidence_artifacts() {
     assert_eq!(
         error.to_string(),
         "context summary summary-with-missing-artifact references unreadable evidence artifact-missing: artifact id artifact-missing is not recorded"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn session_context_snapshot_is_independent_from_later_session_mutation() {
+    let compiler = ContextCompiler::new();
+    let runtime = runtime("context-snapshot-isolation");
+    record_summary(
+        &runtime,
+        summary(
+            "summary-before-artifact",
+            "Snapshot evidence must come from the captured artifact state.",
+            vec![evidence(
+                "future artifact",
+                line_evidence("artifact-recorded-later", 1, 1),
+            )],
+        ),
+    )
+    .await;
+
+    let snapshot = runtime.context_snapshot().await;
+
+    record_text_artifact(&runtime, "artifact-recorded-later", "available later\n").await;
+
+    let stale_error = compiler
+        .compile(&snapshot)
+        .expect_err("snapshot must not observe artifacts recorded later");
+    assert_eq!(
+        stale_error,
+        ContextError::UnreadableEvidence {
+            summary_id: "summary-before-artifact".to_owned(),
+            artifact_id: artifact_id("artifact-recorded-later"),
+            source: ArtifactError::MissingArtifact {
+                id: artifact_id("artifact-recorded-later"),
+            },
+        }
+    );
+
+    let current = compiler
+        .compile(&runtime.context_snapshot().await)
+        .expect("current snapshot sees the later artifact");
+    assert_eq!(
+        current.to_snapshot(),
+        [
+            "summary:summary-before-artifact",
+            "text:Snapshot evidence must come from the captured artifact state.",
+            "evidence:future artifact:artifact-recorded-later:line:1-1",
+        ]
+        .join("\n")
     );
 }
 

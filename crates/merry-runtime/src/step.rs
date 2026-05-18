@@ -1,6 +1,9 @@
-//! Runtime step inputs and execution context.
+//! Runtime step inputs, execution context, and provider request compilation.
 
-use crate::RuntimeError;
+use crate::{CompiledContext, RuntimeError};
+use merry_llm::{
+    GenerationConfig, ModelContent, ModelMessage, ModelMessageRole, ModelName, ModelRequest,
+};
 use tokio_util::sync::CancellationToken;
 
 /// Input snapshot for a runtime step.
@@ -74,6 +77,34 @@ fn validate_user_text(text: &str) -> Result<(), RuntimeError> {
     }
 
     Ok(())
+}
+
+pub(crate) fn compile_step_model_request(
+    input: &StepInput,
+    model: &ModelName,
+    context: &CompiledContext,
+) -> Result<ModelRequest, merry_llm::ModelError> {
+    let context_snapshot = context.to_snapshot();
+    let mut messages = Vec::with_capacity(if context_snapshot.is_empty() { 1 } else { 2 });
+
+    if !context_snapshot.is_empty() {
+        messages.push(ModelMessage::new(
+            ModelMessageRole::System,
+            ModelContent::text(&context_snapshot)?,
+        )?);
+    }
+
+    messages.push(ModelMessage::new(
+        ModelMessageRole::User,
+        ModelContent::text(input.text())?,
+    )?);
+
+    ModelRequest::new(
+        model.clone(),
+        messages,
+        Vec::new(),
+        GenerationConfig::default(),
+    )
 }
 
 #[cfg(test)]

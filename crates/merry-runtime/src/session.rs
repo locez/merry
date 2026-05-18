@@ -33,12 +33,32 @@ impl SessionState {
         }
     }
 
-    pub(crate) fn record_artifact(
+    pub(crate) fn record_artifact_state(
         &mut self,
         artifact: ArtifactRef,
         content: ArtifactContent,
     ) -> Result<ArtifactRef, ArtifactError> {
         self.artifacts.record(artifact, content)
+    }
+
+    pub(crate) fn record_artifact_events(
+        &mut self,
+        artifact: ArtifactRef,
+        content: ArtifactContent,
+    ) -> Result<Vec<RuntimeEvent>, ArtifactError> {
+        let recorded = self.record_artifact_state(artifact, content)?;
+        let mut events = Vec::with_capacity(if self.session_started { 1 } else { 2 });
+
+        if let Some(started) = self.record_session_started_if_needed() {
+            events.push(started);
+        }
+
+        events.push(self.record_event(
+            RuntimeEventKind::ArtifactRecorded { artifact: recorded },
+            LedgerFactKind::ArtifactRecorded,
+        ));
+
+        Ok(events)
     }
 
     pub(crate) fn evidence_ref(
@@ -55,6 +75,10 @@ impl SessionState {
 
     pub(crate) fn context_snapshot(&self) -> SessionContextSnapshot {
         SessionContextSnapshot::new(self.context_entries.clone(), self.artifacts.clone())
+    }
+
+    pub(crate) fn ledger_projection(&self) -> crate::ledger::LedgerProjectionSnapshot {
+        self.ledger.project()
     }
 
     pub(crate) fn record_session_started_if_needed(&mut self) -> Option<RuntimeEvent> {
@@ -84,6 +108,13 @@ impl SessionState {
         self.record_event(
             RuntimeEventKind::Cancelled { diagnostic },
             LedgerFactKind::Cancelled,
+        )
+    }
+
+    pub(crate) fn record_failed(&mut self, diagnostic: ErrorInfo) -> RuntimeEvent {
+        self.record_event(
+            RuntimeEventKind::Failed { diagnostic },
+            LedgerFactKind::Failed,
         )
     }
 

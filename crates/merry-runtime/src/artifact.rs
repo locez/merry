@@ -1,7 +1,7 @@
 //! In-memory artifact registry.
 
 use merry_core::{ArtifactId, ArtifactKind, ArtifactRef, EvidenceLocator, EvidenceRef};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 use thiserror::Error;
 
 /// Exact content stored for an artifact.
@@ -95,7 +95,7 @@ pub enum ArtifactContentKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactRecord {
     artifact: ArtifactRef,
-    content: ArtifactContent,
+    content: Arc<ArtifactContent>,
 }
 
 impl ArtifactRecord {
@@ -108,7 +108,7 @@ impl ArtifactRecord {
     /// Borrows the recorded exact content.
     #[must_use]
     pub fn content(&self) -> &ArtifactContent {
-        &self.content
+        self.content.as_ref()
     }
 }
 
@@ -191,8 +191,13 @@ impl ArtifactRegistry {
         validate_content_kind(&artifact, &content)?;
 
         let recorded = artifact.clone();
-        self.records
-            .insert(id, ArtifactRecord { artifact, content });
+        self.records.insert(
+            id,
+            ArtifactRecord {
+                artifact,
+                content: Arc::new(content),
+            },
+        );
         Ok(recorded)
     }
 
@@ -436,5 +441,55 @@ fn invalid_locator(artifact_id: &ArtifactId, reason: &'static str) -> ArtifactEr
     ArtifactError::InvalidEvidenceLocator {
         id: artifact_id.clone(),
         reason,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ArtifactContent, ArtifactRegistry};
+    use merry_core::{ArtifactId, ArtifactKind, ArtifactRef};
+    use std::sync::Arc;
+
+    fn artifact_id(value: &str) -> ArtifactId {
+        ArtifactId::new(value).expect("valid artifact id")
+    }
+
+    fn artifact_ref(value: &str, kind: ArtifactKind) -> ArtifactRef {
+        ArtifactRef::new(artifact_id(value), kind)
+    }
+
+    #[test]
+    fn cloned_registry_shares_recorded_content_storage() {
+        let mut registry = ArtifactRegistry::default();
+        let artifact = artifact_ref("large-tool-output", ArtifactKind::Text);
+        registry
+            .record(
+                artifact.clone(),
+                ArtifactContent::text("large exact output\n".repeat(1024)),
+            )
+            .expect("artifact should record");
+
+        let cloned = registry.clone();
+
+        assert_eq!(
+            registry
+                .read_content(artifact.id())
+                .expect("original content should be readable"),
+            cloned
+                .read_content(artifact.id())
+                .expect("cloned content should be readable")
+        );
+
+        let original_record = registry
+            .read_record(artifact.id())
+            .expect("original record should be readable");
+        let cloned_record = cloned
+            .read_record(artifact.id())
+            .expect("cloned record should be readable");
+
+        assert!(Arc::ptr_eq(
+            &original_record.content,
+            &cloned_record.content
+        ));
     }
 }

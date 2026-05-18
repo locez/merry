@@ -236,12 +236,16 @@ impl LifecycleFact {
 pub enum LedgerFactKind {
     /// Session start has been recorded.
     SessionStarted,
+    /// Artifact state has been recorded.
+    ArtifactRecorded,
     /// Step start has been recorded.
     StepStarted,
     /// Step completion has been recorded.
     StepCompleted,
     /// Step cancellation has been recorded.
     Cancelled,
+    /// Step failure has been recorded.
+    Failed,
 }
 
 /// Owned deterministic view of the ledger for context compilation.

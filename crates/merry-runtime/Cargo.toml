@@ -6,7 +6,9 @@ rust-version.workspace = true
 
 [dependencies]
 futures-core.workspace = true
+futures-util.workspace = true
 merry-core = { path = "../merry-core" }
+merry-llm = { path = "../merry-llm" }
 thiserror.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
