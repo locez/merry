@@ -371,4 +371,28 @@ mod tests {
 
         assert_eq!(error.kind(), ProviderErrorKind::Protocol);
     }
+
+    #[test]
+    fn streaming_usage_chunk_completes_after_finish_reason_with_empty_choices() {
+        let fixture = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Done\"},\"finish_reason\":null}],\"usage\":null}\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":null}\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":1,\"total_tokens\":5}}\n",
+            "data: [DONE]\n",
+        );
+
+        let events = crate::parse::parse_chat_completion_stream_events(fixture)
+            .expect("usage-only completion chunk should parse");
+
+        assert_eq!(
+            events.last(),
+            Some(&ModelEvent::Completed {
+                response: merry_llm::ModelResponse::new(
+                    vec![ModelOutput::text("Done")],
+                    FinishReason::Stop,
+                    Some(Usage::new(4, 1)),
+                )
+            })
+        );
+    }
 }

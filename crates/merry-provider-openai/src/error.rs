@@ -15,6 +15,14 @@ pub enum OpenAiProviderError {
     /// Provider response did not match the expected Chat Completions protocol.
     #[error("OpenAI provider protocol error: {reason}")]
     Protocol { reason: String },
+    /// Provider returned a non-successful HTTP status or transport failure.
+    #[error("OpenAI provider request failed ({kind:?}): {message}")]
+    Provider {
+        /// Provider-neutral error category.
+        kind: ProviderErrorKind,
+        /// Actionable provider-neutral message.
+        message: String,
+    },
 }
 
 impl OpenAiProviderError {
@@ -37,6 +45,13 @@ impl OpenAiProviderError {
             reason: reason.into(),
         }
     }
+
+    pub(crate) fn provider(kind: ProviderErrorKind, message: impl Into<String>) -> Self {
+        Self::Provider {
+            kind,
+            message: message.into(),
+        }
+    }
 }
 
 impl From<OpenAiProviderError> for ModelError {
@@ -47,6 +62,7 @@ impl From<OpenAiProviderError> for ModelError {
             OpenAiProviderError::Protocol { reason } => {
                 Self::provider(ProviderErrorKind::Protocol, reason)
             }
+            OpenAiProviderError::Provider { kind, message } => Self::provider(kind, message),
         }
     }
 }
