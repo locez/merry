@@ -14,4 +14,6 @@ pub use event::{ErrorInfo, RuntimeEvent, RuntimeEventKind};
 pub use evidence::{EvidenceLocator, EvidenceRef};
 pub use id::{ArtifactId, ProviderName, SessionId, SkillId, ToolCallId, ToolName};
 pub use schema::ToolInputSchema;
-pub use tool::{PendingToolCall, ToolCallArguments, ToolSpec};
+pub use tool::{
+    PendingToolCall, ToolCallArguments, ToolCallResult, ToolCallResultStatus, ToolSpec,
+};

@@ -10,7 +10,7 @@ use crate::{
 use futures_util::StreamExt;
 use merry_core::{
     ArtifactId, ArtifactRef, CoreError, ErrorInfo, EvidenceLocator, EvidenceRef, PendingToolCall,
-    RuntimeEvent, SessionId, ToolCallArguments, ToolCallId,
+    RuntimeEvent, SessionId, ToolCallArguments, ToolCallId, ToolCallResult,
 };
 use merry_llm::{
     FinishReason, GenerationConfig, ModelError, ModelEvent, ModelName, ModelOutput, ModelProvider,
@@ -98,6 +98,24 @@ impl Runtime {
         session
             .record_artifact_events(artifact, content)
             .map_err(Into::into)
+    }
+
+    /// Resolves one pending tool call with an artifact-backed result.
+    ///
+    /// The artifact content is durably recorded before `ToolCallResolved` is
+    /// emitted. The event carries only the artifact reference, not the payload.
+    pub async fn submit_tool_result(
+        &self,
+        result: ToolCallResult,
+        content: ArtifactContent,
+    ) -> Result<Vec<RuntimeEvent>, RuntimeError> {
+        let _active_permit = ActiveStepPermit::acquire(Arc::clone(&self.inner.active_step))
+            .ok_or_else(|| RuntimeError::StepAlreadyActive {
+                session_id: self.inner.session_id.clone(),
+            })?;
+
+        let mut session = self.inner.session.lock().await;
+        session.submit_tool_result(result, content)
     }
 
     /// Creates an exact evidence reference from artifact state owned by this session.
@@ -546,8 +564,16 @@ async fn send_tool_call_pending_event(
         session.record_tool_call_pending(call)
     };
 
-    permit.send(event);
-    true
+    match event {
+        Ok(event) => {
+            permit.send(event);
+            true
+        }
+        Err(diagnostic) => {
+            drop(permit);
+            send_failed_event(inner, sender, token, diagnostic).await
+        }
+    }
 }
 
 async fn send_failed_event(
