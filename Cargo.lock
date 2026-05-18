@@ -118,6 +118,13 @@ dependencies = [
 [[package]]
 name = "merry-provider-openai"
 version = "0.1.0"
+dependencies = [
+ "merry-core",
+ "merry-llm",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
 
 [[package]]
 name = "merry-runtime"

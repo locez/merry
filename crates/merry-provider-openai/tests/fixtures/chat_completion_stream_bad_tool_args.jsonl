@@ -1,0 +1,4 @@
+data: {"id":"chatcmpl-stream-bad-tool","object":"chat.completion.chunk","created":1730000005,"model":"gpt-4.1-mini","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_stream_bad","type":"function","function":{"name":"lookup_weather","arguments":"\"not an object\""}}]},"finish_reason":null}],"usage":null}
+data: {"id":"chatcmpl-stream-bad-tool","object":"chat.completion.chunk","created":1730000005,"model":"gpt-4.1-mini","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":null}
+data: {"id":"chatcmpl-stream-bad-tool","object":"chat.completion.chunk","created":1730000005,"model":"gpt-4.1-mini","choices":[],"usage":{"prompt_tokens":14,"completion_tokens":6,"total_tokens":20}}
+data: [DONE]
