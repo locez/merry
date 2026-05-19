@@ -1,13 +1,16 @@
 use futures_util::StreamExt;
 use merry_core::{
     ArtifactId, ArtifactKind, ArtifactRef, EvidenceLocator, RuntimeEvent, RuntimeEventKind,
-    SessionId, ToolCallId, ToolCallResult,
+    SessionId, ToolCallId, ToolCallResult, ToolInputSchema, ToolName, ToolSpec,
 };
 use merry_runtime::{
     ArtifactContent, ArtifactContentKind, ArtifactError, ContextCompiler, ContextSummary,
-    LedgerFactKind, LedgerProjection, Runtime, RuntimeError, StepContext, StepInput,
+    LedgerFactKind, LedgerProjection, RegisteredTool, Runtime, RuntimeError, StepContext,
+    StepInput, ToolExecutionContext, ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture,
 };
-use std::num::NonZeroUsize;
+use schemars::Schema;
+use serde_json::json;
+use std::{num::NonZeroUsize, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
 fn session_id() -> SessionId {
@@ -27,6 +30,29 @@ fn tool_result(call_id: &str, artifact: &str, kind: ArtifactKind) -> ToolCallRes
         tool_call_id(call_id),
         ArtifactRef::new(artifact_id(artifact), kind),
     )
+}
+
+fn tool_spec(name: &str) -> ToolSpec {
+    let schema =
+        Schema::try_from(json!({ "type": "object" })).expect("test schema should be a JSON schema");
+    ToolSpec::new(
+        ToolName::new(name).expect("valid tool name"),
+        "Test tool",
+        ToolInputSchema::new(schema).expect("valid tool schema"),
+    )
+    .expect("valid tool spec")
+}
+
+struct StaticToolExecutor;
+
+impl ToolExecutor for StaticToolExecutor {
+    fn execute<'a>(
+        &'a self,
+        _call: merry_core::PendingToolCall,
+        _context: ToolExecutionContext,
+    ) -> ToolExecutorFuture<'a> {
+        Box::pin(async move { Ok(ToolExecutionOutcome::succeeded_text("ok\n")) })
+    }
 }
 
 async fn collect_step(runtime: &Runtime, text: &str) -> Vec<RuntimeEvent> {
@@ -142,6 +168,59 @@ async fn submit_tool_result_for_unknown_call_does_not_mutate_session() {
 
     let events = collect_step(&runtime, "after unknown submit").await;
     assert_sequences(&events, &[0, 1, 2]);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn duplicate_tool_registration_is_build_error() {
+    let err = match Runtime::builder(session_id())
+        .register_tool(RegisteredTool::new(
+            tool_spec("duplicate_tool"),
+            Arc::new(StaticToolExecutor),
+        ))
+        .register_tool(RegisteredTool::new(
+            tool_spec("duplicate_tool"),
+            Arc::new(StaticToolExecutor),
+        ))
+        .build()
+    {
+        Ok(_) => panic!("duplicate tool registration should fail"),
+        Err(err) => err,
+    };
+
+    assert!(matches!(
+        err,
+        RuntimeError::DuplicateToolRegistration { name }
+            if name == ToolName::new("duplicate_tool").expect("valid tool name")
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn execute_tool_result_for_unknown_call_does_not_mutate_session() {
+    let runtime = Runtime::builder(session_id())
+        .register_tool(RegisteredTool::new(
+            tool_spec("search_notes"),
+            Arc::new(StaticToolExecutor),
+        ))
+        .build()
+        .expect("runtime should build");
+    let before = runtime.ledger_projection().await;
+    let unknown = tool_call_id("unknown-execute-call");
+
+    let err = runtime
+        .execute_tool_call(&unknown, ToolExecutionContext::default())
+        .await
+        .expect_err("unknown tool call should be rejected");
+    let after = runtime.ledger_projection().await;
+
+    assert!(matches!(
+        err,
+        RuntimeError::UnknownToolCall {
+            session_id: rejected_session,
+            call_id
+        } if rejected_session == session_id() && call_id == unknown
+    ));
+    assert_projection_unchanged(&before, &after);
+    assert!(runtime.pending_tool_calls().await.is_empty());
 }
 
 #[tokio::test(flavor = "current_thread")]

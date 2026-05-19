@@ -1,7 +1,7 @@
 //! Runtime error types.
 
 use crate::artifact::{ArtifactContentKind, ArtifactError};
-use merry_core::{ArtifactId, CoreError, SessionId, ToolCallId};
+use merry_core::{ArtifactId, CoreError, SessionId, ToolCallId, ToolName};
 use thiserror::Error;
 
 /// Errors raised by Merry runtime construction and step admission.
@@ -37,6 +37,33 @@ pub enum RuntimeError {
         session_id: SessionId,
         /// Tool call id that already has a result.
         call_id: ToolCallId,
+    },
+
+    /// Runtime construction tried to register the same tool name more than once.
+    #[error("tool {name} is already registered")]
+    DuplicateToolRegistration {
+        /// Duplicate tool name.
+        name: ToolName,
+    },
+
+    /// Tool execution was cancelled before producing a durable result.
+    #[error("tool call {call_id} execution was cancelled in session {session_id}")]
+    ToolExecutionCancelled {
+        /// Session executing the tool call.
+        session_id: SessionId,
+        /// Tool call id that remained pending.
+        call_id: ToolCallId,
+    },
+
+    /// Tool executor infrastructure failed before producing a durable result.
+    #[error("tool call {call_id} executor failed in session {session_id}: {message}")]
+    ToolExecutionFailed {
+        /// Session executing the tool call.
+        session_id: SessionId,
+        /// Tool call id that remained pending.
+        call_id: ToolCallId,
+        /// Actionable executor failure detail.
+        message: String,
     },
 
     /// A tool result used content that the MVP submit path does not accept.

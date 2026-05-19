@@ -6,6 +6,7 @@ use crate::{
     event_stream::ActiveStepPermit,
     session::SessionState,
     step::{StepContext, StepInput, compile_step_model_request},
+    tool::{RegisteredTool, ToolExecutionContext, ToolExecutionError, ToolRegistry},
 };
 use futures_util::StreamExt;
 use merry_core::{
@@ -31,6 +32,7 @@ const DIAGNOSTIC_MODEL_TOOL_CALL_MIXED_OUTPUT: &str = "model_tool_call_mixed_out
 const DIAGNOSTIC_MODEL_PARALLEL_TOOL_CALLS_UNSUPPORTED: &str =
     "model_parallel_tool_calls_unsupported";
 const DIAGNOSTIC_TOOL_CALL_RESULT_REQUIRED: &str = "tool_call_result_required";
+const DIAGNOSTIC_TOOL_NOT_REGISTERED: &str = "tool_not_registered";
 
 /// Merry runtime handle for one session.
 #[derive(Clone)]
@@ -119,6 +121,114 @@ impl Runtime {
         session.submit_tool_result(result, content)
     }
 
+    /// Executes one pending tool call through a runtime-registered executor.
+    ///
+    /// Runtime code owns the resulting artifact id and `ToolCallResult`.
+    /// Executor infrastructure errors and cancellation leave the call pending.
+    pub async fn execute_tool_call(
+        &self,
+        call_id: &ToolCallId,
+        context: ToolExecutionContext,
+    ) -> Result<Vec<RuntimeEvent>, RuntimeError> {
+        let _active_permit = ActiveStepPermit::acquire(Arc::clone(&self.inner.active_step))
+            .ok_or_else(|| RuntimeError::StepAlreadyActive {
+                session_id: self.inner.session_id.clone(),
+            })?;
+
+        if context.cancellation_token().is_cancelled() {
+            return Err(RuntimeError::ToolExecutionCancelled {
+                session_id: self.inner.session_id.clone(),
+                call_id: call_id.clone(),
+            });
+        }
+
+        let pending = {
+            let session = self.inner.session.lock().await;
+            session
+                .pending_tool_call(call_id)
+                .ok_or_else(|| RuntimeError::UnknownToolCall {
+                    session_id: self.inner.session_id.clone(),
+                    call_id: call_id.clone(),
+                })?
+        };
+
+        let Some(executor) = self.inner.tool_registry.executor(pending.name()) else {
+            if context.cancellation_token().is_cancelled() {
+                return Err(RuntimeError::ToolExecutionCancelled {
+                    session_id: self.inner.session_id.clone(),
+                    call_id: call_id.clone(),
+                });
+            }
+
+            let diagnostic = diagnostic_from_text(
+                DIAGNOSTIC_TOOL_NOT_REGISTERED,
+                format!("tool {} is not registered", pending.name()),
+            );
+            let content = ArtifactContent::json(format!(
+                r#"{{"error":"tool_not_registered","tool":"{}"}}"#,
+                pending.name()
+            ));
+            let mut session = self.inner.session.lock().await;
+            if context.cancellation_token().is_cancelled() {
+                return Err(RuntimeError::ToolExecutionCancelled {
+                    session_id: self.inner.session_id.clone(),
+                    call_id: call_id.clone(),
+                });
+            }
+            return session.submit_tool_execution_outcome(
+                call_id,
+                merry_core::ToolCallResultStatus::Failed,
+                content,
+                Some(diagnostic),
+            );
+        };
+
+        let execution = tokio::select! {
+            biased;
+            () = context.cancellation_token().cancelled() => {
+                return Err(RuntimeError::ToolExecutionCancelled {
+                    session_id: self.inner.session_id.clone(),
+                    call_id: call_id.clone(),
+                });
+            }
+            execution = executor.execute(pending, context.clone()) => execution,
+        };
+
+        if context.cancellation_token().is_cancelled() {
+            return Err(RuntimeError::ToolExecutionCancelled {
+                session_id: self.inner.session_id.clone(),
+                call_id: call_id.clone(),
+            });
+        }
+
+        let outcome = match execution {
+            Ok(outcome) => outcome,
+            Err(ToolExecutionError::Cancelled) => {
+                return Err(RuntimeError::ToolExecutionCancelled {
+                    session_id: self.inner.session_id.clone(),
+                    call_id: call_id.clone(),
+                });
+            }
+            Err(ToolExecutionError::Infrastructure { message }) => {
+                return Err(RuntimeError::ToolExecutionFailed {
+                    session_id: self.inner.session_id.clone(),
+                    call_id: call_id.clone(),
+                    message,
+                });
+            }
+        };
+
+        let (status, content, diagnostic) = outcome.into_parts();
+        let mut session = self.inner.session.lock().await;
+        if context.cancellation_token().is_cancelled() {
+            return Err(RuntimeError::ToolExecutionCancelled {
+                session_id: self.inner.session_id.clone(),
+                call_id: call_id.clone(),
+            });
+        }
+        session.submit_tool_execution_outcome(call_id, status, content, diagnostic)
+    }
+
     /// Creates an exact evidence reference from artifact state owned by this session.
     pub async fn evidence_ref(
         &self,
@@ -167,6 +277,7 @@ pub struct RuntimeBuilder {
     session_id: SessionId,
     event_buffer_size: NonZeroUsize,
     model_provider: Option<ModelProviderConfig>,
+    registered_tools: Vec<RegisteredTool>,
 }
 
 impl RuntimeBuilder {
@@ -176,6 +287,7 @@ impl RuntimeBuilder {
             event_buffer_size: NonZeroUsize::new(DEFAULT_EVENT_BUFFER_SIZE)
                 .expect("default event buffer size is non-zero"),
             model_provider: None,
+            registered_tools: Vec::new(),
         }
     }
 
@@ -193,8 +305,22 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Registers a runtime-owned tool executor.
+    #[must_use]
+    pub fn register_tool(mut self, tool: RegisteredTool) -> Self {
+        self.registered_tools.push(tool);
+        self
+    }
+
     /// Builds the runtime.
     pub fn build(self) -> Result<Runtime, RuntimeError> {
+        let tool_registry =
+            ToolRegistry::from_registered(self.registered_tools).map_err(|duplicate| {
+                RuntimeError::DuplicateToolRegistration {
+                    name: duplicate.name,
+                }
+            })?;
+
         Ok(Runtime {
             inner: Arc::new(RuntimeInner {
                 session_id: self.session_id.clone(),
@@ -202,6 +328,7 @@ impl RuntimeBuilder {
                 active_step: Arc::new(AtomicBool::new(false)),
                 event_buffer_size: self.event_buffer_size,
                 model_provider: self.model_provider,
+                tool_registry,
             }),
         })
     }
@@ -219,6 +346,7 @@ struct RuntimeInner {
     active_step: Arc<AtomicBool>,
     event_buffer_size: NonZeroUsize,
     model_provider: Option<ModelProviderConfig>,
+    tool_registry: ToolRegistry,
 }
 
 async fn run_step(
@@ -318,6 +446,7 @@ async fn run_provider_step(
         (session.context_snapshot(), continuations)
     };
     let sent_continuation_count = continuations.len();
+    let tool_specs = inner.tool_registry.tool_specs();
 
     let compiled_context = match ContextCompiler::new().compile(&snapshot) {
         Ok(context) => context,
@@ -333,6 +462,7 @@ async fn run_provider_step(
         &provider_config.model,
         &compiled_context,
         &continuations,
+        tool_specs,
         generation_config,
     ) {
         Ok(request) => request,
@@ -867,14 +997,16 @@ async fn reserve_cancelled_event_slot<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::{RuntimeInner, send_cancelled_event};
+    use super::{Runtime, RuntimeInner, send_cancelled_event};
     use crate::session::SessionState;
-    use merry_core::SessionId;
+    use crate::tool::{ToolExecutionContext, ToolRegistry};
+    use merry_core::{PendingToolCall, SessionId, ToolCallArguments, ToolCallId, ToolName};
     use std::{
         num::NonZeroUsize,
         sync::{Arc, atomic::AtomicBool},
     };
-    use tokio::sync::{Mutex, mpsc};
+    use tokio::sync::{Mutex, mpsc, oneshot};
+    use tokio_util::sync::CancellationToken;
 
     fn runtime_inner() -> RuntimeInner {
         let session_id = SessionId::new("runtime-send-test").expect("valid session id");
@@ -884,6 +1016,7 @@ mod tests {
             active_step: Arc::new(AtomicBool::new(false)),
             event_buffer_size: NonZeroUsize::new(1).expect("non-zero buffer"),
             model_provider: None,
+            tool_registry: ToolRegistry::default(),
         }
     }
 
@@ -901,5 +1034,74 @@ mod tests {
 
         assert!(!sent);
         assert!(projection.entries().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelling_unregistered_tool_while_waiting_to_submit_keeps_pending() {
+        let session_id =
+            SessionId::new("runtime-unregistered-submit-cancel").expect("valid session id");
+        let call_id = ToolCallId::new("call-unregistered").expect("valid tool call id");
+        let pending = PendingToolCall::new(
+            call_id.clone(),
+            ToolName::new("missing_tool").expect("valid tool name"),
+            ToolCallArguments::new(Default::default()),
+        );
+        let runtime = Runtime::builder(session_id)
+            .build()
+            .expect("runtime should build");
+
+        let mut initial_session_guard = runtime.inner.session.lock().await;
+        initial_session_guard
+            .record_tool_call_pending(pending.clone())
+            .expect("pending call should record");
+        let projection_before = initial_session_guard.ledger_projection();
+
+        let token = CancellationToken::new();
+        let execute_runtime = runtime.clone();
+        let execute_call_id = call_id.clone();
+        let execute_token = token.clone();
+        let execute_handle = tokio::spawn(async move {
+            execute_runtime
+                .execute_tool_call(&execute_call_id, ToolExecutionContext::new(execute_token))
+                .await
+        });
+        tokio::task::yield_now().await;
+
+        let (lock_acquired_sender, lock_acquired_receiver) = oneshot::channel();
+        let (release_lock_sender, release_lock_receiver) = oneshot::channel();
+        let blocker_runtime = runtime.clone();
+        let blocker_handle = tokio::spawn(async move {
+            let _session_guard = blocker_runtime.inner.session.lock().await;
+            let _ = lock_acquired_sender.send(());
+            let _ = release_lock_receiver.await;
+        });
+        tokio::task::yield_now().await;
+
+        drop(initial_session_guard);
+        lock_acquired_receiver
+            .await
+            .expect("blocker should acquire the session lock after pending lookup");
+        tokio::task::yield_now().await;
+
+        token.cancel();
+        release_lock_sender
+            .send(())
+            .expect("blocker should still be waiting for release");
+
+        let err = execute_handle
+            .await
+            .expect("tool execution task should not panic")
+            .expect_err("cancelled unregistered tool execution should not resolve pending");
+        blocker_handle
+            .await
+            .expect("session lock blocker should not panic");
+
+        assert!(matches!(
+            err,
+            crate::RuntimeError::ToolExecutionCancelled { call_id: cancelled, .. }
+                if cancelled == call_id
+        ));
+        assert_eq!(runtime.pending_tool_calls().await, vec![pending]);
+        assert_eq!(runtime.ledger_projection().await, projection_before);
     }
 }

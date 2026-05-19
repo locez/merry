@@ -1,8 +1,8 @@
 use futures_util::{StreamExt, stream};
 use merry_core::{
-    ArtifactId, ArtifactKind, ArtifactRef, EvidenceLocator, PendingToolCall, ProviderName,
-    RuntimeEvent, RuntimeEventKind, SessionId, ToolCallId, ToolCallResult, ToolCallResultStatus,
-    ToolName,
+    ArtifactId, ArtifactKind, ArtifactRef, ErrorInfo, EvidenceLocator, PendingToolCall,
+    ProviderName, RuntimeEvent, RuntimeEventKind, SessionId, ToolCallId, ToolCallResult,
+    ToolCallResultStatus, ToolInputSchema, ToolName, ToolSpec,
 };
 use merry_llm::{
     FinishReason, GenerationConfig, ModelCapabilities, ModelError, ModelEvent, ModelEventStream,
@@ -12,8 +12,10 @@ use merry_llm::{
 };
 use merry_runtime::{
     ArtifactContent, ContextCompiler, ContextEvidence, ContextSummary, LedgerFactKind,
-    LedgerProjection, Runtime, StepContext, StepInput,
+    LedgerProjection, RegisteredTool, Runtime, StepContext, StepInput, ToolExecutionContext,
+    ToolExecutionError, ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture,
 };
+use schemars::Schema;
 use serde_json::{Map, Value, json};
 use std::{
     num::NonZeroUsize,
@@ -340,6 +342,119 @@ fn failed_tool_result(
     )
 }
 
+fn test_tool_spec(name: &str) -> ToolSpec {
+    let schema = Schema::try_from(json!({
+        "type": "object",
+        "properties": {
+            "query": { "type": "string" }
+        },
+        "required": ["query"]
+    }))
+    .expect("test schema should be a JSON schema");
+
+    ToolSpec::new(
+        ToolName::new(name).expect("valid tool name"),
+        "Search test notes",
+        ToolInputSchema::new(schema).expect("valid tool schema"),
+    )
+    .expect("valid tool spec")
+}
+
+#[derive(Clone)]
+struct ScriptedToolExecutor {
+    calls: Arc<Mutex<Vec<PendingToolCall>>>,
+    response: ToolExecutorResponse,
+}
+
+#[derive(Clone)]
+enum ToolExecutorResponse {
+    Outcome(ToolExecutionOutcome),
+    Error(Arc<dyn Fn() -> ToolExecutionError + Send + Sync>),
+}
+
+impl ScriptedToolExecutor {
+    fn succeeding_text(text: &str) -> Self {
+        Self::new(ToolExecutorResponse::Outcome(
+            ToolExecutionOutcome::succeeded_text(text),
+        ))
+    }
+
+    fn failing_json(code: &str, content: &str) -> Self {
+        Self::new(ToolExecutorResponse::Outcome(
+            ToolExecutionOutcome::failed_json(
+                content,
+                ErrorInfo::new(code, "tool domain failure").expect("valid diagnostic"),
+            ),
+        ))
+    }
+
+    fn infrastructure_error(message: &str) -> Self {
+        let message = message.to_owned();
+        Self::new(ToolExecutorResponse::Error(Arc::new(move || {
+            ToolExecutionError::infrastructure(message.clone())
+        })))
+    }
+
+    fn new(response: ToolExecutorResponse) -> Self {
+        Self {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            response,
+        }
+    }
+
+    fn calls(&self) -> Vec<PendingToolCall> {
+        self.calls
+            .lock()
+            .expect("tool calls mutex should not be poisoned")
+            .clone()
+    }
+}
+
+impl ToolExecutor for ScriptedToolExecutor {
+    fn execute<'a>(
+        &'a self,
+        call: PendingToolCall,
+        _context: ToolExecutionContext,
+    ) -> ToolExecutorFuture<'a> {
+        Box::pin(async move {
+            self.calls
+                .lock()
+                .expect("tool calls mutex should not be poisoned")
+                .push(call);
+
+            match &self.response {
+                ToolExecutorResponse::Outcome(outcome) => Ok(outcome.clone()),
+                ToolExecutorResponse::Error(error) => Err(error()),
+            }
+        })
+    }
+}
+
+fn runtime_with_registered_tool(
+    session: &str,
+    provider: ScriptedModelProvider,
+    executor: ScriptedToolExecutor,
+) -> Runtime {
+    Runtime::builder(session_id(session))
+        .register_tool(RegisteredTool::new(
+            test_tool_spec("search_notes"),
+            Arc::new(executor),
+        ))
+        .model_provider(Arc::new(provider), model_name())
+        .build()
+        .expect("runtime should build")
+}
+
+fn resolved_tool_result(events: &[RuntimeEvent]) -> &ToolCallResult {
+    events
+        .iter()
+        .find_map(|event| match &event.kind {
+            RuntimeEventKind::ToolCallResolved { result } => Some(result),
+            _ => None,
+        })
+        .expect("resolved tool call should be emitted")
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn runtime_step_with_provider_compiles_user_text_request_and_records_assistant_output_artifact()
  {
@@ -664,6 +779,241 @@ async fn provider_streamed_tool_call_requested_emits_pending_without_completion(
     assert_no_artifact_recorded(&events);
     assert_no_completion(&events);
     assert!(failed_code(&events).is_none());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn registered_tool_specs_are_compiled_into_provider_request() {
+    let provider = FakeModelProvider::new(vec![Ok(completed_event())]);
+    let tool = test_tool_spec("search_notes");
+    let runtime = Runtime::builder(session_id("provider-registered-tool-spec"))
+        .register_tool(RegisteredTool::new(
+            tool.clone(),
+            Arc::new(ScriptedToolExecutor::succeeding_text("unused")),
+        ))
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .build()
+        .expect("runtime should build");
+
+    let events = collect_step(&runtime, "Use registered tools.").await;
+
+    assert_eq!(
+        event_kind_names(&events),
+        [
+            "SessionStarted",
+            "StepStarted",
+            "ArtifactRecorded",
+            "StepCompleted"
+        ]
+    );
+    let requests = provider.recorded_requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].tools(), &[tool]);
+    assert!(requests[0].continuations().is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn execute_registered_tool_success_records_artifact_resolves_and_compiles_continuation() {
+    let call = model_tool_call_with_args(
+        "call-success",
+        "search_notes",
+        Map::from_iter([("query".to_owned(), Value::String("alpha".to_owned()))]),
+    );
+    let provider = ScriptedModelProvider::new(vec![
+        vec![Ok(completed_outputs_event(
+            vec![ModelOutput::tool_call(call.clone())],
+            FinishReason::ToolCalls,
+        ))],
+        vec![Ok(completed_text_event("used tool result"))],
+    ]);
+    let executor = ScriptedToolExecutor::succeeding_text("search result\n");
+    let runtime = runtime_with_registered_tool(
+        "provider-execute-tool-success",
+        provider.clone(),
+        executor.clone(),
+    );
+
+    let pending_events = collect_step(&runtime, "Search notes.").await;
+    let pending = pending_tool_call(&pending_events).clone();
+    let execution_events = runtime
+        .execute_tool_call(pending.id(), ToolExecutionContext::default())
+        .await
+        .expect("tool execution should resolve");
+    let continuation_events = collect_step(&runtime, "Continue with result.").await;
+
+    assert_eq!(
+        event_kind_names(&execution_events),
+        ["ArtifactRecorded", "ToolCallResolved"]
+    );
+    let result = resolved_tool_result(&execution_events);
+    assert_eq!(result.status(), ToolCallResultStatus::Succeeded);
+    assert_eq!(result.artifact().id().as_str(), "tool-result-3");
+    assert_eq!(result.artifact().kind(), &ArtifactKind::Text);
+    assert_eq!(result.call_id(), pending.id());
+    assert_eq!(executor.calls(), vec![pending.clone()]);
+    assert_eq!(
+        event_kind_names(&continuation_events),
+        ["StepStarted", "ArtifactRecorded", "StepCompleted"]
+    );
+
+    let requests = provider.recorded_requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].tools(), &[test_tool_spec("search_notes")]);
+    assert!(requests[0].continuations().is_empty());
+    assert_eq!(requests[1].tools(), &[test_tool_spec("search_notes")]);
+    let continuation = requests[1]
+        .continuations()
+        .first()
+        .expect("tool result continuation should be compiled");
+    assert_eq!(continuation.call().id().as_str(), "call-success");
+    assert_eq!(
+        continuation.result().status(),
+        ToolCallResultStatus::Succeeded
+    );
+    assert_eq!(
+        continuation.result().content().as_text(),
+        Some("search result\n")
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn execute_tool_domain_failure_resolves_failed_without_runtime_failed() {
+    let call = model_tool_call_with_id("call-domain-failure");
+    let provider = ScriptedModelProvider::new(vec![vec![Ok(completed_outputs_event(
+        vec![ModelOutput::tool_call(call)],
+        FinishReason::ToolCalls,
+    ))]]);
+    let executor = ScriptedToolExecutor::failing_json("tool_lookup_failed", r#"{"ok":false}"#);
+    let runtime = runtime_with_registered_tool("provider-execute-tool-failure", provider, executor);
+    let pending_events = collect_step(&runtime, "Search notes.").await;
+    let pending = pending_tool_call(&pending_events).clone();
+
+    let execution_events = runtime
+        .execute_tool_call(pending.id(), ToolExecutionContext::default())
+        .await
+        .expect("domain failure should resolve the pending call");
+
+    assert_eq!(
+        event_kind_names(&execution_events),
+        ["ArtifactRecorded", "ToolCallResolved"]
+    );
+    assert!(
+        execution_events
+            .iter()
+            .all(|event| !matches!(event.kind, RuntimeEventKind::Failed { .. })),
+        "tool domain failure must not emit RuntimeEventKind::Failed: {execution_events:?}"
+    );
+    let result = resolved_tool_result(&execution_events);
+    assert_eq!(result.status(), ToolCallResultStatus::Failed);
+    assert_eq!(
+        result
+            .diagnostic()
+            .expect("failed result should have diagnostic")
+            .code(),
+        "tool_lookup_failed"
+    );
+    assert!(runtime.pending_tool_calls().await.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn executor_infrastructure_error_keeps_pending_without_artifact_or_result() {
+    let call = model_tool_call_with_id("call-infra-failure");
+    let provider = ScriptedModelProvider::new(vec![vec![Ok(completed_outputs_event(
+        vec![ModelOutput::tool_call(call)],
+        FinishReason::ToolCalls,
+    ))]]);
+    let executor = ScriptedToolExecutor::infrastructure_error("temporary executor outage");
+    let runtime =
+        runtime_with_registered_tool("provider-execute-tool-infra-error", provider, executor);
+    let pending_events = collect_step(&runtime, "Search notes.").await;
+    let pending = pending_tool_call(&pending_events).clone();
+    let before = runtime.ledger_projection().await;
+
+    let err = runtime
+        .execute_tool_call(pending.id(), ToolExecutionContext::default())
+        .await
+        .expect_err("infrastructure failure should not resolve the pending call");
+    let after = runtime.ledger_projection().await;
+
+    assert!(matches!(
+        err,
+        merry_runtime::RuntimeError::ToolExecutionFailed { call_id, .. }
+            if call_id == *pending.id()
+    ));
+    assert_eq!(before, after);
+    assert_eq!(runtime.pending_tool_calls().await, vec![pending]);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn unregistered_pending_tool_name_resolves_failed_with_tool_not_registered() {
+    let call = model_tool_call_with_args("call-unregistered", "missing_tool", Map::new());
+    let provider = ScriptedModelProvider::new(vec![
+        vec![Ok(completed_outputs_event(
+            vec![ModelOutput::tool_call(call)],
+            FinishReason::ToolCalls,
+        ))],
+        vec![Ok(completed_text_event("continued after missing tool"))],
+    ]);
+    let runtime = Runtime::builder(session_id("provider-execute-tool-unregistered"))
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .build()
+        .expect("runtime should build");
+    let pending_events = collect_step(&runtime, "Call missing tool.").await;
+    let pending = pending_tool_call(&pending_events).clone();
+
+    let execution_events = runtime
+        .execute_tool_call(pending.id(), ToolExecutionContext::default())
+        .await
+        .expect("unregistered tool should synthesize failed result");
+    let continuation_events = collect_step(&runtime, "Continue after missing tool.").await;
+
+    assert_eq!(
+        event_kind_names(&execution_events),
+        ["ArtifactRecorded", "ToolCallResolved"]
+    );
+    let result = resolved_tool_result(&execution_events);
+    assert_eq!(result.status(), ToolCallResultStatus::Failed);
+    assert_eq!(
+        result
+            .diagnostic()
+            .expect("failed result should have diagnostic")
+            .code(),
+        "tool_not_registered"
+    );
+    assert_eq!(result.artifact().id().as_str(), "tool-result-3");
+    assert!(failed_code(&execution_events).is_none());
+    assert!(runtime.pending_tool_calls().await.is_empty());
+    assert_eq!(
+        event_kind_names(&continuation_events),
+        ["StepStarted", "ArtifactRecorded", "StepCompleted"]
+    );
+    assert_eq!(provider.recorded_requests()[1].continuations().len(), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn execute_tool_with_bad_or_missing_args_still_reaches_executor() {
+    let call = model_tool_call_with_args("call-bad-args", "search_notes", Map::new());
+    let provider = ScriptedModelProvider::new(vec![vec![Ok(completed_outputs_event(
+        vec![ModelOutput::tool_call(call)],
+        FinishReason::ToolCalls,
+    ))]]);
+    let executor = ScriptedToolExecutor::succeeding_text("accepted bad args\n");
+    let runtime = runtime_with_registered_tool(
+        "provider-execute-tool-schema-pass",
+        provider,
+        executor.clone(),
+    );
+    let pending_events = collect_step(&runtime, "Search with missing args.").await;
+    let pending = pending_tool_call(&pending_events).clone();
+
+    runtime
+        .execute_tool_call(pending.id(), ToolExecutionContext::default())
+        .await
+        .expect("runtime should not schema-validate tool arguments");
+
+    let calls = executor.calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].id().as_str(), "call-bad-args");
+    assert!(calls[0].arguments().as_object().is_empty());
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -4,7 +4,7 @@ use crate::{
     CompiledContext, RuntimeError, artifact::ArtifactContent,
     session::ResolvedToolContinuationSnapshot,
 };
-use merry_core::{PendingToolCall, ToolCallResult, ToolCallResultStatus};
+use merry_core::{PendingToolCall, ToolCallResult, ToolCallResultStatus, ToolSpec};
 use merry_llm::{
     GenerationConfig, ModelContent, ModelMessage, ModelMessageRole, ModelName, ModelRequest,
     ModelToolCall, ModelToolCallId, ModelToolContinuation, ModelToolResult, ModelToolResultContent,
@@ -108,6 +108,7 @@ pub(crate) fn compile_step_model_request(
     model: &ModelName,
     context: &CompiledContext,
     continuations: &[ResolvedToolContinuationSnapshot],
+    tool_specs: Vec<ToolSpec>,
     generation_config: GenerationConfig,
 ) -> Result<ModelRequest, merry_llm::ModelError> {
     let context_snapshot = context.to_snapshot();
@@ -133,7 +134,7 @@ pub(crate) fn compile_step_model_request(
     ModelRequest::new_with_continuations(
         model.clone(),
         messages,
-        Vec::new(),
+        tool_specs,
         continuations,
         generation_config,
     )
