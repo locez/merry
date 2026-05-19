@@ -201,6 +201,7 @@ fn debug_openai_help_writes_usage_to_stdout() {
     assert!(stdout.contains("--max-output-tokens <N>"));
     assert!(stdout.contains("--debug-tool-result <TEXT>"));
     assert!(stdout.contains("Optional maximum output tokens"));
+    assert!(stdout.contains("Require first step to call debug_echo"));
     assert!(!stdout.contains("Rejected until"));
     assert!(stdout.contains("MERRY_OPENAI_DEBUG=1"));
 }

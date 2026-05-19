@@ -325,19 +325,24 @@ where
     let events = write_runtime_step_events_to(runtime, input, context.clone(), &mut writer).await?;
     let pending = first_pending_tool_call(&events);
 
-    if let Some(pending) = pending {
-        write_runtime_events(
-            runtime
-                .execute_tool_call(pending.id(), ToolExecutionContext::default())
-                .await
-                .map_err(unexpected)?,
-            &mut writer,
-        )
-        .await?;
+    let Some(pending) = pending else {
+        writer.flush().await.map_err(stdout_error)?;
+        return Err(CliError::Unexpected(format!(
+            "debug tool `{DEBUG_TOOL_NAME}` was not called on the first step; no tool call was pending"
+        )));
+    };
 
-        let input = StepInput::user_text(DEBUG_TOOL_CONTINUATION_INPUT).map_err(unexpected)?;
-        write_runtime_step_events_to(runtime, input, context, &mut writer).await?;
-    }
+    write_runtime_events(
+        runtime
+            .execute_tool_call(pending.id(), ToolExecutionContext::default())
+            .await
+            .map_err(unexpected)?,
+        &mut writer,
+    )
+    .await?;
+
+    let input = StepInput::user_text(DEBUG_TOOL_CONTINUATION_INPUT).map_err(unexpected)?;
+    write_runtime_step_events_to(runtime, input, context, &mut writer).await?;
 
     writer.flush().await.map_err(stdout_error)
 }
@@ -501,7 +506,7 @@ fn debug_usage() -> &'static str {
 }
 
 fn debug_openai_usage() -> &'static str {
-    "Usage: merry debug openai --input <TEXT> [--model <MODEL>] [--max-output-tokens <N>] [--debug-tool-result <TEXT>]\n\nOptions:\n  --input <TEXT>             User text input to send through Runtime::step\n  --model <MODEL>            Model name; falls back to MERRY_OPENAI_MODEL\n  --max-output-tokens <N>    Optional maximum output tokens for this step\n  --debug-tool-result <TEXT> Register debug_echo and return this text when it is called\n  --help                     Print help\n\nEnvironment:\n  MERRY_OPENAI_DEBUG=1       Required opt-in before any network attempt\n  OPENAI_API_KEY             Required after opt-in\n  MERRY_OPENAI_MODEL         Required when --model is omitted\n  MERRY_OPENAI_BASE_URL      Optional OpenAI-compatible base URL\n  OPENAI_ORG_ID              Optional organization header\n  OPENAI_PROJECT_ID          Optional project header\n"
+    "Usage: merry debug openai --input <TEXT> [--model <MODEL>] [--max-output-tokens <N>] [--debug-tool-result <TEXT>]\n\nOptions:\n  --input <TEXT>             User text input to send through Runtime::step\n  --model <MODEL>            Model name; falls back to MERRY_OPENAI_MODEL\n  --max-output-tokens <N>    Optional maximum output tokens for this step\n  --debug-tool-result <TEXT> Require first step to call debug_echo; return this text\n  --help                     Print help\n\nEnvironment:\n  MERRY_OPENAI_DEBUG=1       Required opt-in before any network attempt\n  OPENAI_API_KEY             Required after opt-in\n  MERRY_OPENAI_MODEL         Required when --model is omitted\n  MERRY_OPENAI_BASE_URL      Optional OpenAI-compatible base URL\n  OPENAI_ORG_ID              Optional organization header\n  OPENAI_PROJECT_ID          Optional project header\n"
 }
 
 fn unexpected(err: impl fmt::Display) -> CliError {
@@ -564,7 +569,9 @@ impl Termination for CliExit {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEBUG_TOOL_CONTINUATION_INPUT, debug_echo_tool, write_debug_openai_tool_events};
+    use super::{
+        CliError, DEBUG_TOOL_CONTINUATION_INPUT, debug_echo_tool, write_debug_openai_tool_events,
+    };
     use super::{DEBUG_TOOL_NAME, write_runtime_step_events};
     use futures_util::stream;
     use merry_core::{ProviderName, RuntimeEvent, ToolCallResultStatus, ToolName};
@@ -895,5 +902,74 @@ mod tests {
         );
         assert_eq!(requests[1].generation().max_output_tokens(), Some(16));
         assert!(!requests[1].generation().allow_parallel_tool_calls());
+    }
+
+    #[tokio::test]
+    async fn debug_openai_tool_helper_errors_when_first_step_does_not_call_debug_echo() {
+        let provider = ScriptedProvider::new(vec![vec![Ok(ModelEvent::Completed {
+            response: ModelResponse::new(
+                vec![ModelOutput::text("completed without tool")],
+                FinishReason::Stop,
+                None,
+            ),
+        })]]);
+        let runtime = Runtime::builder(merry_core::SessionId::new("debug-openai-no-tool").unwrap())
+            .register_tool(
+                debug_echo_tool("debug result").unwrap_or_else(|_| panic!("valid debug tool")),
+            )
+            .model_provider(
+                Arc::new(provider.clone()),
+                ModelName::new("debug-model").unwrap(),
+            )
+            .build()
+            .expect("runtime should build");
+        let input = StepInput::user_text("do not call the tool").expect("valid input");
+        let mut output = Vec::new();
+
+        let error =
+            write_debug_openai_tool_events(&runtime, input, StepContext::default(), &mut output)
+                .await
+                .expect_err("missing first-step tool call should fail");
+
+        match error {
+            CliError::Unexpected(message) => {
+                assert!(message.contains(DEBUG_TOOL_NAME));
+                assert!(message.contains("no tool call was pending"));
+            }
+            _ => panic!("expected unexpected error for missing tool call"),
+        }
+
+        let text = String::from_utf8(output).expect("output should be utf-8");
+        let events = text
+            .lines()
+            .map(|line| serde_json::from_str::<RuntimeEvent>(line).expect("line should be JSON"))
+            .collect::<Vec<_>>();
+        assert!(
+            !events.is_empty(),
+            "first-step runtime events should be preserved"
+        );
+        let event_types = events
+            .iter()
+            .map(|event| {
+                let value = serde_json::to_value(event).expect("event should serialize");
+                value["kind"]["type"].as_str().unwrap().to_owned()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            event_types,
+            [
+                "session_started",
+                "step_started",
+                "artifact_recorded",
+                "step_completed",
+            ]
+        );
+        assert!(!event_types.iter().any(|kind| kind == "tool_call_pending"));
+        assert!(!event_types.iter().any(|kind| kind == "tool_call_resolved"));
+
+        let requests = provider.recorded_requests();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].continuations().is_empty());
     }
 }
