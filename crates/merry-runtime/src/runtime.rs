@@ -9,6 +9,10 @@ use crate::{
     ArtifactContent, ContextCompiler, ContextEntry, ContextSummary, LedgerProjectionSnapshot,
     RuntimeError, RuntimeEventStream, SessionContextSnapshot,
     event_stream::ActiveStepPermit,
+    memory::{
+        MemoryActivationSeed, MemoryActivationSource, MemoryActivationSourceKind, MemoryScope,
+        NoopMemoryActivationSource,
+    },
     session::{SessionState, is_runtime_reserved_artifact_id},
     step::{StepContext, StepInput, compile_step_model_request},
     tool::{RegisteredTool, ToolExecutionContext, ToolExecutionError, ToolRegistry},
@@ -373,6 +377,7 @@ pub struct RuntimeBuilder {
     event_buffer_size: NonZeroUsize,
     model_provider: Option<ModelProviderConfig>,
     registered_tools: Vec<RegisteredTool>,
+    memory_activation_source: Arc<dyn MemoryActivationSource>,
 }
 
 impl RuntimeBuilder {
@@ -383,6 +388,7 @@ impl RuntimeBuilder {
                 .expect("default event buffer size is non-zero"),
             model_provider: None,
             registered_tools: Vec::new(),
+            memory_activation_source: Arc::new(NoopMemoryActivationSource),
         }
     }
 
@@ -438,6 +444,7 @@ impl RuntimeBuilder {
                 event_buffer_size: self.event_buffer_size,
                 model_provider: self.model_provider,
                 tool_registry,
+                memory_activation_source: self.memory_activation_source,
             }),
         })
     }
@@ -456,6 +463,7 @@ struct RuntimeInner {
     event_buffer_size: NonZeroUsize,
     model_provider: Option<ModelProviderConfig>,
     tool_registry: ToolRegistry,
+    memory_activation_source: Arc<dyn MemoryActivationSource>,
 }
 
 async fn run_step(
@@ -538,11 +546,42 @@ async fn run_provider_step(
         return;
     }
 
+    clear_current_activated_memories(inner).await;
+
+    if token.is_cancelled() {
+        let _ = send_cancelled_event(inner, sender).await;
+        return;
+    }
+
+    let seed = match memory_activation_seed_from_step_input(&input) {
+        Ok(seed) => seed,
+        Err(error) => {
+            let diagnostic = diagnostic_from_text("memory_activation", error.to_string());
+            let _ = send_failed_event(inner, sender, token, diagnostic).await;
+            return;
+        }
+    };
+    let activated_memories = match inner.memory_activation_source.activate(&seed) {
+        Ok(memories) => memories,
+        Err(error) => {
+            let diagnostic = diagnostic_from_text("memory_activation", error.to_string());
+            let _ = send_failed_event(inner, sender, token, diagnostic).await;
+            return;
+        }
+    };
+
     let (snapshot, continuations) = {
-        let session = inner.session.lock().await;
+        let mut session = inner.session.lock().await;
+        if token.is_cancelled() {
+            drop(session);
+            let _ = send_cancelled_event(inner, sender).await;
+            return;
+        }
+        session.replace_activated_memories(activated_memories);
         let continuations = match session.unconsumed_tool_continuation_snapshots() {
             Ok(continuations) => continuations,
             Err(error) => {
+                session.replace_activated_memories(Vec::new());
                 let diagnostic = diagnostic_from_text(
                     "tool_continuation_artifact",
                     format!("tool continuation artifact could not be read: {error}"),
@@ -560,6 +599,7 @@ async fn run_provider_step(
     let compiled_context = match ContextCompiler::new().compile(&snapshot) {
         Ok(context) => context,
         Err(error) => {
+            clear_current_activated_memories(inner).await;
             let diagnostic = diagnostic_from_text("context_compile", error.to_string());
             let _ = send_failed_event(inner, sender, token, diagnostic).await;
             return;
@@ -576,6 +616,7 @@ async fn run_provider_step(
     ) {
         Ok(request) => request,
         Err(error) => {
+            clear_current_activated_memories(inner).await;
             let diagnostic = diagnostic_from_text("model_request", error.to_string());
             let _ = send_failed_event(inner, sender, token, diagnostic).await;
             return;
@@ -586,6 +627,7 @@ async fn run_provider_step(
     let stream_result = tokio::select! {
         biased;
         () = token.cancelled() => {
+            clear_current_activated_memories(inner).await;
             let _ = send_cancelled_event(inner, sender).await;
             return;
         }
@@ -595,6 +637,7 @@ async fn run_provider_step(
     let mut stream = match stream_result {
         Ok(stream) => stream,
         Err(error) => {
+            clear_current_activated_memories(inner).await;
             if is_cancelled_model_error(&error) {
                 let _ = send_cancelled_event(inner, sender).await;
                 return;
@@ -757,9 +800,25 @@ async fn run_provider_step(
     }
 }
 
+async fn clear_current_activated_memories(inner: &RuntimeInner) {
+    let mut session = inner.session.lock().await;
+    session.replace_activated_memories(Vec::new());
+}
+
 async fn has_unresolved_pending_tool_calls(inner: &RuntimeInner) -> bool {
     let session = inner.session.lock().await;
     session.has_pending_tool_calls()
+}
+
+fn memory_activation_seed_from_step_input(
+    input: &StepInput,
+) -> Result<MemoryActivationSeed, crate::memory::MemoryError> {
+    MemoryActivationSeed::new(
+        input.text(),
+        vec![MemoryScope::Session, MemoryScope::Task, MemoryScope::Step],
+        MemoryActivationSourceKind::UserQuery,
+        "step input",
+    )
 }
 
 async fn send_assistant_text_output_completed_events(
@@ -1106,23 +1165,39 @@ async fn reserve_cancelled_event_slot<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::{Runtime, RuntimeInner, send_cancelled_event};
+    use super::{
+        DIAGNOSTIC_TOOL_CALL_RESULT_REQUIRED, Runtime, RuntimeInner,
+        memory_activation_seed_from_step_input, send_cancelled_event,
+    };
     use crate::ArtifactError;
+    use crate::artifact::ArtifactContent;
+    use crate::memory::{
+        ActivatedMemory, MemoryActivationReason, MemoryActivationScore, MemoryActivationSource,
+        MemoryActivationSourceKind, MemoryError, MemoryEvidence, MemoryId, MemoryItem,
+        MemoryItemSelection, MemoryScope,
+    };
     use crate::session::SessionState;
     use crate::tool::{
         RegisteredTool, ToolExecutionContext, ToolExecutionOutcome, ToolExecutor,
         ToolExecutorFuture, ToolRegistry,
     };
+    use futures_util::StreamExt;
     use merry_core::{
-        ArtifactId, EvidenceLocator, PendingToolCall, SessionId, ToolCallArguments, ToolCallId,
-        ToolInputSchema, ToolName, ToolSpec,
+        ArtifactId, ArtifactKind, ArtifactRef, EvidenceLocator, EvidenceRef, PendingToolCall,
+        RuntimeEvent, RuntimeEventKind, SessionId, ToolCallArguments, ToolCallId, ToolInputSchema,
+        ToolName, ToolSpec,
+    };
+    use merry_llm::{
+        FinishReason, ModelCapabilities, ModelError, ModelEvent, ModelEventStream,
+        ModelMessageRole, ModelName, ModelOutput, ModelProvider, ModelProviderFuture, ModelRequest,
+        ModelResponse, ModelStreamContext,
     };
     use schemars::Schema;
     use serde_json::json;
     use std::{
         num::NonZeroUsize,
         sync::{
-            Arc,
+            Arc, Mutex as StdMutex,
             atomic::{AtomicBool, AtomicUsize, Ordering},
         },
     };
@@ -1138,11 +1213,699 @@ mod tests {
             event_buffer_size: NonZeroUsize::new(1).expect("non-zero buffer"),
             model_provider: None,
             tool_registry: ToolRegistry::default(),
+            memory_activation_source: Arc::new(crate::memory::NoopMemoryActivationSource),
         }
     }
 
     fn artifact_id(value: &str) -> ArtifactId {
         ArtifactId::new(value).expect("valid artifact id")
+    }
+
+    fn session_id(value: &str) -> SessionId {
+        SessionId::new(value).expect("valid session id")
+    }
+
+    fn model_name() -> ModelName {
+        ModelName::new("fake/model").expect("valid model name")
+    }
+
+    fn completed_event() -> ModelEvent {
+        ModelEvent::Completed {
+            response: ModelResponse::new(
+                vec![ModelOutput::text("model result")],
+                FinishReason::Stop,
+                None,
+            ),
+        }
+    }
+
+    fn event_kind_names(events: &[RuntimeEvent]) -> Vec<&'static str> {
+        events
+            .iter()
+            .map(|event| match event.kind {
+                RuntimeEventKind::SessionStarted => "SessionStarted",
+                RuntimeEventKind::StepStarted => "StepStarted",
+                RuntimeEventKind::StepCompleted => "StepCompleted",
+                RuntimeEventKind::Cancelled { .. } => "Cancelled",
+                RuntimeEventKind::Failed { .. } => "Failed",
+                RuntimeEventKind::ArtifactRecorded { .. } => "ArtifactRecorded",
+                RuntimeEventKind::EvidenceReferenced { .. } => "EvidenceReferenced",
+                RuntimeEventKind::ToolCallPending { .. } => "ToolCallPending",
+                RuntimeEventKind::ToolCallResolved { .. } => "ToolCallResolved",
+                _ => "Unknown",
+            })
+            .collect()
+    }
+
+    fn failed_code(events: &[RuntimeEvent]) -> Option<&str> {
+        events.iter().find_map(|event| match &event.kind {
+            RuntimeEventKind::Failed { diagnostic } => Some(diagnostic.code()),
+            _ => None,
+        })
+    }
+
+    async fn collect_step(
+        runtime: &Runtime,
+        text: &str,
+        context: crate::StepContext,
+    ) -> Vec<RuntimeEvent> {
+        runtime
+            .step(
+                crate::StepInput::user_text(text).expect("valid step input"),
+                context,
+            )
+            .expect("step should start")
+            .collect()
+            .await
+    }
+
+    fn pending_tool_call(id: &str) -> PendingToolCall {
+        PendingToolCall::new(
+            ToolCallId::new(id).expect("valid tool call id"),
+            ToolName::new("lookup").expect("valid tool name"),
+            ToolCallArguments::new(Default::default()),
+        )
+    }
+
+    fn activated_memory(id: &str, text: &str, evidence_artifact: &str) -> ActivatedMemory {
+        let item = MemoryItem::new(
+            MemoryId::new(id).expect("valid memory id"),
+            MemoryScope::Session,
+            text,
+            vec![
+                MemoryEvidence::new(
+                    "primary source",
+                    EvidenceRef::new(
+                        artifact_id(evidence_artifact),
+                        EvidenceLocator::whole_artifact(),
+                    ),
+                )
+                .expect("valid memory evidence"),
+            ],
+            MemoryItemSelection::new(vec!["topic".to_owned()], 0.8, 1, None)
+                .expect("valid memory selection"),
+        )
+        .expect("valid memory item");
+        let score = MemoryActivationScore::new(1, 1, 0.8).expect("valid memory score");
+        ActivatedMemory::new(
+            item,
+            score,
+            vec![
+                MemoryActivationReason::ScopeAllowed,
+                MemoryActivationReason::trigger_matched("topic").expect("valid trigger"),
+                MemoryActivationReason::ranked(score),
+            ],
+            crate::memory::MemoryActivationProvenance::new(
+                "topic",
+                vec![MemoryScope::Session, MemoryScope::Task, MemoryScope::Step],
+                MemoryActivationSourceKind::UserQuery,
+                "test source",
+            )
+            .expect("valid provenance"),
+        )
+        .expect("valid activated memory")
+    }
+
+    fn activated_memory_with_unreadable_evidence(id: &str) -> ActivatedMemory {
+        activated_memory(id, "Unreadable evidence memory.", &format!("{id}-missing"))
+    }
+
+    fn record_memory_artifact(runtime: &Runtime, artifact_id_value: &str, content: &str) {
+        let mut session = runtime
+            .inner
+            .session
+            .try_lock()
+            .expect("session lock is free");
+        session
+            .record_artifact_state(
+                ArtifactRef::new(artifact_id(artifact_id_value), ArtifactKind::Text),
+                ArtifactContent::text(content),
+            )
+            .expect("memory artifact records");
+    }
+
+    #[derive(Debug, Clone)]
+    enum ScriptedMemoryActivationResponse {
+        Memories(Vec<ActivatedMemory>),
+        Error(MemoryError),
+        CancelThenMemories {
+            token: CancellationToken,
+            memories: Vec<ActivatedMemory>,
+        },
+    }
+
+    impl ScriptedMemoryActivationResponse {
+        fn into_result(self) -> Result<Vec<ActivatedMemory>, MemoryError> {
+            match self {
+                Self::Memories(memories) => Ok(memories),
+                Self::Error(error) => Err(error),
+                Self::CancelThenMemories { token, memories } => {
+                    token.cancel();
+                    Ok(memories)
+                }
+            }
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct ScriptedMemoryActivationSource {
+        responses: Arc<StdMutex<Vec<ScriptedMemoryActivationResponse>>>,
+        calls: Arc<AtomicUsize>,
+        observed_queries: Arc<StdMutex<Vec<String>>>,
+    }
+
+    impl ScriptedMemoryActivationSource {
+        fn new(responses: Vec<Vec<ActivatedMemory>>) -> Self {
+            Self::with_script(
+                responses
+                    .into_iter()
+                    .map(ScriptedMemoryActivationResponse::Memories)
+                    .collect(),
+            )
+        }
+
+        fn with_script(responses: Vec<ScriptedMemoryActivationResponse>) -> Self {
+            Self {
+                responses: Arc::new(StdMutex::new(responses.into_iter().rev().collect())),
+                calls: Arc::new(AtomicUsize::new(0)),
+                observed_queries: Arc::new(StdMutex::new(Vec::new())),
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+
+        fn observed_queries(&self) -> Vec<String> {
+            self.observed_queries
+                .lock()
+                .expect("observed query mutex should not be poisoned")
+                .clone()
+        }
+    }
+
+    impl MemoryActivationSource for ScriptedMemoryActivationSource {
+        fn activate(
+            &self,
+            seed: &crate::memory::MemoryActivationSeed,
+        ) -> Result<Vec<ActivatedMemory>, MemoryError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.observed_queries
+                .lock()
+                .expect("observed query mutex should not be poisoned")
+                .push(seed.query().to_owned());
+            self.responses
+                .lock()
+                .expect("memory response mutex should not be poisoned")
+                .pop()
+                .map_or(
+                    Ok(Vec::new()),
+                    ScriptedMemoryActivationResponse::into_result,
+                )
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct RecordingModelProvider {
+        requests: Arc<StdMutex<Vec<ModelRequest>>>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl RecordingModelProvider {
+        fn new() -> Self {
+            Self {
+                requests: Arc::new(StdMutex::new(Vec::new())),
+                calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn recorded_requests(&self) -> Vec<ModelRequest> {
+            self.requests
+                .lock()
+                .expect("recorded requests mutex should not be poisoned")
+                .clone()
+        }
+    }
+
+    impl ModelProvider for RecordingModelProvider {
+        fn name(&self) -> &merry_core::ProviderName {
+            static PROVIDER_NAME: std::sync::OnceLock<merry_core::ProviderName> =
+                std::sync::OnceLock::new();
+            PROVIDER_NAME.get_or_init(|| {
+                merry_core::ProviderName::new("runtime-test-provider").expect("valid provider name")
+            })
+        }
+
+        fn capabilities(&self) -> &ModelCapabilities {
+            static CAPABILITIES: std::sync::OnceLock<ModelCapabilities> =
+                std::sync::OnceLock::new();
+            CAPABILITIES.get_or_init(|| {
+                ModelCapabilities::new(true, true, false, true, None, None)
+                    .expect("valid capabilities")
+            })
+        }
+
+        fn stream_model<'a>(
+            &'a self,
+            request: ModelRequest,
+            context: ModelStreamContext,
+        ) -> ModelProviderFuture<'a, Result<ModelEventStream, ModelError>> {
+            Box::pin(async move {
+                if context.cancellation_token().is_cancelled() {
+                    return Err(ModelError::Cancelled);
+                }
+
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.requests
+                    .lock()
+                    .expect("recorded requests mutex should not be poisoned")
+                    .push(request);
+                let stream: ModelEventStream =
+                    Box::pin(futures_util::stream::iter(vec![Ok(completed_event())]));
+                Ok(stream)
+            })
+        }
+    }
+
+    fn runtime_with_provider_and_memory_source<S>(
+        session: &str,
+        provider: RecordingModelProvider,
+        source: S,
+    ) -> Runtime
+    where
+        S: MemoryActivationSource + 'static,
+    {
+        Runtime {
+            inner: Arc::new(RuntimeInner {
+                session_id: session_id(session),
+                session: Mutex::new(SessionState::new(session_id(session))),
+                active_step: Arc::new(AtomicBool::new(false)),
+                event_buffer_size: NonZeroUsize::new(16).expect("non-zero buffer"),
+                model_provider: Some(super::ModelProviderConfig {
+                    provider: Arc::new(provider),
+                    model: model_name(),
+                }),
+                tool_registry: ToolRegistry::default(),
+                memory_activation_source: Arc::new(source),
+            }),
+        }
+    }
+
+    fn runtime_without_provider_with_memory_source<S>(session: &str, source: S) -> Runtime
+    where
+        S: MemoryActivationSource + 'static,
+    {
+        Runtime {
+            inner: Arc::new(RuntimeInner {
+                session_id: session_id(session),
+                session: Mutex::new(SessionState::new(session_id(session))),
+                active_step: Arc::new(AtomicBool::new(false)),
+                event_buffer_size: NonZeroUsize::new(16).expect("non-zero buffer"),
+                model_provider: None,
+                tool_registry: ToolRegistry::default(),
+                memory_activation_source: Arc::new(source),
+            }),
+        }
+    }
+
+    #[test]
+    fn memory_activation_seed_uses_step_input_as_user_query_source() {
+        let input = crate::StepInput::user_text("  Topic\trequest\n").expect("valid step input");
+
+        let seed = memory_activation_seed_from_step_input(&input).expect("seed builds");
+
+        assert_eq!(seed.query(), "topic request");
+        assert_eq!(
+            seed.provenance().source_kind(),
+            MemoryActivationSourceKind::UserQuery
+        );
+        assert_eq!(seed.provenance().source_label(), "step input");
+        assert_eq!(
+            seed.provenance().allowed_scopes(),
+            &[MemoryScope::Session, MemoryScope::Task, MemoryScope::Step]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn provider_step_projects_activated_memory_before_user_message() {
+        let memory = activated_memory(
+            "memory-topic",
+            "Remember that topic answers should mention runtime timing.",
+            "memory-topic-artifact",
+        );
+        let source = ScriptedMemoryActivationSource::new(vec![vec![memory]]);
+        let provider = RecordingModelProvider::new();
+        let runtime = runtime_with_provider_and_memory_source(
+            "runtime-memory-context",
+            provider.clone(),
+            source.clone(),
+        );
+        record_memory_artifact(
+            &runtime,
+            "memory-topic-artifact",
+            "exact evidence for timing memory",
+        );
+
+        let events = collect_step(
+            &runtime,
+            "Topic request.",
+            crate::StepContext::new(CancellationToken::new()),
+        )
+        .await;
+
+        assert_eq!(
+            event_kind_names(&events),
+            [
+                "SessionStarted",
+                "StepStarted",
+                "ArtifactRecorded",
+                "StepCompleted"
+            ]
+        );
+        assert_eq!(source.call_count(), 1);
+        assert_eq!(source.observed_queries(), ["topic request."]);
+
+        let requests = provider.recorded_requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].messages().len(), 2);
+        assert_eq!(requests[0].messages()[0].role(), ModelMessageRole::System);
+        assert_eq!(requests[0].messages()[1].role(), ModelMessageRole::User);
+        assert!(
+            requests[0].messages()[0]
+                .content()
+                .as_text()
+                .contains("memory:memory-topic")
+        );
+        assert!(
+            requests[0].messages()[0]
+                .content()
+                .as_text()
+                .contains("memory-text:Remember that topic answers should mention runtime timing.")
+        );
+        assert_eq!(
+            requests[0].messages()[1].content().as_text(),
+            "Topic request."
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn provider_step_replaces_activated_memories_between_requests() {
+        let first_memory = activated_memory(
+            "memory-stale",
+            "Stale memory must not survive the next projection.",
+            "memory-stale-artifact",
+        );
+        let source = ScriptedMemoryActivationSource::new(vec![vec![first_memory], Vec::new()]);
+        let provider = RecordingModelProvider::new();
+        let runtime = runtime_with_provider_and_memory_source(
+            "runtime-memory-replace",
+            provider.clone(),
+            source.clone(),
+        );
+        record_memory_artifact(
+            &runtime,
+            "memory-stale-artifact",
+            "exact evidence for stale memory",
+        );
+
+        let first_events = collect_step(
+            &runtime,
+            "First topic request.",
+            crate::StepContext::new(CancellationToken::new()),
+        )
+        .await;
+        let second_events = collect_step(
+            &runtime,
+            "Second topic request.",
+            crate::StepContext::new(CancellationToken::new()),
+        )
+        .await;
+
+        assert_eq!(
+            event_kind_names(&first_events),
+            [
+                "SessionStarted",
+                "StepStarted",
+                "ArtifactRecorded",
+                "StepCompleted"
+            ]
+        );
+        assert_eq!(
+            event_kind_names(&second_events),
+            ["StepStarted", "ArtifactRecorded", "StepCompleted"]
+        );
+        assert_eq!(source.call_count(), 2);
+
+        let requests = provider.recorded_requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].messages().len(), 2);
+        assert!(
+            requests[0].messages()[0]
+                .content()
+                .as_text()
+                .contains("memory:memory-stale")
+        );
+        assert_eq!(requests[1].messages().len(), 1);
+        assert_eq!(requests[1].messages()[0].role(), ModelMessageRole::User);
+        assert!(
+            requests[1]
+                .messages()
+                .iter()
+                .all(|message| !message.content().as_text().contains("memory-stale"))
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn activation_source_error_clears_previous_successful_projection() {
+        let memory = activated_memory(
+            "memory-success",
+            "Previous successful memory must not survive activation failure.",
+            "memory-success-artifact",
+        );
+        let source = ScriptedMemoryActivationSource::with_script(vec![
+            ScriptedMemoryActivationResponse::Memories(vec![memory]),
+            ScriptedMemoryActivationResponse::Error(MemoryError::BlankField {
+                field: "memory activation source label",
+            }),
+        ]);
+        let provider = RecordingModelProvider::new();
+        let runtime = runtime_with_provider_and_memory_source(
+            "runtime-memory-source-error-clears",
+            provider.clone(),
+            source.clone(),
+        );
+        record_memory_artifact(
+            &runtime,
+            "memory-success-artifact",
+            "exact evidence for successful memory",
+        );
+
+        let first_events = collect_step(
+            &runtime,
+            "First topic request.",
+            crate::StepContext::new(CancellationToken::new()),
+        )
+        .await;
+        let second_events = collect_step(
+            &runtime,
+            "Second topic request.",
+            crate::StepContext::new(CancellationToken::new()),
+        )
+        .await;
+
+        assert_eq!(
+            event_kind_names(&first_events),
+            [
+                "SessionStarted",
+                "StepStarted",
+                "ArtifactRecorded",
+                "StepCompleted"
+            ]
+        );
+        assert_eq!(event_kind_names(&second_events), ["StepStarted", "Failed"]);
+        assert_eq!(failed_code(&second_events), Some("memory_activation"));
+        assert_eq!(source.call_count(), 2);
+        assert_eq!(provider.recorded_requests().len(), 1);
+        assert_eq!(
+            crate::ContextCompiler::new()
+                .compile(&runtime.context_snapshot().await)
+                .expect("context compiles after activation source failure")
+                .to_snapshot(),
+            ""
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unresolved_pending_tool_call_blocks_memory_activation() {
+        let source = ScriptedMemoryActivationSource::new(vec![vec![activated_memory(
+            "memory-blocked",
+            "This memory must not activate while a tool call is pending.",
+            "memory-blocked-artifact",
+        )]]);
+        let provider = RecordingModelProvider::new();
+        let runtime = runtime_with_provider_and_memory_source(
+            "runtime-memory-pending-gate",
+            provider.clone(),
+            source.clone(),
+        );
+        {
+            let mut session = runtime.inner.session.lock().await;
+            session
+                .record_tool_call_pending(pending_tool_call("pending-call"))
+                .expect("pending call records");
+        }
+
+        let events = collect_step(
+            &runtime,
+            "Topic request.",
+            crate::StepContext::new(CancellationToken::new()),
+        )
+        .await;
+
+        assert_eq!(
+            event_kind_names(&events),
+            ["SessionStarted", "StepStarted", "Failed"]
+        );
+        assert_eq!(
+            failed_code(&events),
+            Some(DIAGNOSTIC_TOOL_CALL_RESULT_REQUIRED)
+        );
+        assert_eq!(source.call_count(), 0);
+        assert_eq!(provider.recorded_requests().len(), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pre_cancelled_provider_step_does_not_activate_memory() {
+        let source = ScriptedMemoryActivationSource::new(vec![vec![activated_memory(
+            "memory-cancelled",
+            "This memory must not activate for a pre-cancelled step.",
+            "memory-cancelled-artifact",
+        )]]);
+        let provider = RecordingModelProvider::new();
+        let runtime = runtime_with_provider_and_memory_source(
+            "runtime-memory-pre-cancelled",
+            provider.clone(),
+            source.clone(),
+        );
+        let token = CancellationToken::new();
+        token.cancel();
+
+        let events = collect_step(&runtime, "Topic request.", crate::StepContext::new(token)).await;
+
+        assert_eq!(event_kind_names(&events), ["Cancelled"]);
+        assert_eq!(source.call_count(), 0);
+        assert_eq!(provider.recorded_requests().len(), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn provider_absent_step_does_not_activate_memory() {
+        let source = ScriptedMemoryActivationSource::new(vec![vec![activated_memory(
+            "memory-no-provider",
+            "This memory must not activate without a provider.",
+            "memory-no-provider-artifact",
+        )]]);
+        let runtime = runtime_without_provider_with_memory_source(
+            "runtime-memory-no-provider",
+            source.clone(),
+        );
+
+        let events = collect_step(
+            &runtime,
+            "Topic request.",
+            crate::StepContext::new(CancellationToken::new()),
+        )
+        .await;
+
+        assert_eq!(
+            event_kind_names(&events),
+            ["SessionStarted", "StepStarted", "StepCompleted"]
+        );
+        assert_eq!(source.call_count(), 0);
+        assert_eq!(
+            crate::ContextCompiler::new()
+                .compile(&runtime.context_snapshot().await)
+                .expect("empty context compiles")
+                .to_snapshot(),
+            ""
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unreadable_memory_evidence_from_activation_fails_before_provider_call() {
+        let source = ScriptedMemoryActivationSource::new(vec![vec![
+            activated_memory_with_unreadable_evidence("memory-unreadable"),
+        ]]);
+        let provider = RecordingModelProvider::new();
+        let runtime = runtime_with_provider_and_memory_source(
+            "runtime-memory-context-compile-failure",
+            provider.clone(),
+            source.clone(),
+        );
+
+        let events = collect_step(
+            &runtime,
+            "Topic request.",
+            crate::StepContext::new(CancellationToken::new()),
+        )
+        .await;
+
+        assert_eq!(
+            event_kind_names(&events),
+            ["SessionStarted", "StepStarted", "Failed"]
+        );
+        assert_eq!(failed_code(&events), Some("context_compile"));
+        assert_eq!(source.call_count(), 1);
+        assert_eq!(provider.recorded_requests().len(), 0);
+        assert_eq!(
+            crate::ContextCompiler::new()
+                .compile(&runtime.context_snapshot().await)
+                .expect("context compiles after bad projection cleanup")
+                .to_snapshot(),
+            ""
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancellation_after_activation_before_provider_request_clears_projection() {
+        let memory = activated_memory(
+            "memory-cancelled-after-activation",
+            "Activated memory must not survive cancellation before provider setup.",
+            "memory-cancelled-after-activation-artifact",
+        );
+        let token = CancellationToken::new();
+        let source = ScriptedMemoryActivationSource::with_script(vec![
+            ScriptedMemoryActivationResponse::CancelThenMemories {
+                token: token.clone(),
+                memories: vec![memory],
+            },
+        ]);
+        let provider = RecordingModelProvider::new();
+        let runtime = runtime_with_provider_and_memory_source(
+            "runtime-memory-activation-cancel-clears",
+            provider.clone(),
+            source.clone(),
+        );
+        record_memory_artifact(
+            &runtime,
+            "memory-cancelled-after-activation-artifact",
+            "exact evidence for activation cancellation",
+        );
+
+        let events = collect_step(&runtime, "Topic request.", crate::StepContext::new(token)).await;
+
+        assert_eq!(
+            event_kind_names(&events),
+            ["SessionStarted", "StepStarted", "Cancelled"]
+        );
+        assert_eq!(source.call_count(), 1);
+        assert_eq!(provider.recorded_requests().len(), 0);
+        assert_eq!(
+            crate::ContextCompiler::new()
+                .compile(&runtime.context_snapshot().await)
+                .expect("context compiles after cancellation cleanup")
+                .to_snapshot(),
+            ""
+        );
     }
 
     fn registered_tool_spec() -> ToolSpec {

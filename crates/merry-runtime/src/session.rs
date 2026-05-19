@@ -154,6 +154,10 @@ impl SessionState {
         self.activated_memories.extend(memories);
     }
 
+    pub(crate) fn replace_activated_memories(&mut self, memories: Vec<ActivatedMemory>) {
+        self.activated_memories = memories;
+    }
+
     pub(crate) fn context_snapshot(&self) -> SessionContextSnapshot {
         SessionContextSnapshot::new(
             self.context_entries.clone(),
@@ -757,6 +761,40 @@ mod tests {
 
         assert!(compiled.to_snapshot().contains("memory:memory-a"));
         assert!(compiled.to_snapshot().contains("memory:memory-b"));
+    }
+
+    #[test]
+    fn replace_activated_memories_updates_current_memory_projection() {
+        let mut session = SessionState::new(session_id());
+        let stale = activated_memory("memory-stale");
+        let current = activated_memory("memory-current");
+        record_memory_artifacts(&mut session, &[&stale, &current]);
+
+        session.record_activated_memory(stale);
+        session.replace_activated_memories(vec![current]);
+
+        let compiled = ContextCompiler::new()
+            .compile(&session.context_snapshot())
+            .expect("snapshot compiles");
+
+        assert!(!compiled.to_snapshot().contains("memory:memory-stale"));
+        assert!(compiled.to_snapshot().contains("memory:memory-current"));
+    }
+
+    #[test]
+    fn replace_activated_memories_with_empty_clears_current_memory_projection() {
+        let mut session = SessionState::new(session_id());
+        let memory = activated_memory("memory-cleared");
+        record_memory_artifacts(&mut session, &[&memory]);
+
+        session.record_activated_memory(memory);
+        session.replace_activated_memories(Vec::new());
+
+        let compiled = ContextCompiler::new()
+            .compile(&session.context_snapshot())
+            .expect("snapshot compiles");
+
+        assert_eq!(compiled.to_snapshot(), "");
     }
 
     #[test]

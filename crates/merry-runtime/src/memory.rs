@@ -543,6 +543,21 @@ impl ActivatedMemory {
     }
 }
 
+/// Crate-internal source for the current provider request's memory projection.
+pub(crate) trait MemoryActivationSource: Send + Sync {
+    fn activate(&self, seed: &MemoryActivationSeed) -> Result<Vec<ActivatedMemory>, MemoryError>;
+}
+
+/// Production MVP source: memory activation is timed, but no store is wired yet.
+#[derive(Debug, Default)]
+pub(crate) struct NoopMemoryActivationSource;
+
+impl MemoryActivationSource for NoopMemoryActivationSource {
+    fn activate(&self, _seed: &MemoryActivationSeed) -> Result<Vec<ActivatedMemory>, MemoryError> {
+        Ok(Vec::new())
+    }
+}
+
 /// Pure deterministic internal memory activator.
 #[derive(Debug, Default)]
 pub(crate) struct MemoryActivator;
