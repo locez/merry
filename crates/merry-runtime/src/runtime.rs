@@ -11,7 +11,7 @@ use crate::{
     event_stream::ActiveStepPermit,
     memory::{
         MemoryActivationSeed, MemoryActivationSource, MemoryActivationSourceKind, MemoryScope,
-        NoopMemoryActivationSource,
+        StoredMemoryActivationSource,
     },
     session::{SessionState, is_runtime_reserved_artifact_id},
     step::{StepContext, StepInput, compile_step_model_request},
@@ -391,7 +391,7 @@ impl RuntimeBuilder {
                 .expect("default event buffer size is non-zero"),
             model_provider: None,
             registered_tools: Vec::new(),
-            memory_activation_source: Arc::new(NoopMemoryActivationSource),
+            memory_activation_source: Arc::new(StoredMemoryActivationSource),
         }
     }
 
@@ -566,7 +566,20 @@ async fn run_provider_step(
             return;
         }
     };
-    let activated_memories = match inner.memory_activation_source.activate(&seed) {
+
+    let memory_store = {
+        let session = inner.session.lock().await;
+        session.memory_store().clone()
+    };
+    if token.is_cancelled() {
+        let _ = send_cancelled_event(inner, sender).await;
+        return;
+    }
+
+    let activated_memories = match inner
+        .memory_activation_source
+        .activate(&seed, &memory_store)
+    {
         Ok(memories) => memories,
         Err(error) => {
             let diagnostic = diagnostic_from_text("memory_activation", error.to_string());
@@ -1261,7 +1274,7 @@ mod tests {
     use crate::memory::{
         ActivatedMemory, MemoryActivationReason, MemoryActivationScore, MemoryActivationSource,
         MemoryActivationSourceKind, MemoryError, MemoryEvidence, MemoryId, MemoryItem,
-        MemoryItemSelection, MemoryScope,
+        MemoryItemSelection, MemoryScope, MemoryStore,
     };
     use crate::session::SessionState;
     use crate::tool::{
@@ -1302,7 +1315,7 @@ mod tests {
             event_buffer_size: NonZeroUsize::new(1).expect("non-zero buffer"),
             model_provider: None,
             tool_registry: ToolRegistry::default(),
-            memory_activation_source: Arc::new(crate::memory::NoopMemoryActivationSource),
+            memory_activation_source: Arc::new(crate::memory::StoredMemoryActivationSource),
         }
     }
 
@@ -1391,24 +1404,7 @@ mod tests {
     }
 
     fn activated_memory(id: &str, text: &str, evidence_artifact: &str) -> ActivatedMemory {
-        let item = MemoryItem::new(
-            MemoryId::new(id).expect("valid memory id"),
-            MemoryScope::Session,
-            text,
-            vec![
-                MemoryEvidence::new(
-                    "primary source",
-                    EvidenceRef::new(
-                        artifact_id(evidence_artifact),
-                        EvidenceLocator::whole_artifact(),
-                    ),
-                )
-                .expect("valid memory evidence"),
-            ],
-            MemoryItemSelection::new(vec!["topic".to_owned()], 0.8, 1, None)
-                .expect("valid memory selection"),
-        )
-        .expect("valid memory item");
+        let item = memory_item(id, text, evidence_artifact, &["topic"]);
         let score = MemoryActivationScore::new(1, 1, 0.8).expect("valid memory score");
         ActivatedMemory::new(
             item,
@@ -1429,6 +1425,35 @@ mod tests {
         .expect("valid activated memory")
     }
 
+    fn memory_item(id: &str, text: &str, evidence_artifact: &str, triggers: &[&str]) -> MemoryItem {
+        MemoryItem::new(
+            MemoryId::new(id).expect("valid memory id"),
+            MemoryScope::Session,
+            text,
+            vec![
+                MemoryEvidence::new(
+                    "primary source",
+                    EvidenceRef::new(
+                        artifact_id(evidence_artifact),
+                        EvidenceLocator::whole_artifact(),
+                    ),
+                )
+                .expect("valid memory evidence"),
+            ],
+            MemoryItemSelection::new(
+                triggers
+                    .iter()
+                    .map(|trigger| (*trigger).to_owned())
+                    .collect(),
+                0.8,
+                1,
+                None,
+            )
+            .expect("valid memory selection"),
+        )
+        .expect("valid memory item")
+    }
+
     fn activated_memory_with_unreadable_evidence(id: &str) -> ActivatedMemory {
         activated_memory(id, "Unreadable evidence memory.", &format!("{id}-missing"))
     }
@@ -1447,6 +1472,17 @@ mod tests {
             .expect("memory artifact records");
     }
 
+    fn record_memory_item(runtime: &Runtime, item: MemoryItem) {
+        let mut session = runtime
+            .inner
+            .session
+            .try_lock()
+            .expect("session lock is free");
+        session
+            .record_memory_item(item)
+            .expect("memory item records");
+    }
+
     fn runtime_with_provider_and_single_memory(
         session: &str,
         provider: RecordingModelProvider,
@@ -1454,17 +1490,15 @@ mod tests {
         memory_text: &str,
         memory_artifact_id: &str,
     ) -> (Runtime, ScriptedMemoryActivationSource) {
-        let source = ScriptedMemoryActivationSource::new(vec![vec![activated_memory(
-            memory_id,
-            memory_text,
-            memory_artifact_id,
-        )]]);
+        let memory = activated_memory(memory_id, memory_text, memory_artifact_id);
+        let source = ScriptedMemoryActivationSource::new(vec![vec![memory.clone()]]);
         let runtime = runtime_with_provider_and_memory_source(session, provider, source.clone());
         record_memory_artifact(
             &runtime,
             memory_artifact_id,
             "exact evidence for lifecycle memory",
         );
+        record_memory_item(&runtime, memory.item().clone());
         (runtime, source)
     }
 
@@ -1546,19 +1580,13 @@ mod tests {
         fn call_count(&self) -> usize {
             self.calls.load(Ordering::SeqCst)
         }
-
-        fn observed_queries(&self) -> Vec<String> {
-            self.observed_queries
-                .lock()
-                .expect("observed query mutex should not be poisoned")
-                .clone()
-        }
     }
 
     impl MemoryActivationSource for ScriptedMemoryActivationSource {
         fn activate(
             &self,
             seed: &crate::memory::MemoryActivationSeed,
+            _store: &MemoryStore,
         ) -> Result<Vec<ActivatedMemory>, MemoryError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.observed_queries
@@ -1719,6 +1747,24 @@ mod tests {
         }
     }
 
+    fn runtime_with_provider(session: &str, provider: RecordingModelProvider) -> Runtime {
+        Runtime {
+            inner: Arc::new(RuntimeInner {
+                session_id: session_id(session),
+                session: Mutex::new(SessionState::new(session_id(session))),
+                active_step: Arc::new(AtomicBool::new(false)),
+                memory_projection_epoch: AtomicU64::new(0),
+                event_buffer_size: NonZeroUsize::new(16).expect("non-zero buffer"),
+                model_provider: Some(super::ModelProviderConfig {
+                    provider: Arc::new(provider),
+                    model: model_name(),
+                }),
+                tool_registry: ToolRegistry::default(),
+                memory_activation_source: Arc::new(crate::memory::StoredMemoryActivationSource),
+            }),
+        }
+    }
+
     fn runtime_without_provider_with_memory_source<S>(session: &str, source: S) -> Runtime
     where
         S: MemoryActivationSource + 'static,
@@ -1756,24 +1802,21 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn provider_step_projects_activated_memory_before_user_message() {
-        let memory = activated_memory(
+    async fn default_stored_source_projects_session_memory_before_user_message() {
+        let memory = memory_item(
             "memory-topic",
             "Remember that topic answers should mention runtime timing.",
             "memory-topic-artifact",
+            &["topic"],
         );
-        let source = ScriptedMemoryActivationSource::new(vec![vec![memory]]);
         let provider = RecordingModelProvider::new();
-        let runtime = runtime_with_provider_and_memory_source(
-            "runtime-memory-context",
-            provider.clone(),
-            source.clone(),
-        );
+        let runtime = runtime_with_provider("runtime-memory-context", provider.clone());
         record_memory_artifact(
             &runtime,
             "memory-topic-artifact",
             "exact evidence for timing memory",
         );
+        record_memory_item(&runtime, memory);
 
         let events = collect_step(
             &runtime,
@@ -1791,8 +1834,6 @@ mod tests {
                 "StepCompleted"
             ]
         );
-        assert_eq!(source.call_count(), 1);
-        assert_eq!(source.observed_queries(), ["topic request."]);
 
         let requests = provider.recorded_requests();
         assert_eq!(requests.len(), 1);
@@ -1814,6 +1855,84 @@ mod tests {
         assert_eq!(
             requests[0].messages()[1].content().as_text(),
             "Topic request."
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unmatched_stored_memory_does_not_add_system_message() {
+        let memory = memory_item(
+            "memory-other",
+            "This memory should not match topic input.",
+            "memory-other-artifact",
+            &["other"],
+        );
+        let provider = RecordingModelProvider::new();
+        let runtime = runtime_with_provider("runtime-memory-no-match", provider.clone());
+        record_memory_artifact(
+            &runtime,
+            "memory-other-artifact",
+            "exact evidence for unmatched memory",
+        );
+        record_memory_item(&runtime, memory);
+
+        let events = collect_step(
+            &runtime,
+            "Topic request.",
+            crate::StepContext::new(CancellationToken::new()),
+        )
+        .await;
+
+        assert_eq!(
+            event_kind_names(&events),
+            [
+                "SessionStarted",
+                "StepStarted",
+                "ArtifactRecorded",
+                "StepCompleted"
+            ]
+        );
+        let requests = provider.recorded_requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].messages().len(), 1);
+        assert_eq!(requests[0].messages()[0].role(), ModelMessageRole::User);
+        assert_eq!(
+            requests[0].messages()[0].content().as_text(),
+            "Topic request."
+        );
+        assert_eq!(compiled_context_snapshot(&runtime).await, "");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stored_memory_with_missing_evidence_fails_before_provider_call() {
+        let memory = memory_item(
+            "memory-missing-evidence",
+            "This memory has no readable evidence artifact.",
+            "memory-missing-evidence-artifact",
+            &["topic"],
+        );
+        let provider = RecordingModelProvider::new();
+        let runtime = runtime_with_provider("runtime-memory-missing-evidence", provider.clone());
+        record_memory_item(&runtime, memory);
+
+        let events = collect_step(
+            &runtime,
+            "Topic request.",
+            crate::StepContext::new(CancellationToken::new()),
+        )
+        .await;
+
+        assert_eq!(
+            event_kind_names(&events),
+            ["SessionStarted", "StepStarted", "Failed"]
+        );
+        assert_eq!(failed_code(&events), Some("context_compile"));
+        assert_eq!(provider.recorded_requests().len(), 0);
+        assert_eq!(
+            crate::ContextCompiler::new()
+                .compile(&runtime.context_snapshot().await)
+                .expect("context compiles after missing evidence cleanup")
+                .to_snapshot(),
+            ""
         );
     }
 

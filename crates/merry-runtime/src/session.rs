@@ -5,7 +5,7 @@ use crate::{
     artifact::{ArtifactContent, ArtifactError, ArtifactRegistry},
     context::{ContextEntry, SessionContextSnapshot},
     ledger::{LedgerFactKind, TaskLedger},
-    memory::ActivatedMemory,
+    memory::{ActivatedMemory, MemoryError, MemoryItem, MemoryStore},
 };
 use merry_core::{
     ArtifactId, ArtifactKind, ArtifactRef, ErrorInfo, EvidenceLocator, EvidenceRef,
@@ -68,6 +68,7 @@ pub(crate) struct SessionState {
     session_started: bool,
     ledger: TaskLedger,
     artifacts: ArtifactRegistry,
+    memory_store: MemoryStore,
     context_entries: Vec<ContextEntry>,
     activated_memories: Vec<ActivatedMemory>,
     pending_tool_calls: Vec<PendingToolCall>,
@@ -83,6 +84,7 @@ impl SessionState {
             session_started: false,
             ledger: TaskLedger::default(),
             artifacts: ArtifactRegistry::default(),
+            memory_store: MemoryStore::new(),
             context_entries: Vec::new(),
             activated_memories: Vec::new(),
             pending_tool_calls: Vec::new(),
@@ -142,6 +144,15 @@ impl SessionState {
 
     pub(crate) fn record_context_entry(&mut self, entry: ContextEntry) {
         self.context_entries.push(entry);
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn record_memory_item(&mut self, item: MemoryItem) -> Result<(), MemoryError> {
+        self.memory_store.record(item)
+    }
+
+    pub(crate) fn memory_store(&self) -> &MemoryStore {
+        &self.memory_store
     }
 
     #[allow(dead_code)]
