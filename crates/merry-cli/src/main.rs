@@ -559,26 +559,31 @@ enum CliExit {
     Unexpected(String),
 }
 
+fn report_cli_exit<W: io::Write>(exit: CliExit, stderr: &mut W) -> ExitCode {
+    match exit {
+        CliExit::Success => ExitCode::SUCCESS,
+        CliExit::Usage { message, usage } => {
+            writeln!(stderr, "{message}\n\n{usage}").expect("failed to write usage to stderr");
+            ExitCode::from(2)
+        }
+        CliExit::Unexpected(message) => {
+            writeln!(stderr, "{message}").expect("failed to write error to stderr");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 impl Termination for CliExit {
     fn report(self) -> ExitCode {
-        match self {
-            Self::Success => ExitCode::SUCCESS,
-            Self::Usage { message, usage } => {
-                eprintln!("{message}\n\n{usage}");
-                ExitCode::from(2)
-            }
-            Self::Unexpected(message) => {
-                eprintln!("{message}");
-                ExitCode::FAILURE
-            }
-        }
+        report_cli_exit(self, &mut io::stderr())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        CliError, DEBUG_TOOL_CONTINUATION_INPUT, debug_echo_tool, write_debug_openai_tool_events,
+        CliError, CliExit, DEBUG_TOOL_CONTINUATION_INPUT, debug_echo_tool, debug_openai_usage,
+        report_cli_exit, write_debug_openai_tool_events,
     };
     use super::{DEBUG_TOOL_NAME, write_runtime_step_events};
     use futures_util::stream;
@@ -590,7 +595,48 @@ mod tests {
     };
     use merry_runtime::{Runtime, StepContext, StepInput};
     use serde_json::{Map, Value};
-    use std::sync::{Arc, Mutex};
+    use std::{
+        process::ExitCode,
+        sync::{Arc, Mutex},
+    };
+
+    #[test]
+    fn cli_exit_unexpected_reports_failure_without_usage() {
+        let mut stderr = Vec::new();
+
+        let exit_code = report_cli_exit(
+            CliExit::Unexpected(
+                "debug tool `debug_echo` was not called on the first step".to_owned(),
+            ),
+            &mut stderr,
+        );
+
+        assert_eq!(exit_code, ExitCode::FAILURE);
+        let stderr = String::from_utf8(stderr).expect("stderr should be utf-8");
+        assert_eq!(
+            stderr,
+            "debug tool `debug_echo` was not called on the first step\n"
+        );
+        assert!(!stderr.contains("Usage: merry debug openai"));
+    }
+
+    #[test]
+    fn cli_exit_usage_reports_exit_two_and_usage() {
+        let mut stderr = Vec::new();
+
+        let exit_code = report_cli_exit(
+            CliExit::Usage {
+                message: "--input requires a value".to_owned(),
+                usage: debug_openai_usage(),
+            },
+            &mut stderr,
+        );
+
+        assert_eq!(exit_code, ExitCode::from(2));
+        let stderr = String::from_utf8(stderr).expect("stderr should be utf-8");
+        assert!(stderr.starts_with("--input requires a value\n\nUsage: merry debug openai"));
+        assert!(stderr.contains("MERRY_OPENAI_DEBUG=1"));
+    }
 
     struct CompletingProvider {
         name: ProviderName,
