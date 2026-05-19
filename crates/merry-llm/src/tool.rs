@@ -1,11 +1,11 @@
 //! Model tool call protocol.
 
 use crate::ModelError;
-use merry_core::ToolName;
-use schemars::JsonSchema;
+use merry_core::{ErrorInfo, ToolCallResultStatus, ToolName};
+use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_json::{Map, Value};
-use std::{fmt, str::FromStr};
+use std::{borrow::Cow, fmt, str::FromStr};
 
 const MAX_PROVIDER_IDENTIFIER_LEN: usize = 256;
 
@@ -180,6 +180,260 @@ impl<'de> Deserialize<'de> for ModelToolCall {
     }
 }
 
+/// Provider-neutral inline content returned by a completed tool call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelToolResultContent {
+    /// Text result content.
+    Text(String),
+    /// JSON result content encoded as a string.
+    Json(String),
+}
+
+impl ModelToolResultContent {
+    /// Creates validated text result content.
+    pub fn text(text: &str) -> Result<Self, ModelError> {
+        validate_tool_result_content("ModelToolResultContent text", text)?;
+        Ok(Self::Text(text.to_owned()))
+    }
+
+    /// Creates validated JSON result content.
+    pub fn json(json: &str) -> Result<Self, ModelError> {
+        validate_tool_result_content("ModelToolResultContent json", json)?;
+        Ok(Self::Json(json.to_owned()))
+    }
+
+    /// Returns the content as text when this is text content.
+    #[must_use]
+    pub fn as_text(&self) -> Option<&str> {
+        match self {
+            Self::Text(text) => Some(text),
+            Self::Json(_) => None,
+        }
+    }
+
+    /// Returns the content as JSON when this is JSON content.
+    #[must_use]
+    pub fn as_json(&self) -> Option<&str> {
+        match self {
+            Self::Text(_) => None,
+            Self::Json(json) => Some(json),
+        }
+    }
+
+    /// Borrows the content string regardless of content kind.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Text(text) => text,
+            Self::Json(json) => json,
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ModelToolResultContentRef<'a> {
+    Text { text: &'a str },
+    Json { json: &'a str },
+}
+
+impl Serialize for ModelToolResultContent {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Text(text) => ModelToolResultContentRef::Text { text }.serialize(serializer),
+            Self::Json(json) => ModelToolResultContentRef::Json { json }.serialize(serializer),
+        }
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+enum ModelToolResultContentWire {
+    Text { text: String },
+    Json { json: String },
+}
+
+impl<'de> Deserialize<'de> for ModelToolResultContent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match ModelToolResultContentWire::deserialize(deserializer)? {
+            ModelToolResultContentWire::Text { text } => {
+                Self::text(&text).map_err(de::Error::custom)
+            }
+            ModelToolResultContentWire::Json { json } => {
+                Self::json(&json).map_err(de::Error::custom)
+            }
+        }
+    }
+}
+
+impl JsonSchema for ModelToolResultContent {
+    fn schema_name() -> Cow<'static, str> {
+        "ModelToolResultContent".into()
+    }
+
+    fn schema_id() -> Cow<'static, str> {
+        concat!(module_path!(), "::ModelToolResultContent").into()
+    }
+
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        ModelToolResultContentWire::json_schema(generator)
+    }
+}
+
+/// Provider-neutral result for a model-requested tool call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ModelToolResult {
+    call_id: ModelToolCallId,
+    status: ToolCallResultStatus,
+    content: ModelToolResultContent,
+    diagnostic: Option<ErrorInfo>,
+}
+
+impl ModelToolResult {
+    /// Creates a validated tool call result.
+    pub fn new(
+        call_id: ModelToolCallId,
+        status: ToolCallResultStatus,
+        content: ModelToolResultContent,
+        diagnostic: Option<ErrorInfo>,
+    ) -> Result<Self, ModelError> {
+        validate_result_diagnostic(status, diagnostic.as_ref())?;
+        Ok(Self {
+            call_id,
+            status,
+            content,
+            diagnostic,
+        })
+    }
+
+    /// Creates a successful tool call result.
+    #[must_use]
+    pub fn succeeded(call_id: ModelToolCallId, content: ModelToolResultContent) -> Self {
+        Self {
+            call_id,
+            status: ToolCallResultStatus::Succeeded,
+            content,
+            diagnostic: None,
+        }
+    }
+
+    /// Creates a failed tool call result with a diagnostic.
+    #[must_use]
+    pub fn failed(
+        call_id: ModelToolCallId,
+        content: ModelToolResultContent,
+        diagnostic: ErrorInfo,
+    ) -> Self {
+        Self {
+            call_id,
+            status: ToolCallResultStatus::Failed,
+            content,
+            diagnostic: Some(diagnostic),
+        }
+    }
+
+    /// Borrows the provider-originated call id being resolved.
+    #[must_use]
+    pub fn call_id(&self) -> &ModelToolCallId {
+        &self.call_id
+    }
+
+    /// Returns the tool call result status.
+    #[must_use]
+    pub fn status(&self) -> ToolCallResultStatus {
+        self.status
+    }
+
+    /// Borrows the provider-neutral result content.
+    #[must_use]
+    pub fn content(&self) -> &ModelToolResultContent {
+        &self.content
+    }
+
+    /// Borrows the optional failure diagnostic.
+    #[must_use]
+    pub fn diagnostic(&self) -> Option<&ErrorInfo> {
+        self.diagnostic.as_ref()
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelToolResultWire {
+    call_id: ModelToolCallId,
+    status: ToolCallResultStatus,
+    content: ModelToolResultContent,
+    diagnostic: Option<ErrorInfo>,
+}
+
+impl<'de> Deserialize<'de> for ModelToolResult {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = ModelToolResultWire::deserialize(deserializer)?;
+        Self::new(wire.call_id, wire.status, wire.content, wire.diagnostic)
+            .map_err(de::Error::custom)
+    }
+}
+
+/// Ordered model-visible continuation for a tool call and its result.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ModelToolContinuation {
+    call: ModelToolCall,
+    result: ModelToolResult,
+}
+
+impl ModelToolContinuation {
+    /// Creates a validated tool continuation.
+    pub fn new(call: ModelToolCall, result: ModelToolResult) -> Result<Self, ModelError> {
+        if call.id() != result.call_id() {
+            return Err(ModelError::invalid_request(
+                "ModelToolContinuation call id must match result call_id",
+            ));
+        }
+
+        Ok(Self { call, result })
+    }
+
+    /// Borrows the original model-requested tool call.
+    #[must_use]
+    pub fn call(&self) -> &ModelToolCall {
+        &self.call
+    }
+
+    /// Borrows the tool call result.
+    #[must_use]
+    pub fn result(&self) -> &ModelToolResult {
+        &self.result
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelToolContinuationWire {
+    call: ModelToolCall,
+    result: ModelToolResult,
+}
+
+impl<'de> Deserialize<'de> for ModelToolContinuation {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = ModelToolContinuationWire::deserialize(deserializer)?;
+        Self::new(wire.call, wire.result).map_err(de::Error::custom)
+    }
+}
+
 pub(crate) fn validate_provider_identifier(
     kind: &'static str,
     value: &str,
@@ -218,4 +472,29 @@ pub(crate) fn validate_provider_identifier(
 
 fn invalid_identifier(kind: &'static str, reason: &'static str) -> ModelError {
     ModelError::invalid_request(format!("{kind} {reason}"))
+}
+
+fn validate_tool_result_content(kind: &'static str, value: &str) -> Result<(), ModelError> {
+    if value.trim().is_empty() {
+        return Err(ModelError::invalid_request(format!(
+            "{kind} must not be blank"
+        )));
+    }
+
+    Ok(())
+}
+
+fn validate_result_diagnostic(
+    status: ToolCallResultStatus,
+    diagnostic: Option<&ErrorInfo>,
+) -> Result<(), ModelError> {
+    match (status, diagnostic) {
+        (ToolCallResultStatus::Succeeded, None) | (ToolCallResultStatus::Failed, Some(_)) => Ok(()),
+        (ToolCallResultStatus::Succeeded, Some(_)) => Err(ModelError::invalid_request(
+            "succeeded model tool result must not include a diagnostic",
+        )),
+        (ToolCallResultStatus::Failed, None) => Err(ModelError::invalid_request(
+            "failed model tool result must include a diagnostic",
+        )),
+    }
 }

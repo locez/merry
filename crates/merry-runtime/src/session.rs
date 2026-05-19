@@ -12,6 +12,49 @@ use merry_core::{
 };
 use std::collections::BTreeSet;
 
+/// Resolved tool call state that has not yet been compiled into a provider request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedToolContinuation {
+    call: PendingToolCall,
+    result: ToolCallResult,
+}
+
+impl ResolvedToolContinuation {
+    fn new(call: PendingToolCall, result: ToolCallResult) -> Self {
+        Self { call, result }
+    }
+}
+
+/// Tool continuation data read from session state for one request compilation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedToolContinuationSnapshot {
+    call: PendingToolCall,
+    result: ToolCallResult,
+    content: ArtifactContent,
+}
+
+impl ResolvedToolContinuationSnapshot {
+    fn new(call: PendingToolCall, result: ToolCallResult, content: ArtifactContent) -> Self {
+        Self {
+            call,
+            result,
+            content,
+        }
+    }
+
+    pub(crate) fn call(&self) -> &PendingToolCall {
+        &self.call
+    }
+
+    pub(crate) fn result(&self) -> &ToolCallResult {
+        &self.result
+    }
+
+    pub(crate) fn content(&self) -> &ArtifactContent {
+        &self.content
+    }
+}
+
 /// Mutable runtime state for one session.
 #[derive(Debug)]
 pub(crate) struct SessionState {
@@ -23,6 +66,7 @@ pub(crate) struct SessionState {
     context_entries: Vec<ContextEntry>,
     pending_tool_calls: Vec<PendingToolCall>,
     resolved_tool_calls: BTreeSet<ToolCallId>,
+    unconsumed_tool_continuations: Vec<ResolvedToolContinuation>,
 }
 
 impl SessionState {
@@ -36,6 +80,7 @@ impl SessionState {
             context_entries: Vec::new(),
             pending_tool_calls: Vec::new(),
             resolved_tool_calls: BTreeSet::new(),
+            unconsumed_tool_continuations: Vec::new(),
         }
     }
 
@@ -102,6 +147,34 @@ impl SessionState {
 
     pub(crate) fn pending_tool_calls(&self) -> Vec<PendingToolCall> {
         self.pending_tool_calls.clone()
+    }
+
+    pub(crate) fn has_pending_tool_calls(&self) -> bool {
+        !self.pending_tool_calls.is_empty()
+    }
+
+    pub(crate) fn unconsumed_tool_continuation_snapshots(
+        &self,
+    ) -> Result<Vec<ResolvedToolContinuationSnapshot>, ArtifactError> {
+        self.unconsumed_tool_continuations
+            .iter()
+            .map(|continuation| {
+                let content = self
+                    .artifacts
+                    .read_content(continuation.result.artifact().id())?
+                    .clone();
+                Ok(ResolvedToolContinuationSnapshot::new(
+                    continuation.call.clone(),
+                    continuation.result.clone(),
+                    content,
+                ))
+            })
+            .collect()
+    }
+
+    pub(crate) fn consume_tool_continuations(&mut self, count: usize) {
+        let count = count.min(self.unconsumed_tool_continuations.len());
+        self.unconsumed_tool_continuations.drain(..count);
     }
 
     #[cfg(test)]
@@ -188,8 +261,10 @@ impl SessionState {
         let recorded = self.record_artifact_state(result.artifact().clone(), content)?;
         debug_assert_eq!(&recorded, result.artifact());
 
-        self.pending_tool_calls.remove(pending_index);
+        let pending = self.pending_tool_calls.remove(pending_index);
         self.resolved_tool_calls.insert(result.call_id().clone());
+        self.unconsumed_tool_continuations
+            .push(ResolvedToolContinuation::new(pending, result.clone()));
 
         let mut events = Vec::with_capacity(if self.session_started { 2 } else { 3 });
         if let Some(started) = self.record_session_started_if_needed() {
@@ -245,10 +320,6 @@ impl SessionState {
                 | (ArtifactKind::Json, ArtifactContent::Json(_))
         );
 
-        if supported && compatible {
-            return Ok(());
-        }
-
         if !supported {
             return Err(RuntimeError::UnsupportedToolResultContent {
                 artifact_id: result.artifact().id().clone(),
@@ -256,12 +327,27 @@ impl SessionState {
             });
         }
 
-        Err(ArtifactError::IncompatibleContent {
-            id: result.artifact().id().clone(),
-            artifact_kind: result.artifact().kind().clone(),
-            content_kind: content.kind(),
+        if !compatible {
+            return Err(ArtifactError::IncompatibleContent {
+                id: result.artifact().id().clone(),
+                artifact_kind: result.artifact().kind().clone(),
+                content_kind: content.kind(),
+            }
+            .into());
         }
-        .into())
+
+        match content {
+            ArtifactContent::Text(text) | ArtifactContent::Json(text) if text.trim().is_empty() => {
+                Err(RuntimeError::UnsupportedToolResultContent {
+                    artifact_id: result.artifact().id().clone(),
+                    content_kind: content.kind(),
+                })
+            }
+            ArtifactContent::Text(_) | ArtifactContent::Json(_) => Ok(()),
+            ArtifactContent::Binary(_) | ArtifactContent::Image(_) | ArtifactContent::Other(_) => {
+                unreachable!("unsupported tool result content is rejected before blank validation")
+            }
+        }
     }
 }
 

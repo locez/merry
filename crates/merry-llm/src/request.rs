@@ -1,6 +1,9 @@
 //! Provider-neutral model requests.
 
-use crate::{ModelError, tool::validate_provider_identifier};
+use crate::{
+    ModelError,
+    tool::{ModelToolContinuation, validate_provider_identifier},
+};
 use merry_core::ToolSpec;
 use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
@@ -262,6 +265,8 @@ pub struct ModelRequest {
     model: ModelName,
     messages: Vec<ModelMessage>,
     tools: Vec<ToolSpec>,
+    #[serde(default)]
+    continuations: Vec<ModelToolContinuation>,
     generation: GenerationConfig,
 }
 
@@ -271,6 +276,17 @@ impl ModelRequest {
         model: ModelName,
         messages: Vec<ModelMessage>,
         tools: Vec<ToolSpec>,
+        generation: GenerationConfig,
+    ) -> Result<Self, ModelError> {
+        Self::new_with_continuations(model, messages, tools, Vec::new(), generation)
+    }
+
+    /// Creates a validated compiled model request snapshot with ordered tool continuations.
+    pub fn new_with_continuations(
+        model: ModelName,
+        messages: Vec<ModelMessage>,
+        tools: Vec<ToolSpec>,
+        continuations: Vec<ModelToolContinuation>,
         generation: GenerationConfig,
     ) -> Result<Self, ModelError> {
         if messages.is_empty() {
@@ -283,6 +299,7 @@ impl ModelRequest {
             model,
             messages,
             tools,
+            continuations,
             generation,
         })
     }
@@ -305,6 +322,12 @@ impl ModelRequest {
         &self.tools
     }
 
+    /// Ordered tool call/result continuations visible to the model.
+    #[must_use]
+    pub fn continuations(&self) -> &[ModelToolContinuation] {
+        &self.continuations
+    }
+
     /// Generation controls.
     #[must_use]
     pub fn generation(&self) -> &GenerationConfig {
@@ -318,6 +341,8 @@ struct ModelRequestWire {
     model: ModelName,
     messages: Vec<ModelMessage>,
     tools: Vec<ToolSpec>,
+    #[serde(default)]
+    continuations: Vec<ModelToolContinuation>,
     generation: GenerationConfig,
 }
 
@@ -327,7 +352,14 @@ impl<'de> Deserialize<'de> for ModelRequest {
         D: Deserializer<'de>,
     {
         let wire = ModelRequestWire::deserialize(deserializer)?;
-        Self::new(wire.model, wire.messages, wire.tools, wire.generation).map_err(de::Error::custom)
+        Self::new_with_continuations(
+            wire.model,
+            wire.messages,
+            wire.tools,
+            wire.continuations,
+            wire.generation,
+        )
+        .map_err(de::Error::custom)
     }
 }
 
