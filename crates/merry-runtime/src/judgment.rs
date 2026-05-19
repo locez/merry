@@ -9,14 +9,28 @@
 //! Summaries remain navigation only. Any exact evidence used to draft or assess
 //! a summary must remain available through artifact-backed [`EvidenceRef`]
 //! values, and a judgment outcome never replaces those artifacts.
+//!
+//! Completed judgments are recorded in a crate-internal audit registry. That
+//! registry uses internal artifacts for exact request/outcome payloads; it does
+//! not claim public runtime artifacts, emit events, or append ledger facts.
 
 // Staged internal judgment types are compiled before runtime call paths are wired.
 #![cfg_attr(not(test), allow(dead_code))]
 
-use merry_core::EvidenceRef;
-use std::{fmt, future::Future, pin::Pin};
+use crate::artifact::ArtifactError;
+use merry_core::{ArtifactId, EvidenceLocator, EvidenceRef};
+use std::{
+    collections::BTreeMap,
+    fmt::{self, Write as _},
+    future::Future,
+    pin::Pin,
+};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
+
+const JUDGMENT_PAYLOAD_SCHEMA_VERSION: &str = "merry.judgment.audit.v1";
+const JUDGMENT_RECORD_ID_PREFIX: &str = "judgment-record-";
+const JUDGMENT_RECORD_ID_ORDER_DIGITS: usize = 20;
 
 /// Semantic purpose for an internal advisory judgment request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,6 +46,14 @@ pub(crate) enum JudgmentPurpose {
 impl JudgmentPurpose {
     fn requires_request_evidence(self) -> bool {
         matches!(self, Self::SummaryDraft)
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::MemoryRelevance => "memory_relevance",
+            Self::SummaryDraft => "summary_draft",
+            Self::ToolRiskReview => "tool_risk_review",
+        }
     }
 }
 
@@ -56,6 +78,17 @@ pub(crate) enum JudgmentSourceKind {
     Human,
     /// Produced by a test source.
     Test,
+}
+
+impl JudgmentSourceKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Deterministic => "deterministic",
+            Self::Llm => "llm",
+            Self::Human => "human",
+            Self::Test => "test",
+        }
+    }
 }
 
 /// Validated confidence in the inclusive finite 0.0..=1.0 range.
@@ -248,6 +281,17 @@ pub(crate) enum JudgmentRiskLevel {
     Unknown,
 }
 
+impl JudgmentRiskLevel {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 /// Structured advisory recommendation from a judgment source.
 ///
 /// These variants deliberately describe semantic recommendations only. They do
@@ -292,6 +336,16 @@ impl JudgmentRecommendation {
 
     fn requires_outcome_evidence(&self) -> bool {
         matches!(self, Self::SummaryDraft { .. })
+    }
+
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::MemoryRelevant => "memory_relevant",
+            Self::MemoryNotRelevant => "memory_not_relevant",
+            Self::SummaryDraft { .. } => "summary_draft",
+            Self::ToolRiskReview { .. } => "tool_risk_review",
+            Self::NoRecommendation => "no_recommendation",
+        }
     }
 }
 
@@ -380,6 +434,262 @@ impl JudgmentOutcome {
     #[must_use]
     pub(crate) fn provenance(&self) -> &JudgmentProvenance {
         &self.provenance
+    }
+}
+
+/// Validated internal identifier for completed judgment audit records.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct JudgmentRecordId(String);
+
+impl JudgmentRecordId {
+    pub(crate) fn new(value: &str) -> Result<Self, JudgmentError> {
+        validate_record_id(value)?;
+        Ok(Self(value.to_owned()))
+    }
+
+    fn generated(order: u64) -> Self {
+        Self(format!(
+            "{JUDGMENT_RECORD_ID_PREFIX}{order:0JUDGMENT_RECORD_ID_ORDER_DIGITS$}"
+        ))
+    }
+
+    #[must_use]
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for JudgmentRecordId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+/// Internal artifact identifier for judgment audit payloads.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct JudgmentInternalArtifactId(String);
+
+impl JudgmentInternalArtifactId {
+    fn for_record(record_id: &JudgmentRecordId, kind: JudgmentInternalArtifactKind) -> Self {
+        Self(format!("{}-{}", record_id.as_str(), kind.as_str()))
+    }
+
+    #[must_use]
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for JudgmentInternalArtifactId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JudgmentInternalArtifactKind {
+    Request,
+    Outcome,
+}
+
+impl JudgmentInternalArtifactKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Request => "request",
+            Self::Outcome => "outcome",
+        }
+    }
+}
+
+/// Internal exact payload artifact for judgment audit records.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct JudgmentInternalArtifact {
+    id: JudgmentInternalArtifactId,
+    content: String,
+}
+
+impl JudgmentInternalArtifact {
+    fn new(id: JudgmentInternalArtifactId, content: String) -> Self {
+        Self { id, content }
+    }
+
+    #[must_use]
+    pub(crate) fn id(&self) -> &JudgmentInternalArtifactId {
+        &self.id
+    }
+
+    #[must_use]
+    pub(crate) fn content(&self) -> &str {
+        &self.content
+    }
+}
+
+/// Internal request/outcome artifact pair for a completed judgment record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct JudgmentRecordArtifacts {
+    request: JudgmentInternalArtifact,
+    outcome: JudgmentInternalArtifact,
+}
+
+impl JudgmentRecordArtifacts {
+    fn new(
+        record_id: &JudgmentRecordId,
+        order: u64,
+        request: &JudgmentRequest,
+        outcome: &JudgmentOutcome,
+    ) -> Self {
+        let request = JudgmentInternalArtifact::new(
+            JudgmentInternalArtifactId::for_record(
+                record_id,
+                JudgmentInternalArtifactKind::Request,
+            ),
+            render_request_payload(record_id, order, request),
+        );
+        let outcome = JudgmentInternalArtifact::new(
+            JudgmentInternalArtifactId::for_record(
+                record_id,
+                JudgmentInternalArtifactKind::Outcome,
+            ),
+            render_outcome_payload(record_id, order, outcome),
+        );
+
+        Self { request, outcome }
+    }
+
+    #[must_use]
+    pub(crate) fn request(&self) -> &JudgmentInternalArtifact {
+        &self.request
+    }
+
+    #[must_use]
+    pub(crate) fn outcome(&self) -> &JudgmentInternalArtifact {
+        &self.outcome
+    }
+}
+
+/// Completed internal advisory judgment audit record.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct JudgmentRecord {
+    id: JudgmentRecordId,
+    request: JudgmentRequest,
+    outcome: JudgmentOutcome,
+    artifacts: JudgmentRecordArtifacts,
+    commit_order: u64,
+}
+
+impl JudgmentRecord {
+    #[must_use]
+    pub(crate) fn id(&self) -> &JudgmentRecordId {
+        &self.id
+    }
+
+    #[must_use]
+    pub(crate) fn request(&self) -> &JudgmentRequest {
+        &self.request
+    }
+
+    #[must_use]
+    pub(crate) fn outcome(&self) -> &JudgmentOutcome {
+        &self.outcome
+    }
+
+    #[must_use]
+    pub(crate) fn artifacts(&self) -> &JudgmentRecordArtifacts {
+        &self.artifacts
+    }
+
+    #[must_use]
+    pub(crate) fn commit_order(&self) -> u64 {
+        self.commit_order
+    }
+}
+
+/// Deterministic snapshot of completed judgment audit records.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct JudgmentRegistrySnapshot {
+    records: Vec<JudgmentRecord>,
+}
+
+impl JudgmentRegistrySnapshot {
+    #[must_use]
+    pub(crate) fn records(&self) -> &[JudgmentRecord] {
+        &self.records
+    }
+}
+
+/// Crate-internal completed judgment audit registry.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct JudgmentRegistry {
+    records: BTreeMap<JudgmentRecordId, JudgmentRecord>,
+    next_order: u64,
+}
+
+impl JudgmentRegistry {
+    #[must_use]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.records.is_empty()
+    }
+
+    pub(crate) fn record_completed(
+        &mut self,
+        request: JudgmentRequest,
+        outcome: JudgmentOutcome,
+    ) -> Result<JudgmentRecord, JudgmentError> {
+        let id = self.next_generated_id();
+        self.record_completed_with_id(id, request, outcome)
+    }
+
+    pub(crate) fn record_completed_with_id(
+        &mut self,
+        id: JudgmentRecordId,
+        request: JudgmentRequest,
+        outcome: JudgmentOutcome,
+    ) -> Result<JudgmentRecord, JudgmentError> {
+        if self.records.contains_key(&id) {
+            return Err(JudgmentError::DuplicateRecordId { id });
+        }
+
+        validate_record_purpose(&request, &outcome)?;
+
+        let commit_order = self.next_order;
+        let artifacts = JudgmentRecordArtifacts::new(&id, commit_order, &request, &outcome);
+        let record = JudgmentRecord {
+            id: id.clone(),
+            request,
+            outcome,
+            artifacts,
+            commit_order,
+        };
+
+        self.records.insert(id, record.clone());
+        self.next_order += 1;
+        Ok(record)
+    }
+
+    #[must_use]
+    pub(crate) fn snapshot(&self) -> JudgmentRegistrySnapshot {
+        let mut records = self.records.values().cloned().collect::<Vec<_>>();
+        records.sort_by(|left, right| {
+            left.commit_order()
+                .cmp(&right.commit_order())
+                .then_with(|| left.id().cmp(right.id()))
+        });
+
+        JudgmentRegistrySnapshot { records }
+    }
+
+    fn next_generated_id(&self) -> JudgmentRecordId {
+        let mut order = self.next_order;
+        loop {
+            let id = JudgmentRecordId::generated(order);
+            if !self.records.contains_key(&id) {
+                return id;
+            }
+
+            order = order
+                .checked_add(1)
+                .expect("judgment record id space is exhausted");
+        }
     }
 }
 
@@ -483,6 +793,42 @@ pub(crate) enum JudgmentError {
         recommendation: &'static str,
     },
 
+    /// Completed record request and outcome purposes did not match.
+    #[error(
+        "judgment outcome purpose {outcome_purpose} does not match request purpose {request_purpose}"
+    )]
+    RecordPurposeMismatch {
+        /// Request purpose.
+        request_purpose: JudgmentPurpose,
+        /// Outcome purpose.
+        outcome_purpose: JudgmentPurpose,
+    },
+
+    /// Internal judgment record id was invalid.
+    #[error("judgment record id {value:?} is invalid: {reason}")]
+    InvalidRecordId {
+        /// Rejected identifier text.
+        value: String,
+        /// Actionable reason.
+        reason: &'static str,
+    },
+
+    /// Internal judgment record id already exists.
+    #[error("judgment record id {id} is already recorded")]
+    DuplicateRecordId {
+        /// Duplicate record identifier.
+        id: JudgmentRecordId,
+    },
+
+    /// Judgment evidence could not be read from the session artifact registry.
+    #[error("judgment evidence artifact {artifact_id} is unreadable: {source}")]
+    UnreadableEvidence {
+        /// Artifact identifier referenced by unreadable evidence.
+        artifact_id: ArtifactId,
+        /// Artifact registry read/locator failure.
+        source: ArtifactError,
+    },
+
     /// Judgment source observed cooperative cancellation before producing output.
     #[error("judgment source cancelled before producing an advisory outcome")]
     Cancelled,
@@ -513,6 +859,220 @@ fn validate_recommendation(
         | JudgmentRecommendation::MemoryNotRelevant
         | JudgmentRecommendation::NoRecommendation => Ok(()),
     }
+}
+
+fn validate_record_purpose(
+    request: &JudgmentRequest,
+    outcome: &JudgmentOutcome,
+) -> Result<(), JudgmentError> {
+    if request.purpose() != outcome.purpose() {
+        return Err(JudgmentError::RecordPurposeMismatch {
+            request_purpose: request.purpose(),
+            outcome_purpose: outcome.purpose(),
+        });
+    }
+
+    Ok(())
+}
+
+fn validate_record_id(value: &str) -> Result<(), JudgmentError> {
+    if value.is_empty() {
+        return Err(invalid_record_id(value, "must not be empty"));
+    }
+
+    if value.trim().is_empty() {
+        return Err(invalid_record_id(value, "must not be whitespace only"));
+    }
+
+    if value.trim() != value {
+        return Err(invalid_record_id(
+            value,
+            "must not have leading or trailing whitespace",
+        ));
+    }
+
+    if value.chars().count() > 128 {
+        return Err(invalid_record_id(
+            value,
+            "is longer than the allowed maximum length",
+        ));
+    }
+
+    if value.chars().any(char::is_control) {
+        return Err(invalid_record_id(
+            value,
+            "must not contain control characters",
+        ));
+    }
+
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(invalid_record_id(
+            value,
+            "must contain only ASCII letters, digits, '-', '_' or '.'",
+        ));
+    }
+
+    Ok(())
+}
+
+fn invalid_record_id(value: &str, reason: &'static str) -> JudgmentError {
+    JudgmentError::InvalidRecordId {
+        value: value.to_owned(),
+        reason,
+    }
+}
+
+fn render_request_payload(
+    record_id: &JudgmentRecordId,
+    order: u64,
+    request: &JudgmentRequest,
+) -> String {
+    let mut payload = String::new();
+    push_field(
+        &mut payload,
+        "schema_version",
+        JUDGMENT_PAYLOAD_SCHEMA_VERSION,
+    );
+    push_field(&mut payload, "artifact", "request");
+    push_field(&mut payload, "record_id", record_id.as_str());
+    push_field(&mut payload, "commit_order", &order.to_string());
+    push_field(&mut payload, "purpose", request.purpose().as_str());
+    push_field(&mut payload, "subject", request.subject());
+    push_field(&mut payload, "input", request.input());
+    push_field(&mut payload, "source_label", request.source_label());
+    push_list(&mut payload, "constraints", request.constraints());
+    push_evidence(&mut payload, "evidence", request.evidence());
+    payload
+}
+
+fn render_outcome_payload(
+    record_id: &JudgmentRecordId,
+    order: u64,
+    outcome: &JudgmentOutcome,
+) -> String {
+    let mut payload = String::new();
+    push_field(
+        &mut payload,
+        "schema_version",
+        JUDGMENT_PAYLOAD_SCHEMA_VERSION,
+    );
+    push_field(&mut payload, "artifact", "outcome");
+    push_field(&mut payload, "record_id", record_id.as_str());
+    push_field(&mut payload, "commit_order", &order.to_string());
+    push_field(&mut payload, "purpose", outcome.purpose().as_str());
+    push_recommendation(&mut payload, outcome.recommendation());
+    push_field(
+        &mut payload,
+        "confidence",
+        &format!("{:.6}", outcome.confidence().as_f32()),
+    );
+    push_evidence(&mut payload, "evidence", outcome.evidence());
+    push_field(&mut payload, "rationale", outcome.rationale());
+    push_field(&mut payload, "uncertainty", outcome.uncertainty());
+    push_field(
+        &mut payload,
+        "provenance.kind",
+        outcome.provenance().source_kind().as_str(),
+    );
+    push_field(
+        &mut payload,
+        "provenance.label",
+        outcome.provenance().source_label(),
+    );
+    payload
+}
+
+fn push_recommendation(payload: &mut String, recommendation: &JudgmentRecommendation) {
+    push_field(payload, "recommendation.kind", recommendation.as_str());
+
+    match recommendation {
+        JudgmentRecommendation::SummaryDraft { draft } => {
+            push_field(payload, "recommendation.draft", draft);
+        }
+        JudgmentRecommendation::ToolRiskReview { risk, concerns } => {
+            push_field(payload, "recommendation.risk", risk.as_str());
+            push_list(payload, "recommendation.concerns", concerns);
+        }
+        JudgmentRecommendation::MemoryRelevant
+        | JudgmentRecommendation::MemoryNotRelevant
+        | JudgmentRecommendation::NoRecommendation => {}
+    }
+}
+
+fn push_list(payload: &mut String, name: &str, values: &[String]) {
+    push_field(payload, &format!("{name}.count"), &values.len().to_string());
+    for (index, value) in values.iter().enumerate() {
+        push_field(payload, &format!("{name}.{index}"), value);
+    }
+}
+
+fn push_evidence(payload: &mut String, name: &str, evidence: &[JudgmentEvidence]) {
+    push_field(
+        payload,
+        &format!("{name}.count"),
+        &evidence.len().to_string(),
+    );
+    for (index, item) in evidence.iter().enumerate() {
+        push_field(payload, &format!("{name}.{index}.label"), item.label());
+        push_field(
+            payload,
+            &format!("{name}.{index}.artifact_id"),
+            item.reference().artifact_id.as_str(),
+        );
+        push_field(
+            payload,
+            &format!("{name}.{index}.locator"),
+            &format_locator(&item.reference().locator),
+        );
+    }
+}
+
+fn push_field(payload: &mut String, key: &str, value: &str) {
+    writeln!(payload, "{key}={}", escape_payload_value(value))
+        .expect("writing to a String cannot fail");
+}
+
+fn escape_payload_value(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+
+    for character in value.chars() {
+        match character {
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            other => escaped.push(other),
+        }
+    }
+
+    escaped
+}
+
+fn format_locator(locator: &EvidenceLocator) -> String {
+    if locator.is_whole_artifact() {
+        return "whole".to_owned();
+    }
+
+    if let Some((start, end)) = locator.as_line_range() {
+        return format!("line:{start}-{end}");
+    }
+
+    if let Some((start, end)) = locator.as_byte_range() {
+        return format!("byte:{start}-{end}");
+    }
+
+    if let Some(pointer) = locator.as_json_pointer() {
+        return format!("json:{pointer}");
+    }
+
+    if let Some(name) = locator.as_named_section() {
+        return format!("section:{name}");
+    }
+
+    unreachable!("all evidence locator variants are covered by public accessors")
 }
 
 fn validate_non_blank(field: &'static str, value: &str) -> Result<(), JudgmentError> {
@@ -782,6 +1342,118 @@ mod tests {
         );
     }
 
+    #[test]
+    fn registry_generates_stable_record_ids_and_snapshot_order() {
+        let mut registry = JudgmentRegistry::default();
+        let first = registry
+            .record_completed(memory_relevance_request(), memory_relevant_outcome())
+            .expect("first record should commit");
+        let second = registry
+            .record_completed(tool_risk_request(), high_tool_risk_outcome())
+            .expect("second record should commit");
+
+        assert_eq!(first.id().as_str(), "judgment-record-00000000000000000000");
+        assert_eq!(second.id().as_str(), "judgment-record-00000000000000000001");
+        assert_eq!(first.commit_order(), 0);
+        assert_eq!(second.commit_order(), 1);
+
+        let snapshot = registry.snapshot();
+        assert_eq!(
+            snapshot
+                .records()
+                .iter()
+                .map(|record| record.id().as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "judgment-record-00000000000000000000",
+                "judgment-record-00000000000000000001",
+            ]
+        );
+    }
+
+    #[test]
+    fn registry_payloads_include_schema_version_and_core_fields() {
+        let mut registry = JudgmentRegistry::default();
+        let record = registry
+            .record_completed(summary_draft_request(), summary_draft_outcome())
+            .expect("summary draft record should commit");
+        let request_payload = record.artifacts().request().content();
+        let outcome_payload = record.artifacts().outcome().content();
+
+        assert_eq!(
+            record.artifacts().request().id().as_str(),
+            "judgment-record-00000000000000000000-request"
+        );
+        assert_eq!(
+            record.artifacts().outcome().id().as_str(),
+            "judgment-record-00000000000000000000-outcome"
+        );
+        assert!(request_payload.contains("schema_version=merry.judgment.audit.v1\n"));
+        assert!(request_payload.contains("artifact=request\n"));
+        assert!(request_payload.contains("purpose=summary_draft\n"));
+        assert!(request_payload.contains("subject=session summary\n"));
+        assert!(request_payload.contains("input=draft a compact summary\\nwith evidence\n"));
+        assert!(request_payload.contains("constraints.0=advisory semantic signal only\n"));
+        assert!(request_payload.contains("evidence.0.artifact_id=summary-source\n"));
+        assert!(request_payload.contains("evidence.0.locator=whole\n"));
+
+        assert!(outcome_payload.contains("schema_version=merry.judgment.audit.v1\n"));
+        assert!(outcome_payload.contains("artifact=outcome\n"));
+        assert!(outcome_payload.contains("purpose=summary_draft\n"));
+        assert!(outcome_payload.contains("recommendation.kind=summary_draft\n"));
+        assert!(
+            outcome_payload.contains("recommendation.draft=Summary draft from exact evidence.\n")
+        );
+        assert!(outcome_payload.contains("confidence=0.750000\n"));
+        assert!(
+            outcome_payload.contains("rationale=The draft uses the supplied artifact evidence.\n")
+        );
+        assert!(outcome_payload.contains("uncertainty=Coverage is partial.\n"));
+        assert!(outcome_payload.contains("provenance.kind=test\n"));
+        assert!(outcome_payload.contains("provenance.label=test source\n"));
+    }
+
+    #[test]
+    fn registry_rejects_record_purpose_mismatch() {
+        let mut registry = JudgmentRegistry::default();
+        let error = registry
+            .record_completed(memory_relevance_request(), high_tool_risk_outcome())
+            .expect_err("mismatched request and outcome purposes should be rejected");
+
+        assert_eq!(
+            error,
+            JudgmentError::RecordPurposeMismatch {
+                request_purpose: JudgmentPurpose::MemoryRelevance,
+                outcome_purpose: JudgmentPurpose::ToolRiskReview,
+            }
+        );
+        assert!(registry.is_empty());
+    }
+
+    #[test]
+    fn registry_rejects_duplicate_manual_record_id() {
+        let mut registry = JudgmentRegistry::default();
+        let id = JudgmentRecordId::new("manual-record").expect("manual id is valid");
+        registry
+            .record_completed_with_id(
+                id.clone(),
+                memory_relevance_request(),
+                memory_relevant_outcome(),
+            )
+            .expect("first manual id record should commit");
+
+        let error = registry
+            .record_completed_with_id(
+                id.clone(),
+                memory_relevance_request(),
+                memory_relevant_outcome(),
+            )
+            .expect_err("duplicate manual id should be rejected");
+
+        assert_eq!(error, JudgmentError::DuplicateRecordId { id });
+        assert_eq!(registry.snapshot().records().len(), 1);
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn source_trait_can_be_called_through_arc_dyn() {
         let source: Arc<dyn JudgmentSource> = Arc::new(NoopJudgmentSource);
@@ -890,6 +1562,74 @@ mod tests {
             "test request",
         )
         .expect("memory relevance request is valid")
+    }
+
+    fn tool_risk_request() -> JudgmentRequest {
+        JudgmentRequest::new(
+            JudgmentPurpose::ToolRiskReview,
+            "lookup tool call",
+            "Review whether the pending tool request has semantic risk.",
+            Vec::new(),
+            constraints(),
+            "test request",
+        )
+        .expect("tool risk request is valid")
+    }
+
+    fn summary_draft_request() -> JudgmentRequest {
+        JudgmentRequest::new(
+            JudgmentPurpose::SummaryDraft,
+            "session summary",
+            "draft a compact summary\nwith evidence",
+            vec![evidence("source", "summary-source")],
+            constraints(),
+            "test request",
+        )
+        .expect("summary draft request is valid")
+    }
+
+    fn memory_relevant_outcome() -> JudgmentOutcome {
+        JudgmentOutcome::new(
+            JudgmentPurpose::MemoryRelevance,
+            JudgmentRecommendation::MemoryRelevant,
+            confidence(0.8),
+            Vec::new(),
+            "The memory overlaps with the request.",
+            "Only the supplied text was inspected.",
+            provenance(JudgmentSourceKind::Test),
+        )
+        .expect("memory relevance outcome is valid")
+    }
+
+    fn high_tool_risk_outcome() -> JudgmentOutcome {
+        JudgmentOutcome::new(
+            JudgmentPurpose::ToolRiskReview,
+            JudgmentRecommendation::ToolRiskReview {
+                risk: JudgmentRiskLevel::High,
+                concerns: vec!["The request may expose credentials.".to_owned()],
+            },
+            confidence(0.9),
+            Vec::new(),
+            "The tool input references credential material.",
+            "The review is advisory and does not authorize policy.",
+            provenance(JudgmentSourceKind::Test),
+        )
+        .expect("tool risk outcome is valid")
+    }
+
+    fn summary_draft_outcome() -> JudgmentOutcome {
+        JudgmentOutcome::new(
+            JudgmentPurpose::SummaryDraft,
+            JudgmentRecommendation::SummaryDraft {
+                draft: "Summary draft from exact evidence.".to_owned(),
+            },
+            confidence(0.75),
+            vec![evidence("used source", "summary-source")],
+            "The draft uses the supplied artifact evidence.",
+            "Coverage is partial.",
+            provenance(JudgmentSourceKind::Test),
+        )
+        .expect("summary draft outcome is valid")
     }
 
     fn confidence(value: f32) -> JudgmentConfidence {
