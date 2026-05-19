@@ -4,9 +4,9 @@ This roadmap is public-safe and implementation-focused. Private product strategy
 
 ## Current Phase
 
-Merry is in M9 Memory Activation MVP internal runtime integration and contract validation.
+Merry is in M18F-A LLM-assisted judgment boundary internal contract work, building on the M9 Memory Activation MVP runtime integration.
 
-M8 runtime/provider/tool execution hardening is now maintenance and foundation work. The current focus is proving that structured memory activation can enter compiled context deterministically inside `merry-runtime` without claiming that production memory storage, public APIs, external persistence, or a stable activation contract are complete. Live provider flows remain explicit opt-in/manual debug paths; they are not the basis for deterministic verification.
+M8 runtime/provider/tool execution hardening and M9 Memory Activation MVP are now maintenance and foundation work. Memory Activation now uses a session-owned in-memory stored source by default, but external/default sessions have no candidate memories until runtime-owned state records them. Production memory storage, public memory APIs, external persistence, and a stable activation contract are still not complete. Live provider flows remain explicit opt-in/manual debug paths; they are not the basis for deterministic verification.
 
 ## Status Summary
 
@@ -27,24 +27,30 @@ M8 runtime/provider/tool execution hardening is now maintenance and foundation w
 - Registered tool execution through the runtime tool registry.
 - Runtime-reserved artifact IDs for tool/model output paths that must be claimed before events are emitted.
 - Opt-in OpenAI debug/tool flow for manual provider integration checks.
+- Memory Activation MVP internal runtime integration with session-owned in-memory stored source, deterministic activation, evidence validation, provider-step timing, and lifecycle cleanup coverage.
 
 ### Recently Completed
 
 - Runtime/provider/tool execution MVP hardening moved into maintenance and foundation status.
 - Provider output storage, pending tool calls, tool result resolution, tool continuations, registered tool execution, and public runtime export/rustdoc alignment have enough deterministic coverage to support the next runtime milestone.
+- Memory Activation MVP moved into maintenance and foundation status for internal runtime use.
+- Default memory activation is no longer noop: it is backed by a session-owned in-memory stored source. Public memory write APIs, external persistence, and a stable activation contract remain absent, so external/default sessions still start with no candidate memories.
+- Memory activation tests cover validation, deterministic matching/scoring/conflict behavior, stored-source projection, evidence failures before provider calls, replacement/clearing behavior, pending-tool gating, cancellation/drop cleanup, and provider lifecycle retention/cleanup.
 - OpenAI-compatible debug/tool flows remain opt-in manual verification paths, not deterministic test dependencies.
 
 ### Active
 
-- Integrate Memory Activation MVP internally in `merry-runtime`.
-- Validate deterministic activation projection and evidence handling against stored runtime state.
-- Validate provider-step timing so activated memory is available to context compilation before model requests.
+- Add M18F-A LLM-assisted judgment boundary as a crate-internal `merry-runtime` contract.
+- Keep judgment advisory: semantic recommendations can inform runtime policy, but hard runtime policy still decides tool execution, actions, and context mutation.
+- Keep the initial judgment contract provider-neutral, evidence-aware, cancellable, and deterministic-testable.
+- Do not connect live LLM judgment, public judgment APIs, or tool execution gates in this milestone.
 - Keep deterministic verification based on fake providers, stored runtime state, artifact references, and ledger assertions.
 - Improve public docs as implementation status changes, while keeping private notes under `docs/`.
 
 ### Deferred / Next
 
 - Production memory store, public Memory Activation APIs, external persistence, and stable activation contract.
+- Live LLM-backed judgment source, public judgment API, and tool execution gate integration.
 - Python SDK and `merry-py`.
 - Rust facade crate `merry`.
 - Macro crate support for boilerplate generation.
@@ -179,34 +185,53 @@ Tasks:
 - Preserve deterministic tests around fake providers and local tool execution.
 - Keep OpenAI-compatible debug/tool flows explicit opt-in paths for manual verification only.
 
-## Active Milestone
-
 ### Milestone 9: Memory Activation MVP
 
 Goal: prove structured memory enters context through activation, not chat history.
 
-Memory Activation MVP is in internal `merry-runtime` integration and contract validation. The default production source remains noop until production storage, public APIs, external persistence, and the stable contract are ready.
+Memory Activation MVP is internally integrated in `merry-runtime`. The default source is a session-owned in-memory stored source. This does not imply production memory storage, public memory APIs, external persistence, or a stable activation contract; external/default sessions have no candidate memories until runtime-owned state records them.
 
 Done:
 
 - Define internal activation data shapes before public runtime APIs.
-- Add deterministic projection and evidence validation for activated memory.
-- Add provider-step timing skeleton so activation can be projected before model requests.
+- Add session-owned in-memory candidate storage and deterministic stored activation source.
+- Add deterministic projection, scoring, scope, trigger, confidence, priority, conflict, and evidence validation.
+- Add provider-step timing so activated memory is projected before model requests.
+- Record why activated memory entered context.
+- Validate lifecycle behavior for replacement, clearing, pending-tool gating, cancellation/drop cleanup, and provider setup/stream completion paths.
+
+Not included:
+
+- Public Memory Activation API surface.
+- External persistence or production memory backend.
+- Stable activation contract for external consumers.
+- External/default candidate memories.
+
+## Active Milestone
+
+### M18F-A: LLM-Assisted Judgment Boundary
+
+Goal: reserve an internal runtime boundary for semantic judgment without giving judgment authority over runtime policy.
+
+M18F-A is a crate-internal contract skeleton in `merry-runtime`. Judgment outcomes are advisory semantic evidence; they cannot authorize tool execution, actions, or context mutation. Provider wire formats do not enter runtime, and summary/evidence exact artifact rules remain unchanged.
+
+Done:
+
+- Define internal purpose, provenance, confidence, evidence, request, recommendation, outcome, context, source trait, and typed error shapes.
+- Add object-safe boxed-future source boundary and deterministic noop source.
+- Add unit tests for validation, evidence requirements, object-safe calls, advisory noop behavior, and cancellation context.
 
 Active:
 
-- Validate activation seeds and deterministic scoring inside runtime-owned state.
-- Prove activated memory records why it entered context.
-- Keep activation deterministic and reproducible from stored runtime state.
-- Add memory projection template.
+- Keep the boundary internal while runtime policy integration is designed.
+- Preserve the advisory/hard-policy split in docs and names.
 
 Not yet:
 
-- Add production memory store or external persistence.
-- Add public Memory Activation API surface.
-- Stabilize the activation contract for external consumers.
-- Replace the default production noop source.
-- Add tests for scope, trigger, confidence, priority, and conflict handling.
+- Live LLM-backed judgment source.
+- Public judgment API.
+- Tool execution gate integration.
+- New public `merry-core` event, id, or reference types.
 
 ## Deferred Milestones
 
