@@ -106,10 +106,10 @@ mod tests {
     fn request_with_tool_continuation() -> ModelRequest {
         ModelRequest::new_with_continuations(
             ModelName::new("gpt-4.1-mini").expect("valid model name"),
-            vec![message(
-                ModelMessageRole::User,
-                "Continue after tool result.",
-            )],
+            vec![
+                message(ModelMessageRole::System, "You are concise."),
+                message(ModelMessageRole::User, "Continue after tool result."),
+            ],
             vec![weather_tool()],
             vec![tool_continuation_with_json_result()],
             GenerationConfig::new(Some(256), false).expect("valid generation config"),
@@ -282,40 +282,60 @@ mod tests {
     }
 
     #[test]
-    fn rendered_request_appends_tool_continuation_chat_messages_without_runtime_state() {
+    fn rendered_request_tool_continuation_matches_chat_json_without_state() {
         let rendered =
             crate::render::render_chat_completion_request(&request_with_tool_continuation())
                 .expect("request should render");
 
         assert_eq!(
-            rendered["messages"],
-            json!([
-                { "role": "user", "content": "Continue after tool result." },
-                {
-                    "role": "assistant",
-                    "content": null,
-                    "tool_calls": [
-                        {
-                            "id": "call_abc123",
-                            "type": "function",
-                            "function": {
-                                "name": "lookup_weather",
-                                "arguments": "{\"city\":\"Shanghai\",\"units\":\"metric\"}"
+            rendered,
+            json!({
+                "model": "gpt-4.1-mini",
+                "messages": [
+                    { "role": "system", "content": "You are concise." },
+                    { "role": "user", "content": "Continue after tool result." },
+                    {
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": [
+                            {
+                                "id": "call_abc123",
+                                "type": "function",
+                                "function": {
+                                    "name": "lookup_weather",
+                                    "arguments": "{\"city\":\"Shanghai\",\"units\":\"metric\"}"
+                                }
+                            }
+                        ]
+                    },
+                    {
+                        "role": "tool",
+                        "tool_call_id": "call_abc123",
+                        "content": "{\"temperature_c\":22,\"condition\":\"clear\"}"
+                    }
+                ],
+                "stream": true,
+                "stream_options": { "include_usage": true },
+                "parallel_tool_calls": false,
+                "max_completion_tokens": 256,
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "lookup_weather",
+                            "description": "Look up weather for a city",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "city": { "type": "string" }
+                                },
+                                "required": ["city"]
                             }
                         }
-                    ]
-                },
-                {
-                    "role": "tool",
-                    "tool_call_id": "call_abc123",
-                    "content": "{\"temperature_c\":22,\"condition\":\"clear\"}"
-                }
-            ])
-        );
-        assert_eq!(rendered["tools"][0]["type"], "function");
-        assert_eq!(
-            rendered["tools"][0]["function"]["name"], "lookup_weather",
-            "tool specs should remain rendered as Chat Completions function tools"
+                    }
+                ],
+                "tool_choice": "auto"
+            })
         );
 
         let object = rendered
