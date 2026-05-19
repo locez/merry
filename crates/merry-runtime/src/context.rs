@@ -1,20 +1,22 @@
 //! Deterministic context compiler skeleton.
 //!
-//! The MVP context model is summary-only. A summary is navigation text, not the
-//! source of truth: exact evidence must remain readable from session-owned
-//! artifacts before the summary can enter compiled context.
+//! The public MVP context model exposes summary sections only. A summary is
+//! navigation text, not the source of truth: exact evidence must remain readable
+//! from session-owned artifacts before the summary can enter compiled context.
+//! The runtime may also attach crate-internal projections, such as activated
+//! memory, to snapshots for provider request compilation.
 //!
 //! [`SessionContextSnapshot`] is intentionally opaque and created by the
 //! runtime session that owns both context entries and artifacts. The compiler
 //! accepts snapshots rather than arbitrary caller-paired entries and registries
 //! so evidence validation is tied to the owning session.
 //!
-//! The shapes in this module are current MVP contracts. [`ContextEntry`] and
-//! [`CompiledContextSection`] may gain variants as Memory Activation and richer
-//! context assembly are introduced.
-
 use crate::artifact::{ArtifactError, ArtifactRegistry};
+use crate::memory::{
+    ActivatedMemory, MemoryActivationReason, MemoryActivationScore, MemoryId, MemoryScope,
+};
 use merry_core::{ArtifactId, EvidenceLocator, EvidenceRef};
+use std::collections::{BTreeMap, btree_map::Entry};
 use thiserror::Error;
 
 /// Compiles structured runtime state into a deterministic context snapshot.
@@ -54,13 +56,18 @@ impl ContextCompiler {
         &self,
         snapshot: &SessionContextSnapshot,
     ) -> Result<CompiledContext, ContextError> {
-        compile_entries(snapshot.entries(), snapshot.artifacts())
+        compile_entries(
+            snapshot.entries(),
+            snapshot.artifacts(),
+            snapshot.memories(),
+        )
     }
 }
 
 fn compile_entries(
     entries: &[ContextEntry],
     artifacts: &ArtifactRegistry,
+    memories: &[ActivatedMemory],
 ) -> Result<CompiledContext, ContextError> {
     let mut sections = Vec::with_capacity(entries.len());
 
@@ -89,13 +96,25 @@ fn compile_entries(
 
     sections.sort_by(|left, right| left.sort_key().cmp(&right.sort_key()));
 
-    Ok(CompiledContext { sections })
+    let mut memory_projection = canonical_memory_projection(memories);
+    memory_projection.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+
+    Ok(CompiledContext {
+        sections,
+        memory_projection,
+    })
 }
 
-/// Session-owned context state and matching artifact view.
+/// Session-owned context state, matching artifact view, and internal projections.
 ///
 /// The fields are private so public callers can compile only snapshots created
-/// by the runtime session that owns both summaries and artifact state.
+/// by the runtime session that owns summaries, artifact state, and any
+/// crate-internal context projections.
 ///
 /// Treat this as an opaque view of session state. It is cloneable for
 /// deterministic compilation and tests, but external callers should not depend
@@ -113,11 +132,20 @@ fn compile_entries(
 pub struct SessionContextSnapshot {
     entries: Vec<ContextEntry>,
     artifacts: ArtifactRegistry,
+    memories: Vec<ActivatedMemory>,
 }
 
 impl SessionContextSnapshot {
-    pub(crate) fn new(entries: Vec<ContextEntry>, artifacts: ArtifactRegistry) -> Self {
-        Self { entries, artifacts }
+    pub(crate) fn new(
+        entries: Vec<ContextEntry>,
+        artifacts: ArtifactRegistry,
+        memories: Vec<ActivatedMemory>,
+    ) -> Self {
+        Self {
+            entries,
+            artifacts,
+            memories,
+        }
     }
 
     fn entries(&self) -> &[ContextEntry] {
@@ -127,12 +155,17 @@ impl SessionContextSnapshot {
     fn artifacts(&self) -> &ArtifactRegistry {
         &self.artifacts
     }
+
+    fn memories(&self) -> &[ActivatedMemory] {
+        &self.memories
+    }
 }
 
-/// Structured input item for the context compiler.
+/// Structured input item for the public context compiler view.
 ///
-/// The MVP has only summary entries. Additional variants may be added when the
-/// runtime records Memory Activation or other structured context sources.
+/// The MVP public view has only summary entries. Crate-internal projections,
+/// including activated memory, are carried by [`SessionContextSnapshot`] rather
+/// than exposed as public entries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContextEntry {
     /// A compact navigation summary backed by exact evidence references.
@@ -244,10 +277,14 @@ impl ContextEvidence {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompiledContext {
     sections: Vec<CompiledContextSection>,
+    memory_projection: Vec<CompiledMemory>,
 }
 
 impl CompiledContext {
-    /// Ordered compiled context sections.
+    /// Ordered public compiled context sections.
+    ///
+    /// This summary-only view excludes crate-internal projections such as
+    /// activated memory.
     #[must_use]
     pub fn sections(&self) -> &[CompiledContextSection] {
         &self.sections
@@ -278,14 +315,52 @@ impl CompiledContext {
             }
         }
 
+        for memory in &self.memory_projection {
+            lines.push(format!("memory:{}", memory.id));
+            lines.push(format!(
+                "memory-scope:{}",
+                format_memory_scope(memory.scope)
+            ));
+            lines.push(format!("memory-text:{}", memory.text));
+            for reason in &memory.reasons {
+                match reason {
+                    CompiledMemoryReason::ScopeAllowed => {
+                        lines.push("memory-reason:scope_allowed".to_owned());
+                    }
+                    CompiledMemoryReason::TriggerMatched(trigger) => {
+                        lines.push(format!("memory-reason:trigger:{trigger}"));
+                    }
+                    CompiledMemoryReason::Ranked { score } => {
+                        lines.push(format!(
+                            "memory-reason:rank:matches={};priority={};confidence={:.3}",
+                            score.trigger_matches(),
+                            score.priority(),
+                            score.confidence().as_f32()
+                        ));
+                    }
+                    CompiledMemoryReason::ConflictWinner { suppressed } => {
+                        lines.push(format!(
+                            "memory-reason:conflict_winner:suppressed={}",
+                            suppressed
+                                .iter()
+                                .map(MemoryId::as_str)
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        ));
+                    }
+                }
+            }
+        }
+
         lines.join("\n")
     }
 }
 
 /// A section in the compiled context snapshot.
 ///
-/// The enum may grow as the runtime adds Memory Activation and other structured
-/// context sources. Match exhaustively only inside this crate.
+/// The public compiled section view is summary-only in the MVP. Crate-internal
+/// projections may still be present in [`CompiledContext::to_snapshot`] for
+/// runtime-owned provider request compilation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompiledContextSection {
     /// Navigation summary plus exact retrievable evidence references.
@@ -297,6 +372,98 @@ pub enum CompiledContextSection {
         /// Exact evidence metadata that preserves source access.
         evidence: Vec<ContextEvidence>,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CompiledMemory {
+    id: MemoryId,
+    scope: MemoryScope,
+    text: String,
+    score: MemoryActivationScore,
+    reasons: Vec<CompiledMemoryReason>,
+}
+
+impl CompiledMemory {
+    fn from_activation(memory: &ActivatedMemory) -> Self {
+        let mut reasons = memory
+            .reasons()
+            .iter()
+            .map(CompiledMemoryReason::from_reason)
+            .collect::<Vec<_>>();
+        reasons.sort();
+        reasons.dedup();
+
+        Self {
+            id: memory.item().id().clone(),
+            scope: memory.item().scope(),
+            text: memory.item().text().to_owned(),
+            score: memory.score(),
+            reasons,
+        }
+    }
+}
+
+fn canonical_memory_projection(memories: &[ActivatedMemory]) -> Vec<CompiledMemory> {
+    let mut by_id = BTreeMap::<MemoryId, CompiledMemory>::new();
+
+    for memory in memories.iter().map(CompiledMemory::from_activation) {
+        match by_id.entry(memory.id.clone()) {
+            Entry::Occupied(mut entry) => {
+                if memory.canonical_key() < entry.get().canonical_key() {
+                    entry.insert(memory);
+                }
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(memory);
+            }
+        }
+    }
+
+    by_id.into_values().collect()
+}
+
+impl CompiledMemory {
+    fn canonical_key(&self) -> CompiledMemoryCanonicalKey<'_> {
+        (
+            std::cmp::Reverse(self.score),
+            self.scope,
+            self.text.as_str(),
+            self.reasons.as_slice(),
+        )
+    }
+}
+
+type CompiledMemoryCanonicalKey<'a> = (
+    std::cmp::Reverse<MemoryActivationScore>,
+    MemoryScope,
+    &'a str,
+    &'a [CompiledMemoryReason],
+);
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum CompiledMemoryReason {
+    ScopeAllowed,
+    TriggerMatched(String),
+    Ranked { score: MemoryActivationScore },
+    ConflictWinner { suppressed: Vec<MemoryId> },
+}
+
+impl CompiledMemoryReason {
+    fn from_reason(reason: &MemoryActivationReason) -> Self {
+        match reason {
+            MemoryActivationReason::ScopeAllowed => Self::ScopeAllowed,
+            MemoryActivationReason::TriggerMatched(trigger) => {
+                Self::TriggerMatched(canonicalize_memory_reason_text(trigger))
+            }
+            MemoryActivationReason::Ranked { score } => Self::Ranked { score: *score },
+            MemoryActivationReason::ConflictWinner { suppressed } => {
+                let mut suppressed = suppressed.clone();
+                suppressed.sort();
+                suppressed.dedup();
+                Self::ConflictWinner { suppressed }
+            }
+        }
+    }
 }
 
 impl CompiledContextSection {
@@ -388,4 +555,433 @@ fn format_locator(locator: &EvidenceLocator) -> String {
     }
 
     unreachable!("all evidence locator variants are covered by public accessors")
+}
+
+fn format_memory_scope(scope: MemoryScope) -> &'static str {
+    match scope {
+        MemoryScope::Session => "session",
+        MemoryScope::Task => "task",
+        MemoryScope::Step => "step",
+    }
+}
+
+fn canonicalize_memory_reason_text(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        artifact::ArtifactContent,
+        memory::{ActivatedMemory, MemoryActivationReason, MemoryActivationScore, MemoryItem},
+    };
+    use merry_core::{ArtifactKind, ArtifactRef};
+
+    #[test]
+    fn to_snapshot_includes_activated_memory_text_and_reasons() {
+        let memory = activated_memory(
+            "memory-main",
+            MemoryScope::Task,
+            "Prefer the Rust 2024 workspace.",
+            2,
+            7,
+            0.875,
+            vec![
+                MemoryActivationReason::ranked(score(2, 7, 0.875)),
+                MemoryActivationReason::trigger_matched("workspace").expect("valid trigger"),
+                MemoryActivationReason::conflict_winner(vec![
+                    memory_id("memory-z"),
+                    memory_id("memory-a"),
+                ])
+                .expect("valid conflict winner"),
+                MemoryActivationReason::ScopeAllowed,
+                MemoryActivationReason::trigger_matched("rust").expect("valid trigger"),
+            ],
+        );
+        let snapshot =
+            SessionContextSnapshot::new(Vec::new(), ArtifactRegistry::default(), vec![memory]);
+
+        let compiled = ContextCompiler::new()
+            .compile(&snapshot)
+            .expect("memory-only context compiles");
+
+        assert_eq!(
+            compiled.to_snapshot(),
+            [
+                "memory:memory-main",
+                "memory-scope:task",
+                "memory-text:Prefer the Rust 2024 workspace.",
+                "memory-reason:scope_allowed",
+                "memory-reason:trigger:rust",
+                "memory-reason:trigger:workspace",
+                "memory-reason:rank:matches=2;priority=7;confidence=0.875",
+                "memory-reason:conflict_winner:suppressed=memory-a,memory-z",
+            ]
+            .join("\n")
+        );
+    }
+
+    #[test]
+    fn memory_projection_ordering_is_independent_of_insertion_order() {
+        let lower = activated_memory(
+            "memory-a",
+            MemoryScope::Session,
+            "Lower ranked memory.",
+            1,
+            1,
+            0.5,
+            ranked_reasons(1, 1, 0.5),
+        );
+        let higher = activated_memory(
+            "memory-b",
+            MemoryScope::Session,
+            "Higher ranked memory.",
+            1,
+            3,
+            0.5,
+            ranked_reasons(1, 3, 0.5),
+        );
+
+        let first = SessionContextSnapshot::new(
+            Vec::new(),
+            ArtifactRegistry::default(),
+            vec![lower.clone(), higher.clone()],
+        );
+        let second = SessionContextSnapshot::new(
+            Vec::new(),
+            ArtifactRegistry::default(),
+            vec![higher, lower],
+        );
+
+        let first = ContextCompiler::new()
+            .compile(&first)
+            .expect("first snapshot compiles")
+            .to_snapshot();
+        let second = ContextCompiler::new()
+            .compile(&second)
+            .expect("second snapshot compiles")
+            .to_snapshot();
+
+        assert_eq!(first, second);
+        assert!(first.starts_with("memory:memory-b\n"));
+    }
+
+    #[test]
+    fn duplicate_memory_ids_are_canonicalized_deterministically() {
+        let lower_duplicate = activated_memory(
+            "memory-duplicate",
+            MemoryScope::Session,
+            "Lower ranked duplicate.",
+            1,
+            1,
+            0.5,
+            ranked_reasons(1, 1, 0.5),
+        );
+        let higher_duplicate = activated_memory(
+            "memory-duplicate",
+            MemoryScope::Task,
+            "Higher ranked duplicate.",
+            2,
+            1,
+            0.5,
+            ranked_reasons(2, 1, 0.5),
+        );
+        let other = activated_memory(
+            "memory-other",
+            MemoryScope::Session,
+            "Other memory.",
+            1,
+            3,
+            0.5,
+            ranked_reasons(1, 3, 0.5),
+        );
+
+        let first = SessionContextSnapshot::new(
+            Vec::new(),
+            ArtifactRegistry::default(),
+            vec![
+                lower_duplicate.clone(),
+                other.clone(),
+                higher_duplicate.clone(),
+            ],
+        );
+        let second = SessionContextSnapshot::new(
+            Vec::new(),
+            ArtifactRegistry::default(),
+            vec![higher_duplicate, other, lower_duplicate],
+        );
+
+        let first = ContextCompiler::new()
+            .compile(&first)
+            .expect("first snapshot compiles")
+            .to_snapshot();
+        let second = ContextCompiler::new()
+            .compile(&second)
+            .expect("second snapshot compiles")
+            .to_snapshot();
+
+        assert_eq!(first, second);
+        assert_eq!(first.matches("memory:memory-duplicate").count(), 1);
+        assert!(first.contains("memory-text:Higher ranked duplicate."));
+        assert!(!first.contains("memory-text:Lower ranked duplicate."));
+    }
+
+    #[test]
+    fn duplicate_memory_id_ties_use_stable_content_ordering() {
+        let z_text = activated_memory(
+            "memory-duplicate",
+            MemoryScope::Session,
+            "Z text.",
+            1,
+            1,
+            0.5,
+            ranked_reasons(1, 1, 0.5),
+        );
+        let a_text = activated_memory(
+            "memory-duplicate",
+            MemoryScope::Session,
+            "A text.",
+            1,
+            1,
+            0.5,
+            ranked_reasons(1, 1, 0.5),
+        );
+
+        let first = SessionContextSnapshot::new(
+            Vec::new(),
+            ArtifactRegistry::default(),
+            vec![z_text.clone(), a_text.clone()],
+        );
+        let second = SessionContextSnapshot::new(
+            Vec::new(),
+            ArtifactRegistry::default(),
+            vec![a_text, z_text],
+        );
+
+        let first = ContextCompiler::new()
+            .compile(&first)
+            .expect("first snapshot compiles")
+            .to_snapshot();
+        let second = ContextCompiler::new()
+            .compile(&second)
+            .expect("second snapshot compiles")
+            .to_snapshot();
+
+        assert_eq!(first, second);
+        assert_eq!(first.matches("memory:memory-duplicate").count(), 1);
+        assert!(first.contains("memory-text:A text."));
+        assert!(!first.contains("memory-text:Z text."));
+    }
+
+    #[test]
+    fn sections_public_view_does_not_expose_memory_projection() {
+        let memory = activated_memory(
+            "memory-only",
+            MemoryScope::Step,
+            "Internal memory projection.",
+            1,
+            0,
+            0.5,
+            ranked_reasons(1, 0, 0.5),
+        );
+        let snapshot =
+            SessionContextSnapshot::new(Vec::new(), ArtifactRegistry::default(), vec![memory]);
+
+        let compiled = ContextCompiler::new()
+            .compile(&snapshot)
+            .expect("memory-only context compiles");
+
+        assert!(compiled.sections().is_empty());
+        assert!(
+            compiled
+                .to_snapshot()
+                .contains("memory-text:Internal memory projection.")
+        );
+    }
+
+    #[test]
+    fn memory_projection_does_not_bypass_summary_evidence_validation() {
+        let memory = activated_memory(
+            "memory-present",
+            MemoryScope::Session,
+            "Memory should not make invalid summaries compile.",
+            1,
+            0,
+            0.5,
+            ranked_reasons(1, 0, 0.5),
+        );
+        let summary = ContextEntry::summary(
+            ContextSummary::new("summary-without-evidence", "Missing evidence.", Vec::new())
+                .expect("summary fields are valid"),
+        );
+        let snapshot =
+            SessionContextSnapshot::new(vec![summary], ArtifactRegistry::default(), vec![memory]);
+
+        let error = ContextCompiler::new()
+            .compile(&snapshot)
+            .expect_err("summary evidence validation still applies");
+
+        assert_eq!(
+            error,
+            ContextError::SummaryWithoutEvidence {
+                id: "summary-without-evidence".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn summary_evidence_validation_still_uses_artifact_registry_with_memory_present() {
+        let memory = activated_memory(
+            "memory-present",
+            MemoryScope::Session,
+            "Memory should not make missing artifacts compile.",
+            1,
+            0,
+            0.5,
+            ranked_reasons(1, 0, 0.5),
+        );
+        let summary = ContextEntry::summary(
+            ContextSummary::new(
+                "summary-missing-artifact",
+                "Missing artifact.",
+                vec![
+                    ContextEvidence::new(
+                        "missing",
+                        EvidenceRef::new(
+                            artifact_id("missing-artifact"),
+                            EvidenceLocator::whole_artifact(),
+                        ),
+                    )
+                    .expect("evidence metadata is valid"),
+                ],
+            )
+            .expect("summary fields are valid"),
+        );
+        let snapshot =
+            SessionContextSnapshot::new(vec![summary], ArtifactRegistry::default(), vec![memory]);
+
+        let error = ContextCompiler::new()
+            .compile(&snapshot)
+            .expect_err("missing summary evidence still fails");
+
+        assert!(matches!(
+            error,
+            ContextError::UnreadableEvidence {
+                summary_id,
+                artifact_id,
+                source: ArtifactError::MissingArtifact { .. },
+            } if summary_id == "summary-missing-artifact" && artifact_id.as_str() == "missing-artifact"
+        ));
+    }
+
+    #[test]
+    fn summaries_and_memory_compile_together() {
+        let mut artifacts = ArtifactRegistry::default();
+        artifacts
+            .record(
+                ArtifactRef::new(artifact_id("artifact-a"), ArtifactKind::Text),
+                ArtifactContent::text("exact evidence\n"),
+            )
+            .expect("artifact records");
+        let summary = ContextEntry::summary(
+            ContextSummary::new(
+                "summary-a",
+                "Navigation.",
+                vec![
+                    ContextEvidence::new(
+                        "whole artifact",
+                        EvidenceRef::new(
+                            artifact_id("artifact-a"),
+                            EvidenceLocator::whole_artifact(),
+                        ),
+                    )
+                    .expect("evidence metadata is valid"),
+                ],
+            )
+            .expect("summary fields are valid"),
+        );
+        let memory = activated_memory(
+            "memory-a",
+            MemoryScope::Session,
+            "Internal memory.",
+            1,
+            0,
+            0.5,
+            ranked_reasons(1, 0, 0.5),
+        );
+        let snapshot = SessionContextSnapshot::new(vec![summary], artifacts, vec![memory]);
+
+        let compiled = ContextCompiler::new()
+            .compile(&snapshot)
+            .expect("summary and memory compile");
+
+        assert_eq!(compiled.sections().len(), 1);
+        assert_eq!(
+            compiled.to_snapshot(),
+            [
+                "summary:summary-a",
+                "text:Navigation.",
+                "evidence:whole artifact:artifact-a:whole",
+                "memory:memory-a",
+                "memory-scope:session",
+                "memory-text:Internal memory.",
+                "memory-reason:scope_allowed",
+                "memory-reason:trigger:topic",
+                "memory-reason:rank:matches=1;priority=0;confidence=0.500",
+            ]
+            .join("\n")
+        );
+    }
+
+    fn activated_memory(
+        id: &str,
+        scope: MemoryScope,
+        text: &str,
+        matches: usize,
+        priority: i32,
+        confidence: f32,
+        reasons: Vec<MemoryActivationReason>,
+    ) -> ActivatedMemory {
+        let item = MemoryItem::new(
+            memory_id(id),
+            scope,
+            text,
+            vec!["topic".to_owned()],
+            confidence,
+            priority,
+            None,
+        )
+        .expect("memory item is valid");
+        ActivatedMemory::new(item, score(matches, priority, confidence), reasons)
+            .expect("activated memory is valid")
+    }
+
+    fn ranked_reasons(
+        matches: usize,
+        priority: i32,
+        confidence: f32,
+    ) -> Vec<MemoryActivationReason> {
+        vec![
+            MemoryActivationReason::ScopeAllowed,
+            MemoryActivationReason::trigger_matched("topic").expect("valid trigger"),
+            MemoryActivationReason::ranked(score(matches, priority, confidence)),
+        ]
+    }
+
+    fn score(matches: usize, priority: i32, confidence: f32) -> MemoryActivationScore {
+        MemoryActivationScore::new(matches, priority, confidence).expect("score is valid")
+    }
+
+    fn memory_id(value: &str) -> MemoryId {
+        MemoryId::new(value).expect("memory id is valid")
+    }
+
+    fn artifact_id(value: &str) -> ArtifactId {
+        ArtifactId::new(value).expect("artifact id is valid")
+    }
 }
