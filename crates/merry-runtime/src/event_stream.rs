@@ -1,4 +1,9 @@
 //! Runtime event stream wrapper.
+//!
+//! The stream owns the lifetime of one active runtime step. Polling yields
+//! provider-neutral [`RuntimeEvent`] values after session state has been
+//! recorded. Dropping the stream cancels and aborts the producer; the active
+//! step permit is released when that producer future stops and drops its state.
 
 use futures_core::Stream;
 use merry_core::RuntimeEvent;
@@ -15,6 +20,11 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 
 /// Stream of provider-neutral runtime events.
+///
+/// A stream is returned by [`crate::Runtime::step`]. It should be driven until
+/// completion when callers want the producer to finish normally. Dropping it is
+/// the cancellation path for the active step, but the permit may remain active
+/// briefly until the producer future is stopped.
 pub struct RuntimeEventStream {
     inner: Option<ReceiverStream<RuntimeEvent>>,
     cancellation_token: CancellationToken,

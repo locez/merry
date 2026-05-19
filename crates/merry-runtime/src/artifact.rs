@@ -1,10 +1,23 @@
 //! In-memory artifact registry.
+//!
+//! [`ArtifactContent`] and [`ArtifactError`] are the MVP runtime boundary for
+//! exact artifact payloads and artifact-state failures. [`ArtifactRegistry`] is
+//! a low-level in-memory implementation aid for session state and tests.
+//!
+//! External callers should prefer [`crate::Runtime::record_artifact`] and
+//! [`crate::Runtime::evidence_ref`] when working with session-owned state. That
+//! facade enforces runtime artifact-id ownership and records lifecycle facts
+//! before observable events.
 
 use merry_core::{ArtifactId, ArtifactKind, ArtifactRef, EvidenceLocator, EvidenceRef};
 use std::{collections::BTreeMap, sync::Arc};
 use thiserror::Error;
 
 /// Exact content stored for an artifact.
+///
+/// This enum is the MVP payload boundary for runtime-owned artifacts. Variants
+/// are provider-neutral and intentionally mirror Merry artifact kinds rather
+/// than provider wire content blocks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArtifactContent {
     /// UTF-8 text.
@@ -26,6 +39,9 @@ impl ArtifactContent {
     }
 
     /// Creates serialized JSON artifact content.
+    ///
+    /// The runtime stores JSON as exact text in the MVP; it does not parse or
+    /// rewrite the payload.
     pub fn json(content: impl Into<String>) -> Self {
         Self::Json(content.into())
     }
@@ -58,6 +74,9 @@ impl ArtifactContent {
     }
 
     /// Borrows textual artifact content.
+    ///
+    /// JSON content is returned as text because the MVP registry preserves the
+    /// exact serialized payload.
     #[must_use]
     pub fn as_text(&self) -> Option<&str> {
         match self {
@@ -77,6 +96,8 @@ impl ArtifactContent {
 }
 
 /// Artifact content category used for metadata/content compatibility checks.
+///
+/// This is a runtime-local category, not a provider media type registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArtifactContentKind {
     /// UTF-8 text.
@@ -92,6 +113,10 @@ pub enum ArtifactContentKind {
 }
 
 /// A recorded artifact reference and its exact content.
+///
+/// Records are exposed for the low-level in-memory registry. Session callers
+/// should usually keep using [`crate::Runtime`] methods so artifact ownership
+/// and event ordering remain centralized.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactRecord {
     artifact: ArtifactRef,
@@ -113,6 +138,9 @@ impl ArtifactRecord {
 }
 
 /// Errors raised by artifact registry operations.
+///
+/// These errors describe artifact-state validation and read failures at the MVP
+/// boundary. Runtime facade methods wrap them in [`crate::RuntimeError`].
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ArtifactError {
     /// The artifact id already exists in this registry.
@@ -165,6 +193,11 @@ pub enum ArtifactError {
 ///
 /// Recording returns an [`ArtifactRef`] only after metadata and exact content
 /// have been stored, keeping state-before-reference usage natural for callers.
+///
+/// This registry is a low-level implementation aid for the current in-memory
+/// runtime. It does not enforce session-level policies such as reserved runtime
+/// artifact ids; use [`crate::Runtime::record_artifact`] for session-owned
+/// external recording.
 #[derive(Debug, Clone, Default)]
 pub struct ArtifactRegistry {
     records: BTreeMap<ArtifactId, ArtifactRecord>,
@@ -178,6 +211,9 @@ impl ArtifactRegistry {
     }
 
     /// Records an artifact reference and its exact content.
+    ///
+    /// The registry validates metadata/content compatibility but does not emit
+    /// runtime events or lifecycle facts.
     pub fn record(
         &mut self,
         artifact: ArtifactRef,
@@ -219,6 +255,8 @@ impl ArtifactRegistry {
     }
 
     /// Creates an evidence reference only if the target artifact and locator are readable.
+    ///
+    /// Prefer [`crate::Runtime::evidence_ref`] for session-owned state.
     pub fn evidence_ref(
         &self,
         artifact_id: &ArtifactId,
@@ -236,6 +274,9 @@ impl ArtifactRegistry {
     }
 
     /// Reads exact evidence content referenced by a recorded evidence reference.
+    ///
+    /// The returned content is a cloned exact slice or payload for the selected
+    /// locator.
     pub fn read_evidence(&self, evidence: &EvidenceRef) -> Result<ArtifactContent, ArtifactError> {
         let record = self.read_record(&evidence.artifact_id)?;
         read_located_content(record.artifact.id(), record.content(), &evidence.locator)

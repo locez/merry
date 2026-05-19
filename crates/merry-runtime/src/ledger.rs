@@ -1,9 +1,23 @@
 //! In-memory task ledger update primitives.
+//!
+//! [`crate::Runtime::ledger_projection`] is the preferred public read path for
+//! runtime ledger state. [`TaskLedger`] and direct mutation APIs are currently
+//! public low-level primitives for the in-memory MVP and should be treated as
+//! unstable implementation-facing surfaces.
+//!
+//! Lifecycle facts are recorded before the corresponding runtime events become
+//! observable. Projections preserve that recorded ordering for deterministic
+//! context and debugging use.
 
 use std::fmt;
 use thiserror::Error;
 
 /// Compact record of state transitions that happened before event emission.
+///
+/// This is the low-level in-memory ledger used by the current session state.
+/// External callers should prefer [`crate::Runtime::ledger_projection`] for
+/// read access and avoid depending on direct append/record mutation as stable
+/// API.
 #[derive(Debug, Default)]
 pub struct TaskLedger {
     entries: Vec<LedgerEntryRef>,
@@ -15,6 +29,9 @@ pub struct TaskLedger {
 
 impl TaskLedger {
     /// Appends a compact ledger update and returns the recorded entry.
+    ///
+    /// This low-level mutation surface is available for the MVP but not yet the
+    /// preferred application-facing ledger API.
     pub fn append(&mut self, kind: LedgerUpdateKind) -> &LedgerUpdate {
         let update = LedgerUpdate {
             sequence: self.next_sequence,
@@ -36,6 +53,9 @@ impl TaskLedger {
     }
 
     /// Records an event lifecycle fact that was durably written before event emission.
+    ///
+    /// Runtime session code calls this before the matching [`merry_core::RuntimeEvent`]
+    /// is emitted or returned to a caller.
     pub fn record_lifecycle(&mut self, sequence: u64, kind: LedgerFactKind) -> &LifecycleFact {
         let fact = LifecycleFact {
             sequence,
@@ -53,18 +73,26 @@ impl TaskLedger {
     }
 
     /// Returns compact updates in append order.
+    ///
+    /// Prefer [`TaskLedger::project`] or [`crate::Runtime::ledger_projection`]
+    /// when callers need a stable read model.
     #[must_use]
     pub fn updates(&self) -> &[LedgerUpdate] {
         &self.updates
     }
 
     /// Returns lifecycle facts in append order.
+    ///
+    /// Facts represent durable state already recorded before observable events.
     #[must_use]
     pub fn lifecycle_facts(&self) -> &[LifecycleFact] {
         &self.lifecycle_facts
     }
 
     /// Builds a deterministic projection suitable for future context compilation.
+    ///
+    /// This is the low-level equivalent of [`crate::Runtime::ledger_projection`]
+    /// for callers already working with an in-memory [`TaskLedger`].
     #[must_use]
     pub fn project(&self) -> LedgerProjectionSnapshot {
         let entries = self
@@ -106,6 +134,9 @@ impl TaskLedger {
 }
 
 /// Scope for a compact ledger update.
+///
+/// Scopes keep compact facts typed without making prompt text or raw chat
+/// history the ledger source of truth.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LedgerScope {
     /// A fact that applies to the current runtime session.
@@ -117,6 +148,9 @@ pub enum LedgerScope {
 }
 
 /// Compact, validated text for ledger facts.
+///
+/// This is intentionally compact navigation/state text, not exact evidence.
+/// Exact source material should remain available through artifacts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompactLedgerText(String);
 
@@ -164,6 +198,9 @@ pub enum LedgerValidationError {
 }
 
 /// A typed compact update recorded in the task ledger.
+///
+/// Updates are current MVP facts and may be complemented by richer typed facts
+/// as runtime state expands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LedgerUpdate {
     sequence: u64,
@@ -192,6 +229,9 @@ impl LedgerUpdate {
 }
 
 /// Compact facts suitable for deterministic context compilation.
+///
+/// The enum is intentionally small for the MVP and may grow with additional
+/// runtime-owned fact types.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LedgerUpdateKind {
     /// A compact factual observation from a step, session, or task boundary.
@@ -204,6 +244,9 @@ pub enum LedgerUpdateKind {
 }
 
 /// Event lifecycle fact recorded before the corresponding event is observable.
+///
+/// Lifecycle facts are the ledger-side proof that state existed before callers
+/// could observe the event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LifecycleFact {
     sequence: u64,
@@ -232,6 +275,8 @@ impl LifecycleFact {
 }
 
 /// Existing event lifecycle fact kinds recorded by the runtime session.
+///
+/// These variants describe Merry runtime events, not provider event names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LedgerFactKind {
     /// Session start has been recorded.
@@ -253,6 +298,9 @@ pub enum LedgerFactKind {
 }
 
 /// Owned deterministic view of the ledger for context compilation.
+///
+/// This is the preferred shape returned by [`crate::Runtime::ledger_projection`].
+/// It is read-only and detached from direct [`TaskLedger`] mutation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LedgerProjectionSnapshot {
     entries: Vec<LedgerProjection>,
@@ -267,6 +315,10 @@ impl LedgerProjectionSnapshot {
 }
 
 /// Deterministic ledger projection entry.
+///
+/// Entries preserve the ledger's recorded sequence and append order so callers
+/// can reason about lifecycle-before-event guarantees without accessing
+/// mutable ledger internals.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LedgerProjection {
     /// Compact fact projected from a typed ledger update.

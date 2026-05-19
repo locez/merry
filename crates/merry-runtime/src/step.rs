@@ -1,4 +1,8 @@
 //! Runtime step inputs, execution context, and provider request compilation.
+//!
+//! Public step types are provider-neutral. Request compilation is internal
+//! glue from structured runtime state into `merry-llm` model requests; provider
+//! crates render those normalized requests into wire formats.
 
 use crate::{
     CompiledContext, RuntimeError, artifact::ArtifactContent,
@@ -13,6 +17,10 @@ use merry_llm::{
 use tokio_util::sync::CancellationToken;
 
 /// Input snapshot for a runtime step.
+///
+/// The MVP step input is user text only. Runtime state such as context,
+/// artifacts, tool continuations, and ledger facts is read from the owning
+/// session rather than passed as raw chat history.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StepInput {
     user_text: String,
@@ -20,6 +28,9 @@ pub struct StepInput {
 
 impl StepInput {
     /// Creates a user-text step input.
+    ///
+    /// Text must be non-blank and may contain newlines and tabs, but not other
+    /// control characters.
     pub fn user_text(text: &str) -> Result<Self, RuntimeError> {
         validate_user_text(text)?;
         Ok(Self {
@@ -35,6 +46,9 @@ impl StepInput {
 }
 
 /// Context shared with runtime step producers.
+///
+/// The context carries cancellation and provider-neutral generation controls
+/// for one step. It does not carry provider conversation state.
 #[derive(Debug, Clone)]
 pub struct StepContext {
     cancellation_token: CancellationToken,
@@ -52,12 +66,18 @@ impl StepContext {
     }
 
     /// Returns the cancellation token for this step.
+    ///
+    /// Runtime producers check this token at cancellation checkpoints. Dropping
+    /// the returned [`crate::RuntimeEventStream`] also cancels the step token.
     #[must_use]
     pub fn cancellation_token(&self) -> &CancellationToken {
         &self.cancellation_token
     }
 
     /// Sets provider-neutral generation controls for this step.
+    ///
+    /// Controls are normalized Merry model settings, not provider request
+    /// fields.
     #[must_use]
     pub fn with_generation_config(mut self, generation_config: GenerationConfig) -> Self {
         self.generation_config = generation_config;
