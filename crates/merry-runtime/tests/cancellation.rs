@@ -9,8 +9,8 @@ use merry_llm::{
 };
 use merry_runtime::{
     ArtifactError, LedgerFactKind, LedgerProjection, RegisteredTool, Runtime, RuntimeError,
-    StepContext, StepInput, ToolExecutionContext, ToolExecutionError, ToolExecutor,
-    ToolExecutorFuture,
+    StepContext, StepInput, ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome,
+    ToolExecutor, ToolExecutorFuture,
 };
 use schemars::Schema;
 use serde_json::json;
@@ -113,7 +113,7 @@ async fn assert_missing_tool_result_artifact(runtime: &Runtime) {
     ));
 }
 
-fn runtime_with_waiting_tool(session: &str, executor: WaitingToolExecutor) -> Runtime {
+fn runtime_with_waiting_tool(session: &str, executor: impl ToolExecutor + 'static) -> Runtime {
     Runtime::builder(SessionId::new(session).expect("valid session id"))
         .register_tool(RegisteredTool::new(tool_spec(), Arc::new(executor)))
         .model_provider(
@@ -153,6 +153,37 @@ impl ToolExecutor for WaitingToolExecutor {
             self.calls.fetch_add(1, Ordering::SeqCst);
             context.cancellation_token().cancelled().await;
             Err(ToolExecutionError::Cancelled)
+        })
+    }
+}
+
+#[derive(Clone)]
+struct CancellingSuccessfulToolExecutor {
+    calls: Arc<AtomicUsize>,
+}
+
+impl CancellingSuccessfulToolExecutor {
+    fn new() -> Self {
+        Self {
+            calls: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn call_count(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+impl ToolExecutor for CancellingSuccessfulToolExecutor {
+    fn execute<'a>(
+        &'a self,
+        _call: PendingToolCall,
+        context: ToolExecutionContext,
+    ) -> ToolExecutorFuture<'a> {
+        Box::pin(async move {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            context.cancellation_token().cancel();
+            Ok(ToolExecutionOutcome::succeeded_text("ok\n"))
         })
     }
 }
@@ -370,6 +401,71 @@ async fn cancelling_during_tool_execution_keeps_pending_and_releases_active_perm
     assert_eq!(runtime.ledger_projection().await, projection_before_cancel);
     assert_missing_tool_result_artifact(&runtime).await;
     let follow_up_events = start_step_after_cleanup(&runtime, "after during-cancel").await;
+    assert!(
+        follow_up_events
+            .iter()
+            .any(|event| matches!(event.kind, RuntimeEventKind::Failed { .. }))
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cancelling_after_successful_tool_execution_keeps_pending_and_releases_active_permit() {
+    let executor = CancellingSuccessfulToolExecutor::new();
+    let runtime = runtime_with_waiting_tool("cancel-tool-after-success", executor.clone());
+    let events = collect_pending_step(&runtime, "request wait tool").await;
+    assert_eq!(
+        event_kind_names(&events),
+        ["SessionStarted", "StepStarted", "ToolCallPending"]
+    );
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2]
+    );
+    let pending_before_cancel = runtime.pending_tool_calls().await;
+    assert_eq!(pending_before_cancel.len(), 1);
+    let projection_before_cancel = runtime.ledger_projection().await;
+    assert_eq!(
+        projection_before_cancel.entries(),
+        [
+            LedgerProjection::Lifecycle {
+                sequence: 0,
+                order: 0,
+                kind: LedgerFactKind::SessionStarted,
+            },
+            LedgerProjection::Lifecycle {
+                sequence: 1,
+                order: 1,
+                kind: LedgerFactKind::StepStarted,
+            },
+            LedgerProjection::Lifecycle {
+                sequence: 2,
+                order: 2,
+                kind: LedgerFactKind::ToolCallPending,
+            },
+        ]
+    );
+
+    let err = runtime
+        .execute_tool_call(
+            &tool_call_id("cancel-tool-call"),
+            ToolExecutionContext::new(CancellationToken::new()),
+        )
+        .await
+        .expect_err("late-cancelled successful tool execution should return an error");
+
+    assert!(matches!(
+        err,
+        RuntimeError::ToolExecutionCancelled { call_id, .. }
+            if call_id == tool_call_id("cancel-tool-call")
+    ));
+    assert_eq!(executor.call_count(), 1);
+    assert_eq!(runtime.pending_tool_calls().await, pending_before_cancel);
+    assert_eq!(runtime.ledger_projection().await, projection_before_cancel);
+    assert_missing_tool_result_artifact(&runtime).await;
+    let follow_up_events = start_step_after_cleanup(&runtime, "after late-cancel").await;
     assert!(
         follow_up_events
             .iter()

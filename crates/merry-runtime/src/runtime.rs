@@ -1010,12 +1010,24 @@ async fn reserve_cancelled_event_slot<'a>(
 #[cfg(test)]
 mod tests {
     use super::{Runtime, RuntimeInner, send_cancelled_event};
+    use crate::ArtifactError;
     use crate::session::SessionState;
-    use crate::tool::{ToolExecutionContext, ToolRegistry};
-    use merry_core::{PendingToolCall, SessionId, ToolCallArguments, ToolCallId, ToolName};
+    use crate::tool::{
+        RegisteredTool, ToolExecutionContext, ToolExecutionOutcome, ToolExecutor,
+        ToolExecutorFuture, ToolRegistry,
+    };
+    use merry_core::{
+        ArtifactId, EvidenceLocator, PendingToolCall, SessionId, ToolCallArguments, ToolCallId,
+        ToolInputSchema, ToolName, ToolSpec,
+    };
+    use schemars::Schema;
+    use serde_json::json;
     use std::{
         num::NonZeroUsize,
-        sync::{Arc, atomic::AtomicBool},
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
     };
     use tokio::sync::{Mutex, mpsc, oneshot};
     use tokio_util::sync::CancellationToken;
@@ -1029,6 +1041,51 @@ mod tests {
             event_buffer_size: NonZeroUsize::new(1).expect("non-zero buffer"),
             model_provider: None,
             tool_registry: ToolRegistry::default(),
+        }
+    }
+
+    fn artifact_id(value: &str) -> ArtifactId {
+        ArtifactId::new(value).expect("valid artifact id")
+    }
+
+    fn registered_tool_spec() -> ToolSpec {
+        let schema = Schema::try_from(json!({ "type": "object" }))
+            .expect("test schema should be a JSON schema");
+        ToolSpec::new(
+            ToolName::new("registered_tool").expect("valid tool name"),
+            "Registered test tool",
+            ToolInputSchema::new(schema).expect("valid tool schema"),
+        )
+        .expect("valid tool spec")
+    }
+
+    #[derive(Clone)]
+    struct SuccessfulToolExecutor {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl SuccessfulToolExecutor {
+        fn new() -> Self {
+            Self {
+                calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl ToolExecutor for SuccessfulToolExecutor {
+        fn execute<'a>(
+            &'a self,
+            _call: PendingToolCall,
+            _context: ToolExecutionContext,
+        ) -> ToolExecutorFuture<'a> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(ToolExecutionOutcome::succeeded_text("ok\n"))
+            })
         }
     }
 
@@ -1115,5 +1172,93 @@ mod tests {
         ));
         assert_eq!(runtime.pending_tool_calls().await, vec![pending]);
         assert_eq!(runtime.ledger_projection().await, projection_before);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelling_registered_tool_after_success_before_submit_keeps_pending() {
+        let session_id =
+            SessionId::new("runtime-registered-submit-cancel").expect("valid session id");
+        let call_id = ToolCallId::new("call-registered").expect("valid tool call id");
+        let tool_spec = registered_tool_spec();
+        let pending = PendingToolCall::new(
+            call_id.clone(),
+            tool_spec.name().clone(),
+            ToolCallArguments::new(Default::default()),
+        );
+        let executor = SuccessfulToolExecutor::new();
+        let runtime = Runtime::builder(session_id)
+            .register_tool(RegisteredTool::new(tool_spec, Arc::new(executor.clone())))
+            .build()
+            .expect("runtime should build");
+
+        let mut initial_session_guard = runtime.inner.session.lock().await;
+        initial_session_guard
+            .record_tool_call_pending(pending.clone())
+            .expect("pending call should record");
+        let projection_before = initial_session_guard.ledger_projection();
+
+        let token = CancellationToken::new();
+        let execute_runtime = runtime.clone();
+        let execute_call_id = call_id.clone();
+        let execute_token = token.clone();
+        let execute_handle = tokio::spawn(async move {
+            execute_runtime
+                .execute_tool_call(&execute_call_id, ToolExecutionContext::new(execute_token))
+                .await
+        });
+        tokio::task::yield_now().await;
+
+        let (lock_acquired_sender, lock_acquired_receiver) = oneshot::channel();
+        let (release_lock_sender, release_lock_receiver) = oneshot::channel();
+        let blocker_runtime = runtime.clone();
+        let blocker_handle = tokio::spawn(async move {
+            let _session_guard = blocker_runtime.inner.session.lock().await;
+            let _ = lock_acquired_sender.send(());
+            let _ = release_lock_receiver.await;
+        });
+        tokio::task::yield_now().await;
+
+        drop(initial_session_guard);
+        lock_acquired_receiver
+            .await
+            .expect("blocker should acquire the session lock after pending lookup");
+        tokio::task::yield_now().await;
+        assert_eq!(executor.call_count(), 1);
+
+        token.cancel();
+        release_lock_sender
+            .send(())
+            .expect("blocker should still be waiting for release");
+
+        let err = execute_handle
+            .await
+            .expect("tool execution task should not panic")
+            .expect_err("late-cancelled registered tool execution should not resolve pending");
+        blocker_handle
+            .await
+            .expect("session lock blocker should not panic");
+
+        assert!(matches!(
+            err,
+            crate::RuntimeError::ToolExecutionCancelled { call_id: cancelled, .. }
+                if cancelled == call_id
+        ));
+        assert_eq!(runtime.pending_tool_calls().await, vec![pending]);
+        assert_eq!(runtime.ledger_projection().await, projection_before);
+
+        let expected_result_artifact_id = artifact_id("tool-result-1");
+        let evidence_err = runtime
+            .evidence_ref(
+                &expected_result_artifact_id,
+                EvidenceLocator::whole_artifact(),
+            )
+            .await
+            .expect_err("cancelled tool execution must not record runtime-owned result artifact");
+        assert!(matches!(
+            evidence_err,
+            crate::RuntimeError::Artifact {
+                source: ArtifactError::MissingArtifact { id }
+            } if id == expected_result_artifact_id
+        ));
     }
 }
