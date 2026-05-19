@@ -32,6 +32,7 @@ mod artifact;
 mod context;
 mod error;
 mod event_stream;
+mod judgment;
 mod ledger;
 mod memory;
 mod runtime;
