@@ -28,7 +28,10 @@ use merry_llm::{
 };
 use std::{
     num::NonZeroUsize,
-    sync::{Arc, atomic::AtomicBool},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
 };
 use tokio::sync::{Mutex, mpsc, mpsc::Permit};
 use tokio_stream::wrappers::ReceiverStream;
@@ -441,6 +444,7 @@ impl RuntimeBuilder {
                 session_id: self.session_id.clone(),
                 session: Mutex::new(SessionState::new(self.session_id)),
                 active_step: Arc::new(AtomicBool::new(false)),
+                memory_projection_epoch: AtomicU64::new(0),
                 event_buffer_size: self.event_buffer_size,
                 model_provider: self.model_provider,
                 tool_registry,
@@ -460,6 +464,7 @@ struct RuntimeInner {
     session_id: SessionId,
     session: Mutex<SessionState>,
     active_step: Arc<AtomicBool>,
+    memory_projection_epoch: AtomicU64,
     event_buffer_size: NonZeroUsize,
     model_provider: Option<ModelProviderConfig>,
     tool_registry: ToolRegistry,
@@ -530,7 +535,7 @@ async fn run_step(
 }
 
 async fn run_provider_step(
-    inner: &RuntimeInner,
+    inner: &Arc<RuntimeInner>,
     sender: &mpsc::Sender<RuntimeEvent>,
     token: &CancellationToken,
     input: StepInput,
@@ -570,7 +575,7 @@ async fn run_provider_step(
         }
     };
 
-    let (snapshot, continuations) = {
+    let (snapshot, continuations, activation_epoch) = {
         let mut session = inner.session.lock().await;
         if token.is_cancelled() {
             drop(session);
@@ -578,10 +583,15 @@ async fn run_provider_step(
             return;
         }
         session.replace_activated_memories(activated_memories);
+        let activation_epoch = inner
+            .memory_projection_epoch
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1);
         let continuations = match session.unconsumed_tool_continuation_snapshots() {
             Ok(continuations) => continuations,
             Err(error) => {
                 session.replace_activated_memories(Vec::new());
+                inner.memory_projection_epoch.fetch_add(1, Ordering::AcqRel);
                 let diagnostic = diagnostic_from_text(
                     "tool_continuation_artifact",
                     format!("tool continuation artifact could not be read: {error}"),
@@ -591,8 +601,10 @@ async fn run_provider_step(
                 return;
             }
         };
-        (session.context_snapshot(), continuations)
+        (session.context_snapshot(), continuations, activation_epoch)
     };
+    let mut projection_guard =
+        ActivationProjectionGuard::new(Arc::clone(inner), token.clone(), activation_epoch);
     let sent_continuation_count = continuations.len();
     let tool_specs = inner.tool_registry.tool_specs();
 
@@ -648,6 +660,7 @@ async fn run_provider_step(
             return;
         }
     };
+    projection_guard.disarm();
 
     let mut saw_non_empty_text_delta = false;
     let mut streamed_tool_call: Option<PendingToolCall> = None;
@@ -803,11 +816,85 @@ async fn run_provider_step(
 async fn clear_current_activated_memories(inner: &RuntimeInner) {
     let mut session = inner.session.lock().await;
     session.replace_activated_memories(Vec::new());
+    inner.memory_projection_epoch.fetch_add(1, Ordering::AcqRel);
 }
 
 async fn has_unresolved_pending_tool_calls(inner: &RuntimeInner) -> bool {
     let session = inner.session.lock().await;
     session.has_pending_tool_calls()
+}
+
+/// Clears pre-commit memory activation if the producer is aborted before the
+/// provider has returned an event stream.
+struct ActivationProjectionGuard {
+    inner: Arc<RuntimeInner>,
+    token: CancellationToken,
+    epoch: u64,
+    armed: bool,
+}
+
+impl ActivationProjectionGuard {
+    fn new(inner: Arc<RuntimeInner>, token: CancellationToken, epoch: u64) -> Self {
+        Self {
+            inner,
+            token,
+            epoch,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ActivationProjectionGuard {
+    fn drop(&mut self) {
+        if !self.armed || !self.token.is_cancelled() {
+            return;
+        }
+
+        if self.inner.memory_projection_epoch.load(Ordering::Acquire) != self.epoch {
+            return;
+        }
+
+        if clear_activated_memories_if_epoch_matches(&self.inner, self.epoch) {
+            return;
+        }
+
+        let inner = Arc::clone(&self.inner);
+        let epoch = self.epoch;
+        tokio::spawn(async move {
+            if inner.memory_projection_epoch.load(Ordering::Acquire) != epoch {
+                return;
+            }
+
+            let mut session = inner.session.lock().await;
+            if inner
+                .memory_projection_epoch
+                .compare_exchange(epoch, epoch + 1, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                session.replace_activated_memories(Vec::new());
+            }
+        });
+    }
+}
+
+fn clear_activated_memories_if_epoch_matches(inner: &RuntimeInner, epoch: u64) -> bool {
+    let Ok(mut session) = inner.session.try_lock() else {
+        return false;
+    };
+
+    if inner
+        .memory_projection_epoch
+        .compare_exchange(epoch, epoch + 1, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        session.replace_activated_memories(Vec::new());
+    }
+
+    true
 }
 
 fn memory_activation_seed_from_step_input(
@@ -1190,7 +1277,8 @@ mod tests {
     use merry_llm::{
         FinishReason, ModelCapabilities, ModelError, ModelEvent, ModelEventStream,
         ModelMessageRole, ModelName, ModelOutput, ModelProvider, ModelProviderFuture, ModelRequest,
-        ModelResponse, ModelStreamContext,
+        ModelResponse, ModelStreamContext, ModelToolCall, ModelToolCallId, ProviderErrorKind,
+        ToolArguments,
     };
     use schemars::Schema;
     use serde_json::json;
@@ -1198,7 +1286,7 @@ mod tests {
         num::NonZeroUsize,
         sync::{
             Arc, Mutex as StdMutex,
-            atomic::{AtomicBool, AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         },
     };
     use tokio::sync::{Mutex, mpsc, oneshot};
@@ -1210,6 +1298,7 @@ mod tests {
             session_id: session_id.clone(),
             session: Mutex::new(SessionState::new(session_id)),
             active_step: Arc::new(AtomicBool::new(false)),
+            memory_projection_epoch: AtomicU64::new(0),
             event_buffer_size: NonZeroUsize::new(1).expect("non-zero buffer"),
             model_provider: None,
             tool_registry: ToolRegistry::default(),
@@ -1236,6 +1325,12 @@ mod tests {
                 FinishReason::Stop,
                 None,
             ),
+        }
+    }
+
+    fn completed_event_with(outputs: Vec<ModelOutput>, finish_reason: FinishReason) -> ModelEvent {
+        ModelEvent::Completed {
+            response: ModelResponse::new(outputs, finish_reason, None),
         }
     }
 
@@ -1284,6 +1379,14 @@ mod tests {
             ToolCallId::new(id).expect("valid tool call id"),
             ToolName::new("lookup").expect("valid tool name"),
             ToolCallArguments::new(Default::default()),
+        )
+    }
+
+    fn model_tool_call(id: &str) -> ModelToolCall {
+        ModelToolCall::new(
+            ModelToolCallId::new(id).expect("valid model tool call id"),
+            ToolName::new("lookup").expect("valid tool name"),
+            ToolArguments::new(Default::default()),
         )
     }
 
@@ -1342,6 +1445,54 @@ mod tests {
                 ArtifactContent::text(content),
             )
             .expect("memory artifact records");
+    }
+
+    fn runtime_with_provider_and_single_memory(
+        session: &str,
+        provider: RecordingModelProvider,
+        memory_id: &str,
+        memory_text: &str,
+        memory_artifact_id: &str,
+    ) -> (Runtime, ScriptedMemoryActivationSource) {
+        let source = ScriptedMemoryActivationSource::new(vec![vec![activated_memory(
+            memory_id,
+            memory_text,
+            memory_artifact_id,
+        )]]);
+        let runtime = runtime_with_provider_and_memory_source(session, provider, source.clone());
+        record_memory_artifact(
+            &runtime,
+            memory_artifact_id,
+            "exact evidence for lifecycle memory",
+        );
+        (runtime, source)
+    }
+
+    async fn compiled_context_snapshot(runtime: &Runtime) -> String {
+        crate::ContextCompiler::new()
+            .compile(&runtime.context_snapshot().await)
+            .expect("context compiles")
+            .to_snapshot()
+    }
+
+    async fn assert_activated_memory_projection_cleared(runtime: &Runtime) {
+        assert_eq!(compiled_context_snapshot(runtime).await, "");
+    }
+
+    async fn assert_activated_memory_projection_retained(
+        runtime: &Runtime,
+        memory_id: &str,
+        memory_text: &str,
+    ) {
+        let snapshot = compiled_context_snapshot(runtime).await;
+        assert!(
+            snapshot.contains(&format!("memory:{memory_id}")),
+            "compiled context should retain memory id {memory_id}; snapshot:\n{snapshot}"
+        );
+        assert!(
+            snapshot.contains(&format!("memory-text:{memory_text}")),
+            "compiled context should retain memory text for {memory_id}; snapshot:\n{snapshot}"
+        );
     }
 
     #[derive(Debug, Clone)]
@@ -1425,17 +1576,50 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    enum ScriptedModelProviderResponse {
+        SetupError(ModelError),
+        PendingSetup(oneshot::Sender<()>),
+        PendingSetupWithDrop {
+            started: oneshot::Sender<()>,
+            dropped: oneshot::Sender<()>,
+        },
+        Stream(Vec<Result<ModelEvent, ModelError>>),
+    }
+
+    struct NotifyOnDrop(Option<oneshot::Sender<()>>);
+
+    impl NotifyOnDrop {
+        fn new(sender: oneshot::Sender<()>) -> Self {
+            Self(Some(sender))
+        }
+    }
+
+    impl Drop for NotifyOnDrop {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
+
     #[derive(Debug, Clone)]
     struct RecordingModelProvider {
         requests: Arc<StdMutex<Vec<ModelRequest>>>,
         calls: Arc<AtomicUsize>,
+        responses: Arc<StdMutex<Vec<ScriptedModelProviderResponse>>>,
     }
 
     impl RecordingModelProvider {
         fn new() -> Self {
+            Self::with_script(Vec::new())
+        }
+
+        fn with_script(responses: Vec<ScriptedModelProviderResponse>) -> Self {
             Self {
                 requests: Arc::new(StdMutex::new(Vec::new())),
                 calls: Arc::new(AtomicUsize::new(0)),
+                responses: Arc::new(StdMutex::new(responses.into_iter().rev().collect())),
             }
         }
 
@@ -1444,6 +1628,16 @@ mod tests {
                 .lock()
                 .expect("recorded requests mutex should not be poisoned")
                 .clone()
+        }
+
+        fn next_response(&self) -> ScriptedModelProviderResponse {
+            self.responses
+                .lock()
+                .expect("model response mutex should not be poisoned")
+                .pop()
+                .unwrap_or_else(|| {
+                    ScriptedModelProviderResponse::Stream(vec![Ok(completed_event())])
+                })
         }
     }
 
@@ -1480,9 +1674,22 @@ mod tests {
                     .lock()
                     .expect("recorded requests mutex should not be poisoned")
                     .push(request);
-                let stream: ModelEventStream =
-                    Box::pin(futures_util::stream::iter(vec![Ok(completed_event())]));
-                Ok(stream)
+                match self.next_response() {
+                    ScriptedModelProviderResponse::SetupError(error) => Err(error),
+                    ScriptedModelProviderResponse::PendingSetup(started) => {
+                        let _ = started.send(());
+                        std::future::pending::<Result<ModelEventStream, ModelError>>().await
+                    }
+                    ScriptedModelProviderResponse::PendingSetupWithDrop { started, dropped } => {
+                        let _notify_on_drop = NotifyOnDrop::new(dropped);
+                        let _ = started.send(());
+                        std::future::pending::<Result<ModelEventStream, ModelError>>().await
+                    }
+                    ScriptedModelProviderResponse::Stream(events) => {
+                        let stream: ModelEventStream = Box::pin(futures_util::stream::iter(events));
+                        Ok(stream)
+                    }
+                }
             })
         }
     }
@@ -1500,6 +1707,7 @@ mod tests {
                 session_id: session_id(session),
                 session: Mutex::new(SessionState::new(session_id(session))),
                 active_step: Arc::new(AtomicBool::new(false)),
+                memory_projection_epoch: AtomicU64::new(0),
                 event_buffer_size: NonZeroUsize::new(16).expect("non-zero buffer"),
                 model_provider: Some(super::ModelProviderConfig {
                     provider: Arc::new(provider),
@@ -1520,6 +1728,7 @@ mod tests {
                 session_id: session_id(session),
                 session: Mutex::new(SessionState::new(session_id(session))),
                 active_step: Arc::new(AtomicBool::new(false)),
+                memory_projection_epoch: AtomicU64::new(0),
                 event_buffer_size: NonZeroUsize::new(16).expect("non-zero buffer"),
                 model_provider: None,
                 tool_registry: ToolRegistry::default(),
@@ -1906,6 +2115,381 @@ mod tests {
                 .to_snapshot(),
             ""
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dropping_step_during_provider_setup_clears_activated_memory_projection() {
+        let (provider_started_tx, provider_started_rx) = oneshot::channel();
+        let provider =
+            RecordingModelProvider::with_script(vec![ScriptedModelProviderResponse::PendingSetup(
+                provider_started_tx,
+            )]);
+        let (runtime, source) = runtime_with_provider_and_single_memory(
+            "runtime-memory-provider-setup-drop-clears",
+            provider.clone(),
+            "memory-provider-setup-drop",
+            "Activated memory must not survive dropped setup before stream commit.",
+            "memory-provider-setup-drop-artifact",
+        );
+
+        let stream = runtime
+            .step(
+                crate::StepInput::user_text("Topic request.").expect("valid step input"),
+                crate::StepContext::new(CancellationToken::new()),
+            )
+            .expect("step should start");
+        provider_started_rx
+            .await
+            .expect("provider setup future should start");
+
+        assert_eq!(source.call_count(), 1);
+        assert_eq!(provider.recorded_requests().len(), 1);
+        assert_activated_memory_projection_retained(
+            &runtime,
+            "memory-provider-setup-drop",
+            "Activated memory must not survive dropped setup before stream commit.",
+        )
+        .await;
+
+        drop(stream);
+        tokio::task::yield_now().await;
+
+        assert_activated_memory_projection_cleared(&runtime).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dropping_step_during_provider_setup_with_held_session_lock_defers_projection_cleanup()
+    {
+        let (provider_started_tx, provider_started_rx) = oneshot::channel();
+        let (provider_dropped_tx, provider_dropped_rx) = oneshot::channel();
+        let provider = RecordingModelProvider::with_script(vec![
+            ScriptedModelProviderResponse::PendingSetupWithDrop {
+                started: provider_started_tx,
+                dropped: provider_dropped_tx,
+            },
+        ]);
+        let (runtime, source) = runtime_with_provider_and_single_memory(
+            "runtime-memory-provider-setup-drop-spawned-cleanup",
+            provider.clone(),
+            "memory-provider-setup-drop-spawned",
+            "Activated memory is cleared by spawned cleanup when drop cannot lock session.",
+            "memory-provider-setup-drop-spawned-artifact",
+        );
+
+        let stream = runtime
+            .step(
+                crate::StepInput::user_text("Topic request.").expect("valid step input"),
+                crate::StepContext::new(CancellationToken::new()),
+            )
+            .expect("step should start");
+        provider_started_rx
+            .await
+            .expect("provider setup future should start");
+
+        assert_eq!(source.call_count(), 1);
+        assert_eq!(provider.recorded_requests().len(), 1);
+        assert_activated_memory_projection_retained(
+            &runtime,
+            "memory-provider-setup-drop-spawned",
+            "Activated memory is cleared by spawned cleanup when drop cannot lock session.",
+        )
+        .await;
+
+        let session = runtime.inner.session.lock().await;
+        drop(stream);
+        provider_dropped_rx
+            .await
+            .expect("provider setup future should be aborted");
+        tokio::task::yield_now().await;
+
+        let snapshot = crate::ContextCompiler::new()
+            .compile(&session.context_snapshot())
+            .expect("context compiles while cleanup waits for session lock")
+            .to_snapshot();
+        assert!(
+            snapshot.contains("memory:memory-provider-setup-drop-spawned"),
+            "projection should remain while spawned cleanup is waiting for session lock; snapshot:\n{snapshot}"
+        );
+
+        drop(session);
+        tokio::task::yield_now().await;
+
+        assert_activated_memory_projection_cleared(&runtime).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn provider_setup_error_before_stream_clears_activated_memory_projection() {
+        let provider =
+            RecordingModelProvider::with_script(vec![ScriptedModelProviderResponse::SetupError(
+                ModelError::provider(ProviderErrorKind::Unavailable, "provider setup failed"),
+            )]);
+        let (runtime, source) = runtime_with_provider_and_single_memory(
+            "runtime-memory-provider-setup-error-clears",
+            provider.clone(),
+            "memory-provider-setup-error",
+            "Activated memory must not survive provider setup failure.",
+            "memory-provider-setup-error-artifact",
+        );
+
+        let events = collect_step(
+            &runtime,
+            "Topic request.",
+            crate::StepContext::new(CancellationToken::new()),
+        )
+        .await;
+
+        assert_eq!(
+            event_kind_names(&events),
+            ["SessionStarted", "StepStarted", "Failed"]
+        );
+        assert_eq!(failed_code(&events), Some("model_unavailable"));
+        assert_eq!(source.call_count(), 1);
+        assert_eq!(provider.recorded_requests().len(), 1);
+        assert_activated_memory_projection_cleared(&runtime).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn provider_stream_error_after_stream_start_retains_activated_memory_projection() {
+        let provider = RecordingModelProvider::with_script(vec![
+            ScriptedModelProviderResponse::Stream(vec![Err(ModelError::provider(
+                ProviderErrorKind::Unavailable,
+                "provider stream failed",
+            ))]),
+        ]);
+        let (runtime, source) = runtime_with_provider_and_single_memory(
+            "runtime-memory-provider-stream-error-retains",
+            provider.clone(),
+            "memory-provider-stream-error",
+            "Activated memory must survive provider stream failure after setup.",
+            "memory-provider-stream-error-artifact",
+        );
+
+        let events = collect_step(
+            &runtime,
+            "Topic request.",
+            crate::StepContext::new(CancellationToken::new()),
+        )
+        .await;
+
+        assert_eq!(
+            event_kind_names(&events),
+            ["SessionStarted", "StepStarted", "Failed"]
+        );
+        assert_eq!(failed_code(&events), Some("model_unavailable"));
+        assert_eq!(source.call_count(), 1);
+        assert_eq!(provider.recorded_requests().len(), 1);
+        assert_activated_memory_projection_retained(
+            &runtime,
+            "memory-provider-stream-error",
+            "Activated memory must survive provider stream failure after setup.",
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn provider_stream_cancelled_error_retains_activated_memory_projection() {
+        let provider = RecordingModelProvider::with_script(vec![
+            ScriptedModelProviderResponse::Stream(vec![Err(ModelError::Cancelled)]),
+        ]);
+        let (runtime, source) = runtime_with_provider_and_single_memory(
+            "runtime-memory-provider-stream-cancelled-error-retains",
+            provider.clone(),
+            "memory-provider-stream-cancelled-error",
+            "Activated memory must survive stream cancellation after setup.",
+            "memory-provider-stream-cancelled-error-artifact",
+        );
+
+        let events = collect_step(
+            &runtime,
+            "Topic request.",
+            crate::StepContext::new(CancellationToken::new()),
+        )
+        .await;
+
+        assert_eq!(
+            event_kind_names(&events),
+            ["SessionStarted", "StepStarted", "Cancelled"]
+        );
+        assert_eq!(source.call_count(), 1);
+        assert_eq!(provider.recorded_requests().len(), 1);
+        assert_activated_memory_projection_retained(
+            &runtime,
+            "memory-provider-stream-cancelled-error",
+            "Activated memory must survive stream cancellation after setup.",
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn provider_cancelled_finish_retains_activated_memory_projection() {
+        let provider =
+            RecordingModelProvider::with_script(vec![ScriptedModelProviderResponse::Stream(vec![
+                Ok(completed_event_with(Vec::new(), FinishReason::Cancelled)),
+            ])]);
+        let (runtime, source) = runtime_with_provider_and_single_memory(
+            "runtime-memory-provider-cancelled-finish-retains",
+            provider.clone(),
+            "memory-provider-cancelled-finish",
+            "Activated memory must survive cancelled finish after setup.",
+            "memory-provider-cancelled-finish-artifact",
+        );
+
+        let events = collect_step(
+            &runtime,
+            "Topic request.",
+            crate::StepContext::new(CancellationToken::new()),
+        )
+        .await;
+
+        assert_eq!(
+            event_kind_names(&events),
+            ["SessionStarted", "StepStarted", "Cancelled"]
+        );
+        assert_eq!(source.call_count(), 1);
+        assert_eq!(provider.recorded_requests().len(), 1);
+        assert_activated_memory_projection_retained(
+            &runtime,
+            "memory-provider-cancelled-finish",
+            "Activated memory must survive cancelled finish after setup.",
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn provider_completed_with_error_finish_retains_activated_memory_projection() {
+        let provider =
+            RecordingModelProvider::with_script(vec![ScriptedModelProviderResponse::Stream(vec![
+                Ok(completed_event_with(Vec::new(), FinishReason::Error)),
+            ])]);
+        let (runtime, source) = runtime_with_provider_and_single_memory(
+            "runtime-memory-provider-finish-error-retains",
+            provider.clone(),
+            "memory-provider-finish-error",
+            "Activated memory must survive provider error finish after setup.",
+            "memory-provider-finish-error-artifact",
+        );
+
+        let events = collect_step(
+            &runtime,
+            "Topic request.",
+            crate::StepContext::new(CancellationToken::new()),
+        )
+        .await;
+
+        assert_eq!(
+            event_kind_names(&events),
+            ["SessionStarted", "StepStarted", "Failed"]
+        );
+        assert_eq!(failed_code(&events), Some("model_finish_error"));
+        assert_eq!(source.call_count(), 1);
+        assert_eq!(provider.recorded_requests().len(), 1);
+        assert_activated_memory_projection_retained(
+            &runtime,
+            "memory-provider-finish-error",
+            "Activated memory must survive provider error finish after setup.",
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn provider_tool_call_pending_retains_activated_memory_projection_and_pending_gate_does_not_clear_it()
+     {
+        let call = model_tool_call("call-tool-pending");
+        let provider = RecordingModelProvider::with_script(vec![
+            ScriptedModelProviderResponse::Stream(vec![Ok(completed_event_with(
+                vec![ModelOutput::tool_call(call)],
+                FinishReason::ToolCalls,
+            ))]),
+        ]);
+        let (runtime, source) = runtime_with_provider_and_single_memory(
+            "runtime-memory-provider-tool-call-retains",
+            provider.clone(),
+            "memory-provider-tool-call",
+            "Activated memory must survive a pending tool call and pending gate.",
+            "memory-provider-tool-call-artifact",
+        );
+
+        let first_events = collect_step(
+            &runtime,
+            "Topic request.",
+            crate::StepContext::new(CancellationToken::new()),
+        )
+        .await;
+
+        assert_eq!(
+            event_kind_names(&first_events),
+            ["SessionStarted", "StepStarted", "ToolCallPending"]
+        );
+        assert_eq!(
+            runtime.pending_tool_calls().await,
+            vec![pending_tool_call("call-tool-pending")]
+        );
+        assert_eq!(source.call_count(), 1);
+        assert_eq!(provider.recorded_requests().len(), 1);
+        assert_activated_memory_projection_retained(
+            &runtime,
+            "memory-provider-tool-call",
+            "Activated memory must survive a pending tool call and pending gate.",
+        )
+        .await;
+
+        let second_events = collect_step(
+            &runtime,
+            "Second topic request.",
+            crate::StepContext::new(CancellationToken::new()),
+        )
+        .await;
+
+        assert_eq!(event_kind_names(&second_events), ["StepStarted", "Failed"]);
+        assert_eq!(
+            failed_code(&second_events),
+            Some(DIAGNOSTIC_TOOL_CALL_RESULT_REQUIRED)
+        );
+        assert_eq!(source.call_count(), 1);
+        assert_eq!(provider.recorded_requests().len(), 1);
+        assert_activated_memory_projection_retained(
+            &runtime,
+            "memory-provider-tool-call",
+            "Activated memory must survive a pending tool call and pending gate.",
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn provider_stop_completion_retains_activated_memory_projection() {
+        let provider = RecordingModelProvider::new();
+        let (runtime, source) = runtime_with_provider_and_single_memory(
+            "runtime-memory-provider-stop-retains",
+            provider.clone(),
+            "memory-provider-stop",
+            "Activated memory must survive provider stop completion after setup.",
+            "memory-provider-stop-artifact",
+        );
+
+        let events = collect_step(
+            &runtime,
+            "Topic request.",
+            crate::StepContext::new(CancellationToken::new()),
+        )
+        .await;
+
+        assert_eq!(
+            event_kind_names(&events),
+            [
+                "SessionStarted",
+                "StepStarted",
+                "ArtifactRecorded",
+                "StepCompleted"
+            ]
+        );
+        assert_eq!(source.call_count(), 1);
+        assert_eq!(provider.recorded_requests().len(), 1);
+        assert_activated_memory_projection_retained(
+            &runtime,
+            "memory-provider-stop",
+            "Activated memory must survive provider stop completion after setup.",
+        )
+        .await;
     }
 
     fn registered_tool_spec() -> ToolSpec {
