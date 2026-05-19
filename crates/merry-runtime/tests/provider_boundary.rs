@@ -11,9 +11,10 @@ use merry_llm::{
     ToolArguments, testing::FakeModelProvider,
 };
 use merry_runtime::{
-    ArtifactContent, ContextCompiler, ContextEvidence, ContextSummary, LedgerFactKind,
-    LedgerProjection, RegisteredTool, Runtime, StepContext, StepInput, ToolExecutionContext,
-    ToolExecutionError, ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture,
+    ArtifactContent, ArtifactContentKind, ArtifactError, ContextCompiler, ContextEvidence,
+    ContextSummary, LedgerFactKind, LedgerProjection, RegisteredTool, Runtime, StepContext,
+    StepInput, ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome, ToolExecutor,
+    ToolExecutorFuture,
 };
 use schemars::Schema;
 use serde_json::{Map, Value, json};
@@ -430,6 +431,105 @@ impl ToolExecutor for ScriptedToolExecutor {
     }
 }
 
+#[derive(Clone)]
+struct ReentrantMutationExecutor {
+    runtime: Arc<Mutex<Option<Runtime>>>,
+    observations: Arc<Mutex<Vec<ReentrantMutationObservation>>>,
+}
+
+impl ReentrantMutationExecutor {
+    fn new() -> Self {
+        Self {
+            runtime: Arc::new(Mutex::new(None)),
+            observations: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn set_runtime(&self, runtime: Runtime) {
+        *self
+            .runtime
+            .lock()
+            .expect("reentrant runtime mutex should not be poisoned") = Some(runtime);
+    }
+
+    fn observations(&self) -> Vec<ReentrantMutationObservation> {
+        self.observations
+            .lock()
+            .expect("reentrant observations mutex should not be poisoned")
+            .clone()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ReentrantMutationObservation {
+    RecordStepAlreadyActive,
+    SubmitStepAlreadyActive,
+    Other(String),
+}
+
+impl ToolExecutor for ReentrantMutationExecutor {
+    fn execute<'a>(
+        &'a self,
+        call: PendingToolCall,
+        _context: ToolExecutionContext,
+    ) -> ToolExecutorFuture<'a> {
+        Box::pin(async move {
+            let runtime = self
+                .runtime
+                .lock()
+                .expect("reentrant runtime mutex should not be poisoned")
+                .clone()
+                .expect("runtime should be installed before executor runs");
+            let artifact =
+                ArtifactRef::new(artifact_id("executor-inner-artifact"), ArtifactKind::Text);
+            let record_observation = match runtime
+                .record_artifact(
+                    artifact.clone(),
+                    ArtifactContent::text("inner artifact must not record\n"),
+                )
+                .await
+            {
+                Ok(_) => ReentrantMutationObservation::Other(
+                    "record_artifact unexpectedly succeeded".to_owned(),
+                ),
+                Err(merry_runtime::RuntimeError::StepAlreadyActive { .. }) => {
+                    ReentrantMutationObservation::RecordStepAlreadyActive
+                }
+                Err(error) => ReentrantMutationObservation::Other(error.to_string()),
+            };
+            self.observations
+                .lock()
+                .expect("reentrant observations mutex should not be poisoned")
+                .push(record_observation);
+
+            let result = ToolCallResult::succeeded(call.id().clone(), artifact);
+            let submit_observation = match runtime
+                .submit_tool_result(
+                    result,
+                    ArtifactContent::text("inner result must not resolve\n"),
+                )
+                .await
+            {
+                Ok(_) => ReentrantMutationObservation::Other(
+                    "submit_tool_result unexpectedly succeeded".to_owned(),
+                ),
+                Err(merry_runtime::RuntimeError::StepAlreadyActive { .. }) => {
+                    ReentrantMutationObservation::SubmitStepAlreadyActive
+                }
+                Err(error) => ReentrantMutationObservation::Other(error.to_string()),
+            };
+            self.observations
+                .lock()
+                .expect("reentrant observations mutex should not be poisoned")
+                .push(submit_observation);
+
+            Ok(ToolExecutionOutcome::succeeded_text(
+                "outer executor result\n",
+            ))
+        })
+    }
+}
+
 fn runtime_with_registered_tool(
     session: &str,
     provider: ScriptedModelProvider,
@@ -534,6 +634,57 @@ async fn runtime_step_with_provider_compiles_user_text_request_and_records_assis
     assert!(request.tools().is_empty());
     assert_eq!(request.generation(), &GenerationConfig::default());
     assert!(!request.generation().allow_parallel_tool_calls());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn reserved_assistant_output_external_recording_does_not_block_runtime_owned_output() {
+    let provider = FakeModelProvider::new(vec![Ok(completed_event())]);
+    let runtime = runtime_with_provider("provider-reserved-assistant-output", provider);
+    let artifact = ArtifactRef::new(artifact_id("assistant-output-3"), ArtifactKind::Text);
+    let before = runtime.ledger_projection().await;
+
+    let err = runtime
+        .record_artifact(
+            artifact.clone(),
+            ArtifactContent::text("external shadow output\n"),
+        )
+        .await
+        .expect_err("external recording should not use runtime-owned assistant output ids");
+    let after = runtime.ledger_projection().await;
+
+    assert!(matches!(
+        err,
+        merry_runtime::RuntimeError::ReservedArtifactId { artifact_id } if artifact_id == *artifact.id()
+    ));
+    assert_eq!(before, after);
+    let evidence_err = runtime
+        .evidence_ref(artifact.id(), EvidenceLocator::whole_artifact())
+        .await
+        .expect_err("reserved artifact must not be recorded");
+    assert!(matches!(
+        evidence_err,
+        merry_runtime::RuntimeError::Artifact {
+            source: ArtifactError::MissingArtifact { id }
+        } if id == *artifact.id()
+    ));
+
+    let events = collect_step(&runtime, "after reserved artifact").await;
+    assert_eq!(
+        event_kind_names(&events),
+        [
+            "SessionStarted",
+            "StepStarted",
+            "ArtifactRecorded",
+            "StepCompleted"
+        ]
+    );
+    let generated = assistant_output_artifact(&events);
+    assert_eq!(generated.id().as_str(), "assistant-output-2");
+    let evidence = runtime
+        .evidence_ref(generated.id(), EvidenceLocator::whole_artifact())
+        .await
+        .expect("runtime-owned assistant output should be readable");
+    assert_eq!(evidence.artifact_id, *generated.id());
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -834,6 +985,35 @@ async fn execute_registered_tool_success_records_artifact_resolves_and_compiles_
 
     let pending_events = collect_step(&runtime, "Search notes.").await;
     let pending = pending_tool_call(&pending_events).clone();
+    let reserved_artifact = ArtifactRef::new(artifact_id("tool-result-4"), ArtifactKind::Text);
+    let before_reserved = runtime.ledger_projection().await;
+    let reserved_err = runtime
+        .record_artifact(
+            reserved_artifact.clone(),
+            ArtifactContent::text("external shadow result\n"),
+        )
+        .await
+        .expect_err("external recording should not use runtime-owned tool result ids");
+    let after_reserved = runtime.ledger_projection().await;
+
+    assert!(matches!(
+        reserved_err,
+        merry_runtime::RuntimeError::ReservedArtifactId { artifact_id }
+            if artifact_id == *reserved_artifact.id()
+    ));
+    assert_eq!(before_reserved, after_reserved);
+    assert_eq!(runtime.pending_tool_calls().await, vec![pending.clone()]);
+    let evidence_err = runtime
+        .evidence_ref(reserved_artifact.id(), EvidenceLocator::whole_artifact())
+        .await
+        .expect_err("reserved tool result id must not be externally recorded");
+    assert!(matches!(
+        evidence_err,
+        merry_runtime::RuntimeError::Artifact {
+            source: ArtifactError::MissingArtifact { id }
+        } if id == *reserved_artifact.id()
+    ));
+
     let execution_events = runtime
         .execute_tool_call(pending.id(), ToolExecutionContext::default())
         .await
@@ -849,6 +1029,11 @@ async fn execute_registered_tool_success_records_artifact_resolves_and_compiles_
     assert_eq!(result.artifact().id().as_str(), "tool-result-3");
     assert_eq!(result.artifact().kind(), &ArtifactKind::Text);
     assert_eq!(result.call_id(), pending.id());
+    let evidence = runtime
+        .evidence_ref(result.artifact().id(), EvidenceLocator::whole_artifact())
+        .await
+        .expect("executor result artifact should be readable after ArtifactRecorded");
+    assert_eq!(evidence.artifact_id, *result.artifact().id());
     assert_eq!(executor.calls(), vec![pending.clone()]);
     assert_eq!(
         event_kind_names(&continuation_events),
@@ -941,6 +1126,162 @@ async fn executor_infrastructure_error_keeps_pending_without_artifact_or_result(
     ));
     assert_eq!(before, after);
     assert_eq!(runtime.pending_tool_calls().await, vec![pending]);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn execute_tool_blank_text_outcome_keeps_pending_without_artifact_or_result() {
+    let call = model_tool_call_with_id("call-blank-text-outcome");
+    let provider = ScriptedModelProvider::new(vec![vec![Ok(completed_outputs_event(
+        vec![ModelOutput::tool_call(call)],
+        FinishReason::ToolCalls,
+    ))]]);
+    let executor = ScriptedToolExecutor::succeeding_text(" \n\t ");
+    let runtime = runtime_with_registered_tool(
+        "provider-execute-tool-blank-text-outcome",
+        provider,
+        executor,
+    );
+    let pending_events = collect_step(&runtime, "Search notes.").await;
+    let pending = pending_tool_call(&pending_events).clone();
+    let before = runtime.ledger_projection().await;
+
+    let err = runtime
+        .execute_tool_call(pending.id(), ToolExecutionContext::default())
+        .await
+        .expect_err("blank executor text should not resolve the pending call");
+    let after = runtime.ledger_projection().await;
+
+    assert!(matches!(
+        err,
+        merry_runtime::RuntimeError::UnsupportedToolResultContent {
+            artifact_id,
+            content_kind: ArtifactContentKind::Text
+        } if artifact_id.as_str() == "tool-result-3"
+    ));
+    assert_eq!(before, after);
+    assert_eq!(runtime.pending_tool_calls().await, vec![pending]);
+    let evidence_err = runtime
+        .evidence_ref(
+            &artifact_id("tool-result-3"),
+            EvidenceLocator::whole_artifact(),
+        )
+        .await
+        .expect_err("blank executor outcome must not record an artifact");
+    assert!(matches!(
+        evidence_err,
+        merry_runtime::RuntimeError::Artifact {
+            source: ArtifactError::MissingArtifact { id }
+        } if id == artifact_id("tool-result-3")
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn execute_tool_blank_json_outcome_keeps_pending_without_artifact_or_result() {
+    let call = model_tool_call_with_id("call-blank-json-outcome");
+    let provider = ScriptedModelProvider::new(vec![vec![Ok(completed_outputs_event(
+        vec![ModelOutput::tool_call(call)],
+        FinishReason::ToolCalls,
+    ))]]);
+    let executor = ScriptedToolExecutor::new(ToolExecutorResponse::Outcome(
+        ToolExecutionOutcome::succeeded_json(" \n\t "),
+    ));
+    let runtime = runtime_with_registered_tool(
+        "provider-execute-tool-blank-json-outcome",
+        provider,
+        executor,
+    );
+    let pending_events = collect_step(&runtime, "Search notes.").await;
+    let pending = pending_tool_call(&pending_events).clone();
+    let before = runtime.ledger_projection().await;
+
+    let err = runtime
+        .execute_tool_call(pending.id(), ToolExecutionContext::default())
+        .await
+        .expect_err("blank executor JSON should not resolve the pending call");
+    let after = runtime.ledger_projection().await;
+
+    assert!(matches!(
+        err,
+        merry_runtime::RuntimeError::UnsupportedToolResultContent {
+            artifact_id,
+            content_kind: ArtifactContentKind::Json
+        } if artifact_id.as_str() == "tool-result-3"
+    ));
+    assert_eq!(before, after);
+    assert_eq!(runtime.pending_tool_calls().await, vec![pending]);
+    let evidence_err = runtime
+        .evidence_ref(
+            &artifact_id("tool-result-3"),
+            EvidenceLocator::whole_artifact(),
+        )
+        .await
+        .expect_err("blank executor outcome must not record an artifact");
+    assert!(matches!(
+        evidence_err,
+        merry_runtime::RuntimeError::Artifact {
+            source: ArtifactError::MissingArtifact { id }
+        } if id == artifact_id("tool-result-3")
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn executor_reentrant_runtime_mutations_are_rejected_while_outer_execution_resolves() {
+    let call = model_tool_call_with_id("call-reentrant-executor");
+    let provider = ScriptedModelProvider::new(vec![vec![Ok(completed_outputs_event(
+        vec![ModelOutput::tool_call(call)],
+        FinishReason::ToolCalls,
+    ))]]);
+    let executor = ReentrantMutationExecutor::new();
+    let runtime = Runtime::builder(session_id("provider-execute-tool-reentrant"))
+        .register_tool(RegisteredTool::new(
+            test_tool_spec("search_notes"),
+            Arc::new(executor.clone()),
+        ))
+        .model_provider(Arc::new(provider), model_name())
+        .build()
+        .expect("runtime should build");
+    executor.set_runtime(runtime.clone());
+    let pending_events = collect_step(&runtime, "Search notes.").await;
+    let pending = pending_tool_call(&pending_events).clone();
+
+    let execution_events = runtime
+        .execute_tool_call(pending.id(), ToolExecutionContext::default())
+        .await
+        .expect("outer registered executor result should resolve");
+
+    assert_eq!(
+        executor.observations(),
+        [
+            ReentrantMutationObservation::RecordStepAlreadyActive,
+            ReentrantMutationObservation::SubmitStepAlreadyActive,
+        ]
+    );
+    assert_eq!(
+        event_kind_names(&execution_events),
+        ["ArtifactRecorded", "ToolCallResolved"]
+    );
+    let result = resolved_tool_result(&execution_events);
+    assert_eq!(result.artifact().id().as_str(), "tool-result-3");
+    assert_eq!(result.call_id(), pending.id());
+    assert!(runtime.pending_tool_calls().await.is_empty());
+    let outer_evidence = runtime
+        .evidence_ref(result.artifact().id(), EvidenceLocator::whole_artifact())
+        .await
+        .expect("outer executor result artifact should be readable");
+    assert_eq!(outer_evidence.artifact_id, *result.artifact().id());
+    let inner_evidence_err = runtime
+        .evidence_ref(
+            &artifact_id("executor-inner-artifact"),
+            EvidenceLocator::whole_artifact(),
+        )
+        .await
+        .expect_err("reentrant executor artifact must not be recorded");
+    assert!(matches!(
+        inner_evidence_err,
+        merry_runtime::RuntimeError::Artifact {
+            source: ArtifactError::MissingArtifact { id }
+        } if id == artifact_id("executor-inner-artifact")
+    ));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1304,7 +1645,7 @@ async fn repeated_provider_tool_call_id_after_pending_fails_without_second_pendi
     );
 
     let result_artifact = ArtifactRef::new(
-        artifact_id("tool-result-after-duplicate-pending"),
+        artifact_id("manual-result-after-duplicate-pending"),
         ArtifactKind::Text,
     );
     let result = ToolCallResult::succeeded(
@@ -1321,7 +1662,7 @@ async fn repeated_provider_tool_call_id_after_pending_fails_without_second_pendi
     let duplicate_result = ToolCallResult::succeeded(
         ToolCallId::new("call-1").expect("valid call id"),
         ArtifactRef::new(
-            artifact_id("tool-result-after-duplicate-second"),
+            artifact_id("manual-result-after-duplicate-second"),
             ArtifactKind::Text,
         ),
     );
@@ -1356,7 +1697,8 @@ async fn submit_tool_result_records_success_artifact_resolves_pending_and_update
     let runtime = runtime_with_scripted_provider("provider-tool-result-success", provider.clone());
     let pending_events = collect_step(&runtime, "Request a tool.").await;
     let call = pending_tool_call(&pending_events).clone();
-    let result_artifact = ArtifactRef::new(artifact_id("tool-result-success"), ArtifactKind::Text);
+    let result_artifact =
+        ArtifactRef::new(artifact_id("manual-result-success"), ArtifactKind::Text);
     let result = ToolCallResult::succeeded(call.id().clone(), result_artifact.clone());
 
     let events = runtime
@@ -1438,6 +1780,46 @@ async fn submit_tool_result_records_success_artifact_resolves_pending_and_update
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn submit_tool_result_rejects_reserved_artifact_ids_without_mutation() {
+    let provider = FakeModelProvider::new(vec![Ok(completed_outputs_event(
+        vec![ModelOutput::tool_call(model_tool_call())],
+        FinishReason::ToolCalls,
+    ))]);
+    let runtime = runtime_with_provider("provider-tool-result-reserved-submit", provider);
+    let pending_events = collect_step(&runtime, "Request a tool.").await;
+    let call = pending_tool_call(&pending_events).clone();
+    let before = runtime.ledger_projection().await;
+
+    for reserved_id in ["tool-result-4", "assistant-output-4"] {
+        let artifact = ArtifactRef::new(artifact_id(reserved_id), ArtifactKind::Text);
+        let result = ToolCallResult::succeeded(call.id().clone(), artifact.clone());
+        let err = runtime
+            .submit_tool_result(result, ArtifactContent::text("external shadow result\n"))
+            .await
+            .expect_err("external submit should not use runtime-owned artifact ids");
+        let after = runtime.ledger_projection().await;
+
+        assert!(matches!(
+            err,
+            merry_runtime::RuntimeError::ReservedArtifactId { artifact_id }
+                if artifact_id == *artifact.id()
+        ));
+        assert_eq!(before, after);
+        assert_eq!(runtime.pending_tool_calls().await, vec![call.clone()]);
+        let evidence_err = runtime
+            .evidence_ref(artifact.id(), EvidenceLocator::whole_artifact())
+            .await
+            .expect_err("reserved submitted result artifact must not be recorded");
+        assert!(matches!(
+            evidence_err,
+            merry_runtime::RuntimeError::Artifact {
+                source: merry_runtime::ArtifactError::MissingArtifact { id }
+            } if id == *artifact.id()
+        ));
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn submitted_tool_result_is_compiled_as_provider_neutral_continuation() {
     let arguments = Map::from_iter([
         ("query".to_owned(), json!("runtime continuation")),
@@ -1458,7 +1840,7 @@ async fn submitted_tool_result_is_compiled_as_provider_neutral_continuation() {
     let pending_events = collect_step(&runtime, "Request a search.").await;
     let call = pending_tool_call(&pending_events).clone();
     let result_artifact = ArtifactRef::new(
-        artifact_id("tool-result-continuation-text"),
+        artifact_id("manual-result-continuation-text"),
         ArtifactKind::Text,
     );
     let result = ToolCallResult::succeeded(call.id().clone(), result_artifact.clone());
@@ -1533,7 +1915,7 @@ async fn successful_provider_step_consumes_sent_tool_continuation_without_replay
     let pending_events = collect_step(&runtime, "Request a tool.").await;
     let call = pending_tool_call(&pending_events).clone();
     let result_artifact = ArtifactRef::new(
-        artifact_id("tool-result-consumed-on-success"),
+        artifact_id("manual-result-consumed-on-success"),
         ArtifactKind::Text,
     );
     runtime
@@ -1582,7 +1964,7 @@ async fn sent_tool_continuation_is_consumed_when_provider_records_new_pending_ca
             ToolCallResult::succeeded(
                 old_call.id().clone(),
                 ArtifactRef::new(
-                    artifact_id("tool-result-before-new-pending"),
+                    artifact_id("manual-result-before-new-pending"),
                     ArtifactKind::Text,
                 ),
             ),
@@ -1650,7 +2032,7 @@ async fn duplicate_new_tool_call_id_does_not_consume_sent_tool_continuation() {
             ToolCallResult::succeeded(
                 old_call.id().clone(),
                 ArtifactRef::new(
-                    artifact_id("tool-result-before-duplicate-new-id"),
+                    artifact_id("manual-result-before-duplicate-new-id"),
                     ArtifactKind::Text,
                 ),
             ),
@@ -1709,7 +2091,7 @@ async fn provider_error_does_not_consume_tool_continuation_and_retry_replays_it(
             ToolCallResult::succeeded(
                 call.id().clone(),
                 ArtifactRef::new(
-                    artifact_id("tool-result-retry-after-error"),
+                    artifact_id("manual-result-retry-after-error"),
                     ArtifactKind::Text,
                 ),
             ),
@@ -1755,7 +2137,7 @@ async fn provider_setup_error_does_not_consume_tool_continuation_and_retry_repla
             ToolCallResult::succeeded(
                 call.id().clone(),
                 ArtifactRef::new(
-                    artifact_id("tool-result-retry-after-setup-error"),
+                    artifact_id("manual-result-retry-after-setup-error"),
                     ArtifactKind::Text,
                 ),
             ),
@@ -1798,7 +2180,7 @@ async fn provider_cancel_does_not_consume_tool_continuation_and_retry_replays_it
             ToolCallResult::succeeded(
                 call.id().clone(),
                 ArtifactRef::new(
-                    artifact_id("tool-result-retry-after-cancel"),
+                    artifact_id("manual-result-retry-after-cancel"),
                     ArtifactKind::Text,
                 ),
             ),
@@ -1842,7 +2224,7 @@ async fn failed_tool_result_status_diagnostic_and_content_are_compiled_without_r
     let pending_events = collect_step(&runtime, "Request a failing tool.").await;
     let call = pending_tool_call(&pending_events).clone();
     let result_artifact = ArtifactRef::new(
-        artifact_id("tool-result-continuation-failed-json"),
+        artifact_id("manual-result-continuation-failed-json"),
         ArtifactKind::Json,
     );
     let result = failed_tool_result(
@@ -1900,7 +2282,7 @@ async fn submit_failed_tool_result_preserves_diagnostic_and_failure_artifact_wit
     let call = pending_tool_call(&pending_events).clone();
     let diagnostic = merry_core::ErrorInfo::new("tool_failed", "Tool exited with status 2")
         .expect("valid diagnostic");
-    let result_artifact = ArtifactRef::new(artifact_id("tool-result-failed"), ArtifactKind::Json);
+    let result_artifact = ArtifactRef::new(artifact_id("manual-result-failed"), ArtifactKind::Json);
     let result = ToolCallResult::failed(call.id().clone(), result_artifact.clone(), diagnostic);
 
     let events = runtime
@@ -1988,7 +2370,7 @@ async fn duplicate_tool_result_after_resolved_does_not_mutate_session() {
     let runtime = runtime_with_provider("provider-tool-result-duplicate", provider);
     let pending_events = collect_step(&runtime, "Request a tool.").await;
     let call = pending_tool_call(&pending_events).clone();
-    let first_artifact = ArtifactRef::new(artifact_id("tool-result-first"), ArtifactKind::Text);
+    let first_artifact = ArtifactRef::new(artifact_id("manual-result-first"), ArtifactKind::Text);
     let first = ToolCallResult::succeeded(call.id().clone(), first_artifact.clone());
     runtime
         .submit_tool_result(first, ArtifactContent::text("first result\n"))
@@ -1996,7 +2378,7 @@ async fn duplicate_tool_result_after_resolved_does_not_mutate_session() {
         .expect("first result should resolve");
     let projection_before_duplicate = runtime.ledger_projection().await;
     let duplicate_artifact =
-        ArtifactRef::new(artifact_id("tool-result-duplicate"), ArtifactKind::Text);
+        ArtifactRef::new(artifact_id("manual-result-duplicate"), ArtifactKind::Text);
     let duplicate = ToolCallResult::succeeded(call.id().clone(), duplicate_artifact.clone());
 
     let err = runtime
@@ -2037,7 +2419,7 @@ async fn artifact_error_while_submitting_tool_result_keeps_call_pending_and_sequ
     let pending_events = collect_step(&runtime, "Request a tool.").await;
     let call = pending_tool_call(&pending_events).clone();
     let duplicate_artifact =
-        ArtifactRef::new(artifact_id("tool-result-conflict"), ArtifactKind::Text);
+        ArtifactRef::new(artifact_id("manual-result-conflict"), ArtifactKind::Text);
     runtime
         .record_artifact(
             duplicate_artifact.clone(),
@@ -2087,7 +2469,10 @@ async fn incompatible_tool_result_content_keeps_call_pending_and_sequence_stable
     let projection_before_error = runtime.ledger_projection().await;
     let result = ToolCallResult::succeeded(
         call.id().clone(),
-        ArtifactRef::new(artifact_id("tool-result-json-mismatch"), ArtifactKind::Json),
+        ArtifactRef::new(
+            artifact_id("manual-result-json-mismatch"),
+            ArtifactKind::Json,
+        ),
     );
 
     let err = runtime
@@ -2137,7 +2522,7 @@ async fn blank_text_tool_result_keeps_call_pending_and_sequence_stable() {
     let projection_before_error = runtime.ledger_projection().await;
     let result = ToolCallResult::succeeded(
         call.id().clone(),
-        ArtifactRef::new(artifact_id("tool-result-blank-text"), ArtifactKind::Text),
+        ArtifactRef::new(artifact_id("manual-result-blank-text"), ArtifactKind::Text),
     );
 
     let err = runtime
@@ -2190,7 +2575,7 @@ async fn blank_json_tool_result_keeps_call_pending_and_sequence_stable() {
     let projection_before_error = runtime.ledger_projection().await;
     let result = ToolCallResult::succeeded(
         call.id().clone(),
-        ArtifactRef::new(artifact_id("tool-result-blank-json"), ArtifactKind::Json),
+        ArtifactRef::new(artifact_id("manual-result-blank-json"), ArtifactKind::Json),
     );
 
     let err = runtime
@@ -2232,7 +2617,7 @@ async fn submit_tool_result_rejects_unsupported_content_kind_without_mutation() 
     let projection_before_error = runtime.ledger_projection().await;
     let result = ToolCallResult::succeeded(
         call.id().clone(),
-        ArtifactRef::new(artifact_id("tool-result-binary"), ArtifactKind::Binary),
+        ArtifactRef::new(artifact_id("manual-result-binary"), ArtifactKind::Binary),
     );
 
     let err = runtime

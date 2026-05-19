@@ -1,4 +1,10 @@
 //! Runtime-owned tool execution API and registry.
+//!
+//! [`ToolExecutor`] is an outcome-only boundary. Executors should run tool
+//! infrastructure and return [`ToolExecutionOutcome`]; they should not call
+//! runtime mutation APIs as callbacks. [`crate::Runtime::execute_tool_call`]
+//! already owns the active runtime step permit while the executor runs, so
+//! reentrant mutation attempts are rejected by normal step admission.
 
 use crate::ArtifactContent;
 use merry_core::{ErrorInfo, PendingToolCall, ToolCallResultStatus, ToolName, ToolSpec};
@@ -10,6 +16,11 @@ use tokio_util::sync::CancellationToken;
 pub type ToolExecutorFuture<'a> = Pin<Box<dyn Future<Output = ToolExecutionResult> + Send + 'a>>;
 
 /// Result returned by a runtime-owned tool executor.
+///
+/// [`ToolExecutionError`] represents executor infrastructure failure or
+/// cooperative cancellation. Tool-domain failures should be returned as a
+/// failed [`ToolExecutionOutcome`] so runtime can durably resolve the pending
+/// tool call.
 pub type ToolExecutionResult = Result<ToolExecutionOutcome, ToolExecutionError>;
 
 /// Context passed to a tool executor.
@@ -41,6 +52,9 @@ impl Default for ToolExecutionContext {
 }
 
 /// Object-safe runtime tool executor boundary.
+///
+/// The executor returns content and status only. Runtime code records the
+/// artifact, emits events, updates the ledger, and resolves the pending call.
 pub trait ToolExecutor: Send + Sync {
     /// Executes one pending model-requested tool call.
     fn execute<'a>(
@@ -54,6 +68,7 @@ pub trait ToolExecutor: Send + Sync {
 ///
 /// Runtime code turns this into a stable artifact reference and a
 /// `ToolCallResult`; executors only provide the exact text or JSON payload.
+/// This type intentionally carries no artifact id, event, or ledger update.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolExecutionOutcome {
     status: ToolCallResultStatus,
@@ -126,6 +141,10 @@ impl ToolExecutionOutcome {
 }
 
 /// Infrastructure-level errors raised by tool executors.
+///
+/// Use this for cancellation or infrastructure failures only. If the tool ran
+/// and produced a domain-level failure, return a failed [`ToolExecutionOutcome`]
+/// instead.
 #[derive(Debug, Error)]
 pub enum ToolExecutionError {
     /// Tool execution was cancelled cooperatively.
@@ -151,6 +170,11 @@ impl ToolExecutionError {
 }
 
 /// Runtime-owned registered tool definition.
+///
+/// A registered tool binds a provider-visible spec to an executor. It does not
+/// start or automate a tool loop. [`crate::Runtime::submit_tool_result`] is the
+/// external/manual result path; [`crate::Runtime::execute_tool_call`] is the
+/// runtime-registered executor path.
 #[derive(Clone)]
 pub struct RegisteredTool {
     spec: ToolSpec,

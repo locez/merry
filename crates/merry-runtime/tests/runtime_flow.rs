@@ -267,6 +267,43 @@ async fn submit_tool_result_is_rejected_while_step_is_active() {
     drop(stream);
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn submit_tool_result_reserved_id_keeps_step_already_active_priority() {
+    let runtime = Runtime::builder(session_id())
+        .event_buffer_size(NonZeroUsize::new(1).expect("non-zero buffer"))
+        .build()
+        .expect("runtime should build");
+    let stream = runtime
+        .step(
+            StepInput::user_text("hold the stream open").expect("valid step input"),
+            StepContext::new(CancellationToken::new()),
+        )
+        .expect("step should start");
+    tokio::task::yield_now().await;
+
+    let result = tool_result(
+        "call-while-active",
+        "tool-result-active",
+        ArtifactKind::Text,
+    );
+    let err = runtime
+        .submit_tool_result(
+            result,
+            ArtifactContent::text("should not reach reserved validation\n"),
+        )
+        .await
+        .expect_err("active step should be checked before reserved artifact id");
+
+    assert!(matches!(
+        err,
+        RuntimeError::StepAlreadyActive {
+            session_id: active_session
+        } if active_session == session_id()
+    ));
+
+    drop(stream);
+}
+
 #[track_caller]
 fn assert_sequences(events: &[RuntimeEvent], expected: &[u64]) {
     assert_eq!(
@@ -362,6 +399,72 @@ async fn record_artifact_is_rejected_while_step_is_active() {
         RuntimeError::Artifact {
             source: ArtifactError::MissingArtifact { id }
         } if id == *artifact.id()
+    ));
+
+    drop(stream);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn record_artifact_rejects_reserved_assistant_output_id_without_mutation() {
+    let runtime = Runtime::builder(session_id())
+        .build()
+        .expect("runtime should build");
+    let artifact = ArtifactRef::new(artifact_id("assistant-output-3"), ArtifactKind::Text);
+    let before = runtime.ledger_projection().await;
+
+    let err = runtime
+        .record_artifact(
+            artifact.clone(),
+            ArtifactContent::text("external shadow output\n"),
+        )
+        .await
+        .expect_err("external recording should not use runtime-owned assistant output ids");
+    let after = runtime.ledger_projection().await;
+
+    assert!(matches!(
+        err,
+        RuntimeError::ReservedArtifactId { artifact_id } if artifact_id == *artifact.id()
+    ));
+    assert_projection_unchanged(&before, &after);
+    let evidence_err = runtime
+        .evidence_ref(artifact.id(), EvidenceLocator::whole_artifact())
+        .await
+        .expect_err("reserved artifact must not be recorded");
+    assert!(matches!(
+        evidence_err,
+        RuntimeError::Artifact {
+            source: ArtifactError::MissingArtifact { id }
+        } if id == *artifact.id()
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn record_artifact_reserved_id_keeps_step_already_active_priority() {
+    let runtime = Runtime::builder(session_id())
+        .event_buffer_size(NonZeroUsize::new(1).expect("non-zero buffer"))
+        .build()
+        .expect("runtime should build");
+    let stream = runtime
+        .step(
+            StepInput::user_text("hold active step").expect("valid step input"),
+            StepContext::new(CancellationToken::new()),
+        )
+        .expect("step should start");
+    tokio::task::yield_now().await;
+
+    let err = runtime
+        .record_artifact(
+            ArtifactRef::new(artifact_id("assistant-output-3"), ArtifactKind::Text),
+            ArtifactContent::text("should not reach reserved validation\n"),
+        )
+        .await
+        .expect_err("active step should be checked before reserved artifact id");
+
+    assert!(matches!(
+        err,
+        RuntimeError::StepAlreadyActive {
+            session_id: active_session
+        } if active_session == session_id()
     ));
 
     drop(stream);

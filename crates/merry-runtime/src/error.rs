@@ -21,6 +21,13 @@ pub enum RuntimeError {
         reason: &'static str,
     },
 
+    /// External artifact recording tried to use a runtime-owned artifact id prefix.
+    #[error("artifact id {artifact_id} uses a runtime-reserved prefix")]
+    ReservedArtifactId {
+        /// Rejected artifact identifier.
+        artifact_id: ArtifactId,
+    },
+
     /// A submitted tool result does not match any pending or resolved call.
     #[error("tool call {call_id} is not pending in session {session_id}")]
     UnknownToolCall {

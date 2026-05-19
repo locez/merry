@@ -13,6 +13,9 @@ use merry_core::{
 };
 use std::collections::BTreeSet;
 
+const ASSISTANT_OUTPUT_ARTIFACT_PREFIX: &str = "assistant-output-";
+const TOOL_RESULT_ARTIFACT_PREFIX: &str = "tool-result-";
+
 /// Resolved tool call state that has not yet been compiled into a provider request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedToolContinuation {
@@ -401,13 +404,22 @@ impl SessionState {
     }
 }
 
+pub(crate) fn is_runtime_reserved_artifact_id(artifact_id: &ArtifactId) -> bool {
+    artifact_id
+        .as_str()
+        .starts_with(ASSISTANT_OUTPUT_ARTIFACT_PREFIX)
+        || artifact_id
+            .as_str()
+            .starts_with(TOOL_RESULT_ARTIFACT_PREFIX)
+}
+
 fn assistant_output_id(sequence: u64) -> ArtifactId {
-    ArtifactId::new(&format!("assistant-output-{sequence}"))
+    ArtifactId::new(&format!("{ASSISTANT_OUTPUT_ARTIFACT_PREFIX}{sequence}"))
         .expect("assistant output artifact id uses a valid static prefix and sequence")
 }
 
 fn tool_result_id(sequence: u64) -> ArtifactId {
-    ArtifactId::new(&format!("tool-result-{sequence}"))
+    ArtifactId::new(&format!("{TOOL_RESULT_ARTIFACT_PREFIX}{sequence}"))
         .expect("tool result artifact id uses a valid static prefix and sequence")
 }
 
