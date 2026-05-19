@@ -19,8 +19,70 @@ pub(crate) struct ChatCompletionRequest<'a> {
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct ChatMessage<'a> {
+#[serde(untagged)]
+pub(crate) enum ChatMessage<'a> {
+    Text(ChatTextMessage<'a>),
+    AssistantToolCalls(ChatAssistantToolCallsMessage<'a>),
+    ToolResult(ChatToolResultMessage<'a>),
+}
+
+impl<'a> ChatMessage<'a> {
+    pub(crate) fn text(role: &'static str, content: &'a str) -> Self {
+        Self::Text(ChatTextMessage { role, content })
+    }
+
+    pub(crate) fn assistant_tool_call(id: &'a str, name: &'a str, arguments: String) -> Self {
+        Self::AssistantToolCalls(ChatAssistantToolCallsMessage {
+            role: "assistant",
+            content: None,
+            tool_calls: vec![ChatRequestToolCall {
+                id,
+                kind: "function",
+                function: ChatRequestToolCallFunction { name, arguments },
+            }],
+        })
+    }
+
+    pub(crate) fn tool_result(tool_call_id: &'a str, content: &'a str) -> Self {
+        Self::ToolResult(ChatToolResultMessage {
+            role: "tool",
+            tool_call_id,
+            content,
+        })
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ChatTextMessage<'a> {
     pub(crate) role: &'static str,
+    pub(crate) content: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ChatAssistantToolCallsMessage<'a> {
+    pub(crate) role: &'static str,
+    pub(crate) content: Option<&'static str>,
+    pub(crate) tool_calls: Vec<ChatRequestToolCall<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ChatRequestToolCall<'a> {
+    pub(crate) id: &'a str,
+    #[serde(rename = "type")]
+    pub(crate) kind: &'static str,
+    pub(crate) function: ChatRequestToolCallFunction<'a>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ChatRequestToolCallFunction<'a> {
+    pub(crate) name: &'a str,
+    pub(crate) arguments: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ChatToolResultMessage<'a> {
+    pub(crate) role: &'static str,
+    pub(crate) tool_call_id: &'a str,
     pub(crate) content: &'a str,
 }
 

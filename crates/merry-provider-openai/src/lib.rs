@@ -14,10 +14,12 @@ pub use provider::OpenAiProvider;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use merry_core::{ToolInputSchema, ToolName, ToolSpec};
+    use merry_core::{ToolCallResultStatus, ToolInputSchema, ToolName, ToolSpec};
     use merry_llm::{
         FinishReason, GenerationConfig, ModelContent, ModelEvent, ModelMessage, ModelMessageRole,
-        ModelName, ModelOutput, ModelRequest, ProviderErrorKind, Usage,
+        ModelName, ModelOutput, ModelRequest, ModelToolCall, ModelToolCallId,
+        ModelToolContinuation, ModelToolResult, ModelToolResultContent, ProviderErrorKind,
+        ToolArguments, Usage,
     };
     use serde_json::{Value, json};
 
@@ -75,6 +77,42 @@ mod tests {
             vec![message(ModelMessageRole::User, "Weather in Shanghai?")],
             vec![weather_tool()],
             GenerationConfig::new(Some(256), true).expect("valid generation config"),
+        )
+        .expect("valid model request")
+    }
+
+    fn tool_continuation_with_json_result() -> ModelToolContinuation {
+        let call = ModelToolCall::new(
+            ModelToolCallId::new("call_abc123").expect("valid call id"),
+            ToolName::new("lookup_weather").expect("valid tool name"),
+            ToolArguments::try_from(json!({
+                "city": "Shanghai",
+                "units": "metric"
+            }))
+            .expect("valid tool arguments"),
+        );
+        let result = ModelToolResult::new(
+            call.id().clone(),
+            ToolCallResultStatus::Succeeded,
+            ModelToolResultContent::json(r#"{"temperature_c":22,"condition":"clear"}"#)
+                .expect("valid JSON result"),
+            None,
+        )
+        .expect("valid tool result");
+
+        ModelToolContinuation::new(call, result).expect("valid continuation")
+    }
+
+    fn request_with_tool_continuation() -> ModelRequest {
+        ModelRequest::new_with_continuations(
+            ModelName::new("gpt-4.1-mini").expect("valid model name"),
+            vec![message(
+                ModelMessageRole::User,
+                "Continue after tool result.",
+            )],
+            vec![weather_tool()],
+            vec![tool_continuation_with_json_result()],
+            GenerationConfig::new(Some(256), false).expect("valid generation config"),
         )
         .expect("valid model request")
     }
@@ -215,6 +253,7 @@ mod tests {
 
         let runtime_state_fields = [
             "previous_response_id",
+            "store",
             "thread_id",
             "session_id",
             "ledger_id",
@@ -240,6 +279,58 @@ mod tests {
         assert!(!object.contains_key("tools"));
         assert!(!object.contains_key("tool_choice"));
         assert!(!object.contains_key("max_completion_tokens"));
+    }
+
+    #[test]
+    fn rendered_request_appends_tool_continuation_chat_messages_without_runtime_state() {
+        let rendered =
+            crate::render::render_chat_completion_request(&request_with_tool_continuation())
+                .expect("request should render");
+
+        assert_eq!(
+            rendered["messages"],
+            json!([
+                { "role": "user", "content": "Continue after tool result." },
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [
+                        {
+                            "id": "call_abc123",
+                            "type": "function",
+                            "function": {
+                                "name": "lookup_weather",
+                                "arguments": "{\"city\":\"Shanghai\",\"units\":\"metric\"}"
+                            }
+                        }
+                    ]
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_abc123",
+                    "content": "{\"temperature_c\":22,\"condition\":\"clear\"}"
+                }
+            ])
+        );
+        assert_eq!(rendered["tools"][0]["type"], "function");
+        assert_eq!(
+            rendered["tools"][0]["function"]["name"], "lookup_weather",
+            "tool specs should remain rendered as Chat Completions function tools"
+        );
+
+        let object = rendered
+            .as_object()
+            .expect("request JSON should be an object");
+        for field in [
+            "previous_response_id",
+            "store",
+            "thread_id",
+            "session_id",
+            "ledger_id",
+            "conversation",
+        ] {
+            assert!(!object.contains_key(field), "{field} should be omitted");
+        }
     }
 
     #[test]

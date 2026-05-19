@@ -19,5 +19,8 @@ pub use request::{
     GenerationConfig, ModelContent, ModelMessage, ModelMessageRole, ModelName, ModelRequest,
 };
 pub use response::{FinishReason, ModelOutput, ModelResponse};
-pub use tool::{ModelToolCall, ModelToolCallId, ToolArguments};
+pub use tool::{
+    ModelToolCall, ModelToolCallId, ModelToolContinuation, ModelToolResult, ModelToolResultContent,
+    ToolArguments,
+};
 pub use usage::Usage;

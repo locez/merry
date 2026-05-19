@@ -1,8 +1,14 @@
 //! Runtime step inputs, execution context, and provider request compilation.
 
-use crate::{CompiledContext, RuntimeError};
+use crate::{
+    CompiledContext, RuntimeError, artifact::ArtifactContent,
+    session::ResolvedToolContinuationSnapshot,
+};
+use merry_core::{PendingToolCall, ToolCallResult, ToolCallResultStatus};
 use merry_llm::{
     GenerationConfig, ModelContent, ModelMessage, ModelMessageRole, ModelName, ModelRequest,
+    ModelToolCall, ModelToolCallId, ModelToolContinuation, ModelToolResult, ModelToolResultContent,
+    ToolArguments,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -101,6 +107,7 @@ pub(crate) fn compile_step_model_request(
     input: &StepInput,
     model: &ModelName,
     context: &CompiledContext,
+    continuations: &[ResolvedToolContinuationSnapshot],
     generation_config: GenerationConfig,
 ) -> Result<ModelRequest, merry_llm::ModelError> {
     let context_snapshot = context.to_snapshot();
@@ -118,7 +125,73 @@ pub(crate) fn compile_step_model_request(
         ModelContent::text(input.text())?,
     )?);
 
-    ModelRequest::new(model.clone(), messages, Vec::new(), generation_config)
+    let continuations = continuations
+        .iter()
+        .map(model_tool_continuation_from_snapshot)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    ModelRequest::new_with_continuations(
+        model.clone(),
+        messages,
+        Vec::new(),
+        continuations,
+        generation_config,
+    )
+}
+
+fn model_tool_continuation_from_snapshot(
+    snapshot: &ResolvedToolContinuationSnapshot,
+) -> Result<ModelToolContinuation, merry_llm::ModelError> {
+    let call = model_tool_call_from_pending(snapshot.call())?;
+    let result = model_tool_result_from_result(snapshot.result(), snapshot.content())?;
+    ModelToolContinuation::new(call, result)
+}
+
+fn model_tool_call_from_pending(
+    call: &PendingToolCall,
+) -> Result<ModelToolCall, merry_llm::ModelError> {
+    Ok(ModelToolCall::new(
+        ModelToolCallId::new(call.id().as_str())?,
+        call.name().clone(),
+        ToolArguments::new(call.arguments().as_object().clone()),
+    ))
+}
+
+fn model_tool_result_from_result(
+    result: &ToolCallResult,
+    content: &ArtifactContent,
+) -> Result<ModelToolResult, merry_llm::ModelError> {
+    let call_id = ModelToolCallId::new(result.call_id().as_str())?;
+    let content = model_tool_result_content(content)?;
+
+    match result.status() {
+        ToolCallResultStatus::Succeeded => ModelToolResult::new(
+            call_id,
+            ToolCallResultStatus::Succeeded,
+            content,
+            result.diagnostic().cloned(),
+        ),
+        ToolCallResultStatus::Failed => ModelToolResult::new(
+            call_id,
+            ToolCallResultStatus::Failed,
+            content,
+            result.diagnostic().cloned(),
+        ),
+    }
+}
+
+fn model_tool_result_content(
+    content: &ArtifactContent,
+) -> Result<ModelToolResultContent, merry_llm::ModelError> {
+    match content {
+        ArtifactContent::Text(text) => ModelToolResultContent::text(text),
+        ArtifactContent::Json(json) => ModelToolResultContent::json(json),
+        ArtifactContent::Binary(_) | ArtifactContent::Image(_) | ArtifactContent::Other(_) => {
+            Err(merry_llm::ModelError::invalid_request(
+                "tool result continuation content must be text or json",
+            ))
+        }
+    }
 }
 
 #[cfg(test)]

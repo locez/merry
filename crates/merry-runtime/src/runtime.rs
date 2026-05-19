@@ -30,6 +30,7 @@ const DIAGNOSTIC_MODEL_TOOL_CALL_MISSING: &str = "model_tool_call_missing";
 const DIAGNOSTIC_MODEL_TOOL_CALL_MIXED_OUTPUT: &str = "model_tool_call_mixed_output";
 const DIAGNOSTIC_MODEL_PARALLEL_TOOL_CALLS_UNSUPPORTED: &str =
     "model_parallel_tool_calls_unsupported";
+const DIAGNOSTIC_TOOL_CALL_RESULT_REQUIRED: &str = "tool_call_result_required";
 
 /// Merry runtime handle for one session.
 #[derive(Clone)]
@@ -291,10 +292,32 @@ async fn run_provider_step(
     generation_config: GenerationConfig,
     provider_config: ModelProviderConfig,
 ) {
-    let snapshot = {
+    if has_unresolved_pending_tool_calls(inner).await {
+        let diagnostic = diagnostic_from_text(
+            DIAGNOSTIC_TOOL_CALL_RESULT_REQUIRED,
+            "a pending tool call must be resolved before the next provider step",
+        );
+        let _ = send_failed_event(inner, sender, token, diagnostic).await;
+        return;
+    }
+
+    let (snapshot, continuations) = {
         let session = inner.session.lock().await;
-        session.context_snapshot()
+        let continuations = match session.unconsumed_tool_continuation_snapshots() {
+            Ok(continuations) => continuations,
+            Err(error) => {
+                let diagnostic = diagnostic_from_text(
+                    "tool_continuation_artifact",
+                    format!("tool continuation artifact could not be read: {error}"),
+                );
+                drop(session);
+                let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                return;
+            }
+        };
+        (session.context_snapshot(), continuations)
     };
+    let sent_continuation_count = continuations.len();
 
     let compiled_context = match ContextCompiler::new().compile(&snapshot) {
         Ok(context) => context,
@@ -309,6 +332,7 @@ async fn run_provider_step(
         &input,
         &provider_config.model,
         &compiled_context,
+        &continuations,
         generation_config,
     ) {
         Ok(request) => request,
@@ -388,6 +412,7 @@ async fn run_provider_step(
                         sender,
                         token,
                         text.clone(),
+                        sent_continuation_count,
                     )
                     .await
                     {
@@ -410,7 +435,15 @@ async fn run_provider_step(
                         streamed_tool_call.as_ref(),
                     ) {
                         Ok(call) => {
-                            if !send_tool_call_pending_event(inner, sender, token, call).await {
+                            if !send_tool_call_pending_event(
+                                inner,
+                                sender,
+                                token,
+                                call,
+                                sent_continuation_count,
+                            )
+                            .await
+                            {
                                 let _ = send_cancelled_if_requested(inner, sender, token).await;
                             }
                         }
@@ -485,11 +518,17 @@ async fn run_provider_step(
     }
 }
 
+async fn has_unresolved_pending_tool_calls(inner: &RuntimeInner) -> bool {
+    let session = inner.session.lock().await;
+    session.has_pending_tool_calls()
+}
+
 async fn send_assistant_text_output_completed_events(
     inner: &RuntimeInner,
     sender: &mpsc::Sender<RuntimeEvent>,
     token: &CancellationToken,
     text: String,
+    sent_continuation_count: usize,
 ) -> bool {
     if token.is_cancelled() {
         return false;
@@ -504,7 +543,13 @@ async fn send_assistant_text_output_completed_events(
         if token.is_cancelled() {
             return false;
         }
-        session.record_assistant_text_output(text)
+        match session.record_assistant_text_output(text) {
+            Ok(event) => {
+                session.consume_tool_continuations(sent_continuation_count);
+                Ok(event)
+            }
+            Err(error) => Err(error),
+        }
     };
 
     let Ok(artifact_event) = artifact_event else {
@@ -547,6 +592,7 @@ async fn send_tool_call_pending_event(
     sender: &mpsc::Sender<RuntimeEvent>,
     token: &CancellationToken,
     call: PendingToolCall,
+    sent_continuation_count: usize,
 ) -> bool {
     if token.is_cancelled() {
         return false;
@@ -561,7 +607,13 @@ async fn send_tool_call_pending_event(
         if token.is_cancelled() {
             return false;
         }
-        session.record_tool_call_pending(call)
+        match session.record_tool_call_pending(call) {
+            Ok(event) => {
+                session.consume_tool_continuations(sent_continuation_count);
+                Ok(event)
+            }
+            Err(diagnostic) => Err(diagnostic),
+        }
     };
 
     match event {

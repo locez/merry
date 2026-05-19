@@ -1,19 +1,24 @@
-use futures_util::StreamExt;
+use futures_util::{StreamExt, stream};
 use merry_core::{
-    ArtifactId, ArtifactKind, ArtifactRef, EvidenceLocator, PendingToolCall, RuntimeEvent,
-    RuntimeEventKind, SessionId, ToolCallId, ToolCallResult, ToolCallResultStatus, ToolName,
+    ArtifactId, ArtifactKind, ArtifactRef, EvidenceLocator, PendingToolCall, ProviderName,
+    RuntimeEvent, RuntimeEventKind, SessionId, ToolCallId, ToolCallResult, ToolCallResultStatus,
+    ToolName,
 };
 use merry_llm::{
-    FinishReason, GenerationConfig, ModelError, ModelEvent, ModelMessageRole, ModelName,
-    ModelOutput, ModelResponse, ModelToolCall, ModelToolCallId, ProviderErrorKind, ToolArguments,
-    testing::FakeModelProvider,
+    FinishReason, GenerationConfig, ModelCapabilities, ModelError, ModelEvent, ModelEventStream,
+    ModelMessageRole, ModelName, ModelOutput, ModelProvider, ModelProviderFuture, ModelRequest,
+    ModelResponse, ModelStreamContext, ModelToolCall, ModelToolCallId, ProviderErrorKind,
+    ToolArguments, testing::FakeModelProvider,
 };
 use merry_runtime::{
     ArtifactContent, ContextCompiler, ContextEvidence, ContextSummary, LedgerFactKind,
     LedgerProjection, Runtime, StepContext, StepInput,
 };
 use serde_json::{Map, Value, json};
-use std::{num::NonZeroUsize, sync::Arc};
+use std::{
+    num::NonZeroUsize,
+    sync::{Arc, Mutex},
+};
 use tokio_util::sync::CancellationToken;
 
 fn session_id(value: &str) -> SessionId {
@@ -79,6 +84,97 @@ fn runtime_with_provider_event_buffer(
         .model_provider(Arc::new(provider), model_name())
         .build()
         .expect("runtime should build")
+}
+
+fn runtime_with_scripted_provider(session: &str, provider: ScriptedModelProvider) -> Runtime {
+    Runtime::builder(session_id(session))
+        .model_provider(Arc::new(provider), model_name())
+        .build()
+        .expect("runtime should build")
+}
+
+#[derive(Debug, Clone)]
+struct ScriptedModelProvider {
+    name: ProviderName,
+    capabilities: ModelCapabilities,
+    steps: Arc<Mutex<Vec<ScriptedProviderStep>>>,
+    recorded_requests: Arc<Mutex<Vec<ModelRequest>>>,
+}
+
+#[derive(Debug)]
+enum ScriptedProviderStep {
+    Stream(Vec<Result<ModelEvent, ModelError>>),
+    SetupError(ModelError),
+}
+
+impl ScriptedModelProvider {
+    fn new(scripts: Vec<Vec<Result<ModelEvent, ModelError>>>) -> Self {
+        Self::new_steps(
+            scripts
+                .into_iter()
+                .map(ScriptedProviderStep::Stream)
+                .collect(),
+        )
+    }
+
+    fn new_steps(steps: Vec<ScriptedProviderStep>) -> Self {
+        Self {
+            name: ProviderName::new("scripted-model-provider").expect("valid provider name"),
+            capabilities: ModelCapabilities::new(true, true, false, true, None, None)
+                .expect("valid capabilities"),
+            steps: Arc::new(Mutex::new(steps.into_iter().rev().collect())),
+            recorded_requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn recorded_requests(&self) -> Vec<ModelRequest> {
+        self.recorded_requests
+            .lock()
+            .expect("recorded requests mutex should not be poisoned")
+            .clone()
+    }
+}
+
+impl ModelProvider for ScriptedModelProvider {
+    fn name(&self) -> &ProviderName {
+        &self.name
+    }
+
+    fn capabilities(&self) -> &ModelCapabilities {
+        &self.capabilities
+    }
+
+    fn stream_model<'a>(
+        &'a self,
+        request: ModelRequest,
+        context: ModelStreamContext,
+    ) -> ModelProviderFuture<'a, Result<ModelEventStream, ModelError>> {
+        Box::pin(async move {
+            if context.cancellation_token().is_cancelled() {
+                return Err(ModelError::Cancelled);
+            }
+
+            self.recorded_requests
+                .lock()
+                .expect("recorded requests mutex should not be poisoned")
+                .push(request);
+
+            let step = self
+                .steps
+                .lock()
+                .expect("steps mutex should not be poisoned")
+                .pop()
+                .unwrap_or_else(|| ScriptedProviderStep::Stream(Vec::new()));
+
+            match step {
+                ScriptedProviderStep::Stream(script) => {
+                    let event_stream: ModelEventStream = Box::pin(stream::iter(script));
+                    Ok(event_stream)
+                }
+                ScriptedProviderStep::SetupError(error) => Err(error),
+            }
+        })
+    }
 }
 
 async fn collect_step(runtime: &Runtime, text: &str) -> Vec<RuntimeEvent> {
@@ -229,6 +325,19 @@ fn pending_tool_call(events: &[RuntimeEvent]) -> &PendingToolCall {
             _ => None,
         })
         .expect("pending tool call should be emitted")
+}
+
+fn failed_tool_result(
+    call_id: ToolCallId,
+    artifact: ArtifactRef,
+    code: &str,
+    message: &str,
+) -> ToolCallResult {
+    ToolCallResult::failed(
+        call_id,
+        artifact,
+        merry_core::ErrorInfo::new(code, message).expect("valid diagnostic"),
+    )
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -747,12 +856,47 @@ async fn provider_tool_call_pending_preserves_id_name_arguments_and_ledger_fact(
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn unresolved_pending_tool_call_blocks_next_provider_step_without_calling_provider() {
+    let provider = ScriptedModelProvider::new(vec![
+        vec![Ok(completed_outputs_event(
+            vec![ModelOutput::tool_call(model_tool_call())],
+            FinishReason::ToolCalls,
+        ))],
+        vec![Ok(completed_text_event("must not be requested"))],
+    ]);
+    let runtime = runtime_with_scripted_provider("provider-pending-blocks-step", provider.clone());
+
+    let first_events = collect_step(&runtime, "Request a tool.").await;
+    let second_events = collect_step(&runtime, "Try to continue without tool result.").await;
+
+    assert_eq!(
+        event_kind_names(&first_events),
+        ["SessionStarted", "StepStarted", "ToolCallPending"]
+    );
+    assert_eq!(event_kind_names(&second_events), ["StepStarted", "Failed"]);
+    assert_eq!(
+        failed_code(&second_events),
+        Some("tool_call_result_required")
+    );
+    assert_eq!(provider.recorded_requests().len(), 1);
+    assert_eq!(
+        runtime
+            .pending_tool_calls()
+            .await
+            .iter()
+            .map(|call| call.id().as_str().to_owned())
+            .collect::<Vec<_>>(),
+        vec!["call-1".to_owned()]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn repeated_provider_tool_call_id_after_pending_fails_without_second_pending() {
     let provider = FakeModelProvider::new(vec![Ok(completed_outputs_event(
         vec![ModelOutput::tool_call(model_tool_call())],
         FinishReason::ToolCalls,
     ))]);
-    let runtime = runtime_with_provider("provider-tool-call-duplicate-id", provider);
+    let runtime = runtime_with_provider("provider-tool-call-duplicate-id", provider.clone());
 
     let first_events = collect_step(&runtime, "Request a tool.").await;
     let second_events = collect_step(&runtime, "Request the same tool id again.").await;
@@ -762,7 +906,11 @@ async fn repeated_provider_tool_call_id_after_pending_fails_without_second_pendi
         ["SessionStarted", "StepStarted", "ToolCallPending"]
     );
     assert_eq!(event_kind_names(&second_events), ["StepStarted", "Failed"]);
-    assert_eq!(failed_code(&second_events), Some("tool_call_duplicate"));
+    assert_eq!(
+        failed_code(&second_events),
+        Some("tool_call_result_required")
+    );
+    assert_eq!(provider.recorded_requests().len(), 1);
     assert_eq!(
         runtime
             .pending_tool_calls()
@@ -848,11 +996,14 @@ async fn repeated_provider_tool_call_id_after_pending_fails_without_second_pendi
 
 #[tokio::test(flavor = "current_thread")]
 async fn submit_tool_result_records_success_artifact_resolves_pending_and_updates_ledger() {
-    let provider = FakeModelProvider::new(vec![Ok(completed_outputs_event(
-        vec![ModelOutput::tool_call(model_tool_call())],
-        FinishReason::ToolCalls,
-    ))]);
-    let runtime = runtime_with_provider("provider-tool-result-success", provider);
+    let provider = ScriptedModelProvider::new(vec![
+        vec![Ok(completed_outputs_event(
+            vec![ModelOutput::tool_call(model_tool_call())],
+            FinishReason::ToolCalls,
+        ))],
+        vec![Ok(completed_text_event("continued after tool result"))],
+    ]);
+    let runtime = runtime_with_scripted_provider("provider-tool-result-success", provider.clone());
     let pending_events = collect_step(&runtime, "Request a tool.").await;
     let call = pending_tool_call(&pending_events).clone();
     let result_artifact = ArtifactRef::new(artifact_id("tool-result-success"), ArtifactKind::Text);
@@ -923,11 +1074,467 @@ async fn submit_tool_result_records_success_artifact_resolves_pending_and_update
 
     let next_events = collect_step(&runtime, "after tool result").await;
     assert_eq!(
+        event_kind_names(&next_events),
+        ["StepStarted", "ArtifactRecorded", "StepCompleted"]
+    );
+    assert_eq!(provider.recorded_requests().len(), 2);
+    assert_eq!(
         next_events
             .iter()
             .map(|event| event.sequence)
             .collect::<Vec<_>>(),
-        vec![5, 6]
+        vec![5, 6, 7]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn submitted_tool_result_is_compiled_as_provider_neutral_continuation() {
+    let arguments = Map::from_iter([
+        ("query".to_owned(), json!("runtime continuation")),
+        ("limit".to_owned(), json!(2)),
+    ]);
+    let provider = ScriptedModelProvider::new(vec![
+        vec![Ok(completed_outputs_event(
+            vec![ModelOutput::tool_call(model_tool_call_with_args(
+                "call.provider/opaque.id:42",
+                "search_notes",
+                arguments.clone(),
+            ))],
+            FinishReason::ToolCalls,
+        ))],
+        vec![Ok(completed_text_event("continued after search"))],
+    ]);
+    let runtime = runtime_with_scripted_provider("provider-tool-continuation", provider.clone());
+    let pending_events = collect_step(&runtime, "Request a search.").await;
+    let call = pending_tool_call(&pending_events).clone();
+    let result_artifact = ArtifactRef::new(
+        artifact_id("tool-result-continuation-text"),
+        ArtifactKind::Text,
+    );
+    let result = ToolCallResult::succeeded(call.id().clone(), result_artifact.clone());
+    runtime
+        .submit_tool_result(result, ArtifactContent::text("exact search result\n"))
+        .await
+        .expect("tool result should resolve");
+
+    let events = collect_step(&runtime, "Use the tool result.").await;
+
+    assert_eq!(
+        event_kind_names(&events),
+        ["StepStarted", "ArtifactRecorded", "StepCompleted"]
+    );
+    let requests = provider.recorded_requests();
+    assert_eq!(requests.len(), 2);
+    let continuation = requests[1]
+        .continuations()
+        .first()
+        .expect("continuation should be compiled");
+    assert_eq!(
+        continuation.call().id().as_str(),
+        "call.provider/opaque.id:42"
+    );
+    assert_eq!(continuation.call().name().as_str(), "search_notes");
+    assert_eq!(continuation.call().arguments().as_object(), &arguments);
+    assert_eq!(
+        continuation.result().call_id().as_str(),
+        "call.provider/opaque.id:42"
+    );
+    assert_eq!(
+        continuation.result().status(),
+        ToolCallResultStatus::Succeeded
+    );
+    assert_eq!(
+        continuation.result().content().as_text(),
+        Some("exact search result\n")
+    );
+    assert!(continuation.result().diagnostic().is_none());
+
+    let value = serde_json::to_value(&requests[1]).expect("request should serialize");
+    assert!(value.get("session_id").is_none());
+    assert!(value.get("ledger_id").is_none());
+    assert!(value.get("artifact_id").is_none());
+    assert!(value.get("previous_response_id").is_none());
+    assert!(value.get("store").is_none());
+    assert!(value.get("tool_call_id").is_none());
+    assert!(
+        value["continuations"][0]["call"]
+            .get("tool_call_id")
+            .is_none()
+    );
+    assert!(
+        value["continuations"][0]["result"]
+            .get("tool_call_id")
+            .is_none()
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn successful_provider_step_consumes_sent_tool_continuation_without_replay() {
+    let provider = ScriptedModelProvider::new(vec![
+        vec![Ok(completed_outputs_event(
+            vec![ModelOutput::tool_call(model_tool_call())],
+            FinishReason::ToolCalls,
+        ))],
+        vec![Ok(completed_text_event("used tool result"))],
+        vec![Ok(completed_text_event("fresh request"))],
+    ]);
+    let runtime =
+        runtime_with_scripted_provider("provider-tool-continuation-consume", provider.clone());
+    let pending_events = collect_step(&runtime, "Request a tool.").await;
+    let call = pending_tool_call(&pending_events).clone();
+    let result_artifact = ArtifactRef::new(
+        artifact_id("tool-result-consumed-on-success"),
+        ArtifactKind::Text,
+    );
+    runtime
+        .submit_tool_result(
+            ToolCallResult::succeeded(call.id().clone(), result_artifact),
+            ArtifactContent::text("result to consume\n"),
+        )
+        .await
+        .expect("tool result should resolve");
+
+    let continuation_events = collect_step(&runtime, "Use tool result.").await;
+    let next_events = collect_step(&runtime, "Do not replay it.").await;
+
+    assert_eq!(
+        event_kind_names(&continuation_events),
+        ["StepStarted", "ArtifactRecorded", "StepCompleted"]
+    );
+    assert_eq!(
+        event_kind_names(&next_events),
+        ["StepStarted", "ArtifactRecorded", "StepCompleted"]
+    );
+    let requests = provider.recorded_requests();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[1].continuations().len(), 1);
+    assert!(requests[2].continuations().is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sent_tool_continuation_is_consumed_when_provider_records_new_pending_call() {
+    let provider = ScriptedModelProvider::new(vec![
+        vec![Ok(completed_outputs_event(
+            vec![ModelOutput::tool_call(model_tool_call_with_id("call-old"))],
+            FinishReason::ToolCalls,
+        ))],
+        vec![Ok(completed_outputs_event(
+            vec![ModelOutput::tool_call(model_tool_call_with_id("call-new"))],
+            FinishReason::ToolCalls,
+        ))],
+    ]);
+    let runtime =
+        runtime_with_scripted_provider("provider-tool-continuation-new-pending", provider.clone());
+    let pending_events = collect_step(&runtime, "Request first tool.").await;
+    let old_call = pending_tool_call(&pending_events).clone();
+    runtime
+        .submit_tool_result(
+            ToolCallResult::succeeded(
+                old_call.id().clone(),
+                ArtifactRef::new(
+                    artifact_id("tool-result-before-new-pending"),
+                    ArtifactKind::Text,
+                ),
+            ),
+            ArtifactContent::text("old result\n"),
+        )
+        .await
+        .expect("old tool result should resolve");
+
+    let new_pending_events = collect_step(&runtime, "Use old result and request another.").await;
+    let blocked_events = collect_step(&runtime, "Do not replay old result.").await;
+
+    assert_eq!(
+        event_kind_names(&new_pending_events),
+        ["StepStarted", "ToolCallPending"]
+    );
+    assert_eq!(
+        pending_tool_call(&new_pending_events).id().as_str(),
+        "call-new"
+    );
+    assert_eq!(event_kind_names(&blocked_events), ["StepStarted", "Failed"]);
+    assert_eq!(
+        failed_code(&blocked_events),
+        Some("tool_call_result_required")
+    );
+    assert_eq!(
+        runtime
+            .pending_tool_calls()
+            .await
+            .iter()
+            .map(|call| call.id().as_str().to_owned())
+            .collect::<Vec<_>>(),
+        vec!["call-new".to_owned()]
+    );
+
+    let requests = provider.recorded_requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1].continuations().len(), 1);
+    assert_eq!(
+        requests[1].continuations()[0].call().id().as_str(),
+        "call-old"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn duplicate_new_tool_call_id_does_not_consume_sent_tool_continuation() {
+    let provider = ScriptedModelProvider::new(vec![
+        vec![Ok(completed_outputs_event(
+            vec![ModelOutput::tool_call(model_tool_call_with_id("call-old"))],
+            FinishReason::ToolCalls,
+        ))],
+        vec![Ok(completed_outputs_event(
+            vec![ModelOutput::tool_call(model_tool_call_with_id("call-old"))],
+            FinishReason::ToolCalls,
+        ))],
+        vec![Ok(completed_text_event("retry consumes old result"))],
+    ]);
+    let runtime = runtime_with_scripted_provider(
+        "provider-tool-continuation-duplicate-new-id",
+        provider.clone(),
+    );
+    let pending_events = collect_step(&runtime, "Request first tool.").await;
+    let old_call = pending_tool_call(&pending_events).clone();
+    runtime
+        .submit_tool_result(
+            ToolCallResult::succeeded(
+                old_call.id().clone(),
+                ArtifactRef::new(
+                    artifact_id("tool-result-before-duplicate-new-id"),
+                    ArtifactKind::Text,
+                ),
+            ),
+            ArtifactContent::text("old result\n"),
+        )
+        .await
+        .expect("old tool result should resolve");
+
+    let duplicate_events = collect_step(&runtime, "Provider repeats resolved id.").await;
+    let retry_events = collect_step(&runtime, "Retry after duplicate id.").await;
+
+    assert_eq!(
+        event_kind_names(&duplicate_events),
+        ["StepStarted", "Failed"]
+    );
+    assert_eq!(failed_code(&duplicate_events), Some("tool_call_duplicate"));
+    assert_eq!(
+        event_kind_names(&retry_events),
+        ["StepStarted", "ArtifactRecorded", "StepCompleted"]
+    );
+    assert!(runtime.pending_tool_calls().await.is_empty());
+
+    let requests = provider.recorded_requests();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[1].continuations().len(), 1);
+    assert_eq!(requests[2].continuations().len(), 1);
+    assert_eq!(
+        requests[1].continuations()[0].call().id().as_str(),
+        "call-old"
+    );
+    assert_eq!(
+        requests[2].continuations()[0].call().id().as_str(),
+        "call-old"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn provider_error_does_not_consume_tool_continuation_and_retry_replays_it() {
+    let provider = ScriptedModelProvider::new(vec![
+        vec![Ok(completed_outputs_event(
+            vec![ModelOutput::tool_call(model_tool_call())],
+            FinishReason::ToolCalls,
+        ))],
+        vec![Err(ModelError::provider(
+            ProviderErrorKind::Protocol,
+            "transient continuation failure",
+        ))],
+        vec![Ok(completed_text_event("retry succeeded"))],
+    ]);
+    let runtime =
+        runtime_with_scripted_provider("provider-tool-continuation-error", provider.clone());
+    let pending_events = collect_step(&runtime, "Request a tool.").await;
+    let call = pending_tool_call(&pending_events).clone();
+    runtime
+        .submit_tool_result(
+            ToolCallResult::succeeded(
+                call.id().clone(),
+                ArtifactRef::new(
+                    artifact_id("tool-result-retry-after-error"),
+                    ArtifactKind::Text,
+                ),
+            ),
+            ArtifactContent::text("retry me\n"),
+        )
+        .await
+        .expect("tool result should resolve");
+
+    let error_events = collect_step(&runtime, "Use result, provider fails.").await;
+    let retry_events = collect_step(&runtime, "Retry with same result.").await;
+
+    assert_eq!(event_kind_names(&error_events), ["StepStarted", "Failed"]);
+    assert_eq!(failed_code(&error_events), Some("model_protocol"));
+    assert_eq!(
+        event_kind_names(&retry_events),
+        ["StepStarted", "ArtifactRecorded", "StepCompleted"]
+    );
+    let requests = provider.recorded_requests();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[1].continuations().len(), 1);
+    assert_eq!(requests[2].continuations().len(), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn provider_setup_error_does_not_consume_tool_continuation_and_retry_replays_it() {
+    let provider = ScriptedModelProvider::new_steps(vec![
+        ScriptedProviderStep::Stream(vec![Ok(completed_outputs_event(
+            vec![ModelOutput::tool_call(model_tool_call())],
+            FinishReason::ToolCalls,
+        ))]),
+        ScriptedProviderStep::SetupError(ModelError::provider(
+            ProviderErrorKind::Unavailable,
+            "setup unavailable",
+        )),
+        ScriptedProviderStep::Stream(vec![Ok(completed_text_event("retry after setup"))]),
+    ]);
+    let runtime =
+        runtime_with_scripted_provider("provider-tool-continuation-setup-error", provider.clone());
+    let pending_events = collect_step(&runtime, "Request a tool.").await;
+    let call = pending_tool_call(&pending_events).clone();
+    runtime
+        .submit_tool_result(
+            ToolCallResult::succeeded(
+                call.id().clone(),
+                ArtifactRef::new(
+                    artifact_id("tool-result-retry-after-setup-error"),
+                    ArtifactKind::Text,
+                ),
+            ),
+            ArtifactContent::text("retry after setup\n"),
+        )
+        .await
+        .expect("tool result should resolve");
+
+    let error_events = collect_step(&runtime, "Setup fails.").await;
+    let retry_events = collect_step(&runtime, "Retry setup.").await;
+
+    assert_eq!(event_kind_names(&error_events), ["StepStarted", "Failed"]);
+    assert_eq!(failed_code(&error_events), Some("model_unavailable"));
+    assert_eq!(
+        event_kind_names(&retry_events),
+        ["StepStarted", "ArtifactRecorded", "StepCompleted"]
+    );
+    let requests = provider.recorded_requests();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[1].continuations().len(), 1);
+    assert_eq!(requests[2].continuations().len(), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn provider_cancel_does_not_consume_tool_continuation_and_retry_replays_it() {
+    let provider = ScriptedModelProvider::new(vec![
+        vec![Ok(completed_outputs_event(
+            vec![ModelOutput::tool_call(model_tool_call())],
+            FinishReason::ToolCalls,
+        ))],
+        vec![Err(ModelError::Cancelled)],
+        vec![Ok(completed_text_event("retry after cancel"))],
+    ]);
+    let runtime =
+        runtime_with_scripted_provider("provider-tool-continuation-cancel", provider.clone());
+    let pending_events = collect_step(&runtime, "Request a tool.").await;
+    let call = pending_tool_call(&pending_events).clone();
+    runtime
+        .submit_tool_result(
+            ToolCallResult::succeeded(
+                call.id().clone(),
+                ArtifactRef::new(
+                    artifact_id("tool-result-retry-after-cancel"),
+                    ArtifactKind::Text,
+                ),
+            ),
+            ArtifactContent::text("retry after cancel\n"),
+        )
+        .await
+        .expect("tool result should resolve");
+
+    let cancel_events = collect_step(&runtime, "Provider cancels.").await;
+    let retry_events = collect_step(&runtime, "Retry after cancel.").await;
+
+    assert_eq!(
+        event_kind_names(&cancel_events),
+        ["StepStarted", "Cancelled"]
+    );
+    assert_no_failed(&cancel_events);
+    assert_eq!(
+        event_kind_names(&retry_events),
+        ["StepStarted", "ArtifactRecorded", "StepCompleted"]
+    );
+    let requests = provider.recorded_requests();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[1].continuations().len(), 1);
+    assert_eq!(requests[2].continuations().len(), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn failed_tool_result_status_diagnostic_and_content_are_compiled_without_runtime_failed_event()
+ {
+    let provider = ScriptedModelProvider::new(vec![
+        vec![Ok(completed_outputs_event(
+            vec![ModelOutput::tool_call(model_tool_call())],
+            FinishReason::ToolCalls,
+        ))],
+        vec![Ok(completed_text_event("handled failed tool result"))],
+    ]);
+    let runtime = runtime_with_scripted_provider(
+        "provider-tool-continuation-failed-result",
+        provider.clone(),
+    );
+    let pending_events = collect_step(&runtime, "Request a failing tool.").await;
+    let call = pending_tool_call(&pending_events).clone();
+    let result_artifact = ArtifactRef::new(
+        artifact_id("tool-result-continuation-failed-json"),
+        ArtifactKind::Json,
+    );
+    let result = failed_tool_result(
+        call.id().clone(),
+        result_artifact.clone(),
+        "tool_failed",
+        "Tool exited with status 2",
+    );
+    let resolved_events = runtime
+        .submit_tool_result(
+            result,
+            ArtifactContent::json(r#"{"stderr":"permission denied"}"#),
+        )
+        .await
+        .expect("failed tool result should resolve");
+    let continuation_events = collect_step(&runtime, "Continue after failed tool.").await;
+
+    assert!(
+        pending_events
+            .iter()
+            .chain(resolved_events.iter())
+            .chain(continuation_events.iter())
+            .all(|event| !matches!(event.kind, RuntimeEventKind::Failed { .. })),
+        "tool execution failure should be model-visible data, not runtime failure"
+    );
+    let requests = provider.recorded_requests();
+    assert_eq!(requests.len(), 2);
+    let continuation = requests[1]
+        .continuations()
+        .first()
+        .expect("failed result continuation should be compiled");
+    assert_eq!(continuation.result().status(), ToolCallResultStatus::Failed);
+    assert_eq!(
+        continuation
+            .result()
+            .diagnostic()
+            .map(merry_core::ErrorInfo::code),
+        Some("tool_failed")
+    );
+    assert_eq!(
+        continuation.result().content().as_json(),
+        Some(r#"{"stderr":"permission denied"}"#)
     );
 }
 
@@ -1107,6 +1714,8 @@ async fn artifact_error_while_submitting_tool_result_keeps_call_pending_and_sequ
     assert_eq!(runtime.pending_tool_calls().await, vec![call]);
 
     let next_events = collect_step(&runtime, "after duplicate artifact submit").await;
+    assert_eq!(event_kind_names(&next_events), ["StepStarted", "Failed"]);
+    assert_eq!(failed_code(&next_events), Some("tool_call_result_required"));
     assert_eq!(
         next_events
             .iter()
@@ -1158,6 +1767,101 @@ async fn incompatible_tool_result_content_keeps_call_pending_and_sequence_stable
         .evidence_ref(result.artifact().id(), EvidenceLocator::whole_artifact())
         .await
         .expect_err("incompatible result artifact must not be recorded");
+    assert!(matches!(
+        evidence_err,
+        merry_runtime::RuntimeError::Artifact {
+            source: merry_runtime::ArtifactError::MissingArtifact { id }
+        } if id == *result.artifact().id()
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn blank_text_tool_result_keeps_call_pending_and_sequence_stable() {
+    let provider = FakeModelProvider::new(vec![Ok(completed_outputs_event(
+        vec![ModelOutput::tool_call(model_tool_call())],
+        FinishReason::ToolCalls,
+    ))]);
+    let runtime = runtime_with_provider("provider-tool-result-blank-text", provider);
+    let pending_events = collect_step(&runtime, "Request a tool.").await;
+    let call = pending_tool_call(&pending_events).clone();
+    let projection_before_error = runtime.ledger_projection().await;
+    let result = ToolCallResult::succeeded(
+        call.id().clone(),
+        ArtifactRef::new(artifact_id("tool-result-blank-text"), ArtifactKind::Text),
+    );
+
+    let err = runtime
+        .submit_tool_result(result.clone(), ArtifactContent::text(" \n\t "))
+        .await
+        .expect_err("blank text tool result should be rejected before resolution");
+    let projection_after_error = runtime.ledger_projection().await;
+
+    assert!(matches!(
+        err,
+        merry_runtime::RuntimeError::UnsupportedToolResultContent {
+            artifact_id,
+            content_kind: merry_runtime::ArtifactContentKind::Text
+        } if artifact_id == *result.artifact().id()
+    ));
+    assert_eq!(projection_before_error, projection_after_error);
+    assert_eq!(runtime.pending_tool_calls().await, vec![call]);
+    let evidence_err = runtime
+        .evidence_ref(result.artifact().id(), EvidenceLocator::whole_artifact())
+        .await
+        .expect_err("blank result artifact must not be recorded");
+    assert!(matches!(
+        evidence_err,
+        merry_runtime::RuntimeError::Artifact {
+            source: merry_runtime::ArtifactError::MissingArtifact { id }
+        } if id == *result.artifact().id()
+    ));
+
+    let next_events = collect_step(&runtime, "after blank text submit").await;
+    assert_eq!(event_kind_names(&next_events), ["StepStarted", "Failed"]);
+    assert_eq!(failed_code(&next_events), Some("tool_call_result_required"));
+    assert_eq!(
+        next_events
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        vec![3, 4]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn blank_json_tool_result_keeps_call_pending_and_sequence_stable() {
+    let provider = FakeModelProvider::new(vec![Ok(completed_outputs_event(
+        vec![ModelOutput::tool_call(model_tool_call())],
+        FinishReason::ToolCalls,
+    ))]);
+    let runtime = runtime_with_provider("provider-tool-result-blank-json", provider);
+    let pending_events = collect_step(&runtime, "Request a tool.").await;
+    let call = pending_tool_call(&pending_events).clone();
+    let projection_before_error = runtime.ledger_projection().await;
+    let result = ToolCallResult::succeeded(
+        call.id().clone(),
+        ArtifactRef::new(artifact_id("tool-result-blank-json"), ArtifactKind::Json),
+    );
+
+    let err = runtime
+        .submit_tool_result(result.clone(), ArtifactContent::json(" \n\t "))
+        .await
+        .expect_err("blank json tool result should be rejected before resolution");
+    let projection_after_error = runtime.ledger_projection().await;
+
+    assert!(matches!(
+        err,
+        merry_runtime::RuntimeError::UnsupportedToolResultContent {
+            artifact_id,
+            content_kind: merry_runtime::ArtifactContentKind::Json
+        } if artifact_id == *result.artifact().id()
+    ));
+    assert_eq!(projection_before_error, projection_after_error);
+    assert_eq!(runtime.pending_tool_calls().await, vec![call]);
+    let evidence_err = runtime
+        .evidence_ref(result.artifact().id(), EvidenceLocator::whole_artifact())
+        .await
+        .expect_err("blank result artifact must not be recorded");
     assert!(matches!(
         evidence_err,
         merry_runtime::RuntimeError::Artifact {

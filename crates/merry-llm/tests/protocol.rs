@@ -1,11 +1,14 @@
 use futures_executor::block_on;
 use futures_util::StreamExt;
-use merry_core::{ProviderName, ToolInputSchema, ToolName, ToolSpec};
+use merry_core::{
+    ErrorInfo, ProviderName, ToolCallResultStatus, ToolInputSchema, ToolName, ToolSpec,
+};
 use merry_llm::{
     FinishReason, GenerationConfig, ModelCapabilities, ModelContent, ModelError, ModelEvent,
     ModelEventStream, ModelMessage, ModelMessageRole, ModelName, ModelOutput, ModelProvider,
     ModelProviderFuture, ModelRequest, ModelResponse, ModelStreamContext, ModelToolCall,
-    ModelToolCallId, ToolArguments, Usage,
+    ModelToolCallId, ModelToolContinuation, ModelToolResult, ModelToolResultContent, ToolArguments,
+    Usage,
 };
 use schemars::{JsonSchema, Schema};
 use serde::{Serialize, de::DeserializeOwned};
@@ -74,6 +77,22 @@ fn test_tool_call() -> ModelToolCall {
         ToolName::new("lookup_weather").expect("valid tool name"),
         ToolArguments::new(arguments),
     )
+}
+
+fn test_diagnostic() -> ErrorInfo {
+    ErrorInfo::new("tool_failed", "Tool failed with status 2").expect("valid diagnostic")
+}
+
+fn test_tool_result() -> ModelToolResult {
+    ModelToolResult::succeeded(
+        test_tool_call().id().clone(),
+        ModelToolResultContent::json(r#"{"temperature_c":22}"#).expect("valid result content"),
+    )
+}
+
+fn test_tool_continuation() -> ModelToolContinuation {
+    ModelToolContinuation::new(test_tool_call(), test_tool_result())
+        .expect("matching tool call continuation")
 }
 
 fn test_response() -> ModelResponse {
@@ -146,6 +165,21 @@ fn protocol_types_round_trip_through_json() {
         &GenerationConfig::new(Some(256), false).expect("valid generation config"),
     );
     assert_json_round_trip(&test_request());
+    assert_json_round_trip(
+        &ModelToolResultContent::text("Sunny").expect("valid text result content"),
+    );
+    assert_json_round_trip(
+        &ModelToolResultContent::json(r#"{"temperature_c":22}"#)
+            .expect("valid JSON result content"),
+    );
+    assert_json_round_trip(&test_tool_result());
+    assert_json_round_trip(&ModelToolResult::failed(
+        test_tool_call().id().clone(),
+        ModelToolResultContent::text("Tool execution failed")
+            .expect("valid failure result content"),
+        test_diagnostic(),
+    ));
+    assert_json_round_trip(&test_tool_continuation());
     assert_json_round_trip(&Usage::new(5, 8));
     assert_json_round_trip(
         &ModelCapabilities::new(true, true, false, true, Some(8192), Some(2048))
@@ -188,6 +222,9 @@ fn schema_generation_compiles_for_public_protocol_types() {
     assert_schema_compiles::<ModelToolCallId>();
     assert_schema_compiles::<ToolArguments>();
     assert_schema_compiles::<ModelToolCall>();
+    assert_schema_compiles::<ModelToolResultContent>();
+    assert_schema_compiles::<ModelToolResult>();
+    assert_schema_compiles::<ModelToolContinuation>();
     assert_schema_compiles::<ModelContent>();
     assert_schema_compiles::<ModelMessageRole>();
     assert_schema_compiles::<ModelMessage>();
@@ -247,6 +284,18 @@ fn validation_rejects_invalid_protocol_values() {
     assert!(ToolArguments::try_from(json!("not an object")).is_err());
     assert!(ToolArguments::try_from(json!([["city", "Shanghai"]])).is_err());
     assert!(serde_json::from_value::<ToolArguments>(json!(null)).is_err());
+    assert!(ModelToolResultContent::text("").is_err());
+    assert!(ModelToolResultContent::text("   ").is_err());
+    assert!(ModelToolResultContent::json("").is_err());
+    assert!(ModelToolResultContent::json("   ").is_err());
+    assert!(
+        serde_json::from_value::<ModelToolResultContent>(json!({ "type": "text", "text": "" }))
+            .is_err()
+    );
+    assert!(
+        serde_json::from_value::<ModelToolResultContent>(json!({ "type": "json", "json": "   " }))
+            .is_err()
+    );
     assert!(
         serde_json::from_value::<ModelMessage>(json!({
             "role": "user",
@@ -261,6 +310,24 @@ fn validation_rejects_invalid_protocol_values() {
             "tools": [],
             "generation": { "max_output_tokens": null, "allow_parallel_tool_calls": false }
         }))
+        .is_err()
+    );
+    assert!(
+        ModelToolResult::new(
+            test_tool_call().id().clone(),
+            ToolCallResultStatus::Succeeded,
+            ModelToolResultContent::text("ok").expect("valid content"),
+            Some(test_diagnostic()),
+        )
+        .is_err()
+    );
+    assert!(
+        ModelToolResult::new(
+            test_tool_call().id().clone(),
+            ToolCallResultStatus::Failed,
+            ModelToolResultContent::text("failed").expect("valid content"),
+            None,
+        )
         .is_err()
     );
 }
@@ -304,6 +371,149 @@ fn tagged_protocol_json_rejects_unknown_fields() {
         }))
         .is_err()
     );
+    assert!(
+        serde_json::from_value::<ModelToolCall>(json!({
+            "id": "call.provider/abc-123",
+            "name": "lookup_weather",
+            "arguments": { "city": "Shanghai" },
+            "unexpected": true
+        }))
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<ModelToolResultContent>(
+            json!({ "type": "text", "text": "hello", "unexpected": true })
+        )
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<ModelToolResult>(json!({
+            "call_id": "call.provider/abc-123",
+            "status": "succeeded",
+            "content": { "type": "text", "text": "hello" },
+            "diagnostic": null,
+            "unexpected": true
+        }))
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<ModelToolContinuation>(json!({
+            "call": test_tool_call(),
+            "result": test_tool_result(),
+            "unexpected": true
+        }))
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<ModelRequest>(json!({
+            "model": "model",
+            "messages": [{ "role": "user", "content": { "type": "text", "text": "hello" } }],
+            "tools": [],
+            "continuations": [],
+            "generation": { "max_output_tokens": null, "allow_parallel_tool_calls": false },
+            "unexpected": true
+        }))
+        .is_err()
+    );
+}
+
+#[test]
+fn model_tool_result_enforces_diagnostic_constraints() {
+    let call_id = test_tool_call().id().clone();
+    let content = ModelToolResultContent::text("ok").expect("valid content");
+
+    let succeeded = ModelToolResult::new(
+        call_id.clone(),
+        ToolCallResultStatus::Succeeded,
+        content.clone(),
+        None,
+    )
+    .expect("successful result without diagnostic should be valid");
+    assert_eq!(succeeded.status(), ToolCallResultStatus::Succeeded);
+    assert!(succeeded.diagnostic().is_none());
+
+    let failed = ModelToolResult::new(
+        call_id,
+        ToolCallResultStatus::Failed,
+        content,
+        Some(test_diagnostic()),
+    )
+    .expect("failed result with diagnostic should be valid");
+    assert_eq!(failed.status(), ToolCallResultStatus::Failed);
+    assert_eq!(
+        failed.diagnostic().map(ErrorInfo::code),
+        Some("tool_failed")
+    );
+
+    assert!(
+        serde_json::from_value::<ModelToolResult>(json!({
+            "call_id": "call.provider/abc-123",
+            "status": "succeeded",
+            "content": { "type": "text", "text": "ok" },
+            "diagnostic": { "code": "tool_failed", "message": "Tool failed with status 2" }
+        }))
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<ModelToolResult>(json!({
+            "call_id": "call.provider/abc-123",
+            "status": "failed",
+            "content": { "type": "text", "text": "failed" },
+            "diagnostic": null
+        }))
+        .is_err()
+    );
+}
+
+#[test]
+fn tool_continuation_rejects_call_result_id_mismatch() {
+    let mismatched_result = ModelToolResult::succeeded(
+        ModelToolCallId::new("call.provider/other").expect("valid call id"),
+        ModelToolResultContent::text("ok").expect("valid content"),
+    );
+
+    assert!(ModelToolContinuation::new(test_tool_call(), mismatched_result).is_err());
+    assert!(
+        serde_json::from_value::<ModelToolContinuation>(json!({
+            "call": test_tool_call(),
+            "result": {
+                "call_id": "call.provider/other",
+                "status": "succeeded",
+                "content": { "type": "text", "text": "ok" },
+                "diagnostic": null
+            }
+        }))
+        .is_err()
+    );
+}
+
+#[test]
+fn model_request_constructors_preserve_compatibility_and_continuations() {
+    let request = test_request();
+    assert!(request.continuations().is_empty());
+
+    let continuation = test_tool_continuation();
+    let request_with_continuations = ModelRequest::new_with_continuations(
+        ModelName::new("vendor/model-family:2025-04-14").expect("valid model name"),
+        vec![user_message("Continue after checking the weather.")],
+        vec![weather_tool()],
+        vec![continuation.clone()],
+        GenerationConfig::new(Some(128), false).expect("valid generation config"),
+    )
+    .expect("valid request with continuations");
+    assert_eq!(request_with_continuations.continuations(), &[continuation]);
+
+    let decoded_without_continuations = serde_json::from_value::<ModelRequest>(json!({
+        "model": "vendor/model-family:2025-04-14",
+        "messages": [{
+            "role": "user",
+            "content": { "type": "text", "text": "What is the weather in Shanghai?" }
+        }],
+        "tools": [],
+        "generation": { "max_output_tokens": 128, "allow_parallel_tool_calls": false }
+    }))
+    .expect("old request JSON without continuations should deserialize");
+    assert!(decoded_without_continuations.continuations().is_empty());
 }
 
 #[test]
@@ -329,16 +539,34 @@ fn usage_total_is_overflow_safe() {
 
 #[test]
 fn model_request_json_has_no_provider_conversation_or_openai_tool_wrappers() {
-    let value = serde_json::to_value(test_request()).expect("request should serialize");
+    let request = ModelRequest::new_with_continuations(
+        ModelName::new("vendor/model-family:2025-04-14").expect("valid model name"),
+        vec![user_message("Continue after checking the weather.")],
+        vec![weather_tool()],
+        vec![test_tool_continuation()],
+        GenerationConfig::new(Some(128), false).expect("valid generation config"),
+    )
+    .expect("valid request");
+    let value = serde_json::to_value(request).expect("request should serialize");
 
     assert!(value.get("previous_response_id").is_none());
     assert!(value.get("thread_id").is_none());
     assert!(value.get("store").is_none());
     assert!(value.get("session_id").is_none());
     assert!(value.get("ledger_id").is_none());
+    assert!(value.get("tool_call_id").is_none());
+    assert!(value.get("tool_calls").is_none());
 
     let tool = &value["tools"][0];
     assert_eq!(tool["name"], json!("lookup_weather"));
     assert!(tool.get("function").is_none());
     assert_ne!(tool.get("type"), Some(&json!("function")));
+
+    let continuation = &value["continuations"][0];
+    assert!(continuation["call"].get("tool_call_id").is_none());
+    assert!(continuation["result"].get("tool_call_id").is_none());
+    assert_eq!(
+        continuation["result"]["call_id"],
+        json!("call.provider/abc-123")
+    );
 }
