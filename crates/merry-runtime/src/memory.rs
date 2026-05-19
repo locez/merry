@@ -1,11 +1,17 @@
 //! Internal memory activation data shapes.
 //!
-//! This module is deliberately crate-internal and not connected to runtime,
-//! context compilation, providers, events, or the task ledger yet.
+//! This module is deliberately crate-internal. Activated memory is projected
+//! into session-owned context snapshots for compiler use, but it is not part of
+//! the provider, event, ledger, or public runtime surface.
 
-#![allow(dead_code)]
+// Staged internal activation types are compiled before every call path is wired.
+#![cfg_attr(not(test), allow(dead_code))]
 
-use std::{cmp::Ordering, collections::BTreeMap, fmt};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
 use thiserror::Error;
 
 /// Validated internal memory identifier.
@@ -100,13 +106,22 @@ impl MemoryItem {
         let text = text.into();
         validate_non_blank("memory text", &text)?;
 
-        for trigger in &triggers {
-            validate_non_blank("memory trigger", trigger)?;
-        }
+        let mut triggers = triggers
+            .into_iter()
+            .map(|trigger| {
+                validate_non_blank("memory trigger", &trigger)?;
+                Ok(canonicalize_match_text(&trigger))
+            })
+            .collect::<Result<Vec<_>, MemoryError>>()?;
+        triggers.sort();
+        triggers.dedup();
 
-        if let Some(key) = conflict_key.as_deref() {
-            validate_non_blank("memory conflict key", key)?;
-        }
+        let conflict_key = conflict_key
+            .map(|key| {
+                validate_non_blank("memory conflict key", &key)?;
+                Ok(canonicalize_match_text(&key))
+            })
+            .transpose()?;
 
         Ok(Self {
             id,
@@ -163,14 +178,24 @@ pub(crate) struct MemoryActivationSeed {
 }
 
 impl MemoryActivationSeed {
-    pub(crate) fn new(query: impl Into<String>, mut allowed_scopes: Vec<MemoryScope>) -> Self {
+    pub(crate) fn new(
+        query: impl Into<String>,
+        mut allowed_scopes: Vec<MemoryScope>,
+    ) -> Result<Self, MemoryError> {
+        let query = query.into();
+        validate_non_blank("memory activation query", &query)?;
+
+        if allowed_scopes.is_empty() {
+            return Err(MemoryError::EmptyAllowedScopes);
+        }
+
         allowed_scopes.sort();
         allowed_scopes.dedup();
 
-        Self {
-            query: query.into(),
+        Ok(Self {
+            query: canonicalize_match_text(&query),
             allowed_scopes,
-        }
+        })
     }
 
     #[must_use]
@@ -252,7 +277,7 @@ impl MemoryActivationReason {
     pub(crate) fn trigger_matched(trigger: impl Into<String>) -> Result<Self, MemoryError> {
         let trigger = trigger.into();
         validate_non_blank("memory activation trigger reason", &trigger)?;
-        Ok(Self::TriggerMatched(trigger))
+        Ok(Self::TriggerMatched(canonicalize_match_text(&trigger)))
     }
 
     #[must_use]
@@ -260,13 +285,15 @@ impl MemoryActivationReason {
         Self::Ranked { score }
     }
 
-    pub(crate) fn conflict_winner(suppressed: Vec<MemoryId>) -> Result<Self, MemoryError> {
+    pub(crate) fn conflict_winner(mut suppressed: Vec<MemoryId>) -> Result<Self, MemoryError> {
         if suppressed.is_empty() {
             return Err(MemoryError::BlankActivationReason {
                 reason: "conflict winner requires at least one suppressed memory id",
             });
         }
 
+        suppressed.sort();
+        suppressed.dedup();
         Ok(Self::ConflictWinner { suppressed })
     }
 }
@@ -335,8 +362,15 @@ impl MemoryActivator {
     ) -> Result<Vec<ActivatedMemory>, MemoryError> {
         let query = seed.query().to_lowercase();
         let mut eligible = Vec::new();
+        let mut seen_ids = BTreeSet::new();
 
         for item in candidates {
+            if !seen_ids.insert(item.id().clone()) {
+                return Err(MemoryError::DuplicateMemoryId {
+                    id: item.id().clone(),
+                });
+            }
+
             if !seed.allows_scope(item.scope()) {
                 continue;
             }
@@ -390,6 +424,17 @@ pub(crate) enum MemoryError {
         value: f32,
     },
 
+    /// A candidate set contained the same memory id more than once.
+    #[error("memory id {id} appears more than once in activation candidates")]
+    DuplicateMemoryId {
+        /// Duplicate memory identifier.
+        id: MemoryId,
+    },
+
+    /// Activation seed did not allow any memory scopes.
+    #[error("memory activation seed must allow at least one scope")]
+    EmptyAllowedScopes,
+
     /// Activated memory requires at least one reason.
     #[error("activated memory {memory_id} must have at least one activation reason")]
     EmptyActivationReasons {
@@ -411,6 +456,14 @@ fn validate_non_blank(field: &'static str, value: &str) -> Result<(), MemoryErro
     }
 
     Ok(())
+}
+
+fn canonicalize_match_text(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
 }
 
 fn validate_reason(reason: &MemoryActivationReason) -> Result<(), MemoryError> {
@@ -520,6 +573,21 @@ mod tests {
     }
 
     #[test]
+    fn activation_seed_rejects_blank_query_and_empty_scopes() {
+        assert!(matches!(
+            MemoryActivationSeed::new(" ", vec![MemoryScope::Session]),
+            Err(MemoryError::BlankField {
+                field: "memory activation query"
+            })
+        ));
+
+        assert!(matches!(
+            MemoryActivationSeed::new("topic", Vec::new()),
+            Err(MemoryError::EmptyAllowedScopes)
+        ));
+    }
+
+    #[test]
     fn validation_rejects_confidence_outside_range() {
         assert!(matches!(
             MemoryItem::new(
@@ -561,7 +629,8 @@ mod tests {
         let seed = MemoryActivationSeed::new(
             "ALPHA request",
             vec![MemoryScope::Session, MemoryScope::Task],
-        );
+        )
+        .expect("seed is valid");
 
         let ordered =
             MemoryActivator::activate(&seed, &[first.clone(), second.clone(), third.clone()])
@@ -578,7 +647,8 @@ mod tests {
         let session = item("session", MemoryScope::Session, &["billing"], 0.5, 0, None);
         let task = item("task", MemoryScope::Task, &["billing"], 0.5, 0, None);
         let step = item("step", MemoryScope::Step, &["billing"], 0.5, 0, None);
-        let seed = MemoryActivationSeed::new("billing issue", vec![MemoryScope::Session]);
+        let seed = MemoryActivationSeed::new("billing issue", vec![MemoryScope::Session])
+            .expect("seed is valid");
 
         let activated =
             MemoryActivator::activate(&seed, &[task, step, session]).expect("activation succeeds");
@@ -596,7 +666,8 @@ mod tests {
             0,
             None,
         );
-        let seed = MemoryActivationSeed::new("debug rust ownership", vec![MemoryScope::Session]);
+        let seed = MemoryActivationSeed::new("debug rust ownership", vec![MemoryScope::Session])
+            .expect("seed is valid");
 
         let activated = MemoryActivator::activate(&seed, &[memory]).expect("activation succeeds");
 
@@ -609,7 +680,7 @@ mod tests {
         assert!(
             activated[0]
                 .reasons()
-                .contains(&MemoryActivationReason::TriggerMatched("Rust".to_owned()))
+                .contains(&MemoryActivationReason::TriggerMatched("rust".to_owned()))
         );
         assert!(activated[0].reasons().iter().any(|reason| matches!(
             reason,
@@ -643,7 +714,8 @@ mod tests {
                 None,
             ),
         ];
-        let seed = MemoryActivationSeed::new("topic", vec![MemoryScope::Session]);
+        let seed =
+            MemoryActivationSeed::new("topic", vec![MemoryScope::Session]).expect("seed is valid");
 
         let activated = MemoryActivator::activate(&seed, &candidates).expect("activation succeeds");
 
@@ -695,7 +767,8 @@ mod tests {
                 Some("shared"),
             ),
         ];
-        let seed = MemoryActivationSeed::new("topic", vec![MemoryScope::Session]);
+        let seed =
+            MemoryActivationSeed::new("topic", vec![MemoryScope::Session]).expect("seed is valid");
 
         let activated = MemoryActivator::activate(&seed, &candidates).expect("activation succeeds");
 
@@ -707,6 +780,85 @@ mod tests {
             MemoryActivationReason::ConflictWinner { suppressed }
                 if ids_from_memory_ids(suppressed) == ["suppressed-a", "suppressed-b"]
         )));
+    }
+
+    #[test]
+    fn duplicate_triggers_do_not_duplicate_reasons_or_inflate_score() {
+        let memory = item(
+            "deduped",
+            MemoryScope::Session,
+            &["Rust", " rust ", "RUST"],
+            0.5,
+            0,
+            None,
+        );
+        let seed = MemoryActivationSeed::new("debug rust ownership", vec![MemoryScope::Session])
+            .expect("seed is valid");
+
+        let activated = MemoryActivator::activate(&seed, &[memory]).expect("activation succeeds");
+
+        let trigger_reasons = activated[0]
+            .reasons()
+            .iter()
+            .filter(|reason| matches!(reason, MemoryActivationReason::TriggerMatched(_)))
+            .count();
+        assert_eq!(trigger_reasons, 1);
+        assert!(activated[0].reasons().iter().any(|reason| matches!(
+            reason,
+            MemoryActivationReason::Ranked { score } if score.trigger_matches() == 1
+        )));
+    }
+
+    #[test]
+    fn conflict_key_canonicalization_groups_trimmed_case_variants() {
+        let candidates = vec![
+            item(
+                "winner",
+                MemoryScope::Session,
+                &["topic"],
+                0.7,
+                10,
+                Some(" Shared "),
+            ),
+            item(
+                "suppressed",
+                MemoryScope::Session,
+                &["topic"],
+                0.7,
+                1,
+                Some("shared"),
+            ),
+        ];
+        let seed =
+            MemoryActivationSeed::new("topic", vec![MemoryScope::Session]).expect("seed is valid");
+
+        let activated = MemoryActivator::activate(&seed, &candidates).expect("activation succeeds");
+
+        assert_eq!(ids(&activated), ["winner"]);
+        assert!(activated[0].reasons().iter().any(|reason| matches!(
+            reason,
+            MemoryActivationReason::ConflictWinner { suppressed }
+                if ids_from_memory_ids(suppressed) == ["suppressed"]
+        )));
+    }
+
+    #[test]
+    fn activation_rejects_duplicate_memory_ids() {
+        let candidates = vec![
+            item("duplicate", MemoryScope::Session, &["topic"], 0.7, 10, None),
+            item("duplicate", MemoryScope::Task, &["topic"], 0.7, 1, None),
+        ];
+        let seed =
+            MemoryActivationSeed::new("topic", vec![MemoryScope::Session, MemoryScope::Task])
+                .expect("seed is valid");
+
+        let error = MemoryActivator::activate(&seed, &candidates)
+            .expect_err("duplicate ids should be rejected");
+
+        assert!(matches!(
+            error,
+            MemoryError::DuplicateMemoryId { id } if id.as_str() == "duplicate"
+        ));
     }
 
     #[test]

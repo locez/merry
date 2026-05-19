@@ -5,6 +5,7 @@ use crate::{
     artifact::{ArtifactContent, ArtifactError, ArtifactRegistry},
     context::{ContextEntry, SessionContextSnapshot},
     ledger::{LedgerFactKind, TaskLedger},
+    memory::ActivatedMemory,
 };
 use merry_core::{
     ArtifactId, ArtifactKind, ArtifactRef, ErrorInfo, EvidenceLocator, EvidenceRef,
@@ -68,6 +69,7 @@ pub(crate) struct SessionState {
     ledger: TaskLedger,
     artifacts: ArtifactRegistry,
     context_entries: Vec<ContextEntry>,
+    activated_memories: Vec<ActivatedMemory>,
     pending_tool_calls: Vec<PendingToolCall>,
     resolved_tool_calls: BTreeSet<ToolCallId>,
     unconsumed_tool_continuations: Vec<ResolvedToolContinuation>,
@@ -82,6 +84,7 @@ impl SessionState {
             ledger: TaskLedger::default(),
             artifacts: ArtifactRegistry::default(),
             context_entries: Vec::new(),
+            activated_memories: Vec::new(),
             pending_tool_calls: Vec::new(),
             resolved_tool_calls: BTreeSet::new(),
             unconsumed_tool_continuations: Vec::new(),
@@ -141,8 +144,22 @@ impl SessionState {
         self.context_entries.push(entry);
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn record_activated_memory(&mut self, memory: ActivatedMemory) {
+        self.activated_memories.push(memory);
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn record_activated_memories(&mut self, memories: Vec<ActivatedMemory>) {
+        self.activated_memories.extend(memories);
+    }
+
     pub(crate) fn context_snapshot(&self) -> SessionContextSnapshot {
-        SessionContextSnapshot::new(self.context_entries.clone(), self.artifacts.clone())
+        SessionContextSnapshot::new(
+            self.context_entries.clone(),
+            self.artifacts.clone(),
+            self.activated_memories.clone(),
+        )
     }
 
     pub(crate) fn ledger_projection(&self) -> crate::ledger::LedgerProjectionSnapshot {
@@ -434,7 +451,14 @@ fn duplicate_tool_call_diagnostic(call_id: &ToolCallId, state: &'static str) -> 
 #[cfg(test)]
 mod tests {
     use super::SessionState;
-    use crate::artifact::ArtifactContent;
+    use crate::{
+        artifact::ArtifactContent,
+        context::ContextCompiler,
+        memory::{
+            ActivatedMemory, MemoryActivationReason, MemoryActivationScore, MemoryId, MemoryItem,
+            MemoryScope,
+        },
+    };
     use merry_core::{
         ArtifactId, ArtifactKind, ArtifactRef, PendingToolCall, RuntimeEventKind, SessionId,
         ToolCallArguments, ToolCallId, ToolCallResult, ToolName,
@@ -460,6 +484,45 @@ mod tests {
             ToolCallArguments::try_from(json!({ "query": "value" }))
                 .expect("object arguments are valid"),
         )
+    }
+
+    fn memory_id(value: &str) -> MemoryId {
+        MemoryId::new(value).expect("valid memory id")
+    }
+
+    fn activated_memory(id: &str) -> ActivatedMemory {
+        activated_memory_with_details(id, format!("{id} text"), 1, 0, 0.5)
+    }
+
+    fn activated_memory_with_details(
+        id: &str,
+        text: impl Into<String>,
+        matches: usize,
+        priority: i32,
+        confidence: f32,
+    ) -> ActivatedMemory {
+        let item = MemoryItem::new(
+            memory_id(id),
+            MemoryScope::Session,
+            text,
+            vec!["topic".to_owned()],
+            confidence,
+            priority,
+            None,
+        )
+        .expect("valid memory item");
+        let score =
+            MemoryActivationScore::new(matches, priority, confidence).expect("valid memory score");
+        ActivatedMemory::new(
+            item,
+            score,
+            vec![
+                MemoryActivationReason::ScopeAllowed,
+                MemoryActivationReason::trigger_matched("topic").expect("valid trigger"),
+                MemoryActivationReason::ranked(score),
+            ],
+        )
+        .expect("valid activated memory")
     }
 
     #[test]
@@ -587,5 +650,67 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![0]
         );
+    }
+
+    #[test]
+    fn context_snapshot_is_independent_from_later_recorded_memory() {
+        let mut session = SessionState::new(session_id());
+
+        let stale = session.context_snapshot();
+        session.record_activated_memory(activated_memory("memory-later"));
+        let current = session.context_snapshot();
+
+        let stale = ContextCompiler::new()
+            .compile(&stale)
+            .expect("stale snapshot compiles");
+        let current = ContextCompiler::new()
+            .compile(&current)
+            .expect("current snapshot compiles");
+
+        assert_eq!(stale.to_snapshot(), "");
+        assert!(current.to_snapshot().contains("memory:memory-later"));
+    }
+
+    #[test]
+    fn record_activated_memories_appends_to_memory_projection() {
+        let mut session = SessionState::new(session_id());
+        session.record_activated_memories(vec![
+            activated_memory("memory-a"),
+            activated_memory("memory-b"),
+        ]);
+
+        let compiled = ContextCompiler::new()
+            .compile(&session.context_snapshot())
+            .expect("snapshot compiles");
+
+        assert!(compiled.to_snapshot().contains("memory:memory-a"));
+        assert!(compiled.to_snapshot().contains("memory:memory-b"));
+    }
+
+    #[test]
+    fn duplicate_recorded_activated_memories_compile_once_deterministically() {
+        let lower_duplicate =
+            activated_memory_with_details("memory-duplicate", "Lower duplicate.", 1, 0, 0.5);
+        let higher_duplicate =
+            activated_memory_with_details("memory-duplicate", "Higher duplicate.", 2, 0, 0.5);
+
+        let mut first = SessionState::new(session_id());
+        first.record_activated_memories(vec![lower_duplicate.clone(), higher_duplicate.clone()]);
+        let first = ContextCompiler::new()
+            .compile(&first.context_snapshot())
+            .expect("first snapshot compiles")
+            .to_snapshot();
+
+        let mut second = SessionState::new(session_id());
+        second.record_activated_memories(vec![higher_duplicate, lower_duplicate]);
+        let second = ContextCompiler::new()
+            .compile(&second.context_snapshot())
+            .expect("second snapshot compiles")
+            .to_snapshot();
+
+        assert_eq!(first, second);
+        assert_eq!(first.matches("memory:memory-duplicate").count(), 1);
+        assert!(first.contains("memory-text:Higher duplicate."));
+        assert!(!first.contains("memory-text:Lower duplicate."));
     }
 }
