@@ -455,13 +455,14 @@ mod tests {
         artifact::ArtifactContent,
         context::ContextCompiler,
         memory::{
-            ActivatedMemory, MemoryActivationReason, MemoryActivationScore, MemoryId, MemoryItem,
-            MemoryScope,
+            ActivatedMemory, MemoryActivationProvenance, MemoryActivationReason,
+            MemoryActivationScore, MemoryActivationSourceKind, MemoryEvidence, MemoryId,
+            MemoryItem, MemoryItemSelection, MemoryScope,
         },
     };
     use merry_core::{
-        ArtifactId, ArtifactKind, ArtifactRef, PendingToolCall, RuntimeEventKind, SessionId,
-        ToolCallArguments, ToolCallId, ToolCallResult, ToolName,
+        ArtifactId, ArtifactKind, ArtifactRef, EvidenceLocator, EvidenceRef, PendingToolCall,
+        RuntimeEventKind, SessionId, ToolCallArguments, ToolCallId, ToolCallResult, ToolName,
     };
     use serde_json::json;
 
@@ -505,10 +506,9 @@ mod tests {
             memory_id(id),
             MemoryScope::Session,
             text,
-            vec!["topic".to_owned()],
-            confidence,
-            priority,
-            None,
+            vec![memory_evidence("primary source", &format!("{id}-artifact"))],
+            MemoryItemSelection::new(vec!["topic".to_owned()], confidence, priority, None)
+                .expect("valid memory selection"),
         )
         .expect("valid memory item");
         let score =
@@ -521,8 +521,53 @@ mod tests {
                 MemoryActivationReason::trigger_matched("topic").expect("valid trigger"),
                 MemoryActivationReason::ranked(score),
             ],
+            provenance(),
         )
         .expect("valid activated memory")
+    }
+
+    fn provenance() -> MemoryActivationProvenance {
+        MemoryActivationProvenance::new(
+            "topic",
+            vec![MemoryScope::Session, MemoryScope::Task, MemoryScope::Step],
+            MemoryActivationSourceKind::UserQuery,
+            "user request",
+        )
+        .expect("valid memory provenance")
+    }
+
+    fn memory_evidence(label: &str, artifact: &str) -> MemoryEvidence {
+        MemoryEvidence::new(
+            label,
+            EvidenceRef::new(artifact_id(artifact), EvidenceLocator::whole_artifact()),
+        )
+        .expect("valid memory evidence")
+    }
+
+    fn record_memory_artifacts(session: &mut SessionState, memories: &[&ActivatedMemory]) {
+        let mut seen = std::collections::BTreeSet::new();
+
+        for memory in memories {
+            for evidence in memory.item().evidence() {
+                if !seen.insert(evidence.reference().artifact_id.clone()) {
+                    continue;
+                }
+
+                session
+                    .record_artifact_state(
+                        ArtifactRef::new(
+                            evidence.reference().artifact_id.clone(),
+                            ArtifactKind::Text,
+                        ),
+                        ArtifactContent::text(format!(
+                            "evidence for {}\n{}",
+                            memory.item().id(),
+                            memory.item().text()
+                        )),
+                    )
+                    .expect("memory artifact records");
+            }
+        }
     }
 
     #[test]
@@ -657,8 +702,24 @@ mod tests {
         let mut session = SessionState::new(session_id());
 
         let stale = session.context_snapshot();
-        session.record_activated_memory(activated_memory("memory-later"));
+        let memory = activated_memory("memory-later");
+        session.record_activated_memory(memory.clone());
+        session
+            .record_artifact_state(
+                ArtifactRef::new(artifact_id("memory-later-artifact"), ArtifactKind::Text),
+                ArtifactContent::text("first exact memory evidence\n"),
+            )
+            .expect("memory artifact records");
         let current = session.context_snapshot();
+        let second_memory =
+            activated_memory_with_details("memory-later-2", "later text", 1, 2, 0.5);
+        session.record_activated_memory(second_memory);
+        session
+            .record_artifact_state(
+                ArtifactRef::new(artifact_id("memory-later-2-artifact"), ArtifactKind::Text),
+                ArtifactContent::text("second exact memory evidence\n"),
+            )
+            .expect("later memory artifact records");
 
         let stale = ContextCompiler::new()
             .compile(&stale)
@@ -669,15 +730,26 @@ mod tests {
 
         assert_eq!(stale.to_snapshot(), "");
         assert!(current.to_snapshot().contains("memory:memory-later"));
+        assert!(
+            current
+                .to_snapshot()
+                .contains("memory-evidence:primary source:memory-later-artifact:whole")
+        );
+        assert!(
+            current
+                .to_snapshot()
+                .contains("memory-activation-source-label:user request")
+        );
+        assert!(!current.to_snapshot().contains("memory-later-2"));
     }
 
     #[test]
     fn record_activated_memories_appends_to_memory_projection() {
         let mut session = SessionState::new(session_id());
-        session.record_activated_memories(vec![
-            activated_memory("memory-a"),
-            activated_memory("memory-b"),
-        ]);
+        let memory_a = activated_memory("memory-a");
+        let memory_b = activated_memory("memory-b");
+        record_memory_artifacts(&mut session, &[&memory_a, &memory_b]);
+        session.record_activated_memories(vec![memory_a, memory_b]);
 
         let compiled = ContextCompiler::new()
             .compile(&session.context_snapshot())
@@ -695,6 +767,7 @@ mod tests {
             activated_memory_with_details("memory-duplicate", "Higher duplicate.", 2, 0, 0.5);
 
         let mut first = SessionState::new(session_id());
+        record_memory_artifacts(&mut first, &[&lower_duplicate, &higher_duplicate]);
         first.record_activated_memories(vec![lower_duplicate.clone(), higher_duplicate.clone()]);
         let first = ContextCompiler::new()
             .compile(&first.context_snapshot())
@@ -702,6 +775,7 @@ mod tests {
             .to_snapshot();
 
         let mut second = SessionState::new(session_id());
+        record_memory_artifacts(&mut second, &[&higher_duplicate, &lower_duplicate]);
         second.record_activated_memories(vec![higher_duplicate, lower_duplicate]);
         let second = ContextCompiler::new()
             .compile(&second.context_snapshot())
