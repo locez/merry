@@ -4,6 +4,7 @@ use crate::{
     RuntimeError,
     artifact::{ArtifactContent, ArtifactError, ArtifactRegistry},
     context::{ContextEntry, SessionContextSnapshot},
+    judgment::{JudgmentError, JudgmentOutcome, JudgmentRecord, JudgmentRegistry, JudgmentRequest},
     ledger::{LedgerFactKind, TaskLedger},
     memory::{ActivatedMemory, MemoryError, MemoryItem, MemoryStore},
 };
@@ -71,6 +72,8 @@ pub(crate) struct SessionState {
     memory_store: MemoryStore,
     context_entries: Vec<ContextEntry>,
     activated_memories: Vec<ActivatedMemory>,
+    #[allow(dead_code)]
+    judgments: JudgmentRegistry,
     pending_tool_calls: Vec<PendingToolCall>,
     resolved_tool_calls: BTreeSet<ToolCallId>,
     unconsumed_tool_continuations: Vec<ResolvedToolContinuation>,
@@ -87,6 +90,7 @@ impl SessionState {
             memory_store: MemoryStore::new(),
             context_entries: Vec::new(),
             activated_memories: Vec::new(),
+            judgments: JudgmentRegistry::default(),
             pending_tool_calls: Vec::new(),
             resolved_tool_calls: BTreeSet::new(),
             unconsumed_tool_continuations: Vec::new(),
@@ -179,6 +183,21 @@ impl SessionState {
 
     pub(crate) fn ledger_projection(&self) -> crate::ledger::LedgerProjectionSnapshot {
         self.ledger.project()
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn record_judgment(
+        &mut self,
+        request: JudgmentRequest,
+        outcome: JudgmentOutcome,
+    ) -> Result<JudgmentRecord, JudgmentError> {
+        self.validate_judgment_evidence(&request, &outcome)?;
+        self.judgments.record_completed(request, outcome)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn judgment_records(&self) -> Vec<JudgmentRecord> {
+        self.judgments.snapshot().records().to_vec()
     }
 
     pub(crate) fn pending_tool_calls(&self) -> Vec<PendingToolCall> {
@@ -434,6 +453,24 @@ impl SessionState {
             }
         }
     }
+
+    #[allow(dead_code)]
+    fn validate_judgment_evidence(
+        &self,
+        request: &JudgmentRequest,
+        outcome: &JudgmentOutcome,
+    ) -> Result<(), JudgmentError> {
+        for evidence in request.evidence().iter().chain(outcome.evidence()) {
+            self.artifacts
+                .validate_evidence(evidence.reference())
+                .map_err(|source| JudgmentError::UnreadableEvidence {
+                    artifact_id: evidence.reference().artifact_id.clone(),
+                    source,
+                })?;
+        }
+
+        Ok(())
+    }
 }
 
 pub(crate) fn is_runtime_reserved_artifact_id(artifact_id: &ArtifactId) -> bool {
@@ -467,8 +504,13 @@ fn duplicate_tool_call_diagnostic(call_id: &ToolCallId, state: &'static str) -> 
 mod tests {
     use super::SessionState;
     use crate::{
-        artifact::ArtifactContent,
+        artifact::{ArtifactContent, ArtifactError},
         context::ContextCompiler,
+        judgment::{
+            JudgmentConfidence, JudgmentError, JudgmentEvidence, JudgmentOutcome,
+            JudgmentProvenance, JudgmentPurpose, JudgmentRecommendation, JudgmentRiskLevel,
+            JudgmentSourceKind,
+        },
         memory::{
             ActivatedMemory, MemoryActivationProvenance, MemoryActivationReason,
             MemoryActivationScore, MemoryActivationSourceKind, MemoryEvidence, MemoryId,
@@ -500,6 +542,106 @@ mod tests {
             ToolCallArguments::try_from(json!({ "query": "value" }))
                 .expect("object arguments are valid"),
         )
+    }
+
+    fn judgment_evidence(label: &str, id: &str, locator: EvidenceLocator) -> JudgmentEvidence {
+        JudgmentEvidence::new(label, EvidenceRef::new(artifact_id(id), locator))
+            .expect("valid judgment evidence")
+    }
+
+    fn judgment_constraints() -> Vec<String> {
+        vec!["advisory semantic signal only".to_owned()]
+    }
+
+    fn judgment_provenance() -> JudgmentProvenance {
+        JudgmentProvenance::new(JudgmentSourceKind::Test, "session test source")
+            .expect("valid judgment provenance")
+    }
+
+    fn judgment_confidence(value: f32) -> JudgmentConfidence {
+        JudgmentConfidence::new(value).expect("valid judgment confidence")
+    }
+
+    fn memory_relevance_request(
+        evidence: Vec<JudgmentEvidence>,
+    ) -> crate::judgment::JudgmentRequest {
+        crate::judgment::JudgmentRequest::new(
+            JudgmentPurpose::MemoryRelevance,
+            "candidate memory",
+            "Is this memory relevant?",
+            evidence,
+            judgment_constraints(),
+            "session test request",
+        )
+        .expect("valid memory relevance request")
+    }
+
+    fn summary_draft_request(evidence: Vec<JudgmentEvidence>) -> crate::judgment::JudgmentRequest {
+        crate::judgment::JudgmentRequest::new(
+            JudgmentPurpose::SummaryDraft,
+            "session summary",
+            "Draft from exact evidence.",
+            evidence,
+            judgment_constraints(),
+            "session test request",
+        )
+        .expect("valid summary draft request")
+    }
+
+    fn memory_relevant_outcome(evidence: Vec<JudgmentEvidence>) -> JudgmentOutcome {
+        JudgmentOutcome::new(
+            JudgmentPurpose::MemoryRelevance,
+            JudgmentRecommendation::MemoryRelevant,
+            judgment_confidence(0.7),
+            evidence,
+            "The memory matches the current task.",
+            "Only supplied evidence was reviewed.",
+            judgment_provenance(),
+        )
+        .expect("valid memory relevant outcome")
+    }
+
+    fn summary_draft_outcome(evidence: Vec<JudgmentEvidence>) -> JudgmentOutcome {
+        JudgmentOutcome::new(
+            JudgmentPurpose::SummaryDraft,
+            JudgmentRecommendation::SummaryDraft {
+                draft: "Draft from readable evidence.".to_owned(),
+            },
+            judgment_confidence(0.8),
+            evidence,
+            "The draft is grounded in readable evidence.",
+            "The source is partial.",
+            judgment_provenance(),
+        )
+        .expect("valid summary draft outcome")
+    }
+
+    fn high_tool_risk_request() -> crate::judgment::JudgmentRequest {
+        crate::judgment::JudgmentRequest::new(
+            JudgmentPurpose::ToolRiskReview,
+            "pending lookup tool",
+            "Review whether the lookup input has semantic risk.",
+            Vec::new(),
+            judgment_constraints(),
+            "session test request",
+        )
+        .expect("valid tool risk request")
+    }
+
+    fn high_tool_risk_outcome() -> JudgmentOutcome {
+        JudgmentOutcome::new(
+            JudgmentPurpose::ToolRiskReview,
+            JudgmentRecommendation::ToolRiskReview {
+                risk: JudgmentRiskLevel::High,
+                concerns: vec!["Input references credential-like material.".to_owned()],
+            },
+            judgment_confidence(0.95),
+            Vec::new(),
+            "Credential-like input is semantically risky.",
+            "This is advisory and not a hard policy decision.",
+            judgment_provenance(),
+        )
+        .expect("valid high risk outcome")
     }
 
     fn memory_id(value: &str) -> MemoryId {
@@ -710,6 +852,175 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![0]
         );
+    }
+
+    #[test]
+    fn record_judgment_rejects_missing_evidence_without_registry_record() {
+        let mut session = SessionState::new(session_id());
+        let request = summary_draft_request(vec![judgment_evidence(
+            "missing source",
+            "missing-judgment-artifact",
+            EvidenceLocator::whole_artifact(),
+        )]);
+        let outcome = summary_draft_outcome(vec![judgment_evidence(
+            "missing source",
+            "missing-judgment-artifact",
+            EvidenceLocator::whole_artifact(),
+        )]);
+
+        let error = session
+            .record_judgment(request, outcome)
+            .expect_err("missing judgment evidence should reject before registry write");
+
+        assert!(matches!(
+            error,
+            JudgmentError::UnreadableEvidence {
+                artifact_id,
+                source: ArtifactError::MissingArtifact { .. },
+            } if artifact_id.as_str() == "missing-judgment-artifact"
+        ));
+        assert!(session.judgment_records().is_empty());
+    }
+
+    #[test]
+    fn record_judgment_rejects_bad_evidence_locator_without_registry_record() {
+        let mut session = SessionState::new(session_id());
+        session
+            .record_artifact_state(
+                ArtifactRef::new(artifact_id("short-judgment-artifact"), ArtifactKind::Text),
+                ArtifactContent::text("one line\n"),
+            )
+            .expect("artifact records");
+        let request = summary_draft_request(vec![judgment_evidence(
+            "bad line",
+            "short-judgment-artifact",
+            EvidenceLocator::line_range(4, 4).expect("valid locator shape"),
+        )]);
+        let outcome = summary_draft_outcome(vec![judgment_evidence(
+            "whole source",
+            "short-judgment-artifact",
+            EvidenceLocator::whole_artifact(),
+        )]);
+
+        let error = session
+            .record_judgment(request, outcome)
+            .expect_err("bad judgment evidence locator should reject before registry write");
+
+        assert!(matches!(
+            error,
+            JudgmentError::UnreadableEvidence {
+                artifact_id,
+                source: ArtifactError::InvalidEvidenceLocator { .. },
+            } if artifact_id.as_str() == "short-judgment-artifact"
+        ));
+        assert!(session.judgment_records().is_empty());
+    }
+
+    #[test]
+    fn record_judgment_success_is_readable_from_internal_registry() {
+        let mut session = SessionState::new(session_id());
+        session
+            .record_artifact_state(
+                ArtifactRef::new(artifact_id("judgment-source"), ArtifactKind::Text),
+                ArtifactContent::text("first line\nsecond line\n"),
+            )
+            .expect("artifact records");
+        let request = summary_draft_request(vec![judgment_evidence(
+            "selected line",
+            "judgment-source",
+            EvidenceLocator::line_range(1, 1).expect("valid line locator"),
+        )]);
+        let outcome = summary_draft_outcome(vec![judgment_evidence(
+            "whole source",
+            "judgment-source",
+            EvidenceLocator::whole_artifact(),
+        )]);
+
+        let record = session
+            .record_judgment(request, outcome)
+            .expect("readable judgment evidence should record");
+        let records = session.judgment_records();
+
+        assert_eq!(records, vec![record.clone()]);
+        assert_eq!(record.id().as_str(), "judgment-record-00000000000000000000");
+        assert_eq!(record.request().purpose(), JudgmentPurpose::SummaryDraft);
+        assert_eq!(record.outcome().purpose(), JudgmentPurpose::SummaryDraft);
+        assert!(
+            record
+                .artifacts()
+                .request()
+                .content()
+                .contains("artifact=request\n")
+        );
+        assert!(
+            record
+                .artifacts()
+                .outcome()
+                .content()
+                .contains("artifact=outcome\n")
+        );
+        assert!(
+            record
+                .artifacts()
+                .request()
+                .content()
+                .contains("evidence.0.locator=line:1-1\n")
+        );
+    }
+
+    #[test]
+    fn record_judgment_does_not_alter_ledger_projection_or_event_sequence() {
+        let mut session = SessionState::new(session_id());
+        let started = session
+            .record_session_started_if_needed()
+            .expect("session should start");
+        let projection_before = session.ledger_projection();
+        let next_sequence_before = session.next_sequence();
+
+        session
+            .record_judgment(
+                memory_relevance_request(Vec::new()),
+                memory_relevant_outcome(Vec::new()),
+            )
+            .expect("judgment without evidence records");
+        let completed = session.record_step_completed();
+
+        assert_eq!(session.ledger_projection().entries().len(), 2);
+        assert_eq!(
+            session.ledger_projection().entries()[0],
+            projection_before.entries()[0]
+        );
+        assert_eq!(next_sequence_before, 1);
+        assert_eq!(started.sequence, 0);
+        assert_eq!(completed.sequence, 1);
+    }
+
+    #[test]
+    fn high_tool_risk_review_does_not_mutate_pending_tool_or_context_state() {
+        let mut session = SessionState::new(session_id());
+        let call = pending_tool_call("risky-call");
+        session
+            .record_tool_call_pending(call.clone())
+            .expect("pending tool call records");
+        let pending_before = session.pending_tool_calls();
+        let projection_before = session.ledger_projection();
+        let context_before = ContextCompiler::new()
+            .compile(&session.context_snapshot())
+            .expect("empty context compiles")
+            .to_snapshot();
+
+        session
+            .record_judgment(high_tool_risk_request(), high_tool_risk_outcome())
+            .expect("high tool risk review records internally");
+
+        assert_eq!(session.pending_tool_calls(), pending_before);
+        assert_eq!(session.ledger_projection(), projection_before);
+        let context_after = ContextCompiler::new()
+            .compile(&session.context_snapshot())
+            .expect("empty context compiles after judgment")
+            .to_snapshot();
+        assert_eq!(context_after, context_before);
+        assert_eq!(session.judgment_records().len(), 1);
     }
 
     #[test]

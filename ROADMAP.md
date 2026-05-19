@@ -4,7 +4,7 @@ This roadmap is public-safe and implementation-focused. Private product strategy
 
 ## Current Phase
 
-Merry is in M18F-A LLM-assisted judgment boundary internal contract work, building on the M9 Memory Activation MVP runtime integration.
+Merry is in M18F-B LLM-assisted judgment boundary internal audit work, building on the M9 Memory Activation MVP runtime integration.
 
 M8 runtime/provider/tool execution hardening and M9 Memory Activation MVP are now maintenance and foundation work. Memory Activation now uses a session-owned in-memory stored source by default, but external/default sessions have no candidate memories until runtime-owned state records them. Production memory storage, public memory APIs, external persistence, and a stable activation contract are still not complete. Live provider flows remain explicit opt-in/manual debug paths; they are not the basis for deterministic verification.
 
@@ -40,17 +40,17 @@ M8 runtime/provider/tool execution hardening and M9 Memory Activation MVP are no
 
 ### Active
 
-- Add M18F-A LLM-assisted judgment boundary as a crate-internal `merry-runtime` contract.
+- Add M18F-B LLM-assisted judgment internal audit storage as a crate-internal `merry-runtime` contract.
 - Keep judgment advisory: semantic recommendations can inform runtime policy, but hard runtime policy still decides tool execution, actions, and context mutation.
 - Keep the initial judgment contract provider-neutral, evidence-aware, cancellable, and deterministic-testable.
-- Do not connect live LLM judgment, public judgment APIs, or tool execution gates in this milestone.
+- Do not connect live LLM judgment, public judgment APIs, public runtime events, ledger facts, or tool execution gates in this milestone.
 - Keep deterministic verification based on fake providers, stored runtime state, artifact references, and ledger assertions.
 - Improve public docs as implementation status changes, while keeping private notes under `docs/`.
 
 ### Deferred / Next
 
 - Production memory store, public Memory Activation APIs, external persistence, and stable activation contract.
-- Live LLM-backed judgment source, public judgment API, and tool execution gate integration.
+- Live LLM-backed judgment source, public judgment API, public judgment events/facts, and tool execution gate integration.
 - Python SDK and `merry-py`.
 - Rust facade crate `merry`.
 - Macro crate support for boilerplate generation.
@@ -209,22 +209,24 @@ Not included:
 
 ## Active Milestone
 
-### M18F-A: LLM-Assisted Judgment Boundary
+### M18F-A / M18F-B: LLM-Assisted Judgment Boundary
 
-Goal: reserve an internal runtime boundary for semantic judgment without giving judgment authority over runtime policy.
+Goal: reserve an internal runtime boundary and audit carrier for semantic judgment without giving judgment authority over runtime policy.
 
-M18F-A is a crate-internal contract skeleton in `merry-runtime`. Judgment outcomes are advisory semantic evidence; they cannot authorize tool execution, actions, or context mutation. Provider wire formats do not enter runtime, and summary/evidence exact artifact rules remain unchanged.
+M18F-A established the crate-internal contract skeleton in `merry-runtime`. M18F-B adds a crate-internal completed-judgment audit registry with exact internal request/outcome payload carriers. Judgment outcomes are advisory semantic evidence; they cannot authorize tool execution, actions, or context mutation. Provider wire formats do not enter runtime, and summary/evidence exact artifact rules remain unchanged.
 
 Done:
 
 - Define internal purpose, provenance, confidence, evidence, request, recommendation, outcome, context, source trait, and typed error shapes.
 - Add object-safe boxed-future source boundary and deterministic noop source.
 - Add unit tests for validation, evidence requirements, object-safe calls, advisory noop behavior, and cancellation context.
+- Add internal completed-only judgment record ids, deterministic registry snapshots, and exact internal request/outcome payload artifacts.
+- Add session-private judgment recording helpers that validate request/outcome evidence against session artifacts before writing the internal registry.
 
 Active:
 
 - Keep the boundary internal while runtime policy integration is designed.
-- Preserve the advisory/hard-policy split in docs and names.
+- Preserve the advisory/hard-policy split in docs, names, and storage boundaries.
 
 Not yet:
 
@@ -232,6 +234,7 @@ Not yet:
 - Public judgment API.
 - Tool execution gate integration.
 - New public `merry-core` event, id, or reference types.
+- Public runtime events or ledger facts for judgments.
 
 ## Deferred Milestones
 
