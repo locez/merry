@@ -10,8 +10,8 @@ use crate::{
     RuntimeError, RuntimeEventStream, SessionContextSnapshot,
     event_stream::ActiveStepPermit,
     memory::{
-        MemoryActivationSeed, MemoryActivationSource, MemoryActivationSourceKind, MemoryScope,
-        StoredMemoryActivationSource,
+        MemoryActivationContext, MemoryActivationSeed, MemoryActivationSource,
+        MemoryActivationSourceKind, MemoryScope, StoredMemoryActivationSource,
     },
     session::{SessionState, is_runtime_reserved_artifact_id},
     step::{StepContext, StepInput, compile_step_model_request},
@@ -567,19 +567,32 @@ async fn run_provider_step(
         }
     };
 
-    let memory_store = {
+    let candidates = {
         let session = inner.session.lock().await;
-        session.memory_store().clone()
+        session.memory_store().candidate_snapshot()
     };
     if token.is_cancelled() {
         let _ = send_cancelled_event(inner, sender).await;
         return;
     }
 
-    let activated_memories = match inner
-        .memory_activation_source
-        .activate(&seed, &memory_store)
-    {
+    let activation_context = MemoryActivationContext::new(token.clone());
+    let activation_result = tokio::select! {
+        biased;
+        () = token.cancelled() => {
+            let _ = send_cancelled_event(inner, sender).await;
+            return;
+        }
+        result = inner
+            .memory_activation_source
+            .activate(seed, candidates, activation_context) => result,
+    };
+    if token.is_cancelled() {
+        let _ = send_cancelled_event(inner, sender).await;
+        return;
+    }
+
+    let activated_memories = match activation_result {
         Ok(memories) => memories,
         Err(error) => {
             let diagnostic = diagnostic_from_text("memory_activation", error.to_string());
@@ -1272,9 +1285,9 @@ mod tests {
     use crate::ArtifactError;
     use crate::artifact::ArtifactContent;
     use crate::memory::{
-        ActivatedMemory, MemoryActivationReason, MemoryActivationScore, MemoryActivationSource,
-        MemoryActivationSourceKind, MemoryError, MemoryEvidence, MemoryId, MemoryItem,
-        MemoryItemSelection, MemoryScope, MemoryStore,
+        ActivatedMemory, MemoryActivationContext, MemoryActivationFuture, MemoryActivationReason,
+        MemoryActivationScore, MemoryActivationSource, MemoryActivationSourceKind, MemoryError,
+        MemoryEvidence, MemoryId, MemoryItem, MemoryItemSelection, MemoryScope,
     };
     use crate::session::SessionState;
     use crate::tool::{
@@ -1529,7 +1542,7 @@ mod tests {
         );
     }
 
-    #[derive(Debug, Clone)]
+    #[derive(Debug)]
     enum ScriptedMemoryActivationResponse {
         Memories(Vec<ActivatedMemory>),
         Error(MemoryError),
@@ -1537,16 +1550,25 @@ mod tests {
             token: CancellationToken,
             memories: Vec<ActivatedMemory>,
         },
+        PendingUntilDropped {
+            started: oneshot::Sender<()>,
+            dropped: oneshot::Sender<()>,
+        },
     }
 
     impl ScriptedMemoryActivationResponse {
-        fn into_result(self) -> Result<Vec<ActivatedMemory>, MemoryError> {
+        async fn into_result(self) -> Result<Vec<ActivatedMemory>, MemoryError> {
             match self {
                 Self::Memories(memories) => Ok(memories),
                 Self::Error(error) => Err(error),
                 Self::CancelThenMemories { token, memories } => {
                     token.cancel();
                     Ok(memories)
+                }
+                Self::PendingUntilDropped { started, dropped } => {
+                    let _notify_on_drop = NotifyOnDrop::new(dropped);
+                    let _ = started.send(());
+                    std::future::pending::<Result<Vec<ActivatedMemory>, MemoryError>>().await
                 }
             }
         }
@@ -1583,25 +1605,50 @@ mod tests {
     }
 
     impl MemoryActivationSource for ScriptedMemoryActivationSource {
-        fn activate(
-            &self,
-            seed: &crate::memory::MemoryActivationSeed,
-            _store: &MemoryStore,
-        ) -> Result<Vec<ActivatedMemory>, MemoryError> {
+        fn activate<'a>(
+            &'a self,
+            seed: crate::memory::MemoryActivationSeed,
+            _candidates: Vec<MemoryItem>,
+            context: MemoryActivationContext,
+        ) -> MemoryActivationFuture<'a> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.observed_queries
                 .lock()
                 .expect("observed query mutex should not be poisoned")
                 .push(seed.query().to_owned());
-            self.responses
+            let response = self
+                .responses
                 .lock()
                 .expect("memory response mutex should not be poisoned")
-                .pop()
-                .map_or(
-                    Ok(Vec::new()),
-                    ScriptedMemoryActivationResponse::into_result,
-                )
+                .pop();
+            Box::pin(async move {
+                if context.cancellation_token().is_cancelled() {
+                    return Ok(Vec::new());
+                }
+
+                match response {
+                    Some(response) => response.into_result().await,
+                    None => Ok(Vec::new()),
+                }
+            })
         }
+    }
+
+    fn pending_memory_activation_source() -> (
+        ScriptedMemoryActivationSource,
+        oneshot::Receiver<()>,
+        oneshot::Receiver<()>,
+    ) {
+        let (started_tx, started_rx) = oneshot::channel();
+        let (dropped_tx, dropped_rx) = oneshot::channel();
+        let source = ScriptedMemoryActivationSource::with_script(vec![
+            ScriptedMemoryActivationResponse::PendingUntilDropped {
+                started: started_tx,
+                dropped: dropped_tx,
+            },
+        ]);
+
+        (source, started_rx, dropped_rx)
     }
 
     #[derive(Debug)]
@@ -2191,6 +2238,101 @@ mod tests {
                 .to_snapshot(),
             ""
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelling_pending_memory_activation_emits_cancelled_without_provider_call() {
+        let (source, activation_started_rx, activation_dropped_rx) =
+            pending_memory_activation_source();
+        let provider = RecordingModelProvider::new();
+        let runtime = runtime_with_provider_and_memory_source(
+            "runtime-memory-pending-activation-cancel",
+            provider.clone(),
+            source.clone(),
+        );
+        let token = CancellationToken::new();
+        let mut stream = runtime
+            .step(
+                crate::StepInput::user_text("Topic request.").expect("valid step input"),
+                crate::StepContext::new(token.clone()),
+            )
+            .expect("step should start");
+
+        assert!(matches!(
+            stream.next().await.expect("session started event"),
+            RuntimeEvent {
+                kind: RuntimeEventKind::SessionStarted,
+                ..
+            }
+        ));
+        assert!(matches!(
+            stream.next().await.expect("step started event"),
+            RuntimeEvent {
+                kind: RuntimeEventKind::StepStarted,
+                ..
+            }
+        ));
+        activation_started_rx
+            .await
+            .expect("activation future should start");
+
+        token.cancel();
+        activation_dropped_rx
+            .await
+            .expect("activation future should be dropped on cancellation");
+        let remaining: Vec<_> = stream.collect().await;
+
+        assert_eq!(event_kind_names(&remaining), ["Cancelled"]);
+        assert_eq!(source.call_count(), 1);
+        assert_eq!(provider.recorded_requests().len(), 0);
+        assert_activated_memory_projection_cleared(&runtime).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dropping_stream_while_memory_activation_pending_drops_activation_without_provider_call()
+     {
+        let (source, activation_started_rx, activation_dropped_rx) =
+            pending_memory_activation_source();
+        let provider = RecordingModelProvider::new();
+        let runtime = runtime_with_provider_and_memory_source(
+            "runtime-memory-pending-activation-drop",
+            provider.clone(),
+            source.clone(),
+        );
+        let mut stream = runtime
+            .step(
+                crate::StepInput::user_text("Topic request.").expect("valid step input"),
+                crate::StepContext::new(CancellationToken::new()),
+            )
+            .expect("step should start");
+
+        assert!(matches!(
+            stream.next().await.expect("session started event"),
+            RuntimeEvent {
+                kind: RuntimeEventKind::SessionStarted,
+                ..
+            }
+        ));
+        assert!(matches!(
+            stream.next().await.expect("step started event"),
+            RuntimeEvent {
+                kind: RuntimeEventKind::StepStarted,
+                ..
+            }
+        ));
+        activation_started_rx
+            .await
+            .expect("activation future should start");
+
+        drop(stream);
+        activation_dropped_rx
+            .await
+            .expect("activation future should be dropped when stream is dropped");
+        tokio::task::yield_now().await;
+
+        assert_eq!(source.call_count(), 1);
+        assert_eq!(provider.recorded_requests().len(), 0);
+        assert_activated_memory_projection_cleared(&runtime).await;
     }
 
     #[tokio::test(flavor = "current_thread")]
