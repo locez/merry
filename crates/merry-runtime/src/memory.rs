@@ -12,8 +12,11 @@ use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet, btree_map::Entry},
     fmt,
+    future::Future,
+    pin::Pin,
 };
 use thiserror::Error;
+use tokio_util::sync::CancellationToken;
 
 /// Validated internal memory identifier.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -301,13 +304,6 @@ impl MemoryStore {
     pub(crate) fn candidate_snapshot(&self) -> Vec<MemoryItem> {
         self.candidates.values().cloned().collect()
     }
-
-    pub(crate) fn activate(
-        &self,
-        seed: &MemoryActivationSeed,
-    ) -> Result<Vec<ActivatedMemory>, MemoryError> {
-        MemoryActivator::activate(seed, &self.candidate_snapshot())
-    }
 }
 
 /// Provider-neutral source category for an activation seed.
@@ -579,17 +575,39 @@ impl ActivatedMemory {
     }
 }
 
+/// Result returned by a crate-internal memory activation source.
+pub(crate) type MemoryActivationResult = Result<Vec<ActivatedMemory>, MemoryError>;
+
+/// Boxed memory activation future used for object-safe async boundaries.
+pub(crate) type MemoryActivationFuture<'a> =
+    Pin<Box<dyn Future<Output = MemoryActivationResult> + Send + 'a>>;
+
+/// Context passed to a memory activation source.
+#[derive(Debug, Clone)]
+pub(crate) struct MemoryActivationContext {
+    cancellation_token: CancellationToken,
+}
+
+impl MemoryActivationContext {
+    #[must_use]
+    pub(crate) fn new(cancellation_token: CancellationToken) -> Self {
+        Self { cancellation_token }
+    }
+
+    #[must_use]
+    pub(crate) fn cancellation_token(&self) -> &CancellationToken {
+        &self.cancellation_token
+    }
+}
+
 /// Crate-internal source for the current provider request's memory projection.
-///
-/// Activation is synchronous in this stage because the store is pure
-/// in-memory, performs no IO, and scans a bounded deterministic candidate
-/// snapshot owned by the session.
 pub(crate) trait MemoryActivationSource: Send + Sync {
-    fn activate(
-        &self,
-        seed: &MemoryActivationSeed,
-        store: &MemoryStore,
-    ) -> Result<Vec<ActivatedMemory>, MemoryError>;
+    fn activate<'a>(
+        &'a self,
+        seed: MemoryActivationSeed,
+        candidates: Vec<MemoryItem>,
+        context: MemoryActivationContext,
+    ) -> MemoryActivationFuture<'a>;
 }
 
 /// Production MVP source backed by the session-owned in-memory store.
@@ -597,12 +615,13 @@ pub(crate) trait MemoryActivationSource: Send + Sync {
 pub(crate) struct StoredMemoryActivationSource;
 
 impl MemoryActivationSource for StoredMemoryActivationSource {
-    fn activate(
-        &self,
-        seed: &MemoryActivationSeed,
-        store: &MemoryStore,
-    ) -> Result<Vec<ActivatedMemory>, MemoryError> {
-        store.activate(seed)
+    fn activate<'a>(
+        &'a self,
+        seed: MemoryActivationSeed,
+        candidates: Vec<MemoryItem>,
+        _context: MemoryActivationContext,
+    ) -> MemoryActivationFuture<'a> {
+        Box::pin(async move { MemoryActivator::activate(&seed, &candidates) })
     }
 }
 
@@ -1270,8 +1289,8 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn stored_source_activates_matching_candidate() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn stored_source_activates_matching_candidate() {
         let mut store = MemoryStore::new();
         store
             .record(item(
@@ -1286,14 +1305,19 @@ mod tests {
         let source = StoredMemoryActivationSource;
 
         let activated = source
-            .activate(&seed("topic request", vec![MemoryScope::Session]), &store)
+            .activate(
+                seed("topic request", vec![MemoryScope::Session]),
+                store.candidate_snapshot(),
+                MemoryActivationContext::new(CancellationToken::new()),
+            )
+            .await
             .expect("activation succeeds");
 
         assert_eq!(ids(&activated), ["stored-topic"]);
     }
 
-    #[test]
-    fn stored_source_ignores_unmatched_trigger() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn stored_source_ignores_unmatched_trigger() {
         let mut store = MemoryStore::new();
         store
             .record(item(
@@ -1308,7 +1332,12 @@ mod tests {
         let source = StoredMemoryActivationSource;
 
         let activated = source
-            .activate(&seed("topic request", vec![MemoryScope::Session]), &store)
+            .activate(
+                seed("topic request", vec![MemoryScope::Session]),
+                store.candidate_snapshot(),
+                MemoryActivationContext::new(CancellationToken::new()),
+            )
+            .await
             .expect("activation succeeds");
 
         assert!(activated.is_empty());
