@@ -10,7 +10,7 @@
 use merry_core::EvidenceRef;
 use std::{
     cmp::Ordering,
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, btree_map::Entry},
     fmt,
 };
 use thiserror::Error;
@@ -271,6 +271,42 @@ impl MemoryItem {
             priority,
             conflict_key,
         })
+    }
+}
+
+/// Deterministic in-memory candidate store owned by a session.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct MemoryStore {
+    candidates: BTreeMap<MemoryId, MemoryItem>,
+}
+
+impl MemoryStore {
+    #[must_use]
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn record(&mut self, item: MemoryItem) -> Result<(), MemoryError> {
+        let id = item.id().clone();
+        match self.candidates.entry(id.clone()) {
+            Entry::Occupied(_) => Err(MemoryError::DuplicateMemoryId { id }),
+            Entry::Vacant(entry) => {
+                entry.insert(item);
+                Ok(())
+            }
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn candidate_snapshot(&self) -> Vec<MemoryItem> {
+        self.candidates.values().cloned().collect()
+    }
+
+    pub(crate) fn activate(
+        &self,
+        seed: &MemoryActivationSeed,
+    ) -> Result<Vec<ActivatedMemory>, MemoryError> {
+        MemoryActivator::activate(seed, &self.candidate_snapshot())
     }
 }
 
@@ -544,17 +580,29 @@ impl ActivatedMemory {
 }
 
 /// Crate-internal source for the current provider request's memory projection.
+///
+/// Activation is synchronous in this stage because the store is pure
+/// in-memory, performs no IO, and scans a bounded deterministic candidate
+/// snapshot owned by the session.
 pub(crate) trait MemoryActivationSource: Send + Sync {
-    fn activate(&self, seed: &MemoryActivationSeed) -> Result<Vec<ActivatedMemory>, MemoryError>;
+    fn activate(
+        &self,
+        seed: &MemoryActivationSeed,
+        store: &MemoryStore,
+    ) -> Result<Vec<ActivatedMemory>, MemoryError>;
 }
 
-/// Production MVP source: memory activation is timed, but no store is wired yet.
+/// Production MVP source backed by the session-owned in-memory store.
 #[derive(Debug, Default)]
-pub(crate) struct NoopMemoryActivationSource;
+pub(crate) struct StoredMemoryActivationSource;
 
-impl MemoryActivationSource for NoopMemoryActivationSource {
-    fn activate(&self, _seed: &MemoryActivationSeed) -> Result<Vec<ActivatedMemory>, MemoryError> {
-        Ok(Vec::new())
+impl MemoryActivationSource for StoredMemoryActivationSource {
+    fn activate(
+        &self,
+        seed: &MemoryActivationSeed,
+        store: &MemoryStore,
+    ) -> Result<Vec<ActivatedMemory>, MemoryError> {
+        store.activate(seed)
     }
 }
 
@@ -636,8 +684,8 @@ pub(crate) enum MemoryError {
         value: f32,
     },
 
-    /// A candidate set contained the same memory id more than once.
-    #[error("memory id {id} appears more than once in activation candidates")]
+    /// A candidate set or memory store contained the same memory id more than once.
+    #[error("memory id {id} appears more than once in memory candidates")]
     DuplicateMemoryId {
         /// Duplicate memory identifier.
         id: MemoryId,
@@ -1154,6 +1202,116 @@ mod tests {
             error,
             MemoryError::DuplicateMemoryId { id } if id.as_str() == "duplicate"
         ));
+    }
+
+    #[test]
+    fn store_candidate_snapshot_is_deterministic() {
+        let mut store = MemoryStore::new();
+        store
+            .record(item(
+                "memory-b",
+                MemoryScope::Session,
+                &["topic"],
+                0.5,
+                0,
+                None,
+            ))
+            .expect("memory b records");
+        store
+            .record(item(
+                "memory-a",
+                MemoryScope::Session,
+                &["topic"],
+                0.5,
+                0,
+                None,
+            ))
+            .expect("memory a records");
+
+        let snapshot = store.candidate_snapshot();
+
+        assert_eq!(
+            snapshot
+                .iter()
+                .map(|memory| memory.id().as_str())
+                .collect::<Vec<_>>(),
+            ["memory-a", "memory-b"]
+        );
+    }
+
+    #[test]
+    fn store_rejects_duplicate_memory_id() {
+        let mut store = MemoryStore::new();
+        store
+            .record(item(
+                "duplicate",
+                MemoryScope::Session,
+                &["topic"],
+                0.5,
+                0,
+                None,
+            ))
+            .expect("first duplicate records");
+
+        let error = store
+            .record(item(
+                "duplicate",
+                MemoryScope::Task,
+                &["topic"],
+                0.5,
+                1,
+                None,
+            ))
+            .expect_err("duplicate memory id is rejected");
+
+        assert!(matches!(
+            error,
+            MemoryError::DuplicateMemoryId { id } if id.as_str() == "duplicate"
+        ));
+    }
+
+    #[test]
+    fn stored_source_activates_matching_candidate() {
+        let mut store = MemoryStore::new();
+        store
+            .record(item(
+                "stored-topic",
+                MemoryScope::Session,
+                &["topic"],
+                0.5,
+                0,
+                None,
+            ))
+            .expect("memory records");
+        let source = StoredMemoryActivationSource;
+
+        let activated = source
+            .activate(&seed("topic request", vec![MemoryScope::Session]), &store)
+            .expect("activation succeeds");
+
+        assert_eq!(ids(&activated), ["stored-topic"]);
+    }
+
+    #[test]
+    fn stored_source_ignores_unmatched_trigger() {
+        let mut store = MemoryStore::new();
+        store
+            .record(item(
+                "stored-other",
+                MemoryScope::Session,
+                &["other"],
+                0.5,
+                0,
+                None,
+            ))
+            .expect("memory records");
+        let source = StoredMemoryActivationSource;
+
+        let activated = source
+            .activate(&seed("topic request", vec![MemoryScope::Session]), &store)
+            .expect("activation succeeds");
+
+        assert!(activated.is_empty());
     }
 
     #[test]
