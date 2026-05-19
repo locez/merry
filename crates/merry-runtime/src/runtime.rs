@@ -4,7 +4,7 @@ use crate::{
     ArtifactContent, ContextCompiler, ContextEntry, ContextSummary, LedgerProjectionSnapshot,
     RuntimeError, RuntimeEventStream, SessionContextSnapshot,
     event_stream::ActiveStepPermit,
-    session::SessionState,
+    session::{SessionState, is_runtime_reserved_artifact_id},
     step::{StepContext, StepInput, compile_step_model_request},
     tool::{RegisteredTool, ToolExecutionContext, ToolExecutionError, ToolRegistry},
 };
@@ -97,6 +97,12 @@ impl Runtime {
                 session_id: self.inner.session_id.clone(),
             })?;
 
+        if is_runtime_reserved_artifact_id(artifact.id()) {
+            return Err(RuntimeError::ReservedArtifactId {
+                artifact_id: artifact.id().clone(),
+            });
+        }
+
         let mut session = self.inner.session.lock().await;
         session
             .record_artifact_events(artifact, content)
@@ -116,6 +122,12 @@ impl Runtime {
             .ok_or_else(|| RuntimeError::StepAlreadyActive {
                 session_id: self.inner.session_id.clone(),
             })?;
+
+        if is_runtime_reserved_artifact_id(result.artifact().id()) {
+            return Err(RuntimeError::ReservedArtifactId {
+                artifact_id: result.artifact().id().clone(),
+            });
+        }
 
         let mut session = self.inner.session.lock().await;
         session.submit_tool_result(result, content)
