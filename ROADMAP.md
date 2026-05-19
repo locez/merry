@@ -33,6 +33,7 @@ The current focus is making the Rust runtime loop, provider step boundary, artif
 - Harden runtime/provider/tool execution MVP behavior and tests.
 - Keep deterministic verification based on fake providers, stored runtime state, artifact references, and ledger assertions.
 - Continue tightening and aligning the runtime public API surface, rustdoc, and re-export contract.
+- Start Memory Activation MVP design with runtime-owned internal data shapes and deterministic context requirements; runtime execution integration remains deferred until the activation contract is validated.
 - Improve public docs as implementation status changes, while keeping private notes under `docs/`.
 
 ### Deferred / Next
@@ -178,11 +179,14 @@ Tasks:
 
 Goal: prove structured memory enters context through activation, not chat history.
 
+Design starts with runtime-owned internal data shapes and deterministic context requirements. Runtime execution integration remains deferred until the activation contract is validated.
+
 Tasks:
 
-- Add `MemoryItem`.
+- Define internal activation data shapes before public runtime APIs.
 - Add activation seeds and deterministic scoring.
-- Add `ActivatedMemory` with selection reasons.
+- Prove activated memory records why it entered context.
+- Keep activation deterministic and reproducible from stored runtime state.
 - Add memory projection template.
 - Add tests for scope, trigger, confidence, priority, and conflict handling.
 
