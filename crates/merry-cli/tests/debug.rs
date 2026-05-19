@@ -199,6 +199,7 @@ fn debug_openai_help_writes_usage_to_stdout() {
     assert!(stdout.contains("--input <TEXT>"));
     assert!(stdout.contains("--model <MODEL>"));
     assert!(stdout.contains("--max-output-tokens <N>"));
+    assert!(stdout.contains("--debug-tool-result <TEXT>"));
     assert!(stdout.contains("Optional maximum output tokens"));
     assert!(!stdout.contains("Rejected until"));
     assert!(stdout.contains("MERRY_OPENAI_DEBUG=1"));
@@ -252,6 +253,31 @@ fn debug_openai_rejects_unknown_option() {
     );
     let stderr = std::str::from_utf8(&output.stderr).expect("stderr should be utf-8");
     assert!(stderr.contains("unknown debug openai option: --bad-option"));
+    assert!(stderr.contains("Usage: merry debug openai"));
+}
+
+#[test]
+fn debug_openai_requires_debug_tool_result_value() {
+    let output = merry_without_openai_env()
+        .args([
+            "debug",
+            "openai",
+            "--input",
+            "hello",
+            "--model",
+            "gpt-test",
+            "--debug-tool-result",
+        ])
+        .output()
+        .expect("merry debug openai should run");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        output.stdout.is_empty(),
+        "usage errors should not write stdout"
+    );
+    let stderr = std::str::from_utf8(&output.stderr).expect("stderr should be utf-8");
+    assert!(stderr.contains("--debug-tool-result requires a value"));
     assert!(stderr.contains("Usage: merry debug openai"));
 }
 

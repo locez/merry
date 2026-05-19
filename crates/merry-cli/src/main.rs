@@ -1,10 +1,15 @@
 //! Debug and demonstration CLI for Merry.
 
 use futures_util::StreamExt;
-use merry_core::SessionId;
+use merry_core::{
+    PendingToolCall, RuntimeEvent, RuntimeEventKind, SessionId, ToolInputSchema, ToolName, ToolSpec,
+};
 use merry_llm::{GenerationConfig, ModelName};
 use merry_provider_openai::{OpenAiProvider, OpenAiProviderConfig};
-use merry_runtime::{Runtime, StepContext, StepInput};
+use merry_runtime::{
+    RegisteredTool, Runtime, StepContext, StepInput, ToolExecutionContext, ToolExecutionOutcome,
+    ToolExecutor, ToolExecutorFuture,
+};
 use std::{
     env, fmt, io,
     process::{ExitCode, Termination},
@@ -14,6 +19,8 @@ use tokio::io::{AsyncWrite, AsyncWriteExt, BufWriter};
 
 const DEFAULT_SESSION_ID: &str = "debug-session";
 const DEFAULT_INPUT: &str = "debug step";
+const DEBUG_TOOL_NAME: &str = "debug_echo";
+const DEBUG_TOOL_CONTINUATION_INPUT: &str = "continue after debug tool";
 
 fn main() -> CliExit {
     let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -58,7 +65,15 @@ async fn async_main() -> CliExit {
             input,
             model,
             max_output_tokens,
-        }) => match run_debug_openai(&input, model.as_deref(), max_output_tokens).await {
+            debug_tool_result,
+        }) => match run_debug_openai(
+            &input,
+            model.as_deref(),
+            max_output_tokens,
+            debug_tool_result.as_deref(),
+        )
+        .await
+        {
             Ok(()) => CliExit::Success,
             Err(CliError::BrokenPipe) => CliExit::Success,
             Err(CliError::DebugOpenAiUsage(message)) => CliExit::Usage {
@@ -98,6 +113,7 @@ enum Command {
         input: String,
         model: Option<String>,
         max_output_tokens: Option<u64>,
+        debug_tool_result: Option<String>,
     },
 }
 
@@ -173,6 +189,7 @@ fn parse_debug_openai_args(args: impl IntoIterator<Item = String>) -> Result<Com
     let mut input = None;
     let mut model = None;
     let mut max_output_tokens = None;
+    let mut debug_tool_result = None;
     let mut args = args.into_iter();
 
     while let Some(arg) = args.next() {
@@ -201,6 +218,11 @@ fn parse_debug_openai_args(args: impl IntoIterator<Item = String>) -> Result<Com
                 })?;
                 max_output_tokens = Some(parse_max_output_tokens(&value)?);
             }
+            "--debug-tool-result" => {
+                debug_tool_result = Some(args.next().ok_or_else(|| {
+                    ParseError::DebugOpenAi("--debug-tool-result requires a value".to_owned())
+                })?);
+            }
             other if other.starts_with("--") => {
                 return Err(ParseError::DebugOpenAi(format!(
                     "unknown debug openai option: {other}"
@@ -221,6 +243,7 @@ fn parse_debug_openai_args(args: impl IntoIterator<Item = String>) -> Result<Com
         input,
         model,
         max_output_tokens,
+        debug_tool_result,
     })
 }
 
@@ -251,22 +274,28 @@ async fn run_debug_openai(
     input: &str,
     model: Option<&str>,
     max_output_tokens: Option<u64>,
+    debug_tool_result: Option<&str>,
 ) -> Result<(), CliError> {
     let config = debug_openai_config(model)?;
 
     let session_id = SessionId::new(DEFAULT_SESSION_ID).map_err(debug_openai_usage_error)?;
     let model = ModelName::new(&config.model).map_err(debug_openai_usage_error)?;
     let provider = OpenAiProvider::new(config.provider);
-    let runtime = Runtime::builder(session_id)
-        .model_provider(Arc::new(provider), model)
-        .build()
-        .map_err(unexpected)?;
+    let mut builder = Runtime::builder(session_id).model_provider(Arc::new(provider), model);
+    if let Some(result) = debug_tool_result {
+        builder = builder.register_tool(debug_echo_tool(result)?);
+    }
+    let runtime = builder.build().map_err(unexpected)?;
     let input = StepInput::user_text(input).map_err(debug_openai_usage_error)?;
     let generation_config =
         GenerationConfig::new(max_output_tokens, false).map_err(debug_openai_usage_error)?;
     let context = StepContext::new(Default::default()).with_generation_config(generation_config);
 
-    write_runtime_step_events(&runtime, input, context, tokio::io::stdout()).await
+    if debug_tool_result.is_some() {
+        write_debug_openai_tool_events(&runtime, input, context, tokio::io::stdout()).await
+    } else {
+        write_runtime_step_events(&runtime, input, context, tokio::io::stdout()).await
+    }
 }
 
 async fn write_runtime_step_events<W>(
@@ -278,20 +307,128 @@ async fn write_runtime_step_events<W>(
 where
     W: AsyncWrite + Unpin,
 {
-    let mut events = runtime.step(input, context).map_err(unexpected)?;
-
     let mut writer = BufWriter::new(writer);
+    write_runtime_step_events_to(runtime, input, context, &mut writer).await?;
+    writer.flush().await.map_err(stdout_error)
+}
 
-    while let Some(event) = events.next().await {
-        let line = serde_json::to_string(&event).map_err(unexpected)?;
-        writer
-            .write_all(line.as_bytes())
-            .await
-            .map_err(stdout_error)?;
-        writer.write_all(b"\n").await.map_err(stdout_error)?;
+async fn write_debug_openai_tool_events<W>(
+    runtime: &Runtime,
+    input: StepInput,
+    context: StepContext,
+    writer: W,
+) -> Result<(), CliError>
+where
+    W: AsyncWrite + Unpin,
+{
+    let mut writer = BufWriter::new(writer);
+    let events = write_runtime_step_events_to(runtime, input, context.clone(), &mut writer).await?;
+    let pending = first_pending_tool_call(&events);
+
+    if let Some(pending) = pending {
+        write_runtime_events(
+            runtime
+                .execute_tool_call(pending.id(), ToolExecutionContext::default())
+                .await
+                .map_err(unexpected)?,
+            &mut writer,
+        )
+        .await?;
+
+        let input = StepInput::user_text(DEBUG_TOOL_CONTINUATION_INPUT).map_err(unexpected)?;
+        write_runtime_step_events_to(runtime, input, context, &mut writer).await?;
     }
 
     writer.flush().await.map_err(stdout_error)
+}
+
+async fn write_runtime_step_events_to<W>(
+    runtime: &Runtime,
+    input: StepInput,
+    context: StepContext,
+    writer: &mut W,
+) -> Result<Vec<RuntimeEvent>, CliError>
+where
+    W: AsyncWrite + Unpin,
+{
+    let mut events = runtime.step(input, context).map_err(unexpected)?;
+    let mut written = Vec::new();
+    while let Some(event) = events.next().await {
+        write_runtime_event(&event, writer).await?;
+        written.push(event);
+    }
+
+    Ok(written)
+}
+
+async fn write_runtime_events<W>(events: Vec<RuntimeEvent>, writer: &mut W) -> Result<(), CliError>
+where
+    W: AsyncWrite + Unpin,
+{
+    for event in events {
+        write_runtime_event(&event, writer).await?;
+    }
+    Ok(())
+}
+
+async fn write_runtime_event<W>(event: &RuntimeEvent, writer: &mut W) -> Result<(), CliError>
+where
+    W: AsyncWrite + Unpin,
+{
+    let line = serde_json::to_string(event).map_err(unexpected)?;
+    writer
+        .write_all(line.as_bytes())
+        .await
+        .map_err(stdout_error)?;
+    writer.write_all(b"\n").await.map_err(stdout_error)
+}
+
+fn first_pending_tool_call(events: &[RuntimeEvent]) -> Option<PendingToolCall> {
+    events.iter().find_map(|event| match &event.kind {
+        RuntimeEventKind::ToolCallPending { call } => Some(call.clone()),
+        _ => None,
+    })
+}
+
+fn debug_echo_tool(result: &str) -> Result<RegisteredTool, CliError> {
+    if result.trim().is_empty() {
+        return Err(debug_openai_usage_error(
+            "--debug-tool-result must not be blank",
+        ));
+    }
+
+    let schema = serde_json::from_value::<ToolInputSchema>(serde_json::json!({
+        "type": "object",
+        "additionalProperties": true
+    }))
+    .map_err(debug_openai_usage_error)?;
+    let spec = ToolSpec::new(
+        ToolName::new(DEBUG_TOOL_NAME).map_err(debug_openai_usage_error)?,
+        "Return the fixed debug text provided by the CLI.",
+        schema,
+    )
+    .map_err(debug_openai_usage_error)?;
+
+    Ok(RegisteredTool::new(
+        spec,
+        Arc::new(DebugEchoExecutor {
+            result: result.to_owned(),
+        }),
+    ))
+}
+
+struct DebugEchoExecutor {
+    result: String,
+}
+
+impl ToolExecutor for DebugEchoExecutor {
+    fn execute<'a>(
+        &'a self,
+        _call: PendingToolCall,
+        _context: ToolExecutionContext,
+    ) -> ToolExecutorFuture<'a> {
+        Box::pin(async move { Ok(ToolExecutionOutcome::succeeded_text(self.result.clone())) })
+    }
 }
 
 fn debug_openai_config(model_flag: Option<&str>) -> Result<DebugOpenAiConfig, CliError> {
@@ -360,11 +497,11 @@ fn root_usage() -> &'static str {
 }
 
 fn debug_usage() -> &'static str {
-    "Usage: merry debug [--session-id <SESSION_ID>] [--input <TEXT>]\n       merry debug openai --input <TEXT> [--model <MODEL>] [--max-output-tokens <N>]\n\nCommands:\n  openai                     Run opt-in OpenAI-compatible model debugging\n\nOptions:\n  --session-id <SESSION_ID>  Session id to use [default: debug-session]\n  --input <TEXT>             User text input [default: debug step]\n  --help                     Print help\n"
+    "Usage: merry debug [--session-id <SESSION_ID>] [--input <TEXT>]\n       merry debug openai --input <TEXT> [--model <MODEL>] [--max-output-tokens <N>] [--debug-tool-result <TEXT>]\n\nCommands:\n  openai                     Run opt-in OpenAI-compatible model debugging\n\nOptions:\n  --session-id <SESSION_ID>  Session id to use [default: debug-session]\n  --input <TEXT>             User text input [default: debug step]\n  --help                     Print help\n"
 }
 
 fn debug_openai_usage() -> &'static str {
-    "Usage: merry debug openai --input <TEXT> [--model <MODEL>] [--max-output-tokens <N>]\n\nOptions:\n  --input <TEXT>             User text input to send through Runtime::step\n  --model <MODEL>            Model name; falls back to MERRY_OPENAI_MODEL\n  --max-output-tokens <N>    Optional maximum output tokens for this step\n  --help                     Print help\n\nEnvironment:\n  MERRY_OPENAI_DEBUG=1       Required opt-in before any network attempt\n  OPENAI_API_KEY             Required after opt-in\n  MERRY_OPENAI_MODEL         Required when --model is omitted\n  MERRY_OPENAI_BASE_URL      Optional OpenAI-compatible base URL\n  OPENAI_ORG_ID              Optional organization header\n  OPENAI_PROJECT_ID          Optional project header\n"
+    "Usage: merry debug openai --input <TEXT> [--model <MODEL>] [--max-output-tokens <N>] [--debug-tool-result <TEXT>]\n\nOptions:\n  --input <TEXT>             User text input to send through Runtime::step\n  --model <MODEL>            Model name; falls back to MERRY_OPENAI_MODEL\n  --max-output-tokens <N>    Optional maximum output tokens for this step\n  --debug-tool-result <TEXT> Register debug_echo and return this text when it is called\n  --help                     Print help\n\nEnvironment:\n  MERRY_OPENAI_DEBUG=1       Required opt-in before any network attempt\n  OPENAI_API_KEY             Required after opt-in\n  MERRY_OPENAI_MODEL         Required when --model is omitted\n  MERRY_OPENAI_BASE_URL      Optional OpenAI-compatible base URL\n  OPENAI_ORG_ID              Optional organization header\n  OPENAI_PROJECT_ID          Optional project header\n"
 }
 
 fn unexpected(err: impl fmt::Display) -> CliError {
@@ -427,16 +564,17 @@ impl Termination for CliExit {
 
 #[cfg(test)]
 mod tests {
-    use super::write_runtime_step_events;
+    use super::{DEBUG_TOOL_CONTINUATION_INPUT, debug_echo_tool, write_debug_openai_tool_events};
+    use super::{DEBUG_TOOL_NAME, write_runtime_step_events};
     use futures_util::stream;
-    use merry_core::ProviderName;
+    use merry_core::{ProviderName, RuntimeEvent, ToolCallResultStatus, ToolName};
     use merry_llm::{
         FinishReason, GenerationConfig, ModelCapabilities, ModelError, ModelEvent,
         ModelEventStream, ModelName, ModelOutput, ModelProvider, ModelProviderFuture, ModelRequest,
-        ModelResponse, ModelStreamContext,
+        ModelResponse, ModelStreamContext, ModelToolCall, ModelToolCallId, ToolArguments,
     };
     use merry_runtime::{Runtime, StepContext, StepInput};
-    use serde_json::Value;
+    use serde_json::{Map, Value};
     use std::sync::{Arc, Mutex};
 
     struct CompletingProvider {
@@ -522,6 +660,67 @@ mod tests {
         }
     }
 
+    type ScriptedStep = Vec<Result<ModelEvent, ModelError>>;
+
+    #[derive(Debug, Clone)]
+    struct ScriptedProvider {
+        name: ProviderName,
+        capabilities: ModelCapabilities,
+        steps: Arc<Mutex<Vec<ScriptedStep>>>,
+        requests: Arc<Mutex<Vec<ModelRequest>>>,
+    }
+
+    impl ScriptedProvider {
+        fn new(scripts: Vec<ScriptedStep>) -> Self {
+            Self {
+                name: ProviderName::new("debug-scripted-provider").expect("valid provider name"),
+                capabilities: ModelCapabilities::new(true, true, false, true, None, None)
+                    .expect("valid capabilities"),
+                steps: Arc::new(Mutex::new(scripts.into_iter().rev().collect())),
+                requests: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn recorded_requests(&self) -> Vec<ModelRequest> {
+            self.requests
+                .lock()
+                .expect("request mutex should not be poisoned")
+                .clone()
+        }
+    }
+
+    impl ModelProvider for ScriptedProvider {
+        fn name(&self) -> &ProviderName {
+            &self.name
+        }
+
+        fn capabilities(&self) -> &ModelCapabilities {
+            &self.capabilities
+        }
+
+        fn stream_model<'a>(
+            &'a self,
+            request: ModelRequest,
+            _context: ModelStreamContext,
+        ) -> ModelProviderFuture<'a, Result<ModelEventStream, ModelError>> {
+            Box::pin(async move {
+                self.requests
+                    .lock()
+                    .expect("request mutex should not be poisoned")
+                    .push(request);
+
+                let script = self
+                    .steps
+                    .lock()
+                    .expect("step mutex should not be poisoned")
+                    .pop()
+                    .unwrap_or_default();
+
+                Ok(Box::pin(stream::iter(script)) as ModelEventStream)
+            })
+        }
+    }
+
     #[tokio::test]
     async fn debug_openai_runtime_helper_writes_runtime_lifecycle_jsonl_without_model_events() {
         let runtime = Runtime::builder(merry_core::SessionId::new("debug-openai-test").unwrap())
@@ -586,5 +785,115 @@ mod tests {
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].generation().max_output_tokens(), Some(16));
         assert!(!requests[0].generation().allow_parallel_tool_calls());
+    }
+
+    #[tokio::test]
+    async fn debug_openai_tool_helper_executes_one_pending_call_and_continues() {
+        let call = ModelToolCall::new(
+            ModelToolCallId::new("call-debug").expect("valid tool call id"),
+            ToolName::new(DEBUG_TOOL_NAME).expect("valid tool name"),
+            ToolArguments::new(Map::new()),
+        );
+        let provider = ScriptedProvider::new(vec![
+            vec![Ok(ModelEvent::Completed {
+                response: ModelResponse::new(
+                    vec![ModelOutput::tool_call(call)],
+                    FinishReason::ToolCalls,
+                    None,
+                ),
+            })],
+            vec![Ok(ModelEvent::Completed {
+                response: ModelResponse::new(
+                    vec![ModelOutput::text("continued after tool")],
+                    FinishReason::Stop,
+                    None,
+                ),
+            })],
+        ]);
+        let runtime = Runtime::builder(merry_core::SessionId::new("debug-openai-tool").unwrap())
+            .register_tool(
+                debug_echo_tool("debug result").unwrap_or_else(|_| panic!("valid debug tool")),
+            )
+            .model_provider(
+                Arc::new(provider.clone()),
+                ModelName::new("debug-model").unwrap(),
+            )
+            .build()
+            .expect("runtime should build");
+        let input = StepInput::user_text("please call the tool").expect("valid input");
+        let context = StepContext::default().with_generation_config(
+            GenerationConfig::new(Some(16), false).expect("valid generation config"),
+        );
+        let mut output = Vec::new();
+
+        write_debug_openai_tool_events(&runtime, input, context, &mut output)
+            .await
+            .unwrap_or_else(|_| panic!("tool events should write"));
+
+        let text = String::from_utf8(output).expect("output should be utf-8");
+        let events = text
+            .lines()
+            .map(|line| serde_json::from_str::<RuntimeEvent>(line).expect("line should be JSON"))
+            .collect::<Vec<_>>();
+        let event_types = events
+            .iter()
+            .map(|event| {
+                let value = serde_json::to_value(event).expect("event should serialize");
+                value["kind"]["type"].as_str().unwrap().to_owned()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            event_types,
+            [
+                "session_started",
+                "step_started",
+                "tool_call_pending",
+                "artifact_recorded",
+                "tool_call_resolved",
+                "step_started",
+                "artifact_recorded",
+                "step_completed",
+            ]
+        );
+
+        let resolved = events
+            .iter()
+            .find_map(|event| match &event.kind {
+                merry_core::RuntimeEventKind::ToolCallResolved { result } => Some(result),
+                _ => None,
+            })
+            .expect("tool should be resolved");
+        assert_eq!(resolved.status(), ToolCallResultStatus::Succeeded);
+
+        let requests = provider.recorded_requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].tools().len(), 1);
+        assert_eq!(requests[0].tools()[0].name().as_str(), DEBUG_TOOL_NAME);
+        assert!(requests[0].continuations().is_empty());
+        assert_eq!(requests[0].generation().max_output_tokens(), Some(16));
+        assert!(!requests[0].generation().allow_parallel_tool_calls());
+
+        assert_eq!(requests[1].tools().len(), 1);
+        assert_eq!(requests[1].tools()[0].name().as_str(), DEBUG_TOOL_NAME);
+        assert_eq!(requests[1].continuations().len(), 1);
+        let continuation = &requests[1].continuations()[0];
+        assert_eq!(continuation.call().id().as_str(), "call-debug");
+        assert_eq!(
+            continuation.result().status(),
+            ToolCallResultStatus::Succeeded
+        );
+        assert_eq!(
+            continuation.result().content().as_text(),
+            Some("debug result")
+        );
+        assert!(
+            requests[1]
+                .messages()
+                .iter()
+                .any(|message| message.content().as_text() == DEBUG_TOOL_CONTINUATION_INPUT)
+        );
+        assert_eq!(requests[1].generation().max_output_tokens(), Some(16));
+        assert!(!requests[1].generation().allow_parallel_tool_calls());
     }
 }
