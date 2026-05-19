@@ -1,4 +1,17 @@
 //! Deterministic context compiler skeleton.
+//!
+//! The MVP context model is summary-only. A summary is navigation text, not the
+//! source of truth: exact evidence must remain readable from session-owned
+//! artifacts before the summary can enter compiled context.
+//!
+//! [`SessionContextSnapshot`] is intentionally opaque and created by the
+//! runtime session that owns both context entries and artifacts. The compiler
+//! accepts snapshots rather than arbitrary caller-paired entries and registries
+//! so evidence validation is tied to the owning session.
+//!
+//! The shapes in this module are current MVP contracts. [`ContextEntry`] and
+//! [`CompiledContextSection`] may gain variants as Memory Activation and richer
+//! context assembly are introduced.
 
 use crate::artifact::{ArtifactError, ArtifactRegistry};
 use merry_core::{ArtifactId, EvidenceLocator, EvidenceRef};
@@ -33,6 +46,10 @@ impl ContextCompiler {
     /// This enforces the runtime rule that summaries are navigation only:
     /// every linked exact evidence reference must resolve through recorded
     /// artifact content before summary text enters the compiled context.
+    ///
+    /// Output ordering is deterministic for a given snapshot. The resulting
+    /// [`CompiledContext`] is a runtime-owned intermediate, not a stable prompt
+    /// format for provider adapters.
     pub fn compile(
         &self,
         snapshot: &SessionContextSnapshot,
@@ -80,6 +97,10 @@ fn compile_entries(
 /// The fields are private so public callers can compile only snapshots created
 /// by the runtime session that owns both summaries and artifact state.
 ///
+/// Treat this as an opaque view of session state. It is cloneable for
+/// deterministic compilation and tests, but external callers should not depend
+/// on its internal storage shape.
+///
 /// ```compile_fail
 /// use merry_runtime::{ArtifactRegistry, ContextEntry, SessionContextSnapshot};
 ///
@@ -109,6 +130,9 @@ impl SessionContextSnapshot {
 }
 
 /// Structured input item for the context compiler.
+///
+/// The MVP has only summary entries. Additional variants may be added when the
+/// runtime records Memory Activation or other structured context sources.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContextEntry {
     /// A compact navigation summary backed by exact evidence references.
@@ -124,6 +148,9 @@ impl ContextEntry {
 }
 
 /// Navigation text that must remain tied to exact retrievable evidence.
+///
+/// The text is a compact guide for context assembly. It must not replace the
+/// artifact-backed evidence that supports it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextSummary {
     id: String,
@@ -133,6 +160,9 @@ pub struct ContextSummary {
 
 impl ContextSummary {
     /// Creates a validated context summary.
+    ///
+    /// Evidence presence is checked during compilation so construction can
+    /// remain focused on field validity.
     pub fn new(
         id: impl Into<String>,
         text: impl Into<String>,
@@ -167,6 +197,10 @@ impl ContextSummary {
 }
 
 /// Exact evidence metadata linked from compiled context.
+///
+/// Evidence metadata keeps the compiled context connected to exact artifact
+/// locations. Labels explain why a reference was selected; they are not a
+/// substitute for readable evidence content.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextEvidence {
     label: String,
@@ -204,6 +238,9 @@ impl ContextEvidence {
 }
 
 /// Reproducible compiled context snapshot.
+///
+/// This is a deterministic runtime intermediate for MVP request compilation.
+/// It is not a stable serialized prompt contract.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompiledContext {
     sections: Vec<CompiledContextSection>,
@@ -217,6 +254,9 @@ impl CompiledContext {
     }
 
     /// Stable text snapshot for tests and future adapter work.
+    ///
+    /// The string is deterministic for a compiled snapshot, but it is a helper
+    /// representation rather than a stable provider prompt format.
     #[must_use]
     pub fn to_snapshot(&self) -> String {
         let mut lines = Vec::new();
@@ -243,6 +283,9 @@ impl CompiledContext {
 }
 
 /// A section in the compiled context snapshot.
+///
+/// The enum may grow as the runtime adds Memory Activation and other structured
+/// context sources. Match exhaustively only inside this crate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompiledContextSection {
     /// Navigation summary plus exact retrievable evidence references.
@@ -265,6 +308,9 @@ impl CompiledContextSection {
 }
 
 /// Errors raised while constructing or compiling structured context.
+///
+/// These errors protect the MVP contract that summary text cannot enter
+/// compiled context unless its exact evidence is readable.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ContextError {
     /// A required context field was blank.

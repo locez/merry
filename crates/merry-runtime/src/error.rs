@@ -1,10 +1,18 @@
 //! Runtime error types.
+//!
+//! Errors in this module describe runtime construction, admission, artifact,
+//! and tool execution contracts. Provider failures are normalized before they
+//! become runtime events; provider wire errors are not exposed as runtime state.
 
 use crate::artifact::{ArtifactContentKind, ArtifactError};
 use merry_core::{ArtifactId, CoreError, SessionId, ToolCallId, ToolName};
 use thiserror::Error;
 
 /// Errors raised by Merry runtime construction and step admission.
+///
+/// Variants are actionable contract failures at the runtime facade boundary.
+/// Cancellation and executor infrastructure failures leave pending tool calls
+/// unresolved unless a durable result was already recorded.
 #[derive(Debug, Error)]
 pub enum RuntimeError {
     /// A new step was requested while another step still owns the runtime.

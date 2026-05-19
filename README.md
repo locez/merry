@@ -2,7 +2,7 @@
 
 Merry is an early-stage Rust-first agent runtime project. APIs and crate boundaries are still unstable.
 
-Current implementation work focuses on hardening the runtime/provider/tool execution MVP: structured runtime state, artifact-backed model output, provider step boundaries, pending tool calls, tool result resolution, tool continuations, registered tool execution, and opt-in OpenAI debug/tool flows.
+Current implementation work focuses on hardening the runtime/provider/tool execution MVP: structured runtime state, artifact-backed model output, provider step boundaries, pending tool calls, tool result resolution, tool continuations, registered tool execution, public runtime API contract cleanup/review/alignment, and opt-in OpenAI debug/tool flows.
 
 Deterministic verification is based on fake providers and stored runtime state. Live provider flows are manual and opt-in, not required for normal tests.
 

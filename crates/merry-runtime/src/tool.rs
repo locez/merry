@@ -5,6 +5,10 @@
 //! runtime mutation APIs as callbacks. [`crate::Runtime::execute_tool_call`]
 //! already owns the active runtime step permit while the executor runs, so
 //! reentrant mutation attempts are rejected by normal step admission.
+//!
+//! Tool calls and results are provider-neutral Merry values. Provider adapters
+//! render tool specs and continuations into provider wire formats outside this
+//! crate.
 
 use crate::ArtifactContent;
 use merry_core::{ErrorInfo, PendingToolCall, ToolCallResultStatus, ToolName, ToolSpec};
@@ -13,6 +17,9 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 /// Boxed tool executor future used for object-safe async tool boundaries.
+///
+/// Public tool boundaries use an explicit boxed future so registered executors
+/// can be stored behind [`ToolExecutor`].
 pub type ToolExecutorFuture<'a> = Pin<Box<dyn Future<Output = ToolExecutionResult> + Send + 'a>>;
 
 /// Result returned by a runtime-owned tool executor.
@@ -24,6 +31,9 @@ pub type ToolExecutorFuture<'a> = Pin<Box<dyn Future<Output = ToolExecutionResul
 pub type ToolExecutionResult = Result<ToolExecutionOutcome, ToolExecutionError>;
 
 /// Context passed to a tool executor.
+///
+/// The context is intentionally small for the MVP: cancellation is cooperative
+/// and runtime state mutation stays owned by [`crate::Runtime::execute_tool_call`].
 #[derive(Debug, Clone)]
 pub struct ToolExecutionContext {
     cancellation_token: CancellationToken,
@@ -37,6 +47,9 @@ impl ToolExecutionContext {
     }
 
     /// Returns the cancellation token for this tool execution.
+    ///
+    /// Executors should check this token at cancellation points and return
+    /// [`ToolExecutionError::Cancelled`] when no durable result was produced.
     #[must_use]
     pub fn cancellation_token(&self) -> &CancellationToken {
         &self.cancellation_token
@@ -55,8 +68,15 @@ impl Default for ToolExecutionContext {
 ///
 /// The executor returns content and status only. Runtime code records the
 /// artifact, emits events, updates the ledger, and resolves the pending call.
+///
+/// Implementations should not call runtime mutation APIs from inside
+/// [`ToolExecutor::execute`]. The runtime already owns the active-step permit
+/// while this method runs.
 pub trait ToolExecutor: Send + Sync {
     /// Executes one pending model-requested tool call.
+    ///
+    /// The pending call uses Merry-owned ids, tool names, and arguments rather
+    /// than provider response structs.
     fn execute<'a>(
         &'a self,
         call: PendingToolCall,
@@ -90,12 +110,18 @@ impl ToolExecutionOutcome {
     }
 
     /// Creates a failed text result with a small diagnostic.
+    ///
+    /// Use this when the tool ran and produced a domain-level failure that
+    /// should resolve the pending call durably.
     #[must_use]
     pub fn failed_text(content: impl Into<String>, diagnostic: ErrorInfo) -> Self {
         Self::failed(ArtifactContent::text(content), diagnostic)
     }
 
     /// Creates a failed JSON result with a small diagnostic.
+    ///
+    /// Use this when the tool ran and produced a domain-level failure that
+    /// should resolve the pending call durably.
     #[must_use]
     pub fn failed_json(content: impl Into<String>, diagnostic: ErrorInfo) -> Self {
         Self::failed(ArtifactContent::json(content), diagnostic)
@@ -108,6 +134,9 @@ impl ToolExecutionOutcome {
     }
 
     /// Borrows the exact execution content.
+    ///
+    /// Runtime code records this content into a generated artifact before
+    /// emitting the resolution event.
     #[must_use]
     pub fn content(&self) -> &ArtifactContent {
         &self.content
@@ -161,6 +190,8 @@ pub enum ToolExecutionError {
 
 impl ToolExecutionError {
     /// Creates an infrastructure error.
+    ///
+    /// Infrastructure errors leave the pending tool call unresolved.
     #[must_use]
     pub fn infrastructure(message: impl Into<String>) -> Self {
         Self::Infrastructure {
@@ -183,6 +214,9 @@ pub struct RegisteredTool {
 
 impl RegisteredTool {
     /// Creates a registered tool from its provider-visible spec and runtime executor.
+    ///
+    /// The spec is provider-visible after adapter rendering, but the executor
+    /// remains a runtime-owned boundary.
     #[must_use]
     pub fn new(spec: ToolSpec, executor: Arc<dyn ToolExecutor>) -> Self {
         Self { spec, executor }

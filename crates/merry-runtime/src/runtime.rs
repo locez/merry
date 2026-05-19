@@ -1,4 +1,9 @@
 //! Runtime builder and step execution skeleton.
+//!
+//! [`Runtime`] is the MVP facade for session-owned state. Step execution and
+//! event-producing direct mutation APIs admit one active operation at a time,
+//! record durable session state before returning observable events, and keep
+//! provider wire details behind the `merry-llm` provider boundary.
 
 use crate::{
     ArtifactContent, ContextCompiler, ContextEntry, ContextSummary, LedgerProjectionSnapshot,
@@ -35,6 +40,11 @@ const DIAGNOSTIC_TOOL_CALL_RESULT_REQUIRED: &str = "tool_call_result_required";
 const DIAGNOSTIC_TOOL_NOT_REGISTERED: &str = "tool_not_registered";
 
 /// Merry runtime handle for one session.
+///
+/// A cloned handle points at the same session-owned state. [`Runtime::step`]
+/// and event-producing direct mutation APIs such as
+/// [`Runtime::record_artifact`], [`Runtime::submit_tool_result`], and
+/// [`Runtime::execute_tool_call`] acquire the active-step permit.
 #[derive(Clone)]
 pub struct Runtime {
     inner: Arc<RuntimeInner>,
@@ -42,12 +52,28 @@ pub struct Runtime {
 
 impl Runtime {
     /// Creates a runtime builder for the provided session.
+    ///
+    /// The session id defines the ownership boundary for artifacts, context,
+    /// ledger facts, pending tool calls, and emitted runtime events.
     #[must_use]
     pub fn builder(session_id: SessionId) -> RuntimeBuilder {
         RuntimeBuilder::new(session_id)
     }
 
     /// Starts a runtime step and returns its event stream.
+    ///
+    /// Only one step or event-producing direct mutation may own the runtime at
+    /// a time. The step producer owns the active-step permit. Dropping the
+    /// returned [`RuntimeEventStream`] cancels and aborts the producer; the
+    /// permit is released when that producer future stops and drops its state.
+    ///
+    /// All events emitted by the step are provider-neutral [`RuntimeEvent`]
+    /// values. The runtime records session, ledger, artifact, and pending-tool
+    /// state before the corresponding event becomes observable.
+    ///
+    /// Cancellation records a cancelled event when the producer reaches a
+    /// cancellation checkpoint. Pending tool calls remain pending unless a
+    /// durable result has already been recorded.
     pub fn step(
         &self,
         input: StepInput,
@@ -87,6 +113,15 @@ impl Runtime {
     ///
     /// When this is the first observable action in the session, `SessionStarted`
     /// is returned before `ArtifactRecorded`.
+    ///
+    /// This direct mutation path acquires the active-step permit and therefore
+    /// cannot run concurrently with [`Runtime::step`],
+    /// [`Runtime::submit_tool_result`], or [`Runtime::execute_tool_call`]. State
+    /// is written before returned events are handed to the caller.
+    ///
+    /// Artifact ids with runtime-reserved prefixes are rejected. Runtime-owned
+    /// ids are used for internally generated artifacts such as assistant output
+    /// and registered tool execution results.
     pub async fn record_artifact(
         &self,
         artifact: ArtifactRef,
@@ -113,6 +148,15 @@ impl Runtime {
     ///
     /// The artifact content is durably recorded before `ToolCallResolved` is
     /// emitted. The event carries only the artifact reference, not the payload.
+    ///
+    /// This is the manual result path for external tool runners. Callers choose
+    /// the artifact id and must not use runtime-reserved artifact ids. The
+    /// registered executor path is [`Runtime::execute_tool_call`], where runtime
+    /// code owns the generated artifact id and result envelope.
+    ///
+    /// Cancellation or executor infrastructure failures do not resolve the call;
+    /// a pending tool call remains pending until this method or
+    /// [`Runtime::execute_tool_call`] records a durable result.
     pub async fn submit_tool_result(
         &self,
         result: ToolCallResult,
@@ -137,6 +181,13 @@ impl Runtime {
     ///
     /// Runtime code owns the resulting artifact id and `ToolCallResult`.
     /// Executor infrastructure errors and cancellation leave the call pending.
+    /// Tool-domain failures should be returned as failed outcomes so the
+    /// runtime can still record a durable result and emit `ToolCallResolved`.
+    ///
+    /// This method acquires the active-step permit while the executor runs. The
+    /// executor receives provider-neutral pending call data and returns
+    /// provider-neutral artifact content; provider-specific tool wire formats do
+    /// not enter runtime state.
     pub async fn execute_tool_call(
         &self,
         call_id: &ToolCallId,
@@ -242,6 +293,10 @@ impl Runtime {
     }
 
     /// Creates an exact evidence reference from artifact state owned by this session.
+    ///
+    /// Prefer this facade over reading [`crate::ArtifactRegistry`] directly. The
+    /// returned reference is valid only for artifact content already owned by
+    /// this runtime session.
     pub async fn evidence_ref(
         &self,
         artifact_id: &ArtifactId,
@@ -254,30 +309,54 @@ impl Runtime {
     }
 
     /// Records a structured context entry into the owning session.
+    ///
+    /// This is the current MVP context mutation surface. It records
+    /// summary-only context entries today by taking the session lock. It does
+    /// not acquire the active-step permit and does not emit runtime events.
+    /// This surface may expand when Memory Activation becomes part of the
+    /// runtime state model.
     pub async fn record_context_entry(&self, entry: ContextEntry) {
         let mut session = self.inner.session.lock().await;
         session.record_context_entry(entry);
     }
 
     /// Records a summary context entry into the owning session.
+    ///
+    /// Summaries are navigation only; exact supporting evidence must remain
+    /// readable through session-owned artifacts. This helper delegates to
+    /// [`Runtime::record_context_entry`], so it takes the session lock and does
+    /// not acquire the active-step permit or emit runtime events.
     pub async fn record_context_summary(&self, summary: ContextSummary) {
         self.record_context_entry(ContextEntry::summary(summary))
             .await
     }
 
     /// Builds a sealed context snapshot from session-owned context and artifacts.
+    ///
+    /// The snapshot is opaque and session-owned. It exists so
+    /// [`ContextCompiler`] can validate summaries against the matching artifact
+    /// view without accepting arbitrary caller-assembled state.
     pub async fn context_snapshot(&self) -> SessionContextSnapshot {
         let session = self.inner.session.lock().await;
         session.context_snapshot()
     }
 
     /// Builds a read-only deterministic projection of the task ledger.
+    ///
+    /// This is the preferred public read path for lifecycle and compact ledger
+    /// facts. Direct [`crate::TaskLedger`] access is a low-level in-memory MVP
+    /// primitive and should not be treated as the stable application-facing
+    /// ledger API.
     pub async fn ledger_projection(&self) -> LedgerProjectionSnapshot {
         let session = self.inner.session.lock().await;
         session.ledger_projection()
     }
 
     /// Returns a snapshot of provider-neutral tool calls currently awaiting results.
+    ///
+    /// The returned calls are normalized Merry runtime state, not provider wire
+    /// payloads. A call remains listed until a durable result is submitted or
+    /// executed through a registered executor.
     pub async fn pending_tool_calls(&self) -> Vec<PendingToolCall> {
         let session = self.inner.session.lock().await;
         session.pending_tool_calls()
@@ -285,6 +364,10 @@ impl Runtime {
 }
 
 /// Builder for a Merry runtime.
+///
+/// The builder wires provider-neutral runtime configuration: event buffering,
+/// one optional model provider, and zero or more runtime-owned tool executors.
+/// Provider integrations stay outside this crate behind [`ModelProvider`].
 pub struct RuntimeBuilder {
     session_id: SessionId,
     event_buffer_size: NonZeroUsize,
@@ -304,6 +387,10 @@ impl RuntimeBuilder {
     }
 
     /// Sets the bounded event channel buffer size.
+    ///
+    /// Runtime event production uses a bounded channel. Backpressure is part of
+    /// the state-before-event contract: producers reserve an event slot before
+    /// mutating durable session state for the corresponding event.
     #[must_use]
     pub fn event_buffer_size(mut self, event_buffer_size: NonZeroUsize) -> Self {
         self.event_buffer_size = event_buffer_size;
@@ -311,6 +398,10 @@ impl RuntimeBuilder {
     }
 
     /// Sets the provider and model used by runtime steps.
+    ///
+    /// The provider receives normalized model requests and returns normalized
+    /// model events from `merry-llm`. Provider response formats are not stored
+    /// in runtime state.
     #[must_use]
     pub fn model_provider(mut self, provider: Arc<dyn ModelProvider>, model: ModelName) -> Self {
         self.model_provider = Some(ModelProviderConfig { provider, model });
@@ -318,6 +409,10 @@ impl RuntimeBuilder {
     }
 
     /// Registers a runtime-owned tool executor.
+    ///
+    /// Registering a tool makes its spec available to provider requests and
+    /// lets [`Runtime::execute_tool_call`] resolve matching pending calls. It
+    /// does not start an automatic tool loop.
     #[must_use]
     pub fn register_tool(mut self, tool: RegisteredTool) -> Self {
         self.registered_tools.push(tool);
@@ -325,6 +420,8 @@ impl RuntimeBuilder {
     }
 
     /// Builds the runtime.
+    ///
+    /// Duplicate tool names are rejected before the runtime is constructed.
     pub fn build(self) -> Result<Runtime, RuntimeError> {
         let tool_registry =
             ToolRegistry::from_registered(self.registered_tools).map_err(|duplicate| {

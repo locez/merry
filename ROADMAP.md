@@ -32,6 +32,7 @@ The current focus is making the Rust runtime loop, provider step boundary, artif
 
 - Harden runtime/provider/tool execution MVP behavior and tests.
 - Keep deterministic verification based on fake providers, stored runtime state, artifact references, and ledger assertions.
+- Continue tightening and aligning the runtime public API surface, rustdoc, and re-export contract.
 - Improve public docs as implementation status changes, while keeping private notes under `docs/`.
 
 ### Deferred / Next
@@ -167,6 +168,7 @@ Tasks:
 - Keep provider output stored as artifacts before observable runtime events claim it.
 - Keep tool call, tool result, and continuation behavior reproducible from runtime state.
 - Keep registered tool execution bounded by explicit runtime policy and artifact ownership.
+- Keep public runtime exports/rustdoc aligned with implemented runtime/provider/tool behavior.
 - Preserve deterministic tests around fake providers and local tool execution.
 - Keep OpenAI-compatible debug/tool flows explicit opt-in paths for manual verification only.
 
@@ -186,7 +188,7 @@ Tasks:
 
 ### Milestone 10: Python SDK Shell
 
-Goal: expose the stable runtime event API to Python.
+Goal: expose the runtime event API to Python.
 
 Tasks:
 
