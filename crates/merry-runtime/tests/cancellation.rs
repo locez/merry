@@ -1,15 +1,16 @@
 use futures_util::StreamExt;
 use merry_core::{
-    PendingToolCall, RuntimeEvent, RuntimeEventKind, SessionId, ToolCallId, ToolInputSchema,
-    ToolName, ToolSpec,
+    ArtifactId, EvidenceLocator, PendingToolCall, RuntimeEvent, RuntimeEventKind, SessionId,
+    ToolCallId, ToolInputSchema, ToolName, ToolSpec,
 };
 use merry_llm::{
     FinishReason, ModelEvent, ModelName, ModelOutput, ModelResponse, ModelToolCall,
     ModelToolCallId, ToolArguments, testing::FakeModelProvider,
 };
 use merry_runtime::{
-    RegisteredTool, Runtime, RuntimeError, StepContext, StepInput, ToolExecutionContext,
-    ToolExecutionError, ToolExecutor, ToolExecutorFuture,
+    ArtifactError, LedgerFactKind, LedgerProjection, RegisteredTool, Runtime, RuntimeError,
+    StepContext, StepInput, ToolExecutionContext, ToolExecutionError, ToolExecutor,
+    ToolExecutorFuture,
 };
 use schemars::Schema;
 use serde_json::json;
@@ -28,6 +29,10 @@ fn session_id() -> SessionId {
 
 fn tool_call_id(value: &str) -> ToolCallId {
     ToolCallId::new(value).expect("valid tool call id")
+}
+
+fn artifact_id(value: &str) -> ArtifactId {
+    ArtifactId::new(value).expect("valid artifact id")
 }
 
 fn tool_spec() -> ToolSpec {
@@ -72,6 +77,40 @@ async fn collect_pending_step(runtime: &Runtime, text: &str) -> Vec<RuntimeEvent
         .expect("step should start")
         .collect()
         .await
+}
+
+fn event_kind_names(events: &[RuntimeEvent]) -> Vec<&'static str> {
+    events
+        .iter()
+        .map(|event| match event.kind {
+            RuntimeEventKind::SessionStarted => "SessionStarted",
+            RuntimeEventKind::StepStarted => "StepStarted",
+            RuntimeEventKind::StepCompleted => "StepCompleted",
+            RuntimeEventKind::Cancelled { .. } => "Cancelled",
+            RuntimeEventKind::Failed { .. } => "Failed",
+            RuntimeEventKind::ArtifactRecorded { .. } => "ArtifactRecorded",
+            RuntimeEventKind::EvidenceReferenced { .. } => "EvidenceReferenced",
+            RuntimeEventKind::ToolCallPending { .. } => "ToolCallPending",
+            RuntimeEventKind::ToolCallResolved { .. } => "ToolCallResolved",
+            _ => "Unknown",
+        })
+        .collect()
+}
+
+async fn assert_missing_tool_result_artifact(runtime: &Runtime) {
+    let evidence_err = runtime
+        .evidence_ref(
+            &artifact_id("tool-result-3"),
+            EvidenceLocator::whole_artifact(),
+        )
+        .await
+        .expect_err("cancelled tool execution must not record runtime-owned tool result artifact");
+    assert!(matches!(
+        evidence_err,
+        RuntimeError::Artifact {
+            source: ArtifactError::MissingArtifact { id }
+        } if id == artifact_id("tool-result-3")
+    ));
 }
 
 fn runtime_with_waiting_tool(session: &str, executor: WaitingToolExecutor) -> Runtime {
@@ -204,10 +243,37 @@ async fn pre_cancelled_tool_execution_keeps_pending_and_releases_active_permit()
     let executor = WaitingToolExecutor::new();
     let runtime = runtime_with_waiting_tool("cancel-tool-pre", executor.clone());
     let events = collect_pending_step(&runtime, "request wait tool").await;
-    assert!(
+    assert_eq!(
+        event_kind_names(&events),
+        ["SessionStarted", "StepStarted", "ToolCallPending"]
+    );
+    assert_eq!(
         events
             .iter()
-            .any(|event| matches!(event.kind, RuntimeEventKind::ToolCallPending { .. }))
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2]
+    );
+    let projection_before_cancel = runtime.ledger_projection().await;
+    assert_eq!(
+        projection_before_cancel.entries(),
+        [
+            LedgerProjection::Lifecycle {
+                sequence: 0,
+                order: 0,
+                kind: LedgerFactKind::SessionStarted,
+            },
+            LedgerProjection::Lifecycle {
+                sequence: 1,
+                order: 1,
+                kind: LedgerFactKind::StepStarted,
+            },
+            LedgerProjection::Lifecycle {
+                sequence: 2,
+                order: 2,
+                kind: LedgerFactKind::ToolCallPending,
+            },
+        ]
     );
 
     let token = CancellationToken::new();
@@ -227,6 +293,8 @@ async fn pre_cancelled_tool_execution_keeps_pending_and_releases_active_permit()
     ));
     assert_eq!(executor.call_count(), 0);
     assert_eq!(runtime.pending_tool_calls().await.len(), 1);
+    assert_eq!(runtime.ledger_projection().await, projection_before_cancel);
+    assert_missing_tool_result_artifact(&runtime).await;
     let follow_up_events = start_step_after_cleanup(&runtime, "after pre-cancel").await;
     assert!(
         follow_up_events
@@ -240,10 +308,37 @@ async fn cancelling_during_tool_execution_keeps_pending_and_releases_active_perm
     let executor = WaitingToolExecutor::new();
     let runtime = runtime_with_waiting_tool("cancel-tool-during", executor.clone());
     let events = collect_pending_step(&runtime, "request wait tool").await;
-    assert!(
+    assert_eq!(
+        event_kind_names(&events),
+        ["SessionStarted", "StepStarted", "ToolCallPending"]
+    );
+    assert_eq!(
         events
             .iter()
-            .any(|event| matches!(event.kind, RuntimeEventKind::ToolCallPending { .. }))
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2]
+    );
+    let projection_before_cancel = runtime.ledger_projection().await;
+    assert_eq!(
+        projection_before_cancel.entries(),
+        [
+            LedgerProjection::Lifecycle {
+                sequence: 0,
+                order: 0,
+                kind: LedgerFactKind::SessionStarted,
+            },
+            LedgerProjection::Lifecycle {
+                sequence: 1,
+                order: 1,
+                kind: LedgerFactKind::StepStarted,
+            },
+            LedgerProjection::Lifecycle {
+                sequence: 2,
+                order: 2,
+                kind: LedgerFactKind::ToolCallPending,
+            },
+        ]
     );
     let token = CancellationToken::new();
     let execute_runtime = runtime.clone();
@@ -272,6 +367,8 @@ async fn cancelling_during_tool_execution_keeps_pending_and_releases_active_perm
             if call_id == tool_call_id("cancel-tool-call")
     ));
     assert_eq!(runtime.pending_tool_calls().await.len(), 1);
+    assert_eq!(runtime.ledger_projection().await, projection_before_cancel);
+    assert_missing_tool_result_artifact(&runtime).await;
     let follow_up_events = start_step_after_cleanup(&runtime, "after during-cancel").await;
     assert!(
         follow_up_events

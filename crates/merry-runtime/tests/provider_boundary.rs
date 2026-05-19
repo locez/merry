@@ -984,6 +984,17 @@ async fn execute_registered_tool_success_records_artifact_resolves_and_compiles_
     );
 
     let pending_events = collect_step(&runtime, "Search notes.").await;
+    assert_eq!(
+        event_kind_names(&pending_events),
+        ["SessionStarted", "StepStarted", "ToolCallPending"]
+    );
+    assert_eq!(
+        pending_events
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2]
+    );
     let pending = pending_tool_call(&pending_events).clone();
     let reserved_artifact = ArtifactRef::new(artifact_id("tool-result-4"), ArtifactKind::Text);
     let before_reserved = runtime.ledger_projection().await;
@@ -1018,13 +1029,27 @@ async fn execute_registered_tool_success_records_artifact_resolves_and_compiles_
         .execute_tool_call(pending.id(), ToolExecutionContext::default())
         .await
         .expect("tool execution should resolve");
-    let continuation_events = collect_step(&runtime, "Continue with result.").await;
 
     assert_eq!(
         event_kind_names(&execution_events),
         ["ArtifactRecorded", "ToolCallResolved"]
     );
+    assert_eq!(
+        execution_events
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        vec![3, 4]
+    );
     let result = resolved_tool_result(&execution_events);
+    assert!(matches!(
+        &execution_events[0].kind,
+        RuntimeEventKind::ArtifactRecorded { artifact } if artifact == result.artifact()
+    ));
+    assert!(matches!(
+        &execution_events[1].kind,
+        RuntimeEventKind::ToolCallResolved { result: resolved } if resolved == result
+    ));
     assert_eq!(result.status(), ToolCallResultStatus::Succeeded);
     assert_eq!(result.artifact().id().as_str(), "tool-result-3");
     assert_eq!(result.artifact().kind(), &ArtifactKind::Text);
@@ -1035,9 +1060,49 @@ async fn execute_registered_tool_success_records_artifact_resolves_and_compiles_
         .expect("executor result artifact should be readable after ArtifactRecorded");
     assert_eq!(evidence.artifact_id, *result.artifact().id());
     assert_eq!(executor.calls(), vec![pending.clone()]);
+    let projection = runtime.ledger_projection().await;
+    assert_eq!(
+        projection.entries(),
+        [
+            LedgerProjection::Lifecycle {
+                sequence: 0,
+                order: 0,
+                kind: LedgerFactKind::SessionStarted,
+            },
+            LedgerProjection::Lifecycle {
+                sequence: 1,
+                order: 1,
+                kind: LedgerFactKind::StepStarted,
+            },
+            LedgerProjection::Lifecycle {
+                sequence: 2,
+                order: 2,
+                kind: LedgerFactKind::ToolCallPending,
+            },
+            LedgerProjection::Lifecycle {
+                sequence: 3,
+                order: 3,
+                kind: LedgerFactKind::ArtifactRecorded,
+            },
+            LedgerProjection::Lifecycle {
+                sequence: 4,
+                order: 4,
+                kind: LedgerFactKind::ToolCallResolved,
+            },
+        ]
+    );
+
+    let continuation_events = collect_step(&runtime, "Continue with result.").await;
     assert_eq!(
         event_kind_names(&continuation_events),
         ["StepStarted", "ArtifactRecorded", "StepCompleted"]
+    );
+    assert_eq!(
+        continuation_events
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        vec![5, 6, 7]
     );
 
     let requests = provider.recorded_requests();
@@ -1070,6 +1135,17 @@ async fn execute_tool_domain_failure_resolves_failed_without_runtime_failed() {
     let executor = ScriptedToolExecutor::failing_json("tool_lookup_failed", r#"{"ok":false}"#);
     let runtime = runtime_with_registered_tool("provider-execute-tool-failure", provider, executor);
     let pending_events = collect_step(&runtime, "Search notes.").await;
+    assert_eq!(
+        event_kind_names(&pending_events),
+        ["SessionStarted", "StepStarted", "ToolCallPending"]
+    );
+    assert_eq!(
+        pending_events
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2]
+    );
     let pending = pending_tool_call(&pending_events).clone();
 
     let execution_events = runtime
@@ -1081,6 +1157,13 @@ async fn execute_tool_domain_failure_resolves_failed_without_runtime_failed() {
         event_kind_names(&execution_events),
         ["ArtifactRecorded", "ToolCallResolved"]
     );
+    assert_eq!(
+        execution_events
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        vec![3, 4]
+    );
     assert!(
         execution_events
             .iter()
@@ -1088,7 +1171,18 @@ async fn execute_tool_domain_failure_resolves_failed_without_runtime_failed() {
         "tool domain failure must not emit RuntimeEventKind::Failed: {execution_events:?}"
     );
     let result = resolved_tool_result(&execution_events);
+    assert!(matches!(
+        &execution_events[0].kind,
+        RuntimeEventKind::ArtifactRecorded { artifact } if artifact == result.artifact()
+    ));
+    assert!(matches!(
+        &execution_events[1].kind,
+        RuntimeEventKind::ToolCallResolved { result: resolved } if resolved == result
+    ));
     assert_eq!(result.status(), ToolCallResultStatus::Failed);
+    assert_eq!(result.artifact().id().as_str(), "tool-result-3");
+    assert_eq!(result.artifact().kind(), &ArtifactKind::Json);
+    assert_eq!(result.call_id(), pending.id());
     assert_eq!(
         result
             .diagnostic()
@@ -1097,6 +1191,42 @@ async fn execute_tool_domain_failure_resolves_failed_without_runtime_failed() {
         "tool_lookup_failed"
     );
     assert!(runtime.pending_tool_calls().await.is_empty());
+    let evidence = runtime
+        .evidence_ref(result.artifact().id(), EvidenceLocator::whole_artifact())
+        .await
+        .expect("domain failure artifact should be readable after ArtifactRecorded");
+    assert_eq!(evidence.artifact_id, *result.artifact().id());
+    let projection = runtime.ledger_projection().await;
+    assert_eq!(
+        projection.entries(),
+        [
+            LedgerProjection::Lifecycle {
+                sequence: 0,
+                order: 0,
+                kind: LedgerFactKind::SessionStarted,
+            },
+            LedgerProjection::Lifecycle {
+                sequence: 1,
+                order: 1,
+                kind: LedgerFactKind::StepStarted,
+            },
+            LedgerProjection::Lifecycle {
+                sequence: 2,
+                order: 2,
+                kind: LedgerFactKind::ToolCallPending,
+            },
+            LedgerProjection::Lifecycle {
+                sequence: 3,
+                order: 3,
+                kind: LedgerFactKind::ArtifactRecorded,
+            },
+            LedgerProjection::Lifecycle {
+                sequence: 4,
+                order: 4,
+                kind: LedgerFactKind::ToolCallResolved,
+            },
+        ]
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1110,8 +1240,39 @@ async fn executor_infrastructure_error_keeps_pending_without_artifact_or_result(
     let runtime =
         runtime_with_registered_tool("provider-execute-tool-infra-error", provider, executor);
     let pending_events = collect_step(&runtime, "Search notes.").await;
+    assert_eq!(
+        event_kind_names(&pending_events),
+        ["SessionStarted", "StepStarted", "ToolCallPending"]
+    );
+    assert_eq!(
+        pending_events
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2]
+    );
     let pending = pending_tool_call(&pending_events).clone();
     let before = runtime.ledger_projection().await;
+    assert_eq!(
+        before.entries(),
+        [
+            LedgerProjection::Lifecycle {
+                sequence: 0,
+                order: 0,
+                kind: LedgerFactKind::SessionStarted,
+            },
+            LedgerProjection::Lifecycle {
+                sequence: 1,
+                order: 1,
+                kind: LedgerFactKind::StepStarted,
+            },
+            LedgerProjection::Lifecycle {
+                sequence: 2,
+                order: 2,
+                kind: LedgerFactKind::ToolCallPending,
+            },
+        ]
+    );
 
     let err = runtime
         .execute_tool_call(pending.id(), ToolExecutionContext::default())
@@ -1126,6 +1287,19 @@ async fn executor_infrastructure_error_keeps_pending_without_artifact_or_result(
     ));
     assert_eq!(before, after);
     assert_eq!(runtime.pending_tool_calls().await, vec![pending]);
+    let evidence_err = runtime
+        .evidence_ref(
+            &artifact_id("tool-result-3"),
+            EvidenceLocator::whole_artifact(),
+        )
+        .await
+        .expect_err("infrastructure failure must not record runtime-owned tool result artifact");
+    assert!(matches!(
+        evidence_err,
+        merry_runtime::RuntimeError::Artifact {
+            source: ArtifactError::MissingArtifact { id }
+        } if id == artifact_id("tool-result-3")
+    ));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1299,19 +1473,44 @@ async fn unregistered_pending_tool_name_resolves_failed_with_tool_not_registered
         .build()
         .expect("runtime should build");
     let pending_events = collect_step(&runtime, "Call missing tool.").await;
+    assert_eq!(
+        event_kind_names(&pending_events),
+        ["SessionStarted", "StepStarted", "ToolCallPending"]
+    );
+    assert_eq!(
+        pending_events
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2]
+    );
     let pending = pending_tool_call(&pending_events).clone();
 
     let execution_events = runtime
         .execute_tool_call(pending.id(), ToolExecutionContext::default())
         .await
         .expect("unregistered tool should synthesize failed result");
-    let continuation_events = collect_step(&runtime, "Continue after missing tool.").await;
 
     assert_eq!(
         event_kind_names(&execution_events),
         ["ArtifactRecorded", "ToolCallResolved"]
     );
+    assert_eq!(
+        execution_events
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        vec![3, 4]
+    );
     let result = resolved_tool_result(&execution_events);
+    assert!(matches!(
+        &execution_events[0].kind,
+        RuntimeEventKind::ArtifactRecorded { artifact } if artifact == result.artifact()
+    ));
+    assert!(matches!(
+        &execution_events[1].kind,
+        RuntimeEventKind::ToolCallResolved { result: resolved } if resolved == result
+    ));
     assert_eq!(result.status(), ToolCallResultStatus::Failed);
     assert_eq!(
         result
@@ -1321,11 +1520,58 @@ async fn unregistered_pending_tool_name_resolves_failed_with_tool_not_registered
         "tool_not_registered"
     );
     assert_eq!(result.artifact().id().as_str(), "tool-result-3");
+    assert_eq!(result.artifact().kind(), &ArtifactKind::Json);
+    assert_eq!(result.call_id(), pending.id());
     assert!(failed_code(&execution_events).is_none());
     assert!(runtime.pending_tool_calls().await.is_empty());
+    let evidence = runtime
+        .evidence_ref(result.artifact().id(), EvidenceLocator::whole_artifact())
+        .await
+        .expect("unregistered tool failure artifact should be readable after ArtifactRecorded");
+    assert_eq!(evidence.artifact_id, *result.artifact().id());
+    let projection = runtime.ledger_projection().await;
+    assert_eq!(
+        projection.entries(),
+        [
+            LedgerProjection::Lifecycle {
+                sequence: 0,
+                order: 0,
+                kind: LedgerFactKind::SessionStarted,
+            },
+            LedgerProjection::Lifecycle {
+                sequence: 1,
+                order: 1,
+                kind: LedgerFactKind::StepStarted,
+            },
+            LedgerProjection::Lifecycle {
+                sequence: 2,
+                order: 2,
+                kind: LedgerFactKind::ToolCallPending,
+            },
+            LedgerProjection::Lifecycle {
+                sequence: 3,
+                order: 3,
+                kind: LedgerFactKind::ArtifactRecorded,
+            },
+            LedgerProjection::Lifecycle {
+                sequence: 4,
+                order: 4,
+                kind: LedgerFactKind::ToolCallResolved,
+            },
+        ]
+    );
+
+    let continuation_events = collect_step(&runtime, "Continue after missing tool.").await;
     assert_eq!(
         event_kind_names(&continuation_events),
         ["StepStarted", "ArtifactRecorded", "StepCompleted"]
+    );
+    assert_eq!(
+        continuation_events
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        vec![5, 6, 7]
     );
     assert_eq!(provider.recorded_requests()[1].continuations().len(), 1);
 }
