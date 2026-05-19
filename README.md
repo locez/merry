@@ -2,9 +2,9 @@
 
 Merry is an early-stage Rust-first agent runtime project. APIs and crate boundaries are still unstable.
 
-Current implementation work focuses on hardening the runtime/provider/tool execution MVP: structured runtime state, artifact-backed model output, provider step boundaries, pending tool calls, tool result resolution, tool continuations, registered tool execution, public runtime API contract cleanup/review/alignment, and opt-in OpenAI debug/tool flows.
+M8 runtime/provider/tool execution hardening has shifted into maintenance and foundation work: structured runtime state, artifact-backed model output, provider step boundaries, pending tool calls, tool result resolution, tool continuations, registered tool execution, public runtime API contract cleanup/review/alignment, and opt-in OpenAI debug/tool flows remain the base for later runtime work.
 
-Memory Activation is being designed as the next structured-context capability, but it is not yet part of the runtime execution contract.
+Memory Activation MVP work has started inside `merry-runtime`. Internal activation shapes, deterministic projection/evidence validation, and the provider-step timing skeleton are in place. A production memory store, public API, external persistence, and stable activation contract are not complete yet; the default production memory source remains noop.
 
 Deterministic verification is based on fake providers and stored runtime state. Live provider flows are manual and opt-in, not required for normal tests.
 

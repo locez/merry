@@ -4,9 +4,9 @@ This roadmap is public-safe and implementation-focused. Private product strategy
 
 ## Current Phase
 
-Merry is in runtime/provider/tool execution MVP hardening.
+Merry is in M9 Memory Activation MVP internal runtime integration and contract validation.
 
-The current focus is making the Rust runtime loop, provider step boundary, artifact-backed model output, and tool execution path deterministic enough to evolve safely. Live provider flows exist as explicit opt-in/manual debug paths; they are not the basis for deterministic verification.
+M8 runtime/provider/tool execution hardening is now maintenance and foundation work. The current focus is proving that structured memory activation can enter compiled context deterministically inside `merry-runtime` without claiming that production memory storage, public APIs, external persistence, or a stable activation contract are complete. Live provider flows remain explicit opt-in/manual debug paths; they are not the basis for deterministic verification.
 
 ## Status Summary
 
@@ -28,17 +28,23 @@ The current focus is making the Rust runtime loop, provider step boundary, artif
 - Runtime-reserved artifact IDs for tool/model output paths that must be claimed before events are emitted.
 - Opt-in OpenAI debug/tool flow for manual provider integration checks.
 
+### Recently Completed
+
+- Runtime/provider/tool execution MVP hardening moved into maintenance and foundation status.
+- Provider output storage, pending tool calls, tool result resolution, tool continuations, registered tool execution, and public runtime export/rustdoc alignment have enough deterministic coverage to support the next runtime milestone.
+- OpenAI-compatible debug/tool flows remain opt-in manual verification paths, not deterministic test dependencies.
+
 ### Active
 
-- Harden runtime/provider/tool execution MVP behavior and tests.
+- Integrate Memory Activation MVP internally in `merry-runtime`.
+- Validate deterministic activation projection and evidence handling against stored runtime state.
+- Validate provider-step timing so activated memory is available to context compilation before model requests.
 - Keep deterministic verification based on fake providers, stored runtime state, artifact references, and ledger assertions.
-- Continue tightening and aligning the runtime public API surface, rustdoc, and re-export contract.
-- Start Memory Activation MVP design with runtime-owned internal data shapes and deterministic context requirements; runtime execution integration remains deferred until the activation contract is validated.
 - Improve public docs as implementation status changes, while keeping private notes under `docs/`.
 
 ### Deferred / Next
 
-- Memory activation MVP.
+- Production memory store, public Memory Activation APIs, external persistence, and stable activation contract.
 - Python SDK and `merry-py`.
 - Rust facade crate `merry`.
 - Macro crate support for boilerplate generation.
@@ -158,7 +164,7 @@ Tasks:
 - Add snapshot-style tests for compiled context.
 - Ensure summaries never replace required exact evidence in compiler tests.
 
-## Active Milestone
+## Recently Completed Milestone
 
 ### Milestone 8: Runtime/Provider/Tool Execution MVP Hardening
 
@@ -173,22 +179,36 @@ Tasks:
 - Preserve deterministic tests around fake providers and local tool execution.
 - Keep OpenAI-compatible debug/tool flows explicit opt-in paths for manual verification only.
 
-## Deferred Milestones
+## Active Milestone
 
 ### Milestone 9: Memory Activation MVP
 
 Goal: prove structured memory enters context through activation, not chat history.
 
-Design starts with runtime-owned internal data shapes and deterministic context requirements. Runtime execution integration remains deferred until the activation contract is validated.
+Memory Activation MVP is in internal `merry-runtime` integration and contract validation. The default production source remains noop until production storage, public APIs, external persistence, and the stable contract are ready.
 
-Tasks:
+Done:
 
 - Define internal activation data shapes before public runtime APIs.
-- Add activation seeds and deterministic scoring.
+- Add deterministic projection and evidence validation for activated memory.
+- Add provider-step timing skeleton so activation can be projected before model requests.
+
+Active:
+
+- Validate activation seeds and deterministic scoring inside runtime-owned state.
 - Prove activated memory records why it entered context.
 - Keep activation deterministic and reproducible from stored runtime state.
 - Add memory projection template.
+
+Not yet:
+
+- Add production memory store or external persistence.
+- Add public Memory Activation API surface.
+- Stabilize the activation contract for external consumers.
+- Replace the default production noop source.
 - Add tests for scope, trigger, confidence, priority, and conflict handling.
+
+## Deferred Milestones
 
 ### Milestone 10: Python SDK Shell
 
