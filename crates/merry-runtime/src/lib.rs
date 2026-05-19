@@ -8,6 +8,7 @@ mod ledger;
 mod runtime;
 mod session;
 mod step;
+mod tool;
 
 pub use artifact::{
     ArtifactContent, ArtifactContentKind, ArtifactError, ArtifactRecord, ArtifactRegistry,
@@ -24,3 +25,7 @@ pub use ledger::{
 };
 pub use runtime::{Runtime, RuntimeBuilder};
 pub use step::{StepContext, StepInput};
+pub use tool::{
+    RegisteredTool, ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome,
+    ToolExecutionResult, ToolExecutor, ToolExecutorFuture,
+};

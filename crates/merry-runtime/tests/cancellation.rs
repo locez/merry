@@ -1,11 +1,121 @@
 use futures_util::StreamExt;
-use merry_core::{RuntimeEventKind, SessionId};
-use merry_runtime::{Runtime, RuntimeError, StepContext, StepInput};
-use std::num::NonZeroUsize;
+use merry_core::{
+    PendingToolCall, RuntimeEvent, RuntimeEventKind, SessionId, ToolCallId, ToolInputSchema,
+    ToolName, ToolSpec,
+};
+use merry_llm::{
+    FinishReason, ModelEvent, ModelName, ModelOutput, ModelResponse, ModelToolCall,
+    ModelToolCallId, ToolArguments, testing::FakeModelProvider,
+};
+use merry_runtime::{
+    RegisteredTool, Runtime, RuntimeError, StepContext, StepInput, ToolExecutionContext,
+    ToolExecutionError, ToolExecutor, ToolExecutorFuture,
+};
+use schemars::Schema;
+use serde_json::json;
+use std::{
+    num::NonZeroUsize,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 use tokio_util::sync::CancellationToken;
 
 fn session_id() -> SessionId {
     SessionId::new("cancel-session").expect("valid session id")
+}
+
+fn tool_call_id(value: &str) -> ToolCallId {
+    ToolCallId::new(value).expect("valid tool call id")
+}
+
+fn tool_spec() -> ToolSpec {
+    let schema =
+        Schema::try_from(json!({ "type": "object" })).expect("test schema should be a JSON schema");
+    ToolSpec::new(
+        ToolName::new("wait_tool").expect("valid tool name"),
+        "Waits for cancellation",
+        ToolInputSchema::new(schema).expect("valid tool schema"),
+    )
+    .expect("valid tool spec")
+}
+
+fn model_name() -> ModelName {
+    ModelName::new("fake/model").expect("valid model name")
+}
+
+fn pending_model_tool_call(call_id: &str) -> ModelToolCall {
+    ModelToolCall::new(
+        ModelToolCallId::new(call_id).expect("valid model tool call id"),
+        ToolName::new("wait_tool").expect("valid tool name"),
+        ToolArguments::new(Default::default()),
+    )
+}
+
+fn pending_tool_response(call_id: &str) -> ModelEvent {
+    ModelEvent::Completed {
+        response: ModelResponse::new(
+            vec![ModelOutput::tool_call(pending_model_tool_call(call_id))],
+            FinishReason::ToolCalls,
+            None,
+        ),
+    }
+}
+
+async fn collect_pending_step(runtime: &Runtime, text: &str) -> Vec<RuntimeEvent> {
+    runtime
+        .step(
+            StepInput::user_text(text).expect("valid step input"),
+            StepContext::new(CancellationToken::new()),
+        )
+        .expect("step should start")
+        .collect()
+        .await
+}
+
+fn runtime_with_waiting_tool(session: &str, executor: WaitingToolExecutor) -> Runtime {
+    Runtime::builder(SessionId::new(session).expect("valid session id"))
+        .register_tool(RegisteredTool::new(tool_spec(), Arc::new(executor)))
+        .model_provider(
+            Arc::new(FakeModelProvider::new(vec![Ok(pending_tool_response(
+                "cancel-tool-call",
+            ))])),
+            model_name(),
+        )
+        .build()
+        .expect("runtime should build")
+}
+
+#[derive(Clone)]
+struct WaitingToolExecutor {
+    calls: Arc<AtomicUsize>,
+}
+
+impl WaitingToolExecutor {
+    fn new() -> Self {
+        Self {
+            calls: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn call_count(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+impl ToolExecutor for WaitingToolExecutor {
+    fn execute<'a>(
+        &'a self,
+        _call: PendingToolCall,
+        context: ToolExecutionContext,
+    ) -> ToolExecutorFuture<'a> {
+        Box::pin(async move {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            context.cancellation_token().cancelled().await;
+            Err(ToolExecutionError::Cancelled)
+        })
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -59,6 +169,115 @@ async fn concurrent_step_is_rejected() {
 
     assert!(matches!(err, RuntimeError::StepAlreadyActive { .. }));
     drop(first_stream);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn execute_tool_call_is_rejected_while_step_is_active() {
+    let executor = WaitingToolExecutor::new();
+    let runtime = Runtime::builder(session_id())
+        .register_tool(RegisteredTool::new(tool_spec(), Arc::new(executor)))
+        .event_buffer_size(NonZeroUsize::new(1).expect("non-zero buffer"))
+        .build()
+        .expect("runtime should build");
+    let stream = runtime
+        .step(
+            StepInput::user_text("hold active step").expect("valid step input"),
+            StepContext::new(CancellationToken::new()),
+        )
+        .expect("step should start");
+    tokio::task::yield_now().await;
+
+    let err = runtime
+        .execute_tool_call(
+            &tool_call_id("cancel-tool-call"),
+            ToolExecutionContext::default(),
+        )
+        .await
+        .expect_err("tool execution should be rejected while a step is active");
+
+    assert!(matches!(err, RuntimeError::StepAlreadyActive { .. }));
+    drop(stream);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn pre_cancelled_tool_execution_keeps_pending_and_releases_active_permit() {
+    let executor = WaitingToolExecutor::new();
+    let runtime = runtime_with_waiting_tool("cancel-tool-pre", executor.clone());
+    let events = collect_pending_step(&runtime, "request wait tool").await;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.kind, RuntimeEventKind::ToolCallPending { .. }))
+    );
+
+    let token = CancellationToken::new();
+    token.cancel();
+    let err = runtime
+        .execute_tool_call(
+            &tool_call_id("cancel-tool-call"),
+            ToolExecutionContext::new(token),
+        )
+        .await
+        .expect_err("pre-cancelled tool execution should be rejected");
+
+    assert!(matches!(
+        err,
+        RuntimeError::ToolExecutionCancelled { call_id, .. }
+            if call_id == tool_call_id("cancel-tool-call")
+    ));
+    assert_eq!(executor.call_count(), 0);
+    assert_eq!(runtime.pending_tool_calls().await.len(), 1);
+    let follow_up_events = start_step_after_cleanup(&runtime, "after pre-cancel").await;
+    assert!(
+        follow_up_events
+            .iter()
+            .any(|event| matches!(event.kind, RuntimeEventKind::Failed { .. }))
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cancelling_during_tool_execution_keeps_pending_and_releases_active_permit() {
+    let executor = WaitingToolExecutor::new();
+    let runtime = runtime_with_waiting_tool("cancel-tool-during", executor.clone());
+    let events = collect_pending_step(&runtime, "request wait tool").await;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.kind, RuntimeEventKind::ToolCallPending { .. }))
+    );
+    let token = CancellationToken::new();
+    let execute_runtime = runtime.clone();
+    let execute_token = token.clone();
+
+    let handle = tokio::spawn(async move {
+        execute_runtime
+            .execute_tool_call(
+                &tool_call_id("cancel-tool-call"),
+                ToolExecutionContext::new(execute_token),
+            )
+            .await
+    });
+    tokio::task::yield_now().await;
+    assert_eq!(executor.call_count(), 1);
+    token.cancel();
+
+    let err = handle
+        .await
+        .expect("tool execution task should not panic")
+        .expect_err("cancelled tool execution should return an error");
+
+    assert!(matches!(
+        err,
+        RuntimeError::ToolExecutionCancelled { call_id, .. }
+            if call_id == tool_call_id("cancel-tool-call")
+    ));
+    assert_eq!(runtime.pending_tool_calls().await.len(), 1);
+    let follow_up_events = start_step_after_cleanup(&runtime, "after during-cancel").await;
+    assert!(
+        follow_up_events
+            .iter()
+            .any(|event| matches!(event.kind, RuntimeEventKind::Failed { .. }))
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

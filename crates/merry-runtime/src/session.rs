@@ -9,6 +9,7 @@ use crate::{
 use merry_core::{
     ArtifactId, ArtifactKind, ArtifactRef, ErrorInfo, EvidenceLocator, EvidenceRef,
     PendingToolCall, RuntimeEvent, RuntimeEventKind, SessionId, ToolCallId, ToolCallResult,
+    ToolCallResultStatus,
 };
 use std::collections::BTreeSet;
 
@@ -149,6 +150,13 @@ impl SessionState {
         self.pending_tool_calls.clone()
     }
 
+    pub(crate) fn pending_tool_call(&self, call_id: &ToolCallId) -> Option<PendingToolCall> {
+        self.pending_tool_calls
+            .iter()
+            .find(|call| call.id() == call_id)
+            .cloned()
+    }
+
     pub(crate) fn has_pending_tool_calls(&self) -> bool {
         !self.pending_tool_calls.is_empty()
     }
@@ -283,6 +291,44 @@ impl SessionState {
         Ok(events)
     }
 
+    pub(crate) fn submit_tool_execution_outcome(
+        &mut self,
+        call_id: &ToolCallId,
+        status: ToolCallResultStatus,
+        content: ArtifactContent,
+        diagnostic: Option<ErrorInfo>,
+    ) -> Result<Vec<RuntimeEvent>, RuntimeError> {
+        let artifact_kind = match &content {
+            ArtifactContent::Text(_) => ArtifactKind::Text,
+            ArtifactContent::Json(_) => ArtifactKind::Json,
+            ArtifactContent::Binary(_) | ArtifactContent::Image(_) | ArtifactContent::Other(_) => {
+                return Err(RuntimeError::UnsupportedToolResultContent {
+                    artifact_id: self.next_tool_result_artifact_id(),
+                    content_kind: content.kind(),
+                });
+            }
+        };
+        let artifact = ArtifactRef::new(self.next_tool_result_artifact_id(), artifact_kind);
+        let result = match status {
+            ToolCallResultStatus::Succeeded => ToolCallResult::new(
+                call_id.clone(),
+                ToolCallResultStatus::Succeeded,
+                artifact,
+                diagnostic,
+            )?,
+            ToolCallResultStatus::Failed => {
+                let diagnostic = diagnostic.ok_or(RuntimeError::Core {
+                    source: merry_core::CoreError::InvalidToolCallResult {
+                        reason: "failed tool execution outcome must include a diagnostic",
+                    },
+                })?;
+                ToolCallResult::failed(call_id.clone(), artifact, diagnostic)
+            }
+        };
+
+        self.submit_tool_result(result, content)
+    }
+
     pub(crate) fn record_cancelled(&mut self, diagnostic: ErrorInfo) -> RuntimeEvent {
         self.record_event(
             RuntimeEventKind::Cancelled { diagnostic },
@@ -306,6 +352,10 @@ impl SessionState {
 
     fn next_sequence(&self) -> u64 {
         self.next_sequence
+    }
+
+    fn next_tool_result_artifact_id(&self) -> ArtifactId {
+        tool_result_id(self.next_sequence())
     }
 
     fn validate_tool_result_content(
@@ -354,6 +404,11 @@ impl SessionState {
 fn assistant_output_id(sequence: u64) -> ArtifactId {
     ArtifactId::new(&format!("assistant-output-{sequence}"))
         .expect("assistant output artifact id uses a valid static prefix and sequence")
+}
+
+fn tool_result_id(sequence: u64) -> ArtifactId {
+    ArtifactId::new(&format!("tool-result-{sequence}"))
+        .expect("tool result artifact id uses a valid static prefix and sequence")
 }
 
 fn duplicate_tool_call_diagnostic(call_id: &ToolCallId, state: &'static str) -> ErrorInfo {
