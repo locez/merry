@@ -332,6 +332,14 @@ where
         )));
     };
 
+    let actual_tool_name = pending.name().as_str();
+    if actual_tool_name != DEBUG_TOOL_NAME {
+        writer.flush().await.map_err(stdout_error)?;
+        return Err(CliError::Unexpected(format!(
+            "debug tool `{DEBUG_TOOL_NAME}` was not called on the first step; pending tool was `{actual_tool_name}`"
+        )));
+    }
+
     write_runtime_events(
         runtime
             .execute_tool_call(pending.id(), ToolExecutionContext::default())
@@ -902,6 +910,90 @@ mod tests {
         );
         assert_eq!(requests[1].generation().max_output_tokens(), Some(16));
         assert!(!requests[1].generation().allow_parallel_tool_calls());
+    }
+
+    #[tokio::test]
+    async fn debug_openai_tool_helper_errors_when_first_step_calls_wrong_tool() {
+        let wrong_tool_name = "wrong_tool";
+        let call = ModelToolCall::new(
+            ModelToolCallId::new("call-wrong").expect("valid tool call id"),
+            ToolName::new(wrong_tool_name).expect("valid tool name"),
+            ToolArguments::new(Map::new()),
+        );
+        let provider = ScriptedProvider::new(vec![
+            vec![Ok(ModelEvent::Completed {
+                response: ModelResponse::new(
+                    vec![ModelOutput::tool_call(call)],
+                    FinishReason::ToolCalls,
+                    None,
+                ),
+            })],
+            vec![Ok(ModelEvent::Completed {
+                response: ModelResponse::new(
+                    vec![ModelOutput::text("should not continue")],
+                    FinishReason::Stop,
+                    None,
+                ),
+            })],
+        ]);
+        let runtime =
+            Runtime::builder(merry_core::SessionId::new("debug-openai-wrong-tool").unwrap())
+                .register_tool(
+                    debug_echo_tool("debug result").unwrap_or_else(|_| panic!("valid debug tool")),
+                )
+                .model_provider(
+                    Arc::new(provider.clone()),
+                    ModelName::new("debug-model").unwrap(),
+                )
+                .build()
+                .expect("runtime should build");
+        let input = StepInput::user_text("please call the tool").expect("valid input");
+        let mut output = Vec::new();
+
+        let error =
+            write_debug_openai_tool_events(&runtime, input, StepContext::default(), &mut output)
+                .await
+                .expect_err("wrong first-step tool call should fail");
+
+        match error {
+            CliError::Unexpected(message) => {
+                assert!(message.contains(DEBUG_TOOL_NAME));
+                assert!(message.contains(wrong_tool_name));
+            }
+            _ => panic!("expected unexpected error for wrong tool call"),
+        }
+
+        let text = String::from_utf8(output).expect("output should be utf-8");
+        let events = text
+            .lines()
+            .map(|line| serde_json::from_str::<RuntimeEvent>(line).expect("line should be JSON"))
+            .collect::<Vec<_>>();
+        assert!(
+            !events.is_empty(),
+            "first-step runtime events should be preserved"
+        );
+        let event_types = events
+            .iter()
+            .map(|event| {
+                let value = serde_json::to_value(event).expect("event should serialize");
+                value["kind"]["type"].as_str().unwrap().to_owned()
+            })
+            .collect::<Vec<_>>();
+
+        assert!(event_types.iter().any(|kind| kind == "tool_call_pending"));
+        assert!(!event_types.iter().any(|kind| kind == "tool_call_resolved"));
+        let pending = events
+            .iter()
+            .find_map(|event| match &event.kind {
+                merry_core::RuntimeEventKind::ToolCallPending { call } => Some(call),
+                _ => None,
+            })
+            .expect("wrong tool call should remain pending in first-step events");
+        assert_eq!(pending.name().as_str(), wrong_tool_name);
+
+        let requests = provider.recorded_requests();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].continuations().is_empty());
     }
 
     #[tokio::test]
