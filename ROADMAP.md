@@ -4,9 +4,9 @@ This roadmap is public-safe and implementation-focused. Private product strategy
 
 ## Current Phase
 
-Merry has closed out M18F LLM-assisted judgment boundary work through M18F-H. M18F-I is documentation/status closeout and roadmap alignment only; it adds no Rust behavior.
+Merry has closed out M18F LLM-assisted judgment boundary work through M18F-I. Since that closeout, the internal model-backed judgment foundation has added a strict tool-risk review model-output parser, crate-private provider-neutral `ModelBackedJudgmentSource`, and deterministic fake-provider runtime harness coverage through `Runtime::run_uncertainty_review`.
 
-M8 runtime/provider/tool execution hardening, M9 Memory Activation MVP, and M18F LLM-assisted judgment boundary are now maintenance and foundation work. Memory Activation now uses a session-owned in-memory stored source by default, but external/default sessions have no candidate memories until runtime-owned state records them. Production memory storage, public memory APIs, external persistence, and a stable activation contract are still not complete. Judgment remains internal and advisory: it is not connected to live LLM judgment, public APIs, runtime events, ledger facts, tool gates, automatic provider-context inclusion, or automatic promotion. Live provider flows remain explicit opt-in/manual debug paths; they are not the basis for deterministic verification.
+M8 runtime/provider/tool execution hardening, M9 Memory Activation MVP, and M18F LLM-assisted judgment boundary are now maintenance and foundation work. Memory Activation now uses a session-owned in-memory stored source by default, but external/default sessions have no candidate memories until runtime-owned state records them. Production memory storage, public memory APIs, external persistence, and a stable activation contract are still not complete. Judgment remains internal and advisory: it is not a public API, public runtime event, ledger fact, tool gate, automatic provider-context inclusion, automatic context mutation or promotion, OpenAI/live-provider path, or builder/runtime configured judgment source. Deterministic judgment verification remains fake-provider only. Live provider flows remain explicit opt-in/manual debug paths; they are not the basis for deterministic verification.
 
 ## Status Summary
 
@@ -39,21 +39,22 @@ M8 runtime/provider/tool execution hardening, M9 Memory Activation MVP, and M18F
 - M18F-G added a crate-internal provider-neutral uncertainty review harness with deterministic scripted-source coverage for evidence preflight, cancellation, source failures, outcome evidence validation, completed internal audit recording, and non-authoritative tool-risk advisory outcomes.
 - M18F-H completed the internal summary-draft promotion safety path by adding a crate-private checked internal context append helper with candidate snapshot compilation before context mutation.
 - M18F-I closed out public status and roadmap alignment for M18F without changing Rust behavior.
+- Strict model judgment parsing and a crate-private provider-neutral `ModelBackedJudgmentSource` now exist for internal advisory tool-risk review, with deterministic fake-provider runtime harness coverage through `Runtime::run_uncertainty_review`.
 - OpenAI-compatible debug/tool flows remain opt-in manual verification paths, not deterministic test dependencies.
 
 ### Active
 
 - Keep judgment advisory: semantic recommendations can inform runtime policy, but hard runtime policy still decides tool execution, actions, and context mutation.
 - Keep the initial judgment contract provider-neutral, evidence-aware, cancellable, and deterministic-testable.
-- Do not connect live LLM judgment, public judgment APIs, public runtime events, ledger facts, tool execution gates, or public summary-draft promotion APIs as part of the closed M18F work.
+- Do not connect model-backed judgment to live LLM/OpenAI paths, public judgment APIs, public runtime events, ledger facts, tool execution gates, public summary-draft promotion APIs, automatic provider-context inclusion, automatic context mutation or promotion, or builder/runtime configured judgment sources.
 - Keep deterministic verification based on fake providers, stored runtime state, artifact references, and ledger assertions.
+- Keep deterministic runtime harness coverage for model-backed judgment fake-provider only.
 - Improve public docs as implementation status changes, while keeping private notes under `docs/`.
 
 ### Deferred / Next
 
 - Production memory store, public Memory Activation APIs, external persistence, and stable activation contract.
-- Live LLM-backed judgment source, public judgment API, public runtime events/ledger facts for judgment or promotion, and tool execution gate integration.
-- Future internal provider-neutral model-backed `JudgmentSource` contract/adapter, if introduced, should remain fake-provider deterministic first and is not implemented by M18F-I.
+- Live LLM-backed judgment path, public judgment API, public runtime events/ledger facts for judgment or promotion, tool execution gate integration, automatic provider-context inclusion, automatic context mutation or promotion, and builder/runtime configured judgment source.
 - Python SDK and `merry-py`.
 - Rust facade crate `merry`.
 - Macro crate support for boilerplate generation.
@@ -218,7 +219,7 @@ Goal: reserve an internal runtime boundary and audit carrier for semantic judgme
 
 M18F-A established the crate-internal contract skeleton in `merry-runtime`. M18F-B adds a crate-internal completed-judgment audit registry with exact internal request/outcome payload carriers. M18F-C wires the first narrow summary-draft audit path through a crate-private helper that records completed advisory `SummaryDraft` judgments only after artifact evidence validation. M18F-D adds an internal explicit acceptance and promotion boundary for accepted summary drafts; promotion is still crate-private, validates exact selected evidence, and compiles a candidate context snapshot before mutation. M18F-E adds a session-owned internal promotion lifecycle registry: exact promoted replays are idempotent no-ops, conflicting payloads are rejected without context mutation, and compile failures become terminal rejected records. M18F-F characterizes the public direct context write boundary: `Runtime::record_context_entry` and `Runtime::record_context_summary` remain raw/manual MVP append helpers with delayed context-compile validation, not summary-draft promotion and not lifecycle-governed. M18F-G adds a crate-internal provider-neutral uncertainty review harness that preflights request evidence, invokes `JudgmentSource` without holding session state across await, validates outcome evidence before commit, and records exactly one completed internal audit payload on success. M18F-H extracts the summary-draft promotion candidate compile-before-mutation path into a crate-private checked internal context append helper; public direct context writes remain raw/manual. Judgment outcomes are advisory semantic evidence; they cannot authorize tool execution, actions, or context mutation. Provider wire formats do not enter runtime, and summary/evidence exact artifact rules remain unchanged.
 
-M18F-I closes this milestone as documentation/status alignment only. It does not introduce a live model-backed `JudgmentSource`, public judgment surface, public summary-draft surface, runtime event or ledger projection, tool gate, automatic provider-context inclusion, or automatic promotion.
+M18F-I closed this milestone as documentation/status alignment only. Later internal foundation work added strict model-output parsing, a crate-private provider-neutral `ModelBackedJudgmentSource` for advisory tool-risk review, and deterministic fake-provider runtime harness coverage through `Runtime::run_uncertainty_review`. That source remains internal, fake-provider deterministic only, and not wired to a live provider or public runtime configuration.
 
 Done:
 
@@ -233,6 +234,7 @@ Done:
 - Add characterization coverage and docs for public direct context writes as raw/manual MVP context mutation outside the summary-draft promotion lifecycle.
 - Add a crate-private uncertainty review harness with deterministic scripted-source tests for request preflight, cancellation, source error, outcome evidence validation, exact internal audit recording, and non-authoritative high/unknown tool-risk advisory results.
 - Add a crate-private checked internal context append helper used by summary-draft promotion, with candidate snapshot compilation before session context mutation.
+- Add a strict model judgment parser and crate-private provider-neutral `ModelBackedJudgmentSource` for internal advisory tool-risk review, with deterministic fake-provider runtime harness coverage through `Runtime::run_uncertainty_review`.
 
 Closed-out guardrails:
 
@@ -241,12 +243,14 @@ Closed-out guardrails:
 - Keep summary-draft audit and promotion internal, with no record-id-authorized or automatic context promotion.
 - Keep promotion lifecycle state out of public runtime APIs, runtime events, ledger facts, and tool-call policy.
 - Keep public direct context write behavior unchanged while it remains a raw/manual MVP surface.
+- Keep model-backed judgment out of OpenAI/live-provider paths, public runtime configuration, public events, ledger facts, tool gates, automatic provider-context inclusion, and automatic context mutation or promotion.
 
-Not yet:
+Still absent:
 
-- Live LLM-backed judgment source.
+- Live LLM-backed or OpenAI-backed judgment path.
 - Public judgment API.
 - Public summary-draft recording or promotion APIs.
+- Builder/runtime configured judgment source.
 - Tool execution gate integration.
 - New public `merry-core` event, id, or reference types.
 - Public runtime events or ledger facts for judgments or promotions.
