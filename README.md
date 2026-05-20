@@ -6,11 +6,11 @@ M8 runtime/provider/tool execution hardening has shifted into maintenance and fo
 
 Memory Activation MVP work is internally integrated in `merry-runtime`. The default activation source is a session-owned in-memory stored source; external/default sessions have no candidate memories until runtime-owned state records them. There is still no public memory write API, external persistence, or stable activation contract.
 
-M18F-H LLM-assisted judgment boundary work has added a crate-private checked internal context append helper used by summary-draft promotion. Promotion still compiles the candidate context snapshot before mutating session context, while public direct context writes remain raw/manual.
+M18F LLM-assisted judgment boundary work is closed out through M18F-H. It reserved an internal advisory judgment boundary, audit carrier, summary-draft promotion lifecycle, uncertainty review harness, and crate-private checked internal context append helper. Promotion still compiles the candidate context snapshot before mutating session context, while public direct context writes remain raw/manual. M18F-I is documentation/status closeout only and adds no runtime behavior.
 
 Public direct context writes remain unchanged. `Runtime::record_context_entry` and `Runtime::record_context_summary` are still raw/manual MVP context mutation helpers: they append direct context entries and rely on later context compilation to validate exact evidence readability. They are not summary-draft promotion, do not create promotion lifecycle records, and are not governed by promotion acceptance/replay rules. The summary-draft promotion lifecycle remains crate-internal.
 
-Judgment remains advisory semantic input only: it is not connected to a live LLM, public judgment API, tool execution gate, public runtime event, ledger fact, or automatic context promotion.
+Judgment remains advisory semantic input only: it is not connected to a live LLM, public judgment API, public summary-draft API, tool execution gate, public runtime event, ledger fact, automatic provider-context inclusion, or automatic context promotion.
 
 Deterministic verification is based on fake providers and stored runtime state. Live provider flows are manual and opt-in, not required for normal tests.
 

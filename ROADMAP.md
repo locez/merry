@@ -4,9 +4,9 @@ This roadmap is public-safe and implementation-focused. Private product strategy
 
 ## Current Phase
 
-Merry is in M18F-G LLM-assisted judgment boundary work, building on the M9 Memory Activation MVP runtime integration.
+Merry has closed out M18F LLM-assisted judgment boundary work through M18F-H. M18F-I is documentation/status closeout and roadmap alignment only; it adds no Rust behavior.
 
-M8 runtime/provider/tool execution hardening and M9 Memory Activation MVP are now maintenance and foundation work. Memory Activation now uses a session-owned in-memory stored source by default, but external/default sessions have no candidate memories until runtime-owned state records them. Production memory storage, public memory APIs, external persistence, and a stable activation contract are still not complete. Live provider flows remain explicit opt-in/manual debug paths; they are not the basis for deterministic verification.
+M8 runtime/provider/tool execution hardening, M9 Memory Activation MVP, and M18F LLM-assisted judgment boundary are now maintenance and foundation work. Memory Activation now uses a session-owned in-memory stored source by default, but external/default sessions have no candidate memories until runtime-owned state records them. Production memory storage, public memory APIs, external persistence, and a stable activation contract are still not complete. Judgment remains internal and advisory: it is not connected to live LLM judgment, public APIs, runtime events, ledger facts, tool gates, automatic provider-context inclusion, or automatic promotion. Live provider flows remain explicit opt-in/manual debug paths; they are not the basis for deterministic verification.
 
 ## Status Summary
 
@@ -37,14 +37,15 @@ M8 runtime/provider/tool execution hardening and M9 Memory Activation MVP are no
 - Default memory activation is no longer noop: it is backed by a session-owned in-memory stored source. Public memory write APIs, external persistence, and a stable activation contract remain absent, so external/default sessions still start with no candidate memories.
 - Memory activation tests cover validation, deterministic matching/scoring/conflict behavior, stored-source projection, evidence failures before provider calls, replacement/clearing behavior, pending-tool gating, cancellation/drop cleanup, and provider lifecycle retention/cleanup.
 - M18F-G added a crate-internal provider-neutral uncertainty review harness with deterministic scripted-source coverage for evidence preflight, cancellation, source failures, outcome evidence validation, completed internal audit recording, and non-authoritative tool-risk advisory outcomes.
+- M18F-H completed the internal summary-draft promotion safety path by adding a crate-private checked internal context append helper with candidate snapshot compilation before context mutation.
+- M18F-I closed out public status and roadmap alignment for M18F without changing Rust behavior.
 - OpenAI-compatible debug/tool flows remain opt-in manual verification paths, not deterministic test dependencies.
 
 ### Active
 
-- Keep M18F-G uncertainty review internal, provider-neutral, and advisory while follow-on policy integration is designed.
 - Keep judgment advisory: semantic recommendations can inform runtime policy, but hard runtime policy still decides tool execution, actions, and context mutation.
 - Keep the initial judgment contract provider-neutral, evidence-aware, cancellable, and deterministic-testable.
-- Do not connect live LLM judgment, public judgment APIs, public runtime events, ledger facts, tool execution gates, or public summary-draft promotion APIs in this milestone.
+- Do not connect live LLM judgment, public judgment APIs, public runtime events, ledger facts, tool execution gates, or public summary-draft promotion APIs as part of the closed M18F work.
 - Keep deterministic verification based on fake providers, stored runtime state, artifact references, and ledger assertions.
 - Improve public docs as implementation status changes, while keeping private notes under `docs/`.
 
@@ -52,6 +53,7 @@ M8 runtime/provider/tool execution hardening and M9 Memory Activation MVP are no
 
 - Production memory store, public Memory Activation APIs, external persistence, and stable activation contract.
 - Live LLM-backed judgment source, public judgment API, public runtime events/ledger facts for judgment or promotion, and tool execution gate integration.
+- Future internal provider-neutral model-backed `JudgmentSource` contract/adapter, if introduced, should remain fake-provider deterministic first and is not implemented by M18F-I.
 - Python SDK and `merry-py`.
 - Rust facade crate `merry`.
 - Macro crate support for boilerplate generation.
@@ -208,13 +210,15 @@ Not included:
 - Stable activation contract for external consumers.
 - External/default candidate memories.
 
-## Active Milestone
+## Closed Milestone
 
 ### M18F-A / M18F-B / M18F-C / M18F-D / M18F-E / M18F-F / M18F-G / M18F-H: LLM-Assisted Judgment Boundary
 
 Goal: reserve an internal runtime boundary and audit carrier for semantic judgment without giving judgment authority over runtime policy.
 
 M18F-A established the crate-internal contract skeleton in `merry-runtime`. M18F-B adds a crate-internal completed-judgment audit registry with exact internal request/outcome payload carriers. M18F-C wires the first narrow summary-draft audit path through a crate-private helper that records completed advisory `SummaryDraft` judgments only after artifact evidence validation. M18F-D adds an internal explicit acceptance and promotion boundary for accepted summary drafts; promotion is still crate-private, validates exact selected evidence, and compiles a candidate context snapshot before mutation. M18F-E adds a session-owned internal promotion lifecycle registry: exact promoted replays are idempotent no-ops, conflicting payloads are rejected without context mutation, and compile failures become terminal rejected records. M18F-F characterizes the public direct context write boundary: `Runtime::record_context_entry` and `Runtime::record_context_summary` remain raw/manual MVP append helpers with delayed context-compile validation, not summary-draft promotion and not lifecycle-governed. M18F-G adds a crate-internal provider-neutral uncertainty review harness that preflights request evidence, invokes `JudgmentSource` without holding session state across await, validates outcome evidence before commit, and records exactly one completed internal audit payload on success. M18F-H extracts the summary-draft promotion candidate compile-before-mutation path into a crate-private checked internal context append helper; public direct context writes remain raw/manual. Judgment outcomes are advisory semantic evidence; they cannot authorize tool execution, actions, or context mutation. Provider wire formats do not enter runtime, and summary/evidence exact artifact rules remain unchanged.
+
+M18F-I closes this milestone as documentation/status alignment only. It does not introduce a live model-backed `JudgmentSource`, public judgment surface, public summary-draft surface, runtime event or ledger projection, tool gate, automatic provider-context inclusion, or automatic promotion.
 
 Done:
 
@@ -230,7 +234,7 @@ Done:
 - Add a crate-private uncertainty review harness with deterministic scripted-source tests for request preflight, cancellation, source error, outcome evidence validation, exact internal audit recording, and non-authoritative high/unknown tool-risk advisory results.
 - Add a crate-private checked internal context append helper used by summary-draft promotion, with candidate snapshot compilation before session context mutation.
 
-Active:
+Closed-out guardrails:
 
 - Keep the boundary internal while runtime policy integration is designed.
 - Preserve the advisory/hard-policy split in docs, names, and storage boundaries.
@@ -242,12 +246,13 @@ Not yet:
 
 - Live LLM-backed judgment source.
 - Public judgment API.
-- Public summary-draft recording API.
-- Public summary-draft promotion API.
+- Public summary-draft recording or promotion APIs.
 - Tool execution gate integration.
 - New public `merry-core` event, id, or reference types.
-- Public runtime events or ledger facts for judgments.
-- Tool-call policy changes or automatic provider-context inclusion from judgment drafts.
+- Public runtime events or ledger facts for judgments or promotions.
+- Tool-call policy changes.
+- Automatic provider-context inclusion from judgment drafts.
+- Automatic summary-draft or judgment-based promotion.
 
 ## Deferred Milestones
 
