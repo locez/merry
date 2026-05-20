@@ -48,7 +48,7 @@ impl OpenAiProviderConfig {
         &self.api_key
     }
 
-    /// Returns the base URL used for Chat Completions-compatible requests.
+    /// Returns the base URL used for Responses requests.
     #[must_use]
     pub fn base_url(&self) -> &str {
         &self.base_url

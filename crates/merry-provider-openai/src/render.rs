@@ -2,13 +2,13 @@
 
 use crate::{
     OpenAiProviderError,
-    wire::{ChatCompletionRequest, ChatMessage, ChatTool, ChatToolFunction, StreamOptions},
+    wire::{ResponsesInputItem, ResponsesRequest, ResponsesTool},
 };
 use merry_llm::{ModelMessageRole, ModelRequest, ModelToolContinuation};
 use serde_json::{Map, Value};
 
 #[allow(dead_code)]
-pub(crate) fn render_chat_completion_request(
+pub(crate) fn render_responses_request(
     request: &ModelRequest,
 ) -> Result<Value, OpenAiProviderError> {
     if request.generation().allow_parallel_tool_calls() {
@@ -17,44 +17,42 @@ pub(crate) fn render_chat_completion_request(
         ));
     }
 
-    let mut messages = request
+    let mut input = request
         .messages()
         .iter()
-        .map(|message| ChatMessage::text(render_role(message.role()), message.content().as_text()))
+        .map(|message| {
+            ResponsesInputItem::message(render_role(message.role()), message.content().as_text())
+        })
         .collect::<Vec<_>>();
-    append_tool_continuation_messages(request, &mut messages)?;
+    append_tool_continuation_input(request, &mut input)?;
 
     let tools = request
         .tools()
         .iter()
         .map(|tool| {
-            Ok(ChatTool {
+            Ok(ResponsesTool {
                 kind: "function",
-                function: ChatToolFunction {
-                    name: tool.name().as_str(),
-                    description: tool.description(),
-                    parameters: schema_as_value(tool)?,
-                },
+                name: tool.name().as_str(),
+                description: tool.description(),
+                parameters: schema_as_value(tool)?,
             })
         })
         .collect::<Result<Vec<_>, OpenAiProviderError>>()?;
 
-    let wire = ChatCompletionRequest {
+    let wire = ResponsesRequest {
         model: request.model().as_str(),
-        messages,
+        input,
         stream: true,
-        stream_options: StreamOptions {
-            include_usage: true,
-        },
-        parallel_tool_calls: request.generation().allow_parallel_tool_calls(),
-        max_completion_tokens: request.generation().max_output_tokens(),
+        store: false,
+        parallel_tool_calls: false,
+        max_output_tokens: request.generation().max_output_tokens(),
         tool_choice: if tools.is_empty() { None } else { Some("auto") },
         tools,
     };
 
     serde_json::to_value(wire).map_err(|error| {
         OpenAiProviderError::invalid_request(format!(
-            "failed to serialize Chat Completions request: {error}"
+            "failed to serialize Responses request: {error}"
         ))
     })
 }
@@ -79,20 +77,20 @@ fn schema_as_value(tool: &merry_core::ToolSpec) -> Result<&Value, OpenAiProvider
     Ok(schema.as_value())
 }
 
-fn append_tool_continuation_messages<'a>(
+fn append_tool_continuation_input<'a>(
     request: &'a ModelRequest,
-    messages: &mut Vec<ChatMessage<'a>>,
+    input: &mut Vec<ResponsesInputItem<'a>>,
 ) -> Result<(), OpenAiProviderError> {
     let continuations = request.continuations();
-    messages.reserve(continuations.len().saturating_mul(2));
+    input.reserve(continuations.len().saturating_mul(2));
     for continuation in continuations {
         let continuation = render_tool_continuation(continuation)?;
-        messages.push(ChatMessage::assistant_tool_call(
+        input.push(ResponsesInputItem::function_call(
             continuation.id,
             continuation.name,
             continuation.arguments,
         ));
-        messages.push(ChatMessage::tool_result(
+        input.push(ResponsesInputItem::function_call_output(
             continuation.id,
             continuation.result_content,
         ));
@@ -142,7 +140,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::render_tool_continuation;
-    use crate::wire::ChatMessage;
+    use crate::wire::ResponsesInputItem;
     use merry_core::{ErrorInfo, ToolCallResultStatus, ToolName};
     use merry_llm::{
         ModelToolCall, ModelToolCallId, ModelToolContinuation, ModelToolResult,
@@ -232,8 +230,8 @@ mod tests {
     }
 
     #[test]
-    fn appends_tool_continuations_as_chat_completion_messages_in_order() {
-        let mut messages = vec![ChatMessage::text("user", "Weather in Shanghai?")];
+    fn appends_tool_continuations_as_responses_input_items_in_order() {
+        let mut input = vec![ResponsesInputItem::message("user", "Weather in Shanghai?")];
         let request = merry_llm::ModelRequest::new_with_continuations(
             merry_llm::ModelName::new("debug-model").expect("valid model name"),
             vec![
@@ -252,34 +250,31 @@ mod tests {
         )
         .expect("valid request");
 
-        super::append_tool_continuation_messages(&request, &mut messages)
-            .expect("continuation messages should render");
+        super::append_tool_continuation_input(&request, &mut input)
+            .expect("continuation input should render");
 
         assert_eq!(
-            serde_json::to_value(messages).expect("messages should serialize"),
+            serde_json::to_value(input).expect("input should serialize"),
             json!([
                 {
                     "role": "user",
-                    "content": "Weather in Shanghai?"
-                },
-                {
-                    "role": "assistant",
-                    "content": null,
-                    "tool_calls": [
+                    "content": [
                         {
-                            "id": "call_abc123",
-                            "type": "function",
-                            "function": {
-                                "name": "lookup_weather",
-                                "arguments": "{\"city\":\"Shanghai\",\"units\":\"metric\"}"
-                            }
+                            "type": "input_text",
+                            "text": "Weather in Shanghai?"
                         }
                     ]
                 },
                 {
-                    "role": "tool",
-                    "tool_call_id": "call_abc123",
-                    "content": "{\"temperature_c\":22}"
+                    "type": "function_call",
+                    "call_id": "call_abc123",
+                    "name": "lookup_weather",
+                    "arguments": "{\"city\":\"Shanghai\",\"units\":\"metric\"}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_abc123",
+                    "output": "{\"temperature_c\":22}"
                 }
             ])
         );

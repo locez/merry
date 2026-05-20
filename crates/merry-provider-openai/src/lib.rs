@@ -215,35 +215,49 @@ mod tests {
     }
 
     #[test]
-    fn rendered_request_with_tool_matches_chat_completions_json_without_runtime_state() {
-        let rendered = crate::render::render_chat_completion_request(&request_with_tools())
+    fn rendered_request_with_tool_matches_responses_json_without_runtime_state() {
+        let rendered = crate::render::render_responses_request(&request_with_tools())
             .expect("request should render");
 
         assert_eq!(
             rendered,
             json!({
                 "model": "gpt-4.1-mini",
-                "messages": [
-                    { "role": "system", "content": "You are concise." },
-                    { "role": "user", "content": "Weather in Shanghai?" }
+                "input": [
+                    {
+                        "role": "system",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "You are concise."
+                            }
+                        ]
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "Weather in Shanghai?"
+                            }
+                        ]
+                    }
                 ],
                 "stream": true,
-                "stream_options": { "include_usage": true },
+                "store": false,
                 "parallel_tool_calls": false,
-                "max_completion_tokens": 256,
+                "max_output_tokens": 256,
                 "tools": [
                     {
                         "type": "function",
-                        "function": {
-                            "name": "lookup_weather",
-                            "description": "Look up weather for a city",
-                            "parameters": {
-                                "type": "object",
-                                "properties": {
-                                    "city": { "type": "string" }
-                                },
-                                "required": ["city"]
-                            }
+                        "name": "lookup_weather",
+                        "description": "Look up weather for a city",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "city": { "type": "string" }
+                            },
+                            "required": ["city"]
                         }
                     }
                 ],
@@ -253,7 +267,6 @@ mod tests {
 
         let runtime_state_fields = [
             "previous_response_id",
-            "store",
             "thread_id",
             "session_id",
             "ledger_id",
@@ -262,6 +275,7 @@ mod tests {
         let object = rendered
             .as_object()
             .expect("request JSON should be an object");
+        assert_eq!(object.get("store"), Some(&json!(false)));
         for field in runtime_state_fields {
             assert!(!object.contains_key(field), "{field} should be omitted");
         }
@@ -269,68 +283,74 @@ mod tests {
 
     #[test]
     fn rendered_request_without_tools_omits_tools_and_tool_choice() {
-        let rendered = crate::render::render_chat_completion_request(&request_without_tools())
+        let rendered = crate::render::render_responses_request(&request_without_tools())
             .expect("request should render");
         let object = rendered
             .as_object()
             .expect("request JSON should be an object");
 
         assert_eq!(object.get("parallel_tool_calls"), Some(&json!(false)));
+        assert_eq!(object.get("store"), Some(&json!(false)));
         assert!(!object.contains_key("tools"));
         assert!(!object.contains_key("tool_choice"));
-        assert!(!object.contains_key("max_completion_tokens"));
+        assert!(!object.contains_key("max_output_tokens"));
     }
 
     #[test]
-    fn rendered_request_tool_continuation_matches_chat_json_without_state() {
-        let rendered =
-            crate::render::render_chat_completion_request(&request_with_tool_continuation())
-                .expect("request should render");
+    fn rendered_request_tool_continuation_matches_responses_json_without_state() {
+        let rendered = crate::render::render_responses_request(&request_with_tool_continuation())
+            .expect("request should render");
 
         assert_eq!(
             rendered,
             json!({
                 "model": "gpt-4.1-mini",
-                "messages": [
-                    { "role": "system", "content": "You are concise." },
-                    { "role": "user", "content": "Continue after tool result." },
+                "input": [
                     {
-                        "role": "assistant",
-                        "content": null,
-                        "tool_calls": [
+                        "role": "system",
+                        "content": [
                             {
-                                "id": "call_abc123",
-                                "type": "function",
-                                "function": {
-                                    "name": "lookup_weather",
-                                    "arguments": "{\"city\":\"Shanghai\",\"units\":\"metric\"}"
-                                }
+                                "type": "input_text",
+                                "text": "You are concise."
                             }
                         ]
                     },
                     {
-                        "role": "tool",
-                        "tool_call_id": "call_abc123",
-                        "content": "{\"temperature_c\":22,\"condition\":\"clear\"}"
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "Continue after tool result."
+                            }
+                        ]
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_abc123",
+                        "name": "lookup_weather",
+                        "arguments": "{\"city\":\"Shanghai\",\"units\":\"metric\"}"
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_abc123",
+                        "output": "{\"temperature_c\":22,\"condition\":\"clear\"}"
                     }
                 ],
                 "stream": true,
-                "stream_options": { "include_usage": true },
+                "store": false,
                 "parallel_tool_calls": false,
-                "max_completion_tokens": 256,
+                "max_output_tokens": 256,
                 "tools": [
                     {
                         "type": "function",
-                        "function": {
-                            "name": "lookup_weather",
-                            "description": "Look up weather for a city",
-                            "parameters": {
-                                "type": "object",
-                                "properties": {
-                                    "city": { "type": "string" }
-                                },
-                                "required": ["city"]
-                            }
+                        "name": "lookup_weather",
+                        "description": "Look up weather for a city",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "city": { "type": "string" }
+                            },
+                            "required": ["city"]
                         }
                     }
                 ],
@@ -341,9 +361,9 @@ mod tests {
         let object = rendered
             .as_object()
             .expect("request JSON should be an object");
+        assert_eq!(object.get("store"), Some(&json!(false)));
         for field in [
             "previous_response_id",
-            "store",
             "thread_id",
             "session_id",
             "ledger_id",
@@ -355,18 +375,17 @@ mod tests {
 
     #[test]
     fn rendered_request_rejects_parallel_tool_calls() {
-        let error =
-            crate::render::render_chat_completion_request(&request_with_parallel_tool_calls())
-                .expect_err("parallel tool calls should be rejected");
+        let error = crate::render::render_responses_request(&request_with_parallel_tool_calls())
+            .expect_err("parallel tool calls should be rejected");
 
         assert!(matches!(error, OpenAiProviderError::InvalidRequest { .. }));
     }
 
     #[test]
-    fn parse_text_completion_fixture_to_model_response() {
-        let fixture = include_str!("../tests/fixtures/chat_completion_text.json");
+    fn parse_text_response_fixture_to_model_response() {
+        let fixture = include_str!("../tests/fixtures/responses_text.json");
         let response =
-            crate::parse::parse_chat_completion_response(fixture).expect("fixture should parse");
+            crate::parse::parse_responses_response(fixture).expect("fixture should parse");
 
         assert_eq!(response.finish_reason(), FinishReason::Stop);
         assert_eq!(response.usage(), Some(Usage::new(12, 5)));
@@ -377,10 +396,10 @@ mod tests {
     }
 
     #[test]
-    fn parse_tool_call_completion_fixture_to_model_response() {
-        let fixture = include_str!("../tests/fixtures/chat_completion_tool_call.json");
+    fn parse_tool_call_response_fixture_to_model_response() {
+        let fixture = include_str!("../tests/fixtures/responses_tool_call.json");
         let response =
-            crate::parse::parse_chat_completion_response(fixture).expect("fixture should parse");
+            crate::parse::parse_responses_response(fixture).expect("fixture should parse");
 
         assert_eq!(response.finish_reason(), FinishReason::ToolCalls);
         assert_eq!(response.usage(), Some(Usage::new(20, 8)));
@@ -401,8 +420,8 @@ mod tests {
 
     #[test]
     fn malformed_tool_arguments_fixture_returns_protocol_error() {
-        let fixture = include_str!("../tests/fixtures/chat_completion_bad_tool_args.json");
-        let error = crate::parse::parse_chat_completion_response(fixture)
+        let fixture = include_str!("../tests/fixtures/responses_bad_tool_args.json");
+        let error = crate::parse::parse_responses_response(fixture)
             .expect_err("malformed tool arguments should fail");
 
         assert_eq!(error.kind(), ProviderErrorKind::Protocol);
@@ -410,9 +429,9 @@ mod tests {
 
     #[test]
     fn parse_streaming_text_jsonl_fixture_to_normalized_events() {
-        let fixture = include_str!("../tests/fixtures/chat_completion_stream_text.jsonl");
-        let events = crate::parse::parse_chat_completion_stream_events(fixture)
-            .expect("stream should parse");
+        let fixture = include_str!("../tests/fixtures/responses_stream_text.jsonl");
+        let events =
+            crate::parse::parse_responses_stream_events(fixture).expect("stream should parse");
 
         assert_eq!(events.len(), 4);
         assert_eq!(events[0], ModelEvent::Started);
@@ -442,8 +461,8 @@ mod tests {
 
     #[test]
     fn parse_streaming_tool_call_jsonl_fixture_to_normalized_events() {
-        let fixture = include_str!("../tests/fixtures/chat_completion_stream_tool_call.jsonl");
-        let events = crate::parse::parse_chat_completion_stream_events(fixture)
+        let fixture = include_str!("../tests/fixtures/responses_stream_tool_call.jsonl");
+        let events = crate::parse::parse_responses_stream_events(fixture)
             .expect("streamed tool call should parse");
 
         assert_eq!(events.len(), 3);
@@ -476,24 +495,23 @@ mod tests {
 
     #[test]
     fn malformed_streaming_tool_arguments_fixture_returns_protocol_error() {
-        let fixture = include_str!("../tests/fixtures/chat_completion_stream_bad_tool_args.jsonl");
-        let error = crate::parse::parse_chat_completion_stream_events(fixture)
+        let fixture = include_str!("../tests/fixtures/responses_stream_bad_tool_args.jsonl");
+        let error = crate::parse::parse_responses_stream_events(fixture)
             .expect_err("malformed streamed tool arguments should fail");
 
         assert_eq!(error.kind(), ProviderErrorKind::Protocol);
     }
 
     #[test]
-    fn streaming_usage_chunk_completes_after_finish_reason_with_empty_choices() {
+    fn streaming_completed_event_completes_response() {
         let fixture = concat!(
-            "data: {\"choices\":[{\"delta\":{\"content\":\"Done\"},\"finish_reason\":null}],\"usage\":null}\n",
-            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":null}\n",
-            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":1,\"total_tokens\":5}}\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Done\"}\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"Done\"}]}],\"usage\":{\"input_tokens\":4,\"output_tokens\":1}}}\n",
             "data: [DONE]\n",
         );
 
-        let events = crate::parse::parse_chat_completion_stream_events(fixture)
-            .expect("usage-only completion chunk should parse");
+        let events = crate::parse::parse_responses_stream_events(fixture)
+            .expect("completion event should parse");
 
         assert_eq!(
             events.last(),

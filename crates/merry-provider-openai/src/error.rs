@@ -12,7 +12,7 @@ pub enum OpenAiProviderError {
     /// Provider payload could not be rendered from Merry-owned model types.
     #[error("invalid OpenAI provider request: {reason}")]
     InvalidRequest { reason: String },
-    /// Provider response did not match the expected Chat Completions protocol.
+    /// Provider response did not match the expected Responses protocol.
     #[error("OpenAI provider protocol error: {reason}")]
     Protocol { reason: String },
     /// Provider returned a non-successful HTTP status or transport failure.
