@@ -451,7 +451,7 @@ fn debug_openai_config(model_flag: Option<&str>) -> Result<DebugOpenAiConfig, Cl
         ));
     }
 
-    let api_key = required_env("OPENAI_API_KEY")?;
+    let api_key = required_openai_api_key()?;
     let model = match model_flag {
         Some(model) => model.to_owned(),
         None => required_env("MERRY_OPENAI_MODEL")?,
@@ -487,6 +487,18 @@ fn required_env(name: &'static str) -> Result<String, CliError> {
     }
 }
 
+fn required_openai_api_key() -> Result<String, CliError> {
+    match optional_env("MERRY_OPENAI_API_KEY")? {
+        Some(value) => Ok(value),
+        None => match optional_env("OPENAI_API_KEY")? {
+            Some(value) => Ok(value),
+            None => Err(debug_openai_usage_error(
+                "MERRY_OPENAI_API_KEY or OPENAI_API_KEY must be set",
+            )),
+        },
+    }
+}
+
 fn optional_env(name: &'static str) -> Result<Option<String>, CliError> {
     match env::var(name) {
         Ok(value) if value.trim().is_empty() => Err(debug_openai_usage_error(format!(
@@ -514,7 +526,7 @@ fn debug_usage() -> &'static str {
 }
 
 fn debug_openai_usage() -> &'static str {
-    "Usage: merry debug openai --input <TEXT> [--model <MODEL>] [--max-output-tokens <N>] [--debug-tool-result <TEXT>]\n\nOptions:\n  --input <TEXT>             User text input to send through Runtime::step\n  --model <MODEL>            Model name; falls back to MERRY_OPENAI_MODEL\n  --max-output-tokens <N>    Optional maximum output tokens for this step\n  --debug-tool-result <TEXT> Require first step to call debug_echo; return this text\n  --help                     Print help\n\nEnvironment:\n  MERRY_OPENAI_DEBUG=1       Required opt-in before any network attempt\n  OPENAI_API_KEY             Required after opt-in\n  MERRY_OPENAI_MODEL         Required when --model is omitted\n  MERRY_OPENAI_BASE_URL      Optional OpenAI-compatible base URL\n  OPENAI_ORG_ID              Optional organization header\n  OPENAI_PROJECT_ID          Optional project header\n"
+    "Usage: merry debug openai --input <TEXT> [--model <MODEL>] [--max-output-tokens <N>] [--debug-tool-result <TEXT>]\n\nOptions:\n  --input <TEXT>             User text input to send through Runtime::step\n  --model <MODEL>            Model name; falls back to MERRY_OPENAI_MODEL\n  --max-output-tokens <N>    Optional maximum output tokens for this step\n  --debug-tool-result <TEXT> Require first step to call debug_echo; return this text\n  --help                     Print help\n\nEnvironment:\n  MERRY_OPENAI_DEBUG=1       Required opt-in before any network attempt\n  MERRY_OPENAI_API_KEY       Preferred API key after opt-in\n  OPENAI_API_KEY             Fallback API key when MERRY_OPENAI_API_KEY is unset\n  MERRY_OPENAI_MODEL         Required when --model is omitted\n  MERRY_OPENAI_BASE_URL      Optional OpenAI-compatible base URL\n  OPENAI_ORG_ID              Optional organization header\n  OPENAI_PROJECT_ID          Optional project header\n"
 }
 
 fn unexpected(err: impl fmt::Display) -> CliError {

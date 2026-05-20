@@ -9,6 +9,7 @@ fn merry_without_openai_env() -> Command {
     let mut command = merry();
     command
         .env_remove("MERRY_OPENAI_DEBUG")
+        .env_remove("MERRY_OPENAI_API_KEY")
         .env_remove("OPENAI_API_KEY")
         .env_remove("MERRY_OPENAI_MODEL")
         .env_remove("MERRY_OPENAI_BASE_URL")
@@ -204,6 +205,10 @@ fn debug_openai_help_writes_usage_to_stdout() {
     assert!(stdout.contains("Require first step to call debug_echo"));
     assert!(!stdout.contains("Rejected until"));
     assert!(stdout.contains("MERRY_OPENAI_DEBUG=1"));
+    assert!(stdout.contains("MERRY_OPENAI_API_KEY"));
+    assert!(stdout.contains("OPENAI_API_KEY"));
+    assert!(stdout.contains("Preferred API key"));
+    assert!(stdout.contains("Fallback API key"));
 }
 
 #[test]
@@ -296,15 +301,18 @@ fn debug_openai_requires_api_key_when_opted_in() {
         "usage errors should not write stdout"
     );
     let stderr = std::str::from_utf8(&output.stderr).expect("stderr should be utf-8");
+    assert!(stderr.contains("MERRY_OPENAI_API_KEY"));
     assert!(stderr.contains("OPENAI_API_KEY"));
+    assert!(stderr.contains("must be set"));
     assert!(stderr.contains("Usage: merry debug openai"));
 }
 
 #[test]
-fn debug_openai_rejects_blank_api_key_when_opted_in() {
+fn debug_openai_rejects_blank_merry_api_key_when_opted_in() {
     let output = merry_without_openai_env()
         .env("MERRY_OPENAI_DEBUG", "1")
-        .env("OPENAI_API_KEY", "")
+        .env("MERRY_OPENAI_API_KEY", "  ")
+        .env("OPENAI_API_KEY", "sk-fallback")
         .args(["debug", "openai", "--input", "hello", "--model", "gpt-test"])
         .output()
         .expect("merry debug openai should run");
@@ -315,7 +323,49 @@ fn debug_openai_rejects_blank_api_key_when_opted_in() {
         "usage errors should not write stdout"
     );
     let stderr = std::str::from_utf8(&output.stderr).expect("stderr should be utf-8");
-    assert!(stderr.contains("OPENAI_API_KEY must not be blank"));
+    assert!(stderr.contains("MERRY_OPENAI_API_KEY must not be blank"));
+    assert!(stderr.contains("Usage: merry debug openai"));
+}
+
+#[test]
+fn debug_openai_accepts_openai_api_key_fallback_when_merry_key_is_unset() {
+    let output = merry_without_openai_env()
+        .env("MERRY_OPENAI_DEBUG", "1")
+        .env("OPENAI_API_KEY", "sk-test")
+        .args(["debug", "openai", "--input", "hello"])
+        .output()
+        .expect("merry debug openai should run");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        output.stdout.is_empty(),
+        "usage errors should not write stdout"
+    );
+    let stderr = std::str::from_utf8(&output.stderr).expect("stderr should be utf-8");
+    assert!(stderr.contains("--model"));
+    assert!(stderr.contains("MERRY_OPENAI_MODEL"));
+    assert!(stderr.contains("Usage: merry debug openai"));
+}
+
+#[test]
+fn debug_openai_prefers_merry_openai_api_key_over_blank_fallback() {
+    let output = merry_without_openai_env()
+        .env("MERRY_OPENAI_DEBUG", "1")
+        .env("MERRY_OPENAI_API_KEY", "sk-test")
+        .env("OPENAI_API_KEY", "")
+        .args(["debug", "openai", "--input", "hello"])
+        .output()
+        .expect("merry debug openai should run");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        output.stdout.is_empty(),
+        "usage errors should not write stdout"
+    );
+    let stderr = std::str::from_utf8(&output.stderr).expect("stderr should be utf-8");
+    assert!(stderr.contains("--model"));
+    assert!(stderr.contains("MERRY_OPENAI_MODEL"));
+    assert!(!stderr.contains("OPENAI_API_KEY must not be blank"));
     assert!(stderr.contains("Usage: merry debug openai"));
 }
 
@@ -323,7 +373,7 @@ fn debug_openai_rejects_blank_api_key_when_opted_in() {
 fn debug_openai_requires_model_from_flag_or_env() {
     let output = merry_without_openai_env()
         .env("MERRY_OPENAI_DEBUG", "1")
-        .env("OPENAI_API_KEY", "sk-test")
+        .env("MERRY_OPENAI_API_KEY", "sk-test")
         .args(["debug", "openai", "--input", "hello"])
         .output()
         .expect("merry debug openai should run");
