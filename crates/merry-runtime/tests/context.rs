@@ -50,7 +50,10 @@ async fn record_text_artifacts(runtime: &Runtime, artifacts: &[(&str, &str)]) {
 }
 
 async fn record_summary(runtime: &Runtime, summary: ContextEntry) {
-    runtime.record_context_entry(summary).await;
+    runtime
+        .record_context_entry(summary)
+        .await
+        .expect("context entry should record");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -169,7 +172,7 @@ async fn registry_mismatch_is_not_expressible_through_public_context_compiler_ap
 async fn direct_record_context_summary_accepts_missing_evidence_until_compile() {
     let compiler = ContextCompiler::new();
     let runtime = runtime("context-missing-evidence");
-    let _: () = runtime
+    runtime
         .record_context_summary(
             ContextSummary::new(
                 "summary-with-missing-artifact",
@@ -181,7 +184,8 @@ async fn direct_record_context_summary_accepts_missing_evidence_until_compile() 
             )
             .expect("valid summary"),
         )
-        .await;
+        .await
+        .expect("raw context summary should record");
 
     let error = compiler
         .compile(&runtime.context_snapshot().await)
@@ -282,7 +286,7 @@ async fn session_snapshot_compilation_rejects_unreadable_evidence_locators() {
     let compiler = ContextCompiler::new();
     let runtime = runtime("context-unreadable-evidence");
     record_text_artifact(&runtime, "artifact-short-log", "01\n02\n").await;
-    let _: () = runtime
+    runtime
         .record_context_summary(
             ContextSummary::new(
                 "summary-with-unreadable-evidence",
@@ -294,7 +298,8 @@ async fn session_snapshot_compilation_rejects_unreadable_evidence_locators() {
             )
             .expect("valid summary"),
         )
-        .await;
+        .await
+        .expect("raw context summary should record");
 
     let error = compiler
         .compile(&runtime.context_snapshot().await)
@@ -319,7 +324,7 @@ async fn direct_duplicate_summary_ids_compile_as_duplicate_sections_when_evidenc
     )
     .await;
 
-    let _: () = runtime
+    runtime
         .record_context_summary(
             ContextSummary::new(
                 "summary-duplicate",
@@ -331,8 +336,9 @@ async fn direct_duplicate_summary_ids_compile_as_duplicate_sections_when_evidenc
             )
             .expect("valid summary"),
         )
-        .await;
-    let _: () = runtime
+        .await
+        .expect("raw context summary should record");
+    runtime
         .record_context_summary(
             ContextSummary::new(
                 "summary-duplicate",
@@ -344,7 +350,8 @@ async fn direct_duplicate_summary_ids_compile_as_duplicate_sections_when_evidenc
             )
             .expect("valid summary"),
         )
-        .await;
+        .await
+        .expect("raw context summary should record");
 
     let compiled = compiler
         .compile(&runtime.context_snapshot().await)

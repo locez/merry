@@ -1,8 +1,8 @@
 use futures_util::stream;
 use merry_core::{
-    ArtifactId, ArtifactKind, ArtifactRef, PendingToolCall, ProviderName, RuntimeEvent,
-    RuntimeEventKind, SessionId, ToolCallId, ToolCallResult, ToolCallResultStatus, ToolInputSchema,
-    ToolName, ToolSpec,
+    ArtifactId, ArtifactKind, ArtifactRef, EvidenceLocator, PendingToolCall, ProviderName,
+    RuntimeEvent, RuntimeEventKind, SessionId, ToolCallId, ToolCallResult, ToolCallResultStatus,
+    ToolInputSchema, ToolName, ToolSpec,
 };
 use merry_llm::{
     FinishReason, ModelCapabilities, ModelError, ModelEvent, ModelEventStream, ModelMessageRole,
@@ -10,9 +10,9 @@ use merry_llm::{
     ModelStreamContext, ModelToolCall, ModelToolCallId, ToolArguments,
 };
 use merry_runtime::{
-    AgentLoopBlockedReason, AgentLoopConfig, AgentLoopConfigError, AgentLoopStatus,
-    DEFAULT_AGENT_LOOP_CONTINUATION_INPUT, Runtime, RuntimeError, StepContext, StepInput,
-    ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome, ToolExecutor,
+    AgentLoopBlockedReason, AgentLoopConfig, AgentLoopConfigError, AgentLoopStatus, ArtifactError,
+    ContextSummary, DEFAULT_AGENT_LOOP_CONTINUATION_INPUT, Runtime, RuntimeError, StepContext,
+    StepInput, ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome, ToolExecutor,
     ToolExecutorFuture,
 };
 use schemars::Schema;
@@ -526,6 +526,123 @@ async fn agent_loop_rejects_concurrent_pending_consumption_during_tool_execution
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn agent_loop_running_step_rejects_concurrent_context_summary_write() {
+    let (started_tx, started_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let provider = BlockingModelProvider::new(started_tx, release_rx);
+    let runtime = Runtime::builder(session_id("agent-loop-context-provider-admission"))
+        .model_provider(Arc::new(provider), model_name())
+        .build()
+        .expect("runtime should build");
+    let loop_runtime = runtime.clone();
+    let loop_handle = tokio::spawn(async move {
+        loop_runtime
+            .run_agent_loop(
+                StepInput::user_text("Block inside provider.").expect("valid step input"),
+                StepContext::new(CancellationToken::new()),
+                AgentLoopConfig::default(),
+            )
+            .await
+            .expect("agent loop should complete after provider release")
+    });
+
+    started_rx
+        .await
+        .expect("provider should signal after the loop step starts");
+
+    let err = runtime
+        .record_context_summary(
+            ContextSummary::new(
+                "blocked-summary",
+                "Raw context write should wait.",
+                Vec::new(),
+            )
+            .expect("summary construction allows compiler validation"),
+        )
+        .await
+        .expect_err("active provider step should reject direct context summary writes");
+    assert!(matches!(
+        err,
+        RuntimeError::StepAlreadyActive {
+            session_id: active_session
+        } if active_session == session_id("agent-loop-context-provider-admission")
+    ));
+
+    release_tx
+        .send(())
+        .expect("blocking provider release receiver should still be active");
+    let result = loop_handle
+        .await
+        .expect("agent loop task should not panic after release");
+    assert_eq!(result.status(), &AgentLoopStatus::Completed);
+
+    runtime
+        .record_context_summary(
+            ContextSummary::new(
+                "post-run-summary",
+                "Raw context write may resume.",
+                Vec::new(),
+            )
+            .expect("summary construction allows compiler validation"),
+        )
+        .await
+        .expect("runtime should accept context summary after the loop completes");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn agent_loop_tool_execution_rejects_concurrent_context_entry_write() {
+    let (started_tx, started_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let provider = ScriptedModelProvider::new(vec![
+        vec![Ok(completed_tool_call_event(model_tool_call(
+            "call-context-entry-blocked",
+            "search_notes",
+        )))],
+        vec![Ok(completed_text_event("final answer"))],
+    ]);
+    let executor = BlockingToolExecutor::new(started_tx, release_rx);
+    let runtime = runtime_with_tool("agent-loop-context-tool-admission", provider, executor);
+    let loop_runtime = runtime.clone();
+    let loop_handle = tokio::spawn(async move {
+        loop_runtime
+            .run_agent_loop(
+                StepInput::user_text("Search notes.").expect("valid step input"),
+                StepContext::new(CancellationToken::new()),
+                AgentLoopConfig::default(),
+            )
+            .await
+            .expect("agent loop should complete after tool release")
+    });
+
+    started_rx
+        .await
+        .expect("executor should signal after tool execution starts");
+
+    let err = runtime
+        .record_context_entry(merry_runtime::ContextEntry::summary(
+            ContextSummary::new("blocked-entry", "Entry write should wait.", Vec::new())
+                .expect("summary construction allows compiler validation"),
+        ))
+        .await
+        .expect_err("active tool execution should reject direct context entry writes");
+    assert!(matches!(
+        err,
+        RuntimeError::StepAlreadyActive {
+            session_id: active_session
+        } if active_session == session_id("agent-loop-context-tool-admission")
+    ));
+
+    release_tx
+        .send(())
+        .expect("blocking executor release receiver should still be active");
+    let result = loop_handle
+        .await
+        .expect("agent loop task should not panic after release");
+    assert_eq!(result.status(), &AgentLoopStatus::Completed);
+    assert!(runtime.pending_tool_calls().await.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn max_steps_blocks_before_infinite_tool_loop_and_leaves_pending() {
     let provider = ScriptedModelProvider::new(vec![vec![Ok(completed_tool_call_event(
         model_tool_call("call-loop", "search_notes"),
@@ -640,6 +757,93 @@ async fn executor_infrastructure_error_preserves_events_and_pending_call() {
         RuntimeError::ToolExecutionFailed { call_id, .. } if call_id == pending.id()
     ));
     assert_eq!(runtime.pending_tool_calls().await, vec![pending]);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn agent_loop_tool_execution_cancellation_returns_cancelled_and_keeps_pending() {
+    let (started_tx, started_rx) = oneshot::channel();
+    let (_release_tx, release_rx) = oneshot::channel();
+    let provider = ScriptedModelProvider::new(vec![
+        vec![Ok(completed_tool_call_event(model_tool_call(
+            "call-loop-cancelled-tool",
+            "search_notes",
+        )))],
+        vec![Ok(completed_text_event("should not continue"))],
+    ]);
+    let executor = BlockingToolExecutor::new(started_tx, release_rx);
+    let runtime = runtime_with_tool(
+        "agent-loop-tool-cancellation",
+        provider.clone(),
+        executor.clone(),
+    );
+    let token = CancellationToken::new();
+    let loop_runtime = runtime.clone();
+    let loop_token = token.clone();
+    let loop_handle = tokio::spawn(async move {
+        loop_runtime
+            .run_agent_loop(
+                StepInput::user_text("Search notes.").expect("valid step input"),
+                StepContext::new(loop_token),
+                AgentLoopConfig::default(),
+            )
+            .await
+            .expect("tool cancellation should return a loop status, not a method error")
+    });
+
+    started_rx
+        .await
+        .expect("executor should signal after tool execution starts");
+    token.cancel();
+
+    let result = loop_handle
+        .await
+        .expect("agent loop task should not panic after cancellation");
+
+    assert!(matches!(
+        result.status(),
+        AgentLoopStatus::Cancelled {
+            diagnostic
+        } if diagnostic.code() == "tool_execution_cancelled"
+            && diagnostic.message().contains("call-loop-cancelled-tool")
+    ));
+    assert_eq!(result.steps_run(), 1);
+    assert_eq!(
+        event_kind_names(result.events()),
+        ["SessionStarted", "StepStarted", "ToolCallPending"]
+    );
+    let pending = pending_tool_call(result.events()).clone();
+    assert_eq!(runtime.pending_tool_calls().await, vec![pending]);
+    assert_eq!(executor.calls().len(), 1);
+    assert_eq!(provider.recorded_requests().len(), 1);
+
+    let evidence_err = runtime
+        .evidence_ref(
+            &artifact_id("tool-result-3"),
+            EvidenceLocator::whole_artifact(),
+        )
+        .await
+        .expect_err("cancelled loop tool execution must not record a tool result artifact");
+    assert!(matches!(
+        evidence_err,
+        RuntimeError::Artifact {
+            source: ArtifactError::MissingArtifact { id }
+        } if id == artifact_id("tool-result-3")
+    ));
+    assert!(
+        result
+            .events()
+            .iter()
+            .all(|event| !matches!(event.kind, RuntimeEventKind::ToolCallResolved { .. }))
+    );
+
+    let artifact_events = runtime
+        .record_artifact(
+            ArtifactRef::new(artifact_id("post-cancel-artifact"), ArtifactKind::Text),
+            merry_runtime::ArtifactContent::text("runtime permit released\n"),
+        )
+        .await
+        .expect("runtime should release active permit after loop cancellation");
+    assert_eq!(event_kind_names(&artifact_events), ["ArtifactRecorded"]);
 }
 
 #[tokio::test(flavor = "current_thread")]

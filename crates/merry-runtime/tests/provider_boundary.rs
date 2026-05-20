@@ -302,7 +302,8 @@ async fn record_valid_context(runtime: &Runtime) -> String {
             )
             .expect("valid context summary"),
         )
-        .await;
+        .await
+        .expect("context summary should record");
 
     ContextCompiler::new()
         .compile(&runtime.context_snapshot().await)
@@ -850,7 +851,8 @@ async fn runtime_step_with_provider_emits_failed_when_context_compile_fails() {
             )
             .expect("summary construction allows compiler validation"),
         )
-        .await;
+        .await
+        .expect("raw context summary should record");
 
     let events = collect_step(&runtime, "Compile context.").await;
 
@@ -3122,7 +3124,8 @@ async fn provider_absent_step_does_not_compile_context_and_preserves_skeleton_be
             )
             .expect("summary construction allows compiler validation"),
         )
-        .await;
+        .await
+        .expect("raw context summary should record");
 
     let events = collect_step(&runtime, "Run without provider.").await;
 
