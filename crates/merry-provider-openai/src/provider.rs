@@ -9,6 +9,7 @@ use merry_llm::{
 };
 use serde_json::Value;
 use std::collections::VecDeque;
+use tracing::Instrument;
 
 const AUTHORIZATION_HEADER: &str = "Authorization";
 const ACCEPT_HEADER: &str = "Accept";
@@ -54,38 +55,72 @@ impl ModelProvider for OpenAiProvider {
         request: ModelRequest,
         context: ModelStreamContext,
     ) -> ModelProviderFuture<'a, Result<ModelEventStream, ModelError>> {
-        Box::pin(async move {
-            if context.cancellation_token().is_cancelled() {
-                return Err(ModelError::Cancelled);
+        let stream_span = tracing::debug_span!(
+            "openai.stream_model",
+            provider_name = self.config.provider_name().as_str(),
+            model = request.model().as_str(),
+            message_count = request.messages().len(),
+            tool_count = request.tools().len(),
+            continuation_count = request.continuations().len(),
+            max_output_tokens = ?request.generation().max_output_tokens(),
+            allow_parallel_tool_calls = request.generation().allow_parallel_tool_calls(),
+            endpoint_path = tracing::field::Empty,
+        );
+        let event_stream_span = stream_span.clone();
+
+        Box::pin(
+            async move {
+                if context.cancellation_token().is_cancelled() {
+                    tracing::debug!("openai stream setup cancelled");
+                    return Err(ModelError::Cancelled);
+                }
+
+                let http_request = build_chat_completion_http_request(&self.config, &request)?;
+                event_stream_span.record("endpoint_path", http_request.endpoint.path());
+                tracing::trace!("openai request rendered");
+
+                let mut request_builder = self
+                    .client
+                    .post(http_request.endpoint)
+                    .json(&http_request.body);
+
+                for header in http_request.headers {
+                    request_builder = request_builder.header(header.name, header.value);
+                }
+
+                let token = context.cancellation_token().clone();
+                tracing::debug!("openai http send start");
+                let response = tokio::select! {
+                    () = token.cancelled() => {
+                        tracing::debug!("openai stream setup cancelled");
+                        return Err(ModelError::Cancelled);
+                    }
+                    response = request_builder.send() => response.map_err(map_transport_error)?,
+                };
+
+                let status = response.status();
+                if status.is_success() {
+                    tracing::debug!("openai http status received and classified");
+                } else {
+                    let error_kind = classify_http_status(status);
+                    tracing::debug!("openai http status received and classified");
+                    let error = map_status_error(response, &token, error_kind).await;
+                    if matches!(error, ModelError::Cancelled) {
+                        tracing::debug!("openai stream setup cancelled");
+                    }
+                    return Err(error);
+                }
+
+                let event_stream = stream::unfold(
+                    OpenAiEventStreamState::new(response, token, event_stream_span),
+                    |state| async move { state.next_item().await },
+                );
+                let event_stream: ModelEventStream = Box::pin(event_stream);
+                tracing::debug!("openai event stream created");
+                Ok(event_stream)
             }
-
-            let http_request = build_chat_completion_http_request(&self.config, &request)?;
-            let mut request_builder = self
-                .client
-                .post(http_request.endpoint)
-                .json(&http_request.body);
-
-            for header in http_request.headers {
-                request_builder = request_builder.header(header.name, header.value);
-            }
-
-            let token = context.cancellation_token().clone();
-            let response = tokio::select! {
-                () = token.cancelled() => return Err(ModelError::Cancelled),
-                response = request_builder.send() => response.map_err(map_transport_error)?,
-            };
-
-            if !response.status().is_success() {
-                return Err(map_status_error(response, &token).await);
-            }
-
-            let event_stream = stream::unfold(
-                OpenAiEventStreamState::new(response, token),
-                |state| async move { state.next_item().await },
-            );
-            let event_stream: ModelEventStream = Box::pin(event_stream);
-            Ok(event_stream)
-        })
+            .instrument(stream_span),
+        )
     }
 }
 
@@ -93,6 +128,7 @@ struct OpenAiEventStreamState {
     response: reqwest::Response,
     events: OpenAiEventStreamEvents,
     cancellation_token: tokio_util::sync::CancellationToken,
+    span: tracing::Span,
     done: bool,
 }
 
@@ -100,35 +136,44 @@ impl OpenAiEventStreamState {
     fn new(
         response: reqwest::Response,
         cancellation_token: tokio_util::sync::CancellationToken,
+        span: tracing::Span,
     ) -> Self {
         Self {
             response,
             events: OpenAiEventStreamEvents::new(),
             cancellation_token,
+            span,
             done: false,
         }
     }
 
-    async fn next_item(mut self) -> Option<(Result<ModelEvent, ModelError>, Self)> {
+    async fn next_item(self) -> Option<(Result<ModelEvent, ModelError>, Self)> {
+        let span = self.span.clone();
+        async move { self.next_item_inner().await }
+            .instrument(span)
+            .await
+    }
+
+    async fn next_item_inner(mut self) -> Option<(Result<ModelEvent, ModelError>, Self)> {
         loop {
             if self.done {
                 return None;
             }
 
             if self.cancellation_token.is_cancelled() {
+                tracing::debug!("openai stream cancelled");
                 self.done = true;
                 return Some((Err(ModelError::Cancelled), self));
             }
 
             if let Some(event) = self.events.pop_pending() {
-                if matches!(event, ModelEvent::Completed { .. }) {
-                    self.done = true;
-                }
+                self.trace_pending_event(&event);
                 return Some((Ok(event), self));
             }
 
             let chunk = tokio::select! {
                 () = self.cancellation_token.cancelled() => {
+                    tracing::debug!("openai stream cancelled");
                     self.done = true;
                     return Some((Err(ModelError::Cancelled), self));
                 }
@@ -137,16 +182,19 @@ impl OpenAiEventStreamState {
 
             match chunk {
                 Ok(Some(chunk)) => {
+                    tracing::trace!(
+                        chunk_byte_length = chunk.len(),
+                        "openai stream chunk received"
+                    );
                     if let Err(error) = self.events.parse_bytes(chunk.as_ref()) {
+                        tracing::debug!("openai stream protocol error");
                         self.done = true;
                         return Some((Err(error.into()), self));
                     }
                 }
                 Ok(None) => match self.events.finish_stream_and_pop_pending() {
                     Ok(Some(event)) => {
-                        if matches!(event, ModelEvent::Completed { .. }) {
-                            self.done = true;
-                        }
+                        self.trace_pending_event(&event);
                         return Some((Ok(event), self));
                     }
                     Ok(None) => {
@@ -154,15 +202,28 @@ impl OpenAiEventStreamState {
                         return None;
                     }
                     Err(error) => {
+                        tracing::debug!("openai stream protocol error");
                         self.done = true;
                         return Some((Err(error.into()), self));
                     }
                 },
                 Err(error) => {
+                    tracing::debug!("openai stream transport error");
                     self.done = true;
                     return Some((Err(map_transport_error(error)), self));
                 }
             }
+        }
+    }
+
+    fn trace_pending_event(&mut self, event: &ModelEvent) {
+        tracing::trace!(
+            pending_event_category = model_event_category(event),
+            "openai stream pending event"
+        );
+        if matches!(event, ModelEvent::Completed { .. }) {
+            tracing::debug!("openai stream completed");
+            self.done = true;
         }
     }
 }
@@ -290,6 +351,7 @@ fn chat_completions_endpoint(base_url: &str) -> Result<reqwest::Url, ModelError>
 async fn map_status_error(
     response: reqwest::Response,
     cancellation_token: &tokio_util::sync::CancellationToken,
+    kind: ProviderErrorKind,
 ) -> ModelError {
     let status = response.status();
     let body = tokio::select! {
@@ -303,10 +365,16 @@ async fn map_status_error(
         truncate_for_error(body.trim())
     );
 
-    ModelError::from(OpenAiProviderError::provider(
-        classify_http_status(status),
-        message,
-    ))
+    ModelError::from(OpenAiProviderError::provider(kind, message))
+}
+
+fn model_event_category(event: &ModelEvent) -> &'static str {
+    match event {
+        ModelEvent::Started => "started",
+        ModelEvent::OutputTextDelta { .. } => "output_text_delta",
+        ModelEvent::ToolCallRequested { .. } => "tool_call_requested",
+        ModelEvent::Completed { .. } => "completed",
+    }
 }
 
 fn classify_http_status(status: reqwest::StatusCode) -> ProviderErrorKind {
