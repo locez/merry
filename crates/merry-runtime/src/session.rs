@@ -7,8 +7,8 @@ use crate::{
     artifact::{ArtifactContent, ArtifactError, ArtifactRegistry},
     context::{ContextCompiler, ContextEntry, SessionContextSnapshot},
     judgment::{
-        JudgmentError, JudgmentOutcome, JudgmentRecord, JudgmentRegistry, JudgmentRequest,
-        SummaryDraftPromotionError, SummaryDraftPromotionInput,
+        JudgmentError, JudgmentEvidence, JudgmentOutcome, JudgmentRecord, JudgmentRegistry,
+        JudgmentRequest, SummaryDraftPromotionError, SummaryDraftPromotionInput,
         context_summary_from_accepted_summary_draft, validate_summary_draft_record_purpose,
     },
     ledger::{LedgerFactKind, TaskLedger},
@@ -195,6 +195,14 @@ impl SessionState {
 
     pub(crate) fn ledger_projection(&self) -> crate::ledger::LedgerProjectionSnapshot {
         self.ledger.project()
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn preflight_judgment_request(
+        &self,
+        request: &JudgmentRequest,
+    ) -> Result<(), JudgmentError> {
+        self.validate_judgment_evidence_refs(request.evidence())
     }
 
     #[allow(dead_code)]
@@ -532,7 +540,15 @@ impl SessionState {
         request: &JudgmentRequest,
         outcome: &JudgmentOutcome,
     ) -> Result<(), JudgmentError> {
-        for evidence in request.evidence().iter().chain(outcome.evidence()) {
+        self.validate_judgment_evidence_refs(request.evidence().iter().chain(outcome.evidence()))
+    }
+
+    #[allow(dead_code)]
+    fn validate_judgment_evidence_refs<'a>(
+        &self,
+        evidence_refs: impl IntoIterator<Item = &'a JudgmentEvidence>,
+    ) -> Result<(), JudgmentError> {
+        for evidence in evidence_refs {
             self.artifacts
                 .validate_evidence(evidence.reference())
                 .map_err(|source| JudgmentError::UnreadableEvidence {
