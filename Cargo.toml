@@ -4,6 +4,7 @@ members = [
     "crates/merry-core",
     "crates/merry-llm",
     "crates/merry-runtime",
+    "crates/merry-tool-workspace",
     "crates/merry-provider-openai",
     "crates/merry-cli",
 ]
@@ -11,6 +12,7 @@ default-members = [
     "crates/merry-core",
     "crates/merry-llm",
     "crates/merry-runtime",
+    "crates/merry-tool-workspace",
     "crates/merry-provider-openai",
     "crates/merry-cli",
 ]
@@ -24,6 +26,7 @@ rust-version = "1.85"
 futures-core = "0.3"
 futures-executor = "0.3"
 futures-util = "0.3"
+libc = "0.2"
 schemars = { version = "1.0", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

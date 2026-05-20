@@ -6,6 +6,19 @@ M8 runtime/provider/tool execution hardening has shifted into maintenance and fo
 
 The first Runtime Agent Loop MVP slice is implemented in `merry-runtime` as a bounded serial loop over the existing `Runtime::step`, registered tool execution, and continuation step primitives. It returns ordered runtime events and typed completed/failed/cancelled/blocked outcomes without adding provider wire state or real filesystem/shell tools. Tool execution cancellation during the loop is reported as a cancelled loop status while leaving the pending tool call unresolved.
 
+The first `merry-tool-workspace` slice is intentionally narrow: it exposes only
+the registered `workspace_read_file` tool for UTF-8 reads under explicitly
+configured workspace roots. It is not a shell, write API, network API, directory
+list/search layer, or complete coding agent. Workspace list/search tools remain
+next-slice work after the read-file contract is stable.
+
+The workspace read-file path-safety contract assumes trusted, stable workspace
+roots. The MVP prevents ordinary path traversal and ordinary symlink traversal
+before reading, and on Unix uses `O_NOFOLLOW` for the final open so a symlink
+swapped into the leaf path is rejected. It is not an OS sandbox and does not
+claim complete hardening against malicious concurrent filesystem mutation, such
+as replacing intermediate directories during validation/open.
+
 The OpenAI provider targets the Responses API only. The provider request path is `/responses`; it keeps the Merry-owned `merry-llm` provider boundary intact, keeps OpenAI wire types private to `merry-provider-openai`, sets `store: false`, omits `previous_response_id`, avoids provider conversation state as Merry runtime state, and keeps `parallel_tool_calls: false` until runtime policy supports parallel tool calls. This provider work does not imply a live/OpenAI judgment path or public judgment API.
 
 Memory Activation MVP work is internally integrated in `merry-runtime`. The default activation source is a session-owned in-memory stored source; external/default sessions have no candidate memories until runtime-owned state records them. There is still no public memory write API, external persistence, or stable activation contract.
