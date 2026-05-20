@@ -197,7 +197,7 @@ async fn stream_model_honors_cancellation_during_streaming() {
     assert!(matches!(error, ModelError::Cancelled));
 }
 
-#[ignore = "requires --features live-tests, MERRY_OPENAI_LIVE_TESTS=1, OPENAI_API_KEY, MERRY_OPENAI_MODEL, optional MERRY_OPENAI_BASE_URL, and --ignored"]
+#[ignore = "requires --features live-tests, MERRY_OPENAI_LIVE_TESTS=1, MERRY_OPENAI_API_KEY or OPENAI_API_KEY, MERRY_OPENAI_MODEL, optional MERRY_OPENAI_BASE_URL, and --ignored"]
 #[tokio::test]
 async fn live_openai_responses_stream_smoke_test() {
     if !cfg!(feature = "live-tests") {
@@ -208,10 +208,11 @@ async fn live_openai_responses_stream_smoke_test() {
         return;
     }
 
-    let api_key = match std::env::var("OPENAI_API_KEY") {
-        Ok(api_key) => api_key,
-        Err(_) => return,
-    };
+    let api_key =
+        match std::env::var("MERRY_OPENAI_API_KEY").or_else(|_| std::env::var("OPENAI_API_KEY")) {
+            Ok(api_key) => api_key,
+            Err(_) => return,
+        };
     let model = match std::env::var("MERRY_OPENAI_MODEL") {
         Ok(model) => model,
         Err(_) => return,
