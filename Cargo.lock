@@ -503,6 +503,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "merry-tool-workspace"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "libc",
+ "merry-core",
+ "merry-llm",
+ "merry-runtime",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "mio"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
