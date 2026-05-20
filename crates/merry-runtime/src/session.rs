@@ -1,5 +1,7 @@
 //! Runtime session state and state-before-event helpers.
 
+#[cfg(test)]
+use crate::summary_draft_promotion::SummaryDraftPromotionRegistrySnapshot;
 use crate::{
     RuntimeError,
     artifact::{ArtifactContent, ArtifactError, ArtifactRegistry},
@@ -11,6 +13,10 @@ use crate::{
     },
     ledger::{LedgerFactKind, TaskLedger},
     memory::{ActivatedMemory, MemoryError, MemoryItem, MemoryStore},
+    summary_draft_promotion::{
+        SummaryDraftPromotionAcceptanceResult, SummaryDraftPromotionAcceptanceStatus,
+        SummaryDraftPromotionRegistry,
+    },
 };
 use merry_core::{
     ArtifactId, ArtifactKind, ArtifactRef, ErrorInfo, EvidenceLocator, EvidenceRef,
@@ -78,6 +84,7 @@ pub(crate) struct SessionState {
     activated_memories: Vec<ActivatedMemory>,
     #[allow(dead_code)]
     judgments: JudgmentRegistry,
+    summary_draft_promotions: SummaryDraftPromotionRegistry,
     pending_tool_calls: Vec<PendingToolCall>,
     resolved_tool_calls: BTreeSet<ToolCallId>,
     unconsumed_tool_continuations: Vec<ResolvedToolContinuation>,
@@ -95,6 +102,7 @@ impl SessionState {
             context_entries: Vec::new(),
             activated_memories: Vec::new(),
             judgments: JudgmentRegistry::default(),
+            summary_draft_promotions: SummaryDraftPromotionRegistry::default(),
             pending_tool_calls: Vec::new(),
             resolved_tool_calls: BTreeSet::new(),
             unconsumed_tool_continuations: Vec::new(),
@@ -216,18 +224,26 @@ impl SessionState {
         outcome: &JudgmentOutcome,
         input: SummaryDraftPromotionInput,
     ) -> Result<(), SummaryDraftPromotionError> {
-        let summary = context_summary_from_accepted_summary_draft(request, outcome, input)?;
+        let summary = context_summary_from_accepted_summary_draft(request, outcome, &input)?;
+        let acceptance_status = self.summary_draft_promotions.acceptance_status(&input)?;
 
         if self.context_entries.iter().any(|entry| {
             matches!(
                 entry,
                 ContextEntry::Summary(existing) if existing.id() == summary.id()
             )
-        }) {
+        }) && acceptance_status != SummaryDraftPromotionAcceptanceStatus::AlreadyPromoted
+        {
             return Err(SummaryDraftPromotionError::DuplicateSummaryId {
                 summary_id: summary.id().to_owned(),
             });
         }
+
+        let acceptance = self.summary_draft_promotions.accept(&input)?;
+        let record_id = match acceptance {
+            SummaryDraftPromotionAcceptanceResult::Accepted(record_id) => record_id,
+            SummaryDraftPromotionAcceptanceResult::AlreadyPromoted => return Ok(()),
+        };
 
         let mut candidate_entries = self.context_entries.clone();
         candidate_entries.push(ContextEntry::summary(summary.clone()));
@@ -236,10 +252,19 @@ impl SessionState {
             self.artifacts.clone(),
             self.activated_memories.clone(),
         );
-        ContextCompiler::new().compile(&candidate_snapshot)?;
+        if let Err(error) = ContextCompiler::new().compile(&candidate_snapshot) {
+            self.summary_draft_promotions.mark_rejected(&record_id);
+            return Err(error.into());
+        }
 
         self.context_entries.push(ContextEntry::summary(summary));
+        self.summary_draft_promotions.mark_promoted(&record_id);
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn summary_draft_promotion_snapshot(&self) -> SummaryDraftPromotionRegistrySnapshot {
+        self.summary_draft_promotions.snapshot()
     }
 
     #[allow(dead_code)]
@@ -555,15 +580,17 @@ mod tests {
         context::{ContextCompiler, ContextError},
         judgment::{
             JudgmentConfidence, JudgmentError, JudgmentEvidence, JudgmentOutcome,
-            JudgmentProvenance, JudgmentPurpose, JudgmentRecommendation, JudgmentRiskLevel,
-            JudgmentSourceKind, SummaryDraftAcceptance, SummaryDraftAcceptanceAuthority,
-            SummaryDraftPromotionError, SummaryDraftPromotionInput,
+            JudgmentProvenance, JudgmentPurpose, JudgmentRecommendation, JudgmentRecordId,
+            JudgmentRiskLevel, JudgmentSourceKind, SummaryDraftAcceptance,
+            SummaryDraftAcceptanceAuthority, SummaryDraftPromotionError,
+            SummaryDraftPromotionInput,
         },
         memory::{
             ActivatedMemory, MemoryActivationProvenance, MemoryActivationReason,
             MemoryActivationScore, MemoryActivationSourceKind, MemoryEvidence, MemoryId,
             MemoryItem, MemoryItemSelection, MemoryScope,
         },
+        summary_draft_promotion::SummaryDraftPromotionState,
     };
     use merry_core::{
         ArtifactId, ArtifactKind, ArtifactRef, EvidenceLocator, EvidenceRef, PendingToolCall,
@@ -695,6 +722,15 @@ mod tests {
         draft_text: &str,
         evidence: Vec<JudgmentEvidence>,
     ) -> SummaryDraftPromotionInput {
+        promotion_input_with_source_record_id(summary_id, draft_text, evidence, None)
+    }
+
+    fn promotion_input_with_source_record_id(
+        summary_id: &str,
+        draft_text: &str,
+        evidence: Vec<JudgmentEvidence>,
+        source_record_id: Option<JudgmentRecordId>,
+    ) -> SummaryDraftPromotionInput {
         SummaryDraftPromotionInput::new(
             summary_id,
             draft_text,
@@ -705,9 +741,31 @@ mod tests {
                 "Hard policy accepted the draft for context promotion.",
             )
             .expect("valid promotion acceptance"),
-            None,
+            source_record_id,
         )
         .expect("valid promotion input")
+    }
+
+    fn assert_single_promotion_record(
+        session: &SessionState,
+        summary_id: &str,
+        state: SummaryDraftPromotionState,
+        source_record_id: Option<&str>,
+    ) {
+        let snapshot = session.summary_draft_promotion_snapshot();
+        assert_eq!(snapshot.records().len(), 1);
+        let record = &snapshot.records()[0];
+        assert_eq!(
+            record.id().as_str(),
+            "summary-draft-promotion-00000000000000000000"
+        );
+        assert_eq!(record.summary_id(), summary_id);
+        assert_eq!(record.state(), state);
+        assert_eq!(record.commit_order(), 0);
+        assert_eq!(
+            record.source_record_id().map(JudgmentRecordId::as_str),
+            source_record_id
+        );
     }
 
     fn activated_memory(id: &str) -> ActivatedMemory {
@@ -1210,10 +1268,16 @@ mod tests {
         assert_eq!(started.sequence, 0);
         assert_eq!(pending_event.sequence, 1);
         assert!(session.judgment_records().is_empty());
+        assert_single_promotion_record(
+            &session,
+            "accepted-summary",
+            SummaryDraftPromotionState::Promoted,
+            None,
+        );
     }
 
     #[test]
-    fn summary_draft_promotion_rejects_duplicate_summary_id_without_context_change() {
+    fn summary_draft_promotion_exact_replay_after_promoted_is_idempotent_without_context_change() {
         let mut session = SessionState::new(session_id());
         session
             .record_artifact_state(
@@ -1224,6 +1288,8 @@ mod tests {
                 ArtifactContent::text("duplicate source text\n"),
             )
             .expect("artifact records");
+        let source_record_id =
+            JudgmentRecordId::new("source-summary-draft-record").expect("valid judgment record id");
         let evidence = judgment_evidence(
             "duplicate source",
             "duplicate-promotion-source",
@@ -1243,15 +1309,20 @@ mod tests {
                 ),
             )
             .expect("first promotion succeeds");
+        assert_single_promotion_record(
+            &session,
+            "duplicate-summary",
+            SummaryDraftPromotionState::Promoted,
+            None,
+        );
         let context_before = ContextCompiler::new()
             .compile(&session.context_snapshot())
-            .expect("context compiles after first promotion")
-            .to_snapshot();
+            .expect("context compiles after first promotion");
         let projection_before = session.ledger_projection();
         let next_sequence_before = session.next_sequence();
         let pending_before = session.pending_tool_calls();
 
-        let error = session
+        session
             .promote_summary_draft_to_context(
                 &request,
                 &outcome,
@@ -1261,11 +1332,52 @@ mod tests {
                     vec![evidence],
                 ),
             )
-            .expect_err("duplicate summary id rejects");
+            .expect("exact promoted replay is idempotent");
+
+        let context_after = ContextCompiler::new()
+            .compile(&session.context_snapshot())
+            .expect("context still compiles after exact replay");
+        assert_eq!(context_after, context_before);
+        assert_eq!(context_after.sections().len(), 1);
+        assert_eq!(
+            context_after.to_snapshot(),
+            [
+                "summary:duplicate-summary",
+                "text:Duplicate summary draft.",
+                "evidence:duplicate source:duplicate-promotion-source:whole",
+            ]
+            .join("\n")
+        );
+        assert_eq!(session.ledger_projection(), projection_before);
+        assert_eq!(session.next_sequence(), next_sequence_before);
+        assert_eq!(session.pending_tool_calls(), pending_before);
+        assert_single_promotion_record(
+            &session,
+            "duplicate-summary",
+            SummaryDraftPromotionState::Promoted,
+            None,
+        );
+
+        let conflict = session
+            .promote_summary_draft_to_context(
+                &request,
+                &outcome,
+                promotion_input_with_source_record_id(
+                    "duplicate-summary",
+                    "Duplicate summary draft.",
+                    vec![judgment_evidence(
+                        "duplicate source",
+                        "duplicate-promotion-source",
+                        EvidenceLocator::whole_artifact(),
+                    )],
+                    Some(source_record_id),
+                ),
+            )
+            .expect_err("same summary id with different source record conflicts");
 
         assert_eq!(
-            error,
-            SummaryDraftPromotionError::DuplicateSummaryId {
+            conflict,
+            SummaryDraftPromotionError::PromotionPayloadConflict {
                 summary_id: "duplicate-summary".to_owned(),
             }
         );
@@ -1274,7 +1386,92 @@ mod tests {
                 .compile(&session.context_snapshot())
                 .expect("context still compiles")
                 .to_snapshot(),
+            context_before.to_snapshot()
+        );
+        assert_eq!(session.ledger_projection(), projection_before);
+        assert_eq!(session.next_sequence(), next_sequence_before);
+        assert_eq!(session.pending_tool_calls(), pending_before);
+        assert_single_promotion_record(
+            &session,
+            "duplicate-summary",
+            SummaryDraftPromotionState::Promoted,
+            None,
+        );
+    }
+
+    #[test]
+    fn summary_draft_promotion_pre_existing_context_duplicate_does_not_write_registry() {
+        let mut session = SessionState::new(session_id());
+        session
+            .record_artifact_state(
+                ArtifactRef::new(
+                    artifact_id("pre-existing-summary-source"),
+                    ArtifactKind::Text,
+                ),
+                ArtifactContent::text("pre-existing source text\n"),
+            )
+            .expect("artifact records");
+        let evidence = judgment_evidence(
+            "pre-existing source",
+            "pre-existing-summary-source",
+            EvidenceLocator::whole_artifact(),
+        );
+        session.record_context_entry(crate::context::ContextEntry::summary(
+            crate::context::ContextSummary::new(
+                "pre-existing-summary",
+                "Already recorded summary.",
+                vec![
+                    crate::context::ContextEvidence::new(
+                        "pre-existing source",
+                        EvidenceRef::new(
+                            artifact_id("pre-existing-summary-source"),
+                            EvidenceLocator::whole_artifact(),
+                        ),
+                    )
+                    .expect("valid context evidence"),
+                ],
+            )
+            .expect("valid context summary"),
+        ));
+        let context_before = ContextCompiler::new()
+            .compile(&session.context_snapshot())
+            .expect("pre-existing context compiles");
+        let projection_before = session.ledger_projection();
+        let next_sequence_before = session.next_sequence();
+        let pending_before = session.pending_tool_calls();
+        let request = summary_draft_request(vec![evidence.clone()]);
+        let outcome =
+            summary_draft_outcome_with_draft(vec![evidence.clone()], "New duplicate draft.");
+
+        let error = session
+            .promote_summary_draft_to_context(
+                &request,
+                &outcome,
+                promotion_input(
+                    "pre-existing-summary",
+                    "New duplicate draft.",
+                    vec![evidence],
+                ),
+            )
+            .expect_err("external context summary id duplicate is rejected");
+
+        assert_eq!(
+            error,
+            SummaryDraftPromotionError::DuplicateSummaryId {
+                summary_id: "pre-existing-summary".to_owned(),
+            }
+        );
+        assert_eq!(
+            ContextCompiler::new()
+                .compile(&session.context_snapshot())
+                .expect("context still compiles after duplicate rejection"),
             context_before
+        );
+        assert!(
+            session
+                .summary_draft_promotion_snapshot()
+                .records()
+                .is_empty()
         );
         assert_eq!(session.ledger_projection(), projection_before);
         assert_eq!(session.next_sequence(), next_sequence_before);
@@ -1282,7 +1479,168 @@ mod tests {
     }
 
     #[test]
-    fn summary_draft_promotion_compile_failure_leaves_context_unchanged() {
+    fn summary_draft_promotion_same_summary_id_different_draft_conflicts_without_context_change() {
+        let mut session = SessionState::new(session_id());
+        session
+            .record_artifact_state(
+                ArtifactRef::new(artifact_id("draft-conflict-source"), ArtifactKind::Text),
+                ArtifactContent::text("draft conflict source text\n"),
+            )
+            .expect("artifact records");
+        let first_evidence = judgment_evidence(
+            "draft conflict source",
+            "draft-conflict-source",
+            EvidenceLocator::whole_artifact(),
+        );
+        let first_request = summary_draft_request(vec![first_evidence.clone()]);
+        let first_outcome =
+            summary_draft_outcome_with_draft(vec![first_evidence.clone()], "Original draft.");
+        session
+            .promote_summary_draft_to_context(
+                &first_request,
+                &first_outcome,
+                promotion_input(
+                    "conflicting-summary",
+                    "Original draft.",
+                    vec![first_evidence],
+                ),
+            )
+            .expect("first promotion succeeds");
+        let context_before = ContextCompiler::new()
+            .compile(&session.context_snapshot())
+            .expect("context compiles after first promotion");
+        let projection_before = session.ledger_projection();
+        let next_sequence_before = session.next_sequence();
+        let pending_before = session.pending_tool_calls();
+        let conflict_evidence = judgment_evidence(
+            "draft conflict source",
+            "draft-conflict-source",
+            EvidenceLocator::whole_artifact(),
+        );
+        let conflict_request = summary_draft_request(vec![conflict_evidence.clone()]);
+        let conflict_outcome =
+            summary_draft_outcome_with_draft(vec![conflict_evidence.clone()], "Changed draft.");
+
+        let error = session
+            .promote_summary_draft_to_context(
+                &conflict_request,
+                &conflict_outcome,
+                promotion_input(
+                    "conflicting-summary",
+                    "Changed draft.",
+                    vec![conflict_evidence],
+                ),
+            )
+            .expect_err("same summary id different draft conflicts");
+
+        assert_eq!(
+            error,
+            SummaryDraftPromotionError::PromotionPayloadConflict {
+                summary_id: "conflicting-summary".to_owned(),
+            }
+        );
+        assert_eq!(
+            ContextCompiler::new()
+                .compile(&session.context_snapshot())
+                .expect("context still compiles after draft conflict"),
+            context_before
+        );
+        assert_eq!(session.ledger_projection(), projection_before);
+        assert_eq!(session.next_sequence(), next_sequence_before);
+        assert_eq!(session.pending_tool_calls(), pending_before);
+        assert_single_promotion_record(
+            &session,
+            "conflicting-summary",
+            SummaryDraftPromotionState::Promoted,
+            None,
+        );
+    }
+
+    #[test]
+    fn summary_draft_promotion_same_summary_id_different_evidence_conflicts_without_context_change()
+    {
+        let mut session = SessionState::new(session_id());
+        session
+            .record_artifact_state(
+                ArtifactRef::new(artifact_id("evidence-conflict-source"), ArtifactKind::Text),
+                ArtifactContent::text("first line\nsecond line\n"),
+            )
+            .expect("artifact records");
+        let first_evidence = judgment_evidence(
+            "first evidence line",
+            "evidence-conflict-source",
+            EvidenceLocator::line_range(1, 1).expect("valid line locator"),
+        );
+        let first_request = summary_draft_request(vec![first_evidence.clone()]);
+        let first_outcome = summary_draft_outcome_with_draft(
+            vec![first_evidence.clone()],
+            "Evidence conflict draft.",
+        );
+        session
+            .promote_summary_draft_to_context(
+                &first_request,
+                &first_outcome,
+                promotion_input(
+                    "evidence-conflicting-summary",
+                    "Evidence conflict draft.",
+                    vec![first_evidence],
+                ),
+            )
+            .expect("first promotion succeeds");
+        let context_before = ContextCompiler::new()
+            .compile(&session.context_snapshot())
+            .expect("context compiles after first promotion");
+        let projection_before = session.ledger_projection();
+        let next_sequence_before = session.next_sequence();
+        let pending_before = session.pending_tool_calls();
+        let conflict_evidence = judgment_evidence(
+            "second evidence line",
+            "evidence-conflict-source",
+            EvidenceLocator::line_range(2, 2).expect("valid line locator"),
+        );
+        let conflict_request = summary_draft_request(vec![conflict_evidence.clone()]);
+        let conflict_outcome = summary_draft_outcome_with_draft(
+            vec![conflict_evidence.clone()],
+            "Evidence conflict draft.",
+        );
+
+        let error = session
+            .promote_summary_draft_to_context(
+                &conflict_request,
+                &conflict_outcome,
+                promotion_input(
+                    "evidence-conflicting-summary",
+                    "Evidence conflict draft.",
+                    vec![conflict_evidence],
+                ),
+            )
+            .expect_err("same summary id different evidence conflicts");
+
+        assert_eq!(
+            error,
+            SummaryDraftPromotionError::PromotionPayloadConflict {
+                summary_id: "evidence-conflicting-summary".to_owned(),
+            }
+        );
+        assert_eq!(
+            ContextCompiler::new()
+                .compile(&session.context_snapshot())
+                .expect("context still compiles after evidence conflict"),
+            context_before
+        );
+        assert_eq!(session.ledger_projection(), projection_before);
+        assert_eq!(session.next_sequence(), next_sequence_before);
+        assert_eq!(session.pending_tool_calls(), pending_before);
+        assert_single_promotion_record(
+            &session,
+            "evidence-conflicting-summary",
+            SummaryDraftPromotionState::Promoted,
+            None,
+        );
+    }
+
+    #[test]
+    fn summary_draft_promotion_compile_failure_rejects_record_and_exact_replay() {
         let mut session = SessionState::new(session_id());
         session
             .record_artifact_state(
@@ -1298,6 +1656,7 @@ mod tests {
         let request = summary_draft_request(vec![bad_evidence.clone()]);
         let outcome =
             summary_draft_outcome_with_draft(vec![bad_evidence.clone()], "Bad summary draft.");
+        let input = promotion_input("bad-summary", "Bad summary draft.", vec![bad_evidence]);
         let context_before = ContextCompiler::new()
             .compile(&session.context_snapshot())
             .expect("empty context compiles before failed promotion")
@@ -1307,11 +1666,7 @@ mod tests {
         let pending_before = session.pending_tool_calls();
 
         let error = session
-            .promote_summary_draft_to_context(
-                &request,
-                &outcome,
-                promotion_input("bad-summary", "Bad summary draft.", vec![bad_evidence]),
-            )
+            .promote_summary_draft_to_context(&request, &outcome, input.clone())
             .expect_err("compile validation rejects unreadable evidence");
 
         assert!(matches!(
@@ -1334,6 +1689,39 @@ mod tests {
         assert_eq!(session.ledger_projection(), projection_before);
         assert_eq!(session.next_sequence(), next_sequence_before);
         assert_eq!(session.pending_tool_calls(), pending_before);
+        assert_single_promotion_record(
+            &session,
+            "bad-summary",
+            SummaryDraftPromotionState::Rejected,
+            None,
+        );
+
+        let replay_error = session
+            .promote_summary_draft_to_context(&request, &outcome, input)
+            .expect_err("exact rejected replay stays rejected");
+
+        assert_eq!(
+            replay_error,
+            SummaryDraftPromotionError::PromotionAlreadyRejected {
+                summary_id: "bad-summary".to_owned(),
+            }
+        );
+        assert_eq!(
+            ContextCompiler::new()
+                .compile(&session.context_snapshot())
+                .expect("context still compiles after rejected replay")
+                .to_snapshot(),
+            context_before
+        );
+        assert_eq!(session.ledger_projection(), projection_before);
+        assert_eq!(session.next_sequence(), next_sequence_before);
+        assert_eq!(session.pending_tool_calls(), pending_before);
+        assert_single_promotion_record(
+            &session,
+            "bad-summary",
+            SummaryDraftPromotionState::Rejected,
+            None,
+        );
     }
 
     #[test]

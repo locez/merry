@@ -38,6 +38,7 @@ mod memory;
 mod runtime;
 mod session;
 mod step;
+mod summary_draft_promotion;
 mod tool;
 
 pub use artifact::{

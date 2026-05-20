@@ -847,6 +847,31 @@ impl SummaryDraftPromotionInput {
             source_record_id,
         })
     }
+
+    #[must_use]
+    pub(crate) fn summary_id(&self) -> &str {
+        &self.summary_id
+    }
+
+    #[must_use]
+    pub(crate) fn draft_text(&self) -> &str {
+        &self.draft_text
+    }
+
+    #[must_use]
+    pub(crate) fn selected_evidence(&self) -> &[JudgmentEvidence] {
+        &self.selected_evidence
+    }
+
+    #[must_use]
+    pub(crate) fn acceptance(&self) -> &SummaryDraftAcceptance {
+        &self.acceptance
+    }
+
+    #[must_use]
+    pub(crate) fn source_record_id(&self) -> Option<&JudgmentRecordId> {
+        self.source_record_id.as_ref()
+    }
 }
 
 /// Errors raised while explicitly promoting an accepted summary draft to context.
@@ -912,6 +937,22 @@ pub(crate) enum SummaryDraftPromotionError {
         summary_id: String,
     },
 
+    /// A promotion for this summary id was already recorded with different input.
+    #[error(
+        "summary draft promotion for context summary id {summary_id} conflicts with an existing promotion payload"
+    )]
+    PromotionPayloadConflict {
+        /// Context summary identifier whose promotion payload conflicted.
+        summary_id: String,
+    },
+
+    /// A promotion for this summary id was already rejected and cannot be retried.
+    #[error("summary draft promotion for context summary id {summary_id} was already rejected")]
+    PromotionAlreadyRejected {
+        /// Context summary identifier whose prior exact promotion was rejected.
+        summary_id: String,
+    },
+
     /// Context construction or compilation rejected the promoted summary.
     #[error("summary draft promotion failed context validation: {source}")]
     Context {
@@ -924,7 +965,7 @@ pub(crate) enum SummaryDraftPromotionError {
 pub(crate) fn context_summary_from_accepted_summary_draft(
     request: &JudgmentRequest,
     outcome: &JudgmentOutcome,
-    input: SummaryDraftPromotionInput,
+    input: &SummaryDraftPromotionInput,
 ) -> Result<ContextSummary, SummaryDraftPromotionError> {
     if request.purpose() != JudgmentPurpose::SummaryDraft {
         return Err(SummaryDraftPromotionError::SummaryDraftPurposeRequired {
@@ -954,26 +995,19 @@ pub(crate) fn context_summary_from_accepted_summary_draft(
         }
     };
 
-    let SummaryDraftPromotionInput {
-        summary_id,
-        draft_text,
-        selected_evidence,
-        acceptance: _acceptance,
-        source_record_id: _source_record_id,
-    } = input;
-
-    if draft_text != recommended_draft {
+    if input.draft_text() != recommended_draft {
         return Err(SummaryDraftPromotionError::DraftMismatch {
             recommended: recommended_draft.to_owned(),
-            accepted: draft_text,
+            accepted: input.draft_text().to_owned(),
         });
     }
 
-    if selected_evidence.is_empty() {
+    if input.selected_evidence().is_empty() {
         return Err(SummaryDraftPromotionError::EmptySelectedEvidence);
     }
 
-    let evidence = selected_evidence
+    let evidence = input
+        .selected_evidence()
         .iter()
         .map(|selected| {
             let evidence =
@@ -992,7 +1026,7 @@ pub(crate) fn context_summary_from_accepted_summary_draft(
         .collect::<Result<Vec<_>, SummaryDraftPromotionError>>()?;
 
     Ok(ContextSummary::new(
-        summary_id,
+        input.summary_id(),
         recommended_draft,
         evidence,
     )?)
@@ -1964,7 +1998,7 @@ mod tests {
         )
         .expect("valid promotion input");
 
-        let summary = context_summary_from_accepted_summary_draft(&request, &outcome, input)
+        let summary = context_summary_from_accepted_summary_draft(&request, &outcome, &input)
             .expect("accepted summary draft promotes to context summary");
 
         assert_eq!(summary.id(), "accepted-summary");
@@ -1985,7 +2019,7 @@ mod tests {
         let error = context_summary_from_accepted_summary_draft(
             &memory_relevance_request(),
             &summary_draft_outcome(),
-            promotion_input("accepted-summary", "Summary draft from exact evidence."),
+            &promotion_input("accepted-summary", "Summary draft from exact evidence."),
         )
         .expect_err("non-summary request rejects");
 
@@ -2003,7 +2037,7 @@ mod tests {
         let error = context_summary_from_accepted_summary_draft(
             &summary_draft_request(),
             &high_tool_risk_outcome(),
-            promotion_input("accepted-summary", "Summary draft from exact evidence."),
+            &promotion_input("accepted-summary", "Summary draft from exact evidence."),
         )
         .expect_err("non-summary outcome rejects");
 
@@ -2033,7 +2067,7 @@ mod tests {
         let error = context_summary_from_accepted_summary_draft(
             &request,
             &outcome,
-            promotion_input("accepted-summary", "Summary draft from exact evidence."),
+            &promotion_input("accepted-summary", "Summary draft from exact evidence."),
         )
         .expect_err("no recommendation rejects");
 
@@ -2045,7 +2079,7 @@ mod tests {
         let error = context_summary_from_accepted_summary_draft(
             &summary_draft_request(),
             &summary_draft_outcome(),
-            promotion_input("accepted-summary", "Different summary text."),
+            &promotion_input("accepted-summary", "Different summary text."),
         )
         .expect_err("draft mismatch rejects");
 
@@ -2072,7 +2106,7 @@ mod tests {
         let error = context_summary_from_accepted_summary_draft(
             &summary_draft_request(),
             &summary_draft_outcome(),
-            input,
+            &input,
         )
         .expect_err("unrelated selected evidence rejects");
 
@@ -2099,7 +2133,7 @@ mod tests {
         let error = context_summary_from_accepted_summary_draft(
             &summary_draft_request(),
             &summary_draft_outcome(),
-            input,
+            &input,
         )
         .expect_err("selected evidence with unmatched label rejects");
 
@@ -2125,7 +2159,7 @@ mod tests {
         let error = context_summary_from_accepted_summary_draft(
             &summary_draft_request(),
             &summary_draft_outcome(),
-            input,
+            &input,
         )
         .expect_err("empty selected evidence rejects");
 
