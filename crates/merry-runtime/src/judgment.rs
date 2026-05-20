@@ -21,13 +21,20 @@ use crate::{
     artifact::ArtifactError,
     context::{ContextError, ContextEvidence, ContextSummary},
 };
+use futures_util::StreamExt;
 use merry_core::{ArtifactId, EvidenceLocator, EvidenceRef};
+use merry_llm::{
+    FinishReason, GenerationConfig, ModelContent, ModelError, ModelEvent, ModelMessage,
+    ModelMessageRole, ModelName, ModelOutput, ModelProvider, ModelRequest, ModelResponse,
+    ModelStreamContext, ProviderErrorKind,
+};
 use serde::Deserialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::{self, Write as _},
     future::Future,
     pin::Pin,
+    sync::Arc,
 };
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
@@ -38,6 +45,7 @@ const JUDGMENT_RECORD_ID_ORDER_DIGITS: usize = 20;
 const MODEL_JUDGMENT_OUTPUT_SCHEMA_VERSION: &str = "merry.model_judgment_output.v1";
 const MODEL_JUDGMENT_TOOL_RISK_RECOMMENDATION_KIND: &str = "tool_risk_review";
 const MODEL_JUDGMENT_TOOL_RISK_EXPECTED_RISK: &str = "low, medium, high, or unknown";
+const MODEL_BACKED_JUDGMENT_MAX_OUTPUT_TOKENS: u64 = 512;
 
 /// Semantic purpose for an internal advisory judgment request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -822,6 +830,101 @@ pub(crate) trait JudgmentSource: Send + Sync {
     ) -> JudgmentFuture<'a>;
 }
 
+/// Provider-neutral model-backed advisory source for tool risk review.
+pub(crate) struct ModelBackedJudgmentSource {
+    provider: Arc<dyn ModelProvider>,
+    model: ModelName,
+    source_label: String,
+    generation_config: GenerationConfig,
+}
+
+impl ModelBackedJudgmentSource {
+    pub(crate) fn new(
+        provider: Arc<dyn ModelProvider>,
+        model: ModelName,
+        source_label: impl Into<String>,
+    ) -> Result<Self, JudgmentError> {
+        let provenance = JudgmentProvenance::new(JudgmentSourceKind::Llm, source_label)?;
+        let generation_config =
+            GenerationConfig::new(Some(MODEL_BACKED_JUDGMENT_MAX_OUTPUT_TOKENS), false)
+                .map_err(map_model_judgment_request_error)?;
+
+        Ok(Self {
+            provider,
+            model,
+            source_label: provenance.source_label().to_owned(),
+            generation_config,
+        })
+    }
+}
+
+impl JudgmentSource for ModelBackedJudgmentSource {
+    fn judge<'a>(
+        &'a self,
+        request: JudgmentRequest,
+        context: JudgmentContext,
+    ) -> JudgmentFuture<'a> {
+        Box::pin(async move {
+            if request.purpose() != JudgmentPurpose::ToolRiskReview {
+                return Err(JudgmentError::ModelJudgmentPurposeRequired {
+                    actual_purpose: request.purpose(),
+                });
+            }
+
+            let token = context.cancellation_token().clone();
+            if token.is_cancelled() {
+                return Err(JudgmentError::Cancelled);
+            }
+
+            let model_request = compile_model_backed_judgment_request(
+                &request,
+                &self.model,
+                self.generation_config.clone(),
+            )?;
+            let stream_context = ModelStreamContext::new(token.clone());
+            let stream_result = tokio::select! {
+                biased;
+                () = token.cancelled() => return Err(JudgmentError::Cancelled),
+                result = self.provider.stream_model(model_request, stream_context) => result,
+            };
+            let mut stream = stream_result.map_err(map_model_judgment_setup_error)?;
+
+            loop {
+                let item = tokio::select! {
+                    biased;
+                    () = token.cancelled() => return Err(JudgmentError::Cancelled),
+                    item = stream.next() => item,
+                };
+
+                match item {
+                    Some(Ok(ModelEvent::Started | ModelEvent::OutputTextDelta { .. })) => {}
+                    Some(Ok(ModelEvent::ToolCallRequested { .. })) => {
+                        return Err(JudgmentError::InvalidModelJudgmentResponseShape {
+                            reason: "model judgment stream must not request tools",
+                        });
+                    }
+                    Some(Ok(ModelEvent::Completed { response })) => {
+                        let text = model_judgment_text_from_completed_response(&response)?;
+                        return parse_tool_risk_review_model_judgment_output(
+                            text,
+                            &request,
+                            &self.source_label,
+                        );
+                    }
+                    Some(Err(error)) => {
+                        return Err(map_model_judgment_stream_error(error));
+                    }
+                    None => {
+                        return Err(JudgmentError::InvalidModelJudgmentResponseShape {
+                            reason: "model judgment stream ended before completed event",
+                        });
+                    }
+                }
+            }
+        })
+    }
+}
+
 /// Deterministic placeholder source that produces no semantic recommendation.
 #[derive(Debug, Default)]
 pub(crate) struct NoopJudgmentSource;
@@ -1235,6 +1338,40 @@ pub(crate) enum JudgmentError {
         actual: String,
     },
 
+    /// Model-backed judgment request compilation failed before provider setup.
+    #[error("model judgment request could not be compiled ({kind:?}): {message}")]
+    ModelJudgmentRequest {
+        /// Provider-neutral error category.
+        kind: ProviderErrorKind,
+        /// Actionable provider-neutral error message.
+        message: String,
+    },
+
+    /// Model-backed judgment provider setup failed.
+    #[error("model judgment provider setup failed ({kind:?}): {message}")]
+    ModelJudgmentProviderSetup {
+        /// Provider-neutral error category.
+        kind: ProviderErrorKind,
+        /// Actionable provider-neutral error message.
+        message: String,
+    },
+
+    /// Model-backed judgment provider stream failed.
+    #[error("model judgment provider stream failed ({kind:?}): {message}")]
+    ModelJudgmentProviderStream {
+        /// Provider-neutral error category.
+        kind: ProviderErrorKind,
+        /// Actionable provider-neutral error message.
+        message: String,
+    },
+
+    /// Model-backed judgment response did not match the accepted stream shape.
+    #[error("model judgment response shape is unsupported: {reason}")]
+    InvalidModelJudgmentResponseShape {
+        /// Stable reason for the rejected provider-neutral response shape.
+        reason: &'static str,
+    },
+
     /// Internal judgment record id was invalid.
     #[error("judgment record id {value:?} is invalid: {reason}")]
     InvalidRecordId {
@@ -1368,6 +1505,139 @@ fn select_model_judgment_evidence(
     }
 
     Ok(selected)
+}
+
+fn compile_model_backed_judgment_request(
+    request: &JudgmentRequest,
+    model: &ModelName,
+    generation_config: GenerationConfig,
+) -> Result<ModelRequest, JudgmentError> {
+    let messages = vec![
+        ModelMessage::new(
+            ModelMessageRole::System,
+            ModelContent::text(&model_backed_judgment_system_prompt())
+                .map_err(map_model_judgment_request_error)?,
+        )
+        .map_err(map_model_judgment_request_error)?,
+        ModelMessage::new(
+            ModelMessageRole::User,
+            ModelContent::text(&model_backed_judgment_user_prompt(request))
+                .map_err(map_model_judgment_request_error)?,
+        )
+        .map_err(map_model_judgment_request_error)?,
+    ];
+
+    ModelRequest::new(model.clone(), messages, Vec::new(), generation_config)
+        .map_err(map_model_judgment_request_error)
+}
+
+fn model_backed_judgment_system_prompt() -> String {
+    format!(
+        concat!(
+            "You are a provider-neutral internal advisory judgment source.\n",
+            "Return exactly one JSON object and no other text.\n",
+            "The result is advisory only and must not authorize tools, actions, context mutation, ledger writes, or events.\n",
+            "Use schema_version {schema_version} and purpose {purpose}.\n",
+            "Required JSON shape: ",
+            "{{\"schema_version\":\"{schema_version}\",\"purpose\":\"{purpose}\",",
+            "\"recommendation\":{{\"kind\":\"{purpose}\",\"risk\":\"low|medium|high|unknown\",\"concerns\":[\"...\"]}},",
+            "\"confidence\":0.0,\"evidence\":[{{\"index\":0,\"label\":\"exact supplied label\"}}],",
+            "\"rationale\":\"...\",\"uncertainty\":\"...\"}}.\n",
+            "Cite only supplied evidence by exact index and label."
+        ),
+        schema_version = MODEL_JUDGMENT_OUTPUT_SCHEMA_VERSION,
+        purpose = JudgmentPurpose::ToolRiskReview.as_str(),
+    )
+}
+
+fn model_backed_judgment_user_prompt(request: &JudgmentRequest) -> String {
+    let mut prompt = String::new();
+    push_field(
+        &mut prompt,
+        "schema_version",
+        MODEL_JUDGMENT_OUTPUT_SCHEMA_VERSION,
+    );
+    push_field(
+        &mut prompt,
+        "purpose",
+        JudgmentPurpose::ToolRiskReview.as_str(),
+    );
+    push_field(&mut prompt, "subject", request.subject());
+    push_field(&mut prompt, "input", request.input());
+    push_list(&mut prompt, "constraints", request.constraints());
+    push_evidence(&mut prompt, "evidence", request.evidence());
+    prompt
+}
+
+fn model_judgment_text_from_completed_response(
+    response: &ModelResponse,
+) -> Result<&str, JudgmentError> {
+    if response.finish_reason() == FinishReason::Cancelled {
+        return Err(JudgmentError::Cancelled);
+    }
+
+    if response.finish_reason() != FinishReason::Stop {
+        return Err(JudgmentError::InvalidModelJudgmentResponseShape {
+            reason: "model judgment completed without stop finish reason",
+        });
+    }
+
+    let [ModelOutput::Text { text }] = response.outputs() else {
+        return Err(JudgmentError::InvalidModelJudgmentResponseShape {
+            reason: "model judgment stop output must contain exactly one text item",
+        });
+    };
+
+    Ok(text)
+}
+
+fn map_model_judgment_request_error(error: ModelError) -> JudgmentError {
+    if is_cancelled_model_judgment_error(&error) {
+        return JudgmentError::Cancelled;
+    }
+
+    let (kind, message) = model_error_parts(error);
+    JudgmentError::ModelJudgmentRequest { kind, message }
+}
+
+fn map_model_judgment_setup_error(error: ModelError) -> JudgmentError {
+    if is_cancelled_model_judgment_error(&error) {
+        return JudgmentError::Cancelled;
+    }
+
+    let (kind, message) = model_error_parts(error);
+    JudgmentError::ModelJudgmentProviderSetup { kind, message }
+}
+
+fn map_model_judgment_stream_error(error: ModelError) -> JudgmentError {
+    if is_cancelled_model_judgment_error(&error) {
+        return JudgmentError::Cancelled;
+    }
+
+    let (kind, message) = model_error_parts(error);
+    JudgmentError::ModelJudgmentProviderStream { kind, message }
+}
+
+fn is_cancelled_model_judgment_error(error: &ModelError) -> bool {
+    matches!(error, ModelError::Cancelled)
+        || matches!(
+            error,
+            ModelError::Provider {
+                kind: ProviderErrorKind::Cancelled,
+                ..
+            }
+        )
+}
+
+fn model_error_parts(error: ModelError) -> (ProviderErrorKind, String) {
+    match error {
+        ModelError::InvalidRequest { reason } => (ProviderErrorKind::InvalidRequest, reason),
+        ModelError::Cancelled => (
+            ProviderErrorKind::Cancelled,
+            "model stream cancelled".to_owned(),
+        ),
+        ModelError::Provider { kind, message } => (kind, message),
+    }
 }
 
 pub(crate) fn validate_summary_draft_record_purpose(
@@ -1629,7 +1899,11 @@ fn canonicalize_label_text(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use merry_core::{ArtifactId, EvidenceLocator};
+    use merry_core::{ArtifactId, EvidenceLocator, ProviderName, ToolName};
+    use merry_llm::{
+        ModelCapabilities, ModelEventStream, ModelProviderFuture, ModelToolCall, ModelToolCallId,
+        ToolArguments, testing::FakeModelProvider,
+    };
     use serde_json::json;
     use std::sync::Arc;
 
@@ -2486,6 +2760,394 @@ mod tests {
         assert_eq!(error, JudgmentError::Cancelled);
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn model_backed_judgment_happy_path_returns_tool_risk_with_llm_provenance_and_evidence() {
+        let first = evidence("tool call", "tool-call");
+        let second = evidence("policy note", "policy-note");
+        let request = tool_risk_request_with_evidence(vec![first.clone(), second.clone()]);
+        let provider = FakeModelProvider::new(vec![Ok(completed_outputs_event(
+            vec![ModelOutput::text(&model_tool_risk_output(
+                "high",
+                vec![json!({ "index": 1, "label": "policy note" })],
+            ))],
+            FinishReason::Stop,
+        ))]);
+        let source = model_backed_source(provider.clone());
+
+        let outcome = source
+            .judge(request, JudgmentContext::new(CancellationToken::new()))
+            .await
+            .expect("valid model-backed judgment returns an outcome");
+
+        assert_eq!(outcome.purpose(), JudgmentPurpose::ToolRiskReview);
+        assert_eq!(
+            outcome.recommendation(),
+            &JudgmentRecommendation::ToolRiskReview {
+                risk: JudgmentRiskLevel::High,
+                concerns: vec!["The pending tool path may affect external state.".to_owned()],
+            }
+        );
+        assert_eq!(outcome.evidence(), &[second]);
+        assert_eq!(outcome.provenance().source_kind(), JudgmentSourceKind::Llm);
+        assert_eq!(
+            outcome.provenance().source_label(),
+            "test model judgment source"
+        );
+        assert_eq!(provider.recorded_requests().len(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn model_backed_judgment_records_expected_model_request_shape() {
+        let request = tool_risk_request_with_evidence(vec![
+            JudgmentEvidence::new(
+                "tool call",
+                EvidenceRef::new(
+                    artifact_id("tool-call"),
+                    EvidenceLocator::line_range(3, 9).expect("valid line range"),
+                ),
+            )
+            .expect("judgment evidence is valid"),
+            JudgmentEvidence::new(
+                "policy note",
+                EvidenceRef::new(
+                    artifact_id("policy-note"),
+                    EvidenceLocator::json_pointer("/risk").expect("valid json pointer"),
+                ),
+            )
+            .expect("judgment evidence is valid"),
+        ]);
+        let provider = FakeModelProvider::new(vec![Ok(completed_outputs_event(
+            vec![ModelOutput::text(&model_tool_risk_output(
+                "low",
+                vec![json!({ "index": 0, "label": "tool call" })],
+            ))],
+            FinishReason::Stop,
+        ))]);
+        let source = model_backed_source(provider.clone());
+
+        source
+            .judge(request, JudgmentContext::new(CancellationToken::new()))
+            .await
+            .expect("valid model-backed judgment returns an outcome");
+
+        let recorded = provider.recorded_requests();
+        let [model_request] = recorded.as_slice() else {
+            panic!("expected exactly one recorded model request");
+        };
+        assert_eq!(model_request.model(), &model_name());
+        assert_eq!(model_request.messages().len(), 2);
+        assert_eq!(model_request.messages()[0].role(), ModelMessageRole::System);
+        assert_eq!(model_request.messages()[1].role(), ModelMessageRole::User);
+        assert!(model_request.tools().is_empty());
+        assert!(model_request.continuations().is_empty());
+        assert_eq!(
+            model_request.generation().max_output_tokens(),
+            Some(MODEL_BACKED_JUDGMENT_MAX_OUTPUT_TOKENS)
+        );
+        assert!(!model_request.generation().allow_parallel_tool_calls());
+
+        let system = model_request.messages()[0].content().as_text();
+        let user = model_request.messages()[1].content().as_text();
+        assert!(system.contains(MODEL_JUDGMENT_OUTPUT_SCHEMA_VERSION));
+        assert!(system.contains("purpose tool_risk_review"));
+        assert!(system.contains("Return exactly one JSON object"));
+        assert!(user.contains("schema_version=merry.model_judgment_output.v1\n"));
+        assert!(user.contains("purpose=tool_risk_review\n"));
+        assert!(user.contains("subject=lookup tool call\n"));
+        assert!(
+            user.contains("input=Review whether the pending tool request has semantic risk.\n")
+        );
+        assert!(user.contains("constraints.0=advisory semantic signal only\n"));
+        assert!(user.contains("evidence.0.label=tool call\n"));
+        assert!(user.contains("evidence.0.artifact_id=tool-call\n"));
+        assert!(user.contains("evidence.0.locator=line:3-9\n"));
+        assert!(user.contains("evidence.1.label=policy note\n"));
+        assert!(user.contains("evidence.1.artifact_id=policy-note\n"));
+        assert!(user.contains("evidence.1.locator=json:/risk\n"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn model_backed_judgment_rejects_non_tool_risk_before_provider_call() {
+        let provider = FakeModelProvider::new(vec![Ok(completed_outputs_event(
+            vec![ModelOutput::text(&model_tool_risk_output(
+                "low",
+                Vec::new(),
+            ))],
+            FinishReason::Stop,
+        ))]);
+        let source = model_backed_source(provider.clone());
+
+        let error = source
+            .judge(
+                memory_relevance_request(),
+                JudgmentContext::new(CancellationToken::new()),
+            )
+            .await
+            .expect_err("non-tool-risk request rejects");
+
+        assert_eq!(
+            error,
+            JudgmentError::ModelJudgmentPurposeRequired {
+                actual_purpose: JudgmentPurpose::MemoryRelevance,
+            }
+        );
+        assert!(provider.recorded_requests().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn model_backed_judgment_pre_cancelled_context_records_no_provider_request() {
+        let provider = FakeModelProvider::new(vec![Ok(completed_outputs_event(
+            vec![ModelOutput::text(&model_tool_risk_output(
+                "low",
+                Vec::new(),
+            ))],
+            FinishReason::Stop,
+        ))]);
+        let source = model_backed_source(provider.clone());
+        let token = CancellationToken::new();
+        token.cancel();
+
+        let error = source
+            .judge(tool_risk_request(), JudgmentContext::new(token))
+            .await
+            .expect_err("pre-cancelled context rejects");
+
+        assert_eq!(error, JudgmentError::Cancelled);
+        assert!(provider.recorded_requests().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn model_backed_judgment_stream_cancellation_maps_to_cancelled() {
+        let provider = FakeModelProvider::new(vec![Err(ModelError::Cancelled)]);
+        let source = model_backed_source(provider.clone());
+
+        let error = source
+            .judge(
+                tool_risk_request(),
+                JudgmentContext::new(CancellationToken::new()),
+            )
+            .await
+            .expect_err("stream cancellation rejects");
+
+        assert_eq!(error, JudgmentError::Cancelled);
+        assert_eq!(provider.recorded_requests().len(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn model_backed_judgment_provider_cancelled_kind_maps_to_cancelled() {
+        let provider = FakeModelProvider::new(vec![Err(ModelError::provider(
+            ProviderErrorKind::Cancelled,
+            "provider cancelled request",
+        ))]);
+        let source = model_backed_source(provider);
+
+        let error = source
+            .judge(
+                tool_risk_request(),
+                JudgmentContext::new(CancellationToken::new()),
+            )
+            .await
+            .expect_err("provider cancellation rejects");
+
+        assert_eq!(error, JudgmentError::Cancelled);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn model_backed_judgment_provider_setup_error_maps_to_typed_cloneable_error() {
+        let source = ModelBackedJudgmentSource::new(
+            Arc::new(SetupErrorModelProvider::new(
+                ProviderErrorKind::Authentication,
+                "provider credentials are unavailable",
+            )),
+            model_name(),
+            "test model judgment source",
+        )
+        .expect("model-backed judgment source is valid");
+
+        let error = source
+            .judge(
+                tool_risk_request(),
+                JudgmentContext::new(CancellationToken::new()),
+            )
+            .await
+            .expect_err("provider setup error rejects");
+
+        assert_eq!(
+            error.clone(),
+            JudgmentError::ModelJudgmentProviderSetup {
+                kind: ProviderErrorKind::Authentication,
+                message: "provider credentials are unavailable".to_owned(),
+            }
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn model_backed_judgment_stream_error_maps_to_typed_cloneable_error() {
+        let provider = FakeModelProvider::new(vec![Err(ModelError::provider(
+            ProviderErrorKind::Unavailable,
+            "provider stream failed",
+        ))]);
+        let source = model_backed_source(provider);
+
+        let error = source
+            .judge(
+                tool_risk_request(),
+                JudgmentContext::new(CancellationToken::new()),
+            )
+            .await
+            .expect_err("stream provider error rejects");
+
+        assert_eq!(
+            error.clone(),
+            JudgmentError::ModelJudgmentProviderStream {
+                kind: ProviderErrorKind::Unavailable,
+                message: "provider stream failed".to_owned(),
+            }
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn model_backed_judgment_invalid_response_shapes_reject() {
+        for (script, expected_reason) in [
+            (
+                Vec::new(),
+                "model judgment stream ended before completed event",
+            ),
+            (
+                vec![Ok(ModelEvent::ToolCallRequested {
+                    call: model_tool_call(),
+                })],
+                "model judgment stream must not request tools",
+            ),
+            (
+                vec![Ok(completed_outputs_event(
+                    vec![ModelOutput::text(&model_tool_risk_output(
+                        "low",
+                        Vec::new(),
+                    ))],
+                    FinishReason::Length,
+                ))],
+                "model judgment completed without stop finish reason",
+            ),
+            (
+                vec![Ok(completed_outputs_event(Vec::new(), FinishReason::Stop))],
+                "model judgment stop output must contain exactly one text item",
+            ),
+            (
+                vec![Ok(completed_outputs_event(
+                    vec![
+                        ModelOutput::text(&model_tool_risk_output("low", Vec::new())),
+                        ModelOutput::text(&model_tool_risk_output("medium", Vec::new())),
+                    ],
+                    FinishReason::Stop,
+                ))],
+                "model judgment stop output must contain exactly one text item",
+            ),
+            (
+                vec![Ok(completed_outputs_event(
+                    vec![ModelOutput::tool_call(model_tool_call())],
+                    FinishReason::Stop,
+                ))],
+                "model judgment stop output must contain exactly one text item",
+            ),
+            (
+                vec![Ok(completed_outputs_event(
+                    vec![
+                        ModelOutput::text(&model_tool_risk_output("low", Vec::new())),
+                        ModelOutput::tool_call(model_tool_call()),
+                    ],
+                    FinishReason::Stop,
+                ))],
+                "model judgment stop output must contain exactly one text item",
+            ),
+        ] {
+            let provider = FakeModelProvider::new(script);
+            let source = model_backed_source(provider);
+
+            let error = source
+                .judge(
+                    tool_risk_request(),
+                    JudgmentContext::new(CancellationToken::new()),
+                )
+                .await
+                .expect_err("invalid model response shape rejects");
+
+            assert_eq!(
+                error,
+                JudgmentError::InvalidModelJudgmentResponseShape {
+                    reason: expected_reason,
+                }
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn model_backed_judgment_rejects_explicit_non_stop_finish_reasons() {
+        for finish_reason in [FinishReason::ToolCalls, FinishReason::Error] {
+            let provider = FakeModelProvider::new(vec![Ok(completed_outputs_event(
+                vec![ModelOutput::text(&model_tool_risk_output(
+                    "low",
+                    Vec::new(),
+                ))],
+                finish_reason,
+            ))]);
+            let source = model_backed_source(provider);
+
+            let error = source
+                .judge(
+                    tool_risk_request(),
+                    JudgmentContext::new(CancellationToken::new()),
+                )
+                .await
+                .expect_err("non-stop finish reason rejects");
+
+            assert_eq!(
+                error,
+                JudgmentError::InvalidModelJudgmentResponseShape {
+                    reason: "model judgment completed without stop finish reason",
+                }
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn model_backed_judgment_completed_cancelled_finish_maps_to_cancelled() {
+        let provider = FakeModelProvider::new(vec![Ok(completed_outputs_event(
+            Vec::new(),
+            FinishReason::Cancelled,
+        ))]);
+        let source = model_backed_source(provider);
+
+        let error = source
+            .judge(
+                tool_risk_request(),
+                JudgmentContext::new(CancellationToken::new()),
+            )
+            .await
+            .expect_err("cancelled finish rejects");
+
+        assert_eq!(error, JudgmentError::Cancelled);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn model_backed_judgment_invalid_strict_json_propagates_parser_error() {
+        let provider = FakeModelProvider::new(vec![Ok(completed_outputs_event(
+            vec![ModelOutput::text("not json")],
+            FinishReason::Stop,
+        ))]);
+        let source = model_backed_source(provider);
+
+        let error = source
+            .judge(
+                tool_risk_request(),
+                JudgmentContext::new(CancellationToken::new()),
+            )
+            .await
+            .expect_err("invalid strict JSON rejects");
+
+        assert_eq!(error, JudgmentError::InvalidModelJudgmentOutput);
+    }
+
     #[test]
     fn source_kinds_and_risk_levels_cover_required_internal_cases() {
         assert_eq!(
@@ -2840,6 +3502,75 @@ mod tests {
             "test request",
         )
         .expect("summary draft request is valid")
+    }
+
+    fn model_backed_source(provider: FakeModelProvider) -> ModelBackedJudgmentSource {
+        ModelBackedJudgmentSource::new(
+            Arc::new(provider),
+            model_name(),
+            " test model judgment source ",
+        )
+        .expect("model-backed judgment source is valid")
+    }
+
+    fn model_name() -> ModelName {
+        ModelName::new("fake/model").expect("valid model name")
+    }
+
+    fn completed_outputs_event(
+        outputs: Vec<ModelOutput>,
+        finish_reason: FinishReason,
+    ) -> ModelEvent {
+        ModelEvent::Completed {
+            response: ModelResponse::new(outputs, finish_reason, None),
+        }
+    }
+
+    fn model_tool_call() -> ModelToolCall {
+        ModelToolCall::new(
+            ModelToolCallId::new("call-1").expect("valid model tool call id"),
+            ToolName::new("lookup").expect("valid tool name"),
+            ToolArguments::new(Default::default()),
+        )
+    }
+
+    #[derive(Debug)]
+    struct SetupErrorModelProvider {
+        name: ProviderName,
+        capabilities: ModelCapabilities,
+        kind: ProviderErrorKind,
+        message: String,
+    }
+
+    impl SetupErrorModelProvider {
+        fn new(kind: ProviderErrorKind, message: impl Into<String>) -> Self {
+            Self {
+                name: ProviderName::new("setup-error-model-provider")
+                    .expect("static provider name is valid"),
+                capabilities: ModelCapabilities::new(true, true, false, true, None, None)
+                    .expect("static capabilities are valid"),
+                kind,
+                message: message.into(),
+            }
+        }
+    }
+
+    impl ModelProvider for SetupErrorModelProvider {
+        fn name(&self) -> &ProviderName {
+            &self.name
+        }
+
+        fn capabilities(&self) -> &ModelCapabilities {
+            &self.capabilities
+        }
+
+        fn stream_model<'a>(
+            &'a self,
+            _request: ModelRequest,
+            _context: ModelStreamContext,
+        ) -> ModelProviderFuture<'a, Result<ModelEventStream, ModelError>> {
+            Box::pin(async move { Err(ModelError::provider(self.kind, self.message.clone())) })
+        }
     }
 
     fn memory_relevant_outcome() -> JudgmentOutcome {
