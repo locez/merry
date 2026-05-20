@@ -9,6 +9,7 @@ use crate::{
     ArtifactContent, ContextCompiler, ContextEntry, ContextSummary, LedgerProjectionSnapshot,
     RuntimeError, RuntimeEventStream, SessionContextSnapshot,
     event_stream::ActiveStepPermit,
+    judgment::{JudgmentContext, JudgmentError, JudgmentRecord, JudgmentRequest, JudgmentSource},
     memory::{
         MemoryActivationContext, MemoryActivationSeed, MemoryActivationSource,
         MemoryActivationSourceKind, MemoryScope, StoredMemoryActivationSource,
@@ -378,6 +379,49 @@ impl Runtime {
     pub async fn pending_tool_calls(&self) -> Vec<PendingToolCall> {
         let session = self.inner.session.lock().await;
         session.pending_tool_calls()
+    }
+
+    #[allow(dead_code)]
+    pub(crate) async fn run_uncertainty_review(
+        &self,
+        source: &dyn JudgmentSource,
+        request: JudgmentRequest,
+        token: CancellationToken,
+    ) -> Result<JudgmentRecord, JudgmentError> {
+        if token.is_cancelled() {
+            return Err(JudgmentError::Cancelled);
+        }
+
+        {
+            let session = self.inner.session.lock().await;
+            if token.is_cancelled() {
+                return Err(JudgmentError::Cancelled);
+            }
+            session.preflight_judgment_request(&request)?;
+        }
+
+        if token.is_cancelled() {
+            return Err(JudgmentError::Cancelled);
+        }
+
+        let context = JudgmentContext::new(token.clone());
+        let outcome = tokio::select! {
+            biased;
+            () = token.cancelled() => {
+                return Err(JudgmentError::Cancelled);
+            }
+            outcome = source.judge(request.clone(), context) => outcome?,
+        };
+
+        if token.is_cancelled() {
+            return Err(JudgmentError::Cancelled);
+        }
+
+        let mut session = self.inner.session.lock().await;
+        if token.is_cancelled() {
+            return Err(JudgmentError::Cancelled);
+        }
+        session.record_judgment(request, outcome)
     }
 }
 
@@ -1295,6 +1339,11 @@ mod tests {
     };
     use crate::ArtifactError;
     use crate::artifact::ArtifactContent;
+    use crate::judgment::{
+        JudgmentConfidence, JudgmentContext, JudgmentError, JudgmentEvidence, JudgmentFuture,
+        JudgmentOutcome, JudgmentProvenance, JudgmentPurpose, JudgmentRecommendation,
+        JudgmentRecord, JudgmentRiskLevel, JudgmentSource, JudgmentSourceKind,
+    };
     use crate::memory::{
         ActivatedMemory, MemoryActivationContext, MemoryActivationFuture, MemoryActivationReason,
         MemoryActivationScore, MemoryActivationSource, MemoryActivationSourceKind, MemoryError,
@@ -1427,6 +1476,148 @@ mod tests {
         )
     }
 
+    fn judgment_evidence(label: &str, id: &str, locator: EvidenceLocator) -> JudgmentEvidence {
+        JudgmentEvidence::new(label, EvidenceRef::new(artifact_id(id), locator))
+            .expect("valid judgment evidence")
+    }
+
+    fn judgment_constraints() -> Vec<String> {
+        vec!["advisory semantic signal only".to_owned()]
+    }
+
+    fn judgment_confidence(value: f32) -> JudgmentConfidence {
+        JudgmentConfidence::new(value).expect("valid judgment confidence")
+    }
+
+    fn judgment_provenance() -> JudgmentProvenance {
+        JudgmentProvenance::new(JudgmentSourceKind::Test, "runtime scripted source")
+            .expect("valid judgment provenance")
+    }
+
+    fn tool_risk_review_request(
+        evidence: Vec<JudgmentEvidence>,
+    ) -> crate::judgment::JudgmentRequest {
+        crate::judgment::JudgmentRequest::new(
+            JudgmentPurpose::ToolRiskReview,
+            "pending lookup tool",
+            "Review whether the lookup input has semantic risk.",
+            evidence,
+            judgment_constraints(),
+            "runtime uncertainty review test",
+        )
+        .expect("valid tool risk request")
+    }
+
+    fn high_tool_risk_outcome(evidence: Vec<JudgmentEvidence>) -> JudgmentOutcome {
+        JudgmentOutcome::new(
+            JudgmentPurpose::ToolRiskReview,
+            JudgmentRecommendation::ToolRiskReview {
+                risk: JudgmentRiskLevel::High,
+                concerns: vec!["Input references credential-like material.".to_owned()],
+            },
+            judgment_confidence(0.95),
+            evidence,
+            "Credential-like input is semantically risky.",
+            "This advisory review cannot authorize or block tool execution.",
+            judgment_provenance(),
+        )
+        .expect("valid high risk outcome")
+    }
+
+    fn unknown_tool_risk_outcome(evidence: Vec<JudgmentEvidence>) -> JudgmentOutcome {
+        JudgmentOutcome::new(
+            JudgmentPurpose::ToolRiskReview,
+            JudgmentRecommendation::ToolRiskReview {
+                risk: JudgmentRiskLevel::Unknown,
+                concerns: vec!["Available semantic evidence is insufficient.".to_owned()],
+            },
+            judgment_confidence(0.35),
+            evidence,
+            "The source could not determine the risk from available input.",
+            "The result is advisory and non-authoritative.",
+            judgment_provenance(),
+        )
+        .expect("valid unknown risk outcome")
+    }
+
+    #[derive(Debug)]
+    enum ScriptedJudgmentResponse {
+        Outcome(JudgmentOutcome),
+        Error(JudgmentError),
+        Cancelled,
+        PendingUntilReleasedOrCancelled {
+            started: oneshot::Sender<()>,
+            release: oneshot::Receiver<()>,
+            outcome: JudgmentOutcome,
+        },
+    }
+
+    #[derive(Debug, Clone)]
+    struct ScriptedJudgmentSource {
+        responses: Arc<StdMutex<Vec<ScriptedJudgmentResponse>>>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl ScriptedJudgmentSource {
+        fn new(responses: Vec<ScriptedJudgmentResponse>) -> Self {
+            Self {
+                responses: Arc::new(StdMutex::new(responses.into_iter().rev().collect())),
+                calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn with_outcome(outcome: JudgmentOutcome) -> Self {
+            Self::new(vec![ScriptedJudgmentResponse::Outcome(outcome)])
+        }
+
+        fn call_count(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl JudgmentSource for ScriptedJudgmentSource {
+        fn judge<'a>(
+            &'a self,
+            _request: crate::judgment::JudgmentRequest,
+            context: JudgmentContext,
+        ) -> JudgmentFuture<'a> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let response = self
+                .responses
+                .lock()
+                .expect("judgment response mutex should not be poisoned")
+                .pop();
+            Box::pin(async move {
+                if context.cancellation_token().is_cancelled() {
+                    return Err(JudgmentError::Cancelled);
+                }
+
+                match response.expect("scripted judgment response should exist") {
+                    ScriptedJudgmentResponse::Outcome(outcome) => Ok(outcome),
+                    ScriptedJudgmentResponse::Error(error) => Err(error),
+                    ScriptedJudgmentResponse::Cancelled => Err(JudgmentError::Cancelled),
+                    ScriptedJudgmentResponse::PendingUntilReleasedOrCancelled {
+                        started,
+                        release,
+                        outcome,
+                    } => {
+                        let _ = started.send(());
+                        tokio::select! {
+                            biased;
+                            () = context.cancellation_token().cancelled() => {
+                                Err(JudgmentError::Cancelled)
+                            }
+                            signal = release => {
+                                signal.map_err(|_| JudgmentError::Cancelled)?;
+                                Ok(outcome)
+                            }
+                        }
+                    }
+                }
+            })
+        }
+    }
+
     fn activated_memory(id: &str, text: &str, evidence_artifact: &str) -> ActivatedMemory {
         let item = memory_item(id, text, evidence_artifact, &["topic"]);
         let score = MemoryActivationScore::new(1, 1, 0.8).expect("valid memory score");
@@ -1531,6 +1722,27 @@ mod tests {
             .compile(&runtime.context_snapshot().await)
             .expect("context compiles")
             .to_snapshot()
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct JudgmentHarnessState {
+        context: String,
+        ledger: crate::LedgerProjectionSnapshot,
+        pending_tool_calls: Vec<PendingToolCall>,
+        judgment_records: Vec<JudgmentRecord>,
+    }
+
+    async fn judgment_harness_state(runtime: &Runtime) -> JudgmentHarnessState {
+        let session = runtime.inner.session.lock().await;
+        JudgmentHarnessState {
+            context: crate::ContextCompiler::new()
+                .compile(&session.context_snapshot())
+                .expect("context compiles")
+                .to_snapshot(),
+            ledger: session.ledger_projection(),
+            pending_tool_calls: session.pending_tool_calls(),
+            judgment_records: session.judgment_records(),
+        }
     }
 
     async fn assert_activated_memory_projection_cleared(runtime: &Runtime) {
@@ -1838,6 +2050,370 @@ mod tests {
                 tool_registry: ToolRegistry::default(),
                 memory_activation_source: Arc::new(source),
             }),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn uncertainty_review_preflight_rejects_unreadable_evidence() {
+        let runtime = Runtime::builder(session_id("uncertainty-preflight"))
+            .build()
+            .expect("runtime builds");
+        {
+            let mut session = runtime
+                .inner
+                .session
+                .try_lock()
+                .expect("session lock is free");
+            session
+                .record_tool_call_pending(pending_tool_call("review-preflight-call"))
+                .expect("pending tool call records");
+        }
+        let before = judgment_harness_state(&runtime).await;
+        let request = tool_risk_review_request(vec![judgment_evidence(
+            "missing request evidence",
+            "missing-review-source",
+            EvidenceLocator::whole_artifact(),
+        )]);
+        let source = ScriptedJudgmentSource::with_outcome(high_tool_risk_outcome(Vec::new()));
+
+        let error = runtime
+            .run_uncertainty_review(&source, request, CancellationToken::new())
+            .await
+            .expect_err("missing request evidence rejects before source invocation");
+
+        assert!(matches!(
+            error,
+            JudgmentError::UnreadableEvidence {
+                artifact_id,
+                source: ArtifactError::MissingArtifact { .. },
+            } if artifact_id.as_str() == "missing-review-source"
+        ));
+        assert_eq!(source.call_count(), 0);
+        assert_eq!(judgment_harness_state(&runtime).await, before);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn uncertainty_review_records_one_internal_payload_and_no_public_state() {
+        let runtime = Runtime::builder(session_id("uncertainty-success"))
+            .build()
+            .expect("runtime builds");
+        record_memory_artifact(
+            &runtime,
+            "review-source",
+            "lookup input may include credential-like material\n",
+        );
+        {
+            let mut session = runtime
+                .inner
+                .session
+                .try_lock()
+                .expect("session lock is free");
+            session
+                .record_tool_call_pending(pending_tool_call("review-success-call"))
+                .expect("pending tool call records");
+        }
+        let evidence = judgment_evidence(
+            "lookup input",
+            "review-source",
+            EvidenceLocator::whole_artifact(),
+        );
+        let request = tool_risk_review_request(vec![evidence.clone()]);
+        let source = ScriptedJudgmentSource::with_outcome(high_tool_risk_outcome(vec![evidence]));
+        let public_before = {
+            let mut state = judgment_harness_state(&runtime).await;
+            state.judgment_records.clear();
+            state
+        };
+
+        let record = runtime
+            .run_uncertainty_review(&source, request, CancellationToken::new())
+            .await
+            .expect("valid uncertainty review records");
+
+        assert_eq!(source.call_count(), 1);
+        assert_eq!(record.id().as_str(), "judgment-record-00000000000000000000");
+        assert_eq!(record.request().purpose(), JudgmentPurpose::ToolRiskReview);
+        assert_eq!(record.outcome().purpose(), JudgmentPurpose::ToolRiskReview);
+        assert_eq!(record.outcome().confidence().as_f32(), 0.95);
+        assert_eq!(
+            record.outcome().uncertainty(),
+            "This advisory review cannot authorize or block tool execution."
+        );
+        assert_eq!(
+            record.outcome().provenance().source_kind(),
+            JudgmentSourceKind::Test
+        );
+        assert_eq!(
+            record.outcome().provenance().source_label(),
+            "runtime scripted source"
+        );
+        match record.outcome().recommendation() {
+            JudgmentRecommendation::ToolRiskReview { risk, concerns } => {
+                assert_eq!(*risk, JudgmentRiskLevel::High);
+                assert_eq!(
+                    concerns,
+                    &["Input references credential-like material.".to_owned()]
+                );
+            }
+            other => panic!("expected tool risk review recommendation, got {other:?}"),
+        }
+        assert!(
+            record
+                .artifacts()
+                .request()
+                .content()
+                .contains("purpose=tool_risk_review\n")
+        );
+        assert!(
+            record
+                .artifacts()
+                .outcome()
+                .content()
+                .contains("recommendation.risk=high\n")
+        );
+        assert!(
+            record
+                .artifacts()
+                .outcome()
+                .content()
+                .contains("confidence=0.950000\n")
+        );
+        assert!(
+            record
+                .artifacts()
+                .outcome()
+                .content()
+                .contains("provenance.kind=test\n")
+        );
+
+        let after = judgment_harness_state(&runtime).await;
+        assert_eq!(after.judgment_records, vec![record]);
+        let public_after = JudgmentHarnessState {
+            judgment_records: Vec::new(),
+            ..after
+        };
+        assert_eq!(public_after, public_before);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn uncertainty_review_rejects_bad_outcome_evidence_without_registry_write() {
+        let runtime = Runtime::builder(session_id("uncertainty-bad-outcome"))
+            .build()
+            .expect("runtime builds");
+        record_memory_artifact(&runtime, "review-request-source", "request evidence\n");
+        {
+            let mut session = runtime
+                .inner
+                .session
+                .try_lock()
+                .expect("session lock is free");
+            session
+                .record_tool_call_pending(pending_tool_call("review-bad-outcome-call"))
+                .expect("pending tool call records");
+        }
+        let request = tool_risk_review_request(vec![judgment_evidence(
+            "request source",
+            "review-request-source",
+            EvidenceLocator::whole_artifact(),
+        )]);
+        let source =
+            ScriptedJudgmentSource::with_outcome(high_tool_risk_outcome(vec![judgment_evidence(
+                "missing outcome source",
+                "missing-outcome-source",
+                EvidenceLocator::whole_artifact(),
+            )]));
+        let before = judgment_harness_state(&runtime).await;
+
+        let error = runtime
+            .run_uncertainty_review(&source, request, CancellationToken::new())
+            .await
+            .expect_err("missing outcome evidence rejects before registry write");
+
+        assert!(matches!(
+            error,
+            JudgmentError::UnreadableEvidence {
+                artifact_id,
+                source: ArtifactError::MissingArtifact { .. },
+            } if artifact_id.as_str() == "missing-outcome-source"
+        ));
+        assert_eq!(source.call_count(), 1);
+        assert_eq!(judgment_harness_state(&runtime).await, before);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn uncertainty_review_pre_cancelled_token_skips_source_and_state_change() {
+        let runtime = Runtime::builder(session_id("uncertainty-pre-cancelled"))
+            .build()
+            .expect("runtime builds");
+        let source = ScriptedJudgmentSource::with_outcome(high_tool_risk_outcome(Vec::new()));
+        let before = judgment_harness_state(&runtime).await;
+        let token = CancellationToken::new();
+        token.cancel();
+
+        let error = runtime
+            .run_uncertainty_review(&source, tool_risk_review_request(Vec::new()), token)
+            .await
+            .expect_err("pre-cancelled token rejects");
+
+        assert_eq!(error, JudgmentError::Cancelled);
+        assert_eq!(source.call_count(), 0);
+        assert_eq!(judgment_harness_state(&runtime).await, before);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn uncertainty_review_cancelled_while_source_future_in_flight_records_nothing() {
+        let runtime = Runtime::builder(session_id("uncertainty-in-flight-cancel"))
+            .build()
+            .expect("runtime builds");
+        {
+            let mut session = runtime
+                .inner
+                .session
+                .try_lock()
+                .expect("session lock is free");
+            session
+                .record_tool_call_pending(pending_tool_call("review-in-flight-call"))
+                .expect("pending tool call records");
+        }
+        let before = judgment_harness_state(&runtime).await;
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let source = ScriptedJudgmentSource::new(vec![
+            ScriptedJudgmentResponse::PendingUntilReleasedOrCancelled {
+                started: started_tx,
+                release: release_rx,
+                outcome: high_tool_risk_outcome(Vec::new()),
+            },
+        ]);
+        let token = CancellationToken::new();
+        let review = {
+            let runtime = runtime.clone();
+            let source = source.clone();
+            let token = token.clone();
+            tokio::spawn(async move {
+                runtime
+                    .run_uncertainty_review(&source, tool_risk_review_request(Vec::new()), token)
+                    .await
+            })
+        };
+
+        started_rx.await.expect("judgment source future starts");
+        assert_eq!(source.call_count(), 1);
+
+        token.cancel();
+        let error = review
+            .await
+            .expect("review task should not panic")
+            .expect_err("in-flight cancellation rejects");
+
+        assert_eq!(error, JudgmentError::Cancelled);
+        assert_eq!(judgment_harness_state(&runtime).await, before);
+        drop(release_tx);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn uncertainty_review_source_error_or_cancel_records_nothing() {
+        for (session, response) in [
+            (
+                "uncertainty-source-error",
+                ScriptedJudgmentResponse::Error(JudgmentError::BlankField {
+                    field: "scripted source failure",
+                }),
+            ),
+            (
+                "uncertainty-source-cancel",
+                ScriptedJudgmentResponse::Cancelled,
+            ),
+        ] {
+            let runtime = Runtime::builder(session_id(session))
+                .build()
+                .expect("runtime builds");
+            {
+                let mut state = runtime
+                    .inner
+                    .session
+                    .try_lock()
+                    .expect("session lock is free");
+                state
+                    .record_tool_call_pending(pending_tool_call(&format!("{session}-call")))
+                    .expect("pending tool call records");
+            }
+            let before = judgment_harness_state(&runtime).await;
+            let source = ScriptedJudgmentSource::new(vec![response]);
+
+            let error = runtime
+                .run_uncertainty_review(
+                    &source,
+                    tool_risk_review_request(Vec::new()),
+                    CancellationToken::new(),
+                )
+                .await
+                .expect_err("source failure rejects");
+
+            assert!(matches!(
+                error,
+                JudgmentError::BlankField {
+                    field: "scripted source failure",
+                } | JudgmentError::Cancelled
+            ));
+            assert_eq!(source.call_count(), 1);
+            assert_eq!(judgment_harness_state(&runtime).await, before);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn uncertainty_review_high_and_unknown_tool_risk_remain_non_authoritative() {
+        for (session, outcome) in [
+            ("uncertainty-high-risk", high_tool_risk_outcome(Vec::new())),
+            (
+                "uncertainty-unknown-risk",
+                unknown_tool_risk_outcome(Vec::new()),
+            ),
+        ] {
+            let runtime = Runtime::builder(session_id(session))
+                .build()
+                .expect("runtime builds");
+            {
+                let mut state = runtime
+                    .inner
+                    .session
+                    .try_lock()
+                    .expect("session lock is free");
+                state
+                    .record_tool_call_pending(pending_tool_call(&format!("{session}-call")))
+                    .expect("pending tool call records");
+            }
+            let public_before = {
+                let mut state = judgment_harness_state(&runtime).await;
+                state.judgment_records.clear();
+                state
+            };
+            let source = ScriptedJudgmentSource::with_outcome(outcome);
+
+            let record = runtime
+                .run_uncertainty_review(
+                    &source,
+                    tool_risk_review_request(Vec::new()),
+                    CancellationToken::new(),
+                )
+                .await
+                .expect("advisory tool risk review records");
+
+            assert_eq!(source.call_count(), 1);
+            assert!(matches!(
+                record.outcome().recommendation(),
+                JudgmentRecommendation::ToolRiskReview {
+                    risk: JudgmentRiskLevel::High | JudgmentRiskLevel::Unknown,
+                    ..
+                }
+            ));
+            let after = judgment_harness_state(&runtime).await;
+            assert_eq!(after.judgment_records.len(), 1);
+            let public_after = JudgmentHarnessState {
+                judgment_records: Vec::new(),
+                ..after
+            };
+            assert_eq!(public_after, public_before);
         }
     }
 
