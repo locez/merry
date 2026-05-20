@@ -804,6 +804,15 @@ pub(crate) enum JudgmentError {
         outcome_purpose: JudgmentPurpose,
     },
 
+    /// A narrow internal recording helper received an unsupported judgment purpose.
+    #[error("{field} requires summary draft judgment purpose, got {actual_purpose}")]
+    SummaryDraftPurposeRequired {
+        /// Name of the rejected input field.
+        field: &'static str,
+        /// Rejected judgment purpose.
+        actual_purpose: JudgmentPurpose,
+    },
+
     /// Internal judgment record id was invalid.
     #[error("judgment record id {value:?} is invalid: {reason}")]
     InvalidRecordId {
@@ -869,6 +878,27 @@ fn validate_record_purpose(
         return Err(JudgmentError::RecordPurposeMismatch {
             request_purpose: request.purpose(),
             outcome_purpose: outcome.purpose(),
+        });
+    }
+
+    Ok(())
+}
+
+pub(crate) fn validate_summary_draft_record_purpose(
+    request: &JudgmentRequest,
+    outcome: &JudgmentOutcome,
+) -> Result<(), JudgmentError> {
+    if request.purpose() != JudgmentPurpose::SummaryDraft {
+        return Err(JudgmentError::SummaryDraftPurposeRequired {
+            field: "judgment request",
+            actual_purpose: request.purpose(),
+        });
+    }
+
+    if outcome.purpose() != JudgmentPurpose::SummaryDraft {
+        return Err(JudgmentError::SummaryDraftPurposeRequired {
+            field: "judgment outcome",
+            actual_purpose: outcome.purpose(),
         });
     }
 
