@@ -4,6 +4,8 @@ Merry is an early-stage Rust-first agent runtime project. APIs and crate boundar
 
 M8 runtime/provider/tool execution hardening has shifted into maintenance and foundation work: structured runtime state, artifact-backed model output, provider step boundaries, pending tool calls, tool result resolution, tool continuations, registered tool execution, public runtime API contract cleanup/review/alignment, and opt-in OpenAI Responses debug/tool flows remain the base for later runtime work.
 
+The first Runtime Agent Loop MVP slice is implemented in `merry-runtime` as a bounded serial loop over the existing `Runtime::step`, registered tool execution, and continuation step primitives. It returns ordered runtime events and typed completed/failed/cancelled/blocked outcomes without adding provider wire state or real filesystem/shell tools.
+
 The OpenAI provider targets the Responses API only. The provider request path is `/responses`; it keeps the Merry-owned `merry-llm` provider boundary intact, keeps OpenAI wire types private to `merry-provider-openai`, sets `store: false`, omits `previous_response_id`, avoids provider conversation state as Merry runtime state, and keeps `parallel_tool_calls: false` until runtime policy supports parallel tool calls. This provider work does not imply a live/OpenAI judgment path or public judgment API.
 
 Memory Activation MVP work is internally integrated in `merry-runtime`. The default activation source is a session-owned in-memory stored source; external/default sessions have no candidate memories until runtime-owned state records them. There is still no public memory write API, external persistence, or stable activation contract.

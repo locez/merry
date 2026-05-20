@@ -28,6 +28,7 @@
 //! builder, event protocol, Memory Activation, and artifact/ledger persistence
 //! contracts settle.
 
+mod agent_loop;
 mod artifact;
 mod context;
 mod error;
@@ -41,6 +42,10 @@ mod step;
 mod summary_draft_promotion;
 mod tool;
 
+pub use agent_loop::{
+    AgentLoopBlockedReason, AgentLoopConfig, AgentLoopConfigError, AgentLoopError, AgentLoopResult,
+    AgentLoopStatus, DEFAULT_AGENT_LOOP_CONTINUATION_INPUT,
+};
 pub use artifact::{
     ArtifactContent, ArtifactContentKind, ArtifactError, ArtifactRecord, ArtifactRegistry,
 };

@@ -43,9 +43,11 @@ The OpenAI provider target is the Responses API only. The provider request path 
 - M18F-I closed out public status and roadmap alignment for M18F without changing Rust behavior.
 - Strict model judgment parsing and a crate-private provider-neutral `ModelBackedJudgmentSource` now exist for internal advisory tool-risk review, with deterministic fake-provider runtime harness coverage through `Runtime::run_uncertainty_review`.
 - OpenAI Responses debug/tool flows remain opt-in manual verification paths, not deterministic test dependencies.
+- Runtime Agent Loop MVP first slice is implemented in `merry-runtime`: a bounded serial public loop composes `Runtime::step`, registered tool execution, and continuation steps, returns ordered events with typed completed/failed/cancelled/blocked outcomes, and keeps provider wire formats and real FS/shell tools out of runtime.
 
 ### Active
 
+- Expand Runtime Agent Loop MVP only through runtime-owned policy and deterministic fake-provider tests; keep parallel tool calls, real tool integrations, provider-specific state, and live-provider verification out of this slice.
 - Keep judgment advisory: semantic recommendations can inform runtime policy, but hard runtime policy still decides tool execution, actions, and context mutation.
 - Keep the initial judgment contract provider-neutral, evidence-aware, cancellable, and deterministic-testable.
 - Do not connect model-backed judgment to live LLM/OpenAI paths, public judgment APIs, public runtime events, ledger facts, tool execution gates, public summary-draft promotion APIs, automatic provider-context inclusion, automatic context mutation or promotion, or builder/runtime configured judgment sources.
