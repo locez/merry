@@ -93,6 +93,23 @@ impl Runtime {
                 session_id: self.inner.session_id.clone(),
             })?;
 
+        self.step_with_active_permit(input, context, active_permit)
+    }
+
+    pub(crate) fn acquire_active_step_permit(&self) -> Result<ActiveStepPermit, RuntimeError> {
+        ActiveStepPermit::acquire(Arc::clone(&self.inner.active_step)).ok_or_else(|| {
+            RuntimeError::StepAlreadyActive {
+                session_id: self.inner.session_id.clone(),
+            }
+        })
+    }
+
+    pub(crate) fn step_with_active_permit(
+        &self,
+        input: StepInput,
+        context: StepContext,
+        active_permit: ActiveStepPermit,
+    ) -> Result<RuntimeEventStream, RuntimeError> {
         let (parent_token, generation_config) = context.into_parts();
         let step_token = parent_token.child_token();
         let producer_token = step_token.clone();
@@ -218,6 +235,16 @@ impl Runtime {
                 session_id: self.inner.session_id.clone(),
             })?;
 
+        self.execute_tool_call_with_active_permit(call_id, context, &_active_permit)
+            .await
+    }
+
+    pub(crate) async fn execute_tool_call_with_active_permit(
+        &self,
+        call_id: &ToolCallId,
+        context: ToolExecutionContext,
+        _active_permit: &ActiveStepPermit,
+    ) -> Result<Vec<RuntimeEvent>, RuntimeError> {
         if context.cancellation_token().is_cancelled() {
             return Err(RuntimeError::ToolExecutionCancelled {
                 session_id: self.inner.session_id.clone(),

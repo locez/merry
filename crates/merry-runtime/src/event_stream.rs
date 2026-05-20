@@ -74,7 +74,6 @@ impl Drop for RuntimeEventStream {
     }
 }
 
-#[derive(Clone)]
 pub(crate) struct ActiveStepPermit {
     inner: Arc<ActiveStepPermitInner>,
 }
@@ -86,27 +85,25 @@ impl ActiveStepPermit {
             .ok()?;
 
         Some(Self {
-            inner: Arc::new(ActiveStepPermitInner {
-                active,
-                released: AtomicBool::new(false),
-            }),
+            inner: Arc::new(ActiveStepPermitInner { active }),
         })
     }
+}
 
-    fn release(&self) {
-        if !self.inner.released.swap(true, Ordering::AcqRel) {
-            self.inner.active.store(false, Ordering::Release);
+impl Clone for ActiveStepPermit {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
         }
     }
 }
 
-impl Drop for ActiveStepPermit {
+impl Drop for ActiveStepPermitInner {
     fn drop(&mut self) {
-        self.release();
+        self.active.store(false, Ordering::Release);
     }
 }
 
 struct ActiveStepPermitInner {
     active: Arc<AtomicBool>,
-    released: AtomicBool,
 }
