@@ -1,14 +1,16 @@
 use futures_util::StreamExt;
 use merry_core::{
-    ArtifactKind, RuntimeEvent, RuntimeEventKind, SessionId, ToolCallResultStatus, ToolName,
+    ArtifactKind, RuntimeEvent, RuntimeEventKind, SessionId, ToolCallResult, ToolCallResultStatus,
+    ToolName,
 };
 use merry_llm::{
     FinishReason, ModelEvent, ModelName, ModelOutput, ModelResponse, ModelToolCall,
-    ModelToolCallId, ToolArguments, testing::FakeModelProvider,
+    ModelToolCallId, ModelToolResultContent, ToolArguments, testing::FakeModelProvider,
 };
 use merry_runtime::{Runtime, StepContext, StepInput, ToolExecutionContext};
 use merry_tool_workspace::{
-    ReadOnlyWorkspaceTools, WORKSPACE_READ_FILE_TOOL, WorkspaceToolsConfig,
+    ReadOnlyWorkspaceTools, WORKSPACE_LIST_DIR_TOOL, WORKSPACE_READ_FILE_TOOL,
+    WORKSPACE_SEARCH_TEXT_TOOL, WorkspaceToolsConfig,
 };
 use serde_json::{Map, Value};
 use std::{
@@ -40,6 +42,14 @@ impl TempWorkspace {
     fn path(&self) -> &Path {
         &self.root
     }
+
+    fn write_text(&self, relative: &str, content: &str) {
+        let path = self.root.join(relative);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("parent directory should be created");
+        }
+        fs::write(path, content).expect("workspace file should be written");
+    }
 }
 
 impl Drop for TempWorkspace {
@@ -56,12 +66,14 @@ fn model_name() -> ModelName {
     ModelName::new("fake/model").expect("valid model name")
 }
 
-fn pending_read_file_call(path: &str) -> ModelEvent {
-    let mut arguments = Map::new();
-    arguments.insert("path".to_owned(), Value::String(path.to_owned()));
+fn pending_workspace_call(
+    call_id: &str,
+    tool_name: &str,
+    arguments: Map<String, Value>,
+) -> ModelEvent {
     let call = ModelToolCall::new(
-        ModelToolCallId::new("workspace-read-call").expect("valid model tool call id"),
-        ToolName::new(WORKSPACE_READ_FILE_TOOL).expect("valid tool name"),
+        ModelToolCallId::new(call_id).expect("valid model tool call id"),
+        ToolName::new(tool_name).expect("valid tool name"),
         ToolArguments::new(arguments),
     );
     ModelEvent::Completed {
@@ -73,6 +85,29 @@ fn pending_read_file_call(path: &str) -> ModelEvent {
     }
 }
 
+fn pending_read_file_call(path: &str) -> ModelEvent {
+    let mut arguments = Map::new();
+    arguments.insert("path".to_owned(), Value::String(path.to_owned()));
+    pending_workspace_call("workspace-read-call", WORKSPACE_READ_FILE_TOOL, arguments)
+}
+
+fn pending_list_dir_call(path: &str) -> ModelEvent {
+    let mut arguments = Map::new();
+    arguments.insert("path".to_owned(), Value::String(path.to_owned()));
+    pending_workspace_call("workspace-list-call", WORKSPACE_LIST_DIR_TOOL, arguments)
+}
+
+fn pending_search_text_call(path: &str, query: &str) -> ModelEvent {
+    let mut arguments = Map::new();
+    arguments.insert("path".to_owned(), Value::String(path.to_owned()));
+    arguments.insert("query".to_owned(), Value::String(query.to_owned()));
+    pending_workspace_call(
+        "workspace-search-call",
+        WORKSPACE_SEARCH_TEXT_TOOL,
+        arguments,
+    )
+}
+
 async fn collect_step(runtime: &Runtime, text: &str) -> Vec<RuntimeEvent> {
     runtime
         .step(
@@ -82,6 +117,52 @@ async fn collect_step(runtime: &Runtime, text: &str) -> Vec<RuntimeEvent> {
         .expect("step should start")
         .collect()
         .await
+}
+
+fn runtime_with_workspace_tools(root: &Path, model_event: ModelEvent) -> Runtime {
+    let (runtime, _) = runtime_with_workspace_tools_and_provider(root, model_event);
+    runtime
+}
+
+fn runtime_with_workspace_tools_and_provider(
+    root: &Path,
+    model_event: ModelEvent,
+) -> (Runtime, FakeModelProvider) {
+    let tools = ReadOnlyWorkspaceTools::new(WorkspaceToolsConfig::new(vec![root.to_path_buf()]))
+        .expect("workspace tools should construct");
+    let provider = FakeModelProvider::new(vec![Ok(model_event)]);
+    let provider_handle = provider.clone();
+    let mut builder =
+        Runtime::builder(session_id()).model_provider(Arc::new(provider), model_name());
+    for tool in tools.into_registered_tools() {
+        builder = builder.register_tool(tool);
+    }
+    (
+        builder.build().expect("runtime should build"),
+        provider_handle,
+    )
+}
+
+async fn execute_first_pending_call(runtime: &Runtime, user_text: &str) -> Vec<RuntimeEvent> {
+    let pending_events = collect_step(runtime, user_text).await;
+    assert_eq!(
+        event_kind_names(&pending_events),
+        ["SessionStarted", "StepStarted", "ToolCallPending"]
+    );
+    let pending_calls = runtime.pending_tool_calls().await;
+    assert_eq!(pending_calls.len(), 1);
+    let pending = pending_calls
+        .into_iter()
+        .next()
+        .expect("pending call should be stored");
+
+    let execution_events = runtime
+        .execute_tool_call(pending.id(), ToolExecutionContext::default())
+        .await
+        .expect("registered workspace tool should execute");
+
+    assert!(runtime.pending_tool_calls().await.is_empty());
+    execution_events
 }
 
 fn event_kind_names(events: &[RuntimeEvent]) -> Vec<&'static str> {
@@ -102,26 +183,107 @@ fn event_kind_names(events: &[RuntimeEvent]) -> Vec<&'static str> {
         .collect()
 }
 
+fn resolved_tool_result(events: &[RuntimeEvent]) -> &ToolCallResult {
+    events
+        .iter()
+        .find_map(|event| match &event.kind {
+            RuntimeEventKind::ToolCallResolved { result } => Some(result),
+            _ => None,
+        })
+        .expect("tool resolution event should be present")
+}
+
+fn assert_artifact_recorded_before_tool_resolution(
+    events: &[RuntimeEvent],
+    result: &ToolCallResult,
+) {
+    assert_eq!(
+        event_kind_names(events),
+        ["ArtifactRecorded", "ToolCallResolved"]
+    );
+    assert!(
+        events
+            .iter()
+            .all(|event| !matches!(event.kind, RuntimeEventKind::Failed { .. })),
+        "tool execution should not emit RuntimeEventKind::Failed: {events:?}"
+    );
+    assert!(matches!(
+        &events[0].kind,
+        RuntimeEventKind::ArtifactRecorded { artifact } if artifact == result.artifact()
+    ));
+    assert!(matches!(
+        &events[1].kind,
+        RuntimeEventKind::ToolCallResolved { result: resolved } if resolved == result
+    ));
+}
+
+fn assert_succeeded_json_result(events: &[RuntimeEvent]) {
+    let result = resolved_tool_result(events);
+    assert_artifact_recorded_before_tool_resolution(events, result);
+    assert_eq!(result.status(), ToolCallResultStatus::Succeeded);
+    assert_eq!(result.artifact().kind(), &ArtifactKind::Json);
+    assert!(result.diagnostic().is_none());
+}
+
+fn assert_failed_json_result(events: &[RuntimeEvent], diagnostic_code: &str) {
+    let result = resolved_tool_result(events);
+    assert_artifact_recorded_before_tool_resolution(events, result);
+    assert_eq!(result.status(), ToolCallResultStatus::Failed);
+    assert_eq!(result.artifact().kind(), &ArtifactKind::Json);
+    assert_eq!(
+        result
+            .diagnostic()
+            .expect("failed result should include diagnostic")
+            .code(),
+        diagnostic_code
+    );
+}
+
+async fn assert_failed_json_artifact_visible_in_next_model_request(
+    runtime: &Runtime,
+    provider: &FakeModelProvider,
+    expected_tool: &str,
+    expected_code: &str,
+    host_root: &Path,
+) {
+    let _events = collect_step(runtime, "continue after tool failure").await;
+
+    let requests = provider.recorded_requests();
+    let request = requests
+        .last()
+        .expect("follow-up request should be recorded");
+    let continuation = request
+        .continuations()
+        .last()
+        .expect("failed tool result should be sent as continuation");
+    assert_eq!(continuation.result().status(), ToolCallResultStatus::Failed);
+    assert_eq!(
+        continuation
+            .result()
+            .diagnostic()
+            .expect("failed continuation should include diagnostic")
+            .code(),
+        expected_code
+    );
+
+    let ModelToolResultContent::Json(json) = continuation.result().content() else {
+        panic!("failed workspace result should be JSON");
+    };
+    let payload: Value = serde_json::from_str(json).expect("failed result JSON should parse");
+    assert_eq!(payload["ok"], false);
+    assert_eq!(payload["tool"], expected_tool);
+    assert_eq!(payload["error"]["code"], expected_code);
+    assert!(
+        !json.contains(host_root.to_str().expect("temp path utf8")),
+        "failed JSON artifact must not include absolute host roots"
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn registered_read_file_tool_records_artifact_before_resolving_pending_call() {
     let temp = TempWorkspace::new("event-order");
-    fs::write(temp.path().join("note.txt"), "alpha\n").expect("workspace file should be written");
-    let tools =
-        ReadOnlyWorkspaceTools::new(WorkspaceToolsConfig::new(vec![temp.path().to_path_buf()]))
-            .expect("workspace tools should construct");
-    let provider = FakeModelProvider::new(vec![Ok(pending_read_file_call("note.txt"))]);
-
-    let runtime = Runtime::builder(session_id())
-        .model_provider(Arc::new(provider), model_name())
-        .register_tool(
-            tools
-                .into_registered_tools()
-                .into_iter()
-                .next()
-                .expect("read tool should be registered"),
-        )
-        .build()
-        .expect("runtime should build");
+    temp.write_text("note.txt", "alpha\n");
+    let runtime = runtime_with_workspace_tools(temp.path(), pending_read_file_call("note.txt"));
 
     let pending_events = collect_step(&runtime, "read note").await;
     assert_eq!(
@@ -149,27 +311,14 @@ async fn registered_read_file_tool_records_artifact_before_resolving_pending_cal
         other => panic!("expected tool resolution, got {other:?}"),
     };
     assert_eq!(result.status(), ToolCallResultStatus::Succeeded);
+    assert_eq!(result.artifact().kind(), &ArtifactKind::Json);
+    assert!(runtime.pending_tool_calls().await.is_empty());
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn registered_read_file_domain_failure_records_failed_json_before_resolving_pending_call() {
     let temp = TempWorkspace::new("domain-failure");
-    let tools =
-        ReadOnlyWorkspaceTools::new(WorkspaceToolsConfig::new(vec![temp.path().to_path_buf()]))
-            .expect("workspace tools should construct");
-    let provider = FakeModelProvider::new(vec![Ok(pending_read_file_call("missing.txt"))]);
-
-    let runtime = Runtime::builder(session_id())
-        .model_provider(Arc::new(provider), model_name())
-        .register_tool(
-            tools
-                .into_registered_tools()
-                .into_iter()
-                .next()
-                .expect("read tool should be registered"),
-        )
-        .build()
-        .expect("runtime should build");
+    let runtime = runtime_with_workspace_tools(temp.path(), pending_read_file_call("missing.txt"));
 
     let pending_events = collect_step(&runtime, "read missing note").await;
     assert_eq!(
@@ -210,4 +359,72 @@ async fn registered_read_file_domain_failure_records_failed_json_before_resolvin
         "workspace_file_not_found"
     );
     assert!(runtime.pending_tool_calls().await.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn registered_list_dir_tool_records_json_artifact_before_resolving_pending_call() {
+    let temp = TempWorkspace::new("list-success");
+    temp.write_text("notes/alpha.txt", "alpha\n");
+    temp.write_text("notes/nested/beta.txt", "beta\n");
+    let runtime = runtime_with_workspace_tools(temp.path(), pending_list_dir_call("notes"));
+
+    let execution_events = execute_first_pending_call(&runtime, "list notes").await;
+
+    assert_succeeded_json_result(&execution_events);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn registered_list_dir_domain_failure_records_failed_json_without_runtime_failed() {
+    let temp = TempWorkspace::new("list-domain-failure");
+    temp.write_text("notes/alpha.txt", "alpha\n");
+    let (runtime, provider) =
+        runtime_with_workspace_tools_and_provider(temp.path(), pending_list_dir_call("../outside"));
+
+    let execution_events = execute_first_pending_call(&runtime, "list outside").await;
+
+    assert_failed_json_result(&execution_events, "workspace_path_denied");
+    assert_failed_json_artifact_visible_in_next_model_request(
+        &runtime,
+        &provider,
+        WORKSPACE_LIST_DIR_TOOL,
+        "workspace_path_denied",
+        temp.path(),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn registered_search_text_tool_records_json_artifact_before_resolving_pending_call() {
+    let temp = TempWorkspace::new("search-success");
+    temp.write_text("notes/alpha.txt", "first alpha\n");
+    temp.write_text("notes/nested/beta.txt", "second alpha\n");
+    temp.write_text("notes/nested/gamma.txt", "unmatched\n");
+    let runtime =
+        runtime_with_workspace_tools(temp.path(), pending_search_text_call("notes", "alpha"));
+
+    let execution_events = execute_first_pending_call(&runtime, "search notes").await;
+
+    assert_succeeded_json_result(&execution_events);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn registered_search_text_domain_failure_records_failed_json_without_runtime_failed() {
+    let temp = TempWorkspace::new("search-domain-failure");
+    temp.write_text("notes/alpha.txt", "alpha\n");
+    let (runtime, provider) = runtime_with_workspace_tools_and_provider(
+        temp.path(),
+        pending_search_text_call("../outside", "alpha"),
+    );
+
+    let execution_events = execute_first_pending_call(&runtime, "search outside").await;
+
+    assert_failed_json_result(&execution_events, "workspace_path_denied");
+    assert_failed_json_artifact_visible_in_next_model_request(
+        &runtime,
+        &provider,
+        WORKSPACE_SEARCH_TEXT_TOOL,
+        "workspace_path_denied",
+        temp.path(),
+    )
+    .await;
 }
