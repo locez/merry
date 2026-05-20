@@ -4,7 +4,7 @@ This roadmap is public-safe and implementation-focused. Private product strategy
 
 ## Current Phase
 
-Merry is in M18F-B LLM-assisted judgment boundary internal audit work, building on the M9 Memory Activation MVP runtime integration.
+Merry is in M18F-C LLM-assisted judgment boundary internal audit work, building on the M9 Memory Activation MVP runtime integration.
 
 M8 runtime/provider/tool execution hardening and M9 Memory Activation MVP are now maintenance and foundation work. Memory Activation now uses a session-owned in-memory stored source by default, but external/default sessions have no candidate memories until runtime-owned state records them. Production memory storage, public memory APIs, external persistence, and a stable activation contract are still not complete. Live provider flows remain explicit opt-in/manual debug paths; they are not the basis for deterministic verification.
 
@@ -40,7 +40,7 @@ M8 runtime/provider/tool execution hardening and M9 Memory Activation MVP are no
 
 ### Active
 
-- Add M18F-B LLM-assisted judgment internal audit storage as a crate-internal `merry-runtime` contract.
+- Add M18F-C LLM-assisted summary-draft audit recording as a crate-internal `merry-runtime` contract.
 - Keep judgment advisory: semantic recommendations can inform runtime policy, but hard runtime policy still decides tool execution, actions, and context mutation.
 - Keep the initial judgment contract provider-neutral, evidence-aware, cancellable, and deterministic-testable.
 - Do not connect live LLM judgment, public judgment APIs, public runtime events, ledger facts, or tool execution gates in this milestone.
@@ -209,11 +209,11 @@ Not included:
 
 ## Active Milestone
 
-### M18F-A / M18F-B: LLM-Assisted Judgment Boundary
+### M18F-A / M18F-B / M18F-C: LLM-Assisted Judgment Boundary
 
 Goal: reserve an internal runtime boundary and audit carrier for semantic judgment without giving judgment authority over runtime policy.
 
-M18F-A established the crate-internal contract skeleton in `merry-runtime`. M18F-B adds a crate-internal completed-judgment audit registry with exact internal request/outcome payload carriers. Judgment outcomes are advisory semantic evidence; they cannot authorize tool execution, actions, or context mutation. Provider wire formats do not enter runtime, and summary/evidence exact artifact rules remain unchanged.
+M18F-A established the crate-internal contract skeleton in `merry-runtime`. M18F-B adds a crate-internal completed-judgment audit registry with exact internal request/outcome payload carriers. M18F-C wires the first narrow summary-draft audit path through a crate-private helper that records completed advisory `SummaryDraft` judgments only after artifact evidence validation. Judgment outcomes are advisory semantic evidence; they cannot authorize tool execution, actions, or context mutation. Provider wire formats do not enter runtime, and summary/evidence exact artifact rules remain unchanged.
 
 Done:
 
@@ -222,19 +222,23 @@ Done:
 - Add unit tests for validation, evidence requirements, object-safe calls, advisory noop behavior, and cancellation context.
 - Add internal completed-only judgment record ids, deterministic registry snapshots, and exact internal request/outcome payload artifacts.
 - Add session-private judgment recording helpers that validate request/outcome evidence against session artifacts before writing the internal registry.
+- Add a crate-private summary-draft judgment helper and deterministic tests proving recorded drafts stay out of compiled context, ledger projection, runtime event sequence, and pending-tool state.
 
 Active:
 
 - Keep the boundary internal while runtime policy integration is designed.
 - Preserve the advisory/hard-policy split in docs, names, and storage boundaries.
+- Keep summary-draft audit as internal storage only, with no automatic context promotion.
 
 Not yet:
 
 - Live LLM-backed judgment source.
 - Public judgment API.
+- Public summary-draft recording API.
 - Tool execution gate integration.
 - New public `merry-core` event, id, or reference types.
 - Public runtime events or ledger facts for judgments.
+- Tool-call policy changes or automatic provider-context inclusion from judgment drafts.
 
 ## Deferred Milestones
 

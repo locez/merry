@@ -6,7 +6,7 @@ M8 runtime/provider/tool execution hardening has shifted into maintenance and fo
 
 Memory Activation MVP work is internally integrated in `merry-runtime`. The default activation source is a session-owned in-memory stored source; external/default sessions have no candidate memories until runtime-owned state records them. There is still no public memory write API, external persistence, or stable activation contract.
 
-M18F-B LLM-assisted judgment boundary work has added an internal completed-judgment audit registry and exact internal request/outcome carrier in `merry-runtime`. Judgment remains advisory semantic input only: it is not connected to a live LLM, public API, tool execution gate, public runtime event, or ledger fact.
+M18F-C LLM-assisted judgment boundary work has added an internal completed-judgment audit registry, exact internal request/outcome carriers, and a crate-private summary-draft audit recording helper in `merry-runtime`. Judgment remains advisory semantic input only: it is not connected to a live LLM, public API, tool execution gate, public runtime event, ledger fact, or automatic context promotion.
 
 Deterministic verification is based on fake providers and stored runtime state. Live provider flows are manual and opt-in, not required for normal tests.
 

@@ -4,7 +4,10 @@ use crate::{
     RuntimeError,
     artifact::{ArtifactContent, ArtifactError, ArtifactRegistry},
     context::{ContextEntry, SessionContextSnapshot},
-    judgment::{JudgmentError, JudgmentOutcome, JudgmentRecord, JudgmentRegistry, JudgmentRequest},
+    judgment::{
+        JudgmentError, JudgmentOutcome, JudgmentRecord, JudgmentRegistry, JudgmentRequest,
+        validate_summary_draft_record_purpose,
+    },
     ledger::{LedgerFactKind, TaskLedger},
     memory::{ActivatedMemory, MemoryError, MemoryItem, MemoryStore},
 };
@@ -193,6 +196,16 @@ impl SessionState {
     ) -> Result<JudgmentRecord, JudgmentError> {
         self.validate_judgment_evidence(&request, &outcome)?;
         self.judgments.record_completed(request, outcome)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn record_summary_draft_judgment(
+        &mut self,
+        request: JudgmentRequest,
+        outcome: JudgmentOutcome,
+    ) -> Result<JudgmentRecord, JudgmentError> {
+        validate_summary_draft_record_purpose(&request, &outcome)?;
+        self.record_judgment(request, outcome)
     }
 
     #[allow(dead_code)]
@@ -588,24 +601,14 @@ mod tests {
         .expect("valid summary draft request")
     }
 
-    fn memory_relevant_outcome(evidence: Vec<JudgmentEvidence>) -> JudgmentOutcome {
-        JudgmentOutcome::new(
-            JudgmentPurpose::MemoryRelevance,
-            JudgmentRecommendation::MemoryRelevant,
-            judgment_confidence(0.7),
-            evidence,
-            "The memory matches the current task.",
-            "Only supplied evidence was reviewed.",
-            judgment_provenance(),
-        )
-        .expect("valid memory relevant outcome")
-    }
-
-    fn summary_draft_outcome(evidence: Vec<JudgmentEvidence>) -> JudgmentOutcome {
+    fn summary_draft_outcome_with_draft(
+        evidence: Vec<JudgmentEvidence>,
+        draft: impl Into<String>,
+    ) -> JudgmentOutcome {
         JudgmentOutcome::new(
             JudgmentPurpose::SummaryDraft,
             JudgmentRecommendation::SummaryDraft {
-                draft: "Draft from readable evidence.".to_owned(),
+                draft: draft.into(),
             },
             judgment_confidence(0.8),
             evidence,
@@ -614,6 +617,10 @@ mod tests {
             judgment_provenance(),
         )
         .expect("valid summary draft outcome")
+    }
+
+    fn summary_draft_outcome(evidence: Vec<JudgmentEvidence>) -> JudgmentOutcome {
+        summary_draft_outcome_with_draft(evidence, "Draft from readable evidence.")
     }
 
     fn high_tool_risk_request() -> crate::judgment::JudgmentRequest {
@@ -855,7 +862,7 @@ mod tests {
     }
 
     #[test]
-    fn record_judgment_rejects_missing_evidence_without_registry_record() {
+    fn summary_draft_judgment_rejects_missing_evidence_without_registry_record() {
         let mut session = SessionState::new(session_id());
         let request = summary_draft_request(vec![judgment_evidence(
             "missing source",
@@ -869,8 +876,8 @@ mod tests {
         )]);
 
         let error = session
-            .record_judgment(request, outcome)
-            .expect_err("missing judgment evidence should reject before registry write");
+            .record_summary_draft_judgment(request, outcome)
+            .expect_err("missing summary draft evidence should reject before registry write");
 
         assert!(matches!(
             error,
@@ -883,7 +890,7 @@ mod tests {
     }
 
     #[test]
-    fn record_judgment_rejects_bad_evidence_locator_without_registry_record() {
+    fn summary_draft_judgment_rejects_bad_evidence_locator_without_registry_record() {
         let mut session = SessionState::new(session_id());
         session
             .record_artifact_state(
@@ -903,8 +910,8 @@ mod tests {
         )]);
 
         let error = session
-            .record_judgment(request, outcome)
-            .expect_err("bad judgment evidence locator should reject before registry write");
+            .record_summary_draft_judgment(request, outcome)
+            .expect_err("bad summary draft evidence locator should reject before registry write");
 
         assert!(matches!(
             error,
@@ -917,7 +924,7 @@ mod tests {
     }
 
     #[test]
-    fn record_judgment_success_is_readable_from_internal_registry() {
+    fn summary_draft_judgment_success_is_readable_from_internal_registry() {
         let mut session = SessionState::new(session_id());
         session
             .record_artifact_state(
@@ -937,8 +944,8 @@ mod tests {
         )]);
 
         let record = session
-            .record_judgment(request, outcome)
-            .expect("readable judgment evidence should record");
+            .record_summary_draft_judgment(request, outcome)
+            .expect("readable summary draft evidence should record");
         let records = session.judgment_records();
 
         assert_eq!(records, vec![record.clone()]);
@@ -969,22 +976,52 @@ mod tests {
     }
 
     #[test]
-    fn record_judgment_does_not_alter_ledger_projection_or_event_sequence() {
+    fn summary_draft_judgment_does_not_enter_context_ledger_events_or_tools() {
         let mut session = SessionState::new(session_id());
         let started = session
             .record_session_started_if_needed()
             .expect("session should start");
+        session
+            .record_artifact_state(
+                ArtifactRef::new(artifact_id("summary-audit-source"), ArtifactKind::Text),
+                ArtifactContent::text("source text for advisory draft\n"),
+            )
+            .expect("artifact records");
+        let request = summary_draft_request(vec![judgment_evidence(
+            "summary source",
+            "summary-audit-source",
+            EvidenceLocator::whole_artifact(),
+        )]);
+        let draft = "Internal advisory summary draft that must not enter context.";
+        let outcome = summary_draft_outcome_with_draft(
+            vec![judgment_evidence(
+                "summary source",
+                "summary-audit-source",
+                EvidenceLocator::whole_artifact(),
+            )],
+            draft,
+        );
         let projection_before = session.ledger_projection();
         let next_sequence_before = session.next_sequence();
+        let pending_tools_before = session.pending_tool_calls();
+        let compiled_before = ContextCompiler::new()
+            .compile(&session.context_snapshot())
+            .expect("empty context compiles before judgment");
 
-        session
-            .record_judgment(
-                memory_relevance_request(Vec::new()),
-                memory_relevant_outcome(Vec::new()),
-            )
-            .expect("judgment without evidence records");
+        let record = session
+            .record_summary_draft_judgment(request, outcome)
+            .expect("summary draft judgment records internally");
+        let compiled_after = ContextCompiler::new()
+            .compile(&session.context_snapshot())
+            .expect("empty context compiles after judgment");
         let completed = session.record_step_completed();
 
+        assert_eq!(session.judgment_records(), vec![record]);
+        assert!(compiled_after.sections().is_empty());
+        assert_eq!(compiled_after.to_snapshot(), "");
+        assert_eq!(compiled_after, compiled_before);
+        assert!(!compiled_after.to_snapshot().contains(draft));
+        assert_eq!(session.pending_tool_calls(), pending_tools_before);
         assert_eq!(session.ledger_projection().entries().len(), 2);
         assert_eq!(
             session.ledger_projection().entries()[0],
@@ -993,6 +1030,63 @@ mod tests {
         assert_eq!(next_sequence_before, 1);
         assert_eq!(started.sequence, 0);
         assert_eq!(completed.sequence, 1);
+    }
+
+    #[test]
+    fn summary_draft_judgment_rejects_non_summary_draft_request_without_registry_record() {
+        let mut session = SessionState::new(session_id());
+        let outcome = JudgmentOutcome::new(
+            JudgmentPurpose::MemoryRelevance,
+            JudgmentRecommendation::NoRecommendation,
+            judgment_confidence(0.1),
+            Vec::new(),
+            "No summary draft was produced.",
+            "Only the helper boundary was exercised.",
+            judgment_provenance(),
+        )
+        .expect("valid no recommendation outcome");
+
+        let error = session
+            .record_summary_draft_judgment(memory_relevance_request(Vec::new()), outcome)
+            .expect_err("non-summary request is rejected by the narrow helper");
+
+        assert_eq!(
+            error,
+            JudgmentError::SummaryDraftPurposeRequired {
+                field: "judgment request",
+                actual_purpose: JudgmentPurpose::MemoryRelevance,
+            }
+        );
+        assert!(session.judgment_records().is_empty());
+    }
+
+    #[test]
+    fn summary_draft_judgment_rejects_non_summary_draft_outcome_without_registry_record() {
+        let mut session = SessionState::new(session_id());
+        session
+            .record_artifact_state(
+                ArtifactRef::new(artifact_id("summary-outcome-source"), ArtifactKind::Text),
+                ArtifactContent::text("source text for advisory draft\n"),
+            )
+            .expect("artifact records");
+        let request = summary_draft_request(vec![judgment_evidence(
+            "summary source",
+            "summary-outcome-source",
+            EvidenceLocator::whole_artifact(),
+        )]);
+
+        let error = session
+            .record_summary_draft_judgment(request, high_tool_risk_outcome())
+            .expect_err("non-summary outcome is rejected by the narrow helper");
+
+        assert_eq!(
+            error,
+            JudgmentError::SummaryDraftPurposeRequired {
+                field: "judgment outcome",
+                actual_purpose: JudgmentPurpose::ToolRiskReview,
+            }
+        );
+        assert!(session.judgment_records().is_empty());
     }
 
     #[test]
