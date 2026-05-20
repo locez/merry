@@ -22,8 +22,9 @@ use crate::{
     context::{ContextError, ContextEvidence, ContextSummary},
 };
 use merry_core::{ArtifactId, EvidenceLocator, EvidenceRef};
+use serde::Deserialize;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt::{self, Write as _},
     future::Future,
     pin::Pin,
@@ -34,6 +35,9 @@ use tokio_util::sync::CancellationToken;
 const JUDGMENT_PAYLOAD_SCHEMA_VERSION: &str = "merry.judgment.audit.v1";
 const JUDGMENT_RECORD_ID_PREFIX: &str = "judgment-record-";
 const JUDGMENT_RECORD_ID_ORDER_DIGITS: usize = 20;
+const MODEL_JUDGMENT_OUTPUT_SCHEMA_VERSION: &str = "merry.model_judgment_output.v1";
+const MODEL_JUDGMENT_TOOL_RISK_RECOMMENDATION_KIND: &str = "tool_risk_review";
+const MODEL_JUDGMENT_TOOL_RISK_EXPECTED_RISK: &str = "low, medium, high, or unknown";
 
 /// Semantic purpose for an internal advisory judgment request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -702,6 +706,95 @@ pub(crate) type JudgmentResult = Result<JudgmentOutcome, JudgmentError>;
 /// Boxed judgment future used for object-safe async boundaries.
 pub(crate) type JudgmentFuture<'a> = Pin<Box<dyn Future<Output = JudgmentResult> + Send + 'a>>;
 
+/// Parse strict model-produced JSON for a tool risk review advisory outcome.
+///
+/// This is a pure converter. It does not record the judgment, mutate session
+/// state, inspect context, emit events, or grant runtime authority.
+pub(crate) fn parse_tool_risk_review_model_judgment_output(
+    output: &str,
+    request: &JudgmentRequest,
+    source_label: &str,
+) -> Result<JudgmentOutcome, JudgmentError> {
+    if request.purpose() != JudgmentPurpose::ToolRiskReview {
+        return Err(JudgmentError::ModelJudgmentPurposeRequired {
+            actual_purpose: request.purpose(),
+        });
+    }
+
+    let output = serde_json::from_str::<ModelJudgmentOutput>(output)
+        .map_err(|_| JudgmentError::InvalidModelJudgmentOutput)?;
+
+    output.into_tool_risk_review_outcome(request, source_label)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelJudgmentOutput {
+    schema_version: String,
+    purpose: String,
+    recommendation: ModelToolRiskReviewRecommendation,
+    confidence: f32,
+    evidence: Vec<ModelJudgmentEvidenceCitation>,
+    rationale: String,
+    uncertainty: String,
+}
+
+impl ModelJudgmentOutput {
+    fn into_tool_risk_review_outcome(
+        self,
+        request: &JudgmentRequest,
+        source_label: &str,
+    ) -> Result<JudgmentOutcome, JudgmentError> {
+        validate_model_judgment_literal(
+            "schema_version",
+            &self.schema_version,
+            MODEL_JUDGMENT_OUTPUT_SCHEMA_VERSION,
+        )?;
+        validate_model_judgment_literal(
+            "purpose",
+            &self.purpose,
+            JudgmentPurpose::ToolRiskReview.as_str(),
+        )?;
+        validate_model_judgment_literal(
+            "recommendation.kind",
+            &self.recommendation.kind,
+            MODEL_JUDGMENT_TOOL_RISK_RECOMMENDATION_KIND,
+        )?;
+
+        let risk = parse_model_judgment_tool_risk_level(&self.recommendation.risk)?;
+        let evidence = select_model_judgment_evidence(self.evidence, request)?;
+        let provenance = JudgmentProvenance::new(JudgmentSourceKind::Llm, source_label)?;
+
+        JudgmentOutcome::new(
+            JudgmentPurpose::ToolRiskReview,
+            JudgmentRecommendation::ToolRiskReview {
+                risk,
+                concerns: self.recommendation.concerns,
+            },
+            JudgmentConfidence::new(self.confidence)?,
+            evidence,
+            self.rationale,
+            self.uncertainty,
+            provenance,
+        )
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelToolRiskReviewRecommendation {
+    kind: String,
+    risk: String,
+    concerns: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelJudgmentEvidenceCitation {
+    index: usize,
+    label: String,
+}
+
 /// Context passed to an advisory judgment source.
 #[derive(Debug, Clone)]
 pub(crate) struct JudgmentContext {
@@ -1091,6 +1184,57 @@ pub(crate) enum JudgmentError {
         actual_purpose: JudgmentPurpose,
     },
 
+    /// The strict model judgment parser received an unsupported request purpose.
+    #[error(
+        "model judgment output parser requires tool risk review judgment purpose, got {actual_purpose}"
+    )]
+    ModelJudgmentPurposeRequired {
+        /// Rejected judgment purpose.
+        actual_purpose: JudgmentPurpose,
+    },
+
+    /// Model judgment output was not one strict JSON object in the expected schema.
+    #[error("model judgment output must be one strict JSON object matching the expected schema")]
+    InvalidModelJudgmentOutput,
+
+    /// Model judgment output used an unsupported literal field value.
+    #[error("model judgment output field {field} must be {expected}, got {actual:?}")]
+    InvalidModelJudgmentLiteral {
+        /// Name of the invalid model output field.
+        field: &'static str,
+        /// Expected literal value.
+        expected: &'static str,
+        /// Rejected value.
+        actual: String,
+    },
+
+    /// Model judgment output cited evidence that was not supplied by the request.
+    #[error("model judgment output evidence index {index} is outside request evidence")]
+    ModelJudgmentEvidenceIndexOutOfRange {
+        /// Rejected evidence citation index.
+        index: usize,
+    },
+
+    /// Model judgment output cited the same request evidence more than once.
+    #[error("model judgment output evidence index {index} is cited more than once")]
+    DuplicateModelJudgmentEvidenceCitation {
+        /// Duplicate evidence citation index.
+        index: usize,
+    },
+
+    /// Model judgment output cited request evidence with the wrong label.
+    #[error(
+        "model judgment output evidence index {index} label must exactly match request evidence label {expected:?}, got {actual:?}"
+    )]
+    ModelJudgmentEvidenceLabelMismatch {
+        /// Evidence citation index whose label did not match.
+        index: usize,
+        /// Request-owned evidence label.
+        expected: String,
+        /// Model-supplied label.
+        actual: String,
+    },
+
     /// Internal judgment record id was invalid.
     #[error("judgment record id {value:?} is invalid: {reason}")]
     InvalidRecordId {
@@ -1160,6 +1304,70 @@ fn validate_record_purpose(
     }
 
     Ok(())
+}
+
+fn validate_model_judgment_literal(
+    field: &'static str,
+    actual: &str,
+    expected: &'static str,
+) -> Result<(), JudgmentError> {
+    if actual != expected {
+        return Err(JudgmentError::InvalidModelJudgmentLiteral {
+            field,
+            expected,
+            actual: actual.to_owned(),
+        });
+    }
+
+    Ok(())
+}
+
+fn parse_model_judgment_tool_risk_level(value: &str) -> Result<JudgmentRiskLevel, JudgmentError> {
+    match value {
+        "low" => Ok(JudgmentRiskLevel::Low),
+        "medium" => Ok(JudgmentRiskLevel::Medium),
+        "high" => Ok(JudgmentRiskLevel::High),
+        "unknown" => Ok(JudgmentRiskLevel::Unknown),
+        actual => Err(JudgmentError::InvalidModelJudgmentLiteral {
+            field: "recommendation.risk",
+            expected: MODEL_JUDGMENT_TOOL_RISK_EXPECTED_RISK,
+            actual: actual.to_owned(),
+        }),
+    }
+}
+
+fn select_model_judgment_evidence(
+    citations: Vec<ModelJudgmentEvidenceCitation>,
+    request: &JudgmentRequest,
+) -> Result<Vec<JudgmentEvidence>, JudgmentError> {
+    let mut selected = Vec::with_capacity(citations.len());
+    let mut seen = BTreeSet::new();
+
+    for citation in citations {
+        if !seen.insert(citation.index) {
+            return Err(JudgmentError::DuplicateModelJudgmentEvidenceCitation {
+                index: citation.index,
+            });
+        }
+
+        let request_evidence = request.evidence().get(citation.index).ok_or(
+            JudgmentError::ModelJudgmentEvidenceIndexOutOfRange {
+                index: citation.index,
+            },
+        )?;
+
+        if request_evidence.label() != citation.label {
+            return Err(JudgmentError::ModelJudgmentEvidenceLabelMismatch {
+                index: citation.index,
+                expected: request_evidence.label().to_owned(),
+                actual: citation.label,
+            });
+        }
+
+        selected.push(request_evidence.clone());
+    }
+
+    Ok(selected)
 }
 
 pub(crate) fn validate_summary_draft_record_purpose(
@@ -1422,6 +1630,7 @@ fn canonicalize_label_text(value: &str) -> String {
 mod tests {
     use super::*;
     use merry_core::{ArtifactId, EvidenceLocator};
+    use serde_json::json;
     use std::sync::Arc;
 
     #[test]
@@ -1671,6 +1880,425 @@ mod tests {
             outcome.recommendation(),
             &JudgmentRecommendation::MemoryNotRelevant
         );
+    }
+
+    #[test]
+    fn model_judgment_tool_risk_output_parses_each_risk_level() {
+        for (value, expected) in [
+            ("low", JudgmentRiskLevel::Low),
+            ("medium", JudgmentRiskLevel::Medium),
+            ("high", JudgmentRiskLevel::High),
+            ("unknown", JudgmentRiskLevel::Unknown),
+        ] {
+            let request = tool_risk_request();
+            let outcome = parse_tool_risk_review_model_judgment_output(
+                &model_tool_risk_output(value, Vec::new()),
+                &request,
+                "test llm source",
+            )
+            .expect("valid tool risk model output parses");
+
+            assert_eq!(outcome.purpose(), JudgmentPurpose::ToolRiskReview);
+            assert_eq!(
+                outcome.recommendation(),
+                &JudgmentRecommendation::ToolRiskReview {
+                    risk: expected,
+                    concerns: vec!["The pending tool path may affect external state.".to_owned()],
+                }
+            );
+            assert_eq!(outcome.confidence().as_f32(), 0.75);
+            assert!(outcome.evidence().is_empty());
+        }
+    }
+
+    #[test]
+    fn model_judgment_tool_risk_output_clones_request_evidence_and_builds_llm_provenance() {
+        let first = evidence("tool call", "tool-call");
+        let second = evidence("policy note", "policy-note");
+        let request = tool_risk_request_with_evidence(vec![first.clone(), second.clone()]);
+
+        let outcome = parse_tool_risk_review_model_judgment_output(
+            &model_tool_risk_output(
+                "high",
+                vec![
+                    json!({ "index": 1, "label": "policy note" }),
+                    json!({ "index": 0, "label": "tool call" }),
+                ],
+            ),
+            &request,
+            "openai risk reviewer",
+        )
+        .expect("valid cited evidence parses");
+
+        assert_eq!(outcome.evidence(), &[second, first]);
+        assert_eq!(outcome.provenance().source_kind(), JudgmentSourceKind::Llm);
+        assert_eq!(outcome.provenance().source_label(), "openai risk reviewer");
+    }
+
+    #[test]
+    fn model_judgment_tool_risk_output_allows_empty_evidence() {
+        let request = tool_risk_request();
+        let outcome = parse_tool_risk_review_model_judgment_output(
+            &model_tool_risk_output("medium", Vec::new()),
+            &request,
+            "test llm source",
+        )
+        .expect("tool risk review allows empty evidence");
+
+        assert!(outcome.evidence().is_empty());
+    }
+
+    #[test]
+    fn model_judgment_tool_risk_output_allows_empty_concerns() {
+        let request = tool_risk_request();
+        let output = model_tool_risk_output_with_recommendation_extra(json!({ "concerns": [] }));
+        let outcome =
+            parse_tool_risk_review_model_judgment_output(&output, &request, "test llm source")
+                .expect("tool risk review allows empty concerns");
+
+        assert_eq!(
+            outcome.recommendation(),
+            &JudgmentRecommendation::ToolRiskReview {
+                risk: JudgmentRiskLevel::Low,
+                concerns: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn model_judgment_output_rejects_wrapped_or_non_object_json() {
+        let request = tool_risk_request();
+        let valid = model_tool_risk_output("low", Vec::new());
+
+        for output in [
+            format!("```json\n{valid}\n```"),
+            format!("review result:\n{valid}"),
+            format!("{valid}\nreview complete"),
+            format!("{valid}\n{valid}"),
+            String::new(),
+            "   ".to_owned(),
+            "[]".to_owned(),
+            "null".to_owned(),
+        ] {
+            assert_eq!(
+                parse_tool_risk_review_model_judgment_output(&output, &request, "test llm source",)
+                    .expect_err("non-strict model output rejects"),
+                JudgmentError::InvalidModelJudgmentOutput
+            );
+        }
+    }
+
+    #[test]
+    fn model_judgment_output_rejects_unknown_or_missing_top_level_fields() {
+        let request = tool_risk_request();
+
+        for output in [
+            model_tool_risk_output_with_extra(json!({ "extra": "field" })),
+            json!({
+                "purpose": "tool_risk_review",
+                "recommendation": {
+                    "kind": "tool_risk_review",
+                    "risk": "low",
+                    "concerns": ["Concern text."]
+                },
+                "confidence": 0.75,
+                "evidence": [],
+                "rationale": "Rationale is present.",
+                "uncertainty": "Uncertainty is present."
+            })
+            .to_string(),
+        ] {
+            assert_eq!(
+                parse_tool_risk_review_model_judgment_output(&output, &request, "test llm source",)
+                    .expect_err("unknown or missing model field rejects"),
+                JudgmentError::InvalidModelJudgmentOutput
+            );
+        }
+    }
+
+    #[test]
+    fn model_judgment_output_rejects_unknown_nested_fields() {
+        let request = tool_risk_request_with_evidence(vec![evidence("tool call", "tool-call")]);
+
+        let unknown_recommendation_field =
+            model_tool_risk_output_with_recommendation_extra(json!({
+                "explanation": "not part of the strict recommendation schema"
+            }));
+        assert_eq!(
+            parse_tool_risk_review_model_judgment_output(
+                &unknown_recommendation_field,
+                &request,
+                "test llm source",
+            )
+            .expect_err("unknown recommendation field rejects"),
+            JudgmentError::InvalidModelJudgmentOutput
+        );
+
+        let unknown_evidence_field = model_tool_risk_output(
+            "low",
+            vec![json!({
+                "index": 0,
+                "label": "tool call",
+                "excerpt": "not part of the strict evidence citation schema"
+            })],
+        );
+        assert_eq!(
+            parse_tool_risk_review_model_judgment_output(
+                &unknown_evidence_field,
+                &request,
+                "test llm source",
+            )
+            .expect_err("unknown evidence citation field rejects"),
+            JudgmentError::InvalidModelJudgmentOutput
+        );
+    }
+
+    #[test]
+    fn model_judgment_output_rejects_non_array_evidence() {
+        let request = tool_risk_request();
+        let output = model_tool_risk_output_with_extra(json!({
+            "evidence": {
+                "index": 0,
+                "label": "tool call"
+            }
+        }));
+
+        assert_eq!(
+            parse_tool_risk_review_model_judgment_output(&output, &request, "test llm source")
+                .expect_err("non-array evidence rejects"),
+            JudgmentError::InvalidModelJudgmentOutput
+        );
+    }
+
+    #[test]
+    fn model_judgment_output_rejects_bad_schema_purpose_kind_and_risk() {
+        let request = tool_risk_request();
+
+        let bad_schema = model_tool_risk_output_with_extra(json!({
+            "schema_version": "merry.model_judgment_output.v2"
+        }));
+        assert_eq!(
+            parse_tool_risk_review_model_judgment_output(&bad_schema, &request, "test llm source",)
+                .expect_err("bad schema version rejects"),
+            JudgmentError::InvalidModelJudgmentLiteral {
+                field: "schema_version",
+                expected: MODEL_JUDGMENT_OUTPUT_SCHEMA_VERSION,
+                actual: "merry.model_judgment_output.v2".to_owned(),
+            }
+        );
+
+        let purpose_mismatch = model_tool_risk_output_with_extra(json!({
+            "purpose": "summary_draft"
+        }));
+        assert_eq!(
+            parse_tool_risk_review_model_judgment_output(
+                &purpose_mismatch,
+                &request,
+                "test llm source",
+            )
+            .expect_err("purpose mismatch rejects"),
+            JudgmentError::InvalidModelJudgmentLiteral {
+                field: "purpose",
+                expected: "tool_risk_review",
+                actual: "summary_draft".to_owned(),
+            }
+        );
+
+        let wrong_kind = model_tool_risk_output_with_recommendation_extra(json!({
+            "kind": "summary_draft"
+        }));
+        assert_eq!(
+            parse_tool_risk_review_model_judgment_output(&wrong_kind, &request, "test llm source",)
+                .expect_err("wrong recommendation kind rejects"),
+            JudgmentError::InvalidModelJudgmentLiteral {
+                field: "recommendation.kind",
+                expected: "tool_risk_review",
+                actual: "summary_draft".to_owned(),
+            }
+        );
+
+        let unknown_risk = model_tool_risk_output_with_recommendation_extra(json!({
+            "risk": "critical"
+        }));
+        assert_eq!(
+            parse_tool_risk_review_model_judgment_output(
+                &unknown_risk,
+                &request,
+                "test llm source",
+            )
+            .expect_err("unknown risk rejects"),
+            JudgmentError::InvalidModelJudgmentLiteral {
+                field: "recommendation.risk",
+                expected: MODEL_JUDGMENT_TOOL_RISK_EXPECTED_RISK,
+                actual: "critical".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn model_judgment_output_rejects_invalid_confidence_and_blank_fields() {
+        let request = tool_risk_request();
+
+        let invalid_confidence = model_tool_risk_output_with_extra(json!({ "confidence": 1.01 }));
+        assert_eq!(
+            parse_tool_risk_review_model_judgment_output(
+                &invalid_confidence,
+                &request,
+                "test llm source",
+            )
+            .expect_err("invalid confidence rejects"),
+            JudgmentError::InvalidConfidence { value: 1.01 }
+        );
+
+        let blank_rationale = model_tool_risk_output_with_extra(json!({ "rationale": " " }));
+        assert_eq!(
+            parse_tool_risk_review_model_judgment_output(
+                &blank_rationale,
+                &request,
+                "test llm source",
+            )
+            .expect_err("blank rationale rejects"),
+            JudgmentError::BlankField {
+                field: "judgment outcome rationale"
+            }
+        );
+
+        let blank_uncertainty = model_tool_risk_output_with_extra(json!({ "uncertainty": " " }));
+        assert_eq!(
+            parse_tool_risk_review_model_judgment_output(
+                &blank_uncertainty,
+                &request,
+                "test llm source",
+            )
+            .expect_err("blank uncertainty rejects"),
+            JudgmentError::BlankField {
+                field: "judgment outcome uncertainty"
+            }
+        );
+
+        let blank_concern = model_tool_risk_output_with_recommendation_extra(json!({
+            "concerns": [" "]
+        }));
+        assert_eq!(
+            parse_tool_risk_review_model_judgment_output(
+                &blank_concern,
+                &request,
+                "test llm source",
+            )
+            .expect_err("blank concern rejects"),
+            JudgmentError::BlankField {
+                field: "judgment tool risk concern"
+            }
+        );
+    }
+
+    #[test]
+    fn model_judgment_output_rejects_bad_evidence_citations() {
+        let request = tool_risk_request_with_evidence(vec![
+            evidence("tool call", "tool-call"),
+            evidence("policy note", "policy-note"),
+        ]);
+
+        let out_of_range = model_tool_risk_output(
+            "low",
+            vec![json!({ "index": 2, "label": "missing evidence" })],
+        );
+        assert_eq!(
+            parse_tool_risk_review_model_judgment_output(
+                &out_of_range,
+                &request,
+                "test llm source",
+            )
+            .expect_err("out-of-range evidence citation rejects"),
+            JudgmentError::ModelJudgmentEvidenceIndexOutOfRange { index: 2 }
+        );
+
+        let duplicate = model_tool_risk_output(
+            "low",
+            vec![
+                json!({ "index": 0, "label": "tool call" }),
+                json!({ "index": 0, "label": "tool call" }),
+            ],
+        );
+        assert_eq!(
+            parse_tool_risk_review_model_judgment_output(&duplicate, &request, "test llm source",)
+                .expect_err("duplicate evidence citation rejects"),
+            JudgmentError::DuplicateModelJudgmentEvidenceCitation { index: 0 }
+        );
+
+        let label_mismatch = model_tool_risk_output(
+            "low",
+            vec![json!({ "index": 1, "label": "renamed evidence" })],
+        );
+        assert_eq!(
+            parse_tool_risk_review_model_judgment_output(
+                &label_mismatch,
+                &request,
+                "test llm source",
+            )
+            .expect_err("evidence label mismatch rejects"),
+            JudgmentError::ModelJudgmentEvidenceLabelMismatch {
+                index: 1,
+                expected: "policy note".to_owned(),
+                actual: "renamed evidence".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn model_judgment_output_rejects_authority_fields_as_unknown() {
+        let request = tool_risk_request();
+
+        for output in [
+            model_tool_risk_output_with_extra(json!({
+                "provenance": {
+                    "source_kind": "llm",
+                    "source_label": "model supplied"
+                }
+            })),
+            model_tool_risk_output_with_extra(json!({ "action": "run_tool" })),
+            model_tool_risk_output_with_extra(json!({ "allow": true })),
+            model_tool_risk_output_with_extra(json!({ "deny": false })),
+        ] {
+            assert_eq!(
+                parse_tool_risk_review_model_judgment_output(&output, &request, "test llm source",)
+                    .expect_err("authority field rejects"),
+                JudgmentError::InvalidModelJudgmentOutput
+            );
+        }
+    }
+
+    #[test]
+    fn model_judgment_output_rejects_non_tool_risk_review_requests() {
+        let error = parse_tool_risk_review_model_judgment_output(
+            &model_tool_risk_output("low", Vec::new()),
+            &memory_relevance_request(),
+            "test llm source",
+        )
+        .expect_err("non-tool-risk request rejects");
+
+        assert_eq!(
+            error,
+            JudgmentError::ModelJudgmentPurposeRequired {
+                actual_purpose: JudgmentPurpose::MemoryRelevance,
+            }
+        );
+    }
+
+    #[test]
+    fn model_judgment_output_parser_is_pure_and_non_authoritative() {
+        let request = tool_risk_request();
+        let outcome = parse_tool_risk_review_model_judgment_output(
+            &model_tool_risk_output("high", Vec::new()),
+            &request,
+            "test llm source",
+        )
+        .expect("valid tool risk model output parses");
+
+        assert_eq!(request.evidence(), &[]);
+        assert_eq!(outcome.purpose(), JudgmentPurpose::ToolRiskReview);
+        assert!(outcome.evidence().is_empty());
+        assert_eq!(outcome.provenance().source_kind(), JudgmentSourceKind::Llm);
     }
 
     #[test]
@@ -2190,6 +2818,18 @@ mod tests {
         .expect("tool risk request is valid")
     }
 
+    fn tool_risk_request_with_evidence(evidence: Vec<JudgmentEvidence>) -> JudgmentRequest {
+        JudgmentRequest::new(
+            JudgmentPurpose::ToolRiskReview,
+            "lookup tool call",
+            "Review whether the pending tool request has semantic risk.",
+            evidence,
+            constraints(),
+            "test request",
+        )
+        .expect("tool risk request is valid")
+    }
+
     fn summary_draft_request() -> JudgmentRequest {
         JudgmentRequest::new(
             JudgmentPurpose::SummaryDraft,
@@ -2288,5 +2928,68 @@ mod tests {
 
     fn artifact_id(value: &str) -> ArtifactId {
         ArtifactId::new(value).expect("artifact id is valid")
+    }
+
+    fn model_tool_risk_output(risk: &str, evidence: Vec<serde_json::Value>) -> String {
+        json!({
+            "schema_version": MODEL_JUDGMENT_OUTPUT_SCHEMA_VERSION,
+            "purpose": "tool_risk_review",
+            "recommendation": {
+                "kind": "tool_risk_review",
+                "risk": risk,
+                "concerns": ["The pending tool path may affect external state."]
+            },
+            "confidence": 0.75,
+            "evidence": evidence,
+            "rationale": "The requested tool path has semantic risk for policy to consider.",
+            "uncertainty": "The review is advisory and does not authorize the tool."
+        })
+        .to_string()
+    }
+
+    fn model_tool_risk_output_with_extra(extra: serde_json::Value) -> String {
+        let mut output = json!({
+            "schema_version": MODEL_JUDGMENT_OUTPUT_SCHEMA_VERSION,
+            "purpose": "tool_risk_review",
+            "recommendation": {
+                "kind": "tool_risk_review",
+                "risk": "low",
+                "concerns": ["The pending tool path may affect external state."]
+            },
+            "confidence": 0.75,
+            "evidence": [],
+            "rationale": "The requested tool path has semantic risk for policy to consider.",
+            "uncertainty": "The review is advisory and does not authorize the tool."
+        });
+
+        merge_json_object(&mut output, extra);
+        output.to_string()
+    }
+
+    fn model_tool_risk_output_with_recommendation_extra(extra: serde_json::Value) -> String {
+        let mut output = json!({
+            "schema_version": MODEL_JUDGMENT_OUTPUT_SCHEMA_VERSION,
+            "purpose": "tool_risk_review",
+            "recommendation": {
+                "kind": "tool_risk_review",
+                "risk": "low",
+                "concerns": ["The pending tool path may affect external state."]
+            },
+            "confidence": 0.75,
+            "evidence": [],
+            "rationale": "The requested tool path has semantic risk for policy to consider.",
+            "uncertainty": "The review is advisory and does not authorize the tool."
+        });
+
+        merge_json_object(&mut output["recommendation"], extra);
+        output.to_string()
+    }
+
+    fn merge_json_object(target: &mut serde_json::Value, patch: serde_json::Value) {
+        let target = target.as_object_mut().expect("target is a JSON object");
+        let patch = patch.as_object().expect("patch is a JSON object");
+        for (key, value) in patch {
+            target.insert(key.clone(), value.clone());
+        }
     }
 }
