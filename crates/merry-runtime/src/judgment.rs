@@ -17,7 +17,10 @@
 // Staged internal judgment types are compiled before runtime call paths are wired.
 #![cfg_attr(not(test), allow(dead_code))]
 
-use crate::artifact::ArtifactError;
+use crate::{
+    artifact::ArtifactError,
+    context::{ContextError, ContextEvidence, ContextSummary},
+};
 use merry_core::{ArtifactId, EvidenceLocator, EvidenceRef};
 use std::{
     collections::BTreeMap,
@@ -754,6 +757,247 @@ impl JudgmentSource for NoopJudgmentSource {
     }
 }
 
+/// Authority allowed to explicitly accept a summary draft for context promotion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SummaryDraftAcceptanceAuthority {
+    /// Runtime hard policy accepted the promotion.
+    HardPolicy,
+    /// A human explicitly accepted the promotion.
+    Human,
+    /// A deterministic, non-LLM review accepted the promotion.
+    DeterministicReview,
+}
+
+/// Explicit acceptance required before a summary draft can become context.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SummaryDraftAcceptance {
+    authority: SummaryDraftAcceptanceAuthority,
+    source_label: String,
+    rationale: String,
+}
+
+impl SummaryDraftAcceptance {
+    pub(crate) fn new(
+        authority: SummaryDraftAcceptanceAuthority,
+        source_label: impl Into<String>,
+        rationale: impl Into<String>,
+    ) -> Result<Self, SummaryDraftPromotionError> {
+        let source_label = source_label.into();
+        validate_promotion_non_blank("summary draft acceptance source label", &source_label)?;
+
+        let rationale = rationale.into();
+        validate_promotion_non_blank("summary draft acceptance rationale", &rationale)?;
+
+        Ok(Self {
+            authority,
+            source_label: canonicalize_label_text(&source_label),
+            rationale,
+        })
+    }
+
+    #[must_use]
+    pub(crate) fn authority(&self) -> SummaryDraftAcceptanceAuthority {
+        self.authority
+    }
+
+    #[must_use]
+    pub(crate) fn source_label(&self) -> &str {
+        &self.source_label
+    }
+
+    #[must_use]
+    pub(crate) fn rationale(&self) -> &str {
+        &self.rationale
+    }
+}
+
+/// Explicit input for turning an accepted summary draft into context.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SummaryDraftPromotionInput {
+    summary_id: String,
+    draft_text: String,
+    selected_evidence: Vec<JudgmentEvidence>,
+    acceptance: SummaryDraftAcceptance,
+    source_record_id: Option<JudgmentRecordId>,
+}
+
+impl SummaryDraftPromotionInput {
+    pub(crate) fn new(
+        summary_id: impl Into<String>,
+        draft_text: impl Into<String>,
+        selected_evidence: Vec<JudgmentEvidence>,
+        acceptance: SummaryDraftAcceptance,
+        source_record_id: Option<JudgmentRecordId>,
+    ) -> Result<Self, SummaryDraftPromotionError> {
+        let summary_id = summary_id.into();
+        validate_promotion_non_blank("summary draft promotion summary id", &summary_id)?;
+
+        let draft_text = draft_text.into();
+        validate_promotion_non_blank("summary draft promotion draft text", &draft_text)?;
+
+        if selected_evidence.is_empty() {
+            return Err(SummaryDraftPromotionError::EmptySelectedEvidence);
+        }
+
+        Ok(Self {
+            summary_id,
+            draft_text,
+            selected_evidence,
+            acceptance,
+            source_record_id,
+        })
+    }
+}
+
+/// Errors raised while explicitly promoting an accepted summary draft to context.
+#[derive(Debug, PartialEq, Eq, Error)]
+pub(crate) enum SummaryDraftPromotionError {
+    /// A required promotion text field was blank.
+    #[error("{field} must not be blank")]
+    BlankField {
+        /// Name of the invalid field.
+        field: &'static str,
+    },
+
+    /// Promotion was attempted for a non-summary-draft request or outcome.
+    #[error("{field} requires summary draft judgment purpose, got {actual_purpose}")]
+    SummaryDraftPurposeRequired {
+        /// Name of the rejected input field.
+        field: &'static str,
+        /// Rejected judgment purpose.
+        actual_purpose: JudgmentPurpose,
+    },
+
+    /// A summary draft outcome produced no promotable recommendation.
+    #[error(
+        "summary draft promotion requires a summary draft recommendation, got no recommendation"
+    )]
+    NoRecommendation,
+
+    /// A summary draft outcome carried an unsupported recommendation variant.
+    #[error(
+        "summary draft promotion requires a summary draft recommendation, got {recommendation}"
+    )]
+    SummaryDraftRecommendationRequired {
+        /// Rejected recommendation kind.
+        recommendation: &'static str,
+    },
+
+    /// Accepted text did not exactly match the draft recommended by the judgment.
+    #[error("accepted summary draft text does not exactly match judgment recommendation")]
+    DraftMismatch {
+        /// Draft recommended by the judgment outcome.
+        recommended: String,
+        /// Draft supplied for promotion.
+        accepted: String,
+    },
+
+    /// Promotion selected no exact evidence references.
+    #[error("summary draft promotion requires at least one selected exact evidence reference")]
+    EmptySelectedEvidence,
+
+    /// Selected evidence did not come from the request/outcome evidence union.
+    #[error("summary draft selected evidence was not present in request or outcome evidence")]
+    SelectedEvidenceNotInJudgment {
+        /// Artifact identifier from the rejected evidence reference.
+        artifact_id: ArtifactId,
+        /// Locator from the rejected evidence reference.
+        locator: EvidenceLocator,
+    },
+
+    /// A context summary id already exists in the owning session.
+    #[error("context summary id {summary_id} already exists")]
+    DuplicateSummaryId {
+        /// Duplicate context summary identifier.
+        summary_id: String,
+    },
+
+    /// Context construction or compilation rejected the promoted summary.
+    #[error("summary draft promotion failed context validation: {source}")]
+    Context {
+        /// Source context validation error.
+        #[from]
+        source: ContextError,
+    },
+}
+
+pub(crate) fn context_summary_from_accepted_summary_draft(
+    request: &JudgmentRequest,
+    outcome: &JudgmentOutcome,
+    input: SummaryDraftPromotionInput,
+) -> Result<ContextSummary, SummaryDraftPromotionError> {
+    if request.purpose() != JudgmentPurpose::SummaryDraft {
+        return Err(SummaryDraftPromotionError::SummaryDraftPurposeRequired {
+            field: "judgment request",
+            actual_purpose: request.purpose(),
+        });
+    }
+
+    if outcome.purpose() != JudgmentPurpose::SummaryDraft {
+        return Err(SummaryDraftPromotionError::SummaryDraftPurposeRequired {
+            field: "judgment outcome",
+            actual_purpose: outcome.purpose(),
+        });
+    }
+
+    let recommended_draft = match outcome.recommendation() {
+        JudgmentRecommendation::SummaryDraft { draft } => draft.as_str(),
+        JudgmentRecommendation::NoRecommendation => {
+            return Err(SummaryDraftPromotionError::NoRecommendation);
+        }
+        recommendation => {
+            return Err(
+                SummaryDraftPromotionError::SummaryDraftRecommendationRequired {
+                    recommendation: recommendation.kind(),
+                },
+            );
+        }
+    };
+
+    let SummaryDraftPromotionInput {
+        summary_id,
+        draft_text,
+        selected_evidence,
+        acceptance: _acceptance,
+        source_record_id: _source_record_id,
+    } = input;
+
+    if draft_text != recommended_draft {
+        return Err(SummaryDraftPromotionError::DraftMismatch {
+            recommended: recommended_draft.to_owned(),
+            accepted: draft_text,
+        });
+    }
+
+    if selected_evidence.is_empty() {
+        return Err(SummaryDraftPromotionError::EmptySelectedEvidence);
+    }
+
+    let evidence = selected_evidence
+        .iter()
+        .map(|selected| {
+            let evidence =
+                find_matching_judgment_evidence(request, outcome, selected).ok_or_else(|| {
+                    SummaryDraftPromotionError::SelectedEvidenceNotInJudgment {
+                        artifact_id: selected.reference().artifact_id.clone(),
+                        locator: selected.reference().locator.clone(),
+                    }
+                })?;
+
+            Ok(ContextEvidence::new(
+                evidence.label(),
+                evidence.reference().clone(),
+            )?)
+        })
+        .collect::<Result<Vec<_>, SummaryDraftPromotionError>>()?;
+
+    Ok(ContextSummary::new(
+        summary_id,
+        recommended_draft,
+        evidence,
+    )?)
+}
+
 /// Errors raised while building or requesting internal advisory judgments.
 #[derive(Debug, Clone, PartialEq, Error)]
 pub(crate) enum JudgmentError {
@@ -900,6 +1144,29 @@ pub(crate) fn validate_summary_draft_record_purpose(
             field: "judgment outcome",
             actual_purpose: outcome.purpose(),
         });
+    }
+
+    Ok(())
+}
+
+fn find_matching_judgment_evidence<'a>(
+    request: &'a JudgmentRequest,
+    outcome: &'a JudgmentOutcome,
+    selected: &JudgmentEvidence,
+) -> Option<&'a JudgmentEvidence> {
+    request
+        .evidence()
+        .iter()
+        .chain(outcome.evidence())
+        .find(|evidence| *evidence == selected)
+}
+
+fn validate_promotion_non_blank(
+    field: &'static str,
+    value: &str,
+) -> Result<(), SummaryDraftPromotionError> {
+    if value.trim().is_empty() {
+        return Err(SummaryDraftPromotionError::BlankField { field });
     }
 
     Ok(())
@@ -1582,6 +1849,289 @@ mod tests {
         );
     }
 
+    #[test]
+    fn summary_draft_acceptance_authority_has_no_llm_route() {
+        fn authority_name(authority: SummaryDraftAcceptanceAuthority) -> &'static str {
+            match authority {
+                SummaryDraftAcceptanceAuthority::HardPolicy => "hard_policy",
+                SummaryDraftAcceptanceAuthority::Human => "human",
+                SummaryDraftAcceptanceAuthority::DeterministicReview => "deterministic_review",
+            }
+        }
+
+        let authorities = [
+            SummaryDraftAcceptanceAuthority::HardPolicy,
+            SummaryDraftAcceptanceAuthority::Human,
+            SummaryDraftAcceptanceAuthority::DeterministicReview,
+        ];
+        assert_eq!(
+            authorities
+                .iter()
+                .copied()
+                .map(authority_name)
+                .collect::<Vec<_>>(),
+            vec!["hard_policy", "human", "deterministic_review"]
+        );
+
+        let acceptance = SummaryDraftAcceptance::new(
+            SummaryDraftAcceptanceAuthority::DeterministicReview,
+            " deterministic review ",
+            "Review accepted the draft for context promotion.",
+        )
+        .expect("explicit deterministic acceptance is valid");
+        assert_eq!(
+            acceptance.authority(),
+            SummaryDraftAcceptanceAuthority::DeterministicReview
+        );
+        assert_eq!(acceptance.source_label(), "deterministic review");
+        assert_eq!(
+            acceptance.rationale(),
+            "Review accepted the draft for context promotion."
+        );
+    }
+
+    #[test]
+    fn summary_draft_acceptance_and_input_reject_blank_or_empty_fields() {
+        assert_eq!(
+            SummaryDraftAcceptance::new(
+                SummaryDraftAcceptanceAuthority::Human,
+                " ",
+                "Human accepted the draft.",
+            )
+            .expect_err("blank acceptance source label rejects"),
+            SummaryDraftPromotionError::BlankField {
+                field: "summary draft acceptance source label"
+            }
+        );
+        assert_eq!(
+            SummaryDraftAcceptance::new(SummaryDraftAcceptanceAuthority::Human, "reviewer", " ",)
+                .expect_err("blank acceptance rationale rejects"),
+            SummaryDraftPromotionError::BlankField {
+                field: "summary draft acceptance rationale"
+            }
+        );
+
+        let acceptance = acceptance();
+        assert_eq!(
+            SummaryDraftPromotionInput::new(
+                " ",
+                "Summary draft from exact evidence.",
+                vec![evidence("source", "summary-source")],
+                acceptance.clone(),
+                None,
+            )
+            .expect_err("blank summary id rejects"),
+            SummaryDraftPromotionError::BlankField {
+                field: "summary draft promotion summary id"
+            }
+        );
+        assert_eq!(
+            SummaryDraftPromotionInput::new(
+                "summary-id",
+                " ",
+                vec![evidence("source", "summary-source")],
+                acceptance.clone(),
+                None,
+            )
+            .expect_err("blank draft text rejects"),
+            SummaryDraftPromotionError::BlankField {
+                field: "summary draft promotion draft text"
+            }
+        );
+        assert_eq!(
+            SummaryDraftPromotionInput::new(
+                "summary-id",
+                "Summary draft from exact evidence.",
+                Vec::new(),
+                acceptance,
+                None,
+            )
+            .expect_err("empty selected evidence rejects"),
+            SummaryDraftPromotionError::EmptySelectedEvidence
+        );
+    }
+
+    #[test]
+    fn accepted_summary_draft_promotes_to_context_summary_with_selected_evidence() {
+        let request = summary_draft_request();
+        let outcome = summary_draft_outcome();
+        let input = SummaryDraftPromotionInput::new(
+            "accepted-summary",
+            "Summary draft from exact evidence.",
+            vec![evidence("source", "summary-source")],
+            acceptance(),
+            Some(JudgmentRecordId::new("audit-record").expect("valid audit record id")),
+        )
+        .expect("valid promotion input");
+
+        let summary = context_summary_from_accepted_summary_draft(&request, &outcome, input)
+            .expect("accepted summary draft promotes to context summary");
+
+        assert_eq!(summary.id(), "accepted-summary");
+        assert_eq!(summary.text(), "Summary draft from exact evidence.");
+        assert_eq!(summary.evidence().len(), 1);
+        assert_eq!(summary.evidence()[0].label(), "source");
+        assert_eq!(
+            summary.evidence()[0].reference(),
+            &EvidenceRef::new(
+                artifact_id("summary-source"),
+                EvidenceLocator::whole_artifact()
+            )
+        );
+    }
+
+    #[test]
+    fn summary_draft_promotion_rejects_non_summary_draft_request() {
+        let error = context_summary_from_accepted_summary_draft(
+            &memory_relevance_request(),
+            &summary_draft_outcome(),
+            promotion_input("accepted-summary", "Summary draft from exact evidence."),
+        )
+        .expect_err("non-summary request rejects");
+
+        assert_eq!(
+            error,
+            SummaryDraftPromotionError::SummaryDraftPurposeRequired {
+                field: "judgment request",
+                actual_purpose: JudgmentPurpose::MemoryRelevance,
+            }
+        );
+    }
+
+    #[test]
+    fn summary_draft_promotion_rejects_non_summary_draft_outcome() {
+        let error = context_summary_from_accepted_summary_draft(
+            &summary_draft_request(),
+            &high_tool_risk_outcome(),
+            promotion_input("accepted-summary", "Summary draft from exact evidence."),
+        )
+        .expect_err("non-summary outcome rejects");
+
+        assert_eq!(
+            error,
+            SummaryDraftPromotionError::SummaryDraftPurposeRequired {
+                field: "judgment outcome",
+                actual_purpose: JudgmentPurpose::ToolRiskReview,
+            }
+        );
+    }
+
+    #[test]
+    fn summary_draft_promotion_rejects_no_recommendation() {
+        let request = summary_draft_request();
+        let outcome = JudgmentOutcome::new(
+            JudgmentPurpose::SummaryDraft,
+            JudgmentRecommendation::NoRecommendation,
+            confidence(0.0),
+            Vec::new(),
+            "No summary draft was produced.",
+            "The advisory source produced no recommendation.",
+            provenance(JudgmentSourceKind::Test),
+        )
+        .expect("summary draft no recommendation outcome is valid");
+
+        let error = context_summary_from_accepted_summary_draft(
+            &request,
+            &outcome,
+            promotion_input("accepted-summary", "Summary draft from exact evidence."),
+        )
+        .expect_err("no recommendation rejects");
+
+        assert_eq!(error, SummaryDraftPromotionError::NoRecommendation);
+    }
+
+    #[test]
+    fn summary_draft_promotion_rejects_draft_mismatch() {
+        let error = context_summary_from_accepted_summary_draft(
+            &summary_draft_request(),
+            &summary_draft_outcome(),
+            promotion_input("accepted-summary", "Different summary text."),
+        )
+        .expect_err("draft mismatch rejects");
+
+        assert_eq!(
+            error,
+            SummaryDraftPromotionError::DraftMismatch {
+                recommended: "Summary draft from exact evidence.".to_owned(),
+                accepted: "Different summary text.".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn summary_draft_promotion_rejects_selected_evidence_not_in_request_or_outcome() {
+        let input = SummaryDraftPromotionInput::new(
+            "accepted-summary",
+            "Summary draft from exact evidence.",
+            vec![evidence("external source", "external-source")],
+            acceptance(),
+            None,
+        )
+        .expect("input shape is valid before membership check");
+
+        let error = context_summary_from_accepted_summary_draft(
+            &summary_draft_request(),
+            &summary_draft_outcome(),
+            input,
+        )
+        .expect_err("unrelated selected evidence rejects");
+
+        assert_eq!(
+            error,
+            SummaryDraftPromotionError::SelectedEvidenceNotInJudgment {
+                artifact_id: artifact_id("external-source"),
+                locator: EvidenceLocator::whole_artifact(),
+            }
+        );
+    }
+
+    #[test]
+    fn summary_draft_promotion_rejects_selected_evidence_with_unmatched_label() {
+        let input = SummaryDraftPromotionInput::new(
+            "accepted-summary",
+            "Summary draft from exact evidence.",
+            vec![evidence("renamed source", "summary-source")],
+            acceptance(),
+            None,
+        )
+        .expect("input shape is valid before membership check");
+
+        let error = context_summary_from_accepted_summary_draft(
+            &summary_draft_request(),
+            &summary_draft_outcome(),
+            input,
+        )
+        .expect_err("selected evidence with unmatched label rejects");
+
+        assert_eq!(
+            error,
+            SummaryDraftPromotionError::SelectedEvidenceNotInJudgment {
+                artifact_id: artifact_id("summary-source"),
+                locator: EvidenceLocator::whole_artifact(),
+            }
+        );
+    }
+
+    #[test]
+    fn summary_draft_promotion_helper_defensively_rejects_empty_selected_evidence() {
+        let input = SummaryDraftPromotionInput {
+            summary_id: "accepted-summary".to_owned(),
+            draft_text: "Summary draft from exact evidence.".to_owned(),
+            selected_evidence: Vec::new(),
+            acceptance: acceptance(),
+            source_record_id: None,
+        };
+
+        let error = context_summary_from_accepted_summary_draft(
+            &summary_draft_request(),
+            &summary_draft_outcome(),
+            input,
+        )
+        .expect_err("empty selected evidence rejects");
+
+        assert_eq!(error, SummaryDraftPromotionError::EmptySelectedEvidence);
+    }
+
     fn memory_relevance_request() -> JudgmentRequest {
         JudgmentRequest::new(
             JudgmentPurpose::MemoryRelevance,
@@ -1676,6 +2226,26 @@ mod tests {
 
     fn evidence(label: &str, id: &str) -> JudgmentEvidence {
         JudgmentEvidence::new(label, evidence_ref(id)).expect("judgment evidence is valid")
+    }
+
+    fn promotion_input(summary_id: &str, draft_text: &str) -> SummaryDraftPromotionInput {
+        SummaryDraftPromotionInput::new(
+            summary_id,
+            draft_text,
+            vec![evidence("source", "summary-source")],
+            acceptance(),
+            None,
+        )
+        .expect("summary draft promotion input is valid")
+    }
+
+    fn acceptance() -> SummaryDraftAcceptance {
+        SummaryDraftAcceptance::new(
+            SummaryDraftAcceptanceAuthority::HardPolicy,
+            "hard policy",
+            "Hard policy accepted the draft for context promotion.",
+        )
+        .expect("summary draft acceptance is valid")
     }
 
     fn evidence_ref(id: &str) -> EvidenceRef {
