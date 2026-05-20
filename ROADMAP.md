@@ -45,7 +45,7 @@ The OpenAI provider target is the Responses API only. The provider request path 
 - OpenAI Responses debug/tool flows remain opt-in manual verification paths, not deterministic test dependencies.
 - Runtime agent loop contract hardening now gates public raw context writes behind active-step admission and maps loop-owned tool execution cancellation to a cancelled loop status without resolving the pending call.
 - Runtime Agent Loop MVP first slice is implemented in `merry-runtime`: a bounded serial public loop composes `Runtime::step`, registered tool execution, and continuation steps, returns ordered events with typed completed/failed/cancelled/blocked outcomes, and keeps provider wire formats and real FS/shell tools out of runtime.
-- `merry-tool-workspace` first slice exists as a separate read-only tool crate exposing only `workspace_read_file` for UTF-8 reads under explicitly configured trusted/stable roots. It prevents ordinary path traversal and ordinary symlink traversal before reading, and on Unix uses `O_NOFOLLOW` for the final open. It is not an OS sandbox and does not claim complete hardening against malicious concurrent filesystem mutation. It is not a shell, write API, network API, directory list/search layer, or complete coding agent.
+- `merry-tool-workspace` has moved from the read-file first slice into read-only workspace navigation/search as a separate tool crate exposing `workspace_read_file`, `workspace_list_dir`, and `workspace_search_text` under explicitly configured trusted/stable roots. It prevents ordinary path traversal and ordinary symlink traversal before read/list/search operations, and on Unix uses `O_NOFOLLOW` for file opens. It is not an OS sandbox and does not claim complete hardening against malicious concurrent filesystem mutation; residual TOCTOU risk remains. It is not a shell, write API, network API, or complete coding agent.
 
 ### Active
 
@@ -55,7 +55,7 @@ The OpenAI provider target is the Responses API only. The provider request path 
 - Do not connect model-backed judgment to live LLM/OpenAI paths, public judgment APIs, public runtime events, ledger facts, tool execution gates, public summary-draft promotion APIs, automatic provider-context inclusion, automatic context mutation or promotion, or builder/runtime configured judgment sources.
 - Keep deterministic verification based on fake providers, stored runtime state, artifact references, and ledger assertions.
 - Keep deterministic runtime harness coverage for model-backed judgment fake-provider only.
-- Keep `merry-tool-workspace` first-slice scope fixed to `workspace_read_file` while hardening read safety and runtime registration behavior.
+- Keep `merry-tool-workspace` read-only navigation/search scope focused on `workspace_read_file`, `workspace_list_dir`, and `workspace_search_text` while hardening path safety and runtime registration behavior.
 - Improve public docs as implementation status changes, while keeping private notes under `docs/`.
 
 ### Deferred / Next
@@ -67,7 +67,7 @@ The OpenAI provider target is the Responses API only. The provider request path 
 - Rust facade crate `merry`.
 - Macro crate support for boilerplate generation.
 - Collaboration and subagent runtime support beyond reserved public contracts.
-- Workspace directory listing and text search tools for `merry-tool-workspace`, after the `workspace_read_file` contract is stable.
+- Write/shell/network workspace tools and full coding-agent behavior for `merry-tool-workspace`; the current slice remains read-only navigation/search only.
 
 ## Adopted Engineering Decisions
 

@@ -1,16 +1,18 @@
 //! Read-only workspace tools for Merry runtimes.
 //!
 //! This crate is intentionally outside `merry-runtime`: it adapts filesystem
-//! reads into runtime-registered tools without making the runtime own real
-//! workspace access policy.
+//! reads and read-only discovery into runtime-registered tools without making
+//! the runtime own real workspace access policy.
 //!
 //! Path safety is scoped to trusted, stable workspace roots. The MVP rejects
-//! absolute paths, parent-directory traversal, hidden paths unless explicitly
-//! enabled, and ordinary symlink components before reading. On Unix, the final
-//! file open also uses `O_NOFOLLOW` to avoid following a symlink swapped into
-//! the leaf path between validation and open. This is not an OS sandbox and
-//! does not claim complete hardening against malicious concurrent filesystem
-//! mutation, including replacement of intermediate directories during a read.
+//! absolute paths, parent-directory traversal, ordinary dot components except
+//! exact `.` where a tool addresses the root, hidden paths unless explicitly
+//! enabled, and ordinary symlink components before reading, listing, or
+//! searching. On Unix, file opens also use `O_NOFOLLOW` to avoid following a
+//! symlink swapped into the leaf path between validation and open. This is not
+//! an OS sandbox and does not claim complete hardening against malicious
+//! concurrent filesystem mutation, including replacement of intermediate
+//! directories during an operation.
 
 use merry_core::{ErrorInfo, PendingToolCall, ToolInputSchema, ToolName, ToolSpec};
 use merry_runtime::{
@@ -18,7 +20,7 @@ use merry_runtime::{
     ToolExecutorFuture,
 };
 use schemars::{JsonSchema, schema_for};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
     fs,
     io::{self, Read},
@@ -31,11 +33,18 @@ use thiserror::Error;
 
 /// Registered tool name for read-only file reads.
 pub const WORKSPACE_READ_FILE_TOOL: &str = "workspace_read_file";
+/// Registered tool name for non-recursive read-only directory listing.
+pub const WORKSPACE_LIST_DIR_TOOL: &str = "workspace_list_dir";
+/// Registered tool name for bounded read-only literal text search.
+pub const WORKSPACE_SEARCH_TEXT_TOOL: &str = "workspace_search_text";
 
 const ERROR_INVALID_ARGUMENTS: &str = "workspace_invalid_arguments";
 const ERROR_PATH_DENIED: &str = "workspace_path_denied";
 const ERROR_FILE_NOT_FOUND: &str = "workspace_file_not_found";
+const ERROR_PATH_NOT_FOUND: &str = "workspace_path_not_found";
 const ERROR_NOT_FILE: &str = "workspace_path_not_file";
+const ERROR_NOT_DIRECTORY: &str = "workspace_path_not_directory";
+const ERROR_NOT_SEARCHABLE: &str = "workspace_path_not_searchable";
 const ERROR_FILE_TOO_LARGE: &str = "workspace_file_too_large";
 const ERROR_NOT_UTF8: &str = "workspace_file_not_utf8";
 const ERROR_READ_FAILED: &str = "workspace_read_failed";
@@ -43,14 +52,35 @@ const ERROR_READ_FAILED: &str = "workspace_read_failed";
 /// Limits applied by read-only workspace tools.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceToolLimits {
-    /// Maximum bytes returned by `workspace_read_file`.
+    /// Maximum bytes read from one file by `workspace_read_file` and `workspace_search_text`.
     pub max_read_bytes: usize,
+    /// Maximum entries returned by `workspace_list_dir`.
+    pub max_list_entries: usize,
+    /// Maximum matches returned by `workspace_search_text`.
+    pub max_search_matches: usize,
+    /// Maximum regular files inspected by one `workspace_search_text` call.
+    pub max_search_files: usize,
+    /// Maximum directory entries inspected by one `workspace_search_text` call.
+    pub max_search_entries: usize,
+    /// Maximum total bytes scanned by one `workspace_search_text` call.
+    pub max_search_bytes: usize,
+    /// Maximum bytes returned for one matched line by `workspace_search_text`.
+    pub max_search_line_bytes: usize,
+    /// Maximum bytes accepted in a `workspace_search_text` query.
+    pub max_search_query_bytes: usize,
 }
 
 impl Default for WorkspaceToolLimits {
     fn default() -> Self {
         Self {
             max_read_bytes: 1024 * 1024,
+            max_list_entries: 512,
+            max_search_matches: 100,
+            max_search_files: 1_000,
+            max_search_entries: 10_000,
+            max_search_bytes: 8 * 1024 * 1024,
+            max_search_line_bytes: 8 * 1024,
+            max_search_query_bytes: 1024,
         }
     }
 }
@@ -157,16 +187,27 @@ impl ReadOnlyWorkspaceTools {
         })
     }
 
-    /// Returns the current first-slice registered tools.
-    ///
-    /// Only `workspace_read_file` is exposed in this first slice. Directory
-    /// listing and text search are intentionally left for a follow-up slice.
+    /// Returns the registered read-only workspace tools.
     #[must_use]
     pub fn into_registered_tools(self) -> Vec<RegisteredTool> {
-        vec![RegisteredTool::new(
-            read_file_spec(),
-            Arc::new(ReadFileExecutor { state: self.state }),
-        )]
+        vec![
+            RegisteredTool::new(
+                read_file_spec(),
+                Arc::new(ReadFileExecutor {
+                    state: Arc::clone(&self.state),
+                }),
+            ),
+            RegisteredTool::new(
+                list_dir_spec(),
+                Arc::new(ListDirExecutor {
+                    state: Arc::clone(&self.state),
+                }),
+            ),
+            RegisteredTool::new(
+                search_text_spec(),
+                Arc::new(SearchTextExecutor { state: self.state }),
+            ),
+        ]
     }
 }
 
@@ -183,11 +224,7 @@ impl WorkspaceToolState {
             return Err(WorkspaceToolConfigError::NoRoots);
         }
 
-        if config.limits.max_read_bytes == 0 {
-            return Err(WorkspaceToolConfigError::InvalidLimit {
-                name: "max_read_bytes",
-            });
-        }
+        validate_limits(&config.limits)?;
 
         let mut roots = Vec::with_capacity(config.roots.len());
         for root in config.roots {
@@ -217,6 +254,25 @@ impl WorkspaceToolState {
     }
 }
 
+fn validate_limits(limits: &WorkspaceToolLimits) -> Result<(), WorkspaceToolConfigError> {
+    for (name, value) in [
+        ("max_read_bytes", limits.max_read_bytes),
+        ("max_list_entries", limits.max_list_entries),
+        ("max_search_matches", limits.max_search_matches),
+        ("max_search_files", limits.max_search_files),
+        ("max_search_entries", limits.max_search_entries),
+        ("max_search_bytes", limits.max_search_bytes),
+        ("max_search_line_bytes", limits.max_search_line_bytes),
+        ("max_search_query_bytes", limits.max_search_query_bytes),
+    ] {
+        if value == 0 {
+            return Err(WorkspaceToolConfigError::InvalidLimit { name });
+        }
+    }
+
+    Ok(())
+}
+
 #[derive(Debug)]
 struct ReadFileExecutor {
     state: Arc<WorkspaceToolState>,
@@ -237,6 +293,7 @@ impl ToolExecutor for ReadFileExecutor {
                 Ok(args) => args.path,
                 Err(message) => {
                     return Ok(failed_outcome(
+                        WORKSPACE_READ_FILE_TOOL,
                         ERROR_INVALID_ARGUMENTS,
                         message,
                         None::<String>,
@@ -268,10 +325,140 @@ impl ToolExecutor for ReadFileExecutor {
     }
 }
 
+#[derive(Debug)]
+struct ListDirExecutor {
+    state: Arc<WorkspaceToolState>,
+}
+
+impl ToolExecutor for ListDirExecutor {
+    fn execute<'a>(
+        &'a self,
+        call: PendingToolCall,
+        context: ToolExecutionContext,
+    ) -> ToolExecutorFuture<'a> {
+        Box::pin(async move {
+            if context.cancellation_token().is_cancelled() {
+                return Err(ToolExecutionError::Cancelled);
+            }
+
+            let path = match parse_list_dir_args(&call) {
+                Ok(args) => args.path,
+                Err(message) => {
+                    return Ok(failed_outcome(
+                        WORKSPACE_LIST_DIR_TOOL,
+                        ERROR_INVALID_ARGUMENTS,
+                        message,
+                        None::<String>,
+                    ));
+                }
+            };
+
+            let state = Arc::clone(&self.state);
+            let token = context.cancellation_token().clone();
+            let worker_token = token.clone();
+            let handle = tokio::task::spawn_blocking(move || {
+                let is_cancelled = || worker_token.is_cancelled();
+                list_dir_blocking_checked(&state, path, &is_cancelled)
+            });
+
+            tokio::select! {
+                biased;
+                () = token.cancelled() => Err(ToolExecutionError::Cancelled),
+                joined = handle => match joined {
+                    Ok(Ok(outcome)) => {
+                        if token.is_cancelled() {
+                            Err(ToolExecutionError::Cancelled)
+                        } else {
+                            Ok(outcome)
+                        }
+                    }
+                    Ok(Err(error)) => Err(error),
+                    Err(error) => Err(ToolExecutionError::infrastructure(format!(
+                        "workspace list task failed to join: {error}"
+                    ))),
+                },
+            }
+        })
+    }
+}
+
+#[derive(Debug)]
+struct SearchTextExecutor {
+    state: Arc<WorkspaceToolState>,
+}
+
+impl ToolExecutor for SearchTextExecutor {
+    fn execute<'a>(
+        &'a self,
+        call: PendingToolCall,
+        context: ToolExecutionContext,
+    ) -> ToolExecutorFuture<'a> {
+        Box::pin(async move {
+            if context.cancellation_token().is_cancelled() {
+                return Err(ToolExecutionError::Cancelled);
+            }
+
+            let args = match parse_search_text_args(&call) {
+                Ok(args) => args,
+                Err(message) => {
+                    return Ok(failed_outcome(
+                        WORKSPACE_SEARCH_TEXT_TOOL,
+                        ERROR_INVALID_ARGUMENTS,
+                        message,
+                        None::<String>,
+                    ));
+                }
+            };
+
+            let state = Arc::clone(&self.state);
+            let token = context.cancellation_token().clone();
+            let worker_token = token.clone();
+            let handle = tokio::task::spawn_blocking(move || {
+                let is_cancelled = || worker_token.is_cancelled();
+                search_text_blocking_checked(&state, args, &is_cancelled)
+            });
+
+            tokio::select! {
+                biased;
+                () = token.cancelled() => Err(ToolExecutionError::Cancelled),
+                joined = handle => match joined {
+                    Ok(Ok(outcome)) => {
+                        if token.is_cancelled() {
+                            Err(ToolExecutionError::Cancelled)
+                        } else {
+                            Ok(outcome)
+                        }
+                    }
+                    Ok(Err(error)) => Err(error),
+                    Err(error) => Err(ToolExecutionError::infrastructure(format!(
+                        "workspace search task failed to join: {error}"
+                    ))),
+                },
+            }
+        })
+    }
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ReadFileArgs {
     path: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ListDirArgs {
+    path: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct SearchTextArgs {
+    query: String,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    max_matches: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -282,6 +469,61 @@ struct ReadFileSuccess<'a> {
     bytes: usize,
     truncated: bool,
     content: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct ListDirSuccess<'a> {
+    ok: bool,
+    tool: &'static str,
+    path: &'a str,
+    entries: Vec<ListDirEntry>,
+    truncated: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ListDirEntry {
+    name: String,
+    path: String,
+    kind: EntryKind,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum EntryKind {
+    File,
+    Directory,
+    Symlink,
+    Other,
+}
+
+#[derive(Debug, Serialize)]
+struct SearchTextSuccess<'a> {
+    ok: bool,
+    tool: &'static str,
+    query: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<&'a str>,
+    matches: Vec<SearchMatch>,
+    searched_files: usize,
+    skipped: SearchSkipCounts,
+    truncated: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct SearchMatch {
+    path: String,
+    line_number: usize,
+    line: String,
+    truncated: bool,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct SearchSkipCounts {
+    hidden: usize,
+    symlink: usize,
+    non_utf8: usize,
+    too_large: usize,
+    read_failed: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -309,39 +551,824 @@ fn read_file_spec() -> ToolSpec {
     .expect("static workspace_read_file spec is valid")
 }
 
+fn list_dir_spec() -> ToolSpec {
+    ToolSpec::new(
+        ToolName::new(WORKSPACE_LIST_DIR_TOOL).expect("static workspace tool name is valid"),
+        "List one directory under configured stable workspace roots as a non-recursive, stable, memory-bounded, cancellable listing without symlink traversal.",
+        ToolInputSchema::new(schema_for!(ListDirArgs))
+            .expect("static workspace_list_dir input schema is valid"),
+    )
+    .expect("static workspace_list_dir spec is valid")
+}
+
+fn search_text_spec() -> ToolSpec {
+    ToolSpec::new(
+        ToolName::new(WORKSPACE_SEARCH_TEXT_TOOL).expect("static workspace tool name is valid"),
+        "Search UTF-8 files under configured stable workspace roots with literal, case-sensitive matching and bounded traversal, entry inspection, and scanned bytes.",
+        ToolInputSchema::new(schema_for!(SearchTextArgs))
+            .expect("static workspace_search_text input schema is valid"),
+    )
+    .expect("static workspace_search_text spec is valid")
+}
+
 fn parse_read_file_args(call: &PendingToolCall) -> Result<ReadFileArgs, String> {
+    parse_tool_args(call, WORKSPACE_READ_FILE_TOOL)
+}
+
+fn parse_list_dir_args(call: &PendingToolCall) -> Result<ListDirArgs, String> {
+    parse_tool_args(call, WORKSPACE_LIST_DIR_TOOL)
+}
+
+fn parse_search_text_args(call: &PendingToolCall) -> Result<SearchTextArgs, String> {
+    parse_tool_args(call, WORKSPACE_SEARCH_TEXT_TOOL)
+}
+
+fn parse_tool_args<T>(call: &PendingToolCall, tool_name: &'static str) -> Result<T, String>
+where
+    T: DeserializeOwned,
+{
     serde_json::from_value(serde_json::Value::Object(
         call.arguments().as_object().clone(),
     ))
-    .map_err(|error| format!("invalid workspace_read_file arguments: {error}"))
+    .map_err(|error| format!("invalid {tool_name} arguments: {error}"))
 }
 
 fn read_file_blocking(state: &WorkspaceToolState, path: String) -> ToolExecutionOutcome {
     let relative = match validate_relative_path(&path, state.allow_hidden) {
         Ok(relative) => relative,
-        Err(error) => return failed_outcome(error.code, error.message, error.path),
+        Err(error) => {
+            return failed_outcome(
+                WORKSPACE_READ_FILE_TOOL,
+                error.code,
+                error.message,
+                error.path,
+            );
+        }
     };
 
     for root in &state.roots {
-        match read_existing_file(root, &relative, state.limits.max_read_bytes) {
-            Ok(Some(success)) => return success,
+        match resolve_existing_path(root, &relative) {
+            Ok(Some(resolved)) => {
+                return match read_resolved_file(&relative, &resolved.path, &state.limits) {
+                    Ok(success) => success,
+                    Err(error) => failed_outcome(
+                        WORKSPACE_READ_FILE_TOOL,
+                        error.code,
+                        error.message,
+                        Some(relative.display),
+                    ),
+                };
+            }
             Ok(None) => {}
-            Err(error) => return failed_outcome(error.code, error.message, Some(relative.display)),
+            Err(error) => {
+                return failed_outcome(
+                    WORKSPACE_READ_FILE_TOOL,
+                    error.code,
+                    error.message,
+                    Some(relative.display),
+                );
+            }
         }
     }
 
     failed_outcome(
+        WORKSPACE_READ_FILE_TOOL,
         ERROR_FILE_NOT_FOUND,
         "workspace file was not found",
         Some(relative.display),
     )
 }
 
-fn read_existing_file(
+fn read_resolved_file(
+    relative: &ValidatedRelativePath,
+    path: &Path,
+    limits: &WorkspaceToolLimits,
+) -> Result<ToolExecutionOutcome, DomainError> {
+    let mut file = open_file_for_read(path)?;
+    let metadata = file.metadata().map_err(|_| {
+        DomainError::new(
+            ERROR_READ_FAILED,
+            "could not inspect workspace file metadata",
+        )
+    })?;
+
+    if !metadata.is_file() {
+        return Err(DomainError::new(
+            ERROR_NOT_FILE,
+            "workspace path is not a regular file",
+        ));
+    }
+
+    if metadata.len() > limits.max_read_bytes as u64 {
+        return Err(DomainError::new(
+            ERROR_FILE_TOO_LARGE,
+            "workspace file exceeds the configured read limit",
+        ));
+    }
+
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take(limits.max_read_bytes as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| DomainError::new(ERROR_READ_FAILED, "could not read workspace file"))?;
+
+    if bytes.len() > limits.max_read_bytes {
+        return Err(DomainError::new(
+            ERROR_FILE_TOO_LARGE,
+            "workspace file exceeds the configured read limit",
+        ));
+    }
+
+    let content = String::from_utf8(bytes)
+        .map_err(|_| DomainError::new(ERROR_NOT_UTF8, "workspace file is not valid UTF-8"))?;
+
+    let payload = ReadFileSuccess {
+        ok: true,
+        tool: WORKSPACE_READ_FILE_TOOL,
+        path: &relative.display,
+        bytes: content.len(),
+        truncated: false,
+        content: &content,
+    };
+    Ok(ToolExecutionOutcome::succeeded_json(
+        serde_json::to_string(&payload).expect("workspace read success envelope serializes"),
+    ))
+}
+
+#[cfg(test)]
+fn list_dir_blocking(state: &WorkspaceToolState, path: String) -> ToolExecutionOutcome {
+    list_dir_blocking_checked(state, path, &|| false)
+        .expect("uncancelled workspace list should not return cancellation")
+}
+
+fn list_dir_blocking_checked(
+    state: &WorkspaceToolState,
+    path: String,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<ToolExecutionOutcome, ToolExecutionError> {
+    if is_cancelled() {
+        return Err(ToolExecutionError::Cancelled);
+    }
+
+    let relative = match validate_relative_path_or_root(&path, state.allow_hidden) {
+        Ok(relative) => relative,
+        Err(error) => {
+            return Ok(failed_outcome(
+                WORKSPACE_LIST_DIR_TOOL,
+                error.code,
+                error.message,
+                error.path,
+            ));
+        }
+    };
+
+    for root in &state.roots {
+        if is_cancelled() {
+            return Err(ToolExecutionError::Cancelled);
+        }
+
+        match resolve_existing_path(root, &relative) {
+            Ok(Some(resolved)) => {
+                return match list_resolved_dir(&relative, &resolved.path, state, is_cancelled) {
+                    Ok(success) => Ok(success),
+                    Err(BlockingToolError::Domain(error)) => Ok(failed_outcome(
+                        WORKSPACE_LIST_DIR_TOOL,
+                        error.code,
+                        error.message,
+                        Some(relative.display),
+                    )),
+                    Err(BlockingToolError::Cancelled) => Err(ToolExecutionError::Cancelled),
+                };
+            }
+            Ok(None) => {}
+            Err(error) => {
+                return Ok(failed_outcome(
+                    WORKSPACE_LIST_DIR_TOOL,
+                    error.code,
+                    error.message,
+                    Some(relative.display),
+                ));
+            }
+        }
+    }
+
+    Ok(failed_outcome(
+        WORKSPACE_LIST_DIR_TOOL,
+        ERROR_PATH_NOT_FOUND,
+        "workspace directory was not found",
+        Some(relative.display),
+    ))
+}
+
+fn list_resolved_dir(
+    relative: &ValidatedRelativePath,
+    path: &Path,
+    state: &WorkspaceToolState,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<ToolExecutionOutcome, BlockingToolError> {
+    let metadata = fs::symlink_metadata(path).map_err(|_| {
+        DomainError::new(
+            ERROR_READ_FAILED,
+            "could not inspect workspace directory metadata",
+        )
+    })?;
+    if !metadata.is_dir() {
+        return Err(
+            DomainError::new(ERROR_NOT_DIRECTORY, "workspace path is not a directory").into(),
+        );
+    }
+
+    let mut entries = Vec::new();
+    let read_dir = fs::read_dir(path)
+        .map_err(|_| DomainError::new(ERROR_READ_FAILED, "could not read workspace directory"))?;
+    for entry in read_dir {
+        if is_cancelled() {
+            return Err(BlockingToolError::Cancelled);
+        }
+
+        let entry = entry.map_err(|_| {
+            DomainError::new(
+                ERROR_READ_FAILED,
+                "could not read workspace directory entry",
+            )
+        })?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if !state.allow_hidden && is_hidden_name(&name) {
+            continue;
+        }
+
+        let file_type = entry.file_type().map_err(|_| {
+            DomainError::new(
+                ERROR_READ_FAILED,
+                "could not inspect workspace directory entry",
+            )
+        })?;
+        let entry_path = join_display_path(&relative.display, &name);
+        push_bounded_list_entry(
+            &mut entries,
+            ListDirEntry {
+                name,
+                path: entry_path,
+                kind: entry_kind(file_type),
+            },
+            state.limits.max_list_entries,
+        );
+    }
+
+    entries.sort_by(|left, right| left.name.cmp(&right.name));
+    let truncated = entries.len() > state.limits.max_list_entries;
+    entries.truncate(state.limits.max_list_entries);
+
+    let payload = ListDirSuccess {
+        ok: true,
+        tool: WORKSPACE_LIST_DIR_TOOL,
+        path: &relative.display,
+        entries,
+        truncated,
+    };
+    Ok(ToolExecutionOutcome::succeeded_json(
+        serde_json::to_string(&payload).expect("workspace list success envelope serializes"),
+    ))
+}
+
+fn push_bounded_list_entry(
+    entries: &mut Vec<ListDirEntry>,
+    entry: ListDirEntry,
+    max_entries: usize,
+) {
+    let retention_limit = max_entries.saturating_add(1);
+    if entries.len() < retention_limit {
+        entries.push(entry);
+        return;
+    }
+
+    let Some(current_last) = entries
+        .iter()
+        .max_by(|left, right| left.name.cmp(&right.name))
+    else {
+        entries.push(entry);
+        return;
+    };
+
+    if entry.name >= current_last.name {
+        return;
+    }
+
+    let current_last_name = current_last.name.clone();
+    if let Some(index) = entries
+        .iter()
+        .position(|candidate| candidate.name == current_last_name)
+    {
+        entries[index] = entry;
+    }
+}
+
+fn entry_kind(file_type: fs::FileType) -> EntryKind {
+    if file_type.is_symlink() {
+        EntryKind::Symlink
+    } else if file_type.is_dir() {
+        EntryKind::Directory
+    } else if file_type.is_file() {
+        EntryKind::File
+    } else {
+        EntryKind::Other
+    }
+}
+
+#[cfg(test)]
+fn search_text_blocking(state: &WorkspaceToolState, args: SearchTextArgs) -> ToolExecutionOutcome {
+    search_text_blocking_checked(state, args, &|| false)
+        .expect("uncancelled workspace search should not return cancellation")
+}
+
+fn search_text_blocking_checked(
+    state: &WorkspaceToolState,
+    args: SearchTextArgs,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<ToolExecutionOutcome, ToolExecutionError> {
+    if is_cancelled() {
+        return Err(ToolExecutionError::Cancelled);
+    }
+
+    if args.query.is_empty() {
+        return Ok(failed_outcome(
+            WORKSPACE_SEARCH_TEXT_TOOL,
+            ERROR_INVALID_ARGUMENTS,
+            "workspace search query must not be empty",
+            None::<String>,
+        ));
+    }
+    if args.query.len() > state.limits.max_search_query_bytes {
+        return Ok(failed_outcome(
+            WORKSPACE_SEARCH_TEXT_TOOL,
+            ERROR_INVALID_ARGUMENTS,
+            "workspace search query exceeds the configured byte limit",
+            None::<String>,
+        ));
+    }
+    if args.query.chars().any(char::is_control) {
+        return Ok(failed_outcome(
+            WORKSPACE_SEARCH_TEXT_TOOL,
+            ERROR_INVALID_ARGUMENTS,
+            "workspace search query must be a single line without control characters",
+            None::<String>,
+        ));
+    }
+
+    let max_matches = args
+        .max_matches
+        .unwrap_or(state.limits.max_search_matches)
+        .min(state.limits.max_search_matches);
+    if max_matches == 0 {
+        return Ok(failed_outcome(
+            WORKSPACE_SEARCH_TEXT_TOOL,
+            ERROR_INVALID_ARGUMENTS,
+            "workspace search max_matches must be greater than zero",
+            None::<String>,
+        ));
+    }
+
+    let mut search = SearchRun::new(&args.query, max_matches, &state.limits, state.allow_hidden);
+
+    if let Some(path) = args.path {
+        let relative = match validate_relative_path_or_root(&path, state.allow_hidden) {
+            Ok(relative) => relative,
+            Err(error) => {
+                return Ok(failed_outcome(
+                    WORKSPACE_SEARCH_TEXT_TOOL,
+                    error.code,
+                    error.message,
+                    error.path,
+                ));
+            }
+        };
+
+        let display = relative.display.clone();
+        for root in &state.roots {
+            if is_cancelled() {
+                return Err(ToolExecutionError::Cancelled);
+            }
+
+            match resolve_existing_path(root, &relative) {
+                Ok(Some(resolved)) => {
+                    return match search_resolved_path(
+                        &mut search,
+                        &resolved.path,
+                        &display,
+                        is_cancelled,
+                    ) {
+                        Ok(()) => Ok(search_success(&args.query, Some(display), search)),
+                        Err(BlockingToolError::Domain(error)) => Ok(failed_outcome(
+                            WORKSPACE_SEARCH_TEXT_TOOL,
+                            error.code,
+                            error.message,
+                            Some(relative.display),
+                        )),
+                        Err(BlockingToolError::Cancelled) => Err(ToolExecutionError::Cancelled),
+                    };
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    return Ok(failed_outcome(
+                        WORKSPACE_SEARCH_TEXT_TOOL,
+                        error.code,
+                        error.message,
+                        Some(relative.display),
+                    ));
+                }
+            }
+        }
+
+        return Ok(failed_outcome(
+            WORKSPACE_SEARCH_TEXT_TOOL,
+            ERROR_PATH_NOT_FOUND,
+            "workspace search path was not found",
+            Some(relative.display),
+        ));
+    }
+
+    for root in &state.roots {
+        if search.is_done() {
+            break;
+        }
+        if is_cancelled() {
+            return Err(ToolExecutionError::Cancelled);
+        }
+        search_directory(&mut search, root, ".", is_cancelled)
+            .map_err(blocking_tool_error_into_execution)?;
+    }
+
+    Ok(search_success(&args.query, None, search))
+}
+
+#[derive(Debug)]
+struct SearchRun<'a> {
+    query: &'a str,
+    max_matches: usize,
+    limits: &'a WorkspaceToolLimits,
+    allow_hidden: bool,
+    matches: Vec<SearchMatch>,
+    searched_files: usize,
+    scanned_bytes: usize,
+    inspected_entries: usize,
+    skipped: SearchSkipCounts,
+    truncated: bool,
+}
+
+impl<'a> SearchRun<'a> {
+    fn new(
+        query: &'a str,
+        max_matches: usize,
+        limits: &'a WorkspaceToolLimits,
+        allow_hidden: bool,
+    ) -> Self {
+        Self {
+            query,
+            max_matches,
+            limits,
+            allow_hidden,
+            matches: Vec::new(),
+            searched_files: 0,
+            scanned_bytes: 0,
+            inspected_entries: 0,
+            skipped: SearchSkipCounts::default(),
+            truncated: false,
+        }
+    }
+
+    fn is_done(&self) -> bool {
+        self.truncated || self.matches.len() >= self.max_matches
+    }
+
+    fn has_search_budget(&self) -> bool {
+        self.scanned_bytes < self.limits.max_search_bytes
+    }
+
+    fn remaining_search_bytes(&self) -> usize {
+        self.limits
+            .max_search_bytes
+            .saturating_sub(self.scanned_bytes)
+    }
+
+    fn record_scanned_bytes(&mut self, bytes: usize) {
+        self.scanned_bytes = self.scanned_bytes.saturating_add(bytes);
+    }
+
+    fn try_inspect_entry(&mut self) -> bool {
+        if self.inspected_entries >= self.limits.max_search_entries {
+            self.truncated = true;
+            return false;
+        }
+
+        self.inspected_entries += 1;
+        true
+    }
+}
+
+fn search_success(
+    query: &str,
+    path: Option<String>,
+    search: SearchRun<'_>,
+) -> ToolExecutionOutcome {
+    let payload = SearchTextSuccess {
+        ok: true,
+        tool: WORKSPACE_SEARCH_TEXT_TOOL,
+        query,
+        path: path.as_deref(),
+        matches: search.matches,
+        searched_files: search.searched_files,
+        skipped: search.skipped,
+        truncated: search.truncated,
+    };
+    ToolExecutionOutcome::succeeded_json(
+        serde_json::to_string(&payload).expect("workspace search success envelope serializes"),
+    )
+}
+
+fn search_resolved_path(
+    search: &mut SearchRun<'_>,
+    path: &Path,
+    display: &str,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<(), BlockingToolError> {
+    if is_cancelled() {
+        return Err(BlockingToolError::Cancelled);
+    }
+
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(_) => {
+            return Err(DomainError::new(
+                ERROR_READ_FAILED,
+                "could not inspect workspace search path",
+            )
+            .into());
+        }
+    };
+
+    if metadata.is_file() {
+        search_file(search, path, display, is_cancelled)?;
+        Ok(())
+    } else if metadata.is_dir() {
+        search_directory(search, path, display, is_cancelled)?;
+        Ok(())
+    } else {
+        Err(DomainError::new(
+            ERROR_NOT_SEARCHABLE,
+            "workspace search path is not a regular file or directory",
+        )
+        .into())
+    }
+}
+
+fn search_directory(
+    search: &mut SearchRun<'_>,
+    path: &Path,
+    display_prefix: &str,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<(), BlockingToolError> {
+    if is_cancelled() {
+        return Err(BlockingToolError::Cancelled);
+    }
+
+    let read_dir = match fs::read_dir(path) {
+        Ok(read_dir) => read_dir,
+        Err(_) => {
+            search.skipped.read_failed += 1;
+            return Ok(());
+        }
+    };
+
+    let mut children = Vec::new();
+    for entry in read_dir {
+        if is_cancelled() {
+            return Err(BlockingToolError::Cancelled);
+        }
+        if search.is_done() {
+            break;
+        }
+        if !search.try_inspect_entry() {
+            break;
+        }
+
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => {
+                search.skipped.read_failed += 1;
+                continue;
+            }
+        };
+
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            search.skipped.non_utf8 += 1;
+            continue;
+        };
+        if !search.allow_hidden && is_hidden_name(&name) {
+            search.skipped.hidden += 1;
+            continue;
+        }
+
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(_) => {
+                search.skipped.read_failed += 1;
+                continue;
+            }
+        };
+
+        if file_type.is_symlink() {
+            search.skipped.symlink += 1;
+            continue;
+        }
+
+        let display = join_display_path(display_prefix, &name);
+        if file_type.is_dir() || file_type.is_file() {
+            children.push(SearchChild {
+                path: entry.path(),
+                display,
+                is_dir: file_type.is_dir(),
+            });
+        }
+    }
+
+    children.sort_by(|left, right| left.display.cmp(&right.display));
+    for child in children {
+        if is_cancelled() {
+            return Err(BlockingToolError::Cancelled);
+        }
+        if search.is_done() {
+            break;
+        }
+        if !search.has_search_budget() {
+            search.truncated = true;
+            break;
+        }
+
+        if child.is_dir {
+            search_directory(search, &child.path, &child.display, is_cancelled)?;
+        } else {
+            search_file(search, &child.path, &child.display, is_cancelled)?;
+        }
+    }
+
+    Ok(())
+}
+
+#[derive(Debug)]
+struct SearchChild {
+    path: PathBuf,
+    display: String,
+    is_dir: bool,
+}
+
+fn search_file(
+    search: &mut SearchRun<'_>,
+    path: &Path,
+    display: &str,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<(), BlockingToolError> {
+    if is_cancelled() {
+        return Err(BlockingToolError::Cancelled);
+    }
+
+    if search.searched_files >= search.limits.max_search_files {
+        search.truncated = true;
+        return Ok(());
+    }
+    if !search.has_search_budget() {
+        search.truncated = true;
+        return Ok(());
+    }
+
+    let mut file = match open_file_for_read(path) {
+        Ok(file) => file,
+        Err(error) => {
+            if error.code == ERROR_PATH_DENIED {
+                search.skipped.symlink += 1;
+            } else {
+                search.skipped.read_failed += 1;
+            }
+            return Ok(());
+        }
+    };
+
+    let metadata = match file.metadata() {
+        Ok(metadata) => metadata,
+        Err(_) => {
+            search.skipped.read_failed += 1;
+            return Ok(());
+        }
+    };
+    if !metadata.is_file() {
+        return Ok(());
+    }
+
+    if metadata.len() > search.limits.max_read_bytes as u64 {
+        search.searched_files += 1;
+        search.skipped.too_large += 1;
+        return Ok(());
+    }
+    let file_size = match usize::try_from(metadata.len()) {
+        Ok(file_size) => file_size,
+        Err(_) => {
+            search.searched_files += 1;
+            search.skipped.too_large += 1;
+            return Ok(());
+        }
+    };
+    if file_size > search.remaining_search_bytes() {
+        search.truncated = true;
+        return Ok(());
+    }
+
+    if is_cancelled() {
+        return Err(BlockingToolError::Cancelled);
+    }
+
+    let mut bytes = Vec::new();
+    if file
+        .by_ref()
+        .take(metadata.len())
+        .read_to_end(&mut bytes)
+        .is_err()
+    {
+        search.skipped.read_failed += 1;
+        return Ok(());
+    }
+
+    search.searched_files += 1;
+    search.record_scanned_bytes(bytes.len());
+
+    if is_cancelled() {
+        return Err(BlockingToolError::Cancelled);
+    }
+
+    let content = match String::from_utf8(bytes) {
+        Ok(content) => content,
+        Err(_) => {
+            search.skipped.non_utf8 += 1;
+            return Ok(());
+        }
+    };
+
+    for (line_index, line) in content.lines().enumerate() {
+        if is_cancelled() {
+            return Err(BlockingToolError::Cancelled);
+        }
+
+        if line.contains(search.query) {
+            let (line, truncated) = truncate_utf8_line(line, search.limits.max_search_line_bytes);
+            search.matches.push(SearchMatch {
+                path: display.to_owned(),
+                line_number: line_index + 1,
+                line,
+                truncated,
+            });
+            if search.matches.len() >= search.max_matches {
+                search.truncated = true;
+                return Ok(());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn join_display_path(prefix: &str, name: &str) -> String {
+    if prefix == "." {
+        name.to_owned()
+    } else {
+        format!("{prefix}/{name}")
+    }
+}
+
+fn is_hidden_name(name: &str) -> bool {
+    name.starts_with('.')
+}
+
+fn truncate_utf8_line(line: &str, max_bytes: usize) -> (String, bool) {
+    if line.len() <= max_bytes {
+        return (line.to_owned(), false);
+    }
+
+    let end = (0..=max_bytes)
+        .rev()
+        .find(|index| line.is_char_boundary(*index))
+        .expect("zero is always a UTF-8 character boundary");
+    (line[..end].to_owned(), true)
+}
+
+#[derive(Debug)]
+struct ResolvedWorkspacePath {
+    path: PathBuf,
+}
+
+fn resolve_existing_path(
     root: &Path,
     relative: &ValidatedRelativePath,
-    max_read_bytes: usize,
-) -> Result<Option<ToolExecutionOutcome>, DomainError> {
+) -> Result<Option<ResolvedWorkspacePath>, DomainError> {
     let mut current = root.to_path_buf();
     for component in &relative.components {
         current.push(component);
@@ -365,10 +1392,7 @@ fn read_existing_file(
     }
 
     let canonical = fs::canonicalize(&current).map_err(|_| {
-        DomainError::new(
-            ERROR_READ_FAILED,
-            "could not canonicalize workspace file path",
-        )
+        DomainError::new(ERROR_READ_FAILED, "could not canonicalize workspace path")
     })?;
     if !canonical.starts_with(root) {
         return Err(DomainError::new(
@@ -377,55 +1401,7 @@ fn read_existing_file(
         ));
     }
 
-    let mut file = open_file_for_read(&current)?;
-    let metadata = file.metadata().map_err(|_| {
-        DomainError::new(
-            ERROR_READ_FAILED,
-            "could not inspect workspace file metadata",
-        )
-    })?;
-
-    if !metadata.is_file() {
-        return Err(DomainError::new(
-            ERROR_NOT_FILE,
-            "workspace path is not a regular file",
-        ));
-    }
-
-    if metadata.len() > max_read_bytes as u64 {
-        return Err(DomainError::new(
-            ERROR_FILE_TOO_LARGE,
-            "workspace file exceeds the configured read limit",
-        ));
-    }
-
-    let mut bytes = Vec::new();
-    file.by_ref()
-        .take(max_read_bytes as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| DomainError::new(ERROR_READ_FAILED, "could not read workspace file"))?;
-
-    if bytes.len() > max_read_bytes {
-        return Err(DomainError::new(
-            ERROR_FILE_TOO_LARGE,
-            "workspace file exceeds the configured read limit",
-        ));
-    }
-
-    let content = String::from_utf8(bytes)
-        .map_err(|_| DomainError::new(ERROR_NOT_UTF8, "workspace file is not valid UTF-8"))?;
-
-    let payload = ReadFileSuccess {
-        ok: true,
-        tool: WORKSPACE_READ_FILE_TOOL,
-        path: &relative.display,
-        bytes: content.len(),
-        truncated: false,
-        content: &content,
-    };
-    Ok(Some(ToolExecutionOutcome::succeeded_json(
-        serde_json::to_string(&payload).expect("workspace read success envelope serializes"),
-    )))
+    Ok(Some(ResolvedWorkspacePath { path: current }))
 }
 
 fn open_file_for_read(path: &Path) -> Result<fs::File, DomainError> {
@@ -470,6 +1446,21 @@ fn validate_relative_path(
     raw_path: &str,
     allow_hidden: bool,
 ) -> Result<ValidatedRelativePath, PathValidationError> {
+    validate_relative_path_impl(raw_path, allow_hidden, false)
+}
+
+fn validate_relative_path_or_root(
+    raw_path: &str,
+    allow_hidden: bool,
+) -> Result<ValidatedRelativePath, PathValidationError> {
+    validate_relative_path_impl(raw_path, allow_hidden, true)
+}
+
+fn validate_relative_path_impl(
+    raw_path: &str,
+    allow_hidden: bool,
+    allow_root: bool,
+) -> Result<ValidatedRelativePath, PathValidationError> {
     if raw_path.is_empty() {
         return Err(PathValidationError::new(
             ERROR_PATH_DENIED,
@@ -486,12 +1477,27 @@ fn validate_relative_path(
         ));
     }
 
+    if allow_root && raw_path == "." {
+        return Ok(ValidatedRelativePath {
+            components: Vec::new(),
+            display: ".".to_owned(),
+        });
+    }
+
     let path = Path::new(raw_path);
     if path.is_absolute() {
         return Err(PathValidationError::new(
             ERROR_PATH_DENIED,
             "workspace path must be relative",
             None,
+        ));
+    }
+
+    if has_forbidden_raw_dot_segment(raw_path) {
+        return Err(PathValidationError::new(
+            ERROR_PATH_DENIED,
+            "workspace path must not contain '.' or '..' components",
+            Some(raw_path.to_owned()),
         ));
     }
 
@@ -540,9 +1546,14 @@ fn validate_relative_path(
     }
 
     if components.is_empty() {
+        let message = if allow_root {
+            "workspace path must be exact '.' or name a relative path"
+        } else {
+            "workspace path must name a file"
+        };
         return Err(PathValidationError::new(
             ERROR_PATH_DENIED,
-            "workspace path must name a file",
+            message,
             Some(raw_path.to_owned()),
         ));
     }
@@ -554,6 +1565,12 @@ fn validate_relative_path(
     })
 }
 
+fn has_forbidden_raw_dot_segment(raw_path: &str) -> bool {
+    raw_path
+        .split('/')
+        .any(|segment| segment == "." || segment == "..")
+}
+
 #[derive(Debug)]
 struct DomainError {
     code: &'static str,
@@ -563,6 +1580,25 @@ struct DomainError {
 impl DomainError {
     fn new(code: &'static str, message: &'static str) -> Self {
         Self { code, message }
+    }
+}
+
+#[derive(Debug)]
+enum BlockingToolError {
+    Domain(DomainError),
+    Cancelled,
+}
+
+impl From<DomainError> for BlockingToolError {
+    fn from(error: DomainError) -> Self {
+        Self::Domain(error)
+    }
+}
+
+fn blocking_tool_error_into_execution(error: BlockingToolError) -> ToolExecutionError {
+    match error {
+        BlockingToolError::Domain(error) => ToolExecutionError::infrastructure(error.message),
+        BlockingToolError::Cancelled => ToolExecutionError::Cancelled,
     }
 }
 
@@ -584,6 +1620,7 @@ impl PathValidationError {
 }
 
 fn failed_outcome(
+    tool: &'static str,
     code: &'static str,
     message: impl Into<String>,
     path: Option<String>,
@@ -591,7 +1628,7 @@ fn failed_outcome(
     let message = message.into();
     let envelope = FailureEnvelope {
         ok: false,
-        tool: WORKSPACE_READ_FILE_TOOL,
+        tool,
         error: FailureError {
             code,
             message: &message,
@@ -599,8 +1636,8 @@ fn failed_outcome(
         path: path.as_deref(),
     };
     ToolExecutionOutcome::failed_json(
-        serde_json::to_string(&envelope).expect("workspace read failure envelope serializes"),
-        ErrorInfo::new(code, &message).expect("workspace read diagnostic is valid"),
+        serde_json::to_string(&envelope).expect("workspace failure envelope serializes"),
+        ErrorInfo::new(code, &message).expect("workspace diagnostic is valid"),
     )
 }
 
@@ -677,6 +1714,26 @@ mod tests {
         read_file_blocking(&tools.state, path.to_owned())
     }
 
+    fn list_outcome(tools: &ReadOnlyWorkspaceTools, path: &str) -> ToolExecutionOutcome {
+        list_dir_blocking(&tools.state, path.to_owned())
+    }
+
+    fn search_outcome(
+        tools: &ReadOnlyWorkspaceTools,
+        query: &str,
+        path: Option<&str>,
+        max_matches: Option<usize>,
+    ) -> ToolExecutionOutcome {
+        search_text_blocking(
+            &tools.state,
+            SearchTextArgs {
+                query: query.to_owned(),
+                path: path.map(str::to_owned),
+                max_matches,
+            },
+        )
+    }
+
     fn json_content(outcome: &ToolExecutionOutcome) -> Value {
         serde_json::from_str(
             outcome
@@ -693,13 +1750,23 @@ mod tests {
         path: Option<&str>,
         host_root: &Path,
     ) {
+        assert_failed_json_for_tool(outcome, WORKSPACE_READ_FILE_TOOL, code, path, host_root);
+    }
+
+    fn assert_failed_json_for_tool(
+        outcome: &ToolExecutionOutcome,
+        tool: &str,
+        code: &str,
+        path: Option<&str>,
+        host_root: &Path,
+    ) {
         assert_eq!(outcome.status(), ToolCallResultStatus::Failed);
         assert_eq!(outcome.content().kind(), ArtifactContentKind::Json);
         assert_eq!(outcome.diagnostic().expect("diagnostic").code(), code);
 
         let payload = json_content(outcome);
         assert_eq!(payload["ok"], false);
-        assert_eq!(payload["tool"], WORKSPACE_READ_FILE_TOOL);
+        assert_eq!(payload["tool"], tool);
         assert_eq!(payload["error"]["code"], code);
         if let Some(path) = path {
             assert_eq!(payload["path"], path);
@@ -721,10 +1788,14 @@ mod tests {
     }
 
     fn pending_call(arguments: Value) -> PendingToolCall {
+        pending_call_for(WORKSPACE_READ_FILE_TOOL, arguments)
+    }
+
+    fn pending_call_for(tool: &str, arguments: Value) -> PendingToolCall {
         let arguments = ToolCallArguments::try_from(arguments).expect("arguments object");
         PendingToolCall::new(
             ToolCallId::new("call-1").expect("valid call id"),
-            ToolName::new(WORKSPACE_READ_FILE_TOOL).expect("valid tool name"),
+            ToolName::new(tool).expect("valid tool name"),
             arguments,
         )
     }
@@ -754,8 +1825,12 @@ mod tests {
     #[test]
     fn config_rejects_zero_read_limit() {
         let temp = TempWorkspace::new("zero-limit");
-        let config = WorkspaceToolsConfig::new(vec![temp.path().to_path_buf()])
-            .with_limits(WorkspaceToolLimits { max_read_bytes: 0 });
+        let config = WorkspaceToolsConfig::new(vec![temp.path().to_path_buf()]).with_limits(
+            WorkspaceToolLimits {
+                max_read_bytes: 0,
+                ..WorkspaceToolLimits::default()
+            },
+        );
 
         let err = ReadOnlyWorkspaceTools::new(config).expect_err("zero limit should be rejected");
         assert!(matches!(
@@ -767,12 +1842,60 @@ mod tests {
     }
 
     #[test]
-    fn into_registered_tools_exposes_only_read_file_first_slice() {
+    fn config_rejects_each_zero_limit() {
+        let temp = TempWorkspace::new("zero-all-limits");
+
+        for invalid_name in [
+            "max_read_bytes",
+            "max_list_entries",
+            "max_search_matches",
+            "max_search_files",
+            "max_search_entries",
+            "max_search_bytes",
+            "max_search_line_bytes",
+            "max_search_query_bytes",
+        ] {
+            let mut limits = WorkspaceToolLimits::default();
+            match invalid_name {
+                "max_read_bytes" => limits.max_read_bytes = 0,
+                "max_list_entries" => limits.max_list_entries = 0,
+                "max_search_matches" => limits.max_search_matches = 0,
+                "max_search_files" => limits.max_search_files = 0,
+                "max_search_entries" => limits.max_search_entries = 0,
+                "max_search_bytes" => limits.max_search_bytes = 0,
+                "max_search_line_bytes" => limits.max_search_line_bytes = 0,
+                "max_search_query_bytes" => limits.max_search_query_bytes = 0,
+                other => panic!("unexpected limit name {other}"),
+            }
+
+            let config =
+                WorkspaceToolsConfig::new(vec![temp.path().to_path_buf()]).with_limits(limits);
+            let err =
+                ReadOnlyWorkspaceTools::new(config).expect_err("zero limit should be rejected");
+            assert!(matches!(
+                err,
+                WorkspaceToolConfigError::InvalidLimit { name } if name == invalid_name
+            ));
+        }
+    }
+
+    #[test]
+    fn into_registered_tools_exposes_read_list_and_search() {
         let temp = TempWorkspace::new("registered-tools");
         let tools = tools_for(temp.path()).into_registered_tools();
+        let names: Vec<_> = tools
+            .iter()
+            .map(|tool| tool.spec().name().as_str())
+            .collect();
 
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].spec().name().as_str(), WORKSPACE_READ_FILE_TOOL);
+        assert_eq!(
+            names,
+            [
+                WORKSPACE_READ_FILE_TOOL,
+                WORKSPACE_LIST_DIR_TOOL,
+                WORKSPACE_SEARCH_TEXT_TOOL
+            ]
+        );
     }
 
     #[test]
@@ -846,8 +1969,12 @@ mod tests {
         temp.write_bytes("binary.bin", &[0xff, 0xfe, 0xfd]);
         temp.write_text("large.txt", "abcdef");
         let tools = ReadOnlyWorkspaceTools::new(
-            WorkspaceToolsConfig::new(vec![temp.path().to_path_buf()])
-                .with_limits(WorkspaceToolLimits { max_read_bytes: 5 }),
+            WorkspaceToolsConfig::new(vec![temp.path().to_path_buf()]).with_limits(
+                WorkspaceToolLimits {
+                    max_read_bytes: 5,
+                    ..WorkspaceToolLimits::default()
+                },
+            ),
         )
         .expect("workspace tools should construct");
 
@@ -925,6 +2052,417 @@ mod tests {
     }
 
     #[test]
+    fn list_dir_success_returns_sorted_non_hidden_entries_and_symlink_kind() {
+        let temp = TempWorkspace::new("list-success");
+        temp.write_text("root/b.txt", "b\n");
+        temp.write_text("root/a.txt", "a\n");
+        fs::create_dir_all(temp.path().join("root/dir")).expect("directory should be created");
+        temp.write_text("root/.secret", "hidden\n");
+        #[cfg(unix)]
+        symlink(
+            temp.path().join("root/a.txt"),
+            temp.path().join("root/link.txt"),
+        )
+        .expect("symlink should be created");
+        let tools = tools_for(temp.path());
+
+        let outcome = list_outcome(&tools, "root");
+
+        assert_eq!(outcome.status(), ToolCallResultStatus::Succeeded);
+        let payload = json_content(&outcome);
+        assert_eq!(payload["ok"], true);
+        assert_eq!(payload["tool"], WORKSPACE_LIST_DIR_TOOL);
+        assert_eq!(payload["path"], "root");
+        assert_eq!(payload["truncated"], false);
+
+        #[cfg(unix)]
+        assert_eq!(
+            payload["entries"],
+            json!([
+                { "name": "a.txt", "path": "root/a.txt", "kind": "file" },
+                { "name": "b.txt", "path": "root/b.txt", "kind": "file" },
+                { "name": "dir", "path": "root/dir", "kind": "directory" },
+                { "name": "link.txt", "path": "root/link.txt", "kind": "symlink" }
+            ])
+        );
+
+        #[cfg(not(unix))]
+        assert_eq!(
+            payload["entries"],
+            json!([
+                { "name": "a.txt", "path": "root/a.txt", "kind": "file" },
+                { "name": "b.txt", "path": "root/b.txt", "kind": "file" },
+                { "name": "dir", "path": "root/dir", "kind": "directory" }
+            ])
+        );
+        assert!(
+            !outcome
+                .content()
+                .as_text()
+                .expect("json content")
+                .contains(temp.path().to_str().expect("temp path utf8")),
+            "tool output must not include absolute host roots"
+        );
+    }
+
+    #[test]
+    fn list_dir_allows_exact_root_dot_and_truncates_as_success() {
+        let temp = TempWorkspace::new("list-root-limit");
+        temp.write_text("c.txt", "c\n");
+        temp.write_text("a.txt", "a\n");
+        temp.write_text("b.txt", "b\n");
+        temp.write_text("aa.txt", "aa\n");
+        let tools = ReadOnlyWorkspaceTools::new(
+            WorkspaceToolsConfig::new(vec![temp.path().to_path_buf()]).with_limits(
+                WorkspaceToolLimits {
+                    max_list_entries: 2,
+                    ..WorkspaceToolLimits::default()
+                },
+            ),
+        )
+        .expect("workspace tools should construct");
+
+        let outcome = list_outcome(&tools, ".");
+
+        assert_eq!(outcome.status(), ToolCallResultStatus::Succeeded);
+        let payload = json_content(&outcome);
+        assert_eq!(payload["path"], ".");
+        assert_eq!(payload["truncated"], true);
+        assert_eq!(
+            payload["entries"],
+            json!([
+                { "name": "a.txt", "path": "a.txt", "kind": "file" },
+                { "name": "aa.txt", "path": "aa.txt", "kind": "file" }
+            ])
+        );
+    }
+
+    #[test]
+    fn list_dir_rejects_bad_paths_and_non_directory_domain_failure() {
+        let temp = TempWorkspace::new("list-domain-failures");
+        temp.write_text("file.txt", "content\n");
+        let tools = tools_for(temp.path());
+
+        let dot_component = list_outcome(&tools, "dir/./file");
+        assert_failed_json_for_tool(
+            &dot_component,
+            WORKSPACE_LIST_DIR_TOOL,
+            ERROR_PATH_DENIED,
+            Some("dir/./file"),
+            temp.path(),
+        );
+
+        let file = list_outcome(&tools, "file.txt");
+        assert_failed_json_for_tool(
+            &file,
+            WORKSPACE_LIST_DIR_TOOL,
+            ERROR_NOT_DIRECTORY,
+            Some("file.txt"),
+            temp.path(),
+        );
+
+        let missing = list_outcome(&tools, "missing");
+        assert_failed_json_for_tool(
+            &missing,
+            WORKSPACE_LIST_DIR_TOOL,
+            ERROR_PATH_NOT_FOUND,
+            Some("missing"),
+            temp.path(),
+        );
+
+        let absolute_parent = list_outcome(&tools, "/../outside");
+        assert_failed_json_for_tool(
+            &absolute_parent,
+            WORKSPACE_LIST_DIR_TOOL,
+            ERROR_PATH_DENIED,
+            None,
+            temp.path(),
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_dir_rejects_requested_symlink_without_following_it() {
+        let temp = TempWorkspace::new("list-symlink");
+        fs::create_dir_all(temp.path().join("target")).expect("target directory should be created");
+        symlink(temp.path().join("target"), temp.path().join("link"))
+            .expect("symlink should be created");
+        let tools = tools_for(temp.path());
+
+        let outcome = list_outcome(&tools, "link");
+
+        assert_failed_json_for_tool(
+            &outcome,
+            WORKSPACE_LIST_DIR_TOOL,
+            ERROR_PATH_DENIED,
+            Some("link"),
+            temp.path(),
+        );
+    }
+
+    #[test]
+    fn search_text_finds_literal_case_sensitive_matches_in_stable_order() {
+        let temp = TempWorkspace::new("search-success");
+        temp.write_text("b.txt", "needle in b\nNeedle uppercase\n");
+        temp.write_text("a.txt", "first\nneedle in a\n");
+        temp.write_text("dir/c.txt", "needle in c\n");
+        let tools = tools_for(temp.path());
+
+        let outcome = search_outcome(&tools, "needle", None, None);
+
+        assert_eq!(outcome.status(), ToolCallResultStatus::Succeeded);
+        let payload = json_content(&outcome);
+        assert_eq!(payload["ok"], true);
+        assert_eq!(payload["tool"], WORKSPACE_SEARCH_TEXT_TOOL);
+        assert_eq!(payload["query"], "needle");
+        assert!(payload.get("path").is_none());
+        assert_eq!(payload["searched_files"], 3);
+        assert_eq!(payload["truncated"], false);
+        assert_eq!(
+            payload["matches"],
+            json!([
+                { "path": "a.txt", "line_number": 2, "line": "needle in a", "truncated": false },
+                { "path": "b.txt", "line_number": 1, "line": "needle in b", "truncated": false },
+                { "path": "dir/c.txt", "line_number": 1, "line": "needle in c", "truncated": false }
+            ])
+        );
+        assert!(
+            !outcome
+                .content()
+                .as_text()
+                .expect("json content")
+                .contains(temp.path().to_str().expect("temp path utf8")),
+            "tool output must not include absolute host roots"
+        );
+    }
+
+    #[test]
+    fn search_text_returns_success_for_no_match() {
+        let temp = TempWorkspace::new("search-no-match");
+        temp.write_text("note.txt", "alpha\n");
+        let tools = tools_for(temp.path());
+
+        let outcome = search_outcome(&tools, "needle", Some("note.txt"), None);
+
+        assert_eq!(outcome.status(), ToolCallResultStatus::Succeeded);
+        let payload = json_content(&outcome);
+        assert_eq!(payload["path"], "note.txt");
+        assert_eq!(payload["matches"], json!([]));
+        assert_eq!(payload["truncated"], false);
+    }
+
+    #[test]
+    fn search_text_respects_match_file_query_and_line_limits() {
+        let temp = TempWorkspace::new("search-limits");
+        temp.write_text("a.txt", "needle abcdef\nneedle again\n");
+        temp.write_text("b.txt", "needle in b\n");
+        let tools = ReadOnlyWorkspaceTools::new(
+            WorkspaceToolsConfig::new(vec![temp.path().to_path_buf()]).with_limits(
+                WorkspaceToolLimits {
+                    max_search_matches: 5,
+                    max_search_files: 1,
+                    max_search_line_bytes: 10,
+                    max_search_query_bytes: 6,
+                    ..WorkspaceToolLimits::default()
+                },
+            ),
+        )
+        .expect("workspace tools should construct");
+
+        let limited = search_outcome(&tools, "needle", None, Some(1));
+        assert_eq!(limited.status(), ToolCallResultStatus::Succeeded);
+        let payload = json_content(&limited);
+        assert_eq!(payload["searched_files"], 1);
+        assert_eq!(payload["truncated"], true);
+        assert_eq!(
+            payload["matches"],
+            json!([
+                { "path": "a.txt", "line_number": 1, "line": "needle abc", "truncated": true }
+            ])
+        );
+
+        let file_limited = search_outcome(&tools, "absent", None, None);
+        assert_eq!(file_limited.status(), ToolCallResultStatus::Succeeded);
+        let payload = json_content(&file_limited);
+        assert_eq!(payload["searched_files"], 1);
+        assert_eq!(payload["truncated"], true);
+        assert_eq!(payload["matches"], json!([]));
+
+        let too_long = search_outcome(&tools, "needles", None, None);
+        assert_failed_json_for_tool(
+            &too_long,
+            WORKSPACE_SEARCH_TEXT_TOOL,
+            ERROR_INVALID_ARGUMENTS,
+            None,
+            temp.path(),
+        );
+    }
+
+    #[test]
+    fn search_text_total_byte_limit_truncates_without_scanning_next_file() {
+        let temp = TempWorkspace::new("search-total-bytes");
+        temp.write_text("a.txt", "abc\n");
+        temp.write_text("b.txt", "needle\n");
+        let tools = ReadOnlyWorkspaceTools::new(
+            WorkspaceToolsConfig::new(vec![temp.path().to_path_buf()]).with_limits(
+                WorkspaceToolLimits {
+                    max_search_bytes: 4,
+                    ..WorkspaceToolLimits::default()
+                },
+            ),
+        )
+        .expect("workspace tools should construct");
+
+        let outcome = search_outcome(&tools, "needle", None, None);
+
+        assert_eq!(outcome.status(), ToolCallResultStatus::Succeeded);
+        let payload = json_content(&outcome);
+        assert_eq!(payload["searched_files"], 1);
+        assert_eq!(payload["truncated"], true);
+        assert_eq!(payload["matches"], json!([]));
+    }
+
+    #[test]
+    fn search_text_entry_limit_truncates_recursive_enumeration() {
+        let temp = TempWorkspace::new("search-entry-limit");
+        temp.write_text("a.txt", "absent\n");
+        temp.write_text("b.txt", "needle\n");
+        let tools = ReadOnlyWorkspaceTools::new(
+            WorkspaceToolsConfig::new(vec![temp.path().to_path_buf()]).with_limits(
+                WorkspaceToolLimits {
+                    max_search_entries: 1,
+                    ..WorkspaceToolLimits::default()
+                },
+            ),
+        )
+        .expect("workspace tools should construct");
+
+        let outcome = search_outcome(&tools, "needle", None, None);
+
+        assert_eq!(outcome.status(), ToolCallResultStatus::Succeeded);
+        let payload = json_content(&outcome);
+        assert_eq!(payload["searched_files"], 0);
+        assert_eq!(payload["truncated"], true);
+        assert_eq!(payload["matches"], json!([]));
+    }
+
+    #[test]
+    fn search_text_counts_skipped_hidden_non_utf8_symlink_and_too_large() {
+        let temp = TempWorkspace::new("search-skips");
+        temp.write_text("visible.txt", "needle\n");
+        temp.write_text(".hidden.txt", "needle hidden\n");
+        temp.write_bytes("binary.bin", &[0xff, 0xfe, 0xfd]);
+        temp.write_text("large.txt", "needle large\n");
+        #[cfg(unix)]
+        symlink(
+            temp.path().join("visible.txt"),
+            temp.path().join("linked.txt"),
+        )
+        .expect("symlink should be created");
+        let tools = ReadOnlyWorkspaceTools::new(
+            WorkspaceToolsConfig::new(vec![temp.path().to_path_buf()]).with_limits(
+                WorkspaceToolLimits {
+                    max_read_bytes: 6,
+                    ..WorkspaceToolLimits::default()
+                },
+            ),
+        )
+        .expect("workspace tools should construct");
+
+        let outcome = search_outcome(&tools, "needle", None, None);
+
+        assert_eq!(outcome.status(), ToolCallResultStatus::Succeeded);
+        let payload = json_content(&outcome);
+        assert_eq!(payload["matches"], json!([]));
+        assert_eq!(payload["skipped"]["hidden"], 1);
+        assert_eq!(payload["skipped"]["non_utf8"], 1);
+        assert_eq!(payload["skipped"]["too_large"], 2);
+        #[cfg(unix)]
+        assert_eq!(payload["skipped"]["symlink"], 1);
+    }
+
+    #[test]
+    fn search_text_rejects_bad_path_and_missing_path_domain_failure() {
+        let temp = TempWorkspace::new("search-domain-failures");
+        let tools = tools_for(temp.path());
+
+        let denied = search_outcome(&tools, "needle", Some("../outside"), None);
+        assert_failed_json_for_tool(
+            &denied,
+            WORKSPACE_SEARCH_TEXT_TOOL,
+            ERROR_PATH_DENIED,
+            Some("../outside"),
+            temp.path(),
+        );
+
+        let missing = search_outcome(&tools, "needle", Some("missing.txt"), None);
+        assert_failed_json_for_tool(
+            &missing,
+            WORKSPACE_SEARCH_TEXT_TOOL,
+            ERROR_PATH_NOT_FOUND,
+            Some("missing.txt"),
+            temp.path(),
+        );
+
+        let empty_query = search_outcome(&tools, "", None, None);
+        assert_failed_json_for_tool(
+            &empty_query,
+            WORKSPACE_SEARCH_TEXT_TOOL,
+            ERROR_INVALID_ARGUMENTS,
+            None,
+            temp.path(),
+        );
+
+        let multiline_query = search_outcome(&tools, "need\nle", None, None);
+        assert_failed_json_for_tool(
+            &multiline_query,
+            WORKSPACE_SEARCH_TEXT_TOOL,
+            ERROR_INVALID_ARGUMENTS,
+            None,
+            temp.path(),
+        );
+
+        let control_query =
+            search_outcome(&tools, &format!("bad{}query", char::from(7)), None, None);
+        assert_failed_json_for_tool(
+            &control_query,
+            WORKSPACE_SEARCH_TEXT_TOOL,
+            ERROR_INVALID_ARGUMENTS,
+            None,
+            temp.path(),
+        );
+
+        let absolute_parent = search_outcome(&tools, "needle", Some("/../outside"), None);
+        assert_failed_json_for_tool(
+            &absolute_parent,
+            WORKSPACE_SEARCH_TEXT_TOOL,
+            ERROR_PATH_DENIED,
+            None,
+            temp.path(),
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn search_text_rejects_requested_symlink_without_following_it() {
+        let temp = TempWorkspace::new("search-symlink");
+        temp.write_text("target.txt", "needle\n");
+        symlink(temp.path().join("target.txt"), temp.path().join("link.txt"))
+            .expect("symlink should be created");
+        let tools = tools_for(temp.path());
+
+        let outcome = search_outcome(&tools, "needle", Some("link.txt"), None);
+
+        assert_failed_json_for_tool(
+            &outcome,
+            WORKSPACE_SEARCH_TEXT_TOOL,
+            ERROR_PATH_DENIED,
+            Some("link.txt"),
+            temp.path(),
+        );
+    }
+
+    #[test]
     fn read_file_executor_returns_cancelled_when_token_is_cancelled() {
         let temp = TempWorkspace::new("cancelled");
         temp.write_text("note.txt", "ok\n");
@@ -944,6 +2482,37 @@ mod tests {
             .expect_err("cancelled execution should return cancellation error");
 
         assert!(matches!(err, ToolExecutionError::Cancelled));
+    }
+
+    #[test]
+    fn list_and_search_executors_return_cancelled_when_token_is_cancelled() {
+        let temp = TempWorkspace::new("list-search-cancelled");
+        temp.write_text("note.txt", "needle\n");
+        let tools = tools_for(temp.path());
+        let token = tokio_util::sync::CancellationToken::new();
+        token.cancel();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("tokio runtime should build");
+
+        let list_executor = ListDirExecutor {
+            state: Arc::clone(&tools.state),
+        };
+        let list_call = pending_call_for(WORKSPACE_LIST_DIR_TOOL, json!({ "path": "." }));
+        let list_err = runtime
+            .block_on(list_executor.execute(list_call, ToolExecutionContext::new(token.clone())))
+            .expect_err("cancelled list execution should return cancellation error");
+        assert!(matches!(list_err, ToolExecutionError::Cancelled));
+
+        let search_executor = SearchTextExecutor {
+            state: Arc::clone(&tools.state),
+        };
+        let search_call =
+            pending_call_for(WORKSPACE_SEARCH_TEXT_TOOL, json!({ "query": "needle" }));
+        let search_err = runtime
+            .block_on(search_executor.execute(search_call, ToolExecutionContext::new(token)))
+            .expect_err("cancelled search execution should return cancellation error");
+        assert!(matches!(search_err, ToolExecutionError::Cancelled));
     }
 
     #[test]

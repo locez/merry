@@ -6,18 +6,20 @@ M8 runtime/provider/tool execution hardening has shifted into maintenance and fo
 
 The first Runtime Agent Loop MVP slice is implemented in `merry-runtime` as a bounded serial loop over the existing `Runtime::step`, registered tool execution, and continuation step primitives. It returns ordered runtime events and typed completed/failed/cancelled/blocked outcomes without adding provider wire state or real filesystem/shell tools. Tool execution cancellation during the loop is reported as a cancelled loop status while leaving the pending tool call unresolved.
 
-The first `merry-tool-workspace` slice is intentionally narrow: it exposes only
-the registered `workspace_read_file` tool for UTF-8 reads under explicitly
-configured workspace roots. It is not a shell, write API, network API, directory
-list/search layer, or complete coding agent. Workspace list/search tools remain
-next-slice work after the read-file contract is stable.
+The `merry-tool-workspace` slice has moved from the read-file first slice into
+read-only workspace navigation/search: it exposes registered
+`workspace_read_file`, `workspace_list_dir`, and `workspace_search_text` tools
+for UTF-8 reads, non-recursive directory listing, and bounded literal text
+search under explicitly configured workspace roots. It is still not a shell,
+write API, network API, or complete coding agent.
 
-The workspace read-file path-safety contract assumes trusted, stable workspace
-roots. The MVP prevents ordinary path traversal and ordinary symlink traversal
-before reading, and on Unix uses `O_NOFOLLOW` for the final open so a symlink
-swapped into the leaf path is rejected. It is not an OS sandbox and does not
-claim complete hardening against malicious concurrent filesystem mutation, such
-as replacing intermediate directories during validation/open.
+The workspace path-safety contract assumes trusted, stable workspace roots. The
+MVP prevents ordinary path traversal and ordinary symlink traversal before
+read/list/search operations, and on Unix uses `O_NOFOLLOW` for file opens so a
+symlink swapped into a file leaf path is rejected. It is not an OS sandbox and
+does not claim complete hardening against malicious concurrent filesystem
+mutation, such as replacing intermediate directories during validation/open;
+that remains a residual TOCTOU risk.
 
 The OpenAI provider targets the Responses API only. The provider request path is `/responses`; it keeps the Merry-owned `merry-llm` provider boundary intact, keeps OpenAI wire types private to `merry-provider-openai`, sets `store: false`, omits `previous_response_id`, avoids provider conversation state as Merry runtime state, and keeps `parallel_tool_calls: false` until runtime policy supports parallel tool calls. This provider work does not imply a live/OpenAI judgment path or public judgment API.
 
