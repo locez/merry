@@ -1,0 +1,22 @@
+{
+  "id": "resp_bad_tool",
+  "object": "response",
+  "created_at": 1730000002,
+  "status": "completed",
+  "model": "gpt-4.1-mini",
+  "output": [
+    {
+      "id": "fc_bad123",
+      "type": "function_call",
+      "status": "completed",
+      "call_id": "call_bad123",
+      "name": "lookup_weather",
+      "arguments": "\"not an object\""
+    }
+  ],
+  "usage": {
+    "input_tokens": 20,
+    "output_tokens": 8,
+    "total_tokens": 28
+  }
+}

@@ -1,179 +1,193 @@
-//! Private Chat Completions-compatible wire shapes.
+//! Private Responses API wire shapes.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Debug, Serialize)]
-pub(crate) struct ChatCompletionRequest<'a> {
+pub(crate) struct ResponsesRequest<'a> {
     pub(crate) model: &'a str,
-    pub(crate) messages: Vec<ChatMessage<'a>>,
+    pub(crate) input: Vec<ResponsesInputItem<'a>>,
     pub(crate) stream: bool,
-    pub(crate) stream_options: StreamOptions,
+    pub(crate) store: bool,
     pub(crate) parallel_tool_calls: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) max_completion_tokens: Option<u64>,
+    pub(crate) max_output_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub(crate) tools: Vec<ChatTool<'a>>,
+    pub(crate) tools: Vec<ResponsesTool<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) tool_choice: Option<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
-pub(crate) enum ChatMessage<'a> {
-    Text(ChatTextMessage<'a>),
-    AssistantToolCalls(ChatAssistantToolCallsMessage<'a>),
-    ToolResult(ChatToolResultMessage<'a>),
+pub(crate) enum ResponsesInputItem<'a> {
+    Message(ResponsesMessageInputItem<'a>),
+    FunctionCall(ResponsesFunctionCallInputItem<'a>),
+    FunctionCallOutput(ResponsesFunctionCallOutputInputItem<'a>),
 }
 
-impl<'a> ChatMessage<'a> {
-    pub(crate) fn text(role: &'static str, content: &'a str) -> Self {
-        Self::Text(ChatTextMessage { role, content })
-    }
-
-    pub(crate) fn assistant_tool_call(id: &'a str, name: &'a str, arguments: String) -> Self {
-        Self::AssistantToolCalls(ChatAssistantToolCallsMessage {
-            role: "assistant",
-            content: None,
-            tool_calls: vec![ChatRequestToolCall {
-                id,
-                kind: "function",
-                function: ChatRequestToolCallFunction { name, arguments },
-            }],
+impl<'a> ResponsesInputItem<'a> {
+    pub(crate) fn message(role: &'static str, text: &'a str) -> Self {
+        Self::Message(ResponsesMessageInputItem {
+            role,
+            content: vec![ResponsesInputContent::input_text(text)],
         })
     }
 
-    pub(crate) fn tool_result(tool_call_id: &'a str, content: &'a str) -> Self {
-        Self::ToolResult(ChatToolResultMessage {
-            role: "tool",
-            tool_call_id,
-            content,
+    pub(crate) fn function_call(call_id: &'a str, name: &'a str, arguments: String) -> Self {
+        Self::FunctionCall(ResponsesFunctionCallInputItem {
+            kind: "function_call",
+            call_id,
+            name,
+            arguments,
+        })
+    }
+
+    pub(crate) fn function_call_output(call_id: &'a str, output: &'a str) -> Self {
+        Self::FunctionCallOutput(ResponsesFunctionCallOutputInputItem {
+            kind: "function_call_output",
+            call_id,
+            output,
         })
     }
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct ChatTextMessage<'a> {
+pub(crate) struct ResponsesMessageInputItem<'a> {
     pub(crate) role: &'static str,
-    pub(crate) content: &'a str,
+    pub(crate) content: Vec<ResponsesInputContent<'a>>,
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct ChatAssistantToolCallsMessage<'a> {
-    pub(crate) role: &'static str,
-    pub(crate) content: Option<&'static str>,
-    pub(crate) tool_calls: Vec<ChatRequestToolCall<'a>>,
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct ChatRequestToolCall<'a> {
-    pub(crate) id: &'a str,
+pub(crate) struct ResponsesInputContent<'a> {
     #[serde(rename = "type")]
     pub(crate) kind: &'static str,
-    pub(crate) function: ChatRequestToolCallFunction<'a>,
+    pub(crate) text: &'a str,
+}
+
+impl<'a> ResponsesInputContent<'a> {
+    fn input_text(text: &'a str) -> Self {
+        Self {
+            kind: "input_text",
+            text,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct ChatRequestToolCallFunction<'a> {
+pub(crate) struct ResponsesFunctionCallInputItem<'a> {
+    #[serde(rename = "type")]
+    pub(crate) kind: &'static str,
+    pub(crate) call_id: &'a str,
     pub(crate) name: &'a str,
     pub(crate) arguments: String,
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct ChatToolResultMessage<'a> {
-    pub(crate) role: &'static str,
-    pub(crate) tool_call_id: &'a str,
-    pub(crate) content: &'a str,
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct StreamOptions {
-    pub(crate) include_usage: bool,
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct ChatTool<'a> {
+pub(crate) struct ResponsesFunctionCallOutputInputItem<'a> {
     #[serde(rename = "type")]
     pub(crate) kind: &'static str,
-    pub(crate) function: ChatToolFunction<'a>,
+    pub(crate) call_id: &'a str,
+    pub(crate) output: &'a str,
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct ChatToolFunction<'a> {
+pub(crate) struct ResponsesTool<'a> {
+    #[serde(rename = "type")]
+    pub(crate) kind: &'static str,
     pub(crate) name: &'a str,
     pub(crate) description: &'a str,
     pub(crate) parameters: &'a Value,
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct ChatCompletionResponse {
-    pub(crate) choices: Vec<ChatCompletionChoice>,
-    pub(crate) usage: Option<ChatUsage>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct ChatCompletionChoice {
-    pub(crate) message: ChatCompletionMessage,
-    pub(crate) finish_reason: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct ChatCompletionMessage {
-    pub(crate) content: Option<String>,
+pub(crate) struct ResponsesResponse {
     #[serde(default)]
-    pub(crate) tool_calls: Vec<ChatToolCall>,
+    pub(crate) output: Vec<ResponsesOutputItem>,
+    pub(crate) status: Option<String>,
+    pub(crate) usage: Option<ResponsesUsage>,
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct ChatToolCall {
-    pub(crate) id: Option<String>,
-    #[serde(rename = "type")]
-    pub(crate) kind: String,
-    pub(crate) function: ChatToolCallFunction,
+#[serde(tag = "type")]
+pub(crate) enum ResponsesOutputItem {
+    #[serde(rename = "message")]
+    Message {
+        content: Vec<ResponsesOutputContent>,
+    },
+    #[serde(rename = "function_call")]
+    FunctionCall {
+        call_id: Option<String>,
+        name: Option<String>,
+        arguments: Option<String>,
+    },
+    #[serde(other)]
+    Other,
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct ChatToolCallFunction {
-    pub(crate) name: Option<String>,
-    pub(crate) arguments: Option<String>,
+#[serde(tag = "type")]
+pub(crate) enum ResponsesOutputContent {
+    #[serde(rename = "output_text")]
+    OutputText { text: String },
+    #[serde(other)]
+    Other,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
-pub(crate) struct ChatUsage {
-    pub(crate) prompt_tokens: u64,
-    pub(crate) completion_tokens: u64,
+pub(crate) struct ResponsesUsage {
+    pub(crate) input_tokens: u64,
+    pub(crate) output_tokens: u64,
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct ChatCompletionStreamChunk {
-    pub(crate) choices: Vec<ChatCompletionStreamChoice>,
-    pub(crate) usage: Option<ChatUsage>,
+#[serde(tag = "type")]
+pub(crate) enum ResponsesStreamEvent {
+    #[serde(rename = "response.created")]
+    Created,
+    #[serde(rename = "response.output_text.delta")]
+    OutputTextDelta { delta: String },
+    #[serde(rename = "response.output_item.added")]
+    OutputItemAdded {
+        output_index: u64,
+        item: ResponsesStreamOutputItem,
+    },
+    #[serde(rename = "response.function_call_arguments.delta")]
+    FunctionCallArgumentsDelta { output_index: u64, delta: String },
+    #[serde(rename = "response.function_call_arguments.done")]
+    FunctionCallArgumentsDone {
+        output_index: u64,
+        arguments: String,
+    },
+    #[serde(rename = "response.output_item.done")]
+    OutputItemDone {
+        output_index: u64,
+        item: ResponsesStreamOutputItem,
+    },
+    #[serde(rename = "response.completed")]
+    Completed { response: ResponsesResponse },
+    #[serde(rename = "response.incomplete")]
+    Incomplete { response: ResponsesResponse },
+    #[serde(rename = "response.failed")]
+    Failed { response: ResponsesResponse },
+    #[serde(rename = "error")]
+    Error {
+        code: Option<String>,
+        message: Option<String>,
+    },
+    #[serde(other)]
+    Other,
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct ChatCompletionStreamChoice {
-    pub(crate) delta: ChatCompletionStreamDelta,
-    pub(crate) finish_reason: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct ChatCompletionStreamDelta {
-    pub(crate) content: Option<String>,
-    #[serde(default)]
-    pub(crate) tool_calls: Vec<ChatCompletionStreamToolCall>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct ChatCompletionStreamToolCall {
-    pub(crate) index: u64,
-    pub(crate) id: Option<String>,
-    #[serde(rename = "type")]
-    pub(crate) kind: Option<String>,
-    pub(crate) function: Option<ChatCompletionStreamToolCallFunction>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct ChatCompletionStreamToolCallFunction {
-    pub(crate) name: Option<String>,
-    pub(crate) arguments: Option<String>,
+#[serde(tag = "type")]
+pub(crate) enum ResponsesStreamOutputItem {
+    #[serde(rename = "function_call")]
+    FunctionCall {
+        call_id: Option<String>,
+        name: Option<String>,
+        arguments: Option<String>,
+    },
+    #[serde(other)]
+    Other,
 }

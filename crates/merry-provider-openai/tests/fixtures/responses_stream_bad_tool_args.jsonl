@@ -1,0 +1,6 @@
+data: {"type":"response.created"}
+data: {"type":"response.output_item.added","output_index":0,"item":{"id":"fc_stream_bad","type":"function_call","status":"in_progress","call_id":"call_stream_bad","name":"lookup_weather","arguments":""}}
+data: {"type":"response.function_call_arguments.done","output_index":0,"arguments":"\"not an object\""}
+data: {"type":"response.output_item.done","output_index":0,"item":{"id":"fc_stream_bad","type":"function_call","status":"completed","call_id":"call_stream_bad","name":"lookup_weather","arguments":"\"not an object\""}}
+data: {"type":"response.completed","response":{"id":"resp_stream_bad_tool","object":"response","created_at":1730000005,"status":"completed","model":"gpt-4.1-mini","output":[{"id":"fc_stream_bad","type":"function_call","status":"completed","call_id":"call_stream_bad","name":"lookup_weather","arguments":"\"not an object\""}],"usage":{"input_tokens":14,"output_tokens":6,"total_tokens":20}}}
+data: [DONE]

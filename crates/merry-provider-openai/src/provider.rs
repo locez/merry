@@ -1,6 +1,6 @@
-//! Provider implementation for the OpenAI-compatible adapter.
+//! Provider implementation for the OpenAI Responses adapter.
 
-use crate::{OpenAiProviderConfig, OpenAiProviderError, parse::ChatCompletionStreamParser};
+use crate::{OpenAiProviderConfig, OpenAiProviderError, parse::ResponsesStreamParser};
 use futures_util::stream;
 use merry_core::ProviderName;
 use merry_llm::{
@@ -75,7 +75,7 @@ impl ModelProvider for OpenAiProvider {
                     return Err(ModelError::Cancelled);
                 }
 
-                let http_request = build_chat_completion_http_request(&self.config, &request)?;
+                let http_request = build_responses_http_request(&self.config, &request)?;
                 event_stream_span.record("endpoint_path", http_request.endpoint.path());
                 tracing::trace!("openai request rendered");
 
@@ -229,7 +229,7 @@ impl OpenAiEventStreamState {
 }
 
 struct OpenAiEventStreamEvents {
-    parser: ChatCompletionStreamParser,
+    parser: ResponsesStreamParser,
     line_buffer: Vec<u8>,
     pending: VecDeque<ModelEvent>,
 }
@@ -237,7 +237,7 @@ struct OpenAiEventStreamEvents {
 impl OpenAiEventStreamEvents {
     fn new() -> Self {
         Self {
-            parser: ChatCompletionStreamParser::new(),
+            parser: ResponsesStreamParser::new(),
             line_buffer: Vec::new(),
             pending: VecDeque::from([ModelEvent::Started]),
         }
@@ -282,13 +282,13 @@ impl OpenAiEventStreamEvents {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-struct ChatCompletionHttpRequest {
+struct ResponsesHttpRequest {
     endpoint: reqwest::Url,
-    headers: Vec<ChatCompletionHttpHeader>,
+    headers: Vec<ResponsesHttpHeader>,
     body: Value,
 }
 
-impl ChatCompletionHttpRequest {
+impl ResponsesHttpRequest {
     #[cfg(test)]
     fn header(&self, name: &str) -> Option<&str> {
         self.headers
@@ -299,50 +299,50 @@ impl ChatCompletionHttpRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ChatCompletionHttpHeader {
+struct ResponsesHttpHeader {
     name: &'static str,
     value: String,
 }
 
-fn build_chat_completion_http_request(
+fn build_responses_http_request(
     config: &OpenAiProviderConfig,
     request: &ModelRequest,
-) -> Result<ChatCompletionHttpRequest, ModelError> {
+) -> Result<ResponsesHttpRequest, ModelError> {
     let mut headers = vec![
-        ChatCompletionHttpHeader {
+        ResponsesHttpHeader {
             name: AUTHORIZATION_HEADER,
             value: format!("Bearer {}", config.api_key()),
         },
-        ChatCompletionHttpHeader {
+        ResponsesHttpHeader {
             name: ACCEPT_HEADER,
             value: SSE_ACCEPT_HEADER_VALUE.to_owned(),
         },
     ];
     if let Some(organization) = config.organization() {
-        headers.push(ChatCompletionHttpHeader {
+        headers.push(ResponsesHttpHeader {
             name: OPENAI_ORGANIZATION_HEADER,
             value: organization.to_owned(),
         });
     }
     if let Some(project) = config.project() {
-        headers.push(ChatCompletionHttpHeader {
+        headers.push(ResponsesHttpHeader {
             name: OPENAI_PROJECT_HEADER,
             value: project.to_owned(),
         });
     }
 
-    Ok(ChatCompletionHttpRequest {
-        endpoint: chat_completions_endpoint(config.base_url())?,
+    Ok(ResponsesHttpRequest {
+        endpoint: responses_endpoint(config.base_url())?,
         headers,
-        body: crate::render::render_chat_completion_request(request)?,
+        body: crate::render::render_responses_request(request)?,
     })
 }
 
-fn chat_completions_endpoint(base_url: &str) -> Result<reqwest::Url, ModelError> {
-    let endpoint = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+fn responses_endpoint(base_url: &str) -> Result<reqwest::Url, ModelError> {
+    let endpoint = format!("{}/responses", base_url.trim_end_matches('/'));
     reqwest::Url::parse(&endpoint).map_err(|error| {
         OpenAiProviderError::invalid_config(format!(
-            "base_url does not form a valid Chat Completions endpoint: {error}"
+            "base_url does not form a valid Responses endpoint: {error}"
         ))
         .into()
     })
@@ -361,7 +361,7 @@ async fn map_status_error(
         }),
     };
     let message = format!(
-        "OpenAI Chat Completions request returned HTTP {status}: {}",
+        "OpenAI Responses request returned HTTP {status}: {}",
         truncate_for_error(body.trim())
     );
 
@@ -389,7 +389,7 @@ fn classify_http_status(status: reqwest::StatusCode) -> ProviderErrorKind {
 fn map_transport_error(error: reqwest::Error) -> ModelError {
     ModelError::from(OpenAiProviderError::provider(
         ProviderErrorKind::Unavailable,
-        format!("OpenAI Chat Completions transport failed: {error}"),
+        format!("OpenAI Responses transport failed: {error}"),
     ))
 }
 
@@ -407,11 +407,9 @@ fn truncate_for_error(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        OpenAiEventStreamEvents, build_chat_completion_http_request, classify_http_status,
-    };
+    use super::{OpenAiEventStreamEvents, build_responses_http_request, classify_http_status};
     use crate::OpenAiProviderConfig;
-    use crate::parse::ChatCompletionStreamParser;
+    use crate::parse::ResponsesStreamParser;
     use merry_llm::{
         FinishReason, GenerationConfig, ModelContent, ModelEvent, ModelMessage, ModelMessageRole,
         ModelName, ModelOutput, ModelProvider, ModelRequest, ModelResponse, ModelStreamContext,
@@ -437,7 +435,7 @@ mod tests {
     }
 
     #[test]
-    fn builds_chat_completion_http_request_without_network() {
+    fn builds_responses_http_request_without_network() {
         let config = OpenAiProviderConfig::new("sk-test")
             .expect("valid config")
             .with_base_url("https://api.example.test/v1/")
@@ -448,11 +446,11 @@ mod tests {
             .expect("valid project");
 
         let request =
-            build_chat_completion_http_request(&config, &request()).expect("request should build");
+            build_responses_http_request(&config, &request()).expect("request should build");
 
         assert_eq!(
             request.endpoint.as_str(),
-            "https://api.example.test/v1/chat/completions"
+            "https://api.example.test/v1/responses"
         );
         assert_eq!(request.header("Authorization"), Some("Bearer sk-test"));
         assert_eq!(request.header("Accept"), Some("text/event-stream"));
@@ -460,7 +458,7 @@ mod tests {
         assert_eq!(request.header("OpenAI-Project"), Some("proj-test"));
         assert_eq!(request.body["model"], "debug-model");
         assert_eq!(request.body["stream"], true);
-        assert_eq!(request.body["stream_options"]["include_usage"], true);
+        assert_eq!(request.body["store"], false);
         assert_eq!(request.body["parallel_tool_calls"], false);
     }
 
@@ -490,14 +488,14 @@ mod tests {
 
     #[test]
     fn parses_sse_lines_to_started_deltas_and_completed_without_network() {
-        let mut parser = ChatCompletionStreamParser::new();
+        let mut parser = ResponsesStreamParser::new();
         let mut events = VecDeque::from([ModelEvent::Started]);
 
         for line in [
-            "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}],\"usage\":null}",
-            "data: {\"choices\":[{\"delta\":{\"content\":\" world\"},\"finish_reason\":null}],\"usage\":null}",
-            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":null}",
-            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":3,\"total_tokens\":12}}",
+            "data: {\"type\":\"response.created\"}",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\" world\"}",
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"Hello world\"}]}],\"usage\":{\"input_tokens\":9,\"output_tokens\":3}}}",
             "data: [DONE]",
         ] {
             events.extend(
@@ -535,9 +533,7 @@ mod tests {
 
         assert_eq!(events.pop_pending(), Some(ModelEvent::Started));
         events
-            .parse_bytes(
-                b"data: {\"choices\":[{\"delta\":{\"content\":\"Done\"},\"finish_reason\":null}],\"usage\":null}\n",
-            )
+            .parse_bytes(b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"Done\"}\n")
             .expect("text delta should parse");
         assert_eq!(
             events.pop_pending(),
@@ -546,13 +542,11 @@ mod tests {
             })
         );
         events
-            .parse_bytes(
-                b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":null}\n",
-            )
-            .expect("finish reason should parse");
+            .parse_bytes(b"data: {\"type\":\"response.created\"}\n")
+            .expect("created event should parse");
         events
-            .parse_bytes(b"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":1,\"total_tokens\":5}}")
-            .expect("unterminated final usage line should buffer");
+            .parse_bytes(b"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"Done\"}]}],\"usage\":{\"input_tokens\":4,\"output_tokens\":1}}}")
+            .expect("unterminated completion line should buffer");
 
         events.finish_stream().expect("stream should finish");
 
@@ -574,9 +568,7 @@ mod tests {
         let mut events = OpenAiEventStreamEvents::new();
         assert_eq!(events.pop_pending(), Some(ModelEvent::Started));
         events
-            .parse_bytes(
-                b"data: {\"choices\":[{\"delta\":{\"content\":\"Done\"},\"finish_reason\":null}],\"usage\":null}\n",
-            )
+            .parse_bytes(b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"Done\"}\n")
             .expect("text delta should parse");
         assert_eq!(
             events.pop_pending(),
@@ -585,13 +577,11 @@ mod tests {
             })
         );
         events
-            .parse_bytes(
-                b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":null}\n",
-            )
-            .expect("finish reason should parse");
+            .parse_bytes(b"data: {\"type\":\"response.created\"}\n")
+            .expect("created event should parse");
         events
-            .parse_bytes(b"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":1,\"total_tokens\":5}}")
-            .expect("unterminated final usage line should buffer");
+            .parse_bytes(b"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"Done\"}]}],\"usage\":{\"input_tokens\":4,\"output_tokens\":1}}}")
+            .expect("unterminated completion line should buffer");
 
         let event = events
             .finish_stream_and_pop_pending()

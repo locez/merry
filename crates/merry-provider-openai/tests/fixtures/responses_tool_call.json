@@ -1,0 +1,22 @@
+{
+  "id": "resp_tool",
+  "object": "response",
+  "created_at": 1730000001,
+  "status": "completed",
+  "model": "gpt-4.1-mini",
+  "output": [
+    {
+      "id": "fc_abc123",
+      "type": "function_call",
+      "status": "completed",
+      "call_id": "call_abc123",
+      "name": "lookup_weather",
+      "arguments": "{\"city\":\"Shanghai\"}"
+    }
+  ],
+  "usage": {
+    "input_tokens": 20,
+    "output_tokens": 8,
+    "total_tokens": 28
+  }
+}

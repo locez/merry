@@ -1,0 +1,26 @@
+{
+  "id": "resp_text",
+  "object": "response",
+  "created_at": 1730000000,
+  "status": "completed",
+  "model": "gpt-4.1-mini",
+  "output": [
+    {
+      "id": "msg_text",
+      "type": "message",
+      "status": "completed",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "Hello from the assistant."
+        }
+      ]
+    }
+  ],
+  "usage": {
+    "input_tokens": 12,
+    "output_tokens": 5,
+    "total_tokens": 17
+  }
+}

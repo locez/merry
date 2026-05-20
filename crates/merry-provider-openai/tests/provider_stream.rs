@@ -51,13 +51,12 @@ fn expect_setup_error(result: Result<merry_llm::ModelEventStream, ModelError>) -
 
 #[ignore = "requires loopback TCP permission; default tests cover this behavior without network"]
 #[tokio::test]
-async fn stream_model_posts_chat_completion_request_and_streams_events() {
+async fn stream_model_posts_responses_request_and_streams_events() {
     let body = concat!(
-        "data: {\"id\":\"chatcmpl-stream\",\"object\":\"chat.completion.chunk\",\"created\":1730000003,\"model\":\"debug-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}],\"usage\":null}\n\n",
-        "data: {\"id\":\"chatcmpl-stream\",\"object\":\"chat.completion.chunk\",\"created\":1730000003,\"model\":\"debug-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}],\"usage\":null}\n\n",
-        "data: {\"id\":\"chatcmpl-stream\",\"object\":\"chat.completion.chunk\",\"created\":1730000003,\"model\":\"debug-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" world\"},\"finish_reason\":null}],\"usage\":null}\n\n",
-        "data: {\"id\":\"chatcmpl-stream\",\"object\":\"chat.completion.chunk\",\"created\":1730000003,\"model\":\"debug-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":null}\n\n",
-        "data: {\"id\":\"chatcmpl-stream\",\"object\":\"chat.completion.chunk\",\"created\":1730000003,\"model\":\"debug-model\",\"choices\":[],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":3,\"total_tokens\":12}}\n\n",
+        "data: {\"type\":\"response.created\"}\n\n",
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}\n\n",
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\" world\"}\n\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"Hello world\"}]}],\"usage\":{\"input_tokens\":9,\"output_tokens\":3}}}\n\n",
         "data: [DONE]\n\n",
     );
     let server = TestServer::spawn(TestResponse::ok_sse(body));
@@ -93,7 +92,7 @@ async fn stream_model_posts_chat_completion_request_and_streams_events() {
 
     let received = server.received();
     assert_eq!(received.method, "POST");
-    assert_eq!(received.path, "/chat/completions");
+    assert_eq!(received.path, "/responses");
     assert_eq!(
         received.header("authorization"),
         Some("Bearer sk-test"),
@@ -105,8 +104,10 @@ async fn stream_model_posts_chat_completion_request_and_streams_events() {
     let json: Value = serde_json::from_str(&received.body).expect("request body should be JSON");
     assert_eq!(json["model"], "debug-model");
     assert_eq!(json["stream"], true);
-    assert_eq!(json["stream_options"]["include_usage"], true);
+    assert_eq!(json["store"], false);
     assert_eq!(json["parallel_tool_calls"], false);
+    assert!(json.get("previous_response_id").is_none());
+    assert!(json.get("conversation").is_none());
 }
 
 #[ignore = "requires loopback TCP permission; default tests cover this behavior without network"]
@@ -172,10 +173,9 @@ async fn stream_model_honors_pre_cancelled_context_before_sending_request() {
 #[tokio::test]
 async fn stream_model_honors_cancellation_during_streaming() {
     let body = concat!(
-        "data: {\"id\":\"chatcmpl-stream\",\"object\":\"chat.completion.chunk\",\"created\":1730000003,\"model\":\"debug-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}],\"usage\":null}\n\n",
-        "data: {\"id\":\"chatcmpl-stream\",\"object\":\"chat.completion.chunk\",\"created\":1730000003,\"model\":\"debug-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" world\"},\"finish_reason\":null}],\"usage\":null}\n\n",
-        "data: {\"id\":\"chatcmpl-stream\",\"object\":\"chat.completion.chunk\",\"created\":1730000003,\"model\":\"debug-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":null}\n\n",
-        "data: {\"id\":\"chatcmpl-stream\",\"object\":\"chat.completion.chunk\",\"created\":1730000003,\"model\":\"debug-model\",\"choices\":[],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":3,\"total_tokens\":12}}\n\n",
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}\n\n",
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\" world\"}\n\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"Hello world\"}]}],\"usage\":{\"input_tokens\":9,\"output_tokens\":3}}}\n\n",
     );
     let server = TestServer::spawn(TestResponse::ok_sse(body));
     let token = CancellationToken::new();
@@ -199,7 +199,7 @@ async fn stream_model_honors_cancellation_during_streaming() {
 
 #[ignore = "requires --features live-tests, MERRY_OPENAI_LIVE_TESTS=1, OPENAI_API_KEY, MERRY_OPENAI_MODEL, and --ignored"]
 #[tokio::test]
-async fn live_openai_chat_completions_stream_smoke_test() {
+async fn live_openai_responses_stream_smoke_test() {
     if !cfg!(feature = "live-tests") {
         return;
     }

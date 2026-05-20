@@ -1,0 +1,8 @@
+data: {"type":"response.created"}
+data: {"type":"response.output_item.added","output_index":0,"item":{"id":"fc_stream_123","type":"function_call","status":"in_progress","call_id":"call_stream_123","name":"lookup_weather","arguments":""}}
+data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\"city\""}
+data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":":\"Shanghai\"}"}
+data: {"type":"response.function_call_arguments.done","output_index":0,"arguments":"{\"city\":\"Shanghai\"}"}
+data: {"type":"response.output_item.done","output_index":0,"item":{"id":"fc_stream_123","type":"function_call","status":"completed","call_id":"call_stream_123","name":"lookup_weather","arguments":"{\"city\":\"Shanghai\"}"}}
+data: {"type":"response.completed","response":{"id":"resp_stream_tool","object":"response","created_at":1730000004,"status":"completed","model":"gpt-4.1-mini","output":[{"id":"fc_stream_123","type":"function_call","status":"completed","call_id":"call_stream_123","name":"lookup_weather","arguments":"{\"city\":\"Shanghai\"}"}],"usage":{"input_tokens":14,"output_tokens":6,"total_tokens":20}}}
+data: [DONE]

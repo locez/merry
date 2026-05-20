@@ -3,8 +3,8 @@
 use crate::{
     OpenAiProviderError,
     wire::{
-        ChatCompletionResponse, ChatCompletionStreamChoice, ChatCompletionStreamChunk,
-        ChatCompletionStreamToolCall, ChatToolCall, ChatUsage,
+        ResponsesOutputContent, ResponsesOutputItem, ResponsesResponse, ResponsesStreamEvent,
+        ResponsesStreamOutputItem, ResponsesUsage,
     },
 };
 use merry_core::ToolName;
@@ -16,34 +16,32 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 #[allow(dead_code)]
-pub(crate) fn parse_chat_completion_response(
+pub(crate) fn parse_responses_response(
     fixture: &str,
 ) -> Result<ModelResponse, merry_llm::ModelError> {
-    parse_chat_completion_response_inner(fixture).map_err(Into::into)
+    parse_responses_response_inner(fixture).map_err(Into::into)
 }
 
-fn parse_chat_completion_response_inner(body: &str) -> Result<ModelResponse, OpenAiProviderError> {
-    let response: ChatCompletionResponse = serde_json::from_str(body).map_err(|error| {
-        OpenAiProviderError::protocol(format!(
-            "failed to parse Chat Completions response: {error}"
-        ))
+fn parse_responses_response_inner(body: &str) -> Result<ModelResponse, OpenAiProviderError> {
+    let response: ResponsesResponse = serde_json::from_str(body).map_err(|error| {
+        OpenAiProviderError::protocol(format!("failed to parse Responses response: {error}"))
     })?;
 
-    parse_completion_response(response)
+    parse_response(response)
 }
 
 #[allow(dead_code)]
-pub(crate) fn parse_chat_completion_stream_events(
+pub(crate) fn parse_responses_stream_events(
     jsonl: &str,
 ) -> Result<Vec<ModelEvent>, merry_llm::ModelError> {
-    parse_chat_completion_stream_events_inner(jsonl).map_err(Into::into)
+    parse_responses_stream_events_inner(jsonl).map_err(Into::into)
 }
 
-fn parse_chat_completion_stream_events_inner(
+fn parse_responses_stream_events_inner(
     jsonl: &str,
 ) -> Result<Vec<ModelEvent>, OpenAiProviderError> {
     let mut events = vec![ModelEvent::Started];
-    let mut parser = ChatCompletionStreamParser::new();
+    let mut parser = ResponsesStreamParser::new();
 
     for raw_line in jsonl.lines() {
         events.extend(parser.parse_sse_line(raw_line)?);
@@ -54,21 +52,19 @@ fn parse_chat_completion_stream_events_inner(
     Ok(events)
 }
 
-pub(crate) struct ChatCompletionStreamParser {
+pub(crate) struct ResponsesStreamParser {
     aggregate_text: String,
     tool_call_buffers: BTreeMap<u64, StreamToolCallBuffer>,
     tool_calls: Vec<ModelToolCall>,
-    finish_reason: Option<FinishReason>,
     completed: bool,
 }
 
-impl ChatCompletionStreamParser {
+impl ResponsesStreamParser {
     pub(crate) fn new() -> Self {
         Self {
             aggregate_text: String::new(),
             tool_call_buffers: BTreeMap::new(),
             tool_calls: Vec::new(),
-            finish_reason: None,
             completed: false,
         }
     }
@@ -78,7 +74,7 @@ impl ChatCompletionStreamParser {
         raw_line: &str,
     ) -> Result<Vec<ModelEvent>, OpenAiProviderError> {
         let line = raw_line.trim();
-        if line.is_empty() {
+        if line.is_empty() || line.starts_with("event: ") {
             return Ok(Vec::new());
         }
 
@@ -90,15 +86,17 @@ impl ChatCompletionStreamParser {
         }
         if self.completed {
             return Err(OpenAiProviderError::protocol(
-                "stream emitted a chunk after completion",
+                "stream emitted an event after completion",
             ));
         }
 
-        let chunk: ChatCompletionStreamChunk = serde_json::from_str(data).map_err(|error| {
-            OpenAiProviderError::protocol(format!("failed to parse stream chunk: {error}"))
+        let event: ResponsesStreamEvent = serde_json::from_str(data).map_err(|error| {
+            OpenAiProviderError::protocol(format!(
+                "failed to parse Responses stream event: {error}"
+            ))
         })?;
 
-        self.parse_chunk(chunk)
+        self.parse_event(event)
     }
 
     pub(crate) fn finish(&self) -> Result<(), OpenAiProviderError> {
@@ -107,174 +105,195 @@ impl ChatCompletionStreamParser {
         }
 
         Err(OpenAiProviderError::protocol(
-            "stream ended before completion usage chunk",
+            "Responses stream ended before response.completed",
         ))
     }
 
-    fn parse_chunk(
+    fn parse_event(
         &mut self,
-        chunk: ChatCompletionStreamChunk,
+        event: ResponsesStreamEvent,
     ) -> Result<Vec<ModelEvent>, OpenAiProviderError> {
-        if chunk.choices.is_empty() {
-            if chunk.usage.is_none() {
-                return Err(OpenAiProviderError::protocol(
-                    "stream chunk with empty choices must include usage",
-                ));
+        match event {
+            ResponsesStreamEvent::Created | ResponsesStreamEvent::Other => Ok(Vec::new()),
+            ResponsesStreamEvent::OutputTextDelta { delta } => {
+                if delta.is_empty() {
+                    return Ok(Vec::new());
+                }
+
+                self.aggregate_text.push_str(&delta);
+                Ok(vec![ModelEvent::OutputTextDelta { delta }])
             }
-
-            let usage = chunk.usage.map(usage_from_wire);
-            let finish_reason = self.finish_reason.ok_or_else(|| {
-                OpenAiProviderError::protocol("usage chunk arrived before finish reason")
-            })?;
-            self.completed = true;
-            return Ok(vec![ModelEvent::Completed {
-                response: ModelResponse::new(
-                    stream_outputs(&self.aggregate_text, &self.tool_calls),
-                    finish_reason,
-                    usage,
-                ),
-            }]);
+            ResponsesStreamEvent::OutputItemAdded { output_index, item } => {
+                self.merge_output_item(output_index, item)?;
+                Ok(Vec::new())
+            }
+            ResponsesStreamEvent::FunctionCallArgumentsDelta {
+                output_index,
+                delta,
+            } => {
+                self.tool_call_buffers
+                    .entry(output_index)
+                    .or_default()
+                    .arguments
+                    .push_str(&delta);
+                Ok(Vec::new())
+            }
+            ResponsesStreamEvent::FunctionCallArgumentsDone {
+                output_index,
+                arguments,
+            } => {
+                self.tool_call_buffers
+                    .entry(output_index)
+                    .or_default()
+                    .set_arguments(arguments)?;
+                Ok(Vec::new())
+            }
+            ResponsesStreamEvent::OutputItemDone { output_index, item } => match item {
+                ResponsesStreamOutputItem::Other => Ok(Vec::new()),
+                item @ ResponsesStreamOutputItem::FunctionCall { .. } => {
+                    self.merge_output_item(output_index, item)?;
+                    let buffer = self
+                        .tool_call_buffers
+                        .remove(&output_index)
+                        .ok_or_else(|| {
+                            OpenAiProviderError::protocol(
+                                "completed function call had no buffered item",
+                            )
+                        })?;
+                    let tool_call = buffer.into_model_tool_call()?;
+                    self.tool_calls.push(tool_call.clone());
+                    Ok(vec![ModelEvent::ToolCallRequested { call: tool_call }])
+                }
+            },
+            ResponsesStreamEvent::Completed { response } => {
+                self.completed = true;
+                Ok(vec![ModelEvent::Completed {
+                    response: self.completed_response(response)?,
+                }])
+            }
+            ResponsesStreamEvent::Incomplete { response } => {
+                Err(OpenAiProviderError::protocol(format!(
+                    "Responses stream ended incomplete with status {}",
+                    response.status.as_deref().unwrap_or("unknown")
+                )))
+            }
+            ResponsesStreamEvent::Failed { response } => {
+                Err(OpenAiProviderError::protocol(format!(
+                    "Responses stream failed with status {}",
+                    response.status.as_deref().unwrap_or("unknown")
+                )))
+            }
+            ResponsesStreamEvent::Error { code, message } => {
+                let code = code.unwrap_or_else(|| "unknown".to_owned());
+                let message =
+                    message.unwrap_or_else(|| "provider returned stream error".to_owned());
+                Err(OpenAiProviderError::protocol(format!(
+                    "Responses stream error {code}: {message}"
+                )))
+            }
         }
+    }
 
-        if chunk.choices.len() != 1 {
+    fn merge_output_item(
+        &mut self,
+        output_index: u64,
+        item: ResponsesStreamOutputItem,
+    ) -> Result<(), OpenAiProviderError> {
+        match item {
+            ResponsesStreamOutputItem::FunctionCall {
+                call_id,
+                name,
+                arguments,
+            } => self
+                .tool_call_buffers
+                .entry(output_index)
+                .or_default()
+                .merge(call_id, name, arguments),
+            ResponsesStreamOutputItem::Other => Ok(()),
+        }
+    }
+
+    fn completed_response(
+        &self,
+        response: ResponsesResponse,
+    ) -> Result<ModelResponse, OpenAiProviderError> {
+        let usage = response.usage.map(usage_from_wire);
+        if !self.tool_call_buffers.is_empty() {
             return Err(OpenAiProviderError::protocol(
-                "stream chunks with multiple choices are not supported",
+                "Responses stream completed with unfinished function call",
             ));
         }
 
-        let choice = chunk
-            .choices
-            .into_iter()
-            .next()
-            .expect("length checked above");
-        let mut events = Vec::new();
-        parse_stream_choice(
-            choice,
-            &mut events,
-            &mut self.aggregate_text,
-            &mut self.tool_call_buffers,
-            &mut self.tool_calls,
-            &mut self.finish_reason,
-        )?;
-        Ok(events)
+        Ok(ModelResponse::new(
+            stream_outputs(&self.aggregate_text, &self.tool_calls),
+            stream_finish_reason(&self.tool_calls),
+            usage,
+        ))
     }
 }
 
-fn parse_completion_response(
-    response: ChatCompletionResponse,
-) -> Result<ModelResponse, OpenAiProviderError> {
-    if response.choices.len() != 1 {
-        return Err(OpenAiProviderError::protocol(
-            "Chat Completions response must contain exactly one choice",
-        ));
-    }
-
-    let choice = response
-        .choices
-        .into_iter()
-        .next()
-        .expect("length checked above");
-    let finish_reason = parse_finish_reason(choice.finish_reason.as_deref())?;
+fn parse_response(response: ResponsesResponse) -> Result<ModelResponse, OpenAiProviderError> {
     let mut outputs = Vec::new();
-
-    if let Some(content) = choice.message.content.filter(|content| !content.is_empty()) {
-        outputs.push(ModelOutput::text(&content));
+    for item in response.output {
+        match item {
+            ResponsesOutputItem::Message { content } => {
+                for content in content {
+                    if let ResponsesOutputContent::OutputText { text } = content
+                        && !text.is_empty()
+                    {
+                        outputs.push(ModelOutput::text(&text));
+                    }
+                }
+            }
+            ResponsesOutputItem::FunctionCall {
+                call_id,
+                name,
+                arguments,
+            } => {
+                outputs.push(ModelOutput::tool_call(parse_tool_call(
+                    call_id, name, arguments,
+                )?));
+            }
+            ResponsesOutputItem::Other => {}
+        }
     }
 
-    for tool_call in choice.message.tool_calls {
-        outputs.push(ModelOutput::tool_call(parse_tool_call(tool_call)?));
-    }
-
+    let has_tool_call = outputs
+        .iter()
+        .any(|output| matches!(output, ModelOutput::ToolCall { .. }));
     Ok(ModelResponse::new(
         outputs,
-        finish_reason,
+        if has_tool_call {
+            FinishReason::ToolCalls
+        } else {
+            parse_response_status(response.status.as_deref())?
+        },
         response.usage.map(usage_from_wire),
     ))
 }
 
-fn parse_stream_choice(
-    choice: ChatCompletionStreamChoice,
-    events: &mut Vec<ModelEvent>,
-    aggregate_text: &mut String,
-    tool_call_buffers: &mut BTreeMap<u64, StreamToolCallBuffer>,
-    tool_calls: &mut Vec<ModelToolCall>,
-    finish_reason: &mut Option<FinishReason>,
-) -> Result<(), OpenAiProviderError> {
-    if let Some(delta) = choice.delta.content.filter(|delta| !delta.is_empty()) {
-        aggregate_text.push_str(&delta);
-        events.push(ModelEvent::OutputTextDelta { delta });
-    }
-
-    for tool_call_delta in choice.delta.tool_calls {
-        merge_stream_tool_call_delta(tool_call_buffers, tool_call_delta)?;
-    }
-
-    if let Some(raw_finish_reason) = choice.finish_reason {
-        let parsed_finish_reason = parse_finish_reason(Some(&raw_finish_reason))?;
-        if parsed_finish_reason == FinishReason::ToolCalls {
-            if tool_call_buffers.is_empty() {
-                return Err(OpenAiProviderError::protocol(
-                    "tool call finish reason had no streamed tool calls",
-                ));
-            }
-
-            for (_, buffer) in std::mem::take(tool_call_buffers) {
-                let tool_call = buffer.into_model_tool_call()?;
-                events.push(ModelEvent::ToolCallRequested {
-                    call: tool_call.clone(),
-                });
-                tool_calls.push(tool_call);
-            }
-        }
-        *finish_reason = Some(parsed_finish_reason);
-    }
-
-    Ok(())
-}
-
-fn parse_tool_call(tool_call: ChatToolCall) -> Result<ModelToolCall, OpenAiProviderError> {
-    if tool_call.kind != "function" {
-        return Err(OpenAiProviderError::protocol(
-            "only function tool calls are supported",
-        ));
-    }
-
-    let id = required_field(tool_call.id, "tool call id")?;
-    let name = required_field(tool_call.function.name, "tool call function name")?;
-    let arguments = required_field(tool_call.function.arguments, "tool call arguments")?;
-    let arguments: Value = serde_json::from_str(&arguments).map_err(|error| {
-        OpenAiProviderError::protocol(format!("tool call arguments must be valid JSON: {error}"))
-    })?;
-    let arguments = ToolArguments::try_from(arguments).map_err(|error| {
-        OpenAiProviderError::protocol(format!(
-            "tool call arguments must be a JSON object: {error}"
-        ))
-    })?;
-    let id = ModelToolCallId::new(&id).map_err(|error| {
-        OpenAiProviderError::protocol(format!("tool call id is invalid: {error}"))
-    })?;
-    let name = ToolName::new(&name).map_err(|error| {
-        OpenAiProviderError::protocol(format!("tool call function name is invalid: {error}"))
-    })?;
-
-    Ok(ModelToolCall::new(id, name, arguments))
-}
-
-fn parse_finish_reason(reason: Option<&str>) -> Result<FinishReason, OpenAiProviderError> {
-    match reason {
-        Some("stop") => Ok(FinishReason::Stop),
-        Some("tool_calls" | "function_call") => Ok(FinishReason::ToolCalls),
-        Some("length") => Ok(FinishReason::Length),
-        Some("content_filter") => Ok(FinishReason::Error),
+fn parse_response_status(status: Option<&str>) -> Result<FinishReason, OpenAiProviderError> {
+    match status {
+        Some("completed") => Ok(FinishReason::Stop),
+        Some("incomplete") => Ok(FinishReason::Length),
+        Some("failed") => Ok(FinishReason::Error),
         Some(other) => Err(OpenAiProviderError::protocol(format!(
-            "unsupported finish reason `{other}`"
+            "unsupported Responses status `{other}`"
         ))),
-        None => Err(OpenAiProviderError::protocol("finish reason is missing")),
+        None => Ok(FinishReason::Stop),
     }
 }
 
-fn usage_from_wire(usage: ChatUsage) -> Usage {
-    Usage::new(usage.prompt_tokens, usage.completion_tokens)
+fn stream_finish_reason(tool_calls: &[ModelToolCall]) -> FinishReason {
+    if tool_calls.is_empty() {
+        FinishReason::Stop
+    } else {
+        FinishReason::ToolCalls
+    }
+}
+
+fn usage_from_wire(usage: ResponsesUsage) -> Usage {
+    Usage::new(usage.input_tokens, usage.output_tokens)
 }
 
 fn stream_outputs(aggregate_text: &str, tool_calls: &[ModelToolCall]) -> Vec<ModelOutput> {
@@ -284,6 +303,34 @@ fn stream_outputs(aggregate_text: &str, tool_calls: &[ModelToolCall]) -> Vec<Mod
     }
     outputs.extend(tool_calls.iter().cloned().map(ModelOutput::tool_call));
     outputs
+}
+
+fn parse_tool_call(
+    call_id: Option<String>,
+    name: Option<String>,
+    arguments: Option<String>,
+) -> Result<ModelToolCall, OpenAiProviderError> {
+    let call_id = required_field(call_id, "function call id")?;
+    let name = required_field(name, "function call name")?;
+    let arguments = required_field(arguments, "function call arguments")?;
+    let arguments: Value = serde_json::from_str(&arguments).map_err(|error| {
+        OpenAiProviderError::protocol(format!(
+            "function call arguments must be valid JSON: {error}"
+        ))
+    })?;
+    let arguments = ToolArguments::try_from(arguments).map_err(|error| {
+        OpenAiProviderError::protocol(format!(
+            "function call arguments must be a JSON object: {error}"
+        ))
+    })?;
+    let call_id = ModelToolCallId::new(&call_id).map_err(|error| {
+        OpenAiProviderError::protocol(format!("function call id is invalid: {error}"))
+    })?;
+    let name = ToolName::new(&name).map_err(|error| {
+        OpenAiProviderError::protocol(format!("function call name is invalid: {error}"))
+    })?;
+
+    Ok(ModelToolCall::new(call_id, name, arguments))
 }
 
 fn required_field(
@@ -298,58 +345,45 @@ fn required_field(
 
 #[derive(Debug, Default)]
 struct StreamToolCallBuffer {
-    id: Option<String>,
-    kind: Option<String>,
+    call_id: Option<String>,
     name: Option<String>,
     arguments: String,
 }
 
 impl StreamToolCallBuffer {
-    fn merge(&mut self, delta: ChatCompletionStreamToolCall) -> Result<(), OpenAiProviderError> {
-        merge_optional_field(&mut self.id, delta.id, "streamed tool call id")?;
-        merge_optional_field(&mut self.kind, delta.kind, "streamed tool call type")?;
-
-        if let Some(function) = delta.function {
-            merge_optional_field(
-                &mut self.name,
-                function.name,
-                "streamed tool call function name",
-            )?;
-            if let Some(arguments) = function.arguments {
-                self.arguments.push_str(&arguments);
-            }
+    fn merge(
+        &mut self,
+        call_id: Option<String>,
+        name: Option<String>,
+        arguments: Option<String>,
+    ) -> Result<(), OpenAiProviderError> {
+        merge_optional_field(&mut self.call_id, call_id, "streamed function call id")?;
+        merge_optional_field(&mut self.name, name, "streamed function call name")?;
+        if let Some(arguments) = arguments {
+            self.set_arguments(arguments)?;
         }
 
         Ok(())
     }
 
-    fn into_model_tool_call(self) -> Result<ModelToolCall, OpenAiProviderError> {
-        let kind = required_field(self.kind, "streamed tool call type")?;
-        if kind != "function" {
-            return Err(OpenAiProviderError::protocol(
-                "only streamed function tool calls are supported",
-            ));
+    fn set_arguments(&mut self, arguments: String) -> Result<(), OpenAiProviderError> {
+        if self.arguments.is_empty() || self.arguments == arguments {
+            self.arguments = arguments;
+            Ok(())
+        } else {
+            Err(OpenAiProviderError::protocol(
+                "streamed function call arguments changed across stream events",
+            ))
         }
-
-        parse_tool_call(ChatToolCall {
-            id: Some(required_field(self.id, "streamed tool call id")?),
-            kind,
-            function: crate::wire::ChatToolCallFunction {
-                name: Some(required_field(
-                    self.name,
-                    "streamed tool call function name",
-                )?),
-                arguments: Some(self.arguments),
-            },
-        })
     }
-}
 
-fn merge_stream_tool_call_delta(
-    buffers: &mut BTreeMap<u64, StreamToolCallBuffer>,
-    delta: ChatCompletionStreamToolCall,
-) -> Result<(), OpenAiProviderError> {
-    buffers.entry(delta.index).or_default().merge(delta)
+    fn into_model_tool_call(self) -> Result<ModelToolCall, OpenAiProviderError> {
+        parse_tool_call(
+            Some(required_field(self.call_id, "streamed function call id")?),
+            Some(required_field(self.name, "streamed function call name")?),
+            Some(self.arguments),
+        )
+    }
 }
 
 fn merge_optional_field(
@@ -364,7 +398,7 @@ fn merge_optional_field(
 
         match slot {
             Some(existing) if existing != &value => Err(OpenAiProviderError::protocol(format!(
-                "{field} changed across stream fragments"
+                "{field} changed across stream events"
             ))),
             Some(_) => Ok(()),
             None => {
