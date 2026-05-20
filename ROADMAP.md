@@ -4,7 +4,7 @@ This roadmap is public-safe and implementation-focused. Private product strategy
 
 ## Current Phase
 
-Merry is in M18F-D LLM-assisted judgment boundary work, building on the M9 Memory Activation MVP runtime integration.
+Merry is in M18F-E LLM-assisted judgment boundary work, building on the M9 Memory Activation MVP runtime integration.
 
 M8 runtime/provider/tool execution hardening and M9 Memory Activation MVP are now maintenance and foundation work. Memory Activation now uses a session-owned in-memory stored source by default, but external/default sessions have no candidate memories until runtime-owned state records them. Production memory storage, public memory APIs, external persistence, and a stable activation contract are still not complete. Live provider flows remain explicit opt-in/manual debug paths; they are not the basis for deterministic verification.
 
@@ -40,7 +40,7 @@ M8 runtime/provider/tool execution hardening and M9 Memory Activation MVP are no
 
 ### Active
 
-- Add M18F-D accepted summary-draft promotion as a crate-internal `merry-runtime` contract with explicit non-LLM acceptance and context compilation validation.
+- Finish M18F-E accepted summary-draft promotion lifecycle as a crate-internal `merry-runtime` contract with explicit non-LLM acceptance, context compilation validation, rejection tracking, and exact replay idempotency.
 - Keep judgment advisory: semantic recommendations can inform runtime policy, but hard runtime policy still decides tool execution, actions, and context mutation.
 - Keep the initial judgment contract provider-neutral, evidence-aware, cancellable, and deterministic-testable.
 - Do not connect live LLM judgment, public judgment APIs, public runtime events, ledger facts, or tool execution gates in this milestone.
@@ -50,7 +50,7 @@ M8 runtime/provider/tool execution hardening and M9 Memory Activation MVP are no
 ### Deferred / Next
 
 - Production memory store, public Memory Activation APIs, external persistence, and stable activation contract.
-- Live LLM-backed judgment source, public judgment API, public judgment events/facts, and tool execution gate integration.
+- Live LLM-backed judgment source, public judgment API, public runtime events/ledger facts for judgment or promotion, and tool execution gate integration.
 - Python SDK and `merry-py`.
 - Rust facade crate `merry`.
 - Macro crate support for boilerplate generation.
@@ -209,11 +209,11 @@ Not included:
 
 ## Active Milestone
 
-### M18F-A / M18F-B / M18F-C / M18F-D: LLM-Assisted Judgment Boundary
+### M18F-A / M18F-B / M18F-C / M18F-D / M18F-E: LLM-Assisted Judgment Boundary
 
 Goal: reserve an internal runtime boundary and audit carrier for semantic judgment without giving judgment authority over runtime policy.
 
-M18F-A established the crate-internal contract skeleton in `merry-runtime`. M18F-B adds a crate-internal completed-judgment audit registry with exact internal request/outcome payload carriers. M18F-C wires the first narrow summary-draft audit path through a crate-private helper that records completed advisory `SummaryDraft` judgments only after artifact evidence validation. M18F-D adds an internal explicit acceptance and promotion boundary for accepted summary drafts; promotion is still crate-private, validates exact selected evidence, and compiles a candidate context snapshot before mutation. Judgment outcomes are advisory semantic evidence; they cannot authorize tool execution, actions, or context mutation. Provider wire formats do not enter runtime, and summary/evidence exact artifact rules remain unchanged.
+M18F-A established the crate-internal contract skeleton in `merry-runtime`. M18F-B adds a crate-internal completed-judgment audit registry with exact internal request/outcome payload carriers. M18F-C wires the first narrow summary-draft audit path through a crate-private helper that records completed advisory `SummaryDraft` judgments only after artifact evidence validation. M18F-D adds an internal explicit acceptance and promotion boundary for accepted summary drafts; promotion is still crate-private, validates exact selected evidence, and compiles a candidate context snapshot before mutation. M18F-E adds a session-owned internal promotion lifecycle registry: exact promoted replays are idempotent no-ops, conflicting payloads are rejected without context mutation, and compile failures become terminal rejected records. Judgment outcomes are advisory semantic evidence; they cannot authorize tool execution, actions, or context mutation. Provider wire formats do not enter runtime, and summary/evidence exact artifact rules remain unchanged.
 
 Done:
 
@@ -223,13 +223,15 @@ Done:
 - Add internal completed-only judgment record ids, deterministic registry snapshots, and exact internal request/outcome payload artifacts.
 - Add session-private judgment recording helpers that validate request/outcome evidence against session artifacts before writing the internal registry.
 - Add a crate-private summary-draft judgment helper and deterministic tests proving recorded drafts stay out of compiled context, ledger projection, runtime event sequence, and pending-tool state.
-- Add crate-private summary-draft acceptance and promotion helpers that reject LLM authority, require exact draft text match, require selected judgment evidence, reject duplicate summary ids, and leave context unchanged on validation failure.
+- Add crate-private summary-draft acceptance and promotion helpers that reject LLM authority, require exact draft text match, require selected judgment evidence, and leave context unchanged on validation failure.
+- Add a crate-internal summary-draft promotion lifecycle registry with deterministic snapshots, promoted exact-replay idempotency, payload conflict detection, and rejected-record replay protection.
 
 Active:
 
 - Keep the boundary internal while runtime policy integration is designed.
 - Preserve the advisory/hard-policy split in docs, names, and storage boundaries.
 - Keep summary-draft audit and promotion internal, with no record-id-authorized or automatic context promotion.
+- Keep promotion lifecycle state out of public runtime APIs, runtime events, ledger facts, and tool-call policy.
 
 Not yet:
 
