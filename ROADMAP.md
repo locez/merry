@@ -8,6 +8,8 @@ Merry has closed out M18F LLM-assisted judgment boundary work through M18F-I. Si
 
 M8 runtime/provider/tool execution hardening, M9 Memory Activation MVP, and M18F LLM-assisted judgment boundary are now maintenance and foundation work. Memory Activation now uses a session-owned in-memory stored source by default, but external/default sessions have no candidate memories until runtime-owned state records them. Production memory storage, public memory APIs, external persistence, and a stable activation contract are still not complete. Judgment remains internal and advisory: it is not a public API, public runtime event, ledger fact, tool gate, automatic provider-context inclusion, automatic context mutation or promotion, OpenAI/live-provider path, or builder/runtime configured judgment source. Deterministic judgment verification remains fake-provider only. Live provider flows remain explicit opt-in/manual debug paths; they are not the basis for deterministic verification.
 
+The OpenAI provider target is the Responses API only. Any existing Chat Completions `/chat/completions` implementation is legacy/transitional and should be removed or replaced, not retained as a compatibility branch. The migration must preserve the Merry-owned `merry-llm` provider boundary, keep OpenAI wire types private to `merry-provider-openai`, set `store: false`, omit `previous_response_id`, avoid provider conversation state as Merry runtime state, and keep `parallel_tool_calls: false` until runtime policy supports parallel tool calls. This provider migration does not imply a live/OpenAI judgment path or public judgment API.
+
 ## Status Summary
 
 ### Completed
@@ -16,7 +18,7 @@ M8 runtime/provider/tool execution hardening, M9 Memory Activation MVP, and M18F
 - Core protocol vocabulary, typed IDs, event contracts, artifact references, tool specs, and provider boundary types.
 - Runtime skeleton with session state, task ledger, artifact metadata, event streaming, cancellation, and deterministic fake-provider tests.
 - CLI debug surface for inspecting runtime events as JSON lines.
-- OpenAI-compatible provider configuration and request rendering skeleton using private provider wire types.
+- Legacy OpenAI Chat Completions transitional configuration and request rendering skeleton using private provider wire types; Responses API provider configuration and request rendering remain target migration work.
 - Context, ledger, and artifact loop for structured runtime state and reproducible context compilation.
 - Provider step boundary that keeps runtime state separate from provider conversation state.
 - Artifact-backed model output handling.
@@ -26,7 +28,7 @@ M8 runtime/provider/tool execution hardening, M9 Memory Activation MVP, and M18F
 - Tool continuation flow after tool results are supplied.
 - Registered tool execution through the runtime tool registry.
 - Runtime-reserved artifact IDs for tool/model output paths that must be claimed before events are emitted.
-- Opt-in OpenAI debug/tool flow for manual provider integration checks.
+- Opt-in legacy OpenAI Chat Completions debug/tool flow for manual provider integration checks.
 - Memory Activation MVP internal runtime integration with session-owned in-memory stored source, deterministic activation, evidence validation, provider-step timing, and lifecycle cleanup coverage.
 
 ### Recently Completed
@@ -40,7 +42,7 @@ M8 runtime/provider/tool execution hardening, M9 Memory Activation MVP, and M18F
 - M18F-H completed the internal summary-draft promotion safety path by adding a crate-private checked internal context append helper with candidate snapshot compilation before context mutation.
 - M18F-I closed out public status and roadmap alignment for M18F without changing Rust behavior.
 - Strict model judgment parsing and a crate-private provider-neutral `ModelBackedJudgmentSource` now exist for internal advisory tool-risk review, with deterministic fake-provider runtime harness coverage through `Runtime::run_uncertainty_review`.
-- OpenAI-compatible debug/tool flows remain opt-in manual verification paths, not deterministic test dependencies.
+- Legacy OpenAI Chat Completions debug/tool flows remain opt-in manual verification paths, not deterministic test dependencies; Responses API debug/tool flows remain target migration work.
 
 ### Active
 
@@ -54,6 +56,7 @@ M8 runtime/provider/tool execution hardening, M9 Memory Activation MVP, and M18F
 ### Deferred / Next
 
 - Production memory store, public Memory Activation APIs, external persistence, and stable activation contract.
+- OpenAI Responses API provider migration that removes or replaces the legacy Chat Completions `/chat/completions` path while preserving the Merry-owned provider boundary, private OpenAI wire types, `store: false`, omitted `previous_response_id`, no provider state as runtime state, and `parallel_tool_calls: false`.
 - Live LLM-backed judgment path, public judgment API, public runtime events/ledger facts for judgment or promotion, tool execution gate integration, automatic provider-context inclusion, automatic context mutation or promotion, and builder/runtime configured judgment source.
 - Python SDK and `merry-py`.
 - Rust facade crate `merry`.
@@ -77,7 +80,7 @@ M8 runtime/provider/tool execution hardening, M9 Memory Activation MVP, and M18F
 - Runtime event APIs are stream-first.
 - Public dyn async boundaries use explicit boxed futures/streams.
 - PyO3/maturin comes after the Rust event loop is stable.
-- MVP OpenAI-compatible provider uses a Merry-owned adapter boundary and direct `reqwest`.
+- MVP OpenAI provider target is the Responses API through a Merry-owned adapter boundary and direct `reqwest`; the current provider implementation is legacy/transitional Chat Completions until that migration lands.
 
 ## Completed Milestones
 
@@ -152,7 +155,7 @@ Tasks:
 
 ### Milestone 6: Provider Adapter Skeleton
 
-Goal: prepare OpenAI-compatible provider integration without depending on it for runtime tests.
+Goal: prepare the OpenAI provider adapter boundary without depending on live provider tests. The completed skeleton is legacy/transitional Chat Completions; Responses API migration remains target work.
 
 Tasks:
 
@@ -187,7 +190,7 @@ Tasks:
 - Keep registered tool execution bounded by explicit runtime policy and artifact ownership.
 - Keep public runtime exports/rustdoc aligned with implemented runtime/provider/tool behavior.
 - Preserve deterministic tests around fake providers and local tool execution.
-- Keep OpenAI-compatible debug/tool flows explicit opt-in paths for manual verification only.
+- Keep legacy OpenAI Chat Completions debug/tool flows explicit opt-in paths for manual verification only until they are removed or replaced by Responses API flows.
 
 ### Milestone 9: Memory Activation MVP
 

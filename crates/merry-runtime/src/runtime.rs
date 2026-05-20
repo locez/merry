@@ -37,6 +37,7 @@ use std::{
 use tokio::sync::{Mutex, mpsc, mpsc::Permit};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 const DEFAULT_EVENT_BUFFER_SIZE: usize = 16;
 const DIAGNOSTIC_MODEL_TOOL_CALL_INVALID: &str = "model_tool_call_invalid";
@@ -97,18 +98,29 @@ impl Runtime {
         let producer_token = step_token.clone();
         let (sender, receiver) = mpsc::channel(self.inner.event_buffer_size.get());
         let inner = Arc::clone(&self.inner);
+        let producer_span = tracing::debug_span!(
+            "runtime.step",
+            session_id = self.inner.session_id.as_str(),
+            event_buffer_size = self.inner.event_buffer_size.get(),
+            provider_configured = self.inner.model_provider.is_some(),
+            max_output_tokens = ?generation_config.max_output_tokens(),
+            allow_parallel_tool_calls = generation_config.allow_parallel_tool_calls(),
+        );
 
-        let producer_handle = tokio::spawn(async move {
-            run_step(
-                inner,
-                sender,
-                producer_token,
-                input,
-                generation_config,
-                active_permit,
-            )
-            .await;
-        });
+        let producer_handle = tokio::spawn(
+            async move {
+                run_step(
+                    inner,
+                    sender,
+                    producer_token,
+                    input,
+                    generation_config,
+                    active_permit,
+                )
+                .await;
+            }
+            .instrument(producer_span),
+        );
 
         Ok(RuntimeEventStream::new(
             ReceiverStream::new(receiver),
@@ -534,7 +546,10 @@ async fn run_step(
     generation_config: GenerationConfig,
     _active_permit: ActiveStepPermit,
 ) {
+    tracing::debug!(category = "started", "runtime step started");
+
     if token.is_cancelled() {
+        tracing::debug!(category = "pre_cancelled", "runtime step pre-cancelled");
         let _ = send_cancelled_event(&inner, &sender).await;
         return;
     }
@@ -544,6 +559,10 @@ async fn run_step(
     })
     .await
     {
+        tracing::debug!(
+            category = "session_start_not_sent",
+            "runtime session-start event not sent"
+        );
         let _ = send_cancelled_if_requested(&inner, &sender, &token).await;
         return;
     }
@@ -568,6 +587,10 @@ async fn run_step(
     }
 
     let Some(provider_config) = inner.model_provider.clone() else {
+        tracing::debug!(
+            category = "no_provider_completion",
+            "runtime step completing without provider"
+        );
         if !send_normal_event(&inner, &sender, &token, |session| {
             Some(session.record_step_completed())
         })
@@ -578,6 +601,10 @@ async fn run_step(
         return;
     };
 
+    tracing::debug!(
+        category = "provider_path_entered",
+        "runtime provider path entered"
+    );
     run_provider_step(
         &inner,
         &sender,
@@ -598,10 +625,16 @@ async fn run_provider_step(
     provider_config: ModelProviderConfig,
 ) {
     if has_unresolved_pending_tool_calls(inner).await {
+        tracing::debug!(
+            category = "unresolved_pending_tool_gate",
+            diagnostic_code = DIAGNOSTIC_TOOL_CALL_RESULT_REQUIRED,
+            "runtime provider step gated by unresolved pending tool call"
+        );
         let diagnostic = diagnostic_from_text(
             DIAGNOSTIC_TOOL_CALL_RESULT_REQUIRED,
             "a pending tool call must be resolved before the next provider step",
         );
+        trace_provider_step_failed(&diagnostic);
         let _ = send_failed_event(inner, sender, token, diagnostic).await;
         return;
     }
@@ -609,6 +642,7 @@ async fn run_provider_step(
     clear_current_activated_memories(inner).await;
 
     if token.is_cancelled() {
+        trace_provider_step_cancelled();
         let _ = send_cancelled_event(inner, sender).await;
         return;
     }
@@ -617,6 +651,7 @@ async fn run_provider_step(
         Ok(seed) => seed,
         Err(error) => {
             let diagnostic = diagnostic_from_text("memory_activation", error.to_string());
+            trace_provider_step_failed(&diagnostic);
             let _ = send_failed_event(inner, sender, token, diagnostic).await;
             return;
         }
@@ -626,7 +661,13 @@ async fn run_provider_step(
         let session = inner.session.lock().await;
         session.memory_store().candidate_snapshot()
     };
+    tracing::debug!(
+        category = "memory_candidate_count",
+        count = candidates.len(),
+        "runtime memory candidates collected"
+    );
     if token.is_cancelled() {
+        trace_provider_step_cancelled();
         let _ = send_cancelled_event(inner, sender).await;
         return;
     }
@@ -635,6 +676,7 @@ async fn run_provider_step(
     let activation_result = tokio::select! {
         biased;
         () = token.cancelled() => {
+            trace_provider_step_cancelled();
             let _ = send_cancelled_event(inner, sender).await;
             return;
         }
@@ -643,6 +685,7 @@ async fn run_provider_step(
             .activate(seed, candidates, activation_context) => result,
     };
     if token.is_cancelled() {
+        trace_provider_step_cancelled();
         let _ = send_cancelled_event(inner, sender).await;
         return;
     }
@@ -651,15 +694,22 @@ async fn run_provider_step(
         Ok(memories) => memories,
         Err(error) => {
             let diagnostic = diagnostic_from_text("memory_activation", error.to_string());
+            trace_provider_step_failed(&diagnostic);
             let _ = send_failed_event(inner, sender, token, diagnostic).await;
             return;
         }
     };
+    tracing::debug!(
+        category = "activated_memory_count",
+        count = activated_memories.len(),
+        "runtime memories activated"
+    );
 
     let (snapshot, continuations, activation_epoch) = {
         let mut session = inner.session.lock().await;
         if token.is_cancelled() {
             drop(session);
+            trace_provider_step_cancelled();
             let _ = send_cancelled_event(inner, sender).await;
             return;
         }
@@ -678,6 +728,7 @@ async fn run_provider_step(
                     format!("tool continuation artifact could not be read: {error}"),
                 );
                 drop(session);
+                trace_provider_step_failed(&diagnostic);
                 let _ = send_failed_event(inner, sender, token, diagnostic).await;
                 return;
             }
@@ -688,12 +739,19 @@ async fn run_provider_step(
         ActivationProjectionGuard::new(Arc::clone(inner), token.clone(), activation_epoch);
     let sent_continuation_count = continuations.len();
     let tool_specs = inner.tool_registry.tool_specs();
+    tracing::debug!(
+        category = "continuations_and_tools",
+        continuation_count = sent_continuation_count,
+        tool_spec_count = tool_specs.len(),
+        "runtime provider request inputs counted"
+    );
 
     let compiled_context = match ContextCompiler::new().compile(&snapshot) {
         Ok(context) => context,
         Err(error) => {
             clear_current_activated_memories(inner).await;
             let diagnostic = diagnostic_from_text("context_compile", error.to_string());
+            trace_provider_step_failed(&diagnostic);
             let _ = send_failed_event(inner, sender, token, diagnostic).await;
             return;
         }
@@ -707,20 +765,32 @@ async fn run_provider_step(
         tool_specs,
         generation_config,
     ) {
-        Ok(request) => request,
+        Ok(request) => {
+            tracing::debug!(
+                category = "model_request_compiled",
+                "runtime model request compiled"
+            );
+            request
+        }
         Err(error) => {
             clear_current_activated_memories(inner).await;
             let diagnostic = diagnostic_from_text("model_request", error.to_string());
+            trace_provider_step_failed(&diagnostic);
             let _ = send_failed_event(inner, sender, token, diagnostic).await;
             return;
         }
     };
 
     let stream_context = ModelStreamContext::new(token.clone());
+    tracing::debug!(
+        category = "provider_setup_start",
+        "runtime provider stream setup started"
+    );
     let stream_result = tokio::select! {
         biased;
         () = token.cancelled() => {
             clear_current_activated_memories(inner).await;
+            trace_provider_step_cancelled();
             let _ = send_cancelled_event(inner, sender).await;
             return;
         }
@@ -728,15 +798,29 @@ async fn run_provider_step(
     };
 
     let mut stream = match stream_result {
-        Ok(stream) => stream,
+        Ok(stream) => {
+            tracing::debug!(
+                category = "provider_setup_success",
+                "runtime provider stream setup succeeded"
+            );
+            stream
+        }
         Err(error) => {
             clear_current_activated_memories(inner).await;
+            let error_kind = error.kind();
+            tracing::debug!(
+                category = "provider_setup_error",
+                error_kind = ?error_kind,
+                "runtime provider stream setup failed"
+            );
             if is_cancelled_model_error(&error) {
+                trace_provider_step_cancelled();
                 let _ = send_cancelled_event(inner, sender).await;
                 return;
             }
 
             let diagnostic = diagnostic_from_model_error(error);
+            trace_provider_step_failed(&diagnostic);
             let _ = send_failed_event(inner, sender, token, diagnostic).await;
             return;
         }
@@ -750,6 +834,7 @@ async fn run_provider_step(
         let item = tokio::select! {
             biased;
             () = token.cancelled() => {
+                trace_provider_step_cancelled();
                 let _ = send_cancelled_event(inner, sender).await;
                 return;
             }
@@ -757,105 +842,130 @@ async fn run_provider_step(
         };
 
         match item {
-            Some(Ok(ModelEvent::Started)) => {}
+            Some(Ok(ModelEvent::Started)) => {
+                tracing::debug!(category = "started", "runtime model stream event received");
+            }
             Some(Ok(ModelEvent::OutputTextDelta { delta })) => {
                 if !delta.is_empty() {
+                    tracing::trace!(
+                        category = "output_text_delta_nonempty",
+                        "runtime model stream event received"
+                    );
                     saw_non_empty_text_delta = true;
                 }
             }
-            Some(Ok(ModelEvent::Completed { response })) => match response.finish_reason() {
-                FinishReason::Stop => {
-                    if streamed_tool_call.is_some() {
-                        let diagnostic = diagnostic_from_text(
-                            DIAGNOSTIC_MODEL_TOOL_CALL_MIXED_OUTPUT,
-                            "model requested a tool call before completing with text output",
-                        );
-                        let _ = send_failed_event(inner, sender, token, diagnostic).await;
+            Some(Ok(ModelEvent::Completed { response })) => {
+                tracing::debug!(
+                    category = "completed",
+                    finish_reason = ?response.finish_reason(),
+                    "runtime model stream event received"
+                );
+                match response.finish_reason() {
+                    FinishReason::Stop => {
+                        if streamed_tool_call.is_some() {
+                            let diagnostic = diagnostic_from_text(
+                                DIAGNOSTIC_MODEL_TOOL_CALL_MIXED_OUTPUT,
+                                "model requested a tool call before completing with text output",
+                            );
+                            trace_provider_step_failed(&diagnostic);
+                            let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                            return;
+                        }
+
+                        let [ModelOutput::Text { text }] = response.outputs() else {
+                            let diagnostic = diagnostic_from_text(
+                                "model_output_unsupported",
+                                "model stop output must contain exactly one text item",
+                            );
+                            trace_provider_step_failed(&diagnostic);
+                            let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                            return;
+                        };
+
+                        if !send_assistant_text_output_completed_events(
+                            inner,
+                            sender,
+                            token,
+                            text.clone(),
+                            sent_continuation_count,
+                        )
+                        .await
+                        {
+                            let _ = send_cancelled_if_requested(inner, sender, token).await;
+                        }
                         return;
                     }
+                    FinishReason::ToolCalls => {
+                        if saw_non_empty_text_delta {
+                            let diagnostic = diagnostic_from_text(
+                                DIAGNOSTIC_MODEL_TOOL_CALL_MIXED_OUTPUT,
+                                "model emitted text before requesting a tool call",
+                            );
+                            trace_provider_step_failed(&diagnostic);
+                            let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                            return;
+                        }
 
-                    let [ModelOutput::Text { text }] = response.outputs() else {
-                        let diagnostic = diagnostic_from_text(
-                            "model_output_unsupported",
-                            "model stop output must contain exactly one text item",
-                        );
-                        let _ = send_failed_event(inner, sender, token, diagnostic).await;
-                        return;
-                    };
-
-                    if !send_assistant_text_output_completed_events(
-                        inner,
-                        sender,
-                        token,
-                        text.clone(),
-                        sent_continuation_count,
-                    )
-                    .await
-                    {
-                        let _ = send_cancelled_if_requested(inner, sender, token).await;
-                    }
-                    return;
-                }
-                FinishReason::ToolCalls => {
-                    if saw_non_empty_text_delta {
-                        let diagnostic = diagnostic_from_text(
-                            DIAGNOSTIC_MODEL_TOOL_CALL_MIXED_OUTPUT,
-                            "model emitted text before requesting a tool call",
-                        );
-                        let _ = send_failed_event(inner, sender, token, diagnostic).await;
-                        return;
-                    }
-
-                    match pending_tool_call_from_outputs(
-                        response.outputs(),
-                        streamed_tool_call.as_ref(),
-                    ) {
-                        Ok(call) => {
-                            if !send_tool_call_pending_event(
-                                inner,
-                                sender,
-                                token,
-                                call,
-                                sent_continuation_count,
-                            )
-                            .await
-                            {
-                                let _ = send_cancelled_if_requested(inner, sender, token).await;
+                        match pending_tool_call_from_outputs(
+                            response.outputs(),
+                            streamed_tool_call.as_ref(),
+                        ) {
+                            Ok(call) => {
+                                if !send_tool_call_pending_event(
+                                    inner,
+                                    sender,
+                                    token,
+                                    call,
+                                    sent_continuation_count,
+                                )
+                                .await
+                                {
+                                    let _ = send_cancelled_if_requested(inner, sender, token).await;
+                                }
+                            }
+                            Err(diagnostic) => {
+                                trace_provider_step_failed(&diagnostic);
+                                let _ = send_failed_event(inner, sender, token, diagnostic).await;
                             }
                         }
-                        Err(diagnostic) => {
-                            let _ = send_failed_event(inner, sender, token, diagnostic).await;
-                        }
+                        return;
                     }
-                    return;
+                    FinishReason::Length => {
+                        let diagnostic = diagnostic_from_text(
+                            "model_length",
+                            "model output stopped because it reached a length limit",
+                        );
+                        trace_provider_step_failed(&diagnostic);
+                        let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                        return;
+                    }
+                    FinishReason::Cancelled => {
+                        trace_provider_step_cancelled();
+                        let _ = send_cancelled_event(inner, sender).await;
+                        return;
+                    }
+                    FinishReason::Error => {
+                        let diagnostic = diagnostic_from_text(
+                            "model_finish_error",
+                            "model output stopped because the provider reported a finish error",
+                        );
+                        trace_provider_step_failed(&diagnostic);
+                        let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                        return;
+                    }
                 }
-                FinishReason::Length => {
-                    let diagnostic = diagnostic_from_text(
-                        "model_length",
-                        "model output stopped because it reached a length limit",
-                    );
-                    let _ = send_failed_event(inner, sender, token, diagnostic).await;
-                    return;
-                }
-                FinishReason::Cancelled => {
-                    let _ = send_cancelled_event(inner, sender).await;
-                    return;
-                }
-                FinishReason::Error => {
-                    let diagnostic = diagnostic_from_text(
-                        "model_finish_error",
-                        "model output stopped because the provider reported a finish error",
-                    );
-                    let _ = send_failed_event(inner, sender, token, diagnostic).await;
-                    return;
-                }
-            },
+            }
             Some(Ok(ModelEvent::ToolCallRequested { call })) => {
+                tracing::debug!(
+                    category = "tool_call_requested",
+                    "runtime model stream event received"
+                );
                 if saw_non_empty_text_delta {
                     let diagnostic = diagnostic_from_text(
                         DIAGNOSTIC_MODEL_TOOL_CALL_MIXED_OUTPUT,
                         "model emitted text before requesting a tool call",
                     );
+                    trace_provider_step_failed(&diagnostic);
                     let _ = send_failed_event(inner, sender, token, diagnostic).await;
                     return;
                 }
@@ -867,26 +977,37 @@ async fn run_provider_step(
                         streamed_tool_call = Some(call);
                     }
                     Err(diagnostic) => {
+                        trace_provider_step_failed(&diagnostic);
                         let _ = send_failed_event(inner, sender, token, diagnostic).await;
                         return;
                     }
                 }
             }
             Some(Err(error)) => {
+                let error_kind = error.kind();
+                tracing::debug!(
+                    category = "provider_error",
+                    error_kind = ?error_kind,
+                    "runtime model stream event received"
+                );
                 if is_cancelled_model_error(&error) {
+                    trace_provider_step_cancelled();
                     let _ = send_cancelled_event(inner, sender).await;
                     return;
                 }
 
                 let diagnostic = diagnostic_from_model_error(error);
+                trace_provider_step_failed(&diagnostic);
                 let _ = send_failed_event(inner, sender, token, diagnostic).await;
                 return;
             }
             None => {
+                tracing::debug!(category = "eof", "runtime model stream ended");
                 let diagnostic = diagnostic_from_text(
                     "model_stream_eof",
                     "model stream ended before completion",
                 );
+                trace_provider_step_failed(&diagnostic);
                 let _ = send_failed_event(inner, sender, token, diagnostic).await;
                 return;
             }
@@ -1212,6 +1333,22 @@ fn diagnostic_from_model_error(error: ModelError) -> ErrorInfo {
     };
 
     diagnostic_from_text(code, error.to_string())
+}
+
+fn trace_provider_step_failed(diagnostic: &ErrorInfo) {
+    tracing::debug!(
+        category = "failed",
+        diagnostic_code = diagnostic.code(),
+        "runtime provider step failed"
+    );
+}
+
+fn trace_provider_step_cancelled() {
+    tracing::debug!(
+        category = "cancelled",
+        diagnostic_code = "cancelled",
+        "runtime provider step cancelled"
+    );
 }
 
 fn diagnostic_from_text(code: &'static str, message: impl AsRef<str>) -> ErrorInfo {
