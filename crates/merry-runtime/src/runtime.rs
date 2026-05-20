@@ -317,11 +317,15 @@ impl Runtime {
 
     /// Records a structured context entry into the owning session.
     ///
-    /// This is the current MVP context mutation surface. It records
+    /// This is the raw/manual MVP direct context mutation surface. It appends
     /// summary-only context entries today by taking the session lock. It does
-    /// not acquire the active-step permit and does not emit runtime events.
-    /// This surface may expand when Memory Activation becomes part of the
-    /// runtime state model.
+    /// not validate evidence readability, reject duplicate summary ids, acquire
+    /// the active-step permit, emit runtime events, or write ledger facts.
+    ///
+    /// Direct writes are validated later when a session snapshot is compiled by
+    /// [`ContextCompiler`]. They are not summary-draft promotion, do not record
+    /// promotion lifecycle state, and are not governed by the internal
+    /// summary-draft promotion acceptance/replay rules.
     pub async fn record_context_entry(&self, entry: ContextEntry) {
         let mut session = self.inner.session.lock().await;
         session.record_context_entry(entry);
@@ -330,9 +334,16 @@ impl Runtime {
     /// Records a summary context entry into the owning session.
     ///
     /// Summaries are navigation only; exact supporting evidence must remain
-    /// readable through session-owned artifacts. This helper delegates to
-    /// [`Runtime::record_context_entry`], so it takes the session lock and does
-    /// not acquire the active-step permit or emit runtime events.
+    /// readable through session-owned artifacts before the summary can enter
+    /// compiled context. This helper is the raw/manual MVP direct write path:
+    /// it delegates to [`Runtime::record_context_entry`], so it records without
+    /// immediate evidence readability validation, duplicate-id rejection,
+    /// active-step permit acquisition, runtime events, or ledger facts.
+    ///
+    /// This API is independent of the internal summary-draft promotion
+    /// lifecycle. Calling it does not create promotion records, perform
+    /// acceptance/replay checks, or authorize context mutation from judgment
+    /// output.
     pub async fn record_context_summary(&self, summary: ContextSummary) {
         self.record_context_entry(ContextEntry::summary(summary))
             .await

@@ -166,21 +166,22 @@ async fn registry_mismatch_is_not_expressible_through_public_context_compiler_ap
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn session_snapshot_compilation_rejects_missing_evidence_artifacts() {
+async fn direct_record_context_summary_accepts_missing_evidence_until_compile() {
     let compiler = ContextCompiler::new();
     let runtime = runtime("context-missing-evidence");
-    record_summary(
-        &runtime,
-        summary(
-            "summary-with-missing-artifact",
-            "Navigation must not outrun exact evidence.",
-            vec![evidence(
-                "missing build output",
-                line_evidence("artifact-missing", 1, 1),
-            )],
-        ),
-    )
-    .await;
+    let _: () = runtime
+        .record_context_summary(
+            ContextSummary::new(
+                "summary-with-missing-artifact",
+                "Navigation must not outrun exact evidence.",
+                vec![evidence(
+                    "missing build output",
+                    line_evidence("artifact-missing", 1, 1),
+                )],
+            )
+            .expect("valid summary"),
+        )
+        .await;
 
     let error = compiler
         .compile(&runtime.context_snapshot().await)
@@ -189,6 +190,21 @@ async fn session_snapshot_compilation_rejects_missing_evidence_artifacts() {
     assert_eq!(
         error.to_string(),
         "context summary summary-with-missing-artifact references unreadable evidence artifact-missing: artifact id artifact-missing is not recorded"
+    );
+
+    record_text_artifact(&runtime, "artifact-missing", "available after raw write\n").await;
+
+    let current = compiler
+        .compile(&runtime.context_snapshot().await)
+        .expect("direct raw write remains in session once evidence is readable");
+    assert_eq!(
+        current.to_snapshot(),
+        [
+            "summary:summary-with-missing-artifact",
+            "text:Navigation must not outrun exact evidence.",
+            "evidence:missing build output:artifact-missing:line:1-1",
+        ]
+        .join("\n")
     );
 }
 
@@ -266,18 +282,19 @@ async fn session_snapshot_compilation_rejects_unreadable_evidence_locators() {
     let compiler = ContextCompiler::new();
     let runtime = runtime("context-unreadable-evidence");
     record_text_artifact(&runtime, "artifact-short-log", "01\n02\n").await;
-    record_summary(
-        &runtime,
-        summary(
-            "summary-with-unreadable-evidence",
-            "Navigation must point at readable content.",
-            vec![evidence(
-                "short compiler output",
-                line_evidence("artifact-short-log", 42, 47),
-            )],
-        ),
-    )
-    .await;
+    let _: () = runtime
+        .record_context_summary(
+            ContextSummary::new(
+                "summary-with-unreadable-evidence",
+                "Navigation must point at readable content.",
+                vec![evidence(
+                    "short compiler output",
+                    line_evidence("artifact-short-log", 42, 47),
+                )],
+            )
+            .expect("valid summary"),
+        )
+        .await;
 
     let error = compiler
         .compile(&runtime.context_snapshot().await)
@@ -286,6 +303,85 @@ async fn session_snapshot_compilation_rejects_unreadable_evidence_locators() {
     assert_eq!(
         error.to_string(),
         "context summary summary-with-unreadable-evidence references unreadable evidence artifact-short-log: artifact id artifact-short-log has invalid evidence locator: line range is outside artifact content"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn direct_duplicate_summary_ids_compile_as_duplicate_sections_when_evidence_is_readable() {
+    let compiler = ContextCompiler::new();
+    let runtime = runtime("context-duplicate-direct-summary-id");
+    record_text_artifacts(
+        &runtime,
+        &[
+            ("artifact-first", "first evidence\n"),
+            ("artifact-second", "second evidence\n"),
+        ],
+    )
+    .await;
+
+    let _: () = runtime
+        .record_context_summary(
+            ContextSummary::new(
+                "summary-duplicate",
+                "First direct summary.",
+                vec![evidence(
+                    "first readable evidence",
+                    line_evidence("artifact-first", 1, 1),
+                )],
+            )
+            .expect("valid summary"),
+        )
+        .await;
+    let _: () = runtime
+        .record_context_summary(
+            ContextSummary::new(
+                "summary-duplicate",
+                "Second direct summary.",
+                vec![evidence(
+                    "second readable evidence",
+                    line_evidence("artifact-second", 1, 1),
+                )],
+            )
+            .expect("valid summary"),
+        )
+        .await;
+
+    let compiled = compiler
+        .compile(&runtime.context_snapshot().await)
+        .expect("direct duplicate summaries compile when evidence is readable");
+
+    assert_eq!(
+        compiled.sections(),
+        &[
+            CompiledContextSection::Summary {
+                id: "summary-duplicate".to_owned(),
+                text: "First direct summary.".to_owned(),
+                evidence: vec![evidence(
+                    "first readable evidence",
+                    line_evidence("artifact-first", 1, 1),
+                )],
+            },
+            CompiledContextSection::Summary {
+                id: "summary-duplicate".to_owned(),
+                text: "Second direct summary.".to_owned(),
+                evidence: vec![evidence(
+                    "second readable evidence",
+                    line_evidence("artifact-second", 1, 1),
+                )],
+            },
+        ]
+    );
+    assert_eq!(
+        compiled.to_snapshot(),
+        [
+            "summary:summary-duplicate",
+            "text:First direct summary.",
+            "evidence:first readable evidence:artifact-first:line:1-1",
+            "summary:summary-duplicate",
+            "text:Second direct summary.",
+            "evidence:second readable evidence:artifact-second:line:1-1",
+        ]
+        .join("\n")
     );
 }
 
