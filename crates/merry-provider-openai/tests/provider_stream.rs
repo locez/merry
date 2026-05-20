@@ -197,7 +197,7 @@ async fn stream_model_honors_cancellation_during_streaming() {
     assert!(matches!(error, ModelError::Cancelled));
 }
 
-#[ignore = "requires --features live-tests, MERRY_OPENAI_LIVE_TESTS=1, OPENAI_API_KEY, MERRY_OPENAI_MODEL, and --ignored"]
+#[ignore = "requires --features live-tests, MERRY_OPENAI_LIVE_TESTS=1, OPENAI_API_KEY, MERRY_OPENAI_MODEL, optional MERRY_OPENAI_BASE_URL, and --ignored"]
 #[tokio::test]
 async fn live_openai_responses_stream_smoke_test() {
     if !cfg!(feature = "live-tests") {
@@ -217,7 +217,11 @@ async fn live_openai_responses_stream_smoke_test() {
         Err(_) => return,
     };
 
-    let provider = OpenAiProvider::new(OpenAiProviderConfig::new(&api_key).expect("valid api key"));
+    let mut config = OpenAiProviderConfig::new(&api_key).expect("valid api key");
+    if let Ok(base_url) = std::env::var("MERRY_OPENAI_BASE_URL") {
+        config = config.with_base_url(&base_url).expect("valid base url");
+    }
+    let provider = OpenAiProvider::new(config);
     let request = ModelRequest::new(
         ModelName::new(&model).expect("valid model name"),
         vec![
