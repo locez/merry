@@ -5,7 +5,7 @@ use crate::summary_draft_promotion::SummaryDraftPromotionRegistrySnapshot;
 use crate::{
     RuntimeError,
     artifact::{ArtifactContent, ArtifactError, ArtifactRegistry},
-    context::{ContextCompiler, ContextEntry, SessionContextSnapshot},
+    context::{ContextCompiler, ContextEntry, ContextError, SessionContextSnapshot},
     judgment::{
         JudgmentError, JudgmentEvidence, JudgmentOutcome, JudgmentRecord, JudgmentRegistry,
         JudgmentRequest, SummaryDraftPromotionError, SummaryDraftPromotionInput,
@@ -162,6 +162,20 @@ impl SessionState {
         self.context_entries.push(entry);
     }
 
+    fn record_checked_context_entry(&mut self, entry: ContextEntry) -> Result<(), ContextError> {
+        let mut candidate_entries = self.context_entries.clone();
+        candidate_entries.push(entry.clone());
+        let candidate_snapshot = SessionContextSnapshot::new(
+            candidate_entries,
+            self.artifacts.clone(),
+            self.activated_memories.clone(),
+        );
+        ContextCompiler::new().compile(&candidate_snapshot)?;
+
+        self.context_entries.push(entry);
+        Ok(())
+    }
+
     #[allow(dead_code)]
     pub(crate) fn record_memory_item(&mut self, item: MemoryItem) -> Result<(), MemoryError> {
         self.memory_store.record(item)
@@ -253,19 +267,11 @@ impl SessionState {
             SummaryDraftPromotionAcceptanceResult::AlreadyPromoted => return Ok(()),
         };
 
-        let mut candidate_entries = self.context_entries.clone();
-        candidate_entries.push(ContextEntry::summary(summary.clone()));
-        let candidate_snapshot = SessionContextSnapshot::new(
-            candidate_entries,
-            self.artifacts.clone(),
-            self.activated_memories.clone(),
-        );
-        if let Err(error) = ContextCompiler::new().compile(&candidate_snapshot) {
+        if let Err(error) = self.record_checked_context_entry(ContextEntry::summary(summary)) {
             self.summary_draft_promotions.mark_rejected(&record_id);
             return Err(error.into());
         }
 
-        self.context_entries.push(ContextEntry::summary(summary));
         self.summary_draft_promotions.mark_promoted(&record_id);
         Ok(())
     }
@@ -593,7 +599,7 @@ mod tests {
     use super::SessionState;
     use crate::{
         artifact::{ArtifactContent, ArtifactError},
-        context::{ContextCompiler, ContextError},
+        context::{ContextCompiler, ContextEntry, ContextError, ContextEvidence, ContextSummary},
         judgment::{
             JudgmentConfidence, JudgmentError, JudgmentEvidence, JudgmentOutcome,
             JudgmentProvenance, JudgmentPurpose, JudgmentRecommendation, JudgmentRecordId,
@@ -1289,6 +1295,81 @@ mod tests {
             "accepted-summary",
             SummaryDraftPromotionState::Promoted,
             None,
+        );
+    }
+
+    #[test]
+    fn checked_context_entry_rejects_invalid_candidate_without_context_mutation() {
+        let mut session = SessionState::new(session_id());
+        session
+            .record_artifact_state(
+                ArtifactRef::new(artifact_id("checked-existing-source"), ArtifactKind::Text),
+                ArtifactContent::text("existing source text\n"),
+            )
+            .expect("existing artifact records");
+        session
+            .record_artifact_state(
+                ArtifactRef::new(artifact_id("checked-short-source"), ArtifactKind::Text),
+                ArtifactContent::text("one line\n"),
+            )
+            .expect("short artifact records");
+        session.record_context_entry(ContextEntry::summary(
+            ContextSummary::new(
+                "checked-existing-summary",
+                "Existing checked summary.",
+                vec![
+                    ContextEvidence::new(
+                        "existing source",
+                        EvidenceRef::new(
+                            artifact_id("checked-existing-source"),
+                            EvidenceLocator::whole_artifact(),
+                        ),
+                    )
+                    .expect("valid context evidence"),
+                ],
+            )
+            .expect("valid context summary"),
+        ));
+        let context_before = ContextCompiler::new()
+            .compile(&session.context_snapshot())
+            .expect("existing context compiles")
+            .to_snapshot();
+
+        let error = session
+            .record_checked_context_entry(ContextEntry::summary(
+                ContextSummary::new(
+                    "checked-invalid-summary",
+                    "Invalid checked summary.",
+                    vec![
+                        ContextEvidence::new(
+                            "invalid source",
+                            EvidenceRef::new(
+                                artifact_id("checked-short-source"),
+                                EvidenceLocator::line_range(2, 2).expect("valid locator shape"),
+                            ),
+                        )
+                        .expect("valid context evidence"),
+                    ],
+                )
+                .expect("valid context summary"),
+            ))
+            .expect_err("checked append rejects unreadable evidence");
+
+        assert!(matches!(
+            error,
+            ContextError::UnreadableEvidence {
+                summary_id,
+                artifact_id,
+                source: ArtifactError::InvalidEvidenceLocator { .. },
+            } if summary_id == "checked-invalid-summary"
+                && artifact_id.as_str() == "checked-short-source"
+        ));
+        assert_eq!(
+            ContextCompiler::new()
+                .compile(&session.context_snapshot())
+                .expect("existing context still compiles")
+                .to_snapshot(),
+            context_before
         );
     }
 

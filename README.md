@@ -6,7 +6,7 @@ M8 runtime/provider/tool execution hardening has shifted into maintenance and fo
 
 Memory Activation MVP work is internally integrated in `merry-runtime`. The default activation source is a session-owned in-memory stored source; external/default sessions have no candidate memories until runtime-owned state records them. There is still no public memory write API, external persistence, or stable activation contract.
 
-M18F-G LLM-assisted judgment boundary work has added a crate-internal provider-neutral uncertainty review harness. It validates request evidence before invoking a `JudgmentSource`, invokes without holding the session lock across await, validates returned outcome evidence before recording, and records only completed internal audit payloads on success.
+M18F-H LLM-assisted judgment boundary work has added a crate-private checked internal context append helper used by summary-draft promotion. Promotion still compiles the candidate context snapshot before mutating session context, while public direct context writes remain raw/manual.
 
 Public direct context writes remain unchanged. `Runtime::record_context_entry` and `Runtime::record_context_summary` are still raw/manual MVP context mutation helpers: they append direct context entries and rely on later context compilation to validate exact evidence readability. They are not summary-draft promotion, do not create promotion lifecycle records, and are not governed by promotion acceptance/replay rules. The summary-draft promotion lifecycle remains crate-internal.
 
