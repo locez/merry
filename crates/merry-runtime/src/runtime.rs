@@ -1,8 +1,8 @@
 //! Runtime builder and step execution skeleton.
 //!
 //! [`Runtime`] is the MVP facade for session-owned state. Step execution and
-//! event-producing direct mutation APIs admit one active operation at a time,
-//! record durable session state before returning observable events, and keep
+//! direct mutation APIs admit one active operation at a time, record durable
+//! session state before returning observable events where applicable, and keep
 //! provider wire details behind the `merry-llm` provider boundary.
 
 use crate::{
@@ -51,8 +51,8 @@ const DIAGNOSTIC_TOOL_NOT_REGISTERED: &str = "tool_not_registered";
 /// Merry runtime handle for one session.
 ///
 /// A cloned handle points at the same session-owned state. [`Runtime::step`]
-/// and event-producing direct mutation APIs such as
-/// [`Runtime::record_artifact`], [`Runtime::submit_tool_result`], and
+/// and direct mutation APIs such as [`Runtime::record_artifact`],
+/// [`Runtime::record_context_entry`], [`Runtime::submit_tool_result`], and
 /// [`Runtime::execute_tool_call`] acquire the active-step permit.
 #[derive(Clone)]
 pub struct Runtime {
@@ -71,8 +71,8 @@ impl Runtime {
 
     /// Starts a runtime step and returns its event stream.
     ///
-    /// Only one step or event-producing direct mutation may own the runtime at
-    /// a time. The step producer owns the active-step permit. Dropping the
+    /// Only one step or direct mutation may own the runtime at a time. The
+    /// step producer owns the active-step permit. Dropping the
     /// returned [`RuntimeEventStream`] cancels and aborts the producer; the
     /// permit is released when that producer future stops and drops its state.
     ///
@@ -358,17 +358,23 @@ impl Runtime {
     /// Records a structured context entry into the owning session.
     ///
     /// This is the raw/manual MVP direct context mutation surface. It appends
-    /// summary-only context entries today by taking the session lock. It does
-    /// not validate evidence readability, reject duplicate summary ids, acquire
-    /// the active-step permit, emit runtime events, or write ledger facts.
+    /// summary-only context entries today after acquiring the active-step
+    /// permit. It does not validate evidence readability, reject duplicate
+    /// summary ids, emit runtime events, or write ledger facts.
     ///
     /// Direct writes are validated later when a session snapshot is compiled by
     /// [`ContextCompiler`]. They are not summary-draft promotion, do not record
     /// promotion lifecycle state, and are not governed by the internal
     /// summary-draft promotion acceptance/replay rules.
-    pub async fn record_context_entry(&self, entry: ContextEntry) {
+    pub async fn record_context_entry(&self, entry: ContextEntry) -> Result<(), RuntimeError> {
+        let _active_permit = ActiveStepPermit::acquire(Arc::clone(&self.inner.active_step))
+            .ok_or_else(|| RuntimeError::StepAlreadyActive {
+                session_id: self.inner.session_id.clone(),
+            })?;
+
         let mut session = self.inner.session.lock().await;
         session.record_context_entry(entry);
+        Ok(())
     }
 
     /// Records a summary context entry into the owning session.
@@ -376,15 +382,19 @@ impl Runtime {
     /// Summaries are navigation only; exact supporting evidence must remain
     /// readable through session-owned artifacts before the summary can enter
     /// compiled context. This helper is the raw/manual MVP direct write path:
-    /// it delegates to [`Runtime::record_context_entry`], so it records without
-    /// immediate evidence readability validation, duplicate-id rejection,
-    /// active-step permit acquisition, runtime events, or ledger facts.
+    /// it delegates to [`Runtime::record_context_entry`], so it records with
+    /// the same active-step admission guard and without immediate evidence
+    /// readability validation, duplicate-id rejection, runtime events, or
+    /// ledger facts.
     ///
     /// This API is independent of the internal summary-draft promotion
     /// lifecycle. Calling it does not create promotion records, perform
     /// acceptance/replay checks, or authorize context mutation from judgment
     /// output.
-    pub async fn record_context_summary(&self, summary: ContextSummary) {
+    pub async fn record_context_summary(
+        &self,
+        summary: ContextSummary,
+    ) -> Result<(), RuntimeError> {
         self.record_context_entry(ContextEntry::summary(summary))
             .await
     }

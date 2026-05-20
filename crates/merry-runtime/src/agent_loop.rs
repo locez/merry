@@ -116,7 +116,8 @@ pub enum AgentLoopStatus {
     /// The runtime emitted a failed event. This is distinct from a method error
     /// returned by [`Runtime::step`] or [`Runtime::execute_tool_call`].
     Failed { diagnostic: ErrorInfo },
-    /// The runtime emitted a cancelled event.
+    /// The runtime emitted a cancelled event, or loop-owned tool execution was
+    /// cancelled before producing a durable result.
     Cancelled { diagnostic: ErrorInfo },
     /// The loop stopped because MVP loop policy cannot safely continue.
     Blocked { reason: AgentLoopBlockedReason },
@@ -141,8 +142,9 @@ pub enum AgentLoopBlockedReason {
 ///
 /// Runtime failed/cancelled events are represented as [`AgentLoopStatus`].
 /// This error is reserved for facade-method failures such as step admission,
-/// unknown calls, cooperative tool cancellation, or executor infrastructure
-/// failure. The already-observed runtime events are preserved for callers.
+/// unknown calls, or executor infrastructure failure. Cooperative tool
+/// cancellation is represented as [`AgentLoopStatus::Cancelled`]. The
+/// already-observed runtime events are preserved for callers.
 #[derive(Debug, Error)]
 #[error("agent loop stopped on runtime method error: {source}")]
 pub struct AgentLoopError {
@@ -188,8 +190,8 @@ impl Runtime {
     /// The MVP loop does not support parallel tool calls and does not introduce
     /// provider conversation state. It owns the runtime active-step permit for
     /// the full step -> tool execution -> continuation sequence. While the loop
-    /// is running, cloned runtime handles reject concurrent event-producing
-    /// mutation APIs with [`RuntimeError::StepAlreadyActive`]. Cancellation and
+    /// is running, cloned runtime handles reject concurrent direct mutation
+    /// APIs with [`RuntimeError::StepAlreadyActive`]. Cancellation and
     /// generation controls are reused from `context` for every step and tool
     /// execution.
     pub async fn run_agent_loop(
@@ -275,6 +277,15 @@ impl Runtime {
                         .await
                     {
                         Ok(execution_events) => events.extend(execution_events),
+                        Err(RuntimeError::ToolExecutionCancelled { call_id, .. }) => {
+                            return Ok(AgentLoopResult::new(
+                                AgentLoopStatus::Cancelled {
+                                    diagnostic: tool_execution_cancelled_diagnostic(&call_id),
+                                },
+                                events,
+                                steps_run,
+                            ));
+                        }
                         Err(source) => return Err(AgentLoopError::new(events, source)),
                     }
 
@@ -294,6 +305,14 @@ async fn collect_step_events(stream: RuntimeEventStream) -> Vec<RuntimeEvent> {
 
 fn continuation_step_input() -> Result<StepInput, RuntimeError> {
     StepInput::user_text(DEFAULT_AGENT_LOOP_CONTINUATION_INPUT)
+}
+
+fn tool_execution_cancelled_diagnostic(call_id: &merry_core::ToolCallId) -> ErrorInfo {
+    ErrorInfo::new(
+        "tool_execution_cancelled",
+        &format!("tool call {call_id} execution was cancelled"),
+    )
+    .expect("static code and runtime-owned tool call id form a valid diagnostic")
 }
 
 enum StepOutcome {

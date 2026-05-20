@@ -106,7 +106,8 @@ async fn runtime_records_context_state_and_builds_compilable_snapshot() {
             )
             .expect("valid summary"),
         )
-        .await;
+        .await
+        .expect("context summary should record");
 
     let compiled = ContextCompiler::new()
         .compile(&runtime.context_snapshot().await)
