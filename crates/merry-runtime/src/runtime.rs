@@ -9,6 +9,7 @@ use crate::{
     ActionProposal, ArtifactContent, ContextCompiler, ContextEntry, ContextSummary,
     LedgerProjectionSnapshot, RuntimeError, RuntimeEventStream, RuntimeModelRole,
     SessionContextSnapshot,
+    action_audit::ActionAuditPolicy,
     action_policy::DefaultActionPolicy,
     event_stream::ActiveStepPermit,
     judgment::{JudgmentContext, JudgmentError, JudgmentRecord, JudgmentRequest, JudgmentSource},
@@ -392,6 +393,26 @@ impl Runtime {
             );
         }
 
+        if let Err(error) = admit_action_to_generic_executor(
+            &pending,
+            registered_tool.action_kind(),
+            &self.inner.session_id,
+        ) {
+            let mut session = self.inner.session.lock().await;
+            if context.cancellation_token().is_cancelled() {
+                return Err(RuntimeError::ToolExecutionCancelled {
+                    session_id: self.inner.session_id.clone(),
+                    call_id: call_id.clone(),
+                });
+            }
+            session.record_guarded_tool_action(
+                &pending,
+                registered_tool.action_kind(),
+                ActionAuditPolicy::from_decision(&policy_decision),
+            )?;
+            return Err(error);
+        }
+
         let executor = registered_tool.executor();
         let execution = tokio::select! {
             biased;
@@ -615,6 +636,22 @@ fn validate_action_proposal(
             call_id: pending.id().clone(),
             message: reason.to_owned(),
         })
+}
+
+pub(crate) fn admit_action_to_generic_executor(
+    pending: &PendingToolCall,
+    action_kind: crate::ToolActionKind,
+    session_id: &SessionId,
+) -> Result<(), RuntimeError> {
+    if action_kind.is_mutating() {
+        return Err(RuntimeError::MutatingActionCommitLifecycleRequired {
+            session_id: session_id.clone(),
+            call_id: pending.id().clone(),
+            action_kind,
+        });
+    }
+
+    Ok(())
 }
 
 /// Builder for a Merry runtime.
@@ -1664,8 +1701,8 @@ async fn reserve_cancelled_event_slot<'a>(
 mod tests {
     use super::{
         DIAGNOSTIC_TOOL_ACTION_POLICY_DENIED, DIAGNOSTIC_TOOL_CALL_RESULT_REQUIRED, Runtime,
-        RuntimeInner, TOOL_ACTION_POLICY_DENIED_MESSAGE, memory_activation_seed_from_step_input,
-        send_cancelled_event,
+        RuntimeInner, TOOL_ACTION_POLICY_DENIED_MESSAGE, admit_action_to_generic_executor,
+        memory_activation_seed_from_step_input, send_cancelled_event,
     };
     use crate::action_audit::ActionAuditStatus;
     use crate::action_policy::{ActionPolicyDisposition, ActionRiskTier, DefaultActionPolicy};
@@ -4400,6 +4437,38 @@ mod tests {
         let result = resolved_tool_result(&events);
         assert_eq!(result.status(), merry_core::ToolCallResultStatus::Succeeded);
         assert!(runtime.pending_tool_calls().await.is_empty());
+    }
+
+    #[test]
+    fn generic_executor_admission_allows_read_only_and_rejects_mutating_actions() {
+        let session_id = SessionId::new("generic-executor-admission").expect("valid session id");
+        let pending = policy_pending_tool_call("call-admission", "policy_admission");
+
+        admit_action_to_generic_executor(&pending, ToolActionKind::ReadOnly, &session_id)
+            .expect("read-only action may enter generic executor");
+
+        for action_kind in [
+            ToolActionKind::WorkspaceWrite,
+            ToolActionKind::CommandExec,
+            ToolActionKind::Network,
+        ] {
+            let err = admit_action_to_generic_executor(&pending, action_kind, &session_id)
+                .expect_err("mutating action must require commit lifecycle");
+            assert!(matches!(
+                err,
+                crate::RuntimeError::MutatingActionCommitLifecycleRequired {
+                    session_id: ref guarded_session,
+                    call_id: ref guarded_call,
+                    action_kind: guarded_kind,
+                } if guarded_session == &session_id
+                    && guarded_call == pending.id()
+                    && guarded_kind == action_kind
+            ));
+            assert!(
+                err.to_string()
+                    .contains("requires an explicit commit lifecycle")
+            );
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

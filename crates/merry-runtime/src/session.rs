@@ -4,7 +4,7 @@
 use crate::summary_draft_promotion::SummaryDraftPromotionRegistrySnapshot;
 use crate::{
     ActionProposal, RuntimeError,
-    action_audit::ActionAuditRegistry,
+    action_audit::{ActionAuditPolicy, ActionAuditRegistry},
     action_policy::ActionPolicyDecision,
     artifact::{ArtifactContent, ArtifactError, ArtifactRegistry},
     context::{ContextCompiler, ContextEntry, ContextError, SessionContextSnapshot},
@@ -572,6 +572,39 @@ impl SessionState {
         ])
     }
 
+    pub(crate) fn record_guarded_tool_action(
+        &mut self,
+        pending: &PendingToolCall,
+        action_kind: crate::ToolActionKind,
+        policy: ActionAuditPolicy,
+    ) -> Result<(), RuntimeError> {
+        debug_assert!(action_kind.is_mutating());
+
+        if !self
+            .pending_tool_calls
+            .iter()
+            .any(|call| call.id() == pending.id())
+        {
+            return if self.resolved_tool_calls.contains(pending.id()) {
+                Err(RuntimeError::ToolCallAlreadyResolved {
+                    session_id: self.session_id.clone(),
+                    call_id: pending.id().clone(),
+                })
+            } else {
+                Err(RuntimeError::UnknownToolCall {
+                    session_id: self.session_id.clone(),
+                    call_id: pending.id().clone(),
+                })
+            };
+        }
+
+        if self.record_guarded_tool_action_audit(pending, action_kind, policy) {
+            self.ledger
+                .record_lifecycle(self.next_sequence, LedgerFactKind::ActionAuditRecorded);
+        }
+        Ok(())
+    }
+
     pub(crate) fn record_cancelled(&mut self, diagnostic: ErrorInfo) -> RuntimeEvent {
         self.record_event(
             RuntimeEventKind::Cancelled { diagnostic },
@@ -608,6 +641,16 @@ impl SessionState {
         self.action_audits.record_proposed_tool_action(proposal);
         self.ledger
             .record_lifecycle(self.next_sequence, LedgerFactKind::ActionAuditRecorded);
+    }
+
+    fn record_guarded_tool_action_audit(
+        &mut self,
+        pending: &PendingToolCall,
+        action_kind: crate::ToolActionKind,
+        policy: ActionAuditPolicy,
+    ) -> bool {
+        self.action_audits
+            .record_guarded_tool_action(pending, action_kind, policy)
     }
 
     fn next_sequence(&self) -> u64 {
@@ -718,8 +761,8 @@ fn duplicate_tool_call_diagnostic(call_id: &ToolCallId, state: &'static str) -> 
 mod tests {
     use super::SessionState;
     use crate::{
-        action_audit::ActionAuditStatus,
-        action_policy::{ActionPolicyDisposition, DefaultActionPolicy},
+        action_audit::{ActionAuditPolicy, ActionAuditStatus},
+        action_policy::{ActionPolicyDisposition, ActionRiskTier, DefaultActionPolicy},
         artifact::{ArtifactContent, ArtifactError},
         context::{ContextCompiler, ContextEntry, ContextError, ContextEvidence, ContextSummary},
         judgment::{
@@ -1132,6 +1175,77 @@ mod tests {
         assert!(audit_index < artifact_index);
         assert!(artifact_index < resolved_index);
         assert!(session.pending_tool_calls().is_empty());
+    }
+
+    #[test]
+    fn guarded_tool_action_records_internal_audit_without_events_or_resolution() {
+        let mut session = SessionState::new(session_id());
+        let call = pending_tool_call("guarded-action-call");
+        session
+            .record_session_started_if_needed()
+            .expect("session should start");
+        session
+            .record_tool_call_pending(call.clone())
+            .expect("pending call should record");
+        let projection_before = session.ledger_projection();
+        let next_sequence_before = session.next_sequence();
+        let policy = ActionAuditPolicy::new(
+            ActionRiskTier::EditElevated,
+            ActionPolicyDisposition::Allow,
+            "test policy allowed workspace write before commit lifecycle",
+        );
+
+        session
+            .record_guarded_tool_action(&call, crate::ToolActionKind::WorkspaceWrite, policy)
+            .expect("guarded audit should record for pending call");
+
+        assert_eq!(session.next_sequence(), next_sequence_before);
+        assert_eq!(session.pending_tool_calls(), vec![call.clone()]);
+        let audit_snapshot = session.action_audit_snapshot();
+        assert_eq!(audit_snapshot.records().len(), 1);
+        let audit = &audit_snapshot.records()[0];
+        assert_eq!(audit.tool_call_id(), call.id());
+        assert_eq!(audit.tool_name(), call.name());
+        assert_eq!(audit.action_kind(), crate::ToolActionKind::WorkspaceWrite);
+        assert_eq!(audit.status(), ActionAuditStatus::Guarded);
+        assert_eq!(
+            audit.policy().expect("guarded audit should include policy"),
+            policy
+        );
+        assert!(audit.proposal().is_none());
+
+        let projection_after = session.ledger_projection();
+        assert_eq!(
+            projection_after.entries().len(),
+            projection_before.entries().len() + 1
+        );
+        assert!(matches!(
+            projection_after.entries().last(),
+            Some(LedgerProjection::Lifecycle {
+                kind: LedgerFactKind::ActionAuditRecorded,
+                ..
+            })
+        ));
+        let expected_result_artifact_id = artifact_id("tool-result-2");
+        assert!(matches!(
+            session.read_artifact_content(&expected_result_artifact_id),
+            Err(ArtifactError::MissingArtifact { id }) if id == expected_result_artifact_id
+        ));
+
+        let audit_snapshot_after_first = session.action_audit_snapshot();
+        let projection_after_first = session.ledger_projection();
+        session
+            .record_guarded_tool_action(&call, crate::ToolActionKind::WorkspaceWrite, policy)
+            .expect("duplicate guarded audit should no-op for pending call");
+
+        assert_eq!(session.next_sequence(), next_sequence_before);
+        assert_eq!(session.pending_tool_calls(), vec![call.clone()]);
+        assert_eq!(session.action_audit_snapshot(), audit_snapshot_after_first);
+        assert_eq!(session.ledger_projection(), projection_after_first);
+        assert!(matches!(
+            session.read_artifact_content(&expected_result_artifact_id),
+            Err(ArtifactError::MissingArtifact { id }) if id == expected_result_artifact_id
+        ));
     }
 
     #[test]
