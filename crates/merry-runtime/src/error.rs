@@ -4,6 +4,7 @@
 //! and tool execution contracts. Provider failures are normalized before they
 //! become runtime events; provider wire errors are not exposed as runtime state.
 
+use crate::ToolActionKind;
 use crate::artifact::{ArtifactContentKind, ArtifactError};
 use merry_core::{ArtifactId, CoreError, SessionId, ToolCallId, ToolName};
 use thiserror::Error;
@@ -79,6 +80,19 @@ pub enum RuntimeError {
         call_id: ToolCallId,
         /// Actionable executor failure detail.
         message: String,
+    },
+
+    /// A mutating action reached the generic executor path before a commit lifecycle exists.
+    #[error(
+        "mutating tool action {action_kind:?} for tool call {call_id} in session {session_id} requires an explicit commit lifecycle before generic execution"
+    )]
+    MutatingActionCommitLifecycleRequired {
+        /// Session executing the tool call.
+        session_id: SessionId,
+        /// Tool call id that remained pending.
+        call_id: ToolCallId,
+        /// Mutating action kind that must use a commit lifecycle.
+        action_kind: ToolActionKind,
     },
 
     /// A tool result used content that the MVP submit path does not accept.

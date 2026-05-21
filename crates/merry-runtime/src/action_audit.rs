@@ -41,6 +41,8 @@ pub(crate) enum ActionAuditStatus {
     Proposed,
     /// The action was denied by runtime policy.
     Denied,
+    /// The action was blocked by runtime admission until commit lifecycle exists.
+    Guarded,
 }
 
 /// Compact runtime-owned policy decision recorded with an action audit.
@@ -52,11 +54,24 @@ pub(crate) struct ActionAuditPolicy {
 }
 
 impl ActionAuditPolicy {
-    fn from_decision(decision: &ActionPolicyDecision) -> Self {
+    pub(crate) fn from_decision(decision: &ActionPolicyDecision) -> Self {
         Self {
             risk_tier: decision.risk_tier(),
             disposition: decision.disposition(),
             reason: decision.reason(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn new(
+        risk_tier: ActionRiskTier,
+        disposition: ActionPolicyDisposition,
+        reason: &'static str,
+    ) -> Self {
+        Self {
+            risk_tier,
+            disposition,
+            reason,
         }
     }
 
@@ -114,6 +129,30 @@ impl ActionAuditRecord {
             status: ActionAuditStatus::Denied,
             proposal: None,
         }
+    }
+
+    fn guarded(
+        order: u64,
+        call: &PendingToolCall,
+        action_kind: ToolActionKind,
+        policy: ActionAuditPolicy,
+    ) -> Self {
+        Self {
+            id: ActionAuditId::from_order(order),
+            order,
+            tool_call_id: call.id().clone(),
+            tool_name: call.name().clone(),
+            action_kind,
+            policy: Some(policy),
+            status: ActionAuditStatus::Guarded,
+            proposal: None,
+        }
+    }
+
+    fn is_guarded_for(&self, call_id: &ToolCallId, action_kind: ToolActionKind) -> bool {
+        self.status == ActionAuditStatus::Guarded
+            && &self.tool_call_id == call_id
+            && self.action_kind == action_kind
     }
 
     #[cfg(test)]
@@ -179,6 +218,26 @@ impl ActionAuditRegistry {
         let record = ActionAuditRecord::denied(self.next_order, call, decision);
         self.next_order += 1;
         self.records.push(record);
+    }
+
+    pub(crate) fn record_guarded_tool_action(
+        &mut self,
+        call: &PendingToolCall,
+        action_kind: ToolActionKind,
+        policy: ActionAuditPolicy,
+    ) -> bool {
+        if self
+            .records
+            .iter()
+            .any(|record| record.is_guarded_for(call.id(), action_kind))
+        {
+            return false;
+        }
+
+        let record = ActionAuditRecord::guarded(self.next_order, call, action_kind, policy);
+        self.next_order += 1;
+        self.records.push(record);
+        true
     }
 
     #[cfg(test)]
