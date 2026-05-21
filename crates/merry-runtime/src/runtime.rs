@@ -7,18 +7,18 @@
 
 use crate::{
     ArtifactContent, ContextCompiler, ContextEntry, ContextSummary, LedgerProjectionSnapshot,
-    RuntimeError, RuntimeEventStream, SessionContextSnapshot,
+    RuntimeError, RuntimeEventStream, RuntimeModelRole, SessionContextSnapshot,
+    action_policy::DefaultActionPolicy,
     event_stream::ActiveStepPermit,
     judgment::{JudgmentContext, JudgmentError, JudgmentRecord, JudgmentRequest, JudgmentSource},
     memory::{
         MemoryActivationContext, MemoryActivationSeed, MemoryActivationSource,
         MemoryActivationSourceKind, MemoryScope, StoredMemoryActivationSource,
     },
+    model_config::{ModelProviderConfig, RuntimeModelConfigs},
     session::{SessionState, is_runtime_reserved_artifact_id},
     step::{StepContext, StepInput, compile_step_model_request},
-    tool::{
-        RegisteredTool, ToolActionKind, ToolExecutionContext, ToolExecutionError, ToolRegistry,
-    },
+    tool::{RegisteredTool, ToolExecutionContext, ToolExecutionError, ToolRegistry},
 };
 use futures_util::StreamExt;
 use merry_core::{
@@ -123,7 +123,10 @@ impl Runtime {
             "runtime.step",
             session_id = self.inner.session_id.as_str(),
             event_buffer_size = self.inner.event_buffer_size.get(),
-            provider_configured = self.inner.model_provider.is_some(),
+            provider_configured = self
+                .inner
+                .model_configs
+                .contains_role(RuntimeModelRole::Primary),
             max_output_tokens = ?generation_config.max_output_tokens(),
             allow_parallel_tool_calls = generation_config.allow_parallel_tool_calls(),
         );
@@ -297,7 +300,8 @@ impl Runtime {
             );
         };
 
-        if registered_tool.action_kind() != ToolActionKind::ReadOnly {
+        let policy_decision = DefaultActionPolicy.decide(registered_tool.action_kind());
+        if !policy_decision.is_allowed() {
             if context.cancellation_token().is_cancelled() {
                 return Err(RuntimeError::ToolExecutionCancelled {
                     session_id: self.inner.session_id.clone(),
@@ -535,7 +539,7 @@ fn denied_tool_action_outcome(pending: &PendingToolCall) -> crate::ToolExecution
 pub struct RuntimeBuilder {
     session_id: SessionId,
     event_buffer_size: NonZeroUsize,
-    model_provider: Option<ModelProviderConfig>,
+    model_configs: RuntimeModelConfigs,
     registered_tools: Vec<RegisteredTool>,
     memory_activation_source: Arc<dyn MemoryActivationSource>,
 }
@@ -546,7 +550,7 @@ impl RuntimeBuilder {
             session_id,
             event_buffer_size: NonZeroUsize::new(DEFAULT_EVENT_BUFFER_SIZE)
                 .expect("default event buffer size is non-zero"),
-            model_provider: None,
+            model_configs: RuntimeModelConfigs::default(),
             registered_tools: Vec::new(),
             memory_activation_source: Arc::new(StoredMemoryActivationSource),
         }
@@ -570,7 +574,24 @@ impl RuntimeBuilder {
     /// in runtime state.
     #[must_use]
     pub fn model_provider(mut self, provider: Arc<dyn ModelProvider>, model: ModelName) -> Self {
-        self.model_provider = Some(ModelProviderConfig { provider, model });
+        self.model_configs
+            .insert(RuntimeModelRole::Primary, provider, model);
+        self
+    }
+
+    /// Sets the provider and model for a runtime model role.
+    ///
+    /// Only [`RuntimeModelRole::Primary`] is used by normal runtime steps today.
+    /// Non-primary roles are stored as runtime-owned configuration for future
+    /// review gates and do not alter provider request compilation.
+    #[must_use]
+    pub fn model_provider_for_role(
+        mut self,
+        role: RuntimeModelRole,
+        provider: Arc<dyn ModelProvider>,
+        model: ModelName,
+    ) -> Self {
+        self.model_configs.insert(role, provider, model);
         self
     }
 
@@ -603,18 +624,12 @@ impl RuntimeBuilder {
                 active_step: Arc::new(AtomicBool::new(false)),
                 memory_projection_epoch: AtomicU64::new(0),
                 event_buffer_size: self.event_buffer_size,
-                model_provider: self.model_provider,
+                model_configs: self.model_configs,
                 tool_registry,
                 memory_activation_source: self.memory_activation_source,
             }),
         })
     }
-}
-
-#[derive(Clone)]
-struct ModelProviderConfig {
-    provider: Arc<dyn ModelProvider>,
-    model: ModelName,
 }
 
 struct RuntimeInner {
@@ -623,7 +638,7 @@ struct RuntimeInner {
     active_step: Arc<AtomicBool>,
     memory_projection_epoch: AtomicU64,
     event_buffer_size: NonZeroUsize,
-    model_provider: Option<ModelProviderConfig>,
+    model_configs: RuntimeModelConfigs,
     tool_registry: ToolRegistry,
     memory_activation_source: Arc<dyn MemoryActivationSource>,
 }
@@ -676,7 +691,7 @@ async fn run_step(
         return;
     }
 
-    let Some(provider_config) = inner.model_provider.clone() else {
+    let Some(provider_config) = inner.model_configs.get(RuntimeModelRole::Primary) else {
         tracing::debug!(
             category = "no_provider_completion",
             "runtime step completing without provider"
@@ -849,7 +864,7 @@ async fn run_provider_step(
 
     let request = match compile_step_model_request(
         &input,
-        &provider_config.model,
+        provider_config.model(),
         &compiled_context,
         &continuations,
         tool_specs,
@@ -872,6 +887,7 @@ async fn run_provider_step(
     };
 
     let stream_context = ModelStreamContext::new(token.clone());
+    let provider = provider_config.provider();
     tracing::debug!(
         category = "provider_setup_start",
         "runtime provider stream setup started"
@@ -884,7 +900,7 @@ async fn run_provider_step(
             let _ = send_cancelled_event(inner, sender).await;
             return;
         }
-        result = provider_config.provider.stream_model(request, stream_context) => result,
+        result = provider.stream_model(request, stream_context) => result,
     };
 
     let mut stream = match stream_result {
@@ -1565,7 +1581,7 @@ mod tests {
         RuntimeInner, TOOL_ACTION_POLICY_DENIED_MESSAGE, memory_activation_seed_from_step_input,
         send_cancelled_event,
     };
-    use crate::ArtifactError;
+    use crate::action_policy::{ActionPolicyDisposition, ActionRiskTier, DefaultActionPolicy};
     use crate::artifact::ArtifactContent;
     use crate::judgment::{
         JudgmentConfidence, JudgmentContext, JudgmentError, JudgmentEvidence, JudgmentFuture,
@@ -1578,11 +1594,13 @@ mod tests {
         MemoryActivationScore, MemoryActivationSource, MemoryActivationSourceKind, MemoryError,
         MemoryEvidence, MemoryId, MemoryItem, MemoryItemSelection, MemoryScope,
     };
+    use crate::model_config::RuntimeModelConfigs;
     use crate::session::SessionState;
     use crate::tool::{
         RegisteredTool, ToolActionKind, ToolExecutionContext, ToolExecutionOutcome, ToolExecutor,
         ToolExecutorFuture, ToolRegistry,
     };
+    use crate::{ArtifactError, RuntimeModelRole};
     use futures_util::StreamExt;
     use merry_core::{
         ArtifactId, ArtifactKind, ArtifactRef, EvidenceLocator, EvidenceRef, PendingToolCall,
@@ -1607,6 +1625,12 @@ mod tests {
     use tokio::sync::{Mutex, mpsc, oneshot};
     use tokio_util::sync::CancellationToken;
 
+    fn model_configs_with_primary(provider: RecordingModelProvider) -> RuntimeModelConfigs {
+        let mut configs = RuntimeModelConfigs::default();
+        configs.insert(RuntimeModelRole::Primary, Arc::new(provider), model_name());
+        configs
+    }
+
     fn runtime_inner() -> RuntimeInner {
         let session_id = SessionId::new("runtime-send-test").expect("valid session id");
         RuntimeInner {
@@ -1615,7 +1639,7 @@ mod tests {
             active_step: Arc::new(AtomicBool::new(false)),
             memory_projection_epoch: AtomicU64::new(0),
             event_buffer_size: NonZeroUsize::new(1).expect("non-zero buffer"),
-            model_provider: None,
+            model_configs: RuntimeModelConfigs::default(),
             tool_registry: ToolRegistry::default(),
             memory_activation_source: Arc::new(crate::memory::StoredMemoryActivationSource),
         }
@@ -1631,6 +1655,10 @@ mod tests {
 
     fn model_name() -> ModelName {
         ModelName::new("fake/model").expect("valid model name")
+    }
+
+    fn named_model(value: &str) -> ModelName {
+        ModelName::new(value).expect("valid model name")
     }
 
     fn completed_event() -> ModelEvent {
@@ -2275,10 +2303,7 @@ mod tests {
                 active_step: Arc::new(AtomicBool::new(false)),
                 memory_projection_epoch: AtomicU64::new(0),
                 event_buffer_size: NonZeroUsize::new(16).expect("non-zero buffer"),
-                model_provider: Some(super::ModelProviderConfig {
-                    provider: Arc::new(provider),
-                    model: model_name(),
-                }),
+                model_configs: model_configs_with_primary(provider),
                 tool_registry: ToolRegistry::default(),
                 memory_activation_source: Arc::new(source),
             }),
@@ -2293,10 +2318,7 @@ mod tests {
                 active_step: Arc::new(AtomicBool::new(false)),
                 memory_projection_epoch: AtomicU64::new(0),
                 event_buffer_size: NonZeroUsize::new(16).expect("non-zero buffer"),
-                model_provider: Some(super::ModelProviderConfig {
-                    provider: Arc::new(provider),
-                    model: model_name(),
-                }),
+                model_configs: model_configs_with_primary(provider),
                 tool_registry: ToolRegistry::default(),
                 memory_activation_source: Arc::new(crate::memory::StoredMemoryActivationSource),
             }),
@@ -2314,7 +2336,7 @@ mod tests {
                 active_step: Arc::new(AtomicBool::new(false)),
                 memory_projection_epoch: AtomicU64::new(0),
                 event_buffer_size: NonZeroUsize::new(16).expect("non-zero buffer"),
-                model_provider: None,
+                model_configs: RuntimeModelConfigs::default(),
                 tool_registry: ToolRegistry::default(),
                 memory_activation_source: Arc::new(source),
             }),
@@ -2968,6 +2990,112 @@ mod tests {
             seed.provenance().allowed_scopes(),
             &[MemoryScope::Session, MemoryScope::Task, MemoryScope::Step]
         );
+    }
+
+    #[test]
+    fn default_action_policy_matches_mvp_hard_policy() {
+        let policy = DefaultActionPolicy;
+
+        let read_only = policy.decide(ToolActionKind::ReadOnly);
+        assert_eq!(read_only.action_kind(), ToolActionKind::ReadOnly);
+        assert_eq!(read_only.risk_tier(), ActionRiskTier::ReadOnly);
+        assert_eq!(read_only.disposition(), ActionPolicyDisposition::Allow);
+        assert!(read_only.is_allowed());
+
+        for (action_kind, risk_tier) in [
+            (ToolActionKind::WorkspaceWrite, ActionRiskTier::EditElevated),
+            (ToolActionKind::CommandExec, ActionRiskTier::ProcessHigh),
+            (ToolActionKind::Network, ActionRiskTier::Network),
+        ] {
+            let decision = policy.decide(action_kind);
+            assert_eq!(decision.action_kind(), action_kind);
+            assert_eq!(decision.risk_tier(), risk_tier);
+            assert_eq!(decision.disposition(), ActionPolicyDisposition::Deny);
+            assert!(!decision.is_allowed());
+        }
+    }
+
+    #[test]
+    fn role_model_config_stores_primary_and_review_models_separately() {
+        let primary = RecordingModelProvider::new();
+        let review = RecordingModelProvider::new();
+        let primary_model = named_model("fake/primary");
+        let review_model = named_model("fake/tool-risk-review");
+
+        let runtime = Runtime::builder(session_id("runtime-role-model-config"))
+            .model_provider(Arc::new(primary), primary_model.clone())
+            .model_provider_for_role(
+                RuntimeModelRole::ToolRiskReview,
+                Arc::new(review),
+                review_model.clone(),
+            )
+            .build()
+            .expect("runtime should build");
+
+        assert_eq!(
+            runtime
+                .inner
+                .model_configs
+                .model_for_role(RuntimeModelRole::Primary),
+            Some(&primary_model)
+        );
+        assert_eq!(
+            runtime
+                .inner
+                .model_configs
+                .model_for_role(RuntimeModelRole::ToolRiskReview),
+            Some(&review_model)
+        );
+        assert_ne!(
+            runtime
+                .inner
+                .model_configs
+                .model_for_role(RuntimeModelRole::Primary),
+            runtime
+                .inner
+                .model_configs
+                .model_for_role(RuntimeModelRole::ToolRiskReview)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn step_uses_primary_model_and_does_not_call_non_primary_role_provider() {
+        let primary = RecordingModelProvider::new();
+        let review = RecordingModelProvider::new();
+        let runtime = Runtime::builder(session_id("runtime-step-primary-role-model"))
+            .model_provider(Arc::new(primary.clone()), named_model("fake/primary-step"))
+            .model_provider_for_role(
+                RuntimeModelRole::ToolRiskReview,
+                Arc::new(review.clone()),
+                named_model("fake/tool-risk-review-step"),
+            )
+            .build()
+            .expect("runtime should build");
+
+        let events = collect_step(
+            &runtime,
+            "Topic request.",
+            crate::StepContext::new(CancellationToken::new()),
+        )
+        .await;
+
+        assert_eq!(
+            event_kind_names(&events),
+            [
+                "SessionStarted",
+                "StepStarted",
+                "ArtifactRecorded",
+                "StepCompleted"
+            ]
+        );
+        let primary_requests = primary.recorded_requests();
+        assert_eq!(primary_requests.len(), 1);
+        assert_eq!(
+            primary_requests[0].model(),
+            &named_model("fake/primary-step")
+        );
+        assert_eq!(review.calls.load(Ordering::SeqCst), 0);
+        assert!(review.recorded_requests().is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]

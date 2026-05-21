@@ -28,6 +28,7 @@
 //! builder, event protocol, Memory Activation, and artifact/ledger persistence
 //! contracts settle.
 
+mod action_policy;
 mod agent_loop;
 mod artifact;
 mod context;
@@ -36,6 +37,7 @@ mod event_stream;
 mod judgment;
 mod ledger;
 mod memory;
+mod model_config;
 mod runtime;
 mod session;
 mod step;
@@ -59,6 +61,7 @@ pub use ledger::{
     CompactLedgerText, LedgerFactKind, LedgerProjection, LedgerProjectionSnapshot, LedgerScope,
     LedgerUpdate, LedgerUpdateKind, LedgerValidationError, LifecycleFact, TaskLedger,
 };
+pub use model_config::RuntimeModelRole;
 pub use runtime::{Runtime, RuntimeBuilder};
 pub use step::{StepContext, StepInput};
 pub use tool::{
