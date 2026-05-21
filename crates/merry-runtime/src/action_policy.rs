@@ -4,7 +4,7 @@
 //! They are intentionally separate from provider-visible tool specs and provider
 //! wire formats.
 
-use crate::ToolActionKind;
+use crate::{ActionProposal, ActionProposalEvidence, ToolActionKind};
 
 /// Runtime-owned risk tier for a registered tool action.
 #[allow(dead_code)]
@@ -94,6 +94,40 @@ impl ActionPolicyDecision {
     pub(crate) const fn is_allowed(&self) -> bool {
         matches!(self.disposition, ActionPolicyDisposition::Allow)
     }
+
+    /// Returns the same policy disposition with a proposal-aware risk tier.
+    #[must_use]
+    pub(crate) const fn with_risk_tier(&self, risk_tier: ActionRiskTier) -> Self {
+        Self {
+            action_kind: self.action_kind,
+            risk_tier,
+            disposition: self.disposition,
+            reason: self.reason,
+        }
+    }
+}
+
+/// Classifies the runtime-owned risk tier for a tool action.
+#[must_use]
+pub(crate) fn classify_tool_action_risk(
+    action_kind: ToolActionKind,
+    proposal: Option<&ActionProposal>,
+) -> ActionRiskTier {
+    match action_kind {
+        ToolActionKind::ReadOnly => ActionRiskTier::ReadOnly,
+        ToolActionKind::WorkspaceWrite => {
+            if matches!(
+                proposal.map(ActionProposal::evidence),
+                Some(ActionProposalEvidence::WorkspacePatch(_))
+            ) {
+                ActionRiskTier::EditLow
+            } else {
+                ActionRiskTier::EditElevated
+            }
+        }
+        ToolActionKind::CommandExec => ActionRiskTier::ProcessHigh,
+        ToolActionKind::Network => ActionRiskTier::Forbidden,
+    }
 }
 
 /// Default runtime hard policy for registered tool actions.
@@ -107,32 +141,114 @@ pub(crate) struct DefaultActionPolicy;
 impl DefaultActionPolicy {
     /// Decides whether a registered tool action may execute.
     #[must_use]
-    pub(crate) const fn decide(&self, action_kind: ToolActionKind) -> ActionPolicyDecision {
+    pub(crate) fn decide(&self, action_kind: ToolActionKind) -> ActionPolicyDecision {
         match action_kind {
             ToolActionKind::ReadOnly => ActionPolicyDecision::new(
                 ToolActionKind::ReadOnly,
-                ActionRiskTier::ReadOnly,
+                classify_tool_action_risk(ToolActionKind::ReadOnly, None),
                 ActionPolicyDisposition::Allow,
                 "read-only tool actions are allowed by default policy",
             ),
             ToolActionKind::WorkspaceWrite => ActionPolicyDecision::new(
                 ToolActionKind::WorkspaceWrite,
-                ActionRiskTier::EditElevated,
+                classify_tool_action_risk(ToolActionKind::WorkspaceWrite, None),
                 ActionPolicyDisposition::Deny,
                 "workspace write tool actions are denied by default policy",
             ),
             ToolActionKind::CommandExec => ActionPolicyDecision::new(
                 ToolActionKind::CommandExec,
-                ActionRiskTier::ProcessHigh,
+                classify_tool_action_risk(ToolActionKind::CommandExec, None),
                 ActionPolicyDisposition::Deny,
                 "command execution tool actions are denied by default policy",
             ),
             ToolActionKind::Network => ActionPolicyDecision::new(
                 ToolActionKind::Network,
-                ActionRiskTier::Network,
+                classify_tool_action_risk(ToolActionKind::Network, None),
                 ActionPolicyDisposition::Deny,
                 "network tool actions are denied by default policy",
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ActionPolicyDisposition, ActionRiskTier, DefaultActionPolicy, classify_tool_action_risk,
+    };
+    use crate::{ActionProposal, ActionProposalEvidence, ToolActionKind, WorkspacePatchProposal};
+    use merry_core::{PendingToolCall, ToolCallArguments, ToolCallId, ToolName};
+    use serde_json::json;
+
+    fn pending_tool_call() -> PendingToolCall {
+        PendingToolCall::new(
+            ToolCallId::new("call-risk-classifier").expect("valid call id"),
+            ToolName::new("patch_file").expect("valid tool name"),
+            ToolCallArguments::try_from(json!({ "path": "notes/proposed.txt" }))
+                .expect("object arguments are valid"),
+        )
+    }
+
+    fn workspace_patch_proposal(call: &PendingToolCall) -> ActionProposal {
+        let patch = WorkspacePatchProposal::new("notes/proposed.txt", 3, 7, 20, 24)
+            .expect("test patch proposal is valid");
+        ActionProposal::new(
+            call,
+            ToolActionKind::WorkspaceWrite,
+            "workspace patch",
+            "notes/proposed.txt",
+            "Replace one matched preimage in notes/proposed.txt",
+            ActionProposalEvidence::WorkspacePatch(patch),
+        )
+        .expect("test action proposal is valid")
+    }
+
+    #[test]
+    fn classifier_assigns_read_only_risk() {
+        assert_eq!(
+            classify_tool_action_risk(ToolActionKind::ReadOnly, None),
+            ActionRiskTier::ReadOnly
+        );
+    }
+
+    #[test]
+    fn classifier_assigns_low_edit_risk_for_workspace_patch_proposal() {
+        let call = pending_tool_call();
+        let proposal = workspace_patch_proposal(&call);
+
+        assert_eq!(
+            classify_tool_action_risk(ToolActionKind::WorkspaceWrite, Some(&proposal)),
+            ActionRiskTier::EditLow
+        );
+    }
+
+    #[test]
+    fn classifier_assigns_elevated_edit_risk_without_compatible_proposal() {
+        assert_eq!(
+            classify_tool_action_risk(ToolActionKind::WorkspaceWrite, None),
+            ActionRiskTier::EditElevated
+        );
+    }
+
+    #[test]
+    fn classifier_assigns_high_process_risk_for_command_exec() {
+        assert_eq!(
+            classify_tool_action_risk(ToolActionKind::CommandExec, None),
+            ActionRiskTier::ProcessHigh
+        );
+    }
+
+    #[test]
+    fn network_actions_are_forbidden_and_denied_by_default_policy() {
+        assert_eq!(
+            classify_tool_action_risk(ToolActionKind::Network, None),
+            ActionRiskTier::Forbidden
+        );
+
+        let decision = DefaultActionPolicy.decide(ToolActionKind::Network);
+        assert_eq!(decision.action_kind(), ToolActionKind::Network);
+        assert_eq!(decision.risk_tier(), ActionRiskTier::Forbidden);
+        assert_eq!(decision.disposition(), ActionPolicyDisposition::Deny);
+        assert!(!decision.is_allowed());
     }
 }
