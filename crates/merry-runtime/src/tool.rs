@@ -230,23 +230,13 @@ pub struct RegisteredTool {
 }
 
 impl RegisteredTool {
-    /// Creates a registered tool from its provider-visible spec and runtime executor.
-    ///
-    /// The spec is provider-visible after adapter rendering, but the executor
-    /// remains a runtime-owned boundary. The action kind defaults to
-    /// [`ToolActionKind::ReadOnly`] for compatibility with existing read-only
-    /// registrations.
-    #[must_use]
-    pub fn new(spec: ToolSpec, executor: Arc<dyn ToolExecutor>) -> Self {
-        Self::new_with_action_kind(spec, executor, ToolActionKind::ReadOnly)
-    }
-
     /// Creates a registered tool with an explicit runtime-owned action category.
     ///
-    /// The action category stays inside runtime and is not rendered into the
-    /// provider-visible tool spec.
+    /// The spec is provider-visible after adapter rendering, but the executor
+    /// remains a runtime-owned boundary. The action category stays inside
+    /// runtime and is not rendered into the provider-visible tool spec.
     #[must_use]
-    pub fn new_with_action_kind(
+    pub fn new(
         spec: ToolSpec,
         executor: Arc<dyn ToolExecutor>,
         action_kind: ToolActionKind,
@@ -258,11 +248,13 @@ impl RegisteredTool {
         }
     }
 
-    /// Marks the runtime-owned action category for this registered tool.
+    /// Creates a registered read-only tool.
+    ///
+    /// Use this only for tools that do not write workspace state, execute
+    /// commands, or access the network.
     #[must_use]
-    pub fn with_action_kind(mut self, action_kind: ToolActionKind) -> Self {
-        self.action_kind = action_kind;
-        self
+    pub fn read_only(spec: ToolSpec, executor: Arc<dyn ToolExecutor>) -> Self {
+        Self::new(spec, executor, ToolActionKind::ReadOnly)
     }
 
     /// Borrows the provider-visible tool specification.
@@ -326,4 +318,58 @@ impl ToolRegistry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DuplicateToolName {
     pub(crate) name: ToolName,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        RegisteredTool, ToolActionKind, ToolExecutionContext, ToolExecutionOutcome, ToolExecutor,
+        ToolExecutorFuture,
+    };
+    use merry_core::{PendingToolCall, ToolInputSchema, ToolName, ToolSpec};
+    use schemars::Schema;
+    use serde_json::json;
+    use std::sync::Arc;
+
+    struct StaticToolExecutor;
+
+    impl ToolExecutor for StaticToolExecutor {
+        fn execute<'a>(
+            &'a self,
+            _call: PendingToolCall,
+            _context: ToolExecutionContext,
+        ) -> ToolExecutorFuture<'a> {
+            Box::pin(async { Ok(ToolExecutionOutcome::succeeded_text("ok")) })
+        }
+    }
+
+    fn tool_spec(name: &str) -> ToolSpec {
+        let schema = Schema::try_from(json!({ "type": "object" }))
+            .expect("test schema should be a JSON schema");
+        ToolSpec::new(
+            ToolName::new(name).expect("valid tool name"),
+            "Test tool",
+            ToolInputSchema::new(schema).expect("valid tool schema"),
+        )
+        .expect("valid tool spec")
+    }
+
+    #[test]
+    fn read_only_constructor_classifies_tool_as_read_only() {
+        let tool =
+            RegisteredTool::read_only(tool_spec("read_only_tool"), Arc::new(StaticToolExecutor));
+
+        assert_eq!(tool.action_kind(), ToolActionKind::ReadOnly);
+    }
+
+    #[test]
+    fn explicit_constructor_preserves_non_read_action_kind() {
+        let tool = RegisteredTool::new(
+            tool_spec("write_tool"),
+            Arc::new(StaticToolExecutor),
+            ToolActionKind::WorkspaceWrite,
+        );
+
+        assert_eq!(tool.action_kind(), ToolActionKind::WorkspaceWrite);
+    }
 }

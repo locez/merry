@@ -422,7 +422,7 @@ fn debug_echo_tool(result: &str) -> Result<RegisteredTool, CliError> {
     )
     .map_err(debug_openai_usage_error)?;
 
-    Ok(RegisteredTool::new(
+    Ok(RegisteredTool::read_only(
         spec,
         Arc::new(DebugEchoExecutor {
             result: result.to_owned(),

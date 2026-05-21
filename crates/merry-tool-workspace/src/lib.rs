@@ -203,25 +203,22 @@ impl ReadOnlyWorkspaceTools {
     #[must_use]
     pub fn into_registered_tools(self) -> Vec<RegisteredTool> {
         vec![
-            RegisteredTool::new(
+            RegisteredTool::read_only(
                 read_file_spec(),
                 Arc::new(ReadFileExecutor {
                     state: Arc::clone(&self.state),
                 }),
-            )
-            .with_action_kind(ToolActionKind::ReadOnly),
-            RegisteredTool::new(
+            ),
+            RegisteredTool::read_only(
                 list_dir_spec(),
                 Arc::new(ListDirExecutor {
                     state: Arc::clone(&self.state),
                 }),
-            )
-            .with_action_kind(ToolActionKind::ReadOnly),
-            RegisteredTool::new(
+            ),
+            RegisteredTool::read_only(
                 search_text_spec(),
                 Arc::new(SearchTextExecutor { state: self.state }),
-            )
-            .with_action_kind(ToolActionKind::ReadOnly),
+            ),
         ]
     }
 
@@ -233,13 +230,11 @@ impl ReadOnlyWorkspaceTools {
     pub fn into_registered_tools_with_patch(self) -> Vec<RegisteredTool> {
         let patch_state = Arc::clone(&self.state);
         let mut tools = self.into_registered_tools();
-        tools.push(
-            RegisteredTool::new(
-                patch_file_spec(),
-                Arc::new(PatchFileExecutor { state: patch_state }),
-            )
-            .with_action_kind(ToolActionKind::WorkspaceWrite),
-        );
+        tools.push(RegisteredTool::new(
+            patch_file_spec(),
+            Arc::new(PatchFileExecutor { state: patch_state }),
+            ToolActionKind::WorkspaceWrite,
+        ));
         tools
     }
 }

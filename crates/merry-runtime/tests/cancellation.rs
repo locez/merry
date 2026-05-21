@@ -115,7 +115,7 @@ async fn assert_missing_tool_result_artifact(runtime: &Runtime) {
 
 fn runtime_with_waiting_tool(session: &str, executor: impl ToolExecutor + 'static) -> Runtime {
     Runtime::builder(SessionId::new(session).expect("valid session id"))
-        .register_tool(RegisteredTool::new(tool_spec(), Arc::new(executor)))
+        .register_tool(RegisteredTool::read_only(tool_spec(), Arc::new(executor)))
         .model_provider(
             Arc::new(FakeModelProvider::new(vec![Ok(pending_tool_response(
                 "cancel-tool-call",
@@ -132,9 +132,11 @@ fn runtime_with_waiting_tool_action(
     action_kind: ToolActionKind,
 ) -> Runtime {
     Runtime::builder(SessionId::new(session).expect("valid session id"))
-        .register_tool(
-            RegisteredTool::new(tool_spec(), Arc::new(executor)).with_action_kind(action_kind),
-        )
+        .register_tool(RegisteredTool::new(
+            tool_spec(),
+            Arc::new(executor),
+            action_kind,
+        ))
         .model_provider(
             Arc::new(FakeModelProvider::new(vec![Ok(pending_tool_response(
                 "cancel-tool-call",
@@ -264,7 +266,7 @@ async fn concurrent_step_is_rejected() {
 async fn execute_tool_call_is_rejected_while_step_is_active() {
     let executor = WaitingToolExecutor::new();
     let runtime = Runtime::builder(session_id())
-        .register_tool(RegisteredTool::new(tool_spec(), Arc::new(executor)))
+        .register_tool(RegisteredTool::read_only(tool_spec(), Arc::new(executor)))
         .event_buffer_size(NonZeroUsize::new(1).expect("non-zero buffer"))
         .build()
         .expect("runtime should build");

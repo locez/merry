@@ -174,11 +174,11 @@ async fn submit_tool_result_for_unknown_call_does_not_mutate_session() {
 #[tokio::test(flavor = "current_thread")]
 async fn duplicate_tool_registration_is_build_error() {
     let err = match Runtime::builder(session_id())
-        .register_tool(RegisteredTool::new(
+        .register_tool(RegisteredTool::read_only(
             tool_spec("duplicate_tool"),
             Arc::new(StaticToolExecutor),
         ))
-        .register_tool(RegisteredTool::new(
+        .register_tool(RegisteredTool::read_only(
             tool_spec("duplicate_tool"),
             Arc::new(StaticToolExecutor),
         ))
@@ -198,7 +198,7 @@ async fn duplicate_tool_registration_is_build_error() {
 #[tokio::test(flavor = "current_thread")]
 async fn execute_tool_result_for_unknown_call_does_not_mutate_session() {
     let runtime = Runtime::builder(session_id())
-        .register_tool(RegisteredTool::new(
+        .register_tool(RegisteredTool::read_only(
             tool_spec("search_notes"),
             Arc::new(StaticToolExecutor),
         ))
