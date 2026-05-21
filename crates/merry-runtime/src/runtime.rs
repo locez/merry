@@ -6,8 +6,9 @@
 //! provider wire details behind the `merry-llm` provider boundary.
 
 use crate::{
-    ArtifactContent, ContextCompiler, ContextEntry, ContextSummary, LedgerProjectionSnapshot,
-    RuntimeError, RuntimeEventStream, RuntimeModelRole, SessionContextSnapshot,
+    ActionProposal, ArtifactContent, ContextCompiler, ContextEntry, ContextSummary,
+    LedgerProjectionSnapshot, RuntimeError, RuntimeEventStream, RuntimeModelRole,
+    SessionContextSnapshot,
     action_policy::DefaultActionPolicy,
     event_stream::ActiveStepPermit,
     judgment::{JudgmentContext, JudgmentError, JudgmentRecord, JudgmentRequest, JudgmentSource},
@@ -302,6 +303,64 @@ impl Runtime {
 
         let policy_decision = DefaultActionPolicy.decide(registered_tool.action_kind());
         if !policy_decision.is_allowed() {
+            let proposal = if registered_tool.action_kind().is_mutating()
+                && registered_tool.proposals_enabled()
+            {
+                if context.cancellation_token().is_cancelled() {
+                    return Err(RuntimeError::ToolExecutionCancelled {
+                        session_id: self.inner.session_id.clone(),
+                        call_id: call_id.clone(),
+                    });
+                }
+
+                let proposer = registered_tool.executor();
+                let proposed = tokio::select! {
+                    biased;
+                    () = context.cancellation_token().cancelled() => {
+                        return Err(RuntimeError::ToolExecutionCancelled {
+                            session_id: self.inner.session_id.clone(),
+                            call_id: call_id.clone(),
+                        });
+                    }
+                    proposed = proposer.propose(pending.clone(), context.clone()) => proposed,
+                };
+
+                if context.cancellation_token().is_cancelled() {
+                    return Err(RuntimeError::ToolExecutionCancelled {
+                        session_id: self.inner.session_id.clone(),
+                        call_id: call_id.clone(),
+                    });
+                }
+
+                match proposed {
+                    Ok(Some(proposal)) => {
+                        validate_action_proposal(
+                            &proposal,
+                            &pending,
+                            registered_tool.action_kind(),
+                            &self.inner.session_id,
+                        )?;
+                        Some(proposal)
+                    }
+                    Ok(None) => None,
+                    Err(ToolExecutionError::Cancelled) => {
+                        return Err(RuntimeError::ToolExecutionCancelled {
+                            session_id: self.inner.session_id.clone(),
+                            call_id: call_id.clone(),
+                        });
+                    }
+                    Err(ToolExecutionError::Infrastructure { message }) => {
+                        return Err(RuntimeError::ToolExecutionFailed {
+                            session_id: self.inner.session_id.clone(),
+                            call_id: call_id.clone(),
+                            message,
+                        });
+                    }
+                }
+            } else {
+                None
+            };
+
             if context.cancellation_token().is_cancelled() {
                 return Err(RuntimeError::ToolExecutionCancelled {
                     session_id: self.inner.session_id.clone(),
@@ -327,6 +386,7 @@ impl Runtime {
             return session.submit_denied_tool_action(
                 &pending,
                 &policy_decision,
+                proposal,
                 content,
                 diagnostic,
             );
@@ -540,6 +600,21 @@ fn denied_tool_action_outcome(pending: &PendingToolCall) -> crate::ToolExecution
     });
 
     crate::ToolExecutionOutcome::failed_json(payload.to_string(), diagnostic)
+}
+
+fn validate_action_proposal(
+    proposal: &ActionProposal,
+    pending: &PendingToolCall,
+    action_kind: crate::ToolActionKind,
+    session_id: &SessionId,
+) -> Result<(), RuntimeError> {
+    proposal
+        .validate_for_call(pending, action_kind)
+        .map_err(|reason| RuntimeError::ToolExecutionFailed {
+            session_id: session_id.clone(),
+            call_id: pending.id().clone(),
+            message: reason.to_owned(),
+        })
 }
 
 /// Builder for a Merry runtime.
@@ -1610,8 +1685,9 @@ mod tests {
     use crate::model_config::RuntimeModelConfigs;
     use crate::session::SessionState;
     use crate::tool::{
-        RegisteredTool, ToolActionKind, ToolExecutionContext, ToolExecutionOutcome, ToolExecutor,
-        ToolExecutorFuture, ToolRegistry,
+        ActionProposal, ActionProposalEvidence, RegisteredTool, ToolActionKind,
+        ToolActionProposalFuture, ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome,
+        ToolExecutor, ToolExecutorFuture, ToolRegistry, WorkspacePatchProposal,
     };
     use crate::{ArtifactError, RuntimeModelRole};
     use futures_util::StreamExt;
@@ -4061,12 +4137,27 @@ mod tests {
         tool_name: &str,
         call_id: &str,
         action_kind: ToolActionKind,
-        executor: SuccessfulToolExecutor,
+        executor: impl ToolExecutor + 'static,
+    ) -> (Runtime, PendingToolCall) {
+        register_policy_pending_registered_tool(
+            session,
+            tool_name,
+            call_id,
+            RegisteredTool::new(policy_tool_spec(tool_name), Arc::new(executor), action_kind),
+        )
+        .await
+    }
+
+    async fn register_policy_pending_registered_tool(
+        session: &str,
+        tool_name: &str,
+        call_id: &str,
+        tool: RegisteredTool,
     ) -> (Runtime, PendingToolCall) {
         let spec = policy_tool_spec(tool_name);
         let pending = policy_pending_tool_call(call_id, spec.name().as_str());
         let runtime = Runtime::builder(session_id(session))
-            .register_tool(RegisteredTool::new(spec, Arc::new(executor), action_kind))
+            .register_tool(tool)
             .build()
             .expect("runtime should build");
         {
@@ -4155,6 +4246,24 @@ mod tests {
         assert!(content.get("previous_response_id").is_none());
     }
 
+    fn event_kind_names_for_tool_execution(events: &[RuntimeEvent]) -> Vec<&'static str> {
+        events
+            .iter()
+            .map(|event| match event.kind {
+                RuntimeEventKind::ArtifactRecorded { .. } => "ArtifactRecorded",
+                RuntimeEventKind::ToolCallResolved { .. } => "ToolCallResolved",
+                RuntimeEventKind::SessionStarted => "SessionStarted",
+                RuntimeEventKind::StepStarted => "StepStarted",
+                RuntimeEventKind::StepCompleted => "StepCompleted",
+                RuntimeEventKind::Cancelled { .. } => "Cancelled",
+                RuntimeEventKind::Failed { .. } => "Failed",
+                RuntimeEventKind::ToolCallPending { .. } => "ToolCallPending",
+                RuntimeEventKind::EvidenceReferenced { .. } => "EvidenceReferenced",
+                _ => "Other",
+            })
+            .collect()
+    }
+
     #[derive(Clone)]
     struct SuccessfulToolExecutor {
         calls: Arc<AtomicUsize>,
@@ -4181,6 +4290,80 @@ mod tests {
             Box::pin(async move {
                 self.calls.fetch_add(1, Ordering::SeqCst);
                 Ok(ToolExecutionOutcome::succeeded_text("ok\n"))
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct ProposingToolExecutor {
+        execute_calls: Arc<AtomicUsize>,
+        propose_calls: Arc<AtomicUsize>,
+        wait_for_cancel: bool,
+    }
+
+    impl ProposingToolExecutor {
+        fn immediate() -> Self {
+            Self {
+                execute_calls: Arc::new(AtomicUsize::new(0)),
+                propose_calls: Arc::new(AtomicUsize::new(0)),
+                wait_for_cancel: false,
+            }
+        }
+
+        fn cancelling() -> Self {
+            Self {
+                execute_calls: Arc::new(AtomicUsize::new(0)),
+                propose_calls: Arc::new(AtomicUsize::new(0)),
+                wait_for_cancel: true,
+            }
+        }
+
+        fn execute_count(&self) -> usize {
+            self.execute_calls.load(Ordering::SeqCst)
+        }
+
+        fn propose_count(&self) -> usize {
+            self.propose_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl ToolExecutor for ProposingToolExecutor {
+        fn propose<'a>(
+            &'a self,
+            call: PendingToolCall,
+            context: ToolExecutionContext,
+        ) -> ToolActionProposalFuture<'a> {
+            Box::pin(async move {
+                self.propose_calls.fetch_add(1, Ordering::SeqCst);
+                if self.wait_for_cancel {
+                    context.cancellation_token().cancelled().await;
+                    return Err(ToolExecutionError::Cancelled);
+                }
+
+                let patch = WorkspacePatchProposal::new("notes/proposed.txt", 3, 7, 20, 24)
+                    .expect("test proposal metadata is valid");
+                Ok(Some(
+                    ActionProposal::new(
+                        &call,
+                        ToolActionKind::WorkspaceWrite,
+                        "workspace patch",
+                        "notes/proposed.txt",
+                        "Replace one matched preimage in notes/proposed.txt",
+                        ActionProposalEvidence::WorkspacePatch(patch),
+                    )
+                    .expect("test action proposal is valid"),
+                ))
+            })
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _call: PendingToolCall,
+            _context: ToolExecutionContext,
+        ) -> ToolExecutorFuture<'a> {
+            Box::pin(async move {
+                self.execute_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(ToolExecutionOutcome::succeeded_text("must not execute\n"))
             })
         }
     }
@@ -4280,10 +4463,11 @@ mod tests {
         assert_eq!(audit.tool_name(), pending.name());
         assert_eq!(audit.action_kind(), ToolActionKind::WorkspaceWrite);
         assert_eq!(audit.status(), ActionAuditStatus::Denied);
-        assert_eq!(audit.policy().disposition(), ActionPolicyDisposition::Deny);
-        assert_eq!(audit.policy().risk_tier(), ActionRiskTier::EditElevated);
+        let policy = audit.policy().expect("denied audit should include policy");
+        assert_eq!(policy.disposition(), ActionPolicyDisposition::Deny);
+        assert_eq!(policy.risk_tier(), ActionRiskTier::EditElevated);
         assert_eq!(
-            audit.policy().reason(),
+            policy.reason(),
             "workspace write tool actions are denied by default policy"
         );
 
@@ -4302,8 +4486,129 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn workspace_write_tool_with_proposal_records_proposed_before_denied_and_resolution() {
+        let executor = ProposingToolExecutor::immediate();
+        let tool = RegisteredTool::new(
+            policy_tool_spec("policy_write_proposed"),
+            Arc::new(executor.clone()),
+            ToolActionKind::WorkspaceWrite,
+        )
+        .with_action_proposal();
+        let (runtime, pending) = register_policy_pending_registered_tool(
+            "runtime-policy-proposed-workspace-write",
+            "policy_write_proposed",
+            "call-workspace-write-proposed",
+            tool,
+        )
+        .await;
+
+        let events = runtime
+            .execute_tool_call(pending.id(), ToolExecutionContext::default())
+            .await
+            .expect("policy denial should durably resolve proposed action");
+
+        assert_eq!(executor.propose_count(), 1);
+        assert_eq!(executor.execute_count(), 0);
+        assert_eq!(
+            event_kind_names_for_tool_execution(&events),
+            ["ArtifactRecorded", "ToolCallResolved"]
+        );
+        assert_sanitized_policy_denial_content(
+            &denied_action_content(&runtime, &events).await,
+            "policy_write_proposed",
+        );
+
+        let audits = action_audit_records(&runtime).await;
+        assert_eq!(audits.len(), 2);
+        assert_eq!(audits[0].status(), ActionAuditStatus::Proposed);
+        assert_eq!(audits[0].tool_call_id(), pending.id());
+        assert_eq!(audits[0].tool_name(), pending.name());
+        assert_eq!(audits[0].action_kind(), ToolActionKind::WorkspaceWrite);
+        assert!(audits[0].policy().is_none());
+        let proposal = audits[0]
+            .proposal()
+            .expect("proposed audit should include proposal evidence");
+        assert_eq!(proposal.tool_call_id(), pending.id());
+        assert_eq!(proposal.tool_name(), pending.name());
+        assert_eq!(proposal.action_kind(), ToolActionKind::WorkspaceWrite);
+        assert_eq!(proposal.label(), "workspace patch");
+        assert_eq!(proposal.subject(), "notes/proposed.txt");
+        assert!(proposal.summary().contains("notes/proposed.txt"));
+        let ActionProposalEvidence::WorkspacePatch(patch) = proposal.evidence();
+        assert_eq!(patch.relative_path(), "notes/proposed.txt");
+        assert_eq!(patch.preimage_bytes(), 3);
+        assert_eq!(patch.replacement_bytes(), 7);
+        assert_eq!(patch.file_bytes_before(), 20);
+        assert_eq!(patch.file_bytes_after(), 24);
+
+        assert_eq!(audits[1].status(), ActionAuditStatus::Denied);
+        assert_eq!(audits[1].tool_call_id(), pending.id());
+        assert_eq!(audits[1].tool_name(), pending.name());
+        assert!(audits[1].proposal().is_none());
+        assert_eq!(
+            audits[1]
+                .policy()
+                .expect("denied audit should include policy")
+                .disposition(),
+            ActionPolicyDisposition::Deny
+        );
+
+        let projection = runtime.ledger_projection().await;
+        let lifecycle = lifecycle_kinds(&projection);
+        let audit_indexes = lifecycle
+            .iter()
+            .enumerate()
+            .filter_map(|(index, kind)| {
+                (*kind == LedgerFactKind::ActionAuditRecorded).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(audit_indexes.len(), 2);
+        let artifact_index = lifecycle
+            .iter()
+            .position(|kind| *kind == LedgerFactKind::ArtifactRecorded)
+            .expect("artifact lifecycle should be recorded");
+        let resolved_index = lifecycle
+            .iter()
+            .position(|kind| *kind == LedgerFactKind::ToolCallResolved)
+            .expect("resolution lifecycle should be recorded");
+        assert!(audit_indexes[0] < audit_indexes[1]);
+        assert!(audit_indexes[1] < artifact_index);
+        assert!(artifact_index < resolved_index);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn workspace_write_tool_without_proposal_opt_in_does_not_call_propose() {
+        let executor = ProposingToolExecutor::immediate();
+        let (runtime, pending) = register_policy_pending_tool(
+            "runtime-policy-proposal-disabled",
+            "policy_write_proposal_disabled",
+            "call-workspace-write-proposal-disabled",
+            ToolActionKind::WorkspaceWrite,
+            executor.clone(),
+        )
+        .await;
+
+        let events = runtime
+            .execute_tool_call(pending.id(), ToolExecutionContext::default())
+            .await
+            .expect("policy denial should durably resolve without proposal hook");
+
+        assert_eq!(executor.propose_count(), 0);
+        assert_eq!(executor.execute_count(), 0);
+        assert_sanitized_policy_denial_content(
+            &denied_action_content(&runtime, &events).await,
+            "policy_write_proposal_disabled",
+        );
+
+        let audits = action_audit_records(&runtime).await;
+        assert_eq!(audits.len(), 1);
+        assert_eq!(audits[0].status(), ActionAuditStatus::Denied);
+        assert!(audits[0].proposal().is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn command_exec_tool_is_denied_before_executor() {
-        let executor = SuccessfulToolExecutor::new();
+        let executor = ProposingToolExecutor::immediate();
         let (runtime, pending) = register_policy_pending_tool(
             "runtime-policy-command-exec",
             "policy_command",
@@ -4318,13 +4623,17 @@ mod tests {
             .await
             .expect("policy denial should durably resolve the pending call");
 
-        assert_eq!(executor.call_count(), 0);
+        assert_eq!(executor.propose_count(), 0);
+        assert_eq!(executor.execute_count(), 0);
         let audits = action_audit_records(&runtime).await;
         assert_eq!(audits.len(), 1);
         assert_eq!(audits[0].action_kind(), ToolActionKind::CommandExec);
         assert_eq!(audits[0].status(), ActionAuditStatus::Denied);
         assert_eq!(
-            audits[0].policy().disposition(),
+            audits[0]
+                .policy()
+                .expect("denied audit should include policy")
+                .disposition(),
             ActionPolicyDisposition::Deny
         );
         let content = denied_action_content(&runtime, &events).await;
@@ -4341,7 +4650,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn network_tool_is_denied_before_executor() {
-        let executor = SuccessfulToolExecutor::new();
+        let executor = ProposingToolExecutor::immediate();
         let (runtime, pending) = register_policy_pending_tool(
             "runtime-policy-network",
             "policy_network",
@@ -4356,13 +4665,17 @@ mod tests {
             .await
             .expect("policy denial should durably resolve the pending call");
 
-        assert_eq!(executor.call_count(), 0);
+        assert_eq!(executor.propose_count(), 0);
+        assert_eq!(executor.execute_count(), 0);
         let audits = action_audit_records(&runtime).await;
         assert_eq!(audits.len(), 1);
         assert_eq!(audits[0].action_kind(), ToolActionKind::Network);
         assert_eq!(audits[0].status(), ActionAuditStatus::Denied);
         assert_eq!(
-            audits[0].policy().disposition(),
+            audits[0]
+                .policy()
+                .expect("denied audit should include policy")
+                .disposition(),
             ActionPolicyDisposition::Deny
         );
         let content = denied_action_content(&runtime, &events).await;
@@ -4414,6 +4727,67 @@ mod tests {
             )
             .await
             .expect_err("pre-cancelled policy denial must not record result artifact");
+        assert!(matches!(
+            evidence_err,
+            crate::RuntimeError::Artifact {
+                source: ArtifactError::MissingArtifact { id }
+            } if id == expected_result_artifact_id
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelling_before_proposal_commit_keeps_pending_without_audit_or_result_artifact() {
+        let executor = ProposingToolExecutor::cancelling();
+        let tool = RegisteredTool::new(
+            policy_tool_spec("policy_proposal_cancel"),
+            Arc::new(executor.clone()),
+            ToolActionKind::WorkspaceWrite,
+        )
+        .with_action_proposal();
+        let (runtime, pending) = register_policy_pending_registered_tool(
+            "runtime-policy-proposal-cancel",
+            "policy_proposal_cancel",
+            "call-policy-proposal-cancel",
+            tool,
+        )
+        .await;
+        let projection_before = runtime.ledger_projection().await;
+        let token = CancellationToken::new();
+        let execute_runtime = runtime.clone();
+        let execute_call_id = pending.id().clone();
+        let execute_token = token.clone();
+
+        let handle = tokio::spawn(async move {
+            execute_runtime
+                .execute_tool_call(&execute_call_id, ToolExecutionContext::new(execute_token))
+                .await
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(executor.propose_count(), 1);
+
+        token.cancel();
+        let err = handle
+            .await
+            .expect("proposal cancellation task should not panic")
+            .expect_err("cancelled proposal should not resolve");
+
+        assert!(matches!(
+            err,
+            crate::RuntimeError::ToolExecutionCancelled { call_id, .. }
+                if call_id == *pending.id()
+        ));
+        assert_eq!(executor.execute_count(), 0);
+        assert_eq!(runtime.pending_tool_calls().await, vec![pending]);
+        assert_eq!(runtime.ledger_projection().await, projection_before);
+        assert!(action_audit_records(&runtime).await.is_empty());
+        let expected_result_artifact_id = artifact_id("tool-result-2");
+        let evidence_err = runtime
+            .evidence_ref(
+                &expected_result_artifact_id,
+                EvidenceLocator::whole_artifact(),
+            )
+            .await
+            .expect_err("cancelled proposal must not record result artifact");
         assert!(matches!(
             evidence_err,
             crate::RuntimeError::Artifact {

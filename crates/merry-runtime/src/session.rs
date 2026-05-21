@@ -3,7 +3,7 @@
 #[cfg(test)]
 use crate::summary_draft_promotion::SummaryDraftPromotionRegistrySnapshot;
 use crate::{
-    RuntimeError,
+    ActionProposal, RuntimeError,
     action_audit::ActionAuditRegistry,
     action_policy::ActionPolicyDecision,
     artifact::{ArtifactContent, ArtifactError, ArtifactRegistry},
@@ -482,6 +482,7 @@ impl SessionState {
         &mut self,
         pending: &PendingToolCall,
         decision: &ActionPolicyDecision,
+        proposal: Option<ActionProposal>,
         content: ArtifactContent,
         diagnostic: ErrorInfo,
     ) -> Result<Vec<RuntimeEvent>, RuntimeError> {
@@ -524,6 +525,9 @@ impl SessionState {
 
         let pending = self.pending_tool_calls.remove(pending_index);
         if let Some(started) = self.record_session_started_if_needed() {
+            if let Some(proposal) = proposal {
+                self.record_proposed_tool_action_audit(proposal);
+            }
             self.record_denied_tool_action_audit(&pending, decision);
             let artifact = self
                 .artifacts
@@ -545,6 +549,9 @@ impl SessionState {
             ]);
         }
 
+        if let Some(proposal) = proposal {
+            self.record_proposed_tool_action_audit(proposal);
+        }
         self.record_denied_tool_action_audit(&pending, decision);
         let artifact = self
             .artifacts
@@ -593,6 +600,12 @@ impl SessionState {
     ) {
         self.action_audits
             .record_denied_tool_action(pending, decision);
+        self.ledger
+            .record_lifecycle(self.next_sequence, LedgerFactKind::ActionAuditRecorded);
+    }
+
+    fn record_proposed_tool_action_audit(&mut self, proposal: ActionProposal) {
+        self.action_audits.record_proposed_tool_action(proposal);
         self.ledger
             .record_lifecycle(self.next_sequence, LedgerFactKind::ActionAuditRecorded);
     }
@@ -1065,6 +1078,7 @@ mod tests {
             .submit_denied_tool_action(
                 &call,
                 &decision,
+                None,
                 ArtifactContent::json(r#"{"ok":false}"#),
                 diagnostic,
             )
@@ -1089,9 +1103,10 @@ mod tests {
         assert_eq!(audit.tool_name(), call.name());
         assert_eq!(audit.action_kind(), crate::ToolActionKind::WorkspaceWrite);
         assert_eq!(audit.status(), ActionAuditStatus::Denied);
-        assert_eq!(audit.policy().disposition(), ActionPolicyDisposition::Deny);
-        assert_eq!(audit.policy().risk_tier(), decision.risk_tier());
-        assert_eq!(audit.policy().reason(), decision.reason());
+        let policy = audit.policy().expect("denied audit should include policy");
+        assert_eq!(policy.disposition(), ActionPolicyDisposition::Deny);
+        assert_eq!(policy.risk_tier(), decision.risk_tier());
+        assert_eq!(policy.reason(), decision.reason());
 
         let projection = session.ledger_projection();
         let lifecycle_kinds = projection

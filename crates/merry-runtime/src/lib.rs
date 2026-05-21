@@ -66,6 +66,8 @@ pub use model_config::RuntimeModelRole;
 pub use runtime::{Runtime, RuntimeBuilder};
 pub use step::{StepContext, StepInput};
 pub use tool::{
-    RegisteredTool, ToolActionKind, ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome,
-    ToolExecutionResult, ToolExecutor, ToolExecutorFuture,
+    ActionProposal, ActionProposalError, ActionProposalEvidence, RegisteredTool, ToolActionKind,
+    ToolActionProposalFuture, ToolActionProposalResult, ToolExecutionContext, ToolExecutionError,
+    ToolExecutionOutcome, ToolExecutionResult, ToolExecutor, ToolExecutorFuture,
+    WorkspacePatchProposal,
 };

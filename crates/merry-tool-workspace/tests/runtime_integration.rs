@@ -1,11 +1,13 @@
 use futures_util::StreamExt;
 use merry_core::{
-    ArtifactKind, RuntimeEvent, RuntimeEventKind, SessionId, ToolCallResult, ToolCallResultStatus,
-    ToolName,
+    ArtifactKind, ProviderName, RuntimeEvent, RuntimeEventKind, SessionId, ToolCallResult,
+    ToolCallResultStatus, ToolName,
 };
 use merry_llm::{
-    FinishReason, ModelEvent, ModelName, ModelOutput, ModelResponse, ModelToolCall,
-    ModelToolCallId, ModelToolResultContent, ToolArguments, testing::FakeModelProvider,
+    FinishReason, ModelCapabilities, ModelError, ModelEvent, ModelEventStream, ModelName,
+    ModelOutput, ModelProvider, ModelProviderFuture, ModelRequest, ModelResponse,
+    ModelStreamContext, ModelToolCall, ModelToolCallId, ModelToolResultContent, ToolArguments,
+    testing::FakeModelProvider,
 };
 use merry_runtime::{Runtime, StepContext, StepInput, ToolExecutionContext};
 use merry_tool_workspace::{
@@ -16,7 +18,7 @@ use serde_json::{Map, Value};
 use std::{
     env, fs,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio_util::sync::CancellationToken;
@@ -114,6 +116,73 @@ fn pending_patch_file_call(path: &str, old_text: &str, new_text: &str) -> ModelE
     arguments.insert("old_text".to_owned(), Value::String(old_text.to_owned()));
     arguments.insert("new_text".to_owned(), Value::String(new_text.to_owned()));
     pending_workspace_call("workspace-patch-call", WORKSPACE_PATCH_FILE_TOOL, arguments)
+}
+
+type ScriptedModelStep = Vec<Result<ModelEvent, ModelError>>;
+type ScriptedModelSteps = Vec<ScriptedModelStep>;
+type RecordedModelRequests = Vec<ModelRequest>;
+
+#[derive(Debug, Clone)]
+struct ScriptedModelProvider {
+    name: ProviderName,
+    capabilities: ModelCapabilities,
+    steps: Arc<Mutex<ScriptedModelSteps>>,
+    recorded_requests: Arc<Mutex<RecordedModelRequests>>,
+}
+
+impl ScriptedModelProvider {
+    fn new(steps: ScriptedModelSteps) -> Self {
+        Self {
+            name: ProviderName::new("workspace-scripted-provider").expect("valid provider name"),
+            capabilities: ModelCapabilities::new(true, true, false, true, None, None)
+                .expect("valid capabilities"),
+            steps: Arc::new(Mutex::new(steps.into_iter().rev().collect())),
+            recorded_requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn recorded_requests(&self) -> RecordedModelRequests {
+        self.recorded_requests
+            .lock()
+            .expect("recorded requests mutex should not be poisoned")
+            .clone()
+    }
+}
+
+impl ModelProvider for ScriptedModelProvider {
+    fn name(&self) -> &ProviderName {
+        &self.name
+    }
+
+    fn capabilities(&self) -> &ModelCapabilities {
+        &self.capabilities
+    }
+
+    fn stream_model<'a>(
+        &'a self,
+        request: merry_llm::ModelRequest,
+        context: ModelStreamContext,
+    ) -> ModelProviderFuture<'a, Result<ModelEventStream, ModelError>> {
+        Box::pin(async move {
+            if context.cancellation_token().is_cancelled() {
+                return Err(ModelError::Cancelled);
+            }
+
+            self.recorded_requests
+                .lock()
+                .expect("recorded requests mutex should not be poisoned")
+                .push(request);
+
+            let script = self
+                .steps
+                .lock()
+                .expect("steps mutex should not be poisoned")
+                .pop()
+                .unwrap_or_default();
+            let stream: ModelEventStream = Box::pin(futures_util::stream::iter(script));
+            Ok(stream)
+        })
+    }
 }
 
 async fn collect_step(runtime: &Runtime, text: &str) -> Vec<RuntimeEvent> {
@@ -257,6 +326,80 @@ fn assert_failed_json_result(events: &[RuntimeEvent], diagnostic_code: &str) {
             .code(),
         diagnostic_code
     );
+}
+
+fn assert_json_key_absent(value: &Value, key: &str) {
+    match value {
+        Value::Object(map) => {
+            assert!(map.get(key).is_none(), "sanitized JSON leaked key {key}");
+            for nested in map.values() {
+                assert_json_key_absent(nested, key);
+            }
+        }
+        Value::Array(values) => {
+            for nested in values {
+                assert_json_key_absent(nested, key);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
+}
+
+fn assert_patch_denial_json_sanitized(json: &str, expected_tool: &str) {
+    let payload: Value = serde_json::from_str(json).expect("denied result JSON should parse");
+    assert_eq!(
+        payload,
+        serde_json::json!({
+            "ok": false,
+            "tool": expected_tool,
+            "error": {
+                "code": "action_policy_denied",
+                "message": "tool action was blocked by runtime policy"
+            }
+        })
+    );
+
+    for forbidden_key in [
+        "proposal",
+        "audit",
+        "action_kind",
+        "policy",
+        "reason",
+        "relative_path",
+        "preimage_bytes",
+        "replacement_bytes",
+        "file_bytes_before",
+        "file_bytes_after",
+        "risk",
+        "internal",
+        "provider",
+        "provider_response",
+        "wire",
+        "previous_response_id",
+    ] {
+        assert_json_key_absent(&payload, forbidden_key);
+    }
+
+    for forbidden_text in [
+        "proposal",
+        "audit",
+        "action_kind",
+        "relative_path",
+        "preimage_bytes",
+        "replacement_bytes",
+        "file_bytes_before",
+        "file_bytes_after",
+        "risk",
+        "internal",
+        "previous_response_id",
+        "OpenAI",
+        "wire",
+    ] {
+        assert!(
+            !json.contains(forbidden_text),
+            "sanitized denied result leaked {forbidden_text}: {json}"
+        );
+    }
 }
 
 async fn assert_failed_json_artifact_visible_in_next_model_request(
@@ -492,4 +635,107 @@ async fn registered_patch_file_tool_is_policy_denied_before_mutating_file() {
         fs::read_to_string(temp.path().join("note.txt")).expect("workspace file should read"),
         "alpha\nold\nomega\n"
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn denied_patch_file_leaves_file_unchanged_and_returns_sanitized_result() {
+    let temp = TempWorkspace::new("patch-policy-proposed");
+    temp.write_text("note.txt", "alpha\nold\nomega\n");
+    let runtime = runtime_with_workspace_patch_tools(
+        temp.path(),
+        pending_patch_file_call("note.txt", "old", "new"),
+    );
+    let _pending_events = collect_step(&runtime, "patch note").await;
+    let pending = runtime
+        .pending_tool_calls()
+        .await
+        .into_iter()
+        .next()
+        .expect("pending call should be stored");
+
+    let execution_events = runtime
+        .execute_tool_call(pending.id(), ToolExecutionContext::default())
+        .await
+        .expect("runtime policy denial should resolve pending call");
+
+    assert_eq!(
+        fs::read_to_string(temp.path().join("note.txt")).expect("workspace file should read"),
+        "alpha\nold\nomega\n"
+    );
+    let result = resolved_tool_result(&execution_events);
+    assert_eq!(result.status(), ToolCallResultStatus::Failed);
+    assert_eq!(
+        result
+            .diagnostic()
+            .expect("policy denial should include diagnostic")
+            .code(),
+        "action_policy_denied"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn patch_proposal_and_audit_do_not_leak_into_sanitized_result_or_continuation() {
+    let temp = TempWorkspace::new("patch-policy-no-leak");
+    temp.write_text("note.txt", "alpha\nold\nomega\n");
+    let tools =
+        ReadOnlyWorkspaceTools::new(WorkspaceToolsConfig::new(vec![temp.path().to_path_buf()]))
+            .expect("workspace tools should construct");
+    let provider = ScriptedModelProvider::new(vec![
+        vec![Ok(pending_patch_file_call("note.txt", "old", "new"))],
+        vec![Ok(ModelEvent::Completed {
+            response: ModelResponse::new(
+                vec![ModelOutput::text("continued after denial")],
+                FinishReason::Stop,
+                None,
+            ),
+        })],
+    ]);
+    let provider_handle = provider.clone();
+    let mut builder =
+        Runtime::builder(session_id()).model_provider(Arc::new(provider), model_name());
+    for tool in tools.into_registered_tools_with_patch() {
+        builder = builder.register_tool(tool);
+    }
+    let runtime = builder.build().expect("runtime should build");
+    let _pending_events = collect_step(&runtime, "patch note").await;
+    let pending = runtime
+        .pending_tool_calls()
+        .await
+        .into_iter()
+        .next()
+        .expect("pending call should be stored");
+    let execution_events = runtime
+        .execute_tool_call(pending.id(), ToolExecutionContext::default())
+        .await
+        .expect("runtime policy denial should resolve pending call");
+
+    let result = resolved_tool_result(&execution_events);
+    assert_eq!(result.status(), ToolCallResultStatus::Failed);
+    assert_eq!(
+        result
+            .diagnostic()
+            .expect("policy denial should include diagnostic")
+            .code(),
+        "action_policy_denied"
+    );
+
+    let _continuation_events = collect_step(&runtime, "continue after denial").await;
+    let requests = provider_handle.recorded_requests();
+    let continuation = requests[1]
+        .continuations()
+        .first()
+        .expect("denied tool result should be compiled as continuation");
+    let ModelToolResultContent::Json(continuation_json) = continuation.result().content() else {
+        panic!("denial continuation should be JSON");
+    };
+    assert_eq!(continuation.result().status(), ToolCallResultStatus::Failed);
+    assert_eq!(
+        continuation
+            .result()
+            .diagnostic()
+            .expect("denial continuation should include diagnostic")
+            .code(),
+        "action_policy_denied"
+    );
+    assert_patch_denial_json_sanitized(continuation_json, WORKSPACE_PATCH_FILE_TOOL);
 }
