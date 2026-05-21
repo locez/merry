@@ -339,7 +339,7 @@ fn runtime_with_tool(
     executor: impl ToolExecutor + 'static,
 ) -> Runtime {
     Runtime::builder(session_id(session))
-        .register_tool(merry_runtime::RegisteredTool::new(
+        .register_tool(merry_runtime::RegisteredTool::read_only(
             tool_spec("search_notes"),
             Arc::new(executor),
         ))
@@ -355,10 +355,11 @@ fn runtime_with_tool_action(
     action_kind: ToolActionKind,
 ) -> Runtime {
     Runtime::builder(session_id(session))
-        .register_tool(
-            merry_runtime::RegisteredTool::new(tool_spec("search_notes"), Arc::new(executor))
-                .with_action_kind(action_kind),
-        )
+        .register_tool(merry_runtime::RegisteredTool::new(
+            tool_spec("search_notes"),
+            Arc::new(executor),
+            action_kind,
+        ))
         .model_provider(Arc::new(provider), model_name())
         .build()
         .expect("runtime should build")

@@ -4066,9 +4066,7 @@ mod tests {
         let spec = policy_tool_spec(tool_name);
         let pending = policy_pending_tool_call(call_id, spec.name().as_str());
         let runtime = Runtime::builder(session_id(session))
-            .register_tool(
-                RegisteredTool::new(spec, Arc::new(executor)).with_action_kind(action_kind),
-            )
+            .register_tool(RegisteredTool::new(spec, Arc::new(executor), action_kind))
             .build()
             .expect("runtime should build");
         {
@@ -4522,7 +4520,10 @@ mod tests {
         );
         let executor = SuccessfulToolExecutor::new();
         let runtime = Runtime::builder(session_id)
-            .register_tool(RegisteredTool::new(tool_spec, Arc::new(executor.clone())))
+            .register_tool(RegisteredTool::read_only(
+                tool_spec,
+                Arc::new(executor.clone()),
+            ))
             .build()
             .expect("runtime should build");
 

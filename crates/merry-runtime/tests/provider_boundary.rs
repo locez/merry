@@ -537,7 +537,7 @@ fn runtime_with_registered_tool(
     executor: ScriptedToolExecutor,
 ) -> Runtime {
     Runtime::builder(session_id(session))
-        .register_tool(RegisteredTool::new(
+        .register_tool(RegisteredTool::read_only(
             test_tool_spec("search_notes"),
             Arc::new(executor),
         ))
@@ -553,10 +553,11 @@ fn runtime_with_registered_tool_action(
     action_kind: ToolActionKind,
 ) -> Runtime {
     Runtime::builder(session_id(session))
-        .register_tool(
-            RegisteredTool::new(test_tool_spec("search_notes"), Arc::new(executor))
-                .with_action_kind(action_kind),
-        )
+        .register_tool(RegisteredTool::new(
+            test_tool_spec("search_notes"),
+            Arc::new(executor),
+            action_kind,
+        ))
         .model_provider(Arc::new(provider), model_name())
         .build()
         .expect("runtime should build")
@@ -977,7 +978,7 @@ async fn registered_tool_specs_are_compiled_into_provider_request() {
     let provider = FakeModelProvider::new(vec![Ok(completed_event())]);
     let tool = test_tool_spec("search_notes");
     let runtime = Runtime::builder(session_id("provider-registered-tool-spec"))
-        .register_tool(RegisteredTool::new(
+        .register_tool(RegisteredTool::read_only(
             tool.clone(),
             Arc::new(ScriptedToolExecutor::succeeding_text("unused")),
         ))
@@ -1447,7 +1448,7 @@ async fn executor_reentrant_runtime_mutations_are_rejected_while_outer_execution
     ))]]);
     let executor = ReentrantMutationExecutor::new();
     let runtime = Runtime::builder(session_id("provider-execute-tool-reentrant"))
-        .register_tool(RegisteredTool::new(
+        .register_tool(RegisteredTool::read_only(
             test_tool_spec("search_notes"),
             Arc::new(executor.clone()),
         ))
