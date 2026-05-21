@@ -28,6 +28,7 @@
 //! builder, event protocol, Memory Activation, and artifact/ledger persistence
 //! contracts settle.
 
+mod action_audit;
 mod action_policy;
 mod agent_loop;
 mod artifact;

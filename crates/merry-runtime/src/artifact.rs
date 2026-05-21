@@ -219,22 +219,42 @@ impl ArtifactRegistry {
         artifact: ArtifactRef,
         content: ArtifactContent,
     ) -> Result<ArtifactRef, ArtifactError> {
-        let id = artifact.id().clone();
-        if self.records.contains_key(&id) {
-            return Err(ArtifactError::DuplicateId { id });
+        self.ensure_recordable(&artifact, &content)?;
+        Ok(self.record_preflighted(artifact, content))
+    }
+
+    pub(crate) fn ensure_recordable(
+        &self,
+        artifact: &ArtifactRef,
+        content: &ArtifactContent,
+    ) -> Result<(), ArtifactError> {
+        if self.records.contains_key(artifact.id()) {
+            return Err(ArtifactError::DuplicateId {
+                id: artifact.id().clone(),
+            });
         }
 
-        validate_content_kind(&artifact, &content)?;
+        validate_content_kind(artifact, content)?;
+        Ok(())
+    }
 
+    pub(crate) fn record_preflighted(
+        &mut self,
+        artifact: ArtifactRef,
+        content: ArtifactContent,
+    ) -> ArtifactRef {
+        debug_assert!(self.ensure_recordable(&artifact, &content).is_ok());
+        let id = artifact.id().clone();
         let recorded = artifact.clone();
-        self.records.insert(
+        let previous = self.records.insert(
             id,
             ArtifactRecord {
                 artifact,
                 content: Arc::new(content),
             },
         );
-        Ok(recorded)
+        debug_assert!(previous.is_none());
+        recorded
     }
 
     /// Reads a recorded artifact by id.
