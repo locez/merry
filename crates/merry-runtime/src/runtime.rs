@@ -311,6 +311,12 @@ impl Runtime {
 
             let outcome = denied_tool_action_outcome(&pending);
             let (status, content, diagnostic) = outcome.into_parts();
+            debug_assert_eq!(status, merry_core::ToolCallResultStatus::Failed);
+            let diagnostic = diagnostic.ok_or(RuntimeError::Core {
+                source: CoreError::InvalidToolCallResult {
+                    reason: "denied tool action outcome must include a diagnostic",
+                },
+            })?;
             let mut session = self.inner.session.lock().await;
             if context.cancellation_token().is_cancelled() {
                 return Err(RuntimeError::ToolExecutionCancelled {
@@ -318,7 +324,12 @@ impl Runtime {
                     call_id: call_id.clone(),
                 });
             }
-            return session.submit_tool_execution_outcome(call_id, status, content, diagnostic);
+            return session.submit_denied_tool_action(
+                &pending,
+                &policy_decision,
+                content,
+                diagnostic,
+            );
         }
 
         let executor = registered_tool.executor();
@@ -1581,6 +1592,7 @@ mod tests {
         RuntimeInner, TOOL_ACTION_POLICY_DENIED_MESSAGE, memory_activation_seed_from_step_input,
         send_cancelled_event,
     };
+    use crate::action_audit::ActionAuditStatus;
     use crate::action_policy::{ActionPolicyDisposition, ActionRiskTier, DefaultActionPolicy};
     use crate::artifact::ArtifactContent;
     use crate::judgment::{
@@ -1589,6 +1601,7 @@ mod tests {
         JudgmentRecord, JudgmentRiskLevel, JudgmentSource, JudgmentSourceKind,
         ModelBackedJudgmentSource,
     };
+    use crate::ledger::{LedgerFactKind, LedgerProjection};
     use crate::memory::{
         ActivatedMemory, MemoryActivationContext, MemoryActivationFuture, MemoryActivationReason,
         MemoryActivationScore, MemoryActivationSource, MemoryActivationSourceKind, MemoryError,
@@ -4083,6 +4096,45 @@ mod tests {
         serde_json::from_str(text).expect("denial artifact should parse as JSON")
     }
 
+    async fn action_audit_records(
+        runtime: &Runtime,
+    ) -> Vec<crate::action_audit::ActionAuditRecord> {
+        let session = runtime.inner.session.lock().await;
+        session.action_audit_snapshot().records().to_vec()
+    }
+
+    fn lifecycle_kinds(
+        runtime_projection: &crate::LedgerProjectionSnapshot,
+    ) -> Vec<LedgerFactKind> {
+        runtime_projection
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                LedgerProjection::Lifecycle { kind, .. } => Some(*kind),
+                LedgerProjection::Fact { .. } => None,
+            })
+            .collect()
+    }
+
+    fn assert_lifecycle_order(
+        lifecycle_kinds: &[LedgerFactKind],
+        before: LedgerFactKind,
+        after: LedgerFactKind,
+    ) {
+        let before_index = lifecycle_kinds
+            .iter()
+            .position(|kind| *kind == before)
+            .expect("before lifecycle kind should exist");
+        let after_index = lifecycle_kinds
+            .iter()
+            .position(|kind| *kind == after)
+            .expect("after lifecycle kind should exist");
+        assert!(
+            before_index < after_index,
+            "{before:?} should be recorded before {after:?}"
+        );
+    }
+
     fn assert_sanitized_policy_denial_content(content: &serde_json::Value, tool_name: &str) {
         assert_eq!(
             content,
@@ -4220,6 +4272,35 @@ mod tests {
 
         let content = denied_action_content(&runtime, &events).await;
         assert_sanitized_policy_denial_content(&content, "policy_write");
+
+        let audits = action_audit_records(&runtime).await;
+        assert_eq!(audits.len(), 1);
+        let audit = &audits[0];
+        assert_eq!(audit.id().as_str(), "action-audit-00000000000000000000");
+        assert_eq!(audit.order(), 0);
+        assert_eq!(audit.tool_call_id(), pending.id());
+        assert_eq!(audit.tool_name(), pending.name());
+        assert_eq!(audit.action_kind(), ToolActionKind::WorkspaceWrite);
+        assert_eq!(audit.status(), ActionAuditStatus::Denied);
+        assert_eq!(audit.policy().disposition(), ActionPolicyDisposition::Deny);
+        assert_eq!(audit.policy().risk_tier(), ActionRiskTier::EditElevated);
+        assert_eq!(
+            audit.policy().reason(),
+            "workspace write tool actions are denied by default policy"
+        );
+
+        let projection = runtime.ledger_projection().await;
+        let lifecycle = lifecycle_kinds(&projection);
+        assert_lifecycle_order(
+            &lifecycle,
+            LedgerFactKind::ActionAuditRecorded,
+            LedgerFactKind::ArtifactRecorded,
+        );
+        assert_lifecycle_order(
+            &lifecycle,
+            LedgerFactKind::ActionAuditRecorded,
+            LedgerFactKind::ToolCallResolved,
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -4240,6 +4321,14 @@ mod tests {
             .expect("policy denial should durably resolve the pending call");
 
         assert_eq!(executor.call_count(), 0);
+        let audits = action_audit_records(&runtime).await;
+        assert_eq!(audits.len(), 1);
+        assert_eq!(audits[0].action_kind(), ToolActionKind::CommandExec);
+        assert_eq!(audits[0].status(), ActionAuditStatus::Denied);
+        assert_eq!(
+            audits[0].policy().disposition(),
+            ActionPolicyDisposition::Deny
+        );
         let content = denied_action_content(&runtime, &events).await;
         assert_sanitized_policy_denial_content(&content, "policy_command");
         assert_eq!(
@@ -4270,6 +4359,14 @@ mod tests {
             .expect("policy denial should durably resolve the pending call");
 
         assert_eq!(executor.call_count(), 0);
+        let audits = action_audit_records(&runtime).await;
+        assert_eq!(audits.len(), 1);
+        assert_eq!(audits[0].action_kind(), ToolActionKind::Network);
+        assert_eq!(audits[0].status(), ActionAuditStatus::Denied);
+        assert_eq!(
+            audits[0].policy().disposition(),
+            ActionPolicyDisposition::Deny
+        );
         let content = denied_action_content(&runtime, &events).await;
         assert_sanitized_policy_denial_content(&content, "policy_network");
         assert_eq!(
@@ -4310,6 +4407,7 @@ mod tests {
         assert_eq!(executor.call_count(), 0);
         assert_eq!(runtime.pending_tool_calls().await, vec![pending]);
         assert_eq!(runtime.ledger_projection().await, projection_before);
+        assert!(action_audit_records(&runtime).await.is_empty());
         let expected_result_artifact_id = artifact_id("tool-result-2");
         let evidence_err = runtime
             .evidence_ref(

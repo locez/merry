@@ -4,6 +4,8 @@
 use crate::summary_draft_promotion::SummaryDraftPromotionRegistrySnapshot;
 use crate::{
     RuntimeError,
+    action_audit::ActionAuditRegistry,
+    action_policy::ActionPolicyDecision,
     artifact::{ArtifactContent, ArtifactError, ArtifactRegistry},
     context::{ContextCompiler, ContextEntry, ContextError, SessionContextSnapshot},
     judgment::{
@@ -85,6 +87,7 @@ pub(crate) struct SessionState {
     #[allow(dead_code)]
     judgments: JudgmentRegistry,
     summary_draft_promotions: SummaryDraftPromotionRegistry,
+    action_audits: ActionAuditRegistry,
     pending_tool_calls: Vec<PendingToolCall>,
     resolved_tool_calls: BTreeSet<ToolCallId>,
     unconsumed_tool_continuations: Vec<ResolvedToolContinuation>,
@@ -103,6 +106,7 @@ impl SessionState {
             activated_memories: Vec::new(),
             judgments: JudgmentRegistry::default(),
             summary_draft_promotions: SummaryDraftPromotionRegistry::default(),
+            action_audits: ActionAuditRegistry::default(),
             pending_tool_calls: Vec::new(),
             resolved_tool_calls: BTreeSet::new(),
             unconsumed_tool_continuations: Vec::new(),
@@ -209,6 +213,11 @@ impl SessionState {
 
     pub(crate) fn ledger_projection(&self) -> crate::ledger::LedgerProjectionSnapshot {
         self.ledger.project()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn action_audit_snapshot(&self) -> crate::action_audit::ActionAuditRegistrySnapshot {
+        self.action_audits.snapshot()
     }
 
     #[allow(dead_code)]
@@ -469,6 +478,93 @@ impl SessionState {
         self.submit_tool_result(result, content)
     }
 
+    pub(crate) fn submit_denied_tool_action(
+        &mut self,
+        pending: &PendingToolCall,
+        decision: &ActionPolicyDecision,
+        content: ArtifactContent,
+        diagnostic: ErrorInfo,
+    ) -> Result<Vec<RuntimeEvent>, RuntimeError> {
+        debug_assert!(!decision.is_allowed());
+
+        let Some(pending_index) = self
+            .pending_tool_calls
+            .iter()
+            .position(|call| call.id() == pending.id())
+        else {
+            return if self.resolved_tool_calls.contains(pending.id()) {
+                Err(RuntimeError::ToolCallAlreadyResolved {
+                    session_id: self.session_id.clone(),
+                    call_id: pending.id().clone(),
+                })
+            } else {
+                Err(RuntimeError::UnknownToolCall {
+                    session_id: self.session_id.clone(),
+                    call_id: pending.id().clone(),
+                })
+            };
+        };
+
+        let artifact_kind = match &content {
+            ArtifactContent::Text(_) => ArtifactKind::Text,
+            ArtifactContent::Json(_) => ArtifactKind::Json,
+            ArtifactContent::Binary(_) | ArtifactContent::Image(_) | ArtifactContent::Other(_) => {
+                return Err(RuntimeError::UnsupportedToolResultContent {
+                    artifact_id: self.next_tool_result_artifact_id(),
+                    content_kind: content.kind(),
+                });
+            }
+        };
+        let artifact = ArtifactRef::new(self.next_tool_result_artifact_id(), artifact_kind);
+        let result = ToolCallResult::failed(pending.id().clone(), artifact, diagnostic);
+
+        self.validate_tool_result_content(&result, &content)?;
+        self.artifacts
+            .ensure_recordable(result.artifact(), &content)?;
+
+        let pending = self.pending_tool_calls.remove(pending_index);
+        if let Some(started) = self.record_session_started_if_needed() {
+            self.record_denied_tool_action_audit(&pending, decision);
+            let artifact = self
+                .artifacts
+                .record_preflighted(result.artifact().clone(), content);
+            debug_assert_eq!(artifact, *result.artifact());
+            self.resolved_tool_calls.insert(result.call_id().clone());
+            self.unconsumed_tool_continuations
+                .push(ResolvedToolContinuation::new(pending, result.clone()));
+            return Ok(vec![
+                started,
+                self.record_event(
+                    RuntimeEventKind::ArtifactRecorded { artifact },
+                    LedgerFactKind::ArtifactRecorded,
+                ),
+                self.record_event(
+                    RuntimeEventKind::ToolCallResolved { result },
+                    LedgerFactKind::ToolCallResolved,
+                ),
+            ]);
+        }
+
+        self.record_denied_tool_action_audit(&pending, decision);
+        let artifact = self
+            .artifacts
+            .record_preflighted(result.artifact().clone(), content);
+        debug_assert_eq!(artifact, *result.artifact());
+        self.resolved_tool_calls.insert(result.call_id().clone());
+        self.unconsumed_tool_continuations
+            .push(ResolvedToolContinuation::new(pending, result.clone()));
+        Ok(vec![
+            self.record_event(
+                RuntimeEventKind::ArtifactRecorded { artifact },
+                LedgerFactKind::ArtifactRecorded,
+            ),
+            self.record_event(
+                RuntimeEventKind::ToolCallResolved { result },
+                LedgerFactKind::ToolCallResolved,
+            ),
+        ])
+    }
+
     pub(crate) fn record_cancelled(&mut self, diagnostic: ErrorInfo) -> RuntimeEvent {
         self.record_event(
             RuntimeEventKind::Cancelled { diagnostic },
@@ -488,6 +584,17 @@ impl SessionState {
         self.ledger.record(sequence, fact_kind);
         self.next_sequence += 1;
         RuntimeEvent::new(self.session_id.clone(), sequence, kind)
+    }
+
+    fn record_denied_tool_action_audit(
+        &mut self,
+        pending: &PendingToolCall,
+        decision: &ActionPolicyDecision,
+    ) {
+        self.action_audits
+            .record_denied_tool_action(pending, decision);
+        self.ledger
+            .record_lifecycle(self.next_sequence, LedgerFactKind::ActionAuditRecorded);
     }
 
     fn next_sequence(&self) -> u64 {
@@ -598,6 +705,8 @@ fn duplicate_tool_call_diagnostic(call_id: &ToolCallId, state: &'static str) -> 
 mod tests {
     use super::SessionState;
     use crate::{
+        action_audit::ActionAuditStatus,
+        action_policy::{ActionPolicyDisposition, DefaultActionPolicy},
         artifact::{ArtifactContent, ArtifactError},
         context::{ContextCompiler, ContextEntry, ContextError, ContextEvidence, ContextSummary},
         judgment::{
@@ -607,6 +716,7 @@ mod tests {
             SummaryDraftAcceptanceAuthority, SummaryDraftPromotionError,
             SummaryDraftPromotionInput,
         },
+        ledger::{LedgerFactKind, LedgerProjection},
         memory::{
             ActivatedMemory, MemoryActivationProvenance, MemoryActivationReason,
             MemoryActivationScore, MemoryActivationSourceKind, MemoryEvidence, MemoryId,
@@ -615,8 +725,9 @@ mod tests {
         summary_draft_promotion::SummaryDraftPromotionState,
     };
     use merry_core::{
-        ArtifactId, ArtifactKind, ArtifactRef, EvidenceLocator, EvidenceRef, PendingToolCall,
-        RuntimeEventKind, SessionId, ToolCallArguments, ToolCallId, ToolCallResult, ToolName,
+        ArtifactId, ArtifactKind, ArtifactRef, ErrorInfo, EvidenceLocator, EvidenceRef,
+        PendingToolCall, RuntimeEventKind, SessionId, ToolCallArguments, ToolCallId,
+        ToolCallResult, ToolName,
     };
     use serde_json::json;
 
@@ -934,6 +1045,78 @@ mod tests {
             events.last().map(|event| &event.kind),
             Some(RuntimeEventKind::ToolCallResolved { result: resolved }) if resolved == &result
         ));
+    }
+
+    #[test]
+    fn denied_tool_action_records_audit_lifecycle_before_artifact_and_resolution() {
+        let mut session = SessionState::new(session_id());
+        let call = pending_tool_call("denied-action-call");
+        let decision = DefaultActionPolicy.decide(crate::ToolActionKind::WorkspaceWrite);
+        let diagnostic = ErrorInfo::new("action_policy_denied", "blocked by test policy")
+            .expect("valid diagnostic");
+        session
+            .record_session_started_if_needed()
+            .expect("session should start");
+        session
+            .record_tool_call_pending(call.clone())
+            .expect("pending call should record");
+
+        let events = session
+            .submit_denied_tool_action(
+                &call,
+                &decision,
+                ArtifactContent::json(r#"{"ok":false}"#),
+                diagnostic,
+            )
+            .expect("denial should resolve");
+
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            events[0].kind,
+            RuntimeEventKind::ArtifactRecorded { .. }
+        ));
+        assert!(matches!(
+            events[1].kind,
+            RuntimeEventKind::ToolCallResolved { .. }
+        ));
+
+        let audit_snapshot = session.action_audit_snapshot();
+        assert_eq!(audit_snapshot.records().len(), 1);
+        let audit = &audit_snapshot.records()[0];
+        assert_eq!(audit.id().as_str(), "action-audit-00000000000000000000");
+        assert_eq!(audit.order(), 0);
+        assert_eq!(audit.tool_call_id(), call.id());
+        assert_eq!(audit.tool_name(), call.name());
+        assert_eq!(audit.action_kind(), crate::ToolActionKind::WorkspaceWrite);
+        assert_eq!(audit.status(), ActionAuditStatus::Denied);
+        assert_eq!(audit.policy().disposition(), ActionPolicyDisposition::Deny);
+        assert_eq!(audit.policy().risk_tier(), decision.risk_tier());
+        assert_eq!(audit.policy().reason(), decision.reason());
+
+        let projection = session.ledger_projection();
+        let lifecycle_kinds = projection
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                LedgerProjection::Lifecycle { kind, .. } => Some(*kind),
+                LedgerProjection::Fact { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        let audit_index = lifecycle_kinds
+            .iter()
+            .position(|kind| *kind == LedgerFactKind::ActionAuditRecorded)
+            .expect("audit lifecycle should be recorded");
+        let artifact_index = lifecycle_kinds
+            .iter()
+            .position(|kind| *kind == LedgerFactKind::ArtifactRecorded)
+            .expect("artifact lifecycle should be recorded");
+        let resolved_index = lifecycle_kinds
+            .iter()
+            .position(|kind| *kind == LedgerFactKind::ToolCallResolved)
+            .expect("resolution lifecycle should be recorded");
+        assert!(audit_index < artifact_index);
+        assert!(artifact_index < resolved_index);
+        assert!(session.pending_tool_calls().is_empty());
     }
 
     #[test]

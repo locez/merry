@@ -1,14 +1,15 @@
-//! Read-only workspace tools for Merry runtimes.
+//! Workspace tools for Merry runtimes.
 //!
 //! This crate is intentionally outside `merry-runtime`: it adapts filesystem
-//! reads and read-only discovery into runtime-registered tools without making
-//! the runtime own real workspace access policy.
+//! reads, read-only discovery, and opt-in constrained workspace edits into
+//! runtime-registered tools without making the runtime own real workspace
+//! access policy.
 //!
 //! Path safety is scoped to trusted, stable workspace roots. The MVP rejects
 //! absolute paths, parent-directory traversal, ordinary dot components except
 //! exact `.` where a tool addresses the root, hidden paths unless explicitly
-//! enabled, and ordinary symlink components before reading, listing, or
-//! searching. On Unix, file opens also use `O_NOFOLLOW` to avoid following a
+//! enabled, and ordinary symlink components before reading, listing, searching,
+//! or patching. On Unix, file opens also use `O_NOFOLLOW` to avoid following a
 //! symlink swapped into the leaf path between validation and open. This is not
 //! an OS sandbox and does not claim complete hardening against malicious
 //! concurrent filesystem mutation, including replacement of intermediate
@@ -21,14 +22,14 @@ use merry_runtime::{
 };
 use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::{
     fs,
-    io::{self, Read},
+    io::{self, Read, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
     sync::Arc,
 };
-#[cfg(unix)]
-use std::{fs::OpenOptions, os::unix::fs::OpenOptionsExt};
 use thiserror::Error;
 
 /// Registered tool name for read-only file reads.
@@ -37,6 +38,8 @@ pub const WORKSPACE_READ_FILE_TOOL: &str = "workspace_read_file";
 pub const WORKSPACE_LIST_DIR_TOOL: &str = "workspace_list_dir";
 /// Registered tool name for bounded read-only literal text search.
 pub const WORKSPACE_SEARCH_TEXT_TOOL: &str = "workspace_search_text";
+/// Registered tool name for opt-in constrained workspace file patches.
+pub const WORKSPACE_PATCH_FILE_TOOL: &str = "workspace_patch_file";
 
 const ERROR_INVALID_ARGUMENTS: &str = "workspace_invalid_arguments";
 const ERROR_PATH_DENIED: &str = "workspace_path_denied";
@@ -48,12 +51,19 @@ const ERROR_NOT_SEARCHABLE: &str = "workspace_path_not_searchable";
 const ERROR_FILE_TOO_LARGE: &str = "workspace_file_too_large";
 const ERROR_NOT_UTF8: &str = "workspace_file_not_utf8";
 const ERROR_READ_FAILED: &str = "workspace_read_failed";
+const ERROR_WRITE_FAILED: &str = "workspace_write_failed";
+const ERROR_PREIMAGE_ABSENT: &str = "workspace_patch_preimage_absent";
+const ERROR_PREIMAGE_AMBIGUOUS: &str = "workspace_patch_preimage_ambiguous";
 
-/// Limits applied by read-only workspace tools.
+/// Limits applied by workspace tools.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceToolLimits {
     /// Maximum bytes read from one file by `workspace_read_file` and `workspace_search_text`.
     pub max_read_bytes: usize,
+    /// Maximum bytes written to one file by `workspace_patch_file`.
+    pub max_write_bytes: usize,
+    /// Maximum combined bytes accepted for `workspace_patch_file` old and new text.
+    pub max_patch_bytes: usize,
     /// Maximum entries returned by `workspace_list_dir`.
     pub max_list_entries: usize,
     /// Maximum matches returned by `workspace_search_text`.
@@ -74,6 +84,8 @@ impl Default for WorkspaceToolLimits {
     fn default() -> Self {
         Self {
             max_read_bytes: 1024 * 1024,
+            max_write_bytes: 1024 * 1024,
+            max_patch_bytes: 128 * 1024,
             max_list_entries: 512,
             max_search_matches: 100,
             max_search_files: 1_000,
@@ -85,7 +97,7 @@ impl Default for WorkspaceToolLimits {
     }
 }
 
-/// Configuration for read-only workspace tools.
+/// Configuration for workspace tools.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceToolsConfig {
     roots: Vec<PathBuf>,
@@ -129,7 +141,7 @@ impl WorkspaceToolsConfig {
         &self.limits
     }
 
-    /// Sets read-only workspace tool limits.
+    /// Sets workspace tool limits.
     #[must_use]
     pub fn with_limits(mut self, limits: WorkspaceToolLimits) -> Self {
         self.limits = limits;
@@ -137,7 +149,7 @@ impl WorkspaceToolsConfig {
     }
 }
 
-/// Errors raised while validating read-only workspace tool configuration.
+/// Errors raised while validating workspace tool configuration.
 #[derive(Debug, Error)]
 pub enum WorkspaceToolConfigError {
     /// At least one root must be configured explicitly.
@@ -212,6 +224,24 @@ impl ReadOnlyWorkspaceTools {
             .with_action_kind(ToolActionKind::ReadOnly),
         ]
     }
+
+    /// Returns the registered read-only workspace tools plus the opt-in patch tool.
+    ///
+    /// The patch tool is classified as [`ToolActionKind::WorkspaceWrite`], so
+    /// current runtime default policy denies it before invoking the executor.
+    #[must_use]
+    pub fn into_registered_tools_with_patch(self) -> Vec<RegisteredTool> {
+        let patch_state = Arc::clone(&self.state);
+        let mut tools = self.into_registered_tools();
+        tools.push(
+            RegisteredTool::new(
+                patch_file_spec(),
+                Arc::new(PatchFileExecutor { state: patch_state }),
+            )
+            .with_action_kind(ToolActionKind::WorkspaceWrite),
+        );
+        tools
+    }
 }
 
 #[derive(Debug)]
@@ -260,6 +290,8 @@ impl WorkspaceToolState {
 fn validate_limits(limits: &WorkspaceToolLimits) -> Result<(), WorkspaceToolConfigError> {
     for (name, value) in [
         ("max_read_bytes", limits.max_read_bytes),
+        ("max_write_bytes", limits.max_write_bytes),
+        ("max_patch_bytes", limits.max_patch_bytes),
         ("max_list_entries", limits.max_list_entries),
         ("max_search_matches", limits.max_search_matches),
         ("max_search_files", limits.max_search_files),
@@ -442,6 +474,63 @@ impl ToolExecutor for SearchTextExecutor {
     }
 }
 
+#[derive(Debug)]
+struct PatchFileExecutor {
+    state: Arc<WorkspaceToolState>,
+}
+
+impl ToolExecutor for PatchFileExecutor {
+    fn execute<'a>(
+        &'a self,
+        call: PendingToolCall,
+        context: ToolExecutionContext,
+    ) -> ToolExecutorFuture<'a> {
+        Box::pin(async move {
+            if context.cancellation_token().is_cancelled() {
+                return Err(ToolExecutionError::Cancelled);
+            }
+
+            let args = match parse_patch_file_args(&call) {
+                Ok(args) => args,
+                Err(message) => {
+                    return Ok(failed_outcome(
+                        WORKSPACE_PATCH_FILE_TOOL,
+                        ERROR_INVALID_ARGUMENTS,
+                        message,
+                        None::<String>,
+                    ));
+                }
+            };
+
+            let state = Arc::clone(&self.state);
+            let token = context.cancellation_token().clone();
+            let worker_token = token.clone();
+            let handle = tokio::task::spawn_blocking(move || {
+                let is_cancelled = || worker_token.is_cancelled();
+                patch_file_blocking_checked(&state, args, &is_cancelled)
+            });
+
+            tokio::select! {
+                biased;
+                () = token.cancelled() => Err(ToolExecutionError::Cancelled),
+                joined = handle => match joined {
+                    Ok(Ok(outcome)) => {
+                        if token.is_cancelled() {
+                            Err(ToolExecutionError::Cancelled)
+                        } else {
+                            Ok(outcome)
+                        }
+                    }
+                    Ok(Err(error)) => Err(error),
+                    Err(error) => Err(ToolExecutionError::infrastructure(format!(
+                        "workspace patch task failed to join: {error}"
+                    ))),
+                },
+            }
+        })
+    }
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ReadFileArgs {
@@ -462,6 +551,14 @@ struct SearchTextArgs {
     path: Option<String>,
     #[serde(default)]
     max_matches: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct PatchFileArgs {
+    path: String,
+    old_text: String,
+    new_text: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -510,6 +607,16 @@ struct SearchTextSuccess<'a> {
     searched_files: usize,
     skipped: SearchSkipCounts,
     truncated: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct PatchFileSuccess<'a> {
+    ok: bool,
+    tool: &'static str,
+    path: &'a str,
+    replacements: usize,
+    bytes_before: usize,
+    bytes_after: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -574,6 +681,16 @@ fn search_text_spec() -> ToolSpec {
     .expect("static workspace_search_text spec is valid")
 }
 
+fn patch_file_spec() -> ToolSpec {
+    ToolSpec::new(
+        ToolName::new(WORKSPACE_PATCH_FILE_TOOL).expect("static workspace tool name is valid"),
+        "Replace exactly one unambiguous UTF-8 preimage in one existing regular file under a configured stable workspace root, without create, delete, rename, symlink traversal, or multi-file edits.",
+        ToolInputSchema::new(schema_for!(PatchFileArgs))
+            .expect("static workspace_patch_file input schema is valid"),
+    )
+    .expect("static workspace_patch_file spec is valid")
+}
+
 fn parse_read_file_args(call: &PendingToolCall) -> Result<ReadFileArgs, String> {
     parse_tool_args(call, WORKSPACE_READ_FILE_TOOL)
 }
@@ -584,6 +701,10 @@ fn parse_list_dir_args(call: &PendingToolCall) -> Result<ListDirArgs, String> {
 
 fn parse_search_text_args(call: &PendingToolCall) -> Result<SearchTextArgs, String> {
     parse_tool_args(call, WORKSPACE_SEARCH_TEXT_TOOL)
+}
+
+fn parse_patch_file_args(call: &PendingToolCall) -> Result<PatchFileArgs, String> {
+    parse_tool_args(call, WORKSPACE_PATCH_FILE_TOOL)
 }
 
 fn parse_tool_args<T>(call: &PendingToolCall, tool_name: &'static str) -> Result<T, String>
@@ -670,7 +791,7 @@ fn read_resolved_file(
     }
 
     let mut bytes = Vec::new();
-    file.by_ref()
+    Read::by_ref(&mut file)
         .take(limits.max_read_bytes as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| DomainError::new(ERROR_READ_FAILED, "could not read workspace file"))?;
@@ -1006,6 +1127,257 @@ fn search_text_blocking_checked(
     Ok(search_success(&args.query, None, search))
 }
 
+#[cfg(test)]
+fn patch_file_blocking(state: &WorkspaceToolState, args: PatchFileArgs) -> ToolExecutionOutcome {
+    patch_file_blocking_checked(state, args, &|| false)
+        .expect("uncancelled workspace patch should not return cancellation")
+}
+
+fn patch_file_blocking_checked(
+    state: &WorkspaceToolState,
+    args: PatchFileArgs,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<ToolExecutionOutcome, ToolExecutionError> {
+    if is_cancelled() {
+        return Err(ToolExecutionError::Cancelled);
+    }
+
+    let relative = match validate_relative_path(&args.path, state.allow_hidden) {
+        Ok(relative) => relative,
+        Err(error) => {
+            return Ok(failed_outcome(
+                WORKSPACE_PATCH_FILE_TOOL,
+                error.code,
+                error.message,
+                error.path,
+            ));
+        }
+    };
+
+    if args.old_text.is_empty() {
+        return Ok(failed_outcome(
+            WORKSPACE_PATCH_FILE_TOOL,
+            ERROR_INVALID_ARGUMENTS,
+            "workspace patch old_text must not be empty",
+            Some(relative.display),
+        ));
+    }
+
+    if args.old_text.contains('\0') || args.new_text.contains('\0') {
+        return Ok(failed_outcome(
+            WORKSPACE_PATCH_FILE_TOOL,
+            ERROR_INVALID_ARGUMENTS,
+            "workspace patch text must not contain NUL bytes",
+            Some(relative.display),
+        ));
+    }
+
+    if args.old_text.len().saturating_add(args.new_text.len()) > state.limits.max_patch_bytes {
+        return Ok(failed_outcome(
+            WORKSPACE_PATCH_FILE_TOOL,
+            ERROR_INVALID_ARGUMENTS,
+            "workspace patch payload exceeds the configured byte limit",
+            Some(relative.display),
+        ));
+    }
+
+    for root in &state.roots {
+        if is_cancelled() {
+            return Err(ToolExecutionError::Cancelled);
+        }
+
+        match resolve_existing_path(root, &relative) {
+            Ok(Some(resolved)) => {
+                return match patch_resolved_file(
+                    &relative,
+                    &resolved.path,
+                    &args,
+                    state,
+                    is_cancelled,
+                ) {
+                    Ok(success) => Ok(success),
+                    Err(BlockingToolError::Domain(error)) => Ok(failed_outcome(
+                        WORKSPACE_PATCH_FILE_TOOL,
+                        error.code,
+                        error.message,
+                        Some(relative.display),
+                    )),
+                    Err(BlockingToolError::Cancelled) => Err(ToolExecutionError::Cancelled),
+                };
+            }
+            Ok(None) => {}
+            Err(error) => {
+                return Ok(failed_outcome(
+                    WORKSPACE_PATCH_FILE_TOOL,
+                    error.code,
+                    error.message,
+                    Some(relative.display),
+                ));
+            }
+        }
+    }
+
+    Ok(failed_outcome(
+        WORKSPACE_PATCH_FILE_TOOL,
+        ERROR_FILE_NOT_FOUND,
+        "workspace file was not found",
+        Some(relative.display),
+    ))
+}
+
+fn patch_resolved_file(
+    relative: &ValidatedRelativePath,
+    path: &Path,
+    args: &PatchFileArgs,
+    state: &WorkspaceToolState,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<ToolExecutionOutcome, BlockingToolError> {
+    if is_cancelled() {
+        return Err(BlockingToolError::Cancelled);
+    }
+
+    let pre_open_metadata = fs::symlink_metadata(path).map_err(|_| {
+        DomainError::new(
+            ERROR_READ_FAILED,
+            "could not inspect workspace file metadata",
+        )
+    })?;
+    if pre_open_metadata.file_type().is_symlink() {
+        return Err(DomainError::new(ERROR_PATH_DENIED, "workspace path uses a symlink").into());
+    }
+    if !pre_open_metadata.is_file() {
+        return Err(
+            DomainError::new(ERROR_NOT_FILE, "workspace path is not a regular file").into(),
+        );
+    }
+
+    let mut file = open_file_for_patch(path)?;
+    let metadata = file.metadata().map_err(|_| {
+        DomainError::new(
+            ERROR_READ_FAILED,
+            "could not inspect workspace file metadata",
+        )
+    })?;
+
+    if !metadata.is_file() {
+        return Err(
+            DomainError::new(ERROR_NOT_FILE, "workspace path is not a regular file").into(),
+        );
+    }
+
+    if metadata.len() > state.limits.max_read_bytes as u64 {
+        return Err(DomainError::new(
+            ERROR_FILE_TOO_LARGE,
+            "workspace file exceeds the configured read limit",
+        )
+        .into());
+    }
+
+    let file_size = usize::try_from(metadata.len()).map_err(|_| {
+        DomainError::new(
+            ERROR_FILE_TOO_LARGE,
+            "workspace file exceeds the configured read limit",
+        )
+    })?;
+
+    if is_cancelled() {
+        return Err(BlockingToolError::Cancelled);
+    }
+
+    let mut bytes = Vec::with_capacity(file_size);
+    Read::by_ref(&mut file)
+        .take(metadata.len())
+        .read_to_end(&mut bytes)
+        .map_err(|_| DomainError::new(ERROR_READ_FAILED, "could not read workspace file"))?;
+
+    if bytes.len() > state.limits.max_read_bytes {
+        return Err(DomainError::new(
+            ERROR_FILE_TOO_LARGE,
+            "workspace file exceeds the configured read limit",
+        )
+        .into());
+    }
+
+    if bytes.contains(&0) {
+        return Err(DomainError::new(ERROR_NOT_UTF8, "workspace file appears to be binary").into());
+    }
+
+    let content = String::from_utf8(bytes)
+        .map_err(|_| DomainError::new(ERROR_NOT_UTF8, "workspace file is not valid UTF-8"))?;
+
+    if is_cancelled() {
+        return Err(BlockingToolError::Cancelled);
+    }
+
+    let replacement = build_replacement(&content, &args.old_text, &args.new_text)?;
+    if replacement.len() > state.limits.max_write_bytes {
+        return Err(DomainError::new(
+            ERROR_FILE_TOO_LARGE,
+            "workspace patch result exceeds the configured write limit",
+        )
+        .into());
+    }
+
+    if is_cancelled() {
+        return Err(BlockingToolError::Cancelled);
+    }
+
+    file.seek(SeekFrom::Start(0))
+        .map_err(|_| DomainError::new(ERROR_WRITE_FAILED, "could not seek workspace file"))?;
+    file.write_all(replacement.as_bytes())
+        .map_err(|_| DomainError::new(ERROR_WRITE_FAILED, "could not write workspace file"))?;
+    file.set_len(replacement.len() as u64)
+        .map_err(|_| DomainError::new(ERROR_WRITE_FAILED, "could not truncate workspace file"))?;
+    file.sync_all()
+        .map_err(|_| DomainError::new(ERROR_WRITE_FAILED, "could not sync workspace file"))?;
+
+    let payload = PatchFileSuccess {
+        ok: true,
+        tool: WORKSPACE_PATCH_FILE_TOOL,
+        path: &relative.display,
+        replacements: 1,
+        bytes_before: content.len(),
+        bytes_after: replacement.len(),
+    };
+    Ok(ToolExecutionOutcome::succeeded_json(
+        serde_json::to_string(&payload).expect("workspace patch success envelope serializes"),
+    ))
+}
+
+fn build_replacement(
+    content: &str,
+    old_text: &str,
+    new_text: &str,
+) -> Result<String, BlockingToolError> {
+    let Some(start) = content.find(old_text) else {
+        return Err(DomainError::new(
+            ERROR_PREIMAGE_ABSENT,
+            "workspace patch preimage was not found",
+        )
+        .into());
+    };
+
+    let after_start = start + old_text.len();
+    if content[after_start..].contains(old_text) {
+        return Err(DomainError::new(
+            ERROR_PREIMAGE_AMBIGUOUS,
+            "workspace patch preimage matched more than once",
+        )
+        .into());
+    }
+
+    let mut replacement = String::with_capacity(
+        content
+            .len()
+            .saturating_sub(old_text.len())
+            .saturating_add(new_text.len()),
+    );
+    replacement.push_str(&content[..start]);
+    replacement.push_str(new_text);
+    replacement.push_str(&content[after_start..]);
+    Ok(replacement)
+}
+
 #[derive(Debug)]
 struct SearchRun<'a> {
     query: &'a str,
@@ -1291,8 +1663,7 @@ fn search_file(
     }
 
     let mut bytes = Vec::new();
-    if file
-        .by_ref()
+    if Read::by_ref(&mut file)
         .take(metadata.len())
         .read_to_end(&mut bytes)
         .is_err()
@@ -1417,9 +1788,22 @@ fn open_file_for_read(path: &Path) -> Result<fs::File, DomainError> {
     })
 }
 
+fn open_file_for_patch(path: &Path) -> Result<fs::File, DomainError> {
+    open_file_for_patch_impl(path).map_err(|error| {
+        if is_symlink_open_error(&error) {
+            DomainError::new(ERROR_PATH_DENIED, "workspace path uses a symlink")
+        } else {
+            DomainError::new(
+                ERROR_WRITE_FAILED,
+                "could not open workspace file for patching",
+            )
+        }
+    })
+}
+
 #[cfg(unix)]
 fn open_file_for_read_impl(path: &Path) -> io::Result<fs::File> {
-    let mut options = OpenOptions::new();
+    let mut options = fs::OpenOptions::new();
     options.read(true).custom_flags(libc::O_NOFOLLOW);
     options.open(path)
 }
@@ -1427,6 +1811,28 @@ fn open_file_for_read_impl(path: &Path) -> io::Result<fs::File> {
 #[cfg(not(unix))]
 fn open_file_for_read_impl(path: &Path) -> io::Result<fs::File> {
     fs::File::open(path)
+}
+
+#[cfg(unix)]
+fn open_file_for_patch_impl(path: &Path) -> io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options
+        .read(true)
+        .write(true)
+        .create(false)
+        .truncate(false)
+        .custom_flags(libc::O_NOFOLLOW);
+    options.open(path)
+}
+
+#[cfg(not(unix))]
+fn open_file_for_patch_impl(path: &Path) -> io::Result<fs::File> {
+    fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(false)
+        .truncate(false)
+        .open(path)
 }
 
 #[cfg(unix)]
@@ -1651,6 +2057,7 @@ mod tests {
     use merry_runtime::{ArtifactContentKind, ToolExecutionError};
     use serde_json::{Map, Value, json};
     use std::{
+        cell::Cell,
         env,
         ffi::OsStr,
         fs::{self, File},
@@ -1737,6 +2144,22 @@ mod tests {
         )
     }
 
+    fn patch_outcome(
+        tools: &ReadOnlyWorkspaceTools,
+        path: &str,
+        old_text: &str,
+        new_text: &str,
+    ) -> ToolExecutionOutcome {
+        patch_file_blocking(
+            &tools.state,
+            PatchFileArgs {
+                path: path.to_owned(),
+                old_text: old_text.to_owned(),
+                new_text: new_text.to_owned(),
+            },
+        )
+    }
+
     fn json_content(outcome: &ToolExecutionOutcome) -> Value {
         serde_json::from_str(
             outcome
@@ -1803,6 +2226,10 @@ mod tests {
         )
     }
 
+    fn read_text(path: &Path) -> String {
+        fs::read_to_string(path).expect("workspace text file should be readable")
+    }
+
     #[test]
     fn config_rejects_missing_roots() {
         let err = ReadOnlyWorkspaceTools::new(WorkspaceToolsConfig::new(Vec::new()))
@@ -1850,6 +2277,8 @@ mod tests {
 
         for invalid_name in [
             "max_read_bytes",
+            "max_write_bytes",
+            "max_patch_bytes",
             "max_list_entries",
             "max_search_matches",
             "max_search_files",
@@ -1861,6 +2290,8 @@ mod tests {
             let mut limits = WorkspaceToolLimits::default();
             match invalid_name {
                 "max_read_bytes" => limits.max_read_bytes = 0,
+                "max_write_bytes" => limits.max_write_bytes = 0,
+                "max_patch_bytes" => limits.max_patch_bytes = 0,
                 "max_list_entries" => limits.max_list_entries = 0,
                 "max_search_matches" => limits.max_search_matches = 0,
                 "max_search_files" => limits.max_search_files = 0,
@@ -1898,6 +2329,32 @@ mod tests {
                 WORKSPACE_LIST_DIR_TOOL,
                 WORKSPACE_SEARCH_TEXT_TOOL
             ]
+        );
+    }
+
+    #[test]
+    fn patch_tool_registration_is_opt_in_and_workspace_write() {
+        let temp = TempWorkspace::new("registered-patch-tools");
+
+        let read_only_tools = tools_for(temp.path()).into_registered_tools();
+        assert!(
+            read_only_tools
+                .iter()
+                .all(|tool| tool.spec().name().as_str() != WORKSPACE_PATCH_FILE_TOOL)
+        );
+
+        let tools = tools_for(temp.path()).into_registered_tools_with_patch();
+        let patch = tools
+            .iter()
+            .find(|tool| tool.spec().name().as_str() == WORKSPACE_PATCH_FILE_TOOL)
+            .expect("patch tool should be registered only by opt-in method");
+        assert_eq!(patch.action_kind(), ToolActionKind::WorkspaceWrite);
+        assert_eq!(tools.len(), 4);
+        assert!(
+            tools
+                .iter()
+                .filter(|tool| tool.spec().name().as_str() != WORKSPACE_PATCH_FILE_TOOL)
+                .all(|tool| tool.action_kind() == ToolActionKind::ReadOnly)
         );
     }
 
@@ -2442,6 +2899,266 @@ mod tests {
             ERROR_PATH_DENIED,
             None,
             temp.path(),
+        );
+    }
+
+    #[test]
+    fn patch_file_executor_replaces_one_preimage_in_existing_utf8_file() {
+        let temp = TempWorkspace::new("patch-success");
+        temp.write_text("dir/note.txt", "alpha\nold value\nomega\n");
+        let tools = tools_for(temp.path());
+        let executor = PatchFileExecutor {
+            state: Arc::clone(&tools.state),
+        };
+        let call = pending_call_for(
+            WORKSPACE_PATCH_FILE_TOOL,
+            json!({
+                "path": "dir/note.txt",
+                "old_text": "old value",
+                "new_text": "new value"
+            }),
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("tokio runtime should build");
+
+        let outcome = runtime
+            .block_on(executor.execute(call, ToolExecutionContext::default()))
+            .expect("patch executor should succeed");
+
+        assert_eq!(outcome.status(), ToolCallResultStatus::Succeeded);
+        let payload = json_content(&outcome);
+        assert_eq!(
+            payload,
+            json!({
+                "ok": true,
+                "tool": WORKSPACE_PATCH_FILE_TOOL,
+                "path": "dir/note.txt",
+                "replacements": 1,
+                "bytes_before": 22,
+                "bytes_after": 22
+            })
+        );
+        assert_eq!(
+            read_text(&temp.path().join("dir/note.txt")),
+            "alpha\nnew value\nomega\n"
+        );
+        assert!(
+            !outcome
+                .content()
+                .as_text()
+                .expect("json content")
+                .contains(temp.path().to_str().expect("temp path utf8")),
+            "tool output must not include absolute host roots"
+        );
+    }
+
+    #[test]
+    fn patch_file_stale_and_ambiguous_preimages_fail_without_mutation() {
+        let temp = TempWorkspace::new("patch-preimage-failures");
+        temp.write_text("stale.txt", "alpha\nbeta\n");
+        temp.write_text("ambiguous.txt", "repeat\nmiddle\nrepeat\n");
+        let tools = tools_for(temp.path());
+
+        let stale = patch_outcome(&tools, "stale.txt", "gamma", "delta");
+        assert_failed_json_for_tool(
+            &stale,
+            WORKSPACE_PATCH_FILE_TOOL,
+            ERROR_PREIMAGE_ABSENT,
+            Some("stale.txt"),
+            temp.path(),
+        );
+        assert_eq!(read_text(&temp.path().join("stale.txt")), "alpha\nbeta\n");
+
+        let ambiguous = patch_outcome(&tools, "ambiguous.txt", "repeat", "single");
+        assert_failed_json_for_tool(
+            &ambiguous,
+            WORKSPACE_PATCH_FILE_TOOL,
+            ERROR_PREIMAGE_AMBIGUOUS,
+            Some("ambiguous.txt"),
+            temp.path(),
+        );
+        assert_eq!(
+            read_text(&temp.path().join("ambiguous.txt")),
+            "repeat\nmiddle\nrepeat\n"
+        );
+    }
+
+    #[test]
+    fn patch_file_rejects_bad_hidden_missing_and_directory_paths_without_mutation() {
+        let temp = TempWorkspace::new("patch-path-denied");
+        temp.write_text("visible.txt", "old\n");
+        temp.write_text(".secret", "old\n");
+        fs::create_dir_all(temp.path().join("dir")).expect("directory should be created");
+        let tools = tools_for(temp.path());
+
+        for denied in [
+            "/etc/passwd".to_owned(),
+            "../outside.txt".to_owned(),
+            ".secret".to_owned(),
+            "dir/./file.txt".to_owned(),
+        ] {
+            let outcome = patch_outcome(&tools, &denied, "old", "new");
+            let expected_path = if denied.starts_with('/') {
+                None
+            } else {
+                Some(denied.as_str())
+            };
+            assert_failed_json_for_tool(
+                &outcome,
+                WORKSPACE_PATCH_FILE_TOOL,
+                ERROR_PATH_DENIED,
+                expected_path,
+                temp.path(),
+            );
+        }
+        assert_eq!(read_text(&temp.path().join(".secret")), "old\n");
+
+        let missing = patch_outcome(&tools, "missing.txt", "old", "new");
+        assert_failed_json_for_tool(
+            &missing,
+            WORKSPACE_PATCH_FILE_TOOL,
+            ERROR_FILE_NOT_FOUND,
+            Some("missing.txt"),
+            temp.path(),
+        );
+        assert!(!temp.path().join("missing.txt").exists());
+
+        let directory = patch_outcome(&tools, "dir", "old", "new");
+        assert_failed_json_for_tool(
+            &directory,
+            WORKSPACE_PATCH_FILE_TOOL,
+            ERROR_NOT_FILE,
+            Some("dir"),
+            temp.path(),
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn patch_file_rejects_symlink_path_without_following_it() {
+        let temp = TempWorkspace::new("patch-symlink");
+        temp.write_text("target.txt", "old\n");
+        symlink(temp.path().join("target.txt"), temp.path().join("link.txt"))
+            .expect("symlink should be created");
+        let tools = tools_for(temp.path());
+
+        let outcome = patch_outcome(&tools, "link.txt", "old", "new");
+
+        assert_failed_json_for_tool(
+            &outcome,
+            WORKSPACE_PATCH_FILE_TOOL,
+            ERROR_PATH_DENIED,
+            Some("link.txt"),
+            temp.path(),
+        );
+        assert_eq!(read_text(&temp.path().join("target.txt")), "old\n");
+    }
+
+    #[test]
+    fn patch_file_rejects_binary_and_limit_failures_without_mutation() {
+        let temp = TempWorkspace::new("patch-binary-limits");
+        temp.write_bytes("binary.txt", b"old\0value\n");
+        temp.write_text("large-read.txt", "abcdef\n");
+        temp.write_text("large-write.txt", "abc\n");
+        temp.write_text("large-payload.txt", "abc\n");
+
+        let binary_tools = tools_for(temp.path());
+        let binary = patch_outcome(&binary_tools, "binary.txt", "old", "new");
+        assert_failed_json_for_tool(
+            &binary,
+            WORKSPACE_PATCH_FILE_TOOL,
+            ERROR_NOT_UTF8,
+            Some("binary.txt"),
+            temp.path(),
+        );
+        assert_eq!(
+            fs::read(temp.path().join("binary.txt")).expect("binary file should be readable"),
+            b"old\0value\n"
+        );
+
+        let read_limited = ReadOnlyWorkspaceTools::new(
+            WorkspaceToolsConfig::new(vec![temp.path().to_path_buf()]).with_limits(
+                WorkspaceToolLimits {
+                    max_read_bytes: 3,
+                    ..WorkspaceToolLimits::default()
+                },
+            ),
+        )
+        .expect("workspace tools should construct");
+        let too_large_read = patch_outcome(&read_limited, "large-read.txt", "abc", "x");
+        assert_failed_json_for_tool(
+            &too_large_read,
+            WORKSPACE_PATCH_FILE_TOOL,
+            ERROR_FILE_TOO_LARGE,
+            Some("large-read.txt"),
+            temp.path(),
+        );
+        assert_eq!(read_text(&temp.path().join("large-read.txt")), "abcdef\n");
+
+        let payload_limited = ReadOnlyWorkspaceTools::new(
+            WorkspaceToolsConfig::new(vec![temp.path().to_path_buf()]).with_limits(
+                WorkspaceToolLimits {
+                    max_patch_bytes: 3,
+                    ..WorkspaceToolLimits::default()
+                },
+            ),
+        )
+        .expect("workspace tools should construct");
+        let too_large_payload = patch_outcome(&payload_limited, "large-payload.txt", "ab", "cd");
+        assert_failed_json_for_tool(
+            &too_large_payload,
+            WORKSPACE_PATCH_FILE_TOOL,
+            ERROR_INVALID_ARGUMENTS,
+            Some("large-payload.txt"),
+            temp.path(),
+        );
+        assert_eq!(read_text(&temp.path().join("large-payload.txt")), "abc\n");
+
+        let write_limited = ReadOnlyWorkspaceTools::new(
+            WorkspaceToolsConfig::new(vec![temp.path().to_path_buf()]).with_limits(
+                WorkspaceToolLimits {
+                    max_write_bytes: 4,
+                    ..WorkspaceToolLimits::default()
+                },
+            ),
+        )
+        .expect("workspace tools should construct");
+        let too_large_write = patch_outcome(&write_limited, "large-write.txt", "b", "bcdef");
+        assert_failed_json_for_tool(
+            &too_large_write,
+            WORKSPACE_PATCH_FILE_TOOL,
+            ERROR_FILE_TOO_LARGE,
+            Some("large-write.txt"),
+            temp.path(),
+        );
+        assert_eq!(read_text(&temp.path().join("large-write.txt")), "abc\n");
+    }
+
+    #[test]
+    fn patch_file_cancellation_before_write_keeps_file_unchanged() {
+        let temp = TempWorkspace::new("patch-cancel-before-write");
+        temp.write_text("note.txt", "alpha\nold\nomega\n");
+        let tools = tools_for(temp.path());
+        let args = PatchFileArgs {
+            path: "note.txt".to_owned(),
+            old_text: "old".to_owned(),
+            new_text: "new".to_owned(),
+        };
+        let checks = Cell::new(0);
+        let is_cancelled = || {
+            let next = checks.get() + 1;
+            checks.set(next);
+            next >= 6
+        };
+
+        let err = patch_file_blocking_checked(&tools.state, args, &is_cancelled)
+            .expect_err("cancellation before write should abort patch execution");
+
+        assert!(matches!(err, ToolExecutionError::Cancelled));
+        assert_eq!(
+            read_text(&temp.path().join("note.txt")),
+            "alpha\nold\nomega\n"
         );
     }
 

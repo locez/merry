@@ -9,8 +9,8 @@ use merry_llm::{
 };
 use merry_runtime::{Runtime, StepContext, StepInput, ToolExecutionContext};
 use merry_tool_workspace::{
-    ReadOnlyWorkspaceTools, WORKSPACE_LIST_DIR_TOOL, WORKSPACE_READ_FILE_TOOL,
-    WORKSPACE_SEARCH_TEXT_TOOL, WorkspaceToolsConfig,
+    ReadOnlyWorkspaceTools, WORKSPACE_LIST_DIR_TOOL, WORKSPACE_PATCH_FILE_TOOL,
+    WORKSPACE_READ_FILE_TOOL, WORKSPACE_SEARCH_TEXT_TOOL, WorkspaceToolsConfig,
 };
 use serde_json::{Map, Value};
 use std::{
@@ -108,6 +108,14 @@ fn pending_search_text_call(path: &str, query: &str) -> ModelEvent {
     )
 }
 
+fn pending_patch_file_call(path: &str, old_text: &str, new_text: &str) -> ModelEvent {
+    let mut arguments = Map::new();
+    arguments.insert("path".to_owned(), Value::String(path.to_owned()));
+    arguments.insert("old_text".to_owned(), Value::String(old_text.to_owned()));
+    arguments.insert("new_text".to_owned(), Value::String(new_text.to_owned()));
+    pending_workspace_call("workspace-patch-call", WORKSPACE_PATCH_FILE_TOOL, arguments)
+}
+
 async fn collect_step(runtime: &Runtime, text: &str) -> Vec<RuntimeEvent> {
     runtime
         .step(
@@ -141,6 +149,18 @@ fn runtime_with_workspace_tools_and_provider(
         builder.build().expect("runtime should build"),
         provider_handle,
     )
+}
+
+fn runtime_with_workspace_patch_tools(root: &Path, model_event: ModelEvent) -> Runtime {
+    let tools = ReadOnlyWorkspaceTools::new(WorkspaceToolsConfig::new(vec![root.to_path_buf()]))
+        .expect("workspace tools should construct");
+    let provider = FakeModelProvider::new(vec![Ok(model_event)]);
+    let mut builder =
+        Runtime::builder(session_id()).model_provider(Arc::new(provider), model_name());
+    for tool in tools.into_registered_tools_with_patch() {
+        builder = builder.register_tool(tool);
+    }
+    builder.build().expect("runtime should build")
 }
 
 async fn execute_first_pending_call(runtime: &Runtime, user_text: &str) -> Vec<RuntimeEvent> {
@@ -427,4 +447,49 @@ async fn registered_search_text_domain_failure_records_failed_json_without_runti
         temp.path(),
     )
     .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn registered_patch_file_tool_is_policy_denied_before_mutating_file() {
+    let temp = TempWorkspace::new("patch-policy-denied");
+    temp.write_text("note.txt", "alpha\nold\nomega\n");
+    let runtime = runtime_with_workspace_patch_tools(
+        temp.path(),
+        pending_patch_file_call("note.txt", "old", "new"),
+    );
+
+    let pending_events = collect_step(&runtime, "patch note").await;
+    assert_eq!(
+        event_kind_names(&pending_events),
+        ["SessionStarted", "StepStarted", "ToolCallPending"]
+    );
+    let pending = runtime
+        .pending_tool_calls()
+        .await
+        .into_iter()
+        .next()
+        .expect("pending call should be stored");
+
+    let execution_events = runtime
+        .execute_tool_call(pending.id(), ToolExecutionContext::default())
+        .await
+        .expect("runtime policy denial should resolve pending call");
+
+    assert_eq!(
+        event_kind_names(&execution_events),
+        ["ArtifactRecorded", "ToolCallResolved"]
+    );
+    let result = resolved_tool_result(&execution_events);
+    assert_eq!(result.status(), ToolCallResultStatus::Failed);
+    assert_eq!(
+        result
+            .diagnostic()
+            .expect("policy denial should include diagnostic")
+            .code(),
+        "action_policy_denied"
+    );
+    assert_eq!(
+        fs::read_to_string(temp.path().join("note.txt")).expect("workspace file should read"),
+        "alpha\nold\nomega\n"
+    );
 }

@@ -69,23 +69,26 @@ impl ActionPolicyDecision {
 
     /// Returns the action category considered by policy.
     #[must_use]
-    #[cfg(test)]
     pub(crate) const fn action_kind(&self) -> ToolActionKind {
         self.action_kind
     }
 
     /// Returns the risk tier assigned by policy.
     #[must_use]
-    #[cfg(test)]
     pub(crate) const fn risk_tier(&self) -> ActionRiskTier {
         self.risk_tier
     }
 
     /// Returns the policy disposition.
     #[must_use]
-    #[cfg(test)]
     pub(crate) const fn disposition(&self) -> ActionPolicyDisposition {
         self.disposition
+    }
+
+    /// Returns the compact hard-policy reason.
+    #[must_use]
+    pub(crate) const fn reason(&self) -> &'static str {
+        self.reason
     }
 
     pub(crate) const fn is_allowed(&self) -> bool {
