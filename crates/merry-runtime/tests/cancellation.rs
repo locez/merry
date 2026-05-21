@@ -9,8 +9,8 @@ use merry_llm::{
 };
 use merry_runtime::{
     ArtifactError, LedgerFactKind, LedgerProjection, RegisteredTool, Runtime, RuntimeError,
-    StepContext, StepInput, ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome,
-    ToolExecutor, ToolExecutorFuture,
+    StepContext, StepInput, ToolActionKind, ToolExecutionContext, ToolExecutionError,
+    ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture,
 };
 use schemars::Schema;
 use serde_json::json;
@@ -116,6 +116,25 @@ async fn assert_missing_tool_result_artifact(runtime: &Runtime) {
 fn runtime_with_waiting_tool(session: &str, executor: impl ToolExecutor + 'static) -> Runtime {
     Runtime::builder(SessionId::new(session).expect("valid session id"))
         .register_tool(RegisteredTool::new(tool_spec(), Arc::new(executor)))
+        .model_provider(
+            Arc::new(FakeModelProvider::new(vec![Ok(pending_tool_response(
+                "cancel-tool-call",
+            ))])),
+            model_name(),
+        )
+        .build()
+        .expect("runtime should build")
+}
+
+fn runtime_with_waiting_tool_action(
+    session: &str,
+    executor: impl ToolExecutor + 'static,
+    action_kind: ToolActionKind,
+) -> Runtime {
+    Runtime::builder(SessionId::new(session).expect("valid session id"))
+        .register_tool(
+            RegisteredTool::new(tool_spec(), Arc::new(executor)).with_action_kind(action_kind),
+        )
         .model_provider(
             Arc::new(FakeModelProvider::new(vec![Ok(pending_tool_response(
                 "cancel-tool-call",
@@ -332,6 +351,42 @@ async fn pre_cancelled_tool_execution_keeps_pending_and_releases_active_permit()
             .iter()
             .any(|event| matches!(event.kind, RuntimeEventKind::Failed { .. }))
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn pre_cancelled_workspace_write_tool_execution_keeps_pending_without_denial_artifact() {
+    let executor = WaitingToolExecutor::new();
+    let runtime = runtime_with_waiting_tool_action(
+        "cancel-tool-pre-policy-denied",
+        executor.clone(),
+        ToolActionKind::WorkspaceWrite,
+    );
+    let events = collect_pending_step(&runtime, "request wait tool").await;
+    assert_eq!(
+        event_kind_names(&events),
+        ["SessionStarted", "StepStarted", "ToolCallPending"]
+    );
+    let projection_before_cancel = runtime.ledger_projection().await;
+
+    let token = CancellationToken::new();
+    token.cancel();
+    let err = runtime
+        .execute_tool_call(
+            &tool_call_id("cancel-tool-call"),
+            ToolExecutionContext::new(token),
+        )
+        .await
+        .expect_err("pre-cancelled policy-denied tool execution should be rejected");
+
+    assert!(matches!(
+        err,
+        RuntimeError::ToolExecutionCancelled { call_id, .. }
+            if call_id == tool_call_id("cancel-tool-call")
+    ));
+    assert_eq!(executor.call_count(), 0);
+    assert_eq!(runtime.pending_tool_calls().await.len(), 1);
+    assert_eq!(runtime.ledger_projection().await, projection_before_cancel);
+    assert_missing_tool_result_artifact(&runtime).await;
 }
 
 #[tokio::test(flavor = "current_thread")]

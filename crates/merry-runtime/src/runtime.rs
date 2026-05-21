@@ -16,7 +16,9 @@ use crate::{
     },
     session::{SessionState, is_runtime_reserved_artifact_id},
     step::{StepContext, StepInput, compile_step_model_request},
-    tool::{RegisteredTool, ToolExecutionContext, ToolExecutionError, ToolRegistry},
+    tool::{
+        RegisteredTool, ToolActionKind, ToolExecutionContext, ToolExecutionError, ToolRegistry,
+    },
 };
 use futures_util::StreamExt;
 use merry_core::{
@@ -46,7 +48,9 @@ const DIAGNOSTIC_MODEL_TOOL_CALL_MIXED_OUTPUT: &str = "model_tool_call_mixed_out
 const DIAGNOSTIC_MODEL_PARALLEL_TOOL_CALLS_UNSUPPORTED: &str =
     "model_parallel_tool_calls_unsupported";
 const DIAGNOSTIC_TOOL_CALL_RESULT_REQUIRED: &str = "tool_call_result_required";
+const DIAGNOSTIC_TOOL_ACTION_POLICY_DENIED: &str = "action_policy_denied";
 const DIAGNOSTIC_TOOL_NOT_REGISTERED: &str = "tool_not_registered";
+const TOOL_ACTION_POLICY_DENIED_MESSAGE: &str = "tool action was blocked by runtime policy";
 
 /// Merry runtime handle for one session.
 ///
@@ -262,7 +266,7 @@ impl Runtime {
                 })?
         };
 
-        let Some(executor) = self.inner.tool_registry.executor(pending.name()) else {
+        let Some(registered_tool) = self.inner.tool_registry.registered_tool(pending.name()) else {
             if context.cancellation_token().is_cancelled() {
                 return Err(RuntimeError::ToolExecutionCancelled {
                     session_id: self.inner.session_id.clone(),
@@ -293,6 +297,27 @@ impl Runtime {
             );
         };
 
+        if registered_tool.action_kind() != ToolActionKind::ReadOnly {
+            if context.cancellation_token().is_cancelled() {
+                return Err(RuntimeError::ToolExecutionCancelled {
+                    session_id: self.inner.session_id.clone(),
+                    call_id: call_id.clone(),
+                });
+            }
+
+            let outcome = denied_tool_action_outcome(&pending);
+            let (status, content, diagnostic) = outcome.into_parts();
+            let mut session = self.inner.session.lock().await;
+            if context.cancellation_token().is_cancelled() {
+                return Err(RuntimeError::ToolExecutionCancelled {
+                    session_id: self.inner.session_id.clone(),
+                    call_id: call_id.clone(),
+                });
+            }
+            return session.submit_tool_execution_outcome(call_id, status, content, diagnostic);
+        }
+
+        let executor = registered_tool.executor();
         let execution = tokio::select! {
             biased;
             () = context.cancellation_token().cancelled() => {
@@ -352,6 +377,17 @@ impl Runtime {
         let session = self.inner.session.lock().await;
         session
             .evidence_ref(artifact_id, locator)
+            .map_err(Into::into)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn read_artifact_content(
+        &self,
+        artifact_id: &ArtifactId,
+    ) -> Result<ArtifactContent, RuntimeError> {
+        let session = self.inner.session.lock().await;
+        session
+            .read_artifact_content(artifact_id)
             .map_err(Into::into)
     }
 
@@ -472,6 +508,23 @@ impl Runtime {
         }
         session.record_judgment(request, outcome)
     }
+}
+
+fn denied_tool_action_outcome(pending: &PendingToolCall) -> crate::ToolExecutionOutcome {
+    let diagnostic = diagnostic_from_text(
+        DIAGNOSTIC_TOOL_ACTION_POLICY_DENIED,
+        TOOL_ACTION_POLICY_DENIED_MESSAGE,
+    );
+    let payload = serde_json::json!({
+        "ok": false,
+        "tool": pending.name().as_str(),
+        "error": {
+            "code": DIAGNOSTIC_TOOL_ACTION_POLICY_DENIED,
+            "message": TOOL_ACTION_POLICY_DENIED_MESSAGE
+        }
+    });
+
+    crate::ToolExecutionOutcome::failed_json(payload.to_string(), diagnostic)
 }
 
 /// Builder for a Merry runtime.
@@ -1508,8 +1561,9 @@ async fn reserve_cancelled_event_slot<'a>(
 #[cfg(test)]
 mod tests {
     use super::{
-        DIAGNOSTIC_TOOL_CALL_RESULT_REQUIRED, Runtime, RuntimeInner,
-        memory_activation_seed_from_step_input, send_cancelled_event,
+        DIAGNOSTIC_TOOL_ACTION_POLICY_DENIED, DIAGNOSTIC_TOOL_CALL_RESULT_REQUIRED, Runtime,
+        RuntimeInner, TOOL_ACTION_POLICY_DENIED_MESSAGE, memory_activation_seed_from_step_input,
+        send_cancelled_event,
     };
     use crate::ArtifactError;
     use crate::artifact::ArtifactContent;
@@ -1526,7 +1580,7 @@ mod tests {
     };
     use crate::session::SessionState;
     use crate::tool::{
-        RegisteredTool, ToolExecutionContext, ToolExecutionOutcome, ToolExecutor,
+        RegisteredTool, ToolActionKind, ToolExecutionContext, ToolExecutionOutcome, ToolExecutor,
         ToolExecutorFuture, ToolRegistry,
     };
     use futures_util::StreamExt;
@@ -3832,6 +3886,97 @@ mod tests {
         .expect("valid tool spec")
     }
 
+    fn policy_tool_spec(name: &str) -> ToolSpec {
+        let schema = Schema::try_from(json!({ "type": "object" }))
+            .expect("test schema should be a JSON schema");
+        ToolSpec::new(
+            ToolName::new(name).expect("valid tool name"),
+            "Policy test tool",
+            ToolInputSchema::new(schema).expect("valid tool schema"),
+        )
+        .expect("valid tool spec")
+    }
+
+    fn policy_pending_tool_call(id: &str, name: &str) -> PendingToolCall {
+        PendingToolCall::new(
+            ToolCallId::new(id).expect("valid tool call id"),
+            ToolName::new(name).expect("valid tool name"),
+            ToolCallArguments::new(Default::default()),
+        )
+    }
+
+    fn resolved_tool_result(events: &[RuntimeEvent]) -> &merry_core::ToolCallResult {
+        events
+            .iter()
+            .find_map(|event| match &event.kind {
+                RuntimeEventKind::ToolCallResolved { result } => Some(result),
+                _ => None,
+            })
+            .expect("tool call should resolve")
+    }
+
+    async fn register_policy_pending_tool(
+        session: &str,
+        tool_name: &str,
+        call_id: &str,
+        action_kind: ToolActionKind,
+        executor: SuccessfulToolExecutor,
+    ) -> (Runtime, PendingToolCall) {
+        let spec = policy_tool_spec(tool_name);
+        let pending = policy_pending_tool_call(call_id, spec.name().as_str());
+        let runtime = Runtime::builder(session_id(session))
+            .register_tool(
+                RegisteredTool::new(spec, Arc::new(executor)).with_action_kind(action_kind),
+            )
+            .build()
+            .expect("runtime should build");
+        {
+            let mut session = runtime.inner.session.lock().await;
+            session.record_session_started_if_needed();
+            session
+                .record_tool_call_pending(pending.clone())
+                .expect("pending call should record");
+        }
+        (runtime, pending)
+    }
+
+    async fn denied_action_content(
+        runtime: &Runtime,
+        events: &[RuntimeEvent],
+    ) -> serde_json::Value {
+        let result = resolved_tool_result(events);
+        let content = runtime
+            .read_artifact_content(result.artifact().id())
+            .await
+            .expect("denial artifact should be readable");
+        let text = content
+            .as_text()
+            .expect("denial artifact should be textual JSON");
+        serde_json::from_str(text).expect("denial artifact should parse as JSON")
+    }
+
+    fn assert_sanitized_policy_denial_content(content: &serde_json::Value, tool_name: &str) {
+        assert_eq!(
+            content,
+            &json!({
+                "ok": false,
+                "tool": tool_name,
+                "error": {
+                    "code": DIAGNOSTIC_TOOL_ACTION_POLICY_DENIED,
+                    "message": TOOL_ACTION_POLICY_DENIED_MESSAGE
+                }
+            })
+        );
+        assert!(content.get("call_id").is_none());
+        assert!(content.get("action_kind").is_none());
+        assert!(content.get("policy").is_none());
+        assert!(content.get("reason").is_none());
+        assert!(content.get("provider").is_none());
+        assert!(content.get("provider_response").is_none());
+        assert!(content.get("wire").is_none());
+        assert!(content.get("previous_response_id").is_none());
+    }
+
     #[derive(Clone)]
     struct SuccessfulToolExecutor {
         calls: Arc<AtomicUsize>,
@@ -3860,6 +4005,197 @@ mod tests {
                 Ok(ToolExecutionOutcome::succeeded_text("ok\n"))
             })
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn read_only_registered_tool_executes_under_default_policy() {
+        let executor = SuccessfulToolExecutor::new();
+        let (runtime, pending) = register_policy_pending_tool(
+            "runtime-policy-read-only",
+            "policy_read",
+            "call-read-only",
+            ToolActionKind::ReadOnly,
+            executor.clone(),
+        )
+        .await;
+
+        let events = runtime
+            .execute_tool_call(pending.id(), ToolExecutionContext::default())
+            .await
+            .expect("read-only tool execution should be allowed");
+
+        assert_eq!(executor.call_count(), 1);
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| match event.kind {
+                    RuntimeEventKind::ArtifactRecorded { .. } => "ArtifactRecorded",
+                    RuntimeEventKind::ToolCallResolved { .. } => "ToolCallResolved",
+                    _ => "Other",
+                })
+                .collect::<Vec<_>>(),
+            ["ArtifactRecorded", "ToolCallResolved"]
+        );
+        let result = resolved_tool_result(&events);
+        assert_eq!(result.status(), merry_core::ToolCallResultStatus::Succeeded);
+        assert!(runtime.pending_tool_calls().await.is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn workspace_write_tool_is_denied_before_executor_and_records_sanitized_failure_artifact()
+    {
+        let executor = SuccessfulToolExecutor::new();
+        let (runtime, pending) = register_policy_pending_tool(
+            "runtime-policy-workspace-write",
+            "policy_write",
+            "call-workspace-write",
+            ToolActionKind::WorkspaceWrite,
+            executor.clone(),
+        )
+        .await;
+
+        let events = runtime
+            .execute_tool_call(pending.id(), ToolExecutionContext::default())
+            .await
+            .expect("policy denial should durably resolve the pending call");
+
+        assert_eq!(executor.call_count(), 0);
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| match event.kind {
+                    RuntimeEventKind::ArtifactRecorded { .. } => "ArtifactRecorded",
+                    RuntimeEventKind::ToolCallResolved { .. } => "ToolCallResolved",
+                    _ => "Other",
+                })
+                .collect::<Vec<_>>(),
+            ["ArtifactRecorded", "ToolCallResolved"]
+        );
+        let result = resolved_tool_result(&events);
+        assert!(matches!(
+            &events[0].kind,
+            RuntimeEventKind::ArtifactRecorded { artifact } if artifact == result.artifact()
+        ));
+        assert!(matches!(
+            &events[1].kind,
+            RuntimeEventKind::ToolCallResolved { result: resolved } if resolved == result
+        ));
+        assert_eq!(result.status(), merry_core::ToolCallResultStatus::Failed);
+        assert_eq!(
+            result
+                .diagnostic()
+                .expect("policy denial should include diagnostic")
+                .code(),
+            DIAGNOSTIC_TOOL_ACTION_POLICY_DENIED
+        );
+        assert!(runtime.pending_tool_calls().await.is_empty());
+
+        let content = denied_action_content(&runtime, &events).await;
+        assert_sanitized_policy_denial_content(&content, "policy_write");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn command_exec_tool_is_denied_before_executor() {
+        let executor = SuccessfulToolExecutor::new();
+        let (runtime, pending) = register_policy_pending_tool(
+            "runtime-policy-command-exec",
+            "policy_command",
+            "call-command-exec",
+            ToolActionKind::CommandExec,
+            executor.clone(),
+        )
+        .await;
+
+        let events = runtime
+            .execute_tool_call(pending.id(), ToolExecutionContext::default())
+            .await
+            .expect("policy denial should durably resolve the pending call");
+
+        assert_eq!(executor.call_count(), 0);
+        let content = denied_action_content(&runtime, &events).await;
+        assert_sanitized_policy_denial_content(&content, "policy_command");
+        assert_eq!(
+            resolved_tool_result(&events)
+                .diagnostic()
+                .expect("policy denial should include diagnostic")
+                .code(),
+            DIAGNOSTIC_TOOL_ACTION_POLICY_DENIED
+        );
+        assert!(runtime.pending_tool_calls().await.is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn network_tool_is_denied_before_executor() {
+        let executor = SuccessfulToolExecutor::new();
+        let (runtime, pending) = register_policy_pending_tool(
+            "runtime-policy-network",
+            "policy_network",
+            "call-network",
+            ToolActionKind::Network,
+            executor.clone(),
+        )
+        .await;
+
+        let events = runtime
+            .execute_tool_call(pending.id(), ToolExecutionContext::default())
+            .await
+            .expect("policy denial should durably resolve the pending call");
+
+        assert_eq!(executor.call_count(), 0);
+        let content = denied_action_content(&runtime, &events).await;
+        assert_sanitized_policy_denial_content(&content, "policy_network");
+        assert_eq!(
+            resolved_tool_result(&events)
+                .diagnostic()
+                .expect("policy denial should include diagnostic")
+                .code(),
+            DIAGNOSTIC_TOOL_ACTION_POLICY_DENIED
+        );
+        assert!(runtime.pending_tool_calls().await.is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pre_cancelled_denied_tool_execution_keeps_pending_without_artifact() {
+        let executor = SuccessfulToolExecutor::new();
+        let (runtime, pending) = register_policy_pending_tool(
+            "runtime-policy-pre-cancel",
+            "policy_pre_cancel",
+            "call-policy-pre-cancel",
+            ToolActionKind::WorkspaceWrite,
+            executor.clone(),
+        )
+        .await;
+        let projection_before = runtime.ledger_projection().await;
+        let token = CancellationToken::new();
+        token.cancel();
+
+        let err = runtime
+            .execute_tool_call(pending.id(), ToolExecutionContext::new(token))
+            .await
+            .expect_err("pre-cancelled denied tool should not resolve");
+
+        assert!(matches!(
+            err,
+            crate::RuntimeError::ToolExecutionCancelled { call_id, .. }
+                if call_id == *pending.id()
+        ));
+        assert_eq!(executor.call_count(), 0);
+        assert_eq!(runtime.pending_tool_calls().await, vec![pending]);
+        assert_eq!(runtime.ledger_projection().await, projection_before);
+        let expected_result_artifact_id = artifact_id("tool-result-2");
+        let evidence_err = runtime
+            .evidence_ref(
+                &expected_result_artifact_id,
+                EvidenceLocator::whole_artifact(),
+            )
+            .await
+            .expect_err("pre-cancelled policy denial must not record result artifact");
+        assert!(matches!(
+            evidence_err,
+            crate::RuntimeError::Artifact {
+                source: ArtifactError::MissingArtifact { id }
+            } if id == expected_result_artifact_id
+        ));
     }
 
     #[tokio::test(flavor = "current_thread")]

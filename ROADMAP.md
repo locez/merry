@@ -6,7 +6,9 @@ This roadmap is public-safe and implementation-focused. Private product strategy
 
 Merry has closed out M18F LLM-assisted judgment boundary work through M18F-I. Since that closeout, the internal model-backed judgment foundation has added a strict tool-risk review model-output parser, crate-private provider-neutral `ModelBackedJudgmentSource`, and deterministic fake-provider runtime harness coverage through `Runtime::run_uncertainty_review`.
 
-M8 runtime/provider/tool execution hardening, M9 Memory Activation MVP, and M18F LLM-assisted judgment boundary are now maintenance and foundation work. Memory Activation now uses a session-owned in-memory stored source by default, but external/default sessions have no candidate memories until runtime-owned state records them. Production memory storage, public memory APIs, external persistence, and a stable activation contract are still not complete. Judgment remains internal and advisory: it is not a public API, public runtime event, ledger fact, tool gate, automatic provider-context inclusion, automatic context mutation or promotion, OpenAI/live-provider path, or builder/runtime configured judgment source. Deterministic judgment verification remains fake-provider only. Live provider flows remain explicit opt-in/manual debug paths; they are not the basis for deterministic verification.
+M8 runtime/provider/tool execution hardening, M9 Memory Activation MVP, M18F LLM-assisted judgment boundary, and read-only workspace navigation/search are now maintenance and foundation work. Memory Activation now uses a session-owned in-memory stored source by default, but external/default sessions have no candidate memories until runtime-owned state records them. Production memory storage, public memory APIs, external persistence, and a stable activation contract are still not complete. Judgment remains internal and advisory: it is not a public API, public runtime event, ledger fact, tool gate, automatic provider-context inclusion, automatic context mutation or promotion, OpenAI/live-provider path, or builder/runtime configured judgment source. Deterministic judgment verification remains fake-provider only. Live provider flows remain explicit opt-in/manual debug paths; they are not the basis for deterministic verification.
+
+The current coding-agent boundary is explicit: Merry is not yet a full coding-agent runtime. Read-only workspace tools provide evidence and navigation; coding-agent side effects now need runtime-owned protocols for policy, workspace patch/write actions, and shell/process actions before they become normal agent capabilities.
 
 The OpenAI provider target is the Responses API only. The provider request path is `/responses`; it preserves the Merry-owned `merry-llm` provider boundary, keeps OpenAI wire types private to `merry-provider-openai`, sets `store: false`, omits `previous_response_id`, avoids provider conversation state as Merry runtime state, and keeps `parallel_tool_calls: false` until runtime policy supports parallel tool calls. This provider work does not imply a live/OpenAI judgment path or public judgment API.
 
@@ -30,6 +32,7 @@ The OpenAI provider target is the Responses API only. The provider request path 
 - Runtime-reserved artifact IDs for tool/model output paths that must be claimed before events are emitted.
 - Opt-in OpenAI Responses debug/tool flow for manual provider integration checks.
 - Memory Activation MVP internal runtime integration with session-owned in-memory stored source, deterministic activation, evidence validation, provider-step timing, and lifecycle cleanup coverage.
+- Read-only workspace navigation/search foundation through `workspace_read_file`, `workspace_list_dir`, and `workspace_search_text` under explicitly configured trusted/stable roots.
 
 ### Recently Completed
 
@@ -49,16 +52,25 @@ The OpenAI provider target is the Responses API only. The provider request path 
 
 ### Active
 
-- Expand Runtime Agent Loop MVP only through runtime-owned policy and deterministic fake-provider tests; keep parallel tool calls, real tool integrations, provider-specific state, and live-provider verification out of this slice.
+- P0: define Action Policy as the runtime-owned admission and audit boundary for side-effectful actions.
+- Next: define Workspace Patch/Write as explicit runtime actions with artifact-backed inputs/outputs, ledger/checkpoint awareness, cancellation boundaries, bounded behavior, and deterministic fake-runtime tests.
+- Next: define Shell/Process Protocol as explicit runtime actions with policy gating, artifact-backed command/output records, ledger/checkpoint awareness, cancellation boundaries, bounded execution, and provider-neutral deterministic tests.
+- Expand Runtime Agent Loop behavior only through runtime-owned policy and deterministic fake-provider tests; keep parallel tool calls, provider-specific state, and live-provider verification out of this slice.
 - Keep judgment advisory: semantic recommendations can inform runtime policy, but hard runtime policy still decides tool execution, actions, and context mutation.
 - Keep the initial judgment contract provider-neutral, evidence-aware, cancellable, and deterministic-testable.
 - Do not connect model-backed judgment to live LLM/OpenAI paths, public judgment APIs, public runtime events, ledger facts, tool execution gates, public summary-draft promotion APIs, automatic provider-context inclusion, automatic context mutation or promotion, or builder/runtime configured judgment sources.
 - Keep deterministic verification based on fake providers, stored runtime state, artifact references, and ledger assertions.
 - Keep deterministic runtime harness coverage for model-backed judgment fake-provider only.
-- Keep `merry-tool-workspace` read-only navigation/search scope focused on `workspace_read_file`, `workspace_list_dir`, and `workspace_search_text` while hardening path safety and runtime registration behavior.
+- Keep `merry-tool-workspace` read-only navigation/search as foundation/maintenance; do not expand it into write, shell/process, network, or full coding-agent runtime behavior through ad hoc tool growth.
 - Improve public docs as implementation status changes, while keeping private notes under `docs/`.
 
-### Deferred / Next
+### Next Active
+
+- Action Policy protocol for side-effectful runtime actions.
+- Workspace Patch/Write protocol for runtime-owned file modifications.
+- Shell/Process Protocol for runtime-owned command execution and process output handling.
+
+### Deferred
 
 - Production memory store, public Memory Activation APIs, external persistence, and stable activation contract.
 - Broaden OpenAI Responses API provider coverage beyond the first streaming/text/function-call slice as runtime policy expands.
@@ -67,7 +79,7 @@ The OpenAI provider target is the Responses API only. The provider request path 
 - Rust facade crate `merry`.
 - Macro crate support for boilerplate generation.
 - Collaboration and subagent runtime support beyond reserved public contracts.
-- Write/shell/network workspace tools and full coding-agent behavior for `merry-tool-workspace`; the current slice remains read-only navigation/search only.
+- Network workspace tools and full coding-agent runtime behavior. The current workspace tool slice remains read-only navigation/search only; write and shell/process work moves through runtime-owned protocols first.
 
 ## Adopted Engineering Decisions
 

@@ -200,6 +200,22 @@ impl ToolExecutionError {
     }
 }
 
+/// Runtime-owned action category for registered tools.
+///
+/// This metadata is intentionally not part of provider-visible [`ToolSpec`].
+/// Runtime policy uses it before invoking an executor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolActionKind {
+    /// Reads runtime or workspace state without changing it.
+    ReadOnly,
+    /// Writes files or other state in the configured workspace.
+    WorkspaceWrite,
+    /// Executes a local command or process.
+    CommandExec,
+    /// Uses network access.
+    Network,
+}
+
 /// Runtime-owned registered tool definition.
 ///
 /// A registered tool binds a provider-visible spec to an executor. It does not
@@ -210,22 +226,55 @@ impl ToolExecutionError {
 pub struct RegisteredTool {
     spec: ToolSpec,
     executor: Arc<dyn ToolExecutor>,
+    action_kind: ToolActionKind,
 }
 
 impl RegisteredTool {
     /// Creates a registered tool from its provider-visible spec and runtime executor.
     ///
     /// The spec is provider-visible after adapter rendering, but the executor
-    /// remains a runtime-owned boundary.
+    /// remains a runtime-owned boundary. The action kind defaults to
+    /// [`ToolActionKind::ReadOnly`] for compatibility with existing read-only
+    /// registrations.
     #[must_use]
     pub fn new(spec: ToolSpec, executor: Arc<dyn ToolExecutor>) -> Self {
-        Self { spec, executor }
+        Self::new_with_action_kind(spec, executor, ToolActionKind::ReadOnly)
+    }
+
+    /// Creates a registered tool with an explicit runtime-owned action category.
+    ///
+    /// The action category stays inside runtime and is not rendered into the
+    /// provider-visible tool spec.
+    #[must_use]
+    pub fn new_with_action_kind(
+        spec: ToolSpec,
+        executor: Arc<dyn ToolExecutor>,
+        action_kind: ToolActionKind,
+    ) -> Self {
+        Self {
+            spec,
+            executor,
+            action_kind,
+        }
+    }
+
+    /// Marks the runtime-owned action category for this registered tool.
+    #[must_use]
+    pub fn with_action_kind(mut self, action_kind: ToolActionKind) -> Self {
+        self.action_kind = action_kind;
+        self
     }
 
     /// Borrows the provider-visible tool specification.
     #[must_use]
     pub fn spec(&self) -> &ToolSpec {
         &self.spec
+    }
+
+    /// Returns the runtime-owned action category for this tool.
+    #[must_use]
+    pub fn action_kind(&self) -> ToolActionKind {
+        self.action_kind
     }
 
     pub(crate) fn executor(&self) -> Arc<dyn ToolExecutor> {
@@ -238,6 +287,7 @@ impl std::fmt::Debug for RegisteredTool {
         formatter
             .debug_struct("RegisteredTool")
             .field("spec", &self.spec)
+            .field("action_kind", &self.action_kind)
             .finish_non_exhaustive()
     }
 }
@@ -268,8 +318,8 @@ impl ToolRegistry {
             .collect()
     }
 
-    pub(crate) fn executor(&self, name: &ToolName) -> Option<Arc<dyn ToolExecutor>> {
-        self.tools.get(name).map(RegisteredTool::executor)
+    pub(crate) fn registered_tool(&self, name: &ToolName) -> Option<&RegisteredTool> {
+        self.tools.get(name)
     }
 }
 

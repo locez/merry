@@ -62,6 +62,6 @@ pub use ledger::{
 pub use runtime::{Runtime, RuntimeBuilder};
 pub use step::{StepContext, StepInput};
 pub use tool::{
-    RegisteredTool, ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome,
+    RegisteredTool, ToolActionKind, ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome,
     ToolExecutionResult, ToolExecutor, ToolExecutorFuture,
 };

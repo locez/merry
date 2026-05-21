@@ -2,6 +2,26 @@
 
 Merry is an early-stage Rust-first agent runtime project. APIs and crate boundaries are still unstable.
 
+## Current Coding-Agent Boundary
+
+Merry is not yet a full coding-agent runtime. The current workspace tool
+surface is a read-only evidence and navigation foundation, not the main
+side-effect path for coding-agent behavior.
+
+The next coding-agent boundary is runtime-owned side-effect protocols: Action
+Policy, Workspace Patch/Write, and Shell/Process Protocol. These protocols need
+to make write and process actions explicit runtime actions with artifacts,
+ledger/checkpoint awareness, cancellation boundaries, bounded execution, and
+deterministic fake-runtime coverage before they are treated as normal agent
+capabilities.
+
+Shell/process support is not being rejected as out of scope. The direction is to
+bring it into a runtime-owned reliable audit path: policy-gated,
+artifact-backed, ledger/checkpoint-aware, cancellable, bounded,
+deterministic-testable, and provider-neutral. LLM judgment may remain advisory
+semantic input, but it is not the authorization gate for side-effectful runtime
+actions.
+
 M8 runtime/provider/tool execution hardening has shifted into maintenance and foundation work: structured runtime state, artifact-backed model output, provider step boundaries, pending tool calls, tool result resolution, tool continuations, registered tool execution, public runtime API contract cleanup/review/alignment, and opt-in OpenAI Responses debug/tool flows remain the base for later runtime work.
 
 The first Runtime Agent Loop MVP slice is implemented in `merry-runtime` as a bounded serial loop over the existing `Runtime::step`, registered tool execution, and continuation step primitives. It returns ordered runtime events and typed completed/failed/cancelled/blocked outcomes without adding provider wire state or real filesystem/shell tools. Tool execution cancellation during the loop is reported as a cancelled loop status while leaving the pending tool call unresolved.
@@ -11,7 +31,10 @@ read-only workspace navigation/search: it exposes registered
 `workspace_read_file`, `workspace_list_dir`, and `workspace_search_text` tools
 for UTF-8 reads, non-recursive directory listing, and bounded literal text
 search under explicitly configured workspace roots. It is still not a shell,
-write API, network API, or complete coding agent.
+write API, network API, or full coding-agent surface. Read-only
+navigation/search is foundation and maintenance work; future write and
+shell/process capabilities belong in runtime-owned action protocols rather than
+provider-specific flows or bare shell escape paths.
 
 The workspace path-safety contract assumes trusted, stable workspace roots. The
 MVP prevents ordinary path traversal and ordinary symlink traversal before

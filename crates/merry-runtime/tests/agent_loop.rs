@@ -12,8 +12,8 @@ use merry_llm::{
 use merry_runtime::{
     AgentLoopBlockedReason, AgentLoopConfig, AgentLoopConfigError, AgentLoopStatus, ArtifactError,
     ContextSummary, DEFAULT_AGENT_LOOP_CONTINUATION_INPUT, Runtime, RuntimeError, StepContext,
-    StepInput, ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome, ToolExecutor,
-    ToolExecutorFuture,
+    StepInput, ToolActionKind, ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome,
+    ToolExecutor, ToolExecutorFuture,
 };
 use schemars::Schema;
 use serde_json::{Map, Value, json};
@@ -346,6 +346,40 @@ fn runtime_with_tool(
         .model_provider(Arc::new(provider), model_name())
         .build()
         .expect("runtime should build")
+}
+
+fn runtime_with_tool_action(
+    session: &str,
+    provider: ScriptedModelProvider,
+    executor: impl ToolExecutor + 'static,
+    action_kind: ToolActionKind,
+) -> Runtime {
+    Runtime::builder(session_id(session))
+        .register_tool(
+            merry_runtime::RegisteredTool::new(tool_spec("search_notes"), Arc::new(executor))
+                .with_action_kind(action_kind),
+        )
+        .model_provider(Arc::new(provider), model_name())
+        .build()
+        .expect("runtime should build")
+}
+
+fn assert_sanitized_policy_denial_json(value: &Value, tool_name: &str) {
+    assert_eq!(
+        value,
+        &json!({
+            "ok": false,
+            "tool": tool_name,
+            "error": {
+                "code": "action_policy_denied",
+                "message": "tool action was blocked by runtime policy"
+            }
+        })
+    );
+    assert!(value.get("call_id").is_none());
+    assert!(value.get("action_kind").is_none());
+    assert!(value.get("policy").is_none());
+    assert!(value.get("reason").is_none());
 }
 
 async fn run_default_loop(runtime: &Runtime, text: &str) -> merry_runtime::AgentLoopResult {
@@ -728,6 +762,73 @@ async fn unregistered_tool_resolves_failed_and_continues_once() {
     );
     assert!(runtime.pending_tool_calls().await.is_empty());
     assert_eq!(provider.recorded_requests()[1].continuations().len(), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn denied_registered_tool_resolves_failed_and_agent_loop_continues_once() {
+    let provider = ScriptedModelProvider::new(vec![
+        vec![Ok(completed_tool_call_event(model_tool_call(
+            "call-policy-denied",
+            "search_notes",
+        )))],
+        vec![Ok(completed_text_event("final after policy denial"))],
+    ]);
+    let executor = ScriptedToolExecutor::succeeding_text("executor must not run\n");
+    let runtime = runtime_with_tool_action(
+        "agent-loop-policy-denied",
+        provider.clone(),
+        executor.clone(),
+        ToolActionKind::WorkspaceWrite,
+    );
+
+    let result = run_default_loop(&runtime, "Call denied tool.").await;
+
+    assert_eq!(result.status(), &AgentLoopStatus::Completed);
+    assert_eq!(
+        event_kind_names(result.events()),
+        [
+            "SessionStarted",
+            "StepStarted",
+            "ToolCallPending",
+            "ArtifactRecorded",
+            "ToolCallResolved",
+            "StepStarted",
+            "ArtifactRecorded",
+            "StepCompleted",
+        ]
+    );
+    assert_eq!(executor.calls().len(), 0);
+    let resolved = result
+        .events()
+        .iter()
+        .find_map(|event| match &event.kind {
+            RuntimeEventKind::ToolCallResolved { result } => Some(result),
+            _ => None,
+        })
+        .expect("tool call should resolve");
+    assert_eq!(resolved.status(), ToolCallResultStatus::Failed);
+    assert_eq!(
+        resolved
+            .diagnostic()
+            .expect("policy denial should include diagnostic")
+            .code(),
+        "action_policy_denied"
+    );
+    assert!(runtime.pending_tool_calls().await.is_empty());
+    let requests = provider.recorded_requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1].continuations().len(), 1);
+    assert_eq!(
+        requests[1].continuations()[0].result().status(),
+        ToolCallResultStatus::Failed
+    );
+    let content = requests[1].continuations()[0]
+        .result()
+        .content()
+        .as_json()
+        .expect("policy denial continuation should carry JSON content");
+    let value: Value = serde_json::from_str(content).expect("denial JSON should parse");
+    assert_sanitized_policy_denial_json(&value, "search_notes");
 }
 
 #[tokio::test(flavor = "current_thread")]
