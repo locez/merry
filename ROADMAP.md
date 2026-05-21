@@ -10,6 +10,8 @@ M8 runtime/provider/tool execution hardening, M9 Memory Activation MVP, M18F LLM
 
 The current coding-agent boundary is explicit: Merry is not yet a full coding-agent runtime. Read-only workspace tools provide evidence and navigation; coding-agent side effects now need runtime-owned protocols for policy, workspace patch/write actions, and shell/process actions before they become normal agent capabilities.
 
+The next runtime design milestone is Action Policy Risk Taxonomy and Role-Scoped Models. It should define runtime-owned action risk levels such as `ReadOnly`, `EditLow`, `EditElevated`, `ProcessLow`, `ProcessHigh`, and `Forbidden`, or an equivalent naming scheme. Automatic edit should be limited to concrete patch/edit actions that runtime policy classifies as low risk; it should not imply arbitrary file-write automation. High-risk shell/process actions need hard policy and may require explicit approval and/or review-role LLM evidence. Review LLM output is policy evidence, not an authorization gate; timeout, provider failure, schema/parse failure, or insufficient evidence must fail closed. The same milestone should reserve internal role-scoped model configuration for roles such as `Primary`, `ToolRiskReview`, `ApprovalReview`, and `SummaryMemory`, without making that a stable public API or leaking provider conversation state into runtime state.
+
 The OpenAI provider target is the Responses API only. The provider request path is `/responses`; it preserves the Merry-owned `merry-llm` provider boundary, keeps OpenAI wire types private to `merry-provider-openai`, sets `store: false`, omits `previous_response_id`, avoids provider conversation state as Merry runtime state, and keeps `parallel_tool_calls: false` until runtime policy supports parallel tool calls. This provider work does not imply a live/OpenAI judgment path or public judgment API.
 
 ## Status Summary
@@ -52,13 +54,14 @@ The OpenAI provider target is the Responses API only. The provider request path 
 
 ### Active
 
-- P0: define Action Policy as the runtime-owned admission and audit boundary for side-effectful actions.
-- Next: define Workspace Patch/Write as explicit runtime actions with artifact-backed inputs/outputs, ledger/checkpoint awareness, cancellation boundaries, bounded behavior, and deterministic fake-runtime tests.
-- Next: define Shell/Process Protocol as explicit runtime actions with policy gating, artifact-backed command/output records, ledger/checkpoint awareness, cancellation boundaries, bounded execution, and provider-neutral deterministic tests.
+- P0: define Action Policy Risk Taxonomy and Role-Scoped Models as the runtime-owned admission vocabulary for side-effectful actions before workspace write or process execution protocols expand.
+- Next: define Workspace Patch/Write as explicit runtime actions with artifact-backed inputs/outputs, ledger/checkpoint awareness, cancellation boundaries, bounded behavior, and deterministic fake-runtime tests. Automatic edit is only for low-risk patch/edit actions after policy classification, not for arbitrary file writes.
+- Next: define Shell/Process Protocol as explicit runtime actions with hard policy gating, artifact-backed command/output records, ledger/checkpoint awareness, cancellation boundaries, bounded execution, and provider-neutral deterministic tests. High-risk process actions may require explicit approval and/or review-role LLM evidence, and review failures must fail closed.
 - Expand Runtime Agent Loop behavior only through runtime-owned policy and deterministic fake-provider tests; keep parallel tool calls, provider-specific state, and live-provider verification out of this slice.
-- Keep judgment advisory: semantic recommendations can inform runtime policy, but hard runtime policy still decides tool execution, actions, and context mutation.
+- Keep judgment advisory: semantic recommendations and review-role LLM outputs can inform runtime policy as evidence, but hard runtime policy still decides tool execution, actions, and context mutation.
 - Keep the initial judgment contract provider-neutral, evidence-aware, cancellable, and deterministic-testable.
-- Do not connect model-backed judgment to live LLM/OpenAI paths, public judgment APIs, public runtime events, ledger facts, tool execution gates, public summary-draft promotion APIs, automatic provider-context inclusion, automatic context mutation or promotion, or builder/runtime configured judgment sources.
+- Reserve internal role-scoped model configuration for `Primary`, `ToolRiskReview`, `ApprovalReview`, `SummaryMemory`, and similar roles without exposing a stable public API or provider state.
+- Until role-scoped model configuration is designed, do not connect the existing model-backed judgment source to live LLM/OpenAI paths, public judgment APIs, public runtime events, ledger facts, tool execution gates, public summary-draft promotion APIs, automatic provider-context inclusion, automatic context mutation or promotion, or builder/runtime configured judgment sources.
 - Keep deterministic verification based on fake providers, stored runtime state, artifact references, and ledger assertions.
 - Keep deterministic runtime harness coverage for model-backed judgment fake-provider only.
 - Keep `merry-tool-workspace` read-only navigation/search as foundation/maintenance; do not expand it into write, shell/process, network, or full coding-agent runtime behavior through ad hoc tool growth.
@@ -66,9 +69,21 @@ The OpenAI provider target is the Responses API only. The provider request path 
 
 ### Next Active
 
-- Action Policy protocol for side-effectful runtime actions.
+- Action Policy Risk Taxonomy and Role-Scoped Models for side-effectful runtime actions.
 - Workspace Patch/Write protocol for runtime-owned file modifications.
 - Shell/Process Protocol for runtime-owned command execution and process output handling.
+
+### Next Milestone: Action Policy Risk Taxonomy and Role-Scoped Models
+
+Goal: define the runtime-owned risk taxonomy and role-scoped model configuration direction before Workspace Patch/Write and Shell/Process Protocol become implementation milestones.
+
+Tasks:
+
+- Define action risk categories such as `ReadOnly`, `EditLow`, `EditElevated`, `ProcessLow`, `ProcessHigh`, and `Forbidden`, or equivalent names.
+- Define the policy meaning of low-risk automatic edit as a classified patch/edit action, not blanket file-write authority.
+- Define hard-policy requirements for high-risk shell/process actions, including explicit approval and/or review-role LLM evidence where policy requires it.
+- Specify fail-closed behavior for review timeout, provider/source failure, schema/parse failure, and insufficient evidence.
+- Reserve internal role-scoped model configuration for roles such as `Primary`, `ToolRiskReview`, `ApprovalReview`, and `SummaryMemory` without exposing a stable public API or provider conversation state.
 
 ### Deferred
 

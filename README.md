@@ -15,12 +15,37 @@ ledger/checkpoint awareness, cancellation boundaries, bounded execution, and
 deterministic fake-runtime coverage before they are treated as normal agent
 capabilities.
 
+Action Policy needs a first-class risk taxonomy before write or process actions
+become normal runtime capabilities. The intended direction is to classify
+candidate actions into policy-owned levels such as `ReadOnly`, `EditLow`,
+`EditElevated`, `ProcessLow`, `ProcessHigh`, and `Forbidden`. Automatic edit
+should only mean that a runtime policy classified a concrete patch/edit action
+as low risk. It must not mean arbitrary file writes are automatically allowed.
+Capability boundaries and approval/review policy are separate concerns: a
+reviewer or approval policy can add required evidence or approval, but cannot
+expand what the runtime capability boundary allows.
+
 Shell/process support is not being rejected as out of scope. The direction is to
 bring it into a runtime-owned reliable audit path: policy-gated,
 artifact-backed, ledger/checkpoint-aware, cancellable, bounded,
 deterministic-testable, and provider-neutral. LLM judgment may remain advisory
 semantic input, but it is not the authorization gate for side-effectful runtime
 actions.
+
+High-risk shell/process actions need hard runtime policy. Depending on the
+policy classification, they may require explicit user approval and/or
+review-role LLM evidence. Review LLM output is policy evidence, not an
+authorization gate. If review output is unavailable, times out, fails to parse,
+or does not satisfy the policy schema, the admission path must fail closed.
+
+Future internal LLM roles should be configurable by role, such as `Primary`,
+`ToolRiskReview`, `ApprovalReview`, and `SummaryMemory`. That direction is for
+runtime/provider composition, not a current stable public API. Role-scoped model
+configuration must not leak provider conversation state into runtime state.
+
+The next roadmap milestone is Action Policy Risk Taxonomy and Role-Scoped
+Models. Workspace Patch/Write and Shell/Process Protocol work should build on
+that policy layer rather than define ad hoc permission rules of their own.
 
 M8 runtime/provider/tool execution hardening has shifted into maintenance and foundation work: structured runtime state, artifact-backed model output, provider step boundaries, pending tool calls, tool result resolution, tool continuations, registered tool execution, public runtime API contract cleanup/review/alignment, and opt-in OpenAI Responses debug/tool flows remain the base for later runtime work.
 
