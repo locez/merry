@@ -10,7 +10,7 @@ use crate::{
     LedgerProjectionSnapshot, RuntimeError, RuntimeEventStream, RuntimeModelRole,
     SessionContextSnapshot,
     action_audit::ActionAuditPolicy,
-    action_policy::DefaultActionPolicy,
+    action_policy::{DefaultActionPolicy, classify_tool_action_risk},
     event_stream::ActiveStepPermit,
     judgment::{JudgmentContext, JudgmentError, JudgmentRecord, JudgmentRequest, JudgmentSource},
     memory::{
@@ -384,9 +384,13 @@ impl Runtime {
                     call_id: call_id.clone(),
                 });
             }
+            let denied_policy_decision = policy_decision.with_risk_tier(classify_tool_action_risk(
+                registered_tool.action_kind(),
+                proposal.as_ref(),
+            ));
             return session.submit_denied_tool_action(
                 &pending,
-                &policy_decision,
+                &denied_policy_decision,
                 proposal,
                 content,
                 diagnostic,
@@ -3131,7 +3135,7 @@ mod tests {
         for (action_kind, risk_tier) in [
             (ToolActionKind::WorkspaceWrite, ActionRiskTier::EditElevated),
             (ToolActionKind::CommandExec, ActionRiskTier::ProcessHigh),
-            (ToolActionKind::Network, ActionRiskTier::Network),
+            (ToolActionKind::Network, ActionRiskTier::Forbidden),
         ] {
             let decision = policy.decide(action_kind);
             assert_eq!(decision.action_kind(), action_kind);
@@ -3142,58 +3146,78 @@ mod tests {
     }
 
     #[test]
-    fn role_model_config_stores_primary_and_review_models_separately() {
-        let primary = RecordingModelProvider::new();
-        let review = RecordingModelProvider::new();
-        let primary_model = named_model("fake/primary");
-        let review_model = named_model("fake/tool-risk-review");
+    fn role_model_config_stores_all_roles_independently_and_overrides_same_role() {
+        let first_primary_model = named_model("fake/primary-v1");
+        let primary_model = named_model("fake/primary-v2");
+        let first_tool_risk_model = named_model("fake/tool-risk-review-v1");
+        let tool_risk_model = named_model("fake/tool-risk-review");
+        let approval_model = named_model("fake/approval-review");
+        let summary_model = named_model("fake/summary-memory");
 
         let runtime = Runtime::builder(session_id("runtime-role-model-config"))
-            .model_provider(Arc::new(primary), primary_model.clone())
+            .model_provider(Arc::new(RecordingModelProvider::new()), first_primary_model)
+            .model_provider(
+                Arc::new(RecordingModelProvider::new()),
+                primary_model.clone(),
+            )
             .model_provider_for_role(
                 RuntimeModelRole::ToolRiskReview,
-                Arc::new(review),
-                review_model.clone(),
+                Arc::new(RecordingModelProvider::new()),
+                first_tool_risk_model,
+            )
+            .model_provider_for_role(
+                RuntimeModelRole::ApprovalReview,
+                Arc::new(RecordingModelProvider::new()),
+                approval_model.clone(),
+            )
+            .model_provider_for_role(
+                RuntimeModelRole::SummaryMemory,
+                Arc::new(RecordingModelProvider::new()),
+                summary_model.clone(),
+            )
+            .model_provider_for_role(
+                RuntimeModelRole::ToolRiskReview,
+                Arc::new(RecordingModelProvider::new()),
+                tool_risk_model.clone(),
             )
             .build()
             .expect("runtime should build");
 
-        assert_eq!(
-            runtime
-                .inner
-                .model_configs
-                .model_for_role(RuntimeModelRole::Primary),
-            Some(&primary_model)
-        );
-        assert_eq!(
-            runtime
-                .inner
-                .model_configs
-                .model_for_role(RuntimeModelRole::ToolRiskReview),
-            Some(&review_model)
-        );
-        assert_ne!(
-            runtime
-                .inner
-                .model_configs
-                .model_for_role(RuntimeModelRole::Primary),
-            runtime
-                .inner
-                .model_configs
-                .model_for_role(RuntimeModelRole::ToolRiskReview)
-        );
+        for (role, expected_model) in [
+            (RuntimeModelRole::Primary, &primary_model),
+            (RuntimeModelRole::ToolRiskReview, &tool_risk_model),
+            (RuntimeModelRole::ApprovalReview, &approval_model),
+            (RuntimeModelRole::SummaryMemory, &summary_model),
+        ] {
+            assert_eq!(
+                runtime.inner.model_configs.model_for_role(role),
+                Some(expected_model)
+            );
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn step_uses_primary_model_and_does_not_call_non_primary_role_provider() {
+    async fn step_uses_primary_model_and_does_not_call_any_non_primary_role_provider() {
         let primary = RecordingModelProvider::new();
-        let review = RecordingModelProvider::new();
+        let tool_risk_review = RecordingModelProvider::new();
+        let approval_review = RecordingModelProvider::new();
+        let summary_memory = RecordingModelProvider::new();
         let runtime = Runtime::builder(session_id("runtime-step-primary-role-model"))
             .model_provider(Arc::new(primary.clone()), named_model("fake/primary-step"))
             .model_provider_for_role(
                 RuntimeModelRole::ToolRiskReview,
-                Arc::new(review.clone()),
+                Arc::new(tool_risk_review.clone()),
                 named_model("fake/tool-risk-review-step"),
+            )
+            .model_provider_for_role(
+                RuntimeModelRole::ApprovalReview,
+                Arc::new(approval_review.clone()),
+                named_model("fake/approval-review-step"),
+            )
+            .model_provider_for_role(
+                RuntimeModelRole::SummaryMemory,
+                Arc::new(summary_memory.clone()),
+                named_model("fake/summary-memory-step"),
             )
             .build()
             .expect("runtime should build");
@@ -3215,13 +3239,16 @@ mod tests {
             ]
         );
         let primary_requests = primary.recorded_requests();
+        assert_eq!(primary.calls.load(Ordering::SeqCst), 1);
         assert_eq!(primary_requests.len(), 1);
         assert_eq!(
             primary_requests[0].model(),
             &named_model("fake/primary-step")
         );
-        assert_eq!(review.calls.load(Ordering::SeqCst), 0);
-        assert!(review.recorded_requests().is_empty());
+        for provider in [&tool_risk_review, &approval_review, &summary_memory] {
+            assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+            assert!(provider.recorded_requests().is_empty());
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -4614,13 +4641,11 @@ mod tests {
         assert_eq!(audits[1].tool_call_id(), pending.id());
         assert_eq!(audits[1].tool_name(), pending.name());
         assert!(audits[1].proposal().is_none());
-        assert_eq!(
-            audits[1]
-                .policy()
-                .expect("denied audit should include policy")
-                .disposition(),
-            ActionPolicyDisposition::Deny
-        );
+        let denied_policy = audits[1]
+            .policy()
+            .expect("denied audit should include policy");
+        assert_eq!(denied_policy.risk_tier(), ActionRiskTier::EditLow);
+        assert_eq!(denied_policy.disposition(), ActionPolicyDisposition::Deny);
 
         let projection = runtime.ledger_projection().await;
         let lifecycle = lifecycle_kinds(&projection);
