@@ -5,7 +5,7 @@
 //! store provider wire formats.
 
 use crate::{
-    ToolActionKind,
+    ActionProposal, ToolActionKind,
     action_policy::{ActionPolicyDecision, ActionPolicyDisposition, ActionRiskTier},
 };
 use merry_core::{PendingToolCall, ToolCallId, ToolName};
@@ -14,7 +14,6 @@ use std::fmt;
 const ACTION_AUDIT_ID_PREFIX: &str = "action-audit-";
 
 /// Deterministic identifier for an internal action audit record.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct ActionAuditId(String);
 
@@ -35,15 +34,16 @@ impl fmt::Display for ActionAuditId {
     }
 }
 
-/// Final status for an audited runtime action.
+/// Runtime-owned lifecycle status for an audited action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ActionAuditStatus {
+    /// The action was proposed with deterministic runtime-owned evidence.
+    Proposed,
     /// The action was denied by runtime policy.
     Denied,
 }
 
-/// Compact internal policy decision recorded with an action audit.
-#[allow(dead_code)]
+/// Compact runtime-owned policy decision recorded with an action audit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ActionAuditPolicy {
     risk_tier: ActionRiskTier,
@@ -76,8 +76,7 @@ impl ActionAuditPolicy {
     }
 }
 
-/// Internal audit record for a runtime action policy decision.
-#[allow(dead_code)]
+/// Runtime-owned audit record for an action proposal or policy decision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ActionAuditRecord {
     id: ActionAuditId,
@@ -85,11 +84,25 @@ pub(crate) struct ActionAuditRecord {
     tool_call_id: ToolCallId,
     tool_name: ToolName,
     action_kind: ToolActionKind,
-    policy: ActionAuditPolicy,
+    policy: Option<ActionAuditPolicy>,
     status: ActionAuditStatus,
+    proposal: Option<ActionProposal>,
 }
 
 impl ActionAuditRecord {
+    fn proposed(order: u64, proposal: ActionProposal) -> Self {
+        Self {
+            id: ActionAuditId::from_order(order),
+            order,
+            tool_call_id: proposal.tool_call_id().clone(),
+            tool_name: proposal.tool_name().clone(),
+            action_kind: proposal.action_kind(),
+            policy: None,
+            status: ActionAuditStatus::Proposed,
+            proposal: Some(proposal),
+        }
+    }
+
     fn denied(order: u64, call: &PendingToolCall, decision: &ActionPolicyDecision) -> Self {
         Self {
             id: ActionAuditId::from_order(order),
@@ -97,8 +110,9 @@ impl ActionAuditRecord {
             tool_call_id: call.id().clone(),
             tool_name: call.name().clone(),
             action_kind: decision.action_kind(),
-            policy: ActionAuditPolicy::from_decision(decision),
+            policy: Some(ActionAuditPolicy::from_decision(decision)),
             status: ActionAuditStatus::Denied,
+            proposal: None,
         }
     }
 
@@ -128,13 +142,18 @@ impl ActionAuditRecord {
     }
 
     #[cfg(test)]
-    pub(crate) const fn policy(&self) -> ActionAuditPolicy {
+    pub(crate) const fn policy(&self) -> Option<ActionAuditPolicy> {
         self.policy
     }
 
     #[cfg(test)]
     pub(crate) const fn status(&self) -> ActionAuditStatus {
         self.status
+    }
+
+    #[cfg(test)]
+    pub(crate) fn proposal(&self) -> Option<&ActionProposal> {
+        self.proposal.as_ref()
     }
 }
 
@@ -146,6 +165,12 @@ pub(crate) struct ActionAuditRegistry {
 }
 
 impl ActionAuditRegistry {
+    pub(crate) fn record_proposed_tool_action(&mut self, proposal: ActionProposal) {
+        let record = ActionAuditRecord::proposed(self.next_order, proposal);
+        self.next_order += 1;
+        self.records.push(record);
+    }
+
     pub(crate) fn record_denied_tool_action(
         &mut self,
         call: &PendingToolCall,
@@ -164,7 +189,7 @@ impl ActionAuditRegistry {
     }
 }
 
-/// Detached read model for action audit tests.
+/// Detached read model for internal runtime action audit records.
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ActionAuditRegistrySnapshot {

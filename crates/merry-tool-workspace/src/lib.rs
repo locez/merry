@@ -17,8 +17,9 @@
 
 use merry_core::{ErrorInfo, PendingToolCall, ToolInputSchema, ToolName, ToolSpec};
 use merry_runtime::{
-    RegisteredTool, ToolActionKind, ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome,
-    ToolExecutor, ToolExecutorFuture,
+    ActionProposal, ActionProposalEvidence, RegisteredTool, ToolActionKind,
+    ToolActionProposalFuture, ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome,
+    ToolExecutor, ToolExecutorFuture, WorkspacePatchProposal,
 };
 use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -230,11 +231,14 @@ impl ReadOnlyWorkspaceTools {
     pub fn into_registered_tools_with_patch(self) -> Vec<RegisteredTool> {
         let patch_state = Arc::clone(&self.state);
         let mut tools = self.into_registered_tools();
-        tools.push(RegisteredTool::new(
-            patch_file_spec(),
-            Arc::new(PatchFileExecutor { state: patch_state }),
-            ToolActionKind::WorkspaceWrite,
-        ));
+        tools.push(
+            RegisteredTool::new(
+                patch_file_spec(),
+                Arc::new(PatchFileExecutor { state: patch_state }),
+                ToolActionKind::WorkspaceWrite,
+            )
+            .with_action_proposal(),
+        );
         tools
     }
 }
@@ -475,6 +479,49 @@ struct PatchFileExecutor {
 }
 
 impl ToolExecutor for PatchFileExecutor {
+    fn propose<'a>(
+        &'a self,
+        call: PendingToolCall,
+        context: ToolExecutionContext,
+    ) -> ToolActionProposalFuture<'a> {
+        Box::pin(async move {
+            if context.cancellation_token().is_cancelled() {
+                return Err(ToolExecutionError::Cancelled);
+            }
+
+            let args = match parse_patch_file_args(&call) {
+                Ok(args) => args,
+                Err(_) => return Ok(None),
+            };
+
+            let state = Arc::clone(&self.state);
+            let token = context.cancellation_token().clone();
+            let worker_token = token.clone();
+            let handle = tokio::task::spawn_blocking(move || {
+                let is_cancelled = || worker_token.is_cancelled();
+                propose_patch_file_blocking_checked(&state, args, &call, &is_cancelled)
+            });
+
+            tokio::select! {
+                biased;
+                () = token.cancelled() => Err(ToolExecutionError::Cancelled),
+                joined = handle => match joined {
+                    Ok(Ok(proposal)) => {
+                        if token.is_cancelled() {
+                            Err(ToolExecutionError::Cancelled)
+                        } else {
+                            Ok(proposal)
+                        }
+                    }
+                    Ok(Err(error)) => Err(error),
+                    Err(error) => Err(ToolExecutionError::infrastructure(format!(
+                        "workspace patch proposal task failed to join: {error}"
+                    ))),
+                },
+            }
+        })
+    }
+
     fn execute<'a>(
         &'a self,
         call: PendingToolCall,
@@ -1128,11 +1175,57 @@ fn patch_file_blocking(state: &WorkspaceToolState, args: PatchFileArgs) -> ToolE
         .expect("uncancelled workspace patch should not return cancellation")
 }
 
+fn propose_patch_file_blocking_checked(
+    state: &WorkspaceToolState,
+    args: PatchFileArgs,
+    call: &PendingToolCall,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<Option<ActionProposal>, ToolExecutionError> {
+    match plan_patch_file_blocking_checked(state, args, is_cancelled) {
+        Ok(PatchPlanOutcome::Planned(plan)) => {
+            let patch = WorkspacePatchProposal::new(
+                plan.relative.display.clone(),
+                plan.old_text_bytes,
+                plan.new_text_bytes,
+                plan.bytes_before,
+                plan.bytes_after,
+            )
+            .map_err(|error| ToolExecutionError::infrastructure(error.to_string()))?;
+            let proposal = ActionProposal::new(
+                call,
+                ToolActionKind::WorkspaceWrite,
+                "workspace patch",
+                plan.relative.display.clone(),
+                format!(
+                    "Replace one preimage in {} ({} bytes -> {} bytes).",
+                    plan.relative.display, plan.bytes_before, plan.bytes_after
+                ),
+                ActionProposalEvidence::WorkspacePatch(patch),
+            )
+            .map_err(|error| ToolExecutionError::infrastructure(error.to_string()))?;
+            Ok(Some(proposal))
+        }
+        Ok(PatchPlanOutcome::Failure(_)) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 fn patch_file_blocking_checked(
     state: &WorkspaceToolState,
     args: PatchFileArgs,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<ToolExecutionOutcome, ToolExecutionError> {
+    match plan_patch_file_blocking_checked(state, args, is_cancelled)? {
+        PatchPlanOutcome::Planned(plan) => execute_patch_plan(plan, is_cancelled),
+        PatchPlanOutcome::Failure(outcome) => Ok(outcome),
+    }
+}
+
+fn plan_patch_file_blocking_checked(
+    state: &WorkspaceToolState,
+    args: PatchFileArgs,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<PatchPlanOutcome, ToolExecutionError> {
     if is_cancelled() {
         return Err(ToolExecutionError::Cancelled);
     }
@@ -1140,40 +1233,40 @@ fn patch_file_blocking_checked(
     let relative = match validate_relative_path(&args.path, state.allow_hidden) {
         Ok(relative) => relative,
         Err(error) => {
-            return Ok(failed_outcome(
+            return Ok(PatchPlanOutcome::Failure(failed_outcome(
                 WORKSPACE_PATCH_FILE_TOOL,
                 error.code,
                 error.message,
                 error.path,
-            ));
+            )));
         }
     };
 
     if args.old_text.is_empty() {
-        return Ok(failed_outcome(
+        return Ok(PatchPlanOutcome::Failure(failed_outcome(
             WORKSPACE_PATCH_FILE_TOOL,
             ERROR_INVALID_ARGUMENTS,
             "workspace patch old_text must not be empty",
             Some(relative.display),
-        ));
+        )));
     }
 
     if args.old_text.contains('\0') || args.new_text.contains('\0') {
-        return Ok(failed_outcome(
+        return Ok(PatchPlanOutcome::Failure(failed_outcome(
             WORKSPACE_PATCH_FILE_TOOL,
             ERROR_INVALID_ARGUMENTS,
             "workspace patch text must not contain NUL bytes",
             Some(relative.display),
-        ));
+        )));
     }
 
     if args.old_text.len().saturating_add(args.new_text.len()) > state.limits.max_patch_bytes {
-        return Ok(failed_outcome(
+        return Ok(PatchPlanOutcome::Failure(failed_outcome(
             WORKSPACE_PATCH_FILE_TOOL,
             ERROR_INVALID_ARGUMENTS,
             "workspace patch payload exceeds the configured byte limit",
             Some(relative.display),
-        ));
+        )));
     }
 
     for root in &state.roots {
@@ -1183,50 +1276,101 @@ fn patch_file_blocking_checked(
 
         match resolve_existing_path(root, &relative) {
             Ok(Some(resolved)) => {
-                return match patch_resolved_file(
-                    &relative,
-                    &resolved.path,
-                    &args,
+                let failure_path = relative.display.clone();
+                return match plan_resolved_patch_file(
+                    relative.clone(),
+                    resolved.path,
+                    args,
                     state,
                     is_cancelled,
                 ) {
-                    Ok(success) => Ok(success),
-                    Err(BlockingToolError::Domain(error)) => Ok(failed_outcome(
-                        WORKSPACE_PATCH_FILE_TOOL,
-                        error.code,
-                        error.message,
-                        Some(relative.display),
-                    )),
+                    Ok(plan) => Ok(PatchPlanOutcome::Planned(plan)),
+                    Err(BlockingToolError::Domain(error)) => {
+                        Ok(PatchPlanOutcome::Failure(failed_outcome(
+                            WORKSPACE_PATCH_FILE_TOOL,
+                            error.code,
+                            error.message,
+                            Some(failure_path),
+                        )))
+                    }
                     Err(BlockingToolError::Cancelled) => Err(ToolExecutionError::Cancelled),
                 };
             }
             Ok(None) => {}
             Err(error) => {
-                return Ok(failed_outcome(
+                return Ok(PatchPlanOutcome::Failure(failed_outcome(
                     WORKSPACE_PATCH_FILE_TOOL,
                     error.code,
                     error.message,
                     Some(relative.display),
-                ));
+                )));
             }
         }
     }
 
-    Ok(failed_outcome(
+    Ok(PatchPlanOutcome::Failure(failed_outcome(
         WORKSPACE_PATCH_FILE_TOOL,
         ERROR_FILE_NOT_FOUND,
         "workspace file was not found",
         Some(relative.display),
-    ))
+    )))
 }
 
-fn patch_resolved_file(
-    relative: &ValidatedRelativePath,
-    path: &Path,
-    args: &PatchFileArgs,
+#[derive(Debug)]
+enum PatchPlanOutcome {
+    Planned(PatchPlan),
+    Failure(ToolExecutionOutcome),
+}
+
+#[derive(Debug)]
+struct PatchPlan {
+    relative: ValidatedRelativePath,
+    path: PathBuf,
+    replacement: String,
+    old_text_bytes: usize,
+    new_text_bytes: usize,
+    bytes_before: usize,
+    bytes_after: usize,
+}
+
+fn plan_resolved_patch_file(
+    relative: ValidatedRelativePath,
+    path: PathBuf,
+    args: PatchFileArgs,
     state: &WorkspaceToolState,
     is_cancelled: &dyn Fn() -> bool,
-) -> Result<ToolExecutionOutcome, BlockingToolError> {
+) -> Result<PatchPlan, BlockingToolError> {
+    let content = read_patch_preimage(&path, state, is_cancelled)?;
+
+    if is_cancelled() {
+        return Err(BlockingToolError::Cancelled);
+    }
+
+    let replacement = build_replacement(&content, &args.old_text, &args.new_text)?;
+    if replacement.len() > state.limits.max_write_bytes {
+        return Err(DomainError::new(
+            ERROR_FILE_TOO_LARGE,
+            "workspace patch result exceeds the configured write limit",
+        )
+        .into());
+    }
+
+    Ok(PatchPlan {
+        relative,
+        path,
+        bytes_before: content.len(),
+        bytes_after: replacement.len(),
+        old_text_bytes: args.old_text.len(),
+        new_text_bytes: args.new_text.len(),
+        replacement,
+    })
+}
+
+fn read_patch_preimage(
+    path: &Path,
+    state: &WorkspaceToolState,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<String, BlockingToolError> {
     if is_cancelled() {
         return Err(BlockingToolError::Cancelled);
     }
@@ -1246,7 +1390,7 @@ fn patch_resolved_file(
         );
     }
 
-    let mut file = open_file_for_patch(path)?;
+    let mut file = open_file_for_read(path)?;
     let metadata = file.metadata().map_err(|_| {
         DomainError::new(
             ERROR_READ_FAILED,
@@ -1300,39 +1444,69 @@ fn patch_resolved_file(
     let content = String::from_utf8(bytes)
         .map_err(|_| DomainError::new(ERROR_NOT_UTF8, "workspace file is not valid UTF-8"))?;
 
+    Ok(content)
+}
+
+fn execute_patch_plan(
+    plan: PatchPlan,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<ToolExecutionOutcome, ToolExecutionError> {
     if is_cancelled() {
-        return Err(BlockingToolError::Cancelled);
+        return Err(ToolExecutionError::Cancelled);
     }
 
-    let replacement = build_replacement(&content, &args.old_text, &args.new_text)?;
-    if replacement.len() > state.limits.max_write_bytes {
-        return Err(DomainError::new(
-            ERROR_FILE_TOO_LARGE,
-            "workspace patch result exceeds the configured write limit",
-        )
-        .into());
+    let relative_display = plan.relative.display;
+    let mut file = match open_file_for_patch(&plan.path) {
+        Ok(file) => file,
+        Err(error) => {
+            return Ok(failed_outcome(
+                WORKSPACE_PATCH_FILE_TOOL,
+                error.code,
+                error.message,
+                Some(relative_display),
+            ));
+        }
+    };
+    if file.seek(SeekFrom::Start(0)).is_err() {
+        return Ok(failed_outcome(
+            WORKSPACE_PATCH_FILE_TOOL,
+            ERROR_WRITE_FAILED,
+            "could not seek workspace file",
+            Some(relative_display),
+        ));
     }
-
-    if is_cancelled() {
-        return Err(BlockingToolError::Cancelled);
+    if file.write_all(plan.replacement.as_bytes()).is_err() {
+        return Ok(failed_outcome(
+            WORKSPACE_PATCH_FILE_TOOL,
+            ERROR_WRITE_FAILED,
+            "could not write workspace file",
+            Some(relative_display),
+        ));
     }
-
-    file.seek(SeekFrom::Start(0))
-        .map_err(|_| DomainError::new(ERROR_WRITE_FAILED, "could not seek workspace file"))?;
-    file.write_all(replacement.as_bytes())
-        .map_err(|_| DomainError::new(ERROR_WRITE_FAILED, "could not write workspace file"))?;
-    file.set_len(replacement.len() as u64)
-        .map_err(|_| DomainError::new(ERROR_WRITE_FAILED, "could not truncate workspace file"))?;
-    file.sync_all()
-        .map_err(|_| DomainError::new(ERROR_WRITE_FAILED, "could not sync workspace file"))?;
+    if file.set_len(plan.replacement.len() as u64).is_err() {
+        return Ok(failed_outcome(
+            WORKSPACE_PATCH_FILE_TOOL,
+            ERROR_WRITE_FAILED,
+            "could not truncate workspace file",
+            Some(relative_display),
+        ));
+    }
+    if file.sync_all().is_err() {
+        return Ok(failed_outcome(
+            WORKSPACE_PATCH_FILE_TOOL,
+            ERROR_WRITE_FAILED,
+            "could not sync workspace file",
+            Some(relative_display),
+        ));
+    }
 
     let payload = PatchFileSuccess {
         ok: true,
         tool: WORKSPACE_PATCH_FILE_TOOL,
-        path: &relative.display,
+        path: &relative_display,
         replacements: 1,
-        bytes_before: content.len(),
-        bytes_after: replacement.len(),
+        bytes_before: plan.bytes_before,
+        bytes_after: plan.bytes_after,
     };
     Ok(ToolExecutionOutcome::succeeded_json(
         serde_json::to_string(&payload).expect("workspace patch success envelope serializes"),
@@ -1840,7 +2014,7 @@ fn is_symlink_open_error(_: &io::Error) -> bool {
     false
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct ValidatedRelativePath {
     components: Vec<String>,
     display: String,
@@ -2155,6 +2329,33 @@ mod tests {
         )
     }
 
+    fn patch_proposal(
+        tools: &ReadOnlyWorkspaceTools,
+        path: &str,
+        old_text: &str,
+        new_text: &str,
+    ) -> Option<ActionProposal> {
+        let call = pending_call_for(
+            WORKSPACE_PATCH_FILE_TOOL,
+            json!({
+                "path": path,
+                "old_text": old_text,
+                "new_text": new_text
+            }),
+        );
+        propose_patch_file_blocking_checked(
+            &tools.state,
+            PatchFileArgs {
+                path: path.to_owned(),
+                old_text: old_text.to_owned(),
+                new_text: new_text.to_owned(),
+            },
+            &call,
+            &|| false,
+        )
+        .expect("uncancelled workspace patch proposal should not return cancellation")
+    }
+
     fn json_content(outcome: &ToolExecutionOutcome) -> Value {
         serde_json::from_str(
             outcome
@@ -2344,12 +2545,15 @@ mod tests {
             .find(|tool| tool.spec().name().as_str() == WORKSPACE_PATCH_FILE_TOOL)
             .expect("patch tool should be registered only by opt-in method");
         assert_eq!(patch.action_kind(), ToolActionKind::WorkspaceWrite);
+        assert!(patch.proposals_enabled());
         assert_eq!(tools.len(), 4);
         assert!(
             tools
                 .iter()
                 .filter(|tool| tool.spec().name().as_str() != WORKSPACE_PATCH_FILE_TOOL)
-                .all(|tool| tool.action_kind() == ToolActionKind::ReadOnly)
+                .all(|tool| {
+                    tool.action_kind() == ToolActionKind::ReadOnly && !tool.proposals_enabled()
+                })
         );
     }
 
@@ -2945,6 +3149,57 @@ mod tests {
                 .expect("json content")
                 .contains(temp.path().to_str().expect("temp path utf8")),
             "tool output must not include absolute host roots"
+        );
+    }
+
+    #[test]
+    fn patch_file_proposal_reads_preimage_metadata_without_mutation() {
+        let temp = TempWorkspace::new("patch-proposal");
+        temp.write_text("dir/note.txt", "alpha\nold value\nomega\n");
+        let tools = tools_for(temp.path());
+
+        let proposal = patch_proposal(&tools, "dir/note.txt", "old value", "newer value")
+            .expect("valid patch should produce proposal");
+
+        assert_eq!(proposal.tool_call_id().as_str(), "call-1");
+        assert_eq!(proposal.tool_name().as_str(), WORKSPACE_PATCH_FILE_TOOL);
+        assert_eq!(proposal.action_kind(), ToolActionKind::WorkspaceWrite);
+        assert_eq!(proposal.label(), "workspace patch");
+        assert_eq!(proposal.subject(), "dir/note.txt");
+        assert!(
+            proposal
+                .summary()
+                .contains("Replace one preimage in dir/note.txt")
+        );
+        let ActionProposalEvidence::WorkspacePatch(patch) = proposal.evidence();
+        assert_eq!(patch.relative_path(), "dir/note.txt");
+        assert_eq!(patch.preimage_bytes(), "old value".len());
+        assert_eq!(patch.replacement_bytes(), "newer value".len());
+        assert_eq!(patch.file_bytes_before(), 22);
+        assert_eq!(patch.file_bytes_after(), 24);
+        assert_eq!(
+            read_text(&temp.path().join("dir/note.txt")),
+            "alpha\nold value\nomega\n"
+        );
+    }
+
+    #[test]
+    fn patch_file_proposal_returns_none_for_invalid_or_stale_patch_without_mutation() {
+        let temp = TempWorkspace::new("patch-proposal-none");
+        temp.write_text("note.txt", "alpha\nold\nomega\n");
+        let tools = tools_for(temp.path());
+
+        assert!(
+            patch_proposal(&tools, "note.txt", "missing", "new").is_none(),
+            "stale preimage should not produce proposal evidence"
+        );
+        assert!(
+            patch_proposal(&tools, "../note.txt", "old", "new").is_none(),
+            "invalid path should not produce proposal evidence"
+        );
+        assert_eq!(
+            read_text(&temp.path().join("note.txt")),
+            "alpha\nold\nomega\n"
         );
     }
 
