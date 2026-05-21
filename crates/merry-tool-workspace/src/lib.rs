@@ -16,8 +16,8 @@
 
 use merry_core::{ErrorInfo, PendingToolCall, ToolInputSchema, ToolName, ToolSpec};
 use merry_runtime::{
-    RegisteredTool, ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome, ToolExecutor,
-    ToolExecutorFuture,
+    RegisteredTool, ToolActionKind, ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome,
+    ToolExecutor, ToolExecutorFuture,
 };
 use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -196,17 +196,20 @@ impl ReadOnlyWorkspaceTools {
                 Arc::new(ReadFileExecutor {
                     state: Arc::clone(&self.state),
                 }),
-            ),
+            )
+            .with_action_kind(ToolActionKind::ReadOnly),
             RegisteredTool::new(
                 list_dir_spec(),
                 Arc::new(ListDirExecutor {
                     state: Arc::clone(&self.state),
                 }),
-            ),
+            )
+            .with_action_kind(ToolActionKind::ReadOnly),
             RegisteredTool::new(
                 search_text_spec(),
                 Arc::new(SearchTextExecutor { state: self.state }),
-            ),
+            )
+            .with_action_kind(ToolActionKind::ReadOnly),
         ]
     }
 }
