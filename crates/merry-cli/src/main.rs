@@ -1,6 +1,6 @@
 //! Debug and demonstration CLI for Merry.
 
-use clap::{Args, CommandFactory, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use futures_util::{StreamExt, stream};
 use merry_core::{
     ErrorInfo, PendingToolCall, ProviderName, RuntimeEvent, RuntimeEventKind, SessionId,
@@ -50,6 +50,8 @@ const SANDBOX_ETC_READ_ONLY_PATHS: &[&str] = &[
 const MERRY_SANDBOX_ENV: &str = "MERRY_SANDBOX";
 const MERRY_SANDBOX_VERSION_ENV: &str = "MERRY_SANDBOX_VERSION";
 const MERRY_SANDBOX_VERSION: &str = "1";
+const SANDBOX_CHILD_HANDOFF_ARG: &str = "--merry-sandbox-child-handoff";
+const SANDBOX_CHILD_HANDOFF_CLI_BWRAP_V1: &str = "cli-bwrap-v1";
 const SANDBOX_HOME: &str = "/home/merry";
 const SANDBOX_TMPDIR: &str = "/tmp";
 const OPENAI_ENV_HELP: &str = "\
@@ -73,8 +75,35 @@ struct Cli {
     #[arg(long, help = "Run the command inside Merry's bubblewrap sandbox")]
     with_sandbox: bool,
 
+    #[arg(
+        long = "merry-sandbox-child-handoff",
+        hide = true,
+        value_enum,
+        value_name = "PROFILE"
+    )]
+    sandbox_child_handoff: Option<SandboxChildHandoff>,
+
     #[command(subcommand)]
     command: CliCommand,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum SandboxChildHandoff {
+    #[value(name = "cli-bwrap-v1")]
+    CliBwrapV1,
+}
+
+impl SandboxChildHandoff {
+    fn as_cli_value(self) -> &'static str {
+        match self {
+            Self::CliBwrapV1 => SANDBOX_CHILD_HANDOFF_CLI_BWRAP_V1,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SandboxRuntimeProfile {
+    CliBwrapV1,
 }
 
 #[derive(Debug, Subcommand)]
@@ -87,6 +116,12 @@ enum CliCommand {
 
 #[derive(Debug, Args)]
 struct ShellArgs {
+    #[arg(
+        long = "accept-local-workspace-process-risk",
+        help = "Accept local workspace process risk when running inside Merry's sandbox handoff"
+    )]
+    accept_local_workspace_process_risk: bool,
+
     #[arg(
         required = true,
         allow_hyphen_values = true,
@@ -192,6 +227,8 @@ fn main() -> CliExit {
 }
 
 async fn async_main(cli: Cli) -> CliExit {
+    let sandbox_child_handoff = cli.sandbox_child_handoff;
+
     match cli.command {
         CliCommand::Debug(DebugArgs {
             session_id,
@@ -247,7 +284,7 @@ async fn async_main(cli: Cli) -> CliExit {
                 usage: shell_usage(),
             },
         },
-        CliCommand::Shell(args) => match run_shell(args).await {
+        CliCommand::Shell(args) => match run_shell(args, sandbox_child_handoff).await {
             Ok(()) => CliExit::Success,
             Err(CliError::BrokenPipe) => CliExit::Success,
             Err(CliError::ShellUsage(message)) => CliExit::Usage {
@@ -421,8 +458,10 @@ fn build_sandbox_plan(host: &SandboxHost, path: OsString, bwrap: PathBuf) -> San
         os(MERRY_SANDBOX_VERSION_ENV),
         os(MERRY_SANDBOX_VERSION),
         current_exe,
+        os(SANDBOX_CHILD_HANDOFF_ARG),
+        os(SandboxChildHandoff::CliBwrapV1.as_cli_value()),
     ]);
-    args.extend(args_without_with_sandbox(&host.args));
+    args.extend(args_without_sandbox_bootstrap_flags(&host.args));
 
     SandboxPlan {
         program: bwrap.as_os_str().to_owned(),
@@ -445,18 +484,51 @@ fn sandbox_path(host: &SandboxHost) -> OsString {
         .unwrap_or_else(|| os(DEFAULT_SANDBOX_PATH))
 }
 
-fn args_without_with_sandbox(args: &[OsString]) -> Vec<OsString> {
+fn args_without_sandbox_bootstrap_flags(args: &[OsString]) -> Vec<OsString> {
     let mut removed = false;
-    args.iter()
-        .filter_map(|arg| {
+    let mut sanitized = Vec::with_capacity(args.len());
+    let mut index = 0;
+    let mut scanning_root_flags = true;
+
+    while index < args.len() {
+        let arg = &args[index];
+
+        if scanning_root_flags {
             if !removed && arg == OsStr::new("--with-sandbox") {
                 removed = true;
-                None
-            } else {
-                Some(arg.clone())
+                index += 1;
+                continue;
             }
-        })
-        .collect()
+
+            if arg == OsStr::new(SANDBOX_CHILD_HANDOFF_ARG) {
+                index += 1;
+                if index < args.len() {
+                    index += 1;
+                }
+                continue;
+            }
+
+            if is_sandbox_child_handoff_assignment(arg) {
+                index += 1;
+                continue;
+            }
+
+            scanning_root_flags = false;
+        }
+
+        sanitized.push(arg.clone());
+        index += 1;
+    }
+
+    sanitized
+}
+
+fn is_sandbox_child_handoff_assignment(arg: &OsStr) -> bool {
+    arg.to_str().is_some_and(|value| {
+        value
+            .strip_prefix(SANDBOX_CHILD_HANDOFF_ARG)
+            .is_some_and(|suffix| suffix.starts_with('='))
+    })
 }
 
 fn os(value: &str) -> OsString {
@@ -565,15 +637,42 @@ async fn run_debug_openai(
     }
 }
 
-async fn run_shell(args: ShellArgs) -> Result<(), CliError> {
+async fn run_shell(
+    args: ShellArgs,
+    sandbox_child_handoff: Option<SandboxChildHandoff>,
+) -> Result<(), CliError> {
+    let sandbox_marker = env::var_os(MERRY_SANDBOX_ENV);
+    let sandbox_version = env::var_os(MERRY_SANDBOX_VERSION_ENV);
+    let home = env::var_os("HOME");
+    let tmpdir = env::var_os("TMPDIR");
+    let mountinfo = read_proc_self_mountinfo().await;
+    let sandbox_runtime_profile = sandbox_runtime_profile_from_evidence(
+        home.as_deref(),
+        tmpdir.as_deref(),
+        mountinfo.as_deref(),
+    );
+    let admission = shell_runtime_admission(
+        args.accept_local_workspace_process_risk,
+        sandbox_child_handoff,
+        sandbox_runtime_profile,
+        sandbox_marker.as_deref(),
+        sandbox_version.as_deref(),
+    );
     let intent = shell_process_action_intent(args.argv)?;
     run_shell_to_writer(
         intent,
-        None,
+        admission,
         Arc::new(TokioProcessRunner),
         tokio::io::stdout(),
     )
     .await
+}
+
+async fn read_proc_self_mountinfo() -> Option<String> {
+    tokio::task::spawn_blocking(|| std::fs::read_to_string("/proc/self/mountinfo"))
+        .await
+        .ok()?
+        .ok()
 }
 
 async fn run_shell_to_writer<W>(
@@ -639,16 +738,70 @@ fn build_shell_runtime(
     builder.build().map_err(unexpected)
 }
 
-#[cfg(test)]
-fn shell_runtime_admission_from_markers(
+fn shell_runtime_admission(
+    accept_local_workspace_process_risk: bool,
+    sandbox_child_handoff: Option<SandboxChildHandoff>,
+    sandbox_runtime_profile: Option<SandboxRuntimeProfile>,
     sandbox: Option<&OsStr>,
     version: Option<&OsStr>,
 ) -> Option<AcceptedLocalWorkspaceProcessAdmission> {
-    if sandbox == Some(OsStr::new("1")) && version == Some(OsStr::new(MERRY_SANDBOX_VERSION)) {
+    if accept_local_workspace_process_risk
+        && sandbox_child_handoff == Some(SandboxChildHandoff::CliBwrapV1)
+        && sandbox_runtime_profile == Some(SandboxRuntimeProfile::CliBwrapV1)
+        && sandbox == Some(OsStr::new("1"))
+        && version == Some(OsStr::new(MERRY_SANDBOX_VERSION))
+    {
         Some(AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1())
     } else {
         None
     }
+}
+
+fn sandbox_runtime_profile_from_evidence(
+    home: Option<&OsStr>,
+    tmpdir: Option<&OsStr>,
+    mountinfo: Option<&str>,
+) -> Option<SandboxRuntimeProfile> {
+    if home == Some(OsStr::new(SANDBOX_HOME))
+        && tmpdir == Some(OsStr::new(SANDBOX_TMPDIR))
+        && mountinfo_has_tmpfs_mounts(mountinfo?, ["/home", SANDBOX_TMPDIR])
+    {
+        Some(SandboxRuntimeProfile::CliBwrapV1)
+    } else {
+        None
+    }
+}
+
+fn mountinfo_has_tmpfs_mounts(mountinfo: &str, mount_points: [&str; 2]) -> bool {
+    mount_points
+        .into_iter()
+        .all(|mount_point| mountinfo_has_tmpfs_mount(mountinfo, mount_point))
+}
+
+fn mountinfo_has_tmpfs_mount(mountinfo: &str, mount_point: &str) -> bool {
+    mountinfo
+        .lines()
+        .filter_map(parse_mountinfo_mount)
+        .any(|mount| mount.mount_point == mount_point && mount.fs_type == "tmpfs")
+}
+
+fn parse_mountinfo_mount(line: &str) -> Option<MountInfoMount<'_>> {
+    let fields = line.split_whitespace().collect::<Vec<_>>();
+    let separator_index = fields.iter().position(|field| *field == "-")?;
+    if separator_index < 5 || fields.len() <= separator_index + 1 {
+        return None;
+    }
+
+    Some(MountInfoMount {
+        mount_point: fields[4],
+        fs_type: fields[separator_index + 1],
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MountInfoMount<'a> {
+    mount_point: &'a str,
+    fs_type: &'a str,
 }
 
 fn shell_process_action_intent(argv: Vec<String>) -> Result<ProcessActionIntent, CliError> {
@@ -1250,11 +1403,12 @@ mod tests {
     use super::{
         Cli, CliCommand, CliError, CliExit, DEBUG_TOOL_CONTINUATION_INPUT, DEFAULT_INPUT,
         DEFAULT_SESSION_ID, DebugCommand, MERRY_SANDBOX_ENV, MERRY_SANDBOX_VERSION,
-        MERRY_SANDBOX_VERSION_ENV, SANDBOX_HOME, SANDBOX_TMPDIR, SandboxBootstrap, SandboxError,
-        SandboxHost, args_without_with_sandbox, debug_echo_tool, debug_openai_usage,
-        find_bwrap_in_path, os, plan_sandbox_bootstrap_with_file_exists, report_cli_exit,
-        shell_process_action_intent, shell_runtime_admission_from_markers, shell_usage,
-        write_debug_openai_tool_events,
+        MERRY_SANDBOX_VERSION_ENV, SANDBOX_CHILD_HANDOFF_ARG, SANDBOX_CHILD_HANDOFF_CLI_BWRAP_V1,
+        SANDBOX_HOME, SANDBOX_TMPDIR, SandboxBootstrap, SandboxChildHandoff, SandboxError,
+        SandboxHost, SandboxRuntimeProfile, args_without_sandbox_bootstrap_flags, debug_echo_tool,
+        debug_openai_usage, find_bwrap_in_path, os, plan_sandbox_bootstrap_with_file_exists,
+        report_cli_exit, sandbox_runtime_profile_from_evidence, shell_process_action_intent,
+        shell_runtime_admission, shell_usage, write_debug_openai_tool_events,
     };
     use super::{DEBUG_TOOL_NAME, run_shell_to_writer, write_runtime_step_events};
     use clap::Parser;
@@ -1368,10 +1522,53 @@ mod tests {
 
         match cli.command {
             CliCommand::Shell(shell) => {
+                assert!(!shell.accept_local_workspace_process_risk);
                 assert_eq!(shell.argv, ["rustc", "--version"]);
             }
             CliCommand::Debug(_) => panic!("expected shell subcommand"),
         }
+    }
+
+    #[test]
+    fn clap_parses_shell_local_workspace_process_risk_acceptance() {
+        let cli = Cli::try_parse_from([
+            "merry",
+            "shell",
+            "--accept-local-workspace-process-risk",
+            "--",
+            "cargo",
+            "test",
+            "-p",
+            "merry-runtime",
+        ])
+        .expect("shell args should parse");
+
+        match cli.command {
+            CliCommand::Shell(shell) => {
+                assert!(shell.accept_local_workspace_process_risk);
+                assert_eq!(shell.argv, ["cargo", "test", "-p", "merry-runtime"]);
+            }
+            CliCommand::Debug(_) => panic!("expected shell subcommand"),
+        }
+    }
+
+    #[test]
+    fn clap_parses_hidden_sandbox_child_handoff() {
+        let cli = Cli::try_parse_from([
+            "merry",
+            SANDBOX_CHILD_HANDOFF_ARG,
+            SANDBOX_CHILD_HANDOFF_CLI_BWRAP_V1,
+            "shell",
+            "--",
+            "rustc",
+            "--version",
+        ])
+        .expect("hidden sandbox handoff args should parse");
+
+        assert_eq!(
+            cli.sandbox_child_handoff,
+            Some(SandboxChildHandoff::CliBwrapV1)
+        );
     }
 
     #[test]
@@ -1384,7 +1581,7 @@ mod tests {
 
     #[test]
     fn shell_usage_contains_shell_usage() {
-        assert!(shell_usage().contains("Usage: merry shell -- <ARGV>..."));
+        assert!(shell_usage().contains("Usage: merry shell [OPTIONS] -- <ARGV>..."));
     }
 
     #[test]
@@ -1404,22 +1601,178 @@ mod tests {
     }
 
     #[test]
-    fn shell_runtime_admission_marker_parsing_requires_exact_sandbox_and_version() {
+    fn shell_runtime_admission_requires_accept_handoff_and_exact_sandbox_markers() {
         assert_eq!(
-            shell_runtime_admission_from_markers(Some(OsStr::new("1")), Some(OsStr::new("1"))),
+            shell_runtime_admission(
+                true,
+                Some(SandboxChildHandoff::CliBwrapV1),
+                Some(SandboxRuntimeProfile::CliBwrapV1),
+                Some(OsStr::new("1")),
+                Some(OsStr::new("1")),
+            ),
             Some(AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1())
         );
 
-        for (sandbox, version) in [
-            (None, Some(os("1"))),
-            (Some(os("1")), None),
-            (Some(os("0")), Some(os("1"))),
-            (Some(os("1")), Some(os("2"))),
-            (Some(os("true")), Some(os("1"))),
-            (Some(os("1")), Some(os(""))),
+        for (accept, handoff, profile, sandbox, version) in [
+            (
+                false,
+                Some(SandboxChildHandoff::CliBwrapV1),
+                Some(SandboxRuntimeProfile::CliBwrapV1),
+                Some(os("1")),
+                Some(os("1")),
+            ),
+            (
+                true,
+                Some(SandboxChildHandoff::CliBwrapV1),
+                None,
+                Some(os("1")),
+                Some(os("1")),
+            ),
+            (true, None, None, None, None),
+            (
+                false,
+                Some(SandboxChildHandoff::CliBwrapV1),
+                None,
+                None,
+                None,
+            ),
+            (
+                true,
+                None,
+                Some(SandboxRuntimeProfile::CliBwrapV1),
+                Some(os("1")),
+                Some(os("1")),
+            ),
+            (
+                false,
+                None,
+                Some(SandboxRuntimeProfile::CliBwrapV1),
+                Some(os("1")),
+                Some(os("1")),
+            ),
+            (
+                true,
+                Some(SandboxChildHandoff::CliBwrapV1),
+                Some(SandboxRuntimeProfile::CliBwrapV1),
+                None,
+                Some(os("1")),
+            ),
+            (
+                true,
+                Some(SandboxChildHandoff::CliBwrapV1),
+                Some(SandboxRuntimeProfile::CliBwrapV1),
+                Some(os("1")),
+                None,
+            ),
+            (
+                true,
+                Some(SandboxChildHandoff::CliBwrapV1),
+                Some(SandboxRuntimeProfile::CliBwrapV1),
+                Some(os("0")),
+                Some(os("1")),
+            ),
+            (
+                true,
+                Some(SandboxChildHandoff::CliBwrapV1),
+                Some(SandboxRuntimeProfile::CliBwrapV1),
+                Some(os("1")),
+                Some(os("2")),
+            ),
+            (
+                true,
+                Some(SandboxChildHandoff::CliBwrapV1),
+                Some(SandboxRuntimeProfile::CliBwrapV1),
+                Some(os("true")),
+                Some(os("1")),
+            ),
+            (
+                true,
+                Some(SandboxChildHandoff::CliBwrapV1),
+                Some(SandboxRuntimeProfile::CliBwrapV1),
+                Some(os("1")),
+                Some(os("")),
+            ),
         ] {
             assert_eq!(
-                shell_runtime_admission_from_markers(sandbox.as_deref(), version.as_deref()),
+                shell_runtime_admission(
+                    accept,
+                    handoff,
+                    profile,
+                    sandbox.as_deref(),
+                    version.as_deref(),
+                ),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn sandbox_runtime_profile_requires_tmpfs_home_tmp_and_expected_env() {
+        let mountinfo = "\
+26 24 0:22 / / rw,relatime - overlay overlay rw
+27 26 0:33 / /home rw,nosuid,nodev - tmpfs tmpfs rw,size=65536k
+28 26 0:34 / /tmp rw,nosuid,nodev - tmpfs tmpfs rw,size=65536k
+";
+
+        assert_eq!(
+            sandbox_runtime_profile_from_evidence(
+                Some(OsStr::new(SANDBOX_HOME)),
+                Some(OsStr::new(SANDBOX_TMPDIR)),
+                Some(mountinfo),
+            ),
+            Some(SandboxRuntimeProfile::CliBwrapV1)
+        );
+
+        for (home, tmpdir, mountinfo) in [
+            (
+                Some(OsStr::new("/home/locez")),
+                Some(OsStr::new(SANDBOX_TMPDIR)),
+                Some(mountinfo),
+            ),
+            (
+                Some(OsStr::new(SANDBOX_HOME)),
+                Some(OsStr::new("/var/tmp")),
+                Some(mountinfo),
+            ),
+            (
+                Some(OsStr::new(SANDBOX_HOME)),
+                Some(OsStr::new(SANDBOX_TMPDIR)),
+                Some(
+                    "\
+26 24 0:22 / / rw,relatime - overlay overlay rw
+28 26 0:34 / /tmp rw,nosuid,nodev - tmpfs tmpfs rw,size=65536k
+",
+                ),
+            ),
+            (
+                Some(OsStr::new(SANDBOX_HOME)),
+                Some(OsStr::new(SANDBOX_TMPDIR)),
+                Some(
+                    "\
+26 24 0:22 / / rw,relatime - overlay overlay rw
+27 26 0:33 / /home rw,relatime - ext4 /dev/sda1 rw
+28 26 0:34 / /tmp rw,nosuid,nodev - tmpfs tmpfs rw,size=65536k
+",
+                ),
+            ),
+            (
+                Some(OsStr::new(SANDBOX_HOME)),
+                Some(OsStr::new(SANDBOX_TMPDIR)),
+                Some(
+                    "\
+26 24 0:22 / / rw,relatime - overlay overlay rw
+27 26 0:33 / /home rw,nosuid,nodev - tmpfs tmpfs rw,size=65536k
+",
+                ),
+            ),
+            (
+                Some(OsStr::new(SANDBOX_HOME)),
+                Some(OsStr::new(SANDBOX_TMPDIR)),
+                None,
+            ),
+        ] {
+            assert_eq!(
+                sandbox_runtime_profile_from_evidence(home, tmpdir, mountinfo),
                 None
             );
         }
@@ -1434,8 +1787,13 @@ mod tests {
             "merry-runtime".to_owned(),
         ])
         .unwrap_or_else(|_| panic!("shell process intent should be valid"));
-        let admission =
-            shell_runtime_admission_from_markers(Some(OsStr::new("1")), Some(OsStr::new("1")));
+        let admission = shell_runtime_admission(
+            true,
+            Some(SandboxChildHandoff::CliBwrapV1),
+            Some(SandboxRuntimeProfile::CliBwrapV1),
+            Some(OsStr::new("1")),
+            Some(OsStr::new("1")),
+        );
         let runner = FakeProcessRunner::succeeding("simulated cargo success\n");
         let mut output = Vec::new();
 
@@ -1467,8 +1825,13 @@ mod tests {
             "echo bad".to_owned(),
         ])
         .unwrap_or_else(|_| panic!("shell process intent should be valid"));
-        let admission =
-            shell_runtime_admission_from_markers(Some(OsStr::new("1")), Some(OsStr::new("1")));
+        let admission = shell_runtime_admission(
+            true,
+            Some(SandboxChildHandoff::CliBwrapV1),
+            Some(SandboxRuntimeProfile::CliBwrapV1),
+            Some(OsStr::new("1")),
+            Some(OsStr::new("1")),
+        );
         let runner = FakeProcessRunner::succeeding("bad\n");
         let mut output = Vec::new();
 
@@ -1733,7 +2096,7 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_plan_reexecs_current_exe_with_sandbox_flag_removed() {
+    fn sandbox_plan_reexecs_current_exe_with_hidden_handoff_and_sandbox_flag_removed() {
         let host = sandbox_host();
         let SandboxBootstrap::Reexec(plan) =
             plan_sandbox(true, &host).expect("sandbox planning should succeed")
@@ -1748,7 +2111,82 @@ mod tests {
             .expect("current executable should be present");
         assert_eq!(
             &args[exe_index + 1..],
-            ["debug", "--session-id", "custom-session"]
+            [
+                SANDBOX_CHILD_HANDOFF_ARG,
+                SANDBOX_CHILD_HANDOFF_CLI_BWRAP_V1,
+                "debug",
+                "--session-id",
+                "custom-session",
+            ]
+        );
+    }
+
+    #[test]
+    fn sandbox_plan_strips_host_provided_hidden_handoff_before_injecting_its_own() {
+        let mut host = sandbox_host();
+        host.args = vec![
+            os("--with-sandbox"),
+            os(SANDBOX_CHILD_HANDOFF_ARG),
+            os(SANDBOX_CHILD_HANDOFF_CLI_BWRAP_V1),
+            os("debug"),
+            os("--session-id"),
+            os("custom-session"),
+        ];
+        let SandboxBootstrap::Reexec(plan) =
+            plan_sandbox(true, &host).expect("sandbox planning should succeed")
+        else {
+            panic!("expected sandbox reexec plan");
+        };
+        let args = plan_args(&plan);
+        let handoff_positions = args
+            .iter()
+            .enumerate()
+            .filter_map(|(index, arg)| (arg == SANDBOX_CHILD_HANDOFF_ARG).then_some(index))
+            .collect::<Vec<_>>();
+
+        assert_eq!(handoff_positions.len(), 1);
+        let handoff_index = handoff_positions[0];
+        assert_eq!(args[handoff_index + 1], SANDBOX_CHILD_HANDOFF_CLI_BWRAP_V1);
+        assert!(contains_sequence(
+            &args,
+            &[
+                "/workspace/merry/target/debug/merry",
+                SANDBOX_CHILD_HANDOFF_ARG,
+                SANDBOX_CHILD_HANDOFF_CLI_BWRAP_V1,
+                "debug",
+                "--session-id",
+                "custom-session",
+            ],
+        ));
+    }
+
+    #[test]
+    fn sandbox_plan_strips_host_provided_hidden_handoff_assignment_before_injecting_its_own() {
+        let mut host = sandbox_host();
+        host.args = vec![
+            os("--with-sandbox"),
+            os("--merry-sandbox-child-handoff=cli-bwrap-v1"),
+            os("debug"),
+            os("--session-id"),
+            os("custom-session"),
+        ];
+        let SandboxBootstrap::Reexec(plan) =
+            plan_sandbox(true, &host).expect("sandbox planning should succeed")
+        else {
+            panic!("expected sandbox reexec plan");
+        };
+        let args = plan_args(&plan);
+
+        assert_eq!(
+            args.iter()
+                .filter(|arg| arg.as_str() == SANDBOX_CHILD_HANDOFF_ARG)
+                .count(),
+            1
+        );
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg == "--merry-sandbox-child-handoff=cli-bwrap-v1")
         );
     }
 
@@ -1779,7 +2217,7 @@ mod tests {
     }
 
     #[test]
-    fn args_without_with_sandbox_removes_only_first_marker() {
+    fn args_without_sandbox_bootstrap_flags_removes_only_first_sandbox_marker() {
         let args = vec![
             os("--with-sandbox"),
             os("debug"),
@@ -1788,8 +2226,31 @@ mod tests {
         ];
 
         assert_eq!(
-            args_without_with_sandbox(&args),
+            args_without_sandbox_bootstrap_flags(&args),
             vec![os("debug"), os("--input"), os("--with-sandbox")]
+        );
+    }
+
+    #[test]
+    fn args_without_sandbox_bootstrap_flags_preserves_shell_trailing_argv() {
+        let args = vec![
+            os("--with-sandbox"),
+            os("shell"),
+            os("--"),
+            os("--with-sandbox"),
+            os(SANDBOX_CHILD_HANDOFF_ARG),
+            os(SANDBOX_CHILD_HANDOFF_CLI_BWRAP_V1),
+        ];
+
+        assert_eq!(
+            args_without_sandbox_bootstrap_flags(&args),
+            vec![
+                os("shell"),
+                os("--"),
+                os("--with-sandbox"),
+                os(SANDBOX_CHILD_HANDOFF_ARG),
+                os(SANDBOX_CHILD_HANDOFF_CLI_BWRAP_V1),
+            ]
         );
     }
 
