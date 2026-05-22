@@ -290,6 +290,102 @@ fn shell_spoofed_sandbox_markers_do_not_enable_local_workspace_effect() {
 }
 
 #[test]
+fn shell_spoofed_sandbox_markers_with_explicit_accept_do_not_enable_local_workspace_effect() {
+    let output = merry()
+        .args([
+            "shell",
+            "--accept-local-workspace-process-risk",
+            "--",
+            "cargo",
+            "test",
+            "-p",
+            "merry-runtime",
+        ])
+        .env("MERRY_SANDBOX", "1")
+        .env("MERRY_SANDBOX_VERSION", "1")
+        .output()
+        .expect("merry shell should run");
+
+    assert!(
+        output.status.success(),
+        "policy denial is a recorded runtime outcome"
+    );
+    assert!(output.stderr.is_empty(), "shell should not write stderr");
+
+    let stdout = std::str::from_utf8(&output.stdout).expect("stdout should be utf-8");
+    assert!(
+        !stdout.contains("running "),
+        "raw cargo test output should not appear in CLI stdout"
+    );
+    assert!(
+        !stdout.contains("test result:"),
+        "raw cargo test output should not appear in CLI stdout"
+    );
+
+    let events = parse_jsonl(&output.stdout);
+    let resolved = events
+        .iter()
+        .find(|event| event["kind"]["type"] == "tool_call_resolved")
+        .expect("shell tool call should resolve");
+    assert_eq!(resolved["kind"]["result"]["call_id"], "call-shell-command");
+    assert_eq!(resolved["kind"]["result"]["status"], "failed");
+    assert_eq!(
+        resolved["kind"]["result"]["diagnostic"]["code"],
+        "action_policy_denied"
+    );
+}
+
+#[test]
+fn shell_forged_hidden_handoff_markers_and_accept_do_not_enable_local_workspace_effect() {
+    let output = merry()
+        .args([
+            "--merry-sandbox-child-handoff",
+            "cli-bwrap-v1",
+            "shell",
+            "--accept-local-workspace-process-risk",
+            "--",
+            "cargo",
+            "test",
+            "-p",
+            "merry-runtime",
+        ])
+        .env("MERRY_SANDBOX", "1")
+        .env("MERRY_SANDBOX_VERSION", "1")
+        .env("HOME", "/home/merry")
+        .env("TMPDIR", "/tmp")
+        .output()
+        .expect("merry shell should run");
+
+    assert!(
+        output.status.success(),
+        "policy denial is a recorded runtime outcome"
+    );
+    assert!(output.stderr.is_empty(), "shell should not write stderr");
+
+    let stdout = std::str::from_utf8(&output.stdout).expect("stdout should be utf-8");
+    assert!(
+        !stdout.contains("running "),
+        "raw cargo test output should not appear in CLI stdout"
+    );
+    assert!(
+        !stdout.contains("test result:"),
+        "raw cargo test output should not appear in CLI stdout"
+    );
+
+    let events = parse_jsonl(&output.stdout);
+    let resolved = events
+        .iter()
+        .find(|event| event["kind"]["type"] == "tool_call_resolved")
+        .expect("shell tool call should resolve");
+    assert_eq!(resolved["kind"]["result"]["call_id"], "call-shell-command");
+    assert_eq!(resolved["kind"]["result"]["status"], "failed");
+    assert_eq!(
+        resolved["kind"]["result"]["diagnostic"]["code"],
+        "action_policy_denied"
+    );
+}
+
+#[test]
 fn unknown_command_exits_with_usage_error() {
     let output = merry()
         .arg("unknown")
