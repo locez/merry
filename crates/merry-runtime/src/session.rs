@@ -3,7 +3,7 @@
 #[cfg(test)]
 use crate::summary_draft_promotion::SummaryDraftPromotionRegistrySnapshot;
 use crate::{
-    ActionProposal, RuntimeError,
+    ActionExecutionEvidence, ActionProposal, RuntimeError, ToolActionKind,
     action_audit::{ActionAuditPolicy, ActionAuditRegistry},
     action_policy::ActionPolicyDecision,
     artifact::{ArtifactContent, ArtifactError, ArtifactRegistry},
@@ -446,7 +446,9 @@ impl SessionState {
         status: ToolCallResultStatus,
         content: ArtifactContent,
         diagnostic: Option<ErrorInfo>,
+        execution_evidence: Option<ActionExecutionEvidence>,
     ) -> Result<Vec<RuntimeEvent>, RuntimeError> {
+        debug_assert!(execution_evidence.is_none());
         let artifact_kind = match &content {
             ArtifactContent::Text(_) => ArtifactKind::Text,
             ArtifactContent::Json(_) => ArtifactKind::Json,
@@ -476,6 +478,102 @@ impl SessionState {
         };
 
         self.submit_tool_result(result, content)
+    }
+
+    pub(crate) fn submit_proposed_tool_execution_outcome(
+        &mut self,
+        proposal: ActionProposal,
+        status: ToolCallResultStatus,
+        content: ArtifactContent,
+        diagnostic: Option<ErrorInfo>,
+        execution_evidence: Option<ActionExecutionEvidence>,
+        policy: ActionAuditPolicy,
+    ) -> Result<Vec<RuntimeEvent>, RuntimeError> {
+        let call_id = proposal.tool_call_id().clone();
+        let Some(pending_index) = self
+            .pending_tool_calls
+            .iter()
+            .position(|call| call.id() == &call_id)
+        else {
+            return if self.resolved_tool_calls.contains(&call_id) {
+                Err(RuntimeError::ToolCallAlreadyResolved {
+                    session_id: self.session_id.clone(),
+                    call_id,
+                })
+            } else {
+                Err(RuntimeError::UnknownToolCall {
+                    session_id: self.session_id.clone(),
+                    call_id,
+                })
+            };
+        };
+
+        let artifact_kind = match &content {
+            ArtifactContent::Text(_) => ArtifactKind::Text,
+            ArtifactContent::Json(_) => ArtifactKind::Json,
+            ArtifactContent::Binary(_) | ArtifactContent::Image(_) | ArtifactContent::Other(_) => {
+                return Err(RuntimeError::UnsupportedToolResultContent {
+                    artifact_id: self.next_tool_result_artifact_id(),
+                    content_kind: content.kind(),
+                });
+            }
+        };
+        let artifact = ArtifactRef::new(self.next_tool_result_artifact_id(), artifact_kind);
+        let result = match status {
+            ToolCallResultStatus::Succeeded => ToolCallResult::new(
+                call_id,
+                ToolCallResultStatus::Succeeded,
+                artifact,
+                diagnostic,
+            )?,
+            ToolCallResultStatus::Failed => {
+                let diagnostic = diagnostic.ok_or(RuntimeError::Core {
+                    source: merry_core::CoreError::InvalidToolCallResult {
+                        reason: "failed tool execution outcome must include a diagnostic",
+                    },
+                })?;
+                ToolCallResult::failed(call_id, artifact, diagnostic)
+            }
+        };
+
+        self.validate_tool_result_content(&result, &content)?;
+        self.artifacts
+            .ensure_recordable(result.artifact(), &content)?;
+
+        let pending = self.pending_tool_calls.remove(pending_index);
+        let mut events = Vec::with_capacity(if self.session_started { 2 } else { 3 });
+        if let Some(started) = self.record_session_started_if_needed() {
+            events.push(started);
+        }
+
+        let action_kind = proposal.action_kind();
+        self.record_proposed_tool_action_audit(proposal);
+        if let Some(execution_evidence) = execution_evidence {
+            self.record_executed_tool_action_audit(
+                &pending,
+                action_kind,
+                policy,
+                execution_evidence,
+            );
+        }
+        let recorded = self
+            .artifacts
+            .record_preflighted(result.artifact().clone(), content);
+        debug_assert_eq!(&recorded, result.artifact());
+        self.resolved_tool_calls.insert(result.call_id().clone());
+        self.unconsumed_tool_continuations
+            .push(ResolvedToolContinuation::new(pending, result.clone()));
+
+        events.push(self.record_event(
+            RuntimeEventKind::ArtifactRecorded { artifact: recorded },
+            LedgerFactKind::ArtifactRecorded,
+        ));
+        events.push(self.record_event(
+            RuntimeEventKind::ToolCallResolved { result },
+            LedgerFactKind::ToolCallResolved,
+        ));
+
+        Ok(events)
     }
 
     pub(crate) fn submit_denied_tool_action(
@@ -643,10 +741,23 @@ impl SessionState {
             .record_lifecycle(self.next_sequence, LedgerFactKind::ActionAuditRecorded);
     }
 
+    fn record_executed_tool_action_audit(
+        &mut self,
+        pending: &PendingToolCall,
+        action_kind: ToolActionKind,
+        policy: ActionAuditPolicy,
+        evidence: ActionExecutionEvidence,
+    ) {
+        self.action_audits
+            .record_executed_tool_action(pending, action_kind, policy, evidence);
+        self.ledger
+            .record_lifecycle(self.next_sequence, LedgerFactKind::ActionAuditRecorded);
+    }
+
     fn record_guarded_tool_action_audit(
         &mut self,
         pending: &PendingToolCall,
-        action_kind: crate::ToolActionKind,
+        action_kind: ToolActionKind,
         policy: ActionAuditPolicy,
     ) -> bool {
         self.action_audits
@@ -761,6 +872,8 @@ fn duplicate_tool_call_diagnostic(call_id: &ToolCallId, state: &'static str) -> 
 mod tests {
     use super::SessionState;
     use crate::{
+        ActionExecutionEvidence, ActionProposal, ActionProposalEvidence,
+        WorkspacePatchExecutionEvidence, WorkspacePatchProposal,
         action_audit::{ActionAuditPolicy, ActionAuditStatus},
         action_policy::{ActionPolicyDisposition, ActionRiskTier, DefaultActionPolicy},
         artifact::{ArtifactContent, ArtifactError},
@@ -1175,6 +1288,127 @@ mod tests {
         assert!(audit_index < artifact_index);
         assert!(artifact_index < resolved_index);
         assert!(session.pending_tool_calls().is_empty());
+    }
+
+    #[test]
+    fn proposed_tool_execution_records_executed_audit_before_artifact_and_resolution() {
+        let mut session = SessionState::new(session_id());
+        let call = pending_tool_call("executed-action-call");
+        session
+            .record_session_started_if_needed()
+            .expect("session should start");
+        session
+            .record_tool_call_pending(call.clone())
+            .expect("pending call should record");
+
+        let proposal_evidence = ActionProposalEvidence::WorkspacePatch(
+            WorkspacePatchProposal::new(
+                "note.txt",
+                3,
+                5,
+                16,
+                18,
+                "fnv1a64:0000000000000100",
+                "fnv1a64:0000000000000101",
+            )
+            .expect("valid workspace patch proposal"),
+        );
+        let proposal = ActionProposal::new(
+            &call,
+            crate::ToolActionKind::WorkspaceWrite,
+            "workspace patch",
+            "note.txt",
+            "Replace one preimage in note.txt.",
+            proposal_evidence,
+        )
+        .expect("valid action proposal");
+        let execution_evidence = ActionExecutionEvidence::WorkspacePatch(
+            WorkspacePatchExecutionEvidence::new(
+                "note.txt",
+                3,
+                5,
+                16,
+                18,
+                "fnv1a64:0000000000000100",
+                "fnv1a64:0000000000000101",
+            )
+            .expect("valid execution evidence"),
+        );
+        let policy = ActionAuditPolicy::new(
+            ActionRiskTier::EditLow,
+            ActionPolicyDisposition::Allow,
+            "test low-risk workspace patch allow",
+        );
+
+        let events = session
+            .submit_proposed_tool_execution_outcome(
+                proposal,
+                merry_core::ToolCallResultStatus::Succeeded,
+                ArtifactContent::json(r#"{"ok":true}"#),
+                None,
+                Some(execution_evidence.clone()),
+                policy,
+            )
+            .expect("proposed execution should resolve");
+
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            events[0].kind,
+            RuntimeEventKind::ArtifactRecorded { .. }
+        ));
+        assert!(matches!(
+            events[1].kind,
+            RuntimeEventKind::ToolCallResolved { .. }
+        ));
+
+        let audit_snapshot = session.action_audit_snapshot();
+        assert_eq!(audit_snapshot.records().len(), 2);
+        assert_eq!(
+            audit_snapshot.records()[0].status(),
+            ActionAuditStatus::Proposed
+        );
+        assert_eq!(
+            audit_snapshot.records()[1].status(),
+            ActionAuditStatus::Executed
+        );
+        assert!(audit_snapshot.records()[0].proposal().is_some());
+        assert!(audit_snapshot.records()[0].execution_evidence().is_none());
+        assert!(audit_snapshot.records()[1].proposal().is_none());
+        assert_eq!(
+            audit_snapshot.records()[1]
+                .execution_evidence()
+                .expect("executed audit should include evidence"),
+            &execution_evidence
+        );
+
+        let lifecycle_kinds = session
+            .ledger_projection()
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                LedgerProjection::Lifecycle { kind, .. } => Some(*kind),
+                LedgerProjection::Fact { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        let audit_indexes = lifecycle_kinds
+            .iter()
+            .enumerate()
+            .filter_map(|(index, kind)| {
+                (*kind == LedgerFactKind::ActionAuditRecorded).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(audit_indexes.len(), 2);
+        let artifact_index = lifecycle_kinds
+            .iter()
+            .position(|kind| *kind == LedgerFactKind::ArtifactRecorded)
+            .expect("artifact lifecycle should be recorded");
+        let resolved_index = lifecycle_kinds
+            .iter()
+            .position(|kind| *kind == LedgerFactKind::ToolCallResolved)
+            .expect("resolution lifecycle should be recorded");
+        assert!(audit_indexes[0] < audit_indexes[1]);
+        assert!(audit_indexes[1] < artifact_index);
+        assert!(artifact_index < resolved_index);
     }
 
     #[test]

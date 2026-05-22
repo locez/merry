@@ -5,13 +5,14 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+clap.workspace = true
 futures-util.workspace = true
 merry-core = { path = "../merry-core" }
 merry-llm = { path = "../merry-llm" }
 merry-provider-openai = { path = "../merry-provider-openai" }
 merry-runtime = { path = "../merry-runtime" }
 serde_json.workspace = true
-tokio = { workspace = true, features = ["io-std", "io-util"] }
+tokio = { workspace = true, features = ["io-std", "io-util", "process"] }
 
 [[bin]]
 name = "merry"

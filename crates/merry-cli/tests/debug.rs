@@ -38,6 +38,25 @@ fn assert_debug_output(stdout: &[u8], expected_session_id: &str) {
     }
 }
 
+fn parse_jsonl(stdout: &[u8]) -> Vec<Value> {
+    let text = std::str::from_utf8(stdout).expect("stdout should be utf-8");
+    assert!(text.ends_with('\n'), "stdout should end with a newline");
+    text.lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("each line should be JSON"))
+        .collect()
+}
+
+fn event_kinds(events: &[Value]) -> Vec<&str> {
+    events
+        .iter()
+        .map(|event| {
+            event["kind"]["type"]
+                .as_str()
+                .expect("event kind type should be a string")
+        })
+        .collect()
+}
+
 #[test]
 fn debug_emits_default_runtime_lifecycle_as_json_lines() {
     let output = merry()
@@ -66,6 +85,127 @@ fn debug_accepts_custom_session_id_and_input() {
     assert!(output.status.success(), "debug should exit successfully");
     assert!(output.stderr.is_empty(), "debug should not write stderr");
     assert_debug_output(&output.stdout, "custom-session");
+}
+
+#[test]
+fn shell_help_writes_usage_to_stdout() {
+    let output = merry()
+        .args(["shell", "--help"])
+        .output()
+        .expect("merry shell --help should run");
+
+    assert!(
+        output.status.success(),
+        "shell help should exit successfully"
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "shell help should not write stderr"
+    );
+    let stdout = std::str::from_utf8(&output.stdout).expect("stdout should be utf-8");
+    assert!(stdout.contains("Usage: merry shell"));
+    assert!(stdout.contains("-- <ARGV>") || stdout.contains("[-- <ARGV>]"));
+    assert!(stdout.contains("ARGV"));
+}
+
+#[test]
+fn shell_requires_argv() {
+    let output = merry()
+        .arg("shell")
+        .output()
+        .expect("merry shell should run");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        output.stdout.is_empty(),
+        "usage errors should not write stdout"
+    );
+    let stderr = std::str::from_utf8(&output.stderr).expect("stderr should be utf-8");
+    assert!(stderr.contains("Usage: merry shell"));
+    assert!(stderr.contains("ARGV") || stderr.contains("required"));
+}
+
+#[test]
+fn shell_rejects_argv_without_separator() {
+    let output = merry()
+        .args(["shell", "rustc", "--version"])
+        .output()
+        .expect("merry shell should run");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        output.stdout.is_empty(),
+        "usage errors should not write stdout"
+    );
+    let stderr = std::str::from_utf8(&output.stderr).expect("stderr should be utf-8");
+    assert!(stderr.contains("Usage: merry shell") || stderr.contains("unexpected argument"));
+    assert!(stderr.contains("rustc") || stderr.contains("ARGV"));
+}
+
+#[test]
+fn shell_rustc_version_emits_runtime_jsonl_and_resolves_success() {
+    let output = merry()
+        .args(["shell", "--", "rustc", "--version"])
+        .output()
+        .expect("merry shell should run");
+
+    assert!(output.status.success(), "shell should exit successfully");
+    assert!(output.stderr.is_empty(), "shell should not write stderr");
+
+    let stdout = std::str::from_utf8(&output.stdout).expect("stdout should be utf-8");
+    assert!(
+        !stdout.starts_with("rustc "),
+        "shell stdout should be runtime JSONL, not raw rustc output"
+    );
+    let events = parse_jsonl(&output.stdout);
+    let kinds = event_kinds(&events);
+    assert!(kinds.contains(&"tool_call_pending"));
+    assert!(kinds.contains(&"artifact_recorded"));
+    assert!(kinds.contains(&"tool_call_resolved"));
+
+    let resolved = events
+        .iter()
+        .find(|event| event["kind"]["type"] == "tool_call_resolved")
+        .expect("shell tool call should resolve");
+    assert_eq!(resolved["kind"]["result"]["call_id"], "call-shell-command");
+    assert_eq!(resolved["kind"]["result"]["status"], "succeeded");
+    assert!(resolved["kind"]["result"]["diagnostic"].is_null());
+}
+
+#[test]
+fn shell_forbidden_command_denies_without_running_raw_command() {
+    let output = merry()
+        .args(["shell", "--", "sh", "-c", "echo bad"])
+        .output()
+        .expect("merry shell should run");
+
+    assert!(
+        output.status.success(),
+        "policy denial is a recorded runtime outcome"
+    );
+    assert!(output.stderr.is_empty(), "shell should not write stderr");
+
+    let stdout = std::str::from_utf8(&output.stdout).expect("stdout should be utf-8");
+    assert!(
+        !stdout.contains("bad"),
+        "forbidden command output should not appear in CLI stdout"
+    );
+    let events = parse_jsonl(&output.stdout);
+    let kinds = event_kinds(&events);
+    assert!(kinds.contains(&"tool_call_pending"));
+    assert!(kinds.contains(&"artifact_recorded"));
+    assert!(kinds.contains(&"tool_call_resolved"));
+
+    let resolved = events
+        .iter()
+        .find(|event| event["kind"]["type"] == "tool_call_resolved")
+        .expect("shell tool call should resolve");
+    assert_eq!(resolved["kind"]["result"]["call_id"], "call-shell-command");
+    assert_eq!(resolved["kind"]["result"]["status"], "failed");
+    assert_eq!(
+        resolved["kind"]["result"]["diagnostic"]["code"],
+        "action_policy_denied"
+    );
 }
 
 #[test]
@@ -121,9 +261,8 @@ fn missing_debug_flag_value_exits_with_debug_usage_error() {
         "usage errors should not write stdout"
     );
     let stderr = std::str::from_utf8(&output.stderr).expect("stderr should be utf-8");
-    assert!(stderr.contains("--input requires a value"));
-    assert!(stderr.contains("Usage: merry debug"));
-    assert!(stderr.contains("--session-id <SESSION_ID>"));
+    assert!(stderr.contains("a value is required for '--input <TEXT>'"));
+    assert!(stderr.contains("try '--help'"));
     assert!(stderr.contains("--input <TEXT>"));
 }
 
@@ -140,7 +279,7 @@ fn debug_rejects_openai_after_debug_options_as_unexpected_argument() {
         "usage errors should not write stdout"
     );
     let stderr = std::str::from_utf8(&output.stderr).expect("stderr should be utf-8");
-    assert!(stderr.contains("unexpected debug argument: openai"));
+    assert!(stderr.contains("the subcommand 'openai' cannot be used with '--input <TEXT>'"));
     assert!(stderr.contains("Usage: merry debug"));
 }
 
@@ -154,7 +293,24 @@ fn root_help_writes_usage_to_stdout() {
     assert!(output.status.success(), "help should exit successfully");
     assert!(output.stderr.is_empty(), "help should not write stderr");
     let stdout = std::str::from_utf8(&output.stdout).expect("stdout should be utf-8");
-    assert!(stdout.contains("Usage: merry <COMMAND>"));
+    assert!(stdout.contains("Usage: merry [OPTIONS] <COMMAND>"));
+    assert!(stdout.contains("--with-sandbox"));
+    assert!(stdout.contains("debug"));
+}
+
+#[test]
+fn root_with_sandbox_help_writes_usage_to_stdout_without_reexec() {
+    let output = merry()
+        .args(["--with-sandbox", "--help"])
+        .env("PATH", "")
+        .output()
+        .expect("merry --with-sandbox --help should run");
+
+    assert!(output.status.success(), "help should exit successfully");
+    assert!(output.stderr.is_empty(), "help should not write stderr");
+    let stdout = std::str::from_utf8(&output.stdout).expect("stdout should be utf-8");
+    assert!(stdout.contains("Usage: merry [OPTIONS] <COMMAND>"));
+    assert!(stdout.contains("--with-sandbox"));
     assert!(stdout.contains("debug"));
 }
 
@@ -241,7 +397,8 @@ fn debug_openai_requires_input() {
         "usage errors should not write stdout"
     );
     let stderr = std::str::from_utf8(&output.stderr).expect("stderr should be utf-8");
-    assert!(stderr.contains("--input requires a value"));
+    assert!(stderr.contains("the following required arguments were not provided"));
+    assert!(stderr.contains("--input <TEXT>"));
     assert!(stderr.contains("Usage: merry debug openai"));
 }
 
@@ -258,7 +415,7 @@ fn debug_openai_rejects_unknown_option() {
         "usage errors should not write stdout"
     );
     let stderr = std::str::from_utf8(&output.stderr).expect("stderr should be utf-8");
-    assert!(stderr.contains("unknown debug openai option: --bad-option"));
+    assert!(stderr.contains("unexpected argument '--bad-option'"));
     assert!(stderr.contains("Usage: merry debug openai"));
 }
 
@@ -283,8 +440,8 @@ fn debug_openai_requires_debug_tool_result_value() {
         "usage errors should not write stdout"
     );
     let stderr = std::str::from_utf8(&output.stderr).expect("stderr should be utf-8");
-    assert!(stderr.contains("--debug-tool-result requires a value"));
-    assert!(stderr.contains("Usage: merry debug openai"));
+    assert!(stderr.contains("a value is required for '--debug-tool-result <TEXT>'"));
+    assert!(stderr.contains("try '--help'"));
 }
 
 #[test]
@@ -413,6 +570,6 @@ fn debug_openai_rejects_zero_or_invalid_max_output_tokens() {
         );
         let stderr = std::str::from_utf8(&output.stderr).expect("stderr should be utf-8");
         assert!(stderr.contains("--max-output-tokens"));
-        assert!(stderr.contains("Usage: merry debug openai"));
+        assert!(stderr.contains("invalid value"));
     }
 }

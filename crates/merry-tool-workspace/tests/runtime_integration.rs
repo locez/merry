@@ -9,7 +9,9 @@ use merry_llm::{
     ModelStreamContext, ModelToolCall, ModelToolCallId, ModelToolResultContent, ToolArguments,
     testing::FakeModelProvider,
 };
-use merry_runtime::{Runtime, StepContext, StepInput, ToolExecutionContext};
+use merry_runtime::{
+    LedgerFactKind, LedgerProjection, Runtime, StepContext, StepInput, ToolExecutionContext,
+};
 use merry_tool_workspace::{
     ReadOnlyWorkspaceTools, WORKSPACE_LIST_DIR_TOOL, WORKSPACE_PATCH_FILE_TOOL,
     WORKSPACE_READ_FILE_TOOL, WORKSPACE_SEARCH_TEXT_TOOL, WorkspaceToolsConfig,
@@ -232,6 +234,34 @@ fn runtime_with_workspace_patch_tools(root: &Path, model_event: ModelEvent) -> R
     builder.build().expect("runtime should build")
 }
 
+fn runtime_with_opt_in_workspace_patch_tools(root: &Path, model_event: ModelEvent) -> Runtime {
+    let tools = ReadOnlyWorkspaceTools::new(WorkspaceToolsConfig::new(vec![root.to_path_buf()]))
+        .expect("workspace tools should construct");
+    let provider = FakeModelProvider::new(vec![Ok(model_event)]);
+    let mut builder = Runtime::builder(session_id())
+        .model_provider(Arc::new(provider), model_name())
+        .allow_low_risk_workspace_patches();
+    for tool in tools.into_registered_tools_with_patch() {
+        builder = builder.register_tool(tool);
+    }
+    builder.build().expect("runtime should build")
+}
+
+fn runtime_with_opt_in_workspace_patch_tools_and_provider(
+    root: &Path,
+    provider: ScriptedModelProvider,
+) -> Runtime {
+    let tools = ReadOnlyWorkspaceTools::new(WorkspaceToolsConfig::new(vec![root.to_path_buf()]))
+        .expect("workspace tools should construct");
+    let mut builder = Runtime::builder(session_id())
+        .model_provider(Arc::new(provider), model_name())
+        .allow_low_risk_workspace_patches();
+    for tool in tools.into_registered_tools_with_patch() {
+        builder = builder.register_tool(tool);
+    }
+    builder.build().expect("runtime should build")
+}
+
 async fn execute_first_pending_call(runtime: &Runtime, user_text: &str) -> Vec<RuntimeEvent> {
     let pending_events = collect_step(runtime, user_text).await;
     assert_eq!(
@@ -312,6 +342,50 @@ fn assert_succeeded_json_result(events: &[RuntimeEvent]) {
     assert_eq!(result.status(), ToolCallResultStatus::Succeeded);
     assert_eq!(result.artifact().kind(), &ArtifactKind::Json);
     assert!(result.diagnostic().is_none());
+}
+
+fn lifecycle_kinds(projection: &merry_runtime::LedgerProjectionSnapshot) -> Vec<LedgerFactKind> {
+    projection
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            LedgerProjection::Lifecycle { kind, .. } => Some(*kind),
+            LedgerProjection::Fact { .. } => None,
+        })
+        .collect()
+}
+
+fn assert_successful_patch_content_does_not_leak_internal_metadata(json: &str) {
+    let payload: Value = serde_json::from_str(json).expect("patch result JSON should parse");
+    assert_eq!(payload["ok"], true);
+    for forbidden_key in [
+        "proposal",
+        "audit",
+        "evidence",
+        "fingerprint",
+        "preimage_bytes",
+        "replacement_bytes",
+        "file_fingerprint_before",
+        "file_fingerprint_after",
+    ] {
+        assert_json_key_absent(&payload, forbidden_key);
+    }
+    for forbidden_text in [
+        "proposal",
+        "audit",
+        "evidence",
+        "fingerprint",
+        "fnv1a64",
+        "preimage_bytes",
+        "replacement_bytes",
+        "file_bytes_before",
+        "file_bytes_after",
+    ] {
+        assert!(
+            !json.contains(forbidden_text),
+            "successful patch result leaked {forbidden_text}: {json}"
+        );
+    }
 }
 
 fn assert_failed_json_result(events: &[RuntimeEvent], diagnostic_code: &str) {
@@ -671,6 +745,103 @@ async fn denied_patch_file_leaves_file_unchanged_and_returns_sanitized_result() 
             .code(),
         "action_policy_denied"
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn opt_in_patch_file_tool_applies_patch_and_records_artifact_before_resolution() {
+    let temp = TempWorkspace::new("patch-opt-in-success");
+    temp.write_text("note.txt", "alpha\nold\nomega\n");
+    let runtime = runtime_with_opt_in_workspace_patch_tools(
+        temp.path(),
+        pending_patch_file_call("note.txt", "old", "new"),
+    );
+
+    let pending_events = collect_step(&runtime, "patch note").await;
+    assert_eq!(
+        event_kind_names(&pending_events),
+        ["SessionStarted", "StepStarted", "ToolCallPending"]
+    );
+    let pending = runtime
+        .pending_tool_calls()
+        .await
+        .into_iter()
+        .next()
+        .expect("pending call should be stored");
+
+    let execution_events = runtime
+        .execute_tool_call(pending.id(), ToolExecutionContext::default())
+        .await
+        .expect("opted-in workspace patch should execute");
+
+    assert_eq!(
+        fs::read_to_string(temp.path().join("note.txt")).expect("workspace file should read"),
+        "alpha\nnew\nomega\n"
+    );
+    assert_succeeded_json_result(&execution_events);
+    let lifecycle = lifecycle_kinds(&runtime.ledger_projection().await);
+    let audit_indexes = lifecycle
+        .iter()
+        .enumerate()
+        .filter_map(|(index, kind)| (*kind == LedgerFactKind::ActionAuditRecorded).then_some(index))
+        .collect::<Vec<_>>();
+    assert_eq!(audit_indexes.len(), 2);
+    let artifact_index = lifecycle
+        .iter()
+        .position(|kind| *kind == LedgerFactKind::ArtifactRecorded)
+        .expect("artifact lifecycle should exist");
+    let resolved_index = lifecycle
+        .iter()
+        .position(|kind| *kind == LedgerFactKind::ToolCallResolved)
+        .expect("resolution lifecycle should exist");
+    assert!(audit_indexes[0] < audit_indexes[1]);
+    assert!(audit_indexes[1] < artifact_index);
+    assert!(artifact_index < resolved_index);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn opt_in_patch_success_continuation_does_not_leak_internal_evidence() {
+    let temp = TempWorkspace::new("patch-opt-in-no-leak");
+    temp.write_text("note.txt", "alpha\nold\nomega\n");
+    let provider = ScriptedModelProvider::new(vec![
+        vec![Ok(pending_patch_file_call("note.txt", "old", "new"))],
+        vec![Ok(ModelEvent::Completed {
+            response: ModelResponse::new(
+                vec![ModelOutput::text("continued after patch")],
+                FinishReason::Stop,
+                None,
+            ),
+        })],
+    ]);
+    let provider_handle = provider.clone();
+    let runtime = runtime_with_opt_in_workspace_patch_tools_and_provider(temp.path(), provider);
+    let _pending_events = collect_step(&runtime, "patch note").await;
+    let pending = runtime
+        .pending_tool_calls()
+        .await
+        .into_iter()
+        .next()
+        .expect("pending call should be stored");
+
+    let execution_events = runtime
+        .execute_tool_call(pending.id(), ToolExecutionContext::default())
+        .await
+        .expect("opted-in workspace patch should execute");
+    assert_succeeded_json_result(&execution_events);
+
+    let _continuation_events = collect_step(&runtime, "continue after patch").await;
+    let requests = provider_handle.recorded_requests();
+    let continuation = requests[1]
+        .continuations()
+        .first()
+        .expect("successful tool result should be compiled as continuation");
+    assert_eq!(
+        continuation.result().status(),
+        ToolCallResultStatus::Succeeded
+    );
+    let ModelToolResultContent::Json(continuation_json) = continuation.result().content() else {
+        panic!("successful patch continuation should be JSON");
+    };
+    assert_successful_patch_content_does_not_leak_internal_metadata(continuation_json);
 }
 
 #[tokio::test(flavor = "current_thread")]

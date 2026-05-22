@@ -10,10 +10,12 @@ use merry_llm::{
     ModelStreamContext, ModelToolCall, ModelToolCallId, ToolArguments,
 };
 use merry_runtime::{
-    AgentLoopBlockedReason, AgentLoopConfig, AgentLoopConfigError, AgentLoopStatus, ArtifactError,
-    ContextSummary, DEFAULT_AGENT_LOOP_CONTINUATION_INPUT, Runtime, RuntimeError, StepContext,
-    StepInput, ToolActionKind, ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome,
-    ToolExecutor, ToolExecutorFuture,
+    ActionExecutionEvidence, ActionProposal, ActionProposalEvidence, AgentLoopBlockedReason,
+    AgentLoopConfig, AgentLoopConfigError, AgentLoopStatus, ArtifactError, ContextSummary,
+    DEFAULT_AGENT_LOOP_CONTINUATION_INPUT, Runtime, RuntimeError, StepContext, StepInput,
+    ToolActionKind, ToolActionProposalFuture, ToolExecutionContext, ToolExecutionError,
+    ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture, WorkspacePatchExecutionEvidence,
+    WorkspacePatchProposal,
 };
 use schemars::Schema;
 use serde_json::{Map, Value, json};
@@ -267,6 +269,96 @@ impl ToolExecutor for ScriptedToolExecutor {
 }
 
 #[derive(Clone)]
+struct ProposingPatchToolExecutor {
+    proposed_calls: Arc<Mutex<Vec<PendingToolCall>>>,
+    executed_calls: Arc<Mutex<Vec<PendingToolCall>>>,
+}
+
+impl ProposingPatchToolExecutor {
+    fn new() -> Self {
+        Self {
+            proposed_calls: Arc::new(Mutex::new(Vec::new())),
+            executed_calls: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn proposed_calls(&self) -> Vec<PendingToolCall> {
+        self.proposed_calls
+            .lock()
+            .expect("proposed calls mutex should not be poisoned")
+            .clone()
+    }
+
+    fn executed_calls(&self) -> Vec<PendingToolCall> {
+        self.executed_calls
+            .lock()
+            .expect("executed calls mutex should not be poisoned")
+            .clone()
+    }
+}
+
+impl ToolExecutor for ProposingPatchToolExecutor {
+    fn propose<'a>(
+        &'a self,
+        call: PendingToolCall,
+        _context: ToolExecutionContext,
+    ) -> ToolActionProposalFuture<'a> {
+        Box::pin(async move {
+            self.proposed_calls
+                .lock()
+                .expect("proposed calls mutex should not be poisoned")
+                .push(call.clone());
+
+            let patch = WorkspacePatchProposal::new(
+                "notes/proposed.txt",
+                5,
+                7,
+                20,
+                22,
+                "fnv1a64:0000000000000010",
+                "fnv1a64:0000000000000011",
+            )
+            .map_err(|error| ToolExecutionError::infrastructure(error.to_string()))?;
+            let proposal = ActionProposal::new(
+                &call,
+                ToolActionKind::WorkspaceWrite,
+                "workspace patch",
+                "notes/proposed.txt",
+                "Replace one matched preimage in notes/proposed.txt",
+                ActionProposalEvidence::WorkspacePatch(patch),
+            )
+            .map_err(|error| ToolExecutionError::infrastructure(error.to_string()))?;
+            Ok(Some(proposal))
+        })
+    }
+
+    fn execute<'a>(
+        &'a self,
+        call: PendingToolCall,
+        _context: ToolExecutionContext,
+    ) -> ToolExecutorFuture<'a> {
+        Box::pin(async move {
+            self.executed_calls
+                .lock()
+                .expect("executed calls mutex should not be poisoned")
+                .push(call);
+            let evidence = WorkspacePatchExecutionEvidence::new(
+                "notes/proposed.txt",
+                5,
+                7,
+                20,
+                22,
+                "fnv1a64:0000000000000010",
+                "fnv1a64:0000000000000011",
+            )
+            .map_err(|error| ToolExecutionError::infrastructure(error.to_string()))?;
+            Ok(ToolExecutionOutcome::succeeded_text("patch applied\n")
+                .with_execution_evidence(ActionExecutionEvidence::WorkspacePatch(evidence)))
+        })
+    }
+}
+
+#[derive(Clone)]
 struct BlockingToolExecutor {
     calls: Arc<Mutex<Vec<PendingToolCall>>>,
     started_tx: Arc<Mutex<Option<oneshot::Sender<()>>>>,
@@ -483,6 +575,106 @@ async fn agent_loop_executes_one_tool_and_continues_to_final_completion() {
         requests[1].continuations()[0].result().status(),
         ToolCallResultStatus::Succeeded
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn agent_loop_executes_opt_in_workspace_patch_and_continues_to_final_completion() {
+    let provider = ScriptedModelProvider::new(vec![
+        vec![Ok(completed_tool_call_event(model_tool_call(
+            "call-patch-success",
+            "workspace_patch_file",
+        )))],
+        vec![Ok(completed_text_event("final after patch"))],
+    ]);
+    let executor = ProposingPatchToolExecutor::new();
+    let runtime = Runtime::builder(session_id("agent-loop-opt-in-workspace-patch"))
+        .register_tool(
+            merry_runtime::RegisteredTool::new(
+                tool_spec("workspace_patch_file"),
+                Arc::new(executor.clone()),
+                ToolActionKind::WorkspaceWrite,
+            )
+            .with_action_proposal(),
+        )
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .allow_low_risk_workspace_patches()
+        .build()
+        .expect("runtime should build");
+
+    let result = run_default_loop(&runtime, "Patch note.").await;
+
+    assert_eq!(result.status(), &AgentLoopStatus::Completed);
+    assert_eq!(result.steps_run(), 2);
+    assert_eq!(
+        event_kind_names(result.events()),
+        [
+            "SessionStarted",
+            "StepStarted",
+            "ToolCallPending",
+            "ArtifactRecorded",
+            "ToolCallResolved",
+            "StepStarted",
+            "ArtifactRecorded",
+            "StepCompleted",
+        ]
+    );
+    assert!(runtime.pending_tool_calls().await.is_empty());
+    assert_eq!(executor.proposed_calls().len(), 1);
+    assert_eq!(executor.executed_calls().len(), 1);
+
+    let resolved = result
+        .events()
+        .iter()
+        .find_map(|event| match &event.kind {
+            RuntimeEventKind::ToolCallResolved { result } => Some(result),
+            _ => None,
+        })
+        .expect("patch tool call should resolve");
+    assert_eq!(resolved.status(), ToolCallResultStatus::Succeeded);
+    assert!(resolved.diagnostic().is_none());
+
+    let requests = provider.recorded_requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[1].messages()[0].content().as_text(),
+        DEFAULT_AGENT_LOOP_CONTINUATION_INPUT
+    );
+    assert_eq!(requests[1].continuations().len(), 1);
+    let continuation_result = requests[1].continuations()[0].result();
+    assert_eq!(
+        continuation_result.status(),
+        ToolCallResultStatus::Succeeded
+    );
+    assert!(continuation_result.diagnostic().is_none());
+    assert_eq!(
+        continuation_result.content().as_text(),
+        Some("patch applied\n")
+    );
+    assert!(
+        !continuation_result
+            .content()
+            .as_str()
+            .contains("action_policy_denied"),
+        "successful opt-in patch continuation must not carry policy denial content"
+    );
+    for forbidden in [
+        "proposal",
+        "audit",
+        "evidence",
+        "fingerprint",
+        "fnv1a64",
+        "preimage_bytes",
+        "replacement_bytes",
+        "file_fingerprint_before",
+        "file_fingerprint_after",
+        "file_bytes_before",
+        "file_bytes_after",
+    ] {
+        assert!(
+            !continuation_result.content().as_str().contains(forbidden),
+            "successful opt-in patch continuation leaked {forbidden}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]

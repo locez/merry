@@ -82,6 +82,19 @@ pub enum RuntimeError {
         message: String,
     },
 
+    /// An admitted mutating action reported success without internal execution evidence.
+    #[error(
+        "tool call {call_id} admitted for {action_kind:?} in session {session_id} succeeded without required execution evidence"
+    )]
+    MissingActionExecutionEvidence {
+        /// Session executing the tool call.
+        session_id: SessionId,
+        /// Tool call id that remained pending.
+        call_id: ToolCallId,
+        /// Action kind that required internal execution evidence.
+        action_kind: ToolActionKind,
+    },
+
     /// A mutating action reached the generic executor path before a commit lifecycle exists.
     #[error(
         "mutating tool action {action_kind:?} for tool call {call_id} in session {session_id} requires an explicit commit lifecycle before generic execution"

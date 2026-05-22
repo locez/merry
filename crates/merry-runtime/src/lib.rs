@@ -39,6 +39,7 @@ mod judgment;
 mod ledger;
 mod memory;
 mod model_config;
+mod process;
 mod runtime;
 mod session;
 mod step;
@@ -63,11 +64,18 @@ pub use ledger::{
     LedgerUpdate, LedgerUpdateKind, LedgerValidationError, LifecycleFact, TaskLedger,
 };
 pub use model_config::RuntimeModelRole;
+pub use process::{
+    MAX_PROCESS_ARG_BYTES, MAX_PROCESS_ARGV_ITEMS, MAX_PROCESS_CWD_BYTES,
+    MAX_PROCESS_OUTPUT_LIMIT_BYTES, MAX_PROCESS_STDIN_TEXT_BYTES, ProcessActionError,
+    ProcessActionIntent, ProcessEnvPolicy, ProcessExecutionEvidence, ProcessExitStatus,
+    ProcessRunner, ProcessRunnerContext, ProcessRunnerError, ProcessRunnerFuture,
+    ProcessRunnerOutput, ProcessRunnerResult, is_low_risk_process_action_intent,
+};
 pub use runtime::{Runtime, RuntimeBuilder};
 pub use step::{StepContext, StepInput};
 pub use tool::{
-    ActionProposal, ActionProposalError, ActionProposalEvidence, RegisteredTool, ToolActionKind,
-    ToolActionProposalFuture, ToolActionProposalResult, ToolExecutionContext, ToolExecutionError,
-    ToolExecutionOutcome, ToolExecutionResult, ToolExecutor, ToolExecutorFuture,
-    WorkspacePatchProposal,
+    ActionExecutionEvidence, ActionProposal, ActionProposalError, ActionProposalEvidence,
+    RegisteredTool, ToolActionKind, ToolActionProposalFuture, ToolActionProposalResult,
+    ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome, ToolExecutionResult,
+    ToolExecutor, ToolExecutorFuture, WorkspacePatchExecutionEvidence, WorkspacePatchProposal,
 };

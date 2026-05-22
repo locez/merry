@@ -5,7 +5,7 @@
 //! store provider wire formats.
 
 use crate::{
-    ActionProposal, ToolActionKind,
+    ActionExecutionEvidence, ActionProposal, ToolActionKind,
     action_policy::{ActionPolicyDecision, ActionPolicyDisposition, ActionRiskTier},
 };
 use merry_core::{PendingToolCall, ToolCallId, ToolName};
@@ -39,6 +39,8 @@ impl fmt::Display for ActionAuditId {
 pub(crate) enum ActionAuditStatus {
     /// The action was proposed with deterministic runtime-owned evidence.
     Proposed,
+    /// The action was applied and recorded with execute-time evidence.
+    Executed,
     /// The action was denied by runtime policy.
     Denied,
     /// The action was blocked by runtime admission until commit lifecycle exists.
@@ -102,10 +104,12 @@ pub(crate) struct ActionAuditRecord {
     policy: Option<ActionAuditPolicy>,
     status: ActionAuditStatus,
     proposal: Option<ActionProposal>,
+    execution_evidence: Option<ActionExecutionEvidence>,
 }
 
 impl ActionAuditRecord {
     fn proposed(order: u64, proposal: ActionProposal) -> Self {
+        let proposal = proposal.audit_sanitized();
         Self {
             id: ActionAuditId::from_order(order),
             order,
@@ -115,6 +119,27 @@ impl ActionAuditRecord {
             policy: None,
             status: ActionAuditStatus::Proposed,
             proposal: Some(proposal),
+            execution_evidence: None,
+        }
+    }
+
+    fn executed(
+        order: u64,
+        call: &PendingToolCall,
+        action_kind: ToolActionKind,
+        policy: ActionAuditPolicy,
+        evidence: ActionExecutionEvidence,
+    ) -> Self {
+        Self {
+            id: ActionAuditId::from_order(order),
+            order,
+            tool_call_id: call.id().clone(),
+            tool_name: call.name().clone(),
+            action_kind,
+            policy: Some(policy),
+            status: ActionAuditStatus::Executed,
+            proposal: None,
+            execution_evidence: Some(evidence),
         }
     }
 
@@ -128,6 +153,7 @@ impl ActionAuditRecord {
             policy: Some(ActionAuditPolicy::from_decision(decision)),
             status: ActionAuditStatus::Denied,
             proposal: None,
+            execution_evidence: None,
         }
     }
 
@@ -146,6 +172,7 @@ impl ActionAuditRecord {
             policy: Some(policy),
             status: ActionAuditStatus::Guarded,
             proposal: None,
+            execution_evidence: None,
         }
     }
 
@@ -194,6 +221,11 @@ impl ActionAuditRecord {
     pub(crate) fn proposal(&self) -> Option<&ActionProposal> {
         self.proposal.as_ref()
     }
+
+    #[cfg(test)]
+    pub(crate) fn execution_evidence(&self) -> Option<&ActionExecutionEvidence> {
+        self.execution_evidence.as_ref()
+    }
 }
 
 /// Append-only registry for internal action audit records.
@@ -216,6 +248,19 @@ impl ActionAuditRegistry {
         decision: &ActionPolicyDecision,
     ) {
         let record = ActionAuditRecord::denied(self.next_order, call, decision);
+        self.next_order += 1;
+        self.records.push(record);
+    }
+
+    pub(crate) fn record_executed_tool_action(
+        &mut self,
+        call: &PendingToolCall,
+        action_kind: ToolActionKind,
+        policy: ActionAuditPolicy,
+        evidence: ActionExecutionEvidence,
+    ) {
+        let record =
+            ActionAuditRecord::executed(self.next_order, call, action_kind, policy, evidence);
         self.next_order += 1;
         self.records.push(record);
     }

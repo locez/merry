@@ -10,7 +10,7 @@
 //! render tool specs and continuations into provider wire formats outside this
 //! crate.
 
-use crate::ArtifactContent;
+use crate::{ArtifactContent, ProcessActionError, ProcessActionIntent, ProcessExecutionEvidence};
 use merry_core::{
     ErrorInfo, PendingToolCall, ToolCallId, ToolCallResultStatus, ToolName, ToolSpec,
 };
@@ -58,13 +58,17 @@ pub type ToolActionProposalResult = Result<Option<ActionProposal>, ToolExecution
 #[derive(Debug, Clone)]
 pub struct ToolExecutionContext {
     cancellation_token: CancellationToken,
+    approved_workspace_patch: Option<WorkspacePatchProposal>,
 }
 
 impl ToolExecutionContext {
     /// Creates a tool execution context with the provided cancellation token.
     #[must_use]
     pub fn new(cancellation_token: CancellationToken) -> Self {
-        Self { cancellation_token }
+        Self {
+            cancellation_token,
+            approved_workspace_patch: None,
+        }
     }
 
     /// Returns the cancellation token for this tool execution.
@@ -75,12 +79,27 @@ impl ToolExecutionContext {
     pub fn cancellation_token(&self) -> &CancellationToken {
         &self.cancellation_token
     }
+
+    /// Borrows the approved workspace patch proposal for this execution.
+    ///
+    /// This is executor-internal runtime state. It is never rendered into
+    /// provider-visible tool specs, tool result artifacts, or continuations.
+    #[must_use]
+    pub fn approved_workspace_patch(&self) -> Option<&WorkspacePatchProposal> {
+        self.approved_workspace_patch.as_ref()
+    }
+
+    pub(crate) fn with_approved_workspace_patch(mut self, patch: WorkspacePatchProposal) -> Self {
+        self.approved_workspace_patch = Some(patch);
+        self
+    }
 }
 
 impl Default for ToolExecutionContext {
     fn default() -> Self {
         Self {
             cancellation_token: CancellationToken::new(),
+            approved_workspace_patch: None,
         }
     }
 }
@@ -129,6 +148,7 @@ pub struct ToolExecutionOutcome {
     status: ToolCallResultStatus,
     content: ArtifactContent,
     diagnostic: Option<ErrorInfo>,
+    execution_evidence: Option<ActionExecutionEvidence>,
 }
 
 impl ToolExecutionOutcome {
@@ -183,8 +203,37 @@ impl ToolExecutionOutcome {
         self.diagnostic.as_ref()
     }
 
-    pub(crate) fn into_parts(self) -> (ToolCallResultStatus, ArtifactContent, Option<ErrorInfo>) {
-        (self.status, self.content, self.diagnostic)
+    /// Borrows provider-invisible evidence produced by the actual execution.
+    ///
+    /// Runtime records this only in internal action audit state. It must not be
+    /// rendered into tool result artifacts, provider continuations, or provider
+    /// request payloads.
+    #[must_use]
+    pub fn execution_evidence(&self) -> Option<&ActionExecutionEvidence> {
+        self.execution_evidence.as_ref()
+    }
+
+    /// Attaches provider-invisible evidence from the actual execution.
+    #[must_use]
+    pub fn with_execution_evidence(mut self, evidence: ActionExecutionEvidence) -> Self {
+        self.execution_evidence = Some(evidence);
+        self
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        ToolCallResultStatus,
+        ArtifactContent,
+        Option<ErrorInfo>,
+        Option<ActionExecutionEvidence>,
+    ) {
+        (
+            self.status,
+            self.content,
+            self.diagnostic,
+            self.execution_evidence,
+        )
     }
 
     fn succeeded(content: ArtifactContent) -> Self {
@@ -192,6 +241,7 @@ impl ToolExecutionOutcome {
             status: ToolCallResultStatus::Succeeded,
             content,
             diagnostic: None,
+            execution_evidence: None,
         }
     }
 
@@ -200,6 +250,7 @@ impl ToolExecutionOutcome {
             status: ToolCallResultStatus::Failed,
             content,
             diagnostic: Some(diagnostic),
+            execution_evidence: None,
         }
     }
 }
@@ -292,6 +343,7 @@ impl ActionProposal {
         if action_kind == ToolActionKind::ReadOnly {
             return Err(ActionProposalError::ReadOnlyAction);
         }
+        validate_proposal_evidence_matches_action_kind(action_kind, &evidence)?;
 
         Ok(Self {
             tool_call_id: call.id().clone(),
@@ -346,6 +398,32 @@ impl ActionProposal {
         &self.evidence
     }
 
+    /// Returns a copy suitable for internal action audit storage.
+    ///
+    /// Proposal audits keep deterministic identity, but process proposals must
+    /// not retain inline stdin payloads.
+    #[must_use]
+    pub(crate) fn audit_sanitized(&self) -> Self {
+        let evidence = match &self.evidence {
+            ActionProposalEvidence::WorkspacePatch(patch) => {
+                ActionProposalEvidence::WorkspacePatch(patch.clone())
+            }
+            ActionProposalEvidence::ProcessAction(intent) => {
+                ActionProposalEvidence::ProcessAction(intent.without_stdin_text())
+            }
+        };
+
+        Self {
+            tool_call_id: self.tool_call_id.clone(),
+            tool_name: self.tool_name.clone(),
+            action_kind: self.action_kind,
+            label: self.label.clone(),
+            subject: self.subject.clone(),
+            summary: self.summary.clone(),
+            evidence,
+        }
+    }
+
     pub(crate) fn validate_for_call(
         &self,
         call: &PendingToolCall,
@@ -360,6 +438,9 @@ impl ActionProposal {
         if self.action_kind != action_kind {
             return Err("proposal action kind does not match registered tool");
         }
+        if !self.evidence.matches_action_kind(action_kind) {
+            return Err("proposal evidence does not match registered tool action kind");
+        }
         Ok(())
     }
 }
@@ -369,12 +450,144 @@ impl ActionProposal {
 pub enum ActionProposalEvidence {
     /// A constrained single-file workspace patch proposal.
     WorkspacePatch(WorkspacePatchProposal),
+    /// A typed local process action intent.
+    ProcessAction(ProcessActionIntent),
+}
+
+impl ActionProposalEvidence {
+    fn matches_action_kind(&self, action_kind: ToolActionKind) -> bool {
+        matches!(
+            (action_kind, self),
+            (ToolActionKind::WorkspaceWrite, Self::WorkspacePatch(_))
+                | (ToolActionKind::CommandExec, Self::ProcessAction(_))
+        )
+    }
+}
+
+/// Provider-neutral internal evidence attached after a mutating action executes.
+///
+/// This evidence is runtime-owned audit state. It intentionally carries no
+/// provider wire data and must not be exposed through artifacts or tool result
+/// continuations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActionExecutionEvidence {
+    /// A constrained single-file workspace patch that was actually applied.
+    WorkspacePatch(WorkspacePatchExecutionEvidence),
+    /// Evidence from a local process action execution.
+    ProcessAction(ProcessExecutionEvidence),
+}
+
+impl ActionExecutionEvidence {
+    pub(crate) fn matches_action_kind(&self, action_kind: ToolActionKind) -> bool {
+        matches!(
+            (action_kind, self),
+            (ToolActionKind::WorkspaceWrite, Self::WorkspacePatch(_))
+                | (ToolActionKind::CommandExec, Self::ProcessAction(_))
+        )
+    }
+}
+
+/// Execute-time metadata for a constrained workspace patch.
+///
+/// This stores only relative workspace identity, byte counts, and stable
+/// non-cryptographic content fingerprints. It does not store old or new text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspacePatchExecutionEvidence {
+    relative_path: String,
+    preimage_bytes: usize,
+    replacement_bytes: usize,
+    file_bytes_before: usize,
+    file_bytes_after: usize,
+    file_fingerprint_before: String,
+    file_fingerprint_after: String,
+}
+
+impl WorkspacePatchExecutionEvidence {
+    /// Creates validated execute-time metadata for a single workspace patch.
+    pub fn new(
+        relative_path: impl Into<String>,
+        preimage_bytes: usize,
+        replacement_bytes: usize,
+        file_bytes_before: usize,
+        file_bytes_after: usize,
+        file_fingerprint_before: impl Into<String>,
+        file_fingerprint_after: impl Into<String>,
+    ) -> Result<Self, ActionProposalError> {
+        let relative_path = validate_workspace_patch_relative_path(relative_path.into())?;
+        validate_workspace_patch_counts(
+            preimage_bytes,
+            replacement_bytes,
+            file_bytes_before,
+            file_bytes_after,
+        )?;
+        let file_fingerprint_before = validate_workspace_patch_fingerprint(
+            "file_fingerprint_before",
+            file_fingerprint_before.into(),
+        )?;
+        let file_fingerprint_after = validate_workspace_patch_fingerprint(
+            "file_fingerprint_after",
+            file_fingerprint_after.into(),
+        )?;
+
+        Ok(Self {
+            relative_path,
+            preimage_bytes,
+            replacement_bytes,
+            file_bytes_before,
+            file_bytes_after,
+            file_fingerprint_before,
+            file_fingerprint_after,
+        })
+    }
+
+    /// Returns the workspace-relative path using `/` separators.
+    #[must_use]
+    pub fn relative_path(&self) -> &str {
+        &self.relative_path
+    }
+
+    /// Returns the byte length of the matched preimage.
+    #[must_use]
+    pub fn preimage_bytes(&self) -> usize {
+        self.preimage_bytes
+    }
+
+    /// Returns the byte length of the replacement text.
+    #[must_use]
+    pub fn replacement_bytes(&self) -> usize {
+        self.replacement_bytes
+    }
+
+    /// Returns the file size immediately before replacement.
+    #[must_use]
+    pub fn file_bytes_before(&self) -> usize {
+        self.file_bytes_before
+    }
+
+    /// Returns the file size observed after replacement was written and read back.
+    #[must_use]
+    pub fn file_bytes_after(&self) -> usize {
+        self.file_bytes_after
+    }
+
+    /// Returns the stable non-cryptographic fingerprint before replacement.
+    #[must_use]
+    pub fn file_fingerprint_before(&self) -> &str {
+        &self.file_fingerprint_before
+    }
+
+    /// Returns the stable non-cryptographic fingerprint after replacement.
+    #[must_use]
+    pub fn file_fingerprint_after(&self) -> &str {
+        &self.file_fingerprint_after
+    }
 }
 
 /// Deterministic metadata for a constrained workspace patch proposal.
 ///
-/// This stores only relative workspace identity and byte counts needed for a
-/// future edit decision. It does not store host absolute paths or provider wire
+/// This stores only relative workspace identity, byte counts, and stable
+/// non-cryptographic content fingerprints needed for a future edit decision.
+/// It does not store old text, new text, host absolute paths, or provider wire
 /// data.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspacePatchProposal {
@@ -383,6 +596,8 @@ pub struct WorkspacePatchProposal {
     replacement_bytes: usize,
     file_bytes_before: usize,
     file_bytes_after: usize,
+    file_fingerprint_before: String,
+    file_fingerprint_after: String,
 }
 
 impl WorkspacePatchProposal {
@@ -393,28 +608,24 @@ impl WorkspacePatchProposal {
         replacement_bytes: usize,
         file_bytes_before: usize,
         file_bytes_after: usize,
+        file_fingerprint_before: impl Into<String>,
+        file_fingerprint_after: impl Into<String>,
     ) -> Result<Self, ActionProposalError> {
         let relative_path = validate_workspace_patch_relative_path(relative_path.into())?;
-        if preimage_bytes == 0 {
-            return Err(ActionProposalError::InvalidWorkspacePatch {
-                field: "preimage_bytes",
-                reason: "must be greater than zero",
-            });
-        }
-
-        let expected_after = file_bytes_before
-            .checked_sub(preimage_bytes)
-            .and_then(|unchanged| unchanged.checked_add(replacement_bytes))
-            .ok_or(ActionProposalError::InvalidWorkspacePatch {
-                field: "file_bytes_after",
-                reason: "must be consistent with before, preimage, and replacement byte counts",
-            })?;
-        if expected_after != file_bytes_after {
-            return Err(ActionProposalError::InvalidWorkspacePatch {
-                field: "file_bytes_after",
-                reason: "must equal file_bytes_before - preimage_bytes + replacement_bytes",
-            });
-        }
+        validate_workspace_patch_counts(
+            preimage_bytes,
+            replacement_bytes,
+            file_bytes_before,
+            file_bytes_after,
+        )?;
+        let file_fingerprint_before = validate_workspace_patch_fingerprint(
+            "file_fingerprint_before",
+            file_fingerprint_before.into(),
+        )?;
+        let file_fingerprint_after = validate_workspace_patch_fingerprint(
+            "file_fingerprint_after",
+            file_fingerprint_after.into(),
+        )?;
 
         Ok(Self {
             relative_path,
@@ -422,6 +633,8 @@ impl WorkspacePatchProposal {
             replacement_bytes,
             file_bytes_before,
             file_bytes_after,
+            file_fingerprint_before,
+            file_fingerprint_after,
         })
     }
 
@@ -454,6 +667,86 @@ impl WorkspacePatchProposal {
     pub fn file_bytes_after(&self) -> usize {
         self.file_bytes_after
     }
+
+    /// Returns the stable non-cryptographic fingerprint before replacement.
+    #[must_use]
+    pub fn file_fingerprint_before(&self) -> &str {
+        &self.file_fingerprint_before
+    }
+
+    /// Returns the projected stable non-cryptographic fingerprint after replacement.
+    #[must_use]
+    pub fn file_fingerprint_after(&self) -> &str {
+        &self.file_fingerprint_after
+    }
+}
+
+fn validate_workspace_patch_counts(
+    preimage_bytes: usize,
+    replacement_bytes: usize,
+    file_bytes_before: usize,
+    file_bytes_after: usize,
+) -> Result<(), ActionProposalError> {
+    if preimage_bytes == 0 {
+        return Err(ActionProposalError::InvalidWorkspacePatch {
+            field: "preimage_bytes",
+            reason: "must be greater than zero",
+        });
+    }
+
+    let expected_after = file_bytes_before
+        .checked_sub(preimage_bytes)
+        .and_then(|unchanged| unchanged.checked_add(replacement_bytes))
+        .ok_or(ActionProposalError::InvalidWorkspacePatch {
+            field: "file_bytes_after",
+            reason: "must be consistent with before, preimage, and replacement byte counts",
+        })?;
+    if expected_after != file_bytes_after {
+        return Err(ActionProposalError::InvalidWorkspacePatch {
+            field: "file_bytes_after",
+            reason: "must equal file_bytes_before - preimage_bytes + replacement_bytes",
+        });
+    }
+
+    Ok(())
+}
+
+fn validate_workspace_patch_fingerprint(
+    field: &'static str,
+    value: String,
+) -> Result<String, ActionProposalError> {
+    if value.trim().is_empty() {
+        return Err(ActionProposalError::InvalidWorkspacePatch {
+            field,
+            reason: "must not be blank",
+        });
+    }
+    if value.len() > 128 {
+        return Err(ActionProposalError::InvalidWorkspacePatch {
+            field,
+            reason: "exceeds the byte limit",
+        });
+    }
+    let Some((algorithm, digest)) = value.split_once(':') else {
+        return Err(ActionProposalError::InvalidWorkspacePatch {
+            field,
+            reason: "must include an algorithm prefix",
+        });
+    };
+    if algorithm != "fnv1a64" {
+        return Err(ActionProposalError::InvalidWorkspacePatch {
+            field,
+            reason: "must use the fnv1a64 fingerprint prefix",
+        });
+    }
+    if digest.len() != 16 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(ActionProposalError::InvalidWorkspacePatch {
+            field,
+            reason: "must include 16 hexadecimal digest characters",
+        });
+    }
+
+    Ok(value)
 }
 
 /// Validation errors for runtime-owned action proposal values.
@@ -479,6 +772,21 @@ pub enum ActionProposalError {
         field: &'static str,
         /// Validation failure detail.
         reason: &'static str,
+    },
+
+    /// Proposal evidence did not match the proposal action kind.
+    #[error("action proposal evidence does not match action kind {action_kind:?}")]
+    EvidenceActionKindMismatch {
+        /// Action kind supplied for the proposal.
+        action_kind: ToolActionKind,
+    },
+
+    /// Process action proposal metadata was invalid.
+    #[error("process action proposal metadata invalid: {source}")]
+    InvalidProcessAction {
+        /// Source process action validation error.
+        #[from]
+        source: ProcessActionError,
     },
 }
 
@@ -579,6 +887,17 @@ fn validate_workspace_patch_relative_path(value: String) -> Result<String, Actio
     }
 
     Ok(value)
+}
+
+fn validate_proposal_evidence_matches_action_kind(
+    action_kind: ToolActionKind,
+    evidence: &ActionProposalEvidence,
+) -> Result<(), ActionProposalError> {
+    if evidence.matches_action_kind(action_kind) {
+        Ok(())
+    } else {
+        Err(ActionProposalError::EvidenceActionKindMismatch { action_kind })
+    }
 }
 
 /// Runtime-owned registered tool definition.
@@ -709,8 +1028,9 @@ mod tests {
     use super::{
         ActionProposal, ActionProposalError, ActionProposalEvidence, RegisteredTool,
         ToolActionKind, ToolExecutionContext, ToolExecutionOutcome, ToolExecutor,
-        ToolExecutorFuture, WorkspacePatchProposal,
+        ToolExecutorFuture, WorkspacePatchExecutionEvidence, WorkspacePatchProposal,
     };
+    use crate::{ProcessActionIntent, ProcessEnvPolicy};
     use merry_core::{
         PendingToolCall, ToolCallArguments, ToolCallId, ToolInputSchema, ToolName, ToolSpec,
     };
@@ -784,17 +1104,41 @@ mod tests {
 
     #[test]
     fn workspace_patch_proposal_validates_relative_path_and_sizes() {
-        let proposal = WorkspacePatchProposal::new("dir/note.txt", 3, 5, 11, 13)
-            .expect("valid workspace patch proposal");
+        let proposal = WorkspacePatchProposal::new(
+            "dir/note.txt",
+            3,
+            5,
+            11,
+            13,
+            "fnv1a64:0123456789abcdef",
+            "fnv1a64:fedcba9876543210",
+        )
+        .expect("valid workspace patch proposal");
 
         assert_eq!(proposal.relative_path(), "dir/note.txt");
         assert_eq!(proposal.preimage_bytes(), 3);
         assert_eq!(proposal.replacement_bytes(), 5);
         assert_eq!(proposal.file_bytes_before(), 11);
         assert_eq!(proposal.file_bytes_after(), 13);
+        assert_eq!(
+            proposal.file_fingerprint_before(),
+            "fnv1a64:0123456789abcdef"
+        );
+        assert_eq!(
+            proposal.file_fingerprint_after(),
+            "fnv1a64:fedcba9876543210"
+        );
 
-        let absolute = WorkspacePatchProposal::new("/tmp/note.txt", 3, 5, 11, 13)
-            .expect_err("absolute paths are rejected");
+        let absolute = WorkspacePatchProposal::new(
+            "/tmp/note.txt",
+            3,
+            5,
+            11,
+            13,
+            "fnv1a64:0123456789abcdef",
+            "fnv1a64:fedcba9876543210",
+        )
+        .expect_err("absolute paths are rejected");
         assert!(matches!(
             absolute,
             ActionProposalError::InvalidWorkspacePatch {
@@ -803,8 +1147,16 @@ mod tests {
             }
         ));
 
-        let dot_segment = WorkspacePatchProposal::new("dir/../note.txt", 3, 5, 11, 13)
-            .expect_err("dot segments are rejected");
+        let dot_segment = WorkspacePatchProposal::new(
+            "dir/../note.txt",
+            3,
+            5,
+            11,
+            13,
+            "fnv1a64:0123456789abcdef",
+            "fnv1a64:fedcba9876543210",
+        )
+        .expect_err("dot segments are rejected");
         assert!(matches!(
             dot_segment,
             ActionProposalError::InvalidWorkspacePatch {
@@ -813,8 +1165,16 @@ mod tests {
             }
         ));
 
-        let mismatched = WorkspacePatchProposal::new("dir/note.txt", 3, 5, 11, 99)
-            .expect_err("projected size must match patch sizes");
+        let mismatched = WorkspacePatchProposal::new(
+            "dir/note.txt",
+            3,
+            5,
+            11,
+            99,
+            "fnv1a64:0123456789abcdef",
+            "fnv1a64:fedcba9876543210",
+        )
+        .expect_err("projected size must match patch sizes");
         assert!(matches!(
             mismatched,
             ActionProposalError::InvalidWorkspacePatch {
@@ -825,11 +1185,65 @@ mod tests {
     }
 
     #[test]
+    fn workspace_patch_execution_evidence_validates_counts_and_fingerprints() {
+        let evidence = WorkspacePatchExecutionEvidence::new(
+            "dir/note.txt",
+            3,
+            5,
+            11,
+            13,
+            "fnv1a64:0123456789abcdef",
+            "fnv1a64:fedcba9876543210",
+        )
+        .expect("valid workspace patch execution evidence");
+
+        assert_eq!(evidence.relative_path(), "dir/note.txt");
+        assert_eq!(evidence.preimage_bytes(), 3);
+        assert_eq!(evidence.replacement_bytes(), 5);
+        assert_eq!(evidence.file_bytes_before(), 11);
+        assert_eq!(evidence.file_bytes_after(), 13);
+        assert_eq!(
+            evidence.file_fingerprint_before(),
+            "fnv1a64:0123456789abcdef"
+        );
+        assert_eq!(
+            evidence.file_fingerprint_after(),
+            "fnv1a64:fedcba9876543210"
+        );
+
+        let invalid = WorkspacePatchExecutionEvidence::new(
+            "dir/note.txt",
+            3,
+            5,
+            11,
+            13,
+            "sha256:not-accepted",
+            "fnv1a64:fedcba9876543210",
+        )
+        .expect_err("fingerprints use the explicit non-cryptographic prefix");
+        assert!(matches!(
+            invalid,
+            ActionProposalError::InvalidWorkspacePatch {
+                field: "file_fingerprint_before",
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn action_proposal_rejects_read_only_and_blank_text() {
         let call = pending_call("workspace_patch_file");
         let evidence = ActionProposalEvidence::WorkspacePatch(
-            WorkspacePatchProposal::new("note.txt", 3, 5, 11, 13)
-                .expect("valid workspace patch proposal"),
+            WorkspacePatchProposal::new(
+                "note.txt",
+                3,
+                5,
+                11,
+                13,
+                "fnv1a64:0123456789abcdef",
+                "fnv1a64:fedcba9876543210",
+            )
+            .expect("valid workspace patch proposal"),
         );
 
         let read_only = ActionProposal::new(
@@ -855,6 +1269,59 @@ mod tests {
         assert!(matches!(
             blank,
             ActionProposalError::InvalidText { field: "label", .. }
+        ));
+    }
+
+    #[test]
+    fn action_proposal_evidence_must_match_action_kind() {
+        let call = pending_call("run_command");
+        let process_intent = ProcessActionIntent::new(
+            vec!["cargo".to_owned(), "test".to_owned()],
+            Some("crates/merry-runtime".to_owned()),
+            ProcessEnvPolicy::empty(),
+            None,
+            1024,
+            1024,
+        )
+        .expect("valid process intent");
+        let process_proposal = ActionProposal::new(
+            &call,
+            ToolActionKind::CommandExec,
+            "process",
+            "cargo test",
+            "Run cargo test in the runtime crate",
+            ActionProposalEvidence::ProcessAction(process_intent),
+        )
+        .expect("process evidence matches command exec action");
+        assert!(matches!(
+            process_proposal.evidence(),
+            ActionProposalEvidence::ProcessAction(_)
+        ));
+
+        let patch = WorkspacePatchProposal::new(
+            "note.txt",
+            3,
+            5,
+            11,
+            13,
+            "fnv1a64:0123456789abcdef",
+            "fnv1a64:fedcba9876543210",
+        )
+        .expect("valid workspace patch proposal");
+        let mismatched = ActionProposal::new(
+            &call,
+            ToolActionKind::CommandExec,
+            "workspace patch",
+            "note.txt",
+            "Patch evidence cannot stand in for command execution",
+            ActionProposalEvidence::WorkspacePatch(patch),
+        )
+        .expect_err("workspace patch evidence must not match command exec");
+        assert!(matches!(
+            mismatched,
+            ActionProposalError::EvidenceActionKindMismatch {
+                action_kind: ToolActionKind::CommandExec
+            }
         ));
     }
 }
