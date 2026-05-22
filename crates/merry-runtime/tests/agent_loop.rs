@@ -12,10 +12,12 @@ use merry_llm::{
 use merry_runtime::{
     ActionExecutionEvidence, ActionProposal, ActionProposalEvidence, AgentLoopBlockedReason,
     AgentLoopConfig, AgentLoopConfigError, AgentLoopStatus, ArtifactError, ContextSummary,
-    DEFAULT_AGENT_LOOP_CONTINUATION_INPUT, Runtime, RuntimeError, StepContext, StepInput,
+    DEFAULT_AGENT_LOOP_CONTINUATION_INPUT, ProcessActionIntent, ProcessEnvPolicy,
+    ProcessExitStatus, ProcessRunner, ProcessRunnerContext, ProcessRunnerError,
+    ProcessRunnerFuture, ProcessRunnerOutput, Runtime, RuntimeError, StepContext, StepInput,
     ToolActionKind, ToolActionProposalFuture, ToolExecutionContext, ToolExecutionError,
     ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture, WorkspacePatchExecutionEvidence,
-    WorkspacePatchProposal,
+    WorkspacePatchProposal, process_command_tool,
 };
 use schemars::Schema;
 use serde_json::{Map, Value, json};
@@ -62,6 +64,14 @@ fn model_tool_call(id: &str, name: &str) -> ModelToolCall {
         ModelToolCallId::new(id).expect("valid model tool call id"),
         ToolName::new(name).expect("valid tool name"),
         ToolArguments::new(Map::<String, Value>::new()),
+    )
+}
+
+fn model_tool_call_with_arguments(id: &str, name: &str, arguments: Value) -> ModelToolCall {
+    ModelToolCall::new(
+        ModelToolCallId::new(id).expect("valid model tool call id"),
+        ToolName::new(name).expect("valid tool name"),
+        ToolArguments::try_from(arguments).expect("valid model tool arguments"),
     )
 }
 
@@ -418,6 +428,57 @@ impl ToolExecutor for BlockingToolExecutor {
     }
 }
 
+#[derive(Clone)]
+struct RecordingProcessRunner {
+    observed_intents: Arc<Mutex<Vec<ProcessActionIntent>>>,
+    stdout_text: String,
+}
+
+impl RecordingProcessRunner {
+    fn succeeding(stdout_text: &str) -> Self {
+        Self {
+            observed_intents: Arc::new(Mutex::new(Vec::new())),
+            stdout_text: stdout_text.to_owned(),
+        }
+    }
+
+    fn observed_intents(&self) -> Vec<ProcessActionIntent> {
+        self.observed_intents
+            .lock()
+            .expect("process intents mutex should not be poisoned")
+            .clone()
+    }
+}
+
+impl ProcessRunner for RecordingProcessRunner {
+    fn run<'a>(
+        &'a self,
+        intent: ProcessActionIntent,
+        context: ProcessRunnerContext,
+    ) -> ProcessRunnerFuture<'a> {
+        Box::pin(async move {
+            if context.cancellation_token().is_cancelled() {
+                return Err(ProcessRunnerError::Cancelled);
+            }
+
+            self.observed_intents
+                .lock()
+                .expect("process intents mutex should not be poisoned")
+                .push(intent.clone());
+
+            ProcessRunnerOutput::new(
+                &intent,
+                ProcessExitStatus::Exited(0),
+                self.stdout_text.clone(),
+                false,
+                "",
+                false,
+            )
+            .map_err(|source| ProcessRunnerError::infrastructure(source.to_string()))
+        })
+    }
+}
+
 fn runtime_with_provider(session: &str, provider: ScriptedModelProvider) -> Runtime {
     Runtime::builder(session_id(session))
         .model_provider(Arc::new(provider), model_name())
@@ -673,6 +734,102 @@ async fn agent_loop_executes_opt_in_workspace_patch_and_continues_to_final_compl
         assert!(
             !continuation_result.content().as_str().contains(forbidden),
             "successful opt-in patch continuation leaked {forbidden}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn agent_loop_process_command_tool_executes_and_continues() {
+    let provider = ScriptedModelProvider::new(vec![
+        vec![Ok(completed_tool_call_event(
+            model_tool_call_with_arguments(
+                "call-rustc-version",
+                "run_process",
+                json!({ "argv": ["rustc", "--version"] }),
+            ),
+        ))],
+        vec![Ok(completed_text_event("final after process"))],
+    ]);
+    let runner = RecordingProcessRunner::succeeding("rustc 1.85.0\n");
+    let runtime = Runtime::builder(session_id("agent-loop-process-command-tool"))
+        .register_tool(
+            process_command_tool(
+                ToolName::new("run_process").expect("valid tool name"),
+                "Run a local process from argv through runtime policy",
+            )
+            .expect("process command tool should build"),
+        )
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .allow_low_risk_process_actions(Arc::new(runner.clone()))
+        .build()
+        .expect("runtime should build");
+
+    let result = run_default_loop(&runtime, "Check rustc version.").await;
+
+    assert_eq!(result.status(), &AgentLoopStatus::Completed);
+    assert_eq!(result.steps_run(), 2);
+    assert_eq!(
+        event_kind_names(result.events()),
+        [
+            "SessionStarted",
+            "StepStarted",
+            "ToolCallPending",
+            "ArtifactRecorded",
+            "ToolCallResolved",
+            "StepStarted",
+            "ArtifactRecorded",
+            "StepCompleted",
+        ]
+    );
+    assert!(runtime.pending_tool_calls().await.is_empty());
+
+    let observed_intents = runner.observed_intents();
+    assert_eq!(observed_intents.len(), 1);
+    let intent = &observed_intents[0];
+    assert_eq!(intent.argv(), ["rustc", "--version"]);
+    assert_eq!(intent.cwd(), None);
+    assert_eq!(intent.env_policy(), ProcessEnvPolicy::Empty);
+    assert!(intent.stdin_text().is_none());
+
+    let requests = provider.recorded_requests();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[0]
+            .tools()
+            .iter()
+            .any(|tool| tool.name().as_str() == "run_process"),
+        "first model request should expose the registered process command tool"
+    );
+    assert!(requests[0].continuations().is_empty());
+    assert_eq!(
+        requests[1].messages()[0].content().as_text(),
+        DEFAULT_AGENT_LOOP_CONTINUATION_INPUT
+    );
+    assert_eq!(requests[1].continuations().len(), 1);
+    let continuation = &requests[1].continuations()[0];
+    assert_eq!(continuation.call().id().as_str(), "call-rustc-version");
+    assert_eq!(
+        continuation.result().status(),
+        ToolCallResultStatus::Succeeded
+    );
+    assert!(continuation.result().diagnostic().is_none());
+    let content = continuation
+        .result()
+        .content()
+        .as_json()
+        .expect("process result should be JSON");
+    let value: Value = serde_json::from_str(content).expect("process result JSON should parse");
+    assert_eq!(value["ok"], true);
+    assert_eq!(value["kind"], "process_action");
+    assert_eq!(value["status"], json!({ "kind": "exited", "code": 0 }));
+    assert_eq!(value["intent"]["argv"], json!(["rustc", "--version"]));
+    assert_eq!(value["intent"]["cwd"], Value::Null);
+    assert_eq!(value["stdout"]["text"], "rustc 1.85.0\n");
+    assert_eq!(value["stderr"]["text"], "");
+    for forbidden in ["proposal", "audit", "evidence"] {
+        assert!(
+            !content.contains(forbidden),
+            "process continuation leaked internal {forbidden}"
         );
     }
 }
