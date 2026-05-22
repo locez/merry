@@ -65,6 +65,7 @@ pub use ledger::{
 };
 pub use model_config::RuntimeModelRole;
 pub use process::{
+    AcceptedLocalWorkspaceProcessAdmission, LocalWorkspaceProcessSandboxProfile,
     MAX_PROCESS_ARG_BYTES, MAX_PROCESS_ARGV_ITEMS, MAX_PROCESS_CWD_BYTES,
     MAX_PROCESS_OUTPUT_LIMIT_BYTES, MAX_PROCESS_STDIN_TEXT_BYTES, ProcessActionError,
     ProcessActionIntent, ProcessEnvPolicy, ProcessExecutionEvidence, ProcessExitStatus,
