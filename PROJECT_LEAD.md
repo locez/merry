@@ -13,6 +13,12 @@ The lead agent acts as:
 
 The lead agent should not act as a solo implementer for every task. Use subagents for bounded research, implementation, and review when tasks are independent and have clear contracts.
 
+The lead agent is accountable for outcome traction. A technically coherent
+capability milestone is not enough if it does not move the active MVP
+capability forward. When a milestone is meant to advance product capability,
+first define the acceptance target in terms of a command, test, API behavior,
+runtime event, or artifact that will newly work after the milestone.
+
 ## Current Product Direction
 
 Merry is a Rust-first runtime for building strong long-running agents.
@@ -31,6 +37,10 @@ event protocol
 ```
 
 Subagent collaboration and graph memory are important, but must be introduced through explicit runtime contracts rather than ad hoc prompt behavior.
+
+The current near-term product direction belongs in `ROADMAP.md`. The lead
+agent must read that current status before selecting milestones and must not
+turn one phase's delivery focus into a permanent lifecycle rule.
 
 ## Non-Negotiable Boundaries
 
@@ -89,11 +99,18 @@ For uncertain hard decisions, especially async runtime design, provider APIs, Py
 
 Do not turn every uncertainty into a research project. Research only when the decision affects long-term architecture or hard-to-reverse API boundaries.
 
+Research is not a deliverable for an MVP capability milestone unless the user
+explicitly asks for research only. Every research task for an active MVP should
+name the implementation decision it will unblock. If it does not unblock an
+acceptance target, defer it.
+
 ## Planning Discipline
 
 Before implementation:
 
 - define the milestone
+- define the MVP capability being advanced
+- define the concrete acceptance command, test, API behavior, runtime event, or artifact
 - identify public tracked outputs versus private ignored notes
 - split work into modules with clear ownership
 - write tasks small enough for review
@@ -103,6 +120,9 @@ Before implementation:
 During implementation:
 
 - keep commits focused
+- keep policy, docs, taxonomy, and guardrail work subordinate to the acceptance target
+- use at least one implementation worker for a capability implementation milestone when subagents are requested, not only research workers
+- stop and reframe if the milestone becomes mostly explanatory or preventative work
 - run relevant checks before claiming completion
 - update `AGENTS.md` when a repeated quality rule emerges
 - keep private docs ignored
@@ -111,7 +131,30 @@ After implementation:
 
 - run final verification
 - review git diff
-- summarize changed files, decisions, and residual risks
+- summarize changed files, decisions, residual risks, and the concrete evidence
+  that the active MVP capability moved forward
+
+## Drift Control
+
+Use this drift check at the start and end of each substantial milestone:
+
+- What is the active product goal?
+- What new user-visible or runtime-visible capability will work after this slice?
+- What is the smallest acceptance command/test that proves it?
+- Which supporting work is necessary for that proof, and which work is only nice
+  to have?
+- Did subagents receive implementation-oriented contracts when implementation
+  was requested?
+
+If the answers show that the work is moving toward documentation, taxonomy,
+classification, or policy without unlocking the stated capability, stop and
+choose a smaller vertical slice that proves the active focus with runtime
+behavior, API behavior, artifacts, tests, or another concrete acceptance target.
+
+When the user explicitly requests docs, status, planning, or research-only
+work, that requested output is the round's delivery focus and is not drift
+solely because it does not create a new runtime capability. In that case, report
+the status or decision accurately instead of forcing a capability milestone.
 
 ## First Implementation Priorities
 
@@ -126,4 +169,3 @@ The first engineering milestones should be conservative:
 7. Python binding shell after core event flow is stable.
 
 Do not start with a full autonomous agent loop.
-

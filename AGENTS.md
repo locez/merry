@@ -11,6 +11,30 @@ This repository is a Rust-first agent runtime project. Treat this file as the wo
 - Prefer small, reviewable changes over broad rewrites.
 - If the worktree contains changes you did not make, preserve them and adapt around them.
 
+## Delivery Focus Discipline
+
+This file defines lifecycle-level working rules. It must not hard-code a
+temporary roadmap milestone as the permanent project goal. The active delivery
+focus belongs in tracked planning/status files such as `ROADMAP.md`, or in the
+user's explicit current instruction.
+
+Agents must keep each round tied to the active delivery focus:
+
+- Start substantial work by naming the current gap being advanced.
+- Before dispatching research, state which implementation decision or
+  acceptance test the research will unblock.
+- Prefer implementation, tests, and executable verification over more planning
+  when the next implementation step is known.
+- Before ending a round, report whether the work advanced the active delivery
+  focus. If not, mark it as drift unless it resolved a named blocker.
+- Do not let policy, classifier, roadmap, role-model, or research work become
+  the primary output unless the user asked for that specifically or it resolves
+  a named blocker for the active focus.
+- User-requested docs, status, planning, or research-only rounds are not drift
+  solely because they do not deliver a new runtime capability. Treat the
+  requested tracked update, answer, or research result as that round's delivery
+  focus and report it accurately.
+
 ## Architecture Boundaries
 
 Merry is runtime-first. Keep these ownership boundaries clear:
@@ -49,6 +73,33 @@ Do not leak provider-specific response formats into runtime, memory, artifact, s
 - Tool outputs should become artifacts and compact ledger updates, not permanent prompt text.
 - Memory activation must record why memory entered context.
 - Context compilation should be deterministic and reproducible from stored runtime state.
+
+## Goal And MVP Discipline
+
+Agents must keep the project pointed at the current product goal, not just at
+locally coherent architecture work. When the active goal is an MVP capability,
+the next milestone must be framed around a runnable or testable capability
+unless the user explicitly asks for docs, status, research, planning, or design
+only.
+
+- State the capability being advanced before implementation.
+- Define at least one concrete acceptance command, test, or observable runtime
+  behavior before doing substantial implementation work.
+- Treat research, policy, taxonomy, docs, and guardrail work as support for the
+  acceptance target, not as a substitute for delivering the capability, unless
+  the user explicitly requested that kind of work as the deliverable.
+- If a proposed milestone cannot say what new command, API behavior, runtime
+  event, artifact, or test will work after the change, stop and reframe it.
+- Prefer the smallest real vertical slice that proves the capability over a
+  broad framework that only describes the capability.
+- Before reporting completion, answer whether the change moved the current MVP
+  capability forward, and name the evidence.
+- If the user challenges direction or says the work is drifting, pause feature
+  work and update the tracked guardrails or roadmap before continuing.
+
+Active product priorities must come from the current roadmap or user
+instruction. `AGENTS.md` may define how agents avoid drift, but it must not
+choose one temporary capability as the permanent project direction.
 
 ## Subagent And Parallel Work Rules
 

@@ -5,15 +5,59 @@ Merry is an early-stage Rust-first agent runtime project. APIs and crate boundar
 ## Current Coding-Agent Boundary
 
 Merry is not yet a full coding-agent runtime. The current workspace tool
-surface is a read-only evidence and navigation foundation, not the main
-side-effect path for coding-agent behavior.
+surface is a read-only evidence and navigation foundation, bootstrap,
+fallback, and maintenance path. It is not the main actuator for coding-agent
+behavior.
 
 The next coding-agent boundary is runtime-owned side-effect protocols: Action
-Policy, Workspace Patch/Write, and Shell/Process Protocol. These protocols need
-to make write and process actions explicit runtime actions with artifacts,
-ledger/checkpoint awareness, cancellation boundaries, bounded execution, and
-deterministic fake-runtime coverage before they are treated as normal agent
-capabilities.
+Policy, Shell/Process Primary Actuator Protocol, and Workspace Patch/Write.
+These protocols need to make process and write actions explicit runtime actions
+with artifacts, ledger/checkpoint awareness, cancellation boundaries, bounded
+execution, approval hooks, and deterministic fake-runtime coverage before they
+are treated as normal agent capabilities.
+
+The current roadmap direction is shell/process as the primary actuator. A
+future model should be able to compose ordinary process tools such as `rg`,
+`sed`, `cargo`, `git`, pipelines, and small scripts under Merry-owned runtime
+control. The runtime should own policy, risk review, audit, artifacts,
+cancellation, and approval. Merry should not try to enumerate every useful CLI
+affordance as a built-in read/search tool.
+
+The implemented shell/process surface is still narrow and split by boundary:
+`merry-runtime` owns provider-neutral `ProcessActionIntent` and
+`ProcessExecutionEvidence` protocol values, action-audit variants for proposed
+and executed process actions, the intent classifier, and injected
+`ProcessRunner` admission lanes. The runtime crate does not directly spawn OS
+processes and has no concrete OS process adapter. `merry-cli` has a debug/demo
+`merry shell -- <argv>` path with a real runner adapter built on
+`tokio::process::Command`. That CLI path routes exact argv through the runtime
+process protocol and prints runtime JSONL events with artifact-backed tool
+results; raw process stdout is not printed directly as CLI stdout.
+
+Low-risk informational commands such as `rustc --version` and `rg --version`
+can run through the CLI shell path. A local workspace effect such as exact
+`cargo test -p merry-runtime` requires explicit
+`--accept-local-workspace-process-risk`, the CLI `bwrap` child handoff, and
+sandbox runtime profile evidence. Default host execution, environment-spoofed
+sandbox markers, forged hidden handoff markers, forbidden commands, and unknown
+commands remain denied.
+
+This is not a general shell or coding-agent capability. There is no raw shell
+string parsing, pipeline/script execution, arbitrary environment or stdin
+support, complete sandbox/security/provenance proof, or general approval/review
+admission UX. Reviewer or LLM output remains evidence for policy; it is not
+authorization.
+
+The CLI Sandbox Bootstrap slice is implemented in `merry-cli`: the root
+`--with-sandbox` flag uses `clap` and performs Linux `bwrap` self-reexec before
+normal CLI execution. The v1 behavior keeps a narrow sandbox assumption:
+minimal explicit environment, `PATH` lookup for `bwrap`, plan-stage
+missing-`bwrap` handling, recursion avoidance, sandbox-local `/tmp`, the
+current repo/project as the primary read-write workspace, and a minimal `/etc`
+allowlist including `/etc/ld.so.cache`, resolver/host/NSS files, and SSL/PKI
+paths. v1 still allows network access and is not a complete security boundary;
+repo-local destructive effects remain possible. A real smoke of
+`target/debug/merry --with-sandbox debug` has passed.
 
 Action Policy needs a first-class risk taxonomy before write or process actions
 become normal runtime capabilities. The intended direction is to classify
@@ -28,24 +72,35 @@ expand what the runtime capability boundary allows.
 Shell/process support is not being rejected as out of scope. The direction is to
 bring it into a runtime-owned reliable audit path: policy-gated,
 artifact-backed, ledger/checkpoint-aware, cancellable, bounded,
-deterministic-testable, and provider-neutral. LLM judgment may remain advisory
-semantic input, but it is not the authorization gate for side-effectful runtime
-actions.
+deterministic-testable, and provider-neutral. The protocol should support open
+composition of ordinary shell/process tools under runtime audit and control. It
+is not a deny-only gate and not an exhaustive allowlist of every useful CLI
+operation. LLM judgment may remain advisory semantic input, but it is not the
+authorization gate for side-effectful runtime actions.
 
 High-risk shell/process actions need hard runtime policy. Depending on the
 policy classification, they may require explicit user approval and/or
 review-role LLM evidence. Review LLM output is policy evidence, not an
 authorization gate. If review output is unavailable, times out, fails to parse,
 or does not satisfy the policy schema, the admission path must fail closed.
+Uncertain risk can route through reviewer evidence and approval policy when
+runtime policy requires it, but hard runtime policy decides. User approval is an
+authorization source when policy accepts it; reviewer recommendations are only
+structured evidence, not authorization.
 
 Future internal LLM roles should be configurable by role, such as `Primary`,
 `ToolRiskReview`, `ApprovalReview`, and `SummaryMemory`. That direction is for
 runtime/provider composition, not a current stable public API. Role-scoped model
 configuration must not leak provider conversation state into runtime state.
 
-The next roadmap milestone is Action Policy Risk Taxonomy and Role-Scoped
-Models. Workspace Patch/Write and Shell/Process Protocol work should build on
-that policy layer rather than define ad hoc permission rules of their own.
+The CLI Sandbox Bootstrap slice is now the implemented v1 assumption for later
+shell/process work, and the runtime process protocol foundation plus narrow CLI
+real-runner debug path are in place. The next roadmap focus is continuing the
+Shell/Process Primary Actuator Protocol toward broader sandbox-aware admission,
+review/approval policy, and risk-policy refinement through Action Policy Risk
+Taxonomy and Role-Scoped Models. Workspace Patch/Write should build on the same
+runtime-owned policy model rather than define ad hoc permission rules of its
+own.
 
 M8 runtime/provider/tool execution hardening has shifted into maintenance and foundation work: structured runtime state, artifact-backed model output, provider step boundaries, pending tool calls, tool result resolution, tool continuations, registered tool execution, public runtime API contract cleanup/review/alignment, and opt-in OpenAI Responses debug/tool flows remain the base for later runtime work.
 
@@ -57,9 +112,9 @@ read-only workspace navigation/search: it exposes registered
 for UTF-8 reads, non-recursive directory listing, and bounded literal text
 search under explicitly configured workspace roots. It is still not a shell,
 write API, network API, or full coding-agent surface. Read-only
-navigation/search is foundation and maintenance work; future write and
-shell/process capabilities belong in runtime-owned action protocols rather than
-provider-specific flows or bare shell escape paths.
+navigation/search is foundation, bootstrap, fallback, and maintenance work;
+future write and shell/process capabilities belong in runtime-owned action
+protocols rather than provider-specific flows or bare shell escape paths.
 
 The workspace path-safety contract assumes trusted, stable workspace roots. The
 MVP prevents ordinary path traversal and ordinary symlink traversal before
