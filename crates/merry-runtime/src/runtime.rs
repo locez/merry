@@ -6,10 +6,11 @@
 //! provider wire details behind the `merry-llm` provider boundary.
 
 use crate::{
-    ActionExecutionEvidence, ActionProposal, ArtifactContent, ContextCompiler, ContextEntry,
-    ContextSummary, LedgerProjectionSnapshot, ProcessActionIntent, ProcessExitStatus,
-    ProcessRunner, ProcessRunnerContext, ProcessRunnerError, ProcessRunnerOutput, RuntimeError,
-    RuntimeEventStream, RuntimeModelRole, SessionContextSnapshot,
+    AcceptedLocalWorkspaceProcessAdmission, ActionExecutionEvidence, ActionProposal,
+    ArtifactContent, ContextCompiler, ContextEntry, ContextSummary, LedgerProjectionSnapshot,
+    ProcessActionIntent, ProcessExitStatus, ProcessRunner, ProcessRunnerContext,
+    ProcessRunnerError, ProcessRunnerOutput, RuntimeError, RuntimeEventStream, RuntimeModelRole,
+    SessionContextSnapshot,
     action_audit::ActionAuditPolicy,
     action_policy::{
         ActionPolicyDecision, DefaultActionPolicy, classify_tool_action_risk,
@@ -1100,11 +1101,13 @@ impl RuntimeBuilder {
     /// Opts in to executing validated local workspace effect process proposals.
     ///
     /// Runner injection alone is not a sandbox or an authorization source. This
-    /// lane represents explicit runtime construction-time acceptance of medium
-    /// local workspace process risk for the narrow classified process intent.
+    /// lane requires explicit runtime construction-time admission that declares
+    /// the sandbox profile and accepted local workspace process risk for the
+    /// narrow classified process intent.
     #[must_use]
     pub fn allow_accepted_local_workspace_process_actions(
         mut self,
+        _admission: AcceptedLocalWorkspaceProcessAdmission,
         runner: Arc<dyn ProcessRunner>,
     ) -> Self {
         self.accepted_local_workspace_process_runner = Some(runner);
@@ -2113,9 +2116,9 @@ mod tests {
     };
     use crate::model_config::RuntimeModelConfigs;
     use crate::process::{
-        ProcessActionIntent, ProcessEnvPolicy, ProcessExecutionEvidence, ProcessExitStatus,
-        ProcessRunner, ProcessRunnerContext, ProcessRunnerError, ProcessRunnerFuture,
-        ProcessRunnerOutput,
+        AcceptedLocalWorkspaceProcessAdmission, ProcessActionIntent, ProcessEnvPolicy,
+        ProcessExecutionEvidence, ProcessExitStatus, ProcessRunner, ProcessRunnerContext,
+        ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput,
     };
     use crate::session::SessionState;
     use crate::tool::{
@@ -2186,6 +2189,10 @@ mod tests {
 
     fn named_model(value: &str) -> ModelName {
         ModelName::new(value).expect("valid model name")
+    }
+
+    fn accepted_local_workspace_process_admission() -> AcceptedLocalWorkspaceProcessAdmission {
+        AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1()
     }
 
     fn completed_event() -> ModelEvent {
@@ -6126,7 +6133,10 @@ mod tests {
             |builder| {
                 builder
                     .allow_low_risk_process_actions(Arc::new(runner.clone()))
-                    .allow_accepted_local_workspace_process_actions(Arc::new(runner.clone()))
+                    .allow_accepted_local_workspace_process_actions(
+                        accepted_local_workspace_process_admission(),
+                        Arc::new(runner.clone()),
+                    )
                     .build()
             },
         )
@@ -6247,7 +6257,10 @@ mod tests {
             tool,
             |builder| {
                 builder
-                    .allow_accepted_local_workspace_process_actions(Arc::new(runner.clone()))
+                    .allow_accepted_local_workspace_process_actions(
+                        accepted_local_workspace_process_admission(),
+                        Arc::new(runner.clone()),
+                    )
                     .build()
             },
         )
@@ -6400,7 +6413,10 @@ mod tests {
             |builder| {
                 builder
                     .allow_low_risk_process_actions(Arc::new(runner.clone()))
-                    .allow_accepted_local_workspace_process_actions(Arc::new(runner.clone()))
+                    .allow_accepted_local_workspace_process_actions(
+                        accepted_local_workspace_process_admission(),
+                        Arc::new(runner.clone()),
+                    )
                     .build()
             },
         )

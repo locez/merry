@@ -13,11 +13,12 @@ use merry_llm::{
 };
 use merry_provider_openai::{OpenAiProvider, OpenAiProviderConfig};
 use merry_runtime::{
-    ActionProposal, ActionProposalEvidence, MAX_PROCESS_OUTPUT_LIMIT_BYTES, ProcessActionIntent,
-    ProcessEnvPolicy, ProcessExitStatus, ProcessRunner, ProcessRunnerContext, ProcessRunnerError,
-    ProcessRunnerFuture, ProcessRunnerOutput, RegisteredTool, Runtime, StepContext, StepInput,
-    ToolActionKind, ToolActionProposalFuture, ToolExecutionContext, ToolExecutionError,
-    ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture,
+    AcceptedLocalWorkspaceProcessAdmission, ActionProposal, ActionProposalEvidence,
+    MAX_PROCESS_OUTPUT_LIMIT_BYTES, ProcessActionIntent, ProcessEnvPolicy, ProcessExitStatus,
+    ProcessRunner, ProcessRunnerContext, ProcessRunnerError, ProcessRunnerFuture,
+    ProcessRunnerOutput, RegisteredTool, Runtime, StepContext, StepInput, ToolActionKind,
+    ToolActionProposalFuture, ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome,
+    ToolExecutor, ToolExecutorFuture,
 };
 use std::{
     env,
@@ -566,21 +567,29 @@ async fn run_debug_openai(
 
 async fn run_shell(args: ShellArgs) -> Result<(), CliError> {
     let intent = shell_process_action_intent(args.argv)?;
+    run_shell_to_writer(
+        intent,
+        None,
+        Arc::new(TokioProcessRunner),
+        tokio::io::stdout(),
+    )
+    .await
+}
+
+async fn run_shell_to_writer<W>(
+    intent: ProcessActionIntent,
+    admission: Option<AcceptedLocalWorkspaceProcessAdmission>,
+    runner: Arc<dyn ProcessRunner>,
+    writer: W,
+) -> Result<(), CliError>
+where
+    W: AsyncWrite + Unpin,
+{
     let session_id = SessionId::new(DEFAULT_SESSION_ID).map_err(shell_usage_error)?;
-    let shell_tool = shell_command_tool(intent)?;
-    let provider = ShellToolCallProvider::new()?;
-    let runtime = Runtime::builder(session_id)
-        .register_tool(shell_tool)
-        .allow_low_risk_process_actions(Arc::new(TokioProcessRunner))
-        .model_provider(
-            Arc::new(provider),
-            ModelName::new("merry-shell-debug").map_err(unexpected)?,
-        )
-        .build()
-        .map_err(unexpected)?;
+    let runtime = build_shell_runtime(session_id, intent, admission, runner)?;
     let input = StepInput::user_text(SHELL_STEP_INPUT).map_err(unexpected)?;
 
-    let mut writer = BufWriter::new(tokio::io::stdout());
+    let mut writer = BufWriter::new(writer);
     let events =
         write_runtime_step_events_to(&runtime, input, StepContext::default(), &mut writer).await?;
     let Some(pending) = first_pending_tool_call(&events) else {
@@ -607,6 +616,39 @@ async fn run_shell(args: ShellArgs) -> Result<(), CliError> {
     )
     .await?;
     writer.flush().await.map_err(stdout_error)
+}
+
+fn build_shell_runtime(
+    session_id: SessionId,
+    intent: ProcessActionIntent,
+    admission: Option<AcceptedLocalWorkspaceProcessAdmission>,
+    runner: Arc<dyn ProcessRunner>,
+) -> Result<Runtime, CliError> {
+    let shell_tool = shell_command_tool(intent)?;
+    let provider = ShellToolCallProvider::new()?;
+    let mut builder = Runtime::builder(session_id)
+        .register_tool(shell_tool)
+        .allow_low_risk_process_actions(Arc::clone(&runner))
+        .model_provider(
+            Arc::new(provider),
+            ModelName::new("merry-shell-debug").map_err(unexpected)?,
+        );
+    if let Some(admission) = admission {
+        builder = builder.allow_accepted_local_workspace_process_actions(admission, runner);
+    }
+    builder.build().map_err(unexpected)
+}
+
+#[cfg(test)]
+fn shell_runtime_admission_from_markers(
+    sandbox: Option<&OsStr>,
+    version: Option<&OsStr>,
+) -> Option<AcceptedLocalWorkspaceProcessAdmission> {
+    if sandbox == Some(OsStr::new("1")) && version == Some(OsStr::new(MERRY_SANDBOX_VERSION)) {
+        Some(AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1())
+    } else {
+        None
+    }
 }
 
 fn shell_process_action_intent(argv: Vec<String>) -> Result<ProcessActionIntent, CliError> {
@@ -1211,9 +1253,10 @@ mod tests {
         MERRY_SANDBOX_VERSION_ENV, SANDBOX_HOME, SANDBOX_TMPDIR, SandboxBootstrap, SandboxError,
         SandboxHost, args_without_with_sandbox, debug_echo_tool, debug_openai_usage,
         find_bwrap_in_path, os, plan_sandbox_bootstrap_with_file_exists, report_cli_exit,
-        shell_process_action_intent, shell_usage, write_debug_openai_tool_events,
+        shell_process_action_intent, shell_runtime_admission_from_markers, shell_usage,
+        write_debug_openai_tool_events,
     };
-    use super::{DEBUG_TOOL_NAME, write_runtime_step_events};
+    use super::{DEBUG_TOOL_NAME, run_shell_to_writer, write_runtime_step_events};
     use clap::Parser;
     use futures_util::stream;
     use merry_core::{ProviderName, RuntimeEvent, ToolCallResultStatus, ToolName};
@@ -1223,14 +1266,20 @@ mod tests {
         ModelResponse, ModelStreamContext, ModelToolCall, ModelToolCallId, ToolArguments,
     };
     use merry_runtime::{
-        MAX_PROCESS_OUTPUT_LIMIT_BYTES, ProcessEnvPolicy, Runtime, StepContext, StepInput,
+        AcceptedLocalWorkspaceProcessAdmission, MAX_PROCESS_OUTPUT_LIMIT_BYTES,
+        ProcessActionIntent, ProcessEnvPolicy, ProcessExitStatus, ProcessRunner,
+        ProcessRunnerContext, ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput,
+        Runtime, StepContext, StepInput,
     };
     use serde_json::{Map, Value};
     use std::{
-        ffi::OsString,
+        ffi::{OsStr, OsString},
         path::{Path, PathBuf},
         process::ExitCode,
-        sync::{Arc, Mutex},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
     };
 
     fn sandbox_host() -> SandboxHost {
@@ -1352,6 +1401,178 @@ mod tests {
         assert!(intent.stdin_text().is_none());
         assert_eq!(intent.stdout_limit_bytes(), MAX_PROCESS_OUTPUT_LIMIT_BYTES);
         assert_eq!(intent.stderr_limit_bytes(), MAX_PROCESS_OUTPUT_LIMIT_BYTES);
+    }
+
+    #[test]
+    fn shell_runtime_admission_marker_parsing_requires_exact_sandbox_and_version() {
+        assert_eq!(
+            shell_runtime_admission_from_markers(Some(OsStr::new("1")), Some(OsStr::new("1"))),
+            Some(AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1())
+        );
+
+        for (sandbox, version) in [
+            (None, Some(os("1"))),
+            (Some(os("1")), None),
+            (Some(os("0")), Some(os("1"))),
+            (Some(os("1")), Some(os("2"))),
+            (Some(os("true")), Some(os("1"))),
+            (Some(os("1")), Some(os(""))),
+        ] {
+            assert_eq!(
+                shell_runtime_admission_from_markers(sandbox.as_deref(), version.as_deref()),
+                None
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn shell_helper_simulated_sandbox_runs_local_workspace_effect_with_fake_runner() {
+        let intent = shell_process_action_intent(vec![
+            "cargo".to_owned(),
+            "test".to_owned(),
+            "-p".to_owned(),
+            "merry-runtime".to_owned(),
+        ])
+        .unwrap_or_else(|_| panic!("shell process intent should be valid"));
+        let admission =
+            shell_runtime_admission_from_markers(Some(OsStr::new("1")), Some(OsStr::new("1")));
+        let runner = FakeProcessRunner::succeeding("simulated cargo success\n");
+        let mut output = Vec::new();
+
+        run_shell_to_writer(intent, admission, Arc::new(runner.clone()), &mut output)
+            .await
+            .unwrap_or_else(|_| panic!("accepted local workspace shell command should resolve"));
+
+        assert_eq!(runner.call_count(), 1);
+        assert_eq!(
+            runner.observed_argv(),
+            vec![vec!["cargo", "test", "-p", "merry-runtime"]]
+        );
+        let text = String::from_utf8(output).expect("output should be utf-8");
+        assert!(
+            !text.contains("simulated cargo success"),
+            "process stdout should stay in the result artifact, not raw CLI stdout"
+        );
+        let events = parse_runtime_events(&text);
+        let resolved = resolved_tool_result(&events);
+        assert_eq!(resolved.status(), ToolCallResultStatus::Succeeded);
+        assert!(resolved.diagnostic().is_none());
+    }
+
+    #[tokio::test]
+    async fn shell_helper_simulated_sandbox_marker_still_denies_forbidden_command() {
+        let intent = shell_process_action_intent(vec![
+            "sh".to_owned(),
+            "-c".to_owned(),
+            "echo bad".to_owned(),
+        ])
+        .unwrap_or_else(|_| panic!("shell process intent should be valid"));
+        let admission =
+            shell_runtime_admission_from_markers(Some(OsStr::new("1")), Some(OsStr::new("1")));
+        let runner = FakeProcessRunner::succeeding("bad\n");
+        let mut output = Vec::new();
+
+        run_shell_to_writer(intent, admission, Arc::new(runner.clone()), &mut output)
+            .await
+            .unwrap_or_else(|_| panic!("forbidden command should resolve as a policy denial"));
+
+        assert_eq!(runner.call_count(), 0);
+        let text = String::from_utf8(output).expect("output should be utf-8");
+        assert!(
+            !text.contains("bad"),
+            "forbidden process output should not appear in CLI stdout"
+        );
+        let events = parse_runtime_events(&text);
+        let resolved = resolved_tool_result(&events);
+        assert_eq!(resolved.status(), ToolCallResultStatus::Failed);
+        assert_eq!(
+            resolved
+                .diagnostic()
+                .expect("denied result should include a diagnostic")
+                .code(),
+            "action_policy_denied"
+        );
+    }
+
+    #[derive(Clone)]
+    struct FakeProcessRunner {
+        calls: Arc<AtomicUsize>,
+        observed_argv: Arc<Mutex<Vec<Vec<String>>>>,
+        stdout: String,
+        stderr: String,
+        status: ProcessExitStatus,
+    }
+
+    impl FakeProcessRunner {
+        fn succeeding(stdout: impl Into<String>) -> Self {
+            Self {
+                calls: Arc::new(AtomicUsize::new(0)),
+                observed_argv: Arc::new(Mutex::new(Vec::new())),
+                stdout: stdout.into(),
+                stderr: String::new(),
+                status: ProcessExitStatus::Exited(0),
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+
+        fn observed_argv(&self) -> Vec<Vec<String>> {
+            self.observed_argv
+                .lock()
+                .expect("observed argv mutex should not be poisoned")
+                .clone()
+        }
+    }
+
+    impl ProcessRunner for FakeProcessRunner {
+        fn run<'a>(
+            &'a self,
+            intent: ProcessActionIntent,
+            context: ProcessRunnerContext,
+        ) -> ProcessRunnerFuture<'a> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.observed_argv
+                    .lock()
+                    .expect("observed argv mutex should not be poisoned")
+                    .push(intent.argv().to_vec());
+                if context.cancellation_token().is_cancelled() {
+                    return Err(ProcessRunnerError::Cancelled);
+                }
+
+                ProcessRunnerOutput::new(
+                    &intent,
+                    self.status,
+                    self.stdout.clone(),
+                    false,
+                    self.stderr.clone(),
+                    false,
+                )
+                .map_err(|source| ProcessRunnerError::infrastructure(source.to_string()))
+            })
+        }
+    }
+
+    fn parse_runtime_events(text: &str) -> Vec<RuntimeEvent> {
+        assert!(
+            text.ends_with('\n'),
+            "runtime JSONL should end with newline"
+        );
+        text.lines()
+            .map(|line| serde_json::from_str::<RuntimeEvent>(line).expect("line should be JSON"))
+            .collect()
+    }
+
+    fn resolved_tool_result(events: &[RuntimeEvent]) -> &merry_core::ToolCallResult {
+        events
+            .iter()
+            .find_map(|event| match &event.kind {
+                merry_core::RuntimeEventKind::ToolCallResolved { result } => Some(result),
+                _ => None,
+            })
+            .expect("shell command should resolve a tool call")
     }
 
     #[test]

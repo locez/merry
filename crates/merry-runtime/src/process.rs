@@ -46,6 +46,45 @@ impl ProcessEnvPolicy {
     }
 }
 
+/// Explicit admission for the accepted local workspace process lane.
+///
+/// This value is intentionally small and declarative. It records that the
+/// caller has selected Merry's current CLI bubblewrap profile and accepted the
+/// local workspace process risk for that profile; it is not proof that any
+/// process is actually confined. Runtime code treats it only as construction-
+/// time admission for the narrow local workspace process predicate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AcceptedLocalWorkspaceProcessAdmission {
+    sandbox_profile: LocalWorkspaceProcessSandboxProfile,
+}
+
+impl AcceptedLocalWorkspaceProcessAdmission {
+    /// Creates admission for the Merry CLI bubblewrap v1 sandbox profile.
+    ///
+    /// Calling this explicitly accepts the local workspace process risk for the
+    /// declared profile.
+    #[must_use]
+    pub const fn accept_cli_bwrap_v1() -> Self {
+        Self {
+            sandbox_profile: LocalWorkspaceProcessSandboxProfile::CliBwrapV1,
+        }
+    }
+
+    /// Returns the declared sandbox profile for this admission.
+    #[must_use]
+    pub const fn sandbox_profile(self) -> LocalWorkspaceProcessSandboxProfile {
+        self.sandbox_profile
+    }
+}
+
+/// Declared sandbox/profile associated with local workspace process admission.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalWorkspaceProcessSandboxProfile {
+    /// Merry CLI bubblewrap profile version 1.
+    CliBwrapV1,
+}
+
 /// Boxed process runner future used for object-safe runtime process boundaries.
 ///
 /// The runner boundary is runtime-owned and provider-neutral. It accepts only a
