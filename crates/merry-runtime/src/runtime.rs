@@ -6,11 +6,16 @@
 //! provider wire details behind the `merry-llm` provider boundary.
 
 use crate::{
-    ActionProposal, ArtifactContent, ContextCompiler, ContextEntry, ContextSummary,
-    LedgerProjectionSnapshot, RuntimeError, RuntimeEventStream, RuntimeModelRole,
-    SessionContextSnapshot,
+    ActionExecutionEvidence, ActionProposal, ArtifactContent, ContextCompiler, ContextEntry,
+    ContextSummary, LedgerProjectionSnapshot, ProcessActionIntent, ProcessExitStatus,
+    ProcessRunner, ProcessRunnerContext, ProcessRunnerError, ProcessRunnerOutput, RuntimeError,
+    RuntimeEventStream, RuntimeModelRole, SessionContextSnapshot,
     action_audit::ActionAuditPolicy,
-    action_policy::{DefaultActionPolicy, classify_tool_action_risk},
+    action_policy::{
+        ActionPolicyDecision, DefaultActionPolicy, classify_tool_action_risk,
+        is_local_workspace_effect_process_action_proposal, is_low_risk_process_action_proposal,
+        is_low_risk_workspace_patch_proposal,
+    },
     event_stream::ActiveStepPermit,
     judgment::{JudgmentContext, JudgmentError, JudgmentRecord, JudgmentRequest, JudgmentSource},
     memory::{
@@ -20,7 +25,10 @@ use crate::{
     model_config::{ModelProviderConfig, RuntimeModelConfigs},
     session::{SessionState, is_runtime_reserved_artifact_id},
     step::{StepContext, StepInput, compile_step_model_request},
-    tool::{RegisteredTool, ToolExecutionContext, ToolExecutionError, ToolRegistry},
+    tool::{
+        ActionProposalEvidence, RegisteredTool, ToolExecutionContext, ToolExecutionError,
+        ToolRegistry,
+    },
 };
 use futures_util::StreamExt;
 use merry_core::{
@@ -53,6 +61,7 @@ const DIAGNOSTIC_TOOL_CALL_RESULT_REQUIRED: &str = "tool_call_result_required";
 const DIAGNOSTIC_TOOL_ACTION_POLICY_DENIED: &str = "action_policy_denied";
 const DIAGNOSTIC_TOOL_NOT_REGISTERED: &str = "tool_not_registered";
 const TOOL_ACTION_POLICY_DENIED_MESSAGE: &str = "tool action was blocked by runtime policy";
+const WORKSPACE_PATCH_FILE_TOOL_NAME: &str = "workspace_patch_file";
 
 /// Merry runtime handle for one session.
 ///
@@ -299,10 +308,12 @@ impl Runtime {
                 merry_core::ToolCallResultStatus::Failed,
                 content,
                 Some(diagnostic),
+                None,
             );
         };
 
-        let policy_decision = DefaultActionPolicy.decide(registered_tool.action_kind());
+        let mut policy_decision = DefaultActionPolicy.decide(registered_tool.action_kind());
+        let mut allowed_proposal = None;
         if !policy_decision.is_allowed() {
             let proposal = if registered_tool.action_kind().is_mutating()
                 && registered_tool.proposals_enabled()
@@ -369,37 +380,110 @@ impl Runtime {
                 });
             }
 
-            let outcome = denied_tool_action_outcome(&pending);
-            let (status, content, diagnostic) = outcome.into_parts();
-            debug_assert_eq!(status, merry_core::ToolCallResultStatus::Failed);
-            let diagnostic = diagnostic.ok_or(RuntimeError::Core {
-                source: CoreError::InvalidToolCallResult {
-                    reason: "denied tool action outcome must include a diagnostic",
-                },
-            })?;
-            let mut session = self.inner.session.lock().await;
-            if context.cancellation_token().is_cancelled() {
-                return Err(RuntimeError::ToolExecutionCancelled {
-                    session_id: self.inner.session_id.clone(),
-                    call_id: call_id.clone(),
-                });
+            if let Some(proposal) = proposal {
+                if self.inner.allow_low_risk_workspace_patches
+                    && pending.name().as_str() == WORKSPACE_PATCH_FILE_TOOL_NAME
+                    && is_low_risk_workspace_patch_proposal(
+                        registered_tool.action_kind(),
+                        &proposal,
+                    )
+                {
+                    policy_decision = ActionPolicyDecision::allow_low_risk_workspace_patch();
+                    allowed_proposal = Some(proposal);
+                } else if let Some(runner) = self.inner.low_risk_process_runner.clone()
+                    && is_low_risk_process_action_proposal(registered_tool.action_kind(), &proposal)
+                {
+                    policy_decision = ActionPolicyDecision::allow_low_risk_process_action();
+                    return self
+                        .execute_admitted_process_action(
+                            &pending,
+                            proposal,
+                            policy_decision,
+                            runner,
+                            context,
+                        )
+                        .await;
+                } else if let Some(runner) =
+                    self.inner.accepted_local_workspace_process_runner.clone()
+                    && is_local_workspace_effect_process_action_proposal(
+                        registered_tool.action_kind(),
+                        &proposal,
+                    )
+                {
+                    policy_decision =
+                        ActionPolicyDecision::allow_accepted_local_workspace_process_action();
+                    return self
+                        .execute_admitted_process_action(
+                            &pending,
+                            proposal,
+                            policy_decision,
+                            runner,
+                            context,
+                        )
+                        .await;
+                } else {
+                    let outcome = denied_tool_action_outcome(&pending);
+                    let (status, content, diagnostic, execution_evidence) = outcome.into_parts();
+                    debug_assert_eq!(status, merry_core::ToolCallResultStatus::Failed);
+                    debug_assert!(execution_evidence.is_none());
+                    let diagnostic = diagnostic.ok_or(RuntimeError::Core {
+                        source: CoreError::InvalidToolCallResult {
+                            reason: "denied tool action outcome must include a diagnostic",
+                        },
+                    })?;
+                    let mut session = self.inner.session.lock().await;
+                    if context.cancellation_token().is_cancelled() {
+                        return Err(RuntimeError::ToolExecutionCancelled {
+                            session_id: self.inner.session_id.clone(),
+                            call_id: call_id.clone(),
+                        });
+                    }
+                    let denied_policy_decision = policy_decision.with_risk_tier(
+                        classify_tool_action_risk(registered_tool.action_kind(), Some(&proposal)),
+                    );
+                    return session.submit_denied_tool_action(
+                        &pending,
+                        &denied_policy_decision,
+                        Some(proposal),
+                        content,
+                        diagnostic,
+                    );
+                }
+            } else {
+                let outcome = denied_tool_action_outcome(&pending);
+                let (status, content, diagnostic, execution_evidence) = outcome.into_parts();
+                debug_assert_eq!(status, merry_core::ToolCallResultStatus::Failed);
+                debug_assert!(execution_evidence.is_none());
+                let diagnostic = diagnostic.ok_or(RuntimeError::Core {
+                    source: CoreError::InvalidToolCallResult {
+                        reason: "denied tool action outcome must include a diagnostic",
+                    },
+                })?;
+                let mut session = self.inner.session.lock().await;
+                if context.cancellation_token().is_cancelled() {
+                    return Err(RuntimeError::ToolExecutionCancelled {
+                        session_id: self.inner.session_id.clone(),
+                        call_id: call_id.clone(),
+                    });
+                }
+                let denied_policy_decision = policy_decision.with_risk_tier(
+                    classify_tool_action_risk(registered_tool.action_kind(), None),
+                );
+                return session.submit_denied_tool_action(
+                    &pending,
+                    &denied_policy_decision,
+                    None,
+                    content,
+                    diagnostic,
+                );
             }
-            let denied_policy_decision = policy_decision.with_risk_tier(classify_tool_action_risk(
-                registered_tool.action_kind(),
-                proposal.as_ref(),
-            ));
-            return session.submit_denied_tool_action(
-                &pending,
-                &denied_policy_decision,
-                proposal,
-                content,
-                diagnostic,
-            );
         }
 
         if let Err(error) = admit_action_to_generic_executor(
             &pending,
             registered_tool.action_kind(),
+            &policy_decision,
+            allowed_proposal.as_ref(),
             &self.inner.session_id,
         ) {
             let mut session = self.inner.session.lock().await;
@@ -417,27 +501,34 @@ impl Runtime {
             return Err(error);
         }
 
+        let execution_context =
+            context_with_approved_proposal(context.clone(), allowed_proposal.as_ref());
         let executor = registered_tool.executor();
-        let execution = tokio::select! {
-            biased;
-            () = context.cancellation_token().cancelled() => {
-                return Err(RuntimeError::ToolExecutionCancelled {
-                    session_id: self.inner.session_id.clone(),
-                    call_id: call_id.clone(),
-                });
+        let execution = if allowed_proposal.is_some() {
+            executor.execute(pending, execution_context).await
+        } else {
+            tokio::select! {
+                biased;
+                () = context.cancellation_token().cancelled() => {
+                    return Err(RuntimeError::ToolExecutionCancelled {
+                        session_id: self.inner.session_id.clone(),
+                        call_id: call_id.clone(),
+                    });
+                }
+                execution = executor.execute(pending, execution_context) => execution,
             }
-            execution = executor.execute(pending, context.clone()) => execution,
         };
 
-        if context.cancellation_token().is_cancelled() {
-            return Err(RuntimeError::ToolExecutionCancelled {
-                session_id: self.inner.session_id.clone(),
-                call_id: call_id.clone(),
-            });
-        }
-
         let outcome = match execution {
-            Ok(outcome) => outcome,
+            Ok(outcome) => {
+                if context.cancellation_token().is_cancelled() && allowed_proposal.is_none() {
+                    return Err(RuntimeError::ToolExecutionCancelled {
+                        session_id: self.inner.session_id.clone(),
+                        call_id: call_id.clone(),
+                    });
+                }
+                outcome
+            }
             Err(ToolExecutionError::Cancelled) => {
                 return Err(RuntimeError::ToolExecutionCancelled {
                     session_id: self.inner.session_id.clone(),
@@ -445,6 +536,12 @@ impl Runtime {
                 });
             }
             Err(ToolExecutionError::Infrastructure { message }) => {
+                if context.cancellation_token().is_cancelled() {
+                    return Err(RuntimeError::ToolExecutionCancelled {
+                        session_id: self.inner.session_id.clone(),
+                        call_id: call_id.clone(),
+                    });
+                }
                 return Err(RuntimeError::ToolExecutionFailed {
                     session_id: self.inner.session_id.clone(),
                     call_id: call_id.clone(),
@@ -453,15 +550,155 @@ impl Runtime {
             }
         };
 
-        let (status, content, diagnostic) = outcome.into_parts();
+        let (status, content, diagnostic, execution_evidence) = outcome.into_parts();
         let mut session = self.inner.session.lock().await;
-        if context.cancellation_token().is_cancelled() {
+        if context.cancellation_token().is_cancelled() && allowed_proposal.is_none() {
             return Err(RuntimeError::ToolExecutionCancelled {
                 session_id: self.inner.session_id.clone(),
                 call_id: call_id.clone(),
             });
         }
-        session.submit_tool_execution_outcome(call_id, status, content, diagnostic)
+        if let Some(proposal) = allowed_proposal {
+            if status == merry_core::ToolCallResultStatus::Succeeded && execution_evidence.is_none()
+            {
+                return Err(RuntimeError::MissingActionExecutionEvidence {
+                    session_id: self.inner.session_id.clone(),
+                    call_id: call_id.clone(),
+                    action_kind: registered_tool.action_kind(),
+                });
+            }
+            if status == merry_core::ToolCallResultStatus::Succeeded {
+                if let Some(evidence) = execution_evidence.as_ref() {
+                    if !evidence.matches_action_kind(registered_tool.action_kind()) {
+                        return Err(RuntimeError::ToolExecutionFailed {
+                            session_id: self.inner.session_id.clone(),
+                            call_id: call_id.clone(),
+                            message: "admitted action execution evidence did not match the registered action kind"
+                                .to_owned(),
+                        });
+                    }
+                    if !action_execution_evidence_matches_proposal(&proposal, evidence) {
+                        return Err(RuntimeError::ToolExecutionFailed {
+                            session_id: self.inner.session_id.clone(),
+                            call_id: call_id.clone(),
+                            message: "admitted workspace patch execution evidence did not match the approved proposal"
+                                .to_owned(),
+                        });
+                    }
+                }
+            }
+            return session.submit_proposed_tool_execution_outcome(
+                proposal,
+                status,
+                content,
+                diagnostic,
+                execution_evidence,
+                ActionAuditPolicy::from_decision(&policy_decision),
+            );
+        }
+        session.submit_tool_execution_outcome(
+            call_id,
+            status,
+            content,
+            diagnostic,
+            execution_evidence,
+        )
+    }
+
+    async fn execute_admitted_process_action(
+        &self,
+        pending: &PendingToolCall,
+        proposal: ActionProposal,
+        policy_decision: ActionPolicyDecision,
+        runner: Arc<dyn ProcessRunner>,
+        context: ToolExecutionContext,
+    ) -> Result<Vec<RuntimeEvent>, RuntimeError> {
+        let ActionProposalEvidence::ProcessAction(intent) = proposal.evidence().clone() else {
+            return Err(RuntimeError::ToolExecutionFailed {
+                session_id: self.inner.session_id.clone(),
+                call_id: pending.id().clone(),
+                message: "admitted process proposal did not include process action evidence"
+                    .to_owned(),
+            });
+        };
+
+        if context.cancellation_token().is_cancelled() {
+            return Err(RuntimeError::ToolExecutionCancelled {
+                session_id: self.inner.session_id.clone(),
+                call_id: pending.id().clone(),
+            });
+        }
+
+        let runner_context = ProcessRunnerContext::new(context.cancellation_token().clone());
+        let output = tokio::select! {
+            biased;
+            () = context.cancellation_token().cancelled() => {
+                return Err(RuntimeError::ToolExecutionCancelled {
+                    session_id: self.inner.session_id.clone(),
+                    call_id: pending.id().clone(),
+                });
+            }
+            output = runner.run(intent.clone(), runner_context) => output,
+        };
+
+        let output = match output {
+            Ok(output) => output,
+            Err(ProcessRunnerError::Cancelled) => {
+                return Err(RuntimeError::ToolExecutionCancelled {
+                    session_id: self.inner.session_id.clone(),
+                    call_id: pending.id().clone(),
+                });
+            }
+            Err(ProcessRunnerError::Infrastructure { message }) => {
+                if context.cancellation_token().is_cancelled() {
+                    return Err(RuntimeError::ToolExecutionCancelled {
+                        session_id: self.inner.session_id.clone(),
+                        call_id: pending.id().clone(),
+                    });
+                }
+                return Err(RuntimeError::ToolExecutionFailed {
+                    session_id: self.inner.session_id.clone(),
+                    call_id: pending.id().clone(),
+                    message,
+                });
+            }
+        };
+
+        let execution_evidence = output
+            .execution_evidence(&intent)
+            .map(ActionExecutionEvidence::ProcessAction)
+            .map_err(|source| RuntimeError::ToolExecutionFailed {
+                session_id: self.inner.session_id.clone(),
+                call_id: pending.id().clone(),
+                message: format!("process execution evidence did not match intent: {source}"),
+            })?;
+        let content = process_output_artifact_content(&intent, &output);
+        let status = if output.ok() {
+            merry_core::ToolCallResultStatus::Succeeded
+        } else {
+            merry_core::ToolCallResultStatus::Failed
+        };
+        let diagnostic = if output.ok() {
+            None
+        } else {
+            Some(diagnostic_from_text(
+                "process_action_failed",
+                format!(
+                    "process action completed with status {}",
+                    process_status_label(output.status())
+                ),
+            ))
+        };
+
+        let mut session = self.inner.session.lock().await;
+        session.submit_proposed_tool_execution_outcome(
+            proposal,
+            status,
+            content,
+            diagnostic,
+            Some(execution_evidence),
+            ActionAuditPolicy::from_decision(&policy_decision),
+        )
     }
 
     /// Creates an exact evidence reference from artifact state owned by this session.
@@ -627,6 +864,54 @@ fn denied_tool_action_outcome(pending: &PendingToolCall) -> crate::ToolExecution
     crate::ToolExecutionOutcome::failed_json(payload.to_string(), diagnostic)
 }
 
+fn process_output_artifact_content(
+    intent: &ProcessActionIntent,
+    output: &ProcessRunnerOutput,
+) -> ArtifactContent {
+    let payload = serde_json::json!({
+        "ok": output.ok(),
+        "kind": "process_action",
+        "status": process_status_json(output.status()),
+        "intent": {
+            "summary": intent.summary(),
+            "argv": intent.argv(),
+            "cwd": intent.cwd(),
+        },
+        "stdout": {
+            "text": output.stdout_text(),
+            "bytes": output.stdout_bytes(),
+            "truncated": output.stdout_truncated(),
+        },
+        "stderr": {
+            "text": output.stderr_text(),
+            "bytes": output.stderr_bytes(),
+            "truncated": output.stderr_truncated(),
+        }
+    });
+
+    ArtifactContent::json(payload.to_string())
+}
+
+fn process_status_json(status: ProcessExitStatus) -> serde_json::Value {
+    match status {
+        ProcessExitStatus::Exited(code) => {
+            serde_json::json!({ "kind": "exited", "code": code })
+        }
+        ProcessExitStatus::Cancelled => serde_json::json!({ "kind": "cancelled" }),
+        ProcessExitStatus::FailedToStart => serde_json::json!({ "kind": "failed_to_start" }),
+        ProcessExitStatus::DomainFailed => serde_json::json!({ "kind": "domain_failed" }),
+    }
+}
+
+fn process_status_label(status: ProcessExitStatus) -> String {
+    match status {
+        ProcessExitStatus::Exited(code) => format!("exit code {code}"),
+        ProcessExitStatus::Cancelled => "cancelled".to_owned(),
+        ProcessExitStatus::FailedToStart => "failed to start".to_owned(),
+        ProcessExitStatus::DomainFailed => "domain failed".to_owned(),
+    }
+}
+
 fn validate_action_proposal(
     proposal: &ActionProposal,
     pending: &PendingToolCall,
@@ -642,12 +927,63 @@ fn validate_action_proposal(
         })
 }
 
+fn context_with_approved_proposal(
+    context: ToolExecutionContext,
+    proposal: Option<&ActionProposal>,
+) -> ToolExecutionContext {
+    match proposal.map(ActionProposal::evidence) {
+        Some(ActionProposalEvidence::WorkspacePatch(patch)) => {
+            context.with_approved_workspace_patch(patch.clone())
+        }
+        Some(ActionProposalEvidence::ProcessAction(_)) | None => context,
+    }
+}
+
+fn action_execution_evidence_matches_proposal(
+    proposal: &ActionProposal,
+    execution_evidence: &ActionExecutionEvidence,
+) -> bool {
+    match (proposal.evidence(), execution_evidence) {
+        (
+            ActionProposalEvidence::WorkspacePatch(proposed),
+            ActionExecutionEvidence::WorkspacePatch(executed),
+        ) => {
+            proposed.relative_path() == executed.relative_path()
+                && proposed.preimage_bytes() == executed.preimage_bytes()
+                && proposed.replacement_bytes() == executed.replacement_bytes()
+                && proposed.file_bytes_before() == executed.file_bytes_before()
+                && proposed.file_bytes_after() == executed.file_bytes_after()
+                && proposed.file_fingerprint_before() == executed.file_fingerprint_before()
+                && proposed.file_fingerprint_after() == executed.file_fingerprint_after()
+        }
+        (
+            ActionProposalEvidence::ProcessAction(proposed),
+            ActionExecutionEvidence::ProcessAction(executed),
+        ) => executed.matches_intent(proposed),
+        _ => false,
+    }
+}
+
 pub(crate) fn admit_action_to_generic_executor(
     pending: &PendingToolCall,
     action_kind: crate::ToolActionKind,
+    decision: &ActionPolicyDecision,
+    proposal: Option<&ActionProposal>,
     session_id: &SessionId,
 ) -> Result<(), RuntimeError> {
-    if action_kind.is_mutating() {
+    if !action_kind.is_mutating() {
+        return Ok(());
+    }
+
+    let low_risk_workspace_patch_admitted = decision.is_allowed()
+        && decision.action_kind() == crate::ToolActionKind::WorkspaceWrite
+        && decision.risk_tier() == crate::action_policy::ActionRiskTier::EditLow
+        && pending.name().as_str() == WORKSPACE_PATCH_FILE_TOOL_NAME
+        && action_kind == crate::ToolActionKind::WorkspaceWrite
+        && proposal
+            .is_some_and(|proposal| is_low_risk_workspace_patch_proposal(action_kind, proposal));
+
+    if !low_risk_workspace_patch_admitted {
         return Err(RuntimeError::MutatingActionCommitLifecycleRequired {
             session_id: session_id.clone(),
             call_id: pending.id().clone(),
@@ -669,6 +1005,9 @@ pub struct RuntimeBuilder {
     model_configs: RuntimeModelConfigs,
     registered_tools: Vec<RegisteredTool>,
     memory_activation_source: Arc<dyn MemoryActivationSource>,
+    allow_low_risk_workspace_patches: bool,
+    low_risk_process_runner: Option<Arc<dyn ProcessRunner>>,
+    accepted_local_workspace_process_runner: Option<Arc<dyn ProcessRunner>>,
 }
 
 impl RuntimeBuilder {
@@ -680,6 +1019,9 @@ impl RuntimeBuilder {
             model_configs: RuntimeModelConfigs::default(),
             registered_tools: Vec::new(),
             memory_activation_source: Arc::new(StoredMemoryActivationSource),
+            allow_low_risk_workspace_patches: false,
+            low_risk_process_runner: None,
+            accepted_local_workspace_process_runner: None,
         }
     }
 
@@ -733,6 +1075,42 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Opts in to executing validated low-risk workspace patch proposals.
+    ///
+    /// This keeps the default policy conservative: workspace writes remain
+    /// denied unless the tool provides valid workspace patch proposal evidence
+    /// and runtime construction explicitly enables this lane.
+    #[must_use]
+    pub fn allow_low_risk_workspace_patches(mut self) -> Self {
+        self.allow_low_risk_workspace_patches = true;
+        self
+    }
+
+    /// Opts in to executing validated low-risk process action proposals.
+    ///
+    /// The default policy remains deny. This lane is available only for command
+    /// execution proposals with provider-neutral process evidence, an injected
+    /// runtime runner, and the narrow SP2 low-risk predicate.
+    #[must_use]
+    pub fn allow_low_risk_process_actions(mut self, runner: Arc<dyn ProcessRunner>) -> Self {
+        self.low_risk_process_runner = Some(runner);
+        self
+    }
+
+    /// Opts in to executing validated local workspace effect process proposals.
+    ///
+    /// Runner injection alone is not a sandbox or an authorization source. This
+    /// lane represents explicit runtime construction-time acceptance of medium
+    /// local workspace process risk for the narrow classified process intent.
+    #[must_use]
+    pub fn allow_accepted_local_workspace_process_actions(
+        mut self,
+        runner: Arc<dyn ProcessRunner>,
+    ) -> Self {
+        self.accepted_local_workspace_process_runner = Some(runner);
+        self
+    }
+
     /// Builds the runtime.
     ///
     /// Duplicate tool names are rejected before the runtime is constructed.
@@ -754,6 +1132,10 @@ impl RuntimeBuilder {
                 model_configs: self.model_configs,
                 tool_registry,
                 memory_activation_source: self.memory_activation_source,
+                allow_low_risk_workspace_patches: self.allow_low_risk_workspace_patches,
+                low_risk_process_runner: self.low_risk_process_runner,
+                accepted_local_workspace_process_runner: self
+                    .accepted_local_workspace_process_runner,
             }),
         })
     }
@@ -768,6 +1150,9 @@ struct RuntimeInner {
     model_configs: RuntimeModelConfigs,
     tool_registry: ToolRegistry,
     memory_activation_source: Arc<dyn MemoryActivationSource>,
+    allow_low_risk_workspace_patches: bool,
+    low_risk_process_runner: Option<Arc<dyn ProcessRunner>>,
+    accepted_local_workspace_process_runner: Option<Arc<dyn ProcessRunner>>,
 }
 
 async fn run_step(
@@ -1705,11 +2090,14 @@ async fn reserve_cancelled_event_slot<'a>(
 mod tests {
     use super::{
         DIAGNOSTIC_TOOL_ACTION_POLICY_DENIED, DIAGNOSTIC_TOOL_CALL_RESULT_REQUIRED, Runtime,
-        RuntimeInner, TOOL_ACTION_POLICY_DENIED_MESSAGE, admit_action_to_generic_executor,
+        RuntimeBuilder, RuntimeInner, TOOL_ACTION_POLICY_DENIED_MESSAGE,
+        WORKSPACE_PATCH_FILE_TOOL_NAME, admit_action_to_generic_executor,
         memory_activation_seed_from_step_input, send_cancelled_event,
     };
     use crate::action_audit::ActionAuditStatus;
-    use crate::action_policy::{ActionPolicyDisposition, ActionRiskTier, DefaultActionPolicy};
+    use crate::action_policy::{
+        ActionPolicyDecision, ActionPolicyDisposition, ActionRiskTier, DefaultActionPolicy,
+    };
     use crate::artifact::ArtifactContent;
     use crate::judgment::{
         JudgmentConfidence, JudgmentContext, JudgmentError, JudgmentEvidence, JudgmentFuture,
@@ -1724,13 +2112,19 @@ mod tests {
         MemoryEvidence, MemoryId, MemoryItem, MemoryItemSelection, MemoryScope,
     };
     use crate::model_config::RuntimeModelConfigs;
+    use crate::process::{
+        ProcessActionIntent, ProcessEnvPolicy, ProcessExecutionEvidence, ProcessExitStatus,
+        ProcessRunner, ProcessRunnerContext, ProcessRunnerError, ProcessRunnerFuture,
+        ProcessRunnerOutput,
+    };
     use crate::session::SessionState;
     use crate::tool::{
-        ActionProposal, ActionProposalEvidence, RegisteredTool, ToolActionKind,
-        ToolActionProposalFuture, ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome,
-        ToolExecutor, ToolExecutorFuture, ToolRegistry, WorkspacePatchProposal,
+        ActionExecutionEvidence, ActionProposal, ActionProposalEvidence, RegisteredTool,
+        ToolActionKind, ToolActionProposalFuture, ToolExecutionContext, ToolExecutionError,
+        ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture, ToolRegistry,
+        WorkspacePatchExecutionEvidence, WorkspacePatchProposal,
     };
-    use crate::{ArtifactError, RuntimeModelRole};
+    use crate::{ArtifactError, RuntimeError, RuntimeModelRole};
     use futures_util::StreamExt;
     use merry_core::{
         ArtifactId, ArtifactKind, ArtifactRef, EvidenceLocator, EvidenceRef, PendingToolCall,
@@ -1772,6 +2166,9 @@ mod tests {
             model_configs: RuntimeModelConfigs::default(),
             tool_registry: ToolRegistry::default(),
             memory_activation_source: Arc::new(crate::memory::StoredMemoryActivationSource),
+            allow_low_risk_workspace_patches: false,
+            low_risk_process_runner: None,
+            accepted_local_workspace_process_runner: None,
         }
     }
 
@@ -2436,6 +2833,9 @@ mod tests {
                 model_configs: model_configs_with_primary(provider),
                 tool_registry: ToolRegistry::default(),
                 memory_activation_source: Arc::new(source),
+                allow_low_risk_workspace_patches: false,
+                low_risk_process_runner: None,
+                accepted_local_workspace_process_runner: None,
             }),
         }
     }
@@ -2451,6 +2851,9 @@ mod tests {
                 model_configs: model_configs_with_primary(provider),
                 tool_registry: ToolRegistry::default(),
                 memory_activation_source: Arc::new(crate::memory::StoredMemoryActivationSource),
+                allow_low_risk_workspace_patches: false,
+                low_risk_process_runner: None,
+                accepted_local_workspace_process_runner: None,
             }),
         }
     }
@@ -2469,6 +2872,9 @@ mod tests {
                 model_configs: RuntimeModelConfigs::default(),
                 tool_registry: ToolRegistry::default(),
                 memory_activation_source: Arc::new(source),
+                allow_low_risk_workspace_patches: false,
+                low_risk_process_runner: None,
+                accepted_local_workspace_process_runner: None,
             }),
         }
     }
@@ -4218,11 +4624,26 @@ mod tests {
         call_id: &str,
         tool: RegisteredTool,
     ) -> (Runtime, PendingToolCall) {
+        register_policy_pending_registered_tool_with_builder(
+            session,
+            tool_name,
+            call_id,
+            tool,
+            RuntimeBuilder::build,
+        )
+        .await
+    }
+
+    async fn register_policy_pending_registered_tool_with_builder(
+        session: &str,
+        tool_name: &str,
+        call_id: &str,
+        tool: RegisteredTool,
+        configure: impl FnOnce(RuntimeBuilder) -> Result<Runtime, RuntimeError>,
+    ) -> (Runtime, PendingToolCall) {
         let spec = policy_tool_spec(tool_name);
         let pending = policy_pending_tool_call(call_id, spec.name().as_str());
-        let runtime = Runtime::builder(session_id(session))
-            .register_tool(tool)
-            .build()
+        let runtime = configure(Runtime::builder(session_id(session)).register_tool(tool))
             .expect("runtime should build");
         {
             let mut session = runtime.inner.session.lock().await;
@@ -4363,6 +4784,8 @@ mod tests {
         execute_calls: Arc<AtomicUsize>,
         propose_calls: Arc<AtomicUsize>,
         wait_for_cancel: bool,
+        record_approved_proposal: Arc<StdMutex<Vec<bool>>>,
+        attach_execution_evidence: bool,
     }
 
     impl ProposingToolExecutor {
@@ -4371,6 +4794,8 @@ mod tests {
                 execute_calls: Arc::new(AtomicUsize::new(0)),
                 propose_calls: Arc::new(AtomicUsize::new(0)),
                 wait_for_cancel: false,
+                record_approved_proposal: Arc::new(StdMutex::new(Vec::new())),
+                attach_execution_evidence: true,
             }
         }
 
@@ -4379,6 +4804,18 @@ mod tests {
                 execute_calls: Arc::new(AtomicUsize::new(0)),
                 propose_calls: Arc::new(AtomicUsize::new(0)),
                 wait_for_cancel: true,
+                record_approved_proposal: Arc::new(StdMutex::new(Vec::new())),
+                attach_execution_evidence: true,
+            }
+        }
+
+        fn missing_execution_evidence() -> Self {
+            Self {
+                execute_calls: Arc::new(AtomicUsize::new(0)),
+                propose_calls: Arc::new(AtomicUsize::new(0)),
+                wait_for_cancel: false,
+                record_approved_proposal: Arc::new(StdMutex::new(Vec::new())),
+                attach_execution_evidence: false,
             }
         }
 
@@ -4388,6 +4825,13 @@ mod tests {
 
         fn propose_count(&self) -> usize {
             self.propose_calls.load(Ordering::SeqCst)
+        }
+
+        fn approved_proposal_seen(&self) -> Vec<bool> {
+            self.record_approved_proposal
+                .lock()
+                .expect("approved proposal records mutex should not be poisoned")
+                .clone()
         }
     }
 
@@ -4404,8 +4848,16 @@ mod tests {
                     return Err(ToolExecutionError::Cancelled);
                 }
 
-                let patch = WorkspacePatchProposal::new("notes/proposed.txt", 3, 7, 20, 24)
-                    .expect("test proposal metadata is valid");
+                let patch = WorkspacePatchProposal::new(
+                    "notes/proposed.txt",
+                    3,
+                    7,
+                    20,
+                    24,
+                    "fnv1a64:0000000000000001",
+                    "fnv1a64:0000000000000002",
+                )
+                .expect("test proposal metadata is valid");
                 Ok(Some(
                     ActionProposal::new(
                         &call,
@@ -4423,11 +4875,335 @@ mod tests {
         fn execute<'a>(
             &'a self,
             _call: PendingToolCall,
+            context: ToolExecutionContext,
+        ) -> ToolExecutorFuture<'a> {
+            Box::pin(async move {
+                self.execute_calls.fetch_add(1, Ordering::SeqCst);
+                self.record_approved_proposal
+                    .lock()
+                    .expect("approved proposal records mutex should not be poisoned")
+                    .push(context.approved_workspace_patch().is_some());
+                if !self.attach_execution_evidence {
+                    return Ok(ToolExecutionOutcome::succeeded_text(
+                        "patched without evidence\n",
+                    ));
+                }
+                let evidence = WorkspacePatchExecutionEvidence::new(
+                    "notes/proposed.txt",
+                    3,
+                    7,
+                    20,
+                    24,
+                    "fnv1a64:0000000000000001",
+                    "fnv1a64:0000000000000002",
+                )
+                .expect("test execution evidence is valid");
+                Ok(ToolExecutionOutcome::succeeded_text("patched\n")
+                    .with_execution_evidence(ActionExecutionEvidence::WorkspacePatch(evidence)))
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct ProcessProposingToolExecutor {
+        execute_calls: Arc<AtomicUsize>,
+        propose_calls: Arc<AtomicUsize>,
+        argv: Vec<String>,
+        stdin_text: Option<String>,
+    }
+
+    impl ProcessProposingToolExecutor {
+        fn new() -> Self {
+            Self::with_argv(["rustc", "--version"])
+        }
+
+        fn with_argv<const N: usize>(argv: [&str; N]) -> Self {
+            Self {
+                execute_calls: Arc::new(AtomicUsize::new(0)),
+                propose_calls: Arc::new(AtomicUsize::new(0)),
+                argv: argv.into_iter().map(str::to_owned).collect(),
+                stdin_text: None,
+            }
+        }
+
+        fn with_stdin_text(stdin_text: impl Into<String>) -> Self {
+            Self {
+                execute_calls: Arc::new(AtomicUsize::new(0)),
+                propose_calls: Arc::new(AtomicUsize::new(0)),
+                argv: ["cargo", "test", "-p", "merry-runtime"]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
+                stdin_text: Some(stdin_text.into()),
+            }
+        }
+
+        fn execute_count(&self) -> usize {
+            self.execute_calls.load(Ordering::SeqCst)
+        }
+
+        fn propose_count(&self) -> usize {
+            self.propose_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl ToolExecutor for ProcessProposingToolExecutor {
+        fn propose<'a>(
+            &'a self,
+            call: PendingToolCall,
+            _context: ToolExecutionContext,
+        ) -> ToolActionProposalFuture<'a> {
+            Box::pin(async move {
+                self.propose_calls.fetch_add(1, Ordering::SeqCst);
+                let intent = ProcessActionIntent::new(
+                    self.argv.clone(),
+                    Some(".".to_owned()),
+                    ProcessEnvPolicy::empty(),
+                    self.stdin_text.clone(),
+                    16 * 1024,
+                    16 * 1024,
+                )
+                .expect("test process intent is valid");
+                Ok(Some(
+                    ActionProposal::new(
+                        &call,
+                        ToolActionKind::CommandExec,
+                        "process action",
+                        self.argv.join(" "),
+                        "Run proposed process action.",
+                        ActionProposalEvidence::ProcessAction(intent),
+                    )
+                    .expect("test process action proposal is valid"),
+                ))
+            })
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _call: PendingToolCall,
             _context: ToolExecutionContext,
         ) -> ToolExecutorFuture<'a> {
             Box::pin(async move {
                 self.execute_calls.fetch_add(1, Ordering::SeqCst);
-                Ok(ToolExecutionOutcome::succeeded_text("must not execute\n"))
+                Ok(ToolExecutionOutcome::succeeded_text(
+                    "process execution must not be reached in SP1\n",
+                ))
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct FakeProcessRunner {
+        calls: Arc<AtomicUsize>,
+        observed_intents: Arc<StdMutex<Vec<ProcessActionIntent>>>,
+        response: Arc<StdMutex<Option<FakeProcessRunnerResponse>>>,
+    }
+
+    impl FakeProcessRunner {
+        fn succeeding() -> Self {
+            Self::with_response(FakeProcessRunnerResponse::Success {
+                stdout_text: "runtime tests passed\n".to_owned(),
+                stderr_text: String::new(),
+            })
+        }
+
+        fn cancelling() -> Self {
+            Self::with_response(FakeProcessRunnerResponse::Error(
+                ProcessRunnerError::Cancelled,
+            ))
+        }
+
+        fn succeeding_then_cancelling_token() -> Self {
+            Self::with_response(FakeProcessRunnerResponse::SuccessThenCancel {
+                stdout_text: "runtime tests passed after token cancellation\n".to_owned(),
+                stderr_text: String::new(),
+            })
+        }
+
+        fn with_response(response: FakeProcessRunnerResponse) -> Self {
+            Self {
+                calls: Arc::new(AtomicUsize::new(0)),
+                observed_intents: Arc::new(StdMutex::new(Vec::new())),
+                response: Arc::new(StdMutex::new(Some(response))),
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+
+        fn observed_intents(&self) -> Vec<ProcessActionIntent> {
+            self.observed_intents
+                .lock()
+                .expect("observed intents mutex should not be poisoned")
+                .clone()
+        }
+    }
+
+    enum FakeProcessRunnerResponse {
+        Success {
+            stdout_text: String,
+            stderr_text: String,
+        },
+        SuccessThenCancel {
+            stdout_text: String,
+            stderr_text: String,
+        },
+        Error(ProcessRunnerError),
+    }
+
+    impl ProcessRunner for FakeProcessRunner {
+        fn run<'a>(
+            &'a self,
+            intent: ProcessActionIntent,
+            context: ProcessRunnerContext,
+        ) -> ProcessRunnerFuture<'a> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.observed_intents
+                    .lock()
+                    .expect("observed intents mutex should not be poisoned")
+                    .push(intent.clone());
+                if context.cancellation_token().is_cancelled() {
+                    return Err(ProcessRunnerError::Cancelled);
+                }
+
+                let response = self
+                    .response
+                    .lock()
+                    .expect("process response mutex should not be poisoned")
+                    .take()
+                    .expect("scripted process response should exist");
+                match response {
+                    FakeProcessRunnerResponse::Success {
+                        stdout_text,
+                        stderr_text,
+                    } => ProcessRunnerOutput::new(
+                        &intent,
+                        ProcessExitStatus::Exited(0),
+                        stdout_text,
+                        false,
+                        stderr_text,
+                        false,
+                    )
+                    .map_err(|source| ProcessRunnerError::infrastructure(source.to_string())),
+                    FakeProcessRunnerResponse::SuccessThenCancel {
+                        stdout_text,
+                        stderr_text,
+                    } => {
+                        let output = ProcessRunnerOutput::new(
+                            &intent,
+                            ProcessExitStatus::Exited(0),
+                            stdout_text,
+                            false,
+                            stderr_text,
+                            false,
+                        )
+                        .map_err(|source| ProcessRunnerError::infrastructure(source.to_string()))?;
+                        context.cancellation_token().cancel();
+                        Ok(output)
+                    }
+                    FakeProcessRunnerResponse::Error(error) => Err(error),
+                }
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct CancellingOptInPatchExecutor {
+        execute_calls: Arc<AtomicUsize>,
+        propose_calls: Arc<AtomicUsize>,
+        side_effect: Arc<AtomicBool>,
+        record_approved_proposal: Arc<StdMutex<Vec<bool>>>,
+    }
+
+    impl CancellingOptInPatchExecutor {
+        fn new() -> Self {
+            Self {
+                execute_calls: Arc::new(AtomicUsize::new(0)),
+                propose_calls: Arc::new(AtomicUsize::new(0)),
+                side_effect: Arc::new(AtomicBool::new(false)),
+                record_approved_proposal: Arc::new(StdMutex::new(Vec::new())),
+            }
+        }
+
+        fn execute_count(&self) -> usize {
+            self.execute_calls.load(Ordering::SeqCst)
+        }
+
+        fn propose_count(&self) -> usize {
+            self.propose_calls.load(Ordering::SeqCst)
+        }
+
+        fn side_effect_happened(&self) -> bool {
+            self.side_effect.load(Ordering::SeqCst)
+        }
+
+        fn approved_proposal_seen(&self) -> Vec<bool> {
+            self.record_approved_proposal
+                .lock()
+                .expect("approved proposal records mutex should not be poisoned")
+                .clone()
+        }
+    }
+
+    impl ToolExecutor for CancellingOptInPatchExecutor {
+        fn propose<'a>(
+            &'a self,
+            call: PendingToolCall,
+            _context: ToolExecutionContext,
+        ) -> ToolActionProposalFuture<'a> {
+            Box::pin(async move {
+                self.propose_calls.fetch_add(1, Ordering::SeqCst);
+                let patch = WorkspacePatchProposal::new(
+                    "notes/proposed.txt",
+                    3,
+                    7,
+                    20,
+                    24,
+                    "fnv1a64:0000000000000003",
+                    "fnv1a64:0000000000000004",
+                )
+                .expect("test proposal metadata is valid");
+                Ok(Some(
+                    ActionProposal::new(
+                        &call,
+                        ToolActionKind::WorkspaceWrite,
+                        "workspace patch",
+                        "notes/proposed.txt",
+                        "Replace one matched preimage in notes/proposed.txt",
+                        ActionProposalEvidence::WorkspacePatch(patch),
+                    )
+                    .expect("test action proposal is valid"),
+                ))
+            })
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _call: PendingToolCall,
+            context: ToolExecutionContext,
+        ) -> ToolExecutorFuture<'a> {
+            Box::pin(async move {
+                self.execute_calls.fetch_add(1, Ordering::SeqCst);
+                self.record_approved_proposal
+                    .lock()
+                    .expect("approved proposal records mutex should not be poisoned")
+                    .push(context.approved_workspace_patch().is_some());
+                self.side_effect.store(true, Ordering::SeqCst);
+                context.cancellation_token().cancel();
+                let evidence = WorkspacePatchExecutionEvidence::new(
+                    "notes/proposed.txt",
+                    3,
+                    7,
+                    20,
+                    24,
+                    "fnv1a64:0000000000000003",
+                    "fnv1a64:0000000000000004",
+                )
+                .expect("test execution evidence is valid");
+                Ok(ToolExecutionOutcome::succeeded_text("patched\n")
+                    .with_execution_evidence(ActionExecutionEvidence::WorkspacePatch(evidence)))
             })
         }
     }
@@ -4469,18 +5245,32 @@ mod tests {
     #[test]
     fn generic_executor_admission_allows_read_only_and_rejects_mutating_actions() {
         let session_id = SessionId::new("generic-executor-admission").expect("valid session id");
-        let pending = policy_pending_tool_call("call-admission", "policy_admission");
+        let pending = policy_pending_tool_call("call-admission", WORKSPACE_PATCH_FILE_TOOL_NAME);
 
-        admit_action_to_generic_executor(&pending, ToolActionKind::ReadOnly, &session_id)
-            .expect("read-only action may enter generic executor");
+        let read_only_decision = DefaultActionPolicy.decide(ToolActionKind::ReadOnly);
+        admit_action_to_generic_executor(
+            &pending,
+            ToolActionKind::ReadOnly,
+            &read_only_decision,
+            None,
+            &session_id,
+        )
+        .expect("read-only action may enter generic executor");
 
         for action_kind in [
             ToolActionKind::WorkspaceWrite,
             ToolActionKind::CommandExec,
             ToolActionKind::Network,
         ] {
-            let err = admit_action_to_generic_executor(&pending, action_kind, &session_id)
-                .expect_err("mutating action must require commit lifecycle");
+            let decision = DefaultActionPolicy.decide(action_kind);
+            let err = admit_action_to_generic_executor(
+                &pending,
+                action_kind,
+                &decision,
+                None,
+                &session_id,
+            )
+            .expect_err("mutating action must require commit lifecycle");
             assert!(matches!(
                 err,
                 crate::RuntimeError::MutatingActionCommitLifecycleRequired {
@@ -4496,6 +5286,90 @@ mod tests {
                     .contains("requires an explicit commit lifecycle")
             );
         }
+
+        let patch = WorkspacePatchProposal::new(
+            "notes/proposed.txt",
+            3,
+            7,
+            20,
+            24,
+            "fnv1a64:0000000000000001",
+            "fnv1a64:0000000000000002",
+        )
+        .expect("test proposal metadata is valid");
+        let proposal = ActionProposal::new(
+            &pending,
+            ToolActionKind::WorkspaceWrite,
+            "workspace patch",
+            "notes/proposed.txt",
+            "Replace one matched preimage in notes/proposed.txt",
+            ActionProposalEvidence::WorkspacePatch(patch),
+        )
+        .expect("test action proposal is valid");
+        let allowed_decision = ActionPolicyDecision::allow_low_risk_workspace_patch();
+        admit_action_to_generic_executor(
+            &pending,
+            ToolActionKind::WorkspaceWrite,
+            &allowed_decision,
+            Some(&proposal),
+            &session_id,
+        )
+        .expect("low-risk workspace patch proposal may enter generic executor");
+
+        let non_patch_pending =
+            policy_pending_tool_call("call-admission-other", "policy_admission");
+        let err = admit_action_to_generic_executor(
+            &non_patch_pending,
+            ToolActionKind::WorkspaceWrite,
+            &allowed_decision,
+            Some(&proposal),
+            &session_id,
+        )
+        .expect_err("only workspace_patch_file may enter the low-risk patch lane");
+        assert!(matches!(
+            err,
+            crate::RuntimeError::MutatingActionCommitLifecycleRequired {
+                action_kind: ToolActionKind::WorkspaceWrite,
+                ..
+            }
+        ));
+
+        for action_kind in [ToolActionKind::CommandExec, ToolActionKind::Network] {
+            let err = admit_action_to_generic_executor(
+                &pending,
+                action_kind,
+                &allowed_decision,
+                Some(&proposal),
+                &session_id,
+            )
+            .expect_err("only workspace patch proposals may enter generic executor");
+            assert!(matches!(
+                err,
+                crate::RuntimeError::MutatingActionCommitLifecycleRequired {
+                    action_kind: guarded_kind,
+                    ..
+                } if guarded_kind == action_kind
+            ));
+        }
+
+        let elevated_decision = DefaultActionPolicy
+            .decide(ToolActionKind::WorkspaceWrite)
+            .with_risk_tier(ActionRiskTier::EditElevated);
+        let err = admit_action_to_generic_executor(
+            &pending,
+            ToolActionKind::WorkspaceWrite,
+            &elevated_decision,
+            Some(&proposal),
+            &session_id,
+        )
+        .expect_err("workspace write requires low-risk allow decision");
+        assert!(matches!(
+            err,
+            crate::RuntimeError::MutatingActionCommitLifecycleRequired {
+                action_kind: ToolActionKind::WorkspaceWrite,
+                ..
+            }
+        ));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -4630,12 +5504,16 @@ mod tests {
         assert_eq!(proposal.label(), "workspace patch");
         assert_eq!(proposal.subject(), "notes/proposed.txt");
         assert!(proposal.summary().contains("notes/proposed.txt"));
-        let ActionProposalEvidence::WorkspacePatch(patch) = proposal.evidence();
+        let ActionProposalEvidence::WorkspacePatch(patch) = proposal.evidence() else {
+            panic!("workspace write proposal should record workspace patch evidence");
+        };
         assert_eq!(patch.relative_path(), "notes/proposed.txt");
         assert_eq!(patch.preimage_bytes(), 3);
         assert_eq!(patch.replacement_bytes(), 7);
         assert_eq!(patch.file_bytes_before(), 20);
         assert_eq!(patch.file_bytes_after(), 24);
+        assert_eq!(patch.file_fingerprint_before(), "fnv1a64:0000000000000001");
+        assert_eq!(patch.file_fingerprint_after(), "fnv1a64:0000000000000002");
 
         assert_eq!(audits[1].status(), ActionAuditStatus::Denied);
         assert_eq!(audits[1].tool_call_id(), pending.id());
@@ -4668,6 +5546,245 @@ mod tests {
         assert!(audit_indexes[0] < audit_indexes[1]);
         assert!(audit_indexes[1] < artifact_index);
         assert!(artifact_index < resolved_index);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn opt_in_workspace_write_patch_proposal_executes_and_records_execution_audit() {
+        let executor = ProposingToolExecutor::immediate();
+        let tool = RegisteredTool::new(
+            policy_tool_spec(WORKSPACE_PATCH_FILE_TOOL_NAME),
+            Arc::new(executor.clone()),
+            ToolActionKind::WorkspaceWrite,
+        )
+        .with_action_proposal();
+        let (runtime, pending) = register_policy_pending_registered_tool_with_builder(
+            "runtime-policy-proposed-workspace-write-opt-in",
+            WORKSPACE_PATCH_FILE_TOOL_NAME,
+            "call-workspace-write-opt-in",
+            tool,
+            |builder| builder.allow_low_risk_workspace_patches().build(),
+        )
+        .await;
+
+        let events = runtime
+            .execute_tool_call(pending.id(), ToolExecutionContext::default())
+            .await
+            .expect("opted-in low-risk workspace patch should execute");
+
+        assert_eq!(executor.propose_count(), 1);
+        assert_eq!(executor.execute_count(), 1);
+        assert_eq!(executor.approved_proposal_seen(), vec![true]);
+        assert_eq!(
+            event_kind_names_for_tool_execution(&events),
+            ["ArtifactRecorded", "ToolCallResolved"]
+        );
+        assert_eq!(
+            resolved_tool_result(&events).status(),
+            merry_core::ToolCallResultStatus::Succeeded
+        );
+        assert!(runtime.pending_tool_calls().await.is_empty());
+
+        let audits = action_audit_records(&runtime).await;
+        assert_eq!(audits.len(), 2);
+        assert_eq!(audits[0].status(), ActionAuditStatus::Proposed);
+        assert_eq!(audits[0].tool_call_id(), pending.id());
+        assert_eq!(audits[0].tool_name(), pending.name());
+        assert_eq!(audits[0].action_kind(), ToolActionKind::WorkspaceWrite);
+        assert!(audits[0].policy().is_none());
+        assert!(audits[0].proposal().is_some());
+        assert!(audits[0].execution_evidence().is_none());
+
+        assert_eq!(audits[1].status(), ActionAuditStatus::Executed);
+        assert_eq!(audits[1].tool_call_id(), pending.id());
+        assert_eq!(audits[1].tool_name(), pending.name());
+        assert_eq!(audits[1].action_kind(), ToolActionKind::WorkspaceWrite);
+        assert!(audits[1].proposal().is_none());
+        let policy = audits[1]
+            .policy()
+            .expect("executed audit should include allow policy");
+        assert_eq!(policy.risk_tier(), ActionRiskTier::EditLow);
+        assert_eq!(policy.disposition(), ActionPolicyDisposition::Allow);
+        let ActionExecutionEvidence::WorkspacePatch(evidence) = audits[1]
+            .execution_evidence()
+            .expect("executed audit should include actual evidence")
+        else {
+            panic!("workspace patch execution should record workspace patch evidence");
+        };
+        assert_eq!(evidence.relative_path(), "notes/proposed.txt");
+        assert_eq!(evidence.preimage_bytes(), 3);
+        assert_eq!(evidence.replacement_bytes(), 7);
+        assert_eq!(evidence.file_bytes_before(), 20);
+        assert_eq!(evidence.file_bytes_after(), 24);
+        assert_eq!(
+            evidence.file_fingerprint_before(),
+            "fnv1a64:0000000000000001"
+        );
+        assert_eq!(
+            evidence.file_fingerprint_after(),
+            "fnv1a64:0000000000000002"
+        );
+
+        let projection = runtime.ledger_projection().await;
+        let lifecycle = lifecycle_kinds(&projection);
+        let audit_indexes = lifecycle
+            .iter()
+            .enumerate()
+            .filter_map(|(index, kind)| {
+                (*kind == LedgerFactKind::ActionAuditRecorded).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(audit_indexes.len(), 2);
+        let artifact_index = lifecycle
+            .iter()
+            .position(|kind| *kind == LedgerFactKind::ArtifactRecorded)
+            .expect("artifact lifecycle should be recorded");
+        let resolved_index = lifecycle
+            .iter()
+            .position(|kind| *kind == LedgerFactKind::ToolCallResolved)
+            .expect("resolution lifecycle should be recorded");
+        assert!(audit_indexes[0] < audit_indexes[1]);
+        assert!(audit_indexes[1] < artifact_index);
+        assert!(artifact_index < resolved_index);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn opt_in_workspace_write_patch_proposal_rejects_non_patch_file_tool_name() {
+        let executor = ProposingToolExecutor::immediate();
+        let tool = RegisteredTool::new(
+            policy_tool_spec("policy_write_opt_in"),
+            Arc::new(executor.clone()),
+            ToolActionKind::WorkspaceWrite,
+        )
+        .with_action_proposal();
+        let (runtime, pending) = register_policy_pending_registered_tool_with_builder(
+            "runtime-policy-proposed-workspace-write-opt-in-wrong-tool",
+            "policy_write_opt_in",
+            "call-workspace-write-opt-in-wrong-tool",
+            tool,
+            |builder| builder.allow_low_risk_workspace_patches().build(),
+        )
+        .await;
+
+        let events = runtime
+            .execute_tool_call(pending.id(), ToolExecutionContext::default())
+            .await
+            .expect("non-patch-file low-risk proposal should resolve as policy denial");
+
+        assert_eq!(executor.propose_count(), 1);
+        assert_eq!(executor.execute_count(), 0);
+        assert_eq!(
+            event_kind_names_for_tool_execution(&events),
+            ["ArtifactRecorded", "ToolCallResolved"]
+        );
+        assert_eq!(
+            resolved_tool_result(&events).status(),
+            merry_core::ToolCallResultStatus::Failed
+        );
+        assert_sanitized_policy_denial_content(
+            &denied_action_content(&runtime, &events).await,
+            "policy_write_opt_in",
+        );
+
+        let audits = action_audit_records(&runtime).await;
+        assert_eq!(audits.len(), 2);
+        assert_eq!(audits[0].status(), ActionAuditStatus::Proposed);
+        assert_eq!(audits[0].tool_call_id(), pending.id());
+        assert_eq!(audits[0].tool_name(), pending.name());
+        assert!(audits[0].proposal().is_some());
+        assert_eq!(audits[1].status(), ActionAuditStatus::Denied);
+        assert_eq!(audits[1].tool_call_id(), pending.id());
+        assert_eq!(audits[1].tool_name(), pending.name());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn opt_in_workspace_write_patch_records_outcome_when_cancelled_after_side_effect() {
+        let executor = CancellingOptInPatchExecutor::new();
+        let tool = RegisteredTool::new(
+            policy_tool_spec(WORKSPACE_PATCH_FILE_TOOL_NAME),
+            Arc::new(executor.clone()),
+            ToolActionKind::WorkspaceWrite,
+        )
+        .with_action_proposal();
+        let (runtime, pending) = register_policy_pending_registered_tool_with_builder(
+            "runtime-policy-workspace-write-opt-in-cancel-after-side-effect",
+            WORKSPACE_PATCH_FILE_TOOL_NAME,
+            "call-workspace-write-opt-in-cancel-after-side-effect",
+            tool,
+            |builder| builder.allow_low_risk_workspace_patches().build(),
+        )
+        .await;
+        let token = CancellationToken::new();
+
+        let events = runtime
+            .execute_tool_call(pending.id(), ToolExecutionContext::new(token))
+            .await
+            .expect("successful opt-in patch execution must be durably recorded");
+
+        assert_eq!(executor.propose_count(), 1);
+        assert_eq!(executor.execute_count(), 1);
+        assert_eq!(executor.approved_proposal_seen(), vec![true]);
+        assert!(executor.side_effect_happened());
+        assert_eq!(
+            event_kind_names_for_tool_execution(&events),
+            ["ArtifactRecorded", "ToolCallResolved"]
+        );
+        assert_eq!(
+            resolved_tool_result(&events).status(),
+            merry_core::ToolCallResultStatus::Succeeded
+        );
+        assert!(runtime.pending_tool_calls().await.is_empty());
+
+        let audits = action_audit_records(&runtime).await;
+        assert_eq!(audits.len(), 2);
+        assert_eq!(audits[0].status(), ActionAuditStatus::Proposed);
+        assert_eq!(audits[0].tool_call_id(), pending.id());
+        assert_eq!(audits[0].tool_name(), pending.name());
+        assert_eq!(audits[0].action_kind(), ToolActionKind::WorkspaceWrite);
+        assert!(audits[0].policy().is_none());
+        assert!(audits[0].proposal().is_some());
+        assert_eq!(audits[1].status(), ActionAuditStatus::Executed);
+        assert_eq!(audits[1].tool_call_id(), pending.id());
+        assert_eq!(audits[1].tool_name(), pending.name());
+        assert_eq!(audits[1].action_kind(), ToolActionKind::WorkspaceWrite);
+        assert!(audits[1].proposal().is_none());
+        assert!(audits[1].execution_evidence().is_some());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn opt_in_workspace_write_patch_missing_execution_evidence_fails_closed() {
+        let executor = ProposingToolExecutor::missing_execution_evidence();
+        let tool = RegisteredTool::new(
+            policy_tool_spec(WORKSPACE_PATCH_FILE_TOOL_NAME),
+            Arc::new(executor.clone()),
+            ToolActionKind::WorkspaceWrite,
+        )
+        .with_action_proposal();
+        let (runtime, pending) = register_policy_pending_registered_tool_with_builder(
+            "runtime-policy-workspace-write-opt-in-missing-evidence",
+            WORKSPACE_PATCH_FILE_TOOL_NAME,
+            "call-workspace-write-opt-in-missing-evidence",
+            tool,
+            |builder| builder.allow_low_risk_workspace_patches().build(),
+        )
+        .await;
+        let projection_before = runtime.ledger_projection().await;
+
+        let err = runtime
+            .execute_tool_call(pending.id(), ToolExecutionContext::default())
+            .await
+            .expect_err("successful admitted patch without evidence must fail closed");
+
+        assert!(matches!(
+            err,
+            RuntimeError::MissingActionExecutionEvidence { call_id, action_kind, .. }
+                if call_id == *pending.id() && action_kind == ToolActionKind::WorkspaceWrite
+        ));
+        assert_eq!(executor.propose_count(), 1);
+        assert_eq!(executor.execute_count(), 1);
+        assert_eq!(executor.approved_proposal_seen(), vec![true]);
+        assert_eq!(runtime.pending_tool_calls().await, vec![pending]);
+        assert_eq!(runtime.ledger_projection().await, projection_before);
+        assert!(action_audit_records(&runtime).await.is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -4740,6 +5857,872 @@ mod tests {
             DIAGNOSTIC_TOOL_ACTION_POLICY_DENIED
         );
         assert!(runtime.pending_tool_calls().await.is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn command_exec_with_process_proposal_records_proposed_then_denied_without_execute() {
+        let executor =
+            ProcessProposingToolExecutor::with_argv(["cargo", "test", "-p", "merry-runtime"]);
+        let tool = RegisteredTool::new(
+            policy_tool_spec("policy_command_proposed"),
+            Arc::new(executor.clone()),
+            ToolActionKind::CommandExec,
+        )
+        .with_action_proposal();
+        let (runtime, pending) = register_policy_pending_registered_tool(
+            "runtime-policy-proposed-command-exec",
+            "policy_command_proposed",
+            "call-command-exec-proposed",
+            tool,
+        )
+        .await;
+
+        let events = runtime
+            .execute_tool_call(pending.id(), ToolExecutionContext::default())
+            .await
+            .expect("policy denial should durably resolve proposed command exec");
+
+        assert_eq!(executor.propose_count(), 1);
+        assert_eq!(executor.execute_count(), 0);
+        assert_eq!(
+            event_kind_names_for_tool_execution(&events),
+            ["ArtifactRecorded", "ToolCallResolved"]
+        );
+        assert_sanitized_policy_denial_content(
+            &denied_action_content(&runtime, &events).await,
+            "policy_command_proposed",
+        );
+        assert_eq!(
+            resolved_tool_result(&events)
+                .diagnostic()
+                .expect("policy denial should include diagnostic")
+                .code(),
+            DIAGNOSTIC_TOOL_ACTION_POLICY_DENIED
+        );
+
+        let audits = action_audit_records(&runtime).await;
+        assert_eq!(audits.len(), 2);
+        assert_eq!(audits[0].status(), ActionAuditStatus::Proposed);
+        assert_eq!(audits[0].tool_call_id(), pending.id());
+        assert_eq!(audits[0].tool_name(), pending.name());
+        assert_eq!(audits[0].action_kind(), ToolActionKind::CommandExec);
+        assert!(audits[0].policy().is_none());
+        let proposal = audits[0]
+            .proposal()
+            .expect("proposed audit should include process proposal");
+        assert_eq!(proposal.action_kind(), ToolActionKind::CommandExec);
+        let ActionProposalEvidence::ProcessAction(intent) = proposal.evidence() else {
+            panic!("command exec proposal should record process action evidence");
+        };
+        assert_eq!(intent.argv(), ["cargo", "test", "-p", "merry-runtime"]);
+        assert_eq!(intent.cwd(), Some("."));
+        assert_eq!(intent.env_policy(), ProcessEnvPolicy::Empty);
+
+        assert_eq!(audits[1].status(), ActionAuditStatus::Denied);
+        assert_eq!(audits[1].tool_call_id(), pending.id());
+        assert_eq!(audits[1].tool_name(), pending.name());
+        assert_eq!(audits[1].action_kind(), ToolActionKind::CommandExec);
+        assert!(audits[1].proposal().is_none());
+        let denied_policy = audits[1]
+            .policy()
+            .expect("denied audit should include policy");
+        assert_eq!(
+            denied_policy.risk_tier(),
+            ActionRiskTier::ProcessLocalWorkspaceEffect
+        );
+        assert_eq!(denied_policy.disposition(), ActionPolicyDisposition::Deny);
+        assert_eq!(
+            denied_policy.reason(),
+            "command execution tool actions are denied by default policy"
+        );
+
+        let projection = runtime.ledger_projection().await;
+        let lifecycle = lifecycle_kinds(&projection);
+        let audit_indexes = lifecycle
+            .iter()
+            .enumerate()
+            .filter_map(|(index, kind)| {
+                (*kind == LedgerFactKind::ActionAuditRecorded).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(audit_indexes.len(), 2);
+        let artifact_index = lifecycle
+            .iter()
+            .position(|kind| *kind == LedgerFactKind::ArtifactRecorded)
+            .expect("artifact lifecycle should be recorded");
+        let resolved_index = lifecycle
+            .iter()
+            .position(|kind| *kind == LedgerFactKind::ToolCallResolved)
+            .expect("resolution lifecycle should be recorded");
+        assert!(audit_indexes[0] < audit_indexes[1]);
+        assert!(audit_indexes[1] < artifact_index);
+        assert!(artifact_index < resolved_index);
+        assert!(runtime.pending_tool_calls().await.is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn opt_in_process_action_uses_runner_and_records_execution_audit() {
+        let executor = ProcessProposingToolExecutor::new();
+        let runner = FakeProcessRunner::succeeding();
+        let tool = RegisteredTool::new(
+            policy_tool_spec("policy_command_opt_in"),
+            Arc::new(executor.clone()),
+            ToolActionKind::CommandExec,
+        )
+        .with_action_proposal();
+        let (runtime, pending) = register_policy_pending_registered_tool_with_builder(
+            "runtime-policy-command-exec-opt-in",
+            "policy_command_opt_in",
+            "call-command-exec-opt-in",
+            tool,
+            |builder| {
+                builder
+                    .allow_low_risk_process_actions(Arc::new(runner.clone()))
+                    .build()
+            },
+        )
+        .await;
+
+        let events = runtime
+            .execute_tool_call(pending.id(), ToolExecutionContext::default())
+            .await
+            .expect("opted-in low-risk process action should execute through runner");
+
+        assert_eq!(executor.propose_count(), 1);
+        assert_eq!(executor.execute_count(), 0);
+        assert_eq!(runner.call_count(), 1);
+        assert_eq!(
+            event_kind_names_for_tool_execution(&events),
+            ["ArtifactRecorded", "ToolCallResolved"]
+        );
+        let result = resolved_tool_result(&events);
+        assert_eq!(result.status(), merry_core::ToolCallResultStatus::Succeeded);
+        assert!(result.diagnostic().is_none());
+        assert!(matches!(
+            &events[0].kind,
+            RuntimeEventKind::ArtifactRecorded { artifact } if artifact == result.artifact()
+        ));
+        assert!(matches!(
+            &events[1].kind,
+            RuntimeEventKind::ToolCallResolved { result: resolved } if resolved == result
+        ));
+        assert!(runtime.pending_tool_calls().await.is_empty());
+
+        let content = runtime
+            .read_artifact_content(result.artifact().id())
+            .await
+            .expect("process result artifact should be readable");
+        let payload: serde_json::Value = serde_json::from_str(
+            content
+                .as_text()
+                .expect("process result artifact should be textual JSON"),
+        )
+        .expect("process result artifact should parse as JSON");
+        assert_eq!(
+            payload,
+            json!({
+                "ok": true,
+                "kind": "process_action",
+                "status": {
+                    "kind": "exited",
+                    "code": 0,
+                },
+                "intent": {
+                    "summary": "process argv[0]=rustc; argc=2; cwd=.",
+                    "argv": ["rustc", "--version"],
+                    "cwd": ".",
+                },
+                "stdout": {
+                    "text": "runtime tests passed\n",
+                    "bytes": "runtime tests passed\n".len(),
+                    "truncated": false,
+                },
+                "stderr": {
+                    "text": "",
+                    "bytes": 0,
+                    "truncated": false,
+                }
+            })
+        );
+        assert!(payload.get("provider").is_none());
+        assert!(payload.get("wire").is_none());
+
+        let audits = action_audit_records(&runtime).await;
+        assert_eq!(audits.len(), 2);
+        assert_eq!(audits[0].status(), ActionAuditStatus::Proposed);
+        assert_eq!(audits[0].tool_call_id(), pending.id());
+        assert_eq!(audits[0].tool_name(), pending.name());
+        assert_eq!(audits[0].action_kind(), ToolActionKind::CommandExec);
+        assert!(audits[0].policy().is_none());
+        let proposal = audits[0]
+            .proposal()
+            .expect("proposed audit should include process proposal");
+        let ActionProposalEvidence::ProcessAction(intent) = proposal.evidence() else {
+            panic!("proposed audit should record process action intent");
+        };
+        assert_eq!(runner.observed_intents(), vec![intent.clone()]);
+
+        assert_eq!(audits[1].status(), ActionAuditStatus::Executed);
+        assert_eq!(audits[1].tool_call_id(), pending.id());
+        assert_eq!(audits[1].tool_name(), pending.name());
+        assert_eq!(audits[1].action_kind(), ToolActionKind::CommandExec);
+        assert!(audits[1].proposal().is_none());
+        let policy = audits[1]
+            .policy()
+            .expect("executed audit should include process allow policy");
+        assert_eq!(policy.risk_tier(), ActionRiskTier::ProcessLow);
+        assert_eq!(policy.disposition(), ActionPolicyDisposition::Allow);
+        let ActionExecutionEvidence::ProcessAction(evidence) = audits[1]
+            .execution_evidence()
+            .expect("executed audit should include process evidence")
+        else {
+            panic!("process action should record process execution evidence");
+        };
+        assert_eq!(evidence.status(), ProcessExitStatus::Exited(0));
+        assert_eq!(evidence.stdout_bytes(), "runtime tests passed\n".len());
+        assert!(!evidence.stdout_truncated());
+        assert_eq!(evidence.stderr_bytes(), 0);
+        assert!(!evidence.stderr_truncated());
+        assert!(evidence.matches_intent(intent));
+
+        let projection = runtime.ledger_projection().await;
+        let lifecycle = lifecycle_kinds(&projection);
+        let audit_indexes = lifecycle
+            .iter()
+            .enumerate()
+            .filter_map(|(index, kind)| {
+                (*kind == LedgerFactKind::ActionAuditRecorded).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(audit_indexes.len(), 2);
+        let artifact_index = lifecycle
+            .iter()
+            .position(|kind| *kind == LedgerFactKind::ArtifactRecorded)
+            .expect("artifact lifecycle should be recorded");
+        let resolved_index = lifecycle
+            .iter()
+            .position(|kind| *kind == LedgerFactKind::ToolCallResolved)
+            .expect("resolution lifecycle should be recorded");
+        assert!(audit_indexes[0] < audit_indexes[1]);
+        assert!(audit_indexes[1] < artifact_index);
+        assert!(artifact_index < resolved_index);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn opt_in_process_action_denies_dangerous_argv_without_runner_call() {
+        let executor = ProcessProposingToolExecutor::with_argv(["sh", "-c", "echo unsafe"]);
+        let runner = FakeProcessRunner::succeeding();
+        let tool = RegisteredTool::new(
+            policy_tool_spec("policy_command_dangerous_argv"),
+            Arc::new(executor.clone()),
+            ToolActionKind::CommandExec,
+        )
+        .with_action_proposal();
+        let (runtime, pending) = register_policy_pending_registered_tool_with_builder(
+            "runtime-policy-command-exec-dangerous-argv",
+            "policy_command_dangerous_argv",
+            "call-command-exec-dangerous-argv",
+            tool,
+            |builder| {
+                builder
+                    .allow_low_risk_process_actions(Arc::new(runner.clone()))
+                    .allow_accepted_local_workspace_process_actions(Arc::new(runner.clone()))
+                    .build()
+            },
+        )
+        .await;
+
+        let events = runtime
+            .execute_tool_call(pending.id(), ToolExecutionContext::default())
+            .await
+            .expect("dangerous process proposal should be denied durably");
+
+        assert_eq!(executor.propose_count(), 1);
+        assert_eq!(executor.execute_count(), 0);
+        assert_eq!(runner.call_count(), 0);
+        assert_eq!(
+            event_kind_names_for_tool_execution(&events),
+            ["ArtifactRecorded", "ToolCallResolved"]
+        );
+        assert_eq!(
+            resolved_tool_result(&events).status(),
+            merry_core::ToolCallResultStatus::Failed
+        );
+        assert!(runtime.pending_tool_calls().await.is_empty());
+
+        let audits = action_audit_records(&runtime).await;
+        assert_eq!(audits.len(), 2);
+        assert_eq!(audits[0].status(), ActionAuditStatus::Proposed);
+        let proposal = audits[0]
+            .proposal()
+            .expect("proposed audit should include dangerous argv identity");
+        let ActionProposalEvidence::ProcessAction(intent) = proposal.evidence() else {
+            panic!("proposal should include process action intent");
+        };
+        assert_eq!(intent.argv(), ["sh", "-c", "echo unsafe"]);
+        assert_eq!(intent.stdin_text(), None);
+        assert_eq!(audits[1].status(), ActionAuditStatus::Denied);
+        let policy = audits[1]
+            .policy()
+            .expect("denied audit should include policy");
+        assert_eq!(policy.risk_tier(), ActionRiskTier::Forbidden);
+        assert_eq!(policy.disposition(), ActionPolicyDisposition::Deny);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn opt_in_process_action_denies_local_workspace_effect_without_accepted_risk_opt_in() {
+        let executor =
+            ProcessProposingToolExecutor::with_argv(["cargo", "test", "-p", "merry-runtime"]);
+        let runner = FakeProcessRunner::succeeding();
+        let tool = RegisteredTool::new(
+            policy_tool_spec("policy_command_local_effect"),
+            Arc::new(executor.clone()),
+            ToolActionKind::CommandExec,
+        )
+        .with_action_proposal();
+        let (runtime, pending) = register_policy_pending_registered_tool_with_builder(
+            "runtime-policy-command-exec-local-effect",
+            "policy_command_local_effect",
+            "call-command-exec-local-effect",
+            tool,
+            |builder| {
+                builder
+                    .allow_low_risk_process_actions(Arc::new(runner.clone()))
+                    .build()
+            },
+        )
+        .await;
+
+        let events = runtime
+            .execute_tool_call(pending.id(), ToolExecutionContext::default())
+            .await
+            .expect("local workspace effect process proposal should be denied durably");
+
+        assert_eq!(executor.propose_count(), 1);
+        assert_eq!(executor.execute_count(), 0);
+        assert_eq!(runner.call_count(), 0);
+        assert_eq!(
+            resolved_tool_result(&events).status(),
+            merry_core::ToolCallResultStatus::Failed
+        );
+        assert!(runtime.pending_tool_calls().await.is_empty());
+
+        let audits = action_audit_records(&runtime).await;
+        assert_eq!(audits.len(), 2);
+        assert_eq!(audits[0].status(), ActionAuditStatus::Proposed);
+        let proposal = audits[0]
+            .proposal()
+            .expect("proposed audit should include local effect argv identity");
+        let ActionProposalEvidence::ProcessAction(intent) = proposal.evidence() else {
+            panic!("proposal should include process action intent");
+        };
+        assert_eq!(intent.argv(), ["cargo", "test", "-p", "merry-runtime"]);
+        assert_eq!(audits[1].status(), ActionAuditStatus::Denied);
+        let policy = audits[1]
+            .policy()
+            .expect("denied audit should include policy");
+        assert_eq!(
+            policy.risk_tier(),
+            ActionRiskTier::ProcessLocalWorkspaceEffect
+        );
+        assert_eq!(policy.disposition(), ActionPolicyDisposition::Deny);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn opt_in_accepted_local_workspace_process_action_executes_local_workspace_effect_and_records_policy()
+     {
+        let executor =
+            ProcessProposingToolExecutor::with_argv(["cargo", "test", "-p", "merry-runtime"]);
+        let runner = FakeProcessRunner::succeeding();
+        let tool = RegisteredTool::new(
+            policy_tool_spec("policy_command_accepted_local_effect"),
+            Arc::new(executor.clone()),
+            ToolActionKind::CommandExec,
+        )
+        .with_action_proposal();
+        let (runtime, pending) = register_policy_pending_registered_tool_with_builder(
+            "runtime-policy-command-exec-accepted-local-effect",
+            "policy_command_accepted_local_effect",
+            "call-command-exec-accepted-local-effect",
+            tool,
+            |builder| {
+                builder
+                    .allow_accepted_local_workspace_process_actions(Arc::new(runner.clone()))
+                    .build()
+            },
+        )
+        .await;
+
+        let events = runtime
+            .execute_tool_call(pending.id(), ToolExecutionContext::default())
+            .await
+            .expect("accepted local workspace process action should execute through runner");
+
+        assert_eq!(executor.propose_count(), 1);
+        assert_eq!(executor.execute_count(), 0);
+        assert_eq!(runner.call_count(), 1);
+        assert_eq!(
+            event_kind_names_for_tool_execution(&events),
+            ["ArtifactRecorded", "ToolCallResolved"]
+        );
+        let result = resolved_tool_result(&events);
+        assert_eq!(result.status(), merry_core::ToolCallResultStatus::Succeeded);
+        assert!(result.diagnostic().is_none());
+        assert!(runtime.pending_tool_calls().await.is_empty());
+
+        let content = runtime
+            .read_artifact_content(result.artifact().id())
+            .await
+            .expect("process result artifact should be readable");
+        let payload: serde_json::Value = serde_json::from_str(
+            content
+                .as_text()
+                .expect("process result artifact should be textual JSON"),
+        )
+        .expect("process result artifact should parse as JSON");
+        assert_eq!(
+            payload,
+            json!({
+                "ok": true,
+                "kind": "process_action",
+                "status": {
+                    "kind": "exited",
+                    "code": 0,
+                },
+                "intent": {
+                    "summary": "process argv[0]=cargo; argc=4; cwd=.",
+                    "argv": ["cargo", "test", "-p", "merry-runtime"],
+                    "cwd": ".",
+                },
+                "stdout": {
+                    "text": "runtime tests passed\n",
+                    "bytes": "runtime tests passed\n".len(),
+                    "truncated": false,
+                },
+                "stderr": {
+                    "text": "",
+                    "bytes": 0,
+                    "truncated": false,
+                }
+            })
+        );
+        assert!(payload.get("provider").is_none());
+        assert!(payload.get("wire").is_none());
+
+        let audits = action_audit_records(&runtime).await;
+        assert_eq!(audits.len(), 2);
+        assert_eq!(audits[0].status(), ActionAuditStatus::Proposed);
+        assert_eq!(audits[0].tool_call_id(), pending.id());
+        assert_eq!(audits[0].tool_name(), pending.name());
+        assert_eq!(audits[0].action_kind(), ToolActionKind::CommandExec);
+        assert!(audits[0].policy().is_none());
+        let proposal = audits[0]
+            .proposal()
+            .expect("proposed audit should include process proposal");
+        let ActionProposalEvidence::ProcessAction(intent) = proposal.evidence() else {
+            panic!("proposed audit should record process action intent");
+        };
+        assert_eq!(intent.argv(), ["cargo", "test", "-p", "merry-runtime"]);
+        assert_eq!(intent.cwd(), Some("."));
+        assert_eq!(intent.env_policy(), ProcessEnvPolicy::Empty);
+        assert_eq!(intent.stdin_text(), None);
+        assert_eq!(runner.observed_intents(), vec![intent.clone()]);
+
+        assert_eq!(audits[1].status(), ActionAuditStatus::Executed);
+        assert_eq!(audits[1].tool_call_id(), pending.id());
+        assert_eq!(audits[1].tool_name(), pending.name());
+        assert_eq!(audits[1].action_kind(), ToolActionKind::CommandExec);
+        assert!(audits[1].proposal().is_none());
+        let policy = audits[1]
+            .policy()
+            .expect("executed audit should include process allow policy");
+        assert_eq!(
+            policy.risk_tier(),
+            ActionRiskTier::ProcessLocalWorkspaceEffect
+        );
+        assert_eq!(policy.disposition(), ActionPolicyDisposition::Allow);
+        assert_eq!(
+            policy.reason(),
+            "local workspace effect process actions are allowed only by explicit runtime opt-in for accepted local workspace process risk"
+        );
+        let ActionExecutionEvidence::ProcessAction(evidence) = audits[1]
+            .execution_evidence()
+            .expect("executed audit should include process evidence")
+        else {
+            panic!("process action should record process execution evidence");
+        };
+        assert_eq!(evidence.status(), ProcessExitStatus::Exited(0));
+        assert_eq!(evidence.stdout_bytes(), "runtime tests passed\n".len());
+        assert!(!evidence.stdout_truncated());
+        assert_eq!(evidence.stderr_bytes(), 0);
+        assert!(!evidence.stderr_truncated());
+        assert!(evidence.matches_intent(intent));
+
+        let projection = runtime.ledger_projection().await;
+        let lifecycle = lifecycle_kinds(&projection);
+        let audit_indexes = lifecycle
+            .iter()
+            .enumerate()
+            .filter_map(|(index, kind)| {
+                (*kind == LedgerFactKind::ActionAuditRecorded).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(audit_indexes.len(), 2);
+        let artifact_index = lifecycle
+            .iter()
+            .position(|kind| *kind == LedgerFactKind::ArtifactRecorded)
+            .expect("artifact lifecycle should be recorded");
+        let resolved_index = lifecycle
+            .iter()
+            .position(|kind| *kind == LedgerFactKind::ToolCallResolved)
+            .expect("resolution lifecycle should be recorded");
+        assert!(audit_indexes[0] < audit_indexes[1]);
+        assert!(audit_indexes[1] < artifact_index);
+        assert!(artifact_index < resolved_index);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn opt_in_process_action_denies_unknown_argv_without_runner_call() {
+        let executor =
+            ProcessProposingToolExecutor::with_argv(["unknown-readonly-ish", "--version"]);
+        let runner = FakeProcessRunner::succeeding();
+        let tool = RegisteredTool::new(
+            policy_tool_spec("policy_command_unknown_argv"),
+            Arc::new(executor.clone()),
+            ToolActionKind::CommandExec,
+        )
+        .with_action_proposal();
+        let (runtime, pending) = register_policy_pending_registered_tool_with_builder(
+            "runtime-policy-command-exec-unknown-argv",
+            "policy_command_unknown_argv",
+            "call-command-exec-unknown-argv",
+            tool,
+            |builder| {
+                builder
+                    .allow_low_risk_process_actions(Arc::new(runner.clone()))
+                    .allow_accepted_local_workspace_process_actions(Arc::new(runner.clone()))
+                    .build()
+            },
+        )
+        .await;
+
+        let events = runtime
+            .execute_tool_call(pending.id(), ToolExecutionContext::default())
+            .await
+            .expect("unknown process proposal should be denied durably");
+
+        assert_eq!(executor.propose_count(), 1);
+        assert_eq!(executor.execute_count(), 0);
+        assert_eq!(runner.call_count(), 0);
+        assert_eq!(
+            event_kind_names_for_tool_execution(&events),
+            ["ArtifactRecorded", "ToolCallResolved"]
+        );
+        assert_eq!(
+            resolved_tool_result(&events).status(),
+            merry_core::ToolCallResultStatus::Failed
+        );
+        assert!(runtime.pending_tool_calls().await.is_empty());
+
+        let audits = action_audit_records(&runtime).await;
+        assert_eq!(audits.len(), 2);
+        assert_eq!(audits[0].status(), ActionAuditStatus::Proposed);
+        let proposal = audits[0]
+            .proposal()
+            .expect("proposed audit should include unknown argv identity");
+        let ActionProposalEvidence::ProcessAction(intent) = proposal.evidence() else {
+            panic!("proposal should include process action intent");
+        };
+        assert_eq!(intent.argv(), ["unknown-readonly-ish", "--version"]);
+        assert_eq!(intent.stdin_text(), None);
+        assert_eq!(audits[1].status(), ActionAuditStatus::Denied);
+        let policy = audits[1]
+            .policy()
+            .expect("denied audit should include policy");
+        assert_eq!(policy.risk_tier(), ActionRiskTier::ProcessHigh);
+        assert_eq!(policy.disposition(), ActionPolicyDisposition::Deny);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn opt_in_process_action_commits_output_after_runner_cancels_token() {
+        let executor = ProcessProposingToolExecutor::new();
+        let runner = FakeProcessRunner::succeeding_then_cancelling_token();
+        let tool = RegisteredTool::new(
+            policy_tool_spec("policy_command_post_output_cancel"),
+            Arc::new(executor.clone()),
+            ToolActionKind::CommandExec,
+        )
+        .with_action_proposal();
+        let (runtime, pending) = register_policy_pending_registered_tool_with_builder(
+            "runtime-policy-command-exec-post-output-cancel",
+            "policy_command_post_output_cancel",
+            "call-command-exec-post-output-cancel",
+            tool,
+            |builder| {
+                builder
+                    .allow_low_risk_process_actions(Arc::new(runner.clone()))
+                    .build()
+            },
+        )
+        .await;
+
+        let events = runtime
+            .execute_tool_call(pending.id(), ToolExecutionContext::default())
+            .await
+            .expect("runner output should commit even if token is cancelled afterward");
+
+        assert_eq!(executor.propose_count(), 1);
+        assert_eq!(executor.execute_count(), 0);
+        assert_eq!(runner.call_count(), 1);
+        assert_eq!(
+            event_kind_names_for_tool_execution(&events),
+            ["ArtifactRecorded", "ToolCallResolved"]
+        );
+        let result = resolved_tool_result(&events);
+        assert_eq!(result.status(), merry_core::ToolCallResultStatus::Succeeded);
+        assert!(runtime.pending_tool_calls().await.is_empty());
+
+        let content = runtime
+            .read_artifact_content(result.artifact().id())
+            .await
+            .expect("process result artifact should be readable");
+        let payload: serde_json::Value = serde_json::from_str(
+            content
+                .as_text()
+                .expect("process result artifact should be textual JSON"),
+        )
+        .expect("process result artifact should parse as JSON");
+        assert_eq!(
+            payload
+                .pointer("/stdout/text")
+                .expect("process stdout text should be present"),
+            "runtime tests passed after token cancellation\n"
+        );
+
+        let audits = action_audit_records(&runtime).await;
+        assert_eq!(audits.len(), 2);
+        assert_eq!(audits[0].status(), ActionAuditStatus::Proposed);
+        assert_eq!(audits[1].status(), ActionAuditStatus::Executed);
+        let ActionExecutionEvidence::ProcessAction(evidence) = audits[1]
+            .execution_evidence()
+            .expect("executed audit should include process evidence")
+        else {
+            panic!("process action should record execution evidence");
+        };
+        assert_eq!(evidence.status(), ProcessExitStatus::Exited(0));
+        assert_eq!(
+            evidence.stdout_bytes(),
+            "runtime tests passed after token cancellation\n".len()
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn opt_in_process_action_pre_cancel_keeps_pending_without_audit_or_result_artifact() {
+        let executor = ProcessProposingToolExecutor::new();
+        let runner = FakeProcessRunner::succeeding();
+        let tool = RegisteredTool::new(
+            policy_tool_spec("policy_command_pre_cancel"),
+            Arc::new(executor.clone()),
+            ToolActionKind::CommandExec,
+        )
+        .with_action_proposal();
+        let (runtime, pending) = register_policy_pending_registered_tool_with_builder(
+            "runtime-policy-command-exec-pre-cancel",
+            "policy_command_pre_cancel",
+            "call-command-exec-pre-cancel",
+            tool,
+            |builder| {
+                builder
+                    .allow_low_risk_process_actions(Arc::new(runner.clone()))
+                    .build()
+            },
+        )
+        .await;
+        let projection_before = runtime.ledger_projection().await;
+        let token = CancellationToken::new();
+        token.cancel();
+
+        let err = runtime
+            .execute_tool_call(pending.id(), ToolExecutionContext::new(token))
+            .await
+            .expect_err("pre-cancelled process action should not resolve");
+
+        assert!(matches!(
+            err,
+            RuntimeError::ToolExecutionCancelled { call_id, .. } if call_id == *pending.id()
+        ));
+        assert_eq!(executor.propose_count(), 0);
+        assert_eq!(executor.execute_count(), 0);
+        assert_eq!(runner.call_count(), 0);
+        assert_eq!(runtime.pending_tool_calls().await, vec![pending]);
+        assert_eq!(runtime.ledger_projection().await, projection_before);
+        assert!(action_audit_records(&runtime).await.is_empty());
+        let expected_result_artifact_id = artifact_id("tool-result-2");
+        let evidence_err = runtime
+            .evidence_ref(
+                &expected_result_artifact_id,
+                EvidenceLocator::whole_artifact(),
+            )
+            .await
+            .expect_err("pre-cancelled process action must not record result artifact");
+        assert!(matches!(
+            evidence_err,
+            RuntimeError::Artifact {
+                source: ArtifactError::MissingArtifact { id }
+            } if id == expected_result_artifact_id
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn opt_in_process_action_runner_cancel_keeps_pending_without_audit_or_result_artifact() {
+        let executor = ProcessProposingToolExecutor::new();
+        let runner = FakeProcessRunner::cancelling();
+        let tool = RegisteredTool::new(
+            policy_tool_spec("policy_command_runner_cancel"),
+            Arc::new(executor.clone()),
+            ToolActionKind::CommandExec,
+        )
+        .with_action_proposal();
+        let (runtime, pending) = register_policy_pending_registered_tool_with_builder(
+            "runtime-policy-command-exec-runner-cancel",
+            "policy_command_runner_cancel",
+            "call-command-exec-runner-cancel",
+            tool,
+            |builder| {
+                builder
+                    .allow_low_risk_process_actions(Arc::new(runner.clone()))
+                    .build()
+            },
+        )
+        .await;
+        let projection_before = runtime.ledger_projection().await;
+
+        let err = runtime
+            .execute_tool_call(pending.id(), ToolExecutionContext::default())
+            .await
+            .expect_err("runner-cancelled process action should not resolve");
+
+        assert!(matches!(
+            err,
+            RuntimeError::ToolExecutionCancelled { call_id, .. } if call_id == *pending.id()
+        ));
+        assert_eq!(executor.propose_count(), 1);
+        assert_eq!(executor.execute_count(), 0);
+        assert_eq!(runner.call_count(), 1);
+        assert_eq!(runtime.pending_tool_calls().await, vec![pending]);
+        assert_eq!(runtime.ledger_projection().await, projection_before);
+        assert!(action_audit_records(&runtime).await.is_empty());
+        let expected_result_artifact_id = artifact_id("tool-result-2");
+        let evidence_err = runtime
+            .evidence_ref(
+                &expected_result_artifact_id,
+                EvidenceLocator::whole_artifact(),
+            )
+            .await
+            .expect_err("runner-cancelled process action must not record result artifact");
+        assert!(matches!(
+            evidence_err,
+            RuntimeError::Artifact {
+                source: ArtifactError::MissingArtifact { id }
+            } if id == expected_result_artifact_id
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn opt_in_process_action_with_stdin_is_denied_without_runner_call() {
+        let executor = ProcessProposingToolExecutor::with_stdin_text("stdin is not admitted\n");
+        let runner = FakeProcessRunner::succeeding();
+        let tool = RegisteredTool::new(
+            policy_tool_spec("policy_command_stdin"),
+            Arc::new(executor.clone()),
+            ToolActionKind::CommandExec,
+        )
+        .with_action_proposal();
+        let (runtime, pending) = register_policy_pending_registered_tool_with_builder(
+            "runtime-policy-command-exec-stdin",
+            "policy_command_stdin",
+            "call-command-exec-stdin",
+            tool,
+            |builder| {
+                builder
+                    .allow_low_risk_process_actions(Arc::new(runner.clone()))
+                    .build()
+            },
+        )
+        .await;
+
+        let events = runtime
+            .execute_tool_call(pending.id(), ToolExecutionContext::default())
+            .await
+            .expect("stdin process proposal should be denied durably");
+
+        assert_eq!(executor.propose_count(), 1);
+        assert_eq!(executor.execute_count(), 0);
+        assert_eq!(runner.call_count(), 0);
+        assert_eq!(
+            event_kind_names_for_tool_execution(&events),
+            ["ArtifactRecorded", "ToolCallResolved"]
+        );
+        assert_eq!(
+            resolved_tool_result(&events).status(),
+            merry_core::ToolCallResultStatus::Failed
+        );
+        assert_sanitized_policy_denial_content(
+            &denied_action_content(&runtime, &events).await,
+            "policy_command_stdin",
+        );
+        assert!(runtime.pending_tool_calls().await.is_empty());
+
+        let audits = action_audit_records(&runtime).await;
+        assert_eq!(audits.len(), 2);
+        assert_eq!(audits[0].status(), ActionAuditStatus::Proposed);
+        assert_eq!(audits[0].action_kind(), ToolActionKind::CommandExec);
+        let proposal = audits[0]
+            .proposal()
+            .expect("proposed audit should include stdin process proposal");
+        let ActionProposalEvidence::ProcessAction(intent) = proposal.evidence() else {
+            panic!("proposal should include process action intent");
+        };
+        assert_eq!(intent.argv(), ["cargo", "test", "-p", "merry-runtime"]);
+        assert_eq!(intent.cwd(), Some("."));
+        assert_eq!(intent.env_policy(), ProcessEnvPolicy::Empty);
+        assert_eq!(intent.stdin_text(), None);
+        assert_eq!(audits[1].status(), ActionAuditStatus::Denied);
+        assert_eq!(audits[1].action_kind(), ToolActionKind::CommandExec);
+        let policy = audits[1]
+            .policy()
+            .expect("denied audit should include policy");
+        assert_eq!(
+            policy.risk_tier(),
+            ActionRiskTier::ProcessLocalWorkspaceEffect
+        );
+        assert_eq!(policy.disposition(), ActionPolicyDisposition::Deny);
+    }
+
+    #[test]
+    fn process_execution_evidence_matches_process_action_kind() {
+        let intent = ProcessActionIntent::new(
+            vec!["rustc".to_owned(), "--version".to_owned()],
+            None,
+            ProcessEnvPolicy::empty(),
+            None,
+            4096,
+            4096,
+        )
+        .expect("valid process intent");
+        let evidence = ProcessExecutionEvidence::new(
+            &intent,
+            ProcessExitStatus::Exited(0),
+            64,
+            false,
+            0,
+            false,
+        )
+        .expect("valid process execution evidence");
+        let execution_evidence = ActionExecutionEvidence::ProcessAction(evidence);
+
+        assert!(execution_evidence.matches_action_kind(ToolActionKind::CommandExec));
+        assert!(!execution_evidence.matches_action_kind(ToolActionKind::WorkspaceWrite));
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -4,7 +4,10 @@
 //! They are intentionally separate from provider-visible tool specs and provider
 //! wire formats.
 
-use crate::{ActionProposal, ActionProposalEvidence, ToolActionKind};
+use crate::{
+    ActionProposal, ActionProposalEvidence, ToolActionKind,
+    process::{ProcessIntentClass, classify_process_intent},
+};
 
 /// Runtime-owned risk tier for a registered tool action.
 #[allow(dead_code)]
@@ -18,6 +21,8 @@ pub(crate) enum ActionRiskTier {
     EditElevated,
     /// Starts a bounded, low-risk local process.
     ProcessLow,
+    /// Starts a local process with accepted workspace effects.
+    ProcessLocalWorkspaceEffect,
     /// Starts a higher-risk local process.
     ProcessHigh,
     /// Uses network access.
@@ -105,6 +110,39 @@ impl ActionPolicyDecision {
             reason: self.reason,
         }
     }
+
+    /// Allows an otherwise denied action after a narrow proposal-aware opt-in.
+    #[must_use]
+    pub(crate) const fn allow_low_risk_workspace_patch() -> Self {
+        Self::new(
+            ToolActionKind::WorkspaceWrite,
+            ActionRiskTier::EditLow,
+            ActionPolicyDisposition::Allow,
+            "low-risk workspace patch tool actions are allowed by explicit runtime opt-in",
+        )
+    }
+
+    /// Allows an otherwise denied command execution after a narrow process opt-in.
+    #[must_use]
+    pub(crate) const fn allow_low_risk_process_action() -> Self {
+        Self::new(
+            ToolActionKind::CommandExec,
+            ActionRiskTier::ProcessLow,
+            ActionPolicyDisposition::Allow,
+            "low-risk process actions are allowed by explicit runtime opt-in",
+        )
+    }
+
+    /// Allows an otherwise denied local workspace effect process after explicit risk acceptance.
+    #[must_use]
+    pub(crate) const fn allow_accepted_local_workspace_process_action() -> Self {
+        Self::new(
+            ToolActionKind::CommandExec,
+            ActionRiskTier::ProcessLocalWorkspaceEffect,
+            ActionPolicyDisposition::Allow,
+            "local workspace effect process actions are allowed only by explicit runtime opt-in for accepted local workspace process risk",
+        )
+    }
 }
 
 /// Classifies the runtime-owned risk tier for a tool action.
@@ -125,9 +163,67 @@ pub(crate) fn classify_tool_action_risk(
                 ActionRiskTier::EditElevated
             }
         }
-        ToolActionKind::CommandExec => ActionRiskTier::ProcessHigh,
+        ToolActionKind::CommandExec => match proposal.map(ActionProposal::evidence) {
+            Some(ActionProposalEvidence::ProcessAction(intent)) => {
+                match classify_process_intent(intent) {
+                    ProcessIntentClass::Informational => ActionRiskTier::ProcessLow,
+                    ProcessIntentClass::LocalWorkspaceEffect => {
+                        ActionRiskTier::ProcessLocalWorkspaceEffect
+                    }
+                    ProcessIntentClass::Unknown => ActionRiskTier::ProcessHigh,
+                    ProcessIntentClass::Forbidden => ActionRiskTier::Forbidden,
+                }
+            }
+            _ => ActionRiskTier::ProcessHigh,
+        },
         ToolActionKind::Network => ActionRiskTier::Forbidden,
     }
+}
+
+/// Returns whether proposal evidence is compatible with the low-risk workspace patch lane.
+#[must_use]
+pub(crate) fn is_low_risk_workspace_patch_proposal(
+    action_kind: ToolActionKind,
+    proposal: &ActionProposal,
+) -> bool {
+    action_kind == ToolActionKind::WorkspaceWrite
+        && proposal.action_kind() == ToolActionKind::WorkspaceWrite
+        && matches!(
+            proposal.evidence(),
+            ActionProposalEvidence::WorkspacePatch(_)
+        )
+}
+
+/// Returns whether proposal evidence is compatible with the low-risk process lane.
+#[must_use]
+pub(crate) fn is_low_risk_process_action_proposal(
+    action_kind: ToolActionKind,
+    proposal: &ActionProposal,
+) -> bool {
+    action_kind == ToolActionKind::CommandExec
+        && proposal.action_kind() == ToolActionKind::CommandExec
+        && matches!(
+            proposal.evidence(),
+            ActionProposalEvidence::ProcessAction(intent)
+                if crate::is_low_risk_process_action_intent(intent)
+        )
+}
+
+/// Returns whether proposal evidence is compatible with the accepted local workspace process lane.
+#[must_use]
+pub(crate) fn is_local_workspace_effect_process_action_proposal(
+    action_kind: ToolActionKind,
+    proposal: &ActionProposal,
+) -> bool {
+    action_kind == ToolActionKind::CommandExec
+        && proposal.action_kind() == ToolActionKind::CommandExec
+        && matches!(
+            proposal.evidence(),
+            ActionProposalEvidence::ProcessAction(intent)
+                if intent.env_policy() == crate::ProcessEnvPolicy::Empty
+                    && intent.stdin_text().is_none()
+                    && classify_process_intent(intent) == ProcessIntentClass::LocalWorkspaceEffect
+        )
 }
 
 /// Default runtime hard policy for registered tool actions.
@@ -175,8 +271,12 @@ impl DefaultActionPolicy {
 mod tests {
     use super::{
         ActionPolicyDisposition, ActionRiskTier, DefaultActionPolicy, classify_tool_action_risk,
+        is_local_workspace_effect_process_action_proposal, is_low_risk_process_action_proposal,
     };
-    use crate::{ActionProposal, ActionProposalEvidence, ToolActionKind, WorkspacePatchProposal};
+    use crate::{
+        ActionProposal, ActionProposalEvidence, ProcessActionIntent, ProcessEnvPolicy,
+        ToolActionKind, WorkspacePatchProposal,
+    };
     use merry_core::{PendingToolCall, ToolCallArguments, ToolCallId, ToolName};
     use serde_json::json;
 
@@ -190,8 +290,16 @@ mod tests {
     }
 
     fn workspace_patch_proposal(call: &PendingToolCall) -> ActionProposal {
-        let patch = WorkspacePatchProposal::new("notes/proposed.txt", 3, 7, 20, 24)
-            .expect("test patch proposal is valid");
+        let patch = WorkspacePatchProposal::new(
+            "notes/proposed.txt",
+            3,
+            7,
+            20,
+            24,
+            "fnv1a64:0000000000000001",
+            "fnv1a64:0000000000000002",
+        )
+        .expect("test patch proposal is valid");
         ActionProposal::new(
             call,
             ToolActionKind::WorkspaceWrite,
@@ -201,6 +309,36 @@ mod tests {
             ActionProposalEvidence::WorkspacePatch(patch),
         )
         .expect("test action proposal is valid")
+    }
+
+    fn process_proposal(call: &PendingToolCall, argv: &[&str]) -> ActionProposal {
+        process_proposal_with_policy(call, argv, ProcessEnvPolicy::empty(), None)
+    }
+
+    fn process_proposal_with_policy(
+        call: &PendingToolCall,
+        argv: &[&str],
+        env_policy: ProcessEnvPolicy,
+        stdin_text: Option<&str>,
+    ) -> ActionProposal {
+        let intent = ProcessActionIntent::new(
+            argv.iter().map(|argument| (*argument).to_owned()).collect(),
+            Some(".".to_owned()),
+            env_policy,
+            stdin_text.map(str::to_owned),
+            1024,
+            1024,
+        )
+        .expect("test process intent is valid");
+        ActionProposal::new(
+            call,
+            ToolActionKind::CommandExec,
+            "process",
+            argv.join(" "),
+            "Classify process proposal.",
+            ActionProposalEvidence::ProcessAction(intent),
+        )
+        .expect("test process proposal is valid")
     }
 
     #[test]
@@ -236,6 +374,98 @@ mod tests {
             classify_tool_action_risk(ToolActionKind::CommandExec, None),
             ActionRiskTier::ProcessHigh
         );
+
+        let call = pending_tool_call();
+        for argv in [["rustc", "--version"], ["rg", "--version"]] {
+            let informational = process_proposal(&call, &argv);
+            assert_eq!(
+                classify_tool_action_risk(ToolActionKind::CommandExec, Some(&informational)),
+                ActionRiskTier::ProcessLow
+            );
+        }
+
+        let local_effect = process_proposal(&call, &["cargo", "test", "-p", "merry-runtime"]);
+        assert_eq!(
+            classify_tool_action_risk(ToolActionKind::CommandExec, Some(&local_effect)),
+            ActionRiskTier::ProcessLocalWorkspaceEffect
+        );
+
+        let forbidden = process_proposal(&call, &["sh", "-c", "echo unsafe"]);
+        assert_eq!(
+            classify_tool_action_risk(ToolActionKind::CommandExec, Some(&forbidden)),
+            ActionRiskTier::Forbidden
+        );
+
+        let unknown = process_proposal(&call, &["unknown-readonly-ish", "--version"]);
+        assert_eq!(
+            classify_tool_action_risk(ToolActionKind::CommandExec, Some(&unknown)),
+            ActionRiskTier::ProcessHigh
+        );
+    }
+
+    #[test]
+    fn process_admission_predicates_keep_low_and_local_workspace_lanes_distinct() {
+        let call = pending_tool_call();
+        let informational = process_proposal(&call, &["rustc", "--version"]);
+        assert!(is_low_risk_process_action_proposal(
+            ToolActionKind::CommandExec,
+            &informational
+        ));
+        assert!(!is_local_workspace_effect_process_action_proposal(
+            ToolActionKind::CommandExec,
+            &informational
+        ));
+
+        let local_effect = process_proposal(&call, &["cargo", "test", "-p", "merry-runtime"]);
+        assert!(!is_low_risk_process_action_proposal(
+            ToolActionKind::CommandExec,
+            &local_effect
+        ));
+        assert!(is_local_workspace_effect_process_action_proposal(
+            ToolActionKind::CommandExec,
+            &local_effect
+        ));
+        assert!(!is_local_workspace_effect_process_action_proposal(
+            ToolActionKind::WorkspaceWrite,
+            &local_effect
+        ));
+
+        let local_effect_with_stdin = process_proposal_with_policy(
+            &call,
+            &["cargo", "test", "-p", "merry-runtime"],
+            ProcessEnvPolicy::empty(),
+            Some("stdin is not admitted"),
+        );
+        assert!(!is_local_workspace_effect_process_action_proposal(
+            ToolActionKind::CommandExec,
+            &local_effect_with_stdin
+        ));
+
+        let local_effect_with_env = process_proposal_with_policy(
+            &call,
+            &["cargo", "test", "-p", "merry-runtime"],
+            ProcessEnvPolicy::NonEmptyForTest,
+            None,
+        );
+        assert!(!is_local_workspace_effect_process_action_proposal(
+            ToolActionKind::CommandExec,
+            &local_effect_with_env
+        ));
+
+        for argv in [
+            ["/tmp/cargo", "test", "-p", "merry-runtime"],
+            ["./cargo", "test", "-p", "merry-runtime"],
+        ] {
+            let path_qualified_local_effect_shape = process_proposal(&call, &argv);
+            assert!(!is_low_risk_process_action_proposal(
+                ToolActionKind::CommandExec,
+                &path_qualified_local_effect_shape
+            ));
+            assert!(!is_local_workspace_effect_process_action_proposal(
+                ToolActionKind::CommandExec,
+                &path_qualified_local_effect_shape
+            ));
+        }
     }
 
     #[test]
