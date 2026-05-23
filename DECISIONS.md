@@ -169,3 +169,40 @@ Follow-up:
 Create an implementation plan for XDG TOML config, `--with-sandbox` config/log
 path mounting, config-backed tracing subscriber setup, runtime/tool/process/
 provider instrumentation, and deterministic config/tracing tests.
+
+## 2026-05-23 - Sandboxed Live Provider Credentials Stay In Merry Config Scope
+
+Decision:
+The observability implementation plan allows OpenAI-compatible provider config
+to resolve credentials from `api_key_env` first and from an optional
+config-relative `api_key_file` second, such as
+`~/.config/merry/secrets/openai.key`.
+
+Reason:
+`merry --with-sandbox` clears the host environment and should not pass API keys
+through bwrap command arguments. Mounting the Merry config directory read-only
+is already required for this milestone, so a config-scoped secret file gives the
+live smoke a practical local credential source without restoring broad
+environment inheritance or keeping repo-local `.merry/secrets/openai.env` as
+the long-term path.
+
+Evidence:
+The approved observability design requires XDG TOML provider/model settings and
+sandbox config mounting. The current live smoke reads repo-local ignored config
+because the sandbox clears host env. Moving the credential file under
+`~/.config/merry/` aligns the live smoke with the new config boundary while
+keeping default tests deterministic and credential-free.
+
+Tradeoff:
+This adds one small provider credential source beyond the example TOML shape.
+The value is that sandboxed live testing works without leaking secrets through
+process argv. Logs and diagnostics must still redact secret contents and avoid
+printing full credential file contents.
+
+Reversible:
+Yes. A later secret-store integration can replace `api_key_file` while keeping
+the provider config boundary and sandbox config mount behavior.
+
+Follow-up:
+Implement this only inside the CLI/provider config loading path. Do not put API
+keys into runtime state, logs, artifacts, or provider-neutral request types.

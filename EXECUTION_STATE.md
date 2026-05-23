@@ -10,6 +10,7 @@ Lease status: rollover
 - `README.md`
 - `DECISIONS.md`
 - `specs/2026-05-23-observability-first-coding-loop.md`
+- `plans/2026-05-23-config-backed-observability.md`
 - `docs/design/mvp-design.md` (ignored private local design source)
 - `docs/design/global-design.md` (ignored private local design source)
 - `docs/product/product-strategy.md` (ignored private local product source)
@@ -17,13 +18,14 @@ Lease status: rollover
 
 ## Planning Maturity
 
-Level: structured-roadmap
+Level: implementation-plan-ready
 
 Current planning artifact:
 
 - `ROADMAP.md`
 - `DECISIONS.md`
 - `specs/2026-05-23-observability-first-coding-loop.md`
+- `plans/2026-05-23-config-backed-observability.md`
 
 ## Communication
 
@@ -38,14 +40,13 @@ Style notes:
 
 Current milestone or track:
 
-- Configuration-backed observability-first coding-loop design.
+- Configuration-backed observability-first coding loop.
 
 Session milestone:
 
-- Correct the previous event-first CLI direction into a configuration-backed
-  observability milestone: XDG TOML config, sandbox config mounting, and
-  structured logs/traces at runtime, tool, process, provider, artifact,
-  sandbox, and loop boundaries before any new interactive CLI/TUI.
+- Convert the user-approved observability spec into a tracked implementation
+  plan with concrete files, tests, sandbox behavior, config behavior, and
+  execution handoff.
 
 Goal:
 
@@ -56,58 +57,49 @@ Goal:
 
 Task queue status:
 
-- User clarified that event CLI is not the real need; the real need is
-  observability/logging for key actions and multi-turn debugging: completed.
-- User clarified that logging should be configured through XDG TOML config, not
-  new `--log-level` / `--log-format` flags, and that `--with-sandbox` should
-  mount the Merry config directory: completed.
-- User clarified that when logging is enabled but no path is configured, the
-  default should be `$XDG_STATE_HOME/merry/logs/merry.jsonl`, falling back to
-  `~/.local/state/merry/logs/merry.jsonl`, with clear failure on open/create
-  errors: completed.
-- Use Locez Lens to reframe the issue from "render runtime events" to "make
-  action boundaries observable and correlated": completed.
-- Inspect existing tracing/runtime/CLI state: completed. Provider has localized
-  `tracing`; runtime/tool/process smoke path lacks a coherent log contract.
-- Move and rewrite spec from event-first CLI to observability-first coding
-  loop: completed.
-- Revise observability spec to make XDG TOML config and sandbox config mounting
-  part of the milestone: completed.
-- Update roadmap and decision record away from event-first CLI: completed.
-- Update continuity state and handoff: in progress.
-- Validate and commit: pending.
+- User approved the corrected observability-first spec: completed.
+- Write a tracked implementation plan for XDG TOML config, sandbox config/log
+  mounting, config-backed tracing setup, and runtime/tool/process/provider
+  instrumentation: completed.
+- Record the credential-source decision needed for sandboxed live smoke:
+  completed.
+- Update continuity state and handoff: completed.
+- Validate and commit: in progress.
 
 Allowed expansion:
 
-- Public-safe tracked planning/spec updates for the corrected milestone.
-- Continuity updates.
+- Public-safe tracked implementation plan and continuity updates.
+- Decision record for the implementation-plan credential source.
 - No Rust implementation in this lease.
 
 Done condition:
 
-- Public tracked state consistently names observability-first logging/tracing as
-  the next milestone, names XDG TOML config and sandbox config mounting as
-  first-class requirements, the old event-first CLI spec path is gone, and the
-  next exact action is user review of the corrected observability spec.
+- `plans/2026-05-23-config-backed-observability.md` exists, maps the approved
+  spec to executable tasks and tests, records no private raw-doc material, and
+  the next exact action is choosing execution mode.
 
 Drift boundary:
 
-- Do not implement tracing/logging code in this lease.
+- Do not implement tracing/logging/config code in this lease.
 - Do not add TUI, REPL, or interactive CLI scope.
 - Do not move private ignored notes into tracked files.
 - Do not commit `.superpowers/`, `.merry/`, `docs/`, or `merry-raw-docs/`.
 
-Task type: planning/design correction
+Task type: implementation planning
 
 Acceptance criteria:
 
-- Spec names logs/traces as the milestone center, not event CLI.
-- Spec defines XDG config discovery, TOML provider/model/log settings, sandbox
-  config mounting, stable correlation fields, action boundaries, redaction,
-  default log path behavior, tests, and live/manual smoke expectations.
-- Roadmap and decisions no longer point to event-first CLI as the next
-  milestone.
-- Continuity handoff gives the next exact action.
+- Plan starts from XDG TOML config, not new root logging flags.
+- Plan preserves stdout/log separation.
+- Plan specifies default log path behavior:
+  `$XDG_STATE_HOME/merry/logs/merry.jsonl`, falling back to
+  `~/.local/state/merry/logs/merry.jsonl`.
+- Plan specifies sandbox config read-only mount and log directory read-write
+  mount only when file logging is enabled.
+- Plan specifies deterministic tests for config parsing, log path failures,
+  sandbox mount planning, subscriber setup, runtime/process/workspace/provider
+  trace capture, and redaction.
+- Plan keeps live provider and bwrap checks opt-in.
 
 ## Scope
 
@@ -116,9 +108,7 @@ Allowed edits:
 - `DECISIONS.md`
 - `EXECUTION_STATE.md`
 - `HANDOFF.md`
-- `ROADMAP.md`
-- `specs/2026-05-23-observability-first-coding-loop.md`
-- removal of `specs/2026-05-23-event-first-interactive-cli.md`
+- `plans/2026-05-23-config-backed-observability.md`
 
 Forbidden edits:
 
@@ -138,24 +128,24 @@ Protected files:
 
 Validation command:
 
-- `rg` for stale event-first milestone references in tracked planning/spec files
-- `rg` for stale logging CLI flag direction in tracked planning/spec files
-- `rg` for XDG/TOML config references in tracked planning/spec files
-- `rg` for placeholders/private-material leakage in the new spec
+- `rg` for unresolved placeholders in the implementation plan
+- `rg` for forbidden root logging-flag direction in the implementation plan
+- `rg` for private-material leakage paths in tracked changes
 - `git diff --check`
 
 Validation notes:
 
-- Stale-reference scan found no tracked planning state that still makes the
-  event-first CLI the next milestone. Remaining old spec path mentions are
-  historical move/removal notes in continuity files.
-- Placeholder/private-material scan found no unresolved placeholders or copied
-  private source material. Matches are expected guardrail/config examples.
-- Stale logging flag scan found `--log-level` / `--log-format` only in
-  explicit non-goal text.
-- XDG/TOML scan confirmed config discovery, log settings, and sandbox config
-  mounting are represented in spec, roadmap, README, decisions, and continuity.
-- `git diff --check` passed.
+- Placeholder scan found no unresolved plan placeholders.
+- Root logging flag scan found `--log-level` / `--log-format` only in
+  explicit non-goal text and the plan's "does not add" checklist.
+- Private-material scan found no copied private docs. Matches are expected
+  source-of-truth guardrails, ignored-path references, and fake test secret
+  strings such as `sk-test`.
+- XDG/TOML/tracing scan confirmed the implementation plan covers config
+  discovery, default log path behavior, sandbox mounts, and runtime/process
+  trace points.
+- `git diff --check` passed for tracked changes; the new plan file had no
+  whitespace check output when checked as a new file.
 
 ## Research
 
@@ -163,24 +153,23 @@ Research required: no
 
 Research reason:
 
-- The user supplied the product correction. Repo inspection was sufficient to
-  confirm the implementation direction: `tracing` already exists in workspace
-  dependencies and provider code, but runtime/tool/process logging is not
-  consistently instrumented.
+- The user approved the local spec. Repo inspection was sufficient to map the
+  implementation plan to current files and tests.
 
 Research artifact:
 
-- Repo inspection of current `tracing` usage, runtime events, smoke commands,
-  and `ok` output behavior.
+- Repo inspection of CLI sandbox bootstrap, live smoke config path, runtime
+  agent loop, process tool execution path, workspace tool executors, provider
+  tracing, and current test structure.
 
 ## Next Action
 
 Next exact action:
 
-- User reviews `specs/2026-05-23-observability-first-coding-loop.md`. If
-  approved, the next lease should create an implementation plan for the first
-  observability slice: XDG TOML config discovery, sandbox config/log path
-  mounting, config-backed tracing setup, and deterministic config/tracing tests.
+- Ask the user to choose execution mode for
+  `plans/2026-05-23-config-backed-observability.md`:
+  1. Subagent-Driven (recommended)
+  2. Inline Execution
 
 Do not reconsider:
 

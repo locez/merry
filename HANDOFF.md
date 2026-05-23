@@ -6,47 +6,28 @@ Status: rollover
 
 Current milestone or track:
 
-- Configuration-backed observability-first coding-loop design.
+- Configuration-backed observability-first coding loop.
 
 Session milestone:
 
-- Correct the previous event-first CLI direction into a configuration-backed
-  observability milestone that records key runtime/tool/process/provider/
-  artifact actions before adding any new interactive CLI/TUI surface.
+- Convert the approved observability spec into a tracked implementation plan
+  and prepare the next execution handoff.
 
 Task queue status:
 
-- User clarified the event CLI was the wrong center; the real need is
-  observability/logging for key actions and later multi-turn debugging.
-- User clarified that logging should not be controlled by new command-line
-  flags. Merry should default to XDG TOML config, keep logs off by default,
-  configure log enablement/level/format/path there, and mount the config
-  directory in `--with-sandbox`.
-- User clarified the default log file behavior: if logging is enabled and no
-  path is configured, use `$XDG_STATE_HOME/merry/logs/merry.jsonl`, falling
-  back to `~/.local/state/merry/logs/merry.jsonl`; failing to create/open it
-  should be a clear error, not a silent stderr fallback.
-- Current tracing/runtime/CLI state inspected: provider has localized tracing;
-  runtime/tool/process smoke behavior still lacks a coherent log contract.
-- Spec moved from `specs/2026-05-23-event-first-interactive-cli.md` to
-  `specs/2026-05-23-observability-first-coding-loop.md` and rewritten.
-- Spec revised to make XDG TOML config, provider/model settings, observability
-  settings, and sandbox config/log mounting first-class requirements.
-- Spec revised to pin the default log file path and open/create failure
-  behavior.
-- Roadmap updated to make observability-first logging/tracing the next
-  milestone.
-- Decision record corrected from Event-First CLI Before TUI to Observability
-  Before Interactive CLI Or TUI.
-- Continuity state updated.
-- Validation: passed for planning/spec correction.
+- User approved `specs/2026-05-23-observability-first-coding-loop.md`.
+- Implementation plan created at
+  `plans/2026-05-23-config-backed-observability.md`.
+- Decision record updated to explain why sandboxed live provider credentials
+  should support config-relative `api_key_file` in addition to `api_key_env`.
+- Continuity state updated for implementation-plan-ready status.
+- Validation: passed for planning changes.
 - Commit: pending.
 
 Done condition:
 
-- Tracked planning state consistently says the next milestone is structured
-  observability/logging for the coding loop, not event-first CLI, and gives the
-  next exact action as user review of the corrected observability spec.
+- Plan is tracked, public-safe, concrete enough for subagent or inline
+  execution, and the next exact action is execution-mode selection.
 
 ## What Changed
 
@@ -55,76 +36,67 @@ Files changed:
 - `DECISIONS.md`
 - `EXECUTION_STATE.md`
 - `HANDOFF.md`
-- `README.md`
-- `ROADMAP.md`
-- `specs/2026-05-23-observability-first-coding-loop.md`
-- removed `specs/2026-05-23-event-first-interactive-cli.md`
+- `plans/2026-05-23-config-backed-observability.md`
 
 Summary:
 
-- Replaced the event-first CLI design with observability-first design.
-- Defined configuration-backed structured logging/tracing as the next value
-  slice: XDG TOML config, sandbox config mounting, runtime loop, provider
-  boundary, tool calls, process execution, workspace tools, artifact recording,
-  errors, cancellation, redaction, and stable correlation fields.
-- Deferred event renderers, REPL, TUI, and multi-turn UI until logs make the
-  current loop understandable.
+- Added an implementation plan for XDG TOML config, config-backed log setup,
+  sandbox config/log mounting, XDG provider config, runtime/process tracing,
+  workspace/provider tracing, and end-to-end deterministic log smoke coverage.
+- Kept the milestone focused on observability, not event CLI, REPL, or TUI.
+- Recorded the sandbox credential handling decision: prefer `api_key_env`, and
+  allow config-relative `api_key_file` so the sandbox does not need API keys in
+  bwrap argv.
 
 ## Validation
 
 Commands run so far:
 
-- repo inspection for current tracing/runtime event/smoke surfaces
-- stale event-first planning-reference scan
-- stale logging CLI flag direction scan
-- XDG/TOML config direction scan
-- placeholder/private-material scan for the new spec
+- repo inspection for current CLI/runtime/provider/tool structure
+- plan placeholder scan
+- root logging flag direction scan
+- private-material/reference scan
+- XDG/TOML/tracing coverage scan
 - `git diff --check`
+- whitespace check for the new plan file
 
 Result:
 
-- Passed. Stale-reference scan found no tracked planning state that still makes
-  event-first CLI the next milestone; remaining old spec path mentions are
-  historical move/removal notes in continuity files. Placeholder/private-material
-  scan found no unresolved placeholders or copied private source material.
-  Logging flag scan found `--log-level` / `--log-format` only as explicit
-  non-goals, and XDG/TOML scan confirmed the corrected config direction.
+- Passed. The logging flag scan found only explicit non-goal/checklist
+  references. Private-material matches are guardrails, ignored path references,
+  and fake test secret strings, not copied private docs or real credentials.
 
 ## Decisions
 
 Decisions made:
 
-- Treat the user's message as a requested correction to the written spec, not
-  as approval to implement the old event-first CLI.
-- Configuration-backed observability/logging is the milestone center; event
-  JSONL and future CLI/TUI are downstream consumers.
-- Keep implementation out of this lease; next lease should create an
-  implementation plan for the observability slice after user review/approval.
+- Save the implementation plan under tracked `plans/` instead of ignored
+  `docs/superpowers/plans/`.
+- Use config-relative `api_key_file` as a practical sandboxed live-smoke
+  credential source, while keeping secrets out of logs and runtime state.
 
 Pending decisions:
 
-- Exact first implementation breakdown for XDG TOML config, sandbox config/log
-  mounting, config-backed subscriber setup, and runtime/tool instrumentation.
-  The next lease should write this plan before code changes.
+- User must choose execution mode for the plan:
+  1. Subagent-Driven (recommended)
+  2. Inline Execution
 
 ## Blockers
 
 Blockers:
 
-- None for the design correction.
+- None for planning. Implementation has not started.
 
 Next exact action:
 
-- User reviews `specs/2026-05-23-observability-first-coding-loop.md`. If
-  approved, create an implementation plan for the first configuration-backed
-  observability slice.
+- Present execution choices for
+  `plans/2026-05-23-config-backed-observability.md`.
 
 ## Scope For Next Session
 
 Allowed edits:
 
-- Implementation plan for the observability-first coding loop.
-- Rust/CLI/test files named by that implementation plan.
+- Files named by the implementation plan.
 - Continuity file updates.
 
 Forbidden edits:
@@ -137,8 +109,8 @@ Forbidden edits:
 
 Do not reconsider:
 
-- The next proof gap is not a UI surface. It is logs/traces that explain real
-  runtime behavior while the loop runs.
+- The next proof gap is logs/traces that explain real runtime behavior while
+  the loop runs.
 - Default tests remain deterministic/offline; live provider and bwrap smoke are
   opt-in.
 
@@ -148,7 +120,7 @@ Status: pending
 
 Message:
 
-- project-continuity: correct next milestone to observability
+- project-continuity: plan config-backed observability
 
 No-commit reason:
 
