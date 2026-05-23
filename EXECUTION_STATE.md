@@ -34,63 +34,64 @@ Style notes:
 
 Current milestone or track:
 
-- Roadmap/MVP recalibration around a real sandboxed coding-agent runtime loop.
+- Runtime Coding Loop Harness first slice.
 
 Session milestone:
 
-- Re-anchor Merry's current P0 to a minimal useful coding loop that proves runtime value through artifact-backed, bwrap-sandboxed, eventually live-provider execution instead of policy-only progress.
+- Implement the first deterministic Minimal Useful Coding Loop harness slice.
 
 Goal:
 
-- Update durable continuity and roadmap state so future `/goal $project-continuity` sessions advance the real sandboxed coding-loop MVP and know where local API credentials belong.
+- Add a focused fake-provider/fake-runner test that proves one runtime-owned loop can inspect workspace evidence, apply one constrained patch, run verification, continue through tool results, and finish with deterministic events/artifacts/ledger facts.
 
 Task queue:
 
-- Created missing continuity artifacts.
-- Recorded the roadmap/MVP decision.
-- Marked ignored private source material and local credential files.
-- Updated the public roadmap current phase and MVP acceptance target.
-- Aligned `README.md` and `AGENTS.md` entry points with the corrected P0.
-- Wrote handoff and validation status.
+- Dispatched read-only subagent exploration for runtime loop and process/patch/sandbox entry points.
+- Implemented the deterministic multi-step coding-loop harness test.
+- Updated roadmap/continuity status to name exactly what the first slice proves and what remains.
+- Ran focused verification.
+- Commit is pending final staged review.
 
 Allowed expansion:
 
-- Small entry-point doc alignment when needed to keep the current roadmap discoverable.
-- No Rust implementation in this lease.
+- Minimal helper test code under the owned integration-test file.
+- Small documentation/status updates tied to the implemented slice.
 
 Done condition:
 
-- Continuity files exist, `ROADMAP.md` names the real sandboxed coding-loop MVP as current P0, local credential/config handling is documented, and `HANDOFF.md` points the next session at the first implementation slice.
+- A deterministic test proves the first coding-loop slice with runtime agent loop, workspace patch, process verification, tool continuations, and final completion. Continuity state and handoff reflect the implemented evidence and the next exact slice.
 
 Drift boundary:
 
-- Stop before designing or implementing the full coding agent, broad skill VM, graph memory, Python SDK, or live-provider harness beyond the acceptance target and configuration policy.
+- Do not implement a full autonomous coding agent, real live-provider harness, broad process profile, broad CLI UX, graph memory, skill VM, or Python SDK in this lease.
 
-Task type: planning
+Task type: implementation
 
 Acceptance criteria:
 
-- `SESSION_RUNBOOK.md`, `AGENT_ROLES.md`, `EXECUTION_STATE.md`, and `HANDOFF.md` exist.
-- `ROADMAP.md` current phase no longer treats policy taxonomy as the primary output.
-- The next MVP acceptance test includes a real bwrap sandbox lane and an opt-in live provider lane.
-- API keys/base URL are assigned to ignored local env/config only.
+- A focused test runs `Runtime::run_agent_loop` for at least five provider steps: inspect, read exact evidence, patch, verify, final answer.
+- The test uses a fake provider and injected fake process runner, not a live provider or host process.
+- The loop records exact process argv for inspection and verification.
+- The patch goes through `workspace_patch_file` with low-risk patch opt-in and mutates only a temp workspace fixture.
+- The loop reaches `AgentLoopStatus::Completed`, leaves no pending tool calls, and records artifact-before-resolution ordering through lifecycle facts.
+- The loop performs four tool-result continuation steps before the final
+  completion; each continuation carries the newly resolved tool result through
+  provider-neutral runtime state.
 
 ## Scope
 
 Allowed edits:
 
-- `SESSION_RUNBOOK.md`
-- `AGENT_ROLES.md`
 - `EXECUTION_STATE.md`
 - `HANDOFF.md`
 - `DECISIONS.md`
-- `.gitignore`
 - `ROADMAP.md`
-- small `AGENTS.md` or `README.md` routing updates if needed
+- `crates/merry-tool-workspace/tests/runtime_integration.rs`
+- small `README.md` status update if needed
 
 Forbidden edits:
 
-- Rust runtime/provider/CLI implementation
+- Rust production runtime/provider/CLI implementation outside the test harness slice
 - private ignored source material under `docs/` or `merry-raw-docs/`
 - real credentials or generated build artifacts
 
@@ -105,15 +106,18 @@ Protected files:
 
 Validation command:
 
+- `cargo test -p merry-tool-workspace coding_loop_harness`
 - `git diff --check`
 
 Validation status: passed
 
 Validation notes:
 
+- `cargo test -p merry-tool-workspace coding_loop_harness` passed.
+- `cargo test -p merry-tool-workspace` passed.
+- `cargo fmt --all --check` passed after formatting.
+- `cargo clippy -p merry-tool-workspace --all-targets -- -D warnings` passed.
 - `git diff --check` passed.
-- Rust checks were not run because this lease changed only documentation,
-  continuity state, and ignore rules.
 
 ## Research
 
@@ -121,17 +125,17 @@ Research required: no
 
 Research reason:
 
-- User explicitly requested the roadmap/MVP correction, and repo/private-doc evidence is sufficient.
+- User allowed subagents. Read-only explorer subagents are being used to confirm existing runtime loop/process/patch entry points; no external research is required.
 
 Research artifact:
 
-- none
+- Explorer outputs from subagent workers Feynman and Godel in this lease.
 
 ## Next Action
 
 Next exact action:
 
-- Implement the first Runtime Coding Loop Harness slice: an opt-in test/harness that can run inside `merry --with-sandbox` against a disposable fixture repo, using fake provider by default and a separately gated live OpenAI-compatible provider path.
+- Add the real `bwrap` sandbox smoke for the same coding-loop shape, likely by introducing a CLI or test wrapper that can register workspace tools, use a disposable fixture, and run with the existing `--with-sandbox` handoff without inheriting secrets.
 
 Do not reconsider:
 

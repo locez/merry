@@ -97,6 +97,7 @@ The OpenAI provider target is the Responses API only. The provider request path 
 - `merry-tool-workspace` has moved from the read-file first slice into read-only workspace navigation/search as a separate tool crate exposing `workspace_read_file`, `workspace_list_dir`, and `workspace_search_text` under explicitly configured trusted/stable roots. It prevents ordinary path traversal and ordinary symlink traversal before read/list/search operations, and on Unix uses `O_NOFOLLOW` for file opens. It is not an OS sandbox and does not claim complete hardening against malicious concurrent filesystem mutation; residual TOCTOU risk remains. It is not a shell, write API, network API, or complete coding agent.
 - CLI Sandbox Bootstrap is implemented in `merry-cli`: the root `--with-sandbox` flag uses `clap` and performs Linux `bwrap` self-reexec with a minimal environment, `PATH` lookup for `bwrap`, plan-stage missing-`bwrap` handling, recursion avoidance, sandbox-local `/tmp`, the current repo/project as the primary read-write workspace, and a minimal `/etc` allowlist including `/etc/ld.so.cache`, resolver/host/NSS files, and SSL/PKI paths. v1 still allows network access and is not a complete security boundary. A real smoke of `target/debug/merry --with-sandbox debug` has passed.
 - Shell/Process SP1/SP2/SP3-A plus the latest CLI admission slices are implemented: `merry-runtime` has provider-neutral process intent/evidence, proposed/executed process action audit variants, explicit injected `ProcessRunner` boundaries, process intent classification, opt-in informational process admission, accepted local workspace process admission, bounded stdout/stderr result artifacts, payload-free proposal/execution evidence, default deny behavior, cancellation paths that keep pending calls unresolved until runner output exists, and deterministic fake-runner tests. `merry-cli` has the narrow debug/demo `merry shell -- <argv>` real runner adapter using `tokio::process::Command`; informational `rustc --version` / `rg --version` can run, and exact `cargo test -p merry-runtime` requires accepted local workspace risk plus the CLI bwrap handoff and sandbox runtime evidence. This does not implement general shell/process/coding-agent capability, raw shell mode, pipelines/scripts, arbitrary env/stdin, a complete sandbox proof, or a general approval/review admission UX.
+- Minimal Useful Coding Loop first deterministic slice is implemented in `merry-tool-workspace` integration tests. `coding_loop_harness_inspects_patches_verifies_and_completes` builds a runtime with workspace read/patch tools plus `process_command_tool`, runs `Runtime::run_agent_loop` for inspect -> exact read -> patch -> verification -> final answer, uses a fake provider and injected fake process runner, mutates only a temporary workspace fixture through `workspace_patch_file`, records exact process argv for `rg --files` and `cargo test -p merry-runtime`, verifies tool-result continuation flow, and checks artifact-before-resolution ledger ordering. This is not yet the real `bwrap` smoke or live provider lane.
 
 ### Active
 
@@ -112,10 +113,10 @@ The OpenAI provider target is the Responses API only. The provider request path 
 
 ### Next Active
 
-- Runtime Coding Loop Harness for the Minimal Useful Coding Loop.
-- Read-only process profile for reusable workspace inspection and exact evidence retrieval.
-- Real `bwrap` sandbox smoke against a disposable fixture repository.
-- Opt-in live OpenAI-compatible smoke configuration for the same loop.
+- Add the real `bwrap` sandbox smoke for the same coding-loop shape against a disposable fixture repository.
+- Replace one-off process classification growth with a runtime-owned read-only process profile for reusable workspace inspection and exact evidence retrieval, including a file-slice shape such as `sed -n RANGE FILE` or an equivalent typed read tool.
+- Define the opt-in live OpenAI-compatible smoke configuration for the same loop without making live provider behavior part of default `cargo test`.
+- Keep expanding the Runtime Coding Loop Harness only through executable acceptance slices.
 
 ### Next Milestone: Minimal Useful Coding Loop Harness
 
@@ -160,12 +161,12 @@ opt-in live provider smoke:
 
 Tasks:
 
-- Add a fixture repository purpose-built for the loop, with a tiny failing behavior or deterministic text replacement target.
-- Add a harness command or integration test wrapper that builds a runtime with the coding-loop tool set.
+- Add a fixture repository purpose-built for the loop, with a tiny failing behavior or deterministic text replacement target. The first deterministic slice uses a temporary workspace fixture in `merry-tool-workspace` tests; a reusable real bwrap fixture remains.
+- Add a harness command or integration test wrapper that builds a runtime with the coding-loop tool set. The first deterministic integration test exists; a real smoke wrapper remains.
 - Add a read-only process profile or equivalent reusable admission layer for file listing, literal search, and exact source slice retrieval.
 - Register the runtime-owned default coding-loop tools from library code, not by ad hoc CLI-only assembly.
-- Use `workspace_patch_file` or its successor for the edit step and keep shell side effects out of the edit path.
-- Add deterministic fake-provider/fake-runner tests for the full multi-step loop.
+- Use `workspace_patch_file` or its successor for the edit step and keep shell side effects out of the edit path. The first deterministic slice now does this.
+- Add deterministic fake-provider/fake-runner tests for the full multi-step loop. The first slice now covers inspect, exact read, patch, verification, continuation, and final answer.
 - Add ignored local config guidance for live provider credentials and base URL.
 - Add an explicit, non-default bwrap/live smoke command once the deterministic loop passes.
 

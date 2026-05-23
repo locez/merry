@@ -6,32 +6,42 @@ Status: complete
 
 Current milestone or track:
 
-- Roadmap/MVP recalibration around a real sandboxed coding-agent runtime loop.
+- Runtime Coding Loop Harness first slice.
 
 Session milestone:
 
-- Re-anchor the current P0 to a minimal useful coding-loop MVP and initialize project-continuity state.
+- Implement the first deterministic Minimal Useful Coding Loop harness slice.
 
 Task queue status:
 
-- Continuity artifacts: created in this lease.
-- Roadmap P0: updated to Minimal Useful Coding Loop.
-- Entry points: `README.md` and `AGENTS.md` aligned with the corrected P0.
+- Read-only subagent exploration: completed.
+- Deterministic coding-loop harness test: implemented.
+- Roadmap/continuity status: updated.
 - Validation: passed.
 
 Done condition:
 
-- Continuity files exist, roadmap current phase points to the real sandboxed coding-loop MVP, local credential/config handling is documented, and next session has one exact implementation action.
+- A deterministic test proves the first coding-loop slice with runtime agent
+  loop, workspace patch, process verification, tool continuations, and final
+  completion. Continuity state and handoff reflect the implemented evidence and
+  the next exact slice.
 
 Drift boundary:
 
-- Do not start Rust implementation, full skill VM, graph memory, Python SDK, or live-provider harness implementation in this lease.
+- Do not start a full autonomous coding agent, live-provider harness, broad
+  process profile, broad CLI UX, graph memory, skill VM, or Python SDK unless a
+  later lease explicitly selects that slice.
 
 Acceptance criteria:
 
-- `SESSION_RUNBOOK.md`, `AGENT_ROLES.md`, `EXECUTION_STATE.md`, and `HANDOFF.md` exist.
-- `ROADMAP.md` current phase identifies the real sandboxed coding loop as P0.
-- Ignored local credentials and raw source material are protected from commit.
+- `Runtime::run_agent_loop` runs at least five provider steps: inspect, read
+  exact evidence, patch, verify, final answer.
+- The test uses a fake provider and injected fake process runner.
+- Exact process argv is recorded for inspection and verification.
+- `workspace_patch_file` applies one constrained temp-workspace patch.
+- The loop completes, leaves no pending tool calls, and checks
+  artifact-before-resolution ledger ordering.
+- Four tool-result continuation steps occur before final completion.
 
 ## Communication
 
@@ -45,26 +55,45 @@ Style notes:
 
 Files changed:
 
-- `.gitignore`
-- `AGENTS.md`
-- `README.md`
-- `SESSION_RUNBOOK.md`
-- `AGENT_ROLES.md`
-- `EXECUTION_STATE.md`
-- `DECISIONS.md`
-- `HANDOFF.md`
+- `crates/merry-tool-workspace/tests/runtime_integration.rs`
 - `ROADMAP.md`
+- `EXECUTION_STATE.md`
+- `HANDOFF.md`
 
 Summary:
 
-- Initialized project-continuity state, protected ignored raw/local secret
-  paths, and re-anchored the public roadmap on the Minimal Useful Coding Loop
-  as the current P0.
+- Added `coding_loop_harness_inspects_patches_verifies_and_completes`, a
+  deterministic fake-provider/fake-runner integration test that builds a
+  runtime with workspace read/patch tools plus `process_command_tool`.
+- The test runs inspect -> exact read -> patch -> verification -> final answer
+  through the runtime agent loop.
+- The test verifies temp fixture mutation, exact process argv, continuation
+  flow, pending-call cleanup, and ledger artifact-before-resolution ordering.
+- `ROADMAP.md` now records that the first deterministic slice is complete while
+  bwrap/live lanes remain future opt-in work.
+
+## Subagent Evidence
+
+Workers used:
+
+- Feynman: read-only explorer for runtime agent loop/test entry points.
+- Godel: read-only explorer for process policy/runner, workspace patch, and
+  CLI bwrap interfaces.
+
+Integrated decision:
+
+- Use `merry-tool-workspace` integration tests for the first slice because it
+  can prove real temp-workspace read/patch behavior without making
+  `merry-runtime` depend on the workspace tool crate.
 
 ## Validation
 
-Command:
+Commands:
 
+- `cargo test -p merry-tool-workspace coding_loop_harness`
+- `cargo test -p merry-tool-workspace`
+- `cargo fmt --all --check`
+- `cargo clippy -p merry-tool-workspace --all-targets -- -D warnings`
 - `git diff --check`
 
 Result:
@@ -73,18 +102,26 @@ Result:
 
 Known failures:
 
-- none
+- Initial sandboxed `cargo test -p merry-tool-workspace coding_loop_harness`
+  could not resolve `index.crates.io`; rerunning with approved cargo network
+  access succeeded.
 
 ## Decisions
 
 Decisions made:
 
-- Current P0 should prove runtime usefulness with a real sandboxed coding-loop MVP, not policy-only progress.
+- First slice proves deterministic runtime value with fake provider/fake runner
+  and a real temp-workspace patch.
+- Real `bwrap` process smoke and live provider smoke remain separate opt-in
+  lanes.
 
 Pending decisions:
 
-- Exact command shape for the opt-in live-provider harness.
-- Whether to add file-based env loading or require users to export env vars manually.
+- Exact CLI/test command shape for the real bwrap coding-loop smoke.
+- Whether to load live smoke config from ignored files or require exported env
+  vars only.
+- How to represent a reusable read-only process profile for file slices such as
+  `sed -n RANGE FILE` or an equivalent typed read tool.
 
 ## Blockers
 
@@ -94,13 +131,16 @@ Blockers:
 
 Next exact action:
 
-- Implement the first Runtime Coding Loop Harness slice.
+- Add the real `bwrap` sandbox smoke for the same coding-loop shape against a
+  disposable fixture repository.
 
 ## Scope For Next Session
 
 Allowed edits:
 
-- Runtime/CLI tests or harness files needed for the first coding-loop slice.
+- Runtime/CLI test or harness files needed for the bwrap smoke.
+- Minimal CLI dependency/wiring if needed to register workspace tools inside the
+  smoke.
 - Small docs/status updates tied to that slice.
 
 Forbidden edits:
@@ -112,7 +152,8 @@ Forbidden edits:
 Do not reconsider:
 
 - Policy taxonomy is support work, not the current P0 deliverable.
-- Default tests remain deterministic/offline; live provider and bwrap smoke are opt-in.
+- Default tests remain deterministic/offline; live provider and bwrap smoke are
+  opt-in.
 
 ## Commit
 
@@ -120,7 +161,7 @@ Status: committed
 
 Message:
 
-- project-continuity: recalibrate mvp roadmap
+- project-continuity: add coding loop harness
 
 No-commit reason:
 
