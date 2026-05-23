@@ -1,6 +1,6 @@
 # Execution State
 
-Lease status: complete
+Lease status: rollover
 
 ## Source Of Truth
 
@@ -8,6 +8,8 @@ Lease status: complete
 - `PROJECT_LEAD.md`
 - `ROADMAP.md`
 - `README.md`
+- `DECISIONS.md`
+- `specs/2026-05-23-event-first-interactive-cli.md`
 - `docs/design/mvp-design.md` (ignored private local design source)
 - `docs/design/global-design.md` (ignored private local design source)
 - `docs/product/product-strategy.md` (ignored private local product source)
@@ -20,6 +22,8 @@ Level: structured-roadmap
 Current planning artifact:
 
 - `ROADMAP.md`
+- `DECISIONS.md`
+- `specs/2026-05-23-event-first-interactive-cli.md`
 
 ## Communication
 
@@ -34,118 +38,83 @@ Style notes:
 
 Current milestone or track:
 
-- LLM-driven sandbox coding-loop smoke.
+- Event-first interactive CLI design.
 
 Session milestone:
 
-- Add an opt-in live OpenAI-compatible smoke that runs the coding-loop shape
-  inside the existing `merry --with-sandbox` bwrap handoff with real LLM tool
-  selection.
+- Decide whether the next useful milestone should be a line-oriented
+  interactive CLI, reusable runtime-owned profile work, or TUI research; write
+  the selected design without starting implementation.
 
 Goal:
 
-- Prove a real LLM can drive the inspect -> exact evidence -> constrained patch
-  -> verification -> final loop shape through Merry runtime tools inside the
-  CLI bwrap sandbox, while default tests remain deterministic/offline and
-  credentials stay ignored/local.
+- Make Merry's already-proven live coding loop inspectable by a human operator
+  so real use can expose product gaps. The chosen design is an event-first CLI
+  that shows runtime event/tool/artifact flow before investing in a full TUI.
 
 Task queue status:
 
-- Fix agent-loop continuation input so real LLM steps keep the original task
-  goal visible after tool results: implemented.
-- Add ignored local config loading for live smoke credentials inside the bwrap
-  workspace: implemented.
-- Add an explicit non-default live LLM coding-loop smoke command requiring
-  `--with-sandbox` and OpenAI debug opt-in: implemented.
-- Add tests for argument parsing, credential/config gating, default-suite
-  non-network behavior, and ignored live smoke execution: implemented.
-- Update roadmap/continuity status with what the live LLM slice proves and
-  what remains: implemented.
-- Run the credentialed live LLM smoke: passed in the user's trusted configured
-  environment.
-- Fix provider request metadata exposed by the live smoke: implemented
-  `User-Agent`.
-- Commit or record why the lease cannot be committed: completed.
+- Read current continuity, roadmap, CLI, runtime event, and artifact evidence:
+  completed.
+- Use Locez Lens to reframe the problem from "build UI" to "make runtime
+  behavior observable during real use": completed.
+- Use brainstorming to compare Event CLI, Runtime Profile, and TUI Research:
+  completed.
+- Offer visual companion and provide a local browser comparison page:
+  completed; companion artifacts are local/untracked and ignored.
+- Research TUI feasibility at a high level: completed. Ratatui/Crossterm are
+  viable, but deferred until event-first CLI usage proves needed views.
+- User selected direction 1: Event-first interactive CLI.
+- Write public-safe spec for selected direction: completed.
+- Update roadmap and continuity state: completed.
+- Commit or record no-commit reason: completed.
 
 Allowed expansion:
 
-- Minimal runtime agent-loop continuation fix needed for real LLM reliability.
-- Minimal CLI helper code for local ignored config parsing, live provider
-  runtime construction, prompt/task text, and event/result validation.
-- Minimal provider HTTP metadata fix exposed by the successful live smoke.
-- Small documentation/status updates tied to the implemented slice.
+- Public-safe tracked planning/spec files for the selected next milestone.
+- `.gitignore` update for local visual companion artifacts.
+- No Rust implementation in this lease.
 
 Done condition:
 
-- The CLI exposes an explicit opt-in live LLM smoke command that refuses to run
-  outside a validated sandbox handoff and OpenAI debug opt-in, reads credentials
-  from ignored local config or env where safe, uses a real OpenAI-compatible
-  provider to choose tools, executes the coding-loop shape inside bwrap with
-  real process runner and workspace patch tooling, and reports success only
-  when runtime events prove the LLM-driven tool sequence and fixture result.
-
-Live proof status:
-
-- The user reported that `cargo run -p merry-cli -- --with-sandbox debug
-  coding-loop-live-smoke` passed against their trusted configured server. This
-  satisfies the live LLM proof lane for this milestone. This agent sandbox did
-  not rerun the trusted external request because elevated external egress was
-  rejected by the approval policy.
+- The next milestone direction is selected, a public-safe design spec exists,
+  continuity state points to it, and implementation is explicitly deferred
+  until user review/approval of the written spec.
 
 Drift boundary:
 
-- Do not implement a full autonomous coding agent, broad process profile, broad
-  CLI UX, graph memory, skill VM, Python SDK, arbitrary shell expansion, or a
-  live-provider judgment path in this lease.
+- Do not implement the CLI/TUI in this lease.
+- Do not add TUI dependencies.
+- Do not move private ignored notes into tracked files.
+- Do not commit `.superpowers/`, `.merry/`, `docs/`, or `merry-raw-docs/`.
 
-Task type: implementation
+Task type: planning/design
 
 Acceptance criteria:
 
-- The CLI command is explicit and non-default, under debug/smoke tooling.
-- The command requires the real `--with-sandbox` child handoff evidence before
-  running local workspace effect verification.
-- The command requires `MERRY_OPENAI_DEBUG=1` or an equivalent ignored local
-  config opt-in before any network attempt.
-- Credentials and base URL can be supplied from ignored local files that remain
-  available inside the sandbox; secrets are not passed through bwrap argv or
-  committed env.
-- The smoke uses `OpenAiProvider`, not a deterministic scripted provider, for
-  the model decisions.
-- The smoke uses `TokioProcessRunner` for real `rg --files` and verification
-  process execution inside the sandbox.
-- The smoke uses `workspace_patch_file` for the edit and mutates only a
-  disposable fixture under ignored local state.
-- Runtime events prove at least one process inspection call, one exact source
-  read/search call, one workspace patch call, and one process verification call
-  resolved successfully before final completion.
-- The smoke reaches `AgentLoopStatus::Completed`, leaves no pending tool calls,
-  and validates the patched fixture content.
-- Default `cargo test` does not require bwrap, network, or live credentials.
+- Spec names the event-first CLI command shape, output modes, runtime event
+  mapping, artifact summary behavior, errors, tests, and TUI follow-up.
+- Spec keeps default tests deterministic/offline.
+- Roadmap names event-first CLI as the next user-facing proof gap.
+- Continuity handoff gives the next exact action.
 
 ## Scope
 
 Allowed edits:
 
+- `.gitignore`
+- `DECISIONS.md`
 - `EXECUTION_STATE.md`
 - `HANDOFF.md`
-- `DECISIONS.md`
 - `ROADMAP.md`
-- `README.md`
-- `crates/merry-runtime/src/agent_loop.rs`
-- `crates/merry-runtime/tests/agent_loop.rs`
-- `crates/merry-cli/src/main.rs`
-- `crates/merry-cli/tests/debug.rs`
-- `crates/merry-provider-openai/src/provider.rs`
-- `crates/merry-provider-openai/tests/provider_stream.rs`
-- `crates/merry-tool-workspace/tests/runtime_integration.rs`
+- `specs/2026-05-23-event-first-interactive-cli.md`
 
 Forbidden edits:
 
-- Rust production runtime/provider/CLI implementation outside the live smoke,
-  agent-loop continuation slice, and provider HTTP request metadata fix
+- Rust source implementation
 - private ignored source material under `docs/` or `merry-raw-docs/`
 - real credentials or generated build artifacts
+- `.superpowers/` visual companion artifacts
 
 Protected files:
 
@@ -158,24 +127,17 @@ Protected files:
 
 Validation command:
 
-- `cargo fmt --all --check`
-- `cargo clippy -p merry-provider-openai --all-targets -- -D warnings`
-- `cargo test -p merry-provider-openai`
-- `cargo test -p merry-provider-openai builds_responses_http_request_without_network`
-- `cargo test -p merry-provider-openai stream_model_posts_responses_request_and_streams_events -- --ignored`
 - `git diff --check`
-- user-run opt-in live LLM bwrap smoke against trusted configured server
+- spec self-review for placeholders, contradictions, ambiguity, and private
+  material leakage
 
 Validation notes:
 
-- The user reported that the credentialed live smoke passed against their
-  trusted configured server. That satisfies the live LLM proof lane outside this
-  agent sandbox.
-- The live run exposed a provider HTTP request metadata gap: Merry did not set
-  a `User-Agent` header. This lease adds a provider-layer fix and deterministic
-  request-construction coverage.
-- Provider request-construction, loopback header integration, full provider
-  tests, provider clippy, formatting, and diff whitespace checks passed.
+- `git diff --check` passed.
+- Placeholder/private-material self-review found no unresolved placeholders in
+  the new spec and no copied private source content. Matches in roadmap/state
+  are expected guardrail references to ignored docs, raw notes, and local
+  credentials.
 
 ## Research
 
@@ -183,23 +145,26 @@ Research required: yes
 
 Research reason:
 
-- This lease touches live provider behavior and runtime agent-loop semantics.
-  Repo evidence is sufficient; no external research is required.
+- The user asked whether TUI should be next and noted that TUI may require
+  research.
 
 Research artifact:
 
-- Local inspection of OpenAI provider rendering/parsing, runtime agent loop
-  continuation, CLI bwrap env clearing, and workspace/process tool boundaries.
+- Repo inspection of existing runtime event/artifact flow and CLI JSONL
+  surfaces.
+- High-level TUI feasibility check: Ratatui/Crossterm is viable, but TUI should
+  follow event-first CLI usage evidence.
 
 ## Next Action
 
 Next exact action:
 
-- Commit the completed lease.
+- User reviews `specs/2026-05-23-event-first-interactive-cli.md`. If approved,
+  the next lease should invoke `superpowers:writing-plans` and create an
+  implementation plan for the Event-first interactive CLI.
 
 Do not reconsider:
 
 - Do not make policy taxonomy the primary P0 output.
-- Do not commit `docs/`, `merry-raw-docs/`, `.env.merry.local`,
-  `.merry/local/`, or `.merry/secrets/`.
+- Do not start TUI implementation before event-first CLI usage evidence.
 - Do not require live provider tests in default `cargo test`.

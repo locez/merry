@@ -1,132 +1,141 @@
 # Handoff
 
-Status: complete
+Status: rollover
 
 ## Current Work
 
 Current milestone or track:
 
-- LLM-driven sandbox coding-loop smoke.
+- Event-first interactive CLI design.
 
 Session milestone:
 
-- Add an opt-in live OpenAI-compatible smoke that runs the coding-loop shape
-  inside the existing `merry --with-sandbox` bwrap handoff with real LLM tool
-  selection.
+- Use the renewed roadmap/product concern to decide the next useful milestone
+  after proving live tool calls, compare event-first CLI vs runtime profile vs
+  TUI research, and write the selected spec without starting implementation.
 
 Task queue status:
 
-- Runtime continuation keeps the original task visible after tool results:
-  implemented.
-- Ignored local OpenAI-compatible config for sandboxed live smoke:
-  implemented.
-- `debug coding-loop-live-smoke` CLI command using `OpenAiProvider`:
-  implemented.
-- Parser/gating/default-offline/ignored-live-smoke tests: implemented.
-- Credentialed live LLM proof: passed in the user's trusted configured
-  environment.
-- Provider HTTP request `User-Agent`: implemented in this lease.
-- Validation: passed.
+- Current project state and ignored source-material guidance reviewed.
+- Runtime event/artifact/agent-loop surfaces inspected.
+- Locez Lens used to reframe the gap as real-use observability, not UI polish.
+- Brainstorming compared three options: event-first CLI, runtime-owned profile,
+  and TUI research.
+- User selected option 1: event-first interactive CLI.
+- Spec written at `specs/2026-05-23-event-first-interactive-cli.md`.
+- Roadmap updated to make event-first CLI the next user-facing proof gap.
+- Decision recorded: Event-first CLI before TUI.
+- `.gitignore` updated to keep local `.superpowers/` visual companion metadata
+  out of commits.
+- Validation: passed for planning/spec changes.
 - Commit: completed.
 
 Done condition:
 
-- The live smoke reaches `AgentLoopStatus::Completed` inside the CLI bwrap
-  sandbox, leaves no pending tool calls, validates the patched fixture content,
-  and runtime events prove real `rg --files`, exact source read,
-  `workspace_patch_file`, and real `rg fixed-by-live-llm` verification calls
-  chosen by the live model.
-
-Live proof status:
-
-- The user reported that `cargo run -p merry-cli -- --with-sandbox debug
-  coding-loop-live-smoke` passed against their trusted configured server. That
-  satisfies the live LLM proof lane for this milestone.
-- This agent sandbox did not rerun the trusted external request because
-  elevated external egress was rejected by the approval policy.
-- The successful live run exposed one provider-layer gap: requests did not set
-  a `User-Agent` header.
+- The selected next milestone is recorded in a public-safe spec and roadmap,
+  and the next implementation step is blocked on user review/approval of the
+  spec per the brainstorming workflow.
 
 ## What Changed
 
 Files changed:
 
-- `crates/merry-provider-openai/src/provider.rs`
-- `crates/merry-provider-openai/tests/provider_stream.rs`
+- `.gitignore`
+- `DECISIONS.md`
 - `EXECUTION_STATE.md`
 - `HANDOFF.md`
+- `ROADMAP.md`
+- `specs/2026-05-23-event-first-interactive-cli.md`
 
 Summary:
 
-- Added `User-Agent: merry/<crate version>` to OpenAI-compatible Responses
-  request headers.
-- Added deterministic request-construction coverage for the `User-Agent`
-  header.
-- Added loopback integration coverage asserting the actual HTTP request carries
-  the same `User-Agent` header.
-- Updated continuity state to record that the live smoke passed in the user's
-  trusted configured environment.
+- Added a concrete event-first interactive CLI design: command shape,
+  human-readable timeline, exact `--events-jsonl`, runtime event mapping,
+  artifact summaries, fail-closed gates, deterministic tests, and TUI follow-up.
+- Re-anchored the roadmap so the next milestone is human-visible runtime
+  interaction, while keeping the coding-loop harness as the acceptance skeleton.
+- Recorded that TUI is viable but deferred until line-oriented usage shows the
+  views and interactions worth building.
 
 ## Validation
 
 Commands run so far:
 
-- `cargo test -p merry-provider-openai builds_responses_http_request_without_network`
-- `cargo test -p merry-provider-openai stream_model_posts_responses_request_and_streams_events -- --ignored`
-- `cargo fmt --all --check`
-- `cargo clippy -p merry-provider-openai --all-targets -- -D warnings`
-- `cargo test -p merry-provider-openai`
+- spec self-review with `rg` for placeholders/private-material references
 - `git diff --check`
 
 Result:
 
-- Request-construction test passed after first failing red test.
-- Loopback ignored test passed with escalated local TCP permission.
-- Formatting, provider clippy, full provider test, and diff checks passed.
+- Passed. The self-review found no unresolved placeholders in the new spec and
+  no copied private source content. Matches in roadmap/state are expected
+  guardrail references to ignored docs, raw notes, and local credentials.
+
+Reviewer pass:
+
+- Scope alignment: aligned with the user-selected option 1 and the
+  project-continuity/brainstorming constraint to write and review a spec before
+  implementation.
+- Protected file check: `ROADMAP.md` was intentionally updated under the user's
+  explicit roadmap-correction request; no private ignored material was moved
+  into tracked files.
+- State and handoff check: continuity state and handoff both point to the same
+  next exact action.
+- Recommendation: rollover for user spec review.
+- Residual risk: no code behavior changed in this lease, so Rust checks were
+  not run.
 
 ## Decisions
 
 Decisions made:
 
-- `User-Agent` belongs in `merry-provider-openai` request construction, not in
-  runtime or CLI smoke code.
-- Use the crate version for the value: `merry/<crate version>`.
-- Keep live LLM proof opt-in and credentialed; do not move it into default
-  tests.
+- Choose option 1 from the brainstorm: event-first interactive CLI.
+- Keep TUI as a researched follow-up, not the next implementation milestone.
+- Keep implementation out of this lease until the user reviews/approves the
+  spec and a written implementation plan exists.
+- Store the spec under tracked `specs/` rather than ignored `docs/`, because
+  repository rules keep `docs/` private and uncommitted.
 
 Pending decisions:
 
-- None for this lease after validation.
+- User review of `specs/2026-05-23-event-first-interactive-cli.md`.
+- Whether the first implementation should reuse the live smoke assembly
+  directly or extract common setup before adding the command. The spec
+  recommends reuse first, extraction after the shape proves useful.
 
 ## Blockers
 
 Blockers:
 
-- none
+- None for design. Implementation intentionally waits for user review/approval
+  of the spec.
 
 Next exact action:
 
-- Continue the next project-continuity lease from the reusable runtime-owned
-  process profile and coding-loop tool-set registration work.
+- User reviews `specs/2026-05-23-event-first-interactive-cli.md`. If approved,
+  the next lease should use `superpowers:writing-plans` to create a scoped
+  implementation plan for the Event-first interactive CLI.
 
 ## Scope For Next Session
 
 Allowed edits:
 
-- Follow-up fixes only if provider validation exposes a problem.
-- Status updates tied directly to this lease.
+- Implementation plan for the event-first CLI after user approval.
+- Rust/CLI/test files named by that implementation plan.
+- Continuity file updates.
 
 Forbidden edits:
 
 - Private raw docs.
 - Real credentials.
-- Broad roadmap rewrites.
-- Full autonomous coding agent, Python SDK, graph memory, or live judgment
-  harness.
+- `.superpowers/`, `.merry/`, `docs/`, or `merry-raw-docs/` content.
+- Full-screen TUI before event-first CLI usage evidence.
+- Policy taxonomy as the primary deliverable unless it directly blocks the
+  interactive CLI acceptance test.
 
 Do not reconsider:
 
-- Policy taxonomy is support work, not the current P0 deliverable.
+- The next user-facing proof gap is event-first visibility into the runtime
+  loop, not more invisible architecture.
 - Default tests remain deterministic/offline; live provider and bwrap smoke are
   opt-in.
 
@@ -136,7 +145,7 @@ Status: committed
 
 Message:
 
-- project-continuity: add openai user agent
+- project-continuity: design event first cli
 
 No-commit reason:
 

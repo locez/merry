@@ -120,3 +120,40 @@ metadata can be added later only if there is a concrete provider/debugging need.
 Reversible:
 Yes. The header value can be made configurable later without changing runtime
 state or the provider trait boundary.
+
+## 2026-05-23 - Event-First CLI Before TUI
+
+Decision:
+The next user-facing milestone is a line-oriented event-first interactive CLI,
+specified in `specs/2026-05-23-event-first-interactive-cli.md`, not a full TUI.
+The first command should expose the sandboxed coding-loop timeline to a human
+operator and keep exact `RuntimeEvent` JSONL capture available.
+
+Reason:
+The live coding-loop smoke has proven that tool calling works, but its success
+path still collapses the runtime's evidence into `ok`. The user needs to see
+what ran, which tools were requested, which artifacts were recorded, and how the
+loop completed so real usage can expose product gaps. A TUI is likely useful
+later, but it would add terminal layout/event-loop complexity before the project
+knows which views matter.
+
+Evidence:
+`Runtime::step` and `Runtime::run_agent_loop` already emit session, step, tool,
+artifact, resolution, completion, failure, and cancellation events. The live
+smoke has passed in the user's trusted configured environment. Ratatui and
+Crossterm are viable Rust TUI building blocks, but the current gap is
+observability, not full-screen interaction.
+
+Tradeoff:
+This keeps CLI code as the first UI owner for one more milestone. The benefit is
+fast real-use feedback and deterministic renderer tests; the cost is that
+runtime-owned process profiles and richer tool-set registration wait behind one
+small usability slice.
+
+Reversible:
+Yes. Once event-first CLI usage shows the needed panes and interactions, the
+renderer/event mapping can feed a Ratatui-based TUI or a different upper layer.
+
+Follow-up:
+User reviews the event-first CLI spec. If approved, create an implementation
+plan before writing code.
