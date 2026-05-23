@@ -25,6 +25,7 @@ merry-llm = { path = "../merry-llm", features = ["test-utils"] }
 schemars.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+tracing-subscriber.workspace = true
 
 [lints]
 workspace = true

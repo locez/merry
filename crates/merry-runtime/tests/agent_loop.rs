@@ -21,9 +21,69 @@ use merry_runtime::{
 };
 use schemars::Schema;
 use serde_json::{Map, Value, json};
-use std::sync::{Arc, Mutex};
+use std::{
+    future::Future,
+    sync::{Arc, Mutex, OnceLock},
+};
 use tokio::sync::{Mutex as AsyncMutex, oneshot};
 use tokio_util::sync::CancellationToken;
+
+fn trace_output_buffer() -> &'static Arc<Mutex<Vec<u8>>> {
+    #[derive(Clone)]
+    struct Buffer(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Buffer {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("buffer mutex should not be poisoned")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    static TRACE_OUTPUT: OnceLock<Arc<Mutex<Vec<u8>>>> = OnceLock::new();
+    TRACE_OUTPUT.get_or_init(|| {
+        use tracing_subscriber::{fmt, prelude::*};
+
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let writer_bytes = Arc::clone(&bytes);
+        let subscriber = tracing_subscriber::registry().with(
+            fmt::layer()
+                .json()
+                .with_writer(move || Buffer(Arc::clone(&writer_bytes))),
+        );
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("test tracing subscriber should install once");
+        bytes
+    })
+}
+
+async fn capture_traces_for<F, R>(trace_marker: &str, future: F) -> (R, String)
+where
+    F: Future<Output = R>,
+{
+    let bytes = Arc::clone(trace_output_buffer());
+    let start = bytes
+        .lock()
+        .expect("buffer mutex should not be poisoned")
+        .len();
+    let result = future.await;
+    let text = {
+        let guard = bytes.lock().expect("buffer mutex should not be poisoned");
+        String::from_utf8(guard[start..].to_vec()).expect("trace output should be UTF-8")
+    };
+    let text = text
+        .lines()
+        .filter(|line| line.contains(trace_marker))
+        .collect::<Vec<_>>()
+        .join("\n");
+    (result, text)
+}
 
 fn session_id(value: &str) -> SessionId {
     SessionId::new(value).expect("valid session id")
@@ -839,6 +899,61 @@ async fn agent_loop_process_command_tool_executes_and_continues() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn agent_loop_traces_loop_steps_tool_process_and_terminal_status() {
+    let provider = ScriptedModelProvider::new(vec![
+        vec![Ok(completed_tool_call_event(
+            model_tool_call_with_arguments(
+                "call-rustc-version",
+                "run_process",
+                json!({ "argv": ["rustc", "--version"] }),
+            ),
+        ))],
+        vec![Ok(completed_text_event("final after process"))],
+    ]);
+    let runner = RecordingProcessRunner::succeeding("rustc 1.85.0\n");
+    let runtime = Runtime::builder(session_id("agent-loop-tracing"))
+        .register_tool(
+            process_command_tool(
+                ToolName::new("run_process").expect("valid tool name"),
+                "Run a local process from argv through runtime policy",
+            )
+            .expect("process command tool should build"),
+        )
+        .model_provider(Arc::new(provider), model_name())
+        .allow_low_risk_process_actions(Arc::new(runner))
+        .build()
+        .expect("runtime should build");
+
+    let (result, logs) = capture_traces_for(
+        "agent-loop-tracing",
+        runtime.run_agent_loop(
+            StepInput::user_text("Check rustc version.").expect("valid step input"),
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::new(8).expect("valid config"),
+        ),
+    )
+    .await;
+
+    let result = result.expect("agent loop should run");
+    assert_eq!(result.status(), &AgentLoopStatus::Completed);
+    assert!(logs.contains("\"event\":\"runtime.loop.start\""));
+    assert!(logs.contains("\"event\":\"runtime.step.start\""));
+    assert!(logs.contains("\"event\":\"runtime.tool.pending\""));
+    assert!(logs.contains("\"event\":\"runtime.tool.execute.start\""));
+    assert!(logs.contains("\"event\":\"runtime.process.execute.start\""));
+    assert!(logs.contains("\"event\":\"runtime.process.execute.finish\""));
+    assert!(logs.contains("\"event\":\"runtime.tool.execute.finish\""));
+    assert!(logs.contains("\"event\":\"runtime.loop.finish\""));
+    assert!(logs.contains("\"status\":\"completed\""));
+    assert!(logs.contains("\"tool_name\":\"run_process\""));
+    assert!(logs.contains("\"tool_call_id\":\"call-rustc-version\""));
+    assert!(logs.contains("\"argv\":\"[\\\"rustc\\\", \\\"--version\\\"]\""));
+    assert!(logs.contains("\"stdout_bytes\":13"));
+    assert!(logs.contains("\"stderr_bytes\":0"));
+    assert!(!logs.contains("rustc 1.85.0"));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn agent_loop_process_command_tool_executes_rg_files_and_continues() {
     let provider = ScriptedModelProvider::new(vec![
         vec![Ok(completed_tool_call_event(
@@ -1213,7 +1328,16 @@ async fn denied_registered_tool_resolves_failed_and_agent_loop_continues_once() 
         ToolActionKind::WorkspaceWrite,
     );
 
-    let result = run_default_loop(&runtime, "Call denied tool.").await;
+    let (result, logs) = capture_traces_for(
+        "agent-loop-policy-denied",
+        runtime.run_agent_loop(
+            StepInput::user_text("Call denied tool.").expect("valid step input"),
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default(),
+        ),
+    )
+    .await;
+    let result = result.expect("agent loop should complete after denied tool");
 
     assert_eq!(result.status(), &AgentLoopStatus::Completed);
     assert_eq!(
@@ -1261,6 +1385,14 @@ async fn denied_registered_tool_resolves_failed_and_agent_loop_continues_once() 
         .expect("policy denial continuation should carry JSON content");
     let value: Value = serde_json::from_str(content).expect("denial JSON should parse");
     assert_sanitized_policy_denial_json(&value, "search_notes");
+    assert_eq!(
+        logs.matches("\"event\":\"runtime.tool.execute.finish\"")
+            .count(),
+        1
+    );
+    assert!(logs.contains("\"status\":\"denied\""));
+    assert!(logs.contains("\"diagnostic_code\":\"action_policy_denied\""));
+    assert!(!logs.contains("\"status\":\"failed\""));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1271,14 +1403,16 @@ async fn executor_infrastructure_error_preserves_events_and_pending_call() {
     let executor = ScriptedToolExecutor::infrastructure_error("temporary executor outage");
     let runtime = runtime_with_tool("agent-loop-infra-error", provider, executor);
 
-    let err = runtime
-        .run_agent_loop(
+    let (result, logs) = capture_traces_for(
+        "agent-loop-infra-error",
+        runtime.run_agent_loop(
             StepInput::user_text("Search notes.").expect("valid step input"),
             StepContext::new(CancellationToken::new()),
             AgentLoopConfig::default(),
-        )
-        .await
-        .expect_err("infrastructure error should stop the loop as a method error");
+        ),
+    )
+    .await;
+    let err = result.expect_err("infrastructure error should stop the loop as a method error");
 
     assert_eq!(
         event_kind_names(err.events()),
@@ -1290,6 +1424,9 @@ async fn executor_infrastructure_error_preserves_events_and_pending_call() {
         RuntimeError::ToolExecutionFailed { call_id, .. } if call_id == pending.id()
     ));
     assert_eq!(runtime.pending_tool_calls().await, vec![pending]);
+    assert!(logs.contains("\"event\":\"runtime.loop.finish\""));
+    assert!(logs.contains("\"status\":\"error\""));
+    assert!(logs.contains("\"diagnostic_code\":\"tool_execution_failed\""));
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -34,7 +34,7 @@ use crate::{
 use futures_util::StreamExt;
 use merry_core::{
     ArtifactId, ArtifactRef, CoreError, ErrorInfo, EvidenceLocator, EvidenceRef, PendingToolCall,
-    RuntimeEvent, SessionId, ToolCallArguments, ToolCallId, ToolCallResult,
+    RuntimeEvent, RuntimeEventKind, SessionId, ToolCallArguments, ToolCallId, ToolCallResult,
 };
 use merry_llm::{
     FinishReason, GenerationConfig, ModelError, ModelEvent, ModelName, ModelOutput, ModelProvider,
@@ -118,6 +118,10 @@ impl Runtime {
                 session_id: self.inner.session_id.clone(),
             }
         })
+    }
+
+    pub(crate) fn session_id(&self) -> &SessionId {
+        &self.inner.session_id
     }
 
     pub(crate) fn step_with_active_permit(
@@ -442,13 +446,15 @@ impl Runtime {
                     let denied_policy_decision = policy_decision.with_risk_tier(
                         classify_tool_action_risk(registered_tool.action_kind(), Some(&proposal)),
                     );
-                    return session.submit_denied_tool_action(
+                    let events = session.submit_denied_tool_action(
                         &pending,
                         &denied_policy_decision,
                         Some(proposal),
                         content,
                         diagnostic,
-                    );
+                    )?;
+                    trace_denied_tool_execution(self.inner.session_id.as_str(), &pending, &events);
+                    return Ok(events);
                 }
             } else {
                 let outcome = denied_tool_action_outcome(&pending);
@@ -470,13 +476,15 @@ impl Runtime {
                 let denied_policy_decision = policy_decision.with_risk_tier(
                     classify_tool_action_risk(registered_tool.action_kind(), None),
                 );
-                return session.submit_denied_tool_action(
+                let events = session.submit_denied_tool_action(
                     &pending,
                     &denied_policy_decision,
                     None,
                     content,
                     diagnostic,
-                );
+                )?;
+                trace_denied_tool_execution(self.inner.session_id.as_str(), &pending, &events);
+                return Ok(events);
             }
         }
 
@@ -631,6 +639,17 @@ impl Runtime {
         }
 
         let runner_context = ProcessRunnerContext::new(context.cancellation_token().clone());
+        tracing::info!(
+            event = "runtime.process.execute.start",
+            session_id = self.inner.session_id.as_str(),
+            tool_call_id = pending.id().as_str(),
+            tool_name = pending.name().as_str(),
+            argv = ?intent.argv(),
+            cwd = intent.cwd().unwrap_or("."),
+            stdout_limit_bytes = intent.stdout_limit_bytes(),
+            stderr_limit_bytes = intent.stderr_limit_bytes(),
+            "runtime process execution start"
+        );
         let output = tokio::select! {
             biased;
             () = context.cancellation_token().cancelled() => {
@@ -673,6 +692,18 @@ impl Runtime {
                 call_id: pending.id().clone(),
                 message: format!("process execution evidence did not match intent: {source}"),
             })?;
+        tracing::info!(
+            event = "runtime.process.execute.finish",
+            session_id = self.inner.session_id.as_str(),
+            tool_call_id = pending.id().as_str(),
+            tool_name = pending.name().as_str(),
+            status = %process_status_label(output.status()),
+            stdout_bytes = output.stdout_bytes(),
+            stderr_bytes = output.stderr_bytes(),
+            stdout_truncated = output.stdout_truncated(),
+            stderr_truncated = output.stderr_truncated(),
+            "runtime process execution finish"
+        );
         let content = process_output_artifact_content(&intent, &output);
         let status = if output.ok() {
             merry_core::ToolCallResultStatus::Succeeded
@@ -867,6 +898,35 @@ fn denied_tool_action_outcome(pending: &PendingToolCall) -> crate::ToolExecution
     });
 
     crate::ToolExecutionOutcome::failed_json(payload.to_string(), diagnostic)
+}
+
+fn trace_denied_tool_execution(
+    session_id: &str,
+    pending: &PendingToolCall,
+    events: &[RuntimeEvent],
+) {
+    tracing::info!(
+        event = "runtime.tool.execute.finish",
+        session_id,
+        tool_call_id = pending.id().as_str(),
+        tool_name = pending.name().as_str(),
+        status = "denied",
+        artifact_id = tool_resolution_artifact_id(events),
+        diagnostic_code = DIAGNOSTIC_TOOL_ACTION_POLICY_DENIED,
+        "runtime tool execution denied"
+    );
+}
+
+fn tool_resolution_artifact_id(events: &[RuntimeEvent]) -> String {
+    events
+        .iter()
+        .find_map(|event| match &event.kind {
+            RuntimeEventKind::ToolCallResolved { result } => {
+                Some(result.artifact().id().as_str().to_owned())
+            }
+            _ => None,
+        })
+        .unwrap_or_default()
 }
 
 fn process_output_artifact_content(
@@ -2147,14 +2207,72 @@ mod tests {
     use schemars::Schema;
     use serde_json::json;
     use std::{
+        future::Future,
         num::NonZeroUsize,
         sync::{
-            Arc, Mutex as StdMutex,
+            Arc, Mutex as StdMutex, OnceLock,
             atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         },
     };
     use tokio::sync::{Mutex, mpsc, oneshot};
     use tokio_util::sync::CancellationToken;
+
+    fn trace_output_buffer() -> &'static Arc<StdMutex<Vec<u8>>> {
+        #[derive(Clone)]
+        struct Buffer(Arc<StdMutex<Vec<u8>>>);
+
+        impl std::io::Write for Buffer {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .expect("buffer mutex should not be poisoned")
+                    .extend_from_slice(buf);
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        static TRACE_OUTPUT: OnceLock<Arc<StdMutex<Vec<u8>>>> = OnceLock::new();
+        TRACE_OUTPUT.get_or_init(|| {
+            use tracing_subscriber::{fmt, prelude::*};
+
+            let bytes = Arc::new(StdMutex::new(Vec::new()));
+            let writer_bytes = Arc::clone(&bytes);
+            let subscriber = tracing_subscriber::registry().with(
+                fmt::layer()
+                    .json()
+                    .with_writer(move || Buffer(Arc::clone(&writer_bytes))),
+            );
+            tracing::subscriber::set_global_default(subscriber)
+                .expect("test tracing subscriber should install once");
+            bytes
+        })
+    }
+
+    async fn capture_traces_for<F, R>(trace_marker: &str, future: F) -> (R, String)
+    where
+        F: Future<Output = R>,
+    {
+        let bytes = Arc::clone(trace_output_buffer());
+        let start = bytes
+            .lock()
+            .expect("buffer mutex should not be poisoned")
+            .len();
+        let result = future.await;
+        let text = {
+            let guard = bytes.lock().expect("buffer mutex should not be poisoned");
+            String::from_utf8(guard[start..].to_vec()).expect("trace output should be UTF-8")
+        };
+        let text = text
+            .lines()
+            .filter(|line| line.contains(trace_marker))
+            .collect::<Vec<_>>()
+            .join("\n");
+        (result, text)
+    }
 
     fn model_configs_with_primary(provider: RecordingModelProvider) -> RuntimeModelConfigs {
         let mut configs = RuntimeModelConfigs::default();
@@ -6181,6 +6299,54 @@ mod tests {
             .expect("denied audit should include policy");
         assert_eq!(policy.risk_tier(), ActionRiskTier::Forbidden);
         assert_eq!(policy.disposition(), ActionPolicyDisposition::Deny);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn denied_process_action_traces_denied_tool_finish_without_process_execution() {
+        let executor = ProcessProposingToolExecutor::with_argv(["sh", "-c", "echo unsafe"]);
+        let runner = FakeProcessRunner::succeeding();
+        let tool = RegisteredTool::new(
+            policy_tool_spec("policy_command_dangerous_trace"),
+            Arc::new(executor.clone()),
+            ToolActionKind::CommandExec,
+        )
+        .with_action_proposal();
+        let (runtime, pending) = register_policy_pending_registered_tool_with_builder(
+            "runtime-policy-command-exec-dangerous-trace",
+            "policy_command_dangerous_trace",
+            "call-command-exec-dangerous-trace",
+            tool,
+            |builder| {
+                builder
+                    .allow_low_risk_process_actions(Arc::new(runner.clone()))
+                    .allow_accepted_local_workspace_process_actions(
+                        accepted_local_workspace_process_admission(),
+                        Arc::new(runner.clone()),
+                    )
+                    .build()
+            },
+        )
+        .await;
+
+        let (events, logs) = capture_traces_for(
+            "runtime-policy-command-exec-dangerous-trace",
+            runtime.execute_tool_call(pending.id(), ToolExecutionContext::default()),
+        )
+        .await;
+        let events = events.expect("dangerous process proposal should be denied durably");
+
+        assert_eq!(
+            event_kind_names_for_tool_execution(&events),
+            ["ArtifactRecorded", "ToolCallResolved"]
+        );
+        assert_eq!(runner.call_count(), 0);
+        assert!(logs.contains("\"event\":\"runtime.tool.execute.finish\""));
+        assert!(logs.contains("\"status\":\"denied\""));
+        assert!(logs.contains("\"diagnostic_code\":\"action_policy_denied\""));
+        assert!(logs.contains("\"tool_name\":\"policy_command_dangerous_trace\""));
+        assert!(logs.contains("\"tool_call_id\":\"call-command-exec-dangerous-trace\""));
+        assert!(!logs.contains("runtime.process.execute.start"));
+        assert!(!logs.contains("runtime.process.execute.finish"));
     }
 
     #[tokio::test(flavor = "current_thread")]

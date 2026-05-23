@@ -8,7 +8,9 @@ use crate::{
     Runtime, RuntimeError, RuntimeEventStream, StepContext, StepInput, ToolExecutionContext,
 };
 use futures_util::StreamExt;
-use merry_core::{ErrorInfo, PendingToolCall, RuntimeEvent, RuntimeEventKind};
+use merry_core::{
+    ErrorInfo, PendingToolCall, RuntimeEvent, RuntimeEventKind, ToolCallResultStatus,
+};
 use std::num::NonZeroUsize;
 use thiserror::Error;
 
@@ -212,16 +214,33 @@ impl Runtime {
         let mut events = Vec::new();
         let mut steps_run = 0;
 
+        tracing::info!(
+            event = "runtime.loop.start",
+            session_id = self.session_id().as_str(),
+            max_steps = config.max_steps(),
+            "runtime loop start"
+        );
+
         loop {
             let input = next_input
                 .take()
                 .expect("agent loop always installs the next step input before continuing");
+            let step_index = steps_run + 1;
+            tracing::info!(
+                event = "runtime.step.start",
+                session_id = self.session_id().as_str(),
+                step_index,
+                "runtime loop step start"
+            );
             let step_context = StepContext::new(loop_token.clone())
                 .with_generation_config(generation_config.clone());
             let stream =
                 match self.step_with_active_permit(input, step_context, loop_permit.clone()) {
                     Ok(stream) => stream,
-                    Err(source) => return Err(AgentLoopError::new(events, source)),
+                    Err(source) => {
+                        trace_loop_error(self.session_id().as_str(), steps_run, &source);
+                        return Err(AgentLoopError::new(events, source));
+                    }
                 };
             steps_run += 1;
 
@@ -231,6 +250,7 @@ impl Runtime {
 
             match outcome {
                 StepOutcome::Completed => {
+                    trace_loop_finish(self.session_id().as_str(), "completed", steps_run, None);
                     return Ok(AgentLoopResult::new(
                         AgentLoopStatus::Completed,
                         events,
@@ -238,6 +258,12 @@ impl Runtime {
                     ));
                 }
                 StepOutcome::Failed(diagnostic) => {
+                    trace_loop_finish(
+                        self.session_id().as_str(),
+                        "failed",
+                        steps_run,
+                        Some(diagnostic.code()),
+                    );
                     return Ok(AgentLoopResult::new(
                         AgentLoopStatus::Failed { diagnostic },
                         events,
@@ -245,6 +271,12 @@ impl Runtime {
                     ));
                 }
                 StepOutcome::Cancelled(diagnostic) => {
+                    trace_loop_finish(
+                        self.session_id().as_str(),
+                        "cancelled",
+                        steps_run,
+                        Some(diagnostic.code()),
+                    );
                     return Ok(AgentLoopResult::new(
                         AgentLoopStatus::Cancelled { diagnostic },
                         events,
@@ -252,6 +284,12 @@ impl Runtime {
                     ));
                 }
                 StepOutcome::Blocked(reason) => {
+                    trace_loop_finish(
+                        self.session_id().as_str(),
+                        "blocked",
+                        steps_run,
+                        Some(blocked_reason_code(&reason)),
+                    );
                     return Ok(AgentLoopResult::new(
                         AgentLoopStatus::Blocked { reason },
                         events,
@@ -260,6 +298,12 @@ impl Runtime {
                 }
                 StepOutcome::Pending(call) => {
                     if steps_run >= config.max_steps() {
+                        trace_loop_finish(
+                            self.session_id().as_str(),
+                            "blocked",
+                            steps_run,
+                            Some("max_steps_reached"),
+                        );
                         return Ok(AgentLoopResult::new(
                             AgentLoopStatus::Blocked {
                                 reason: AgentLoopBlockedReason::MaxStepsReached {
@@ -271,6 +315,22 @@ impl Runtime {
                         ));
                     }
 
+                    tracing::info!(
+                        event = "runtime.tool.pending",
+                        session_id = self.session_id().as_str(),
+                        step_index = steps_run,
+                        tool_call_id = call.id().as_str(),
+                        tool_name = call.name().as_str(),
+                        "runtime loop saw pending tool"
+                    );
+                    tracing::info!(
+                        event = "runtime.tool.execute.start",
+                        session_id = self.session_id().as_str(),
+                        step_index = steps_run,
+                        tool_call_id = call.id().as_str(),
+                        tool_name = call.name().as_str(),
+                        "runtime loop tool execution start"
+                    );
                     match self
                         .execute_tool_call_with_active_permit(
                             call.id(),
@@ -279,8 +339,30 @@ impl Runtime {
                         )
                         .await
                     {
-                        Ok(execution_events) => events.extend(execution_events),
+                        Ok(execution_events) => {
+                            if !tool_resolution_is_policy_denied(&execution_events) {
+                                tracing::info!(
+                                    event = "runtime.tool.execute.finish",
+                                    session_id = self.session_id().as_str(),
+                                    step_index = steps_run,
+                                    tool_call_id = call.id().as_str(),
+                                    tool_name = call.name().as_str(),
+                                    status = tool_resolution_status(&execution_events),
+                                    artifact_id = tool_resolution_artifact_id(&execution_events),
+                                    diagnostic_code =
+                                        tool_resolution_diagnostic_code(&execution_events),
+                                    "runtime loop tool execution finish"
+                                );
+                            }
+                            events.extend(execution_events);
+                        }
                         Err(RuntimeError::ToolExecutionCancelled { call_id, .. }) => {
+                            trace_loop_finish(
+                                self.session_id().as_str(),
+                                "cancelled",
+                                steps_run,
+                                Some("tool_execution_cancelled"),
+                            );
                             return Ok(AgentLoopResult::new(
                                 AgentLoopStatus::Cancelled {
                                     diagnostic: tool_execution_cancelled_diagnostic(&call_id),
@@ -289,17 +371,48 @@ impl Runtime {
                                 steps_run,
                             ));
                         }
-                        Err(source) => return Err(AgentLoopError::new(events, source)),
+                        Err(source) => {
+                            trace_loop_error(self.session_id().as_str(), steps_run, &source);
+                            return Err(AgentLoopError::new(events, source));
+                        }
                     }
 
                     next_input = Some(match continuation_step_input(&original_task) {
                         Ok(input) => input,
-                        Err(source) => return Err(AgentLoopError::new(events, source)),
+                        Err(source) => {
+                            trace_loop_error(self.session_id().as_str(), steps_run, &source);
+                            return Err(AgentLoopError::new(events, source));
+                        }
                     });
                 }
             }
         }
     }
+}
+
+fn trace_loop_finish(
+    session_id: &str,
+    status: &'static str,
+    steps_run: usize,
+    diagnostic_code: Option<&str>,
+) {
+    tracing::info!(
+        event = "runtime.loop.finish",
+        session_id,
+        status,
+        steps_run,
+        diagnostic_code,
+        "runtime loop finish"
+    );
+}
+
+fn trace_loop_error(session_id: &str, steps_run: usize, source: &RuntimeError) {
+    trace_loop_finish(
+        session_id,
+        "error",
+        steps_run,
+        Some(runtime_error_code(source)),
+    );
 }
 
 async fn collect_step_events(stream: RuntimeEventStream) -> Vec<RuntimeEvent> {
@@ -318,6 +431,77 @@ fn tool_execution_cancelled_diagnostic(call_id: &merry_core::ToolCallId) -> Erro
         &format!("tool call {call_id} execution was cancelled"),
     )
     .expect("static code and runtime-owned tool call id form a valid diagnostic")
+}
+
+fn blocked_reason_code(reason: &AgentLoopBlockedReason) -> &'static str {
+    match reason {
+        AgentLoopBlockedReason::MaxStepsReached { .. } => "max_steps_reached",
+        AgentLoopBlockedReason::MultiplePendingToolCalls { .. } => "multiple_pending_tool_calls",
+        AgentLoopBlockedReason::StepCompletedWithPendingToolCall { .. } => {
+            "step_completed_with_pending_tool_call"
+        }
+        AgentLoopBlockedReason::StepEndedWithoutTerminalEvent => {
+            "step_ended_without_terminal_event"
+        }
+    }
+}
+
+fn runtime_error_code(error: &RuntimeError) -> &'static str {
+    match error {
+        RuntimeError::StepAlreadyActive { .. } => "step_already_active",
+        RuntimeError::InvalidStepInput { .. } => "invalid_step_input",
+        RuntimeError::ReservedArtifactId { .. } => "reserved_artifact_id",
+        RuntimeError::UnknownToolCall { .. } => "unknown_tool_call",
+        RuntimeError::ToolCallAlreadyResolved { .. } => "tool_call_already_resolved",
+        RuntimeError::DuplicateToolRegistration { .. } => "duplicate_tool_registration",
+        RuntimeError::ToolExecutionCancelled { .. } => "tool_execution_cancelled",
+        RuntimeError::ToolExecutionFailed { .. } => "tool_execution_failed",
+        RuntimeError::MissingActionExecutionEvidence { .. } => "missing_action_execution_evidence",
+        RuntimeError::MutatingActionCommitLifecycleRequired { .. } => {
+            "mutating_action_commit_lifecycle_required"
+        }
+        RuntimeError::UnsupportedToolResultContent { .. } => "unsupported_tool_result_content",
+        RuntimeError::Core { .. } => "core_error",
+        RuntimeError::Artifact { .. } => "artifact_error",
+    }
+}
+
+fn tool_resolution_status(events: &[RuntimeEvent]) -> &'static str {
+    events
+        .iter()
+        .find_map(|event| match &event.kind {
+            RuntimeEventKind::ToolCallResolved { result } => Some(match result.status() {
+                ToolCallResultStatus::Succeeded => "succeeded",
+                ToolCallResultStatus::Failed => "failed",
+            }),
+            _ => None,
+        })
+        .unwrap_or("unresolved")
+}
+
+fn tool_resolution_artifact_id(events: &[RuntimeEvent]) -> String {
+    events
+        .iter()
+        .find_map(|event| match &event.kind {
+            RuntimeEventKind::ToolCallResolved { result } => {
+                Some(result.artifact().id().as_str().to_owned())
+            }
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+fn tool_resolution_diagnostic_code(events: &[RuntimeEvent]) -> Option<&str> {
+    events.iter().find_map(|event| match &event.kind {
+        RuntimeEventKind::ToolCallResolved { result } => {
+            result.diagnostic().map(merry_core::ErrorInfo::code)
+        }
+        _ => None,
+    })
+}
+
+fn tool_resolution_is_policy_denied(events: &[RuntimeEvent]) -> bool {
+    tool_resolution_diagnostic_code(events) == Some("action_policy_denied")
 }
 
 enum StepOutcome {
