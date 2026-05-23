@@ -718,8 +718,12 @@ impl Runtime {
             .map_err(Into::into)
     }
 
-    #[cfg(test)]
-    pub(crate) async fn read_artifact_content(
+    /// Reads exact artifact content already owned by this runtime session.
+    ///
+    /// This is an inspection facade over session-owned artifact state. It does
+    /// not mutate runtime state, advance event sequence, or expose provider
+    /// wire formats.
+    pub async fn read_artifact_content(
         &self,
         artifact_id: &ArtifactId,
     ) -> Result<ArtifactContent, RuntimeError> {

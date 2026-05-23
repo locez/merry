@@ -3,8 +3,8 @@
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use futures_util::{StreamExt, stream};
 use merry_core::{
-    ErrorInfo, PendingToolCall, ProviderName, RuntimeEvent, RuntimeEventKind, SessionId,
-    ToolInputSchema, ToolName, ToolSpec,
+    PendingToolCall, ProviderName, RuntimeEvent, RuntimeEventKind, SessionId, ToolInputSchema,
+    ToolName, ToolSpec,
 };
 use merry_llm::{
     FinishReason, GenerationConfig, ModelCapabilities, ModelError, ModelEvent, ModelEventStream,
@@ -13,12 +13,11 @@ use merry_llm::{
 };
 use merry_provider_openai::{OpenAiProvider, OpenAiProviderConfig};
 use merry_runtime::{
-    AcceptedLocalWorkspaceProcessAdmission, ActionProposal, ActionProposalEvidence,
-    MAX_PROCESS_OUTPUT_LIMIT_BYTES, ProcessActionIntent, ProcessEnvPolicy, ProcessExitStatus,
-    ProcessRunner, ProcessRunnerContext, ProcessRunnerError, ProcessRunnerFuture,
-    ProcessRunnerOutput, RegisteredTool, Runtime, StepContext, StepInput, ToolActionKind,
-    ToolActionProposalFuture, ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome,
-    ToolExecutor, ToolExecutorFuture,
+    AcceptedLocalWorkspaceProcessAdmission, ArtifactContent, MAX_PROCESS_OUTPUT_LIMIT_BYTES,
+    ProcessActionIntent, ProcessEnvPolicy, ProcessExitStatus, ProcessRunner, ProcessRunnerContext,
+    ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput, RegisteredTool, Runtime,
+    StepContext, StepInput, ToolExecutionContext, ToolExecutionOutcome, ToolExecutor,
+    ToolExecutorFuture, process_command_tool,
 };
 use std::{
     env,
@@ -121,6 +120,12 @@ struct ShellArgs {
         help = "Accept local workspace process risk when running inside Merry's sandbox handoff"
     )]
     accept_local_workspace_process_risk: bool,
+
+    #[arg(
+        long = "events-jsonl",
+        help = "Print runtime lifecycle events as JSONL instead of command stdout/stderr"
+    )]
+    events_jsonl: bool,
 
     #[arg(
         required = true,
@@ -663,6 +668,7 @@ async fn run_shell(
         intent,
         admission,
         Arc::new(TokioProcessRunner),
+        args.events_jsonl,
         tokio::io::stdout(),
     )
     .await
@@ -679,6 +685,7 @@ async fn run_shell_to_writer<W>(
     intent: ProcessActionIntent,
     admission: Option<AcceptedLocalWorkspaceProcessAdmission>,
     runner: Arc<dyn ProcessRunner>,
+    events_jsonl: bool,
     writer: W,
 ) -> Result<(), CliError>
 where
@@ -689,8 +696,11 @@ where
     let input = StepInput::user_text(SHELL_STEP_INPUT).map_err(unexpected)?;
 
     let mut writer = BufWriter::new(writer);
-    let events =
-        write_runtime_step_events_to(&runtime, input, StepContext::default(), &mut writer).await?;
+    let events = if events_jsonl {
+        write_runtime_step_events_to(&runtime, input, StepContext::default(), &mut writer).await?
+    } else {
+        collect_runtime_step_events(&runtime, input, StepContext::default()).await?
+    };
     let Some(pending) = first_pending_tool_call(&events) else {
         writer.flush().await.map_err(stdout_error)?;
         return Err(CliError::Unexpected(format!(
@@ -706,14 +716,15 @@ where
         )));
     }
 
-    write_runtime_events(
-        runtime
-            .execute_tool_call(pending.id(), ToolExecutionContext::default())
-            .await
-            .map_err(unexpected)?,
-        &mut writer,
-    )
-    .await?;
+    let execution_events = runtime
+        .execute_tool_call(pending.id(), ToolExecutionContext::default())
+        .await
+        .map_err(unexpected)?;
+    if events_jsonl {
+        write_runtime_events(execution_events.clone(), &mut writer).await?;
+    } else {
+        write_shell_process_output(&runtime, &execution_events, &mut writer).await?;
+    }
     writer.flush().await.map_err(stdout_error)
 }
 
@@ -723,8 +734,12 @@ fn build_shell_runtime(
     admission: Option<AcceptedLocalWorkspaceProcessAdmission>,
     runner: Arc<dyn ProcessRunner>,
 ) -> Result<Runtime, CliError> {
-    let shell_tool = shell_command_tool(intent)?;
-    let provider = ShellToolCallProvider::new()?;
+    let shell_tool = process_command_tool(
+        ToolName::new(SHELL_TOOL_NAME).map_err(unexpected)?,
+        "Run the exact CLI argv as a Merry process action.",
+    )
+    .map_err(unexpected)?;
+    let provider = ShellToolCallProvider::new(&intent)?;
     let mut builder = Runtime::builder(session_id)
         .register_tool(shell_tool)
         .allow_low_risk_process_actions(Arc::clone(&runner))
@@ -882,14 +897,23 @@ async fn write_runtime_step_events_to<W>(
 where
     W: AsyncWrite + Unpin,
 {
+    let events = collect_runtime_step_events(runtime, input, context).await?;
+    write_runtime_events(events.clone(), writer).await?;
+    Ok(events)
+}
+
+async fn collect_runtime_step_events(
+    runtime: &Runtime,
+    input: StepInput,
+    context: StepContext,
+) -> Result<Vec<RuntimeEvent>, CliError> {
     let mut events = runtime.step(input, context).map_err(unexpected)?;
-    let mut written = Vec::new();
+    let mut collected = Vec::new();
     while let Some(event) = events.next().await {
-        write_runtime_event(&event, writer).await?;
-        written.push(event);
+        collected.push(event);
     }
 
-    Ok(written)
+    Ok(collected)
 }
 
 async fn write_runtime_events<W>(events: Vec<RuntimeEvent>, writer: &mut W) -> Result<(), CliError>
@@ -900,6 +924,56 @@ where
         write_runtime_event(&event, writer).await?;
     }
     Ok(())
+}
+
+async fn write_shell_process_output<W>(
+    runtime: &Runtime,
+    events: &[RuntimeEvent],
+    writer: &mut W,
+) -> Result<(), CliError>
+where
+    W: AsyncWrite + Unpin,
+{
+    let result = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            RuntimeEventKind::ToolCallResolved { result } => Some(result),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            CliError::Unexpected("shell command did not resolve a tool call".to_owned())
+        })?;
+    let content = runtime
+        .read_artifact_content(result.artifact().id())
+        .await
+        .map_err(unexpected)?;
+    let ArtifactContent::Json(content) = content else {
+        return Err(CliError::Unexpected(
+            "shell command result artifact was not JSON".to_owned(),
+        ));
+    };
+    let value = serde_json::from_str::<serde_json::Value>(&content).map_err(unexpected)?;
+    let stdout = value
+        .pointer("/stdout/text")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            CliError::Unexpected("shell command result missing stdout text".to_owned())
+        })?;
+    let stderr = value
+        .pointer("/stderr/text")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            CliError::Unexpected("shell command result missing stderr text".to_owned())
+        })?;
+
+    writer
+        .write_all(stdout.as_bytes())
+        .await
+        .map_err(stdout_error)?;
+    writer
+        .write_all(stderr.as_bytes())
+        .await
+        .map_err(stdout_error)
 }
 
 async fn write_runtime_event<W>(event: &RuntimeEvent, writer: &mut W) -> Result<(), CliError>
@@ -962,77 +1036,6 @@ impl ToolExecutor for DebugEchoExecutor {
     }
 }
 
-fn shell_command_tool(intent: ProcessActionIntent) -> Result<RegisteredTool, CliError> {
-    let schema = serde_json::from_value::<ToolInputSchema>(serde_json::json!({
-        "type": "object",
-        "additionalProperties": false
-    }))
-    .map_err(unexpected)?;
-    let spec = ToolSpec::new(
-        ToolName::new(SHELL_TOOL_NAME).map_err(unexpected)?,
-        "Propose the exact CLI argv as a Merry process action.",
-        schema,
-    )
-    .map_err(unexpected)?;
-
-    Ok(RegisteredTool::new(
-        spec,
-        Arc::new(ShellCommandExecutor { intent }),
-        ToolActionKind::CommandExec,
-    )
-    .with_action_proposal())
-}
-
-struct ShellCommandExecutor {
-    intent: ProcessActionIntent,
-}
-
-impl ToolExecutor for ShellCommandExecutor {
-    fn propose<'a>(
-        &'a self,
-        call: PendingToolCall,
-        _context: ToolExecutionContext,
-    ) -> ToolActionProposalFuture<'a> {
-        Box::pin(async move {
-            let proposal = ActionProposal::new(
-                &call,
-                ToolActionKind::CommandExec,
-                "shell command",
-                self.intent.summary(),
-                "Run proposed shell argv through the process action protocol.",
-                ActionProposalEvidence::ProcessAction(self.intent.clone()),
-            )
-            .map_err(|source| ToolExecutionError::infrastructure(source.to_string()))?;
-            Ok(Some(proposal))
-        })
-    }
-
-    fn execute<'a>(
-        &'a self,
-        _call: PendingToolCall,
-        _context: ToolExecutionContext,
-    ) -> ToolExecutorFuture<'a> {
-        Box::pin(async move {
-            let diagnostic = ErrorInfo::new(
-                "shell_generic_execute_reached",
-                "shell command reached generic executor instead of the process runner lane",
-            )
-            .expect("static shell diagnostic is valid");
-            let payload = serde_json::json!({
-                "ok": false,
-                "error": {
-                    "code": diagnostic.code(),
-                    "message": diagnostic.message()
-                }
-            });
-            Ok(ToolExecutionOutcome::failed_json(
-                payload.to_string(),
-                diagnostic,
-            ))
-        })
-    }
-}
-
 struct ShellToolCallProvider {
     name: ProviderName,
     capabilities: ModelCapabilities,
@@ -1040,7 +1043,13 @@ struct ShellToolCallProvider {
 }
 
 impl ShellToolCallProvider {
-    fn new() -> Result<Self, CliError> {
+    fn new(intent: &ProcessActionIntent) -> Result<Self, CliError> {
+        let mut arguments = serde_json::Map::new();
+        arguments.insert("argv".to_owned(), serde_json::json!(intent.argv()));
+        if let Some(cwd) = intent.cwd() {
+            arguments.insert("cwd".to_owned(), serde_json::Value::String(cwd.to_owned()));
+        }
+
         Ok(Self {
             name: ProviderName::new("merry-shell-cli-provider").map_err(unexpected)?,
             capabilities: ModelCapabilities::new(true, true, false, true, None, None)
@@ -1048,7 +1057,7 @@ impl ShellToolCallProvider {
             call: ModelToolCall::new(
                 ModelToolCallId::new(SHELL_TOOL_CALL_ID).map_err(unexpected)?,
                 ToolName::new(SHELL_TOOL_NAME).map_err(unexpected)?,
-                ToolArguments::new(Default::default()),
+                ToolArguments::new(arguments),
             ),
         })
     }
@@ -1797,9 +1806,15 @@ mod tests {
         let runner = FakeProcessRunner::succeeding("simulated cargo success\n");
         let mut output = Vec::new();
 
-        run_shell_to_writer(intent, admission, Arc::new(runner.clone()), &mut output)
-            .await
-            .unwrap_or_else(|_| panic!("accepted local workspace shell command should resolve"));
+        run_shell_to_writer(
+            intent,
+            admission,
+            Arc::new(runner.clone()),
+            false,
+            &mut output,
+        )
+        .await
+        .unwrap_or_else(|_| panic!("accepted local workspace shell command should resolve"));
 
         assert_eq!(runner.call_count(), 1);
         assert_eq!(
@@ -1807,14 +1822,7 @@ mod tests {
             vec![vec!["cargo", "test", "-p", "merry-runtime"]]
         );
         let text = String::from_utf8(output).expect("output should be utf-8");
-        assert!(
-            !text.contains("simulated cargo success"),
-            "process stdout should stay in the result artifact, not raw CLI stdout"
-        );
-        let events = parse_runtime_events(&text);
-        let resolved = resolved_tool_result(&events);
-        assert_eq!(resolved.status(), ToolCallResultStatus::Succeeded);
-        assert!(resolved.diagnostic().is_none());
+        assert_eq!(text, "simulated cargo success\n");
     }
 
     #[tokio::test]
@@ -1835,16 +1843,18 @@ mod tests {
         let runner = FakeProcessRunner::succeeding("bad\n");
         let mut output = Vec::new();
 
-        run_shell_to_writer(intent, admission, Arc::new(runner.clone()), &mut output)
-            .await
-            .unwrap_or_else(|_| panic!("forbidden command should resolve as a policy denial"));
+        run_shell_to_writer(
+            intent,
+            admission,
+            Arc::new(runner.clone()),
+            true,
+            &mut output,
+        )
+        .await
+        .unwrap_or_else(|_| panic!("forbidden command should resolve as a policy denial"));
 
         assert_eq!(runner.call_count(), 0);
         let text = String::from_utf8(output).expect("output should be utf-8");
-        assert!(
-            !text.contains("bad"),
-            "forbidden process output should not appear in CLI stdout"
-        );
         let events = parse_runtime_events(&text);
         let resolved = resolved_tool_result(&events);
         assert_eq!(resolved.status(), ToolCallResultStatus::Failed);

@@ -334,7 +334,6 @@ impl SessionState {
         self.unconsumed_tool_continuations.drain(..count);
     }
 
-    #[cfg(test)]
     pub(crate) fn read_artifact_content(
         &self,
         artifact_id: &ArtifactId,

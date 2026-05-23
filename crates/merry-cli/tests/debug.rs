@@ -143,7 +143,7 @@ fn shell_rejects_argv_without_separator() {
 }
 
 #[test]
-fn shell_rustc_version_emits_runtime_jsonl_and_resolves_success() {
+fn shell_rustc_version_prints_process_stdout() {
     let output = merry()
         .args(["shell", "--", "rustc", "--version"])
         .output()
@@ -153,15 +153,35 @@ fn shell_rustc_version_emits_runtime_jsonl_and_resolves_success() {
     assert!(output.stderr.is_empty(), "shell should not write stderr");
 
     let stdout = std::str::from_utf8(&output.stdout).expect("stdout should be utf-8");
-    assert!(
-        !stdout.starts_with("rustc "),
-        "shell stdout should be runtime JSONL, not raw rustc output"
-    );
+    assert!(stdout.starts_with("rustc "));
+    assert!(!stdout.contains("tool_call_pending"));
+}
+
+#[test]
+fn shell_events_jsonl_records_exact_argv_and_resolves_success() {
+    let output = merry()
+        .args(["shell", "--events-jsonl", "--", "rg", "--files"])
+        .output()
+        .expect("merry shell should run");
+
+    assert!(output.status.success(), "shell should exit successfully");
+    assert!(output.stderr.is_empty(), "shell should not write stderr");
+
     let events = parse_jsonl(&output.stdout);
     let kinds = event_kinds(&events);
     assert!(kinds.contains(&"tool_call_pending"));
     assert!(kinds.contains(&"artifact_recorded"));
     assert!(kinds.contains(&"tool_call_resolved"));
+
+    let pending = events
+        .iter()
+        .find(|event| event["kind"]["type"] == "tool_call_pending")
+        .expect("shell tool call should be pending before execution");
+    assert_eq!(
+        pending["kind"]["call"]["arguments"]["argv"],
+        serde_json::json!(["rg", "--files"])
+    );
+    assert_eq!(pending["kind"]["call"]["arguments"]["cwd"], ".");
 
     let resolved = events
         .iter()
@@ -173,7 +193,7 @@ fn shell_rustc_version_emits_runtime_jsonl_and_resolves_success() {
 }
 
 #[test]
-fn shell_rg_files_emits_runtime_jsonl_and_resolves_success() {
+fn shell_rg_files_prints_process_stdout() {
     let output = merry()
         .args(["shell", "--", "rg", "--files"])
         .output()
@@ -183,29 +203,14 @@ fn shell_rg_files_emits_runtime_jsonl_and_resolves_success() {
     assert!(output.stderr.is_empty(), "shell should not write stderr");
 
     let stdout = std::str::from_utf8(&output.stdout).expect("stdout should be utf-8");
-    assert!(
-        !stdout.starts_with("Cargo.toml"),
-        "shell stdout should be runtime JSONL, not raw rg output"
-    );
-    let events = parse_jsonl(&output.stdout);
-    let kinds = event_kinds(&events);
-    assert!(kinds.contains(&"tool_call_pending"));
-    assert!(kinds.contains(&"artifact_recorded"));
-    assert!(kinds.contains(&"tool_call_resolved"));
-
-    let resolved = events
-        .iter()
-        .find(|event| event["kind"]["type"] == "tool_call_resolved")
-        .expect("shell tool call should resolve");
-    assert_eq!(resolved["kind"]["result"]["call_id"], "call-shell-command");
-    assert_eq!(resolved["kind"]["result"]["status"], "succeeded");
-    assert!(resolved["kind"]["result"]["diagnostic"].is_null());
+    assert!(stdout.contains("Cargo.toml"));
+    assert!(!stdout.contains("tool_call_pending"));
 }
 
 #[test]
 fn shell_forbidden_command_denies_without_running_raw_command() {
     let output = merry()
-        .args(["shell", "--", "sh", "-c", "echo bad"])
+        .args(["shell", "--events-jsonl", "--", "sh", "-c", "echo bad"])
         .output()
         .expect("merry shell should run");
 
@@ -215,11 +220,6 @@ fn shell_forbidden_command_denies_without_running_raw_command() {
     );
     assert!(output.stderr.is_empty(), "shell should not write stderr");
 
-    let stdout = std::str::from_utf8(&output.stdout).expect("stdout should be utf-8");
-    assert!(
-        !stdout.contains("bad"),
-        "forbidden command output should not appear in CLI stdout"
-    );
     let events = parse_jsonl(&output.stdout);
     let kinds = event_kinds(&events);
     assert!(kinds.contains(&"tool_call_pending"));
@@ -241,7 +241,15 @@ fn shell_forbidden_command_denies_without_running_raw_command() {
 #[test]
 fn shell_local_workspace_effect_denies_without_sandbox_admission_or_raw_cargo_output() {
     let output = merry()
-        .args(["shell", "--", "cargo", "test", "-p", "merry-runtime"])
+        .args([
+            "shell",
+            "--events-jsonl",
+            "--",
+            "cargo",
+            "test",
+            "-p",
+            "merry-runtime",
+        ])
         .env_remove("MERRY_SANDBOX")
         .env_remove("MERRY_SANDBOX_VERSION")
         .output()
@@ -284,7 +292,15 @@ fn shell_local_workspace_effect_denies_without_sandbox_admission_or_raw_cargo_ou
 #[test]
 fn shell_spoofed_sandbox_markers_do_not_enable_local_workspace_effect() {
     let output = merry()
-        .args(["shell", "--", "cargo", "test", "-p", "merry-runtime"])
+        .args([
+            "shell",
+            "--events-jsonl",
+            "--",
+            "cargo",
+            "test",
+            "-p",
+            "merry-runtime",
+        ])
         .env("MERRY_SANDBOX", "1")
         .env("MERRY_SANDBOX_VERSION", "1")
         .output()
@@ -325,6 +341,7 @@ fn shell_spoofed_sandbox_markers_with_explicit_accept_do_not_enable_local_worksp
         .args([
             "shell",
             "--accept-local-workspace-process-risk",
+            "--events-jsonl",
             "--",
             "cargo",
             "test",
@@ -373,6 +390,7 @@ fn shell_forged_hidden_handoff_markers_and_accept_do_not_enable_local_workspace_
             "cli-bwrap-v1",
             "shell",
             "--accept-local-workspace-process-risk",
+            "--events-jsonl",
             "--",
             "cargo",
             "test",
