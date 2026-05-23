@@ -4,19 +4,57 @@ This roadmap is public-safe and implementation-focused. Private product strategy
 
 ## Current Phase
 
-Merry has closed out M18F LLM-assisted judgment boundary work through M18F-I. Since that closeout, the internal model-backed judgment foundation has added a strict tool-risk review model-output parser, crate-private provider-neutral `ModelBackedJudgmentSource`, and deterministic fake-provider runtime harness coverage through `Runtime::run_uncertainty_review`.
+Merry has enough foundation to stop treating policy and sandbox design as the
+main product output. Runtime/provider/tool execution hardening, Memory
+Activation MVP internals, read-only workspace tools, workspace patch tooling,
+the serial `Runtime::run_agent_loop`, OpenAI Responses provider wiring, process
+action intent/evidence, and the CLI `bwrap` sandbox bootstrap are now
+foundation for a real capability test.
 
-M8 runtime/provider/tool execution hardening, M9 Memory Activation MVP, M18F LLM-assisted judgment boundary, and read-only workspace navigation/search are now maintenance and foundation work. Memory Activation now uses a session-owned in-memory stored source by default, but external/default sessions have no candidate memories until runtime-owned state records them. Production memory storage, public memory APIs, external persistence, and a stable activation contract are still not complete. Judgment remains internal and advisory: it is not a public API, public runtime event, ledger fact, tool gate, automatic provider-context inclusion, automatic context mutation or promotion, OpenAI/live-provider path, or builder/runtime configured judgment source. Deterministic judgment verification remains fake-provider only. Live provider flows remain explicit opt-in/manual debug paths; they are not the basis for deterministic verification.
+The current P0 is the **Minimal Useful Coding Loop**: prove that Merry can run a
+small coding-style task through runtime-owned state, tools, artifacts,
+continuations, and verification. This is not because Merry's product identity is
+"coding shell". Coding is the hard benchmark that forces exact evidence,
+artifact-backed tool output, patch/write behavior, test loops, cancellation, and
+prompt/context stability to work together.
 
-The current coding-agent boundary is explicit: Merry is not yet a full coding-agent runtime. The current roadmap direction is shell/process as the primary actuator: a model should eventually be able to compose ordinary process tools such as `rg`, `sed`, `cargo`, `git`, pipelines, and small scripts under Merry-owned runtime control. The runtime should own policy, risk review, audit records, artifacts, cancellation, and approval flow around those actions. It should not try to enumerate every useful CLI affordance as built-in read/search tools. The current read-only workspace tools remain foundation, bootstrap, fallback, and maintenance capabilities for exact evidence and navigation; they are not the main actuator for coding-agent behavior.
+The target loop is:
 
-The CLI Sandbox Bootstrap slice is implemented in `merry-cli`: `merry --with-sandbox` is an opt-in Linux `bwrap` self-reexec path that puts Merry itself inside a constrained process environment before shell/process work expands. This alone does not mean general shell/process capability or a complete sandbox is implemented. The v1 sandbox assumption remains intentionally narrow: mount the current repo/project path as the primary read-write workspace, provide sandbox-local `/tmp`, avoid mounting the full home directory, do not pass API keys or secret environment variables by default, and pass only a minimal explicit environment such as `PATH`. It performs `PATH` lookup for `bwrap`, handles missing `bwrap` at planning time, avoids recursive sandboxing, and uses a minimal `/etc` allowlist including `/etc/ld.so.cache`, resolver/host/NSS files, and SSL/PKI paths. v1 allows network access and must not claim network isolation. It also is not a complete security boundary: destructive changes inside the mounted repo can still happen, and network risk remains for later policy, reviewer, and approval handling. A real smoke of `target/debug/merry --with-sandbox debug` has passed.
+```text
+user task
+-> runtime agent loop
+-> inspect workspace with read-only process/workspace tools
+-> read exact source evidence
+-> apply one constrained workspace patch
+-> run verification inside a bwrap sandbox
+-> final answer backed by runtime events, artifacts, and ledger facts
+```
 
-Shell/Process Primary Actuator Protocol remains the active P0 track and has advanced through `78764ee` (protocol), `c819fae` (local workspace admission guard), and `fc6bc7f` (sandbox local process admission). In `merry-runtime`, the protocol remains provider-neutral with process intent/evidence values, proposed/executed `CommandExec` action-audit records, an intent classifier, and injected `ProcessRunner` boundaries; the runtime crate does not directly spawn OS processes or contain a concrete OS adapter. In `merry-cli`, the debug/demo `merry shell -- <argv>` path has a narrow real runner adapter using `tokio::process::Command`. It routes exact argv through the runtime process protocol, emits runtime JSONL and artifact-backed tool results, and does not print raw process stdout directly as CLI stdout.
+Safety remains mandatory, but it is a runtime property of the loop, not the
+loop's substitute. Policy, risk taxonomy, reviewer evidence, and role-scoped
+models should advance only when they unblock this executable acceptance target.
 
-Default policy still denies `CommandExec`. Low-risk informational commands such as `rustc --version` and `rg --version` can run through the CLI shell path with empty environment policy and no stdin. A local workspace effect such as exact `cargo test -p merry-runtime` requires explicit `--accept-local-workspace-process-risk`, the CLI `bwrap` child handoff, and sandbox runtime profile evidence. Default host execution, environment-spoofed sandbox markers, forged hidden handoff markers, forbidden commands, and unknown commands remain denied. This is not a general shell, process, or coding-agent capability: there is no raw shell string parsing, pipeline/script execution, arbitrary environment or stdin support, complete sandbox/security/provenance proof, or general approval/review admission UX.
+Default `cargo test` must stay deterministic, offline, and fake-provider based.
+In addition, Merry needs explicit opt-in smoke lanes:
 
-The next runtime design track is Shell/Process Primary Actuator Protocol and risk-policy refinement through Action Policy Risk Taxonomy and Role-Scoped Models. It should define runtime-owned action risk levels such as `ReadOnly`, `EditLow`, `EditElevated`, `ProcessLow`, `ProcessHigh`, and `Forbidden`, or an equivalent naming scheme. Automatic edit should be limited to concrete patch/edit actions that runtime policy classifies as low risk; it should not imply arbitrary file-write automation. Shell/process policy must stay tiered: read-only actions can be automatic, medium local effects may be automatic only inside the sandbox and/or after user risk acceptance, high-risk actions require explicit approval and/or review-role evidence when policy requires it, and critical actions are denied. High-risk and uncertain shell/process actions need hard policy. Review LLM output is policy evidence, not an authorization gate; timeout, provider failure, schema/parse failure, or insufficient evidence must fail closed. The same track should reserve internal role-scoped model configuration for roles such as `Primary`, `ToolRiskReview`, `ApprovalReview`, and `SummaryMemory`, without making that a stable public API or leaking provider conversation state into runtime state.
+- `bwrap` sandbox smoke using a disposable fixture repository and real process
+  runner.
+- Live OpenAI-compatible smoke using locally supplied credentials and
+  `MERRY_OPENAI_DEBUG=1`.
+
+Local credentials must never be committed. Existing live provider config uses:
+
+```text
+MERRY_OPENAI_DEBUG=1
+MERRY_OPENAI_API_KEY=<local secret>
+MERRY_OPENAI_MODEL=<model>
+MERRY_OPENAI_BASE_URL=<optional OpenAI-compatible base URL>
+OPENAI_ORG_ID=<optional>
+OPENAI_PROJECT_ID=<optional>
+```
+
+If file-based local config is introduced, it must live under ignored paths such
+as `.env.merry.local`, `.merry/local/`, or `.merry/secrets/`.
 
 The OpenAI provider target is the Responses API only. The provider request path is `/responses`; it preserves the Merry-owned `merry-llm` provider boundary, keeps OpenAI wire types private to `merry-provider-openai`, sets `store: false`, omits `previous_response_id`, avoids provider conversation state as Merry runtime state, and keeps `parallel_tool_calls: false` until runtime policy supports parallel tool calls. This provider work does not imply a live/OpenAI judgment path or public judgment API.
 
@@ -62,26 +100,89 @@ The OpenAI provider target is the Responses API only. The provider request path 
 
 ### Active
 
-- P0: continue Shell/Process Primary Actuator Protocol as explicit runtime actions for open composition of ordinary shell/process tools under runtime audit and control, built on the implemented CLI sandbox assumption and narrow CLI shell runner rather than bare host execution. The next slices must broaden sandbox-aware admission, risk classification, approval/review evidence, and process semantics without claiming general shell/process/coding-agent capability prematurely. It is not a deny-only gate and not an exhaustive allowlist of every useful CLI operation.
-- P0: refine Action Policy Risk Taxonomy and Role-Scoped Models as the runtime-owned admission vocabulary for side-effectful actions before workspace write or process execution protocols expand.
-- Next: define Workspace Patch/Write as explicit runtime actions with artifact-backed inputs/outputs, ledger/checkpoint awareness, cancellation boundaries, bounded behavior, and deterministic fake-runtime tests. Automatic edit is only for low-risk patch/edit actions after policy classification, not for arbitrary file writes.
-- Expand Runtime Agent Loop behavior only through runtime-owned policy and deterministic fake-provider tests; keep parallel tool calls, provider-specific state, and live-provider verification out of this slice.
-- Keep shell policy tiered even with sandbox bootstrap: read-only actions can be automatic; medium local effects can be automatic only inside the sandbox and/or after user risk acceptance; high-risk actions ask or use reviewer evidence where policy requires it; critical actions are denied.
-- Keep judgment advisory: semantic recommendations and review-role LLM outputs can inform runtime policy as evidence, but hard runtime policy still decides tool execution, actions, and context mutation. Uncertain risk can route through reviewer evidence and approval policy when policy requires it, but the reviewer does not authorize the action.
-- Keep edit as a separate typed patch/apply-patch path with its own evidence and audit model; do not make shell side effects the primary edit mechanism.
-- Keep the initial judgment contract provider-neutral, evidence-aware, cancellable, and deterministic-testable.
-- Reserve internal role-scoped model configuration for `Primary`, `ToolRiskReview`, `ApprovalReview`, `SummaryMemory`, and similar roles without exposing a stable public API or provider state.
-- Until role-scoped model configuration is designed, do not connect the existing model-backed judgment source to live LLM/OpenAI paths, public judgment APIs, public runtime events, ledger facts, tool execution gates, public summary-draft promotion APIs, automatic provider-context inclusion, automatic context mutation or promotion, or builder/runtime configured judgment sources.
-- Keep deterministic verification based on fake providers, stored runtime state, artifact references, and ledger assertions.
-- Keep deterministic runtime harness coverage for model-backed judgment fake-provider only.
-- Keep `merry-tool-workspace` read-only navigation/search as foundation, bootstrap, fallback, and maintenance; do not expand it into write, shell/process, network, or full coding-agent runtime behavior through ad hoc tool growth.
-- Improve public docs as implementation status changes, while keeping private notes under `docs/`.
+- P0: implement the Minimal Useful Coding Loop as the current MVP proof. The loop must show multi-step runtime behavior, not only one tool call followed by a final response.
+- P0: add a Runtime Coding Loop Harness that can run against a disposable fixture repository. The required default lane uses fake provider/fake runner for deterministic `cargo test`; opt-in lanes run with the real `bwrap` sandbox and live OpenAI-compatible provider.
+- P0: define a runtime-owned read-only process profile for command families, not one-off command matches. Initial coverage should include `rg --files`, literal `rg <pattern>`, and a read-only file-slice command shape such as `sed -n RANGE FILE`, or an equivalent typed process/read tool that proves the same evidence loop.
+- P0: keep edit/write on the typed workspace patch path. The MVP loop should apply one constrained patch through `workspace_patch_file` or its runtime-owned successor, record artifact/audit/ledger evidence, and then run verification.
+- Keep safety tiered but subordinate to the executable acceptance target: read-only inspection automatic, constrained patch opt-in, verification in `bwrap`, high-risk or unknown process actions denied or escalated.
+- Keep CLI shell as smoke/debug, not the design owner. The main contract is the runtime library and its registered tool/profile set.
+- Keep judgment advisory. Do not wire model-backed judgment to live provider, public events, ledger facts, or authorization until a concrete coding-loop acceptance test needs reviewer evidence.
+- Keep default verification deterministic and offline. Live provider and host/sandbox process smokes are explicit opt-in checks with local credentials and disposable workspaces.
+- Improve public docs as implementation status changes, while keeping private notes under `docs/` and `merry-raw-docs/` ignored.
 
 ### Next Active
 
-- Shell/Process Primary Actuator Protocol for runtime-owned command execution and process output handling.
-- Action Policy Risk Taxonomy and Role-Scoped Models for side-effectful runtime actions.
-- Workspace Patch/Write protocol for runtime-owned file modifications.
+- Runtime Coding Loop Harness for the Minimal Useful Coding Loop.
+- Read-only process profile for reusable workspace inspection and exact evidence retrieval.
+- Real `bwrap` sandbox smoke against a disposable fixture repository.
+- Opt-in live OpenAI-compatible smoke configuration for the same loop.
+
+### Next Milestone: Minimal Useful Coding Loop Harness
+
+Goal: prove Merry's runtime value with one small coding-style task that performs inspection, exact evidence retrieval, constrained edit, verification, continuation, and final answer through runtime-owned events and artifacts.
+
+Acceptance target:
+
+```text
+fake-provider default test:
+  model step 1 requests workspace inspection (`rg --files` or workspace list)
+  model step 2 requests exact evidence (`rg <literal>` / file slice / read tool)
+  model step 3 requests one constrained workspace patch
+  model step 4 requests verification
+  model final step returns an answer
+
+runtime evidence:
+  exact command/tool intent is recorded
+  stdout/stderr or file outputs are artifacts
+  patch proposal/execution evidence is recorded
+  verification result is an artifact
+  tool continuations are provider-neutral
+  event order is deterministic
+  ledger facts prove state-before-event ordering
+```
+
+Real smoke target:
+
+```text
+opt-in bwrap smoke:
+  runs the same disposable fixture repo inside `merry --with-sandbox`
+  mounts only the fixture/workspace path plus sandbox-local temp
+  uses no inherited secrets
+  confirms the patch and verification behavior with a real process runner
+
+opt-in live provider smoke:
+  requires `MERRY_OPENAI_DEBUG=1`
+  requires local `MERRY_OPENAI_API_KEY` or `OPENAI_API_KEY`
+  requires `MERRY_OPENAI_MODEL`
+  optionally uses `MERRY_OPENAI_BASE_URL`
+  is never part of default `cargo test`
+```
+
+Tasks:
+
+- Add a fixture repository purpose-built for the loop, with a tiny failing behavior or deterministic text replacement target.
+- Add a harness command or integration test wrapper that builds a runtime with the coding-loop tool set.
+- Add a read-only process profile or equivalent reusable admission layer for file listing, literal search, and exact source slice retrieval.
+- Register the runtime-owned default coding-loop tools from library code, not by ad hoc CLI-only assembly.
+- Use `workspace_patch_file` or its successor for the edit step and keep shell side effects out of the edit path.
+- Add deterministic fake-provider/fake-runner tests for the full multi-step loop.
+- Add ignored local config guidance for live provider credentials and base URL.
+- Add an explicit, non-default bwrap/live smoke command once the deterministic loop passes.
+
+Non-goals:
+
+- Do not implement a full autonomous coding agent.
+- Do not add arbitrary shell parsing, pipelines, inherited env, stdin, network tools, or broad filesystem writes.
+- Do not make live provider behavior a default test dependency.
+- Do not make risk taxonomy or reviewer models the milestone output unless they unblock this loop.
+- Do not build graph memory, skill VM, Python SDK, or subagent runtime in this milestone.
+
+Verification:
+
+- `cargo fmt --all --check`
+- focused deterministic cargo test for the coding-loop harness
+- opt-in real bwrap smoke command once implemented
+- opt-in live provider smoke command once implemented
 
 ### Next Milestone: Action Policy Risk Taxonomy and Role-Scoped Models
 

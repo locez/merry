@@ -9,19 +9,28 @@ surface is a read-only evidence and navigation foundation, bootstrap,
 fallback, and maintenance path. It is not the main actuator for coding-agent
 behavior.
 
-The next coding-agent boundary is runtime-owned side-effect protocols: Action
-Policy, Shell/Process Primary Actuator Protocol, and Workspace Patch/Write.
-These protocols need to make process and write actions explicit runtime actions
-with artifacts, ledger/checkpoint awareness, cancellation boundaries, bounded
-execution, approval hooks, and deterministic fake-runtime coverage before they
-are treated as normal agent capabilities.
+The current roadmap P0 is the Minimal Useful Coding Loop: run a small
+coding-style task through runtime-owned state, tools, artifacts, continuations,
+and verification. The target loop inspects a disposable fixture repository,
+reads exact source evidence, applies one constrained workspace patch, runs
+verification inside the CLI `bwrap` sandbox, and returns a final answer backed
+by runtime events, artifacts, and ledger facts.
 
-The current roadmap direction is shell/process as the primary actuator. A
-future model should be able to compose ordinary process tools such as `rg`,
-`sed`, `cargo`, `git`, pipelines, and small scripts under Merry-owned runtime
-control. The runtime should own policy, risk review, audit, artifacts,
-cancellation, and approval. Merry should not try to enumerate every useful CLI
-affordance as a built-in read/search tool.
+Policy and shell/process design remain important, but they are support work for
+that executable acceptance target. The next boundary is a runtime-owned tool
+and action surface that can prove the loop: reusable read-only inspection
+profiles, typed patch/write behavior, sandboxed verification, artifact output,
+cancellation, and deterministic fake-runtime coverage, with opt-in real bwrap
+and live provider smokes.
+
+Shell/process remains the primary verification and inspection actuator under
+runtime control. A future model should be able to compose ordinary process
+tools such as `rg`, `sed`, `cargo`, and `git` through policy-owned profiles
+rather than through one-off CLI-only matches. The runtime should own policy,
+risk review, audit, artifacts, cancellation, and approval. Merry should not try
+to enumerate every useful CLI affordance as a built-in read/search tool, and
+the CLI shell path should remain a smoke/debug adapter rather than the design
+owner.
 
 The implemented shell/process surface is still narrow and split by boundary:
 `merry-runtime` owns provider-neutral `ProcessActionIntent` and
@@ -93,14 +102,14 @@ Future internal LLM roles should be configurable by role, such as `Primary`,
 runtime/provider composition, not a current stable public API. Role-scoped model
 configuration must not leak provider conversation state into runtime state.
 
-The CLI Sandbox Bootstrap slice is now the implemented v1 assumption for later
-shell/process work, and the runtime process protocol foundation plus narrow CLI
-real-runner debug path are in place. The next roadmap focus is continuing the
-Shell/Process Primary Actuator Protocol toward broader sandbox-aware admission,
-review/approval policy, and risk-policy refinement through Action Policy Risk
-Taxonomy and Role-Scoped Models. Workspace Patch/Write should build on the same
-runtime-owned policy model rather than define ad hoc permission rules of its
-own.
+The CLI Sandbox Bootstrap slice is now the implemented v1 assumption for the
+first real coding-loop smoke, and the runtime process protocol foundation plus
+narrow CLI real-runner debug path are in place. The next roadmap focus is the
+Runtime Coding Loop Harness: deterministic fake-provider/fake-runner coverage
+by default, plus opt-in bwrap and OpenAI-compatible live-provider smokes using
+ignored local credentials. Workspace Patch/Write and Shell/Process should both
+serve that loop through runtime-owned policy rather than define ad hoc
+permission rules of their own.
 
 M8 runtime/provider/tool execution hardening has shifted into maintenance and foundation work: structured runtime state, artifact-backed model output, provider step boundaries, pending tool calls, tool result resolution, tool continuations, registered tool execution, public runtime API contract cleanup/review/alignment, and opt-in OpenAI Responses debug/tool flows remain the base for later runtime work.
 

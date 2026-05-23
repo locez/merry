@@ -7,9 +7,25 @@ This repository is a Rust-first agent runtime project. Treat this file as the wo
 - Keep implementation changes scoped to the requested module or task.
 - Do not commit private planning material, product strategy, market notes, or design drafts unless explicitly asked.
 - `docs/` is intentionally ignored by git and may contain private local notes.
+- `merry-raw-docs/` is ignored original source material; use it as local evidence only and do not commit it.
 - Do not move private notes into tracked files.
 - Prefer small, reviewable changes over broad rewrites.
 - If the worktree contains changes you did not make, preserve them and adapt around them.
+
+## Project Continuity Routing
+
+When the user invokes `$project-continuity` or asks to continue the durable
+project lease, read these files first:
+
+1. `SESSION_RUNBOOK.md`
+2. `AGENT_ROLES.md`
+3. `EXECUTION_STATE.md`
+4. `HANDOFF.md`
+5. Source-of-truth files listed in `EXECUTION_STATE.md`
+
+Run one bounded lease, update `EXECUTION_STATE.md` and `HANDOFF.md`, validate,
+and commit unless a no-commit reason is recorded. The next fresh-session command
+is `/goal $project-continuity`.
 
 ## Delivery Focus Discipline
 
