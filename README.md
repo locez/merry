@@ -17,11 +17,12 @@ verification inside the CLI `bwrap` sandbox, and returns a final answer backed
 by runtime events, artifacts, and ledger facts.
 
 Policy and shell/process design remain important, but they are support work for
-that executable acceptance target. The next boundary is a runtime-owned tool
-and action surface that can prove the loop: reusable read-only inspection
-profiles, typed patch/write behavior, sandboxed verification, artifact output,
-cancellation, and deterministic fake-runtime coverage, with opt-in real bwrap
-and live provider smokes.
+that executable acceptance target. The next boundary is observability for the
+runtime-owned tool and action surface that already proves the loop. Before
+adding a new interactive CLI, REPL, or TUI, Merry needs structured logs/traces
+that show runtime loop boundaries, provider request metadata, tool choices,
+process execution, artifact IDs, diagnostics, cancellation, and final loop
+status while deterministic and live smokes run.
 
 Shell/process remains the primary verification and inspection actuator under
 runtime control. A future model should be able to compose ordinary process
@@ -104,16 +105,16 @@ configuration must not leak provider conversation state into runtime state.
 
 The CLI Sandbox Bootstrap slice is now the implemented v1 assumption for the
 first real coding-loop smoke, and the runtime process protocol foundation plus
-narrow CLI real-runner debug path are in place. The next roadmap focus is the
-Runtime Coding Loop Harness: deterministic fake-provider/fake-runner coverage
-by default, plus opt-in bwrap and OpenAI-compatible live-provider smokes using
-ignored local credentials. `merry --with-sandbox debug coding-loop-smoke`
-proves the deterministic bwrap/process/patch path. `merry --with-sandbox debug
-coding-loop-live-smoke` is the live LLM proof lane; it is implemented but still
-requires a local ignored config file before it can prove real model behavior in
-this workspace. Workspace Patch/Write and Shell/Process should both serve that
-loop through runtime-owned policy rather than define ad hoc permission rules of
-their own.
+narrow CLI real-runner debug path are in place. The Runtime Coding Loop Harness
+has deterministic fake-provider/fake-runner coverage by default, plus opt-in
+bwrap and OpenAI-compatible live-provider smokes using ignored local
+credentials. `merry --with-sandbox debug coding-loop-smoke` proves the
+deterministic bwrap/process/patch path. `merry --with-sandbox debug
+coding-loop-live-smoke` is the live LLM proof lane, and the user has reported a
+successful credentialed run against their trusted configured server. The next
+roadmap focus is to make these paths observable with structured logs/traces.
+Workspace Patch/Write and Shell/Process should both serve that loop through
+runtime-owned policy rather than define ad hoc permission rules of their own.
 
 For the sandboxed live smoke, put local OpenAI-compatible config in
 `.merry/secrets/openai.env`:

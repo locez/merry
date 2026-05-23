@@ -85,11 +85,12 @@ The OpenAI provider target is the Responses API only. The provider request path 
 
 ### Recently Completed
 
-- Event-first interactive CLI direction is selected and specified in
-  `specs/2026-05-23-event-first-interactive-cli.md`. The spec turns the
-  successful live coding loop from an `ok` smoke into a human-readable runtime
-  event/tool/artifact timeline plus exact JSONL capture. TUI remains a
-  follow-up after line-oriented usage exposes the views that matter.
+- Observability-first coding-loop direction is selected and specified in
+  `specs/2026-05-23-observability-first-coding-loop.md`. This corrects the
+  previous event-first CLI direction: the next value gap is structured
+  runtime/tool/process/provider logging with stable correlation fields, not a
+  new CLI view. Event JSONL, future interactive CLI, and TUI are consumers of
+  this observability layer, not the layer itself.
 - Runtime/provider/tool execution MVP hardening moved into maintenance and foundation status.
 - Provider output storage, pending tool calls, tool result resolution, tool continuations, registered tool execution, and public runtime export/rustdoc alignment have enough deterministic coverage to support the next runtime milestone.
 - Memory Activation MVP moved into maintenance and foundation status for internal runtime use.
@@ -111,7 +112,7 @@ The OpenAI provider target is the Responses API only. The provider request path 
 
 ### Active
 
-- P0: continue the Minimal Useful Coding Loop as the current MVP proof. The loop now has a deterministic fake-provider/fake-runner slice, a deterministic real `bwrap` process-runner smoke, and a user-verified live-provider smoke command. The next user-facing proof gap is event-first interaction: a line-oriented CLI that shows the runtime event/tool/artifact timeline while running the loop, so real use can expose product gaps before investing in a full TUI.
+- P0: continue the Minimal Useful Coding Loop as the current MVP proof. The loop now has a deterministic fake-provider/fake-runner slice, a deterministic real `bwrap` process-runner smoke, and a user-verified live-provider smoke command. The next proof gap is observability: a correlated structured log/trace stream that shows runtime loop boundaries, provider requests, tool choices, process execution, artifact IDs, failures, cancellations, and final loop status while the smoke runs.
 - P0: keep the Runtime Coding Loop Harness executable against a disposable fixture repository. The default lane uses fake provider/fake runner for deterministic `cargo test`; the deterministic `bwrap` lane is an explicit ignored smoke; the live OpenAI-compatible lane is also explicit and ignored and has passed in the user's trusted configured environment.
 - P0: define a runtime-owned read-only process profile for command families, not one-off command matches. Initial coverage should include `rg --files`, literal `rg <pattern>`, and a read-only file-slice command shape such as `sed -n RANGE FILE`, or an equivalent typed process/read tool that proves the same evidence loop.
 - P0: keep edit/write on the typed workspace patch path. The MVP loop should apply one constrained patch through `workspace_patch_file` or its runtime-owned successor, record artifact/audit/ledger evidence, and then run verification.
@@ -123,55 +124,62 @@ The OpenAI provider target is the Responses API only. The provider request path 
 
 ### Next Active
 
-- Implement the event-first interactive CLI design in `specs/2026-05-23-event-first-interactive-cli.md`, starting with human-readable event timeline rendering plus exact `--events-jsonl` output for a single sandboxed coding-loop task.
+- Implement the observability-first coding-loop design in `specs/2026-05-23-observability-first-coding-loop.md`, starting with opt-in CLI logging flags and structured `tracing` instrumentation for the deterministic and live coding-loop smokes.
 - Replace one-off process classification growth with a runtime-owned read-only process profile for reusable workspace inspection and exact evidence retrieval, including a file-slice shape such as `sed -n RANGE FILE` or an equivalent typed read tool.
 - Move coding-loop tool-set/profile registration toward reusable runtime/library construction so upper layers do not have to assemble `process_command_tool`, workspace read/search fallback, and patch tooling ad hoc.
 - Keep the opt-in live OpenAI-compatible smoke as a regression lane; when it fails, inspect the failure as model/tool-contract evidence and tune only the smallest runtime/provider/tool fix needed.
 - Keep expanding the Runtime Coding Loop Harness only through executable acceptance slices.
 
-### Next Milestone: Event-First Interactive CLI
+### Next Milestone: Observability-First Coding Loop
 
-Goal: make Merry's already-proven sandboxed/live coding loop usable and
-inspectable by a human operator. The command should stream runtime events,
-tool requests, artifact references, tool resolutions, final status, and the
-final answer while preserving an exact JSONL mode for debugging and regression
-capture.
+Goal: make Merry's already-proven sandboxed/live coding loop observable before
+adding another interaction surface. The operator should be able to run the
+existing deterministic and live coding-loop smokes with logs enabled and see
+what happened: runtime loop boundaries, provider boundary metadata, model tool
+choices, tool execution, process argv/cwd/exit evidence, artifact IDs, failure
+or cancellation diagnostics, and final loop status.
 
 Spec:
 
-- `specs/2026-05-23-event-first-interactive-cli.md`
+- `specs/2026-05-23-observability-first-coding-loop.md`
 
 Acceptance target:
 
 ```text
-sandboxed interactive CLI:
-  command shape starts under debug while the contract stabilizes
-  example: `merry --with-sandbox debug agent --task "..."`
-  prints session/step/tool/artifact/resolution/final-answer timeline
-  supports `--events-jsonl` for exact runtime event capture
+log-enabled smoke:
+  example: `merry --log-level info --log-format json --with-sandbox debug coding-loop-smoke`
+  logs runtime loop start/finish and each step boundary
+  logs provider request metadata without provider wire payloads
+  logs tool pending/execution/result status with tool_call_id and tool_name
+  logs process argv/cwd/exit status and stdout/stderr byte counts
+  logs artifact IDs and diagnostic codes where applicable
   fails closed when sandbox or local provider config is missing
 
 default tests:
-  renderer tests use deterministic fake events/artifacts
+  tracing capture tests use deterministic fake provider/fake runner
   no bwrap, network, or live credentials required
-  status formatting covers completed, failed, cancelled, and blocked loops
+  log assertions cover completed, failed, cancelled, and blocked loops
 ```
 
 Tasks:
 
-- Add a CLI-local event renderer for `RuntimeEvent` values.
-- Summarize `run_process`, `workspace_read_file`, and `workspace_patch_file`
-  tool calls and their result artifacts in bounded human-readable output.
-- Keep exact `RuntimeEvent` JSONL output available through `--events-jsonl`.
-- Reuse the existing live smoke setup for the first interactive command, then
-  extract common setup only after the interaction shape proves useful.
-- Add deterministic renderer/config-gating tests.
+- Add CLI-owned `tracing-subscriber` setup with opt-in text/JSON log output to
+  stderr while preserving command stdout.
+- Instrument `Runtime::run_agent_loop`, step boundaries, tool pending/execution
+  boundaries, artifact recording, cancellation, failure, and terminal loop
+  status with stable fields.
+- Instrument process and workspace tool paths with exact safe action summaries,
+  status, output byte counts, artifact IDs, and diagnostic codes.
+- Align OpenAI-compatible provider tracing with the runtime correlation fields
+  while keeping provider wire payloads private.
+- Add deterministic tracing capture tests and redaction/bounded-summary tests.
 - Keep the existing deterministic `bwrap` and live provider smokes explicit and
   non-default.
 
 Non-goals:
 
 - Do not build a full-screen TUI in this milestone.
+- Do not add a new REPL or multi-turn prompt UI in this milestone.
 - Do not turn the CLI into a general autonomous coding agent.
 - Do not add arbitrary shell parsing, pipelines, inherited env, stdin, network
   tools, or broad filesystem writes.
@@ -180,7 +188,8 @@ Non-goals:
 Verification:
 
 - `cargo fmt --all --check`
-- focused deterministic cargo tests for the CLI event renderer and gating
+- focused deterministic cargo tests for CLI logging setup and runtime/process
+  tracing capture
 - existing opt-in real bwrap smoke may remain ignored/manual
 - existing opt-in live provider smoke may remain ignored/manual
 

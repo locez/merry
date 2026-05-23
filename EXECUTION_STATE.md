@@ -9,7 +9,7 @@ Lease status: rollover
 - `ROADMAP.md`
 - `README.md`
 - `DECISIONS.md`
-- `specs/2026-05-23-event-first-interactive-cli.md`
+- `specs/2026-05-23-observability-first-coding-loop.md`
 - `docs/design/mvp-design.md` (ignored private local design source)
 - `docs/design/global-design.md` (ignored private local design source)
 - `docs/product/product-strategy.md` (ignored private local product source)
@@ -23,7 +23,7 @@ Current planning artifact:
 
 - `ROADMAP.md`
 - `DECISIONS.md`
-- `specs/2026-05-23-event-first-interactive-cli.md`
+- `specs/2026-05-23-observability-first-coding-loop.md`
 
 ## Communication
 
@@ -38,76 +38,75 @@ Style notes:
 
 Current milestone or track:
 
-- Event-first interactive CLI design.
+- Observability-first coding-loop design.
 
 Session milestone:
 
-- Decide whether the next useful milestone should be a line-oriented
-  interactive CLI, reusable runtime-owned profile work, or TUI research; write
-  the selected design without starting implementation.
+- Correct the previous event-first CLI direction into an observability-first
+  milestone: structured logs/traces at runtime, tool, process, provider,
+  artifact, sandbox, and loop boundaries before any new interactive CLI/TUI.
 
 Goal:
 
-- Make Merry's already-proven live coding loop inspectable by a human operator
-  so real use can expose product gaps. The chosen design is an event-first CLI
-  that shows runtime event/tool/artifact flow before investing in a full TUI.
+- Make Merry's already-proven live coding loop diagnosable while it runs. The
+  next implementation should let an operator enable logs and understand what
+  happened, which tool ran, which artifact was recorded, and why a loop
+  completed, failed, blocked, or cancelled.
 
 Task queue status:
 
-- Read current continuity, roadmap, CLI, runtime event, and artifact evidence:
-  completed.
-- Use Locez Lens to reframe the problem from "build UI" to "make runtime
-  behavior observable during real use": completed.
-- Use brainstorming to compare Event CLI, Runtime Profile, and TUI Research:
-  completed.
-- Offer visual companion and provide a local browser comparison page:
-  completed; companion artifacts are local/untracked and ignored.
-- Research TUI feasibility at a high level: completed. Ratatui/Crossterm are
-  viable, but deferred until event-first CLI usage proves needed views.
-- User selected direction 1: Event-first interactive CLI.
-- Write public-safe spec for selected direction: completed.
-- Update roadmap and continuity state: completed.
-- Commit or record no-commit reason: completed.
+- User clarified that event CLI is not the real need; the real need is
+  observability/logging for key actions and multi-turn debugging: completed.
+- Use Locez Lens to reframe the issue from "render runtime events" to "make
+  action boundaries observable and correlated": completed.
+- Inspect existing tracing/runtime/CLI state: completed. Provider has localized
+  `tracing`; runtime/tool/process smoke path lacks a coherent log contract.
+- Move and rewrite spec from event-first CLI to observability-first coding
+  loop: completed.
+- Update roadmap and decision record away from event-first CLI: completed.
+- Update continuity state and handoff: in progress.
+- Validate and commit: pending.
 
 Allowed expansion:
 
-- Public-safe tracked planning/spec files for the selected next milestone.
-- `.gitignore` update for local visual companion artifacts.
+- Public-safe tracked planning/spec updates for the corrected milestone.
+- Continuity updates.
 - No Rust implementation in this lease.
 
 Done condition:
 
-- The next milestone direction is selected, a public-safe design spec exists,
-  continuity state points to it, and implementation is explicitly deferred
-  until user review/approval of the written spec.
+- Public tracked state consistently names observability-first logging/tracing as
+  the next milestone, the old event-first CLI spec path is gone, and the next
+  exact action is user review of the corrected observability spec.
 
 Drift boundary:
 
-- Do not implement the CLI/TUI in this lease.
-- Do not add TUI dependencies.
+- Do not implement tracing/logging code in this lease.
+- Do not add TUI, REPL, or interactive CLI scope.
 - Do not move private ignored notes into tracked files.
 - Do not commit `.superpowers/`, `.merry/`, `docs/`, or `merry-raw-docs/`.
 
-Task type: planning/design
+Task type: planning/design correction
 
 Acceptance criteria:
 
-- Spec names the event-first CLI command shape, output modes, runtime event
-  mapping, artifact summary behavior, errors, tests, and TUI follow-up.
-- Spec keeps default tests deterministic/offline.
-- Roadmap names event-first CLI as the next user-facing proof gap.
+- Spec names logs/traces as the milestone center, not event CLI.
+- Spec defines stable correlation fields, action boundaries, redaction, tests,
+  and live/manual smoke expectations.
+- Roadmap and decisions no longer point to event-first CLI as the next
+  milestone.
 - Continuity handoff gives the next exact action.
 
 ## Scope
 
 Allowed edits:
 
-- `.gitignore`
 - `DECISIONS.md`
 - `EXECUTION_STATE.md`
 - `HANDOFF.md`
 - `ROADMAP.md`
-- `specs/2026-05-23-event-first-interactive-cli.md`
+- `specs/2026-05-23-observability-first-coding-loop.md`
+- removal of `specs/2026-05-23-event-first-interactive-cli.md`
 
 Forbidden edits:
 
@@ -127,44 +126,46 @@ Protected files:
 
 Validation command:
 
+- `rg` for stale event-first milestone references in tracked planning/spec files
+- `rg` for placeholders/private-material leakage in the new spec
 - `git diff --check`
-- spec self-review for placeholders, contradictions, ambiguity, and private
-  material leakage
 
 Validation notes:
 
+- Stale-reference scan found no tracked planning state that still makes the
+  event-first CLI the next milestone. Remaining old spec path mentions are
+  historical move/removal notes in continuity files.
+- Placeholder/private-material scan found no unresolved placeholders or copied
+  private source material. Matches are expected guardrail/config examples.
 - `git diff --check` passed.
-- Placeholder/private-material self-review found no unresolved placeholders in
-  the new spec and no copied private source content. Matches in roadmap/state
-  are expected guardrail references to ignored docs, raw notes, and local
-  credentials.
 
 ## Research
 
-Research required: yes
+Research required: no
 
 Research reason:
 
-- The user asked whether TUI should be next and noted that TUI may require
-  research.
+- The user supplied the product correction. Repo inspection was sufficient to
+  confirm the implementation direction: `tracing` already exists in workspace
+  dependencies and provider code, but runtime/tool/process logging is not
+  consistently instrumented.
 
 Research artifact:
 
-- Repo inspection of existing runtime event/artifact flow and CLI JSONL
-  surfaces.
-- High-level TUI feasibility check: Ratatui/Crossterm is viable, but TUI should
-  follow event-first CLI usage evidence.
+- Repo inspection of current `tracing` usage, runtime events, smoke commands,
+  and `ok` output behavior.
 
 ## Next Action
 
 Next exact action:
 
-- User reviews `specs/2026-05-23-event-first-interactive-cli.md`. If approved,
-  the next lease should invoke `superpowers:writing-plans` and create an
-  implementation plan for the Event-first interactive CLI.
+- User reviews `specs/2026-05-23-observability-first-coding-loop.md`. If
+  approved, the next lease should create an implementation plan for the first
+  observability slice: CLI-owned log configuration plus deterministic
+  runtime/tool/process tracing capture tests.
 
 Do not reconsider:
 
-- Do not make policy taxonomy the primary P0 output.
-- Do not start TUI implementation before event-first CLI usage evidence.
+- Do not make event-first CLI the primary next milestone.
+- Do not start TUI or REPL before observability exists.
 - Do not require live provider tests in default `cargo test`.

@@ -6,120 +6,105 @@ Status: rollover
 
 Current milestone or track:
 
-- Event-first interactive CLI design.
+- Observability-first coding-loop design.
 
 Session milestone:
 
-- Use the renewed roadmap/product concern to decide the next useful milestone
-  after proving live tool calls, compare event-first CLI vs runtime profile vs
-  TUI research, and write the selected spec without starting implementation.
+- Correct the previous event-first CLI direction into an observability-first
+  milestone that records key runtime/tool/process/provider/artifact actions
+  before adding any new interactive CLI/TUI surface.
 
 Task queue status:
 
-- Current project state and ignored source-material guidance reviewed.
-- Runtime event/artifact/agent-loop surfaces inspected.
-- Locez Lens used to reframe the gap as real-use observability, not UI polish.
-- Brainstorming compared three options: event-first CLI, runtime-owned profile,
-  and TUI research.
-- User selected option 1: event-first interactive CLI.
-- Spec written at `specs/2026-05-23-event-first-interactive-cli.md`.
-- Roadmap updated to make event-first CLI the next user-facing proof gap.
-- Decision recorded: Event-first CLI before TUI.
-- `.gitignore` updated to keep local `.superpowers/` visual companion metadata
-  out of commits.
-- Validation: passed for planning/spec changes.
-- Commit: completed.
+- User clarified the event CLI was the wrong center; the real need is
+  observability/logging for key actions and later multi-turn debugging.
+- Current tracing/runtime/CLI state inspected: provider has localized tracing;
+  runtime/tool/process smoke behavior still lacks a coherent log contract.
+- Spec moved from `specs/2026-05-23-event-first-interactive-cli.md` to
+  `specs/2026-05-23-observability-first-coding-loop.md` and rewritten.
+- Roadmap updated to make observability-first logging/tracing the next
+  milestone.
+- Decision record corrected from Event-First CLI Before TUI to Observability
+  Before Interactive CLI Or TUI.
+- Continuity state updated.
+- Validation: passed for planning/spec correction.
+- Commit: pending.
 
 Done condition:
 
-- The selected next milestone is recorded in a public-safe spec and roadmap,
-  and the next implementation step is blocked on user review/approval of the
-  spec per the brainstorming workflow.
+- Tracked planning state consistently says the next milestone is structured
+  observability/logging for the coding loop, not event-first CLI, and gives the
+  next exact action as user review of the corrected observability spec.
 
 ## What Changed
 
 Files changed:
 
-- `.gitignore`
 - `DECISIONS.md`
 - `EXECUTION_STATE.md`
 - `HANDOFF.md`
+- `README.md`
 - `ROADMAP.md`
-- `specs/2026-05-23-event-first-interactive-cli.md`
+- `specs/2026-05-23-observability-first-coding-loop.md`
+- removed `specs/2026-05-23-event-first-interactive-cli.md`
 
 Summary:
 
-- Added a concrete event-first interactive CLI design: command shape,
-  human-readable timeline, exact `--events-jsonl`, runtime event mapping,
-  artifact summaries, fail-closed gates, deterministic tests, and TUI follow-up.
-- Re-anchored the roadmap so the next milestone is human-visible runtime
-  interaction, while keeping the coding-loop harness as the acceptance skeleton.
-- Recorded that TUI is viable but deferred until line-oriented usage shows the
-  views and interactions worth building.
+- Replaced the event-first CLI design with observability-first design.
+- Defined structured logging/tracing as the next value slice: runtime loop,
+  provider boundary, tool calls, process execution, workspace tools, artifact
+  recording, errors, cancellation, redaction, and stable correlation fields.
+- Deferred event renderers, REPL, TUI, and multi-turn UI until logs make the
+  current loop understandable.
 
 ## Validation
 
 Commands run so far:
 
-- spec self-review with `rg` for placeholders/private-material references
+- repo inspection for current tracing/runtime event/smoke surfaces
+- stale event-first planning-reference scan
+- placeholder/private-material scan for the new spec
 - `git diff --check`
 
 Result:
 
-- Passed. The self-review found no unresolved placeholders in the new spec and
-  no copied private source content. Matches in roadmap/state are expected
-  guardrail references to ignored docs, raw notes, and local credentials.
-
-Reviewer pass:
-
-- Scope alignment: aligned with the user-selected option 1 and the
-  project-continuity/brainstorming constraint to write and review a spec before
-  implementation.
-- Protected file check: `ROADMAP.md` was intentionally updated under the user's
-  explicit roadmap-correction request; no private ignored material was moved
-  into tracked files.
-- State and handoff check: continuity state and handoff both point to the same
-  next exact action.
-- Recommendation: rollover for user spec review.
-- Residual risk: no code behavior changed in this lease, so Rust checks were
-  not run.
+- Passed. Stale-reference scan found no tracked planning state that still makes
+  event-first CLI the next milestone; remaining old spec path mentions are
+  historical move/removal notes in continuity files. Placeholder/private-material
+  scan found no unresolved placeholders or copied private source material.
 
 ## Decisions
 
 Decisions made:
 
-- Choose option 1 from the brainstorm: event-first interactive CLI.
-- Keep TUI as a researched follow-up, not the next implementation milestone.
-- Keep implementation out of this lease until the user reviews/approves the
-  spec and a written implementation plan exists.
-- Store the spec under tracked `specs/` rather than ignored `docs/`, because
-  repository rules keep `docs/` private and uncommitted.
+- Treat the user's message as a requested correction to the written spec, not
+  as approval to implement the old event-first CLI.
+- Observability/logging is the milestone center; event JSONL and future CLI/TUI
+  are downstream consumers.
+- Keep implementation out of this lease; next lease should create an
+  implementation plan for the observability slice after user review/approval.
 
 Pending decisions:
 
-- User review of `specs/2026-05-23-event-first-interactive-cli.md`.
-- Whether the first implementation should reuse the live smoke assembly
-  directly or extract common setup before adding the command. The spec
-  recommends reuse first, extraction after the shape proves useful.
+- Exact first implementation breakdown for CLI logging setup vs runtime/tool
+  instrumentation. The next lease should write this plan before code changes.
 
 ## Blockers
 
 Blockers:
 
-- None for design. Implementation intentionally waits for user review/approval
-  of the spec.
+- None for the design correction.
 
 Next exact action:
 
-- User reviews `specs/2026-05-23-event-first-interactive-cli.md`. If approved,
-  the next lease should use `superpowers:writing-plans` to create a scoped
-  implementation plan for the Event-first interactive CLI.
+- User reviews `specs/2026-05-23-observability-first-coding-loop.md`. If
+  approved, create an implementation plan for the first observability slice.
 
 ## Scope For Next Session
 
 Allowed edits:
 
-- Implementation plan for the event-first CLI after user approval.
+- Implementation plan for the observability-first coding loop.
 - Rust/CLI/test files named by that implementation plan.
 - Continuity file updates.
 
@@ -128,24 +113,23 @@ Forbidden edits:
 - Private raw docs.
 - Real credentials.
 - `.superpowers/`, `.merry/`, `docs/`, or `merry-raw-docs/` content.
-- Full-screen TUI before event-first CLI usage evidence.
-- Policy taxonomy as the primary deliverable unless it directly blocks the
-  interactive CLI acceptance test.
+- Full-screen TUI, REPL, or multi-turn UI before observability exists.
+- Event-first CLI as the primary milestone.
 
 Do not reconsider:
 
-- The next user-facing proof gap is event-first visibility into the runtime
-  loop, not more invisible architecture.
+- The next proof gap is not a UI surface. It is logs/traces that explain real
+  runtime behavior while the loop runs.
 - Default tests remain deterministic/offline; live provider and bwrap smoke are
   opt-in.
 
 ## Commit
 
-Status: committed
+Status: pending
 
 Message:
 
-- project-continuity: design event first cli
+- project-continuity: correct next milestone to observability
 
 No-commit reason:
 

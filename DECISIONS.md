@@ -121,39 +121,44 @@ Reversible:
 Yes. The header value can be made configurable later without changing runtime
 state or the provider trait boundary.
 
-## 2026-05-23 - Event-First CLI Before TUI
+## 2026-05-23 - Observability Before Interactive CLI Or TUI
 
 Decision:
-The next user-facing milestone is a line-oriented event-first interactive CLI,
-specified in `specs/2026-05-23-event-first-interactive-cli.md`, not a full TUI.
-The first command should expose the sandboxed coding-loop timeline to a human
-operator and keep exact `RuntimeEvent` JSONL capture available.
+The next milestone is structured observability for the coding loop, specified
+in `specs/2026-05-23-observability-first-coding-loop.md`, not an event-first
+CLI and not a full TUI. The first implementation should add opt-in logging and
+`tracing` instrumentation at runtime, tool, process, provider, sandbox, and
+artifact boundaries.
 
 Reason:
 The live coding-loop smoke has proven that tool calling works, but its success
-path still collapses the runtime's evidence into `ok`. The user needs to see
-what ran, which tools were requested, which artifacts were recorded, and how the
-loop completed so real usage can expose product gaps. A TUI is likely useful
-later, but it would add terminal layout/event-loop complexity before the project
-knows which views matter.
+path still collapses the runtime's evidence into `ok`, and runtime events alone
+do not explain in-flight behavior well enough for real debugging. The user needs
+to know what action is happening, why it happened, what arguments and policy
+shape were used, what artifact was recorded, and where a multi-step or later
+multi-turn run drifted. Adding another CLI view before the logging contract
+would still leave the system opaque.
 
 Evidence:
 `Runtime::step` and `Runtime::run_agent_loop` already emit session, step, tool,
 artifact, resolution, completion, failure, and cancellation events. The live
-smoke has passed in the user's trusted configured environment. Ratatui and
-Crossterm are viable Rust TUI building blocks, but the current gap is
-observability, not full-screen interaction.
+smoke has passed in the user's trusted configured environment. The OpenAI
+provider already has localized `tracing` spans, but the runtime/tool/process
+loop lacks a consistent structured log contract. Ratatui and Crossterm are
+viable Rust TUI building blocks, but the current gap is observability, not
+full-screen interaction.
 
 Tradeoff:
-This keeps CLI code as the first UI owner for one more milestone. The benefit is
-fast real-use feedback and deterministic renderer tests; the cost is that
-runtime-owned process profiles and richer tool-set registration wait behind one
-small usability slice.
+This delays a new interactive CLI/REPL/TUI surface. The benefit is that every
+later surface can consume stable correlation fields and operators can debug real
+smoke behavior immediately. The cost is that multi-turn UI input waits behind
+one observability slice.
 
 Reversible:
-Yes. Once event-first CLI usage shows the needed panes and interactions, the
-renderer/event mapping can feed a Ratatui-based TUI or a different upper layer.
+Yes. Once logs show which state and action views matter, an event renderer,
+interactive CLI, REPL, or Ratatui-based TUI can be added on top without
+redefining runtime behavior.
 
 Follow-up:
-User reviews the event-first CLI spec. If approved, create an implementation
-plan before writing code.
+Create an implementation plan for CLI-owned tracing subscriber setup plus
+runtime/tool/process/provider instrumentation and deterministic tracing tests.
