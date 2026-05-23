@@ -22,12 +22,18 @@ Task queue status:
   flags. Merry should default to XDG TOML config, keep logs off by default,
   configure log enablement/level/format/path there, and mount the config
   directory in `--with-sandbox`.
+- User clarified the default log file behavior: if logging is enabled and no
+  path is configured, use `$XDG_STATE_HOME/merry/logs/merry.jsonl`, falling
+  back to `~/.local/state/merry/logs/merry.jsonl`; failing to create/open it
+  should be a clear error, not a silent stderr fallback.
 - Current tracing/runtime/CLI state inspected: provider has localized tracing;
   runtime/tool/process smoke behavior still lacks a coherent log contract.
 - Spec moved from `specs/2026-05-23-event-first-interactive-cli.md` to
   `specs/2026-05-23-observability-first-coding-loop.md` and rewritten.
 - Spec revised to make XDG TOML config, provider/model settings, observability
   settings, and sandbox config/log mounting first-class requirements.
+- Spec revised to pin the default log file path and open/create failure
+  behavior.
 - Roadmap updated to make observability-first logging/tracing the next
   milestone.
 - Decision record corrected from Event-First CLI Before TUI to Observability

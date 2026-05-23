@@ -53,7 +53,10 @@ fallback: ~/.config/merry/config.toml
 That config should own global defaults, provider/model settings, and
 observability settings such as log enabled/level/format/path. Logs should be
 off by default and, when file-backed, should use XDG state paths such as
-`$XDG_STATE_HOME/merry/logs/` with `~/.local/state/merry/logs/` as fallback.
+`$XDG_STATE_HOME/merry/logs/merry.jsonl` with
+`~/.local/state/merry/logs/merry.jsonl` as fallback when no path is configured.
+Opening or creating the configured/default log file should fail clearly instead
+of silently falling back to stderr.
 The existing `.merry/secrets/openai.env` live-smoke config is a transitional
 debug path, not the long-term default.
 

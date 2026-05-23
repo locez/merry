@@ -74,8 +74,8 @@ fallback: ~/.config/merry/config.toml
 Merry should also be prepared to use XDG state paths for logs:
 
 ```text
-$XDG_STATE_HOME/merry/logs/
-fallback: ~/.local/state/merry/logs/
+$XDG_STATE_HOME/merry/logs/merry.jsonl
+fallback: ~/.local/state/merry/logs/merry.jsonl
 ```
 
 The first config file can be small but should establish the future shape:
@@ -88,7 +88,7 @@ profile = "default"
 enabled = false
 level = "info"
 format = "json"
-# Optional. If omitted and logging is enabled, use XDG_STATE_HOME fallback.
+# Optional. If omitted and logging is enabled, use the XDG state fallback.
 path = "~/.local/state/merry/logs/merry.jsonl"
 
 [providers.default]
@@ -127,8 +127,12 @@ logging path.
 Logs should not replace command stdout. Existing command output, such as
 `coding-loop-live-smoke: ok`, should remain on stdout so scripts and tests can
 continue to distinguish command result from diagnostics. If logging is enabled
-and no file path is configured, stderr is acceptable for early manual use, but
-the stable long-term path should be configurable and XDG-state based.
+and no file path is configured, logs should go to
+`$XDG_STATE_HOME/merry/logs/merry.jsonl`, falling back to
+`~/.local/state/merry/logs/merry.jsonl`. Merry should create the parent
+directory when possible. If the directory cannot be created or the log file
+cannot be opened, the command should fail with a clear diagnostic instead of
+silently falling back to stderr.
 
 A readable text log mode is useful for manual testing, but JSON logs should be
 the primary stable shape for regression capture. A representative JSON log
@@ -266,6 +270,11 @@ The MVP config contract should be intentionally small and extensible:
 - support global defaults separately from provider-specific settings
 - support observability logging config with `enabled`, `level`, `format`, and
   optional `path`
+- when logging is enabled and `path` is omitted, write to
+  `$XDG_STATE_HOME/merry/logs/merry.jsonl`, falling back to
+  `~/.local/state/merry/logs/merry.jsonl`
+- create the default log directory when possible and fail clearly if the log
+  path cannot be opened
 - keep API keys out of logs; prefer `api_key_env` for the first version, while
   leaving room for future local secret file support under the Merry config
   directory
@@ -310,6 +319,8 @@ Test coverage should include:
 - XDG path resolution for set/unset/empty/relative `$XDG_CONFIG_HOME` and
   `$XDG_STATE_HOME`.
 - TOML config parsing for global, observability, provider, and model settings.
+- Default log path tests for omitted `observability.log.path`.
+- Log path failure tests for parent directory creation and file open errors.
 - Sandbox plan tests proving `--with-sandbox` mounts the Merry config directory
   read-only and mounts the configured/default log directory only when needed.
 - CLI log configuration and subscriber setup smoke tests driven by config.
@@ -359,6 +370,11 @@ are actually useful.
   enabled through `~/.config/merry/config.toml` and see the runtime loop,
   provider boundary, tool choices, process execution, artifact IDs, and final
   status in one correlated log stream.
+- If `observability.log.path` is omitted, logs are written to
+  `$XDG_STATE_HOME/merry/logs/merry.jsonl`, falling back to
+  `~/.local/state/merry/logs/merry.jsonl`.
+- If that default log file cannot be opened, Merry reports a clear error and
+  does not silently fall back to stderr.
 - `merry --with-sandbox` mounts the resolved Merry config directory into the
   sandbox so deterministic and live smokes can read the same user-local config.
 - A user can run the live coding-loop smoke with config-backed logging and see

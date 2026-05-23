@@ -122,8 +122,10 @@ The long-term config direction is `$XDG_CONFIG_HOME/merry/config.toml`, falling
 back to `~/.config/merry/config.toml`. That TOML config should own global
 defaults, provider/model settings, and observability settings such as whether
 logs are enabled, log level, log format, and log output path. Logs should be off
-by default and file logs should use `$XDG_STATE_HOME/merry/logs/`, falling back
-to `~/.local/state/merry/logs/`.
+by default. If logging is enabled and no path is configured, file logs should
+use `$XDG_STATE_HOME/merry/logs/merry.jsonl`, falling back to
+`~/.local/state/merry/logs/merry.jsonl`; failure to create/open that file should
+be a clear error, not an implicit stderr fallback.
 
 The existing `.merry/secrets/openai.env` live-smoke config is a transitional
 debug path from the first live proof. It is ignored and must not be committed.

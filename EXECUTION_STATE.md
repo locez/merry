@@ -61,6 +61,10 @@ Task queue status:
 - User clarified that logging should be configured through XDG TOML config, not
   new `--log-level` / `--log-format` flags, and that `--with-sandbox` should
   mount the Merry config directory: completed.
+- User clarified that when logging is enabled but no path is configured, the
+  default should be `$XDG_STATE_HOME/merry/logs/merry.jsonl`, falling back to
+  `~/.local/state/merry/logs/merry.jsonl`, with clear failure on open/create
+  errors: completed.
 - Use Locez Lens to reframe the issue from "render runtime events" to "make
   action boundaries observable and correlated": completed.
 - Inspect existing tracing/runtime/CLI state: completed. Provider has localized
@@ -100,7 +104,7 @@ Acceptance criteria:
 - Spec names logs/traces as the milestone center, not event CLI.
 - Spec defines XDG config discovery, TOML provider/model/log settings, sandbox
   config mounting, stable correlation fields, action boundaries, redaction,
-  tests, and live/manual smoke expectations.
+  default log path behavior, tests, and live/manual smoke expectations.
 - Roadmap and decisions no longer point to event-first CLI as the next
   milestone.
 - Continuity handoff gives the next exact action.
