@@ -11,6 +11,7 @@ merry-raw-docs/
 .agents/
 .codex/
 .superpowers/
+.worktrees/
 
 # Rust build outputs.
 target/
