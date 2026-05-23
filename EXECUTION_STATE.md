@@ -1,6 +1,6 @@
 # Execution State
 
-Lease status: rollover
+Lease status: complete
 
 ## Source Of Truth
 
@@ -61,7 +61,10 @@ Task queue status:
   non-network behavior, and ignored live smoke execution: implemented.
 - Update roadmap/continuity status with what the live LLM slice proves and
   what remains: implemented.
-- Run the credentialed live LLM smoke: pending local `.merry/secrets/openai.env`.
+- Run the credentialed live LLM smoke: passed in the user's trusted configured
+  environment.
+- Fix provider request metadata exposed by the live smoke: implemented
+  `User-Agent`.
 - Commit or record why the lease cannot be committed: completed.
 
 Allowed expansion:
@@ -69,6 +72,7 @@ Allowed expansion:
 - Minimal runtime agent-loop continuation fix needed for real LLM reliability.
 - Minimal CLI helper code for local ignored config parsing, live provider
   runtime construction, prompt/task text, and event/result validation.
+- Minimal provider HTTP metadata fix exposed by the successful live smoke.
 - Small documentation/status updates tied to the implemented slice.
 
 Done condition:
@@ -80,12 +84,13 @@ Done condition:
   real process runner and workspace patch tooling, and reports success only
   when runtime events prove the LLM-driven tool sequence and fixture result.
 
-Rollover reason:
+Live proof status:
 
-- The implementation and deterministic verification are complete, but this
-  environment does not have `.merry/secrets/openai.env`, so the true live LLM
-  proof has not run. The current live command fails before any network attempt
-  with a missing-config usage error, which is the intended safe gate.
+- The user reported that `cargo run -p merry-cli -- --with-sandbox debug
+  coding-loop-live-smoke` passed against their trusted configured server. This
+  satisfies the live LLM proof lane for this milestone. This agent sandbox did
+  not rerun the trusted external request because elevated external egress was
+  rejected by the approval policy.
 
 Drift boundary:
 
@@ -131,12 +136,14 @@ Allowed edits:
 - `crates/merry-runtime/tests/agent_loop.rs`
 - `crates/merry-cli/src/main.rs`
 - `crates/merry-cli/tests/debug.rs`
+- `crates/merry-provider-openai/src/provider.rs`
+- `crates/merry-provider-openai/tests/provider_stream.rs`
 - `crates/merry-tool-workspace/tests/runtime_integration.rs`
 
 Forbidden edits:
 
-- Rust production runtime/provider/CLI implementation outside the live smoke
-  and agent-loop continuation slice
+- Rust production runtime/provider/CLI implementation outside the live smoke,
+  agent-loop continuation slice, and provider HTTP request metadata fix
 - private ignored source material under `docs/` or `merry-raw-docs/`
 - real credentials or generated build artifacts
 
@@ -152,22 +159,23 @@ Protected files:
 Validation command:
 
 - `cargo fmt --all --check`
-- `cargo clippy -p merry-cli --all-targets -- -D warnings`
-- `cargo clippy -p merry-runtime --all-targets -- -D warnings`
-- `cargo test -p merry-cli`
-- `cargo test -p merry-runtime agent_loop`
-- `cargo test -p merry-tool-workspace coding_loop_harness`
-- `cargo test -p merry-cli debug_coding_loop_smoke_runs_inside_real_bwrap_when_opted_in -- --ignored`
+- `cargo clippy -p merry-provider-openai --all-targets -- -D warnings`
+- `cargo test -p merry-provider-openai`
+- `cargo test -p merry-provider-openai builds_responses_http_request_without_network`
+- `cargo test -p merry-provider-openai stream_model_posts_responses_request_and_streams_events -- --ignored`
 - `git diff --check`
-- opt-in live LLM bwrap smoke command when local credentials are configured
+- user-run opt-in live LLM bwrap smoke against trusted configured server
 
 Validation notes:
 
-- Focused deterministic tests, clippy, formatting, diff whitespace, and the
-  deterministic real bwrap ignored smoke passed.
-- The live command was attempted with
-  `cargo run -p merry-cli -- --with-sandbox debug coding-loop-live-smoke` and
-  failed before network because `.merry/secrets/openai.env` does not exist.
+- The user reported that the credentialed live smoke passed against their
+  trusted configured server. That satisfies the live LLM proof lane outside this
+  agent sandbox.
+- The live run exposed a provider HTTP request metadata gap: Merry did not set
+  a `User-Agent` header. This lease adds a provider-layer fix and deterministic
+  request-construction coverage.
+- Provider request-construction, loopback header integration, full provider
+  tests, provider clippy, formatting, and diff whitespace checks passed.
 
 ## Research
 
@@ -187,11 +195,7 @@ Research artifact:
 
 Next exact action:
 
-- Create `.merry/secrets/openai.env` locally with debug opt-in, API key, model,
-  and optional base URL, then run
-  `cargo run -p merry-cli -- --with-sandbox debug coding-loop-live-smoke`.
-  If the live model deviates, inspect the runtime error/events and make the
-  smallest prompt/tool-contract fix.
+- Commit the completed lease.
 
 Do not reconsider:
 

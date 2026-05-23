@@ -1,6 +1,6 @@
 # Handoff
 
-Status: rollover
+Status: complete
 
 ## Current Work
 
@@ -23,8 +23,11 @@ Task queue status:
 - `debug coding-loop-live-smoke` CLI command using `OpenAiProvider`:
   implemented.
 - Parser/gating/default-offline/ignored-live-smoke tests: implemented.
-- Roadmap, decisions, and continuity state: updated.
-- Credentialed live LLM proof: pending local `.merry/secrets/openai.env`.
+- Credentialed live LLM proof: passed in the user's trusted configured
+  environment.
+- Provider HTTP request `User-Agent`: implemented in this lease.
+- Validation: passed.
+- Commit: completed.
 
 Done condition:
 
@@ -34,159 +37,90 @@ Done condition:
   `workspace_patch_file`, and real `rg fixed-by-live-llm` verification calls
   chosen by the live model.
 
-Drift boundary:
+Live proof status:
 
-- Do not start a full autonomous coding agent, broad process profile, broad CLI
-  UX, graph memory, skill VM, Python SDK, arbitrary shell expansion, or a
-  live-provider judgment path unless a later lease explicitly selects that
-  slice.
-
-Acceptance criteria:
-
-- The CLI command is explicit and non-default under debug tooling.
-- The command refuses to run without validated `--with-sandbox` child handoff
-  evidence before reading config or attempting network.
-- The command requires `MERRY_OPENAI_DEBUG=1` via ignored local config or env.
-- The smoke uses `OpenAiProvider`, not a deterministic scripted provider, for
-  model decisions.
-- The smoke uses `TokioProcessRunner` for real `rg --files` and
-  `rg fixed-by-live-llm` execution inside the sandbox.
-- The smoke uses `workspace_patch_file` and mutates only
-  `.merry/local/coding-loop-live-smoke`.
-- Default `cargo test` does not require bwrap, network, or live credentials.
-
-## Communication
-
-Language: Chinese
-
-Style notes:
-
-- Keep updates concise and technical.
+- The user reported that `cargo run -p merry-cli -- --with-sandbox debug
+  coding-loop-live-smoke` passed against their trusted configured server. That
+  satisfies the live LLM proof lane for this milestone.
+- This agent sandbox did not rerun the trusted external request because
+  elevated external egress was rejected by the approval policy.
+- The successful live run exposed one provider-layer gap: requests did not set
+  a `User-Agent` header.
 
 ## What Changed
 
 Files changed:
 
-- `crates/merry-runtime/src/agent_loop.rs`
-- `crates/merry-runtime/tests/agent_loop.rs`
-- `crates/merry-tool-workspace/tests/runtime_integration.rs`
-- `crates/merry-cli/src/main.rs`
-- `crates/merry-cli/tests/debug.rs`
-- `README.md`
-- `ROADMAP.md`
-- `DECISIONS.md`
+- `crates/merry-provider-openai/src/provider.rs`
+- `crates/merry-provider-openai/tests/provider_stream.rs`
 - `EXECUTION_STATE.md`
 - `HANDOFF.md`
 
 Summary:
 
-- `Runtime::run_agent_loop` now includes the original user task in continuation
-  inputs after tool results. This addresses the real-model failure mode where
-  later turns only saw "Continue after tool result."
-- Added `merry --with-sandbox debug coding-loop-live-smoke`, which builds a
-  live OpenAI-compatible runtime with workspace read/patch tools and
-  `process_command_tool`.
-- Added ignored local config parsing for `.merry/secrets/openai.env` with
-  supported OpenAI-compatible keys only; host env still works for non-sandboxed
-  provider debug paths, but bwrap live smoke should use the file because the
-  sandbox clears env.
-- The live smoke creates a disposable fixture under
-  `.merry/local/coding-loop-live-smoke`, asks the model to run one tool per
-  step, validates the patched source, and checks resolved artifacts for real
-  process inspection and verification evidence.
-- Updated deterministic bwrap smoke fixture values to match the live smoke
-  target string: `"unfixed"` -> `"fixed-by-live-llm"`.
-- Updated roadmap/decision docs so scripted-provider success and live-provider
-  proof are tracked separately.
+- Added `User-Agent: merry/<crate version>` to OpenAI-compatible Responses
+  request headers.
+- Added deterministic request-construction coverage for the `User-Agent`
+  header.
+- Added loopback integration coverage asserting the actual HTTP request carries
+  the same `User-Agent` header.
+- Updated continuity state to record that the live smoke passed in the user's
+  trusted configured environment.
 
 ## Validation
 
-Commands run during the lease:
+Commands run so far:
 
+- `cargo test -p merry-provider-openai builds_responses_http_request_without_network`
+- `cargo test -p merry-provider-openai stream_model_posts_responses_request_and_streams_events -- --ignored`
 - `cargo fmt --all --check`
-- `cargo clippy -p merry-cli --all-targets -- -D warnings`
-- `cargo clippy -p merry-runtime --all-targets -- -D warnings`
-- `cargo test -p merry-cli`
-- `cargo test -p merry-runtime agent_loop`
-- `cargo test -p merry-tool-workspace coding_loop_harness`
-- `cargo test -p merry-cli debug_coding_loop_smoke_runs_inside_real_bwrap_when_opted_in -- --ignored`
-- `cargo run -p merry-cli -- --with-sandbox debug coding-loop-live-smoke`
+- `cargo clippy -p merry-provider-openai --all-targets -- -D warnings`
+- `cargo test -p merry-provider-openai`
 - `git diff --check`
 
 Result:
 
-- Deterministic checks passed.
-- The live command exited 2 before network because `.merry/secrets/openai.env`
-  is missing.
-
-Live proof status:
-
-- Not passed yet. `cargo run -p merry-cli -- --with-sandbox debug
-  coding-loop-live-smoke` currently fails before network with missing
-  `.merry/secrets/openai.env`, which is the intended credential gate.
+- Request-construction test passed after first failing red test.
+- Loopback ignored test passed with escalated local TCP permission.
+- Formatting, provider clippy, full provider test, and diff checks passed.
 
 ## Decisions
 
 Decisions made:
 
-- Live LLM coding-loop proof is a separate acceptance gate from deterministic
-  scripted-provider bwrap proof.
-- Sandboxed live smoke should read ignored local `KEY=value` config from
-  `.merry/secrets/openai.env` because bwrap clears host environment before CLI
-  execution.
-- Agent-loop continuation input should carry the original task text; runtime
-  state remains structured, but real model turns still need the objective.
+- `User-Agent` belongs in `merry-provider-openai` request construction, not in
+  runtime or CLI smoke code.
+- Use the crate version for the value: `merry/<crate version>`.
+- Keep live LLM proof opt-in and credentialed; do not move it into default
+  tests.
 
 Pending decisions:
 
-- Whether the live prompt/tool contract is sufficient once a real credentialed
-  run is attempted.
-- How to represent reusable runtime-owned read-only process profiles and
-  coding-loop tool-set registration outside ad hoc CLI assembly.
+- None for this lease after validation.
 
 ## Blockers
 
 Blockers:
 
-- No tracked blocker. The next step needs local ignored credentials/config that
-  should not be committed.
+- none
 
 Next exact action:
 
-- Create `.merry/secrets/openai.env` locally:
-
-```text
-MERRY_OPENAI_DEBUG=1
-MERRY_OPENAI_API_KEY=<local secret>
-MERRY_OPENAI_MODEL=<model>
-MERRY_OPENAI_BASE_URL=<optional OpenAI-compatible base URL>
-```
-
-- Then run:
-
-```bash
-cargo run -p merry-cli -- --with-sandbox debug coding-loop-live-smoke
-```
-
-- If it fails after reaching the live provider, inspect the error/runtime
-  events and make the smallest prompt, schema, continuation, or process-profile
-  correction needed for a passing live loop.
+- Continue the next project-continuity lease from the reusable runtime-owned
+  process profile and coding-loop tool-set registration work.
 
 ## Scope For Next Session
 
 Allowed edits:
 
-- Small live-smoke prompt/tool-contract/runtime-continuation fixes driven by
-  the actual credentialed run.
-- Runtime/process profile code needed if live failure proves the profile is too
-  narrow.
-- Tests and docs tied directly to the live-smoke proof.
+- Follow-up fixes only if provider validation exposes a problem.
+- Status updates tied directly to this lease.
 
 Forbidden edits:
 
 - Private raw docs.
 - Real credentials.
-- Broad roadmap rewrites unless the live proof exposes a blocker.
+- Broad roadmap rewrites.
 - Full autonomous coding agent, Python SDK, graph memory, or live judgment
   harness.
 
@@ -202,7 +136,7 @@ Status: committed
 
 Message:
 
-- project-continuity: add live coding loop smoke
+- project-continuity: add openai user agent
 
 No-commit reason:
 

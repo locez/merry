@@ -77,8 +77,9 @@ reads ignored local config from `.merry/secrets/openai.env`, uses real
 `rg --files`, `workspace_read_file`, `workspace_patch_file`, and
 `rg fixed-by-live-llm`. `Runtime::run_agent_loop` also carries the original
 task text into continuation turns so a real model does not lose the objective
-after tool results. In this environment the live command currently fails before
-network because `.merry/secrets/openai.env` is missing.
+after tool results. The user reported that the credentialed live smoke passed
+against their trusted configured server. That live run exposed a provider HTTP
+metadata gap: Merry did not set a `User-Agent` header.
 
 Tradeoff:
 The live smoke is nondeterministic and credential-dependent, so it stays
@@ -91,6 +92,31 @@ Yes. The command can later become a thin wrapper around reusable runtime-owned
 coding-loop profile registration once that contract exists.
 
 Follow-up:
-Create `.merry/secrets/openai.env` locally, run the live smoke, and treat any
-failure as the next minimal runtime/tool-contract fix rather than widening the
-roadmap.
+Keep the live smoke as an opt-in regression lane, fix the provider
+`User-Agent` gap, and treat any future live failure as the next minimal
+runtime/tool-contract fix rather than widening the roadmap.
+
+## 2026-05-23 - OpenAI-Compatible Requests Send Merry User-Agent
+
+Decision:
+`merry-provider-openai` sets `User-Agent: merry/<crate version>` on
+OpenAI-compatible Responses requests.
+
+Reason:
+The live coding-loop smoke passed against the user's trusted configured server,
+but exposed that Merry requests lacked a product identity header. This belongs
+at the provider HTTP boundary because runtime, CLI, and tool code should not
+know provider wire headers.
+
+Evidence:
+The provider request-construction test asserts the `User-Agent` header without
+network, and the ignored loopback integration test asserts the actual HTTP
+request carries the same header.
+
+Tradeoff:
+The value is intentionally simple and stable. Richer telemetry or per-command
+metadata can be added later only if there is a concrete provider/debugging need.
+
+Reversible:
+Yes. The header value can be made configurable later without changing runtime
+state or the provider trait boundary.

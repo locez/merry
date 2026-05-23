@@ -100,6 +100,7 @@ async fn stream_model_posts_responses_request_and_streams_events() {
     );
     assert_eq!(received.header("openai-organization"), Some("org-test"));
     assert_eq!(received.header("openai-project"), Some("proj-test"));
+    assert_eq!(received.header("user-agent"), Some("merry/0.1.0"));
 
     let json: Value = serde_json::from_str(&received.body).expect("request body should be JSON");
     assert_eq!(json["model"], "debug-model");

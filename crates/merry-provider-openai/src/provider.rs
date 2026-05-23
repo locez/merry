@@ -14,6 +14,8 @@ use tracing::Instrument;
 const AUTHORIZATION_HEADER: &str = "Authorization";
 const ACCEPT_HEADER: &str = "Accept";
 const SSE_ACCEPT_HEADER_VALUE: &str = "text/event-stream";
+const USER_AGENT_HEADER: &str = "User-Agent";
+const USER_AGENT_HEADER_VALUE: &str = concat!("merry/", env!("CARGO_PKG_VERSION"));
 const OPENAI_ORGANIZATION_HEADER: &str = "OpenAI-Organization";
 const OPENAI_PROJECT_HEADER: &str = "OpenAI-Project";
 
@@ -317,6 +319,10 @@ fn build_responses_http_request(
             name: ACCEPT_HEADER,
             value: SSE_ACCEPT_HEADER_VALUE.to_owned(),
         },
+        ResponsesHttpHeader {
+            name: USER_AGENT_HEADER,
+            value: USER_AGENT_HEADER_VALUE.to_owned(),
+        },
     ];
     if let Some(organization) = config.organization() {
         headers.push(ResponsesHttpHeader {
@@ -454,6 +460,7 @@ mod tests {
         );
         assert_eq!(request.header("Authorization"), Some("Bearer sk-test"));
         assert_eq!(request.header("Accept"), Some("text/event-stream"));
+        assert_eq!(request.header("User-Agent"), Some("merry/0.1.0"));
         assert_eq!(request.header("OpenAI-Organization"), Some("org-test"));
         assert_eq!(request.header("OpenAI-Project"), Some("proj-test"));
         assert_eq!(request.body["model"], "debug-model");
