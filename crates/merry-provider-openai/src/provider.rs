@@ -58,13 +58,14 @@ impl ModelProvider for OpenAiProvider {
         context: ModelStreamContext,
     ) -> ModelProviderFuture<'a, Result<ModelEventStream, ModelError>> {
         let stream_span = tracing::debug_span!(
-            "openai.stream_model",
+            "runtime.provider.stream",
+            event = "runtime.provider.stream",
             provider_name = self.config.provider_name().as_str(),
             model = request.model().as_str(),
             message_count = request.messages().len(),
             tool_count = request.tools().len(),
             continuation_count = request.continuations().len(),
-            max_output_tokens = ?request.generation().max_output_tokens(),
+            max_output_tokens = request.generation().max_output_tokens(),
             allow_parallel_tool_calls = request.generation().allow_parallel_tool_calls(),
             endpoint_path = tracing::field::Empty,
         );
@@ -77,9 +78,12 @@ impl ModelProvider for OpenAiProvider {
                     return Err(ModelError::Cancelled);
                 }
 
-                let http_request = build_responses_http_request(&self.config, &request)?;
-                event_stream_span.record("endpoint_path", http_request.endpoint.path());
-                tracing::trace!("openai request rendered");
+                let http_request = build_and_trace_responses_http_request(
+                    &self.config,
+                    &request,
+                    &event_stream_span,
+                )?;
+                tracing::trace!(event = "runtime.provider.request.rendered");
 
                 let mut request_builder = self
                     .client
@@ -344,6 +348,36 @@ fn build_responses_http_request(
     })
 }
 
+fn build_and_trace_responses_http_request(
+    config: &OpenAiProviderConfig,
+    request: &ModelRequest,
+    span: &tracing::Span,
+) -> Result<ResponsesHttpRequest, ModelError> {
+    let http_request = build_responses_http_request(config, request)?;
+    span.record("endpoint_path", http_request.endpoint.path());
+    trace_openai_request_metadata(config, request, http_request.endpoint.path());
+    Ok(http_request)
+}
+
+fn trace_openai_request_metadata(
+    config: &OpenAiProviderConfig,
+    request: &ModelRequest,
+    endpoint_path: &str,
+) {
+    tracing::debug!(
+        event = "runtime.provider.request",
+        provider_name = config.provider_name().as_str(),
+        model = request.model().as_str(),
+        message_count = request.messages().len(),
+        tool_count = request.tools().len(),
+        continuation_count = request.continuations().len(),
+        max_output_tokens = request.generation().max_output_tokens(),
+        allow_parallel_tool_calls = request.generation().allow_parallel_tool_calls(),
+        endpoint_path,
+        "runtime provider request metadata"
+    );
+}
+
 fn responses_endpoint(base_url: &str) -> Result<reqwest::Url, ModelError> {
     let endpoint = format!("{}/responses", base_url.trim_end_matches('/'));
     reqwest::Url::parse(&endpoint).map_err(|error| {
@@ -413,7 +447,10 @@ fn truncate_for_error(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{OpenAiEventStreamEvents, build_responses_http_request, classify_http_status};
+    use super::{
+        OpenAiEventStreamEvents, build_and_trace_responses_http_request,
+        build_responses_http_request, classify_http_status, trace_openai_request_metadata,
+    };
     use crate::OpenAiProviderConfig;
     use crate::parse::ResponsesStreamParser;
     use merry_llm::{
@@ -421,8 +458,18 @@ mod tests {
         ModelName, ModelOutput, ModelProvider, ModelRequest, ModelResponse, ModelStreamContext,
         ProviderErrorKind, Usage,
     };
-    use std::collections::VecDeque;
+    use std::{
+        collections::VecDeque,
+        fmt,
+        sync::{Arc, Mutex},
+    };
     use tokio_util::sync::CancellationToken;
+    use tracing::{
+        Event, Level, Subscriber,
+        field::{Field, Visit},
+        metadata::{LevelFilter, Metadata},
+        span::{Attributes, Id, Record},
+    };
 
     fn request() -> ModelRequest {
         ModelRequest::new(
@@ -438,6 +485,132 @@ mod tests {
             GenerationConfig::default(),
         )
         .expect("valid request")
+    }
+
+    #[derive(Debug, Clone)]
+    struct CapturedTraceFields(Arc<Mutex<Vec<String>>>);
+
+    impl CapturedTraceFields {
+        fn new() -> Self {
+            Self(Arc::new(Mutex::new(Vec::new())))
+        }
+
+        fn joined(&self) -> String {
+            self.0
+                .lock()
+                .expect("trace buffer should not be poisoned")
+                .join(" ")
+        }
+    }
+
+    struct CapturingSubscriber {
+        fields: CapturedTraceFields,
+    }
+
+    impl CapturingSubscriber {
+        fn new(fields: CapturedTraceFields) -> Self {
+            Self { fields }
+        }
+    }
+
+    impl Subscriber for CapturingSubscriber {
+        fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+            *metadata.level() <= Level::DEBUG
+        }
+
+        fn max_level_hint(&self) -> Option<LevelFilter> {
+            Some(LevelFilter::DEBUG)
+        }
+
+        fn new_span(&self, span: &Attributes<'_>) -> Id {
+            let metadata = span.metadata();
+            self.fields
+                .0
+                .lock()
+                .expect("trace buffer should not be poisoned")
+                .push(format!("span={:?}", metadata.name()));
+            let mut visitor = TraceFieldVisitor::default();
+            span.record(&mut visitor);
+            self.fields
+                .0
+                .lock()
+                .expect("trace buffer should not be poisoned")
+                .extend(visitor.fields);
+            Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &Id, values: &Record<'_>) {
+            let mut visitor = TraceFieldVisitor::default();
+            values.record(&mut visitor);
+            self.fields
+                .0
+                .lock()
+                .expect("trace buffer should not be poisoned")
+                .extend(visitor.fields);
+        }
+
+        fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+
+        fn event(&self, event: &Event<'_>) {
+            let mut visitor = TraceFieldVisitor::default();
+            event.record(&mut visitor);
+            self.fields
+                .0
+                .lock()
+                .expect("trace buffer should not be poisoned")
+                .extend(visitor.fields);
+        }
+
+        fn enter(&self, _span: &Id) {}
+
+        fn exit(&self, _span: &Id) {}
+    }
+
+    #[derive(Default)]
+    struct TraceFieldVisitor {
+        fields: Vec<String>,
+    }
+
+    impl Visit for TraceFieldVisitor {
+        fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+            self.fields.push(format!("{}={value:?}", field.name()));
+        }
+    }
+
+    fn capture_trace_fields<F>(operation: F) -> String
+    where
+        F: FnOnce(),
+    {
+        let fields = CapturedTraceFields::new();
+        let subscriber = CapturingSubscriber::new(fields.clone());
+        tracing::subscriber::with_default(subscriber, operation);
+        fields.joined()
+    }
+
+    fn capture_stream_model_span_fields(
+        config: OpenAiProviderConfig,
+        request: ModelRequest,
+    ) -> String {
+        capture_trace_fields(|| {
+            let provider = super::OpenAiProvider::new(config);
+            let stream = provider.stream_model(request, ModelStreamContext::default());
+            drop(stream);
+        })
+    }
+
+    fn trace_rendered_request_fields(
+        config: &OpenAiProviderConfig,
+        request: &ModelRequest,
+    ) -> String {
+        capture_trace_fields(|| {
+            let span = tracing::debug_span!(
+                "test.provider.request",
+                endpoint_path = tracing::field::Empty
+            );
+            let http_request = build_and_trace_responses_http_request(config, request, &span)
+                .expect("request should build and trace");
+            drop(http_request);
+        })
     }
 
     #[test]
@@ -467,6 +640,116 @@ mod tests {
         assert_eq!(request.body["stream"], true);
         assert_eq!(request.body["store"], false);
         assert_eq!(request.body["parallel_tool_calls"], false);
+    }
+
+    #[test]
+    fn provider_trace_metadata_does_not_include_api_key_or_prompt_text() {
+        let config = OpenAiProviderConfig::new("sk-secret-trace-key")
+            .expect("valid config")
+            .with_provider_name("openai-test")
+            .expect("valid provider name");
+        let request = ModelRequest::new(
+            ModelName::new("trace-model").expect("valid model name"),
+            vec![
+                ModelMessage::new(
+                    ModelMessageRole::User,
+                    ModelContent::text("do not log this prompt text").expect("valid content"),
+                )
+                .expect("valid message"),
+            ],
+            Vec::new(),
+            GenerationConfig::new(Some(128), false).expect("valid generation config"),
+        )
+        .expect("valid request");
+
+        let fields = capture_trace_fields(|| {
+            trace_openai_request_metadata(&config, &request, "/v1/responses");
+        });
+
+        assert!(fields.contains("event=\"runtime.provider.request\""));
+        assert!(fields.contains("provider_name=\"openai-test\""));
+        assert!(fields.contains("model=\"trace-model\""));
+        assert!(fields.contains("message_count=1"));
+        assert!(fields.contains("tool_count=0"));
+        assert!(fields.contains("continuation_count=0"));
+        assert!(fields.contains("max_output_tokens=128"));
+        assert!(fields.contains("allow_parallel_tool_calls=false"));
+        assert!(fields.contains("endpoint_path=\"/v1/responses\""));
+        assert!(!fields.contains("sk-secret-trace-key"));
+        assert!(!fields.contains("do not log this prompt text"));
+    }
+
+    #[test]
+    fn provider_render_path_traces_request_metadata_without_api_key_or_prompt_text() {
+        let config = OpenAiProviderConfig::new("sk-render-secret")
+            .expect("valid config")
+            .with_provider_name("openai-render-test")
+            .expect("valid provider name")
+            .with_base_url("https://api.example.test/v1")
+            .expect("valid base url");
+        let request = ModelRequest::new(
+            ModelName::new("render-model").expect("valid model name"),
+            vec![
+                ModelMessage::new(
+                    ModelMessageRole::User,
+                    ModelContent::text("render prompt must not be logged").expect("valid content"),
+                )
+                .expect("valid message"),
+            ],
+            Vec::new(),
+            GenerationConfig::new(Some(32), false).expect("valid generation config"),
+        )
+        .expect("valid request");
+
+        let fields = trace_rendered_request_fields(&config, &request);
+
+        assert!(fields.contains("event=\"runtime.provider.request\""));
+        assert!(fields.contains("provider_name=\"openai-render-test\""));
+        assert!(fields.contains("model=\"render-model\""));
+        assert!(fields.contains("message_count=1"));
+        assert!(fields.contains("tool_count=0"));
+        assert!(fields.contains("continuation_count=0"));
+        assert!(fields.contains("max_output_tokens=32"));
+        assert!(fields.contains("allow_parallel_tool_calls=false"));
+        assert!(fields.contains("endpoint_path=\"/v1/responses\""));
+        assert!(!fields.contains("sk-render-secret"));
+        assert!(!fields.contains("render prompt must not be logged"));
+    }
+
+    #[test]
+    fn provider_stream_span_uses_runtime_request_metadata_fields_without_prompt_text() {
+        let config = OpenAiProviderConfig::new("sk-span-secret")
+            .expect("valid config")
+            .with_provider_name("openai-span-test")
+            .expect("valid provider name");
+        let request = ModelRequest::new(
+            ModelName::new("span-model").expect("valid model name"),
+            vec![
+                ModelMessage::new(
+                    ModelMessageRole::User,
+                    ModelContent::text("span prompt must not be logged").expect("valid content"),
+                )
+                .expect("valid message"),
+            ],
+            Vec::new(),
+            GenerationConfig::new(Some(64), false).expect("valid generation config"),
+        )
+        .expect("valid request");
+
+        let fields = capture_stream_model_span_fields(config, request);
+
+        assert!(fields.contains("span=\"runtime.provider.stream\""));
+        assert!(fields.contains("event=\"runtime.provider.stream\""));
+        assert!(fields.contains("provider_name=\"openai-span-test\""));
+        assert!(fields.contains("model=\"span-model\""));
+        assert!(fields.contains("message_count=1"));
+        assert!(fields.contains("tool_count=0"));
+        assert!(fields.contains("continuation_count=0"));
+        assert!(fields.contains("max_output_tokens="));
+        assert!(fields.contains("allow_parallel_tool_calls=false"));
+        assert!(!fields.contains("openai.stream_model"));
+        assert!(!fields.contains("sk-span-secret"));
+        assert!(!fields.contains("span prompt must not be logged"));
     }
 
     #[test]

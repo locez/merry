@@ -123,12 +123,18 @@ The OpenAI provider target is the Responses API only. The provider request path 
   step, tool-call, tool-name, artifact, status, and diagnostic-code fields; the
   process path emits argv/cwd, output byte counts, truncation flags, and status
   without logging stdout/stderr contents. Policy-denied process proposals emit
-  one denied tool-finish trace and no process execution trace. Workspace tool
-  and provider trace alignment remain the next observability gap.
+  one denied tool-finish trace and no process execution trace.
+- Workspace tool and OpenAI-compatible provider trace alignment is implemented:
+  workspace read/list/search/patch emit bounded safe start/finish traces for
+  success, domain failure, invalid arguments, cancellation, and infrastructure
+  errors; search logs query byte counts rather than query text; patch logs
+  preimage/replacement byte counts rather than patch text; provider tracing
+  records safe request metadata without API keys, prompts, provider wire
+  payloads, or response payloads.
 
 ### Active
 
-- P0: continue the Minimal Useful Coding Loop as the current MVP proof. The loop now has a deterministic fake-provider/fake-runner slice, a deterministic real `bwrap` process-runner smoke, and a user-verified live-provider smoke command. The next proof gap is observability: a correlated structured log/trace stream that shows provider requests, workspace tool actions, artifact IDs, failures, cancellations, and final loop status while the smoke runs. Runtime loop and process execution traces now provide the first half of that stream.
+- P0: continue the Minimal Useful Coding Loop as the current MVP proof. The loop now has a deterministic fake-provider/fake-runner slice, a deterministic real `bwrap` process-runner smoke, and a user-verified live-provider smoke command. The next proof gap is end-to-end observability verification: a log-enabled smoke should show the already-instrumented runtime loop, provider request metadata, workspace tool actions, artifact/tool resolution, process execution, failures/cancellations, and final loop status together.
 - P0: keep the Runtime Coding Loop Harness executable against a disposable fixture repository. The default lane uses fake provider/fake runner for deterministic `cargo test`; the deterministic `bwrap` lane is an explicit ignored smoke; the live OpenAI-compatible lane is also explicit and ignored and has passed in the user's trusted configured environment.
 - P0: define a runtime-owned read-only process profile for command families, not one-off command matches. Initial coverage should include `rg --files`, literal `rg <pattern>`, and a read-only file-slice command shape such as `sed -n RANGE FILE`, or an equivalent typed process/read tool that proves the same evidence loop.
 - P0: keep edit/write on the typed workspace patch path. The MVP loop should apply one constrained patch through `workspace_patch_file` or its runtime-owned successor, record artifact/audit/ledger evidence, and then run verification.
@@ -140,7 +146,7 @@ The OpenAI provider target is the Responses API only. The provider request path 
 
 ### Next Active
 
-- Continue the observability-first coding-loop design in `specs/2026-05-23-observability-first-coding-loop.md`. The CLI config/log/sandbox/provider-config slice and the runtime loop/process tracing slice are complete; the next slice is structured `tracing` alignment for workspace tools and provider metadata.
+- Continue the observability-first coding-loop design in `specs/2026-05-23-observability-first-coding-loop.md`. The CLI config/log/sandbox/provider-config slice, runtime loop/process tracing slice, and workspace/provider trace-alignment slice are complete; the next slice is end-to-end log-enabled smoke verification.
 - Replace one-off process classification growth with a runtime-owned read-only process profile for reusable workspace inspection and exact evidence retrieval, including a file-slice shape such as `sed -n RANGE FILE` or an equivalent typed read tool.
 - Move coding-loop tool-set/profile registration toward reusable runtime/library construction so upper layers do not have to assemble `process_command_tool`, workspace read/search fallback, and patch tooling ad hoc.
 - Keep the opt-in live OpenAI-compatible smoke as a regression lane; when it fails, inspect the failure as model/tool-contract evidence and tune only the smallest runtime/provider/tool fix needed.
@@ -201,13 +207,28 @@ Completed second slice:
 - Deterministic runtime trace-capture tests for completed process execution,
   policy denial, and executor infrastructure error paths.
 
+Completed third slice:
+
+- Workspace read/list/search/patch tools emit `runtime.workspace_tool.start`
+  and `runtime.workspace_tool.finish` traces with `tool_call_id`, `tool_name`,
+  status, diagnostic code, output byte count where applicable, and bounded
+  action summaries that avoid file contents, raw search queries, and patch
+  text.
+- OpenAI-compatible provider tracing records safe request metadata through
+  `runtime.provider.request` and keeps the provider stream span separate as
+  `runtime.provider.stream`.
+- Deterministic workspace/provider tests cover redaction, bounded summaries,
+  invalid arguments, cancellation after start, domain failures, and
+  request-render metadata without secrets or prompt text.
+
 Remaining tasks:
 
-- Instrument workspace tool paths with exact safe action summaries, status,
-  output byte counts where applicable, artifact IDs, and diagnostic codes.
-- Align OpenAI-compatible provider tracing with the runtime correlation fields
-  while keeping provider wire payloads private.
-- Add deterministic tracing capture tests and redaction/bounded-summary tests.
+- Add end-to-end log-enabled smoke verification for the existing deterministic
+  coding-loop smoke and the configured log path.
+- Check that the combined smoke log contains runtime loop, provider request,
+  workspace tool, process execution, artifact/tool resolution, diagnostic, and
+  terminal status records without provider wire payloads, secrets, prompts, file
+  contents, or process output contents.
 - Keep the existing deterministic `bwrap` and live provider smokes explicit
   and non-default.
 

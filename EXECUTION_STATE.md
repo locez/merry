@@ -44,14 +44,15 @@ Current milestone or track:
 
 Session milestone:
 
-- Implement Task 5 from `plans/2026-05-23-config-backed-observability.md`:
-  runtime loop and process-action tracing with stable correlation fields.
+- Implement Task 6 from `plans/2026-05-23-config-backed-observability.md`:
+  workspace tool and OpenAI-compatible provider trace alignment.
 
 Goal:
 
-- Make the serial runtime agent loop and process execution path explainable in
-  config-backed structured logs before extending the same trace vocabulary to
-  workspace tools and provider metadata.
+- Extend the config-backed structured trace vocabulary from runtime/process
+  paths to workspace read/list/search/patch tools and provider request metadata
+  without logging file contents, raw search queries, patch text, provider wire
+  payloads, prompt text, API keys, or response payloads.
 
 Task queue status:
 
@@ -60,35 +61,42 @@ Task queue status:
 - Task 3, sandbox config/log mount planning: completed.
 - Task 4, XDG provider config for OpenAI-compatible debug paths: completed.
 - Task 5, runtime loop and process tracing: completed.
-- `ROADMAP.md` updated to reflect completed runtime-loop/process tracing and
-  the remaining workspace-tool/provider trace-alignment gap.
-- Plan progress checkboxes updated for Tasks 1-5. Task 6 remains next.
+- Task 6, workspace tool and provider trace alignment: completed.
+- `ROADMAP.md` updated to reflect completed workspace/provider trace alignment
+  and the next log-enabled smoke verification gap.
+- Plan progress checkboxes updated for Tasks 1-6. Task 7 remains next.
 - Continuity state and handoff: completed.
 
 Allowed expansion:
 
-- Runtime loop/process tracing implementation required by
-  `plans/2026-05-23-config-backed-observability.md`, Task 5.
+- Workspace tool trace instrumentation and tests required by
+  `plans/2026-05-23-config-backed-observability.md`, Task 6.
+- OpenAI-compatible provider metadata trace instrumentation and tests required
+  by Task 6.
 - Public-safe roadmap status update for implementation facts changed by this
   lease.
 - Continuity file updates.
 
 Done condition:
 
-- `Runtime::run_agent_loop` emits loop start/finish, step start, pending-tool,
-  and tool execution start/finish traces with `session_id`, `step_index`,
-  `tool_call_id`, `tool_name`, terminal status, artifact IDs, and diagnostic
-  codes where applicable.
-- The process execution path emits start/finish traces with argv/cwd, byte
-  counts, truncation flags, and status, without logging stdout/stderr contents.
-- Denied process actions emit a denied tool finish trace and do not emit process
-  execution start/finish traces.
+- Workspace read/list/search/patch executors emit `runtime.workspace_tool.start`
+  and `runtime.workspace_tool.finish` traces with stable tool/call fields,
+  bounded action summaries, statuses, diagnostic codes, and output byte counts
+  where an outcome exists.
+- Workspace traces cover success, domain failure, invalid arguments, and
+  cancellation after start; implementation paths also emit infrastructure-error
+  finish traces without logging invalid payloads, file contents, raw search
+  query text, or patch text.
+- OpenAI-compatible provider tracing emits safe request metadata at
+  `runtime.provider.request` and uses a distinct `runtime.provider.stream`
+  span for stream setup metadata.
 - Focused and full validation pass.
+- Reviewer pass has no blocking findings.
 - Handoff updated and lease committed.
 
 Drift boundary:
 
-- Do not implement Task 6 workspace-tool or provider trace alignment in this
+- Do not implement Task 7 end-to-end log-enabled smoke verification in this
   lease.
 - Do not add TUI, REPL, or interactive CLI scope.
 - Do not move private ignored notes into tracked files.
@@ -98,15 +106,16 @@ Task type: implementation
 
 Acceptance criteria:
 
-- Runtime loop traces include `runtime.loop.start`, `runtime.step.start`,
-  `runtime.tool.pending`, `runtime.tool.execute.start`,
-  `runtime.tool.execute.finish`, and `runtime.loop.finish`.
-- Process action traces include `runtime.process.execute.start` and
-  `runtime.process.execute.finish` for admitted process actions only.
-- Policy-denied process proposals produce one denied tool finish trace with
-  `diagnostic_code = "action_policy_denied"` and no process execution trace.
-- Runtime trace capture tests are deterministic/offline and stable under the
-  default parallel Rust test harness.
+- Workspace tool traces include `runtime.workspace_tool.start` and
+  `runtime.workspace_tool.finish`.
+- Workspace finish traces distinguish `succeeded`, `failed`, `cancelled`, and
+  `error` statuses and carry existing diagnostic codes where applicable.
+- Workspace trace summaries are bounded and safe: no file contents, raw search
+  query text, patch old/new text, invalid argument payload, or absolute host
+  root leakage through trace fields.
+- Provider traces include provider name, model, message/tool/continuation
+  counts, `max_output_tokens`, `allow_parallel_tool_calls`, and endpoint path
+  without API keys, prompts, provider wire payloads, or response payloads.
 - Workspace-wide Rust validation passes.
 
 ## Scope
@@ -114,10 +123,9 @@ Acceptance criteria:
 Allowed edits:
 
 - `Cargo.lock`
-- `crates/merry-runtime/Cargo.toml`
-- `crates/merry-runtime/src/agent_loop.rs`
-- `crates/merry-runtime/src/runtime.rs`
-- `crates/merry-runtime/tests/agent_loop.rs`
+- `crates/merry-tool-workspace/Cargo.toml`
+- `crates/merry-tool-workspace/src/lib.rs`
+- `crates/merry-provider-openai/src/provider.rs`
 - `plans/2026-05-23-config-backed-observability.md`
 - `ROADMAP.md`
 - `EXECUTION_STATE.md`
@@ -128,7 +136,7 @@ Forbidden edits:
 - private ignored source material under `docs/` or `merry-raw-docs/`
 - real credentials or generated build artifacts
 - `.superpowers/`, `.merry/`, `docs/`, or `merry-raw-docs/` content
-- Task 6 workspace-tool/provider trace alignment in this lease
+- Task 7 CLI log-smoke implementation in this lease
 
 Protected files:
 
@@ -140,41 +148,40 @@ Protected files:
 
 Validation command:
 
-- `cargo test -p merry-runtime executor_infrastructure_error_preserves_events_and_pending_call -- --nocapture`
-- `cargo test -p merry-runtime denied_registered_tool_resolves_failed_and_agent_loop_continues_once -- --nocapture`
-- `cargo test -p merry-runtime agent_loop_traces_loop_steps_tool_process_and_terminal_status -- --nocapture`
-- `cargo test -p merry-runtime denied_process_action_traces_denied_tool_finish_without_process_execution -- --nocapture`
-- `cargo test -p merry-runtime process -- --nocapture`
-- `cargo test -p merry-runtime`
-- `cargo clippy -p merry-runtime --all-targets --all-features -- -D warnings`
+- `cargo test -p merry-tool-workspace workspace_tool_invalid_arguments_trace_failed_without_payload -- --nocapture`
+- `cargo test -p merry-tool-workspace workspace_ -- --nocapture`
+- `cargo test -p merry-provider-openai provider_ -- --nocapture`
+- `cargo test -p merry-tool-workspace`
+- `cargo test -p merry-provider-openai`
+- `cargo clippy -p merry-tool-workspace --all-targets --all-features -- -D warnings`
+- `cargo clippy -p merry-provider-openai --all-targets --all-features -- -D warnings`
 - `cargo fmt --all --check`
-- `cargo test --all`
 - `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test --all`
 - `git diff --check`
 - `git status --short`
 
 Validation notes:
 
-- The new trace tests first exposed missing/error-path trace coverage and then
-  passed after instrumentation.
-- Trace capture uses a process-global JSON subscriber plus per-session marker
-  filtering so tests remain stable under the default parallel Rust harness.
-- Focused loop/process tests passed for completed, denied, and executor-error
-  paths. The completed process trace test asserts stdout/stderr byte counts and
-  verifies stdout content is not logged.
-- `cargo test -p merry-runtime` passed.
-- `cargo clippy -p merry-runtime --all-targets --all-features -- -D warnings`
+- The invalid-arguments trace test was written first and failed because no
+  `runtime.workspace_tool.finish` record existed for parse failures; it passed
+  after adding payload-free invalid-argument tracing.
+- Focused workspace trace tests passed for read/list/search/patch redaction,
+  bounded path summary, invalid arguments, cancellation after start, and domain
+  failure paths.
+- Provider focused tests passed for metadata helper redaction, actual
+  request-render metadata emission, and stream span safe fields.
+- Full package tests for `merry-tool-workspace` and `merry-provider-openai`
   passed.
-- First `cargo test --all` attempt failed in the sandbox because DNS could not
-  resolve `static.crates.io` for missing cached dependencies. The command was
-  rerun with approved network access and passed all workspace tests. Ignored
-  live/network/bwrap tests remained ignored.
-- `cargo clippy --all-targets --all-features -- -D warnings` passed for the
-  workspace.
+- Package and workspace clippy passed with `-D warnings`.
+- Workspace `cargo test --all` passed. Ignored live/network/bwrap tests remained
+  ignored/non-default.
 - `cargo fmt --all --check` and `git diff --check` passed.
-- Review found one duplicate denied-tool finish trace risk; the loop now skips
-  its own generic finish event when the lower denied-action path already emitted
-  `status = "denied"`.
+- First reviewer pass found missing finish traces for cancelled/error paths,
+  unbounded path summaries, provider span/event naming ambiguity, and a weak
+  provider render-path test; those were fixed.
+- Final reviewer pass found invalid-arguments parse failures bypassed workspace
+  traces; this was fixed with a red/green regression test.
 
 ## Research
 
@@ -187,19 +194,20 @@ Research reason:
 
 Research artifact:
 
-- Repo inspection of runtime agent loop, process-action execution, trace
-  capture behavior, deterministic tests, roadmap status, and plan task
+- Repo inspection of workspace tool executors, provider request rendering,
+  trace capture behavior, deterministic tests, roadmap status, and plan task
   requirements.
 
 ## Next Action
 
 Next exact action:
 
-- Continue `plans/2026-05-23-config-backed-observability.md` at Task 6:
-  Workspace Tool And Provider Trace Alignment. Start with workspace trace
-  capture tests, then instrument workspace read/list/search/patch and provider
-  metadata traces without logging file contents, raw provider payloads, or API
-  keys.
+- Continue `plans/2026-05-23-config-backed-observability.md` at Task 7:
+  End-To-End Log-Enabled Smoke Verification. Start with a deterministic CLI log
+  smoke that enables file-backed JSON logs from XDG TOML config and asserts the
+  log contains runtime loop, provider request, workspace tool, process
+  execution, artifact/tool resolution, diagnostic, and final loop status
+  records without secrets or raw payload contents.
 
 Do not reconsider:
 
@@ -207,4 +215,4 @@ Do not reconsider:
 - Do not start TUI or REPL before observability exists.
 - Do not reintroduce repo-local `.merry/secrets/openai.env` as the live-smoke
   provider config path.
-- Do not reopen Task 5 unless a regression appears.
+- Do not reopen Task 6 unless a regression appears.

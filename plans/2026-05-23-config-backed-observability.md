@@ -8,8 +8,8 @@
 
 **Tech Stack:** Rust 2024, `serde`, `toml`, `tracing`, `tracing-subscriber`, `tracing-appender`, Tokio, existing `bwrap` bootstrap, deterministic fake provider/fake runner tests.
 
-**Implementation progress:** 2026-05-23 leases completed Tasks 1-5. Task 6 is
-the next workspace-tool/provider trace-alignment entry point.
+**Implementation progress:** 2026-05-23 leases completed Tasks 1-6. Task 7 is
+the next end-to-end log-enabled smoke verification entry point.
 
 ---
 
@@ -1434,7 +1434,7 @@ git commit -m "feat(runtime): trace agent loop and process actions"
 - Modify: `crates/merry-tool-workspace/src/lib.rs`
 - Modify: `crates/merry-provider-openai/src/provider.rs`
 
-- [ ] **Step 1: Add workspace tool tracing dependency**
+- [x] **Step 1: Add workspace tool tracing dependency**
 
 Edit `crates/merry-tool-workspace/Cargo.toml`:
 
@@ -1446,7 +1446,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 ```
 
-- [ ] **Step 2: Instrument workspace read/list/search/patch**
+- [x] **Step 2: Instrument workspace read/list/search/patch**
 
 In each `ToolExecutor` implementation, log start before blocking work and finish after outcome construction:
 
@@ -1486,7 +1486,7 @@ tracing::info!(
 
 For search, log `query_bytes = args.query.len()` instead of raw query when the query is longer than 128 bytes. For patch, log `relative_path`, `preimage_bytes`, and `replacement_bytes`, never full file content.
 
-- [ ] **Step 3: Add workspace trace capture tests**
+- [x] **Step 3: Add workspace trace capture tests**
 
 Add tests beside existing executor tests:
 
@@ -1514,20 +1514,22 @@ async fn workspace_read_file_traces_start_and_finish_without_file_contents() {
 
 Reuse the same capture helper shape as runtime tests. Keep helpers inside the test module.
 
-- [ ] **Step 4: Align OpenAI provider metadata fields**
+- [x] **Step 4: Align OpenAI provider metadata fields**
 
-In `crates/merry-provider-openai/src/provider.rs`, change the `debug_span!` name and fields to match the runtime contract:
+In `crates/merry-provider-openai/src/provider.rs`, change the stream
+`debug_span!` fields to match the runtime contract while keeping the rendered
+request metadata event separate:
 
 ```rust
 let stream_span = tracing::debug_span!(
-    "runtime.provider.request",
-    event = "runtime.provider.request",
+    "runtime.provider.stream",
+    event = "runtime.provider.stream",
     provider_name = self.config.provider_name().as_str(),
     model = request.model().as_str(),
     message_count = request.messages().len(),
     tool_count = request.tools().len(),
     continuation_count = request.continuations().len(),
-    max_output_tokens = ?request.generation().max_output_tokens(),
+    max_output_tokens = request.generation().max_output_tokens(),
     allow_parallel_tool_calls = request.generation().allow_parallel_tool_calls(),
     endpoint_path = tracing::field::Empty,
 );
@@ -1535,7 +1537,7 @@ let stream_span = tracing::debug_span!(
 
 Keep existing request-body logging at `trace` as metadata only. Do not log raw HTTP body, API key, prompt text, tool result content, or provider response payload.
 
-- [ ] **Step 5: Add provider trace safety test**
+- [x] **Step 5: Add provider trace safety test**
 
 In `crates/merry-provider-openai/src/provider.rs`, add a helper that emits provider request metadata without sending HTTP:
 
@@ -1589,7 +1591,7 @@ fn provider_trace_metadata_does_not_include_api_key_or_prompt_text() {
 }
 ```
 
-- [ ] **Step 6: Run focused tests**
+- [x] **Step 6: Run focused tests**
 
 ```bash
 cargo test -p merry-tool-workspace workspace_read_file_traces_start_and_finish_without_file_contents -- --nocapture
@@ -1598,12 +1600,21 @@ cargo test -p merry-provider-openai provider_trace_metadata_does_not_include_api
 
 Expected: logs include safe metadata and exclude secrets/content.
 
-- [ ] **Step 7: Commit tool/provider trace alignment**
+- [x] **Step 7: Commit tool/provider trace alignment**
 
 ```bash
 git add crates/merry-tool-workspace/Cargo.toml crates/merry-tool-workspace/src/lib.rs crates/merry-provider-openai/src/provider.rs
 git commit -m "feat: trace workspace tools and provider metadata"
 ```
+
+Completed implementation note:
+
+- Workspace read/list/search/patch traces cover success, domain failure,
+  invalid arguments, cancellation after start, and infrastructure errors.
+- Path-like trace values are bounded summaries; search logs query byte counts
+  instead of raw query text; patch logs byte counts instead of patch text.
+- Provider tracing uses `runtime.provider.stream` for the stream span and
+  `runtime.provider.request` for safe rendered-request metadata.
 
 ## Task 7: End-To-End Log-Enabled Smoke Verification
 

@@ -15,7 +15,9 @@
 //! concurrent filesystem mutation, including replacement of intermediate
 //! directories during an operation.
 
-use merry_core::{ErrorInfo, PendingToolCall, ToolInputSchema, ToolName, ToolSpec};
+use merry_core::{
+    ErrorInfo, PendingToolCall, ToolCallResultStatus, ToolInputSchema, ToolName, ToolSpec,
+};
 use merry_runtime::{
     ActionExecutionEvidence, ActionProposal, ActionProposalEvidence, RegisteredTool,
     ToolActionKind, ToolActionProposalFuture, ToolExecutionContext, ToolExecutionError,
@@ -63,9 +65,12 @@ const ERROR_PROPOSAL_MISMATCH: &str = "workspace_patch_approved_mismatch";
 const WORKSPACE_PATCH_PLAN_CHANGED_MESSAGE: &str = "workspace patch plan changed before execution";
 const ERROR_PREIMAGE_ABSENT: &str = "workspace_patch_preimage_absent";
 const ERROR_PREIMAGE_AMBIGUOUS: &str = "workspace_patch_preimage_ambiguous";
+const TRACE_PATH_MAX_CHARS: usize = 96;
 #[cfg(test)]
 static PATCH_TEST_AFTER_WRITE_HOOK: OnceLock<Mutex<Option<PatchTestAfterWriteHook>>> =
     OnceLock::new();
+#[cfg(test)]
+static TRACE_START_TEST_HOOK: OnceLock<Mutex<Option<TraceStartTestHook>>> = OnceLock::new();
 
 /// Limits applied by workspace tools.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,10 +123,29 @@ struct PatchTestAfterWriteHook {
 }
 
 #[cfg(test)]
+#[derive(Debug)]
+struct TraceStartTestHook {
+    tool_call_id: String,
+    hook: fn(),
+    consumed: AtomicBool,
+}
+
+#[cfg(test)]
 impl PatchTestAfterWriteHook {
     fn new(root: PathBuf, hook: fn(&Path)) -> Self {
         Self {
             root,
+            hook,
+            consumed: AtomicBool::new(false),
+        }
+    }
+}
+
+#[cfg(test)]
+impl TraceStartTestHook {
+    fn new(tool_call_id: String, hook: fn()) -> Self {
+        Self {
+            tool_call_id,
             hook,
             consumed: AtomicBool::new(false),
         }
@@ -135,6 +159,15 @@ fn install_patch_test_after_write_hook(root: PathBuf, hook: fn(&Path)) {
         .lock()
         .expect("patch test hook mutex should not be poisoned")
         .replace(PatchTestAfterWriteHook::new(root, hook));
+}
+
+#[cfg(test)]
+fn install_trace_start_test_hook(tool_call_id: &str, hook: fn()) {
+    TRACE_START_TEST_HOOK
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .expect("trace start hook mutex should not be poisoned")
+        .replace(TraceStartTestHook::new(tool_call_id.to_owned(), hook));
 }
 
 #[cfg(test)]
@@ -155,6 +188,26 @@ fn maybe_run_patch_test_after_write_hook(root: &Path) {
         return;
     }
     (hook.hook)(&hook.root);
+}
+
+#[cfg(test)]
+fn maybe_run_trace_start_test_hook(tool_call_id: &str) {
+    let Some(hook_slot) = TRACE_START_TEST_HOOK.get() else {
+        return;
+    };
+    let hook_guard = hook_slot
+        .lock()
+        .expect("trace start hook mutex should not be poisoned");
+    let Some(hook) = hook_guard.as_ref() else {
+        return;
+    };
+    if hook.tool_call_id != tool_call_id {
+        return;
+    }
+    if hook.consumed.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    (hook.hook)();
 }
 
 /// Configuration for workspace tools.
@@ -385,14 +438,19 @@ impl ToolExecutor for ReadFileExecutor {
             let path = match parse_read_file_args(&call) {
                 Ok(args) => args.path,
                 Err(message) => {
-                    return Ok(failed_outcome(
+                    return Ok(invalid_arguments_outcome(
                         WORKSPACE_READ_FILE_TOOL,
-                        ERROR_INVALID_ARGUMENTS,
+                        call.id().as_str(),
                         message,
-                        None::<String>,
                     ));
                 }
             };
+            let trace_path = WorkspaceTracePath::new(path.as_str());
+            trace_workspace_tool_start(
+                WORKSPACE_READ_FILE_TOOL,
+                call.id().as_str(),
+                WorkspaceTraceTarget::Path(trace_path.as_ref()),
+            );
 
             let state = Arc::clone(&self.state);
             let token = context.cancellation_token().clone();
@@ -400,18 +458,46 @@ impl ToolExecutor for ReadFileExecutor {
 
             tokio::select! {
                 biased;
-                () = token.cancelled() => Err(ToolExecutionError::Cancelled),
+                () = token.cancelled() => {
+                    trace_workspace_tool_finish(
+                        WORKSPACE_READ_FILE_TOOL,
+                        call.id().as_str(),
+                        WorkspaceTraceTarget::Path(trace_path.as_ref()),
+                        WorkspaceTraceFinish::Cancelled,
+                    );
+                    Err(ToolExecutionError::Cancelled)
+                }
                 joined = handle => match joined {
                     Ok(outcome) => {
                         if token.is_cancelled() {
+                            trace_workspace_tool_finish(
+                                WORKSPACE_READ_FILE_TOOL,
+                                call.id().as_str(),
+                                WorkspaceTraceTarget::Path(trace_path.as_ref()),
+                                WorkspaceTraceFinish::Cancelled,
+                            );
                             Err(ToolExecutionError::Cancelled)
                         } else {
+                            trace_workspace_tool_finish(
+                                WORKSPACE_READ_FILE_TOOL,
+                                call.id().as_str(),
+                                WorkspaceTraceTarget::Path(trace_path.as_ref()),
+                                WorkspaceTraceFinish::Outcome(&outcome),
+                            );
                             Ok(outcome)
                         }
                     }
-                    Err(error) => Err(ToolExecutionError::infrastructure(format!(
-                        "workspace read task failed to join: {error}"
-                    ))),
+                    Err(error) => {
+                        trace_workspace_tool_finish(
+                            WORKSPACE_READ_FILE_TOOL,
+                            call.id().as_str(),
+                            WorkspaceTraceTarget::Path(trace_path.as_ref()),
+                            WorkspaceTraceFinish::Error("workspace_infrastructure_error"),
+                        );
+                        Err(ToolExecutionError::infrastructure(format!(
+                            "workspace read task failed to join: {error}"
+                        )))
+                    }
                 },
             }
         })
@@ -437,14 +523,19 @@ impl ToolExecutor for ListDirExecutor {
             let path = match parse_list_dir_args(&call) {
                 Ok(args) => args.path,
                 Err(message) => {
-                    return Ok(failed_outcome(
+                    return Ok(invalid_arguments_outcome(
                         WORKSPACE_LIST_DIR_TOOL,
-                        ERROR_INVALID_ARGUMENTS,
+                        call.id().as_str(),
                         message,
-                        None::<String>,
                     ));
                 }
             };
+            let trace_path = WorkspaceTracePath::new(path.as_str());
+            trace_workspace_tool_start(
+                WORKSPACE_LIST_DIR_TOOL,
+                call.id().as_str(),
+                WorkspaceTraceTarget::Path(trace_path.as_ref()),
+            );
 
             let state = Arc::clone(&self.state);
             let token = context.cancellation_token().clone();
@@ -456,19 +547,55 @@ impl ToolExecutor for ListDirExecutor {
 
             tokio::select! {
                 biased;
-                () = token.cancelled() => Err(ToolExecutionError::Cancelled),
+                () = token.cancelled() => {
+                    trace_workspace_tool_finish(
+                        WORKSPACE_LIST_DIR_TOOL,
+                        call.id().as_str(),
+                        WorkspaceTraceTarget::Path(trace_path.as_ref()),
+                        WorkspaceTraceFinish::Cancelled,
+                    );
+                    Err(ToolExecutionError::Cancelled)
+                }
                 joined = handle => match joined {
                     Ok(Ok(outcome)) => {
                         if token.is_cancelled() {
+                            trace_workspace_tool_finish(
+                                WORKSPACE_LIST_DIR_TOOL,
+                                call.id().as_str(),
+                                WorkspaceTraceTarget::Path(trace_path.as_ref()),
+                                WorkspaceTraceFinish::Cancelled,
+                            );
                             Err(ToolExecutionError::Cancelled)
                         } else {
+                            trace_workspace_tool_finish(
+                                WORKSPACE_LIST_DIR_TOOL,
+                                call.id().as_str(),
+                                WorkspaceTraceTarget::Path(trace_path.as_ref()),
+                                WorkspaceTraceFinish::Outcome(&outcome),
+                            );
                             Ok(outcome)
                         }
                     }
-                    Ok(Err(error)) => Err(error),
-                    Err(error) => Err(ToolExecutionError::infrastructure(format!(
-                        "workspace list task failed to join: {error}"
-                    ))),
+                    Ok(Err(error)) => {
+                        trace_workspace_tool_finish(
+                            WORKSPACE_LIST_DIR_TOOL,
+                            call.id().as_str(),
+                            WorkspaceTraceTarget::Path(trace_path.as_ref()),
+                            WorkspaceTraceFinish::from_error(&error),
+                        );
+                        Err(error)
+                    }
+                    Err(error) => {
+                        trace_workspace_tool_finish(
+                            WORKSPACE_LIST_DIR_TOOL,
+                            call.id().as_str(),
+                            WorkspaceTraceTarget::Path(trace_path.as_ref()),
+                            WorkspaceTraceFinish::Error("workspace_infrastructure_error"),
+                        );
+                        Err(ToolExecutionError::infrastructure(format!(
+                            "workspace list task failed to join: {error}"
+                        )))
+                    }
                 },
             }
         })
@@ -494,14 +621,23 @@ impl ToolExecutor for SearchTextExecutor {
             let args = match parse_search_text_args(&call) {
                 Ok(args) => args,
                 Err(message) => {
-                    return Ok(failed_outcome(
+                    return Ok(invalid_arguments_outcome(
                         WORKSPACE_SEARCH_TEXT_TOOL,
-                        ERROR_INVALID_ARGUMENTS,
+                        call.id().as_str(),
                         message,
-                        None::<String>,
                     ));
                 }
             };
+            let trace_path = args.path.as_deref().map(WorkspaceTracePath::new);
+            let trace_query_bytes = args.query.len();
+            trace_workspace_tool_start(
+                WORKSPACE_SEARCH_TEXT_TOOL,
+                call.id().as_str(),
+                WorkspaceTraceTarget::Search {
+                    path: trace_path.as_ref().map(WorkspaceTracePath::as_str),
+                    query_bytes: trace_query_bytes,
+                },
+            );
 
             let state = Arc::clone(&self.state);
             let token = context.cancellation_token().clone();
@@ -513,19 +649,70 @@ impl ToolExecutor for SearchTextExecutor {
 
             tokio::select! {
                 biased;
-                () = token.cancelled() => Err(ToolExecutionError::Cancelled),
+                () = token.cancelled() => {
+                    trace_workspace_tool_finish(
+                        WORKSPACE_SEARCH_TEXT_TOOL,
+                        call.id().as_str(),
+                        WorkspaceTraceTarget::Search {
+                            path: trace_path.as_ref().map(WorkspaceTracePath::as_str),
+                            query_bytes: trace_query_bytes,
+                        },
+                        WorkspaceTraceFinish::Cancelled,
+                    );
+                    Err(ToolExecutionError::Cancelled)
+                }
                 joined = handle => match joined {
                     Ok(Ok(outcome)) => {
                         if token.is_cancelled() {
+                            trace_workspace_tool_finish(
+                                WORKSPACE_SEARCH_TEXT_TOOL,
+                                call.id().as_str(),
+                                WorkspaceTraceTarget::Search {
+                                    path: trace_path.as_ref().map(WorkspaceTracePath::as_str),
+                                    query_bytes: trace_query_bytes,
+                                },
+                                WorkspaceTraceFinish::Cancelled,
+                            );
                             Err(ToolExecutionError::Cancelled)
                         } else {
+                            trace_workspace_tool_finish(
+                                WORKSPACE_SEARCH_TEXT_TOOL,
+                                call.id().as_str(),
+                                WorkspaceTraceTarget::Search {
+                                    path: trace_path.as_ref().map(WorkspaceTracePath::as_str),
+                                    query_bytes: trace_query_bytes,
+                                },
+                                WorkspaceTraceFinish::Outcome(&outcome),
+                            );
                             Ok(outcome)
                         }
                     }
-                    Ok(Err(error)) => Err(error),
-                    Err(error) => Err(ToolExecutionError::infrastructure(format!(
-                        "workspace search task failed to join: {error}"
-                    ))),
+                    Ok(Err(error)) => {
+                        trace_workspace_tool_finish(
+                            WORKSPACE_SEARCH_TEXT_TOOL,
+                            call.id().as_str(),
+                            WorkspaceTraceTarget::Search {
+                                path: trace_path.as_ref().map(WorkspaceTracePath::as_str),
+                                query_bytes: trace_query_bytes,
+                            },
+                            WorkspaceTraceFinish::from_error(&error),
+                        );
+                        Err(error)
+                    }
+                    Err(error) => {
+                        trace_workspace_tool_finish(
+                            WORKSPACE_SEARCH_TEXT_TOOL,
+                            call.id().as_str(),
+                            WorkspaceTraceTarget::Search {
+                                path: trace_path.as_ref().map(WorkspaceTracePath::as_str),
+                                query_bytes: trace_query_bytes,
+                            },
+                            WorkspaceTraceFinish::Error("workspace_infrastructure_error"),
+                        );
+                        Err(ToolExecutionError::infrastructure(format!(
+                            "workspace search task failed to join: {error}"
+                        )))
+                    }
                 },
             }
         })
@@ -594,14 +781,25 @@ impl ToolExecutor for PatchFileExecutor {
             let args = match parse_patch_file_args(&call) {
                 Ok(args) => args,
                 Err(message) => {
-                    return Ok(failed_outcome(
+                    return Ok(invalid_arguments_outcome(
                         WORKSPACE_PATCH_FILE_TOOL,
-                        ERROR_INVALID_ARGUMENTS,
+                        call.id().as_str(),
                         message,
-                        None::<String>,
                     ));
                 }
             };
+            let trace_relative_path = WorkspaceTracePath::new(args.path.as_str());
+            let trace_preimage_bytes = args.old_text.len();
+            let trace_replacement_bytes = args.new_text.len();
+            trace_workspace_tool_start(
+                WORKSPACE_PATCH_FILE_TOOL,
+                call.id().as_str(),
+                WorkspaceTraceTarget::Patch {
+                    relative_path: trace_relative_path.as_ref(),
+                    preimage_bytes: trace_preimage_bytes,
+                    replacement_bytes: trace_replacement_bytes,
+                },
+            );
 
             let state = Arc::clone(&self.state);
             let token = context.cancellation_token().clone();
@@ -615,11 +813,47 @@ impl ToolExecutor for PatchFileExecutor {
             tokio::select! {
                 biased;
                 joined = handle => match joined {
-                    Ok(Ok(outcome)) => Ok(outcome),
-                    Ok(Err(error)) => Err(error),
-                    Err(error) => Err(ToolExecutionError::infrastructure(format!(
-                        "workspace patch task failed to join: {error}"
-                    ))),
+                    Ok(Ok(outcome)) => {
+                        trace_workspace_tool_finish(
+                            WORKSPACE_PATCH_FILE_TOOL,
+                            call.id().as_str(),
+                            WorkspaceTraceTarget::Patch {
+                                relative_path: trace_relative_path.as_ref(),
+                                preimage_bytes: trace_preimage_bytes,
+                                replacement_bytes: trace_replacement_bytes,
+                            },
+                            WorkspaceTraceFinish::Outcome(&outcome),
+                        );
+                        Ok(outcome)
+                    }
+                    Ok(Err(error)) => {
+                        trace_workspace_tool_finish(
+                            WORKSPACE_PATCH_FILE_TOOL,
+                            call.id().as_str(),
+                            WorkspaceTraceTarget::Patch {
+                                relative_path: trace_relative_path.as_ref(),
+                                preimage_bytes: trace_preimage_bytes,
+                                replacement_bytes: trace_replacement_bytes,
+                            },
+                            WorkspaceTraceFinish::from_error(&error),
+                        );
+                        Err(error)
+                    }
+                    Err(error) => {
+                        trace_workspace_tool_finish(
+                            WORKSPACE_PATCH_FILE_TOOL,
+                            call.id().as_str(),
+                            WorkspaceTraceTarget::Patch {
+                                relative_path: trace_relative_path.as_ref(),
+                                preimage_bytes: trace_preimage_bytes,
+                                replacement_bytes: trace_replacement_bytes,
+                            },
+                            WorkspaceTraceFinish::Error("workspace_infrastructure_error"),
+                        );
+                        Err(ToolExecutionError::infrastructure(format!(
+                            "workspace patch task failed to join: {error}"
+                        )))
+                    }
                 },
             }
         })
@@ -654,6 +888,242 @@ struct PatchFileArgs {
     path: String,
     old_text: String,
     new_text: String,
+}
+
+enum WorkspaceTraceTarget<'a> {
+    ToolOnly,
+    Path(&'a str),
+    Search {
+        path: Option<&'a str>,
+        query_bytes: usize,
+    },
+    Patch {
+        relative_path: &'a str,
+        preimage_bytes: usize,
+        replacement_bytes: usize,
+    },
+}
+
+#[derive(Clone, Debug)]
+struct WorkspaceTracePath {
+    summary: String,
+}
+
+impl WorkspaceTracePath {
+    fn new(path: &str) -> Self {
+        Self {
+            summary: bounded_trace_text(path, TRACE_PATH_MAX_CHARS),
+        }
+    }
+
+    fn as_str(&self) -> &str {
+        &self.summary
+    }
+}
+
+impl AsRef<str> for WorkspaceTracePath {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+#[derive(Clone, Copy)]
+enum WorkspaceTraceFinish<'a> {
+    Outcome(&'a ToolExecutionOutcome),
+    Cancelled,
+    Error(&'static str),
+}
+
+impl<'a> WorkspaceTraceFinish<'a> {
+    fn from_error(error: &ToolExecutionError) -> Self {
+        match error {
+            ToolExecutionError::Cancelled => Self::Cancelled,
+            ToolExecutionError::Infrastructure { .. } => {
+                Self::Error("workspace_infrastructure_error")
+            }
+        }
+    }
+
+    fn status(self) -> &'static str {
+        match self {
+            Self::Outcome(outcome) => tool_outcome_status(outcome),
+            Self::Cancelled => "cancelled",
+            Self::Error(_) => "error",
+        }
+    }
+
+    fn diagnostic_code(self) -> Option<&'a str> {
+        match self {
+            Self::Outcome(outcome) => outcome.diagnostic().map(ErrorInfo::code),
+            Self::Cancelled => Some("workspace_tool_cancelled"),
+            Self::Error(code) => Some(code),
+        }
+    }
+
+    fn output_bytes(self) -> Option<usize> {
+        match self {
+            Self::Outcome(outcome) => Some(outcome.content().as_bytes().len()),
+            Self::Cancelled | Self::Error(_) => None,
+        }
+    }
+}
+
+fn trace_workspace_tool_start(
+    tool_name: &'static str,
+    tool_call_id: &str,
+    target: WorkspaceTraceTarget<'_>,
+) {
+    match target {
+        WorkspaceTraceTarget::ToolOnly => {
+            tracing::info!(
+                event = "runtime.workspace_tool.start",
+                tool_name,
+                tool_call_id,
+                "workspace tool start"
+            );
+        }
+        WorkspaceTraceTarget::Path(path) => {
+            tracing::info!(
+                event = "runtime.workspace_tool.start",
+                tool_name,
+                tool_call_id,
+                path,
+                "workspace tool start"
+            );
+        }
+        WorkspaceTraceTarget::Search { path, query_bytes } => {
+            tracing::info!(
+                event = "runtime.workspace_tool.start",
+                tool_name,
+                tool_call_id,
+                path,
+                query_bytes,
+                "workspace tool start"
+            );
+        }
+        WorkspaceTraceTarget::Patch {
+            relative_path,
+            preimage_bytes,
+            replacement_bytes,
+        } => {
+            tracing::info!(
+                event = "runtime.workspace_tool.start",
+                tool_name,
+                tool_call_id,
+                relative_path,
+                preimage_bytes,
+                replacement_bytes,
+                "workspace tool start"
+            );
+        }
+    }
+    #[cfg(test)]
+    maybe_run_trace_start_test_hook(tool_call_id);
+}
+
+fn trace_workspace_tool_finish(
+    tool_name: &'static str,
+    tool_call_id: &str,
+    target: WorkspaceTraceTarget<'_>,
+    finish: WorkspaceTraceFinish<'_>,
+) {
+    let status = finish.status();
+    let diagnostic_code = finish.diagnostic_code();
+    let output_bytes = finish.output_bytes();
+    match target {
+        WorkspaceTraceTarget::ToolOnly => {
+            tracing::info!(
+                event = "runtime.workspace_tool.finish",
+                tool_name,
+                tool_call_id,
+                status,
+                diagnostic_code,
+                output_bytes,
+                "workspace tool finish"
+            );
+        }
+        WorkspaceTraceTarget::Path(path) => {
+            tracing::info!(
+                event = "runtime.workspace_tool.finish",
+                tool_name,
+                tool_call_id,
+                path,
+                status,
+                diagnostic_code,
+                output_bytes,
+                "workspace tool finish"
+            );
+        }
+        WorkspaceTraceTarget::Search { path, query_bytes } => {
+            tracing::info!(
+                event = "runtime.workspace_tool.finish",
+                tool_name,
+                tool_call_id,
+                path,
+                query_bytes,
+                status,
+                diagnostic_code,
+                output_bytes,
+                "workspace tool finish"
+            );
+        }
+        WorkspaceTraceTarget::Patch {
+            relative_path,
+            preimage_bytes,
+            replacement_bytes,
+        } => {
+            tracing::info!(
+                event = "runtime.workspace_tool.finish",
+                tool_name,
+                tool_call_id,
+                relative_path,
+                preimage_bytes,
+                replacement_bytes,
+                status,
+                diagnostic_code,
+                output_bytes,
+                "workspace tool finish"
+            );
+        }
+    }
+}
+
+fn tool_outcome_status(outcome: &ToolExecutionOutcome) -> &'static str {
+    match outcome.status() {
+        ToolCallResultStatus::Succeeded => "succeeded",
+        ToolCallResultStatus::Failed => "failed",
+    }
+}
+
+fn invalid_arguments_outcome(
+    tool_name: &'static str,
+    tool_call_id: &str,
+    message: String,
+) -> ToolExecutionOutcome {
+    let outcome = failed_outcome(tool_name, ERROR_INVALID_ARGUMENTS, message, None::<String>);
+    trace_workspace_tool_start(tool_name, tool_call_id, WorkspaceTraceTarget::ToolOnly);
+    trace_workspace_tool_finish(
+        tool_name,
+        tool_call_id,
+        WorkspaceTraceTarget::ToolOnly,
+        WorkspaceTraceFinish::Outcome(&outcome),
+    );
+    outcome
+}
+
+fn bounded_trace_text(value: &str, max_chars: usize) -> String {
+    let mut output = String::new();
+    let mut truncated = false;
+    for character in value.chars().take(max_chars) {
+        output.push(character);
+    }
+    if value.chars().count() > max_chars {
+        truncated = true;
+    }
+    if truncated {
+        output.push_str("...");
+    }
+    output
 }
 
 #[derive(Debug, Serialize)]
@@ -2506,12 +2976,71 @@ mod tests {
         env,
         ffi::OsStr,
         fs::{self, File},
+        future::Future,
         io::Write,
+        sync::{Arc as StdArc, Mutex as StdMutex, OnceLock as StdOnceLock},
         time::{SystemTime, UNIX_EPOCH},
     };
 
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
+
+    fn trace_output_buffer() -> &'static StdArc<StdMutex<Vec<u8>>> {
+        #[derive(Clone)]
+        struct Buffer(StdArc<StdMutex<Vec<u8>>>);
+
+        impl std::io::Write for Buffer {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .expect("buffer mutex should not be poisoned")
+                    .extend_from_slice(buf);
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        static TRACE_OUTPUT: StdOnceLock<StdArc<StdMutex<Vec<u8>>>> = StdOnceLock::new();
+        TRACE_OUTPUT.get_or_init(|| {
+            use tracing_subscriber::{fmt, prelude::*};
+
+            let bytes = StdArc::new(StdMutex::new(Vec::new()));
+            let writer_bytes = StdArc::clone(&bytes);
+            let subscriber = tracing_subscriber::registry().with(
+                fmt::layer()
+                    .json()
+                    .with_writer(move || Buffer(StdArc::clone(&writer_bytes))),
+            );
+            tracing::subscriber::set_global_default(subscriber)
+                .expect("test tracing subscriber should install once");
+            bytes
+        })
+    }
+
+    async fn capture_traces_for<F, R>(trace_marker: &str, future: F) -> (R, String)
+    where
+        F: Future<Output = R>,
+    {
+        let bytes = StdArc::clone(trace_output_buffer());
+        let start = bytes
+            .lock()
+            .expect("buffer mutex should not be poisoned")
+            .len();
+        let result = future.await;
+        let text = {
+            let guard = bytes.lock().expect("buffer mutex should not be poisoned");
+            String::from_utf8(guard[start..].to_vec()).expect("trace output should be UTF-8")
+        };
+        let text = text
+            .lines()
+            .filter(|line| line.contains(trace_marker))
+            .collect::<Vec<_>>()
+            .join("\n");
+        (result, text)
+    }
 
     struct TempWorkspace {
         root: PathBuf,
@@ -2730,17 +3259,65 @@ mod tests {
         pending_call_for(WORKSPACE_READ_FILE_TOOL, arguments)
     }
 
-    fn pending_call_for(tool: &str, arguments: Value) -> PendingToolCall {
+    fn pending_call_with_id(tool: &str, call_id: &str, arguments: Value) -> PendingToolCall {
         let arguments = ToolCallArguments::try_from(arguments).expect("arguments object");
         PendingToolCall::new(
-            ToolCallId::new("call-1").expect("valid call id"),
+            ToolCallId::new(call_id).expect("valid call id"),
             ToolName::new(tool).expect("valid tool name"),
             arguments,
         )
     }
 
+    fn pending_call_for(tool: &str, arguments: Value) -> PendingToolCall {
+        pending_call_with_id(tool, "call-1", arguments)
+    }
+
+    fn assert_invalid_arguments_trace(
+        outcome: ToolExecutionOutcome,
+        logs: &str,
+        tool_name: &str,
+        tool_call_id: &str,
+    ) {
+        assert_eq!(outcome.status(), ToolCallResultStatus::Failed);
+        assert_eq!(
+            outcome.diagnostic().expect("diagnostic").code(),
+            ERROR_INVALID_ARGUMENTS
+        );
+        assert!(logs.contains("\"event\":\"runtime.workspace_tool.finish\""));
+        assert!(logs.contains("\"status\":\"failed\""));
+        assert!(logs.contains("\"diagnostic_code\":\"workspace_invalid_arguments\""));
+        assert!(logs.contains(&format!("\"tool_name\":\"{tool_name}\"")));
+        assert!(logs.contains(&format!("\"tool_call_id\":\"{tool_call_id}\"")));
+        assert!(!logs.contains("sensitive invalid payload"));
+    }
+
     fn read_text(path: &Path) -> String {
         fs::read_to_string(path).expect("workspace text file should be readable")
+    }
+
+    static TRACE_START_CANCEL_TOKEN: StdOnceLock<
+        StdMutex<Option<tokio_util::sync::CancellationToken>>,
+    > = StdOnceLock::new();
+
+    fn install_trace_start_cancellation_token(token: tokio_util::sync::CancellationToken) {
+        TRACE_START_CANCEL_TOKEN
+            .get_or_init(|| StdMutex::new(None))
+            .lock()
+            .expect("trace start cancel token mutex should not be poisoned")
+            .replace(token);
+    }
+
+    fn cancel_trace_start_token() {
+        let Some(slot) = TRACE_START_CANCEL_TOKEN.get() else {
+            return;
+        };
+        let token = slot
+            .lock()
+            .expect("trace start cancel token mutex should not be poisoned")
+            .take();
+        if let Some(token) = token {
+            token.cancel();
+        }
     }
 
     #[test]
@@ -2919,6 +3496,189 @@ mod tests {
         }
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn workspace_read_file_traces_start_and_finish_without_file_contents() {
+        let temp = TempWorkspace::new("trace-read-file");
+        temp.write_text("lib.rs", "secret source text\n");
+        let tools = tools_for(temp.path());
+        let executor = ReadFileExecutor {
+            state: Arc::clone(&tools.state),
+        };
+        let call = pending_call_with_id(
+            WORKSPACE_READ_FILE_TOOL,
+            "call-trace-read-file",
+            json!({ "path": "lib.rs" }),
+        );
+
+        let (outcome, logs) = capture_traces_for(
+            "call-trace-read-file",
+            executor.execute(call, ToolExecutionContext::default()),
+        )
+        .await;
+        let outcome = outcome.expect("read should succeed");
+
+        assert_eq!(outcome.status(), ToolCallResultStatus::Succeeded);
+        assert!(outcome.diagnostic().is_none());
+        assert!(logs.contains("\"event\":\"runtime.workspace_tool.start\""));
+        assert!(logs.contains("\"event\":\"runtime.workspace_tool.finish\""));
+        assert!(logs.contains("\"status\":\"succeeded\""));
+        assert!(logs.contains("\"tool_name\":\"workspace_read_file\""));
+        assert!(logs.contains("\"tool_call_id\":\"call-trace-read-file\""));
+        assert!(logs.contains("\"path\":\"lib.rs\""));
+        assert!(!logs.contains("secret source text"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn workspace_read_file_failure_trace_includes_diagnostic_code() {
+        let temp = TempWorkspace::new("trace-read-failure");
+        let tools = tools_for(temp.path());
+        let executor = ReadFileExecutor {
+            state: Arc::clone(&tools.state),
+        };
+        let call = pending_call_with_id(
+            WORKSPACE_READ_FILE_TOOL,
+            "call-trace-read-failure",
+            json!({ "path": "../secret.txt" }),
+        );
+
+        let (outcome, logs) = capture_traces_for(
+            "call-trace-read-failure",
+            executor.execute(call, ToolExecutionContext::default()),
+        )
+        .await;
+        let outcome = outcome.expect("path denial should resolve as a domain result");
+
+        assert_eq!(outcome.status(), ToolCallResultStatus::Failed);
+        assert_eq!(
+            outcome.diagnostic().expect("diagnostic").code(),
+            ERROR_PATH_DENIED
+        );
+        assert!(logs.contains("\"event\":\"runtime.workspace_tool.finish\""));
+        assert!(logs.contains("\"status\":\"failed\""));
+        assert!(logs.contains("\"diagnostic_code\":\"workspace_path_denied\""));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn workspace_path_traces_are_bounded_summaries() {
+        let temp = TempWorkspace::new("trace-bounded-path");
+        let tools = tools_for(temp.path());
+        let executor = ReadFileExecutor {
+            state: Arc::clone(&tools.state),
+        };
+        let long_path = format!("{}tail.txt", "nested/".repeat(32));
+        let expected_summary = bounded_trace_text(&long_path, TRACE_PATH_MAX_CHARS);
+        let call = pending_call_with_id(
+            WORKSPACE_READ_FILE_TOOL,
+            "call-trace-bounded-path",
+            json!({ "path": long_path }),
+        );
+
+        let (_outcome, logs) = capture_traces_for(
+            "call-trace-bounded-path",
+            executor.execute(call, ToolExecutionContext::default()),
+        )
+        .await;
+
+        assert!(logs.contains(expected_summary.as_str()));
+        assert!(!logs.contains("nested/nested/nested/nested/nested/nested/nested/nested/nested/nested/nested/nested/nested/nested/nested/nested/nested/nested/nested/nested/nested/nested/nested/nested/nested/nested/nested/nested/nested/nested/nested/nested/tail.txt"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn workspace_started_tool_trace_finishes_cancelled_when_token_cancels() {
+        let temp = TempWorkspace::new("trace-cancelled");
+        temp.write_text("note.txt", "ok\n");
+        let tools = tools_for(temp.path());
+        let executor = ReadFileExecutor {
+            state: Arc::clone(&tools.state),
+        };
+        let call = pending_call_with_id(
+            WORKSPACE_READ_FILE_TOOL,
+            "call-trace-cancelled",
+            json!({ "path": "note.txt" }),
+        );
+        let token = tokio_util::sync::CancellationToken::new();
+        install_trace_start_cancellation_token(token.clone());
+        install_trace_start_test_hook("call-trace-cancelled", cancel_trace_start_token);
+
+        let (result, logs) = capture_traces_for(
+            "call-trace-cancelled",
+            executor.execute(call, ToolExecutionContext::new(token)),
+        )
+        .await;
+        let error = result.expect_err("cancelled execution should return cancellation error");
+
+        assert!(matches!(error, ToolExecutionError::Cancelled));
+        assert!(logs.contains("\"event\":\"runtime.workspace_tool.finish\""));
+        assert!(logs.contains("\"status\":\"cancelled\""));
+        assert!(logs.contains("\"diagnostic_code\":\"workspace_tool_cancelled\""));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn workspace_search_trace_uses_query_bytes_without_long_query_text() {
+        let temp = TempWorkspace::new("trace-search");
+        temp.write_text("notes.txt", "needle\n");
+        let tools = tools_for(temp.path());
+        let executor = SearchTextExecutor {
+            state: Arc::clone(&tools.state),
+        };
+        let long_query = "needle-".repeat(24);
+        let call = pending_call_with_id(
+            WORKSPACE_SEARCH_TEXT_TOOL,
+            "call-trace-search",
+            json!({ "query": long_query }),
+        );
+
+        let (outcome, logs) = capture_traces_for(
+            "call-trace-search",
+            executor.execute(call, ToolExecutionContext::default()),
+        )
+        .await;
+        let outcome = outcome.expect("search should resolve as a domain result");
+
+        assert_eq!(outcome.status(), ToolCallResultStatus::Succeeded);
+        assert!(logs.contains("\"event\":\"runtime.workspace_tool.start\""));
+        assert!(logs.contains("\"event\":\"runtime.workspace_tool.finish\""));
+        assert!(logs.contains("\"tool_name\":\"workspace_search_text\""));
+        assert!(logs.contains("\"query_bytes\":168"));
+        assert!(!logs.contains(long_query.as_str()));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn workspace_patch_trace_uses_byte_counts_without_patch_text() {
+        let temp = TempWorkspace::new("trace-patch");
+        temp.write_text("src/lib.rs", "old secret text\n");
+        let tools = tools_for(temp.path());
+        let executor = PatchFileExecutor {
+            state: Arc::clone(&tools.state),
+        };
+        let call = pending_call_with_id(
+            WORKSPACE_PATCH_FILE_TOOL,
+            "call-trace-patch",
+            json!({
+                "path": "src/lib.rs",
+                "old_text": "old secret text",
+                "new_text": "new secret text"
+            }),
+        );
+
+        let (outcome, logs) = capture_traces_for(
+            "call-trace-patch",
+            executor.execute(call, ToolExecutionContext::default()),
+        )
+        .await;
+        let outcome = outcome.expect("patch should succeed");
+
+        assert_eq!(outcome.status(), ToolCallResultStatus::Succeeded);
+        assert!(logs.contains("\"event\":\"runtime.workspace_tool.start\""));
+        assert!(logs.contains("\"event\":\"runtime.workspace_tool.finish\""));
+        assert!(logs.contains("\"tool_name\":\"workspace_patch_file\""));
+        assert!(logs.contains("\"relative_path\":\"src/lib.rs\""));
+        assert!(logs.contains("\"preimage_bytes\":15"));
+        assert!(logs.contains("\"replacement_bytes\":15"));
+        assert!(!logs.contains("old secret text"));
+        assert!(!logs.contains("new secret text"));
+    }
+
     #[test]
     fn read_file_allows_empty_utf8_file() {
         let temp = TempWorkspace::new("empty-file");
@@ -3093,6 +3853,124 @@ mod tests {
                 .expect("json content")
                 .contains(temp.path().to_str().expect("temp path utf8")),
             "tool output must not include absolute host roots"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn workspace_list_dir_traces_start_and_finish_without_entry_contents() {
+        let temp = TempWorkspace::new("trace-list-dir");
+        temp.write_text("root/secret-name.txt", "secret file content\n");
+        let tools = tools_for(temp.path());
+        let executor = ListDirExecutor {
+            state: Arc::clone(&tools.state),
+        };
+        let call = pending_call_with_id(
+            WORKSPACE_LIST_DIR_TOOL,
+            "call-trace-list-dir",
+            json!({ "path": "root" }),
+        );
+
+        let (outcome, logs) = capture_traces_for(
+            "call-trace-list-dir",
+            executor.execute(call, ToolExecutionContext::default()),
+        )
+        .await;
+        let outcome = outcome.expect("list should succeed");
+
+        assert_eq!(outcome.status(), ToolCallResultStatus::Succeeded);
+        assert!(logs.contains("\"event\":\"runtime.workspace_tool.start\""));
+        assert!(logs.contains("\"event\":\"runtime.workspace_tool.finish\""));
+        assert!(logs.contains("\"status\":\"succeeded\""));
+        assert!(logs.contains("\"tool_name\":\"workspace_list_dir\""));
+        assert!(logs.contains("\"tool_call_id\":\"call-trace-list-dir\""));
+        assert!(logs.contains("\"path\":\"root\""));
+        assert!(!logs.contains("secret file content"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn workspace_tool_invalid_arguments_trace_failed_without_payload() {
+        let temp = TempWorkspace::new("trace-invalid-args");
+        let tools = tools_for(temp.path());
+        let invalid_arguments = json!({ "unexpected": "sensitive invalid payload" });
+
+        let read_executor = ReadFileExecutor {
+            state: Arc::clone(&tools.state),
+        };
+        let read_call = pending_call_with_id(
+            WORKSPACE_READ_FILE_TOOL,
+            "call-trace-read-invalid-args",
+            invalid_arguments.clone(),
+        );
+        let (read_outcome, read_logs) = capture_traces_for(
+            "call-trace-read-invalid-args",
+            read_executor.execute(read_call, ToolExecutionContext::default()),
+        )
+        .await;
+        assert_invalid_arguments_trace(
+            read_outcome.expect("read invalid args should resolve as a failed outcome"),
+            &read_logs,
+            WORKSPACE_READ_FILE_TOOL,
+            "call-trace-read-invalid-args",
+        );
+
+        let list_executor = ListDirExecutor {
+            state: Arc::clone(&tools.state),
+        };
+        let list_call = pending_call_with_id(
+            WORKSPACE_LIST_DIR_TOOL,
+            "call-trace-list-invalid-args",
+            invalid_arguments.clone(),
+        );
+        let (list_outcome, list_logs) = capture_traces_for(
+            "call-trace-list-invalid-args",
+            list_executor.execute(list_call, ToolExecutionContext::default()),
+        )
+        .await;
+        assert_invalid_arguments_trace(
+            list_outcome.expect("list invalid args should resolve as a failed outcome"),
+            &list_logs,
+            WORKSPACE_LIST_DIR_TOOL,
+            "call-trace-list-invalid-args",
+        );
+
+        let search_executor = SearchTextExecutor {
+            state: Arc::clone(&tools.state),
+        };
+        let search_call = pending_call_with_id(
+            WORKSPACE_SEARCH_TEXT_TOOL,
+            "call-trace-search-invalid-args",
+            invalid_arguments.clone(),
+        );
+        let (search_outcome, search_logs) = capture_traces_for(
+            "call-trace-search-invalid-args",
+            search_executor.execute(search_call, ToolExecutionContext::default()),
+        )
+        .await;
+        assert_invalid_arguments_trace(
+            search_outcome.expect("search invalid args should resolve as a failed outcome"),
+            &search_logs,
+            WORKSPACE_SEARCH_TEXT_TOOL,
+            "call-trace-search-invalid-args",
+        );
+
+        let patch_executor = PatchFileExecutor {
+            state: Arc::clone(&tools.state),
+        };
+        let patch_call = pending_call_with_id(
+            WORKSPACE_PATCH_FILE_TOOL,
+            "call-trace-patch-invalid-args",
+            invalid_arguments,
+        );
+        let (patch_outcome, patch_logs) = capture_traces_for(
+            "call-trace-patch-invalid-args",
+            patch_executor.execute(patch_call, ToolExecutionContext::default()),
+        )
+        .await;
+        assert_invalid_arguments_trace(
+            patch_outcome.expect("patch invalid args should resolve as a failed outcome"),
+            &patch_logs,
+            WORKSPACE_PATCH_FILE_TOOL,
+            "call-trace-patch-invalid-args",
         );
     }
 
