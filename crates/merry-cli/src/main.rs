@@ -3,8 +3,8 @@
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use futures_util::{StreamExt, stream};
 use merry_core::{
-    PendingToolCall, ProviderName, RuntimeEvent, RuntimeEventKind, SessionId, ToolInputSchema,
-    ToolName, ToolSpec,
+    PendingToolCall, ProviderName, RuntimeEvent, RuntimeEventKind, SessionId, ToolCallResultStatus,
+    ToolInputSchema, ToolName, ToolSpec,
 };
 use merry_llm::{
     FinishReason, GenerationConfig, ModelCapabilities, ModelError, ModelEvent, ModelEventStream,
@@ -13,19 +13,23 @@ use merry_llm::{
 };
 use merry_provider_openai::{OpenAiProvider, OpenAiProviderConfig};
 use merry_runtime::{
-    AcceptedLocalWorkspaceProcessAdmission, ArtifactContent, MAX_PROCESS_OUTPUT_LIMIT_BYTES,
-    ProcessActionIntent, ProcessEnvPolicy, ProcessExitStatus, ProcessRunner, ProcessRunnerContext,
-    ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput, RegisteredTool, Runtime,
-    StepContext, StepInput, ToolExecutionContext, ToolExecutionOutcome, ToolExecutor,
-    ToolExecutorFuture, process_command_tool,
+    AcceptedLocalWorkspaceProcessAdmission, AgentLoopConfig, AgentLoopStatus, ArtifactContent,
+    MAX_PROCESS_OUTPUT_LIMIT_BYTES, ProcessActionIntent, ProcessEnvPolicy, ProcessExitStatus,
+    ProcessRunner, ProcessRunnerContext, ProcessRunnerError, ProcessRunnerFuture,
+    ProcessRunnerOutput, RegisteredTool, Runtime, StepContext, StepInput, ToolExecutionContext,
+    ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture, process_command_tool,
+};
+use merry_tool_workspace::{
+    ReadOnlyWorkspaceTools, WORKSPACE_PATCH_FILE_TOOL, WORKSPACE_READ_FILE_TOOL,
+    WorkspaceToolsConfig,
 };
 use std::{
     env,
     ffi::{OsStr, OsString},
-    fmt, io,
+    fmt, fs, io,
     path::{Path, PathBuf},
     process::{ExitCode, Stdio, Termination},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufWriter};
 
@@ -33,6 +37,8 @@ const DEFAULT_SESSION_ID: &str = "debug-session";
 const DEFAULT_INPUT: &str = "debug step";
 const DEBUG_TOOL_NAME: &str = "debug_echo";
 const DEBUG_TOOL_CONTINUATION_INPUT: &str = "continue after debug tool";
+const CODING_LOOP_SMOKE_SESSION_ID: &str = "coding-loop-smoke";
+const CODING_LOOP_SMOKE_TOOL_NAME: &str = "run_process";
 const SHELL_TOOL_NAME: &str = "shell_command";
 const SHELL_TOOL_CALL_ID: &str = "call-shell-command";
 const SHELL_STEP_INPUT: &str = "run shell command through Merry process protocol";
@@ -171,6 +177,11 @@ enum DebugCommand {
         after_help = OPENAI_ENV_HELP
     )]
     OpenAi(DebugOpenAiArgs),
+    #[command(
+        name = "coding-loop-smoke",
+        about = "Run an opt-in sandboxed coding-loop smoke with deterministic model steps"
+    )]
+    CodingLoopSmoke,
 }
 
 #[derive(Debug, Args)]
@@ -288,6 +299,26 @@ async fn async_main(cli: Cli) -> CliExit {
                 message,
                 usage: shell_usage(),
             },
+        },
+        CliCommand::Debug(DebugArgs {
+            command: Some(DebugCommand::CodingLoopSmoke),
+            ..
+        }) => match run_debug_coding_loop_smoke(sandbox_child_handoff).await {
+            Ok(()) => CliExit::Success,
+            Err(CliError::BrokenPipe) => CliExit::Success,
+            Err(CliError::DebugUsage(message)) => CliExit::Usage {
+                message,
+                usage: debug_usage(),
+            },
+            Err(CliError::DebugOpenAiUsage(message)) => CliExit::Usage {
+                message,
+                usage: debug_openai_usage(),
+            },
+            Err(CliError::ShellUsage(message)) => CliExit::Usage {
+                message,
+                usage: shell_usage(),
+            },
+            Err(CliError::Unexpected(message)) => CliExit::Unexpected(message),
         },
         CliCommand::Shell(args) => match run_shell(args, sandbox_child_handoff).await {
             Ok(()) => CliExit::Success,
@@ -640,6 +671,326 @@ async fn run_debug_openai(
     } else {
         write_runtime_step_events(&runtime, input, context, tokio::io::stdout()).await
     }
+}
+
+async fn run_debug_coding_loop_smoke(
+    sandbox_child_handoff: Option<SandboxChildHandoff>,
+) -> Result<(), CliError> {
+    let sandbox_marker = env::var_os(MERRY_SANDBOX_ENV);
+    let sandbox_version = env::var_os(MERRY_SANDBOX_VERSION_ENV);
+    let home = env::var_os("HOME");
+    let tmpdir = env::var_os("TMPDIR");
+    let mountinfo = read_proc_self_mountinfo().await;
+    let sandbox_runtime_profile = sandbox_runtime_profile_from_evidence(
+        home.as_deref(),
+        tmpdir.as_deref(),
+        mountinfo.as_deref(),
+    );
+    let Some(admission) = coding_loop_smoke_admission(
+        sandbox_child_handoff,
+        sandbox_runtime_profile,
+        sandbox_marker.as_deref(),
+        sandbox_version.as_deref(),
+    ) else {
+        return Err(CliError::DebugUsage(
+            "coding-loop-smoke must run via `merry --with-sandbox debug coding-loop-smoke`"
+                .to_owned(),
+        ));
+    };
+
+    let smoke_root = prepare_coding_loop_smoke_fixture()?;
+    let relative_cwd = smoke_root
+        .strip_prefix(env::current_dir().map_err(unexpected)?)
+        .map_err(|_| {
+            unexpected("coding-loop-smoke fixture must live under the current workspace")
+        })?;
+    let relative_cwd = path_to_process_cwd(relative_cwd)?;
+    let runtime = build_coding_loop_smoke_runtime(
+        &smoke_root,
+        relative_cwd.as_deref(),
+        admission,
+        Arc::new(TokioProcessRunner),
+    )?;
+
+    let result = runtime
+        .run_agent_loop(
+            StepInput::user_text("Run the sandboxed coding-loop smoke.").map_err(unexpected)?,
+            StepContext::default(),
+            AgentLoopConfig::new(8).map_err(unexpected)?,
+        )
+        .await
+        .map_err(unexpected)?;
+
+    if result.status() != &AgentLoopStatus::Completed {
+        return Err(CliError::Unexpected(format!(
+            "coding-loop-smoke did not complete: {:?}",
+            result.status()
+        )));
+    }
+    if !runtime.pending_tool_calls().await.is_empty() {
+        return Err(CliError::Unexpected(
+            "coding-loop-smoke left pending tool calls".to_owned(),
+        ));
+    }
+    assert_coding_loop_smoke_tool_results(result.events())?;
+
+    let patched = fs::read_to_string(smoke_root.join("src/lib.rs")).map_err(unexpected)?;
+    if patched != coding_loop_smoke_patched_source() {
+        return Err(CliError::Unexpected(
+            "coding-loop-smoke fixture was not patched as expected".to_owned(),
+        ));
+    }
+
+    let mut writer = BufWriter::new(tokio::io::stdout());
+    writer
+        .write_all(b"coding-loop-smoke: ok\n")
+        .await
+        .map_err(stdout_error)?;
+    writer.flush().await.map_err(stdout_error)
+}
+
+fn assert_coding_loop_smoke_tool_results(events: &[RuntimeEvent]) -> Result<(), CliError> {
+    let statuses = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            RuntimeEventKind::ToolCallResolved { result } => Some(result.status()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if statuses.len() != 4 {
+        return Err(CliError::Unexpected(format!(
+            "coding-loop-smoke expected 4 resolved tool calls, saw {}",
+            statuses.len()
+        )));
+    }
+    if statuses
+        .iter()
+        .any(|status| *status != ToolCallResultStatus::Succeeded)
+    {
+        return Err(CliError::Unexpected(
+            "coding-loop-smoke had a failed tool result".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn coding_loop_smoke_admission(
+    sandbox_child_handoff: Option<SandboxChildHandoff>,
+    sandbox_runtime_profile: Option<SandboxRuntimeProfile>,
+    sandbox: Option<&OsStr>,
+    version: Option<&OsStr>,
+) -> Option<AcceptedLocalWorkspaceProcessAdmission> {
+    shell_runtime_admission(
+        true,
+        sandbox_child_handoff,
+        sandbox_runtime_profile,
+        sandbox,
+        version,
+    )
+}
+
+fn prepare_coding_loop_smoke_fixture() -> Result<PathBuf, CliError> {
+    let root = env::current_dir()
+        .map_err(unexpected)?
+        .join(".merry")
+        .join("local")
+        .join("coding-loop-smoke");
+    if root.exists() {
+        fs::remove_dir_all(&root).map_err(unexpected)?;
+    }
+    fs::create_dir_all(root.join("src")).map_err(unexpected)?;
+    fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"merry-coding-loop-smoke\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[lib]\npath = \"src/lib.rs\"\n",
+    )
+    .map_err(unexpected)?;
+    fs::write(root.join("src/lib.rs"), coding_loop_smoke_initial_source()).map_err(unexpected)?;
+    Ok(root)
+}
+
+fn coding_loop_smoke_initial_source() -> &'static str {
+    "pub fn greeting() -> &'static str {\n    \"old\"\n}\n"
+}
+
+fn coding_loop_smoke_patched_source() -> &'static str {
+    "pub fn greeting() -> &'static str {\n    \"new\"\n}\n"
+}
+
+fn path_to_process_cwd(path: &Path) -> Result<Option<String>, CliError> {
+    if path.as_os_str().is_empty() {
+        return Ok(None);
+    }
+    let value = path.to_str().ok_or_else(|| {
+        CliError::Unexpected("coding-loop-smoke fixture path must be UTF-8".to_owned())
+    })?;
+    Ok(Some(value.replace('\\', "/")))
+}
+
+fn build_coding_loop_smoke_runtime(
+    root: &Path,
+    relative_cwd: Option<&str>,
+    admission: AcceptedLocalWorkspaceProcessAdmission,
+    runner: Arc<dyn ProcessRunner>,
+) -> Result<Runtime, CliError> {
+    let provider = CodingLoopSmokeProvider::new(relative_cwd)?;
+    let workspace_tools =
+        ReadOnlyWorkspaceTools::new(WorkspaceToolsConfig::new(vec![root.to_path_buf()]))
+            .map_err(unexpected)?;
+    let mut builder =
+        Runtime::builder(SessionId::new(CODING_LOOP_SMOKE_SESSION_ID).map_err(unexpected)?)
+            .model_provider(
+                Arc::new(provider),
+                ModelName::new("merry-coding-loop-smoke").map_err(unexpected)?,
+            )
+            .allow_low_risk_workspace_patches()
+            .allow_low_risk_process_actions(Arc::clone(&runner))
+            .allow_accepted_local_workspace_process_actions(admission, runner)
+            .register_tool(
+                process_command_tool(
+                    ToolName::new(CODING_LOOP_SMOKE_TOOL_NAME).map_err(unexpected)?,
+                    "Run sandboxed coding-loop smoke process actions.",
+                )
+                .map_err(unexpected)?,
+            );
+    for tool in workspace_tools.into_registered_tools_with_patch() {
+        builder = builder.register_tool(tool);
+    }
+    builder.build().map_err(unexpected)
+}
+
+struct CodingLoopSmokeProvider {
+    name: ProviderName,
+    capabilities: ModelCapabilities,
+    steps: Mutex<Vec<ModelEvent>>,
+}
+
+impl CodingLoopSmokeProvider {
+    fn new(relative_cwd: Option<&str>) -> Result<Self, CliError> {
+        let steps = vec![
+            coding_loop_process_call(
+                "coding-loop-smoke-rg-files",
+                &["rg", "--files"],
+                relative_cwd,
+            )?,
+            coding_loop_workspace_call(
+                "coding-loop-smoke-read",
+                WORKSPACE_READ_FILE_TOOL,
+                [("path", serde_json::Value::String("src/lib.rs".to_owned()))],
+            )?,
+            coding_loop_workspace_call(
+                "coding-loop-smoke-patch",
+                WORKSPACE_PATCH_FILE_TOOL,
+                [
+                    ("path", serde_json::Value::String("src/lib.rs".to_owned())),
+                    ("old_text", serde_json::Value::String("\"old\"".to_owned())),
+                    ("new_text", serde_json::Value::String("\"new\"".to_owned())),
+                ],
+            )?,
+            coding_loop_process_call("coding-loop-smoke-verify", &["rg", "new"], relative_cwd)?,
+            ModelEvent::Completed {
+                response: ModelResponse::new(
+                    vec![ModelOutput::text(
+                        "coding-loop-smoke patched greeting and verified it",
+                    )],
+                    FinishReason::Stop,
+                    None,
+                ),
+            },
+        ];
+
+        Ok(Self {
+            name: ProviderName::new("merry-coding-loop-smoke-provider").map_err(unexpected)?,
+            capabilities: ModelCapabilities::new(true, true, false, true, None, None)
+                .map_err(unexpected)?,
+            steps: Mutex::new(steps.into_iter().rev().collect()),
+        })
+    }
+}
+
+impl ModelProvider for CodingLoopSmokeProvider {
+    fn name(&self) -> &ProviderName {
+        &self.name
+    }
+
+    fn capabilities(&self) -> &ModelCapabilities {
+        &self.capabilities
+    }
+
+    fn stream_model<'a>(
+        &'a self,
+        _request: ModelRequest,
+        context: ModelStreamContext,
+    ) -> ModelProviderFuture<'a, Result<ModelEventStream, ModelError>> {
+        Box::pin(async move {
+            if context.cancellation_token().is_cancelled() {
+                return Err(ModelError::Cancelled);
+            }
+
+            let event = self
+                .steps
+                .lock()
+                .expect("coding loop smoke steps mutex should not be poisoned")
+                .pop()
+                .ok_or_else(|| {
+                    ModelError::invalid_request("coding-loop-smoke provider has no scripted step")
+                })?;
+            Ok(Box::pin(stream::iter([Ok(event)])) as ModelEventStream)
+        })
+    }
+}
+
+fn coding_loop_process_call(
+    call_id: &str,
+    argv: &[&str],
+    cwd: Option<&str>,
+) -> Result<ModelEvent, CliError> {
+    let mut arguments = serde_json::Map::new();
+    arguments.insert(
+        "argv".to_owned(),
+        serde_json::Value::Array(
+            argv.iter()
+                .map(|argument| serde_json::Value::String((*argument).to_owned()))
+                .collect(),
+        ),
+    );
+    if let Some(cwd) = cwd {
+        arguments.insert("cwd".to_owned(), serde_json::Value::String(cwd.to_owned()));
+    }
+    coding_loop_tool_call(call_id, CODING_LOOP_SMOKE_TOOL_NAME, arguments)
+}
+
+fn coding_loop_workspace_call<const N: usize>(
+    call_id: &str,
+    tool_name: &str,
+    arguments: [(&str, serde_json::Value); N],
+) -> Result<ModelEvent, CliError> {
+    coding_loop_tool_call(
+        call_id,
+        tool_name,
+        arguments
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value))
+            .collect(),
+    )
+}
+
+fn coding_loop_tool_call(
+    call_id: &str,
+    tool_name: &str,
+    arguments: serde_json::Map<String, serde_json::Value>,
+) -> Result<ModelEvent, CliError> {
+    let call = ModelToolCall::new(
+        ModelToolCallId::new(call_id).map_err(unexpected)?,
+        ToolName::new(tool_name).map_err(unexpected)?,
+        ToolArguments::new(arguments),
+    );
+    Ok(ModelEvent::Completed {
+        response: ModelResponse::new(
+            vec![ModelOutput::tool_call(call)],
+            FinishReason::ToolCalls,
+            None,
+        ),
+    })
 }
 
 async fn run_shell(
@@ -1416,8 +1767,9 @@ mod tests {
         SANDBOX_HOME, SANDBOX_TMPDIR, SandboxBootstrap, SandboxChildHandoff, SandboxError,
         SandboxHost, SandboxRuntimeProfile, args_without_sandbox_bootstrap_flags, debug_echo_tool,
         debug_openai_usage, find_bwrap_in_path, os, plan_sandbox_bootstrap_with_file_exists,
-        report_cli_exit, sandbox_runtime_profile_from_evidence, shell_process_action_intent,
-        shell_runtime_admission, shell_usage, write_debug_openai_tool_events,
+        report_cli_exit, run_debug_coding_loop_smoke, sandbox_runtime_profile_from_evidence,
+        shell_process_action_intent, shell_runtime_admission, shell_usage,
+        write_debug_openai_tool_events,
     };
     use super::{DEBUG_TOOL_NAME, run_shell_to_writer, write_runtime_step_events};
     use clap::Parser;
@@ -1518,9 +1870,43 @@ mod tests {
                     assert_eq!(openai.max_output_tokens, Some(16));
                     assert_eq!(openai.debug_tool_result.as_deref(), Some("tool result"));
                 }
+                Some(DebugCommand::CodingLoopSmoke) => {
+                    panic!("expected debug openai subcommand");
+                }
                 None => panic!("expected debug openai subcommand"),
             },
             CliCommand::Shell(_) => panic!("expected debug subcommand"),
+        }
+    }
+
+    #[test]
+    fn clap_parses_debug_coding_loop_smoke() {
+        let cli = Cli::try_parse_from(["merry", "debug", "coding-loop-smoke"])
+            .expect("debug coding-loop-smoke args should parse");
+
+        match cli.command {
+            CliCommand::Debug(debug) => match debug.command {
+                Some(DebugCommand::CodingLoopSmoke) => {}
+                Some(DebugCommand::OpenAi(_)) | None => {
+                    panic!("expected debug coding-loop-smoke subcommand")
+                }
+            },
+            CliCommand::Shell(_) => panic!("expected debug subcommand"),
+        }
+    }
+
+    #[tokio::test]
+    async fn coding_loop_smoke_admission_requires_real_sandbox_handoff() {
+        let err = run_debug_coding_loop_smoke(None)
+            .await
+            .expect_err("coding-loop-smoke should require real sandbox handoff");
+
+        match err {
+            CliError::DebugUsage(message) => {
+                assert!(message.contains("--with-sandbox"));
+                assert!(message.contains("coding-loop-smoke"));
+            }
+            _ => panic!("expected debug usage error"),
         }
     }
 

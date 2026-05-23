@@ -557,6 +557,7 @@ dependencies = [
  "merry-llm",
  "merry-provider-openai",
  "merry-runtime",
+ "merry-tool-workspace",
  "serde_json",
  "tokio",
 ]
