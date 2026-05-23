@@ -173,6 +173,36 @@ fn shell_rustc_version_emits_runtime_jsonl_and_resolves_success() {
 }
 
 #[test]
+fn shell_rg_files_emits_runtime_jsonl_and_resolves_success() {
+    let output = merry()
+        .args(["shell", "--", "rg", "--files"])
+        .output()
+        .expect("merry shell should run");
+
+    assert!(output.status.success(), "shell should exit successfully");
+    assert!(output.stderr.is_empty(), "shell should not write stderr");
+
+    let stdout = std::str::from_utf8(&output.stdout).expect("stdout should be utf-8");
+    assert!(
+        !stdout.starts_with("Cargo.toml"),
+        "shell stdout should be runtime JSONL, not raw rg output"
+    );
+    let events = parse_jsonl(&output.stdout);
+    let kinds = event_kinds(&events);
+    assert!(kinds.contains(&"tool_call_pending"));
+    assert!(kinds.contains(&"artifact_recorded"));
+    assert!(kinds.contains(&"tool_call_resolved"));
+
+    let resolved = events
+        .iter()
+        .find(|event| event["kind"]["type"] == "tool_call_resolved")
+        .expect("shell tool call should resolve");
+    assert_eq!(resolved["kind"]["result"]["call_id"], "call-shell-command");
+    assert_eq!(resolved["kind"]["result"]["status"], "succeeded");
+    assert!(resolved["kind"]["result"]["diagnostic"].is_null());
+}
+
+#[test]
 fn shell_forbidden_command_denies_without_running_raw_command() {
     let output = merry()
         .args(["shell", "--", "sh", "-c", "echo bad"])

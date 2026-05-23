@@ -503,7 +503,7 @@ impl ProcessExecutionEvidence {
 /// Coarse runtime-owned classification for a proposed process argv.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessIntentClass {
-    /// Pure version/introspection commands with no workspace effect.
+    /// Read-only inspection and navigation commands with no workspace effect.
     Informational,
     /// Bounded local commands expected to read/write build artifacts.
     LocalWorkspaceEffect,
@@ -533,11 +533,31 @@ fn classify_process_argv(argv: &[String]) -> ProcessIntentClass {
 }
 
 fn is_informational_process_argv(argv: &[String]) -> bool {
-    matches!(
-        argv,
+    match argv {
         [executable, version]
-            if (executable_token_is(executable, "rustc") || executable_token_is(executable, "rg"))
-                && version.as_str() == "--version"
+            if executable_token_is(executable, "rustc") && version.as_str() == "--version" =>
+        {
+            true
+        }
+        [executable, rg_arg] if executable_token_is(executable, "rg") => {
+            is_read_only_rg_single_argument(rg_arg)
+        }
+        _ => false,
+    }
+}
+
+fn is_read_only_rg_single_argument(argument: &str) -> bool {
+    argument == "--version" || argument == "--files" || is_simple_rg_literal_pattern(argument)
+}
+
+fn is_simple_rg_literal_pattern(pattern: &str) -> bool {
+    !pattern.starts_with('-') && !pattern.chars().any(is_rg_regex_metacharacter)
+}
+
+fn is_rg_regex_metacharacter(character: char) -> bool {
+    matches!(
+        character,
+        '\\' | '.' | '^' | '$' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|'
     )
 }
 
@@ -604,12 +624,12 @@ const FORBIDDEN_PROCESS_EXECUTABLES: &[&str] = &[
 
 /// Returns whether a process intent may enter the SP3-A low-risk process lane.
 ///
-/// The first admitted lane is intentionally fail-closed. It is a small
-/// injected-runner informational allowset, not a general command risk model:
+/// The first admitted lane is intentionally fail-closed. It is a small read-only
+/// injected-runner allowset, not a general command risk model:
 /// no inherited/supplied environment, no stdin text, and only deterministic
-/// informational argv shapes explicitly recognized by SP3-A. Future slices can expand this
-/// predicate only with a real policy model and execution evidence for the
-/// additional process inputs.
+/// read-only argv shapes explicitly recognized by SP3-A. Future slices can
+/// expand this predicate only with a real policy model and execution evidence
+/// for the additional process inputs.
 #[must_use]
 pub fn is_low_risk_process_action_intent(intent: &ProcessActionIntent) -> bool {
     intent.env_policy() == ProcessEnvPolicy::Empty
@@ -983,7 +1003,12 @@ mod tests {
 
     #[test]
     fn classifies_known_process_argv_shapes() {
-        for argv in [vec!["rustc", "--version"], vec!["rg", "--version"]] {
+        for argv in [
+            vec!["rustc", "--version"],
+            vec!["rg", "--version"],
+            vec!["rg", "--files"],
+            vec!["rg", "ProcessRunner"],
+        ] {
             let intent = ProcessActionIntent::new(
                 argv.into_iter().map(str::to_owned).collect(),
                 None,
@@ -1071,6 +1096,15 @@ mod tests {
             vec!["../bin/cargo", "test", "-p", "merry-runtime"],
             vec!["/tmp/rustc", "--version"],
             vec!["./rg", "--version"],
+            vec!["/tmp/rg", "--files"],
+            vec!["./rg", "ProcessRunner"],
+            vec!["rg", "-n", "ProcessRunner"],
+            vec!["rg", "--glob", "*.rs"],
+            vec!["rg", "-"],
+            vec!["rg", "-pattern"],
+            vec!["rg", "Process.*"],
+            vec!["rg", "Process|Runner"],
+            vec!["rg", "call()"],
             vec!["unknown-readonly-ish", "--version"],
             vec!["python3.12", "-c", "print('unknown')"],
             vec!["docker", "run", "image"],
@@ -1092,8 +1126,13 @@ mod tests {
     }
 
     #[test]
-    fn sp3a_low_risk_process_admission_is_informational_only() {
-        for argv in [vec!["rustc", "--version"], vec!["rg", "--version"]] {
+    fn sp3a_low_risk_process_admission_allows_narrow_read_only_argv() {
+        for argv in [
+            vec!["rustc", "--version"],
+            vec!["rg", "--version"],
+            vec!["rg", "--files"],
+            vec!["rg", "ProcessRunner"],
+        ] {
             let intent = ProcessActionIntent::new(
                 argv.into_iter().map(str::to_owned).collect(),
                 None,
@@ -1111,6 +1150,11 @@ mod tests {
             vec!["cargo", "test", "--package", "merry-runtime"],
             vec!["/tmp/rustc", "--version"],
             vec!["./rg", "--version"],
+            vec!["rg", "-n", "ProcessRunner"],
+            vec!["rg", "--glob", "*.rs"],
+            vec!["rg", "-"],
+            vec!["rg", "Process.*"],
+            vec!["rg", "Process|Runner"],
             vec!["unknown-readonly-ish", "--version"],
             vec!["sh", "-c", "echo unsafe"],
         ] {
@@ -1130,7 +1174,7 @@ mod tests {
     #[test]
     fn sp3a_low_risk_process_admission_rejects_stdin_or_env() {
         let stdin_intent = ProcessActionIntent::new(
-            vec!["rustc".to_owned(), "--version".to_owned()],
+            vec!["rg".to_owned(), "--files".to_owned()],
             None,
             ProcessEnvPolicy::empty(),
             Some("payload must not enter the auto-admitted lane".to_owned()),

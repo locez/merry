@@ -835,6 +835,84 @@ async fn agent_loop_process_command_tool_executes_and_continues() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn agent_loop_process_command_tool_executes_rg_files_and_continues() {
+    let provider = ScriptedModelProvider::new(vec![
+        vec![Ok(completed_tool_call_event(
+            model_tool_call_with_arguments(
+                "call-rg-files",
+                "run_process",
+                json!({ "argv": ["rg", "--files"] }),
+            ),
+        ))],
+        vec![Ok(completed_text_event("final after rg files"))],
+    ]);
+    let runner =
+        RecordingProcessRunner::succeeding("Cargo.toml\ncrates/merry-runtime/src/lib.rs\n");
+    let runtime = Runtime::builder(session_id("agent-loop-process-command-tool-rg-files"))
+        .register_tool(
+            process_command_tool(
+                ToolName::new("run_process").expect("valid tool name"),
+                "Run a local process from argv through runtime policy",
+            )
+            .expect("process command tool should build"),
+        )
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .allow_low_risk_process_actions(Arc::new(runner.clone()))
+        .build()
+        .expect("runtime should build");
+
+    let result = run_default_loop(&runtime, "List tracked source files.").await;
+
+    assert_eq!(result.status(), &AgentLoopStatus::Completed);
+    assert_eq!(result.steps_run(), 2);
+    assert!(runtime.pending_tool_calls().await.is_empty());
+
+    let observed_intents = runner.observed_intents();
+    assert_eq!(observed_intents.len(), 1);
+    let intent = &observed_intents[0];
+    assert_eq!(intent.argv(), ["rg", "--files"]);
+    assert_eq!(intent.cwd(), None);
+    assert_eq!(intent.env_policy(), ProcessEnvPolicy::Empty);
+    assert!(intent.stdin_text().is_none());
+
+    let requests = provider.recorded_requests();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[0].continuations().is_empty());
+    assert_eq!(
+        requests[1].messages()[0].content().as_text(),
+        DEFAULT_AGENT_LOOP_CONTINUATION_INPUT
+    );
+    assert_eq!(requests[1].continuations().len(), 1);
+    let continuation = &requests[1].continuations()[0];
+    assert_eq!(continuation.call().id().as_str(), "call-rg-files");
+    assert_eq!(
+        continuation.result().status(),
+        ToolCallResultStatus::Succeeded
+    );
+    assert!(continuation.result().diagnostic().is_none());
+    let content = continuation
+        .result()
+        .content()
+        .as_json()
+        .expect("process result should be JSON");
+    let value: Value = serde_json::from_str(content).expect("process result JSON should parse");
+    assert_eq!(value["ok"], true);
+    assert_eq!(value["kind"], "process_action");
+    assert_eq!(value["intent"]["argv"], json!(["rg", "--files"]));
+    assert_eq!(
+        value["stdout"]["text"],
+        "Cargo.toml\ncrates/merry-runtime/src/lib.rs\n"
+    );
+    assert_eq!(value["stderr"]["text"], "");
+    for forbidden in ["proposal", "audit", "evidence"] {
+        assert!(
+            !content.contains(forbidden),
+            "process continuation leaked internal {forbidden}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn agent_loop_rejects_concurrent_pending_consumption_during_tool_execution() {
     let (started_tx, started_rx) = oneshot::channel();
     let (release_tx, release_rx) = oneshot::channel();
