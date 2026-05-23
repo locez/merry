@@ -1,5 +1,11 @@
 # Private product/design notes. Keep local only unless explicitly sanitized.
 docs/
+merry-raw-docs/
+
+# Local runtime/test state and credentials. Never commit API keys.
+.merry/local/
+.merry/secrets/
+.env.merry.local
 
 # Local agent/tool metadata.
 .agents/
@@ -22,4 +28,3 @@ build/
 .DS_Store
 *.swp
 *.swo
-
