@@ -38,13 +38,14 @@ Style notes:
 
 Current milestone or track:
 
-- Observability-first coding-loop design.
+- Configuration-backed observability-first coding-loop design.
 
 Session milestone:
 
-- Correct the previous event-first CLI direction into an observability-first
-  milestone: structured logs/traces at runtime, tool, process, provider,
-  artifact, sandbox, and loop boundaries before any new interactive CLI/TUI.
+- Correct the previous event-first CLI direction into a configuration-backed
+  observability milestone: XDG TOML config, sandbox config mounting, and
+  structured logs/traces at runtime, tool, process, provider, artifact,
+  sandbox, and loop boundaries before any new interactive CLI/TUI.
 
 Goal:
 
@@ -57,12 +58,17 @@ Task queue status:
 
 - User clarified that event CLI is not the real need; the real need is
   observability/logging for key actions and multi-turn debugging: completed.
+- User clarified that logging should be configured through XDG TOML config, not
+  new `--log-level` / `--log-format` flags, and that `--with-sandbox` should
+  mount the Merry config directory: completed.
 - Use Locez Lens to reframe the issue from "render runtime events" to "make
   action boundaries observable and correlated": completed.
 - Inspect existing tracing/runtime/CLI state: completed. Provider has localized
   `tracing`; runtime/tool/process smoke path lacks a coherent log contract.
 - Move and rewrite spec from event-first CLI to observability-first coding
   loop: completed.
+- Revise observability spec to make XDG TOML config and sandbox config mounting
+  part of the milestone: completed.
 - Update roadmap and decision record away from event-first CLI: completed.
 - Update continuity state and handoff: in progress.
 - Validate and commit: pending.
@@ -76,8 +82,9 @@ Allowed expansion:
 Done condition:
 
 - Public tracked state consistently names observability-first logging/tracing as
-  the next milestone, the old event-first CLI spec path is gone, and the next
-  exact action is user review of the corrected observability spec.
+  the next milestone, names XDG TOML config and sandbox config mounting as
+  first-class requirements, the old event-first CLI spec path is gone, and the
+  next exact action is user review of the corrected observability spec.
 
 Drift boundary:
 
@@ -91,8 +98,9 @@ Task type: planning/design correction
 Acceptance criteria:
 
 - Spec names logs/traces as the milestone center, not event CLI.
-- Spec defines stable correlation fields, action boundaries, redaction, tests,
-  and live/manual smoke expectations.
+- Spec defines XDG config discovery, TOML provider/model/log settings, sandbox
+  config mounting, stable correlation fields, action boundaries, redaction,
+  tests, and live/manual smoke expectations.
 - Roadmap and decisions no longer point to event-first CLI as the next
   milestone.
 - Continuity handoff gives the next exact action.
@@ -127,6 +135,8 @@ Protected files:
 Validation command:
 
 - `rg` for stale event-first milestone references in tracked planning/spec files
+- `rg` for stale logging CLI flag direction in tracked planning/spec files
+- `rg` for XDG/TOML config references in tracked planning/spec files
 - `rg` for placeholders/private-material leakage in the new spec
 - `git diff --check`
 
@@ -137,6 +147,10 @@ Validation notes:
   historical move/removal notes in continuity files.
 - Placeholder/private-material scan found no unresolved placeholders or copied
   private source material. Matches are expected guardrail/config examples.
+- Stale logging flag scan found `--log-level` / `--log-format` only in
+  explicit non-goal text.
+- XDG/TOML scan confirmed config discovery, log settings, and sandbox config
+  mounting are represented in spec, roadmap, README, decisions, and continuity.
 - `git diff --check` passed.
 
 ## Research
@@ -161,8 +175,8 @@ Next exact action:
 
 - User reviews `specs/2026-05-23-observability-first-coding-loop.md`. If
   approved, the next lease should create an implementation plan for the first
-  observability slice: CLI-owned log configuration plus deterministic
-  runtime/tool/process tracing capture tests.
+  observability slice: XDG TOML config discovery, sandbox config/log path
+  mounting, config-backed tracing setup, and deterministic config/tracing tests.
 
 Do not reconsider:
 

@@ -17,12 +17,13 @@ verification inside the CLI `bwrap` sandbox, and returns a final answer backed
 by runtime events, artifacts, and ledger facts.
 
 Policy and shell/process design remain important, but they are support work for
-that executable acceptance target. The next boundary is observability for the
-runtime-owned tool and action surface that already proves the loop. Before
-adding a new interactive CLI, REPL, or TUI, Merry needs structured logs/traces
-that show runtime loop boundaries, provider request metadata, tool choices,
-process execution, artifact IDs, diagnostics, cancellation, and final loop
-status while deterministic and live smokes run.
+that executable acceptance target. The next boundary is configuration-backed
+observability for the runtime-owned tool and action surface that already proves
+the loop. Before adding a new interactive CLI, REPL, or TUI, Merry needs
+XDG/TOML configuration plus structured logs/traces that show runtime loop
+boundaries, provider request metadata, tool choices, process execution,
+artifact IDs, diagnostics, cancellation, and final loop status while
+deterministic and live smokes run.
 
 Shell/process remains the primary verification and inspection actuator under
 runtime control. A future model should be able to compose ordinary process
@@ -112,25 +113,22 @@ credentials. `merry --with-sandbox debug coding-loop-smoke` proves the
 deterministic bwrap/process/patch path. `merry --with-sandbox debug
 coding-loop-live-smoke` is the live LLM proof lane, and the user has reported a
 successful credentialed run against their trusted configured server. The next
-roadmap focus is to make these paths observable with structured logs/traces.
+roadmap focus is to make these paths observable through XDG TOML config-backed
+structured logs/traces.
 Workspace Patch/Write and Shell/Process should both serve that loop through
 runtime-owned policy rather than define ad hoc permission rules of their own.
 
-For the sandboxed live smoke, put local OpenAI-compatible config in
-`.merry/secrets/openai.env`:
+The long-term config direction is `$XDG_CONFIG_HOME/merry/config.toml`, falling
+back to `~/.config/merry/config.toml`. That TOML config should own global
+defaults, provider/model settings, and observability settings such as whether
+logs are enabled, log level, log format, and log output path. Logs should be off
+by default and file logs should use `$XDG_STATE_HOME/merry/logs/`, falling back
+to `~/.local/state/merry/logs/`.
 
-```text
-MERRY_OPENAI_DEBUG=1
-MERRY_OPENAI_API_KEY=<local secret>
-MERRY_OPENAI_MODEL=<model>
-MERRY_OPENAI_BASE_URL=<optional OpenAI-compatible base URL>
-OPENAI_ORG_ID=<optional>
-OPENAI_PROJECT_ID=<optional>
-```
-
-The sandbox bootstrap clears the host environment before CLI execution, so the
-file is the intended path for `coding-loop-live-smoke`. The file is ignored and
-must not be committed.
+The existing `.merry/secrets/openai.env` live-smoke config is a transitional
+debug path from the first live proof. It is ignored and must not be committed.
+The `--with-sandbox` path should move toward mounting the resolved Merry config
+directory read-only, plus a log/state path only when file logging is enabled.
 
 M8 runtime/provider/tool execution hardening has shifted into maintenance and foundation work: structured runtime state, artifact-backed model output, provider step boundaries, pending tool calls, tool result resolution, tool continuations, registered tool execution, public runtime API contract cleanup/review/alignment, and opt-in OpenAI Responses debug/tool flows remain the base for later runtime work.
 

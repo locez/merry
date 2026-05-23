@@ -124,9 +124,10 @@ state or the provider trait boundary.
 ## 2026-05-23 - Observability Before Interactive CLI Or TUI
 
 Decision:
-The next milestone is structured observability for the coding loop, specified
-in `specs/2026-05-23-observability-first-coding-loop.md`, not an event-first
-CLI and not a full TUI. The first implementation should add opt-in logging and
+The next milestone is configuration-backed observability for the coding loop,
+specified in `specs/2026-05-23-observability-first-coding-loop.md`, not an
+event-first CLI and not a full TUI. The first implementation should add XDG
+TOML config discovery, config-backed log settings, sandbox config mounting, and
 `tracing` instrumentation at runtime, tool, process, provider, sandbox, and
 artifact boundaries.
 
@@ -137,22 +138,27 @@ do not explain in-flight behavior well enough for real debugging. The user needs
 to know what action is happening, why it happened, what arguments and policy
 shape were used, what artifact was recorded, and where a multi-step or later
 multi-turn run drifted. Adding another CLI view before the logging contract
-would still leave the system opaque.
+would still leave the system opaque. Adding root logging flags would create
+another short-lived debug surface instead of the durable user configuration
+Merry needs for global, provider, model, and observability settings.
 
 Evidence:
 `Runtime::step` and `Runtime::run_agent_loop` already emit session, step, tool,
 artifact, resolution, completion, failure, and cancellation events. The live
 smoke has passed in the user's trusted configured environment. The OpenAI
 provider already has localized `tracing` spans, but the runtime/tool/process
-loop lacks a consistent structured log contract. Ratatui and Crossterm are
-viable Rust TUI building blocks, but the current gap is observability, not
-full-screen interaction.
+loop lacks a consistent structured log contract. The CLI live smoke still uses
+repo-local `.merry/secrets/openai.env`, which should become a transitional path
+once `$XDG_CONFIG_HOME/merry/config.toml` exists. Ratatui and Crossterm are
+viable Rust TUI building blocks, but the current gap is observability and
+configuration, not full-screen interaction.
 
 Tradeoff:
-This delays a new interactive CLI/REPL/TUI surface. The benefit is that every
-later surface can consume stable correlation fields and operators can debug real
-smoke behavior immediately. The cost is that multi-turn UI input waits behind
-one observability slice.
+This delays a new interactive CLI/REPL/TUI surface and avoids new root logging
+flags. The benefit is that every later surface can consume stable correlation
+fields and a durable user config, and operators can debug real smoke behavior
+without changing command shape. The cost is that multi-turn UI input waits
+behind one config/observability slice.
 
 Reversible:
 Yes. Once logs show which state and action views matter, an event renderer,
@@ -160,5 +166,6 @@ interactive CLI, REPL, or Ratatui-based TUI can be added on top without
 redefining runtime behavior.
 
 Follow-up:
-Create an implementation plan for CLI-owned tracing subscriber setup plus
-runtime/tool/process/provider instrumentation and deterministic tracing tests.
+Create an implementation plan for XDG TOML config, `--with-sandbox` config/log
+path mounting, config-backed tracing subscriber setup, runtime/tool/process/
+provider instrumentation, and deterministic config/tracing tests.

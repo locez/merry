@@ -11,12 +11,13 @@ not the absence of an event CLI. It is that key runtime, tool, process,
 provider, sandbox, and artifact actions are not consistently logged in a way a
 human operator can follow while testing real behavior.
 
-The chosen direction is observability-first: add structured logging/tracing at
-the action boundaries that already matter. Runtime events remain protocol
-evidence. A future CLI/TUI can render those events and logs, but the next
-milestone should first answer: what did Merry do, why did it do it, what did the
-model request, what did each tool run, what artifact was recorded, and where did
-the loop stop?
+The chosen direction is configuration-backed observability-first: add an XDG
+and TOML based configuration system, then use it to control structured
+logging/tracing at the action boundaries that already matter. Runtime events
+remain protocol evidence. A future CLI/TUI can render those events and logs,
+but the next milestone should first answer: what did Merry do, why did it do
+it, what did the model request, what did each tool run, what artifact was
+recorded, and where did the loop stop?
 
 This is also the prerequisite for useful multi-turn testing. A prompt loop or
 REPL without logs would still be opaque when the model chooses a surprising
@@ -40,6 +41,9 @@ The current runtime already records protocol evidence:
   currently reports only `coding-loop-live-smoke: ok` on success.
 - `merry-provider-openai` already uses local `tracing` spans for parts of the
   HTTP/streaming path.
+- Current live-smoke configuration is CLI/debug specific and reads a repo-local
+  `.merry/secrets/openai.env` file. That path helped prove the smoke, but it is
+  not the long-term configuration boundary.
 
 The gap is broader than event rendering:
 
@@ -53,27 +57,78 @@ The gap is broader than event rendering:
   stream
 - future multi-turn testing needs stable `turn_index`, `step_index`, and
   `tool_call_id` style correlation before a UI is useful
+- global settings, provider settings, model selection, and observability
+  settings need one durable config source instead of one-off command flags or
+  repo-local smoke files
 
 ## User Experience
 
-Add a non-default structured logging mode that works with existing debug smoke
-commands before adding new interaction commands. The first command shape should
-prefer global CLI logging flags because they survive sandbox re-exec and keep
-stdout semantics stable:
+Add default configuration discovery under the XDG base directory rules. Merry
+should read:
 
-```bash
-merry --log-level info --log-format json --with-sandbox debug coding-loop-smoke
+```text
+$XDG_CONFIG_HOME/merry/config.toml
+fallback: ~/.config/merry/config.toml
 ```
 
-The live path should support the same observability:
+Merry should also be prepared to use XDG state paths for logs:
 
-```bash
-merry --log-level info --log-format json --with-sandbox debug coding-loop-live-smoke
+```text
+$XDG_STATE_HOME/merry/logs/
+fallback: ~/.local/state/merry/logs/
 ```
 
-Logs should go to stderr. Existing command output, such as
+The first config file can be small but should establish the future shape:
+
+```toml
+[global]
+profile = "default"
+
+[observability.log]
+enabled = false
+level = "info"
+format = "json"
+# Optional. If omitted and logging is enabled, use XDG_STATE_HOME fallback.
+path = "~/.local/state/merry/logs/merry.jsonl"
+
+[providers.default]
+provider = "openai-compatible"
+model = "gpt-4.1-mini"
+
+[providers.openai-compatible]
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+```
+
+Logging must be off by default. Enabling logs, choosing level/format, and
+choosing the output path should be configuration decisions, not new root command
+line flags such as `--log-level` or `--log-format`.
+
+The existing debug smoke command shape should remain stable:
+
+```bash
+merry --with-sandbox debug coding-loop-smoke
+```
+
+The live path should also keep its command shape stable:
+
+```bash
+merry --with-sandbox debug coding-loop-live-smoke
+```
+
+When `--with-sandbox` is used, the sandbox bootstrap should make the resolved
+Merry config directory available inside the sandbox. For v1 this should be a
+read-only mount of the host Merry config directory into the sandbox user's XDG
+config location, such as `/home/merry/.config/merry`, with `XDG_CONFIG_HOME`
+set consistently inside the sandbox. If file logging is enabled, the configured
+or default XDG state/log directory should be mounted read-write only for that
+logging path.
+
+Logs should not replace command stdout. Existing command output, such as
 `coding-loop-live-smoke: ok`, should remain on stdout so scripts and tests can
-continue to distinguish command result from diagnostics.
+continue to distinguish command result from diagnostics. If logging is enabled
+and no file path is configured, stderr is acceptable for early manual use, but
+the stable long-term path should be configurable and XDG-state based.
 
 A readable text log mode is useful for manual testing, but JSON logs should be
 the primary stable shape for regression capture. A representative JSON log
@@ -100,7 +155,16 @@ the milestone center. Events answer "what state changed"; logs must answer
 
 In scope:
 
-- CLI-owned tracing subscriber setup with opt-in text or JSON log output.
+- XDG config discovery for Merry's config directory and `config.toml`.
+- TOML config parsing for global settings, observability logging, default model,
+  and OpenAI-compatible provider settings.
+- Migration path from repo-local `.merry/secrets/openai.env` live-smoke config
+  to user-local XDG TOML config.
+- `--with-sandbox` mounting of the resolved Merry config directory into the
+  sandbox, read-only by default.
+- Optional XDG state/log directory mounting when file logging is enabled.
+- CLI-owned tracing subscriber setup driven by config, not by new logging
+  command-line flags.
 - Runtime `tracing` spans/events for agent loop, step, provider boundary,
   tool-pending, tool-execution, artifact-recording, failure, cancellation, and
   loop terminal status.
@@ -119,6 +183,7 @@ In scope:
 
 Out of scope:
 
+- New root logging flags such as `--log-level` or `--log-format`.
 - Full-screen TUI.
 - General coding agent behavior.
 - A new REPL or multi-turn prompt UI in this milestone.
@@ -137,9 +202,17 @@ runtime state by parsing event JSON.
 
 Recommended components:
 
-- `ObservabilityConfig`: CLI-local configuration for log level, format, and
-  output destination.
-- CLI subscriber setup using `tracing-subscriber`, kept in `merry-cli`.
+- `MerryConfig`: validated TOML-backed config model for global, provider/model,
+  and observability settings.
+- `XdgPaths`: path resolver for `$XDG_CONFIG_HOME`, `$XDG_STATE_HOME`, and their
+  default fallbacks. Relative XDG env values should be treated as invalid and
+  ignored, following the XDG base directory rules.
+- `ObservabilityConfig`: config-derived log enablement, level, format, and
+  destination.
+- CLI subscriber setup using `tracing-subscriber`, kept in `merry-cli`, and
+  initialized only when config enables logging.
+- Sandbox config mount planning that resolves host config/state paths before
+  bwrap re-exec and exposes them consistently inside the sandbox.
 - Runtime instrumentation using `tracing` spans/events only; no dependency on
   CLI formatting or subscriber implementation.
 - Small helper functions for stable, safe summaries of tool arguments,
@@ -180,12 +253,43 @@ Field names should be boring and stable. Do not log secrets, API keys, raw
 provider requests, full prompts, full model output, full file contents, or full
 stdout/stderr by default.
 
+## Configuration Contract
+
+The MVP config contract should be intentionally small and extensible:
+
+- read `$XDG_CONFIG_HOME/merry/config.toml`, falling back to
+  `~/.config/merry/config.toml`
+- ignore relative XDG env values and fall back to defaults
+- keep missing config non-fatal for commands that do not need config
+- fail with a clear diagnostic when a command requires provider/model config
+  and the config is missing or invalid
+- support global defaults separately from provider-specific settings
+- support observability logging config with `enabled`, `level`, `format`, and
+  optional `path`
+- keep API keys out of logs; prefer `api_key_env` for the first version, while
+  leaving room for future local secret file support under the Merry config
+  directory
+- do not read repo-local `.merry/secrets/openai.env` as the long-term default
+  once XDG config support exists
+
+The config parser should use a real TOML parser, not ad hoc `KEY=value`
+parsing. TOML schema tests should cover missing optional sections, invalid log
+levels/formats, invalid provider config, and redaction of secret-like fields in
+diagnostics.
+
+Reference:
+
+- XDG Base Directory Specification:
+  https://specifications.freedesktop.org/basedir-spec/latest/
+
 ## Error Handling
 
 The logs should make failure boundaries obvious:
 
 - `--with-sandbox` evidence is missing.
-- local OpenAI-compatible config is missing or invalid.
+- XDG Merry config is missing when required, invalid TOML, or semantically
+  invalid.
+- sandbox config directory mount planning fails.
 - the model emits multiple pending tool calls.
 - the model emits completion and a pending call in the same step.
 - the loop reaches max steps.
@@ -203,7 +307,12 @@ Default tests must stay deterministic and offline.
 
 Test coverage should include:
 
-- CLI log configuration parsing and subscriber setup smoke tests.
+- XDG path resolution for set/unset/empty/relative `$XDG_CONFIG_HOME` and
+  `$XDG_STATE_HOME`.
+- TOML config parsing for global, observability, provider, and model settings.
+- Sandbox plan tests proving `--with-sandbox` mounts the Merry config directory
+  read-only and mounts the configured/default log directory only when needed.
+- CLI log configuration and subscriber setup smoke tests driven by config.
 - Runtime agent-loop tracing capture for start, step, tool pending, tool
   execution, artifact recording, and terminal status using fake provider/fake
   runner.
@@ -247,11 +356,14 @@ are actually useful.
 ## Acceptance Criteria
 
 - A user can run a sandboxed deterministic coding-loop smoke with logging
-  enabled and see the runtime loop, provider boundary, tool choices, process
-  execution, artifact IDs, and final status in one correlated log stream.
-- A user can run the live coding-loop smoke with the same log mode and see why
-  the model/tool loop succeeded, failed, blocked, or cancelled instead of only
-  seeing `ok`.
+  enabled through `~/.config/merry/config.toml` and see the runtime loop,
+  provider boundary, tool choices, process execution, artifact IDs, and final
+  status in one correlated log stream.
+- `merry --with-sandbox` mounts the resolved Merry config directory into the
+  sandbox so deterministic and live smokes can read the same user-local config.
+- A user can run the live coding-loop smoke with config-backed logging and see
+  why the model/tool loop succeeded, failed, blocked, or cancelled instead of
+  only seeing `ok`.
 - Logs include stable correlation fields for session ID, step index, tool call
   ID, tool name, artifact ID, status, and diagnostic code where applicable.
 - Logs do not expose API keys, local secret file contents, full prompts, full

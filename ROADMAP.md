@@ -42,22 +42,20 @@ In addition, Merry needs explicit opt-in smoke lanes:
 - Live OpenAI-compatible smoke using locally supplied credentials and
   `MERRY_OPENAI_DEBUG=1`.
 
-Local credentials must never be committed. Existing live provider config uses:
+Local credentials must never be committed. The long-term config direction is an
+XDG TOML config file:
 
 ```text
-MERRY_OPENAI_DEBUG=1
-MERRY_OPENAI_API_KEY=<local secret>
-MERRY_OPENAI_MODEL=<model>
-MERRY_OPENAI_BASE_URL=<optional OpenAI-compatible base URL>
-OPENAI_ORG_ID=<optional>
-OPENAI_PROJECT_ID=<optional>
+$XDG_CONFIG_HOME/merry/config.toml
+fallback: ~/.config/merry/config.toml
 ```
 
-Sandboxed live smokes clear the host environment before CLI execution, so the
-live coding-loop smoke reads the same `KEY=value` entries from ignored local
-config at `.merry/secrets/openai.env`. Environment variables remain useful for
-non-sandboxed manual provider debug paths, but the bwrap live smoke should use
-the ignored config file.
+That config should own global defaults, provider/model settings, and
+observability settings such as log enabled/level/format/path. Logs should be
+off by default and, when file-backed, should use XDG state paths such as
+`$XDG_STATE_HOME/merry/logs/` with `~/.local/state/merry/logs/` as fallback.
+The existing `.merry/secrets/openai.env` live-smoke config is a transitional
+debug path, not the long-term default.
 
 The OpenAI provider target is the Responses API only. The provider request path is `/responses`; it preserves the Merry-owned `merry-llm` provider boundary, keeps OpenAI wire types private to `merry-provider-openai`, sets `store: false`, omits `previous_response_id`, avoids provider conversation state as Merry runtime state, and keeps `parallel_tool_calls: false` until runtime policy supports parallel tool calls. This provider work does not imply a live/OpenAI judgment path or public judgment API.
 
@@ -124,7 +122,7 @@ The OpenAI provider target is the Responses API only. The provider request path 
 
 ### Next Active
 
-- Implement the observability-first coding-loop design in `specs/2026-05-23-observability-first-coding-loop.md`, starting with opt-in CLI logging flags and structured `tracing` instrumentation for the deterministic and live coding-loop smokes.
+- Implement the observability-first coding-loop design in `specs/2026-05-23-observability-first-coding-loop.md`, starting with XDG TOML config discovery, config-backed log settings, sandbox config mounting, and structured `tracing` instrumentation for the deterministic and live coding-loop smokes.
 - Replace one-off process classification growth with a runtime-owned read-only process profile for reusable workspace inspection and exact evidence retrieval, including a file-slice shape such as `sed -n RANGE FILE` or an equivalent typed read tool.
 - Move coding-loop tool-set/profile registration toward reusable runtime/library construction so upper layers do not have to assemble `process_command_tool`, workspace read/search fallback, and patch tooling ad hoc.
 - Keep the opt-in live OpenAI-compatible smoke as a regression lane; when it fails, inspect the failure as model/tool-contract evidence and tune only the smallest runtime/provider/tool fix needed.
@@ -147,24 +145,33 @@ Acceptance target:
 
 ```text
 log-enabled smoke:
-  example: `merry --log-level info --log-format json --with-sandbox debug coding-loop-smoke`
+  config: `$XDG_CONFIG_HOME/merry/config.toml` or `~/.config/merry/config.toml`
+  example command remains: `merry --with-sandbox debug coding-loop-smoke`
+  log enablement, level, format, and path come from TOML config
+  `--with-sandbox` mounts the resolved Merry config directory read-only
+  file logs use configured or default XDG state/log directory
   logs runtime loop start/finish and each step boundary
   logs provider request metadata without provider wire payloads
   logs tool pending/execution/result status with tool_call_id and tool_name
   logs process argv/cwd/exit status and stdout/stderr byte counts
   logs artifact IDs and diagnostic codes where applicable
-  fails closed when sandbox or local provider config is missing
+  fails closed when sandbox or required provider/model config is missing
 
 default tests:
-  tracing capture tests use deterministic fake provider/fake runner
+  config and tracing capture tests use deterministic fake provider/fake runner
   no bwrap, network, or live credentials required
   log assertions cover completed, failed, cancelled, and blocked loops
 ```
 
 Tasks:
 
-- Add CLI-owned `tracing-subscriber` setup with opt-in text/JSON log output to
-  stderr while preserving command stdout.
+- Add XDG config discovery and TOML parsing for global, observability, default
+  model, and provider settings.
+- Add sandbox mount planning so `--with-sandbox` exposes the Merry config
+  directory read-only and only exposes a log/state path when file logging is
+  enabled.
+- Add CLI-owned `tracing-subscriber` setup driven by config, not by new logging
+  command-line flags.
 - Instrument `Runtime::run_agent_loop`, step boundaries, tool pending/execution
   boundaries, artifact recording, cancellation, failure, and terminal loop
   status with stable fields.
@@ -188,8 +195,8 @@ Non-goals:
 Verification:
 
 - `cargo fmt --all --check`
-- focused deterministic cargo tests for CLI logging setup and runtime/process
-  tracing capture
+- focused deterministic cargo tests for config-backed logging setup and
+  runtime/process tracing capture
 - existing opt-in real bwrap smoke may remain ignored/manual
 - existing opt-in live provider smoke may remain ignored/manual
 
