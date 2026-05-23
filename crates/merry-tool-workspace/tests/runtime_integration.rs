@@ -10,7 +10,11 @@ use merry_llm::{
     testing::FakeModelProvider,
 };
 use merry_runtime::{
-    LedgerFactKind, LedgerProjection, Runtime, StepContext, StepInput, ToolExecutionContext,
+    AcceptedLocalWorkspaceProcessAdmission, AgentLoopConfig, AgentLoopStatus,
+    DEFAULT_AGENT_LOOP_CONTINUATION_INPUT, LedgerFactKind, LedgerProjection, ProcessActionIntent,
+    ProcessExitStatus, ProcessRunner, ProcessRunnerContext, ProcessRunnerError,
+    ProcessRunnerFuture, ProcessRunnerOutput, Runtime, StepContext, StepInput,
+    ToolExecutionContext, process_command_tool,
 };
 use merry_tool_workspace::{
     ReadOnlyWorkspaceTools, WORKSPACE_LIST_DIR_TOOL, WORKSPACE_PATCH_FILE_TOOL,
@@ -118,6 +122,19 @@ fn pending_patch_file_call(path: &str, old_text: &str, new_text: &str) -> ModelE
     arguments.insert("old_text".to_owned(), Value::String(old_text.to_owned()));
     arguments.insert("new_text".to_owned(), Value::String(new_text.to_owned()));
     pending_workspace_call("workspace-patch-call", WORKSPACE_PATCH_FILE_TOOL, arguments)
+}
+
+fn pending_process_call(call_id: &str, argv: &[&str]) -> ModelEvent {
+    let mut arguments = Map::new();
+    arguments.insert(
+        "argv".to_owned(),
+        Value::Array(
+            argv.iter()
+                .map(|argument| Value::String((*argument).to_owned()))
+                .collect(),
+        ),
+    );
+    pending_workspace_call(call_id, "run_process", arguments)
 }
 
 type ScriptedModelStep = Vec<Result<ModelEvent, ModelError>>;
@@ -260,6 +277,109 @@ fn runtime_with_opt_in_workspace_patch_tools_and_provider(
         builder = builder.register_tool(tool);
     }
     builder.build().expect("runtime should build")
+}
+
+fn runtime_with_coding_loop_tools(
+    root: &Path,
+    provider: ScriptedModelProvider,
+    runner: Arc<dyn ProcessRunner>,
+) -> Runtime {
+    let tools = ReadOnlyWorkspaceTools::new(WorkspaceToolsConfig::new(vec![root.to_path_buf()]))
+        .expect("workspace tools should construct");
+    let mut builder = Runtime::builder(session_id())
+        .model_provider(Arc::new(provider), model_name())
+        .allow_low_risk_workspace_patches()
+        .allow_low_risk_process_actions(runner.clone())
+        .allow_accepted_local_workspace_process_actions(
+            AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
+            runner,
+        )
+        .register_tool(
+            process_command_tool(
+                ToolName::new("run_process").expect("valid tool name"),
+                "Run a local process from argv through runtime policy",
+            )
+            .expect("process command tool should build"),
+        );
+    for tool in tools.into_registered_tools_with_patch() {
+        builder = builder.register_tool(tool);
+    }
+    builder.build().expect("runtime should build")
+}
+
+#[derive(Clone)]
+struct ScriptedProcessRunner {
+    observed_intents: Arc<Mutex<Vec<ProcessActionIntent>>>,
+    responses: Arc<Mutex<Vec<ScriptedProcessResponse>>>,
+}
+
+#[derive(Clone)]
+struct ScriptedProcessResponse {
+    status: ProcessExitStatus,
+    stdout_text: String,
+    stderr_text: String,
+}
+
+impl ScriptedProcessRunner {
+    fn new(responses: Vec<ScriptedProcessResponse>) -> Self {
+        Self {
+            observed_intents: Arc::new(Mutex::new(Vec::new())),
+            responses: Arc::new(Mutex::new(responses.into_iter().rev().collect())),
+        }
+    }
+
+    fn observed_intents(&self) -> Vec<ProcessActionIntent> {
+        self.observed_intents
+            .lock()
+            .expect("process intents mutex should not be poisoned")
+            .clone()
+    }
+}
+
+impl ScriptedProcessResponse {
+    fn success(stdout_text: &str) -> Self {
+        Self {
+            status: ProcessExitStatus::Exited(0),
+            stdout_text: stdout_text.to_owned(),
+            stderr_text: String::new(),
+        }
+    }
+}
+
+impl ProcessRunner for ScriptedProcessRunner {
+    fn run<'a>(
+        &'a self,
+        intent: ProcessActionIntent,
+        context: ProcessRunnerContext,
+    ) -> ProcessRunnerFuture<'a> {
+        Box::pin(async move {
+            if context.cancellation_token().is_cancelled() {
+                return Err(ProcessRunnerError::Cancelled);
+            }
+
+            self.observed_intents
+                .lock()
+                .expect("process intents mutex should not be poisoned")
+                .push(intent.clone());
+
+            let response = self
+                .responses
+                .lock()
+                .expect("process responses mutex should not be poisoned")
+                .pop()
+                .expect("scripted process response should exist");
+
+            ProcessRunnerOutput::new(
+                &intent,
+                response.status,
+                response.stdout_text,
+                false,
+                response.stderr_text,
+                false,
+            )
+            .map_err(|source| ProcessRunnerError::infrastructure(source.to_string()))
+        })
+    }
 }
 
 async fn execute_first_pending_call(runtime: &Runtime, user_text: &str) -> Vec<RuntimeEvent> {
@@ -909,4 +1029,131 @@ async fn patch_proposal_and_audit_do_not_leak_into_sanitized_result_or_continuat
         "action_policy_denied"
     );
     assert_patch_denial_json_sanitized(continuation_json, WORKSPACE_PATCH_FILE_TOOL);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn coding_loop_harness_inspects_patches_verifies_and_completes() {
+    let temp = TempWorkspace::new("coding-loop-harness");
+    temp.write_text(
+        "src/lib.rs",
+        "pub fn greeting() -> &'static str {\n    \"old\"\n}\n",
+    );
+    let provider = ScriptedModelProvider::new(vec![
+        vec![Ok(pending_process_call(
+            "coding-loop-rg-files",
+            &["rg", "--files"],
+        ))],
+        vec![Ok(pending_read_file_call("src/lib.rs"))],
+        vec![Ok(pending_patch_file_call(
+            "src/lib.rs",
+            "\"old\"",
+            "\"new\"",
+        ))],
+        vec![Ok(pending_process_call(
+            "coding-loop-cargo-test",
+            &["cargo", "test", "-p", "merry-runtime"],
+        ))],
+        vec![Ok(ModelEvent::Completed {
+            response: ModelResponse::new(
+                vec![ModelOutput::text(
+                    "changed greeting to new and verified tests",
+                )],
+                FinishReason::Stop,
+                None,
+            ),
+        })],
+    ]);
+    let provider_handle = provider.clone();
+    let runner = Arc::new(ScriptedProcessRunner::new(vec![
+        ScriptedProcessResponse::success("src/lib.rs\n"),
+        ScriptedProcessResponse::success("test result: ok. 1 passed; 0 failed\n"),
+    ]));
+    let runtime = runtime_with_coding_loop_tools(temp.path(), provider, runner.clone());
+
+    let result = runtime
+        .run_agent_loop(
+            StepInput::user_text("Fix the greeting and verify it.").expect("valid user task"),
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::new(8).expect("valid step budget"),
+        )
+        .await
+        .expect("coding loop should run");
+
+    assert_eq!(result.status(), &AgentLoopStatus::Completed);
+    assert_eq!(result.steps_run(), 5);
+    assert!(runtime.pending_tool_calls().await.is_empty());
+    assert_eq!(
+        fs::read_to_string(temp.path().join("src/lib.rs"))
+            .expect("patched workspace file should read"),
+        "pub fn greeting() -> &'static str {\n    \"new\"\n}\n"
+    );
+
+    let observed_argv = runner
+        .observed_intents()
+        .into_iter()
+        .map(|intent| intent.argv().to_vec())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        observed_argv,
+        vec![
+            vec!["rg".to_owned(), "--files".to_owned()],
+            vec![
+                "cargo".to_owned(),
+                "test".to_owned(),
+                "-p".to_owned(),
+                "merry-runtime".to_owned()
+            ],
+        ]
+    );
+
+    let requests = provider_handle.recorded_requests();
+    assert_eq!(requests.len(), 5);
+    assert!(requests[0].continuations().is_empty());
+    for request in requests.iter().skip(1) {
+        assert_eq!(
+            request.messages()[0].content().as_text(),
+            DEFAULT_AGENT_LOOP_CONTINUATION_INPUT
+        );
+    }
+    let continuation_ids = requests
+        .iter()
+        .skip(1)
+        .map(|request| {
+            assert_eq!(request.continuations().len(), 1);
+            request.continuations()[0].call().id().as_str().to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        continuation_ids,
+        [
+            "coding-loop-rg-files",
+            "workspace-read-call",
+            "workspace-patch-call",
+            "coding-loop-cargo-test",
+        ]
+    );
+
+    let lifecycle = lifecycle_kinds(&runtime.ledger_projection().await);
+    let artifact_indexes = lifecycle
+        .iter()
+        .enumerate()
+        .filter_map(|(index, kind)| (*kind == LedgerFactKind::ArtifactRecorded).then_some(index))
+        .collect::<Vec<_>>();
+    let resolved_indexes = lifecycle
+        .iter()
+        .enumerate()
+        .filter_map(|(index, kind)| (*kind == LedgerFactKind::ToolCallResolved).then_some(index))
+        .collect::<Vec<_>>();
+    assert_eq!(artifact_indexes.len(), 5);
+    assert_eq!(resolved_indexes.len(), 4);
+    for (artifact_index, resolved_index) in artifact_indexes
+        .iter()
+        .take(resolved_indexes.len())
+        .zip(resolved_indexes.iter())
+    {
+        assert!(
+            artifact_index < resolved_index,
+            "tool result artifact must be recorded before tool resolution"
+        );
+    }
 }
