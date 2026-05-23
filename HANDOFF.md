@@ -1,6 +1,6 @@
 # Handoff
 
-Status: rollover
+Status: complete
 
 ## Current Work
 
@@ -10,8 +10,8 @@ Current milestone or track:
 
 Session milestone:
 
-- Convert the approved observability spec into a tracked implementation plan
-  and prepare the next execution handoff.
+- Repair stale continuity state after the approved observability implementation
+  plan was already committed.
 
 Task queue status:
 
@@ -22,31 +22,30 @@ Task queue status:
   should support config-relative `api_key_file` in addition to `api_key_env`.
 - Continuity state updated for implementation-plan-ready status.
 - Validation: passed for planning changes.
-- Commit: pending.
+- Planning commit: completed as `7694561 project-continuity: plan
+  config-backed observability`.
+- Stale pending-commit handoff/state repaired.
 
 Done condition:
 
 - Plan is tracked, public-safe, concrete enough for subagent or inline
-  execution, and the next exact action is execution-mode selection.
+  execution, and continuity state accurately reflects that the planning lease
+  was committed.
 
 ## What Changed
 
 Files changed:
 
-- `DECISIONS.md`
 - `EXECUTION_STATE.md`
 - `HANDOFF.md`
-- `plans/2026-05-23-config-backed-observability.md`
 
 Summary:
 
-- Added an implementation plan for XDG TOML config, config-backed log setup,
-  sandbox config/log mounting, XDG provider config, runtime/process tracing,
-  workspace/provider tracing, and end-to-end deterministic log smoke coverage.
-- Kept the milestone focused on observability, not event CLI, REPL, or TUI.
-- Recorded the sandbox credential handling decision: prefer `api_key_env`, and
-  allow config-relative `api_key_file` so the sandbox does not need API keys in
-  bwrap argv.
+- Reconciled `EXECUTION_STATE.md` and `HANDOFF.md` with git evidence: the
+  implementation plan and credential-source decision were already committed in
+  `7694561 project-continuity: plan config-backed observability`.
+- Kept the next focus on observability implementation, not event CLI, REPL, or
+  TUI.
 
 ## Validation
 
@@ -59,12 +58,16 @@ Commands run so far:
 - XDG/TOML/tracing coverage scan
 - `git diff --check`
 - whitespace check for the new plan file
+- `git status --short`
+- `git log --oneline -5`
 
 Result:
 
 - Passed. The logging flag scan found only explicit non-goal/checklist
   references. Private-material matches are guardrails, ignored path references,
   and fake test secret strings, not copied private docs or real credentials.
+- Current repair inspection found a clean worktree before edits and confirmed
+  the planning commit exists.
 
 ## Decisions
 
@@ -77,9 +80,9 @@ Decisions made:
 
 Pending decisions:
 
-- User must choose execution mode for the plan:
-  1. Subagent-Driven (recommended)
-  2. Inline Execution
+- None required before starting implementation. The plan recommends
+  `superpowers:subagent-driven-development`; inline execution remains available
+  if the user explicitly asks for it.
 
 ## Blockers
 
@@ -89,8 +92,9 @@ Blockers:
 
 Next exact action:
 
-- Present execution choices for
-  `plans/2026-05-23-config-backed-observability.md`.
+- Start `plans/2026-05-23-config-backed-observability.md`, Task 1: XDG TOML
+  Config Model, using `superpowers:subagent-driven-development` unless the user
+  explicitly chooses inline execution.
 
 ## Scope For Next Session
 
@@ -116,11 +120,11 @@ Do not reconsider:
 
 ## Commit
 
-Status: pending
+Status: committed by this lease
 
 Message:
 
-- project-continuity: plan config-backed observability
+- project-continuity: repair observability handoff
 
 No-commit reason:
 

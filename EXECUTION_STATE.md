@@ -1,6 +1,6 @@
 # Execution State
 
-Lease status: rollover
+Lease status: complete
 
 ## Source Of Truth
 
@@ -44,16 +44,14 @@ Current milestone or track:
 
 Session milestone:
 
-- Convert the user-approved observability spec into a tracked implementation
-  plan with concrete files, tests, sandbox behavior, config behavior, and
-  execution handoff.
+- Repair continuity state after the committed config-backed observability
+  implementation plan was still recorded as commit-pending in the handoff.
 
 Goal:
 
-- Make Merry's already-proven live coding loop diagnosable while it runs. The
-  next implementation should let an operator enable logs and understand what
-  happened, which tool ran, which artifact was recorded, and why a loop
-  completed, failed, blocked, or cancelled.
+- Make durable project state match the current git evidence so the next lease
+  can start implementation of configuration-backed observability without
+  reopening the completed planning work.
 
 Task queue status:
 
@@ -64,19 +62,22 @@ Task queue status:
 - Record the credential-source decision needed for sandboxed live smoke:
   completed.
 - Update continuity state and handoff: completed.
-- Validate and commit: in progress.
+- Validate and commit planning lease: completed in commit `7694561
+  project-continuity: plan config-backed observability`.
+- Repair stale continuity state that still said the planning commit was pending:
+  completed.
 
 Allowed expansion:
 
-- Public-safe tracked implementation plan and continuity updates.
-- Decision record for the implementation-plan credential source.
+- Continuity-state repair only.
 - No Rust implementation in this lease.
 
 Done condition:
 
 - `plans/2026-05-23-config-backed-observability.md` exists, maps the approved
   spec to executable tasks and tests, records no private raw-doc material, and
-  the next exact action is choosing execution mode.
+  the committed planning lease is reflected accurately in `EXECUTION_STATE.md`
+  and `HANDOFF.md`.
 
 Drift boundary:
 
@@ -85,7 +86,7 @@ Drift boundary:
 - Do not move private ignored notes into tracked files.
 - Do not commit `.superpowers/`, `.merry/`, `docs/`, or `merry-raw-docs/`.
 
-Task type: implementation planning
+Task type: repair
 
 Acceptance criteria:
 
@@ -132,6 +133,8 @@ Validation command:
 - `rg` for forbidden root logging-flag direction in the implementation plan
 - `rg` for private-material leakage paths in tracked changes
 - `git diff --check`
+- `git status --short`
+- `git log --oneline -5`
 
 Validation notes:
 
@@ -146,6 +149,9 @@ Validation notes:
   trace points.
 - `git diff --check` passed for tracked changes; the new plan file had no
   whitespace check output when checked as a new file.
+- Current repair inspection confirmed the worktree was clean before repair and
+  commit `7694561 project-continuity: plan config-backed observability` contains
+  the implementation plan, decision record, and prior continuity updates.
 
 ## Research
 
@@ -166,10 +172,10 @@ Research artifact:
 
 Next exact action:
 
-- Ask the user to choose execution mode for
-  `plans/2026-05-23-config-backed-observability.md`:
-  1. Subagent-Driven (recommended)
-  2. Inline Execution
+- Start implementation from
+  `plans/2026-05-23-config-backed-observability.md`, Task 1: XDG TOML Config
+  Model. Use `superpowers:subagent-driven-development` unless the user
+  explicitly chooses inline execution.
 
 Do not reconsider:
 
