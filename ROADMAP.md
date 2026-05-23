@@ -117,13 +117,18 @@ The OpenAI provider target is the Responses API only. The provider request path 
   tracing subscriber setup, sandbox config/log mount planning, host log
   directory creation before bwrap re-exec, and XDG TOML provider config for
   `debug openai` / `debug coding-loop-live-smoke`. The legacy live-smoke
-  `--config .merry/secrets/openai.env` path is rejected. Runtime, process,
-  workspace tool, and provider trace instrumentation remain the next
-  observability gap.
+  `--config .merry/secrets/openai.env` path is rejected.
+- Runtime loop and process-action tracing are implemented in `merry-runtime`:
+  the serial agent loop emits loop/step/tool start-finish records with session,
+  step, tool-call, tool-name, artifact, status, and diagnostic-code fields; the
+  process path emits argv/cwd, output byte counts, truncation flags, and status
+  without logging stdout/stderr contents. Policy-denied process proposals emit
+  one denied tool-finish trace and no process execution trace. Workspace tool
+  and provider trace alignment remain the next observability gap.
 
 ### Active
 
-- P0: continue the Minimal Useful Coding Loop as the current MVP proof. The loop now has a deterministic fake-provider/fake-runner slice, a deterministic real `bwrap` process-runner smoke, and a user-verified live-provider smoke command. The next proof gap is observability: a correlated structured log/trace stream that shows runtime loop boundaries, provider requests, tool choices, process execution, artifact IDs, failures, cancellations, and final loop status while the smoke runs.
+- P0: continue the Minimal Useful Coding Loop as the current MVP proof. The loop now has a deterministic fake-provider/fake-runner slice, a deterministic real `bwrap` process-runner smoke, and a user-verified live-provider smoke command. The next proof gap is observability: a correlated structured log/trace stream that shows provider requests, workspace tool actions, artifact IDs, failures, cancellations, and final loop status while the smoke runs. Runtime loop and process execution traces now provide the first half of that stream.
 - P0: keep the Runtime Coding Loop Harness executable against a disposable fixture repository. The default lane uses fake provider/fake runner for deterministic `cargo test`; the deterministic `bwrap` lane is an explicit ignored smoke; the live OpenAI-compatible lane is also explicit and ignored and has passed in the user's trusted configured environment.
 - P0: define a runtime-owned read-only process profile for command families, not one-off command matches. Initial coverage should include `rg --files`, literal `rg <pattern>`, and a read-only file-slice command shape such as `sed -n RANGE FILE`, or an equivalent typed process/read tool that proves the same evidence loop.
 - P0: keep edit/write on the typed workspace patch path. The MVP loop should apply one constrained patch through `workspace_patch_file` or its runtime-owned successor, record artifact/audit/ledger evidence, and then run verification.
@@ -135,7 +140,7 @@ The OpenAI provider target is the Responses API only. The provider request path 
 
 ### Next Active
 
-- Continue the observability-first coding-loop design in `specs/2026-05-23-observability-first-coding-loop.md`. The CLI config/log/sandbox/provider-config slice is complete; the next slice is structured `tracing` instrumentation for runtime loop boundaries, process execution, workspace tools, and provider metadata.
+- Continue the observability-first coding-loop design in `specs/2026-05-23-observability-first-coding-loop.md`. The CLI config/log/sandbox/provider-config slice and the runtime loop/process tracing slice are complete; the next slice is structured `tracing` alignment for workspace tools and provider metadata.
 - Replace one-off process classification growth with a runtime-owned read-only process profile for reusable workspace inspection and exact evidence retrieval, including a file-slice shape such as `sed -n RANGE FILE` or an equivalent typed read tool.
 - Move coding-loop tool-set/profile registration toward reusable runtime/library construction so upper layers do not have to assemble `process_command_tool`, workspace read/search fallback, and patch tooling ad hoc.
 - Keep the opt-in live OpenAI-compatible smoke as a regression lane; when it fails, inspect the failure as model/tool-contract evidence and tune only the smallest runtime/provider/tool fix needed.
@@ -187,13 +192,19 @@ Completed first slice:
 - XDG TOML provider config for OpenAI-compatible debug and live-smoke paths,
   including config-relative `api_key_file` support.
 
+Completed second slice:
+
+- Runtime loop, step, pending-tool, tool execution, terminal status, and
+  process execution traces with stable correlation fields.
+- Denied process-action traces that record `status = "denied"` and diagnostic
+  code `action_policy_denied` without emitting process start/finish records.
+- Deterministic runtime trace-capture tests for completed process execution,
+  policy denial, and executor infrastructure error paths.
+
 Remaining tasks:
 
-- Instrument `Runtime::run_agent_loop`, step boundaries, tool
-  pending/execution boundaries, artifact recording, cancellation, failure, and
-  terminal loop status with stable fields.
-- Instrument process and workspace tool paths with exact safe action summaries,
-  status, output byte counts, artifact IDs, and diagnostic codes.
+- Instrument workspace tool paths with exact safe action summaries, status,
+  output byte counts where applicable, artifact IDs, and diagnostic codes.
 - Align OpenAI-compatible provider tracing with the runtime correlation fields
   while keeping provider wire payloads private.
 - Add deterministic tracing capture tests and redaction/bounded-summary tests.

@@ -10,107 +10,103 @@ Current milestone or track:
 
 Session milestone:
 
-- Implement `merry-cli` Tasks 1-4 from
-  `plans/2026-05-23-config-backed-observability.md`.
+- Implement `merry-runtime` Task 5 from
+  `plans/2026-05-23-config-backed-observability.md`: runtime loop and
+  process-action tracing.
 
 Task queue status:
 
-- XDG TOML config model: completed in `crates/merry-cli/src/config.rs`.
-- Config-backed file logging setup: completed in
-  `crates/merry-cli/src/observability.rs` and CLI startup.
-- Sandbox config/log mount planning: completed in `crates/merry-cli/src/main.rs`.
-- OpenAI-compatible debug/live-smoke provider config migration from legacy
-  repo-local config to XDG TOML: completed.
-- Plan checkboxes updated for Tasks 1-4.
-- Roadmap status updated to reflect the completed CLI config/log/provider slice
-  and the next runtime tracing gap.
+- Tasks 1-4 remain complete from the prior CLI config/log/provider slice.
+- Task 5 is complete: `Runtime::run_agent_loop` and the process-action path now
+  emit stable structured traces for loop, step, tool, process, denial, failure,
+  cancellation, blocked, and completed paths.
+- Plan checkboxes updated for Tasks 1-5.
+- Roadmap status updated to reflect the completed runtime/process tracing slice
+  and the remaining workspace-tool/provider trace-alignment gap.
 
 Done condition:
 
-- The CLI can load optional Merry XDG config, initialize configured file logs,
-  keep stdout unchanged, plan sandbox config/log mounts, and load
-  OpenAI-compatible provider/model/key source from XDG TOML.
+- Runtime loop/process traces expose correlation fields and terminal status
+  without logging raw process stdout/stderr content.
 
 ## What Changed
 
 Files changed:
 
-- `Cargo.toml`
 - `Cargo.lock`
 - `ROADMAP.md`
-- `crates/merry-cli/Cargo.toml`
-- `crates/merry-cli/src/config.rs`
-- `crates/merry-cli/src/observability.rs`
-- `crates/merry-cli/src/main.rs`
-- `crates/merry-cli/tests/debug.rs`
+- `crates/merry-runtime/Cargo.toml`
+- `crates/merry-runtime/src/agent_loop.rs`
+- `crates/merry-runtime/src/runtime.rs`
+- `crates/merry-runtime/tests/agent_loop.rs`
 - `plans/2026-05-23-config-backed-observability.md`
 - `EXECUTION_STATE.md`
 - `HANDOFF.md`
 
 Summary:
 
-- Added XDG path resolution and TOML parsing for `[global]`,
-  `[observability.log]`, `[providers.default]`, and
-  `[providers.openai-compatible]`.
-- Added config-backed tracing subscriber setup with JSON/text file logging and
-  clear log path errors.
-- Wired CLI startup so logging initializes after sandbox re-exec planning and
-  before command execution.
-- Extended sandbox planning to read config before re-exec, mount the Merry
-  config directory read-only, mount the log directory read-write only when
-  logging is enabled, and create the host log directory before bwrap re-exec.
-- Migrated `debug openai` and `debug coding-loop-live-smoke` provider settings
-  to XDG TOML; `MERRY_OPENAI_DEBUG=1` remains the network opt-in.
-- Removed the live-smoke `--config` path and replaced old `KEY=value` parser
-  tests with TOML/provider config tests.
-- Added the explanatory code comment for `/home/merry`: those constants are
-  sandbox-child paths; host `$HOME` is resolved separately before re-exec.
+- Added `tracing-subscriber` as a runtime dev dependency for trace capture
+  tests.
+- Added runtime loop traces for `runtime.loop.start`,
+  `runtime.step.start`, `runtime.tool.pending`,
+  `runtime.tool.execute.start`, `runtime.tool.execute.finish`, and
+  `runtime.loop.finish`.
+- Added process execution traces for `runtime.process.execute.start` and
+  `runtime.process.execute.finish` with argv/cwd, stdout/stderr byte counts,
+  truncation flags, and status.
+- Added denied process-action tracing as one `runtime.tool.execute.finish`
+  record with `status = "denied"` and
+  `diagnostic_code = "action_policy_denied"`.
+- Added deterministic trace-capture tests using a process-global JSON tracing
+  subscriber and per-session marker filtering for parallel test stability.
+- Extended tests for completed process execution, denied process actions, and
+  executor infrastructure errors.
+- Incorporated reviewer feedback by avoiding duplicate/conflicting
+  `runtime.tool.execute.finish` records for denied actions and asserting process
+  stdout content is absent from logs.
 
 ## Validation
 
 Commands run:
 
-- `cargo test -p merry-cli config::tests -- --nocapture`
-- `cargo test -p merry-cli observability::tests -- --nocapture`
-- `cargo test -p merry-cli debug_writes_configured_json_log_without_changing_stdout --test debug -- --nocapture`
-- `cargo test -p merry-cli sandbox_plan -- --nocapture`
-- `cargo test -p merry-cli openai_debug_config_uses_xdg_toml_provider_and_secret_file -- --nocapture`
-- `cargo test -p merry-cli coding_loop_live_smoke_rejects_legacy_config_flag --test debug -- --nocapture`
-- `cargo test -p merry-cli`
-- `cargo clippy -p merry-cli --all-targets --all-features -- -D warnings`
+- `cargo test -p merry-runtime executor_infrastructure_error_preserves_events_and_pending_call -- --nocapture`
+- `cargo test -p merry-runtime denied_registered_tool_resolves_failed_and_agent_loop_continues_once -- --nocapture`
+- `cargo test -p merry-runtime agent_loop_traces_loop_steps_tool_process_and_terminal_status -- --nocapture`
+- `cargo test -p merry-runtime denied_process_action_traces_denied_tool_finish_without_process_execution -- --nocapture`
+- `cargo test -p merry-runtime process -- --nocapture`
+- `cargo test -p merry-runtime`
+- `cargo clippy -p merry-runtime --all-targets --all-features -- -D warnings`
 - `cargo fmt --all --check`
 - `cargo test --all`
 - `cargo clippy --all-targets --all-features -- -D warnings`
 - `git diff --check`
-- legacy parser/path scans
-- private-material/secret scans
 
 Result:
 
 - Passed.
-- The first sandboxed `cargo test --all` attempt failed only because DNS could
-  not resolve `static.crates.io` for an uncached crate download. It was rerun
-  with approved network access, downloaded `futures-executor`, and passed.
-- Default validation remains deterministic/offline after dependency download;
-  live/network/bwrap tests are still ignored/non-default.
-- No real secrets or private ignored docs were added. Secret-looking matches
-  are fake test strings such as `sk-test`.
+- The first sandboxed `cargo test --all` and workspace clippy attempts needed
+  approved network access to fetch missing cached dependencies from
+  `static.crates.io`; the approved reruns passed.
+- Ignored live/network/bwrap tests remained ignored/non-default.
+- No private ignored docs, credentials, or generated build artifacts were added.
 
 ## Decisions
 
 Decisions made:
 
-- Tasks 1-4 were committed as one lease-sized implementation slice rather than
-  one commit per plan task.
-- Kept runtime/process/workspace/provider tracing out of this lease. That work
-  starts at Task 5.
-- Kept the sandbox path constants as sandbox-child paths (`/home/merry/...`).
-  Host paths are still resolved from the real host environment and mounted
-  into those child paths.
+- Kept Task 5 scoped to runtime loop and process traces. Workspace tool and
+  provider trace alignment remain Task 6.
+- Logged process stdout/stderr byte counts and truncation flags only, not output
+  contents.
+- Used diagnostic codes from existing runtime/tool outcomes rather than adding
+  a new trace-specific error taxonomy.
+- Installed one process-global JSON subscriber in tests, then filtered trace
+  assertions by unique session IDs to stay compatible with the default parallel
+  test harness.
 
 Pending decisions:
 
-- None required before Task 5.
+- None required before Task 6.
 
 ## Blockers
 
@@ -120,25 +116,25 @@ Blockers:
 
 Residual risk:
 
-- Config-backed sandbox logging is verified for the default XDG state log path
-  and the planned Merry log directory mount. Arbitrary absolute custom log
-  paths across host/sandbox namespaces should be tightened or explicitly
-  documented before broad user-facing support.
+- Runtime/process trace vocabulary is now covered, but workspace-tool and
+  provider traces are not aligned yet. Task 6 should cover safe path/query
+  summaries, artifact/status fields, provider metadata, and redaction tests.
 
 Next exact action:
 
-- Start `plans/2026-05-23-config-backed-observability.md`, Task 5: Runtime
-  Loop And Process Tracing. Write trace-capture tests first, then instrument
-  runtime loop/step/tool execution boundaries.
+- Start `plans/2026-05-23-config-backed-observability.md`, Task 6: Workspace
+  Tool And Provider Trace Alignment. Write workspace/provider trace-capture
+  tests first, then instrument workspace read/list/search/patch and
+  OpenAI-compatible provider metadata paths.
 
 ## Scope For Next Session
 
 Allowed edits:
 
-- `crates/merry-runtime/Cargo.toml`
-- `crates/merry-runtime/src/agent_loop.rs`
-- `crates/merry-runtime/src/runtime.rs`
-- Follow-on Task 5 test/support files if needed
+- `crates/merry-tool-workspace/Cargo.toml`
+- `crates/merry-tool-workspace/src/lib.rs`
+- `crates/merry-provider-openai/src/provider.rs`
+- Follow-on Task 6 test/support files if needed
 - Continuity file updates
 
 Forbidden edits:
@@ -152,8 +148,8 @@ Forbidden edits:
 
 Do not reconsider:
 
-- The next proof gap is logs/traces that explain real runtime behavior while
-  the loop runs.
+- The next proof gap is workspace-tool/provider trace alignment on top of the
+  runtime/process trace vocabulary completed here.
 - Default tests remain deterministic/offline; live provider and bwrap smoke are
   opt-in.
 
@@ -163,7 +159,7 @@ Status: committed by this lease
 
 Message:
 
-- feat(cli): add config-backed observability
+- feat(runtime): trace agent loop and process actions
 
 No-commit reason:
 

@@ -8,9 +8,8 @@
 
 **Tech Stack:** Rust 2024, `serde`, `toml`, `tracing`, `tracing-subscriber`, `tracing-appender`, Tokio, existing `bwrap` bootstrap, deterministic fake provider/fake runner tests.
 
-**Implementation progress:** 2026-05-23 lease completed Tasks 1-4 as one
-batched implementation commit. Task 5 is the next runtime-instrumentation
-entry point.
+**Implementation progress:** 2026-05-23 leases completed Tasks 1-5. Task 6 is
+the next workspace-tool/provider trace-alignment entry point.
 
 ---
 
@@ -1210,7 +1209,7 @@ git commit -m "feat(cli): load live provider config from xdg toml"
 - Modify: `crates/merry-runtime/src/agent_loop.rs`
 - Modify: `crates/merry-runtime/src/runtime.rs`
 
-- [ ] **Step 1: Add runtime test dependency**
+- [x] **Step 1: Add runtime test dependency**
 
 Edit `crates/merry-runtime/Cargo.toml`:
 
@@ -1219,7 +1218,7 @@ Edit `crates/merry-runtime/Cargo.toml`:
 tracing-subscriber.workspace = true
 ```
 
-- [ ] **Step 2: Add trace capture helper in runtime tests**
+- [x] **Step 2: Add trace capture helper in runtime tests**
 
 In `agent_loop.rs` test module, add:
 
@@ -1252,7 +1251,7 @@ fn capture_traces<F: FnOnce() -> R, R>(run: F) -> (R, String) {
 }
 ```
 
-- [ ] **Step 3: Write loop tracing test**
+- [x] **Step 3: Write loop tracing test**
 
 Add a deterministic test using the existing fake provider/runner harness:
 
@@ -1283,7 +1282,7 @@ async fn agent_loop_traces_loop_steps_tool_and_terminal_status() {
 
 Use the existing fake process-loop fixture from runtime tests; if its helper is private to another test, move that helper inside the test module without changing runtime public API.
 
-- [ ] **Step 4: Instrument `Runtime::run_agent_loop`**
+- [x] **Step 4: Instrument `Runtime::run_agent_loop`**
 
 In `agent_loop.rs`, add `tracing::info!` records:
 
@@ -1375,7 +1374,7 @@ fn tool_resolution_artifact_id(events: &[RuntimeEvent]) -> String {
 
 Before every return, emit `runtime.loop.finish` with `status` and `steps_run`.
 
-- [ ] **Step 5: Instrument process execution path**
+- [x] **Step 5: Instrument process execution path**
 
 In `Runtime::execute_admitted_process_action`, emit:
 
@@ -1412,7 +1411,7 @@ tracing::info!(
 
 On denied process action, emit `runtime.tool.execute.finish` with `status = "denied"` and diagnostic code `action_policy_denied`.
 
-- [ ] **Step 6: Run runtime trace tests**
+- [x] **Step 6: Run runtime trace tests**
 
 ```bash
 cargo test -p merry-runtime agent_loop_traces_loop_steps_tool_and_terminal_status -- --nocapture
@@ -1421,7 +1420,7 @@ cargo test -p merry-runtime process -- --nocapture
 
 Expected: trace assertions pass without network or bwrap.
 
-- [ ] **Step 7: Commit runtime instrumentation**
+- [x] **Step 7: Commit runtime instrumentation**
 
 ```bash
 git add crates/merry-runtime/Cargo.toml crates/merry-runtime/src/agent_loop.rs crates/merry-runtime/src/runtime.rs
