@@ -126,7 +126,9 @@ impl SessionState {
         artifact: ArtifactRef,
         content: ArtifactContent,
     ) -> Result<Vec<RuntimeEvent>, ArtifactError> {
+        let content_bytes = content.as_bytes().len();
         let recorded = self.record_artifact_state(artifact, content)?;
+        Self::trace_artifact_record(self.session_id.as_str(), &recorded, content_bytes);
         let mut events = Vec::with_capacity(if self.session_started { 1 } else { 2 });
 
         if let Some(started) = self.record_session_started_if_needed() {
@@ -147,7 +149,10 @@ impl SessionState {
     ) -> Result<RuntimeEvent, ArtifactError> {
         let artifact_sequence = self.next_sequence();
         let artifact = ArtifactRef::new(assistant_output_id(artifact_sequence), ArtifactKind::Text);
-        let recorded = self.record_artifact_state(artifact, ArtifactContent::text(text))?;
+        let content = ArtifactContent::text(text);
+        let content_bytes = content.as_bytes().len();
+        let recorded = self.record_artifact_state(artifact, content)?;
+        Self::trace_artifact_record(self.session_id.as_str(), &recorded, content_bytes);
         Ok(self.record_event(
             RuntimeEventKind::ArtifactRecorded { artifact: recorded },
             LedgerFactKind::ArtifactRecorded,
@@ -414,7 +419,9 @@ impl SessionState {
         };
 
         self.validate_tool_result_content(&result, &content)?;
+        let content_bytes = content.as_bytes().len();
         let recorded = self.record_artifact_state(result.artifact().clone(), content)?;
+        Self::trace_artifact_record(self.session_id.as_str(), &recorded, content_bytes);
         debug_assert_eq!(&recorded, result.artifact());
 
         let pending = self.pending_tool_calls.remove(pending_index);
@@ -547,6 +554,7 @@ impl SessionState {
 
         let action_kind = proposal.action_kind();
         self.record_proposed_tool_action_audit(proposal);
+        let content_bytes = content.as_bytes().len();
         if let Some(execution_evidence) = execution_evidence {
             self.record_executed_tool_action_audit(
                 &pending,
@@ -558,6 +566,7 @@ impl SessionState {
         let recorded = self
             .artifacts
             .record_preflighted(result.artifact().clone(), content);
+        Self::trace_artifact_record(self.session_id.as_str(), &recorded, content_bytes);
         debug_assert_eq!(&recorded, result.artifact());
         self.resolved_tool_calls.insert(result.call_id().clone());
         self.unconsumed_tool_continuations
@@ -626,9 +635,11 @@ impl SessionState {
                 self.record_proposed_tool_action_audit(proposal);
             }
             self.record_denied_tool_action_audit(&pending, decision);
+            let content_bytes = content.as_bytes().len();
             let artifact = self
                 .artifacts
                 .record_preflighted(result.artifact().clone(), content);
+            Self::trace_artifact_record(self.session_id.as_str(), &artifact, content_bytes);
             debug_assert_eq!(artifact, *result.artifact());
             self.resolved_tool_calls.insert(result.call_id().clone());
             self.unconsumed_tool_continuations
@@ -650,9 +661,11 @@ impl SessionState {
             self.record_proposed_tool_action_audit(proposal);
         }
         self.record_denied_tool_action_audit(&pending, decision);
+        let content_bytes = content.as_bytes().len();
         let artifact = self
             .artifacts
             .record_preflighted(result.artifact().clone(), content);
+        Self::trace_artifact_record(self.session_id.as_str(), &artifact, content_bytes);
         debug_assert_eq!(artifact, *result.artifact());
         self.resolved_tool_calls.insert(result.call_id().clone());
         self.unconsumed_tool_continuations
@@ -721,6 +734,17 @@ impl SessionState {
         self.ledger.record(sequence, fact_kind);
         self.next_sequence += 1;
         RuntimeEvent::new(self.session_id.clone(), sequence, kind)
+    }
+
+    fn trace_artifact_record(session_id: &str, artifact: &ArtifactRef, byte_count: usize) {
+        tracing::info!(
+            event = "runtime.artifact.record",
+            session_id,
+            artifact_id = artifact.id().as_str(),
+            artifact_kind = ?artifact.kind(),
+            byte_count,
+            "runtime artifact recorded"
+        );
     }
 
     fn record_denied_tool_action_audit(

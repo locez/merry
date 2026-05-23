@@ -350,7 +350,8 @@ impl Runtime {
                                     status = tool_resolution_status(&execution_events),
                                     artifact_id = tool_resolution_artifact_id(&execution_events),
                                     diagnostic_code =
-                                        tool_resolution_diagnostic_code(&execution_events),
+                                        tool_resolution_diagnostic_code(&execution_events)
+                                            .unwrap_or(""),
                                     "runtime loop tool execution finish"
                                 );
                             }
@@ -401,7 +402,7 @@ fn trace_loop_finish(
         session_id,
         status,
         steps_run,
-        diagnostic_code,
+        diagnostic_code = diagnostic_code.unwrap_or(""),
         "runtime loop finish"
     );
 }

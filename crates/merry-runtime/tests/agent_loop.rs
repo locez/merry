@@ -938,10 +938,12 @@ async fn agent_loop_traces_loop_steps_tool_process_and_terminal_status() {
     assert_eq!(result.status(), &AgentLoopStatus::Completed);
     assert!(logs.contains("\"event\":\"runtime.loop.start\""));
     assert!(logs.contains("\"event\":\"runtime.step.start\""));
+    assert!(logs.contains("\"event\":\"runtime.provider.request\""));
     assert!(logs.contains("\"event\":\"runtime.tool.pending\""));
     assert!(logs.contains("\"event\":\"runtime.tool.execute.start\""));
     assert!(logs.contains("\"event\":\"runtime.process.execute.start\""));
     assert!(logs.contains("\"event\":\"runtime.process.execute.finish\""));
+    assert!(logs.contains("\"event\":\"runtime.artifact.record\""));
     assert!(logs.contains("\"event\":\"runtime.tool.execute.finish\""));
     assert!(logs.contains("\"event\":\"runtime.loop.finish\""));
     assert!(logs.contains("\"status\":\"completed\""));
