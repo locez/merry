@@ -24,6 +24,7 @@ use merry_tool_workspace::{
     WorkspaceToolsConfig,
 };
 use std::{
+    collections::BTreeMap,
     env,
     ffi::{OsStr, OsString},
     fmt, fs, io,
@@ -39,6 +40,10 @@ const DEBUG_TOOL_NAME: &str = "debug_echo";
 const DEBUG_TOOL_CONTINUATION_INPUT: &str = "continue after debug tool";
 const CODING_LOOP_SMOKE_SESSION_ID: &str = "coding-loop-smoke";
 const CODING_LOOP_SMOKE_TOOL_NAME: &str = "run_process";
+const CODING_LOOP_LIVE_SMOKE_SESSION_ID: &str = "coding-loop-live-smoke";
+const CODING_LOOP_LIVE_SMOKE_CONFIG_PATH: &str = ".merry/secrets/openai.env";
+const CODING_LOOP_LIVE_SMOKE_INITIAL_VALUE: &str = "unfixed";
+const CODING_LOOP_LIVE_SMOKE_TARGET_VALUE: &str = "fixed-by-live-llm";
 const SHELL_TOOL_NAME: &str = "shell_command";
 const SHELL_TOOL_CALL_ID: &str = "call-shell-command";
 const SHELL_STEP_INPUT: &str = "run shell command through Merry process protocol";
@@ -68,6 +73,10 @@ Environment:
   MERRY_OPENAI_BASE_URL      Optional OpenAI-compatible base URL
   OPENAI_ORG_ID              Optional organization header
   OPENAI_PROJECT_ID          Optional project header
+
+Sandboxed live smokes clear the host environment before CLI execution. Put the
+same KEY=value entries in .merry/secrets/openai.env for
+`merry --with-sandbox debug coding-loop-live-smoke`.
 ";
 
 #[derive(Debug, Parser)]
@@ -182,6 +191,11 @@ enum DebugCommand {
         about = "Run an opt-in sandboxed coding-loop smoke with deterministic model steps"
     )]
     CodingLoopSmoke,
+    #[command(
+        name = "coding-loop-live-smoke",
+        about = "Run an opt-in sandboxed coding-loop smoke driven by a live OpenAI-compatible model"
+    )]
+    CodingLoopLiveSmoke(DebugCodingLoopLiveSmokeArgs),
 }
 
 #[derive(Debug, Args)]
@@ -218,6 +232,34 @@ struct DebugOpenAiArgs {
         help = "Require first step to call debug_echo; return this text"
     )]
     debug_tool_result: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct DebugCodingLoopLiveSmokeArgs {
+    #[arg(
+        long,
+        value_name = "MODEL",
+        allow_hyphen_values = true,
+        help = "Model name; falls back to local config or MERRY_OPENAI_MODEL"
+    )]
+    model: Option<String>,
+
+    #[arg(
+        long = "config",
+        value_name = "PATH",
+        default_value = CODING_LOOP_LIVE_SMOKE_CONFIG_PATH,
+        help = "Ignored local KEY=value config file available inside the sandbox"
+    )]
+    config_path: PathBuf,
+
+    #[arg(
+        long,
+        value_name = "N",
+        value_parser = parse_max_output_tokens,
+        default_value_t = 512,
+        help = "Maximum output tokens per live model step"
+    )]
+    max_output_tokens: u64,
 }
 
 fn main() -> CliExit {
@@ -313,6 +355,38 @@ async fn async_main(cli: Cli) -> CliExit {
             Err(CliError::DebugOpenAiUsage(message)) => CliExit::Usage {
                 message,
                 usage: debug_openai_usage(),
+            },
+            Err(CliError::ShellUsage(message)) => CliExit::Usage {
+                message,
+                usage: shell_usage(),
+            },
+            Err(CliError::Unexpected(message)) => CliExit::Unexpected(message),
+        },
+        CliCommand::Debug(DebugArgs {
+            command:
+                Some(DebugCommand::CodingLoopLiveSmoke(DebugCodingLoopLiveSmokeArgs {
+                    model,
+                    config_path,
+                    max_output_tokens,
+                })),
+            ..
+        }) => match run_debug_coding_loop_live_smoke(
+            sandbox_child_handoff,
+            model.as_deref(),
+            &config_path,
+            max_output_tokens,
+        )
+        .await
+        {
+            Ok(()) => CliExit::Success,
+            Err(CliError::BrokenPipe) => CliExit::Success,
+            Err(CliError::DebugUsage(message)) => CliExit::Usage {
+                message,
+                usage: debug_usage(),
+            },
+            Err(CliError::DebugOpenAiUsage(message)) => CliExit::Usage {
+                message,
+                usage: debug_coding_loop_live_smoke_usage(),
             },
             Err(CliError::ShellUsage(message)) => CliExit::Usage {
                 message,
@@ -676,35 +750,16 @@ async fn run_debug_openai(
 async fn run_debug_coding_loop_smoke(
     sandbox_child_handoff: Option<SandboxChildHandoff>,
 ) -> Result<(), CliError> {
-    let sandbox_marker = env::var_os(MERRY_SANDBOX_ENV);
-    let sandbox_version = env::var_os(MERRY_SANDBOX_VERSION_ENV);
-    let home = env::var_os("HOME");
-    let tmpdir = env::var_os("TMPDIR");
-    let mountinfo = read_proc_self_mountinfo().await;
-    let sandbox_runtime_profile = sandbox_runtime_profile_from_evidence(
-        home.as_deref(),
-        tmpdir.as_deref(),
-        mountinfo.as_deref(),
-    );
-    let Some(admission) = coding_loop_smoke_admission(
-        sandbox_child_handoff,
-        sandbox_runtime_profile,
-        sandbox_marker.as_deref(),
-        sandbox_version.as_deref(),
-    ) else {
-        return Err(CliError::DebugUsage(
-            "coding-loop-smoke must run via `merry --with-sandbox debug coding-loop-smoke`"
-                .to_owned(),
+    let Some(admission) =
+        coding_loop_smoke_admission_from_current_process(sandbox_child_handoff).await
+    else {
+        return Err(coding_loop_smoke_requires_sandbox_error(
+            "coding-loop-smoke",
         ));
     };
 
-    let smoke_root = prepare_coding_loop_smoke_fixture()?;
-    let relative_cwd = smoke_root
-        .strip_prefix(env::current_dir().map_err(unexpected)?)
-        .map_err(|_| {
-            unexpected("coding-loop-smoke fixture must live under the current workspace")
-        })?;
-    let relative_cwd = path_to_process_cwd(relative_cwd)?;
+    let smoke_root = prepare_coding_loop_smoke_fixture("coding-loop-smoke")?;
+    let relative_cwd = smoke_root_relative_cwd(&smoke_root)?;
     let runtime = build_coding_loop_smoke_runtime(
         &smoke_root,
         relative_cwd.as_deref(),
@@ -721,6 +776,111 @@ async fn run_debug_coding_loop_smoke(
         .await
         .map_err(unexpected)?;
 
+    assert_coding_loop_smoke_result(&runtime, &result, &smoke_root).await?;
+
+    let mut writer = BufWriter::new(tokio::io::stdout());
+    writer
+        .write_all(b"coding-loop-smoke: ok\n")
+        .await
+        .map_err(stdout_error)?;
+    writer.flush().await.map_err(stdout_error)
+}
+
+async fn run_debug_coding_loop_live_smoke(
+    sandbox_child_handoff: Option<SandboxChildHandoff>,
+    model_flag: Option<&str>,
+    config_path: &Path,
+    max_output_tokens: u64,
+) -> Result<(), CliError> {
+    let Some(admission) =
+        coding_loop_smoke_admission_from_current_process(sandbox_child_handoff).await
+    else {
+        return Err(coding_loop_smoke_requires_sandbox_error(
+            "coding-loop-live-smoke",
+        ));
+    };
+    if config_path.is_absolute() {
+        return Err(debug_openai_usage_error(
+            "--config must be a relative ignored local path inside the workspace",
+        ));
+    }
+
+    let config = debug_openai_config_with_local_file(model_flag, Some(config_path))?;
+    let smoke_root = prepare_coding_loop_smoke_fixture("coding-loop-live-smoke")?;
+    let relative_cwd = smoke_root_relative_cwd(&smoke_root)?;
+    let runtime = build_coding_loop_live_smoke_runtime(
+        &smoke_root,
+        relative_cwd.as_deref(),
+        admission,
+        config,
+        Arc::new(TokioProcessRunner),
+    )?;
+    let generation_config =
+        GenerationConfig::new(Some(max_output_tokens), false).map_err(debug_openai_usage_error)?;
+    let context = StepContext::default().with_generation_config(generation_config);
+
+    let result = runtime
+        .run_agent_loop(
+            StepInput::user_text(&coding_loop_live_smoke_task(relative_cwd.as_deref()))
+                .map_err(unexpected)?,
+            context,
+            AgentLoopConfig::new(10).map_err(unexpected)?,
+        )
+        .await
+        .map_err(unexpected)?;
+
+    assert_coding_loop_smoke_result(&runtime, &result, &smoke_root).await?;
+    assert_coding_loop_live_smoke_tool_sequence(&runtime, result.events()).await?;
+
+    let mut writer = BufWriter::new(tokio::io::stdout());
+    writer
+        .write_all(b"coding-loop-live-smoke: ok\n")
+        .await
+        .map_err(stdout_error)?;
+    writer.flush().await.map_err(stdout_error)
+}
+
+async fn coding_loop_smoke_admission_from_current_process(
+    sandbox_child_handoff: Option<SandboxChildHandoff>,
+) -> Option<AcceptedLocalWorkspaceProcessAdmission> {
+    let sandbox_marker = env::var_os(MERRY_SANDBOX_ENV);
+    let sandbox_version = env::var_os(MERRY_SANDBOX_VERSION_ENV);
+    let home = env::var_os("HOME");
+    let tmpdir = env::var_os("TMPDIR");
+    let mountinfo = read_proc_self_mountinfo().await;
+    let sandbox_runtime_profile = sandbox_runtime_profile_from_evidence(
+        home.as_deref(),
+        tmpdir.as_deref(),
+        mountinfo.as_deref(),
+    );
+    coding_loop_smoke_admission(
+        sandbox_child_handoff,
+        sandbox_runtime_profile,
+        sandbox_marker.as_deref(),
+        sandbox_version.as_deref(),
+    )
+}
+
+fn coding_loop_smoke_requires_sandbox_error(command: &str) -> CliError {
+    CliError::DebugUsage(format!(
+        "{command} must run via `merry --with-sandbox debug {command}`"
+    ))
+}
+
+fn smoke_root_relative_cwd(smoke_root: &Path) -> Result<Option<String>, CliError> {
+    let relative_cwd = smoke_root
+        .strip_prefix(env::current_dir().map_err(unexpected)?)
+        .map_err(|_| {
+            unexpected("coding-loop-smoke fixture must live under the current workspace")
+        })?;
+    path_to_process_cwd(relative_cwd)
+}
+
+async fn assert_coding_loop_smoke_result(
+    runtime: &Runtime,
+    result: &merry_runtime::AgentLoopResult,
+    smoke_root: &Path,
+) -> Result<(), CliError> {
     if result.status() != &AgentLoopStatus::Completed {
         return Err(CliError::Unexpected(format!(
             "coding-loop-smoke did not complete: {:?}",
@@ -740,13 +900,7 @@ async fn run_debug_coding_loop_smoke(
             "coding-loop-smoke fixture was not patched as expected".to_owned(),
         ));
     }
-
-    let mut writer = BufWriter::new(tokio::io::stdout());
-    writer
-        .write_all(b"coding-loop-smoke: ok\n")
-        .await
-        .map_err(stdout_error)?;
-    writer.flush().await.map_err(stdout_error)
+    Ok(())
 }
 
 fn assert_coding_loop_smoke_tool_results(events: &[RuntimeEvent]) -> Result<(), CliError> {
@@ -789,12 +943,12 @@ fn coding_loop_smoke_admission(
     )
 }
 
-fn prepare_coding_loop_smoke_fixture() -> Result<PathBuf, CliError> {
+fn prepare_coding_loop_smoke_fixture(name: &str) -> Result<PathBuf, CliError> {
     let root = env::current_dir()
         .map_err(unexpected)?
         .join(".merry")
         .join("local")
-        .join("coding-loop-smoke");
+        .join(name);
     if root.exists() {
         fs::remove_dir_all(&root).map_err(unexpected)?;
     }
@@ -809,11 +963,11 @@ fn prepare_coding_loop_smoke_fixture() -> Result<PathBuf, CliError> {
 }
 
 fn coding_loop_smoke_initial_source() -> &'static str {
-    "pub fn greeting() -> &'static str {\n    \"old\"\n}\n"
+    "pub fn greeting() -> &'static str {\n    \"unfixed\"\n}\n"
 }
 
 fn coding_loop_smoke_patched_source() -> &'static str {
-    "pub fn greeting() -> &'static str {\n    \"new\"\n}\n"
+    "pub fn greeting() -> &'static str {\n    \"fixed-by-live-llm\"\n}\n"
 }
 
 fn path_to_process_cwd(path: &Path) -> Result<Option<String>, CliError> {
@@ -833,29 +987,192 @@ fn build_coding_loop_smoke_runtime(
     runner: Arc<dyn ProcessRunner>,
 ) -> Result<Runtime, CliError> {
     let provider = CodingLoopSmokeProvider::new(relative_cwd)?;
-    let workspace_tools =
-        ReadOnlyWorkspaceTools::new(WorkspaceToolsConfig::new(vec![root.to_path_buf()]))
-            .map_err(unexpected)?;
-    let mut builder =
-        Runtime::builder(SessionId::new(CODING_LOOP_SMOKE_SESSION_ID).map_err(unexpected)?)
-            .model_provider(
-                Arc::new(provider),
-                ModelName::new("merry-coding-loop-smoke").map_err(unexpected)?,
-            )
-            .allow_low_risk_workspace_patches()
-            .allow_low_risk_process_actions(Arc::clone(&runner))
-            .allow_accepted_local_workspace_process_actions(admission, runner)
-            .register_tool(
-                process_command_tool(
-                    ToolName::new(CODING_LOOP_SMOKE_TOOL_NAME).map_err(unexpected)?,
-                    "Run sandboxed coding-loop smoke process actions.",
-                )
-                .map_err(unexpected)?,
-            );
+    build_coding_loop_runtime(
+        CODING_LOOP_SMOKE_SESSION_ID,
+        root,
+        admission,
+        Arc::new(provider),
+        ModelName::new("merry-coding-loop-smoke").map_err(unexpected)?,
+        runner,
+        false,
+    )
+}
+
+fn build_coding_loop_live_smoke_runtime(
+    root: &Path,
+    _relative_cwd: Option<&str>,
+    admission: AcceptedLocalWorkspaceProcessAdmission,
+    config: DebugOpenAiConfig,
+    runner: Arc<dyn ProcessRunner>,
+) -> Result<Runtime, CliError> {
+    let provider = OpenAiProvider::new(config.provider);
+    build_coding_loop_runtime(
+        CODING_LOOP_LIVE_SMOKE_SESSION_ID,
+        root,
+        admission,
+        Arc::new(provider),
+        ModelName::new(&config.model).map_err(debug_openai_usage_error)?,
+        runner,
+        true,
+    )
+}
+
+fn build_coding_loop_runtime(
+    session_id: &str,
+    root: &Path,
+    admission: AcceptedLocalWorkspaceProcessAdmission,
+    provider: Arc<dyn ModelProvider>,
+    model: ModelName,
+    runner: Arc<dyn ProcessRunner>,
+    allow_hidden_workspace_paths: bool,
+) -> Result<Runtime, CliError> {
+    let workspace_tools = ReadOnlyWorkspaceTools::new(
+        WorkspaceToolsConfig::new(vec![root.to_path_buf()])
+            .with_allow_hidden(allow_hidden_workspace_paths),
+    )
+    .map_err(unexpected)?;
+    let mut builder = Runtime::builder(SessionId::new(session_id).map_err(unexpected)?)
+    .model_provider(provider, model)
+    .allow_low_risk_workspace_patches()
+    .allow_low_risk_process_actions(Arc::clone(&runner))
+    .allow_accepted_local_workspace_process_actions(admission, runner)
+    .register_tool(
+        process_command_tool(
+            ToolName::new(CODING_LOOP_SMOKE_TOOL_NAME).map_err(unexpected)?,
+            "Run exact argv through Merry process policy. For this smoke use only `rg --files` and `rg fixed-by-live-llm` with the provided cwd.",
+        )
+        .map_err(unexpected)?,
+    );
     for tool in workspace_tools.into_registered_tools_with_patch() {
         builder = builder.register_tool(tool);
     }
     builder.build().map_err(unexpected)
+}
+
+fn coding_loop_live_smoke_task(relative_cwd: Option<&str>) -> String {
+    let cwd = relative_cwd.unwrap_or(".");
+    format!(
+        "\
+You are driving Merry's minimal live coding-loop smoke.
+
+Use the available tools, one tool call per step. Do not answer from memory.
+
+Required sequence:
+1. Call `{process_tool}` with argv `[\"rg\", \"--files\"]` and cwd `{cwd}` to inspect the fixture.
+2. Call `{read_tool}` with path `src/lib.rs` to read exact source.
+3. Call `{patch_tool}` with path `src/lib.rs`, old_text `\"{initial}\"`, and new_text `\"{target}\"`.
+4. Call `{process_tool}` with argv `[\"rg\", \"{target}\"]` and cwd `{cwd}` to verify.
+5. After verification succeeds, return a concise final answer.
+
+Constraints:
+- Do not use shell strings, scripts, pipelines, env, stdin, git, cargo, or any command except the two exact rg argv values above.
+- Do not modify any file except `src/lib.rs` through `{patch_tool}`.
+- The final file must equal:
+
+pub fn greeting() -> &'static str {{
+    \"{target}\"
+}}
+",
+        process_tool = CODING_LOOP_SMOKE_TOOL_NAME,
+        read_tool = WORKSPACE_READ_FILE_TOOL,
+        patch_tool = WORKSPACE_PATCH_FILE_TOOL,
+        initial = CODING_LOOP_LIVE_SMOKE_INITIAL_VALUE,
+        target = CODING_LOOP_LIVE_SMOKE_TARGET_VALUE,
+    )
+}
+
+async fn assert_coding_loop_live_smoke_tool_sequence(
+    runtime: &Runtime,
+    events: &[RuntimeEvent],
+) -> Result<(), CliError> {
+    let mut pending_by_call_id = BTreeMap::new();
+    let mut resolved_tool_names = Vec::new();
+    let mut resolved_artifacts = Vec::new();
+    for event in events {
+        match &event.kind {
+            RuntimeEventKind::ToolCallPending { call } => {
+                pending_by_call_id.insert(call.id().clone(), call.clone());
+            }
+            RuntimeEventKind::ToolCallResolved { result } => {
+                if result.status() != ToolCallResultStatus::Succeeded {
+                    return Err(CliError::Unexpected(format!(
+                        "live smoke tool call {} did not succeed",
+                        result.call_id()
+                    )));
+                }
+                let call = pending_by_call_id.get(result.call_id()).ok_or_else(|| {
+                    CliError::Unexpected(format!(
+                        "live smoke resolved unknown tool call {}",
+                        result.call_id()
+                    ))
+                })?;
+                resolved_tool_names.push(call.name().as_str().to_owned());
+                resolved_artifacts.push(result.artifact().id().clone());
+            }
+            _ => {}
+        }
+    }
+
+    require_live_smoke_tool_name(&resolved_tool_names, CODING_LOOP_SMOKE_TOOL_NAME)?;
+    require_live_smoke_tool_name(&resolved_tool_names, WORKSPACE_READ_FILE_TOOL)?;
+    require_live_smoke_tool_name(&resolved_tool_names, WORKSPACE_PATCH_FILE_TOOL)?;
+
+    let mut process_artifact_texts = Vec::new();
+    for artifact_id in &resolved_artifacts {
+        let Ok(content) = runtime.read_artifact_content(artifact_id).await else {
+            continue;
+        };
+        let Some(text) = content.as_text() else {
+            continue;
+        };
+        if text.contains("\"kind\":\"process_action\"") {
+            process_artifact_texts.push(text.to_owned());
+        }
+    }
+    let inspected = process_artifact_texts.iter().any(|text| {
+        process_artifact_has_argv(text, ["rg", "--files"]) && text.contains("src/lib.rs")
+    });
+    let verified = process_artifact_texts.iter().any(|text| {
+        process_artifact_has_argv(text, ["rg", CODING_LOOP_LIVE_SMOKE_TARGET_VALUE])
+            && text.contains(CODING_LOOP_LIVE_SMOKE_TARGET_VALUE)
+    });
+    if !inspected {
+        return Err(CliError::Unexpected(
+            "live smoke did not resolve a real rg --files process call".to_owned(),
+        ));
+    }
+    if !verified {
+        return Err(CliError::Unexpected(format!(
+            "live smoke did not resolve a real rg {CODING_LOOP_LIVE_SMOKE_TARGET_VALUE} verification call"
+        )));
+    }
+
+    Ok(())
+}
+
+fn require_live_smoke_tool_name(names: &[String], required: &str) -> Result<(), CliError> {
+    if names.iter().any(|name| name == required) {
+        Ok(())
+    } else {
+        Err(CliError::Unexpected(format!(
+            "live smoke did not resolve required tool `{required}`"
+        )))
+    }
+}
+
+fn process_artifact_has_argv<const N: usize>(text: &str, expected: [&str; N]) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return false;
+    };
+    value
+        .get("intent")
+        .and_then(|intent| intent.get("argv"))
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|argv| {
+            argv.iter()
+                .filter_map(serde_json::Value::as_str)
+                .eq(expected)
+        })
 }
 
 struct CodingLoopSmokeProvider {
@@ -882,11 +1199,25 @@ impl CodingLoopSmokeProvider {
                 WORKSPACE_PATCH_FILE_TOOL,
                 [
                     ("path", serde_json::Value::String("src/lib.rs".to_owned())),
-                    ("old_text", serde_json::Value::String("\"old\"".to_owned())),
-                    ("new_text", serde_json::Value::String("\"new\"".to_owned())),
+                    (
+                        "old_text",
+                        serde_json::Value::String(format!(
+                            "\"{CODING_LOOP_LIVE_SMOKE_INITIAL_VALUE}\""
+                        )),
+                    ),
+                    (
+                        "new_text",
+                        serde_json::Value::String(format!(
+                            "\"{CODING_LOOP_LIVE_SMOKE_TARGET_VALUE}\""
+                        )),
+                    ),
                 ],
             )?,
-            coding_loop_process_call("coding-loop-smoke-verify", &["rg", "new"], relative_cwd)?,
+            coding_loop_process_call(
+                "coding-loop-smoke-verify",
+                &["rg", CODING_LOOP_LIVE_SMOKE_TARGET_VALUE],
+                relative_cwd,
+            )?,
             ModelEvent::Completed {
                 response: ModelResponse::new(
                     vec![ModelOutput::text(
@@ -1588,33 +1919,45 @@ where
 }
 
 fn debug_openai_config(model_flag: Option<&str>) -> Result<DebugOpenAiConfig, CliError> {
-    if env::var("MERRY_OPENAI_DEBUG").as_deref() != Ok("1") {
+    debug_openai_config_with_local_file(model_flag, None)
+}
+
+fn debug_openai_config_with_local_file(
+    model_flag: Option<&str>,
+    config_path: Option<&Path>,
+) -> Result<DebugOpenAiConfig, CliError> {
+    let local = match config_path {
+        Some(path) => LocalOpenAiConfig::read(path)?,
+        None => LocalOpenAiConfig::default(),
+    };
+
+    if config_value("MERRY_OPENAI_DEBUG", &local)?.as_deref() != Some("1") {
         return Err(debug_openai_usage_error(
             "set MERRY_OPENAI_DEBUG=1 to enable live OpenAI-compatible debugging",
         ));
     }
 
-    let api_key = required_openai_api_key()?;
+    let api_key = required_openai_api_key(&local)?;
     let model = match model_flag {
         Some(model) => model.to_owned(),
-        None => required_env("MERRY_OPENAI_MODEL")?,
+        None => required_config_value("MERRY_OPENAI_MODEL", &local)?,
     };
 
     let mut provider = OpenAiProviderConfig::new(&api_key).map_err(debug_openai_usage_error)?;
 
-    if let Some(base_url) = optional_env("MERRY_OPENAI_BASE_URL")? {
+    if let Some(base_url) = config_value("MERRY_OPENAI_BASE_URL", &local)? {
         provider = provider
             .with_base_url(&base_url)
             .map_err(debug_openai_usage_error)?;
     }
 
-    if let Some(organization) = optional_env("OPENAI_ORG_ID")? {
+    if let Some(organization) = config_value("OPENAI_ORG_ID", &local)? {
         provider = provider
             .with_organization(&organization)
             .map_err(debug_openai_usage_error)?;
     }
 
-    if let Some(project) = optional_env("OPENAI_PROJECT_ID")? {
+    if let Some(project) = config_value("OPENAI_PROJECT_ID", &local)? {
         provider = provider
             .with_project(&project)
             .map_err(debug_openai_usage_error)?;
@@ -1623,22 +1966,32 @@ fn debug_openai_config(model_flag: Option<&str>) -> Result<DebugOpenAiConfig, Cl
     Ok(DebugOpenAiConfig { provider, model })
 }
 
-fn required_env(name: &'static str) -> Result<String, CliError> {
-    match optional_env(name)? {
+fn required_openai_api_key(local: &LocalOpenAiConfig) -> Result<String, CliError> {
+    match config_value("MERRY_OPENAI_API_KEY", local)? {
         Some(value) => Ok(value),
-        None => Err(debug_openai_usage_error(format!("{name} must be set"))),
-    }
-}
-
-fn required_openai_api_key() -> Result<String, CliError> {
-    match optional_env("MERRY_OPENAI_API_KEY")? {
-        Some(value) => Ok(value),
-        None => match optional_env("OPENAI_API_KEY")? {
+        None => match config_value("OPENAI_API_KEY", local)? {
             Some(value) => Ok(value),
             None => Err(debug_openai_usage_error(
                 "MERRY_OPENAI_API_KEY or OPENAI_API_KEY must be set",
             )),
         },
+    }
+}
+
+fn required_config_value(
+    name: &'static str,
+    local: &LocalOpenAiConfig,
+) -> Result<String, CliError> {
+    match config_value(name, local)? {
+        Some(value) => Ok(value),
+        None => Err(debug_openai_usage_error(format!("{name} must be set"))),
+    }
+}
+
+fn config_value(name: &'static str, local: &LocalOpenAiConfig) -> Result<Option<String>, CliError> {
+    match optional_env(name)? {
+        Some(value) => Ok(Some(value)),
+        None => Ok(local.value(name).map(str::to_owned)),
     }
 }
 
@@ -1658,6 +2011,89 @@ fn optional_env(name: &'static str) -> Result<Option<String>, CliError> {
 struct DebugOpenAiConfig {
     provider: OpenAiProviderConfig,
     model: String,
+}
+
+#[derive(Debug, Default)]
+struct LocalOpenAiConfig {
+    values: BTreeMap<String, String>,
+}
+
+impl LocalOpenAiConfig {
+    fn read(path: &Path) -> Result<Self, CliError> {
+        let text = fs::read_to_string(path).map_err(|source| {
+            debug_openai_usage_error(format!(
+                "failed to read local OpenAI config {}: {source}",
+                path.display()
+            ))
+        })?;
+        parse_local_openai_config(&text)
+    }
+
+    fn value(&self, name: &str) -> Option<&str> {
+        self.values.get(name).map(String::as_str)
+    }
+}
+
+fn parse_local_openai_config(text: &str) -> Result<LocalOpenAiConfig, CliError> {
+    let mut values = BTreeMap::new();
+    for (index, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            return Err(debug_openai_usage_error(format!(
+                "local OpenAI config line {} must use KEY=value",
+                index + 1
+            )));
+        };
+        let key = key.trim();
+        let value = value.trim();
+        if !is_supported_openai_config_key(key) {
+            return Err(debug_openai_usage_error(format!(
+                "local OpenAI config line {} uses unsupported key {key}",
+                index + 1
+            )));
+        }
+        if value.is_empty() {
+            return Err(debug_openai_usage_error(format!("{key} must not be blank")));
+        }
+        values.insert(key.to_owned(), unquote_config_value(value)?.to_owned());
+    }
+    Ok(LocalOpenAiConfig { values })
+}
+
+fn is_supported_openai_config_key(key: &str) -> bool {
+    matches!(
+        key,
+        "MERRY_OPENAI_DEBUG"
+            | "MERRY_OPENAI_API_KEY"
+            | "OPENAI_API_KEY"
+            | "MERRY_OPENAI_MODEL"
+            | "MERRY_OPENAI_BASE_URL"
+            | "OPENAI_ORG_ID"
+            | "OPENAI_PROJECT_ID"
+    )
+}
+
+fn unquote_config_value(value: &str) -> Result<&str, CliError> {
+    if let Some(stripped) = value.strip_prefix('"') {
+        let Some(stripped) = stripped.strip_suffix('"') else {
+            return Err(debug_openai_usage_error(
+                "quoted local OpenAI config values must end with a quote",
+            ));
+        };
+        Ok(stripped)
+    } else if let Some(stripped) = value.strip_prefix('\'') {
+        let Some(stripped) = stripped.strip_suffix('\'') else {
+            return Err(debug_openai_usage_error(
+                "quoted local OpenAI config values must end with a quote",
+            ));
+        };
+        Ok(stripped)
+    } else {
+        Ok(value)
+    }
 }
 
 fn debug_usage() -> String {
@@ -1683,6 +2119,16 @@ fn debug_openai_usage() -> String {
         .bin_name("merry debug openai")
         .about("Run opt-in OpenAI-compatible model debugging")
         .after_help(OPENAI_ENV_HELP);
+    command_usage(&mut command)
+}
+
+fn debug_coding_loop_live_smoke_usage() -> String {
+    let mut command = DebugCodingLoopLiveSmokeArgs::augment_args(clap::Command::new(
+        "coding-loop-live-smoke",
+    ))
+    .bin_name("merry debug coding-loop-live-smoke")
+    .about("Run an opt-in sandboxed coding-loop smoke driven by a live OpenAI-compatible model")
+    .after_help(OPENAI_ENV_HELP);
     command_usage(&mut command)
 }
 
@@ -1718,6 +2164,7 @@ fn stdout_error(err: io::Error) -> CliError {
     }
 }
 
+#[derive(Debug)]
 enum CliError {
     BrokenPipe,
     DebugUsage(String),
@@ -1766,10 +2213,10 @@ mod tests {
         MERRY_SANDBOX_VERSION_ENV, SANDBOX_CHILD_HANDOFF_ARG, SANDBOX_CHILD_HANDOFF_CLI_BWRAP_V1,
         SANDBOX_HOME, SANDBOX_TMPDIR, SandboxBootstrap, SandboxChildHandoff, SandboxError,
         SandboxHost, SandboxRuntimeProfile, args_without_sandbox_bootstrap_flags, debug_echo_tool,
-        debug_openai_usage, find_bwrap_in_path, os, plan_sandbox_bootstrap_with_file_exists,
-        report_cli_exit, run_debug_coding_loop_smoke, sandbox_runtime_profile_from_evidence,
-        shell_process_action_intent, shell_runtime_admission, shell_usage,
-        write_debug_openai_tool_events,
+        debug_openai_usage, find_bwrap_in_path, os, parse_local_openai_config,
+        plan_sandbox_bootstrap_with_file_exists, report_cli_exit, run_debug_coding_loop_smoke,
+        sandbox_runtime_profile_from_evidence, shell_process_action_intent,
+        shell_runtime_admission, shell_usage, write_debug_openai_tool_events,
     };
     use super::{DEBUG_TOOL_NAME, run_shell_to_writer, write_runtime_step_events};
     use clap::Parser;
@@ -1870,7 +2317,7 @@ mod tests {
                     assert_eq!(openai.max_output_tokens, Some(16));
                     assert_eq!(openai.debug_tool_result.as_deref(), Some("tool result"));
                 }
-                Some(DebugCommand::CodingLoopSmoke) => {
+                Some(DebugCommand::CodingLoopSmoke | DebugCommand::CodingLoopLiveSmoke(_)) => {
                     panic!("expected debug openai subcommand");
                 }
                 None => panic!("expected debug openai subcommand"),
@@ -1887,8 +2334,38 @@ mod tests {
         match cli.command {
             CliCommand::Debug(debug) => match debug.command {
                 Some(DebugCommand::CodingLoopSmoke) => {}
-                Some(DebugCommand::OpenAi(_)) | None => {
+                Some(DebugCommand::OpenAi(_) | DebugCommand::CodingLoopLiveSmoke(_)) | None => {
                     panic!("expected debug coding-loop-smoke subcommand")
+                }
+            },
+            CliCommand::Shell(_) => panic!("expected debug subcommand"),
+        }
+    }
+
+    #[test]
+    fn clap_parses_debug_coding_loop_live_smoke() {
+        let cli = Cli::try_parse_from([
+            "merry",
+            "debug",
+            "coding-loop-live-smoke",
+            "--model",
+            "gpt-test",
+            "--config",
+            ".merry/secrets/openai.env",
+            "--max-output-tokens",
+            "384",
+        ])
+        .expect("debug coding-loop-live-smoke args should parse");
+
+        match cli.command {
+            CliCommand::Debug(debug) => match debug.command {
+                Some(DebugCommand::CodingLoopLiveSmoke(live)) => {
+                    assert_eq!(live.model.as_deref(), Some("gpt-test"));
+                    assert_eq!(live.config_path, PathBuf::from(".merry/secrets/openai.env"));
+                    assert_eq!(live.max_output_tokens, 384);
+                }
+                Some(DebugCommand::OpenAi(_) | DebugCommand::CodingLoopSmoke) | None => {
+                    panic!("expected debug coding-loop-live-smoke subcommand")
                 }
             },
             CliCommand::Shell(_) => panic!("expected debug subcommand"),
@@ -1907,6 +2384,49 @@ mod tests {
                 assert!(message.contains("coding-loop-smoke"));
             }
             _ => panic!("expected debug usage error"),
+        }
+    }
+
+    #[test]
+    fn local_openai_config_parses_supported_key_values() {
+        let config = parse_local_openai_config(
+            "\
+# local only
+MERRY_OPENAI_DEBUG=1
+MERRY_OPENAI_API_KEY=\"sk-test\"
+MERRY_OPENAI_MODEL=gpt-test
+MERRY_OPENAI_BASE_URL='https://api.example.test/v1'
+",
+        )
+        .expect("local config should parse");
+
+        assert_eq!(config.value("MERRY_OPENAI_DEBUG"), Some("1"));
+        assert_eq!(config.value("MERRY_OPENAI_API_KEY"), Some("sk-test"));
+        assert_eq!(config.value("MERRY_OPENAI_MODEL"), Some("gpt-test"));
+        assert_eq!(
+            config.value("MERRY_OPENAI_BASE_URL"),
+            Some("https://api.example.test/v1")
+        );
+    }
+
+    #[test]
+    fn local_openai_config_rejects_unknown_or_blank_entries() {
+        let unknown = parse_local_openai_config("BAD_KEY=value")
+            .expect_err("unknown local config key should be rejected");
+        match unknown {
+            CliError::DebugOpenAiUsage(message) => {
+                assert!(message.contains("unsupported key BAD_KEY"));
+            }
+            _ => panic!("expected debug openai usage error"),
+        }
+
+        let blank = parse_local_openai_config("MERRY_OPENAI_API_KEY= ")
+            .expect_err("blank local config value should be rejected");
+        match blank {
+            CliError::DebugOpenAiUsage(message) => {
+                assert!(message.contains("MERRY_OPENAI_API_KEY must not be blank"));
+            }
+            _ => panic!("expected debug openai usage error"),
         }
     }
 

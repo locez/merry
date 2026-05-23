@@ -568,6 +568,7 @@ fn debug_help_writes_usage_to_stdout() {
     assert!(stdout.contains("--input <TEXT>"));
     assert!(stdout.contains("openai"));
     assert!(stdout.contains("coding-loop-smoke"));
+    assert!(stdout.contains("coding-loop-live-smoke"));
 }
 
 #[test]
@@ -589,6 +590,25 @@ fn debug_coding_loop_smoke_requires_with_sandbox() {
 }
 
 #[test]
+fn debug_coding_loop_live_smoke_requires_with_sandbox_before_config_or_network() {
+    let output = merry_without_openai_env()
+        .args(["debug", "coding-loop-live-smoke"])
+        .output()
+        .expect("merry debug coding-loop-live-smoke should run");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        output.stdout.is_empty(),
+        "usage errors should not write stdout"
+    );
+    let stderr = std::str::from_utf8(&output.stderr).expect("stderr should be utf-8");
+    assert!(stderr.contains("--with-sandbox"));
+    assert!(stderr.contains("coding-loop-live-smoke"));
+    assert!(stderr.contains("Usage: merry debug"));
+    assert!(!stderr.contains("MERRY_OPENAI_API_KEY"));
+}
+
+#[test]
 #[ignore = "requires Linux bubblewrap and local sandbox support"]
 fn debug_coding_loop_smoke_runs_inside_real_bwrap_when_opted_in() {
     let mut command = merry_without_openai_env();
@@ -606,6 +626,29 @@ fn debug_coding_loop_smoke_runs_inside_real_bwrap_when_opted_in() {
     assert!(output.stderr.is_empty(), "smoke should not write stderr");
     let stdout = std::str::from_utf8(&output.stdout).expect("stdout should be utf-8");
     assert_eq!(stdout, "coding-loop-smoke: ok\n");
+}
+
+#[test]
+#[ignore = "requires Linux bubblewrap, network access, and ignored local OpenAI config"]
+fn debug_coding_loop_live_smoke_runs_inside_real_bwrap_when_opted_in() {
+    let mut command = merry_without_openai_env();
+    let output = command
+        .current_dir(repo_root())
+        .args(["--with-sandbox", "debug", "coding-loop-live-smoke"])
+        .output()
+        .expect("merry --with-sandbox debug coding-loop-live-smoke should run");
+
+    assert!(
+        output.status.success(),
+        "live coding-loop smoke should exit successfully: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "live smoke should not write stderr"
+    );
+    let stdout = std::str::from_utf8(&output.stdout).expect("stdout should be utf-8");
+    assert_eq!(stdout, "coding-loop-live-smoke: ok\n");
 }
 
 #[test]

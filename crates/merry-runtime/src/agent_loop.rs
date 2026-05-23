@@ -20,6 +20,8 @@ const DEFAULT_AGENT_LOOP_MAX_STEPS: usize = 16;
 /// state; this text is only a small prompt nudge for the model turn.
 pub const DEFAULT_AGENT_LOOP_CONTINUATION_INPUT: &str = "Continue after tool result.";
 
+const ORIGINAL_TASK_CONTINUATION_LABEL: &str = "Original task:";
+
 /// Configuration for [`Runtime::run_agent_loop`].
 ///
 /// `max_steps` bounds the number of [`Runtime::step`] calls made by one loop
@@ -205,6 +207,7 @@ impl Runtime {
             .map_err(|source| AgentLoopError::new(Vec::new(), source))?;
         let loop_token = context.cancellation_token().clone();
         let generation_config = context.generation_config().clone();
+        let original_task = input.text().to_owned();
         let mut next_input = Some(input);
         let mut events = Vec::new();
         let mut steps_run = 0;
@@ -289,7 +292,7 @@ impl Runtime {
                         Err(source) => return Err(AgentLoopError::new(events, source)),
                     }
 
-                    next_input = Some(match continuation_step_input() {
+                    next_input = Some(match continuation_step_input(&original_task) {
                         Ok(input) => input,
                         Err(source) => return Err(AgentLoopError::new(events, source)),
                     });
@@ -303,8 +306,10 @@ async fn collect_step_events(stream: RuntimeEventStream) -> Vec<RuntimeEvent> {
     stream.collect().await
 }
 
-fn continuation_step_input() -> Result<StepInput, RuntimeError> {
-    StepInput::user_text(DEFAULT_AGENT_LOOP_CONTINUATION_INPUT)
+fn continuation_step_input(original_task: &str) -> Result<StepInput, RuntimeError> {
+    StepInput::user_text(&format!(
+        "{DEFAULT_AGENT_LOOP_CONTINUATION_INPUT}\n\n{ORIGINAL_TASK_CONTINUATION_LABEL}\n{original_task}"
+    ))
 }
 
 fn tool_execution_cancelled_diagnostic(call_id: &merry_core::ToolCallId) -> ErrorInfo {
