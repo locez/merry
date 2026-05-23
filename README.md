@@ -107,9 +107,29 @@ first real coding-loop smoke, and the runtime process protocol foundation plus
 narrow CLI real-runner debug path are in place. The next roadmap focus is the
 Runtime Coding Loop Harness: deterministic fake-provider/fake-runner coverage
 by default, plus opt-in bwrap and OpenAI-compatible live-provider smokes using
-ignored local credentials. Workspace Patch/Write and Shell/Process should both
-serve that loop through runtime-owned policy rather than define ad hoc
-permission rules of their own.
+ignored local credentials. `merry --with-sandbox debug coding-loop-smoke`
+proves the deterministic bwrap/process/patch path. `merry --with-sandbox debug
+coding-loop-live-smoke` is the live LLM proof lane; it is implemented but still
+requires a local ignored config file before it can prove real model behavior in
+this workspace. Workspace Patch/Write and Shell/Process should both serve that
+loop through runtime-owned policy rather than define ad hoc permission rules of
+their own.
+
+For the sandboxed live smoke, put local OpenAI-compatible config in
+`.merry/secrets/openai.env`:
+
+```text
+MERRY_OPENAI_DEBUG=1
+MERRY_OPENAI_API_KEY=<local secret>
+MERRY_OPENAI_MODEL=<model>
+MERRY_OPENAI_BASE_URL=<optional OpenAI-compatible base URL>
+OPENAI_ORG_ID=<optional>
+OPENAI_PROJECT_ID=<optional>
+```
+
+The sandbox bootstrap clears the host environment before CLI execution, so the
+file is the intended path for `coding-loop-live-smoke`. The file is ignored and
+must not be committed.
 
 M8 runtime/provider/tool execution hardening has shifted into maintenance and foundation work: structured runtime state, artifact-backed model output, provider step boundaries, pending tool calls, tool result resolution, tool continuations, registered tool execution, public runtime API contract cleanup/review/alignment, and opt-in OpenAI Responses debug/tool flows remain the base for later runtime work.
 

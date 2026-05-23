@@ -565,6 +565,10 @@ fn event_kind_names(events: &[RuntimeEvent]) -> Vec<&'static str> {
         .collect()
 }
 
+fn continuation_input_for(original_task: &str) -> String {
+    format!("{DEFAULT_AGENT_LOOP_CONTINUATION_INPUT}\n\nOriginal task:\n{original_task}")
+}
+
 fn pending_tool_call(events: &[RuntimeEvent]) -> &PendingToolCall {
     events
         .iter()
@@ -625,7 +629,7 @@ async fn agent_loop_executes_one_tool_and_continues_to_final_completion() {
     assert!(requests[0].continuations().is_empty());
     assert_eq!(
         requests[1].messages()[0].content().as_text(),
-        DEFAULT_AGENT_LOOP_CONTINUATION_INPUT
+        continuation_input_for("Search notes.")
     );
     assert_eq!(requests[1].continuations().len(), 1);
     assert_eq!(
@@ -698,7 +702,7 @@ async fn agent_loop_executes_opt_in_workspace_patch_and_continues_to_final_compl
     assert_eq!(requests.len(), 2);
     assert_eq!(
         requests[1].messages()[0].content().as_text(),
-        DEFAULT_AGENT_LOOP_CONTINUATION_INPUT
+        continuation_input_for("Patch note.")
     );
     assert_eq!(requests[1].continuations().len(), 1);
     let continuation_result = requests[1].continuations()[0].result();
@@ -803,7 +807,7 @@ async fn agent_loop_process_command_tool_executes_and_continues() {
     assert!(requests[0].continuations().is_empty());
     assert_eq!(
         requests[1].messages()[0].content().as_text(),
-        DEFAULT_AGENT_LOOP_CONTINUATION_INPUT
+        continuation_input_for("Check rustc version.")
     );
     assert_eq!(requests[1].continuations().len(), 1);
     let continuation = &requests[1].continuations()[0];
@@ -880,7 +884,7 @@ async fn agent_loop_process_command_tool_executes_rg_files_and_continues() {
     assert!(requests[0].continuations().is_empty());
     assert_eq!(
         requests[1].messages()[0].content().as_text(),
-        DEFAULT_AGENT_LOOP_CONTINUATION_INPUT
+        continuation_input_for("List tracked source files.")
     );
     assert_eq!(requests[1].continuations().len(), 1);
     let continuation = &requests[1].continuations()[0];

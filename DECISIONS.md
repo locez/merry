@@ -35,9 +35,10 @@ credentials or live model behavior part of default validation.
 
 Evidence:
 The command creates `.merry/local/coding-loop-smoke`, runs `rg --files`, reads
-`src/lib.rs`, patches `"old"` to `"new"` through `workspace_patch_file`, runs
-`rg new`, verifies `AgentLoopStatus::Completed`, checks four successful tool
-resolutions, and validates the patched file content. The ignored integration
+`src/lib.rs`, patches `"unfixed"` to `"fixed-by-live-llm"` through
+`workspace_patch_file`, runs `rg fixed-by-live-llm`, verifies
+`AgentLoopStatus::Completed`, checks four successful tool resolutions, and
+validates the patched file content. The ignored integration
 test passed with:
 `cargo test -p merry-cli debug_coding_loop_smoke_runs_inside_real_bwrap_when_opted_in -- --ignored`.
 
@@ -53,3 +54,43 @@ thin wrapper around the library-level profile/tool-set registration.
 Follow-up:
 Implement the runtime-owned read-only process profile and reusable coding-loop
 tool-set registration, then add the live OpenAI-compatible smoke lane.
+
+## 2026-05-23 - Live LLM Coding-Loop Proof Is A Separate Acceptance Gate
+
+Decision:
+The live LLM coding-loop smoke is an explicit second CLI debug command:
+`merry --with-sandbox debug coding-loop-live-smoke`. It must use
+`OpenAiProvider` for model decisions inside the existing bwrap handoff and must
+not be counted as passed until a credentialed local run succeeds.
+
+Reason:
+A scripted provider can prove runtime/tool/sandbox wiring, but it cannot prove
+that a real model can retain the task goal, choose one constrained tool call at
+a time, apply the patch, and verify the result. Treating scripted success as
+live-agent proof would hide the exact drift the MVP is meant to expose.
+
+Evidence:
+The command now builds a live-provider runtime, requires the real
+`--with-sandbox` child handoff before reading config or attempting network,
+reads ignored local config from `.merry/secrets/openai.env`, uses real
+`TokioProcessRunner` process execution, and validates runtime events for
+`rg --files`, `workspace_read_file`, `workspace_patch_file`, and
+`rg fixed-by-live-llm`. `Runtime::run_agent_loop` also carries the original
+task text into continuation turns so a real model does not lose the objective
+after tool results. In this environment the live command currently fails before
+network because `.merry/secrets/openai.env` is missing.
+
+Tradeoff:
+The live smoke is nondeterministic and credential-dependent, so it stays
+ignored/non-default. The payoff is that failures become real evidence about
+prompting, tool schemas, continuation shape, process profile gaps, or provider
+adapter behavior.
+
+Reversible:
+Yes. The command can later become a thin wrapper around reusable runtime-owned
+coding-loop profile registration once that contract exists.
+
+Follow-up:
+Create `.merry/secrets/openai.env` locally, run the live smoke, and treat any
+failure as the next minimal runtime/tool-contract fix rather than widening the
+roadmap.

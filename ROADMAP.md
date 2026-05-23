@@ -53,8 +53,11 @@ OPENAI_ORG_ID=<optional>
 OPENAI_PROJECT_ID=<optional>
 ```
 
-If file-based local config is introduced, it must live under ignored paths such
-as `.env.merry.local`, `.merry/local/`, or `.merry/secrets/`.
+Sandboxed live smokes clear the host environment before CLI execution, so the
+live coding-loop smoke reads the same `KEY=value` entries from ignored local
+config at `.merry/secrets/openai.env`. Environment variables remain useful for
+non-sandboxed manual provider debug paths, but the bwrap live smoke should use
+the ignored config file.
 
 The OpenAI provider target is the Responses API only. The provider request path is `/responses`; it preserves the Merry-owned `merry-llm` provider boundary, keeps OpenAI wire types private to `merry-provider-openai`, sets `store: false`, omits `previous_response_id`, avoids provider conversation state as Merry runtime state, and keeps `parallel_tool_calls: false` until runtime policy supports parallel tool calls. This provider work does not imply a live/OpenAI judgment path or public judgment API.
 
@@ -98,12 +101,13 @@ The OpenAI provider target is the Responses API only. The provider request path 
 - CLI Sandbox Bootstrap is implemented in `merry-cli`: the root `--with-sandbox` flag uses `clap` and performs Linux `bwrap` self-reexec with a minimal environment, `PATH` lookup for `bwrap`, plan-stage missing-`bwrap` handling, recursion avoidance, sandbox-local `/tmp`, the current repo/project as the primary read-write workspace, and a minimal `/etc` allowlist including `/etc/ld.so.cache`, resolver/host/NSS files, and SSL/PKI paths. v1 still allows network access and is not a complete security boundary. A real smoke of `target/debug/merry --with-sandbox debug` has passed.
 - Shell/Process SP1/SP2/SP3-A plus the latest CLI admission slices are implemented: `merry-runtime` has provider-neutral process intent/evidence, proposed/executed process action audit variants, explicit injected `ProcessRunner` boundaries, process intent classification, opt-in informational process admission, accepted local workspace process admission, bounded stdout/stderr result artifacts, payload-free proposal/execution evidence, default deny behavior, cancellation paths that keep pending calls unresolved until runner output exists, and deterministic fake-runner tests. `merry-cli` has the narrow debug/demo `merry shell -- <argv>` real runner adapter using `tokio::process::Command`; informational `rustc --version` / `rg --version` can run, and exact `cargo test -p merry-runtime` requires accepted local workspace risk plus the CLI bwrap handoff and sandbox runtime evidence. This does not implement general shell/process/coding-agent capability, raw shell mode, pipelines/scripts, arbitrary env/stdin, a complete sandbox proof, or a general approval/review admission UX.
 - Minimal Useful Coding Loop first deterministic slice is implemented in `merry-tool-workspace` integration tests. `coding_loop_harness_inspects_patches_verifies_and_completes` builds a runtime with workspace read/patch tools plus `process_command_tool`, runs `Runtime::run_agent_loop` for inspect -> exact read -> patch -> verification -> final answer, uses a fake provider and injected fake process runner, mutates only a temporary workspace fixture through `workspace_patch_file`, records exact process argv for `rg --files` and `cargo test -p merry-runtime`, verifies tool-result continuation flow, and checks artifact-before-resolution ledger ordering. This is not yet the real `bwrap` smoke or live provider lane.
-- Real `bwrap` coding-loop smoke is implemented in `merry-cli`: `merry --with-sandbox debug coding-loop-smoke` is an explicit non-default command that refuses to run without validated CLI bwrap child handoff evidence, creates a disposable fixture under `.merry/local/coding-loop-smoke`, composes a runtime with a deterministic scripted provider, workspace read/patch tools, and `process_command_tool`, then runs inspect -> exact read -> constrained patch -> real process verification -> final answer through `Runtime::run_agent_loop`. The process steps use `TokioProcessRunner` for real `rg --files` and `rg new` inside the sandbox; the edit uses `workspace_patch_file`; the smoke validates `AgentLoopStatus::Completed`, no pending tool calls, four successful tool resolutions, and the patched fixture content. The integration test is ignored by default and passed in this environment with `cargo test -p merry-cli debug_coding_loop_smoke_runs_inside_real_bwrap_when_opted_in -- --ignored`. This is still deterministic-provider and CLI-owned harness assembly, not a live provider lane, not a reusable runtime-owned process profile, and not a complete sandbox hardening claim.
+- Real `bwrap` coding-loop smoke is implemented in `merry-cli`: `merry --with-sandbox debug coding-loop-smoke` is an explicit non-default command that refuses to run without validated CLI bwrap child handoff evidence, creates a disposable fixture under `.merry/local/coding-loop-smoke`, composes a runtime with a deterministic scripted provider, workspace read/patch tools, and `process_command_tool`, then runs inspect -> exact read -> constrained patch -> real process verification -> final answer through `Runtime::run_agent_loop`. The process steps use `TokioProcessRunner` for real `rg --files` and `rg fixed-by-live-llm` inside the sandbox; the edit uses `workspace_patch_file`; the smoke validates `AgentLoopStatus::Completed`, no pending tool calls, four successful tool resolutions, and the patched fixture content. The integration test is ignored by default and passed in this environment with `cargo test -p merry-cli debug_coding_loop_smoke_runs_inside_real_bwrap_when_opted_in -- --ignored`. This is still deterministic-provider and CLI-owned harness assembly, not a reusable runtime-owned process profile, and not a complete sandbox hardening claim.
+- The opt-in live LLM coding-loop smoke command is implemented as `merry --with-sandbox debug coding-loop-live-smoke`. It refuses to run without the real CLI bwrap child handoff, reads ignored local OpenAI-compatible config from `.merry/secrets/openai.env`, uses `OpenAiProvider` for model decisions, keeps `TokioProcessRunner` and `workspace_patch_file` for the real tool path, and validates runtime events for process inspection, exact source read, patch, process verification, loop completion, and patched fixture content. This environment has not yet proven the live lane because `.merry/secrets/openai.env` is absent; the command currently fails before any network attempt with a missing-config usage error.
 
 ### Active
 
-- P0: continue the Minimal Useful Coding Loop as the current MVP proof. The loop already has a deterministic fake-provider/fake-runner slice and a real `bwrap` process-runner smoke; the next work should make the reusable runtime/tool contracts less CLI-owned and add the live-provider opt-in lane.
-- P0: keep the Runtime Coding Loop Harness executable against a disposable fixture repository. The default lane uses fake provider/fake runner for deterministic `cargo test`; the real `bwrap` lane now exists as an explicit ignored smoke; the live OpenAI-compatible lane remains.
+- P0: continue the Minimal Useful Coding Loop as the current MVP proof. The loop already has a deterministic fake-provider/fake-runner slice, a deterministic real `bwrap` process-runner smoke, and an implemented live-provider smoke command. The next proof gap is running the live lane with ignored local credentials and tightening the model/tool contract if the real LLM deviates.
+- P0: keep the Runtime Coding Loop Harness executable against a disposable fixture repository. The default lane uses fake provider/fake runner for deterministic `cargo test`; the deterministic `bwrap` lane is an explicit ignored smoke; the live OpenAI-compatible lane is also explicit and ignored, but still needs a passing credentialed run in this environment.
 - P0: define a runtime-owned read-only process profile for command families, not one-off command matches. Initial coverage should include `rg --files`, literal `rg <pattern>`, and a read-only file-slice command shape such as `sed -n RANGE FILE`, or an equivalent typed process/read tool that proves the same evidence loop.
 - P0: keep edit/write on the typed workspace patch path. The MVP loop should apply one constrained patch through `workspace_patch_file` or its runtime-owned successor, record artifact/audit/ledger evidence, and then run verification.
 - Keep safety tiered but subordinate to the executable acceptance target: read-only inspection automatic, constrained patch opt-in, verification in `bwrap`, high-risk or unknown process actions denied or escalated.
@@ -114,9 +118,9 @@ The OpenAI provider target is the Responses API only. The provider request path 
 
 ### Next Active
 
+- Run the opt-in live OpenAI-compatible smoke with `.merry/secrets/openai.env` configured, inspect failures as model/tool-contract evidence, and tune only the minimal prompt/runtime contract needed for a passing live loop.
 - Replace one-off process classification growth with a runtime-owned read-only process profile for reusable workspace inspection and exact evidence retrieval, including a file-slice shape such as `sed -n RANGE FILE` or an equivalent typed read tool.
 - Move coding-loop tool-set/profile registration toward reusable runtime/library construction so upper layers do not have to assemble `process_command_tool`, workspace read/search fallback, and patch tooling ad hoc.
-- Define the opt-in live OpenAI-compatible smoke configuration for the same loop without making live provider behavior part of default `cargo test`.
 - Keep expanding the Runtime Coding Loop Harness only through executable acceptance slices.
 
 ### Next Milestone: Minimal Useful Coding Loop Harness
@@ -154,8 +158,10 @@ opt-in bwrap smoke:
   current CLI smoke command: `merry --with-sandbox debug coding-loop-smoke`
 
 opt-in live provider smoke:
+  current CLI smoke command: `merry --with-sandbox debug coding-loop-live-smoke`
+  reads ignored config from `.merry/secrets/openai.env` inside the sandbox
   requires `MERRY_OPENAI_DEBUG=1`
-  requires local `MERRY_OPENAI_API_KEY` or `OPENAI_API_KEY`
+  requires `MERRY_OPENAI_API_KEY` or `OPENAI_API_KEY`
   requires `MERRY_OPENAI_MODEL`
   optionally uses `MERRY_OPENAI_BASE_URL`
   is never part of default `cargo test`
@@ -169,8 +175,8 @@ Tasks:
 - Register the runtime-owned default coding-loop tools from library code, not by ad hoc CLI-only assembly.
 - Use `workspace_patch_file` or its successor for the edit step and keep shell side effects out of the edit path. The first deterministic slice now does this.
 - Add deterministic fake-provider/fake-runner tests for the full multi-step loop. The first slice now covers inspect, exact read, patch, verification, continuation, and final answer.
-- Add ignored local config guidance for live provider credentials and base URL.
-- Add an explicit, non-default live smoke command once the deterministic and real bwrap loop slices pass.
+- Keep ignored local config guidance for live provider credentials and base URL.
+- Run the explicit, non-default live smoke command with local credentials and treat any model deviation as evidence for the next smallest runtime/tool-contract fix.
 
 Non-goals:
 
@@ -185,7 +191,7 @@ Verification:
 - `cargo fmt --all --check`
 - focused deterministic cargo test for the coding-loop harness
 - opt-in real bwrap smoke command: `cargo test -p merry-cli debug_coding_loop_smoke_runs_inside_real_bwrap_when_opted_in -- --ignored`
-- opt-in live provider smoke command once implemented
+- opt-in live provider smoke command: `cargo test -p merry-cli debug_coding_loop_live_smoke_runs_inside_real_bwrap_when_opted_in -- --ignored`
 
 ### Next Milestone: Action Policy Risk Taxonomy and Role-Scoped Models
 

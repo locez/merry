@@ -215,6 +215,10 @@ async fn collect_step(runtime: &Runtime, text: &str) -> Vec<RuntimeEvent> {
         .await
 }
 
+fn continuation_input_for(original_task: &str) -> String {
+    format!("{DEFAULT_AGENT_LOOP_CONTINUATION_INPUT}\n\nOriginal task:\n{original_task}")
+}
+
 fn runtime_with_workspace_tools(root: &Path, model_event: ModelEvent) -> Runtime {
     let (runtime, _) = runtime_with_workspace_tools_and_provider(root, model_event);
     runtime
@@ -1109,10 +1113,11 @@ async fn coding_loop_harness_inspects_patches_verifies_and_completes() {
     let requests = provider_handle.recorded_requests();
     assert_eq!(requests.len(), 5);
     assert!(requests[0].continuations().is_empty());
+    let expected_continuation_input = continuation_input_for("Fix the greeting and verify it.");
     for request in requests.iter().skip(1) {
         assert_eq!(
             request.messages()[0].content().as_text(),
-            DEFAULT_AGENT_LOOP_CONTINUATION_INPUT
+            expected_continuation_input
         );
     }
     let continuation_ids = requests

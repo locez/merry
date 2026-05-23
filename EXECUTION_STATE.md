@@ -1,6 +1,6 @@
 # Execution State
 
-Lease status: complete
+Lease status: rollover
 
 ## Source Of Truth
 
@@ -34,49 +34,89 @@ Style notes:
 
 Current milestone or track:
 
-- Real bwrap coding-loop smoke.
+- LLM-driven sandbox coding-loop smoke.
 
 Session milestone:
 
-- Add an opt-in CLI smoke that runs the coding-loop shape inside the existing `merry --with-sandbox` bwrap handoff.
+- Add an opt-in live OpenAI-compatible smoke that runs the coding-loop shape
+  inside the existing `merry --with-sandbox` bwrap handoff with real LLM tool
+  selection.
 
 Goal:
 
-- Prove the same inspect -> exact evidence -> constrained patch -> verification -> final loop shape can be executed from `merry-cli` inside the real bwrap sandbox, while keeping default tests deterministic and not requiring live provider credentials.
+- Prove a real LLM can drive the inspect -> exact evidence -> constrained patch
+  -> verification -> final loop shape through Merry runtime tools inside the
+  CLI bwrap sandbox, while default tests remain deterministic/offline and
+  credentials stay ignored/local.
 
-Task queue:
+Task queue status:
 
-- Dispatch read-only subagent exploration for CLI bwrap smoke and process/profile blockers. Done.
-- Add a narrow opt-in CLI debug smoke subcommand for the sandboxed coding-loop shape. Done.
-- Add tests for help/usage and non-sandbox denial; run a real smoke manually if bwrap works in this environment. Done.
-- Update roadmap/continuity status with what the bwrap slice proves and what remains. Done.
-- Commit the lease. Done.
+- Fix agent-loop continuation input so real LLM steps keep the original task
+  goal visible after tool results: implemented.
+- Add ignored local config loading for live smoke credentials inside the bwrap
+  workspace: implemented.
+- Add an explicit non-default live LLM coding-loop smoke command requiring
+  `--with-sandbox` and OpenAI debug opt-in: implemented.
+- Add tests for argument parsing, credential/config gating, default-suite
+  non-network behavior, and ignored live smoke execution: implemented.
+- Update roadmap/continuity status with what the live LLM slice proves and
+  what remains: implemented.
+- Run the credentialed live LLM smoke: pending local `.merry/secrets/openai.env`.
+- Commit or record why the lease cannot be committed: completed.
 
 Allowed expansion:
 
-- Minimal CLI dependency on `merry-tool-workspace` for outer-layer smoke composition.
-- Minimal CLI helper code for scripted provider, disposable fixture setup, runtime construction, and result validation.
+- Minimal runtime agent-loop continuation fix needed for real LLM reliability.
+- Minimal CLI helper code for local ignored config parsing, live provider
+  runtime construction, prompt/task text, and event/result validation.
 - Small documentation/status updates tied to the implemented slice.
 
 Done condition:
 
-- The CLI exposes an explicit opt-in smoke command that refuses to run outside a validated sandbox handoff, executes the coding-loop shape inside bwrap with real process runner and workspace patch tooling, and reports deterministic success. Continuity state and handoff record the command and residual live-provider/config work.
+- The CLI exposes an explicit opt-in live LLM smoke command that refuses to run
+  outside a validated sandbox handoff and OpenAI debug opt-in, reads credentials
+  from ignored local config or env where safe, uses a real OpenAI-compatible
+  provider to choose tools, executes the coding-loop shape inside bwrap with
+  real process runner and workspace patch tooling, and reports success only
+  when runtime events prove the LLM-driven tool sequence and fixture result.
+
+Rollover reason:
+
+- The implementation and deterministic verification are complete, but this
+  environment does not have `.merry/secrets/openai.env`, so the true live LLM
+  proof has not run. The current live command fails before any network attempt
+  with a missing-config usage error, which is the intended safe gate.
 
 Drift boundary:
 
-- Do not implement a full autonomous coding agent, live-provider harness, broad process profile, broad CLI UX, graph memory, skill VM, Python SDK, or arbitrary shell expansion in this lease.
+- Do not implement a full autonomous coding agent, broad process profile, broad
+  CLI UX, graph memory, skill VM, Python SDK, arbitrary shell expansion, or a
+  live-provider judgment path in this lease.
 
 Task type: implementation
 
 Acceptance criteria:
 
 - The CLI command is explicit and non-default, under debug/smoke tooling.
-- The command requires the real `--with-sandbox` child handoff evidence before running local workspace effect verification.
-- The smoke uses a deterministic scripted provider, not a live provider.
-- The smoke uses `TokioProcessRunner` for real `rg --files` and verification process execution inside the sandbox.
-- The smoke uses `workspace_patch_file` for the edit and mutates only a disposable fixture under ignored local state.
-- The smoke reaches `AgentLoopStatus::Completed`, leaves no pending tool calls, and validates the patched fixture content.
-- Default `cargo test` does not require bwrap or live credentials.
+- The command requires the real `--with-sandbox` child handoff evidence before
+  running local workspace effect verification.
+- The command requires `MERRY_OPENAI_DEBUG=1` or an equivalent ignored local
+  config opt-in before any network attempt.
+- Credentials and base URL can be supplied from ignored local files that remain
+  available inside the sandbox; secrets are not passed through bwrap argv or
+  committed env.
+- The smoke uses `OpenAiProvider`, not a deterministic scripted provider, for
+  the model decisions.
+- The smoke uses `TokioProcessRunner` for real `rg --files` and verification
+  process execution inside the sandbox.
+- The smoke uses `workspace_patch_file` for the edit and mutates only a
+  disposable fixture under ignored local state.
+- Runtime events prove at least one process inspection call, one exact source
+  read/search call, one workspace patch call, and one process verification call
+  resolved successfully before final completion.
+- The smoke reaches `AgentLoopStatus::Completed`, leaves no pending tool calls,
+  and validates the patched fixture content.
+- Default `cargo test` does not require bwrap, network, or live credentials.
 
 ## Scope
 
@@ -86,14 +126,17 @@ Allowed edits:
 - `HANDOFF.md`
 - `DECISIONS.md`
 - `ROADMAP.md`
-- `crates/merry-cli/Cargo.toml`
+- `README.md`
+- `crates/merry-runtime/src/agent_loop.rs`
+- `crates/merry-runtime/tests/agent_loop.rs`
 - `crates/merry-cli/src/main.rs`
 - `crates/merry-cli/tests/debug.rs`
-- small `README.md` status update if needed
+- `crates/merry-tool-workspace/tests/runtime_integration.rs`
 
 Forbidden edits:
 
-- Rust production runtime/provider/CLI implementation outside the test harness slice
+- Rust production runtime/provider/CLI implementation outside the live smoke
+  and agent-loop continuation slice
 - private ignored source material under `docs/` or `merry-raw-docs/`
 - real credentials or generated build artifacts
 
@@ -108,41 +151,51 @@ Protected files:
 
 Validation command:
 
-- `cargo test -p merry-cli`
 - `cargo fmt --all --check`
 - `cargo clippy -p merry-cli --all-targets -- -D warnings`
+- `cargo clippy -p merry-runtime --all-targets -- -D warnings`
+- `cargo test -p merry-cli`
+- `cargo test -p merry-runtime agent_loop`
+- `cargo test -p merry-tool-workspace coding_loop_harness`
+- `cargo test -p merry-cli debug_coding_loop_smoke_runs_inside_real_bwrap_when_opted_in -- --ignored`
 - `git diff --check`
-- opt-in real smoke command when supported by the host
+- opt-in live LLM bwrap smoke command when local credentials are configured
 
 Validation notes:
 
-- Passed:
-  - `cargo fmt --all --check`
-  - `cargo clippy -p merry-cli --all-targets -- -D warnings`
-  - `cargo test -p merry-cli`
-  - `cargo test -p merry-cli debug_coding_loop_smoke_runs_inside_real_bwrap_when_opted_in -- --ignored`
-- The default CLI test suite skips the real bwrap smoke; the ignored smoke runs successfully when explicitly selected on this host.
+- Focused deterministic tests, clippy, formatting, diff whitespace, and the
+  deterministic real bwrap ignored smoke passed.
+- The live command was attempted with
+  `cargo run -p merry-cli -- --with-sandbox debug coding-loop-live-smoke` and
+  failed before network because `.merry/secrets/openai.env` does not exist.
 
 ## Research
 
-Research required: no
+Research required: yes
 
 Research reason:
 
-- User allowed subagents. Read-only explorer subagents are being used to confirm CLI bwrap smoke entry points and process/profile blockers; no external research is required.
+- This lease touches live provider behavior and runtime agent-loop semantics.
+  Repo evidence is sufficient; no external research is required.
 
 Research artifact:
 
-- Explorer outputs from subagent workers in this lease.
+- Local inspection of OpenAI provider rendering/parsing, runtime agent loop
+  continuation, CLI bwrap env clearing, and workspace/process tool boundaries.
 
 ## Next Action
 
 Next exact action:
 
-- Implement a reusable runtime-owned read-only process profile or tool-set registration layer for the coding-loop harness, covering `rg --files`, literal search, and exact source evidence retrieval without adding one command match at a time.
+- Create `.merry/secrets/openai.env` locally with debug opt-in, API key, model,
+  and optional base URL, then run
+  `cargo run -p merry-cli -- --with-sandbox debug coding-loop-live-smoke`.
+  If the live model deviates, inspect the runtime error/events and make the
+  smallest prompt/tool-contract fix.
 
 Do not reconsider:
 
 - Do not make policy taxonomy the primary P0 output.
-- Do not commit `docs/`, `merry-raw-docs/`, `.env.merry.local`, `.merry/local/`, or `.merry/secrets/`.
+- Do not commit `docs/`, `merry-raw-docs/`, `.env.merry.local`,
+  `.merry/local/`, or `.merry/secrets/`.
 - Do not require live provider tests in default `cargo test`.
