@@ -8,6 +8,10 @@
 
 **Tech Stack:** Rust 2024, `serde`, `toml`, `tracing`, `tracing-subscriber`, `tracing-appender`, Tokio, existing `bwrap` bootstrap, deterministic fake provider/fake runner tests.
 
+**Implementation progress:** 2026-05-23 lease completed Tasks 1-4 as one
+batched implementation commit. Task 5 is the next runtime-instrumentation
+entry point.
+
 ---
 
 ## File Structure
@@ -50,7 +54,7 @@ MERRY_OPENAI_DEBUG=1 cargo test -p merry-cli debug_coding_loop_live_smoke_runs_i
 - Create: `crates/merry-cli/src/config.rs`
 - Modify: `crates/merry-cli/src/main.rs`
 
-- [ ] **Step 1: Add dependencies**
+- [x] **Step 1: Add dependencies**
 
 Edit the workspace dependencies:
 
@@ -77,7 +81,7 @@ tracing-subscriber.workspace = true
 tempfile.workspace = true
 ```
 
-- [ ] **Step 2: Declare the module**
+- [x] **Step 2: Declare the module**
 
 At the top of `crates/merry-cli/src/main.rs`, below the module doc comment, add:
 
@@ -94,7 +98,7 @@ cargo test -p merry-cli config::tests -- --nocapture
 
 Expected: it fails because `crates/merry-cli/src/config.rs` does not exist yet.
 
-- [ ] **Step 3: Write config tests**
+- [x] **Step 3: Write config tests**
 
 Create `crates/merry-cli/src/config.rs` with the tests first. The implementation in the next step must make these pass.
 
@@ -253,7 +257,7 @@ format = "json"
 }
 ```
 
-- [ ] **Step 4: Implement `config.rs`**
+- [x] **Step 4: Implement `config.rs`**
 
 Implement the module with these public types and behavior:
 
@@ -557,7 +561,7 @@ struct OpenAiCompatibleProviderToml {
 }
 ```
 
-- [ ] **Step 5: Run focused config tests**
+- [x] **Step 5: Run focused config tests**
 
 Run:
 
@@ -567,7 +571,7 @@ cargo test -p merry-cli config::tests -- --nocapture
 
 Expected: all config tests pass.
 
-- [ ] **Step 6: Commit config model**
+- [x] **Step 6: Commit config model**
 
 ```bash
 git add Cargo.toml crates/merry-cli/Cargo.toml crates/merry-cli/src/main.rs crates/merry-cli/src/config.rs
@@ -580,7 +584,7 @@ git commit -m "feat(cli): add xdg toml config model"
 - Create: `crates/merry-cli/src/observability.rs`
 - Modify: `crates/merry-cli/src/main.rs`
 
-- [ ] **Step 1: Write observability tests**
+- [x] **Step 1: Write observability tests**
 
 Create `crates/merry-cli/src/observability.rs` with tests first:
 
@@ -651,7 +655,7 @@ cargo test -p merry-cli observability::tests -- --nocapture
 
 Expected: tests fail because implementation is not present.
 
-- [ ] **Step 2: Implement observability setup**
+- [x] **Step 2: Implement observability setup**
 
 Implement `crates/merry-cli/src/observability.rs`:
 
@@ -733,7 +737,7 @@ pub fn level_filter(level: LogLevel) -> LevelFilter {
 }
 ```
 
-- [ ] **Step 3: Wire startup without changing command stdout**
+- [x] **Step 3: Wire startup without changing command stdout**
 
 In `main`, after `maybe_reexec_sandbox` and before building the Tokio runtime, load config and initialize logging:
 
@@ -766,7 +770,7 @@ Pass `xdg_paths` and `merry_config` into `async_main` so later tasks can use pro
 runtime.block_on(async_main(cli, xdg_paths, merry_config))
 ```
 
-- [ ] **Step 4: Add CLI integration test for logs**
+- [x] **Step 4: Add CLI integration test for logs**
 
 In `crates/merry-cli/tests/debug.rs`, add:
 
@@ -802,7 +806,7 @@ fn debug_writes_configured_json_log_without_changing_stdout() {
 }
 ```
 
-- [ ] **Step 5: Run focused tests**
+- [x] **Step 5: Run focused tests**
 
 ```bash
 cargo test -p merry-cli observability::tests -- --nocapture
@@ -811,7 +815,7 @@ cargo test -p merry-cli debug_writes_configured_json_log_without_changing_stdout
 
 Expected: all focused tests pass and stdout remains the existing JSONL event output for `merry debug`.
 
-- [ ] **Step 6: Commit log initialization**
+- [x] **Step 6: Commit log initialization**
 
 ```bash
 git add crates/merry-cli/src/observability.rs crates/merry-cli/src/main.rs crates/merry-cli/tests/debug.rs
@@ -824,7 +828,7 @@ git commit -m "feat(cli): initialize config-backed observability"
 - Modify: `crates/merry-cli/src/main.rs`
 - Modify: `crates/merry-cli/src/config.rs`
 
-- [ ] **Step 1: Add sandbox path constants**
+- [x] **Step 1: Add sandbox path constants**
 
 In `main.rs`, add:
 
@@ -835,7 +839,7 @@ const SANDBOX_MERRY_CONFIG_DIR: &str = "/home/merry/.config/merry";
 const SANDBOX_MERRY_LOG_DIR: &str = "/home/merry/.local/state/merry/logs";
 ```
 
-- [ ] **Step 2: Extend sandbox host shape**
+- [x] **Step 2: Extend sandbox host shape**
 
 Add these fields to `SandboxHost`:
 
@@ -858,7 +862,7 @@ and render it as:
 SandboxError::Config(error) => write!(formatter, "failed to load Merry config before sandbox bootstrap: {error}")
 ```
 
-- [ ] **Step 3: Add mount plan tests**
+- [x] **Step 3: Add mount plan tests**
 
 In the `#[cfg(test)] mod tests` of `main.rs`, update `sandbox_host()` to include:
 
@@ -936,7 +940,7 @@ fn sandbox_plan_mounts_log_dir_read_write_when_file_logging_is_enabled() {
 }
 ```
 
-- [ ] **Step 4: Implement mount arguments**
+- [x] **Step 4: Implement mount arguments**
 
 In `build_sandbox_plan`, after `/home/merry` is created and before `--clearenv`, append:
 
@@ -969,7 +973,7 @@ os("XDG_STATE_HOME"),
 os(SANDBOX_XDG_STATE_HOME),
 ```
 
-- [ ] **Step 5: Ensure host log directory exists before re-exec**
+- [x] **Step 5: Ensure host log directory exists before re-exec**
 
 Before returning `SandboxBootstrap::Reexec`, if `host.log_settings` is present, create `log_settings.path.parent()` on the host. Return `SandboxError::LogDirectory` on failure:
 
@@ -985,7 +989,7 @@ SandboxError::LogDirectory { path, source } => {
 }
 ```
 
-- [ ] **Step 6: Run sandbox planning tests**
+- [x] **Step 6: Run sandbox planning tests**
 
 ```bash
 cargo test -p merry-cli sandbox_plan_mounts_merry_config_dir_read_only_and_sets_xdg_config_home -- --nocapture
@@ -995,7 +999,7 @@ cargo test -p merry-cli sandbox_plan_does_not_mount_log_dir_when_logging_is_disa
 
 Expected: all focused sandbox tests pass.
 
-- [ ] **Step 7: Commit sandbox mounting**
+- [x] **Step 7: Commit sandbox mounting**
 
 ```bash
 git add crates/merry-cli/src/main.rs crates/merry-cli/src/config.rs
@@ -1009,7 +1013,7 @@ git commit -m "feat(cli): mount merry config and log paths in sandbox"
 - Modify: `crates/merry-cli/src/main.rs`
 - Modify: `crates/merry-cli/tests/debug.rs`
 
-- [ ] **Step 1: Remove live-smoke repo-local config flag**
+- [x] **Step 1: Remove live-smoke repo-local config flag**
 
 Delete `CODING_LOOP_LIVE_SMOKE_CONFIG_PATH`, the `config_path` field from `DebugCodingLoopLiveSmokeArgs`, and the `--config` handling in `async_main`. The live command shape becomes:
 
@@ -1019,7 +1023,7 @@ merry --with-sandbox debug coding-loop-live-smoke --model gpt-4.1-mini
 
 The `--model` flag remains as a per-run model override; provider, base URL, and credential source come from XDG TOML.
 
-- [ ] **Step 2: Add credential resolution**
+- [x] **Step 2: Add credential resolution**
 
 In `config.rs`, add:
 
@@ -1061,7 +1065,7 @@ impl EffectiveOpenAiProviderConfig {
 
 This lets sandboxed live smokes use a secret file under the mounted Merry config directory without passing secrets through bwrap command arguments.
 
-- [ ] **Step 3: Replace `LocalOpenAiConfig` with TOML-backed provider loading**
+- [x] **Step 3: Replace `LocalOpenAiConfig` with TOML-backed provider loading**
 
 Change:
 
@@ -1096,7 +1100,7 @@ Use `MERRY_OPENAI_DEBUG=1` as the network opt-in through `env_value("MERRY_OPENA
 
 Build `OpenAiProviderConfig` from `resolve_api_key()`, apply `base_url`, and keep organization/project outside this slice because the approved TOML schema does not include those fields.
 
-- [ ] **Step 4: Update live smoke function signature**
+- [x] **Step 4: Update live smoke function signature**
 
 Change:
 
@@ -1122,7 +1126,7 @@ async fn run_debug_coding_loop_live_smoke(
 
 Remove the absolute-path rejection for `config_path`; the config path is now owned by `XdgPaths`.
 
-- [ ] **Step 5: Update provider config tests**
+- [x] **Step 5: Update provider config tests**
 
 Replace the `local_openai_config_*` tests in `main.rs` with:
 
@@ -1165,7 +1169,7 @@ api_key_file = "secrets/openai.key"
 }
 ```
 
-- [ ] **Step 6: Update CLI integration test expectations**
+- [x] **Step 6: Update CLI integration test expectations**
 
 In `crates/merry-cli/tests/debug.rs`, update the live-smoke clap test so `--config` is rejected and the default command parses without it:
 
@@ -1183,7 +1187,7 @@ fn coding_loop_live_smoke_rejects_legacy_config_flag() {
 }
 ```
 
-- [ ] **Step 7: Run focused tests**
+- [x] **Step 7: Run focused tests**
 
 ```bash
 cargo test -p merry-cli openai_debug_config_uses_xdg_toml_provider_and_secret_file -- --nocapture
@@ -1192,7 +1196,7 @@ cargo test -p merry-cli coding_loop_live_smoke_rejects_legacy_config_flag --test
 
 Expected: the live-smoke debug path no longer depends on `.merry/secrets/openai.env`; sandboxed live credentials can live under `~/.config/merry/secrets/`.
 
-- [ ] **Step 8: Commit provider config migration**
+- [x] **Step 8: Commit provider config migration**
 
 ```bash
 git add crates/merry-cli/src/config.rs crates/merry-cli/src/main.rs crates/merry-cli/tests/debug.rs

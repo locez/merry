@@ -1,6 +1,10 @@
 //! Debug and demonstration CLI for Merry.
 
+mod config;
+mod observability;
+
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
+use config::{EffectiveLogSettings, MerryConfig, XdgPaths};
 use futures_util::{StreamExt, stream};
 use merry_core::{
     PendingToolCall, ProviderName, RuntimeEvent, RuntimeEventKind, SessionId, ToolCallResultStatus,
@@ -41,7 +45,6 @@ const DEBUG_TOOL_CONTINUATION_INPUT: &str = "continue after debug tool";
 const CODING_LOOP_SMOKE_SESSION_ID: &str = "coding-loop-smoke";
 const CODING_LOOP_SMOKE_TOOL_NAME: &str = "run_process";
 const CODING_LOOP_LIVE_SMOKE_SESSION_ID: &str = "coding-loop-live-smoke";
-const CODING_LOOP_LIVE_SMOKE_CONFIG_PATH: &str = ".merry/secrets/openai.env";
 const CODING_LOOP_LIVE_SMOKE_INITIAL_VALUE: &str = "unfixed";
 const CODING_LOOP_LIVE_SMOKE_TARGET_VALUE: &str = "fixed-by-live-llm";
 const SHELL_TOOL_NAME: &str = "shell_command";
@@ -64,19 +67,21 @@ const SANDBOX_CHILD_HANDOFF_ARG: &str = "--merry-sandbox-child-handoff";
 const SANDBOX_CHILD_HANDOFF_CLI_BWRAP_V1: &str = "cli-bwrap-v1";
 const SANDBOX_HOME: &str = "/home/merry";
 const SANDBOX_TMPDIR: &str = "/tmp";
+// These are sandbox-child paths. Host paths are resolved separately before
+// re-exec; inside bwrap, HOME is intentionally set to SANDBOX_HOME.
+const SANDBOX_XDG_CONFIG_HOME: &str = "/home/merry/.config";
+const SANDBOX_XDG_STATE_HOME: &str = "/home/merry/.local/state";
+const SANDBOX_MERRY_CONFIG_DIR: &str = "/home/merry/.config/merry";
+const SANDBOX_MERRY_LOG_DIR: &str = "/home/merry/.local/state/merry/logs";
 const OPENAI_ENV_HELP: &str = "\
 Environment:
   MERRY_OPENAI_DEBUG=1       Required opt-in before any network attempt
-  MERRY_OPENAI_API_KEY       Preferred API key after opt-in
-  OPENAI_API_KEY             Fallback API key when MERRY_OPENAI_API_KEY is unset
-  MERRY_OPENAI_MODEL         Required when --model is omitted
-  MERRY_OPENAI_BASE_URL      Optional OpenAI-compatible base URL
-  OPENAI_ORG_ID              Optional organization header
-  OPENAI_PROJECT_ID          Optional project header
+  XDG_CONFIG_HOME            Optional base for merry/config.toml
 
-Sandboxed live smokes clear the host environment before CLI execution. Put the
-same KEY=value entries in .merry/secrets/openai.env for
-`merry --with-sandbox debug coding-loop-live-smoke`.
+Provider/model/base URL/API key source come from
+`$XDG_CONFIG_HOME/merry/config.toml` or `~/.config/merry/config.toml`.
+For sandboxed live smokes, prefer a config-relative `api_key_file` such as
+`secrets/openai.key` so credentials are not passed through bwrap argv.
 ";
 
 #[derive(Debug, Parser)]
@@ -213,7 +218,7 @@ struct DebugOpenAiArgs {
         long,
         value_name = "MODEL",
         allow_hyphen_values = true,
-        help = "Model name; falls back to MERRY_OPENAI_MODEL"
+        help = "Model name; overrides [providers.default].model"
     )]
     model: Option<String>,
 
@@ -240,17 +245,9 @@ struct DebugCodingLoopLiveSmokeArgs {
         long,
         value_name = "MODEL",
         allow_hyphen_values = true,
-        help = "Model name; falls back to local config or MERRY_OPENAI_MODEL"
+        help = "Model name; overrides [providers.default].model"
     )]
     model: Option<String>,
-
-    #[arg(
-        long = "config",
-        value_name = "PATH",
-        default_value = CODING_LOOP_LIVE_SMOKE_CONFIG_PATH,
-        help = "Ignored local KEY=value config file available inside the sandbox"
-    )]
-    config_path: PathBuf,
 
     #[arg(
         long,
@@ -269,9 +266,30 @@ fn main() -> CliExit {
         Err(error) => return CliExit::Clap(error),
     };
 
+    let config_paths = match XdgPaths::from_env() {
+        Ok(paths) => paths,
+        Err(error) => return CliExit::Unexpected(error.to_string()),
+    };
+    let _config = match MerryConfig::load_optional(&config_paths) {
+        Ok(config) => config,
+        Err(error) => return CliExit::Unexpected(error.to_string()),
+    };
+    if let Err(error) = validate_loaded_config(_config.as_ref(), &config_paths) {
+        return CliExit::Unexpected(error.to_string());
+    }
+    let log_settings = match effective_log_settings(_config.as_ref(), &config_paths) {
+        Ok(settings) => settings,
+        Err(error) => return CliExit::Unexpected(error.to_string()),
+    };
+
     if let Err(error) = maybe_reexec_sandbox(&cli, argv.iter().skip(1).cloned().collect()) {
         return CliExit::Unexpected(error.to_string());
     }
+
+    let _observability_guard = match observability::init_observability(log_settings.as_ref()) {
+        Ok(guard) => guard,
+        Err(error) => return CliExit::Unexpected(error.to_string()),
+    };
 
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -281,10 +299,10 @@ fn main() -> CliExit {
         Err(err) => return CliExit::Unexpected(err.to_string()),
     };
 
-    runtime.block_on(async_main(cli))
+    runtime.block_on(async_main(cli, _config))
 }
 
-async fn async_main(cli: Cli) -> CliExit {
+async fn async_main(cli: Cli, merry_config: Option<MerryConfig>) -> CliExit {
     let sandbox_child_handoff = cli.sandbox_child_handoff;
 
     match cli.command {
@@ -323,6 +341,7 @@ async fn async_main(cli: Cli) -> CliExit {
             model.as_deref(),
             max_output_tokens,
             debug_tool_result.as_deref(),
+            merry_config.as_ref(),
         )
         .await
         {
@@ -366,15 +385,14 @@ async fn async_main(cli: Cli) -> CliExit {
             command:
                 Some(DebugCommand::CodingLoopLiveSmoke(DebugCodingLoopLiveSmokeArgs {
                     model,
-                    config_path,
                     max_output_tokens,
                 })),
             ..
         }) => match run_debug_coding_loop_live_smoke(
             sandbox_child_handoff,
             model.as_deref(),
-            &config_path,
             max_output_tokens,
+            merry_config.as_ref(),
         )
         .await
         {
@@ -426,6 +444,30 @@ fn parse_max_output_tokens(value: &str) -> Result<u64, String> {
     Ok(tokens)
 }
 
+fn validate_loaded_config(
+    config: Option<&MerryConfig>,
+    paths: &XdgPaths,
+) -> Result<(), config::ConfigError> {
+    let _ = paths.state_dir();
+    let Some(config) = config else {
+        return Ok(());
+    };
+    let _ = effective_log_settings(Some(config), paths)?;
+    let _ = config.profile();
+    config.validate_provider_settings_if_present()?;
+    Ok(())
+}
+
+fn effective_log_settings(
+    config: Option<&MerryConfig>,
+    paths: &XdgPaths,
+) -> Result<Option<EffectiveLogSettings>, config::ConfigError> {
+    config
+        .map(|config| config.effective_log_settings(paths))
+        .transpose()
+        .map(Option::flatten)
+}
+
 fn maybe_reexec_sandbox(cli: &Cli, args: Vec<OsString>) -> Result<(), SandboxError> {
     let host = SandboxHost::from_env(args)?;
     match plan_sandbox_bootstrap(cli.with_sandbox, &host)? {
@@ -441,10 +483,16 @@ struct SandboxHost {
     args: Vec<OsString>,
     path: Option<OsString>,
     inside_sandbox: bool,
+    xdg_paths: XdgPaths,
+    log_settings: Option<EffectiveLogSettings>,
 }
 
 impl SandboxHost {
     fn from_env(args: Vec<OsString>) -> Result<Self, SandboxError> {
+        let xdg_paths = XdgPaths::from_env().map_err(SandboxError::Config)?;
+        let merry_config = MerryConfig::load_optional(&xdg_paths).map_err(SandboxError::Config)?;
+        let log_settings = effective_log_settings(merry_config.as_ref(), &xdg_paths)
+            .map_err(SandboxError::Config)?;
         Ok(Self {
             cwd: env::current_dir().map_err(SandboxError::CurrentDir)?,
             current_exe: env::current_exe().map_err(SandboxError::CurrentExe)?,
@@ -453,6 +501,8 @@ impl SandboxHost {
             // This marker is only a recursion guard for self-reexec. It is
             // not a security proof that the current process is confined.
             inside_sandbox: env::var_os(MERRY_SANDBOX_ENV).as_deref() == Some(OsStr::new("1")),
+            xdg_paths,
+            log_settings,
         })
     }
 }
@@ -493,10 +543,24 @@ fn plan_sandbox_bootstrap_with_file_exists(
 
     let path = sandbox_path(host);
     let bwrap = find_bwrap_in_path(&path, file_exists).ok_or(SandboxError::MissingBubblewrap)?;
+    ensure_host_log_directory(host)?;
 
     Ok(SandboxBootstrap::Reexec(build_sandbox_plan(
         host, path, bwrap,
     )))
+}
+
+fn ensure_host_log_directory(host: &SandboxHost) -> Result<(), SandboxError> {
+    let Some(log_settings) = host.log_settings.as_ref() else {
+        return Ok(());
+    };
+    let Some(log_dir) = log_settings.path.parent() else {
+        return Ok(());
+    };
+    fs::create_dir_all(log_dir).map_err(|source| SandboxError::LogDirectory {
+        path: log_dir.to_path_buf(),
+        source,
+    })
 }
 
 fn build_sandbox_plan(host: &SandboxHost, path: OsString, bwrap: PathBuf) -> SandboxPlan {
@@ -526,6 +590,9 @@ fn build_sandbox_plan(host: &SandboxHost, path: OsString, bwrap: PathBuf) -> San
         os("0700"),
         os("--dir"),
         os(SANDBOX_HOME),
+        os("--ro-bind-try"),
+        host.xdg_paths.config_dir().as_os_str().to_owned(),
+        os(SANDBOX_MERRY_CONFIG_DIR),
         os("--ro-bind"),
         os("/usr"),
         os("/usr"),
@@ -548,6 +615,17 @@ fn build_sandbox_plan(host: &SandboxHost, path: OsString, bwrap: PathBuf) -> San
         cwd.clone(),
         os("--chdir"),
         cwd.clone(),
+    ]);
+    if let Some(log_settings) = host.log_settings.as_ref()
+        && let Some(host_log_dir) = log_settings.path.parent()
+    {
+        args.extend([
+            os("--bind"),
+            host_log_dir.as_os_str().to_owned(),
+            os(SANDBOX_MERRY_LOG_DIR),
+        ]);
+    }
+    args.extend([
         os("--clearenv"),
         os("--setenv"),
         os("PATH"),
@@ -558,6 +636,12 @@ fn build_sandbox_plan(host: &SandboxHost, path: OsString, bwrap: PathBuf) -> San
         os("--setenv"),
         os("TMPDIR"),
         os(SANDBOX_TMPDIR),
+        os("--setenv"),
+        os("XDG_CONFIG_HOME"),
+        os(SANDBOX_XDG_CONFIG_HOME),
+        os("--setenv"),
+        os("XDG_STATE_HOME"),
+        os(SANDBOX_XDG_STATE_HOME),
         os("--setenv"),
         os("PWD"),
         cwd,
@@ -676,6 +760,11 @@ fn exec_sandbox_plan(plan: &SandboxPlan) -> io::Error {
 enum SandboxError {
     CurrentDir(io::Error),
     CurrentExe(io::Error),
+    Config(config::ConfigError),
+    LogDirectory {
+        path: PathBuf,
+        source: io::Error,
+    },
     #[cfg(not(target_os = "linux"))]
     UnsupportedPlatform,
     MissingBubblewrap,
@@ -692,6 +781,15 @@ impl fmt::Display for SandboxError {
             SandboxError::CurrentExe(error) => write!(
                 formatter,
                 "failed to locate current executable before sandbox bootstrap: {error}"
+            ),
+            SandboxError::Config(error) => write!(
+                formatter,
+                "failed to load Merry config before sandbox bootstrap: {error}"
+            ),
+            SandboxError::LogDirectory { path, source } => write!(
+                formatter,
+                "failed to create host log directory {} before sandbox bootstrap: {source}",
+                path.display()
             ),
             #[cfg(not(target_os = "linux"))]
             SandboxError::UnsupportedPlatform => write!(
@@ -724,8 +822,9 @@ async fn run_debug_openai(
     model: Option<&str>,
     max_output_tokens: Option<u64>,
     debug_tool_result: Option<&str>,
+    merry_config: Option<&MerryConfig>,
 ) -> Result<(), CliError> {
-    let config = debug_openai_config(model)?;
+    let config = debug_openai_config(model, merry_config)?;
 
     let session_id = SessionId::new(DEFAULT_SESSION_ID).map_err(debug_openai_usage_error)?;
     let model = ModelName::new(&config.model).map_err(debug_openai_usage_error)?;
@@ -789,8 +888,8 @@ async fn run_debug_coding_loop_smoke(
 async fn run_debug_coding_loop_live_smoke(
     sandbox_child_handoff: Option<SandboxChildHandoff>,
     model_flag: Option<&str>,
-    config_path: &Path,
     max_output_tokens: u64,
+    merry_config: Option<&MerryConfig>,
 ) -> Result<(), CliError> {
     let Some(admission) =
         coding_loop_smoke_admission_from_current_process(sandbox_child_handoff).await
@@ -799,13 +898,7 @@ async fn run_debug_coding_loop_live_smoke(
             "coding-loop-live-smoke",
         ));
     };
-    if config_path.is_absolute() {
-        return Err(debug_openai_usage_error(
-            "--config must be a relative ignored local path inside the workspace",
-        ));
-    }
-
-    let config = debug_openai_config_with_local_file(model_flag, Some(config_path))?;
+    let config = debug_openai_config(model_flag, merry_config)?;
     let smoke_root = prepare_coding_loop_smoke_fixture("coding-loop-live-smoke")?;
     let relative_cwd = smoke_root_relative_cwd(&smoke_root)?;
     let runtime = build_coding_loop_live_smoke_runtime(
@@ -1918,81 +2011,53 @@ where
     Ok(BoundedOutput { bytes, truncated })
 }
 
-fn debug_openai_config(model_flag: Option<&str>) -> Result<DebugOpenAiConfig, CliError> {
-    debug_openai_config_with_local_file(model_flag, None)
+fn debug_openai_config(
+    model_flag: Option<&str>,
+    merry_config: Option<&MerryConfig>,
+) -> Result<DebugOpenAiConfig, CliError> {
+    debug_openai_config_with_env(model_flag, merry_config, optional_env)
 }
 
-fn debug_openai_config_with_local_file(
+fn debug_openai_config_with_env(
     model_flag: Option<&str>,
-    config_path: Option<&Path>,
+    merry_config: Option<&MerryConfig>,
+    env_value: impl Fn(&'static str) -> Result<Option<String>, CliError>,
 ) -> Result<DebugOpenAiConfig, CliError> {
-    let local = match config_path {
-        Some(path) => LocalOpenAiConfig::read(path)?,
-        None => LocalOpenAiConfig::default(),
-    };
-
-    if config_value("MERRY_OPENAI_DEBUG", &local)?.as_deref() != Some("1") {
+    if env_value("MERRY_OPENAI_DEBUG")?.as_deref() != Some("1") {
         return Err(debug_openai_usage_error(
             "set MERRY_OPENAI_DEBUG=1 to enable live OpenAI-compatible debugging",
         ));
     }
 
-    let api_key = required_openai_api_key(&local)?;
+    let merry_config = merry_config.ok_or_else(|| {
+        debug_openai_usage_error(
+            "Merry XDG provider config is required for OpenAI-compatible debugging",
+        )
+    })?;
+    let provider_config = merry_config
+        .openai_compatible_provider()
+        .map_err(debug_openai_usage_error)?;
+    let api_key = provider_config
+        .resolve_api_key()
+        .map_err(debug_openai_usage_error)?;
     let model = match model_flag {
         Some(model) => model.to_owned(),
-        None => required_config_value("MERRY_OPENAI_MODEL", &local)?,
+        None => provider_config.model.clone().ok_or_else(|| {
+            debug_openai_usage_error(
+                "[providers.default].model must be set or --model must be provided",
+            )
+        })?,
     };
 
     let mut provider = OpenAiProviderConfig::new(&api_key).map_err(debug_openai_usage_error)?;
 
-    if let Some(base_url) = config_value("MERRY_OPENAI_BASE_URL", &local)? {
+    if let Some(base_url) = provider_config.base_url.as_deref() {
         provider = provider
-            .with_base_url(&base_url)
-            .map_err(debug_openai_usage_error)?;
-    }
-
-    if let Some(organization) = config_value("OPENAI_ORG_ID", &local)? {
-        provider = provider
-            .with_organization(&organization)
-            .map_err(debug_openai_usage_error)?;
-    }
-
-    if let Some(project) = config_value("OPENAI_PROJECT_ID", &local)? {
-        provider = provider
-            .with_project(&project)
+            .with_base_url(base_url)
             .map_err(debug_openai_usage_error)?;
     }
 
     Ok(DebugOpenAiConfig { provider, model })
-}
-
-fn required_openai_api_key(local: &LocalOpenAiConfig) -> Result<String, CliError> {
-    match config_value("MERRY_OPENAI_API_KEY", local)? {
-        Some(value) => Ok(value),
-        None => match config_value("OPENAI_API_KEY", local)? {
-            Some(value) => Ok(value),
-            None => Err(debug_openai_usage_error(
-                "MERRY_OPENAI_API_KEY or OPENAI_API_KEY must be set",
-            )),
-        },
-    }
-}
-
-fn required_config_value(
-    name: &'static str,
-    local: &LocalOpenAiConfig,
-) -> Result<String, CliError> {
-    match config_value(name, local)? {
-        Some(value) => Ok(value),
-        None => Err(debug_openai_usage_error(format!("{name} must be set"))),
-    }
-}
-
-fn config_value(name: &'static str, local: &LocalOpenAiConfig) -> Result<Option<String>, CliError> {
-    match optional_env(name)? {
-        Some(value) => Ok(Some(value)),
-        None => Ok(local.value(name).map(str::to_owned)),
-    }
 }
 
 fn optional_env(name: &'static str) -> Result<Option<String>, CliError> {
@@ -2011,89 +2076,6 @@ fn optional_env(name: &'static str) -> Result<Option<String>, CliError> {
 struct DebugOpenAiConfig {
     provider: OpenAiProviderConfig,
     model: String,
-}
-
-#[derive(Debug, Default)]
-struct LocalOpenAiConfig {
-    values: BTreeMap<String, String>,
-}
-
-impl LocalOpenAiConfig {
-    fn read(path: &Path) -> Result<Self, CliError> {
-        let text = fs::read_to_string(path).map_err(|source| {
-            debug_openai_usage_error(format!(
-                "failed to read local OpenAI config {}: {source}",
-                path.display()
-            ))
-        })?;
-        parse_local_openai_config(&text)
-    }
-
-    fn value(&self, name: &str) -> Option<&str> {
-        self.values.get(name).map(String::as_str)
-    }
-}
-
-fn parse_local_openai_config(text: &str) -> Result<LocalOpenAiConfig, CliError> {
-    let mut values = BTreeMap::new();
-    for (index, line) in text.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let Some((key, value)) = line.split_once('=') else {
-            return Err(debug_openai_usage_error(format!(
-                "local OpenAI config line {} must use KEY=value",
-                index + 1
-            )));
-        };
-        let key = key.trim();
-        let value = value.trim();
-        if !is_supported_openai_config_key(key) {
-            return Err(debug_openai_usage_error(format!(
-                "local OpenAI config line {} uses unsupported key {key}",
-                index + 1
-            )));
-        }
-        if value.is_empty() {
-            return Err(debug_openai_usage_error(format!("{key} must not be blank")));
-        }
-        values.insert(key.to_owned(), unquote_config_value(value)?.to_owned());
-    }
-    Ok(LocalOpenAiConfig { values })
-}
-
-fn is_supported_openai_config_key(key: &str) -> bool {
-    matches!(
-        key,
-        "MERRY_OPENAI_DEBUG"
-            | "MERRY_OPENAI_API_KEY"
-            | "OPENAI_API_KEY"
-            | "MERRY_OPENAI_MODEL"
-            | "MERRY_OPENAI_BASE_URL"
-            | "OPENAI_ORG_ID"
-            | "OPENAI_PROJECT_ID"
-    )
-}
-
-fn unquote_config_value(value: &str) -> Result<&str, CliError> {
-    if let Some(stripped) = value.strip_prefix('"') {
-        let Some(stripped) = stripped.strip_suffix('"') else {
-            return Err(debug_openai_usage_error(
-                "quoted local OpenAI config values must end with a quote",
-            ));
-        };
-        Ok(stripped)
-    } else if let Some(stripped) = value.strip_prefix('\'') {
-        let Some(stripped) = stripped.strip_suffix('\'') else {
-            return Err(debug_openai_usage_error(
-                "quoted local OpenAI config values must end with a quote",
-            ));
-        };
-        Ok(stripped)
-    } else {
-        Ok(value)
-    }
 }
 
 fn debug_usage() -> String {
@@ -2211,9 +2193,10 @@ mod tests {
         Cli, CliCommand, CliError, CliExit, DEBUG_TOOL_CONTINUATION_INPUT, DEFAULT_INPUT,
         DEFAULT_SESSION_ID, DebugCommand, MERRY_SANDBOX_ENV, MERRY_SANDBOX_VERSION,
         MERRY_SANDBOX_VERSION_ENV, SANDBOX_CHILD_HANDOFF_ARG, SANDBOX_CHILD_HANDOFF_CLI_BWRAP_V1,
-        SANDBOX_HOME, SANDBOX_TMPDIR, SandboxBootstrap, SandboxChildHandoff, SandboxError,
-        SandboxHost, SandboxRuntimeProfile, args_without_sandbox_bootstrap_flags, debug_echo_tool,
-        debug_openai_usage, find_bwrap_in_path, os, parse_local_openai_config,
+        SANDBOX_HOME, SANDBOX_MERRY_CONFIG_DIR, SANDBOX_MERRY_LOG_DIR, SANDBOX_TMPDIR,
+        SANDBOX_XDG_CONFIG_HOME, SANDBOX_XDG_STATE_HOME, SandboxBootstrap, SandboxChildHandoff,
+        SandboxError, SandboxHost, SandboxRuntimeProfile, args_without_sandbox_bootstrap_flags,
+        debug_echo_tool, debug_openai_config_with_env, debug_openai_usage, find_bwrap_in_path, os,
         plan_sandbox_bootstrap_with_file_exists, report_cli_exit, run_debug_coding_loop_smoke,
         sandbox_runtime_profile_from_evidence, shell_process_action_intent,
         shell_runtime_admission, shell_usage, write_debug_openai_tool_events,
@@ -2256,6 +2239,12 @@ mod tests {
             ],
             path: Some(os("/custom/bin:/usr/bin")),
             inside_sandbox: false,
+            xdg_paths: super::config::XdgPaths::from_parts(
+                PathBuf::from("/home/alice"),
+                Some(PathBuf::from("/host/config")),
+                Some(PathBuf::from("/host/state")),
+            ),
+            log_settings: None,
         }
     }
 
@@ -2350,8 +2339,6 @@ mod tests {
             "coding-loop-live-smoke",
             "--model",
             "gpt-test",
-            "--config",
-            ".merry/secrets/openai.env",
             "--max-output-tokens",
             "384",
         ])
@@ -2361,7 +2348,6 @@ mod tests {
             CliCommand::Debug(debug) => match debug.command {
                 Some(DebugCommand::CodingLoopLiveSmoke(live)) => {
                     assert_eq!(live.model.as_deref(), Some("gpt-test"));
-                    assert_eq!(live.config_path, PathBuf::from(".merry/secrets/openai.env"));
                     assert_eq!(live.max_output_tokens, 384);
                 }
                 Some(DebugCommand::OpenAi(_) | DebugCommand::CodingLoopSmoke) | None => {
@@ -2388,46 +2374,40 @@ mod tests {
     }
 
     #[test]
-    fn local_openai_config_parses_supported_key_values() {
-        let config = parse_local_openai_config(
-            "\
-# local only
-MERRY_OPENAI_DEBUG=1
-MERRY_OPENAI_API_KEY=\"sk-test\"
-MERRY_OPENAI_MODEL=gpt-test
-MERRY_OPENAI_BASE_URL='https://api.example.test/v1'
-",
-        )
-        .expect("local config should parse");
-
-        assert_eq!(config.value("MERRY_OPENAI_DEBUG"), Some("1"));
-        assert_eq!(config.value("MERRY_OPENAI_API_KEY"), Some("sk-test"));
-        assert_eq!(config.value("MERRY_OPENAI_MODEL"), Some("gpt-test"));
-        assert_eq!(
-            config.value("MERRY_OPENAI_BASE_URL"),
-            Some("https://api.example.test/v1")
+    fn openai_debug_config_uses_xdg_toml_provider_and_secret_file() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let config_dir = temp.path().join("config/merry");
+        std::fs::create_dir_all(config_dir.join("secrets")).expect("config dir should be created");
+        std::fs::write(config_dir.join("secrets/openai.key"), "sk-test\n")
+            .expect("secret file should write");
+        let paths = super::config::XdgPaths::from_parts(
+            PathBuf::from("/home/alice"),
+            Some(temp.path().join("config")),
+            Some(temp.path().join("state")),
         );
-    }
+        let config = super::config::MerryConfig::load_optional_from_text(
+            Some(
+                r#"
+[providers.default]
+provider = "openai-compatible"
+model = "gpt-test"
 
-    #[test]
-    fn local_openai_config_rejects_unknown_or_blank_entries() {
-        let unknown = parse_local_openai_config("BAD_KEY=value")
-            .expect_err("unknown local config key should be rejected");
-        match unknown {
-            CliError::DebugOpenAiUsage(message) => {
-                assert!(message.contains("unsupported key BAD_KEY"));
-            }
-            _ => panic!("expected debug openai usage error"),
-        }
+[providers.openai-compatible]
+base_url = "https://api.example.test/v1"
+api_key_file = "secrets/openai.key"
+"#,
+            ),
+            &paths,
+        )
+        .expect("config should parse")
+        .expect("config should be present");
 
-        let blank = parse_local_openai_config("MERRY_OPENAI_API_KEY= ")
-            .expect_err("blank local config value should be rejected");
-        match blank {
-            CliError::DebugOpenAiUsage(message) => {
-                assert!(message.contains("MERRY_OPENAI_API_KEY must not be blank"));
-            }
-            _ => panic!("expected debug openai usage error"),
-        }
+        let loaded = debug_openai_config_with_env(None, Some(&config), |name| {
+            Ok((name == "MERRY_OPENAI_DEBUG").then(|| "1".to_owned()))
+        })
+        .expect("debug config should load");
+        assert_eq!(loaded.model, "gpt-test");
+        assert_eq!(loaded.provider.base_url(), "https://api.example.test/v1");
     }
 
     #[test]
@@ -2970,6 +2950,75 @@ MERRY_OPENAI_BASE_URL='https://api.example.test/v1'
             &["--bind", "/workspace/merry", "/workspace/merry"]
         ));
         assert!(contains_sequence(&args, &["--chdir", "/workspace/merry"]));
+    }
+
+    #[test]
+    fn sandbox_plan_mounts_merry_config_dir_read_only_and_sets_xdg_config_home() {
+        let host = sandbox_host();
+        let SandboxBootstrap::Reexec(plan) =
+            plan_sandbox(true, &host).expect("sandbox planning should succeed")
+        else {
+            panic!("expected sandbox reexec plan");
+        };
+        let args = plan_args(&plan);
+
+        assert!(contains_sequence(
+            &args,
+            &[
+                "--ro-bind-try",
+                "/host/config/merry",
+                SANDBOX_MERRY_CONFIG_DIR
+            ]
+        ));
+        assert!(contains_sequence(
+            &args,
+            &["--setenv", "XDG_CONFIG_HOME", SANDBOX_XDG_CONFIG_HOME]
+        ));
+    }
+
+    #[test]
+    fn sandbox_plan_does_not_mount_log_dir_when_logging_is_disabled() {
+        let host = sandbox_host();
+        let SandboxBootstrap::Reexec(plan) =
+            plan_sandbox(true, &host).expect("sandbox planning should succeed")
+        else {
+            panic!("expected sandbox reexec plan");
+        };
+        let args = plan_args(&plan);
+
+        assert!(!contains_sequence(
+            &args,
+            &["--bind", "/host/state/merry/logs", SANDBOX_MERRY_LOG_DIR]
+        ));
+    }
+
+    #[test]
+    fn sandbox_plan_mounts_log_dir_read_write_when_file_logging_is_enabled() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let host_log_dir = temp.path().join("state/merry/logs");
+        let host_log_dir_string = host_log_dir.to_string_lossy().into_owned();
+        let mut host = sandbox_host();
+        host.log_settings = Some(super::config::EffectiveLogSettings {
+            level: super::config::LogLevel::Info,
+            format: super::config::LogFormat::Json,
+            path: host_log_dir.join("merry.jsonl"),
+        });
+        let SandboxBootstrap::Reexec(plan) =
+            plan_sandbox(true, &host).expect("sandbox planning should succeed")
+        else {
+            panic!("expected sandbox reexec plan");
+        };
+        let args = plan_args(&plan);
+
+        assert!(contains_sequence(
+            &args,
+            &["--bind", &host_log_dir_string, SANDBOX_MERRY_LOG_DIR]
+        ));
+        assert!(contains_sequence(
+            &args,
+            &["--setenv", "XDG_STATE_HOME", SANDBOX_XDG_STATE_HOME]
+        ));
+        assert!(host_log_dir.exists());
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use serde_json::Value;
-use std::{path::PathBuf, process::Command};
+use std::{fs, path::PathBuf, process::Command};
 
 fn merry() -> Command {
     Command::new(env!("CARGO_BIN_EXE_merry"))
@@ -16,6 +16,20 @@ fn merry_without_openai_env() -> Command {
         .env_remove("OPENAI_ORG_ID")
         .env_remove("OPENAI_PROJECT_ID");
     command
+}
+
+fn merry_without_openai_env_and_xdg(temp: &tempfile::TempDir) -> Command {
+    let mut command = merry_without_openai_env();
+    command
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .env("XDG_STATE_HOME", temp.path().join("state"));
+    command
+}
+
+fn write_xdg_config(temp: &tempfile::TempDir, text: &str) {
+    let config_dir = temp.path().join("config/merry");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    fs::write(config_dir.join("config.toml"), text).expect("config should write");
 }
 
 fn repo_root() -> PathBuf {
@@ -75,6 +89,41 @@ fn debug_emits_default_runtime_lifecycle_as_json_lines() {
     assert!(output.status.success(), "debug should exit successfully");
     assert!(output.stderr.is_empty(), "debug should not write stderr");
     assert_debug_output(&output.stdout, "debug-session");
+}
+
+#[test]
+fn debug_writes_configured_json_log_without_changing_stdout() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let config_dir = temp.path().join("config/merry");
+    let state_dir = temp.path().join("state");
+    fs::create_dir_all(&config_dir).expect("config dir should be created");
+    let log_path = state_dir.join("merry/logs/merry.jsonl");
+    fs::write(
+        config_dir.join("config.toml"),
+        format!(
+            "[observability.log]\nenabled = true\nlevel = \"debug\"\nformat = \"json\"\npath = {:?}\n",
+            log_path
+        ),
+    )
+    .expect("config should write");
+
+    let output = merry()
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .env("XDG_STATE_HOME", &state_dir)
+        .arg("debug")
+        .output()
+        .expect("merry debug should run");
+
+    assert!(output.status.success(), "debug should exit successfully");
+    assert!(
+        output.stderr.is_empty(),
+        "debug should not write stderr when logging is file-backed"
+    );
+    assert_debug_output(&output.stdout, "debug-session");
+
+    let log = fs::read_to_string(&log_path).expect("log file should exist");
+    assert!(log.contains("runtime.step"));
+    assert!(log.contains("debug-session"));
 }
 
 #[test]
@@ -609,6 +658,23 @@ fn debug_coding_loop_live_smoke_requires_with_sandbox_before_config_or_network()
 }
 
 #[test]
+fn coding_loop_live_smoke_rejects_legacy_config_flag() {
+    let output = merry_without_openai_env()
+        .args([
+            "debug",
+            "coding-loop-live-smoke",
+            "--config",
+            ".merry/secrets/openai.env",
+        ])
+        .output()
+        .expect("merry should run");
+
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = std::str::from_utf8(&output.stderr).expect("stderr should be utf-8");
+    assert!(stderr.contains("unexpected argument") || stderr.contains("--config"));
+}
+
+#[test]
 #[ignore = "requires Linux bubblewrap and local sandbox support"]
 fn debug_coding_loop_smoke_runs_inside_real_bwrap_when_opted_in() {
     let mut command = merry_without_openai_env();
@@ -629,7 +695,7 @@ fn debug_coding_loop_smoke_runs_inside_real_bwrap_when_opted_in() {
 }
 
 #[test]
-#[ignore = "requires Linux bubblewrap, network access, and ignored local OpenAI config"]
+#[ignore = "requires Linux bubblewrap, network access, and XDG OpenAI config"]
 fn debug_coding_loop_live_smoke_runs_inside_real_bwrap_when_opted_in() {
     let mut command = merry_without_openai_env();
     let output = command
@@ -676,10 +742,11 @@ fn debug_openai_help_writes_usage_to_stdout() {
     assert!(stdout.contains("Require first step to call debug_echo"));
     assert!(!stdout.contains("Rejected until"));
     assert!(stdout.contains("MERRY_OPENAI_DEBUG=1"));
-    assert!(stdout.contains("MERRY_OPENAI_API_KEY"));
-    assert!(stdout.contains("OPENAI_API_KEY"));
-    assert!(stdout.contains("Preferred API key"));
-    assert!(stdout.contains("Fallback API key"));
+    assert!(stdout.contains("XDG_CONFIG_HOME"));
+    assert!(stdout.contains("config.toml"));
+    assert!(stdout.contains("api_key_file"));
+    assert!(!stdout.contains("MERRY_OPENAI_API_KEY"));
+    assert!(!stdout.contains("OPENAI_API_KEY"));
 }
 
 #[test]
@@ -760,8 +827,9 @@ fn debug_openai_requires_debug_tool_result_value() {
 }
 
 #[test]
-fn debug_openai_requires_api_key_when_opted_in() {
-    let output = merry_without_openai_env()
+fn debug_openai_requires_xdg_provider_config_when_opted_in() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let output = merry_without_openai_env_and_xdg(&temp)
         .env("MERRY_OPENAI_DEBUG", "1")
         .args(["debug", "openai", "--input", "hello", "--model", "gpt-test"])
         .output()
@@ -773,18 +841,59 @@ fn debug_openai_requires_api_key_when_opted_in() {
         "usage errors should not write stdout"
     );
     let stderr = std::str::from_utf8(&output.stderr).expect("stderr should be utf-8");
-    assert!(stderr.contains("MERRY_OPENAI_API_KEY"));
-    assert!(stderr.contains("OPENAI_API_KEY"));
-    assert!(stderr.contains("must be set"));
+    assert!(stderr.contains("Merry XDG provider config is required"));
     assert!(stderr.contains("Usage: merry debug openai"));
 }
 
 #[test]
-fn debug_openai_rejects_blank_merry_api_key_when_opted_in() {
-    let output = merry_without_openai_env()
+fn debug_openai_requires_configured_api_key_source_when_opted_in() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    write_xdg_config(
+        &temp,
+        r#"
+[providers.default]
+provider = "openai-compatible"
+model = "gpt-test"
+
+[providers.openai-compatible]
+base_url = "https://api.example.test/v1"
+"#,
+    );
+
+    let output = merry_without_openai_env_and_xdg(&temp)
+        .env("MERRY_OPENAI_DEBUG", "1")
+        .args(["debug", "openai", "--input", "hello", "--model", "gpt-test"])
+        .output()
+        .expect("merry debug openai should run");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        output.stdout.is_empty(),
+        "usage errors should not write stdout"
+    );
+    let stderr = std::str::from_utf8(&output.stderr).expect("stderr should be utf-8");
+    assert!(stderr.contains("providers.openai-compatible must set api_key_env or api_key_file"));
+    assert!(stderr.contains("Usage: merry debug openai"));
+}
+
+#[test]
+fn debug_openai_rejects_blank_configured_api_key_env_when_opted_in() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    write_xdg_config(
+        &temp,
+        r#"
+[providers.default]
+provider = "openai-compatible"
+model = "gpt-test"
+
+[providers.openai-compatible]
+api_key_env = "MERRY_OPENAI_API_KEY"
+"#,
+    );
+
+    let output = merry_without_openai_env_and_xdg(&temp)
         .env("MERRY_OPENAI_DEBUG", "1")
         .env("MERRY_OPENAI_API_KEY", "  ")
-        .env("OPENAI_API_KEY", "sk-fallback")
         .args(["debug", "openai", "--input", "hello", "--model", "gpt-test"])
         .output()
         .expect("merry debug openai should run");
@@ -800,11 +909,26 @@ fn debug_openai_rejects_blank_merry_api_key_when_opted_in() {
 }
 
 #[test]
-fn debug_openai_accepts_openai_api_key_fallback_when_merry_key_is_unset() {
-    let output = merry_without_openai_env()
+fn debug_openai_rejects_blank_configured_api_key_file_when_opted_in() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let secret_dir = temp.path().join("config/merry/secrets");
+    fs::create_dir_all(&secret_dir).expect("secret dir should be created");
+    fs::write(secret_dir.join("openai.key"), "  \n").expect("secret should write");
+    write_xdg_config(
+        &temp,
+        r#"
+[providers.default]
+provider = "openai-compatible"
+model = "gpt-test"
+
+[providers.openai-compatible]
+api_key_file = "secrets/openai.key"
+"#,
+    );
+
+    let output = merry_without_openai_env_and_xdg(&temp)
         .env("MERRY_OPENAI_DEBUG", "1")
-        .env("OPENAI_API_KEY", "sk-test")
-        .args(["debug", "openai", "--input", "hello"])
+        .args(["debug", "openai", "--input", "hello", "--model", "gpt-test"])
         .output()
         .expect("merry debug openai should run");
 
@@ -814,51 +938,40 @@ fn debug_openai_accepts_openai_api_key_fallback_when_merry_key_is_unset() {
         "usage errors should not write stdout"
     );
     let stderr = std::str::from_utf8(&output.stderr).expect("stderr should be utf-8");
-    assert!(stderr.contains("--model"));
-    assert!(stderr.contains("MERRY_OPENAI_MODEL"));
+    assert!(stderr.contains("api_key_file"));
+    assert!(stderr.contains("must not be blank"));
     assert!(stderr.contains("Usage: merry debug openai"));
 }
 
 #[test]
-fn debug_openai_prefers_merry_openai_api_key_over_blank_fallback() {
-    let output = merry_without_openai_env()
+fn debug_openai_rejects_unsupported_configured_default_provider() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    write_xdg_config(
+        &temp,
+        r#"
+[providers.default]
+provider = "other"
+model = "gpt-test"
+
+[providers.openai-compatible]
+api_key_file = "secrets/openai.key"
+"#,
+    );
+
+    let output = merry_without_openai_env_and_xdg(&temp)
         .env("MERRY_OPENAI_DEBUG", "1")
-        .env("MERRY_OPENAI_API_KEY", "sk-test")
-        .env("OPENAI_API_KEY", "")
-        .args(["debug", "openai", "--input", "hello"])
+        .args(["debug", "openai", "--input", "hello", "--model", "gpt-test"])
         .output()
         .expect("merry debug openai should run");
 
-    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(output.status.code(), Some(1));
     assert!(
         output.stdout.is_empty(),
-        "usage errors should not write stdout"
+        "config errors should not write stdout"
     );
     let stderr = std::str::from_utf8(&output.stderr).expect("stderr should be utf-8");
-    assert!(stderr.contains("--model"));
-    assert!(stderr.contains("MERRY_OPENAI_MODEL"));
-    assert!(!stderr.contains("OPENAI_API_KEY must not be blank"));
-    assert!(stderr.contains("Usage: merry debug openai"));
-}
-
-#[test]
-fn debug_openai_requires_model_from_flag_or_env() {
-    let output = merry_without_openai_env()
-        .env("MERRY_OPENAI_DEBUG", "1")
-        .env("MERRY_OPENAI_API_KEY", "sk-test")
-        .args(["debug", "openai", "--input", "hello"])
-        .output()
-        .expect("merry debug openai should run");
-
-    assert_eq!(output.status.code(), Some(2));
-    assert!(
-        output.stdout.is_empty(),
-        "usage errors should not write stdout"
-    );
-    let stderr = std::str::from_utf8(&output.stderr).expect("stderr should be utf-8");
-    assert!(stderr.contains("--model"));
-    assert!(stderr.contains("MERRY_OPENAI_MODEL"));
-    assert!(stderr.contains("Usage: merry debug openai"));
+    assert!(stderr.contains("unsupported default provider other"));
+    assert!(!stderr.contains("Usage: merry debug openai"));
 }
 
 #[test]

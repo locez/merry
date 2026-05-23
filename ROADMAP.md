@@ -57,8 +57,10 @@ off by default and, when file-backed, should use XDG state paths such as
 `~/.local/state/merry/logs/merry.jsonl` as fallback when no path is configured.
 Opening or creating the configured/default log file should fail clearly instead
 of silently falling back to stderr.
-The existing `.merry/secrets/openai.env` live-smoke config is a transitional
-debug path, not the long-term default.
+The legacy `.merry/secrets/openai.env` live-smoke config has been replaced for
+the CLI debug smoke path by XDG TOML provider config; the legacy `--config`
+flag is rejected. Config-relative `api_key_file` remains available so
+sandboxed live smoke credentials do not have to pass through bwrap argv.
 
 The OpenAI provider target is the Responses API only. The provider request path is `/responses`; it preserves the Merry-owned `merry-llm` provider boundary, keeps OpenAI wire types private to `merry-provider-openai`, sets `store: false`, omits `previous_response_id`, avoids provider conversation state as Merry runtime state, and keeps `parallel_tool_calls: false` until runtime policy supports parallel tool calls. This provider work does not imply a live/OpenAI judgment path or public judgment API.
 
@@ -109,7 +111,15 @@ The OpenAI provider target is the Responses API only. The provider request path 
 - Shell/Process SP1/SP2/SP3-A plus the latest CLI admission slices are implemented: `merry-runtime` has provider-neutral process intent/evidence, proposed/executed process action audit variants, explicit injected `ProcessRunner` boundaries, process intent classification, opt-in informational process admission, accepted local workspace process admission, bounded stdout/stderr result artifacts, payload-free proposal/execution evidence, default deny behavior, cancellation paths that keep pending calls unresolved until runner output exists, and deterministic fake-runner tests. `merry-cli` has the narrow debug/demo `merry shell -- <argv>` real runner adapter using `tokio::process::Command`; informational `rustc --version` / `rg --version` can run, and exact `cargo test -p merry-runtime` requires accepted local workspace risk plus the CLI bwrap handoff and sandbox runtime evidence. This does not implement general shell/process/coding-agent capability, raw shell mode, pipelines/scripts, arbitrary env/stdin, a complete sandbox proof, or a general approval/review admission UX.
 - Minimal Useful Coding Loop first deterministic slice is implemented in `merry-tool-workspace` integration tests. `coding_loop_harness_inspects_patches_verifies_and_completes` builds a runtime with workspace read/patch tools plus `process_command_tool`, runs `Runtime::run_agent_loop` for inspect -> exact read -> patch -> verification -> final answer, uses a fake provider and injected fake process runner, mutates only a temporary workspace fixture through `workspace_patch_file`, records exact process argv for `rg --files` and `cargo test -p merry-runtime`, verifies tool-result continuation flow, and checks artifact-before-resolution ledger ordering. This is not yet the real `bwrap` smoke or live provider lane.
 - Real `bwrap` coding-loop smoke is implemented in `merry-cli`: `merry --with-sandbox debug coding-loop-smoke` is an explicit non-default command that refuses to run without validated CLI bwrap child handoff evidence, creates a disposable fixture under `.merry/local/coding-loop-smoke`, composes a runtime with a deterministic scripted provider, workspace read/patch tools, and `process_command_tool`, then runs inspect -> exact read -> constrained patch -> real process verification -> final answer through `Runtime::run_agent_loop`. The process steps use `TokioProcessRunner` for real `rg --files` and `rg fixed-by-live-llm` inside the sandbox; the edit uses `workspace_patch_file`; the smoke validates `AgentLoopStatus::Completed`, no pending tool calls, four successful tool resolutions, and the patched fixture content. The integration test is ignored by default and passed in this environment with `cargo test -p merry-cli debug_coding_loop_smoke_runs_inside_real_bwrap_when_opted_in -- --ignored`. This is still deterministic-provider and CLI-owned harness assembly, not a reusable runtime-owned process profile, and not a complete sandbox hardening claim.
-- The opt-in live LLM coding-loop smoke command is implemented as `merry --with-sandbox debug coding-loop-live-smoke`. It refuses to run without the real CLI bwrap child handoff, reads ignored local OpenAI-compatible config from `.merry/secrets/openai.env`, uses `OpenAiProvider` for model decisions, keeps `TokioProcessRunner` and `workspace_patch_file` for the real tool path, and validates runtime events for process inspection, exact source read, patch, process verification, loop completion, and patched fixture content. The user reported that the credentialed live smoke passed against their trusted configured server. That run exposed a provider HTTP metadata gap, now fixed by setting `User-Agent: merry/<crate version>` in `merry-provider-openai`; deterministic request-construction and loopback integration tests cover the header.
+- The opt-in live LLM coding-loop smoke command is implemented as `merry --with-sandbox debug coding-loop-live-smoke`. It refuses to run without the real CLI bwrap child handoff, uses `OpenAiProvider` for model decisions, keeps `TokioProcessRunner` and `workspace_patch_file` for the real tool path, and validates runtime events for process inspection, exact source read, patch, process verification, loop completion, and patched fixture content. The user reported that the credentialed live smoke passed against their trusted configured server. That run exposed a provider HTTP metadata gap, now fixed by setting `User-Agent: merry/<crate version>` in `merry-provider-openai`; deterministic request-construction and loopback integration tests cover the header.
+- The first config-backed observability implementation slice is complete in
+  `merry-cli`: XDG TOML config discovery, config-backed log settings, file
+  tracing subscriber setup, sandbox config/log mount planning, host log
+  directory creation before bwrap re-exec, and XDG TOML provider config for
+  `debug openai` / `debug coding-loop-live-smoke`. The legacy live-smoke
+  `--config .merry/secrets/openai.env` path is rejected. Runtime, process,
+  workspace tool, and provider trace instrumentation remain the next
+  observability gap.
 
 ### Active
 
@@ -125,7 +135,7 @@ The OpenAI provider target is the Responses API only. The provider request path 
 
 ### Next Active
 
-- Implement the observability-first coding-loop design in `specs/2026-05-23-observability-first-coding-loop.md`, starting with XDG TOML config discovery, config-backed log settings, sandbox config mounting, and structured `tracing` instrumentation for the deterministic and live coding-loop smokes.
+- Continue the observability-first coding-loop design in `specs/2026-05-23-observability-first-coding-loop.md`. The CLI config/log/sandbox/provider-config slice is complete; the next slice is structured `tracing` instrumentation for runtime loop boundaries, process execution, workspace tools, and provider metadata.
 - Replace one-off process classification growth with a runtime-owned read-only process profile for reusable workspace inspection and exact evidence retrieval, including a file-slice shape such as `sed -n RANGE FILE` or an equivalent typed read tool.
 - Move coding-loop tool-set/profile registration toward reusable runtime/library construction so upper layers do not have to assemble `process_command_tool`, workspace read/search fallback, and patch tooling ad hoc.
 - Keep the opt-in live OpenAI-compatible smoke as a regression lane; when it fails, inspect the failure as model/tool-contract evidence and tune only the smallest runtime/provider/tool fix needed.
@@ -166,25 +176,29 @@ default tests:
   log assertions cover completed, failed, cancelled, and blocked loops
 ```
 
-Tasks:
+Completed first slice:
 
-- Add XDG config discovery and TOML parsing for global, observability, default
+- XDG config discovery and TOML parsing for global, observability, default
   model, and provider settings.
-- Add sandbox mount planning so `--with-sandbox` exposes the Merry config
-  directory read-only and only exposes a log/state path when file logging is
-  enabled.
-- Add CLI-owned `tracing-subscriber` setup driven by config, not by new logging
+- Sandbox mount planning so `--with-sandbox` exposes the Merry config directory
+  read-only and only exposes a log/state path when file logging is enabled.
+- CLI-owned `tracing-subscriber` setup driven by config, not by new logging
   command-line flags.
-- Instrument `Runtime::run_agent_loop`, step boundaries, tool pending/execution
-  boundaries, artifact recording, cancellation, failure, and terminal loop
-  status with stable fields.
+- XDG TOML provider config for OpenAI-compatible debug and live-smoke paths,
+  including config-relative `api_key_file` support.
+
+Remaining tasks:
+
+- Instrument `Runtime::run_agent_loop`, step boundaries, tool
+  pending/execution boundaries, artifact recording, cancellation, failure, and
+  terminal loop status with stable fields.
 - Instrument process and workspace tool paths with exact safe action summaries,
   status, output byte counts, artifact IDs, and diagnostic codes.
 - Align OpenAI-compatible provider tracing with the runtime correlation fields
   while keeping provider wire payloads private.
 - Add deterministic tracing capture tests and redaction/bounded-summary tests.
-- Keep the existing deterministic `bwrap` and live provider smokes explicit and
-  non-default.
+- Keep the existing deterministic `bwrap` and live provider smokes explicit
+  and non-default.
 
 Non-goals:
 
@@ -239,11 +253,11 @@ opt-in bwrap smoke:
 
 opt-in live provider smoke:
   current CLI smoke command: `merry --with-sandbox debug coding-loop-live-smoke`
-  reads ignored config from `.merry/secrets/openai.env` inside the sandbox
+  reads XDG TOML provider config inside the sandbox
   requires `MERRY_OPENAI_DEBUG=1`
-  requires `MERRY_OPENAI_API_KEY` or `OPENAI_API_KEY`
-  requires `MERRY_OPENAI_MODEL`
-  optionally uses `MERRY_OPENAI_BASE_URL`
+  requires `[providers.default]` model config unless `--model` overrides it
+  requires `[providers.openai-compatible]` with `api_key_env` or `api_key_file`
+  optionally uses `[providers.openai-compatible].base_url`
   is never part of default `cargo test`
 ```
 
@@ -255,7 +269,7 @@ Tasks:
 - Register the runtime-owned default coding-loop tools from library code, not by ad hoc CLI-only assembly.
 - Use `workspace_patch_file` or its successor for the edit step and keep shell side effects out of the edit path. The first deterministic slice now does this.
 - Add deterministic fake-provider/fake-runner tests for the full multi-step loop. The first slice now covers inspect, exact read, patch, verification, continuation, and final answer.
-- Keep ignored local config guidance for live provider credentials and base URL.
+- Keep XDG TOML config guidance for live provider credentials and base URL.
 - Run the explicit, non-default live smoke command with local credentials and treat any model deviation as evidence for the next smallest runtime/tool-contract fix.
 
 Non-goals:
