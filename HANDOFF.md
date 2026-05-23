@@ -10,97 +10,88 @@ Current milestone or track:
 
 Session milestone:
 
-- Implement Task 6 from `plans/2026-05-23-config-backed-observability.md`:
-  workspace tool and OpenAI-compatible provider trace alignment.
+- Add and enforce the user-facing `examples/config.toml` copy-and-edit
+  contract requested by the user.
 
 Task queue status:
 
-- Tasks 1-5 remain complete from prior observability slices.
-- Task 6 is complete: workspace read/list/search/patch and
-  OpenAI-compatible provider request metadata now emit safe structured traces.
-- Plan checkboxes updated for Tasks 1-6.
-- Roadmap status updated to reflect completed workspace/provider trace
-  alignment and the remaining Task 7 log-enabled smoke verification gap.
+- Tasks 1-6 remain complete from prior observability slices.
+- Task 6A is complete: a tracked example config now exists and is parsed by
+  deterministic CLI config tests.
+- `AGENTS.md` now requires future accepted config-key changes to update
+  `examples/config.toml` in the same change unless a reason is recorded.
+- Plan, roadmap, README, execution state, and handoff updated. Task 7 remains
+  next.
 
 Done condition:
 
-- Workspace/provider traces expose correlation and status metadata without
-  logging file contents, raw search queries, patch text, invalid argument
-  payloads, provider wire payloads, prompts, API keys, or response payloads.
+- `examples/config.toml` is a tested, copy-and-edit config starting point and
+  future config schema drift has a tracked maintenance rule.
 
 ## What Changed
 
 Files changed:
 
-- `Cargo.lock`
+- `AGENTS.md`
+- `README.md`
 - `ROADMAP.md`
-- `crates/merry-provider-openai/src/provider.rs`
-- `crates/merry-tool-workspace/Cargo.toml`
-- `crates/merry-tool-workspace/src/lib.rs`
-- `plans/2026-05-23-config-backed-observability.md`
 - `EXECUTION_STATE.md`
 - `HANDOFF.md`
+- `crates/merry-cli/src/config.rs`
+- `examples/config.toml`
+- `plans/2026-05-23-config-backed-observability.md`
 
 Summary:
 
-- Added `tracing` and `tracing-subscriber` coverage for
-  `merry-tool-workspace`.
-- Added workspace tool `runtime.workspace_tool.start` and
-  `runtime.workspace_tool.finish` traces for read/list/search/patch.
-- Added bounded path summaries, search `query_bytes`, patch preimage and
-  replacement byte counts, outcome byte counts, status labels, and diagnostic
-  codes.
-- Added payload-free invalid-argument traces so parse failures still produce a
-  failed tool trace without logging raw bad arguments.
-- Added provider `runtime.provider.request` metadata event and separate
-  `runtime.provider.stream` span with safe provider/model/request fields.
-- Added deterministic trace-capture and redaction tests for workspace tools and
-  provider metadata/render paths.
-- Incorporated reviewer feedback for cancelled/error finish traces, bounded path
-  summaries, provider span/event naming, render-path coverage, and
-  invalid-argument trace coverage.
+- Added `examples/config.toml` with the current user-facing config shape:
+  `[global]`, `[observability.log]`, `[providers.default]`, and
+  `[providers.openai-compatible]`.
+- Documented copy destination and the usual local edits: model, provider base
+  URL, and credential source.
+- Kept secrets out of the example; it references `OPENAI_API_KEY` and a
+  config-relative `secrets/openai.key`.
+- Added a CLI config unit test that includes and parses the example config,
+  proving it matches the current schema and resolves expected defaults.
+- Added repository guidance requiring future config-key changes to update the
+  example config.
+- Updated README/roadmap/plan/continuity status so the example config is treated
+  as a maintained artifact.
 
 ## Validation
 
 Commands run:
 
-- `cargo test -p merry-tool-workspace workspace_tool_invalid_arguments_trace_failed_without_payload -- --nocapture`
-- `cargo test -p merry-tool-workspace workspace_ -- --nocapture`
-- `cargo test -p merry-provider-openai provider_ -- --nocapture`
-- `cargo test -p merry-tool-workspace`
-- `cargo test -p merry-provider-openai`
-- `cargo clippy -p merry-tool-workspace --all-targets --all-features -- -D warnings`
-- `cargo clippy -p merry-provider-openai --all-targets --all-features -- -D warnings`
+- `cargo test -p merry-cli example_config_toml_matches_current_schema_and_resolves_user_defaults -- --nocapture`
+- `cargo test -p merry-cli config::tests -- --nocapture`
 - `cargo fmt --all --check`
+- `cargo clippy -p merry-cli --all-targets --all-features -- -D warnings`
+- `cargo test -p merry-cli`
 - `cargo clippy --all-targets --all-features -- -D warnings`
 - `cargo test --all`
 - `git diff --check`
+- `git status --short --untracked-files=all`
 
 Result:
 
 - Passed.
-- The invalid-arguments regression test failed first because parse failures
-  emitted no workspace tool trace; it passed after the payload-free trace fix.
-- Ignored live/network/bwrap tests remained ignored/non-default.
+- The example-config test failed first because `examples/config.toml` was
+  missing, then passed after adding the file.
+- Validation is deterministic/offline; no bwrap, network, or live credentials
+  were required.
 - No private ignored docs, credentials, or generated build artifacts were added.
 
 ## Decisions
 
 Decisions made:
 
-- Invalid workspace arguments emit tool-only start/finish traces with
-  `workspace_invalid_arguments`; traces intentionally do not include invalid
-  argument payload fields.
-- Workspace trace summaries are bounded to 96 characters for path-like fields.
-- Search traces record query byte count, not query text.
-- Patch traces record path plus byte counts, not old/new patch text or file
-  contents.
-- Provider request metadata is an event named `runtime.provider.request`; the
-  provider stream setup span is `runtime.provider.stream` to avoid conflating
-  span setup with rendered-request metadata.
-- Workspace executors do not log artifact IDs directly because artifact IDs are
-  runtime-owned; Task 5 runtime tool resolution traces already record tool
-  artifact IDs once the runtime records the outcome.
+- Use `examples/config.toml` as the canonical tracked example path.
+- Keep `api_key_env` and config-relative `api_key_file` in the example so it
+  works for both ordinary host runs and sandboxed live smoke setup.
+- Enable debug JSON logging in the example because its main use is smoke/debug
+  diagnosis; the comments explain the default XDG log path when `path` is
+  omitted.
+- Treat future config-key changes as incomplete unless they update
+  `examples/config.toml` or record why the key is intentionally omitted.
 
 Pending decisions:
 
@@ -114,9 +105,8 @@ Blockers:
 
 Residual risk:
 
-- Task 6 has deterministic unit/package/workspace coverage, but the combined
-  smoke log is not asserted yet. Task 7 should verify the existing coding-loop
-  smoke writes the expected config-backed JSON log records end to end.
+- The example is now schema-tested, but Task 7 still needs to verify the
+  end-to-end smoke log content generated from config-backed logging.
 
 Next exact action:
 
@@ -147,7 +137,8 @@ Forbidden edits:
 Do not reconsider:
 
 - The next proof gap is log-enabled smoke verification on top of completed
-  config/log, runtime/process trace, and workspace/provider trace slices.
+  config/log, runtime/process trace, workspace/provider trace, and example
+  config slices.
 - Default tests remain deterministic/offline; live provider and bwrap smoke are
   opt-in.
 
@@ -157,7 +148,7 @@ Status: committed by this lease
 
 Message:
 
-- feat: trace workspace tools and provider metadata
+- docs: add maintained example config
 
 No-commit reason:
 

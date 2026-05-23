@@ -90,6 +90,17 @@ Do not leak provider-specific response formats into runtime, memory, artifact, s
 - Memory activation must record why memory entered context.
 - Context compilation should be deterministic and reproducible from stored runtime state.
 
+## Configuration Example Contract
+
+- Keep the tracked user-facing example config at `examples/config.toml`.
+- When adding, removing, renaming, or changing any `config.toml` key accepted by
+  `merry-cli`, update `examples/config.toml` in the same change unless there is
+  a recorded reason it intentionally does not expose that key yet.
+- Do not put real API keys, host-specific secrets, private endpoints, or local
+  machine paths in `examples/config.toml`.
+- The CLI config tests must continue to parse `examples/config.toml`, so schema
+  drift breaks deterministic tests before it reaches users.
+
 ## Goal And MVP Discipline
 
 Agents must keep the project pointed at the current product goal, not just at

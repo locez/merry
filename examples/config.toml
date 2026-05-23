@@ -1,0 +1,37 @@
+# Copy this file to:
+#   $XDG_CONFIG_HOME/merry/config.toml
+# or, when XDG_CONFIG_HOME is unset:
+#   ~/.config/merry/config.toml
+#
+# Usually required edits:
+# - Set [providers.default].model for your provider.
+# - Set [providers.openai-compatible].base_url for non-OpenAI-compatible hosts.
+# - Export OPENAI_API_KEY, or write the key to:
+#     ~/.config/merry/secrets/openai.key
+#
+# Keep credentials out of this file when committing changes.
+
+[global]
+profile = "default"
+
+[observability.log]
+# Enable this for smoke/debug runs that should write structured JSON logs.
+enabled = true
+level = "debug"
+format = "json"
+# Optional. If omitted, Merry writes to:
+#   $XDG_STATE_HOME/merry/logs/merry.jsonl
+# or:
+#   ~/.local/state/merry/logs/merry.jsonl
+# path = "~/.local/state/merry/logs/merry.jsonl"
+
+[providers.default]
+provider = "openai-compatible"
+model = "gpt-4.1-mini"
+
+[providers.openai-compatible]
+base_url = "https://api.openai.com/v1"
+# Merry tries api_key_env first. In --with-sandbox live smokes the environment
+# is intentionally minimal, so api_key_file is the preferred fallback.
+api_key_env = "OPENAI_API_KEY"
+api_key_file = "secrets/openai.key"

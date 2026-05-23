@@ -61,6 +61,9 @@ The legacy `.merry/secrets/openai.env` live-smoke config has been replaced for
 the CLI debug smoke path by XDG TOML provider config; the legacy `--config`
 flag is rejected. Config-relative `api_key_file` remains available so
 sandboxed live smoke credentials do not have to pass through bwrap argv.
+The tracked copy-and-edit example is `examples/config.toml`; future accepted
+config-key changes should update that example in the same change and keep the
+example free of real secrets or host-private paths.
 
 The OpenAI provider target is the Responses API only. The provider request path is `/responses`; it preserves the Merry-owned `merry-llm` provider boundary, keeps OpenAI wire types private to `merry-provider-openai`, sets `store: false`, omits `previous_response_id`, avoids provider conversation state as Merry runtime state, and keeps `parallel_tool_calls: false` until runtime policy supports parallel tool calls. This provider work does not imply a live/OpenAI judgment path or public judgment API.
 
@@ -131,6 +134,9 @@ The OpenAI provider target is the Responses API only. The provider request path 
   preimage/replacement byte counts rather than patch text; provider tracing
   records safe request metadata without API keys, prompts, provider wire
   payloads, or response payloads.
+- A tracked user-facing config example exists at `examples/config.toml` and is
+  parsed by deterministic CLI config tests. `AGENTS.md` now requires future
+  config-key changes to maintain that example.
 
 ### Active
 

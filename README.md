@@ -126,6 +126,9 @@ by default. If logging is enabled and no path is configured, file logs should
 use `$XDG_STATE_HOME/merry/logs/merry.jsonl`, falling back to
 `~/.local/state/merry/logs/merry.jsonl`; failure to create/open that file should
 be a clear error, not an implicit stderr fallback.
+Use [examples/config.toml](examples/config.toml) as the copy-and-edit starting
+point for local configuration. The example is part of the tested config
+contract; changes to accepted config keys should update it in the same change.
 
 The existing `.merry/secrets/openai.env` live-smoke config is a transitional
 debug path from the first live proof. It is ignored and must not be committed.

@@ -27,6 +27,8 @@ the next end-to-end log-enabled smoke verification entry point.
 - Modify `crates/merry-tool-workspace/src/lib.rs`: emit workspace tool start/finish records with bounded path/query summaries and artifact/action status.
 - Modify `crates/merry-provider-openai/src/provider.rs`: align provider trace field names and ensure raw provider payloads/API keys remain absent.
 - Modify `crates/merry-cli/tests/debug.rs`: add CLI-level config/log smoke coverage that does not require bwrap, network, or live credentials.
+- Create/maintain `examples/config.toml`: copy-and-edit user config example
+  covered by CLI config parsing tests.
 
 ## Acceptance Commands
 
@@ -1615,6 +1617,33 @@ Completed implementation note:
   instead of raw query text; patch logs byte counts instead of patch text.
 - Provider tracing uses `runtime.provider.stream` for the stream span and
   `runtime.provider.request` for safe rendered-request metadata.
+
+## Task 6A: User-Facing Example Config Contract
+
+**Files:**
+- Create: `examples/config.toml`
+- Modify: `crates/merry-cli/src/config.rs`
+- Modify: `AGENTS.md`
+- Modify: `README.md`
+
+- [x] **Step 1: Add a schema-backed example config test**
+
+`merry-cli` has a deterministic unit test that includes
+`examples/config.toml`, parses it through `MerryConfig`, and asserts the
+current observability/provider defaults resolve as expected.
+
+- [x] **Step 2: Add copy-and-edit example config**
+
+`examples/config.toml` covers the currently supported user-facing keys:
+`[global]`, `[observability.log]`, `[providers.default]`, and
+`[providers.openai-compatible]`, including both `api_key_env` and
+config-relative `api_key_file`.
+
+- [x] **Step 3: Add maintenance rule**
+
+`AGENTS.md` now requires future config-key changes to update
+`examples/config.toml` in the same change unless a reason is recorded, and
+forbids real secrets/local private paths in that file.
 
 ## Task 7: End-To-End Log-Enabled Smoke Verification
 
