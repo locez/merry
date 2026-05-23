@@ -466,6 +466,38 @@ api_key_file = "secrets/openai.key"
     }
 
     #[test]
+    fn example_config_toml_matches_current_schema_and_resolves_user_defaults() {
+        let example = include_str!("../../../examples/config.toml");
+        let paths = XdgPaths::from_parts(home(), None, None);
+        let config = MerryConfig::load_optional_from_text(Some(example), &paths)
+            .expect("example config should parse")
+            .expect("example config should be present");
+
+        assert_eq!(config.profile(), Some("default"));
+        let log = config
+            .effective_log_settings(&paths)
+            .expect("example log settings should validate")
+            .expect("example should enable logs for smoke/debug use");
+        assert_eq!(log.level, LogLevel::Debug);
+        assert_eq!(log.format, LogFormat::Json);
+        assert_eq!(log.path, paths.default_log_file());
+
+        let provider = config
+            .openai_compatible_provider()
+            .expect("example provider should validate");
+        assert_eq!(provider.model.as_deref(), Some("gpt-4.1-mini"));
+        assert_eq!(
+            provider.base_url.as_deref(),
+            Some("https://api.openai.com/v1")
+        );
+        assert_eq!(provider.api_key_env.as_deref(), Some("OPENAI_API_KEY"));
+        assert_eq!(
+            provider.api_key_file.as_deref(),
+            Some(Path::new("/home/alice/.config/merry/secrets/openai.key"))
+        );
+    }
+
+    #[test]
     fn disabled_logging_has_no_effective_log_settings() {
         let paths = XdgPaths::from_parts(home(), None, None);
         let config = MerryConfig::load_optional_from_text(
