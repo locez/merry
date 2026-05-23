@@ -1,5 +1,5 @@
 use serde_json::Value;
-use std::process::Command;
+use std::{path::PathBuf, process::Command};
 
 fn merry() -> Command {
     Command::new(env!("CARGO_BIN_EXE_merry"))
@@ -16,6 +16,14 @@ fn merry_without_openai_env() -> Command {
         .env_remove("OPENAI_ORG_ID")
         .env_remove("OPENAI_PROJECT_ID");
     command
+}
+
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|path| path.parent())
+        .expect("merry-cli lives under crates/merry-cli")
+        .to_path_buf()
 }
 
 fn assert_debug_output(stdout: &[u8], expected_session_id: &str) {
@@ -559,6 +567,45 @@ fn debug_help_writes_usage_to_stdout() {
     assert!(stdout.contains("--session-id <SESSION_ID>"));
     assert!(stdout.contains("--input <TEXT>"));
     assert!(stdout.contains("openai"));
+    assert!(stdout.contains("coding-loop-smoke"));
+}
+
+#[test]
+fn debug_coding_loop_smoke_requires_with_sandbox() {
+    let output = merry_without_openai_env()
+        .args(["debug", "coding-loop-smoke"])
+        .output()
+        .expect("merry debug coding-loop-smoke should run");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        output.stdout.is_empty(),
+        "usage errors should not write stdout"
+    );
+    let stderr = std::str::from_utf8(&output.stderr).expect("stderr should be utf-8");
+    assert!(stderr.contains("--with-sandbox"));
+    assert!(stderr.contains("coding-loop-smoke"));
+    assert!(stderr.contains("Usage: merry debug"));
+}
+
+#[test]
+#[ignore = "requires Linux bubblewrap and local sandbox support"]
+fn debug_coding_loop_smoke_runs_inside_real_bwrap_when_opted_in() {
+    let mut command = merry_without_openai_env();
+    let output = command
+        .current_dir(repo_root())
+        .args(["--with-sandbox", "debug", "coding-loop-smoke"])
+        .output()
+        .expect("merry --with-sandbox debug coding-loop-smoke should run");
+
+    assert!(
+        output.status.success(),
+        "coding-loop smoke should exit successfully: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty(), "smoke should not write stderr");
+    let stdout = std::str::from_utf8(&output.stdout).expect("stdout should be utf-8");
+    assert_eq!(stdout, "coding-loop-smoke: ok\n");
 }
 
 #[test]

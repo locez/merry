@@ -34,49 +34,49 @@ Style notes:
 
 Current milestone or track:
 
-- Runtime Coding Loop Harness first slice.
+- Real bwrap coding-loop smoke.
 
 Session milestone:
 
-- Implement the first deterministic Minimal Useful Coding Loop harness slice.
+- Add an opt-in CLI smoke that runs the coding-loop shape inside the existing `merry --with-sandbox` bwrap handoff.
 
 Goal:
 
-- Add a focused fake-provider/fake-runner test that proves one runtime-owned loop can inspect workspace evidence, apply one constrained patch, run verification, continue through tool results, and finish with deterministic events/artifacts/ledger facts.
+- Prove the same inspect -> exact evidence -> constrained patch -> verification -> final loop shape can be executed from `merry-cli` inside the real bwrap sandbox, while keeping default tests deterministic and not requiring live provider credentials.
 
 Task queue:
 
-- Dispatched read-only subagent exploration for runtime loop and process/patch/sandbox entry points.
-- Implemented the deterministic multi-step coding-loop harness test.
-- Updated roadmap/continuity status to name exactly what the first slice proves and what remains.
-- Ran focused verification.
-- Commit is pending final staged review.
+- Dispatch read-only subagent exploration for CLI bwrap smoke and process/profile blockers. Done.
+- Add a narrow opt-in CLI debug smoke subcommand for the sandboxed coding-loop shape. Done.
+- Add tests for help/usage and non-sandbox denial; run a real smoke manually if bwrap works in this environment. Done.
+- Update roadmap/continuity status with what the bwrap slice proves and what remains. Done.
+- Commit the lease. Done.
 
 Allowed expansion:
 
-- Minimal helper test code under the owned integration-test file.
+- Minimal CLI dependency on `merry-tool-workspace` for outer-layer smoke composition.
+- Minimal CLI helper code for scripted provider, disposable fixture setup, runtime construction, and result validation.
 - Small documentation/status updates tied to the implemented slice.
 
 Done condition:
 
-- A deterministic test proves the first coding-loop slice with runtime agent loop, workspace patch, process verification, tool continuations, and final completion. Continuity state and handoff reflect the implemented evidence and the next exact slice.
+- The CLI exposes an explicit opt-in smoke command that refuses to run outside a validated sandbox handoff, executes the coding-loop shape inside bwrap with real process runner and workspace patch tooling, and reports deterministic success. Continuity state and handoff record the command and residual live-provider/config work.
 
 Drift boundary:
 
-- Do not implement a full autonomous coding agent, real live-provider harness, broad process profile, broad CLI UX, graph memory, skill VM, or Python SDK in this lease.
+- Do not implement a full autonomous coding agent, live-provider harness, broad process profile, broad CLI UX, graph memory, skill VM, Python SDK, or arbitrary shell expansion in this lease.
 
 Task type: implementation
 
 Acceptance criteria:
 
-- A focused test runs `Runtime::run_agent_loop` for at least five provider steps: inspect, read exact evidence, patch, verify, final answer.
-- The test uses a fake provider and injected fake process runner, not a live provider or host process.
-- The loop records exact process argv for inspection and verification.
-- The patch goes through `workspace_patch_file` with low-risk patch opt-in and mutates only a temp workspace fixture.
-- The loop reaches `AgentLoopStatus::Completed`, leaves no pending tool calls, and records artifact-before-resolution ordering through lifecycle facts.
-- The loop performs four tool-result continuation steps before the final
-  completion; each continuation carries the newly resolved tool result through
-  provider-neutral runtime state.
+- The CLI command is explicit and non-default, under debug/smoke tooling.
+- The command requires the real `--with-sandbox` child handoff evidence before running local workspace effect verification.
+- The smoke uses a deterministic scripted provider, not a live provider.
+- The smoke uses `TokioProcessRunner` for real `rg --files` and verification process execution inside the sandbox.
+- The smoke uses `workspace_patch_file` for the edit and mutates only a disposable fixture under ignored local state.
+- The smoke reaches `AgentLoopStatus::Completed`, leaves no pending tool calls, and validates the patched fixture content.
+- Default `cargo test` does not require bwrap or live credentials.
 
 ## Scope
 
@@ -86,7 +86,9 @@ Allowed edits:
 - `HANDOFF.md`
 - `DECISIONS.md`
 - `ROADMAP.md`
-- `crates/merry-tool-workspace/tests/runtime_integration.rs`
+- `crates/merry-cli/Cargo.toml`
+- `crates/merry-cli/src/main.rs`
+- `crates/merry-cli/tests/debug.rs`
 - small `README.md` status update if needed
 
 Forbidden edits:
@@ -106,18 +108,20 @@ Protected files:
 
 Validation command:
 
-- `cargo test -p merry-tool-workspace coding_loop_harness`
+- `cargo test -p merry-cli`
+- `cargo fmt --all --check`
+- `cargo clippy -p merry-cli --all-targets -- -D warnings`
 - `git diff --check`
-
-Validation status: passed
+- opt-in real smoke command when supported by the host
 
 Validation notes:
 
-- `cargo test -p merry-tool-workspace coding_loop_harness` passed.
-- `cargo test -p merry-tool-workspace` passed.
-- `cargo fmt --all --check` passed after formatting.
-- `cargo clippy -p merry-tool-workspace --all-targets -- -D warnings` passed.
-- `git diff --check` passed.
+- Passed:
+  - `cargo fmt --all --check`
+  - `cargo clippy -p merry-cli --all-targets -- -D warnings`
+  - `cargo test -p merry-cli`
+  - `cargo test -p merry-cli debug_coding_loop_smoke_runs_inside_real_bwrap_when_opted_in -- --ignored`
+- The default CLI test suite skips the real bwrap smoke; the ignored smoke runs successfully when explicitly selected on this host.
 
 ## Research
 
@@ -125,17 +129,17 @@ Research required: no
 
 Research reason:
 
-- User allowed subagents. Read-only explorer subagents are being used to confirm existing runtime loop/process/patch entry points; no external research is required.
+- User allowed subagents. Read-only explorer subagents are being used to confirm CLI bwrap smoke entry points and process/profile blockers; no external research is required.
 
 Research artifact:
 
-- Explorer outputs from subagent workers Feynman and Godel in this lease.
+- Explorer outputs from subagent workers in this lease.
 
 ## Next Action
 
 Next exact action:
 
-- Add the real `bwrap` sandbox smoke for the same coding-loop shape, likely by introducing a CLI or test wrapper that can register workspace tools, use a disposable fixture, and run with the existing `--with-sandbox` handoff without inheriting secrets.
+- Implement a reusable runtime-owned read-only process profile or tool-set registration layer for the coding-loop harness, covering `rg --files`, literal search, and exact source evidence retrieval without adding one command match at a time.
 
 Do not reconsider:
 
