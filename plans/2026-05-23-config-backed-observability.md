@@ -1649,9 +1649,14 @@ forbids real secrets/local private paths in that file.
 
 **Files:**
 - Modify: `crates/merry-cli/tests/debug.rs`
+- Modify: `crates/merry-cli/src/main.rs` for deterministic CLI-crate smoke coverage.
+- Modify: `crates/merry-runtime/src/agent_loop.rs`
+- Modify: `crates/merry-runtime/src/runtime.rs`
+- Modify: `crates/merry-runtime/src/session.rs`
+- Modify: `crates/merry-runtime/tests/agent_loop.rs`
 - Modify: `README.md` only if the implemented command behavior changes public usage text.
 
-- [ ] **Step 1: Add deterministic CLI log smoke**
+- [x] **Step 1: Add deterministic CLI log smoke**
 
 Add a CLI integration test that runs the deterministic debug command with config-backed logs:
 
@@ -1685,7 +1690,7 @@ fn debug_command_writes_runtime_action_logs_to_default_xdg_state_path() {
 }
 ```
 
-- [ ] **Step 2: Add log path failure integration test**
+- [x] **Step 2: Add log path failure integration test**
 
 ```rust
 #[test]
@@ -1715,7 +1720,7 @@ fn debug_command_fails_clearly_when_default_log_parent_cannot_be_created() {
 }
 ```
 
-- [ ] **Step 3: Run full default validation**
+- [x] **Step 3: Run full default validation**
 
 ```bash
 cargo fmt --all --check
@@ -1725,7 +1730,7 @@ cargo test --all
 
 Expected: all default checks pass without bwrap, network, or live credentials.
 
-- [ ] **Step 4: Run manual bwrap smoke with logs**
+- [x] **Step 4: Run manual bwrap smoke with logs**
 
 Create a local config outside the repo, using a temporary XDG root:
 
@@ -1752,12 +1757,37 @@ tail -n 40 "$tmp/state/merry/logs/merry.jsonl"
 
 Expected: stdout contains `coding-loop-smoke: ok`; the log file contains `runtime.loop.start`, `runtime.provider.request`, `runtime.tool.pending`, `runtime.process.execute.start`, `runtime.process.execute.finish`, and `runtime.loop.finish`.
 
-- [ ] **Step 5: Commit final verification coverage**
+- [x] **Step 5: Commit final verification coverage**
 
 ```bash
-git add crates/merry-cli/tests/debug.rs README.md
+git add crates/merry-cli/src/main.rs crates/merry-cli/tests/debug.rs \
+  crates/merry-runtime/src/agent_loop.rs crates/merry-runtime/src/runtime.rs \
+  crates/merry-runtime/src/session.rs crates/merry-runtime/tests/agent_loop.rs \
+  plans/2026-05-23-config-backed-observability.md ROADMAP.md EXECUTION_STATE.md \
+  HANDOFF.md DECISIONS.md README.md
 git commit -m "test(cli): cover config-backed log smokes"
 ```
+
+Completed implementation note:
+
+- Added a deterministic CLI-crate coding-loop log smoke using XDG TOML
+  observability settings, a temp fixture, scripted provider, and fake process
+  runner. It asserts `runtime.loop.start`, `runtime.provider.request`,
+  `runtime.tool.pending`, `runtime.tool.execute.start/finish`,
+  `runtime.workspace_tool.start/finish`, `runtime.process.execute.start/finish`,
+  `runtime.artifact.record`, `diagnostic_code`, and completed terminal status
+  are present without raw prompt text, source contents, process stdout, model
+  final text, provider wire payloads, or secret-like values.
+- Added default XDG state log-path and log-path failure integration tests for
+  `merry debug`, and isolated integration-test XDG roots from host user config.
+- Added provider-neutral runtime request tracing so deterministic/scripted
+  providers emit the same safe request metadata shape as adapter-backed paths,
+  and added artifact-record traces after artifact state is written.
+- Ran the real deterministic bwrap smoke with a temporary XDG config:
+  `target/debug/merry --with-sandbox debug coding-loop-smoke`; stdout was
+  `coding-loop-smoke: ok` and the log tail contained provider request,
+  workspace patch, process verification, artifact record, tool finish, and
+  loop finish records.
 
 ## Self-Review Checklist
 

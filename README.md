@@ -17,13 +17,13 @@ verification inside the CLI `bwrap` sandbox, and returns a final answer backed
 by runtime events, artifacts, and ledger facts.
 
 Policy and shell/process design remain important, but they are support work for
-that executable acceptance target. The next boundary is configuration-backed
+that executable acceptance target. Merry now has configuration-backed
 observability for the runtime-owned tool and action surface that already proves
-the loop. Before adding a new interactive CLI, REPL, or TUI, Merry needs
-XDG/TOML configuration plus structured logs/traces that show runtime loop
-boundaries, provider request metadata, tool choices, process execution,
-artifact IDs, diagnostics, cancellation, and final loop status while
-deterministic and live smokes run.
+the loop: XDG/TOML logging can show runtime loop boundaries, provider request
+metadata, tool choices, process execution, artifact IDs, diagnostics,
+cancellation, and final loop status while deterministic and live smokes run.
+The next boundary is reusable runtime-owned process/tool profiling rather than
+another one-off CLI assembly path.
 
 Shell/process remains the primary verification and inspection actuator under
 runtime control. A future model should be able to compose ordinary process
@@ -112,9 +112,10 @@ bwrap and OpenAI-compatible live-provider smokes using ignored local
 credentials. `merry --with-sandbox debug coding-loop-smoke` proves the
 deterministic bwrap/process/patch path. `merry --with-sandbox debug
 coding-loop-live-smoke` is the live LLM proof lane, and the user has reported a
-successful credentialed run against their trusted configured server. The next
-roadmap focus is to make these paths observable through XDG TOML config-backed
-structured logs/traces.
+successful credentialed run against their trusted configured server.
+Config-backed structured logs/traces for the deterministic coding-loop smoke
+are now covered by deterministic tests and a real bwrap smoke with temporary
+XDG log config.
 Workspace Patch/Write and Shell/Process should both serve that loop through
 runtime-owned policy rather than define ad hoc permission rules of their own.
 

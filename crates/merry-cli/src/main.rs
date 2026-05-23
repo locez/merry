@@ -2211,7 +2211,7 @@ mod tests {
         ModelResponse, ModelStreamContext, ModelToolCall, ModelToolCallId, ToolArguments,
     };
     use merry_runtime::{
-        AcceptedLocalWorkspaceProcessAdmission, MAX_PROCESS_OUTPUT_LIMIT_BYTES,
+        AcceptedLocalWorkspaceProcessAdmission, AgentLoopConfig, MAX_PROCESS_OUTPUT_LIMIT_BYTES,
         ProcessActionIntent, ProcessEnvPolicy, ProcessExitStatus, ProcessRunner,
         ProcessRunnerContext, ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput,
         Runtime, StepContext, StepInput,
@@ -2370,6 +2370,102 @@ mod tests {
                 assert!(message.contains("coding-loop-smoke"));
             }
             _ => panic!("expected debug usage error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn coding_loop_smoke_writes_configured_json_log_records_without_payloads() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let config_root = temp.path().join("config");
+        let state_root = temp.path().join("state");
+        let paths = super::config::XdgPaths::from_parts(
+            PathBuf::from("/home/alice"),
+            Some(config_root),
+            Some(state_root),
+        );
+        let config = super::config::MerryConfig::load_optional_from_text(
+            Some("[observability.log]\nenabled = true\nlevel = \"debug\"\nformat = \"json\"\n"),
+            &paths,
+        )
+        .expect("config should parse")
+        .expect("config should be present");
+        let log_settings = super::effective_log_settings(Some(&config), &paths)
+            .expect("log settings should validate")
+            .expect("logging should be enabled");
+        let log_path = log_settings.path.clone();
+        let guard = super::observability::init_observability(Some(&log_settings))
+            .expect("observability should initialize")
+            .expect("file logging should install a guard");
+
+        let smoke_root = temp.path().join("coding-loop-smoke-fixture");
+        std::fs::create_dir_all(smoke_root.join("src")).expect("fixture src dir should exist");
+        std::fs::write(
+            smoke_root.join("Cargo.toml"),
+            "[package]\nname = \"merry-coding-loop-smoke\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[lib]\npath = \"src/lib.rs\"\n",
+        )
+        .expect("fixture Cargo.toml should write");
+        std::fs::write(
+            smoke_root.join("src/lib.rs"),
+            super::coding_loop_smoke_initial_source(),
+        )
+        .expect("fixture source should write");
+        let runtime = super::build_coding_loop_smoke_runtime(
+            &smoke_root,
+            None,
+            AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
+            Arc::new(FakeProcessRunner::succeeding(
+                "sensitive process stdout must not leak\n",
+            )),
+        )
+        .expect("coding-loop smoke runtime should build");
+
+        let result = runtime
+            .run_agent_loop(
+                StepInput::user_text("Run the sandboxed coding-loop smoke.")
+                    .expect("valid step input"),
+                StepContext::default(),
+                AgentLoopConfig::new(8).expect("valid loop config"),
+            )
+            .await
+            .expect("coding-loop smoke should run");
+        super::assert_coding_loop_smoke_result(&runtime, &result, &smoke_root)
+            .await
+            .expect("coding-loop smoke result should validate");
+        drop(guard);
+
+        let log = std::fs::read_to_string(&log_path).expect("log file should be written");
+        for expected in [
+            "\"event\":\"runtime.loop.start\"",
+            "\"event\":\"runtime.provider.request\"",
+            "\"event\":\"runtime.tool.pending\"",
+            "\"event\":\"runtime.tool.execute.start\"",
+            "\"event\":\"runtime.workspace_tool.start\"",
+            "\"event\":\"runtime.workspace_tool.finish\"",
+            "\"event\":\"runtime.process.execute.start\"",
+            "\"event\":\"runtime.process.execute.finish\"",
+            "\"event\":\"runtime.artifact.record\"",
+            "\"event\":\"runtime.tool.execute.finish\"",
+            "\"event\":\"runtime.loop.finish\"",
+            "\"session_id\":\"coding-loop-smoke\"",
+            "\"tool_name\":\"run_process\"",
+            "\"tool_name\":\"workspace_read_file\"",
+            "\"tool_name\":\"workspace_patch_file\"",
+            "\"status\":\"completed\"",
+            "\"status\":\"succeeded\"",
+            "\"diagnostic_code\"",
+        ] {
+            assert!(log.contains(expected), "log missing {expected}");
+        }
+        for forbidden in [
+            "Run the sandboxed coding-loop smoke.",
+            "pub fn greeting",
+            "\"unfixed\"",
+            "sensitive process stdout must not leak",
+            "coding-loop-smoke patched greeting and verified it",
+            "sk-",
+            "provider_wire",
+        ] {
+            assert!(!log.contains(forbidden), "log leaked {forbidden}");
         }
     }
 

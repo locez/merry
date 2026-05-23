@@ -1467,6 +1467,7 @@ async fn run_provider_step(
 
     let stream_context = ModelStreamContext::new(token.clone());
     let provider = provider_config.provider();
+    trace_provider_request(provider.name().as_str(), &request, sent_continuation_count);
     tracing::debug!(
         category = "provider_setup_start",
         "runtime provider stream setup started"
@@ -1698,6 +1699,24 @@ async fn run_provider_step(
             }
         }
     }
+}
+
+fn trace_provider_request(
+    provider_name: &str,
+    request: &merry_llm::ModelRequest,
+    continuation_count: usize,
+) {
+    tracing::debug!(
+        event = "runtime.provider.request",
+        provider_name,
+        model = request.model().as_str(),
+        message_count = request.messages().len(),
+        tool_count = request.tools().len(),
+        continuation_count,
+        max_output_tokens = request.generation().max_output_tokens(),
+        allow_parallel_tool_calls = request.generation().allow_parallel_tool_calls(),
+        "runtime provider request metadata"
+    );
 }
 
 async fn clear_current_activated_memories(inner: &RuntimeInner) {

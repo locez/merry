@@ -137,10 +137,18 @@ The OpenAI provider target is the Responses API only. The provider request path 
 - A tracked user-facing config example exists at `examples/config.toml` and is
   parsed by deterministic CLI config tests. `AGENTS.md` now requires future
   config-key changes to maintain that example.
+- End-to-end log-enabled smoke verification is implemented. A deterministic
+  CLI-crate smoke enables file-backed JSON logs through XDG TOML config and
+  proves runtime loop, provider request, workspace tool, process execution,
+  artifact record, tool resolution, diagnostic-code, and completed terminal
+  status records without raw prompt, source, process stdout, provider wire
+  payload, or secret-like content. A real `bwrap` run of
+  `target/debug/merry --with-sandbox debug coding-loop-smoke` with temporary
+  XDG log config passed and produced the expected combined smoke log.
 
 ### Active
 
-- P0: continue the Minimal Useful Coding Loop as the current MVP proof. The loop now has a deterministic fake-provider/fake-runner slice, a deterministic real `bwrap` process-runner smoke, and a user-verified live-provider smoke command. The next proof gap is end-to-end observability verification: a log-enabled smoke should show the already-instrumented runtime loop, provider request metadata, workspace tool actions, artifact/tool resolution, process execution, failures/cancellations, and final loop status together.
+- P0: continue the Minimal Useful Coding Loop as the current MVP proof. The loop now has a deterministic fake-provider/fake-runner slice, a deterministic real `bwrap` process-runner smoke, a user-verified live-provider smoke command, and end-to-end config-backed log verification for the deterministic coding-loop smoke.
 - P0: keep the Runtime Coding Loop Harness executable against a disposable fixture repository. The default lane uses fake provider/fake runner for deterministic `cargo test`; the deterministic `bwrap` lane is an explicit ignored smoke; the live OpenAI-compatible lane is also explicit and ignored and has passed in the user's trusted configured environment.
 - P0: define a runtime-owned read-only process profile for command families, not one-off command matches. Initial coverage should include `rg --files`, literal `rg <pattern>`, and a read-only file-slice command shape such as `sed -n RANGE FILE`, or an equivalent typed process/read tool that proves the same evidence loop.
 - P0: keep edit/write on the typed workspace patch path. The MVP loop should apply one constrained patch through `workspace_patch_file` or its runtime-owned successor, record artifact/audit/ledger evidence, and then run verification.
@@ -152,7 +160,6 @@ The OpenAI provider target is the Responses API only. The provider request path 
 
 ### Next Active
 
-- Continue the observability-first coding-loop design in `specs/2026-05-23-observability-first-coding-loop.md`. The CLI config/log/sandbox/provider-config slice, runtime loop/process tracing slice, and workspace/provider trace-alignment slice are complete; the next slice is end-to-end log-enabled smoke verification.
 - Replace one-off process classification growth with a runtime-owned read-only process profile for reusable workspace inspection and exact evidence retrieval, including a file-slice shape such as `sed -n RANGE FILE` or an equivalent typed read tool.
 - Move coding-loop tool-set/profile registration toward reusable runtime/library construction so upper layers do not have to assemble `process_command_tool`, workspace read/search fallback, and patch tooling ad hoc.
 - Keep the opt-in live OpenAI-compatible smoke as a regression lane; when it fails, inspect the failure as model/tool-contract evidence and tune only the smallest runtime/provider/tool fix needed.
@@ -227,16 +234,22 @@ Completed third slice:
   invalid arguments, cancellation after start, domain failures, and
   request-render metadata without secrets or prompt text.
 
-Remaining tasks:
+Completed fourth slice:
 
-- Add end-to-end log-enabled smoke verification for the existing deterministic
-  coding-loop smoke and the configured log path.
-- Check that the combined smoke log contains runtime loop, provider request,
-  workspace tool, process execution, artifact/tool resolution, diagnostic, and
-  terminal status records without provider wire payloads, secrets, prompts, file
-  contents, or process output contents.
-- Keep the existing deterministic `bwrap` and live provider smokes explicit
-  and non-default.
+- Runtime now emits provider-neutral `runtime.provider.request` metadata before
+  calling any provider, so deterministic/scripted providers are observable
+  without exercising a live adapter.
+- Runtime artifact writes emit `runtime.artifact.record` after artifact state is
+  written and before the observable event path claims the artifact.
+- A deterministic CLI-crate smoke covers the combined coding loop log with
+  file-backed JSON logging from XDG TOML config and asserts no raw prompt, file
+  content, process stdout, model final text, provider wire payload, or
+  secret-like value leaks into the log.
+- Default CLI integration tests cover the default XDG state log path and clear
+  failure when the log parent cannot be created.
+- The existing deterministic `bwrap` and live provider smokes remain explicit
+  and non-default; the deterministic `bwrap` smoke has passed with temporary
+  XDG log config.
 
 Non-goals:
 

@@ -206,3 +206,45 @@ the provider config boundary and sandbox config mount behavior.
 Follow-up:
 Implement this only inside the CLI/provider config loading path. Do not put API
 keys into runtime state, logs, artifacts, or provider-neutral request types.
+
+## 2026-05-23 - Runtime Emits Provider-Neutral Request And Artifact Trace Records
+
+Decision:
+Runtime emits safe `runtime.provider.request` metadata before calling any model
+provider, and session-owned artifact writes emit `runtime.artifact.record`
+after artifact state is written. Provider adapters may still add
+adapter-specific metadata such as endpoint paths, but deterministic/scripted
+providers no longer need adapter-specific tracing to prove the request
+boundary.
+
+Reason:
+Task 7 needed an offline deterministic coding-loop log smoke that covers the
+same operator-visible provider and artifact boundaries as the live path. The
+deterministic smoke uses a scripted provider, so relying only on OpenAI-adapter
+tracing would leave the default smoke unable to prove provider-request
+observability. Runtime owns provider-neutral request construction and artifact
+state ordering, so those are the right stable trace points.
+
+Evidence:
+`coding_loop_smoke_writes_configured_json_log_records_without_payloads` enables
+file-backed JSON logs from XDG TOML config and verifies loop, provider request,
+tool, workspace, process, artifact, diagnostic-code, and completed status
+records without raw prompt, source, process stdout, model final text, provider
+wire payload, or secret-like content. The runtime agent-loop trace test now
+asserts provider request and artifact record events, and a real deterministic
+`bwrap` smoke with temporary XDG log config passed.
+
+Tradeoff:
+OpenAI-compatible runs can now contain both provider-neutral runtime request
+metadata and adapter-specific request metadata. This is acceptable because the
+runtime record proves the Merry-owned request boundary, while the adapter
+record can include provider endpoint details without leaking wire payloads.
+
+Reversible:
+Yes. If a later trace schema separates runtime and adapter request events, the
+event names can be split while preserving the same safe field set.
+
+Follow-up:
+Use the verified observability layer while moving process inspection toward a
+runtime-owned read-only process profile and reusable coding-loop tool-set
+registration.

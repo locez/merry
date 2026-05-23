@@ -46,15 +46,15 @@ Current milestone or track:
 
 Session milestone:
 
-- Add and enforce the user-facing `examples/config.toml` copy-and-edit
-  contract requested by the user.
+- Task 7, end-to-end log-enabled smoke verification.
 
 Goal:
 
-- Provide a tracked example config that users can copy to
-  `$XDG_CONFIG_HOME/merry/config.toml` or `~/.config/merry/config.toml` and
-  edit only necessary values, while making future config-schema changes maintain
-  that example.
+- Prove that config-backed JSON logs can capture the deterministic coding-loop
+  smoke end to end: runtime loop, provider request, workspace tool, process
+  execution, artifact record, tool resolution, diagnostic-code, and completed
+  terminal status records, without raw prompt, source, process stdout, provider
+  wire payload, model final text, or secret-like content.
 
 Task queue status:
 
@@ -65,70 +65,79 @@ Task queue status:
 - Task 5, runtime loop and process tracing: completed.
 - Task 6, workspace tool and provider trace alignment: completed.
 - Task 6A, user-facing example config contract: completed.
-- `examples/config.toml` is now a tracked source-of-truth file and is parsed by
-  deterministic CLI config tests.
-- `AGENTS.md` now requires future accepted config-key changes to update
-  `examples/config.toml` in the same change unless a reason is recorded.
-- Plan/roadmap/readme/continuity state updated. Task 7 remains next.
+- Task 7, end-to-end log-enabled smoke verification: completed.
+- Runtime now emits provider-neutral `runtime.provider.request` metadata before
+  any provider call and `runtime.artifact.record` after artifact state is
+  written.
+- CLI tests isolate default integration-test XDG roots from host user config.
 
 Allowed expansion:
 
-- Example config file and schema-backed test coverage.
-- Repository maintenance rule requiring future config-key changes to keep the
-  example current.
-- Public-safe README, roadmap, plan, and continuity status updates.
+- Runtime/provider-neutral trace fields required to make deterministic smoke
+  logs cover the accepted observability contract.
+- CLI deterministic test support and integration-test XDG isolation.
+- Public-safe README, roadmap, plan, decision, and continuity status updates.
 
 Done condition:
 
-- `examples/config.toml` exists, contains all currently supported user-facing
-  config sections/keys, and contains no real secrets.
-- A deterministic CLI config test parses `examples/config.toml` with
-  `MerryConfig` and asserts expected log/provider resolution.
-- Repository guidance records that future config-key changes must update the
-  example config.
-- Focused and relevant validation pass.
+- Deterministic CLI-crate coding-loop log smoke enables file-backed JSON logs
+  from XDG TOML config and asserts the combined log contains loop, provider,
+  tool, workspace, process, artifact, diagnostic-code, and final status records.
+- The deterministic log smoke asserts raw prompt/source/stdout/model final
+  output/provider wire/secret-like payloads are absent.
+- CLI integration tests cover the default XDG state log path and clear failure
+  when the log parent cannot be created.
+- Runtime trace tests assert provider request and artifact record events.
+- Real deterministic `bwrap` coding-loop smoke with temporary XDG log config
+  passes and the log tail contains the expected combined records.
+- Focused and full default validation pass.
 - Handoff updated and lease committed.
 
 Drift boundary:
 
-- Do not implement Task 7 end-to-end log-enabled smoke verification in this
-  lease.
 - Do not add TUI, REPL, or interactive CLI scope.
 - Do not move private ignored notes into tracked files.
 - Do not commit `.superpowers/`, `.merry/`, `docs/`, or `merry-raw-docs/`.
+- Do not make live provider behavior part of default tests.
 
 Task type: implementation/docs
 
 Acceptance criteria:
 
-- `examples/config.toml` documents copy destination and necessary local edits.
-- `examples/config.toml` includes `[global]`, `[observability.log]`,
-  `[providers.default]`, and `[providers.openai-compatible]`.
-- `examples/config.toml` uses placeholders or config-relative paths only; no
-  real API key, host-private endpoint, or local machine path is committed.
-- `cargo test -p merry-cli example_config_toml_matches_current_schema_and_resolves_user_defaults -- --nocapture`
-  proves the example parses against current schema.
-- Future config schema maintenance is encoded in tracked repo instructions.
+- `coding_loop_smoke_writes_configured_json_log_records_without_payloads`
+  covers deterministic coding-loop log content from XDG TOML config.
+- `debug_command_writes_runtime_action_logs_to_default_xdg_state_path` proves
+  omitted log path resolves to the XDG state fallback.
+- `debug_command_fails_clearly_when_default_log_parent_cannot_be_created`
+  proves logging setup fails clearly before writing command stdout.
+- `agent_loop_traces_loop_steps_tool_process_and_terminal_status` covers
+  provider request and artifact record events in runtime trace capture.
+- `cargo fmt --all --check`, `cargo clippy --all-targets --all-features -- -D warnings`,
+  and `cargo test --all` pass.
 
 ## Scope
 
 Allowed edits:
 
-- `AGENTS.md`
 - `README.md`
 - `ROADMAP.md`
+- `DECISIONS.md`
 - `EXECUTION_STATE.md`
 - `HANDOFF.md`
-- `examples/config.toml`
-- `crates/merry-cli/src/config.rs`
 - `plans/2026-05-23-config-backed-observability.md`
+- `crates/merry-cli/src/main.rs`
+- `crates/merry-cli/tests/debug.rs`
+- `crates/merry-runtime/src/agent_loop.rs`
+- `crates/merry-runtime/src/runtime.rs`
+- `crates/merry-runtime/src/session.rs`
+- `crates/merry-runtime/tests/agent_loop.rs`
 
 Forbidden edits:
 
 - private ignored source material under `docs/` or `merry-raw-docs/`
 - real credentials or generated build artifacts
 - `.superpowers/`, `.merry/`, `docs/`, or `merry-raw-docs/` content
-- Task 7 CLI log-smoke implementation in this lease
+- full-screen TUI, REPL, or multi-turn UI scope
 
 Protected files:
 
@@ -140,52 +149,62 @@ Protected files:
 
 Validation command:
 
-- `cargo test -p merry-cli example_config_toml_matches_current_schema_and_resolves_user_defaults -- --nocapture`
-- `cargo test -p merry-cli config::tests -- --nocapture`
-- `cargo fmt --all --check`
-- `cargo clippy -p merry-cli --all-targets --all-features -- -D warnings`
+- `cargo test -p merry-cli coding_loop_smoke_writes_configured_json_log_records_without_payloads -- --nocapture`
+- `cargo test -p merry-cli debug_command --test debug -- --nocapture`
+- `cargo test -p merry-runtime agent_loop_traces_loop_steps_tool_process_and_terminal_status -- --nocapture`
 - `cargo test -p merry-cli`
+- `cargo fmt --all --check`
 - `cargo clippy --all-targets --all-features -- -D warnings`
 - `cargo test --all`
+- `target/debug/merry --with-sandbox debug coding-loop-smoke` with temporary
+  XDG config enabling JSON logs
 - `git diff --check`
 - `git status --short --untracked-files=all`
 
 Validation notes:
 
-- The example-config test was written first and failed to compile because
-  `examples/config.toml` did not exist; it passed after adding the example.
-- Validation remains deterministic/offline and does not require bwrap, network,
-  or live credentials.
+- The focused coding-loop log smoke failed first because successful log records
+  omitted `diagnostic_code`; the runtime loop/tool finish logs now emit an
+  empty diagnostic code on successful paths and focused validation passes.
+- First `cargo test` attempts needed network escalation to download missing
+  crates. After dependencies were cached, default checks ran normally.
+- The real deterministic `bwrap` smoke passed with temporary XDG log config and
+  stdout `coding-loop-smoke: ok`.
+- Validation remains deterministic/offline by default; live provider and bwrap
+  smoke lanes remain opt-in/manual.
 
 ## Research
 
-Research required: no
+Research required: yes
 
 Research reason:
 
-- The local config implementation and user request were sufficient. No external
-  behavior needed lookup.
+- User allowed subagents; a read-only researcher checked which existing trace
+  events and fields Task 7 could rely on, and identified the deterministic
+  provider-request gap.
 
 Research artifact:
 
-- Repo inspection of `merry-cli` config parsing, README/roadmap config
-  contract, and existing observability plan.
+- Subagent finding: runtime loop/tool/process/workspace trace points already
+  existed; deterministic `CodingLoopSmokeProvider` did not naturally emit
+  `runtime.provider.request`, so provider-neutral runtime request tracing was
+  needed.
 
 ## Next Action
 
 Next exact action:
 
-- Continue `plans/2026-05-23-config-backed-observability.md` at Task 7:
-  End-To-End Log-Enabled Smoke Verification. Start with a deterministic CLI log
-  smoke that enables file-backed JSON logs from XDG TOML config and asserts the
-  log contains runtime loop, provider request, workspace tool, process
-  execution, artifact/tool resolution, diagnostic, and final loop status
-  records without secrets or raw payload contents.
+- Start the next lease from `ROADMAP.md` Next Active: replace one-off process
+  classification growth with a runtime-owned read-only process profile for
+  reusable workspace inspection and exact evidence retrieval. Initial coverage
+  should include `rg --files`, literal `rg <pattern>`, and a file-slice shape
+  such as `sed -n RANGE FILE` or an equivalent typed read tool.
 
 Do not reconsider:
 
 - Do not make event-first CLI the primary next milestone.
-- Do not start TUI or REPL before observability exists.
+- Do not start TUI or REPL before reusable runtime/process/tool profiles are
+  clearer.
 - Do not reintroduce repo-local `.merry/secrets/openai.env` as the live-smoke
   provider config path.
 - Do not let future config schema changes bypass `examples/config.toml`.
