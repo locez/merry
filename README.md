@@ -22,17 +22,25 @@ observability for the runtime-owned tool and action surface that already proves
 the loop: XDG/TOML logging can show runtime loop boundaries, provider request
 metadata, tool choices, process execution, artifact IDs, diagnostics,
 cancellation, and final loop status while deterministic and live smokes run.
-The next boundary is reusable runtime-owned process/tool profiling rather than
-another one-off CLI assembly path.
+The next boundary is a runtime-owned shell/process boundary with permission
+profiles, stable tool profiles, command classification, and artifact-backed
+context reduction rather than another one-off CLI assembly path.
 
 Shell/process remains the primary verification and inspection actuator under
 runtime control. A future model should be able to compose ordinary process
-tools such as `rg`, `sed`, `cargo`, and `git` through policy-owned profiles
-rather than through one-off CLI-only matches. The runtime should own policy,
-risk review, audit, artifacts, cancellation, and approval. Merry should not try
-to enumerate every useful CLI affordance as a built-in read/search tool, and
-the CLI shell path should remain a smoke/debug adapter rather than the design
-owner.
+tools such as `rg`, `sed`, `cargo`, and `git` through runtime policy and command
+classification rather than through one-off CLI-only matches or a growing
+catalog of built-in read/search tools. The runtime should own policy, risk
+review, audit, artifacts, cancellation, approval, ledger updates, and context
+compilation. The CLI shell path should remain a smoke/debug adapter rather than
+the design owner.
+
+In this roadmap, a permission profile describes filesystem, network, and
+side-effect capability. A tool profile describes the stable model-visible tool
+set and schema/cache lane for a task. A command classifier maps a concrete
+process or shell request to a risk category that action policy can allow, deny,
+or route to approval. These are separate concepts and should not be collapsed
+into command-family-specific profiles.
 
 The implemented shell/process surface is still narrow and split by boundary:
 `merry-runtime` owns provider-neutral `ProcessActionIntent` and
@@ -49,7 +57,7 @@ Low-risk informational commands such as `rustc --version` and `rg --version`
 can run through the CLI shell path. A local workspace effect such as exact
 `cargo test -p merry-runtime` requires explicit
 `--accept-local-workspace-process-risk`, the CLI `bwrap` child handoff, and
-sandbox runtime profile evidence. Default host execution, environment-spoofed
+sandbox runtime evidence. Default host execution, environment-spoofed
 sandbox markers, forged hidden handoff markers, forbidden commands, and unknown
 commands remain denied.
 
