@@ -542,6 +542,17 @@ fn is_informational_process_argv(argv: &[String]) -> bool {
         [executable, rg_arg] if executable_token_is(executable, "rg") => {
             is_read_only_rg_single_argument(rg_arg)
         }
+        [executable, print_flag, range, file]
+            if executable_token_is(executable, "sed")
+                && print_flag.as_str() == "-n"
+                && is_read_only_sed_print_range(range)
+                && is_workspace_relative_file_argument(file) =>
+        {
+            true
+        }
+        [executable, subcommand, args @ ..] if executable_token_is(executable, "git") => {
+            is_read_only_git_command(subcommand, args)
+        }
         _ => false,
     }
 }
@@ -561,12 +572,83 @@ fn is_rg_regex_metacharacter(character: char) -> bool {
     )
 }
 
+fn is_read_only_sed_print_range(range: &str) -> bool {
+    let Some(line_range) = range.strip_suffix('p') else {
+        return false;
+    };
+    if line_range.is_empty() {
+        return false;
+    }
+    let mut parts = line_range.split(',');
+    let Some(start) = parts.next() else {
+        return false;
+    };
+    if !is_positive_decimal(start) {
+        return false;
+    }
+    match (parts.next(), parts.next()) {
+        (None, None) => true,
+        (Some(end), None) => is_positive_decimal(end),
+        _ => false,
+    }
+}
+
+fn is_positive_decimal(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) && value != "0"
+}
+
+fn is_workspace_relative_file_argument(argument: &str) -> bool {
+    !argument.starts_with('-')
+        && !Path::new(argument).is_absolute()
+        && !argument.split('/').any(|segment| {
+            segment.is_empty() || segment == "." || segment == ".." || segment.contains('\\')
+        })
+}
+
+fn is_read_only_git_command(subcommand: &str, args: &[String]) -> bool {
+    match subcommand {
+        "status" => args.is_empty() || matches!(args, [arg] if arg.as_str() == "--short"),
+        "branch" => matches!(args, [arg] if arg.as_str() == "--show-current"),
+        "log" => args
+            .iter()
+            .all(|arg| arg.as_str() == "--oneline" || is_git_count_arg(arg)),
+        "diff" => is_read_only_git_diff_args(args),
+        "show" => is_read_only_git_show_args(args),
+        _ => false,
+    }
+}
+
+fn is_git_count_arg(argument: &str) -> bool {
+    let Some(count) = argument.strip_prefix('-') else {
+        return false;
+    };
+    is_positive_decimal(count)
+}
+
+fn is_read_only_git_diff_args(args: &[String]) -> bool {
+    match args {
+        [] => true,
+        [separator, path] if separator.as_str() == "--" => {
+            is_workspace_relative_file_argument(path)
+        }
+        _ => false,
+    }
+}
+
+fn is_read_only_git_show_args(args: &[String]) -> bool {
+    match args {
+        [arg] => !arg.starts_with('-') && !arg.contains(':'),
+        [stat, rev] if stat.as_str() == "--stat" => !rev.starts_with('-') && !rev.contains(':'),
+        _ => false,
+    }
+}
+
 fn is_local_workspace_effect_process_argv(argv: &[String]) -> bool {
     matches!(
         argv,
-        [cargo, test, package_flag, package]
+        [cargo, command, package_flag, package]
             if executable_token_is(cargo, "cargo")
-                && test.as_str() == "test"
+                && matches!(command.as_str(), "test" | "check")
                 && (package_flag.as_str() == "-p" || package_flag.as_str() == "--package")
                 && package.as_str() == "merry-runtime"
     )
@@ -577,7 +659,14 @@ fn is_forbidden_process_argv(argv: &[String]) -> bool {
         return false;
     };
 
-    FORBIDDEN_PROCESS_EXECUTABLES.contains(&executable.as_str())
+    if FORBIDDEN_PROCESS_EXECUTABLES.contains(&executable.as_str()) {
+        return true;
+    }
+
+    executable == "git"
+        && argv
+            .get(1)
+            .is_some_and(|subcommand| FORBIDDEN_GIT_SUBCOMMANDS.contains(&subcommand.as_str()))
 }
 
 fn executable_name(argument: &str) -> String {
@@ -600,7 +689,6 @@ const FORBIDDEN_PROCESS_EXECUTABLES: &[&str] = &[
     "cp",
     "curl",
     "fish",
-    "git",
     "mv",
     "nc",
     "netcat",
@@ -620,6 +708,25 @@ const FORBIDDEN_PROCESS_EXECUTABLES: &[&str] = &[
     "sudo",
     "wget",
     "zsh",
+];
+
+const FORBIDDEN_GIT_SUBCOMMANDS: &[&str] = &[
+    "add",
+    "apply",
+    "checkout",
+    "cherry-pick",
+    "clean",
+    "commit",
+    "merge",
+    "mv",
+    "pull",
+    "push",
+    "rebase",
+    "reset",
+    "restore",
+    "rm",
+    "stash",
+    "switch",
 ];
 
 /// Returns whether a process intent may enter the SP3-A low-risk process lane.
@@ -1008,6 +1115,12 @@ mod tests {
             vec!["rg", "--version"],
             vec!["rg", "--files"],
             vec!["rg", "ProcessRunner"],
+            vec!["sed", "-n", "1,80p", "crates/merry-runtime/src/process.rs"],
+            vec!["git", "status", "--short"],
+            vec!["git", "log", "--oneline", "-5"],
+            vec!["git", "diff", "--", "crates/merry-runtime/src/process.rs"],
+            vec!["git", "show", "--stat", "HEAD"],
+            vec!["git", "branch", "--show-current"],
         ] {
             let intent = ProcessActionIntent::new(
                 argv.into_iter().map(str::to_owned).collect(),
@@ -1027,6 +1140,8 @@ mod tests {
         for argv in [
             vec!["cargo", "test", "-p", "merry-runtime"],
             vec!["cargo", "test", "--package", "merry-runtime"],
+            vec!["cargo", "check", "-p", "merry-runtime"],
+            vec!["cargo", "check", "--package", "merry-runtime"],
         ] {
             let intent = ProcessActionIntent::new(
                 argv.into_iter().map(str::to_owned).collect(),
@@ -1069,7 +1184,9 @@ mod tests {
             vec!["cp", "a", "b"],
             vec!["chmod", "600", "file"],
             vec!["chown", "user", "file"],
-            vec!["git", "status"],
+            vec!["git", "clean", "-fd"],
+            vec!["git", "reset", "--hard"],
+            vec!["git", "checkout", "--", "README.md"],
             vec!["/tmp/sh", "-c", "echo unsafe"],
             vec!["./bash", "-lc", "echo unsafe"],
         ] {
@@ -1105,6 +1222,14 @@ mod tests {
             vec!["rg", "Process.*"],
             vec!["rg", "Process|Runner"],
             vec!["rg", "call()"],
+            vec!["sed", "-e", "1,80p", "crates/merry-runtime/src/process.rs"],
+            vec!["sed", "-n", "1,80d", "crates/merry-runtime/src/process.rs"],
+            vec!["sed", "-n", "1,80p"],
+            vec!["sed", "-n", "1,80p", "../outside.rs"],
+            vec!["sed", "-n", "1,80p", "/tmp/outside.rs"],
+            vec!["git", "status", "--porcelain=v2"],
+            vec!["git", "diff", "--cached"],
+            vec!["git", "show", "HEAD:README.md"],
             vec!["unknown-readonly-ish", "--version"],
             vec!["python3.12", "-c", "print('unknown')"],
             vec!["docker", "run", "image"],
@@ -1132,6 +1257,12 @@ mod tests {
             vec!["rg", "--version"],
             vec!["rg", "--files"],
             vec!["rg", "ProcessRunner"],
+            vec!["sed", "-n", "1,80p", "crates/merry-runtime/src/process.rs"],
+            vec!["git", "status", "--short"],
+            vec!["git", "log", "--oneline", "-5"],
+            vec!["git", "diff", "--", "crates/merry-runtime/src/process.rs"],
+            vec!["git", "show", "--stat", "HEAD"],
+            vec!["git", "branch", "--show-current"],
         ] {
             let intent = ProcessActionIntent::new(
                 argv.into_iter().map(str::to_owned).collect(),
@@ -1155,6 +1286,8 @@ mod tests {
             vec!["rg", "-"],
             vec!["rg", "Process.*"],
             vec!["rg", "Process|Runner"],
+            vec!["sed", "-n", "1,80d", "crates/merry-runtime/src/process.rs"],
+            vec!["git", "clean", "-fd"],
             vec!["unknown-readonly-ish", "--version"],
             vec!["sh", "-c", "echo unsafe"],
         ] {
