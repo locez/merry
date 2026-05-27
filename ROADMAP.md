@@ -145,12 +145,23 @@ The OpenAI provider target is the Responses API only. The provider request path 
   payload, or secret-like content. A real `bwrap` run of
   `target/debug/merry --with-sandbox debug coding-loop-smoke` with temporary
   XDG log config passed and produced the expected combined smoke log.
+- Structured Process Boundary M1 is implemented. Process intent classification
+  covers the first read-only inspection shapes, local workspace verification
+  shapes, unknown requests, and forbidden patterns; admitted intents are routed
+  through explicit process permission profiles; accepted local workspace
+  execution stores and checks the construction-time `bwrap` admission profile;
+  stdout/stderr/status output is artifact-backed and reduced into compact
+  ledger facts with evidence references; and process execution traces include
+  `permission_profile_id` without stdout/stderr payloads.
 
 ### Active
 
 - P0: continue the Minimal Useful Coding Loop as the current MVP proof. The loop now has a deterministic fake-provider/fake-runner slice, a deterministic real `bwrap` process-runner smoke, a user-verified live-provider smoke command, and end-to-end config-backed log verification for the deterministic coding-loop smoke.
 - P0: keep the Runtime Coding Loop Harness executable against a disposable fixture repository. The default lane uses fake provider/fake runner for deterministic `cargo test`; the deterministic `bwrap` lane is an explicit ignored smoke; the live OpenAI-compatible lane is also explicit and ignored and has passed in the user's trusted configured environment.
-- P0: define a runtime-owned shell/process boundary for workspace inspection and verification. The next slice should separate permission profiles for side-effect capability, stable tool profiles for model-visible tool/schema/cache lanes, and command classification for concrete process risk/admission decisions.
+- P0: extend the runtime-owned shell/process boundary from structured argv
+  intents toward a shell-compatible model tool. Permission profiles, stable
+  tool profiles, command classification, artifact-backed output, ledger
+  reducers, and cache-boundary hashes now exist for the structured path.
 - P0: keep process output artifact-backed and context-friendly. Accepted process actions should record stdout/stderr/exit metadata as artifacts before observable events claim them, reduce large output into compact ledger facts plus exact evidence references, and keep dynamic evidence late in compiled context so stable prefixes remain cacheable.
 - P0: keep edit/write on the typed workspace patch path. The MVP loop should apply one constrained patch through `workspace_patch_file` or its runtime-owned successor, record artifact/audit/ledger evidence, and then run verification.
 - Keep safety tiered but subordinate to the executable acceptance target: read-only inspection automatic, constrained patch opt-in, verification in `bwrap`, high-risk or unknown process actions denied or escalated.
@@ -161,9 +172,15 @@ The OpenAI provider target is the Responses API only. The provider request path 
 
 ### Next Active
 
-- Replace one-off process classification growth with a structured shell/process boundary MVP: classify known read-only inspection commands, local workspace verification commands, unknown requests, and forbidden patterns; then route them through permission profiles and artifact-backed reducers.
-- Add context/cache instrumentation for this boundary, such as stable prefix hash, dynamic context hash, tool profile hash, permission profile id, and a recorded reason when the stable cache prefix changes.
-- Move coding-loop tool-set/profile registration toward reusable runtime/library construction so upper layers do not have to assemble `process_command_tool`, workspace read/search fallback, and patch tooling ad hoc.
+- Add the first shell-compatible model tool on top of the structured process
+  intent path. Start with simple command strings that parse into already
+  supported argv shapes, and keep pipelines/scripts/unknown forms denied until
+  approval policy exists.
+- Add a recorded reason when the stable cache prefix changes, now that stable
+  prefix hash, dynamic context hash, tool profile hash, and process
+  `permission_profile_id` are observable.
+- Continue moving coding-loop tool-set/profile registration toward reusable
+  runtime/library construction as M2 consumes the structured process boundary.
 - Keep the opt-in live OpenAI-compatible smoke as a regression lane; when it fails, inspect the failure as model/tool-contract evidence and tune only the smallest runtime/provider/tool fix needed.
 - Keep expanding the Runtime Coding Loop Harness only through executable acceptance slices.
 
@@ -199,6 +216,7 @@ M0 Direction Correction:
 
 M1 Structured Process Boundary MVP:
 
+- Status: complete.
 - Extend command classification for `rg --files`, literal `rg <pattern>`,
   exact source slices such as `sed -n RANGE FILE`, safe read-only git commands,
   `cargo test`/`cargo check` as local workspace effects, unknown requests, and

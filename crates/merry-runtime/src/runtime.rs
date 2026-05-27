@@ -408,15 +408,17 @@ impl Runtime {
                             &pending,
                             proposal,
                             policy_decision,
+                            ProcessPermissionProfileId::READ_ONLY_V1,
                             runner,
                             context,
                         )
                         .await;
-                } else if let Some(runner) =
+                } else if let Some(accepted) =
                     self.inner.accepted_local_workspace_process_runner.clone()
                     && is_local_workspace_effect_process_action_proposal(
                         registered_tool.action_kind(),
                         &proposal,
+                        accepted.admission,
                     )
                 {
                     policy_decision =
@@ -426,7 +428,8 @@ impl Runtime {
                             &pending,
                             proposal,
                             policy_decision,
-                            runner,
+                            accepted.admission.permission_profile_id(),
+                            accepted.runner,
                             context,
                         )
                         .await;
@@ -623,6 +626,7 @@ impl Runtime {
         pending: &PendingToolCall,
         proposal: ActionProposal,
         policy_decision: ActionPolicyDecision,
+        permission_profile_id: ProcessPermissionProfileId,
         runner: Arc<dyn ProcessRunner>,
         context: ToolExecutionContext,
     ) -> Result<Vec<RuntimeEvent>, RuntimeError> {
@@ -648,6 +652,7 @@ impl Runtime {
             session_id = self.inner.session_id.as_str(),
             tool_call_id = pending.id().as_str(),
             tool_name = pending.name().as_str(),
+            permission_profile_id = permission_profile_id.as_str(),
             argv = ?intent.argv(),
             cwd = intent.cwd().unwrap_or("."),
             stdout_limit_bytes = intent.stdout_limit_bytes(),
@@ -688,8 +693,6 @@ impl Runtime {
             }
         };
 
-        let permission_profile_id =
-            process_permission_profile_id(ActionAuditPolicy::from_decision(&policy_decision));
         let execution_evidence = output
             .execution_evidence(&intent, permission_profile_id)
             .map(ActionExecutionEvidence::ProcessAction)
@@ -703,6 +706,7 @@ impl Runtime {
             session_id = self.inner.session_id.as_str(),
             tool_call_id = pending.id().as_str(),
             tool_name = pending.name().as_str(),
+            permission_profile_id = permission_profile_id.as_str(),
             status = %process_status_label(output.status()),
             stdout_bytes = output.stdout_bytes(),
             stderr_bytes = output.stderr_bytes(),
@@ -997,18 +1001,6 @@ fn process_result_ledger_observation(
         .expect("process result ledger summary is built from a non-empty static prefix")
 }
 
-fn process_permission_profile_id(policy: ActionAuditPolicy) -> ProcessPermissionProfileId {
-    match policy.risk_tier() {
-        crate::action_policy::ActionRiskTier::ProcessLow => {
-            ProcessPermissionProfileId::READ_ONLY_V1
-        }
-        crate::action_policy::ActionRiskTier::ProcessLocalWorkspaceEffect => {
-            ProcessPermissionProfileId::LOCAL_WORKSPACE_BWRAP_V1
-        }
-        other => panic!("admitted process action had unsupported risk tier {other:?}"),
-    }
-}
-
 fn process_result_status_label(status: ToolCallResultStatus) -> &'static str {
     match status {
         ToolCallResultStatus::Succeeded => "succeeded",
@@ -1131,7 +1123,7 @@ pub struct RuntimeBuilder {
     memory_activation_source: Arc<dyn MemoryActivationSource>,
     allow_low_risk_workspace_patches: bool,
     low_risk_process_runner: Option<Arc<dyn ProcessRunner>>,
-    accepted_local_workspace_process_runner: Option<Arc<dyn ProcessRunner>>,
+    accepted_local_workspace_process_runner: Option<AcceptedLocalWorkspaceProcessRunner>,
 }
 
 impl RuntimeBuilder {
@@ -1230,10 +1222,11 @@ impl RuntimeBuilder {
     #[must_use]
     pub fn allow_accepted_local_workspace_process_actions(
         mut self,
-        _admission: AcceptedLocalWorkspaceProcessAdmission,
+        admission: AcceptedLocalWorkspaceProcessAdmission,
         runner: Arc<dyn ProcessRunner>,
     ) -> Self {
-        self.accepted_local_workspace_process_runner = Some(runner);
+        self.accepted_local_workspace_process_runner =
+            Some(AcceptedLocalWorkspaceProcessRunner { admission, runner });
         self
     }
 
@@ -1278,7 +1271,13 @@ struct RuntimeInner {
     memory_activation_source: Arc<dyn MemoryActivationSource>,
     allow_low_risk_workspace_patches: bool,
     low_risk_process_runner: Option<Arc<dyn ProcessRunner>>,
-    accepted_local_workspace_process_runner: Option<Arc<dyn ProcessRunner>>,
+    accepted_local_workspace_process_runner: Option<AcceptedLocalWorkspaceProcessRunner>,
+}
+
+#[derive(Clone)]
+struct AcceptedLocalWorkspaceProcessRunner {
+    admission: AcceptedLocalWorkspaceProcessAdmission,
+    runner: Arc<dyn ProcessRunner>,
 }
 
 async fn run_step(
@@ -6721,6 +6720,69 @@ mod tests {
         assert!(audit_indexes[0] < audit_indexes[1]);
         assert!(audit_indexes[1] < artifact_index);
         assert!(artifact_index < resolved_index);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn accepted_local_workspace_process_action_denies_when_admission_profile_mismatches() {
+        let executor =
+            ProcessProposingToolExecutor::with_argv(["cargo", "test", "-p", "merry-runtime"]);
+        let runner = FakeProcessRunner::succeeding();
+        let tool = RegisteredTool::new(
+            policy_tool_spec("policy_command_mismatched_local_effect_profile"),
+            Arc::new(executor.clone()),
+            ToolActionKind::CommandExec,
+        )
+        .with_action_proposal();
+        let mismatched_admission =
+            AcceptedLocalWorkspaceProcessAdmission::for_test_permission_profile_id(
+                ProcessPermissionProfileId::READ_ONLY_V1,
+            );
+        let (runtime, pending) = register_policy_pending_registered_tool_with_builder(
+            "runtime-policy-command-exec-mismatched-local-effect-profile",
+            "policy_command_mismatched_local_effect_profile",
+            "call-command-exec-mismatched-local-effect-profile",
+            tool,
+            |builder| {
+                builder
+                    .allow_accepted_local_workspace_process_actions(
+                        mismatched_admission,
+                        Arc::new(runner.clone()),
+                    )
+                    .build()
+            },
+        )
+        .await;
+
+        let events = runtime
+            .execute_tool_call(pending.id(), ToolExecutionContext::default())
+            .await
+            .expect("mismatched local workspace process profile should be denied durably");
+
+        assert_eq!(executor.propose_count(), 1);
+        assert_eq!(executor.execute_count(), 0);
+        assert_eq!(runner.call_count(), 0);
+        assert_eq!(
+            event_kind_names_for_tool_execution(&events),
+            ["ArtifactRecorded", "ToolCallResolved"]
+        );
+        assert_eq!(
+            resolved_tool_result(&events).status(),
+            merry_core::ToolCallResultStatus::Failed
+        );
+        assert!(runtime.pending_tool_calls().await.is_empty());
+
+        let audits = action_audit_records(&runtime).await;
+        assert_eq!(audits.len(), 2);
+        assert_eq!(audits[0].status(), ActionAuditStatus::Proposed);
+        assert_eq!(audits[1].status(), ActionAuditStatus::Denied);
+        let policy = audits[1]
+            .policy()
+            .expect("denied audit should include policy");
+        assert_eq!(
+            policy.risk_tier(),
+            ActionRiskTier::ProcessLocalWorkspaceEffect
+        );
+        assert_eq!(policy.disposition(), ActionPolicyDisposition::Deny);
     }
 
     #[tokio::test(flavor = "current_thread")]

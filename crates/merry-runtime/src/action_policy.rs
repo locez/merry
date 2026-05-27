@@ -5,8 +5,11 @@
 //! wire formats.
 
 use crate::{
-    ActionProposal, ActionProposalEvidence, ToolActionKind,
-    process::{ProcessIntentClass, classify_process_intent},
+    AcceptedLocalWorkspaceProcessAdmission, ActionProposal, ActionProposalEvidence,
+    ProcessPermissionProfileId, ToolActionKind,
+    process::{
+        ProcessIntentClass, classify_process_intent, required_process_permission_profile_id,
+    },
 };
 
 /// Runtime-owned risk tier for a registered tool action.
@@ -214,15 +217,17 @@ pub(crate) fn is_low_risk_process_action_proposal(
 pub(crate) fn is_local_workspace_effect_process_action_proposal(
     action_kind: ToolActionKind,
     proposal: &ActionProposal,
+    admission: AcceptedLocalWorkspaceProcessAdmission,
 ) -> bool {
     action_kind == ToolActionKind::CommandExec
         && proposal.action_kind() == ToolActionKind::CommandExec
         && matches!(
             proposal.evidence(),
             ActionProposalEvidence::ProcessAction(intent)
-                if intent.env_policy() == crate::ProcessEnvPolicy::Empty
-                    && intent.stdin_text().is_none()
-                    && classify_process_intent(intent) == ProcessIntentClass::LocalWorkspaceEffect
+                if classify_process_intent(intent) == ProcessIntentClass::LocalWorkspaceEffect
+                    && required_process_permission_profile_id(intent)
+                        == Some(ProcessPermissionProfileId::LOCAL_WORKSPACE_BWRAP_V1)
+                    && admission.matches_intent(intent)
         )
 }
 
@@ -274,8 +279,9 @@ mod tests {
         is_local_workspace_effect_process_action_proposal, is_low_risk_process_action_proposal,
     };
     use crate::{
-        ActionProposal, ActionProposalEvidence, ProcessActionIntent, ProcessEnvPolicy,
-        ToolActionKind, WorkspacePatchProposal,
+        AcceptedLocalWorkspaceProcessAdmission, ActionProposal, ActionProposalEvidence,
+        ProcessActionIntent, ProcessEnvPolicy, ProcessPermissionProfileId, ToolActionKind,
+        WorkspacePatchProposal,
     };
     use merry_core::{PendingToolCall, ToolCallArguments, ToolCallId, ToolName};
     use serde_json::json;
@@ -406,6 +412,7 @@ mod tests {
     #[test]
     fn process_admission_predicates_keep_low_and_local_workspace_lanes_distinct() {
         let call = pending_tool_call();
+        let admission = AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1();
         let informational = process_proposal(&call, &["rustc", "--version"]);
         assert!(is_low_risk_process_action_proposal(
             ToolActionKind::CommandExec,
@@ -413,7 +420,8 @@ mod tests {
         ));
         assert!(!is_local_workspace_effect_process_action_proposal(
             ToolActionKind::CommandExec,
-            &informational
+            &informational,
+            admission
         ));
 
         let local_effect = process_proposal(&call, &["cargo", "test", "-p", "merry-runtime"]);
@@ -423,11 +431,13 @@ mod tests {
         ));
         assert!(is_local_workspace_effect_process_action_proposal(
             ToolActionKind::CommandExec,
-            &local_effect
+            &local_effect,
+            admission
         ));
         assert!(!is_local_workspace_effect_process_action_proposal(
             ToolActionKind::WorkspaceWrite,
-            &local_effect
+            &local_effect,
+            admission
         ));
 
         let local_effect_with_stdin = process_proposal_with_policy(
@@ -438,7 +448,8 @@ mod tests {
         );
         assert!(!is_local_workspace_effect_process_action_proposal(
             ToolActionKind::CommandExec,
-            &local_effect_with_stdin
+            &local_effect_with_stdin,
+            admission
         ));
 
         let local_effect_with_env = process_proposal_with_policy(
@@ -449,7 +460,18 @@ mod tests {
         );
         assert!(!is_local_workspace_effect_process_action_proposal(
             ToolActionKind::CommandExec,
-            &local_effect_with_env
+            &local_effect_with_env,
+            admission
+        ));
+
+        let mismatched_admission =
+            AcceptedLocalWorkspaceProcessAdmission::for_test_permission_profile_id(
+                ProcessPermissionProfileId::READ_ONLY_V1,
+            );
+        assert!(!is_local_workspace_effect_process_action_proposal(
+            ToolActionKind::CommandExec,
+            &local_effect,
+            mismatched_admission
         ));
 
         for argv in [
@@ -463,7 +485,8 @@ mod tests {
             ));
             assert!(!is_local_workspace_effect_process_action_proposal(
                 ToolActionKind::CommandExec,
-                &path_qualified_local_effect_shape
+                &path_qualified_local_effect_shape,
+                admission
             ));
         }
     }

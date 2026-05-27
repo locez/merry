@@ -46,72 +46,83 @@ Current milestone or track:
 
 Session milestone:
 
-- Context/cache instrumentation slice: make the provider-neutral request record
-  a stable prefix boundary that includes runtime-owned base instructions and
-  tool profile metadata, with dynamic context hashed separately.
+- Process permission profile routing slice: make classified process intents
+  route through explicit read-only and accepted local workspace permission
+  profiles, with the local workspace admission stored and checked at runtime.
 
 Goal:
 
-- Prove that Merry can distinguish the cacheable provider-neutral request
-  prefix from dynamic context: base instructions and tool specs affect the
-  stable prefix hash, while compiled context, user input, and tool
-  continuations affect the dynamic context hash.
+- Prove that a process runner is not enough to execute a local workspace effect:
+  the classified intent must match the permission profile admitted for that
+  runner, and execution artifacts/ledger/trace records must report the profile
+  that was actually admitted.
 
 Task queue status:
 
-- Added provider-neutral request content hash type and `ModelRequest` metadata:
-  `stable_prefix_message_count`, `stable_prefix_hash`, and
-  `dynamic_context_hash`.
-- Preserved and validated existing `tool_profile_hash`.
-- Added an explicit stable-prefix constructor for requests that know their
-  runtime-owned prefix boundary.
-- Runtime provider request compilation now emits a minimal stable base system
-  message before dynamic compiled context and user input.
-- Runtime request tracing now includes `stable_prefix_message_count`,
-  `tool_profile_hash`, `stable_prefix_hash`, and `dynamic_context_hash`
-  without prompt text or provider wire payloads.
-- Tests updated to account for the stable base message and to prove dynamic
-  context remains outside the stable prefix hash.
+- Added intent-to-permission-profile derivation for structured process intents.
+- `is_low_risk_process_action_intent` now uses that derivation for the
+  read-only lane.
+- `AcceptedLocalWorkspaceProcessAdmission` now carries the admitted
+  `ProcessPermissionProfileId` and can check whether an intent matches it.
+- `RuntimeBuilder::allow_accepted_local_workspace_process_actions` now stores
+  the admission with the runner instead of discarding it.
+- Runtime process execution receives the admitted profile id directly instead
+  of inferring it after the fact from `ActionRiskTier`.
+- Local workspace effect execution is denied when the injected runner's
+  admission profile does not match the classified intent.
+- Process execution traces now include `permission_profile_id` alongside
+  payload-free argv/cwd/status/output-byte metadata.
+- `ROADMAP.md` now marks M1 complete and points the next active work at M2
+  shell-compatible model tooling.
+- `DECISIONS.md` records the admission-time profile routing decision.
 
 Allowed expansion:
 
-- Provider-neutral request metadata needed for cache-boundary observability.
-- Runtime provider request compilation and trace metadata needed to expose the
-  stable/dynamic split.
-- Focused test updates in runtime, LLM, workspace integration, and continuity
-  status files.
+- Runtime process classifier/profile/admission modules and focused tests.
+- Runtime/provider-neutral metadata needed to expose the admitted process
+  permission profile.
+- Existing agent-loop/coding-loop tests needed to prove the structured process
+  boundary still works.
+- Public-safe roadmap/decision/continuity updates.
 
 Done condition:
 
-- `merry-llm` tests prove stable prefix hash changes for base instructions or
-  tool profile changes and dynamic hash changes for dynamic context changes.
-- Runtime provider-boundary tests prove dynamic compiled context does not
-  perturb the stable prefix hash while changing the dynamic context hash.
-- Provider adapters do not receive runtime cache metadata as provider wire
-  state.
-- Focused and full default validation pass.
+- Read-only process intents map to `process.read_only.v1`.
+- Local workspace verification intents map to
+  `process.local_workspace.bwrap.v1`.
+- Unknown, forbidden, stdin-bearing, or non-empty-env intents do not receive an
+  auto-admitted profile.
+- Local workspace execution is denied without a matching stored admission, even
+  when a runner is injected.
+- Process artifacts, ledger facts, and traces record the admitted
+  `permission_profile_id`.
+- Focused runtime tests and full default validation pass.
 - Handoff updated and lease committed.
 
 Drift boundary:
 
 - Do not add TUI, REPL, or interactive CLI scope.
+- Do not implement shell string parsing or pipelines in this M1 lease.
 - Do not move private ignored notes into tracked files.
-- Do not commit `.superpowers/`, `.merry/`, `docs/`, or `merry-raw-docs/`.
+- Do not commit `.superpowers/`, `.merry/`, `docs/`, or `merry-raw-docs`.
 - Do not make live provider behavior part of default tests.
-- Do not expand this slice into full prompt/personality design.
+- Do not expand this slice into approval/session grants.
 
 Task type: implementation/docs
 
 Acceptance criteria:
 
-- `model_request_stable_prefix_hash_tracks_base_instructions_and_tools`
-  demonstrates base instructions and tools are part of the stable prefix hash.
-- `model_request_rejects_non_system_stable_prefix_message` rejects accidental
-  user/dynamic content inside the stable prefix.
-- `model_request_rejects_mismatched_context_hashes` validates serialized hash
-  metadata.
-- `compiled_provider_request_stable_prefix_hash_tracks_base_instructions_and_tools_only`
-  proves runtime dynamic context changes only the dynamic hash.
+- `process_permission_profile_id_is_derived_from_admitted_intent_shape`
+  demonstrates read-only/local-workspace/unknown/stdin profile routing.
+- `local_workspace_process_admission_matches_only_its_permission_profile`
+  demonstrates admission matching.
+- `process_admission_predicates_keep_low_and_local_workspace_lanes_distinct`
+  keeps low-risk and local workspace lanes separate and rejects mismatched
+  admissions.
+- `accepted_local_workspace_process_action_denies_when_admission_profile_mismatches`
+  denies without calling the runner.
+- `agent_loop_traces_loop_steps_tool_process_and_terminal_status` verifies
+  process traces include `permission_profile_id`.
 - `cargo fmt --all --check`, `cargo clippy --all-targets --all-features -- -D warnings`,
   and `cargo test --all` pass.
 
@@ -122,20 +133,20 @@ Allowed edits:
 - `DECISIONS.md`
 - `EXECUTION_STATE.md`
 - `HANDOFF.md`
-- `crates/merry-llm/src/lib.rs`
-- `crates/merry-llm/src/request.rs`
-- `crates/merry-llm/tests/protocol.rs`
+- `ROADMAP.md`
+- `crates/merry-runtime/src/action_audit.rs`
+- `crates/merry-runtime/src/action_policy.rs`
+- `crates/merry-runtime/src/process.rs`
 - `crates/merry-runtime/src/runtime.rs`
-- `crates/merry-runtime/src/step.rs`
 - `crates/merry-runtime/tests/agent_loop.rs`
-- `crates/merry-runtime/tests/provider_boundary.rs`
-- `crates/merry-tool-workspace/tests/runtime_integration.rs`
 
 Forbidden edits:
 
 - private ignored source material under `docs/` or `merry-raw-docs/`
 - real credentials or generated build artifacts
-- `.superpowers/`, `.merry/`, `docs/`, or `merry-raw-docs/` content
+- `.superpowers/`, `.merry/`, `docs/`, or `merry-raw-docs` content
+- shell-compatible model tool implementation, pipelines, scripts, or approval
+  session behavior
 - full-screen TUI, REPL, or multi-turn UI scope
 
 Protected files:
@@ -148,12 +159,13 @@ Protected files:
 
 Validation command:
 
-- `cargo test -p merry-llm --test protocol stable_prefix`
-- `cargo test -p merry-runtime --test provider_boundary stable_prefix`
-- `cargo test -p merry-runtime --test provider_boundary`
-- `cargo test -p merry-runtime --test agent_loop`
-- `cargo test -p merry-llm --test protocol`
+- `cargo test -p merry-runtime --lib process_permission_profile`
+- `cargo test -p merry-runtime --lib local_workspace_process_admission_matches_only_its_permission_profile`
+- `cargo test -p merry-runtime --lib process_admission_predicates_keep_low_and_local_workspace_lanes_distinct`
+- `cargo test -p merry-runtime --lib accepted_local_workspace_process_action_denies_when_admission_profile_mismatches`
+- `cargo test -p merry-runtime --test agent_loop agent_loop_traces_loop_steps_tool_process_and_terminal_status`
 - `cargo test -p merry-runtime --lib`
+- `cargo test -p merry-runtime --test agent_loop`
 - `cargo test -p merry-tool-workspace --test runtime_integration coding_loop_harness_inspects_patches_verifies_and_completes`
 - `cargo fmt --all --check`
 - `cargo clippy --all-targets --all-features -- -D warnings`
@@ -163,43 +175,38 @@ Validation command:
 
 Validation notes:
 
-- Initial full `cargo test --all` failed only on tests that assumed the first
-  runtime provider message was user/dynamic context; those assertions now
-  account for the stable base system message at index 0.
-- Full default validation passed after those test updates.
-- Live provider and real bwrap smoke lanes were not run; they remain explicit
-  opt-in lanes and are not required for this provider-neutral metadata slice.
+- Focused and full default validation passed.
+- Live provider and real `bwrap` smoke lanes were not run for this slice; they
+  remain explicit opt-in lanes and are not required for deterministic M1
+  profile routing.
 
 ## Research
 
-Research required: yes
+Research required: no
 
 Research reason:
 
-- The user asked whether Codex has default system/base instructions and whether
-  that should be considered in the prefix cache design.
+- This lease used existing roadmap/status/code evidence. No internet or ignored
+  private source research was needed.
 
 Research artifact:
 
-- Local ignored Codex source under `.merry/codex` showed Codex resolves
-  `base_instructions`, includes model instruction templates, and sends those
-  instructions as part of model requests. This informed the decision to make
-  Merry's base instructions part of the stable prefix boundary.
+- None.
 
 ## Next Action
 
 Next exact action:
 
-- Continue M1 from `ROADMAP.md`: extend the structured process boundary by
-  routing classified process intents through read-only and workspace-write /
-  sandbox permission profiles, starting with known read-only inspection
-  commands and local workspace verification commands.
+- Start M2 from `ROADMAP.md`: add the first shell-compatible model tool on top
+  of the structured process intent path. Begin with simple command strings that
+  parse into already supported argv shapes and keep pipelines, scripts, stdin,
+  env overrides, and unknown forms denied or approval-gated.
 
 Do not reconsider:
 
+- M1 Structured Process Boundary MVP is complete.
 - Do not make event-first CLI the primary next milestone.
 - Do not start TUI or REPL before reusable runtime/process/tool profiles are
   clearer.
 - Do not move private Codex/raw-doc findings into tracked source text.
-- Do not treat base prompt wording as finalized; the completed contract is the
-  stable-prefix boundary and metadata, not a long-term prompt/personality.
+- Dynamic ledger/evidence/user context remains outside the stable prefix.

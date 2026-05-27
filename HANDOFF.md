@@ -10,24 +10,25 @@ Current milestone or track:
 
 Session milestone:
 
-- Context/cache instrumentation slice: stable provider-neutral request prefix
-  metadata includes runtime-owned base instructions and tool profile, while
-  compiled context, user input, and continuations remain dynamic.
+- Process permission profile routing slice: classified process intents now
+  route through explicit read-only and accepted local workspace permission
+  profiles, and local workspace admission is stored and checked at runtime.
 
 Task queue status:
 
-- Completed this slice. `ModelRequest` now records
-  `stable_prefix_message_count`, `tool_profile_hash`, `stable_prefix_hash`, and
-  `dynamic_context_hash`.
-- Runtime request compilation now inserts a minimal stable base system message
-  before dynamic compiled context and user input.
-- Runtime provider request traces include the new hashes and stable prefix
-  message count without prompt text or provider wire payloads.
+- Completed this slice. Process permission profile id is now derived from the
+  admitted intent shape before execution.
+- `AcceptedLocalWorkspaceProcessAdmission` carries the admitted profile id.
+- Runtime stores local workspace admission with its runner and denies execution
+  when the admission profile does not match the classified intent.
+- Process execution artifacts, audit evidence, compact ledger facts, and traces
+  record the admitted `permission_profile_id`.
+- `ROADMAP.md` marks M1 complete and points the next active work at M2.
 
 Done condition:
 
-- Focused and full validation passed, status files are updated, and this lease
-  is ready to commit.
+- Focused and full validation passed, state files are updated, and this lease
+  is committed.
 
 ## What Changed
 
@@ -36,45 +37,41 @@ Files changed:
 - `DECISIONS.md`
 - `EXECUTION_STATE.md`
 - `HANDOFF.md`
-- `crates/merry-llm/src/lib.rs`
-- `crates/merry-llm/src/request.rs`
-- `crates/merry-llm/tests/protocol.rs`
+- `ROADMAP.md`
+- `crates/merry-runtime/src/action_audit.rs`
+- `crates/merry-runtime/src/action_policy.rs`
+- `crates/merry-runtime/src/process.rs`
 - `crates/merry-runtime/src/runtime.rs`
-- `crates/merry-runtime/src/step.rs`
 - `crates/merry-runtime/tests/agent_loop.rs`
-- `crates/merry-runtime/tests/provider_boundary.rs`
-- `crates/merry-tool-workspace/tests/runtime_integration.rs`
 
 Summary:
 
-- Added `RequestContentHash` and explicit stable-prefix metadata to
-  `merry-llm::ModelRequest`.
-- Added `ModelRequest::new_with_continuations_and_stable_prefix` for callers
-  that know the runtime-owned stable prefix boundary.
-- Validated that stable prefix messages must be leading system messages.
-- Hashed stable prefix content from leading base/system messages plus
-  canonicalized tool specs; dynamic context hash covers the remaining messages
-  and ordered tool continuations.
-- Runtime provider request compilation now adds `You are Merry.` as a minimal
-  stable base instruction message and marks exactly that one message as the
-  stable prefix.
-- Runtime provider request tracing now records `stable_prefix_message_count`,
-  `tool_profile_hash`, `stable_prefix_hash`, and `dynamic_context_hash`.
-- Updated runtime, agent-loop, and workspace integration tests for the new
-  base-message position.
-- Recorded the decision that base instructions are part of the cacheable stable
-  prefix, while ledger/evidence/user context remains dynamic.
+- Added `required_process_permission_profile_id` for structured process intent
+  to profile routing.
+- Kept `is_low_risk_process_action_intent` on the same routing path as the
+  read-only profile.
+- Added profile id storage and matching to
+  `AcceptedLocalWorkspaceProcessAdmission`.
+- Made `RuntimeBuilder::allow_accepted_local_workspace_process_actions` retain
+  admission instead of discarding it.
+- Passed the admitted profile id into process execution instead of deriving it
+  after execution from policy risk tier.
+- Added denial coverage for mismatched local workspace admission profile.
+- Added `permission_profile_id` to process execution trace records.
+- Recorded the decision that permission profiles are admission-time routing
+  inputs.
 
 ## Validation
 
 Commands run:
 
-- `cargo test -p merry-llm --test protocol stable_prefix`
-- `cargo test -p merry-runtime --test provider_boundary stable_prefix`
-- `cargo test -p merry-runtime --test provider_boundary`
-- `cargo test -p merry-runtime --test agent_loop`
-- `cargo test -p merry-llm --test protocol`
+- `cargo test -p merry-runtime --lib process_permission_profile`
+- `cargo test -p merry-runtime --lib local_workspace_process_admission_matches_only_its_permission_profile`
+- `cargo test -p merry-runtime --lib process_admission_predicates_keep_low_and_local_workspace_lanes_distinct`
+- `cargo test -p merry-runtime --lib accepted_local_workspace_process_action_denies_when_admission_profile_mismatches`
+- `cargo test -p merry-runtime --test agent_loop agent_loop_traces_loop_steps_tool_process_and_terminal_status`
 - `cargo test -p merry-runtime --lib`
+- `cargo test -p merry-runtime --test agent_loop`
 - `cargo test -p merry-tool-workspace --test runtime_integration coding_loop_harness_inspects_patches_verifies_and_completes`
 - `cargo fmt --all --check`
 - `cargo clippy --all-targets --all-features -- -D warnings`
@@ -83,28 +80,26 @@ Commands run:
 Result:
 
 - Passed.
-- The first full `cargo test --all` pass failed only on message-index
-  assertions that predated the base instruction message; those were updated and
-  the full suite passed.
-- Live provider and real `bwrap` smokes were not run for this slice.
+- Live provider and real `bwrap` smokes were not run for this deterministic
+  runtime slice.
 
 ## Decisions
 
 Decisions made:
 
-- Stable prefix hash includes runtime-owned base instructions and the
-  model-visible tool profile.
-- Dynamic context hash owns compiled context, current user input, and ordered
-  tool continuations.
-- The initial default base instruction is intentionally minimal; the contract is
-  the stable prefix boundary, not a finalized long-term prompt.
+- Process permission profiles are admission-time routing inputs, not only
+  execute-time labels.
+- Local workspace effect process execution requires an admission profile that
+  matches the classified intent.
+- M1 Structured Process Boundary MVP is complete enough to start M2.
 
 Pending decisions:
 
-- Exact permission-profile id surface and stable-prefix change-reason event or
-  metadata shape.
-- How far M1 should take process artifact reducers before adding the
-  shell-compatible model tool in M2.
+- Exact shell-compatible model tool name and JSON schema.
+- How simple shell parsing should represent unsupported pipelines, scripts,
+  stdin, env overrides, and unknown commands before M3 approval/session support.
+- Whether to add an explicit stable-prefix change reason event or metadata in
+  the next cache-observability slice.
 
 ## Blockers
 
@@ -114,34 +109,34 @@ Blockers:
 
 Residual risk:
 
-- Changing the default base instruction text later will deliberately change
-  `stable_prefix_hash`. That should be treated as a cache-lane change, not a
-  dynamic context change.
-- The current default base instruction is too small for long-term behavior
-  steering; it exists to establish the runtime-owned prefix boundary.
+- Permission profiles are still a small static set. That is expected for M1;
+  broader process/session approval remains a later milestone.
+- The CLI `bwrap` profile remains an opt-in smoke boundary, not a complete
+  sandbox proof.
 
 Next exact action:
 
-- Continue M1 by routing classified process intents through read-only and
-  workspace-write/sandbox permission profiles, starting with known read-only
-  inspection commands and local workspace verification commands.
+- Start M2 by adding the first shell-compatible model tool on top of the
+  structured process intent path. Begin with simple command strings that parse
+  into already supported argv shapes and deny unsupported shell forms.
 
 ## Scope For Next Session
 
 Allowed edits:
 
-- Runtime process classifier/profile/admission modules and focused tests.
-- Runtime/provider-neutral metadata only if needed for permission profile id or
-  prefix-change reasons.
-- Existing CLI/debug smoke wiring only as needed to consume the runtime-owned
-  process boundary.
+- Runtime process tool/parser modules and focused tests.
+- Runtime/tool specs needed for a simple shell-compatible model-facing command
+  tool.
+- Existing deterministic agent-loop/coding-loop tests that consume the new tool.
 - Public-safe roadmap/decision/continuity updates.
 
 Forbidden edits:
 
 - Private raw docs.
 - Real credentials.
-- `.superpowers/`, `.merry/`, `docs/`, or `merry-raw-docs/` content.
+- `.superpowers/`, `.merry/`, `docs/`, or `merry-raw-docs` content.
+- Pipelines, scripts, approval sessions, long-running process sessions, or
+  broad shell execution before M2's simple-command slice is proven.
 - Full-screen TUI, REPL, or multi-turn UI before reusable runtime/tool
   registration is clearer.
 
@@ -150,16 +145,17 @@ Do not reconsider:
 - Observability-first Task 7 is complete.
 - Base instructions are included in the stable prefix cache boundary.
 - Dynamic ledger/evidence/user context remains outside the stable prefix.
+- Process permission profiles now route admission before execution.
 - Default tests remain deterministic/offline; live provider and bwrap smoke are
   opt-in.
 
 ## Commit
 
-Status: pending in this lease
+Status: committed
 
 Message:
 
-- feat(llm): record stable request prefix hash
+- feat(runtime): route process intents through permission profiles
 
 No-commit reason:
 

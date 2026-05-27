@@ -954,6 +954,7 @@ async fn agent_loop_traces_loop_steps_tool_process_and_terminal_status() {
     assert!(logs.contains("\"status\":\"completed\""));
     assert!(logs.contains("\"tool_name\":\"run_process\""));
     assert!(logs.contains("\"tool_call_id\":\"call-rustc-version\""));
+    assert!(logs.contains("\"permission_profile_id\":\"process.read_only.v1\""));
     assert!(logs.contains("\"argv\":\"[\\\"rustc\\\", \\\"--version\\\"]\""));
     assert!(logs.contains("\"stdout_bytes\":13"));
     assert!(logs.contains("\"stderr_bytes\":0"));

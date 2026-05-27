@@ -292,3 +292,49 @@ Continue M1 by wiring command classification and permission/profile routing
 through the process boundary, then add the remaining cache metadata such as
 permission profile id and explicit stable-prefix change reasons where the
 runtime has enough state to explain them.
+
+## 2026-05-27 - Process Permission Profiles Are Admission-Time Routing Inputs
+
+Decision:
+Structured process execution now derives the required process permission
+profile from the admitted `ProcessActionIntent` shape before runner execution:
+read-only inspection commands use `process.read_only.v1`, and local workspace
+verification commands require `process.local_workspace.bwrap.v1`. The runtime
+stores `AcceptedLocalWorkspaceProcessAdmission` with the injected local
+workspace runner and only executes that lane when the admission profile matches
+the classified intent. Execution artifacts, audit evidence, ledger reductions,
+and process traces record the profile that was actually admitted.
+
+Reason:
+The previous builder accepted an `AcceptedLocalWorkspaceProcessAdmission` value
+but discarded it, then inferred the process profile after execution from the
+policy risk tier. That made the profile mostly explanatory rather than a real
+authorization boundary. Keeping the admission and checking it against the
+classified intent makes runner injection insufficient by itself and prevents
+future code from accidentally treating local workspace effects as read-only.
+
+Evidence:
+`process_permission_profile_id_is_derived_from_admitted_intent_shape` covers
+profile derivation for read-only, local workspace, unknown, and stdin-bearing
+intents. `local_workspace_process_admission_matches_only_its_permission_profile`
+and `process_admission_predicates_keep_low_and_local_workspace_lanes_distinct`
+prove admission/profile matching. `accepted_local_workspace_process_action_denies_when_admission_profile_mismatches`
+proves that a runner with a mismatched admission profile is denied without a
+runner call. Full default validation passed with `cargo fmt --all --check`,
+`cargo clippy --all-targets --all-features -- -D warnings`, and
+`cargo test --all`.
+
+Tradeoff:
+The profile set is still small and static. That is intentional for M1: command
+classification remains narrow, and approval/session grants for broader shell
+forms are deferred to later milestones.
+
+Reversible:
+Yes. More permission profiles can be added by extending intent-to-profile
+derivation and admission values without changing provider wire formats.
+
+Follow-up:
+Start M2 by adding a shell-compatible model tool that parses simple command
+strings into the existing structured process intent path. Keep pipelines,
+scripts, stdin, env overrides, and unknown shell forms denied or approval-gated
+until the approval/session milestone exists.
