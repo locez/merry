@@ -15,7 +15,7 @@ use crate::{
     action_policy::{
         ActionPolicyDecision, DefaultActionPolicy, classify_tool_action_risk,
         is_local_workspace_effect_process_action_proposal, is_low_risk_process_action_proposal,
-        is_low_risk_workspace_patch_proposal,
+        is_low_risk_workspace_patch_proposal, is_read_only_shell_process_action_proposal,
     },
     event_stream::ActiveStepPermit,
     judgment::{JudgmentContext, JudgmentError, JudgmentRecord, JudgmentRequest, JudgmentSource},
@@ -409,6 +409,23 @@ impl Runtime {
                             proposal,
                             policy_decision,
                             ProcessPermissionProfileId::READ_ONLY_V1,
+                            runner,
+                            context,
+                        )
+                        .await;
+                } else if let Some(runner) = self.inner.read_only_shell_process_runner.clone()
+                    && is_read_only_shell_process_action_proposal(
+                        registered_tool.action_kind(),
+                        &proposal,
+                    )
+                {
+                    policy_decision = ActionPolicyDecision::allow_read_only_shell_process_action();
+                    return self
+                        .execute_admitted_process_action(
+                            &pending,
+                            proposal,
+                            policy_decision,
+                            ProcessPermissionProfileId::SHELL_READ_ONLY_V1,
                             runner,
                             context,
                         )
@@ -1123,6 +1140,7 @@ pub struct RuntimeBuilder {
     memory_activation_source: Arc<dyn MemoryActivationSource>,
     allow_low_risk_workspace_patches: bool,
     low_risk_process_runner: Option<Arc<dyn ProcessRunner>>,
+    read_only_shell_process_runner: Option<Arc<dyn ProcessRunner>>,
     accepted_local_workspace_process_runner: Option<AcceptedLocalWorkspaceProcessRunner>,
 }
 
@@ -1137,6 +1155,7 @@ impl RuntimeBuilder {
             memory_activation_source: Arc::new(StoredMemoryActivationSource),
             allow_low_risk_workspace_patches: false,
             low_risk_process_runner: None,
+            read_only_shell_process_runner: None,
             accepted_local_workspace_process_runner: None,
         }
     }
@@ -1213,6 +1232,18 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Opts in to executing validated read-only shell wrapper proposals.
+    ///
+    /// This lane is intentionally separate from the structured low-risk argv
+    /// lane. It accepts only a narrow `bash`/`sh`/`zsh -c|-lc` plain command
+    /// sequence classifier and requires an injected runner selected for the
+    /// shell read-only profile. It does not authorize arbitrary shell syntax.
+    #[must_use]
+    pub fn allow_read_only_shell_process_actions(mut self, runner: Arc<dyn ProcessRunner>) -> Self {
+        self.read_only_shell_process_runner = Some(runner);
+        self
+    }
+
     /// Opts in to executing validated local workspace effect process proposals.
     ///
     /// Runner injection alone is not a sandbox or an authorization source. This
@@ -1253,6 +1284,7 @@ impl RuntimeBuilder {
                 memory_activation_source: self.memory_activation_source,
                 allow_low_risk_workspace_patches: self.allow_low_risk_workspace_patches,
                 low_risk_process_runner: self.low_risk_process_runner,
+                read_only_shell_process_runner: self.read_only_shell_process_runner,
                 accepted_local_workspace_process_runner: self
                     .accepted_local_workspace_process_runner,
             }),
@@ -1271,6 +1303,7 @@ struct RuntimeInner {
     memory_activation_source: Arc<dyn MemoryActivationSource>,
     allow_low_risk_workspace_patches: bool,
     low_risk_process_runner: Option<Arc<dyn ProcessRunner>>,
+    read_only_shell_process_runner: Option<Arc<dyn ProcessRunner>>,
     accepted_local_workspace_process_runner: Option<AcceptedLocalWorkspaceProcessRunner>,
 }
 
@@ -2374,6 +2407,7 @@ mod tests {
             memory_activation_source: Arc::new(crate::memory::StoredMemoryActivationSource),
             allow_low_risk_workspace_patches: false,
             low_risk_process_runner: None,
+            read_only_shell_process_runner: None,
             accepted_local_workspace_process_runner: None,
         }
     }
@@ -3045,6 +3079,7 @@ mod tests {
                 memory_activation_source: Arc::new(source),
                 allow_low_risk_workspace_patches: false,
                 low_risk_process_runner: None,
+                read_only_shell_process_runner: None,
                 accepted_local_workspace_process_runner: None,
             }),
         }
@@ -3063,6 +3098,7 @@ mod tests {
                 memory_activation_source: Arc::new(crate::memory::StoredMemoryActivationSource),
                 allow_low_risk_workspace_patches: false,
                 low_risk_process_runner: None,
+                read_only_shell_process_runner: None,
                 accepted_local_workspace_process_runner: None,
             }),
         }
@@ -3084,6 +3120,7 @@ mod tests {
                 memory_activation_source: Arc::new(source),
                 allow_low_risk_workspace_patches: false,
                 low_risk_process_runner: None,
+                read_only_shell_process_runner: None,
                 accepted_local_workspace_process_runner: None,
             }),
         }
@@ -6392,7 +6429,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn opt_in_process_action_denies_dangerous_argv_without_runner_call() {
-        let executor = ProcessProposingToolExecutor::with_argv(["sh", "-c", "echo unsafe"]);
+        let executor = ProcessProposingToolExecutor::with_argv(["sh", "-c", "rm -rf target"]);
         let runner = FakeProcessRunner::succeeding();
         let tool = RegisteredTool::new(
             policy_tool_spec("policy_command_dangerous_argv"),
@@ -6444,7 +6481,7 @@ mod tests {
         let ActionProposalEvidence::ProcessAction(intent) = proposal.evidence() else {
             panic!("proposal should include process action intent");
         };
-        assert_eq!(intent.argv(), ["sh", "-c", "echo unsafe"]);
+        assert_eq!(intent.argv(), ["sh", "-c", "rm -rf target"]);
         assert_eq!(intent.stdin_text(), None);
         assert_eq!(audits[1].status(), ActionAuditStatus::Denied);
         let policy = audits[1]
@@ -6456,7 +6493,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn denied_process_action_traces_denied_tool_finish_without_process_execution() {
-        let executor = ProcessProposingToolExecutor::with_argv(["sh", "-c", "echo unsafe"]);
+        let executor = ProcessProposingToolExecutor::with_argv(["sh", "-c", "rm -rf target"]);
         let runner = FakeProcessRunner::succeeding();
         let tool = RegisteredTool::new(
             policy_tool_spec("policy_command_dangerous_trace"),
@@ -6783,6 +6820,193 @@ mod tests {
             ActionRiskTier::ProcessLocalWorkspaceEffect
         );
         assert_eq!(policy.disposition(), ActionPolicyDisposition::Deny);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn read_only_shell_process_requires_explicit_shell_runner_opt_in() {
+        let executor =
+            ProcessProposingToolExecutor::with_argv(["bash", "-lc", "rg ProcessRunner | wc -l"]);
+        let runner = FakeProcessRunner::succeeding();
+        let tool = RegisteredTool::new(
+            policy_tool_spec("policy_command_shell_read_only_without_shell_opt_in"),
+            Arc::new(executor.clone()),
+            ToolActionKind::CommandExec,
+        )
+        .with_action_proposal();
+        let (runtime, pending) = register_policy_pending_registered_tool_with_builder(
+            "runtime-policy-command-exec-shell-read-only-without-shell-opt-in",
+            "policy_command_shell_read_only_without_shell_opt_in",
+            "call-command-exec-shell-read-only-without-shell-opt-in",
+            tool,
+            |builder| {
+                builder
+                    .allow_low_risk_process_actions(Arc::new(runner.clone()))
+                    .build()
+            },
+        )
+        .await;
+
+        let events = runtime
+            .execute_tool_call(pending.id(), ToolExecutionContext::default())
+            .await
+            .expect("shell process proposal should be denied without shell opt-in");
+
+        assert_eq!(executor.propose_count(), 1);
+        assert_eq!(executor.execute_count(), 0);
+        assert_eq!(runner.call_count(), 0);
+        assert_eq!(
+            event_kind_names_for_tool_execution(&events),
+            ["ArtifactRecorded", "ToolCallResolved"]
+        );
+        assert_eq!(
+            resolved_tool_result(&events).status(),
+            merry_core::ToolCallResultStatus::Failed
+        );
+
+        let audits = action_audit_records(&runtime).await;
+        assert_eq!(audits.len(), 2);
+        assert_eq!(audits[0].status(), ActionAuditStatus::Proposed);
+        assert_eq!(audits[1].status(), ActionAuditStatus::Denied);
+        let policy = audits[1]
+            .policy()
+            .expect("denied audit should include shell read-only policy");
+        assert_eq!(policy.risk_tier(), ActionRiskTier::ProcessShellReadOnly);
+        assert_eq!(policy.disposition(), ActionPolicyDisposition::Deny);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn read_only_shell_process_executes_under_shell_profile_when_opted_in() {
+        let executor =
+            ProcessProposingToolExecutor::with_argv(["bash", "-lc", "rg ProcessRunner | wc -l"]);
+        let runner = FakeProcessRunner::succeeding();
+        let tool = RegisteredTool::new(
+            policy_tool_spec("policy_command_shell_read_only_opt_in"),
+            Arc::new(executor.clone()),
+            ToolActionKind::CommandExec,
+        )
+        .with_action_proposal();
+        let (runtime, pending) = register_policy_pending_registered_tool_with_builder(
+            "runtime-policy-command-exec-shell-read-only-opt-in",
+            "policy_command_shell_read_only_opt_in",
+            "call-command-exec-shell-read-only-opt-in",
+            tool,
+            |builder| {
+                builder
+                    .allow_read_only_shell_process_actions(Arc::new(runner.clone()))
+                    .build()
+            },
+        )
+        .await;
+
+        let events = runtime
+            .execute_tool_call(pending.id(), ToolExecutionContext::default())
+            .await
+            .expect("opted-in read-only shell process action should execute through shell runner");
+
+        assert_eq!(executor.propose_count(), 1);
+        assert_eq!(executor.execute_count(), 0);
+        assert_eq!(runner.call_count(), 1);
+        assert_eq!(
+            event_kind_names_for_tool_execution(&events),
+            ["ArtifactRecorded", "ToolCallResolved"]
+        );
+        let result = resolved_tool_result(&events);
+        assert_eq!(result.status(), merry_core::ToolCallResultStatus::Succeeded);
+
+        let content = runtime
+            .read_artifact_content(result.artifact().id())
+            .await
+            .expect("shell process result artifact should be readable");
+        let payload: serde_json::Value = serde_json::from_str(
+            content
+                .as_text()
+                .expect("shell process result artifact should be textual JSON"),
+        )
+        .expect("shell process result artifact should parse as JSON");
+        assert_eq!(
+            payload["permission_profile_id"],
+            "process.shell.read_only.v1"
+        );
+        assert_eq!(
+            payload["intent"]["argv"],
+            json!(["bash", "-lc", "rg ProcessRunner | wc -l"])
+        );
+        assert!(payload.get("provider").is_none());
+        assert!(payload.get("wire").is_none());
+
+        let audits = action_audit_records(&runtime).await;
+        assert_eq!(audits.len(), 2);
+        assert_eq!(audits[1].status(), ActionAuditStatus::Executed);
+        let policy = audits[1]
+            .policy()
+            .expect("executed audit should include shell allow policy");
+        assert_eq!(policy.risk_tier(), ActionRiskTier::ProcessShellReadOnly);
+        assert_eq!(policy.disposition(), ActionPolicyDisposition::Allow);
+        let ActionExecutionEvidence::ProcessAction(evidence) = audits[1]
+            .execution_evidence()
+            .expect("executed audit should include shell process evidence")
+        else {
+            panic!("shell process action should record process execution evidence");
+        };
+        assert_eq!(
+            evidence.permission_profile_id(),
+            ProcessPermissionProfileId::SHELL_READ_ONLY_V1
+        );
+        let ActionProposalEvidence::ProcessAction(intent) = audits[0]
+            .proposal()
+            .expect("proposed audit should include shell process proposal")
+            .evidence()
+        else {
+            panic!("proposed audit should record shell process intent");
+        };
+        assert_eq!(runner.observed_intents(), vec![intent.clone()]);
+        assert!(evidence.matches_intent(intent));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn read_only_shell_process_denies_complex_or_mutating_shell_without_runner_call() {
+        for (name, argv) in [
+            ("redirect", ["bash", "-lc", "rg ProcessRunner > out.txt"]),
+            ("substitution", ["bash", "-lc", "echo $(pwd)"]),
+            (
+                "mutating-segment",
+                ["bash", "-lc", "rg ProcessRunner | rm -rf target"],
+            ),
+        ] {
+            let executor = ProcessProposingToolExecutor::with_argv(argv);
+            let runner = FakeProcessRunner::succeeding();
+            let tool = RegisteredTool::new(
+                policy_tool_spec(&format!("policy_command_shell_{name}")),
+                Arc::new(executor.clone()),
+                ToolActionKind::CommandExec,
+            )
+            .with_action_proposal();
+            let (runtime, pending) = register_policy_pending_registered_tool_with_builder(
+                &format!("runtime-policy-command-exec-shell-{name}"),
+                &format!("policy_command_shell_{name}"),
+                &format!("call-command-exec-shell-{name}"),
+                tool,
+                |builder| {
+                    builder
+                        .allow_read_only_shell_process_actions(Arc::new(runner.clone()))
+                        .build()
+                },
+            )
+            .await;
+
+            let events = runtime
+                .execute_tool_call(pending.id(), ToolExecutionContext::default())
+                .await
+                .expect("non-read-only shell process proposal should be denied durably");
+
+            assert_eq!(executor.propose_count(), 1);
+            assert_eq!(executor.execute_count(), 0);
+            assert_eq!(runner.call_count(), 0);
+            assert_eq!(
+                resolved_tool_result(&events).status(),
+                merry_core::ToolCallResultStatus::Failed
+            );
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -1,7 +1,9 @@
 //! Provider-neutral process action protocol values.
 //!
 //! This module describes process intent and execution evidence only. It does
-//! not execute commands, spawn subprocesses, or model a shell.
+//! not execute commands or spawn subprocesses. It includes narrow risk
+//! classifiers for process argv and shell-wrapper command text, but those
+//! classifiers are not a shell interpreter.
 
 use std::{
     fmt,
@@ -121,6 +123,8 @@ impl ProcessPermissionProfileId {
     pub const READ_ONLY_V1: Self = Self("process.read_only.v1");
     /// Local workspace process lane accepted for the CLI bubblewrap v1 sandbox.
     pub const LOCAL_WORKSPACE_BWRAP_V1: Self = Self("process.local_workspace.bwrap.v1");
+    /// Read-only shell wrapper lane for plain command sequences under a real shell runner.
+    pub const SHELL_READ_ONLY_V1: Self = Self("process.shell.read_only.v1");
 
     /// Returns the stable profile identifier string.
     #[must_use]
@@ -581,19 +585,27 @@ pub fn classify_process_intent(intent: &ProcessActionIntent) -> ProcessIntentCla
 }
 
 fn classify_process_argv(argv: &[String]) -> ProcessIntentClass {
+    if is_forbidden_process_argv(argv) {
+        return ProcessIntentClass::Forbidden;
+    }
     if is_informational_process_argv(argv) {
         return ProcessIntentClass::Informational;
     }
     if is_local_workspace_effect_process_argv(argv) {
         return ProcessIntentClass::LocalWorkspaceEffect;
     }
-    if is_forbidden_process_argv(argv) {
-        return ProcessIntentClass::Forbidden;
-    }
     ProcessIntentClass::Unknown
 }
 
 fn is_informational_process_argv(argv: &[String]) -> bool {
+    if is_read_only_direct_process_argv(argv) {
+        return true;
+    }
+
+    is_read_only_plain_shell_process_argv(argv)
+}
+
+fn is_read_only_direct_process_argv(argv: &[String]) -> bool {
     match argv {
         [executable, version]
             if executable_token_is(executable, "rustc") && version.as_str() == "--version" =>
@@ -614,8 +626,229 @@ fn is_informational_process_argv(argv: &[String]) -> bool {
         [executable, subcommand, args @ ..] if executable_token_is(executable, "git") => {
             is_read_only_git_command(subcommand, args)
         }
+        [executable] if executable_token_is(executable, "pwd") => true,
+        [executable] if executable_token_is(executable, "true") => true,
+        [executable] if executable_token_is(executable, "false") => true,
+        [executable, args @ ..] if executable_token_is(executable, "echo") => {
+            is_read_only_echo_args(args)
+        }
+        [executable, args @ ..] if executable_token_is(executable, "wc") => {
+            is_read_only_wc_args(args)
+        }
+        [executable, args @ ..] if executable_token_is(executable, "head") => {
+            is_read_only_head_or_tail_args(args)
+        }
+        [executable, args @ ..] if executable_token_is(executable, "tail") => {
+            is_read_only_head_or_tail_args(args)
+        }
+        [executable] if executable_token_is(executable, "ls") => true,
+        [executable, file] if executable_token_is(executable, "ls") => {
+            is_workspace_relative_file_argument(file)
+        }
+        [executable, file] if executable_token_is(executable, "cat") => {
+            is_workspace_relative_file_argument(file)
+        }
         _ => false,
     }
+}
+
+fn is_read_only_plain_shell_process_argv(argv: &[String]) -> bool {
+    let [shell, flag, script] = argv else {
+        return false;
+    };
+    if !is_supported_plain_shell_token(shell) || !matches!(flag.as_str(), "-c" | "-lc") {
+        return false;
+    }
+
+    parse_plain_shell_command_sequence(script).is_some_and(|commands| {
+        !commands.is_empty()
+            && commands
+                .iter()
+                .all(|command| is_read_only_direct_process_argv(command))
+    })
+}
+
+fn is_supported_plain_shell_token(shell: &str) -> bool {
+    matches!(shell, "bash" | "sh" | "zsh")
+}
+
+fn is_read_only_echo_args(args: &[String]) -> bool {
+    !args.iter().any(|arg| arg.starts_with('-'))
+}
+
+fn is_read_only_wc_args(args: &[String]) -> bool {
+    match args {
+        [] => true,
+        [flag_or_file] => {
+            is_read_only_wc_flag(flag_or_file) || is_workspace_relative_file_argument(flag_or_file)
+        }
+        [flag, file] => is_read_only_wc_flag(flag) && is_workspace_relative_file_argument(file),
+        _ => false,
+    }
+}
+
+fn is_read_only_wc_flag(flag: &str) -> bool {
+    matches!(flag, "-l" | "-w" | "-c" | "-m")
+}
+
+fn is_read_only_head_or_tail_args(args: &[String]) -> bool {
+    match args {
+        [] => true,
+        [file] => is_workspace_relative_file_argument(file),
+        [count_flag, count] if count_flag.as_str() == "-n" => is_positive_decimal(count),
+        [count_flag, count, file] if count_flag.as_str() == "-n" => {
+            is_positive_decimal(count) && is_workspace_relative_file_argument(file)
+        }
+        _ => false,
+    }
+}
+
+fn parse_plain_shell_command_sequence(script: &str) -> Option<Vec<Vec<String>>> {
+    let mut chars = script.chars().peekable();
+    let mut commands = Vec::new();
+    let mut current_command = Vec::new();
+    let mut last_token_was_operator = false;
+
+    loop {
+        skip_shell_whitespace(&mut chars);
+        let Some(next) = chars.peek().copied() else {
+            break;
+        };
+
+        if is_shell_sequence_operator_start(next) {
+            parse_shell_sequence_operator(&mut chars)?;
+            if current_command.is_empty() {
+                return None;
+            }
+            commands.push(std::mem::take(&mut current_command));
+            last_token_was_operator = true;
+            continue;
+        }
+
+        let word = parse_plain_shell_word(&mut chars)?;
+        if word.is_empty() {
+            return None;
+        }
+        current_command.push(word);
+        last_token_was_operator = false;
+    }
+
+    if last_token_was_operator {
+        return None;
+    }
+    if !current_command.is_empty() {
+        commands.push(current_command);
+    }
+    if commands.is_empty() {
+        return None;
+    }
+
+    Some(commands)
+}
+
+fn skip_shell_whitespace(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+    while chars
+        .peek()
+        .is_some_and(|character| character.is_whitespace())
+    {
+        chars.next();
+    }
+}
+
+fn parse_shell_sequence_operator(
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+) -> Option<()> {
+    match chars.next()? {
+        ';' | '|' if chars.peek() != Some(&'|') => Some(()),
+        '|' if chars.peek() == Some(&'|') => {
+            chars.next();
+            Some(())
+        }
+        '&' if chars.peek() == Some(&'&') => {
+            chars.next();
+            Some(())
+        }
+        _ => None,
+    }
+}
+
+fn parse_plain_shell_word(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<String> {
+    let mut word = String::new();
+    while let Some(next) = chars.peek().copied() {
+        if next.is_whitespace() || is_shell_sequence_operator_start(next) {
+            break;
+        }
+
+        match next {
+            '\'' => {
+                chars.next();
+                parse_plain_single_quoted_shell_fragment(chars, &mut word)?;
+            }
+            '"' => {
+                chars.next();
+                parse_plain_double_quoted_shell_fragment(chars, &mut word)?;
+            }
+            character if shell_word_character_is_disallowed(character) => return None,
+            character => {
+                chars.next();
+                word.push(character);
+            }
+        }
+    }
+
+    Some(word)
+}
+
+fn parse_plain_single_quoted_shell_fragment(
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+    word: &mut String,
+) -> Option<()> {
+    for character in chars.by_ref() {
+        if character == '\'' {
+            return Some(());
+        }
+        word.push(character);
+    }
+    None
+}
+
+fn parse_plain_double_quoted_shell_fragment(
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+    word: &mut String,
+) -> Option<()> {
+    for character in chars.by_ref() {
+        match character {
+            '"' => return Some(()),
+            '$' | '`' | '\\' | '!' => return None,
+            _ => word.push(character),
+        }
+    }
+    None
+}
+
+fn is_shell_sequence_operator_start(character: char) -> bool {
+    matches!(character, ';' | '|' | '&')
+}
+
+fn shell_word_character_is_disallowed(character: char) -> bool {
+    matches!(
+        character,
+        '$' | '`'
+            | '\\'
+            | '<'
+            | '>'
+            | '('
+            | ')'
+            | '{'
+            | '}'
+            | '['
+            | ']'
+            | '*'
+            | '?'
+            | '~'
+            | '#'
+            | '!'
+    )
 }
 
 fn is_read_only_rg_single_argument(argument: &str) -> bool {
@@ -716,6 +949,10 @@ fn is_local_workspace_effect_process_argv(argv: &[String]) -> bool {
 }
 
 fn is_forbidden_process_argv(argv: &[String]) -> bool {
+    if is_shell_wrapper_process_argv(argv) {
+        return !is_read_only_plain_shell_process_argv(argv);
+    }
+
     let Some(executable) = argv.first().map(|argument| executable_name(argument)) else {
         return false;
     };
@@ -728,6 +965,13 @@ fn is_forbidden_process_argv(argv: &[String]) -> bool {
         && argv
             .get(1)
             .is_some_and(|subcommand| FORBIDDEN_GIT_SUBCOMMANDS.contains(&subcommand.as_str()))
+}
+
+fn is_shell_wrapper_process_argv(argv: &[String]) -> bool {
+    let [shell, flag, _script] = argv else {
+        return false;
+    };
+    is_supported_plain_shell_token(shell) && matches!(flag.as_str(), "-c" | "-lc")
 }
 
 fn executable_name(argument: &str) -> String {
@@ -803,11 +1047,29 @@ pub fn is_low_risk_process_action_intent(intent: &ProcessActionIntent) -> bool {
     required_process_permission_profile_id(intent) == Some(ProcessPermissionProfileId::READ_ONLY_V1)
 }
 
+/// Returns whether a process intent is a plain read-only shell-wrapper action.
+///
+/// This predicate is intentionally separate from the structured read-only
+/// process lane. It recognizes only `bash`/`sh`/`zsh -c|-lc` scripts composed
+/// of plain word commands joined by `|`, `&&`, `||`, or `;`, and it requires
+/// each segment to match the direct read-only process classifier. It is not a
+/// general shell parser and must be paired with an explicit shell runner
+/// admission before execution.
+#[must_use]
+pub fn is_read_only_shell_process_action_intent(intent: &ProcessActionIntent) -> bool {
+    required_process_permission_profile_id(intent)
+        == Some(ProcessPermissionProfileId::SHELL_READ_ONLY_V1)
+}
+
 pub(crate) fn required_process_permission_profile_id(
     intent: &ProcessActionIntent,
 ) -> Option<ProcessPermissionProfileId> {
     if intent.env_policy() != ProcessEnvPolicy::Empty || intent.stdin_text().is_some() {
         return None;
+    }
+
+    if is_read_only_plain_shell_process_argv(intent.argv()) {
+        return Some(ProcessPermissionProfileId::SHELL_READ_ONLY_V1);
     }
 
     match classify_process_intent(intent) {
@@ -1246,6 +1508,24 @@ mod tests {
         )
         .expect("stdin intent is syntactically valid");
         assert_eq!(required_process_permission_profile_id(&with_stdin), None);
+
+        let shell_read_only = ProcessActionIntent::new(
+            vec![
+                "bash".to_owned(),
+                "-lc".to_owned(),
+                "rg ProcessRunner | wc -l".to_owned(),
+            ],
+            None,
+            ProcessEnvPolicy::empty(),
+            None,
+            1024,
+            1024,
+        )
+        .expect("read-only shell intent is valid");
+        assert_eq!(
+            required_process_permission_profile_id(&shell_read_only),
+            Some(ProcessPermissionProfileId::SHELL_READ_ONLY_V1)
+        );
     }
 
     #[test]
@@ -1302,6 +1582,13 @@ mod tests {
             vec!["git", "diff", "--", "crates/merry-runtime/src/process.rs"],
             vec!["git", "show", "--stat", "HEAD"],
             vec!["git", "branch", "--show-current"],
+            vec!["bash", "-lc", "rg ProcessRunner | wc -l"],
+            vec![
+                "sh",
+                "-c",
+                "sed -n '1,5p' crates/merry-runtime/src/process.rs | wc -l",
+            ],
+            vec!["zsh", "-lc", "rg ProcessRunner && pwd"],
         ] {
             let intent = ProcessActionIntent::new(
                 argv.into_iter().map(str::to_owned).collect(),
@@ -1340,9 +1627,9 @@ mod tests {
         }
 
         for argv in [
-            vec!["sh", "-c", "echo unsafe"],
-            vec!["bash", "-lc", "echo unsafe"],
-            vec!["zsh", "-c", "echo unsafe"],
+            vec!["sh", "-c", "rm -rf target"],
+            vec!["bash", "-lc", "rm -rf target"],
+            vec!["zsh", "-c", "rm -rf target"],
             vec!["fish", "-c", "echo unsafe"],
             vec!["cmd", "/C", "echo unsafe"],
             vec!["powershell", "-Command", "Write-Host unsafe"],
@@ -1370,6 +1657,12 @@ mod tests {
             vec!["git", "checkout", "--", "README.md"],
             vec!["/tmp/sh", "-c", "echo unsafe"],
             vec!["./bash", "-lc", "echo unsafe"],
+            vec!["bash", "-lc", "rg ProcessRunner > out.txt"],
+            vec!["bash", "-lc", "echo $(pwd)"],
+            vec!["bash", "-lc", "(pwd)"],
+            vec!["bash", "-lc", "rg ProcessRunner | rm -rf target"],
+            vec!["bash", "-lc", "rg ProcessRunner | tee out.txt"],
+            vec!["/bin/bash", "-lc", "rg ProcessRunner | wc -l"],
         ] {
             let intent = ProcessActionIntent::new(
                 argv.into_iter().map(str::to_owned).collect(),
@@ -1470,7 +1763,8 @@ mod tests {
             vec!["sed", "-n", "1,80d", "crates/merry-runtime/src/process.rs"],
             vec!["git", "clean", "-fd"],
             vec!["unknown-readonly-ish", "--version"],
-            vec!["sh", "-c", "echo unsafe"],
+            vec!["sh", "-c", "rm -rf target"],
+            vec!["bash", "-lc", "rg ProcessRunner | wc -l"],
         ] {
             let intent = ProcessActionIntent::new(
                 argv.into_iter().map(str::to_owned).collect(),
