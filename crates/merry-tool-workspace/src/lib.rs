@@ -19,10 +19,11 @@ use merry_core::{
     ErrorInfo, PendingToolCall, ToolCallResultStatus, ToolInputSchema, ToolName, ToolSpec,
 };
 use merry_runtime::{
-    ActionExecutionEvidence, ActionProposal, ActionProposalEvidence, RegisteredTool,
+    AcceptedLocalWorkspaceProcessAdmission, ActionExecutionEvidence, ActionProposal,
+    ActionProposalEvidence, ProcessCommandToolError, ProcessRunner, RegisteredTool, RuntimeBuilder,
     ToolActionKind, ToolActionProposalFuture, ToolExecutionContext, ToolExecutionError,
     ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture, WorkspacePatchExecutionEvidence,
-    WorkspacePatchProposal,
+    WorkspacePatchProposal, process_command_tool,
 };
 use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -49,6 +50,8 @@ pub const WORKSPACE_LIST_DIR_TOOL: &str = "workspace_list_dir";
 pub const WORKSPACE_SEARCH_TEXT_TOOL: &str = "workspace_search_text";
 /// Registered tool name for opt-in constrained workspace file patches.
 pub const WORKSPACE_PATCH_FILE_TOOL: &str = "workspace_patch_file";
+/// Registered tool name for runtime-owned process execution in the coding-loop profile.
+pub const CODING_LOOP_PROCESS_TOOL: &str = "run_process";
 
 const ERROR_INVALID_ARGUMENTS: &str = "workspace_invalid_arguments";
 const ERROR_PATH_DENIED: &str = "workspace_path_denied";
@@ -297,6 +300,25 @@ pub enum WorkspaceToolConfigError {
     },
 }
 
+/// Errors raised while building a reusable workspace coding-loop profile.
+#[derive(Debug, Error)]
+pub enum WorkspaceCodingLoopProfileError {
+    /// Workspace tool configuration was invalid.
+    #[error(transparent)]
+    WorkspaceTools {
+        /// Source workspace tool configuration error.
+        #[from]
+        source: WorkspaceToolConfigError,
+    },
+    /// The process command tool could not be constructed.
+    #[error(transparent)]
+    ProcessTool {
+        /// Source process command tool error.
+        #[from]
+        source: ProcessCommandToolError,
+    },
+}
+
 /// Read-only workspace tools that can be registered with `merry-runtime`.
 #[derive(Debug, Clone)]
 pub struct ReadOnlyWorkspaceTools {
@@ -352,6 +374,89 @@ impl ReadOnlyWorkspaceTools {
             .with_action_proposal(),
         );
         tools
+    }
+}
+
+/// Reusable tool/profile registration for Merry's workspace coding loop.
+///
+/// This profile keeps upper layers from assembling the same workspace
+/// read/search, optional patch, process tool, and process permission lanes by
+/// hand. It does not change runtime policy by itself: patch support remains
+/// opt-in through [`WorkspaceCodingLoopProfile::with_patch_tool`], and local
+/// workspace process effects require an injected runner plus explicit CLI
+/// bwrap admission through
+/// [`WorkspaceCodingLoopProfile::with_cli_bwrap_process_runner`].
+#[derive(Clone)]
+pub struct WorkspaceCodingLoopProfile {
+    workspace_tools: ReadOnlyWorkspaceTools,
+    include_patch_tool: bool,
+    process_runner: Option<(
+        AcceptedLocalWorkspaceProcessAdmission,
+        Arc<dyn ProcessRunner>,
+    )>,
+}
+
+impl WorkspaceCodingLoopProfile {
+    /// Validates workspace tool configuration and creates the reusable profile.
+    pub fn new(config: WorkspaceToolsConfig) -> Result<Self, WorkspaceToolConfigError> {
+        Ok(Self {
+            workspace_tools: ReadOnlyWorkspaceTools::new(config)?,
+            include_patch_tool: false,
+            process_runner: None,
+        })
+    }
+
+    /// Includes the constrained workspace patch tool and low-risk patch lane.
+    #[must_use]
+    pub fn with_patch_tool(mut self) -> Self {
+        self.include_patch_tool = true;
+        self
+    }
+
+    /// Includes process execution lanes for the declared CLI bubblewrap profile.
+    #[must_use]
+    pub fn with_cli_bwrap_process_runner(
+        mut self,
+        admission: AcceptedLocalWorkspaceProcessAdmission,
+        runner: Arc<dyn ProcessRunner>,
+    ) -> Self {
+        self.process_runner = Some((admission, runner));
+        self
+    }
+
+    /// Registers this profile on an existing runtime builder.
+    ///
+    /// The returned builder is not built yet, so callers can still add model
+    /// providers or other runtime options around the reusable coding-loop
+    /// profile.
+    pub fn register_on(
+        self,
+        mut builder: RuntimeBuilder,
+    ) -> Result<RuntimeBuilder, WorkspaceCodingLoopProfileError> {
+        if self.include_patch_tool {
+            builder = builder.allow_low_risk_workspace_patches();
+        }
+
+        if let Some((admission, runner)) = self.process_runner {
+            builder = builder
+                .allow_low_risk_process_actions(Arc::clone(&runner))
+                .allow_accepted_local_workspace_process_actions(admission, runner)
+                .register_tool(process_command_tool(
+                    ToolName::new(CODING_LOOP_PROCESS_TOOL).expect("static tool name is valid"),
+                    "Run exact argv through Merry process policy for workspace inspection and verification.",
+                )?);
+        }
+
+        let tools = if self.include_patch_tool {
+            self.workspace_tools.into_registered_tools_with_patch()
+        } else {
+            self.workspace_tools.into_registered_tools()
+        };
+        for tool in tools {
+            builder = builder.register_tool(tool);
+        }
+
+        Ok(builder)
     }
 }
 

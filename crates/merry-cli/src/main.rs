@@ -24,8 +24,8 @@ use merry_runtime::{
     ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture, process_command_tool,
 };
 use merry_tool_workspace::{
-    ReadOnlyWorkspaceTools, WORKSPACE_PATCH_FILE_TOOL, WORKSPACE_READ_FILE_TOOL,
-    WorkspaceToolsConfig,
+    CODING_LOOP_PROCESS_TOOL, WORKSPACE_PATCH_FILE_TOOL, WORKSPACE_READ_FILE_TOOL,
+    WorkspaceCodingLoopProfile, WorkspaceToolsConfig,
 };
 use std::{
     collections::BTreeMap,
@@ -43,7 +43,6 @@ const DEFAULT_INPUT: &str = "debug step";
 const DEBUG_TOOL_NAME: &str = "debug_echo";
 const DEBUG_TOOL_CONTINUATION_INPUT: &str = "continue after debug tool";
 const CODING_LOOP_SMOKE_SESSION_ID: &str = "coding-loop-smoke";
-const CODING_LOOP_SMOKE_TOOL_NAME: &str = "run_process";
 const CODING_LOOP_LIVE_SMOKE_SESSION_ID: &str = "coding-loop-live-smoke";
 const CODING_LOOP_LIVE_SMOKE_INITIAL_VALUE: &str = "unfixed";
 const CODING_LOOP_LIVE_SMOKE_TARGET_VALUE: &str = "fixed-by-live-llm";
@@ -1119,27 +1118,20 @@ fn build_coding_loop_runtime(
     runner: Arc<dyn ProcessRunner>,
     allow_hidden_workspace_paths: bool,
 ) -> Result<Runtime, CliError> {
-    let workspace_tools = ReadOnlyWorkspaceTools::new(
+    WorkspaceCodingLoopProfile::new(
         WorkspaceToolsConfig::new(vec![root.to_path_buf()])
             .with_allow_hidden(allow_hidden_workspace_paths),
     )
-    .map_err(unexpected)?;
-    let mut builder = Runtime::builder(SessionId::new(session_id).map_err(unexpected)?)
-    .model_provider(provider, model)
-    .allow_low_risk_workspace_patches()
-    .allow_low_risk_process_actions(Arc::clone(&runner))
-    .allow_accepted_local_workspace_process_actions(admission, runner)
-    .register_tool(
-        process_command_tool(
-            ToolName::new(CODING_LOOP_SMOKE_TOOL_NAME).map_err(unexpected)?,
-            "Run exact argv through Merry process policy. For this smoke use only `rg --files` and `rg fixed-by-live-llm` with the provided cwd.",
-        )
-        .map_err(unexpected)?,
-    );
-    for tool in workspace_tools.into_registered_tools_with_patch() {
-        builder = builder.register_tool(tool);
-    }
-    builder.build().map_err(unexpected)
+    .map_err(unexpected)?
+    .with_patch_tool()
+    .with_cli_bwrap_process_runner(admission, runner)
+    .register_on(
+        Runtime::builder(SessionId::new(session_id).map_err(unexpected)?)
+            .model_provider(provider, model),
+    )
+    .map_err(unexpected)?
+    .build()
+    .map_err(unexpected)
 }
 
 fn coding_loop_live_smoke_task(relative_cwd: Option<&str>) -> String {
@@ -1166,7 +1158,7 @@ pub fn greeting() -> &'static str {{
     \"{target}\"
 }}
 ",
-        process_tool = CODING_LOOP_SMOKE_TOOL_NAME,
+        process_tool = CODING_LOOP_PROCESS_TOOL,
         read_tool = WORKSPACE_READ_FILE_TOOL,
         patch_tool = WORKSPACE_PATCH_FILE_TOOL,
         initial = CODING_LOOP_LIVE_SMOKE_INITIAL_VALUE,
@@ -1206,7 +1198,7 @@ async fn assert_coding_loop_live_smoke_tool_sequence(
         }
     }
 
-    require_live_smoke_tool_name(&resolved_tool_names, CODING_LOOP_SMOKE_TOOL_NAME)?;
+    require_live_smoke_tool_name(&resolved_tool_names, CODING_LOOP_PROCESS_TOOL)?;
     require_live_smoke_tool_name(&resolved_tool_names, WORKSPACE_READ_FILE_TOOL)?;
     require_live_smoke_tool_name(&resolved_tool_names, WORKSPACE_PATCH_FILE_TOOL)?;
 
@@ -1380,7 +1372,7 @@ fn coding_loop_process_call(
     if let Some(cwd) = cwd {
         arguments.insert("cwd".to_owned(), serde_json::Value::String(cwd.to_owned()));
     }
-    coding_loop_tool_call(call_id, CODING_LOOP_SMOKE_TOOL_NAME, arguments)
+    coding_loop_tool_call(call_id, CODING_LOOP_PROCESS_TOOL, arguments)
 }
 
 fn coding_loop_workspace_call<const N: usize>(

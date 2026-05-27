@@ -14,11 +14,12 @@ use merry_runtime::{
     DEFAULT_AGENT_LOOP_CONTINUATION_INPUT, LedgerFactKind, LedgerProjection, ProcessActionIntent,
     ProcessExitStatus, ProcessRunner, ProcessRunnerContext, ProcessRunnerError,
     ProcessRunnerFuture, ProcessRunnerOutput, Runtime, StepContext, StepInput,
-    ToolExecutionContext, process_command_tool,
+    ToolExecutionContext,
 };
 use merry_tool_workspace::{
     ReadOnlyWorkspaceTools, WORKSPACE_LIST_DIR_TOOL, WORKSPACE_PATCH_FILE_TOOL,
-    WORKSPACE_READ_FILE_TOOL, WORKSPACE_SEARCH_TEXT_TOOL, WorkspaceToolsConfig,
+    WORKSPACE_READ_FILE_TOOL, WORKSPACE_SEARCH_TEXT_TOOL, WorkspaceCodingLoopProfile,
+    WorkspaceToolsConfig,
 };
 use serde_json::{Map, Value};
 use std::{
@@ -288,27 +289,109 @@ fn runtime_with_coding_loop_tools(
     provider: ScriptedModelProvider,
     runner: Arc<dyn ProcessRunner>,
 ) -> Runtime {
-    let tools = ReadOnlyWorkspaceTools::new(WorkspaceToolsConfig::new(vec![root.to_path_buf()]))
-        .expect("workspace tools should construct");
-    let mut builder = Runtime::builder(session_id())
-        .model_provider(Arc::new(provider), model_name())
-        .allow_low_risk_workspace_patches()
-        .allow_low_risk_process_actions(runner.clone())
-        .allow_accepted_local_workspace_process_actions(
+    WorkspaceCodingLoopProfile::new(WorkspaceToolsConfig::new(vec![root.to_path_buf()]))
+        .expect("workspace coding loop profile should construct")
+        .with_patch_tool()
+        .with_cli_bwrap_process_runner(
             AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
             runner,
         )
-        .register_tool(
-            process_command_tool(
-                ToolName::new("run_process").expect("valid tool name"),
-                "Run a local process from argv through runtime policy",
+        .register_on(
+            Runtime::builder(session_id()).model_provider(Arc::new(provider), model_name()),
+        )
+        .expect("workspace coding loop runtime should build")
+        .build()
+        .expect("runtime should build")
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn workspace_coding_loop_profile_registers_expected_tools_and_process_lanes() {
+    let temp = TempWorkspace::new("coding-loop-profile-tools");
+    let provider = ScriptedModelProvider::new(vec![vec![Ok(ModelEvent::Completed {
+        response: ModelResponse::new(Vec::new(), FinishReason::Stop, None),
+    })]]);
+    let provider_handle = provider.clone();
+    let runner = Arc::new(ScriptedProcessRunner::new(Vec::new()));
+    let runtime =
+        WorkspaceCodingLoopProfile::new(WorkspaceToolsConfig::new(vec![temp.path().to_path_buf()]))
+            .expect("workspace coding loop profile should construct")
+            .with_cli_bwrap_process_runner(
+                AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
+                runner,
             )
-            .expect("process command tool should build"),
-        );
-    for tool in tools.into_registered_tools_with_patch() {
-        builder = builder.register_tool(tool);
-    }
-    builder.build().expect("runtime should build")
+            .register_on(
+                Runtime::builder(session_id()).model_provider(Arc::new(provider), model_name()),
+            )
+            .expect("workspace coding loop runtime should build")
+            .build()
+            .expect("runtime should build");
+
+    collect_step(&runtime, "inspect workspace").await;
+    let requests = provider_handle.recorded_requests();
+    assert_eq!(requests.len(), 1);
+    let tool_names = requests[0].tools();
+    assert_eq!(tool_names.len(), 4);
+    assert!(
+        tool_names
+            .iter()
+            .any(|tool| tool.name().as_str() == "run_process")
+    );
+    assert!(
+        tool_names
+            .iter()
+            .any(|tool| tool.name().as_str() == WORKSPACE_READ_FILE_TOOL)
+    );
+    assert!(
+        tool_names
+            .iter()
+            .any(|tool| tool.name().as_str() == WORKSPACE_LIST_DIR_TOOL)
+    );
+    assert!(
+        tool_names
+            .iter()
+            .any(|tool| tool.name().as_str() == WORKSPACE_SEARCH_TEXT_TOOL)
+    );
+    assert!(
+        !tool_names
+            .iter()
+            .any(|tool| tool.name().as_str() == WORKSPACE_PATCH_FILE_TOOL),
+        "patch tool should require the explicit with_patch lane"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn workspace_coding_loop_profile_can_enable_patch_tool() {
+    let temp = TempWorkspace::new("coding-loop-profile-patch");
+    let provider = ScriptedModelProvider::new(vec![vec![Ok(ModelEvent::Completed {
+        response: ModelResponse::new(Vec::new(), FinishReason::Stop, None),
+    })]]);
+    let provider_handle = provider.clone();
+    let runner = Arc::new(ScriptedProcessRunner::new(Vec::new()));
+    let runtime =
+        WorkspaceCodingLoopProfile::new(WorkspaceToolsConfig::new(vec![temp.path().to_path_buf()]))
+            .expect("workspace coding loop profile should construct")
+            .with_patch_tool()
+            .with_cli_bwrap_process_runner(
+                AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
+                runner,
+            )
+            .register_on(
+                Runtime::builder(session_id()).model_provider(Arc::new(provider), model_name()),
+            )
+            .expect("workspace coding loop runtime should build")
+            .build()
+            .expect("runtime should build");
+
+    collect_step(&runtime, "inspect workspace").await;
+    let requests = provider_handle.recorded_requests();
+    assert_eq!(requests.len(), 1);
+    let tool_names = requests[0].tools();
+    assert_eq!(tool_names.len(), 5);
+    assert!(
+        tool_names
+            .iter()
+            .any(|tool| tool.name().as_str() == WORKSPACE_PATCH_FILE_TOOL)
+    );
 }
 
 #[derive(Clone)]
