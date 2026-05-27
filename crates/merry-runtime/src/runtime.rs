@@ -1772,6 +1772,10 @@ fn trace_provider_request(
         message_count = request.messages().len(),
         tool_count = request.tools().len(),
         continuation_count,
+        stable_prefix_message_count = request.stable_prefix_message_count(),
+        tool_profile_hash = request.tool_profile_hash().as_str(),
+        stable_prefix_hash = request.stable_prefix_hash().as_str(),
+        dynamic_context_hash = request.dynamic_context_hash().as_str(),
         max_output_tokens = request.generation().max_output_tokens(),
         allow_parallel_tool_calls = request.generation().allow_parallel_tool_calls(),
         "runtime provider request metadata"
@@ -3900,23 +3904,29 @@ mod tests {
 
         let requests = provider.recorded_requests();
         assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].messages().len(), 2);
+        assert_eq!(requests[0].messages().len(), 3);
+        assert_eq!(requests[0].stable_prefix_message_count(), 1);
         assert_eq!(requests[0].messages()[0].role(), ModelMessageRole::System);
-        assert_eq!(requests[0].messages()[1].role(), ModelMessageRole::User);
+        assert_eq!(
+            requests[0].messages()[0].content().as_text(),
+            "You are Merry."
+        );
+        assert_eq!(requests[0].messages()[1].role(), ModelMessageRole::System);
+        assert_eq!(requests[0].messages()[2].role(), ModelMessageRole::User);
         assert!(
-            requests[0].messages()[0]
+            requests[0].messages()[1]
                 .content()
                 .as_text()
                 .contains("memory:memory-topic")
         );
         assert!(
-            requests[0].messages()[0]
+            requests[0].messages()[1]
                 .content()
                 .as_text()
                 .contains("memory-text:Remember that topic answers should mention runtime timing.")
         );
         assert_eq!(
-            requests[0].messages()[1].content().as_text(),
+            requests[0].messages()[2].content().as_text(),
             "Topic request."
         );
     }
@@ -3956,10 +3966,16 @@ mod tests {
         );
         let requests = provider.recorded_requests();
         assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].messages().len(), 1);
-        assert_eq!(requests[0].messages()[0].role(), ModelMessageRole::User);
+        assert_eq!(requests[0].messages().len(), 2);
+        assert_eq!(requests[0].stable_prefix_message_count(), 1);
+        assert_eq!(requests[0].messages()[0].role(), ModelMessageRole::System);
         assert_eq!(
             requests[0].messages()[0].content().as_text(),
+            "You are Merry."
+        );
+        assert_eq!(requests[0].messages()[1].role(), ModelMessageRole::User);
+        assert_eq!(
+            requests[0].messages()[1].content().as_text(),
             "Topic request."
         );
         assert_eq!(compiled_context_snapshot(&runtime).await, "");
@@ -4049,15 +4065,22 @@ mod tests {
 
         let requests = provider.recorded_requests();
         assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0].messages().len(), 2);
+        assert_eq!(requests[0].messages().len(), 3);
+        assert_eq!(requests[0].stable_prefix_message_count(), 1);
         assert!(
-            requests[0].messages()[0]
+            requests[0].messages()[1]
                 .content()
                 .as_text()
                 .contains("memory:memory-stale")
         );
-        assert_eq!(requests[1].messages().len(), 1);
-        assert_eq!(requests[1].messages()[0].role(), ModelMessageRole::User);
+        assert_eq!(requests[1].messages().len(), 2);
+        assert_eq!(requests[1].stable_prefix_message_count(), 1);
+        assert_eq!(requests[1].messages()[0].role(), ModelMessageRole::System);
+        assert_eq!(
+            requests[1].messages()[0].content().as_text(),
+            "You are Merry."
+        );
+        assert_eq!(requests[1].messages()[1].role(), ModelMessageRole::User);
         assert!(
             requests[1]
                 .messages()

@@ -16,6 +16,8 @@ use merry_llm::{
 };
 use tokio_util::sync::CancellationToken;
 
+pub(crate) const DEFAULT_RUNTIME_BASE_INSTRUCTIONS: &str = "You are Merry.";
+
 /// Input snapshot for a runtime step.
 ///
 /// The MVP step input is user text only. Runtime state such as context,
@@ -132,7 +134,12 @@ pub(crate) fn compile_step_model_request(
     generation_config: GenerationConfig,
 ) -> Result<ModelRequest, merry_llm::ModelError> {
     let context_snapshot = context.to_snapshot();
-    let mut messages = Vec::with_capacity(if context_snapshot.is_empty() { 1 } else { 2 });
+    let mut messages = Vec::with_capacity(if context_snapshot.is_empty() { 2 } else { 3 });
+
+    messages.push(ModelMessage::new(
+        ModelMessageRole::System,
+        ModelContent::text(DEFAULT_RUNTIME_BASE_INSTRUCTIONS)?,
+    )?);
 
     if !context_snapshot.is_empty() {
         messages.push(ModelMessage::new(
@@ -151,12 +158,13 @@ pub(crate) fn compile_step_model_request(
         .map(model_tool_continuation_from_snapshot)
         .collect::<Result<Vec<_>, _>>()?;
 
-    ModelRequest::new_with_continuations(
+    ModelRequest::new_with_continuations_and_stable_prefix(
         model.clone(),
         messages,
         tool_specs,
         continuations,
         generation_config,
+        1,
     )
 }
 

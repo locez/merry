@@ -58,6 +58,14 @@ fn user_message(text: &str) -> ModelMessage {
     .expect("valid model message")
 }
 
+fn system_message(text: &str) -> ModelMessage {
+    ModelMessage::new(
+        ModelMessageRole::System,
+        ModelContent::text(text).expect("valid text content"),
+    )
+    .expect("valid model message")
+}
+
 fn test_request() -> ModelRequest {
     ModelRequest::new(
         ModelName::new("vendor/model-family:2025-04-14").expect("valid model name"),
@@ -244,6 +252,125 @@ fn model_request_rejects_mismatched_tool_profile_hash() {
     value["tool_profile_hash"] = Value::String("fnv1a64:0000000000000000".to_owned());
 
     assert!(serde_json::from_value::<ModelRequest>(value).is_err());
+}
+
+#[test]
+fn model_request_stable_prefix_hash_tracks_base_instructions_and_tools() {
+    let model = ModelName::new("vendor/model-family:2025-04-14").expect("valid model name");
+    let first = ModelRequest::new_with_continuations_and_stable_prefix(
+        model.clone(),
+        vec![
+            system_message("Base runtime instructions."),
+            user_message("Use tools for request one."),
+        ],
+        vec![named_tool("search_notes"), named_tool("read_file")],
+        Vec::new(),
+        GenerationConfig::default(),
+        1,
+    )
+    .expect("valid request");
+    let changed_dynamic = ModelRequest::new_with_continuations_and_stable_prefix(
+        model.clone(),
+        vec![
+            system_message("Base runtime instructions."),
+            user_message("Use tools for request two."),
+        ],
+        vec![named_tool("read_file"), named_tool("search_notes")],
+        Vec::new(),
+        GenerationConfig::default(),
+        1,
+    )
+    .expect("valid request");
+    let changed_base = ModelRequest::new_with_continuations_and_stable_prefix(
+        model.clone(),
+        vec![
+            system_message("Changed runtime instructions."),
+            user_message("Use tools for request one."),
+        ],
+        vec![named_tool("search_notes"), named_tool("read_file")],
+        Vec::new(),
+        GenerationConfig::default(),
+        1,
+    )
+    .expect("valid request");
+    let changed_tool_profile = ModelRequest::new_with_continuations_and_stable_prefix(
+        model,
+        vec![
+            system_message("Base runtime instructions."),
+            user_message("Use tools for request one."),
+        ],
+        vec![named_tool("read_file")],
+        Vec::new(),
+        GenerationConfig::default(),
+        1,
+    )
+    .expect("valid request");
+
+    assert_eq!(first.stable_prefix_message_count(), 1);
+    assert_eq!(first.stable_prefix_messages().len(), 1);
+    assert_eq!(first.dynamic_messages().len(), 1);
+    assert!(first.stable_prefix_hash().as_str().starts_with("fnv1a64:"));
+    assert!(
+        first
+            .dynamic_context_hash()
+            .as_str()
+            .starts_with("fnv1a64:")
+    );
+    assert_eq!(
+        first.stable_prefix_hash(),
+        changed_dynamic.stable_prefix_hash()
+    );
+    assert_ne!(
+        first.dynamic_context_hash(),
+        changed_dynamic.dynamic_context_hash()
+    );
+    assert_ne!(
+        first.stable_prefix_hash(),
+        changed_base.stable_prefix_hash()
+    );
+    assert_ne!(
+        first.stable_prefix_hash(),
+        changed_tool_profile.stable_prefix_hash()
+    );
+}
+
+#[test]
+fn model_request_rejects_non_system_stable_prefix_message() {
+    let err = ModelRequest::new_with_continuations_and_stable_prefix(
+        ModelName::new("vendor/model-family:2025-04-14").expect("valid model name"),
+        vec![user_message("User text must not be stable prefix.")],
+        Vec::new(),
+        Vec::new(),
+        GenerationConfig::default(),
+        1,
+    )
+    .expect_err("stable prefix should be system/developer layer only");
+
+    assert!(err.to_string().contains("stable prefix messages"));
+}
+
+#[test]
+fn model_request_rejects_mismatched_context_hashes() {
+    let request = ModelRequest::new_with_continuations_and_stable_prefix(
+        ModelName::new("vendor/model-family:2025-04-14").expect("valid model name"),
+        vec![
+            system_message("Base runtime instructions."),
+            user_message("Use tools."),
+        ],
+        vec![named_tool("read_file")],
+        Vec::new(),
+        GenerationConfig::default(),
+        1,
+    )
+    .expect("valid request");
+
+    let mut stable_value = serde_json::to_value(&request).expect("request should serialize");
+    stable_value["stable_prefix_hash"] = Value::String("fnv1a64:0000000000000000".to_owned());
+    assert!(serde_json::from_value::<ModelRequest>(stable_value).is_err());
+
+    let mut dynamic_value = serde_json::to_value(request).expect("request should serialize");
+    dynamic_value["dynamic_context_hash"] = Value::String("fnv1a64:0000000000000000".to_owned());
+    assert!(serde_json::from_value::<ModelRequest>(dynamic_value).is_err());
 }
 
 #[test]
