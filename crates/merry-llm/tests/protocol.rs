@@ -68,6 +68,15 @@ fn test_request() -> ModelRequest {
     .expect("valid model request")
 }
 
+fn named_tool(name: &str) -> ToolSpec {
+    ToolSpec::new(
+        ToolName::new(name).expect("valid tool name"),
+        "Run a deterministic test tool",
+        object_schema(),
+    )
+    .expect("valid tool spec")
+}
+
 fn test_tool_call() -> ModelToolCall {
     let mut arguments = Map::new();
     arguments.insert("city".to_owned(), Value::String("Shanghai".to_owned()));
@@ -198,6 +207,43 @@ fn protocol_types_round_trip_through_json() {
     assert_json_round_trip(&ModelEvent::Completed {
         response: test_response(),
     });
+}
+
+#[test]
+fn model_request_records_stable_tool_profile_hash() {
+    let first = ModelRequest::new(
+        ModelName::new("vendor/model-family:2025-04-14").expect("valid model name"),
+        vec![user_message("Use tools.")],
+        vec![named_tool("search_notes"), named_tool("read_file")],
+        GenerationConfig::default(),
+    )
+    .expect("valid request");
+    let reordered = ModelRequest::new(
+        ModelName::new("vendor/model-family:2025-04-14").expect("valid model name"),
+        vec![user_message("Use tools.")],
+        vec![named_tool("read_file"), named_tool("search_notes")],
+        GenerationConfig::default(),
+    )
+    .expect("valid request");
+    let changed = ModelRequest::new(
+        ModelName::new("vendor/model-family:2025-04-14").expect("valid model name"),
+        vec![user_message("Use tools.")],
+        vec![named_tool("read_file")],
+        GenerationConfig::default(),
+    )
+    .expect("valid request");
+
+    assert!(first.tool_profile_hash().as_str().starts_with("fnv1a64:"));
+    assert_eq!(first.tool_profile_hash(), reordered.tool_profile_hash());
+    assert_ne!(first.tool_profile_hash(), changed.tool_profile_hash());
+}
+
+#[test]
+fn model_request_rejects_mismatched_tool_profile_hash() {
+    let mut value = serde_json::to_value(test_request()).expect("request should serialize");
+    value["tool_profile_hash"] = Value::String("fnv1a64:0000000000000000".to_owned());
+
+    assert!(serde_json::from_value::<ModelRequest>(value).is_err());
 }
 
 #[test]
