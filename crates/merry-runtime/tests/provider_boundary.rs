@@ -1000,7 +1000,73 @@ async fn registered_tool_specs_are_compiled_into_provider_request() {
     let requests = provider.recorded_requests();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].tools(), &[tool]);
+    assert!(
+        requests[0]
+            .tool_profile_hash()
+            .as_str()
+            .starts_with("fnv1a64:")
+    );
     assert!(requests[0].continuations().is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn compiled_provider_request_tool_profile_hash_tracks_registered_tools() {
+    let first_provider = FakeModelProvider::new(vec![Ok(completed_event())]);
+    let search_tool = test_tool_spec("search_notes");
+    let read_tool = test_tool_spec("read_file");
+    let first_runtime = Runtime::builder(session_id("provider-tool-profile-hash-first"))
+        .register_tool(RegisteredTool::read_only(
+            search_tool.clone(),
+            Arc::new(ScriptedToolExecutor::succeeding_text("unused")),
+        ))
+        .register_tool(RegisteredTool::read_only(
+            read_tool.clone(),
+            Arc::new(ScriptedToolExecutor::succeeding_text("unused")),
+        ))
+        .model_provider(Arc::new(first_provider.clone()), model_name())
+        .build()
+        .expect("runtime should build");
+
+    collect_step(&first_runtime, "Use registered tools.").await;
+    let first_hash = first_provider.recorded_requests()[0]
+        .tool_profile_hash()
+        .clone();
+
+    let reordered_provider = FakeModelProvider::new(vec![Ok(completed_event())]);
+    let reordered_runtime = Runtime::builder(session_id("provider-tool-profile-hash-reordered"))
+        .register_tool(RegisteredTool::read_only(
+            read_tool,
+            Arc::new(ScriptedToolExecutor::succeeding_text("unused")),
+        ))
+        .register_tool(RegisteredTool::read_only(
+            search_tool,
+            Arc::new(ScriptedToolExecutor::succeeding_text("unused")),
+        ))
+        .model_provider(Arc::new(reordered_provider.clone()), model_name())
+        .build()
+        .expect("runtime should build");
+
+    collect_step(&reordered_runtime, "Use registered tools.").await;
+    assert_eq!(
+        reordered_provider.recorded_requests()[0].tool_profile_hash(),
+        &first_hash
+    );
+
+    let changed_provider = FakeModelProvider::new(vec![Ok(completed_event())]);
+    let changed_runtime = Runtime::builder(session_id("provider-tool-profile-hash-changed"))
+        .register_tool(RegisteredTool::read_only(
+            test_tool_spec("read_file"),
+            Arc::new(ScriptedToolExecutor::succeeding_text("unused")),
+        ))
+        .model_provider(Arc::new(changed_provider.clone()), model_name())
+        .build()
+        .expect("runtime should build");
+
+    collect_step(&changed_runtime, "Use registered tools.").await;
+    assert_ne!(
+        changed_provider.recorded_requests()[0].tool_profile_hash(),
+        &first_hash
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

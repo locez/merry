@@ -9,6 +9,9 @@ use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use std::{borrow::Cow, fmt, str::FromStr};
 
+const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+const FNV_PRIME: u64 = 0x100000001b3;
+
 /// Provider model identifier.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, JsonSchema)]
 #[serde(transparent)]
@@ -22,6 +25,21 @@ impl ModelName {
     }
 
     /// Borrows the model identifier as a string slice.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Stable fingerprint of the provider-neutral tool profile visible to a request.
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(transparent)]
+pub struct ToolProfileHash(String);
+
+impl ToolProfileHash {
+    /// Borrows the stable hash label.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
@@ -268,6 +286,7 @@ pub struct ModelRequest {
     #[serde(default)]
     continuations: Vec<ModelToolContinuation>,
     generation: GenerationConfig,
+    tool_profile_hash: ToolProfileHash,
 }
 
 impl ModelRequest {
@@ -298,6 +317,7 @@ impl ModelRequest {
         Ok(Self {
             model,
             messages,
+            tool_profile_hash: tool_profile_hash(&tools),
             tools,
             continuations,
             generation,
@@ -333,6 +353,12 @@ impl ModelRequest {
     pub fn generation(&self) -> &GenerationConfig {
         &self.generation
     }
+
+    /// Stable hash of the provider-neutral tool profile.
+    #[must_use]
+    pub fn tool_profile_hash(&self) -> &ToolProfileHash {
+        &self.tool_profile_hash
+    }
 }
 
 #[derive(Deserialize)]
@@ -344,6 +370,8 @@ struct ModelRequestWire {
     #[serde(default)]
     continuations: Vec<ModelToolContinuation>,
     generation: GenerationConfig,
+    #[serde(default)]
+    tool_profile_hash: Option<ToolProfileHash>,
 }
 
 impl<'de> Deserialize<'de> for ModelRequest {
@@ -352,15 +380,46 @@ impl<'de> Deserialize<'de> for ModelRequest {
         D: Deserializer<'de>,
     {
         let wire = ModelRequestWire::deserialize(deserializer)?;
-        Self::new_with_continuations(
+        let request = Self::new_with_continuations(
             wire.model,
             wire.messages,
             wire.tools,
             wire.continuations,
             wire.generation,
         )
-        .map_err(de::Error::custom)
+        .map_err(de::Error::custom)?;
+
+        if let Some(expected_hash) = wire.tool_profile_hash
+            && expected_hash != request.tool_profile_hash
+        {
+            return Err(de::Error::custom(
+                "ModelRequest tool_profile_hash did not match tools",
+            ));
+        }
+
+        Ok(request)
     }
+}
+
+fn tool_profile_hash(tools: &[ToolSpec]) -> ToolProfileHash {
+    let mut canonical_tools = tools
+        .iter()
+        .map(|tool| {
+            serde_json::to_string(tool)
+                .expect("provider-neutral tool specs must serialize for profile hashing")
+        })
+        .collect::<Vec<_>>();
+    canonical_tools.sort();
+
+    let mut hash = FNV_OFFSET_BASIS;
+    for tool in canonical_tools {
+        for byte in tool.as_bytes() {
+            hash = (hash ^ u64::from(*byte)).wrapping_mul(FNV_PRIME);
+        }
+        hash = (hash ^ 0xff).wrapping_mul(FNV_PRIME);
+    }
+
+    ToolProfileHash(format!("fnv1a64:{hash:016x}"))
 }
 
 fn validate_text(kind: &'static str, value: &str) -> Result<(), ModelError> {
