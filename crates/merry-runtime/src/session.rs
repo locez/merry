@@ -13,7 +13,7 @@ use crate::{
         JudgmentRequest, SummaryDraftPromotionError, SummaryDraftPromotionInput,
         context_summary_from_accepted_summary_draft, validate_summary_draft_record_purpose,
     },
-    ledger::{LedgerFactKind, TaskLedger},
+    ledger::{CompactLedgerText, LedgerFactKind, LedgerScope, LedgerUpdateKind, TaskLedger},
     memory::{ActivatedMemory, MemoryError, MemoryItem, MemoryStore},
     summary_draft_promotion::{
         SummaryDraftPromotionAcceptanceResult, SummaryDraftPromotionAcceptanceStatus,
@@ -49,6 +49,77 @@ pub(crate) struct ResolvedToolContinuationSnapshot {
     call: PendingToolCall,
     result: ToolCallResult,
     content: ArtifactContent,
+}
+
+/// Compact ledger fact to record after a tool result artifact is durable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ToolResultLedgerObservation {
+    scope: LedgerScope,
+    summary: CompactLedgerText,
+}
+
+impl ToolResultLedgerObservation {
+    pub(crate) fn new(
+        scope: LedgerScope,
+        summary: impl Into<String>,
+    ) -> Result<Self, crate::ledger::LedgerValidationError> {
+        Ok(Self {
+            scope,
+            summary: CompactLedgerText::try_from(summary.into())?,
+        })
+    }
+
+    fn into_update_for_artifact(self, artifact: &ArtifactRef) -> LedgerUpdateKind {
+        let summary = CompactLedgerText::try_from(format!(
+            "{}; artifact={}",
+            self.summary.as_str(),
+            artifact.id().as_str()
+        ))
+        .expect("validated compact ledger text remains non-empty after appending artifact id");
+
+        LedgerUpdateKind::Observation {
+            scope: self.scope,
+            summary,
+        }
+    }
+}
+
+/// Complete proposed action execution outcome before session state is mutated.
+#[derive(Debug)]
+pub(crate) struct ProposedToolExecutionOutcome {
+    proposal: ActionProposal,
+    status: ToolCallResultStatus,
+    content: ArtifactContent,
+    diagnostic: Option<ErrorInfo>,
+    execution_evidence: Option<ActionExecutionEvidence>,
+    policy: ActionAuditPolicy,
+    observation: Option<ToolResultLedgerObservation>,
+}
+
+impl ProposedToolExecutionOutcome {
+    pub(crate) fn new(
+        proposal: ActionProposal,
+        status: ToolCallResultStatus,
+        content: ArtifactContent,
+        diagnostic: Option<ErrorInfo>,
+        execution_evidence: Option<ActionExecutionEvidence>,
+        policy: ActionAuditPolicy,
+    ) -> Self {
+        Self {
+            proposal,
+            status,
+            content,
+            diagnostic,
+            execution_evidence,
+            policy,
+            observation: None,
+        }
+    }
+
+    pub(crate) fn with_observation(mut self, observation: ToolResultLedgerObservation) -> Self {
+        self.observation = Some(observation);
+        self
+    }
 }
 
 impl ResolvedToolContinuationSnapshot {
@@ -495,6 +566,29 @@ impl SessionState {
         execution_evidence: Option<ActionExecutionEvidence>,
         policy: ActionAuditPolicy,
     ) -> Result<Vec<RuntimeEvent>, RuntimeError> {
+        self.submit_proposed_tool_execution_outcome_record(ProposedToolExecutionOutcome::new(
+            proposal,
+            status,
+            content,
+            diagnostic,
+            execution_evidence,
+            policy,
+        ))
+    }
+
+    pub(crate) fn submit_proposed_tool_execution_outcome_record(
+        &mut self,
+        outcome: ProposedToolExecutionOutcome,
+    ) -> Result<Vec<RuntimeEvent>, RuntimeError> {
+        let ProposedToolExecutionOutcome {
+            proposal,
+            status,
+            content,
+            diagnostic,
+            execution_evidence,
+            policy,
+            observation,
+        } = outcome;
         let call_id = proposal.tool_call_id().clone();
         let Some(pending_index) = self
             .pending_tool_calls
@@ -541,6 +635,8 @@ impl SessionState {
                 ToolCallResult::failed(call_id, artifact, diagnostic)
             }
         };
+        let observation =
+            observation.map(|observation| observation.into_update_for_artifact(result.artifact()));
 
         self.validate_tool_result_content(&result, &content)?;
         self.artifacts
@@ -576,6 +672,9 @@ impl SessionState {
             RuntimeEventKind::ArtifactRecorded { artifact: recorded },
             LedgerFactKind::ArtifactRecorded,
         ));
+        if let Some(observation) = observation {
+            self.record_tool_result_observation(observation);
+        }
         events.push(self.record_event(
             RuntimeEventKind::ToolCallResolved { result },
             LedgerFactKind::ToolCallResolved,
@@ -736,6 +835,10 @@ impl SessionState {
         RuntimeEvent::new(self.session_id.clone(), sequence, kind)
     }
 
+    fn record_tool_result_observation(&mut self, observation: LedgerUpdateKind) {
+        self.ledger.append(observation);
+    }
+
     fn trace_artifact_record(session_id: &str, artifact: &ArtifactRef, byte_count: usize) {
         tracing::info!(
             event = "runtime.artifact.record",
@@ -893,7 +996,7 @@ fn duplicate_tool_call_diagnostic(call_id: &ToolCallId, state: &'static str) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::SessionState;
+    use super::{ProposedToolExecutionOutcome, SessionState, ToolResultLedgerObservation};
     use crate::{
         ActionExecutionEvidence, ActionProposal, ActionProposalEvidence,
         WorkspacePatchExecutionEvidence, WorkspacePatchProposal,
@@ -908,7 +1011,7 @@ mod tests {
             SummaryDraftAcceptanceAuthority, SummaryDraftPromotionError,
             SummaryDraftPromotionInput,
         },
-        ledger::{LedgerFactKind, LedgerProjection},
+        ledger::{LedgerFactKind, LedgerProjection, LedgerScope},
         memory::{
             ActivatedMemory, MemoryActivationProvenance, MemoryActivationReason,
             MemoryActivationScore, MemoryActivationSourceKind, MemoryEvidence, MemoryId,
@@ -1432,6 +1535,130 @@ mod tests {
         assert!(audit_indexes[0] < audit_indexes[1]);
         assert!(audit_indexes[1] < artifact_index);
         assert!(artifact_index < resolved_index);
+    }
+
+    #[test]
+    fn proposed_tool_execution_can_record_observation_after_artifact_before_resolution() {
+        let mut session = SessionState::new(session_id());
+        let call = pending_tool_call("observed-action-call");
+        session
+            .record_session_started_if_needed()
+            .expect("session should start");
+        session
+            .record_tool_call_pending(call.clone())
+            .expect("pending call should record");
+
+        let proposal_evidence = ActionProposalEvidence::WorkspacePatch(
+            WorkspacePatchProposal::new(
+                "note.txt",
+                3,
+                5,
+                16,
+                18,
+                "fnv1a64:0000000000000100",
+                "fnv1a64:0000000000000101",
+            )
+            .expect("valid workspace patch proposal"),
+        );
+        let proposal = ActionProposal::new(
+            &call,
+            crate::ToolActionKind::WorkspaceWrite,
+            "workspace patch",
+            "note.txt",
+            "Replace one preimage in note.txt.",
+            proposal_evidence,
+        )
+        .expect("valid action proposal");
+        let execution_evidence = ActionExecutionEvidence::WorkspacePatch(
+            WorkspacePatchExecutionEvidence::new(
+                "note.txt",
+                3,
+                5,
+                16,
+                18,
+                "fnv1a64:0000000000000100",
+                "fnv1a64:0000000000000101",
+            )
+            .expect("valid execution evidence"),
+        );
+        let policy = ActionAuditPolicy::new(
+            ActionRiskTier::EditLow,
+            ActionPolicyDisposition::Allow,
+            "test low-risk workspace patch allow",
+        );
+        let observation = ToolResultLedgerObservation::new(
+            LedgerScope::Tool,
+            "process action `rustc --version` exit code 0; stdout_bytes=21; stderr_bytes=0",
+        )
+        .expect("valid compact observation");
+
+        let events = session
+            .submit_proposed_tool_execution_outcome_record(
+                ProposedToolExecutionOutcome::new(
+                    proposal,
+                    merry_core::ToolCallResultStatus::Succeeded,
+                    ArtifactContent::json(r#"{"ok":true}"#),
+                    None,
+                    Some(execution_evidence),
+                    policy,
+                )
+                .with_observation(observation),
+            )
+            .expect("observed proposed execution should resolve");
+        let result = events
+            .iter()
+            .find_map(|event| match &event.kind {
+                RuntimeEventKind::ToolCallResolved { result } => Some(result),
+                _ => None,
+            })
+            .expect("tool result should resolve");
+
+        let projection = session.ledger_projection();
+        let artifact_order = projection
+            .entries()
+            .iter()
+            .find_map(|entry| match entry {
+                LedgerProjection::Lifecycle {
+                    kind: LedgerFactKind::ArtifactRecorded,
+                    order,
+                    ..
+                } => Some(*order),
+                LedgerProjection::Lifecycle { .. } | LedgerProjection::Fact { .. } => None,
+            })
+            .expect("artifact lifecycle should be recorded");
+        let resolved_order = projection
+            .entries()
+            .iter()
+            .find_map(|entry| match entry {
+                LedgerProjection::Lifecycle {
+                    kind: LedgerFactKind::ToolCallResolved,
+                    order,
+                    ..
+                } => Some(*order),
+                LedgerProjection::Lifecycle { .. } | LedgerProjection::Fact { .. } => None,
+            })
+            .expect("resolution lifecycle should be recorded");
+        let (observation_order, observation_text) = projection
+            .entries()
+            .iter()
+            .find_map(|entry| match entry {
+                LedgerProjection::Fact {
+                    order,
+                    scope: LedgerScope::Tool,
+                    text,
+                    ..
+                } if text.starts_with("process action `rustc --version`") => {
+                    Some((*order, text.as_str()))
+                }
+                LedgerProjection::Fact { .. } | LedgerProjection::Lifecycle { .. } => None,
+            })
+            .expect("tool observation should be projected");
+
+        assert!(artifact_order < observation_order);
+        assert!(observation_order < resolved_order);
+        assert!(
+            observation_text.contains(&format!("artifact={}", result.artifact().id().as_str()))
+        );
     }
 
     #[test]

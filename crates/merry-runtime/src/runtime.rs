@@ -24,7 +24,10 @@ use crate::{
         MemoryActivationSourceKind, MemoryScope, StoredMemoryActivationSource,
     },
     model_config::{ModelProviderConfig, RuntimeModelConfigs},
-    session::{SessionState, is_runtime_reserved_artifact_id},
+    session::{
+        ProposedToolExecutionOutcome, SessionState, ToolResultLedgerObservation,
+        is_runtime_reserved_artifact_id,
+    },
     step::{StepContext, StepInput, compile_step_model_request},
     tool::{
         ActionProposalEvidence, RegisteredTool, ToolExecutionContext, ToolExecutionError,
@@ -35,6 +38,7 @@ use futures_util::StreamExt;
 use merry_core::{
     ArtifactId, ArtifactRef, CoreError, ErrorInfo, EvidenceLocator, EvidenceRef, PendingToolCall,
     RuntimeEvent, RuntimeEventKind, SessionId, ToolCallArguments, ToolCallId, ToolCallResult,
+    ToolCallResultStatus,
 };
 use merry_llm::{
     FinishReason, GenerationConfig, ModelError, ModelEvent, ModelName, ModelOutput, ModelProvider,
@@ -706,9 +710,9 @@ impl Runtime {
         );
         let content = process_output_artifact_content(&intent, &output);
         let status = if output.ok() {
-            merry_core::ToolCallResultStatus::Succeeded
+            ToolCallResultStatus::Succeeded
         } else {
-            merry_core::ToolCallResultStatus::Failed
+            ToolCallResultStatus::Failed
         };
         let diagnostic = if output.ok() {
             None
@@ -721,15 +725,19 @@ impl Runtime {
                 ),
             ))
         };
+        let observation = process_result_ledger_observation(&intent, &output, status);
 
         let mut session = self.inner.session.lock().await;
-        session.submit_proposed_tool_execution_outcome(
-            proposal,
-            status,
-            content,
-            diagnostic,
-            Some(execution_evidence),
-            ActionAuditPolicy::from_decision(&policy_decision),
+        session.submit_proposed_tool_execution_outcome_record(
+            ProposedToolExecutionOutcome::new(
+                proposal,
+                status,
+                content,
+                diagnostic,
+                Some(execution_evidence),
+                ActionAuditPolicy::from_decision(&policy_decision),
+            )
+            .with_observation(observation),
         )
     }
 
@@ -955,6 +963,38 @@ fn process_output_artifact_content(
     });
 
     ArtifactContent::json(payload.to_string())
+}
+
+fn process_result_ledger_observation(
+    intent: &ProcessActionIntent,
+    output: &ProcessRunnerOutput,
+    result_status: ToolCallResultStatus,
+) -> ToolResultLedgerObservation {
+    let mut summary = format!(
+        "process action `{}` {}; result={}; stdout_bytes={}; stderr_bytes={}",
+        intent.argv().join(" "),
+        process_status_label(output.status()),
+        process_result_status_label(result_status),
+        output.stdout_bytes(),
+        output.stderr_bytes(),
+    );
+
+    if output.stdout_truncated() {
+        summary.push_str("; stdout_truncated=true");
+    }
+    if output.stderr_truncated() {
+        summary.push_str("; stderr_truncated=true");
+    }
+
+    ToolResultLedgerObservation::new(crate::ledger::LedgerScope::Tool, summary)
+        .expect("process result ledger summary is built from a non-empty static prefix")
+}
+
+fn process_result_status_label(status: ToolCallResultStatus) -> &'static str {
+    match status {
+        ToolCallResultStatus::Succeeded => "succeeded",
+        ToolCallResultStatus::Failed => "failed",
+    }
 }
 
 fn process_status_json(status: ProcessExitStatus) -> serde_json::Value {
@@ -2191,7 +2231,7 @@ mod tests {
         JudgmentRecord, JudgmentRiskLevel, JudgmentSource, JudgmentSourceKind,
         ModelBackedJudgmentSource,
     };
-    use crate::ledger::{LedgerFactKind, LedgerProjection};
+    use crate::ledger::{LedgerFactKind, LedgerProjection, LedgerScope};
     use crate::memory::{
         ActivatedMemory, MemoryActivationContext, MemoryActivationFuture, MemoryActivationReason,
         MemoryActivationScore, MemoryActivationSource, MemoryActivationSourceKind, MemoryError,
@@ -6254,6 +6294,53 @@ mod tests {
         assert!(audit_indexes[0] < audit_indexes[1]);
         assert!(audit_indexes[1] < artifact_index);
         assert!(artifact_index < resolved_index);
+
+        let artifact_order = projection
+            .entries()
+            .iter()
+            .find_map(|entry| match entry {
+                LedgerProjection::Lifecycle {
+                    kind: LedgerFactKind::ArtifactRecorded,
+                    order,
+                    ..
+                } => Some(*order),
+                LedgerProjection::Lifecycle { .. } | LedgerProjection::Fact { .. } => None,
+            })
+            .expect("artifact lifecycle should be projected");
+        let resolved_order = projection
+            .entries()
+            .iter()
+            .find_map(|entry| match entry {
+                LedgerProjection::Lifecycle {
+                    kind: LedgerFactKind::ToolCallResolved,
+                    order,
+                    ..
+                } => Some(*order),
+                LedgerProjection::Lifecycle { .. } | LedgerProjection::Fact { .. } => None,
+            })
+            .expect("resolution lifecycle should be projected");
+        let (observation_order, observation_scope, observation_text) = projection
+            .entries()
+            .iter()
+            .find_map(|entry| match entry {
+                LedgerProjection::Fact {
+                    order, scope, text, ..
+                } if text.starts_with("process action `rustc --version`") => {
+                    Some((*order, *scope, text.as_str()))
+                }
+                LedgerProjection::Fact { .. } | LedgerProjection::Lifecycle { .. } => None,
+            })
+            .expect("process result should be reduced into a compact ledger observation");
+        assert_eq!(observation_scope, LedgerScope::Tool);
+        assert!(artifact_order < observation_order);
+        assert!(observation_order < resolved_order);
+        assert!(observation_text.contains("exit code 0"));
+        assert!(observation_text.contains("stdout_bytes=21"));
+        assert!(observation_text.contains("stderr_bytes=0"));
+        assert!(
+            observation_text.contains(&format!("artifact={}", result.artifact().id().as_str()))
+        );
+        assert!(!observation_text.contains("runtime tests passed"));
     }
 
     #[tokio::test(flavor = "current_thread")]
