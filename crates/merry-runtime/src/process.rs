@@ -57,6 +57,7 @@ impl ProcessEnvPolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AcceptedLocalWorkspaceProcessAdmission {
     sandbox_profile: LocalWorkspaceProcessSandboxProfile,
+    permission_profile_id: ProcessPermissionProfileId,
 }
 
 impl AcceptedLocalWorkspaceProcessAdmission {
@@ -68,6 +69,17 @@ impl AcceptedLocalWorkspaceProcessAdmission {
     pub const fn accept_cli_bwrap_v1() -> Self {
         Self {
             sandbox_profile: LocalWorkspaceProcessSandboxProfile::CliBwrapV1,
+            permission_profile_id: ProcessPermissionProfileId::LOCAL_WORKSPACE_BWRAP_V1,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn for_test_permission_profile_id(
+        permission_profile_id: ProcessPermissionProfileId,
+    ) -> Self {
+        Self {
+            sandbox_profile: LocalWorkspaceProcessSandboxProfile::CliBwrapV1,
+            permission_profile_id,
         }
     }
 
@@ -75,6 +87,16 @@ impl AcceptedLocalWorkspaceProcessAdmission {
     #[must_use]
     pub const fn sandbox_profile(self) -> LocalWorkspaceProcessSandboxProfile {
         self.sandbox_profile
+    }
+
+    /// Returns the permission profile admitted by this construction-time grant.
+    #[must_use]
+    pub const fn permission_profile_id(self) -> ProcessPermissionProfileId {
+        self.permission_profile_id
+    }
+
+    pub(crate) fn matches_intent(self, intent: &ProcessActionIntent) -> bool {
+        required_process_permission_profile_id(intent) == Some(self.permission_profile_id)
     }
 }
 
@@ -778,9 +800,23 @@ const FORBIDDEN_GIT_SUBCOMMANDS: &[&str] = &[
 /// for the additional process inputs.
 #[must_use]
 pub fn is_low_risk_process_action_intent(intent: &ProcessActionIntent) -> bool {
-    intent.env_policy() == ProcessEnvPolicy::Empty
-        && intent.stdin_text().is_none()
-        && classify_process_intent(intent) == ProcessIntentClass::Informational
+    required_process_permission_profile_id(intent) == Some(ProcessPermissionProfileId::READ_ONLY_V1)
+}
+
+pub(crate) fn required_process_permission_profile_id(
+    intent: &ProcessActionIntent,
+) -> Option<ProcessPermissionProfileId> {
+    if intent.env_policy() != ProcessEnvPolicy::Empty || intent.stdin_text().is_some() {
+        return None;
+    }
+
+    match classify_process_intent(intent) {
+        ProcessIntentClass::Informational => Some(ProcessPermissionProfileId::READ_ONLY_V1),
+        ProcessIntentClass::LocalWorkspaceEffect => {
+            Some(ProcessPermissionProfileId::LOCAL_WORKSPACE_BWRAP_V1)
+        }
+        ProcessIntentClass::Unknown | ProcessIntentClass::Forbidden => None,
+    }
 }
 
 /// Validation errors for provider-neutral process action values.
@@ -999,9 +1035,10 @@ fn summarize_intent(argv: &[String], cwd: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_PROCESS_OUTPUT_LIMIT_BYTES, ProcessActionError, ProcessActionIntent, ProcessEnvPolicy,
-        ProcessExecutionEvidence, ProcessExitStatus, ProcessIntentClass,
-        ProcessPermissionProfileId, classify_process_intent, is_low_risk_process_action_intent,
+        AcceptedLocalWorkspaceProcessAdmission, MAX_PROCESS_OUTPUT_LIMIT_BYTES, ProcessActionError,
+        ProcessActionIntent, ProcessEnvPolicy, ProcessExecutionEvidence, ProcessExitStatus,
+        ProcessIntentClass, ProcessPermissionProfileId, classify_process_intent,
+        is_low_risk_process_action_intent, required_process_permission_profile_id,
     };
 
     fn intent() -> ProcessActionIntent {
@@ -1151,6 +1188,105 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn process_permission_profile_id_is_derived_from_admitted_intent_shape() {
+        let informational = ProcessActionIntent::new(
+            vec!["rg".to_owned(), "--files".to_owned()],
+            None,
+            ProcessEnvPolicy::empty(),
+            None,
+            1024,
+            1024,
+        )
+        .expect("informational intent is valid");
+        assert_eq!(
+            required_process_permission_profile_id(&informational),
+            Some(ProcessPermissionProfileId::READ_ONLY_V1)
+        );
+
+        let local_workspace_effect = ProcessActionIntent::new(
+            vec![
+                "cargo".to_owned(),
+                "test".to_owned(),
+                "-p".to_owned(),
+                "merry-runtime".to_owned(),
+            ],
+            None,
+            ProcessEnvPolicy::empty(),
+            None,
+            1024,
+            1024,
+        )
+        .expect("local workspace effect intent is valid");
+        assert_eq!(
+            required_process_permission_profile_id(&local_workspace_effect),
+            Some(ProcessPermissionProfileId::LOCAL_WORKSPACE_BWRAP_V1)
+        );
+
+        let unknown = ProcessActionIntent::new(
+            vec!["unknown-readonly-ish".to_owned(), "--version".to_owned()],
+            None,
+            ProcessEnvPolicy::empty(),
+            None,
+            1024,
+            1024,
+        )
+        .expect("unknown intent is syntactically valid");
+        assert_eq!(required_process_permission_profile_id(&unknown), None);
+
+        let with_stdin = ProcessActionIntent::new(
+            vec!["rg".to_owned(), "--files".to_owned()],
+            None,
+            ProcessEnvPolicy::empty(),
+            Some("stdin is outside the read-only profile".to_owned()),
+            1024,
+            1024,
+        )
+        .expect("stdin intent is syntactically valid");
+        assert_eq!(required_process_permission_profile_id(&with_stdin), None);
+    }
+
+    #[test]
+    fn local_workspace_process_admission_matches_only_its_permission_profile() {
+        let local_workspace_effect = ProcessActionIntent::new(
+            vec![
+                "cargo".to_owned(),
+                "test".to_owned(),
+                "-p".to_owned(),
+                "merry-runtime".to_owned(),
+            ],
+            None,
+            ProcessEnvPolicy::empty(),
+            None,
+            1024,
+            1024,
+        )
+        .expect("local workspace effect intent is valid");
+        let informational = ProcessActionIntent::new(
+            vec!["rg".to_owned(), "--files".to_owned()],
+            None,
+            ProcessEnvPolicy::empty(),
+            None,
+            1024,
+            1024,
+        )
+        .expect("informational intent is valid");
+
+        let admission = AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1();
+        assert_eq!(
+            admission.permission_profile_id(),
+            ProcessPermissionProfileId::LOCAL_WORKSPACE_BWRAP_V1
+        );
+        assert!(admission.matches_intent(&local_workspace_effect));
+        assert!(!admission.matches_intent(&informational));
+
+        let mismatched_admission =
+            AcceptedLocalWorkspaceProcessAdmission::for_test_permission_profile_id(
+                ProcessPermissionProfileId::READ_ONLY_V1,
+            );
+        assert!(!mismatched_admission.matches_intent(&local_workspace_effect));
     }
 
     #[test]
