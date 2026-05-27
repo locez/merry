@@ -77,7 +77,6 @@ impl ActionAuditPolicy {
         }
     }
 
-    #[cfg(test)]
     pub(crate) const fn risk_tier(&self) -> ActionRiskTier {
         self.risk_tier
     }

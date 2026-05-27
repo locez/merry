@@ -70,8 +70,9 @@ pub use process::{
     MAX_PROCESS_ARG_BYTES, MAX_PROCESS_ARGV_ITEMS, MAX_PROCESS_CWD_BYTES,
     MAX_PROCESS_OUTPUT_LIMIT_BYTES, MAX_PROCESS_STDIN_TEXT_BYTES, ProcessActionError,
     ProcessActionIntent, ProcessEnvPolicy, ProcessExecutionEvidence, ProcessExitStatus,
-    ProcessRunner, ProcessRunnerContext, ProcessRunnerError, ProcessRunnerFuture,
-    ProcessRunnerOutput, ProcessRunnerResult, is_low_risk_process_action_intent,
+    ProcessPermissionProfileId, ProcessRunner, ProcessRunnerContext, ProcessRunnerError,
+    ProcessRunnerFuture, ProcessRunnerOutput, ProcessRunnerResult,
+    is_low_risk_process_action_intent,
 };
 pub use process_tool::{ProcessCommandToolError, process_command_tool};
 pub use runtime::{Runtime, RuntimeBuilder};
