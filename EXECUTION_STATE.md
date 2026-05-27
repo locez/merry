@@ -42,89 +42,67 @@ Style notes:
 
 Current milestone or track:
 
-- M1 Structured Process Boundary MVP.
+- M2 Shell-Compatible Runtime Boundary.
 
 Session milestone:
 
-- Process permission profile routing slice: make classified process intents
-  route through explicit read-only and accepted local workspace permission
-  profiles, with the local workspace admission stored and checked at runtime.
+- Direction correction slice: prevent the next milestone from becoming a
+  hand-rolled subset shell parser and reframe shell compatibility around real
+  shell execution under explicit permission/session profiles.
 
 Goal:
 
-- Prove that a process runner is not enough to execute a local workspace effect:
-  the classified intent must match the permission profile admitted for that
-  runner, and execution artifacts/ledger/trace records must report the profile
-  that was actually admitted.
+- Capture the corrected M2 boundary in tracked docs before implementation:
+  structured argv remains the narrow typed lane, while shell-compatible
+  behavior must use a real shell runner under runtime-owned profiles,
+  artifacts, audit, cancellation, ledger reducers, and approvals.
 
 Task queue status:
 
-- Added intent-to-permission-profile derivation for structured process intents.
-- `is_low_risk_process_action_intent` now uses that derivation for the
-  read-only lane.
-- `AcceptedLocalWorkspaceProcessAdmission` now carries the admitted
-  `ProcessPermissionProfileId` and can check whether an intent matches it.
-- `RuntimeBuilder::allow_accepted_local_workspace_process_actions` now stores
-  the admission with the runner instead of discarding it.
-- Runtime process execution receives the admitted profile id directly instead
-  of inferring it after the fact from `ActionRiskTier`.
-- Local workspace effect execution is denied when the injected runner's
-  admission profile does not match the classified intent.
-- Process execution traces now include `permission_profile_id` alongside
-  payload-free argv/cwd/status/output-byte metadata.
-- `ROADMAP.md` now marks M1 complete and points the next active work at M2
-  shell-compatible model tooling.
-- `DECISIONS.md` records the admission-time profile routing decision.
+- Reframed `ROADMAP.md` M2 away from "parse simple shell strings into argv" and
+  toward a shell-compatible runtime boundary.
+- Added roadmap invariants that Merry must not build a subset shell parser as
+  authorization, and that pipes/control flow are legitimate shell mechanisms.
+- Recorded the decision in `DECISIONS.md` that static classifiers are hard-deny
+  or advisory evidence only, not broad shell authorization.
+- Updated `HANDOFF.md` to make the next action a design/implementation slice
+  for shell profile/session admission rather than command-string parsing.
 
 Allowed expansion:
 
-- Runtime process classifier/profile/admission modules and focused tests.
-- Runtime/provider-neutral metadata needed to expose the admitted process
-  permission profile.
-- Existing agent-loop/coding-loop tests needed to prove the structured process
-  boundary still works.
 - Public-safe roadmap/decision/continuity updates.
+- No Rust behavior changes in this correction lease unless needed to keep docs
+  consistent.
 
 Done condition:
 
-- Read-only process intents map to `process.read_only.v1`.
-- Local workspace verification intents map to
-  `process.local_workspace.bwrap.v1`.
-- Unknown, forbidden, stdin-bearing, or non-empty-env intents do not receive an
-  auto-admitted profile.
-- Local workspace execution is denied without a matching stored admission, even
-  when a runner is injected.
-- Process artifacts, ledger facts, and traces record the admitted
-  `permission_profile_id`.
-- Focused runtime tests and full default validation pass.
-- Handoff updated and lease committed.
+- `ROADMAP.md`, `DECISIONS.md`, `EXECUTION_STATE.md`, and `HANDOFF.md` all
+  state that shell compatibility must not depend on a Merry-owned subset parser
+  allowlist.
+- The next exact action points at defining the shell runtime boundary and
+  profile/session admission contract.
+- Diff is documentation-only, passes `git diff --check`, and is committed.
 
 Drift boundary:
 
 - Do not add TUI, REPL, or interactive CLI scope.
-- Do not implement shell string parsing or pipelines in this M1 lease.
+- Do not implement shell string parsing or pipelines in this correction lease.
+- Do not claim shell execution is safe because a classifier recognizes a string
+  shape.
 - Do not move private ignored notes into tracked files.
 - Do not commit `.superpowers/`, `.merry/`, `docs/`, or `merry-raw-docs`.
 - Do not make live provider behavior part of default tests.
-- Do not expand this slice into approval/session grants.
+- Do not expand this slice into approval/session implementation.
 
-Task type: implementation/docs
+Task type: docs
 
 Acceptance criteria:
 
-- `process_permission_profile_id_is_derived_from_admitted_intent_shape`
-  demonstrates read-only/local-workspace/unknown/stdin profile routing.
-- `local_workspace_process_admission_matches_only_its_permission_profile`
-  demonstrates admission matching.
-- `process_admission_predicates_keep_low_and_local_workspace_lanes_distinct`
-  keeps low-risk and local workspace lanes separate and rejects mismatched
-  admissions.
-- `accepted_local_workspace_process_action_denies_when_admission_profile_mismatches`
-  denies without calling the runner.
-- `agent_loop_traces_loop_steps_tool_process_and_terminal_status` verifies
-  process traces include `permission_profile_id`.
-- `cargo fmt --all --check`, `cargo clippy --all-targets --all-features -- -D warnings`,
-  and `cargo test --all` pass.
+- Roadmap M2 is renamed/reframed as a shell-compatible runtime boundary.
+- Decision log records why subset shell parsing is not the authorization model.
+- Handoff next action is implementation-neutral enough to avoid parser-first
+  drift.
+- `git diff --check` passes.
 
 ## Scope
 
@@ -134,17 +112,13 @@ Allowed edits:
 - `EXECUTION_STATE.md`
 - `HANDOFF.md`
 - `ROADMAP.md`
-- `crates/merry-runtime/src/action_audit.rs`
-- `crates/merry-runtime/src/action_policy.rs`
-- `crates/merry-runtime/src/process.rs`
-- `crates/merry-runtime/src/runtime.rs`
-- `crates/merry-runtime/tests/agent_loop.rs`
 
 Forbidden edits:
 
 - private ignored source material under `docs/` or `merry-raw-docs/`
 - real credentials or generated build artifacts
 - `.superpowers/`, `.merry/`, `docs/`, or `merry-raw-docs` content
+- Rust behavior changes
 - shell-compatible model tool implementation, pipelines, scripts, or approval
   session behavior
 - full-screen TUI, REPL, or multi-turn UI scope
@@ -159,26 +133,14 @@ Protected files:
 
 Validation command:
 
-- `cargo test -p merry-runtime --lib process_permission_profile`
-- `cargo test -p merry-runtime --lib local_workspace_process_admission_matches_only_its_permission_profile`
-- `cargo test -p merry-runtime --lib process_admission_predicates_keep_low_and_local_workspace_lanes_distinct`
-- `cargo test -p merry-runtime --lib accepted_local_workspace_process_action_denies_when_admission_profile_mismatches`
-- `cargo test -p merry-runtime --test agent_loop agent_loop_traces_loop_steps_tool_process_and_terminal_status`
-- `cargo test -p merry-runtime --lib`
-- `cargo test -p merry-runtime --test agent_loop`
-- `cargo test -p merry-tool-workspace --test runtime_integration coding_loop_harness_inspects_patches_verifies_and_completes`
-- `cargo fmt --all --check`
-- `cargo clippy --all-targets --all-features -- -D warnings`
-- `cargo test --all`
 - `git diff --check`
 - `git status --short --untracked-files=all`
 
 Validation notes:
 
-- Focused and full default validation passed.
-- Live provider and real `bwrap` smoke lanes were not run for this slice; they
-  remain explicit opt-in lanes and are not required for deterministic M1
-  profile routing.
+- This is a docs-only direction correction. Rust validation from commit
+  `efd2d99` remains the last full code validation. No new Rust behavior is
+  introduced in this lease.
 
 ## Research
 
@@ -197,14 +159,16 @@ Research artifact:
 
 Next exact action:
 
-- Start M2 from `ROADMAP.md`: add the first shell-compatible model tool on top
-  of the structured process intent path. Begin with simple command strings that
-  parse into already supported argv shapes and keep pipelines, scripts, stdin,
-  env overrides, and unknown forms denied or approval-gated.
+- Start M2 from `ROADMAP.md`: define the first shell-compatible runtime
+  boundary and acceptance test around artifact-backed command/script input,
+  explicit permission/session admission, runner cancellation, output artifacts,
+  compact ledger reduction, and payload-free traces. Do not start by splitting
+  shell strings into argv allowlists.
 
 Do not reconsider:
 
 - M1 Structured Process Boundary MVP is complete.
+- Do not make a Merry-owned subset shell parser the authorization model.
 - Do not make event-first CLI the primary next milestone.
 - Do not start TUI or REPL before reusable runtime/process/tool profiles are
   clearer.

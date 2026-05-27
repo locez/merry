@@ -159,9 +159,10 @@ The OpenAI provider target is the Responses API only. The provider request path 
 - P0: continue the Minimal Useful Coding Loop as the current MVP proof. The loop now has a deterministic fake-provider/fake-runner slice, a deterministic real `bwrap` process-runner smoke, a user-verified live-provider smoke command, and end-to-end config-backed log verification for the deterministic coding-loop smoke.
 - P0: keep the Runtime Coding Loop Harness executable against a disposable fixture repository. The default lane uses fake provider/fake runner for deterministic `cargo test`; the deterministic `bwrap` lane is an explicit ignored smoke; the live OpenAI-compatible lane is also explicit and ignored and has passed in the user's trusted configured environment.
 - P0: extend the runtime-owned shell/process boundary from structured argv
-  intents toward a shell-compatible model tool. Permission profiles, stable
-  tool profiles, command classification, artifact-backed output, ledger
-  reducers, and cache-boundary hashes now exist for the structured path.
+  intents toward a real shell-compatible execution boundary, not a hand-rolled
+  shell parser. Structured argv remains the narrow typed lane; richer shell
+  syntax must run through a real interpreter inside explicit permission
+  profiles, session grants, and sandbox constraints.
 - P0: keep process output artifact-backed and context-friendly. Accepted process actions should record stdout/stderr/exit metadata as artifacts before observable events claim them, reduce large output into compact ledger facts plus exact evidence references, and keep dynamic evidence late in compiled context so stable prefixes remain cacheable.
 - P0: keep edit/write on the typed workspace patch path. The MVP loop should apply one constrained patch through `workspace_patch_file` or its runtime-owned successor, record artifact/audit/ledger evidence, and then run verification.
 - Keep safety tiered but subordinate to the executable acceptance target: read-only inspection automatic, constrained patch opt-in, verification in `bwrap`, high-risk or unknown process actions denied or escalated.
@@ -172,10 +173,17 @@ The OpenAI provider target is the Responses API only. The provider request path 
 
 ### Next Active
 
-- Add the first shell-compatible model tool on top of the structured process
-  intent path. Start with simple command strings that parse into already
-  supported argv shapes, and keep pipelines/scripts/unknown forms denied until
-  approval policy exists.
+- Reframe M2 before implementation: do not parse shell strings into argv as the
+  authorization boundary. Shell grammar is too large to safely or usefully
+  exhaust, and forcing pipelines or control flow into separate tool calls would
+  destroy legitimate shell efficiency.
+- Define the first shell-compatible runtime boundary as real command/script
+  execution under explicit permission/session profiles, with command input,
+  stdout/stderr/status, audit, ledger, cancellation, and trace records owned by
+  runtime artifacts.
+- Keep static command classifiers as advisory or hard-deny signals only. They
+  may recognize obvious known-safe or forbidden shapes, but they must not be
+  the reason complex shell syntax is allowed.
 - Add a recorded reason when the stable cache prefix changes, now that stable
   prefix hash, dynamic context hash, tool profile hash, and process
   `permission_profile_id` are observable.
@@ -198,6 +206,12 @@ Shared invariants:
 - Tool profiles describe stable model-visible tool sets and schema/cache lanes.
 - Command classifiers describe concrete process risk and feed action policy;
   they are not authorization by themselves.
+- Do not build a subset shell parser as the authorization model. Shell syntax
+  is delegated to a real shell runner under permission profiles and sandbox
+  constraints; classifiers can only narrow, deny, or explain risk.
+- Pipes and shell control flow are legitimate process-composition mechanisms.
+  Do not force them into separate model tool calls merely to preserve an argv
+  allowlist.
 - Process output becomes artifacts before observable events, ledger facts, or
   final answers claim it.
 - Summaries are navigation; exact evidence must remain retrievable through
@@ -227,13 +241,23 @@ M1 Structured Process Boundary MVP:
 - Reduce process artifacts into compact ledger facts plus exact evidence refs.
 - Test with deterministic fake providers and fake runners.
 
-M2 Shell-Compatible Model Tool:
+M2 Shell-Compatible Runtime Boundary:
 
-- Add a model-facing `shell_command` or `exec_command` style tool after the
-  structured intent path is solid.
-- Parse simple shell strings into process intents.
-- Admit only supported simple command shapes first; route pipelines, scripts,
-  and unknown shell forms through deny or approval until policy supports them.
+- Add a shell-compatible execution boundary after the structured intent path is
+  solid, but do not emulate shell parsing in Merry.
+- A future model-facing `shell_command` or `exec_command` tool should be a thin
+  request shape over this runtime boundary, not a parser that reclassifies
+  shell grammar into structured argv for authorization.
+- Treat command/script text as execution input evidence, preferably with an
+  artifact-backed exact command record and payload-free trace metadata such as
+  byte counts and hashes.
+- Execute shell syntax through a real shell runner inside explicit
+  permission/session profiles. Pipelines, conditionals, and small scripts are
+  allowed only when the selected profile and sandbox make their side effects
+  acceptable, or when an approval/session grant admits them.
+- Keep default behavior fail-closed for ungranted shell execution. Static
+  classifiers may provide hard-deny/advisory risk evidence, but broad shell
+  authorization comes from profiles, sandboxing, and approvals.
 
 M3 Approval And Permission Session:
 
@@ -244,11 +268,11 @@ M3 Approval And Permission Session:
 
 M4 Richer Shell Capability:
 
-- Add pipelines, small scripts, stdin/input artifacts, env policy,
-  long-running sessions, `write_stdin`, timeout, cancellation, and output range
-  rehydration incrementally.
-- Require classifier, artifact, audit, cancellation, approval, and reducer
-  coverage for each added shell form.
+- Add stdin/input artifacts, env policy, long-running sessions, `write_stdin`,
+  timeout, cancellation, and output range rehydration incrementally.
+- Let real shell profiles carry pipelines and control flow instead of
+  reimplementing them as Merry syntax. Require artifact, audit, cancellation,
+  approval, and reducer coverage as profiles become broader.
 - Keep shell write side effects out of the default edit path; typed patch or
   apply-patch remains the preferred edit mechanism.
 

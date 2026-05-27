@@ -6,29 +6,25 @@ Status: complete
 
 Current milestone or track:
 
-- M1 Structured Process Boundary MVP.
+- M2 Shell-Compatible Runtime Boundary.
 
 Session milestone:
 
-- Process permission profile routing slice: classified process intents now
-  route through explicit read-only and accepted local workspace permission
-  profiles, and local workspace admission is stored and checked at runtime.
+- Direction correction slice: shell compatibility must not depend on a
+  Merry-owned subset shell parser or argv allowlist.
 
 Task queue status:
 
-- Completed this slice. Process permission profile id is now derived from the
-  admitted intent shape before execution.
-- `AcceptedLocalWorkspaceProcessAdmission` carries the admitted profile id.
-- Runtime stores local workspace admission with its runner and denies execution
-  when the admission profile does not match the classified intent.
-- Process execution artifacts, audit evidence, compact ledger facts, and traces
-  record the admitted `permission_profile_id`.
-- `ROADMAP.md` marks M1 complete and points the next active work at M2.
+- Corrected `ROADMAP.md`: M2 is now a shell-compatible runtime boundary, not a
+  command-string parser over structured argv.
+- Corrected `DECISIONS.md`: static classifiers are hard-deny/advisory evidence,
+  not broad shell authorization.
+- Corrected `EXECUTION_STATE.md`: next action is to define profile/session
+  admission and artifact-backed shell input/output behavior.
 
 Done condition:
 
-- Focused and full validation passed, state files are updated, and this lease
-  is committed.
+- Public-safe roadmap/decision/continuity files now block parser-first drift.
 
 ## What Changed
 
@@ -38,66 +34,45 @@ Files changed:
 - `EXECUTION_STATE.md`
 - `HANDOFF.md`
 - `ROADMAP.md`
-- `crates/merry-runtime/src/action_audit.rs`
-- `crates/merry-runtime/src/action_policy.rs`
-- `crates/merry-runtime/src/process.rs`
-- `crates/merry-runtime/src/runtime.rs`
-- `crates/merry-runtime/tests/agent_loop.rs`
 
 Summary:
 
-- Added `required_process_permission_profile_id` for structured process intent
-  to profile routing.
-- Kept `is_low_risk_process_action_intent` on the same routing path as the
-  read-only profile.
-- Added profile id storage and matching to
-  `AcceptedLocalWorkspaceProcessAdmission`.
-- Made `RuntimeBuilder::allow_accepted_local_workspace_process_actions` retain
-  admission instead of discarding it.
-- Passed the admitted profile id into process execution instead of deriving it
-  after execution from policy risk tier.
-- Added denial coverage for mismatched local workspace admission profile.
-- Added `permission_profile_id` to process execution trace records.
-- Recorded the decision that permission profiles are admission-time routing
-  inputs.
+- Replaced parser-first M2 wording with a real shell boundary:
+  shell syntax belongs to a real shell runner under explicit permission/session
+  profiles and sandbox constraints.
+- Preserved structured argv as the narrow typed lane for known process intents.
+- Recorded that pipelines/control flow are legitimate shell mechanisms and
+  should not be forced into separate model tool calls just to fit an argv
+  allowlist.
+- Stated that static classifiers may hard-deny or advise, but must not be the
+  authority that allows complex shell syntax.
 
 ## Validation
 
 Commands run:
 
-- `cargo test -p merry-runtime --lib process_permission_profile`
-- `cargo test -p merry-runtime --lib local_workspace_process_admission_matches_only_its_permission_profile`
-- `cargo test -p merry-runtime --lib process_admission_predicates_keep_low_and_local_workspace_lanes_distinct`
-- `cargo test -p merry-runtime --lib accepted_local_workspace_process_action_denies_when_admission_profile_mismatches`
-- `cargo test -p merry-runtime --test agent_loop agent_loop_traces_loop_steps_tool_process_and_terminal_status`
-- `cargo test -p merry-runtime --lib`
-- `cargo test -p merry-runtime --test agent_loop`
-- `cargo test -p merry-tool-workspace --test runtime_integration coding_loop_harness_inspects_patches_verifies_and_completes`
-- `cargo fmt --all --check`
-- `cargo clippy --all-targets --all-features -- -D warnings`
-- `cargo test --all`
+- `git diff --check`
 
 Result:
 
 - Passed.
-- Live provider and real `bwrap` smokes were not run for this deterministic
-  runtime slice.
+- This was docs-only; no Rust behavior changed.
 
 ## Decisions
 
 Decisions made:
 
-- Process permission profiles are admission-time routing inputs, not only
-  execute-time labels.
-- Local workspace effect process execution requires an admission profile that
-  matches the classified intent.
-- M1 Structured Process Boundary MVP is complete enough to start M2.
+- Do not build a subset shell parser as the shell authorization model.
+- Structured argv and shell-compatible execution are sibling runtime lanes.
+- Shell-compatible execution should be admitted by profiles, sandbox/session
+  constraints, artifacts, audit, cancellation, reducers, and approvals.
 
 Pending decisions:
 
-- Exact shell-compatible model tool name and JSON schema.
-- How simple shell parsing should represent unsupported pipelines, scripts,
-  stdin, env overrides, and unknown commands before M3 approval/session support.
+- Exact first shell permission/session profile surface.
+- Exact shell input artifact schema and trace metadata.
+- Whether the first shell-compatible runner uses the existing CLI `bwrap`
+  handoff or a narrower runtime-owned sandbox adapter.
 - Whether to add an explicit stable-prefix change reason event or metadata in
   the next cache-observability slice.
 
@@ -109,24 +84,26 @@ Blockers:
 
 Residual risk:
 
-- Permission profiles are still a small static set. That is expected for M1;
-  broader process/session approval remains a later milestone.
+- M2 still needs a concrete vertical slice. The corrected direction avoids the
+  parser trap, but the first shell boundary must stay small and testable.
 - The CLI `bwrap` profile remains an opt-in smoke boundary, not a complete
   sandbox proof.
 
 Next exact action:
 
-- Start M2 by adding the first shell-compatible model tool on top of the
-  structured process intent path. Begin with simple command strings that parse
-  into already supported argv shapes and deny unsupported shell forms.
+- Start M2 by defining and testing the first shell-compatible runtime boundary:
+  artifact-backed command/script input, explicit permission/session admission,
+  runner cancellation, output artifacts, compact ledger reduction, and
+  payload-free traces. Do not start by splitting shell strings into argv
+  allowlists.
 
 ## Scope For Next Session
 
 Allowed edits:
 
-- Runtime process tool/parser modules and focused tests.
-- Runtime/tool specs needed for a simple shell-compatible model-facing command
-  tool.
+- Runtime process/shell boundary modules and focused tests.
+- Runtime/tool specs needed for a shell-compatible model-facing command tool
+  only after the runtime boundary is clear.
 - Existing deterministic agent-loop/coding-loop tests that consume the new tool.
 - Public-safe roadmap/decision/continuity updates.
 
@@ -135,8 +112,9 @@ Forbidden edits:
 - Private raw docs.
 - Real credentials.
 - `.superpowers/`, `.merry/`, `docs/`, or `merry-raw-docs` content.
-- Pipelines, scripts, approval sessions, long-running process sessions, or
-  broad shell execution before M2's simple-command slice is proven.
+- Merry-owned subset shell parser as the authorization model.
+- Approval sessions, long-running process sessions, or broad shell execution
+  before the first profile/session boundary is proven.
 - Full-screen TUI, REPL, or multi-turn UI before reusable runtime/tool
   registration is clearer.
 
@@ -146,6 +124,8 @@ Do not reconsider:
 - Base instructions are included in the stable prefix cache boundary.
 - Dynamic ledger/evidence/user context remains outside the stable prefix.
 - Process permission profiles now route admission before execution.
+- Shell compatibility must use a real shell boundary under explicit profiles;
+  do not revive parser-first M2.
 - Default tests remain deterministic/offline; live provider and bwrap smoke are
   opt-in.
 
@@ -155,7 +135,7 @@ Status: committed
 
 Message:
 
-- feat(runtime): route process intents through permission profiles
+- docs: reframe shell boundary away from parser allowlists
 
 No-commit reason:
 

@@ -334,7 +334,56 @@ Yes. More permission profiles can be added by extending intent-to-profile
 derivation and admission values without changing provider wire formats.
 
 Follow-up:
-Start M2 by adding a shell-compatible model tool that parses simple command
-strings into the existing structured process intent path. Keep pipelines,
-scripts, stdin, env overrides, and unknown shell forms denied or approval-gated
-until the approval/session milestone exists.
+Start M2 by defining a shell-compatible runtime boundary that does not emulate
+shell parsing in Merry. Use structured argv for the narrow typed lane, but let
+real shell execution happen only under explicit permission/session profiles,
+sandbox constraints, artifact-backed command records, and approval gates where
+needed.
+
+## 2026-05-27 - Do Not Build A Subset Shell Parser As Authorization
+
+Decision:
+Merry must not make shell compatibility depend on parsing shell strings into a
+small allowlisted argv subset. Structured argv remains useful for narrow,
+typed, low-risk process intents, but shell-compatible execution should be a
+separate runtime boundary that delegates shell syntax to a real shell runner
+under explicit permission profiles, sandbox/session constraints, artifacts,
+audit, cancellation, and approvals. Static command classifiers can hard-deny
+obvious forbidden shapes or produce advisory risk evidence, but they are not
+the authorization basis for complex shell syntax.
+
+Reason:
+Shell syntax is open-ended: pipelines, conditionals, redirects, functions,
+subshells, quoting, expansion, and scripts cannot be safely or productively
+covered by a growing parser allowlist. Forcing naturally efficient shell forms
+such as pipelines into separate model tool calls would also make the agent less
+capable and less efficient. The right runtime boundary is not "Merry
+understands all shell"; it is "Merry can run shell input inside an explicitly
+admitted capability profile and keep exact evidence, artifacts, audit, and
+reducers."
+
+Evidence:
+The M1 structured process boundary already proves the narrow typed path:
+classified argv intents route through permission profiles and produce
+artifact/ledger evidence. The next step would drift if it tried to extend that
+same approach into shell grammar. The user explicitly called out that shell
+forms are too varied to exhaust and that pipes are a legitimate efficient
+process-communication mechanism, not a feature to be avoided by decomposition.
+
+Tradeoff:
+This means M2 should define profiles, shell input artifacts, and admission
+semantics before implementing broad shell behavior. It may delay a quick
+`shell_command` tool, but it avoids committing to an architecture that will
+fail as soon as realistic shell syntax appears.
+
+Reversible:
+Partially. A small parser can still exist later for display, linting,
+hard-deny detection, or safe rewrites, but not as the authority that allows
+shell execution.
+
+Follow-up:
+Rewrite M2 as a shell-compatible runtime boundary. The first implementation
+slice should prove artifact-backed command/script input, profile/session
+admission, runner cancellation, output artifacts, compact ledger reduction, and
+payload-free traces. Do not start by splitting shell strings into argv
+allowlists.
