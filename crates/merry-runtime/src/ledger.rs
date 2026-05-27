@@ -145,6 +145,8 @@ pub enum LedgerScope {
     Task,
     /// A fact that applies to one runtime step.
     Step,
+    /// A fact that applies to a runtime-owned tool result.
+    Tool,
 }
 
 /// Compact, validated text for ledger facts.
