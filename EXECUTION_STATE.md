@@ -42,54 +42,53 @@ Style notes:
 
 Current milestone or track:
 
-- Configuration-backed observability-first coding loop.
+- M1 Structured Process Boundary MVP.
 
 Session milestone:
 
-- Task 7, end-to-end log-enabled smoke verification.
+- Context/cache instrumentation slice: make the provider-neutral request record
+  a stable prefix boundary that includes runtime-owned base instructions and
+  tool profile metadata, with dynamic context hashed separately.
 
 Goal:
 
-- Prove that config-backed JSON logs can capture the deterministic coding-loop
-  smoke end to end: runtime loop, provider request, workspace tool, process
-  execution, artifact record, tool resolution, diagnostic-code, and completed
-  terminal status records, without raw prompt, source, process stdout, provider
-  wire payload, model final text, or secret-like content.
+- Prove that Merry can distinguish the cacheable provider-neutral request
+  prefix from dynamic context: base instructions and tool specs affect the
+  stable prefix hash, while compiled context, user input, and tool
+  continuations affect the dynamic context hash.
 
 Task queue status:
 
-- Task 1, XDG TOML config model: completed.
-- Task 2, config-backed log initialization: completed.
-- Task 3, sandbox config/log mount planning: completed.
-- Task 4, XDG provider config for OpenAI-compatible debug paths: completed.
-- Task 5, runtime loop and process tracing: completed.
-- Task 6, workspace tool and provider trace alignment: completed.
-- Task 6A, user-facing example config contract: completed.
-- Task 7, end-to-end log-enabled smoke verification: completed.
-- Runtime now emits provider-neutral `runtime.provider.request` metadata before
-  any provider call and `runtime.artifact.record` after artifact state is
-  written.
-- CLI tests isolate default integration-test XDG roots from host user config.
+- Added provider-neutral request content hash type and `ModelRequest` metadata:
+  `stable_prefix_message_count`, `stable_prefix_hash`, and
+  `dynamic_context_hash`.
+- Preserved and validated existing `tool_profile_hash`.
+- Added an explicit stable-prefix constructor for requests that know their
+  runtime-owned prefix boundary.
+- Runtime provider request compilation now emits a minimal stable base system
+  message before dynamic compiled context and user input.
+- Runtime request tracing now includes `stable_prefix_message_count`,
+  `tool_profile_hash`, `stable_prefix_hash`, and `dynamic_context_hash`
+  without prompt text or provider wire payloads.
+- Tests updated to account for the stable base message and to prove dynamic
+  context remains outside the stable prefix hash.
 
 Allowed expansion:
 
-- Runtime/provider-neutral trace fields required to make deterministic smoke
-  logs cover the accepted observability contract.
-- CLI deterministic test support and integration-test XDG isolation.
-- Public-safe README, roadmap, plan, decision, and continuity status updates.
+- Provider-neutral request metadata needed for cache-boundary observability.
+- Runtime provider request compilation and trace metadata needed to expose the
+  stable/dynamic split.
+- Focused test updates in runtime, LLM, workspace integration, and continuity
+  status files.
 
 Done condition:
 
-- Deterministic CLI-crate coding-loop log smoke enables file-backed JSON logs
-  from XDG TOML config and asserts the combined log contains loop, provider,
-  tool, workspace, process, artifact, diagnostic-code, and final status records.
-- The deterministic log smoke asserts raw prompt/source/stdout/model final
-  output/provider wire/secret-like payloads are absent.
-- CLI integration tests cover the default XDG state log path and clear failure
-  when the log parent cannot be created.
-- Runtime trace tests assert provider request and artifact record events.
-- Real deterministic `bwrap` coding-loop smoke with temporary XDG log config
-  passes and the log tail contains the expected combined records.
+- `merry-llm` tests prove stable prefix hash changes for base instructions or
+  tool profile changes and dynamic hash changes for dynamic context changes.
+- Runtime provider-boundary tests prove dynamic compiled context does not
+  perturb the stable prefix hash while changing the dynamic context hash.
+- Provider adapters do not receive runtime cache metadata as provider wire
+  state.
 - Focused and full default validation pass.
 - Handoff updated and lease committed.
 
@@ -99,19 +98,20 @@ Drift boundary:
 - Do not move private ignored notes into tracked files.
 - Do not commit `.superpowers/`, `.merry/`, `docs/`, or `merry-raw-docs/`.
 - Do not make live provider behavior part of default tests.
+- Do not expand this slice into full prompt/personality design.
 
 Task type: implementation/docs
 
 Acceptance criteria:
 
-- `coding_loop_smoke_writes_configured_json_log_records_without_payloads`
-  covers deterministic coding-loop log content from XDG TOML config.
-- `debug_command_writes_runtime_action_logs_to_default_xdg_state_path` proves
-  omitted log path resolves to the XDG state fallback.
-- `debug_command_fails_clearly_when_default_log_parent_cannot_be_created`
-  proves logging setup fails clearly before writing command stdout.
-- `agent_loop_traces_loop_steps_tool_process_and_terminal_status` covers
-  provider request and artifact record events in runtime trace capture.
+- `model_request_stable_prefix_hash_tracks_base_instructions_and_tools`
+  demonstrates base instructions and tools are part of the stable prefix hash.
+- `model_request_rejects_non_system_stable_prefix_message` rejects accidental
+  user/dynamic content inside the stable prefix.
+- `model_request_rejects_mismatched_context_hashes` validates serialized hash
+  metadata.
+- `compiled_provider_request_stable_prefix_hash_tracks_base_instructions_and_tools_only`
+  proves runtime dynamic context changes only the dynamic hash.
 - `cargo fmt --all --check`, `cargo clippy --all-targets --all-features -- -D warnings`,
   and `cargo test --all` pass.
 
@@ -119,18 +119,17 @@ Acceptance criteria:
 
 Allowed edits:
 
-- `README.md`
-- `ROADMAP.md`
 - `DECISIONS.md`
 - `EXECUTION_STATE.md`
 - `HANDOFF.md`
-- `plans/2026-05-23-config-backed-observability.md`
-- `crates/merry-cli/src/main.rs`
-- `crates/merry-cli/tests/debug.rs`
-- `crates/merry-runtime/src/agent_loop.rs`
+- `crates/merry-llm/src/lib.rs`
+- `crates/merry-llm/src/request.rs`
+- `crates/merry-llm/tests/protocol.rs`
 - `crates/merry-runtime/src/runtime.rs`
-- `crates/merry-runtime/src/session.rs`
+- `crates/merry-runtime/src/step.rs`
 - `crates/merry-runtime/tests/agent_loop.rs`
+- `crates/merry-runtime/tests/provider_boundary.rs`
+- `crates/merry-tool-workspace/tests/runtime_integration.rs`
 
 Forbidden edits:
 
@@ -149,29 +148,27 @@ Protected files:
 
 Validation command:
 
-- `cargo test -p merry-cli coding_loop_smoke_writes_configured_json_log_records_without_payloads -- --nocapture`
-- `cargo test -p merry-cli debug_command --test debug -- --nocapture`
-- `cargo test -p merry-runtime agent_loop_traces_loop_steps_tool_process_and_terminal_status -- --nocapture`
-- `cargo test -p merry-cli`
+- `cargo test -p merry-llm --test protocol stable_prefix`
+- `cargo test -p merry-runtime --test provider_boundary stable_prefix`
+- `cargo test -p merry-runtime --test provider_boundary`
+- `cargo test -p merry-runtime --test agent_loop`
+- `cargo test -p merry-llm --test protocol`
+- `cargo test -p merry-runtime --lib`
+- `cargo test -p merry-tool-workspace --test runtime_integration coding_loop_harness_inspects_patches_verifies_and_completes`
 - `cargo fmt --all --check`
 - `cargo clippy --all-targets --all-features -- -D warnings`
 - `cargo test --all`
-- `target/debug/merry --with-sandbox debug coding-loop-smoke` with temporary
-  XDG config enabling JSON logs
 - `git diff --check`
 - `git status --short --untracked-files=all`
 
 Validation notes:
 
-- The focused coding-loop log smoke failed first because successful log records
-  omitted `diagnostic_code`; the runtime loop/tool finish logs now emit an
-  empty diagnostic code on successful paths and focused validation passes.
-- First `cargo test` attempts needed network escalation to download missing
-  crates. After dependencies were cached, default checks ran normally.
-- The real deterministic `bwrap` smoke passed with temporary XDG log config and
-  stdout `coding-loop-smoke: ok`.
-- Validation remains deterministic/offline by default; live provider and bwrap
-  smoke lanes remain opt-in/manual.
+- Initial full `cargo test --all` failed only on tests that assumed the first
+  runtime provider message was user/dynamic context; those assertions now
+  account for the stable base system message at index 0.
+- Full default validation passed after those test updates.
+- Live provider and real bwrap smoke lanes were not run; they remain explicit
+  opt-in lanes and are not required for this provider-neutral metadata slice.
 
 ## Research
 
@@ -179,32 +176,30 @@ Research required: yes
 
 Research reason:
 
-- User allowed subagents; a read-only researcher checked which existing trace
-  events and fields Task 7 could rely on, and identified the deterministic
-  provider-request gap.
+- The user asked whether Codex has default system/base instructions and whether
+  that should be considered in the prefix cache design.
 
 Research artifact:
 
-- Subagent finding: runtime loop/tool/process/workspace trace points already
-  existed; deterministic `CodingLoopSmokeProvider` did not naturally emit
-  `runtime.provider.request`, so provider-neutral runtime request tracing was
-  needed.
+- Local ignored Codex source under `.merry/codex` showed Codex resolves
+  `base_instructions`, includes model instruction templates, and sends those
+  instructions as part of model requests. This informed the decision to make
+  Merry's base instructions part of the stable prefix boundary.
 
 ## Next Action
 
 Next exact action:
 
-- Start the next lease from `ROADMAP.md` Next Active: replace one-off process
-  classification growth with a runtime-owned read-only process profile for
-  reusable workspace inspection and exact evidence retrieval. Initial coverage
-  should include `rg --files`, literal `rg <pattern>`, and a file-slice shape
-  such as `sed -n RANGE FILE` or an equivalent typed read tool.
+- Continue M1 from `ROADMAP.md`: extend the structured process boundary by
+  routing classified process intents through read-only and workspace-write /
+  sandbox permission profiles, starting with known read-only inspection
+  commands and local workspace verification commands.
 
 Do not reconsider:
 
 - Do not make event-first CLI the primary next milestone.
 - Do not start TUI or REPL before reusable runtime/process/tool profiles are
   clearer.
-- Do not reintroduce repo-local `.merry/secrets/openai.env` as the live-smoke
-  provider config path.
-- Do not let future config schema changes bypass `examples/config.toml`.
+- Do not move private Codex/raw-doc findings into tracked source text.
+- Do not treat base prompt wording as finalized; the completed contract is the
+  stable-prefix boundary and metadata, not a long-term prompt/personality.

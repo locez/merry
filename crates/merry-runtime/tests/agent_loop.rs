@@ -681,14 +681,19 @@ async fn agent_loop_executes_one_tool_and_continues_to_final_completion() {
 
     let requests = provider.recorded_requests();
     assert_eq!(requests.len(), 2);
-    assert_eq!(requests[0].messages()[0].role(), ModelMessageRole::User);
+    assert_eq!(requests[0].messages()[0].role(), ModelMessageRole::System);
     assert_eq!(
         requests[0].messages()[0].content().as_text(),
+        "You are Merry."
+    );
+    assert_eq!(requests[0].messages()[1].role(), ModelMessageRole::User);
+    assert_eq!(
+        requests[0].messages()[1].content().as_text(),
         "Search notes."
     );
     assert!(requests[0].continuations().is_empty());
     assert_eq!(
-        requests[1].messages()[0].content().as_text(),
+        requests[1].messages()[1].content().as_text(),
         continuation_input_for("Search notes.")
     );
     assert_eq!(requests[1].continuations().len(), 1);
@@ -761,7 +766,7 @@ async fn agent_loop_executes_opt_in_workspace_patch_and_continues_to_final_compl
     let requests = provider.recorded_requests();
     assert_eq!(requests.len(), 2);
     assert_eq!(
-        requests[1].messages()[0].content().as_text(),
+        requests[1].messages()[1].content().as_text(),
         continuation_input_for("Patch note.")
     );
     assert_eq!(requests[1].continuations().len(), 1);
@@ -866,7 +871,7 @@ async fn agent_loop_process_command_tool_executes_and_continues() {
     );
     assert!(requests[0].continuations().is_empty());
     assert_eq!(
-        requests[1].messages()[0].content().as_text(),
+        requests[1].messages()[1].content().as_text(),
         continuation_input_for("Check rustc version.")
     );
     assert_eq!(requests[1].continuations().len(), 1);
@@ -1000,7 +1005,7 @@ async fn agent_loop_process_command_tool_executes_rg_files_and_continues() {
     assert_eq!(requests.len(), 2);
     assert!(requests[0].continuations().is_empty());
     assert_eq!(
-        requests[1].messages()[0].content().as_text(),
+        requests[1].messages()[1].content().as_text(),
         continuation_input_for("List tracked source files.")
     );
     assert_eq!(requests[1].continuations().len(), 1);

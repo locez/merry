@@ -1199,7 +1199,7 @@ async fn coding_loop_harness_inspects_patches_verifies_and_completes() {
     let expected_continuation_input = continuation_input_for("Fix the greeting and verify it.");
     for request in requests.iter().skip(1) {
         assert_eq!(
-            request.messages()[0].content().as_text(),
+            request.messages()[1].content().as_text(),
             expected_continuation_input
         );
     }

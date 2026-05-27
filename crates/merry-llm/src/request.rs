@@ -46,6 +46,21 @@ impl ToolProfileHash {
     }
 }
 
+/// Stable fingerprint of provider-neutral request content.
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(transparent)]
+pub struct RequestContentHash(String);
+
+impl RequestContentHash {
+    /// Borrows the stable hash label.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 impl fmt::Display for ModelName {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.0)
@@ -286,7 +301,10 @@ pub struct ModelRequest {
     #[serde(default)]
     continuations: Vec<ModelToolContinuation>,
     generation: GenerationConfig,
+    stable_prefix_message_count: usize,
     tool_profile_hash: ToolProfileHash,
+    stable_prefix_hash: RequestContentHash,
+    dynamic_context_hash: RequestContentHash,
 }
 
 impl ModelRequest {
@@ -308,19 +326,69 @@ impl ModelRequest {
         continuations: Vec<ModelToolContinuation>,
         generation: GenerationConfig,
     ) -> Result<Self, ModelError> {
+        Self::new_with_continuations_and_stable_prefix(
+            model,
+            messages,
+            tools,
+            continuations,
+            generation,
+            0,
+        )
+    }
+
+    /// Creates a validated compiled model request snapshot with an explicit
+    /// stable prefix boundary.
+    ///
+    /// The stable prefix is the runtime-owned provider-neutral request prefix:
+    /// base/system instructions plus the model-visible tool profile. Dynamic
+    /// context, user input, and tool continuations are intentionally hashed
+    /// separately so callers can tell whether a request changed the cacheable
+    /// prefix or only late context.
+    pub fn new_with_continuations_and_stable_prefix(
+        model: ModelName,
+        messages: Vec<ModelMessage>,
+        tools: Vec<ToolSpec>,
+        continuations: Vec<ModelToolContinuation>,
+        generation: GenerationConfig,
+        stable_prefix_message_count: usize,
+    ) -> Result<Self, ModelError> {
         if messages.is_empty() {
             return Err(ModelError::invalid_request(
                 "ModelRequest messages must not be empty",
             ));
         }
 
+        if stable_prefix_message_count > messages.len() {
+            return Err(ModelError::invalid_request(
+                "ModelRequest stable prefix message count must not exceed messages length",
+            ));
+        }
+        if messages
+            .iter()
+            .take(stable_prefix_message_count)
+            .any(|message| message.role() != ModelMessageRole::System)
+        {
+            return Err(ModelError::invalid_request(
+                "ModelRequest stable prefix messages must use the system role",
+            ));
+        }
+
+        let tool_profile_hash = tool_profile_hash(&tools);
+        let stable_prefix_hash =
+            stable_prefix_hash(&messages[..stable_prefix_message_count], &tools);
+        let dynamic_context_hash =
+            dynamic_context_hash(&messages[stable_prefix_message_count..], &continuations);
+
         Ok(Self {
             model,
             messages,
-            tool_profile_hash: tool_profile_hash(&tools),
             tools,
             continuations,
             generation,
+            stable_prefix_message_count,
+            tool_profile_hash,
+            stable_prefix_hash,
+            dynamic_context_hash,
         })
     }
 
@@ -348,6 +416,24 @@ impl ModelRequest {
         &self.continuations
     }
 
+    /// Number of leading messages included in the stable prefix hash.
+    #[must_use]
+    pub fn stable_prefix_message_count(&self) -> usize {
+        self.stable_prefix_message_count
+    }
+
+    /// Leading system/developer messages included in the stable prefix hash.
+    #[must_use]
+    pub fn stable_prefix_messages(&self) -> &[ModelMessage] {
+        &self.messages[..self.stable_prefix_message_count]
+    }
+
+    /// Dynamic messages outside the stable prefix.
+    #[must_use]
+    pub fn dynamic_messages(&self) -> &[ModelMessage] {
+        &self.messages[self.stable_prefix_message_count..]
+    }
+
     /// Generation controls.
     #[must_use]
     pub fn generation(&self) -> &GenerationConfig {
@@ -358,6 +444,18 @@ impl ModelRequest {
     #[must_use]
     pub fn tool_profile_hash(&self) -> &ToolProfileHash {
         &self.tool_profile_hash
+    }
+
+    /// Stable hash of the cacheable provider-neutral prefix.
+    #[must_use]
+    pub fn stable_prefix_hash(&self) -> &RequestContentHash {
+        &self.stable_prefix_hash
+    }
+
+    /// Stable hash of dynamic request context outside the cacheable prefix.
+    #[must_use]
+    pub fn dynamic_context_hash(&self) -> &RequestContentHash {
+        &self.dynamic_context_hash
     }
 }
 
@@ -371,7 +469,13 @@ struct ModelRequestWire {
     continuations: Vec<ModelToolContinuation>,
     generation: GenerationConfig,
     #[serde(default)]
+    stable_prefix_message_count: usize,
+    #[serde(default)]
     tool_profile_hash: Option<ToolProfileHash>,
+    #[serde(default)]
+    stable_prefix_hash: Option<RequestContentHash>,
+    #[serde(default)]
+    dynamic_context_hash: Option<RequestContentHash>,
 }
 
 impl<'de> Deserialize<'de> for ModelRequest {
@@ -380,12 +484,13 @@ impl<'de> Deserialize<'de> for ModelRequest {
         D: Deserializer<'de>,
     {
         let wire = ModelRequestWire::deserialize(deserializer)?;
-        let request = Self::new_with_continuations(
+        let request = Self::new_with_continuations_and_stable_prefix(
             wire.model,
             wire.messages,
             wire.tools,
             wire.continuations,
             wire.generation,
+            wire.stable_prefix_message_count,
         )
         .map_err(de::Error::custom)?;
 
@@ -394,6 +499,20 @@ impl<'de> Deserialize<'de> for ModelRequest {
         {
             return Err(de::Error::custom(
                 "ModelRequest tool_profile_hash did not match tools",
+            ));
+        }
+        if let Some(expected_hash) = wire.stable_prefix_hash
+            && expected_hash != request.stable_prefix_hash
+        {
+            return Err(de::Error::custom(
+                "ModelRequest stable_prefix_hash did not match stable prefix",
+            ));
+        }
+        if let Some(expected_hash) = wire.dynamic_context_hash
+            && expected_hash != request.dynamic_context_hash
+        {
+            return Err(de::Error::custom(
+                "ModelRequest dynamic_context_hash did not match dynamic context",
             ));
         }
 
@@ -420,6 +539,58 @@ fn tool_profile_hash(tools: &[ToolSpec]) -> ToolProfileHash {
     }
 
     ToolProfileHash(format!("fnv1a64:{hash:016x}"))
+}
+
+fn stable_prefix_hash(messages: &[ModelMessage], tools: &[ToolSpec]) -> RequestContentHash {
+    let mut chunks = messages
+        .iter()
+        .map(|message| stable_chunk("message", message))
+        .collect::<Vec<_>>();
+    let mut tool_chunks = tools
+        .iter()
+        .map(|tool| stable_chunk("tool", tool))
+        .collect::<Vec<_>>();
+    tool_chunks.sort();
+    chunks.extend(tool_chunks);
+    request_content_hash(chunks)
+}
+
+fn dynamic_context_hash(
+    messages: &[ModelMessage],
+    continuations: &[ModelToolContinuation],
+) -> RequestContentHash {
+    let mut chunks = messages
+        .iter()
+        .map(|message| stable_chunk("message", message))
+        .collect::<Vec<_>>();
+    chunks.extend(
+        continuations
+            .iter()
+            .map(|continuation| stable_chunk("continuation", continuation)),
+    );
+    request_content_hash(chunks)
+}
+
+fn stable_chunk<T>(kind: &'static str, value: &T) -> String
+where
+    T: Serialize,
+{
+    format!(
+        "{kind}:{}",
+        serde_json::to_string(value).expect("provider-neutral request content must serialize")
+    )
+}
+
+fn request_content_hash(chunks: Vec<String>) -> RequestContentHash {
+    let mut hash = FNV_OFFSET_BASIS;
+    for chunk in chunks {
+        for byte in chunk.as_bytes() {
+            hash = (hash ^ u64::from(*byte)).wrapping_mul(FNV_PRIME);
+        }
+        hash = (hash ^ 0xff).wrapping_mul(FNV_PRIME);
+    }
+
+    RequestContentHash(format!("fnv1a64:{hash:016x}"))
 }
 
 fn validate_text(kind: &'static str, value: &str) -> Result<(), ModelError> {

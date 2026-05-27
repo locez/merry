@@ -665,10 +665,13 @@ async fn runtime_step_with_provider_compiles_user_text_request_and_records_assis
     assert_eq!(requests.len(), 1);
     let request = &requests[0];
     assert_eq!(request.model(), &model_name());
-    assert_eq!(request.messages().len(), 1);
-    assert_eq!(request.messages()[0].role(), ModelMessageRole::User);
+    assert_eq!(request.messages().len(), 2);
+    assert_eq!(request.stable_prefix_message_count(), 1);
+    assert_eq!(request.messages()[0].role(), ModelMessageRole::System);
+    assert_eq!(request.messages()[0].content().as_text(), "You are Merry.");
+    assert_eq!(request.messages()[1].role(), ModelMessageRole::User);
     assert_eq!(
-        request.messages()[0].content().as_text(),
+        request.messages()[1].content().as_text(),
         "Explain the runtime boundary."
     );
     assert!(request.tools().is_empty());
@@ -767,12 +770,15 @@ async fn runtime_step_with_provider_includes_compiled_context_as_system_message(
     let requests = provider.recorded_requests();
     assert_eq!(requests.len(), 1);
     let request = &requests[0];
-    assert_eq!(request.messages().len(), 2);
+    assert_eq!(request.messages().len(), 3);
+    assert_eq!(request.stable_prefix_message_count(), 1);
     assert_eq!(request.messages()[0].role(), ModelMessageRole::System);
-    assert_eq!(request.messages()[0].content().as_text(), expected_snapshot);
-    assert_eq!(request.messages()[1].role(), ModelMessageRole::User);
+    assert_eq!(request.messages()[0].content().as_text(), "You are Merry.");
+    assert_eq!(request.messages()[1].role(), ModelMessageRole::System);
+    assert_eq!(request.messages()[1].content().as_text(), expected_snapshot);
+    assert_eq!(request.messages()[2].role(), ModelMessageRole::User);
     assert_eq!(
-        request.messages()[1].content().as_text(),
+        request.messages()[2].content().as_text(),
         "Use the stored context."
     );
     assert!(request.tools().is_empty());
@@ -863,10 +869,15 @@ async fn second_provider_step_continues_sequences_and_does_not_replay_previous_a
 
     let requests = provider.recorded_requests();
     assert_eq!(requests.len(), 2);
-    assert_eq!(requests[1].messages().len(), 1);
-    assert_eq!(requests[1].messages()[0].role(), ModelMessageRole::User);
+    assert_eq!(requests[1].messages().len(), 2);
+    assert_eq!(requests[1].messages()[0].role(), ModelMessageRole::System);
     assert_eq!(
         requests[1].messages()[0].content().as_text(),
+        "You are Merry."
+    );
+    assert_eq!(requests[1].messages()[1].role(), ModelMessageRole::User);
+    assert_eq!(
+        requests[1].messages()[1].content().as_text(),
         "Second request."
     );
     assert!(
@@ -1066,6 +1077,55 @@ async fn compiled_provider_request_tool_profile_hash_tracks_registered_tools() {
     assert_ne!(
         changed_provider.recorded_requests()[0].tool_profile_hash(),
         &first_hash
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn compiled_provider_request_stable_prefix_hash_tracks_base_instructions_and_tools_only() {
+    let first_provider = FakeModelProvider::new(vec![Ok(completed_event())]);
+    let read_tool = test_tool_spec("read_file");
+    let first_runtime = Runtime::builder(session_id("provider-stable-prefix-first"))
+        .register_tool(RegisteredTool::read_only(
+            read_tool.clone(),
+            Arc::new(ScriptedToolExecutor::succeeding_text("unused")),
+        ))
+        .model_provider(Arc::new(first_provider.clone()), model_name())
+        .build()
+        .expect("runtime should build");
+    collect_step(&first_runtime, "First dynamic request.").await;
+    let first_request = first_provider.recorded_requests()[0].clone();
+
+    let dynamic_provider = FakeModelProvider::new(vec![Ok(completed_event())]);
+    let dynamic_runtime = Runtime::builder(session_id("provider-stable-prefix-dynamic"))
+        .register_tool(RegisteredTool::read_only(
+            read_tool.clone(),
+            Arc::new(ScriptedToolExecutor::succeeding_text("unused")),
+        ))
+        .model_provider(Arc::new(dynamic_provider.clone()), model_name())
+        .build()
+        .expect("runtime should build");
+    let _snapshot = record_valid_context(&dynamic_runtime).await;
+    collect_step(&dynamic_runtime, "Second dynamic request.").await;
+    let dynamic_request = dynamic_provider.recorded_requests()[0].clone();
+
+    assert_eq!(
+        first_request.stable_prefix_hash(),
+        dynamic_request.stable_prefix_hash()
+    );
+    assert_ne!(
+        first_request.dynamic_context_hash(),
+        dynamic_request.dynamic_context_hash()
+    );
+
+    let changed_tools_provider = FakeModelProvider::new(vec![Ok(completed_event())]);
+    let changed_tools_runtime = Runtime::builder(session_id("provider-stable-prefix-tool-change"))
+        .model_provider(Arc::new(changed_tools_provider.clone()), model_name())
+        .build()
+        .expect("runtime should build");
+    collect_step(&changed_tools_runtime, "First dynamic request.").await;
+    assert_ne!(
+        first_request.stable_prefix_hash(),
+        changed_tools_provider.recorded_requests()[0].stable_prefix_hash()
     );
 }
 

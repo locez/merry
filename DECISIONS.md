@@ -248,3 +248,47 @@ Follow-up:
 Use the verified observability layer while moving process inspection toward a
 runtime-owned read-only process profile and reusable coding-loop tool-set
 registration.
+
+## 2026-05-27 - Stable Prefix Hash Includes Base Instructions And Tool Profile
+
+Decision:
+`merry-llm::ModelRequest` records a provider-neutral stable prefix boundary and
+three request hashes: `tool_profile_hash`, `stable_prefix_hash`, and
+`dynamic_context_hash`. Runtime provider steps now compile a minimal
+runtime-owned base instruction message as the first stable system message, then
+place compiled context, user input, and tool continuations outside that stable
+prefix.
+
+Reason:
+The cacheable request prefix is not just the tool schema set. It also includes
+the runtime-owned base instructions that steer the model before dynamic task
+context. Treating base instructions as dynamic would make cache behavior opaque;
+treating ledger/evidence/user input as stable would make the stable prefix
+change every turn. The split makes it observable whether a request changed the
+cacheable lane or only the late dynamic context.
+
+Evidence:
+`model_request_stable_prefix_hash_tracks_base_instructions_and_tools` proves
+that the stable prefix hash changes when base instructions or tools change, but
+not when only user text changes. `compiled_provider_request_stable_prefix_hash_tracks_base_instructions_and_tools_only`
+proves the runtime provider path keeps the stable prefix hash fixed across
+dynamic compiled context changes while `dynamic_context_hash` changes. The
+OpenAI adapter tests still assert provider wire output without runtime state,
+so the new metadata remains Merry-owned and provider-neutral.
+
+Tradeoff:
+The current default base instruction is intentionally minimal. It establishes
+the request-boundary contract without trying to finalize Merry's long-term
+system prompt/personality policy. Older tests that assumed the first message
+was user or compiled context now account for the stable base message.
+
+Reversible:
+Yes. The base instruction text can evolve later; doing so will deliberately
+change the stable prefix hash. More detailed prefix-change reasons can be added
+without changing provider wire formats.
+
+Follow-up:
+Continue M1 by wiring command classification and permission/profile routing
+through the process boundary, then add the remaining cache metadata such as
+permission profile id and explicit stable-prefix change reasons where the
+runtime has enough state to explain them.
