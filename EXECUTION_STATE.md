@@ -46,68 +46,84 @@ Current milestone or track:
 
 Session milestone:
 
-- Direction correction slice: prevent the next milestone from becoming a
-  hand-rolled subset shell parser and reframe shell compatibility around real
-  shell execution under explicit permission/session profiles.
+- First implementation slice: add a separate read-only shell-wrapper admission
+  lane modeled after Codex's narrow plain pipeline classifier, without turning
+  shell parsing into the authorization model.
 
 Goal:
 
-- Capture the corrected M2 boundary in tracked docs before implementation:
-  structured argv remains the narrow typed lane, while shell-compatible
-  behavior must use a real shell runner under runtime-owned profiles,
-  artifacts, audit, cancellation, ledger reducers, and approvals.
+- Prove that a plain read-only shell pipeline can be recognized and routed to a
+  shell-specific permission profile only when a dedicated shell runner lane is
+  explicitly opted in, while complex or mutating shell forms remain denied
+  without runner calls.
 
 Task queue status:
 
-- Reframed `ROADMAP.md` M2 away from "parse simple shell strings into argv" and
-  toward a shell-compatible runtime boundary.
-- Added roadmap invariants that Merry must not build a subset shell parser as
-  authorization, and that pipes/control flow are legitimate shell mechanisms.
-- Recorded the decision in `DECISIONS.md` that static classifiers are hard-deny
-  or advisory evidence only, not broad shell authorization.
-- Updated `HANDOFF.md` to make the next action a design/implementation slice
-  for shell profile/session admission rather than command-string parsing.
+- Added `process.shell.read_only.v1` as a distinct runtime-owned process
+  permission profile.
+- Added a narrow plain shell-wrapper classifier for `bash`/`sh`/`zsh -c|-lc`
+  command text joined by `|`, `&&`, `||`, or `;`, requiring every segment to
+  match the direct read-only process classifier.
+- Added `RuntimeBuilder::allow_read_only_shell_process_actions` so shell wrapper
+  execution cannot be admitted by the existing structured read-only argv runner.
+- Added action-policy and runtime tests proving shell read-only proposals are
+  denied without shell opt-in, execute with the shell profile when opted in, and
+  reject redirects, command substitution, and mutating pipeline segments without
+  runner calls.
+- Updated `ROADMAP.md` and `DECISIONS.md` to record this M2 slice and its
+  guardrails.
 
 Allowed expansion:
 
+- Focused runtime process/shell classifier, admission, audit/artifact/profile
+  plumbing and tests.
 - Public-safe roadmap/decision/continuity updates.
-- No Rust behavior changes in this correction lease unless needed to keep docs
-  consistent.
 
 Done condition:
 
-- `ROADMAP.md`, `DECISIONS.md`, `EXECUTION_STATE.md`, and `HANDOFF.md` all
-  state that shell compatibility must not depend on a Merry-owned subset parser
-  allowlist.
-- The next exact action points at defining the shell runtime boundary and
-  profile/session admission contract.
-- Diff is documentation-only, passes `git diff --check`, and is committed.
+- `bash -lc "rg ProcessRunner | wc -l"` derives
+  `process.shell.read_only.v1`.
+- The same proposal is denied when only structured low-risk process actions are
+  enabled.
+- The proposal executes only when `allow_read_only_shell_process_actions` is
+  configured and records the shell profile in artifact/audit evidence.
+- Complex or mutating shell forms are denied without runner calls.
+- Default validation passes and the lease is committed.
 
 Drift boundary:
 
-- Do not add TUI, REPL, or interactive CLI scope.
-- Do not implement shell string parsing or pipelines in this correction lease.
-- Do not claim shell execution is safe because a classifier recognizes a string
-  shape.
+- Do not add a broad model-facing shell tool in this slice.
+- Do not implement a full shell parser or make the classifier the authorization
+  model for complex shell syntax.
+- Do not make existing `process.read_only.v1` runner injection imply shell
+  execution capability.
+- Do not add approval/session grants, long-running process sessions, stdin/env
+  shell behavior, or real shell runner adapters in this slice.
 - Do not move private ignored notes into tracked files.
 - Do not commit `.superpowers/`, `.merry/`, `docs/`, or `merry-raw-docs`.
 - Do not make live provider behavior part of default tests.
-- Do not expand this slice into approval/session implementation.
 
-Task type: docs
+Task type: code/docs
 
 Acceptance criteria:
 
-- Roadmap M2 is renamed/reframed as a shell-compatible runtime boundary.
-- Decision log records why subset shell parsing is not the authorization model.
-- Handoff next action is implementation-neutral enough to avoid parser-first
-  drift.
-- `git diff --check` passes.
+- Read-only shell-wrapper classification and profile derivation are covered by
+  deterministic unit tests.
+- Runtime admission tests keep structured read-only argv, read-only shell
+  wrapper, and local workspace bwrap lanes distinct.
+- Process result artifacts/audit evidence include
+  `process.shell.read_only.v1` for admitted shell-wrapper execution.
+- `cargo fmt --all --check`, `cargo clippy --all-targets --all-features -- -D warnings`,
+  and `cargo test --all` pass.
 
 ## Scope
 
 Allowed edits:
 
+- `crates/merry-runtime/src/process.rs`
+- `crates/merry-runtime/src/action_policy.rs`
+- `crates/merry-runtime/src/runtime.rs`
+- `crates/merry-runtime/src/lib.rs`
 - `DECISIONS.md`
 - `EXECUTION_STATE.md`
 - `HANDOFF.md`
@@ -118,9 +134,8 @@ Forbidden edits:
 - private ignored source material under `docs/` or `merry-raw-docs/`
 - real credentials or generated build artifacts
 - `.superpowers/`, `.merry/`, `docs/`, or `merry-raw-docs` content
-- Rust behavior changes
-- shell-compatible model tool implementation, pipelines, scripts, or approval
-  session behavior
+- broad shell command tool or real shell runner implementation
+- approval/session implementation
 - full-screen TUI, REPL, or multi-turn UI scope
 
 Protected files:
@@ -133,42 +148,47 @@ Protected files:
 
 Validation command:
 
-- `git diff --check`
-- `git status --short --untracked-files=all`
+- `cargo fmt --all --check`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test --all`
 
 Validation notes:
 
-- This is a docs-only direction correction. Rust validation from commit
-  `efd2d99` remains the last full code validation. No new Rust behavior is
-  introduced in this lease.
+- All validation commands passed in this lease.
+- Ignored/live/bwrap smoke tests remain opt-in and were not run by
+  `cargo test --all`.
 
 ## Research
 
-Research required: no
+Research required: yes
 
 Research reason:
 
-- This lease used existing roadmap/status/code evidence. No internet or ignored
-  private source research was needed.
+- The user explicitly asked to compare Codex's shell pipeline/read-only
+  handling before implementing this direction.
 
 Research artifact:
 
-- None.
+- Local source inspection of `.merry/codex` only. No internet research was used.
+- Key finding: Codex runs real shell commands but uses a narrow plain-command
+  classifier for `bash -lc`/pipeline evidence; every segment must be known safe,
+  and sandbox/approval/policy remain the real execution boundary.
 
 ## Next Action
 
 Next exact action:
 
-- Start M2 from `ROADMAP.md`: define the first shell-compatible runtime
-  boundary and acceptance test around artifact-backed command/script input,
-  explicit permission/session admission, runner cancellation, output artifacts,
-  compact ledger reduction, and payload-free traces. Do not start by splitting
-  shell strings into argv allowlists.
+- Continue M2 by defining shell execution input/output artifacts and payload-free
+  trace metadata for the future shell runner: exact command/script artifact,
+  script byte/hash metadata, stdout/stderr/status artifacts, compact ledger
+  reduction, and cancellation behavior. Keep the real runner/admission profile
+  separate from broad approval/session work.
 
 Do not reconsider:
 
 - M1 Structured Process Boundary MVP is complete.
 - Do not make a Merry-owned subset shell parser the authorization model.
+- Do not merge `process.shell.read_only.v1` into `process.read_only.v1`.
 - Do not make event-first CLI the primary next milestone.
 - Do not start TUI or REPL before reusable runtime/process/tool profiles are
   clearer.

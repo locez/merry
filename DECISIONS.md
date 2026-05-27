@@ -387,3 +387,50 @@ slice should prove artifact-backed command/script input, profile/session
 admission, runner cancellation, output artifacts, compact ledger reduction, and
 payload-free traces. Do not start by splitting shell strings into argv
 allowlists.
+
+## 2026-05-27 - Read-Only Shell Wrappers Require A Separate Shell Runner Lane
+
+Decision:
+Merry now recognizes a narrow read-only shell-wrapper process shape under a
+separate permission profile, `process.shell.read_only.v1`. The classifier only
+accepts `bash`/`sh`/`zsh -c|-lc` scripts composed of plain word commands joined
+by `|`, `&&`, `||`, or `;`, and every segment must match the direct read-only
+process classifier. Execution is not admitted by the existing structured
+read-only argv runner; runtime construction must explicitly opt in with
+`RuntimeBuilder::allow_read_only_shell_process_actions`.
+
+Reason:
+The Codex source analysis showed the right split: run shell syntax through a
+real shell, but use a very narrow plain-command classifier only as evidence for
+safe/low-friction handling. Folding this into `process.read_only.v1` would make
+existing low-risk process runner injection silently acquire shell capability.
+Keeping a separate shell runner lane prevents the classifier from becoming a
+broad authorization shortcut.
+
+Evidence:
+`process_permission_profile_id_is_derived_from_admitted_intent_shape` now covers
+`bash -lc "rg ProcessRunner | wc -l"` deriving
+`process.shell.read_only.v1`. Runtime tests prove that the same proposal is
+denied when only `allow_low_risk_process_actions` is configured, executes only
+when `allow_read_only_shell_process_actions` is configured, and records the
+shell profile in process artifacts/audit evidence. Complex or mutating shell
+forms such as redirects, command substitution, and mutating pipeline segments
+are denied without runner calls. Full default validation passed with
+`cargo fmt --all --check`, `cargo clippy --all-targets --all-features -- -D warnings`,
+and `cargo test --all`.
+
+Tradeoff:
+The classifier is intentionally small and hand-bounded; it is not a general
+shell parser and should not grow into one. It enables the first pipeline-shaped
+read-only evidence path without yet exposing a model-facing shell command tool
+or a reusable real shell runner profile.
+
+Reversible:
+Yes. The classifier can later be replaced by a stronger parser or sandbox
+interception layer while preserving the separate `process.shell.read_only.v1`
+profile and explicit shell-runner opt-in boundary.
+
+Follow-up:
+Wire a real shell runner/profile through the runtime boundary only after command
+input artifacts, payload-free traces, approval/session semantics, and exact
+output artifact reduction are defined for shell execution.

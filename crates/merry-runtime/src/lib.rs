@@ -72,7 +72,7 @@ pub use process::{
     ProcessActionIntent, ProcessEnvPolicy, ProcessExecutionEvidence, ProcessExitStatus,
     ProcessPermissionProfileId, ProcessRunner, ProcessRunnerContext, ProcessRunnerError,
     ProcessRunnerFuture, ProcessRunnerOutput, ProcessRunnerResult,
-    is_low_risk_process_action_intent,
+    is_low_risk_process_action_intent, is_read_only_shell_process_action_intent,
 };
 pub use process_tool::{ProcessCommandToolError, process_command_tool};
 pub use runtime::{Runtime, RuntimeBuilder};

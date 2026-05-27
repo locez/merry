@@ -153,6 +153,15 @@ The OpenAI provider target is the Responses API only. The provider request path 
   stdout/stderr/status output is artifact-backed and reduced into compact
   ledger facts with evidence references; and process execution traces include
   `permission_profile_id` without stdout/stderr payloads.
+- M2 first shell-compatible boundary slice is implemented in `merry-runtime`:
+  narrow plain read-only shell wrappers such as
+  `bash -lc "rg ProcessRunner | wc -l"` derive
+  `process.shell.read_only.v1`, remain separate from the structured
+  `process.read_only.v1` argv lane, and execute only when runtime construction
+  explicitly opts in with `allow_read_only_shell_process_actions`. Complex or
+  mutating shell forms are denied without runner calls. This is classifier and
+  admission plumbing only, not a general shell parser, not a model-facing shell
+  tool, and not a reusable real shell runner profile yet.
 
 ### Active
 
@@ -243,8 +252,13 @@ M1 Structured Process Boundary MVP:
 
 M2 Shell-Compatible Runtime Boundary:
 
+- Status: in progress; first read-only shell-wrapper admission slice is
+  implemented.
 - Add a shell-compatible execution boundary after the structured intent path is
-  solid, but do not emulate shell parsing in Merry.
+  solid, but do not emulate full shell parsing in Merry.
+- Keep `process.shell.read_only.v1` separate from `process.read_only.v1`.
+  Recognizing a plain read-only pipeline must not silently grant shell
+  execution to existing structured argv runners.
 - A future model-facing `shell_command` or `exec_command` tool should be a thin
   request shape over this runtime boundary, not a parser that reclassifies
   shell grammar into structured argv for authorization.

@@ -26,6 +26,8 @@ pub(crate) enum ActionRiskTier {
     ProcessLow,
     /// Starts a local process with accepted workspace effects.
     ProcessLocalWorkspaceEffect,
+    /// Starts a read-only shell wrapper under explicit shell-runner admission.
+    ProcessShellReadOnly,
     /// Starts a higher-risk local process.
     ProcessHigh,
     /// Uses network access.
@@ -146,6 +148,17 @@ impl ActionPolicyDecision {
             "local workspace effect process actions are allowed only by explicit runtime opt-in for accepted local workspace process risk",
         )
     }
+
+    /// Allows an otherwise denied read-only shell wrapper after explicit shell opt-in.
+    #[must_use]
+    pub(crate) const fn allow_read_only_shell_process_action() -> Self {
+        Self::new(
+            ToolActionKind::CommandExec,
+            ActionRiskTier::ProcessShellReadOnly,
+            ActionPolicyDisposition::Allow,
+            "read-only shell process actions are allowed only by explicit runtime opt-in for a shell runner profile",
+        )
+    }
 }
 
 /// Classifies the runtime-owned risk tier for a tool action.
@@ -168,6 +181,9 @@ pub(crate) fn classify_tool_action_risk(
         }
         ToolActionKind::CommandExec => match proposal.map(ActionProposal::evidence) {
             Some(ActionProposalEvidence::ProcessAction(intent)) => {
+                if crate::is_read_only_shell_process_action_intent(intent) {
+                    return ActionRiskTier::ProcessShellReadOnly;
+                }
                 match classify_process_intent(intent) {
                     ProcessIntentClass::Informational => ActionRiskTier::ProcessLow,
                     ProcessIntentClass::LocalWorkspaceEffect => {
@@ -209,6 +225,21 @@ pub(crate) fn is_low_risk_process_action_proposal(
             proposal.evidence(),
             ActionProposalEvidence::ProcessAction(intent)
                 if crate::is_low_risk_process_action_intent(intent)
+        )
+}
+
+/// Returns whether proposal evidence is compatible with the read-only shell process lane.
+#[must_use]
+pub(crate) fn is_read_only_shell_process_action_proposal(
+    action_kind: ToolActionKind,
+    proposal: &ActionProposal,
+) -> bool {
+    action_kind == ToolActionKind::CommandExec
+        && proposal.action_kind() == ToolActionKind::CommandExec
+        && matches!(
+            proposal.evidence(),
+            ActionProposalEvidence::ProcessAction(intent)
+                if crate::is_read_only_shell_process_action_intent(intent)
         )
 }
 
@@ -277,6 +308,7 @@ mod tests {
     use super::{
         ActionPolicyDisposition, ActionRiskTier, DefaultActionPolicy, classify_tool_action_risk,
         is_local_workspace_effect_process_action_proposal, is_low_risk_process_action_proposal,
+        is_read_only_shell_process_action_proposal,
     };
     use crate::{
         AcceptedLocalWorkspaceProcessAdmission, ActionProposal, ActionProposalEvidence,
@@ -396,7 +428,7 @@ mod tests {
             ActionRiskTier::ProcessLocalWorkspaceEffect
         );
 
-        let forbidden = process_proposal(&call, &["sh", "-c", "echo unsafe"]);
+        let forbidden = process_proposal(&call, &["sh", "-c", "rm -rf target"]);
         assert_eq!(
             classify_tool_action_risk(ToolActionKind::CommandExec, Some(&forbidden)),
             ActionRiskTier::Forbidden
@@ -423,9 +455,17 @@ mod tests {
             &informational,
             admission
         ));
+        assert!(!is_read_only_shell_process_action_proposal(
+            ToolActionKind::CommandExec,
+            &informational
+        ));
 
         let local_effect = process_proposal(&call, &["cargo", "test", "-p", "merry-runtime"]);
         assert!(!is_low_risk_process_action_proposal(
+            ToolActionKind::CommandExec,
+            &local_effect
+        ));
+        assert!(!is_read_only_shell_process_action_proposal(
             ToolActionKind::CommandExec,
             &local_effect
         ));
@@ -489,6 +529,21 @@ mod tests {
                 admission
             ));
         }
+
+        let shell_read_only = process_proposal(&call, &["bash", "-lc", "rg ProcessRunner | wc -l"]);
+        assert!(!is_low_risk_process_action_proposal(
+            ToolActionKind::CommandExec,
+            &shell_read_only
+        ));
+        assert!(!is_local_workspace_effect_process_action_proposal(
+            ToolActionKind::CommandExec,
+            &shell_read_only,
+            admission
+        ));
+        assert!(is_read_only_shell_process_action_proposal(
+            ToolActionKind::CommandExec,
+            &shell_read_only
+        ));
     }
 
     #[test]
