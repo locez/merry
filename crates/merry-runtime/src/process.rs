@@ -4,6 +4,7 @@
 //! not execute commands, spawn subprocesses, or model a shell.
 
 use std::{
+    fmt,
     future::Future,
     path::{Component, Path},
     pin::Pin,
@@ -83,6 +84,33 @@ impl AcceptedLocalWorkspaceProcessAdmission {
 pub enum LocalWorkspaceProcessSandboxProfile {
     /// Merry CLI bubblewrap profile version 1.
     CliBwrapV1,
+}
+
+/// Stable identifier for a runtime-owned process permission profile.
+///
+/// Permission profiles describe filesystem, network, and side-effect
+/// capability. They are separate from concrete command classification and from
+/// model-visible tool profiles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ProcessPermissionProfileId(&'static str);
+
+impl ProcessPermissionProfileId {
+    /// Read-only process lane for bounded inspection commands.
+    pub const READ_ONLY_V1: Self = Self("process.read_only.v1");
+    /// Local workspace process lane accepted for the CLI bubblewrap v1 sandbox.
+    pub const LOCAL_WORKSPACE_BWRAP_V1: Self = Self("process.local_workspace.bwrap.v1");
+
+    /// Returns the stable profile identifier string.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        self.0
+    }
+}
+
+impl fmt::Display for ProcessPermissionProfileId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
 }
 
 /// Boxed process runner future used for object-safe runtime process boundaries.
@@ -334,9 +362,11 @@ impl ProcessRunnerOutput {
     pub fn execution_evidence(
         &self,
         intent: &ProcessActionIntent,
+        permission_profile_id: ProcessPermissionProfileId,
     ) -> Result<ProcessExecutionEvidence, ProcessActionError> {
         ProcessExecutionEvidence::new(
             intent,
+            permission_profile_id,
             self.status,
             self.stdout_bytes,
             self.stdout_truncated,
@@ -405,6 +435,7 @@ pub struct ProcessExecutionEvidence {
     intent_summary: String,
     argv: Vec<String>,
     cwd: Option<String>,
+    permission_profile_id: ProcessPermissionProfileId,
     status: ProcessExitStatus,
     stdout_bytes: usize,
     stdout_truncated: bool,
@@ -416,6 +447,7 @@ impl ProcessExecutionEvidence {
     /// Creates validated process execution evidence for a previously proposed intent.
     pub fn new(
         intent: &ProcessActionIntent,
+        permission_profile_id: ProcessPermissionProfileId,
         status: ProcessExitStatus,
         stdout_bytes: usize,
         stdout_truncated: bool,
@@ -429,6 +461,7 @@ impl ProcessExecutionEvidence {
             intent_summary: intent.summary().to_owned(),
             argv: intent.argv().to_vec(),
             cwd: intent.cwd().map(str::to_owned),
+            permission_profile_id,
             status,
             stdout_bytes,
             stdout_truncated,
@@ -453,6 +486,12 @@ impl ProcessExecutionEvidence {
     #[must_use]
     pub fn cwd(&self) -> Option<&str> {
         self.cwd.as_deref()
+    }
+
+    /// Returns the permission profile used for this process execution.
+    #[must_use]
+    pub const fn permission_profile_id(&self) -> ProcessPermissionProfileId {
+        self.permission_profile_id
     }
 
     /// Returns the provider-neutral completion status.
@@ -961,8 +1000,8 @@ fn summarize_intent(argv: &[String], cwd: Option<&str>) -> String {
 mod tests {
     use super::{
         MAX_PROCESS_OUTPUT_LIMIT_BYTES, ProcessActionError, ProcessActionIntent, ProcessEnvPolicy,
-        ProcessExecutionEvidence, ProcessExitStatus, ProcessIntentClass, classify_process_intent,
-        is_low_risk_process_action_intent,
+        ProcessExecutionEvidence, ProcessExitStatus, ProcessIntentClass,
+        ProcessPermissionProfileId, classify_process_intent, is_low_risk_process_action_intent,
     };
 
     fn intent() -> ProcessActionIntent {
@@ -1071,6 +1110,7 @@ mod tests {
         let intent = intent();
         let evidence = ProcessExecutionEvidence::new(
             &intent,
+            ProcessPermissionProfileId::READ_ONLY_V1,
             ProcessExitStatus::Exited(0),
             128,
             false,
@@ -1082,6 +1122,10 @@ mod tests {
         assert_eq!(evidence.intent_summary(), intent.summary());
         assert_eq!(evidence.argv(), intent.argv());
         assert_eq!(evidence.cwd(), intent.cwd());
+        assert_eq!(
+            evidence.permission_profile_id(),
+            ProcessPermissionProfileId::READ_ONLY_V1
+        );
         assert_eq!(evidence.status(), ProcessExitStatus::Exited(0));
         assert_eq!(evidence.exit_code(), Some(0));
         assert_eq!(evidence.stdout_bytes(), 128);
@@ -1092,6 +1136,7 @@ mod tests {
 
         let too_many_bytes = ProcessExecutionEvidence::new(
             &intent,
+            ProcessPermissionProfileId::READ_ONLY_V1,
             ProcessExitStatus::Exited(1),
             1025,
             true,

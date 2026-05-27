@@ -8,9 +8,9 @@
 use crate::{
     AcceptedLocalWorkspaceProcessAdmission, ActionExecutionEvidence, ActionProposal,
     ArtifactContent, ContextCompiler, ContextEntry, ContextSummary, LedgerProjectionSnapshot,
-    ProcessActionIntent, ProcessExitStatus, ProcessRunner, ProcessRunnerContext,
-    ProcessRunnerError, ProcessRunnerOutput, RuntimeError, RuntimeEventStream, RuntimeModelRole,
-    SessionContextSnapshot,
+    ProcessActionIntent, ProcessExitStatus, ProcessPermissionProfileId, ProcessRunner,
+    ProcessRunnerContext, ProcessRunnerError, ProcessRunnerOutput, RuntimeError,
+    RuntimeEventStream, RuntimeModelRole, SessionContextSnapshot,
     action_audit::ActionAuditPolicy,
     action_policy::{
         ActionPolicyDecision, DefaultActionPolicy, classify_tool_action_risk,
@@ -688,8 +688,10 @@ impl Runtime {
             }
         };
 
+        let permission_profile_id =
+            process_permission_profile_id(ActionAuditPolicy::from_decision(&policy_decision));
         let execution_evidence = output
-            .execution_evidence(&intent)
+            .execution_evidence(&intent, permission_profile_id)
             .map(ActionExecutionEvidence::ProcessAction)
             .map_err(|source| RuntimeError::ToolExecutionFailed {
                 session_id: self.inner.session_id.clone(),
@@ -708,7 +710,7 @@ impl Runtime {
             stderr_truncated = output.stderr_truncated(),
             "runtime process execution finish"
         );
-        let content = process_output_artifact_content(&intent, &output);
+        let content = process_output_artifact_content(&intent, &output, permission_profile_id);
         let status = if output.ok() {
             ToolCallResultStatus::Succeeded
         } else {
@@ -725,7 +727,8 @@ impl Runtime {
                 ),
             ))
         };
-        let observation = process_result_ledger_observation(&intent, &output, status);
+        let observation =
+            process_result_ledger_observation(&intent, &output, status, permission_profile_id);
 
         let mut session = self.inner.session.lock().await;
         session.submit_proposed_tool_execution_outcome_record(
@@ -940,10 +943,12 @@ fn tool_resolution_artifact_id(events: &[RuntimeEvent]) -> String {
 fn process_output_artifact_content(
     intent: &ProcessActionIntent,
     output: &ProcessRunnerOutput,
+    permission_profile_id: ProcessPermissionProfileId,
 ) -> ArtifactContent {
     let payload = serde_json::json!({
         "ok": output.ok(),
         "kind": "process_action",
+        "permission_profile_id": permission_profile_id.as_str(),
         "status": process_status_json(output.status()),
         "intent": {
             "summary": intent.summary(),
@@ -969,11 +974,13 @@ fn process_result_ledger_observation(
     intent: &ProcessActionIntent,
     output: &ProcessRunnerOutput,
     result_status: ToolCallResultStatus,
+    permission_profile_id: ProcessPermissionProfileId,
 ) -> ToolResultLedgerObservation {
     let mut summary = format!(
-        "process action `{}` {}; result={}; stdout_bytes={}; stderr_bytes={}",
+        "process action `{}` {}; permission_profile={}; result={}; stdout_bytes={}; stderr_bytes={}",
         intent.argv().join(" "),
         process_status_label(output.status()),
+        permission_profile_id.as_str(),
         process_result_status_label(result_status),
         output.stdout_bytes(),
         output.stderr_bytes(),
@@ -988,6 +995,18 @@ fn process_result_ledger_observation(
 
     ToolResultLedgerObservation::new(crate::ledger::LedgerScope::Tool, summary)
         .expect("process result ledger summary is built from a non-empty static prefix")
+}
+
+fn process_permission_profile_id(policy: ActionAuditPolicy) -> ProcessPermissionProfileId {
+    match policy.risk_tier() {
+        crate::action_policy::ActionRiskTier::ProcessLow => {
+            ProcessPermissionProfileId::READ_ONLY_V1
+        }
+        crate::action_policy::ActionRiskTier::ProcessLocalWorkspaceEffect => {
+            ProcessPermissionProfileId::LOCAL_WORKSPACE_BWRAP_V1
+        }
+        other => panic!("admitted process action had unsupported risk tier {other:?}"),
+    }
 }
 
 fn process_result_status_label(status: ToolCallResultStatus) -> &'static str {
@@ -2240,8 +2259,8 @@ mod tests {
     use crate::model_config::RuntimeModelConfigs;
     use crate::process::{
         AcceptedLocalWorkspaceProcessAdmission, ProcessActionIntent, ProcessEnvPolicy,
-        ProcessExecutionEvidence, ProcessExitStatus, ProcessRunner, ProcessRunnerContext,
-        ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput,
+        ProcessExecutionEvidence, ProcessExitStatus, ProcessPermissionProfileId, ProcessRunner,
+        ProcessRunnerContext, ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput,
     };
     use crate::session::SessionState;
     use crate::tool::{
@@ -6211,6 +6230,7 @@ mod tests {
             json!({
                 "ok": true,
                 "kind": "process_action",
+                "permission_profile_id": "process.read_only.v1",
                 "status": {
                     "kind": "exited",
                     "code": 0,
@@ -6271,6 +6291,10 @@ mod tests {
         assert!(!evidence.stdout_truncated());
         assert_eq!(evidence.stderr_bytes(), 0);
         assert!(!evidence.stderr_truncated());
+        assert_eq!(
+            evidence.permission_profile_id().as_str(),
+            "process.read_only.v1"
+        );
         assert!(evidence.matches_intent(intent));
 
         let projection = runtime.ledger_projection().await;
@@ -6335,6 +6359,7 @@ mod tests {
         assert!(artifact_order < observation_order);
         assert!(observation_order < resolved_order);
         assert!(observation_text.contains("exit code 0"));
+        assert!(observation_text.contains("permission_profile=process.read_only.v1"));
         assert!(observation_text.contains("stdout_bytes=21"));
         assert!(observation_text.contains("stderr_bytes=0"));
         assert!(
@@ -6574,6 +6599,7 @@ mod tests {
             json!({
                 "ok": true,
                 "kind": "process_action",
+                "permission_profile_id": "process.local_workspace.bwrap.v1",
                 "status": {
                     "kind": "exited",
                     "code": 0,
@@ -6645,6 +6671,10 @@ mod tests {
         assert!(!evidence.stdout_truncated());
         assert_eq!(evidence.stderr_bytes(), 0);
         assert!(!evidence.stderr_truncated());
+        assert_eq!(
+            evidence.permission_profile_id().as_str(),
+            "process.local_workspace.bwrap.v1"
+        );
         assert!(evidence.matches_intent(intent));
 
         let projection = runtime.ledger_projection().await;
@@ -7004,6 +7034,7 @@ mod tests {
         .expect("valid process intent");
         let evidence = ProcessExecutionEvidence::new(
             &intent,
+            ProcessPermissionProfileId::READ_ONLY_V1,
             ProcessExitStatus::Exited(0),
             64,
             false,
