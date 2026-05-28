@@ -53,6 +53,7 @@ const SHELL_STEP_INPUT: &str = "run shell command through Merry process protocol
 const BWRAP_PROGRAM: &str = "bwrap";
 const DEFAULT_SANDBOX_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
 const SANDBOX_ETC_READ_ONLY_FILE_PATHS: &[&str] = &[
+    "/etc/ld.so.cache",
     "/etc/ld.so.conf",
     "/etc/resolv.conf",
     "/etc/hosts",
@@ -3686,9 +3687,15 @@ api_key_file = "secrets/openai.key"
             &args,
             &["--dir", "/etc", "--ro-bind", "/etc/ssl", "/etc/ssl"]
         ));
-        assert!(!contains_sequence(
+        assert!(contains_sequence(
             &args,
-            &["--ro-bind", "/etc/ld.so.cache", "/etc/ld.so.cache"]
+            &[
+                "--dir",
+                "/etc",
+                "--ro-bind",
+                "/etc/ld.so.cache",
+                "/etc/ld.so.cache"
+            ]
         ));
         assert!(!contains_sequence(
             &args,

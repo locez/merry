@@ -58,8 +58,8 @@ Goal:
 - Make workspace-tool failures model-recoverable by returning a generic path
   contract in failed JSON artifacts.
 - Keep the sandbox `/etc` allowlist aligned with the user's no-copy helper
-  decision: bind config files/directories directly, but do not bind
-  `/etc/ld.so.cache`.
+  decision: bind config files/directories directly, including
+  `/etc/ld.so.cache`; do not stage-copy them or set `LD_LIBRARY_PATH`.
 
 Task queue status:
 
@@ -84,8 +84,8 @@ Task queue status:
   task smoke paths.
 - Corrected the bwrap `/etc` mount construction to match the user's existing
   helper semantics: file and directory allowlist paths create mount target
-  parents first, then use direct read-only bind. No whole-`/etc` bind,
-  no `/etc/ld.so.cache` bind, no staged copy, and no `LD_LIBRARY_PATH`
+  parents first, then use direct read-only bind. `/etc/ld.so.cache` is kept as
+  a direct file bind; no whole-`/etc` bind, staged copy, or `LD_LIBRARY_PATH`
   fallback were kept.
 - Updated `README.md` and `ROADMAP.md` to describe the bwrap file/directory
   helper semantics and record the new task smoke status.
@@ -220,10 +220,11 @@ Validation notes:
   runs from inside this agent's environment failed on second-level bwrap
   `/etc` file binds, so they are not treated as the authoritative
   outer-environment result.
-- After removing `/etc/ld.so.cache` from the allowlist, the same nested ignored
-  real-bwrap task smoke advanced to a `/etc/resolv.conf` bind failure. That
-  path is kept because live provider DNS needs it and the user's helper binds
-  it directly in an outer environment. No staged copy fallback was added.
+- Nested ignored real-bwrap task smokes can fail on second-level `/etc` file
+  binds such as `/etc/ld.so.cache` or `/etc/resolv.conf` from inside this
+  agent's environment. Treat that as a nested-bwrap limitation, not authority
+  to weaken the outer sandbox allowlist. The user's outer helper binds these
+  files directly; no staged copy fallback was added.
 
 ## Research
 

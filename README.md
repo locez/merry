@@ -79,10 +79,11 @@ normal CLI execution. The v1 behavior keeps a narrow sandbox assumption:
 minimal explicit environment, `PATH` lookup for `bwrap`, plan-stage
 missing-`bwrap` handling, recursion avoidance, sandbox-local `/tmp`, the
 current repo/project as the primary read-write workspace, and a minimal `/etc`
-allowlist. File paths such as resolver, host, NSS, and `/etc/ld.so.conf` are
-mounted through a file helper that creates target parent directories before
-read-only binding; directory paths such as `/etc/ld.so.conf.d`, SSL, and PKI
-paths are mounted through the directory helper. `/etc/ld.so.cache` is not bound.
+allowlist. File paths such as `/etc/ld.so.cache`, resolver, host, NSS, and
+`/etc/ld.so.conf` are mounted through a file helper that creates target parent
+directories before read-only binding; directory paths such as
+`/etc/ld.so.conf.d`, SSL, and PKI paths are mounted through the directory
+helper.
 v1 still allows network access and is not a complete security boundary;
 repo-local destructive effects remain possible. A real smoke of
 `target/debug/merry --with-sandbox debug` has passed.

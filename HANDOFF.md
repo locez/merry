@@ -30,8 +30,9 @@ Task queue status:
 - Updated `examples/config.toml`, README, and ROADMAP to remove
   environment-based credential priority from the public config contract.
 - Fixed bwrap `/etc` planning to use file/directory helper semantics:
-  create mount parents, then direct `--ro-bind`; no broad `/etc` bind, no
-  `/etc/ld.so.cache` bind, no staged copy fallback, and no `LD_LIBRARY_PATH`.
+  create mount parents, then direct `--ro-bind`; `/etc/ld.so.cache` remains a
+  direct file bind, with no broad `/etc` bind, no staged copy fallback, and no
+  `LD_LIBRARY_PATH`.
 - Added `TokioProcessRunner::new_at_workspace_root` and switched coding-loop
   smoke commands to keep model-visible process cwd at `.` while executing real
   processes under the disposable fixture root.
@@ -73,10 +74,10 @@ Summary:
 - OpenAI-compatible credentials are now config-owned via `api_key` or
   `api_key_file`, with no `api_key_env` priority path.
 - Sandbox plan now mirrors the user's no-copy helper semantics for `/etc`
-  file/dir mounts and does not bind `/etc/ld.so.cache`.
+  file/dir mounts, including direct `/etc/ld.so.cache` binding.
 - The earlier real bwrap task smoke was confirmed by the user from an outer
   environment; this nested agent environment still cannot prove second-level
-  bwrap file binds for `/etc/resolv.conf`.
+  bwrap file binds for `/etc` files.
 
 ## Validation
 
@@ -99,9 +100,9 @@ Commands run:
 Nested-only attempted command:
 
 - `cargo test -p merry-cli debug_coding_loop_task_smoke_runs_inside_real_bwrap_when_opted_in -- --ignored`
-  now gets past `/etc/ld.so.cache` but still fails in this nested environment
-  on `/etc/resolv.conf` bind. Keep this as outer-environment validation, not a
-  default local proof.
+  can fail in this nested environment on second-level `/etc` file binds such
+  as `/etc/ld.so.cache` or `/etc/resolv.conf`. Keep this as outer-environment
+  validation, not a default local proof.
 
 User-run validation:
 
@@ -122,8 +123,8 @@ Decisions made:
 - Keep `/etc` mounting as explicit file/dir helper binds; do not mount all of
   `/etc`.
 - Do not add `LD_LIBRARY_PATH`.
-- Do not bind or stage-copy `/etc/ld.so.cache`; use `/etc/ld.so.conf` and
-  `/etc/ld.so.conf.d`.
+- Bind `/etc/ld.so.cache` directly when present; do not stage-copy it.
+- Keep `/etc/ld.so.conf` and `/etc/ld.so.conf.d` as direct helper binds.
 - Keep `/etc/resolv.conf` as direct file bind for live provider DNS; do not add
   staged copy fallback.
 - Keep the current task verification on `rg done` so no process-admission
