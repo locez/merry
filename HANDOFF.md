@@ -10,41 +10,40 @@ Current milestone or track:
 
 Session milestone:
 
-- First implementation slice: separate read-only shell-wrapper admission from
-  the structured read-only argv lane.
+- Second implementation slice: preserve exact shell-wrapper script evidence in
+  artifacts while keeping traces and compact ledger observations payload-free.
 
 Task queue status:
 
-- Added `process.shell.read_only.v1` as a distinct permission profile.
-- Added a narrow plain shell-wrapper classifier for `bash`/`sh`/`zsh -c|-lc`
-  scripts joined by `|`, `&&`, `||`, or `;`, where every segment must match the
-  direct read-only process classifier.
-- Added `RuntimeBuilder::allow_read_only_shell_process_actions` so shell
-  wrappers require an explicit shell runner opt-in.
-- Added deterministic tests proving:
-  - `bash -lc "rg ProcessRunner | wc -l"` derives the shell read-only profile.
-  - the same proposal is denied when only structured low-risk process actions
-    are enabled.
-  - it executes only under the shell read-only opt-in and records
-    `process.shell.read_only.v1`.
-  - redirects, command substitution, and mutating pipeline segments are denied
-    without runner calls.
-- Updated `ROADMAP.md` and `DECISIONS.md` with the M2 slice and guardrails.
+- Added shell input evidence helpers for shell-wrapper process intents.
+- Shell-wrapper result artifacts now include exact `input_evidence`: shell,
+  flag, script text, script byte count, and stable `fnv1a64` fingerprint.
+- Shell-wrapper result artifacts omit duplicate `intent.argv`, so exact shell
+  script text appears once in the provider-visible tool result payload.
+- Shell-wrapper process start/finish traces omit raw `argv` and script text;
+  they record shell, flag, script byte count, script fingerprint, status, output
+  byte counts, and other bounded metadata.
+- Shell-wrapper compact ledger observations omit raw script text and record the
+  shell profile, shell, flag, byte count, fingerprint, output byte counts, and
+  result artifact reference.
+- Added deterministic tests proving artifact exactness and trace/ledger payload
+  omission for `bash -lc "rg ProcessRunner | wc -l"`.
+- Updated `ROADMAP.md` and `DECISIONS.md` with this M2 evidence/metadata slice.
 
 Done condition:
 
-- The M2 shell-compatible boundary now has a first executable, test-backed
-  runtime admission slice without introducing a model-facing shell tool or a
-  broad shell parser.
+- The M2 shell-compatible boundary now preserves exact shell input in artifact
+  content and keeps shell execution traces plus compact ledger observations free
+  of raw script payloads. It still does not introduce a model-facing shell tool,
+  broad shell parser, standalone pre-execution input artifact, or real shell
+  runner.
 
 ## What Changed
 
 Files changed:
 
 - `crates/merry-runtime/src/process.rs`
-- `crates/merry-runtime/src/action_policy.rs`
 - `crates/merry-runtime/src/runtime.rs`
-- `crates/merry-runtime/src/lib.rs`
 - `DECISIONS.md`
 - `EXECUTION_STATE.md`
 - `HANDOFF.md`
@@ -52,21 +51,20 @@ Files changed:
 
 Summary:
 
-- Split read-only shell-wrapper handling from the structured argv lane.
-- Kept shell-wrapper execution fail-closed unless a dedicated shell runner lane
-  is explicitly configured.
-- Preserved artifacts/audit/ledger evidence behavior by reusing the existing
-  process execution path with the new shell profile id.
-- Recorded that the classifier is evidence/admission plumbing only, not the
-  authorization model for complex shell syntax.
+- Added shell-wrapper input evidence metadata and stable fingerprints.
+- Kept exact shell script text in the process result artifact.
+- Avoided duplicating shell script text inside the same result artifact.
+- Removed raw shell argv/script text from shell process execution traces and
+  compact ledger observations.
+- Recorded that this is still the existing result artifact path; a standalone
+  pre-execution command artifact remains the next M2 decision.
 
 ## Validation
 
 Commands run:
 
 - `cargo fmt --all --check`
-- `cargo test -p merry-runtime process --lib`
-- `cargo test -p merry-runtime --lib`
+- `cargo test -p merry-runtime read_only_shell_process --lib`
 - `cargo clippy --all-targets --all-features -- -D warnings`
 - `cargo test --all`
 
@@ -80,17 +78,16 @@ Result:
 
 Decisions made:
 
-- `process.shell.read_only.v1` is separate from `process.read_only.v1`.
-- Existing `allow_low_risk_process_actions` does not admit shell wrappers.
-- Read-only shell wrapper execution requires
-  `allow_read_only_shell_process_actions`.
-- The current shell classifier is intentionally narrow and must not grow into
-  the broad shell authorization model.
+- Exact shell-wrapper script text is artifact payload, not trace payload.
+- Shell-wrapper compact ledger observations use shell/profile/status/output
+  metadata, script byte count, stable fingerprint, and artifact reference.
+- The current implementation uses the process result artifact for exact shell
+  input evidence; it does not yet create a standalone command-start artifact.
 
 Pending decisions:
 
-- Exact shell command/script artifact schema.
-- Payload-free shell trace metadata fields.
+- Whether shell command/script input should be recorded as a standalone
+  pre-execution artifact before runner execution.
 - Whether the first real shell runner uses the existing CLI process runner
   adapter or a runtime-owned shell runner wrapper.
 - Approval/session semantics for shell commands beyond the read-only wrapper
@@ -104,25 +101,26 @@ Blockers:
 
 Residual risk:
 
-- The classifier is hand-bounded and intentionally conservative. A stronger
-  parser or execution interception layer may replace it later, but this slice
-  keeps the profile/admission boundary stable.
+- If a future shell runner is cancelled or fails before output, the current
+  result-artifact-only input evidence path cannot prove command-start evidence.
+  That is why the next slice should decide the standalone pre-execution input
+  artifact boundary.
 - No real shell runner was added in this lease; tests use fake runners.
 
 Next exact action:
 
-- Continue M2 by defining shell execution input/output artifacts and payload-free
-  trace metadata for the future shell runner: exact command/script artifact,
-  script byte/hash metadata, stdout/stderr/status artifacts, compact ledger
-  reduction, and cancellation behavior.
+- Continue M2 by deciding and implementing the pre-execution shell input
+  artifact boundary, then add cancellation tests for execution cancelled or
+  failed before output. Keep real shell runner/admission profile work separate
+  until artifact ordering is proven.
 
 ## Scope For Next Session
 
 Allowed edits:
 
 - Runtime shell/process artifact and trace boundary modules.
-- Focused tests for command/script input evidence, output artifacts, cancellation,
-  and ledger reduction.
+- Focused tests for pre-execution command/script input evidence, output
+  artifacts, cancellation, and ledger reduction.
 - Public-safe roadmap/decision/continuity updates.
 
 Forbidden edits:
@@ -151,7 +149,7 @@ Status: committed
 
 Message:
 
-- feat(runtime): add read-only shell process profile
+- feat(runtime): add shell input evidence metadata
 
 No-commit reason:
 

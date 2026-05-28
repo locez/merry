@@ -162,6 +162,15 @@ The OpenAI provider target is the Responses API only. The provider request path 
   mutating shell forms are denied without runner calls. This is classifier and
   admission plumbing only, not a general shell parser, not a model-facing shell
   tool, and not a reusable real shell runner profile yet.
+- M2 shell input evidence and payload-free metadata slice is implemented in
+  `merry-runtime`: admitted shell-wrapper process result artifacts include
+  exact `input_evidence` with shell, flag, script text, script byte count, and a
+  stable `fnv1a64` script fingerprint, without duplicating the same script in
+  `intent.argv`. Shell process execution traces and compact ledger observations
+  omit raw argv/script text and carry only
+  shell/flag, byte count, fingerprint, status, output byte counts, and artifact
+  references. This is still the existing result artifact path, not a separate
+  pre-execution input artifact and not a real shell runner.
 
 ### Active
 
@@ -182,11 +191,13 @@ The OpenAI provider target is the Responses API only. The provider request path 
 
 ### Next Active
 
-- Reframe M2 before implementation: do not parse shell strings into argv as the
-  authorization boundary. Shell grammar is too large to safely or usefully
-  exhaust, and forcing pipelines or control flow into separate tool calls would
-  destroy legitimate shell efficiency.
-- Define the first shell-compatible runtime boundary as real command/script
+- Continue M2 from the implemented shell wrapper lane: decide and implement the
+  next artifact granularity before a real shell runner. The current slice keeps
+  exact shell script text in the process result artifact; the next slice should
+  decide whether shell input needs a standalone pre-execution artifact so
+  cancellation and started-command evidence are durable even when no output
+  artifact is produced.
+- Keep defining the shell-compatible runtime boundary as real command/script
   execution under explicit permission/session profiles, with command input,
   stdout/stderr/status, audit, ledger, cancellation, and trace records owned by
   runtime artifacts.
@@ -252,7 +263,8 @@ M1 Structured Process Boundary MVP:
 
 M2 Shell-Compatible Runtime Boundary:
 
-- Status: in progress; first read-only shell-wrapper admission slice is
+- Status: in progress; the read-only shell-wrapper admission slice and the
+  shell input evidence / payload-free trace+ledger metadata slice are
   implemented.
 - Add a shell-compatible execution boundary after the structured intent path is
   solid, but do not emulate full shell parsing in Merry.
@@ -262,9 +274,13 @@ M2 Shell-Compatible Runtime Boundary:
 - A future model-facing `shell_command` or `exec_command` tool should be a thin
   request shape over this runtime boundary, not a parser that reclassifies
   shell grammar into structured argv for authorization.
-- Treat command/script text as execution input evidence, preferably with an
-  artifact-backed exact command record and payload-free trace metadata such as
-  byte counts and hashes.
+- Treat command/script text as execution input evidence. The current MVP stores
+  exact shell input in the process result artifact under `input_evidence` and
+  omits duplicate `intent.argv`; traces and compact ledger observations record
+  only shell, flag, byte count, and stable fingerprint. The next artifact
+  decision is whether this
+  should become a standalone pre-execution input artifact before real shell
+  runner work.
 - Execute shell syntax through a real shell runner inside explicit
   permission/session profiles. Pipelines, conditionals, and small scripts are
   allowed only when the selected profile and sandbox make their side effects

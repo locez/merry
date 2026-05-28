@@ -46,48 +46,52 @@ Current milestone or track:
 
 Session milestone:
 
-- First implementation slice: add a separate read-only shell-wrapper admission
-  lane modeled after Codex's narrow plain pipeline classifier, without turning
-  shell parsing into the authorization model.
+- Second implementation slice: keep exact shell-wrapper script evidence in
+  artifacts while making process execution traces and compact ledger
+  observations payload-free.
 
 Goal:
 
-- Prove that a plain read-only shell pipeline can be recognized and routed to a
-  shell-specific permission profile only when a dedicated shell runner lane is
-  explicitly opted in, while complex or mutating shell forms remain denied
-  without runner calls.
+- Prove that an admitted read-only shell-wrapper process preserves exact
+  command/script input in runtime-owned artifact content, while traces and
+  compact ledger observations carry only shell/profile/status/output metadata,
+  script byte counts, fingerprints, and artifact references.
 
 Task queue status:
 
-- Added `process.shell.read_only.v1` as a distinct runtime-owned process
-  permission profile.
-- Added a narrow plain shell-wrapper classifier for `bash`/`sh`/`zsh -c|-lc`
-  command text joined by `|`, `&&`, `||`, or `;`, requiring every segment to
-  match the direct read-only process classifier.
-- Added `RuntimeBuilder::allow_read_only_shell_process_actions` so shell wrapper
-  execution cannot be admitted by the existing structured read-only argv runner.
-- Added action-policy and runtime tests proving shell read-only proposals are
-  denied without shell opt-in, execute with the shell profile when opted in, and
-  reject redirects, command substitution, and mutating pipeline segments without
-  runner calls.
-- Updated `ROADMAP.md` and `DECISIONS.md` to record this M2 slice and its
-  guardrails.
+- Added runtime-local shell input evidence helpers that derive shell, flag,
+  script byte count, and stable `fnv1a64` fingerprint from the already-validated
+  shell-wrapper process intent.
+- Extended process result artifact JSON for shell-wrapper executions with
+  exact `input_evidence` containing shell, flag, script text, script byte count,
+  and script fingerprint; shell artifacts omit duplicate `intent.argv` so the
+  exact script appears once in the provider-visible result payload.
+- Split process execution trace helpers so shell-wrapper start/finish traces do
+  not log raw `argv` or script text; they log shell, flag, script byte count,
+  script fingerprint, cwd, output limits, status, and output byte counts.
+- Updated shell process compact ledger observations so they omit raw script
+  text and include permission profile, shell, flag, script byte count,
+  fingerprint, output byte counts, and the result artifact reference.
+- Added deterministic runtime tests proving artifact exactness and trace/ledger
+  payload omission for `bash -lc "rg ProcessRunner | wc -l"`.
+- Updated `ROADMAP.md` and `DECISIONS.md` to record this M2 evidence/metadata
+  slice and its remaining pre-execution artifact gap.
 
 Allowed expansion:
 
-- Focused runtime process/shell classifier, admission, audit/artifact/profile
-  plumbing and tests.
+- Focused runtime process/shell artifact, trace, ledger, cancellation, and
+  evidence plumbing and tests.
 - Public-safe roadmap/decision/continuity updates.
 
 Done condition:
 
-- `bash -lc "rg ProcessRunner | wc -l"` derives
-  `process.shell.read_only.v1`.
-- The same proposal is denied when only structured low-risk process actions are
-  enabled.
-- The proposal executes only when `allow_read_only_shell_process_actions` is
-  configured and records the shell profile in artifact/audit evidence.
-- Complex or mutating shell forms are denied without runner calls.
+- Admitted shell-wrapper result artifacts include exact script input evidence
+  and stable script fingerprint metadata without duplicating the script in
+  `intent.argv`.
+- Shell-wrapper process start/finish traces do not include raw `argv` or script
+  text.
+- Shell-wrapper compact ledger observations do not include raw script text and
+  include script byte/fingerprint metadata plus result artifact reference.
 - Default validation passes and the lease is committed.
 
 Drift boundary:
@@ -99,6 +103,7 @@ Drift boundary:
   execution capability.
 - Do not add approval/session grants, long-running process sessions, stdin/env
   shell behavior, or real shell runner adapters in this slice.
+- Do not claim this slice added a standalone pre-execution shell input artifact.
 - Do not move private ignored notes into tracked files.
 - Do not commit `.superpowers/`, `.merry/`, `docs/`, or `merry-raw-docs`.
 - Do not make live provider behavior part of default tests.
@@ -107,12 +112,12 @@ Task type: code/docs
 
 Acceptance criteria:
 
-- Read-only shell-wrapper classification and profile derivation are covered by
-  deterministic unit tests.
-- Runtime admission tests keep structured read-only argv, read-only shell
-  wrapper, and local workspace bwrap lanes distinct.
-- Process result artifacts/audit evidence include
-  `process.shell.read_only.v1` for admitted shell-wrapper execution.
+- Shell-wrapper process result artifacts include exact `input_evidence` for the
+  script and its stable fingerprint, while omitting duplicate `intent.argv`.
+- Trace tests prove shell-wrapper execution logs metadata without raw argv or
+  script text.
+- Ledger projection tests prove compact observations include artifact
+  references and fingerprint metadata without raw script text.
 - `cargo fmt --all --check`, `cargo clippy --all-targets --all-features -- -D warnings`,
   and `cargo test --all` pass.
 
@@ -160,29 +165,27 @@ Validation notes:
 
 ## Research
 
-Research required: yes
+Research required: no
 
 Research reason:
 
-- The user explicitly asked to compare Codex's shell pipeline/read-only
-  handling before implementing this direction.
+- This slice follows the already-recorded M2 direction from local Codex source
+  inspection; no new research was required.
 
 Research artifact:
 
-- Local source inspection of `.merry/codex` only. No internet research was used.
-- Key finding: Codex runs real shell commands but uses a narrow plain-command
-  classifier for `bash -lc`/pipeline evidence; every segment must be known safe,
-  and sandbox/approval/policy remain the real execution boundary.
+- None.
 
 ## Next Action
 
 Next exact action:
 
-- Continue M2 by defining shell execution input/output artifacts and payload-free
-  trace metadata for the future shell runner: exact command/script artifact,
-  script byte/hash metadata, stdout/stderr/status artifacts, compact ledger
-  reduction, and cancellation behavior. Keep the real runner/admission profile
-  separate from broad approval/session work.
+- Continue M2 by deciding and implementing the pre-execution shell input
+  artifact boundary: record exact command/script input before runner execution,
+  preserve payload-free trace/ledger metadata, and add cancellation tests for
+  the path where execution is cancelled or fails before an output artifact is
+  produced. Keep real shell runner/admission profile work separate until that
+  artifact ordering is proven.
 
 Do not reconsider:
 

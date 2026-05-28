@@ -434,3 +434,52 @@ Follow-up:
 Wire a real shell runner/profile through the runtime boundary only after command
 input artifacts, payload-free traces, approval/session semantics, and exact
 output artifact reduction are defined for shell execution.
+
+## 2026-05-28 - Shell Script Payloads Stay In Artifacts, Not Trace Or Ledger
+
+Decision:
+Admitted shell-wrapper process results now include exact shell input evidence in
+the result artifact under `input_evidence`: shell, flag, script text, script
+byte count, and a stable `fnv1a64` script fingerprint. The shell result
+artifact omits duplicate `intent.argv` so the exact script appears once in the
+artifact. Runtime process traces and compact ledger observations for
+shell-wrapper executions do not include raw argv or script text; they include
+only payload-free metadata such as shell, flag, script byte count, script
+fingerprint, status, output byte counts, and the result artifact reference.
+
+Reason:
+Merry needs exact command/script evidence for later replay, audit, and user
+explanation, but logs and compact ledger facts should remain context-friendly
+and cache-friendly. Shell script text is dynamic payload. Putting it in traces
+or compact ledger summaries would make routine shell commands leak into
+operator logs and late context summaries, while still failing to preserve exact
+evidence as deliberately as artifacts do.
+
+Evidence:
+`read_only_shell_process_executes_under_shell_profile_when_opted_in` now asserts
+that the shell process result artifact contains exact `input_evidence` for
+`bash -lc "rg ProcessRunner | wc -l"` and that the compact ledger observation
+contains the shell profile, shell, flag, script byte count, stable fingerprint,
+and artifact id without the script text. `read_only_shell_process_traces_payload_free_input_metadata_when_opted_in`
+asserts that shell process start/finish traces include byte/fingerprint
+metadata and omit both the raw `argv` field and the script text. Full default
+validation passed with `cargo fmt --all --check`,
+`cargo clippy --all-targets --all-features -- -D warnings`, and
+`cargo test --all`.
+
+Tradeoff:
+This slice uses the existing process result artifact as the exact evidence
+carrier. It does not yet create a standalone pre-execution shell input artifact,
+so a cancellation or runner infrastructure failure before output still has no
+separate command-start artifact. That is acceptable for this slice because no
+real shell runner is being introduced yet.
+
+Reversible:
+Yes. A later shell runner can split exact command/script input into a separate
+pre-execution artifact while preserving the same payload-free trace and compact
+ledger metadata fields.
+
+Follow-up:
+Before wiring a real shell runner, decide whether shell command/script input
+must be recorded as a standalone pre-execution artifact, then add cancellation
+tests for the no-output path.
