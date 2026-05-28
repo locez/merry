@@ -40,6 +40,7 @@ mod ledger;
 mod memory;
 mod model_config;
 mod process;
+mod process_runner;
 mod process_tool;
 mod runtime;
 mod session;
@@ -74,6 +75,7 @@ pub use process::{
     ProcessRunnerFuture, ProcessRunnerOutput, ProcessRunnerResult,
     is_low_risk_process_action_intent, is_read_only_shell_process_action_intent,
 };
+pub use process_runner::TokioProcessRunner;
 pub use process_tool::{ProcessCommandToolError, process_command_tool};
 pub use runtime::{Runtime, RuntimeBuilder};
 pub use step::{StepContext, StepInput};

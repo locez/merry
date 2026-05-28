@@ -111,9 +111,9 @@ The OpenAI provider target is the Responses API only. The provider request path 
 - Runtime Agent Loop MVP first slice is implemented in `merry-runtime`: a bounded serial public loop composes `Runtime::step`, registered tool execution, and continuation steps, returns ordered events with typed completed/failed/cancelled/blocked outcomes, and keeps provider wire formats and real FS/shell tools out of runtime.
 - `merry-tool-workspace` has moved from the read-file first slice into read-only workspace navigation/search as a separate tool crate exposing `workspace_read_file`, `workspace_list_dir`, and `workspace_search_text` under explicitly configured trusted/stable roots. It prevents ordinary path traversal and ordinary symlink traversal before read/list/search operations, and on Unix uses `O_NOFOLLOW` for file opens. It is not an OS sandbox and does not claim complete hardening against malicious concurrent filesystem mutation; residual TOCTOU risk remains. It is not a shell, write API, network API, or complete coding agent.
 - CLI Sandbox Bootstrap is implemented in `merry-cli`: the root `--with-sandbox` flag uses `clap` and performs Linux `bwrap` self-reexec with a minimal environment, `PATH` lookup for `bwrap`, plan-stage missing-`bwrap` handling, recursion avoidance, sandbox-local `/tmp`, the current repo/project as the primary read-write workspace, and a minimal `/etc` allowlist including `/etc/ld.so.cache`, resolver/host/NSS files, and SSL/PKI paths. v1 still allows network access and is not a complete security boundary. A real smoke of `target/debug/merry --with-sandbox debug` has passed.
-- Shell/Process SP1/SP2/SP3-A plus the latest CLI admission slices are implemented: `merry-runtime` has provider-neutral process intent/evidence, proposed/executed process action audit variants, explicit injected `ProcessRunner` boundaries, process intent classification, opt-in informational process admission, accepted local workspace process admission, bounded stdout/stderr result artifacts, payload-free proposal/execution evidence, default deny behavior, cancellation paths that keep pending calls unresolved until runner output exists, and deterministic fake-runner tests. `merry-cli` has the narrow debug/demo `merry shell -- <argv>` real runner adapter using `tokio::process::Command`; informational `rustc --version` / `rg --version` can run, and exact `cargo test -p merry-runtime` requires accepted local workspace risk plus the CLI bwrap handoff and sandbox runtime evidence. This does not implement general shell/process/coding-agent capability, raw shell mode, pipelines/scripts, arbitrary env/stdin, a complete sandbox proof, or a general approval/review admission UX.
+- Shell/Process SP1/SP2/SP3-A plus the latest CLI admission slices are implemented: `merry-runtime` has provider-neutral process intent/evidence, proposed/executed process action audit variants, explicit injected `ProcessRunner` boundaries, process intent classification, opt-in informational process admission, accepted local workspace process admission, bounded stdout/stderr result artifacts, payload-free proposal/execution evidence, default deny behavior, cancellation paths that keep pending calls unresolved until runner output exists, and deterministic fake-runner tests. `merry-runtime` now also exposes `TokioProcessRunner` as the runtime-owned Tokio process adapter; `merry-cli` reuses that adapter for the narrow debug/demo `merry shell -- <argv>` path. Informational `rustc --version` / `rg --version` can run, and exact `cargo test -p merry-runtime` requires accepted local workspace risk plus the CLI bwrap handoff and sandbox runtime evidence. This does not implement general shell/process/coding-agent capability, broad raw shell mode, arbitrary env/stdin, a complete sandbox proof, or a general approval/review admission UX.
 - Minimal Useful Coding Loop first deterministic slice is implemented in `merry-tool-workspace` integration tests. `coding_loop_harness_inspects_patches_verifies_and_completes` builds a runtime with workspace read/patch tools plus `process_command_tool`, runs `Runtime::run_agent_loop` for inspect -> exact read -> patch -> verification -> final answer, uses a fake provider and injected fake process runner, mutates only a temporary workspace fixture through `workspace_patch_file`, records exact process argv for `rg --files` and `cargo test -p merry-runtime`, verifies tool-result continuation flow, and checks artifact-before-resolution ledger ordering. This is not yet the real `bwrap` smoke or live provider lane.
-- Real `bwrap` coding-loop smoke is implemented in `merry-cli`: `merry --with-sandbox debug coding-loop-smoke` is an explicit non-default command that refuses to run without validated CLI bwrap child handoff evidence, creates a disposable fixture under `.merry/local/coding-loop-smoke`, composes a runtime with a deterministic scripted provider, workspace read/patch tools, and `process_command_tool`, then runs inspect -> exact read -> constrained patch -> real process verification -> final answer through `Runtime::run_agent_loop`. The process steps use `TokioProcessRunner` for real `rg --files` and `rg fixed-by-live-llm` inside the sandbox; the edit uses `workspace_patch_file`; the smoke validates `AgentLoopStatus::Completed`, no pending tool calls, four successful tool resolutions, and the patched fixture content. The integration test is ignored by default and passed in this environment with `cargo test -p merry-cli debug_coding_loop_smoke_runs_inside_real_bwrap_when_opted_in -- --ignored`. This is still deterministic-provider and CLI-owned harness assembly, not a reusable runtime-owned shell/process boundary, and not a complete sandbox hardening claim.
+- Real `bwrap` coding-loop smoke is implemented in `merry-cli`: `merry --with-sandbox debug coding-loop-smoke` is an explicit non-default command that refuses to run without validated CLI bwrap child handoff evidence, creates a disposable fixture under `.merry/local/coding-loop-smoke`, composes a runtime with a deterministic scripted provider, workspace read/patch tools, and `process_command_tool`, then runs inspect -> exact read -> constrained patch -> real process verification -> final answer through `Runtime::run_agent_loop`. The process steps use runtime-owned `TokioProcessRunner` for real `rg --files` and `rg fixed-by-live-llm` inside the sandbox; the edit uses `workspace_patch_file`; the smoke validates `AgentLoopStatus::Completed`, no pending tool calls, four successful tool resolutions, and the patched fixture content. The integration test is ignored by default and passed in this environment with `cargo test -p merry-cli debug_coding_loop_smoke_runs_inside_real_bwrap_when_opted_in -- --ignored`. This is still deterministic-provider and CLI-owned harness assembly, not a complete sandbox hardening claim.
 - The opt-in live LLM coding-loop smoke command is implemented as `merry --with-sandbox debug coding-loop-live-smoke`. It refuses to run without the real CLI bwrap child handoff, uses `OpenAiProvider` for model decisions, keeps `TokioProcessRunner` and `workspace_patch_file` for the real tool path, and validates runtime events for process inspection, exact source read, patch, process verification, loop completion, and patched fixture content. The user reported that the credentialed live smoke passed against their trusted configured server. That run exposed a provider HTTP metadata gap, now fixed by setting `User-Agent: merry/<crate version>` in `merry-provider-openai`; deterministic request-construction and loopback integration tests cover the header.
 - The first config-backed observability implementation slice is complete in
   `merry-cli`: XDG TOML config discovery, config-backed log settings, file
@@ -184,6 +184,15 @@ The OpenAI provider target is the Responses API only. The provider request path 
   infrastructure failure after input recording leaves the pending call
   unresolved, records no result artifact or action audit, but keeps the exact
   input artifact/evidence available in runtime state.
+- M2 reusable real runner adapter slice is implemented: `TokioProcessRunner`
+  moved from CLI-private code into `merry-runtime` and is exported as the
+  runtime-owned process adapter. The CLI shell/debug smokes now reuse that
+  adapter. A runtime provider-boundary test executes a real read-only shell
+  wrapper pipeline, proves `process-input-*` is recorded before the result
+  artifact, and proves the result references `input_artifact` without copying
+  raw script payload. This still does not add a broad model-facing shell tool,
+  approval/session semantics, arbitrary env/stdin, or a general shell
+  authorization model.
 
 ### Active
 
@@ -204,11 +213,11 @@ The OpenAI provider target is the Responses API only. The provider request path 
 
 ### Next Active
 
-- Continue M2 from the implemented shell wrapper lane: now that exact shell
-  input is durable before runner execution, define the first reusable real shell
-  runner/profile boundary. Keep raw shell execution behind explicit runtime
-  construction and permission/session policy; do not make the narrow read-only
-  classifier a general authorization model.
+- Continue M2 from the implemented shell wrapper lane: now that the reusable
+  Tokio runner adapter and pre-execution input artifacts are proven together,
+  define the next shell profile/session boundary, especially how broader shell
+  syntax receives explicit permission or approval without turning the narrow
+  read-only classifier into a general authorization model.
 - Keep defining the shell-compatible runtime boundary as real command/script
   execution under explicit permission/session profiles, with command input,
   stdout/stderr/status, audit, ledger, cancellation, and trace records owned by
@@ -276,8 +285,8 @@ M1 Structured Process Boundary MVP:
 M2 Shell-Compatible Runtime Boundary:
 
 - Status: in progress; the read-only shell-wrapper admission slice and the
-  shell input artifact / payload-free trace+ledger metadata slices are
-  implemented.
+  shell input artifact / payload-free trace+ledger metadata / real runner
+  adapter slices are implemented.
 - Add a shell-compatible execution boundary after the structured intent path is
   solid, but do not emulate full shell parsing in Merry.
 - Keep `process.shell.read_only.v1` separate from `process.read_only.v1`.

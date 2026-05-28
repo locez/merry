@@ -492,3 +492,46 @@ Follow-up:
 Wire the first reusable real shell runner/profile only after preserving this
 ordering: input artifact first, runner second, output artifact and action audit
 only after runner output exists.
+
+## 2026-05-28 - Tokio Process Runner Belongs To Runtime, Not CLI
+
+Decision:
+`TokioProcessRunner` is now exported from `merry-runtime` as the concrete
+Tokio-backed implementation of the provider-neutral `ProcessRunner` trait. The
+CLI shell/debug paths reuse this runtime-owned adapter instead of carrying a
+private subprocess implementation. The adapter still does not authorize process
+or shell execution by itself; execution remains gated by explicit runtime
+construction through permission lanes such as `process.shell.read_only.v1`.
+
+Reason:
+The next M2 shell boundary needed a reusable real runner/profile path, not
+another CLI-only copy of subprocess behavior. Keeping the real adapter in
+runtime makes the artifact, cancellation, output, and profile contracts testable
+at the runtime boundary while preserving CLI as a smoke/debug caller.
+
+Evidence:
+`tokio_process_runner_executes_read_only_shell_wrapper_with_input_artifact`
+builds a runtime with `process_command_tool`,
+`allow_read_only_shell_process_actions(Arc::new(TokioProcessRunner::new()))`,
+and a fake provider that requests `bash -lc "echo ProcessRunner | wc -l"`.
+The test executes the real shell wrapper through the runtime, asserts the
+pre-execution `process-input-*` artifact, asserts a successful result artifact
+that references `input_artifact`, and asserts the result does not duplicate raw
+script payload. CLI shell tests still pass while using the exported runner.
+
+Tradeoff:
+The runtime crate now depends on Tokio's `process` and `io-util` features. That
+matches the existing MVP rule that Tokio owns the runtime surface for now. The
+adapter clears inherited environment, closes stdin, captures bounded UTF-8
+stdout/stderr, and supports cooperative cancellation, but it is not a sandbox
+and does not broaden policy admission.
+
+Reversible:
+Yes. A later crate split can move concrete runner adapters into a provider/tool
+crate while preserving the `ProcessRunner` trait and artifact ordering
+contract.
+
+Follow-up:
+Define the next shell permission/session boundary for broader shell syntax and
+approval semantics. Do not expand the narrow read-only shell classifier into
+the general authorization model.

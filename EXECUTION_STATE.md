@@ -46,36 +46,30 @@ Current milestone or track:
 
 Session milestone:
 
-- Third implementation slice: record exact shell-wrapper input as a
-  pre-execution runtime artifact before runner execution.
+- Fourth implementation slice: make the first real shell runner adapter
+  runtime-owned and prove it against the shell input artifact boundary.
 
 Goal:
 
-- Prove that an admitted read-only shell-wrapper process records exact
-  command/script input before runner execution, keeps result artifacts linked
-  to that input artifact, and preserves payload-free traces plus compact ledger
-  observations.
+- Prove that the read-only shell-wrapper profile can execute through a reusable
+  runtime-owned Tokio process runner while preserving pre-execution input
+  artifacts, result artifact references, and payload-free metadata.
 
 Task queue status:
 
-- Added session-owned `process-input-*` runtime artifact IDs and reserved them
-  from external `record_artifact` / `submit_tool_result` callers.
-- Shell-wrapper execution now records a JSON input artifact before runner
-  execution. It contains shell, flag, script text, script byte count, stable
-  `fnv1a64` fingerprint, tool call id/name, permission profile, and intent
-  summary/cwd.
-- Shell-wrapper result artifacts now reference the input artifact via
-  `input_artifact` and no longer duplicate exact script text under
-  `input_evidence`.
-- Shell process compact ledger observations include the result artifact and
-  input artifact ids plus payload-free shell/profile/status/output/fingerprint
-  metadata, but not raw script text.
-- Added deterministic success, runner-cancel, and runner-failure tests proving
-  input artifact durability, evidence-ref readability, unresolved pending calls
-  on no-output paths, no result artifact before output, and no action audit on
-  runner cancel/failure.
-- Updated `ROADMAP.md` and `DECISIONS.md` to record that the pre-execution shell
-  input artifact boundary is now implemented.
+- Added `merry-runtime::TokioProcessRunner`, a runtime-owned
+  `tokio::process::Command` adapter for the existing `ProcessRunner` trait.
+- The runner clears inherited environment, closes stdin, captures bounded
+  UTF-8 stdout/stderr, maps process status to `ProcessExitStatus`, and handles
+  cooperative cancellation by killing the child process.
+- Removed the duplicate CLI-private `TokioProcessRunner`; CLI shell/debug
+  paths now reuse the runtime-owned adapter.
+- Added a runtime provider-boundary test that uses real `bash -lc "echo
+  ProcessRunner | wc -l"` through `allow_read_only_shell_process_actions`,
+  proves `process-input-*` is recorded first, and proves the result references
+  `input_artifact` without duplicating raw script text.
+- Updated README, `ROADMAP.md`, and `DECISIONS.md` to record that the reusable
+  real runner adapter exists while authorization remains explicit and narrow.
 
 Allowed expansion:
 
@@ -85,15 +79,12 @@ Allowed expansion:
 
 Done condition:
 
-- Admitted shell-wrapper execution records exact script input in a
-  pre-execution input artifact before the runner is called.
-- Shell-wrapper result artifacts reference the pre-execution input artifact and
-  do not duplicate raw script payload.
-- Runner cancellation or infrastructure failure after input recording keeps the
-  pending call unresolved, records no output/result artifact or action audit,
-  and leaves the input artifact/evidence readable.
-- Shell-wrapper traces and compact ledger observations remain free of raw
-  `argv` or script text.
+- Runtime exports a reusable Tokio-backed process runner adapter.
+- CLI no longer owns a duplicate real process runner implementation.
+- A real read-only shell wrapper pipeline executes through runtime policy and
+  preserves the `process-input-*` / result `input_artifact` ordering.
+- The slice does not broaden shell authorization, add approval/session
+  semantics, or introduce a model-facing shell tool.
 - Default validation passes and the lease is committed.
 
 Drift boundary:
@@ -104,7 +95,7 @@ Drift boundary:
 - Do not make existing `process.read_only.v1` runner injection imply shell
   execution capability.
 - Do not add approval/session grants, long-running process sessions, stdin/env
-  shell behavior, or real shell runner adapters in this slice.
+  shell behavior, or broad shell admission in this slice.
 - Do not move private ignored notes into tracked files.
 - Do not commit `.superpowers/`, `.merry/`, `docs/`, or `merry-raw-docs`.
 - Do not make live provider behavior part of default tests.
@@ -113,14 +104,11 @@ Task type: code/docs
 
 Acceptance criteria:
 
-- Shell-wrapper process execution records exact `input_evidence` in
-  `process-input-*` before runner execution.
-- Shell-wrapper result artifacts reference the input artifact and omit raw
-  script payload.
-- Cancellation and runner-failure tests prove input artifact durability without
-  output/result artifact or action audit.
-- Trace and ledger tests prove shell-wrapper metadata remains payload-free and
-  references artifacts/fingerprints instead of raw script text.
+- `TokioProcessRunner` is runtime-owned and exported.
+- CLI shell/debug paths reuse runtime `TokioProcessRunner`.
+- Runtime test proves a real shell wrapper pipeline succeeds under explicit
+  `process.shell.read_only.v1` opt-in and preserves input/result artifact
+  references without raw script duplication.
 - `cargo fmt --all --check`, `cargo clippy --all-targets --all-features -- -D warnings`,
   and `cargo test --all` pass.
 
@@ -128,9 +116,11 @@ Acceptance criteria:
 
 Allowed edits:
 
-- `crates/merry-runtime/src/runtime.rs`
-- `crates/merry-runtime/src/session.rs`
-- `crates/merry-runtime/tests/runtime_flow.rs`
+- `Cargo.toml`
+- `README.md`
+- `crates/merry-runtime/src/lib.rs`
+- `crates/merry-runtime/src/process_runner.rs`
+- `crates/merry-cli/src/main.rs`
 - `crates/merry-runtime/tests/provider_boundary.rs`
 - `DECISIONS.md`
 - `EXECUTION_STATE.md`
@@ -142,7 +132,9 @@ Forbidden edits:
 - private ignored source material under `docs/` or `merry-raw-docs/`
 - real credentials or generated build artifacts
 - `.superpowers/`, `.merry/`, `docs/`, or `merry-raw-docs` content
-- broad shell command tool or real shell runner implementation
+- broad model-facing shell command tool
+- general shell session/approval implementation beyond the reusable process
+  runner adapter
 - approval/session implementation
 - full-screen TUI, REPL, or multi-turn UI scope
 
@@ -163,6 +155,9 @@ Validation command:
 Validation notes:
 
 - All validation commands passed in this lease.
+- Focused checks also passed:
+  `cargo test -p merry-runtime --test provider_boundary tokio_process_runner_executes_read_only_shell_wrapper_with_input_artifact`
+  and `cargo test -p merry-cli shell_`.
 - Ignored/live/bwrap smoke tests remain opt-in and were not run by
   `cargo test --all`.
 
@@ -183,8 +178,8 @@ Research artifact:
 
 Next exact action:
 
-- Continue M2 by defining the first reusable real shell runner/profile boundary
-  on top of the now-proven artifact ordering. Keep raw shell execution behind
+- Continue M2 by defining the next shell permission/session boundary for
+  broader shell syntax and approval semantics. Keep raw shell execution behind
   explicit runtime construction and permission/session policy; do not expand
   the narrow classifier into a general shell authorization model.
 

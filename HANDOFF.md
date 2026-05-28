@@ -10,49 +10,43 @@ Current milestone or track:
 
 Session milestone:
 
-- Third implementation slice: record exact shell-wrapper input as a
-  pre-execution runtime artifact before runner execution.
+- Fourth implementation slice: make the first real shell runner adapter
+  runtime-owned and prove it against the shell input artifact boundary.
 
 Task queue status:
 
-- Added session-owned `process-input-*` runtime artifact IDs and reserved them
-  from external artifact/result submission APIs.
-- Shell-wrapper process execution now records a `process-input-*` JSON artifact
-  before calling the process runner. It contains exact shell, flag, script text,
-  script byte count, stable `fnv1a64` fingerprint, tool call id/name,
-  permission profile, and intent summary/cwd.
-- Shell-wrapper result artifacts reference the input artifact via
-  `input_artifact` and no longer duplicate exact script text under
-  `input_evidence`.
-- Shell-wrapper process start/finish traces omit raw `argv` and script text;
-  they record shell, flag, script byte count, script fingerprint, status, output
-  byte counts, and other bounded metadata.
-- Shell-wrapper compact ledger observations omit raw script text and record the
-  shell profile, shell, flag, byte count, fingerprint, output byte counts,
-  result artifact reference, and input artifact reference.
-- Added deterministic success, runner-cancel, and runner-failure tests proving
-  input artifact durability before output, evidence-ref readability, unresolved
-  pending calls on no-output paths, no result artifact before output, and no
-  action audit on runner cancel/failure.
-- Updated `ROADMAP.md` and `DECISIONS.md` with this M2 pre-execution input
-  artifact slice.
+- Added `merry-runtime::TokioProcessRunner`, a runtime-owned
+  `tokio::process::Command` adapter for the existing `ProcessRunner` trait.
+- The runner clears inherited environment, closes stdin, captures bounded
+  UTF-8 stdout/stderr, maps process status to `ProcessExitStatus`, and handles
+  cooperative cancellation by killing the child process.
+- Removed the duplicate CLI-private `TokioProcessRunner`; CLI shell/debug
+  paths now reuse the runtime-owned adapter.
+- Added a runtime provider-boundary test using real `bash -lc "echo
+  ProcessRunner | wc -l"` under explicit `process.shell.read_only.v1` opt-in.
+  The test proves `process-input-*` is recorded before the result artifact and
+  the result references `input_artifact` without duplicating raw script text.
+- Updated README, `ROADMAP.md`, and `DECISIONS.md` with this reusable real
+  runner adapter slice.
 
 Done condition:
 
-- The M2 shell-compatible boundary now preserves exact shell input in a
-  pre-execution runtime artifact and keeps shell execution traces plus compact
-  ledger observations free of raw script payloads. It still does not introduce a
-  model-facing shell tool, broad shell parser, approval/session semantics, or a
-  reusable real shell runner.
+- The M2 shell-compatible boundary now has a reusable runtime-owned real process
+  runner adapter and preserves the pre-execution shell input artifact ordering
+  when that adapter executes a real read-only shell wrapper. It still does not
+  introduce a model-facing shell tool, broad shell parser, approval/session
+  semantics, or broad shell admission.
 
 ## What Changed
 
 Files changed:
 
-- `crates/merry-runtime/src/runtime.rs`
-- `crates/merry-runtime/src/session.rs`
+- `Cargo.toml`
+- `README.md`
+- `crates/merry-cli/src/main.rs`
+- `crates/merry-runtime/src/lib.rs`
+- `crates/merry-runtime/src/process_runner.rs`
 - `crates/merry-runtime/tests/provider_boundary.rs`
-- `crates/merry-runtime/tests/runtime_flow.rs`
 - `DECISIONS.md`
 - `EXECUTION_STATE.md`
 - `HANDOFF.md`
@@ -60,21 +54,18 @@ Files changed:
 
 Summary:
 
-- Added pre-execution shell-wrapper input artifacts with exact script evidence
-  and stable fingerprints.
-- Removed raw script duplication from shell-wrapper process result artifacts;
-  results now reference `input_artifact`.
-- Removed raw shell argv/script text from shell process execution traces and
-  compact ledger observations.
-- Preserved input evidence on runner cancellation/failure while keeping the
-  pending call unresolved and avoiding result/audit writes.
+- Moved the real Tokio process runner adapter into runtime and exported it.
+- Made CLI shell/debug paths reuse the runtime adapter.
+- Proved a real read-only shell wrapper pipeline still records
+  `process-input-*` first and result `input_artifact` second.
 
 ## Validation
 
 Commands run:
 
 - `cargo fmt --all --check`
-- `cargo test -p merry-runtime read_only_shell_process --lib`
+- `cargo test -p merry-runtime --test provider_boundary tokio_process_runner_executes_read_only_shell_wrapper_with_input_artifact`
+- `cargo test -p merry-cli shell_`
 - `cargo clippy --all-targets --all-features -- -D warnings`
 - `cargo test --all`
 
@@ -88,19 +79,16 @@ Result:
 
 Decisions made:
 
-- Exact shell-wrapper script text is artifact payload, not trace payload.
-- Exact shell-wrapper script text belongs in a pre-execution `process-input-*`
-  artifact, not the process result artifact.
-- Shell-wrapper compact ledger observations use shell/profile/status/output
-  metadata, script byte count, stable fingerprint, result artifact reference,
-  and input artifact reference.
+- `TokioProcessRunner` belongs to runtime, not CLI.
+- Runner availability is not authorization; permission/profile opt-in still
+  controls whether a process or shell action executes.
 
 Pending decisions:
 
-- Whether the first real shell runner uses the existing CLI process runner
-  adapter or a runtime-owned shell runner wrapper.
 - Approval/session semantics for shell commands beyond the read-only wrapper
   lane.
+- How broader shell syntax is admitted without turning the read-only classifier
+  into a general authorization model.
 
 ## Blockers
 
@@ -110,22 +98,22 @@ Blockers:
 
 Residual risk:
 
-- The error return path still does not carry partial event vectors. If a runner
-  cancels/fails after input recording, callers must inspect runtime state to
-  discover the already-recorded input artifact.
-- No real shell runner was added in this lease; tests use fake runners.
+- `TokioProcessRunner` is not a sandbox and does not enforce filesystem/network
+  policy by itself. Sandbox/profile admission must remain outside the adapter.
+- The real shell test depends on host `bash` and `wc`; it skips when either is
+  unavailable.
 
 Next exact action:
 
-- Continue M2 by defining the first reusable real shell runner/profile boundary
-  on top of the proven input/output artifact ordering.
+- Continue M2 by defining the next shell permission/session boundary for
+  broader shell syntax and approval semantics.
 
 ## Scope For Next Session
 
 Allowed edits:
 
 - Runtime shell/process artifact and trace boundary modules.
-- Focused tests for real shell runner/profile admission, output artifacts,
+- Focused tests for shell permission/session admission, output artifacts,
   cancellation, and ledger reduction.
 - Public-safe roadmap/decision/continuity updates.
 
@@ -155,7 +143,7 @@ Status: committed
 
 Message:
 
-- feat(runtime): record shell input before runner
+- feat(runtime): add tokio process runner adapter
 
 No-commit reason:
 

@@ -46,12 +46,15 @@ The implemented shell/process surface is still narrow and split by boundary:
 `merry-runtime` owns provider-neutral `ProcessActionIntent` and
 `ProcessExecutionEvidence` protocol values, action-audit variants for proposed
 and executed process actions, the intent classifier, and injected
-`ProcessRunner` admission lanes. The runtime crate does not directly spawn OS
-processes and has no concrete OS process adapter. `merry-cli` has a debug/demo
-`merry shell -- <argv>` path with a real runner adapter built on
-`tokio::process::Command`. That CLI path routes exact argv through the runtime
-process protocol and prints runtime JSONL events with artifact-backed tool
-results; raw process stdout is not printed directly as CLI stdout.
+`ProcessRunner` admission lanes. It also exposes `TokioProcessRunner` as the
+runtime-owned Tokio process adapter, but using that adapter still requires
+explicit runtime construction through a permission profile such as
+`process.shell.read_only.v1`; registering the adapter is not authorization by
+itself. `merry-cli` has a debug/demo `merry shell -- <argv>` path that reuses
+this runtime adapter. That CLI path routes exact argv through the runtime
+process protocol, records artifact-backed tool results, and either prints
+runtime JSONL events or renders stdout/stderr from those result artifacts; the
+subprocess output does not bypass runtime state.
 
 Low-risk informational commands such as `rustc --version` and `rg --version`
 can run through the CLI shell path. A local workspace effect such as exact
@@ -61,11 +64,11 @@ sandbox runtime evidence. Default host execution, environment-spoofed
 sandbox markers, forged hidden handoff markers, forbidden commands, and unknown
 commands remain denied.
 
-This is not a general shell or coding-agent capability. There is no raw shell
-string parsing, pipeline/script execution, arbitrary environment or stdin
-support, complete sandbox/security/provenance proof, or general approval/review
-admission UX. Reviewer or LLM output remains evidence for policy; it is not
-authorization.
+This is not a general shell or coding-agent capability. The current shell lane
+admits only narrow read-only wrapper forms under explicit opt-in; there is no
+broad raw shell admission, arbitrary environment or stdin support, complete
+sandbox/security/provenance proof, or general approval/review admission UX.
+Reviewer or LLM output remains evidence for policy; it is not authorization.
 
 The CLI Sandbox Bootstrap slice is implemented in `merry-cli`: the root
 `--with-sandbox` flag uses `clap` and performs Linux `bwrap` self-reexec before
