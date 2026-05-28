@@ -4,7 +4,7 @@
 
 **Goal:** Make the live coding-loop task behave like a real stateless-provider coding agent by preserving hot function-call continuity, keeping ledger/artifact state out of default prompt projection, improving patch reliability, and adding budget/checkpoint guardrails without turning provider conversation state into Merry runtime state.
 
-**Architecture:** Runtime remains the source of truth for session state, artifacts, ledger facts, continuations, and context compilation. Provider calls stay stateless by default with `store=false`; Merry replays the recent function-call/output continuity required by the provider protocol while exact evidence remains artifact-backed. The work is split into small vertical slices so each milestone has deterministic tests before live smoke validation.
+**Architecture:** Runtime remains the source of truth for session state, artifacts, ledger facts, continuations, context compilation, and projection policy. Provider calls stay stateless by default with `store=false`; Merry replays the recent function-call/output continuity required by the provider protocol while exact evidence remains artifact-backed. Context projection is allowlisted: ledger observations and artifact payloads do not enter prompt context by default, ordinary summaries cannot become an implicit reducer projection channel, and checkpoint/context-policy projections must be explicit low-frequency boundaries. The work is split into small vertical slices so each milestone has deterministic tests before live smoke validation.
 
 **Tech Stack:** Rust 2024, Tokio, `merry-runtime`, `merry-llm`, `merry-tool-workspace`, `merry-cli`, OpenAI-compatible Responses provider, deterministic fake providers/runners, opt-in `bwrap` and live-provider debug smokes.
 
@@ -17,12 +17,26 @@
 - Current live smoke command: `MERRY_OPENAI_DEBUG=1 ./target/debug/merry --with-sandbox debug coding-loop-task-live-smoke --task status-text`.
 - Current core rule: record aggressively, project conservatively, rewrite rarely.
 - Non-negotiable boundary: do not use provider `previous_response_id` or `store=true` as Merry runtime state.
+- Non-negotiable projection boundary: recording ledger facts, artifacts, or tool-result summaries is not permission to project them into model context.
+
+## Review Corrections Applied
+
+The first version of this plan left too much room for a context projection bypass. This revision makes those boundaries explicit:
+
+- `ContextSummary` must not become an implicit reducer output channel that gets rendered into every prompt.
+- `CompiledContext` may project only explicit checkpoint/context-policy content, explicit manual context, or independently justified runtime projections such as activated memory.
+- Ordinary ledger observations and artifact payloads must stay out of prompt context by default.
+- Append-only user/assistant body is either implemented in this plan or explicitly marked out-of-scope before implementation; it must not remain ambiguous.
+- `AGENTS.md`/project rules need a stable-prefix path if they are treated as durable project instructions.
+- Budget calculations must subtract `stable_prefix_tokens` before deriving body watermarks.
+- Checkpoint trigger primitives do not implement checkpoint content or projection semantics.
 
 ## File Structure
 
-- Modify `crates/merry-runtime/src/session.rs`: rename or clarify hot continuation storage, preserve all hot resolved tool continuations across a single loop, and expose clear/reset operations for terminal/checkpoint boundaries.
-- Modify `crates/merry-runtime/src/runtime.rs`: stop consuming tool continuations when the model emits the next tool call; clear hot continuations only after terminal assistant completion or explicit future checkpoint; extend provider request trace fields as needed.
-- Modify `crates/merry-runtime/src/step.rs`: keep request assembly layered as stable base instructions plus optional compiled context plus current user/continuation input; avoid ledger projection in this slice.
+- Modify `crates/merry-runtime/src/session.rs`: rename or clarify hot continuation storage, preserve all hot resolved tool continuations across a single loop, expose clear/reset operations for terminal hot-continuity lifecycle boundaries, and add session-owned append-only message history support if not already present.
+- Modify `crates/merry-runtime/src/runtime.rs`: stop consuming tool continuations when the model emits the next tool call; clear hot continuations only after terminal assistant completion or explicit future checkpoint; keep terminal assistant completion documented as a hot protocol lifecycle boundary, not a checkpoint; extend provider request trace fields as needed.
+- Modify `crates/merry-runtime/src/context.rs`: define projection policy boundaries for explicit checkpoint/context-policy projections, project rules, append-only body assembly, and budget/checkpoint primitives.
+- Modify `crates/merry-runtime/src/step.rs`: assemble requests as stable runtime instructions plus stable project rules plus append-only body plus hot continuations; avoid default ledger/artifact projection and avoid unrestricted `ContextSummary` projection.
 - Modify `crates/merry-llm/src/request.rs`: expose any missing request diagnostics needed by compiler/cache tests, such as dynamic message hash versus continuation hash if required.
 - Modify `crates/merry-runtime/tests/agent_loop.rs`: add deterministic multi-tool continuity tests and context/cache diagnostic tests.
 - Modify `crates/merry-cli/src/main.rs`: keep debug smoke runtime-event printing for the live task smoke and tighten live-smoke assertions around realistic coding behavior.
@@ -38,14 +52,14 @@
 
 1. **M1: Hot Function-Call Continuity**
    Preserve exact recent tool call/output pairs across multiple model steps under `store=false`.
-2. **M2: Context Compiler Layer Diagnostics**
-   Lock in stable-prefix versus dynamic-body behavior and prove ledger updates are not projected by default.
+2. **M2: Context Compiler Layer Contract**
+   Lock in projection permissions, stable-prefix versus dynamic-body behavior, append-only message history, project rules, and proof that ledger/artifact updates are not projected by default.
 3. **M3: Live Coding Smoke Feedback Loop**
    Use the realistic `status-text` task to verify inspect/read/patch/check/test/final behavior and print enough runtime events to debug failures.
 4. **M4: Diff-Style Workspace Patch Reliability**
    Make `workspace_patch` robust for localized edits, repeated text, and multi-file patches.
-5. **M5: Context Budget And Checkpoint Skeleton**
-   Add model-window-aware budget diagnostics and checkpoint trigger decisions without doing model-generated summaries.
+5. **M5: Context Budget And Checkpoint Trigger Skeleton**
+   Add model-window-aware budget diagnostics and checkpoint trigger decisions without claiming checkpoint content/projection support.
 
 Each milestone must be committed separately unless the user says otherwise.
 
@@ -268,7 +282,11 @@ git commit -m "fix(runtime): preserve hot tool continuations"
 **Files:**
 - Modify: `crates/merry-runtime/tests/agent_loop.rs`
 
-- [ ] **Step 1: Add a post-final request test**
+- [ ] **Step 1: Document the lifecycle boundary in the test name and assertion**
+
+Terminal assistant completion is a hot protocol continuity lifecycle boundary. It is not a checkpoint and it does not erase evidence: exact tool inputs/results remain available through artifacts and ledger facts. The next independent loop should not replay old `function_call`/`function_call_output` pairs by default.
+
+- [ ] **Step 2: Add a post-final request test**
 
 Add this test after the previous continuity test:
 
@@ -297,12 +315,12 @@ async fn agent_loop_clears_hot_tool_continuations_after_final_answer() {
     assert_eq!(requests[1].continuations().len(), 1);
     assert!(
         requests[2].continuations().is_empty(),
-        "terminal assistant completion should clear hot protocol continuity for the next independent loop"
+        "terminal assistant completion is a hot protocol lifecycle boundary; the next independent loop must not replay old tool continuations"
     );
 }
 ```
 
-- [ ] **Step 2: Run the test**
+- [ ] **Step 3: Run the test**
 
 Run:
 
@@ -312,7 +330,7 @@ cargo test -p merry-runtime agent_loop_clears_hot_tool_continuations_after_final
 
 Expected: PASS.
 
-- [ ] **Step 3: Commit if this test was not included in Task 2**
+- [ ] **Step 4: Commit if this test was not included in Task 2**
 
 ```bash
 git add crates/merry-runtime/tests/agent_loop.rs
@@ -321,14 +339,28 @@ git commit -m "test(runtime): cover hot continuation cleanup"
 
 Skip this commit if Task 2 already committed this test.
 
-## Task 4: Add Context/Cache Diagnostics Without Ledger Projection
+## Task 4: Lock Context Projection Boundaries
 
 **Files:**
+- Modify: `crates/merry-runtime/src/context.rs`
 - Modify: `crates/merry-llm/src/request.rs`
 - Modify: `crates/merry-runtime/src/step.rs`
+- Modify: `crates/merry-runtime/src/runtime.rs`
 - Modify: `crates/merry-runtime/tests/agent_loop.rs`
 
-- [ ] **Step 1: Check whether extra hashes are needed**
+- [ ] **Step 1: Write down the projection contract in code comments**
+
+Add or update comments near `ContextCompiler` and `compile_step_model_request` so the implementation contract is explicit:
+
+```text
+Context entries are projection inputs only when they come from an explicit checkpoint/context-policy path or an independently justified runtime projection such as activated memory.
+Reducers must not write ordinary tool-result summaries into prompt context through ContextSummary.
+Artifacts and ledger facts remain queryable runtime state and are not projected just because they were recorded.
+```
+
+If the current `record_context_summary` API remains public, document it as a manual/explicit context API, not a reducer default path.
+
+- [ ] **Step 2: Check whether extra hashes are needed**
 
 Inspect `ModelRequest`:
 
@@ -338,9 +370,51 @@ rg -n "stable_prefix_hash|dynamic_context_hash|stable_prefix_message_count|conti
 
 If `stable_prefix_hash` and `dynamic_context_hash` are enough for the tests, do not add new public fields. Add extra `append_body_hash` or `continuation_hash` only if a deterministic test cannot state the required behavior clearly with existing hashes.
 
-- [ ] **Step 2: Add a test that context summaries affect dynamic context, not stable prefix**
+- [ ] **Step 3: Add a test that ledger observation alone is not prompt projection**
 
-Add a test in `crates/merry-runtime/tests/agent_loop.rs` using existing `record_context_summary` helpers only if the summary can be backed by a real artifact. If the integration test setup is too heavy, place the lower-level test in `crates/merry-runtime/src/runtime.rs` tests where artifact helpers already exist.
+Use a simple one-tool agent loop and inspect `provider.recorded_requests()[1].messages()`:
+
+```rust
+assert_eq!(requests[1].stable_prefix_message_count(), 1);
+assert!(
+    requests[1]
+        .messages()
+        .iter()
+        .all(|message| !message.content().as_text().contains("tool_result_observation"))
+);
+assert!(
+    requests[1]
+        .messages()
+        .iter()
+        .all(|message| !message.content().as_text().contains("Ledger"))
+);
+```
+
+The exact forbidden strings can be adjusted to current ledger wording. The point is to lock the principle: recording is not projection.
+
+- [ ] **Step 4: Add a test that artifact recording alone is not prompt projection**
+
+Create a runtime-owned artifact, then compile or trigger a provider request without adding an explicit context entry. Assert the artifact payload is absent from request messages:
+
+```rust
+let payload = "artifact payload must not enter prompt by default";
+// record artifact through the runtime/session helper used by existing tests
+// trigger one provider request
+assert!(
+    request
+        .messages()
+        .iter()
+        .all(|message| !message.content().as_text().contains(payload))
+);
+```
+
+Use existing artifact helper functions in `crates/merry-runtime/src/runtime.rs` tests if integration-level access is not available from `tests/agent_loop.rs`.
+
+- [ ] **Step 5: Do not bless free-form ContextSummary as ordinary projection**
+
+Do not add a test that treats arbitrary `record_context_summary` as ordinary dynamic context. That would bless the wrong boundary.
+
+If an explicit projection API already exists, test that path and assert explicit projection changes dynamic context but not stable prefix:
 
 The assertion must be:
 
@@ -355,59 +429,231 @@ assert_ne!(
 );
 ```
 
-Do not assert that ledger facts appear in messages.
+Also assert the projected text is traceable to the explicit projection API, not to ledger reducer output.
 
-- [ ] **Step 3: Add a test that tool-result ledger recording alone is not rendered as a new system message**
+If no explicit projection API exists yet, do not invent one in this task. Record the absence as an implementation note and rely on the negative ledger/artifact projection tests plus Task 5 append-only body and Task 6 project-rules work for this milestone.
 
-Use a simple one-tool agent loop and inspect `provider.recorded_requests()[1].messages()`:
+- [ ] **Step 6: Keep `compile_step_model_request` projection allowlisted**
 
-```rust
-assert_eq!(requests[1].stable_prefix_message_count(), 1);
-assert!(
-    requests[1]
-        .messages()
-        .iter()
-        .all(|message| !message.content().as_text().contains("tool_result_observation"))
-);
-```
+In `crates/merry-runtime/src/step.rs`, preserve this shape for this slice:
 
-The exact forbidden string can be adjusted to the current ledger debug wording. The point is to lock the principle: recording is not projection.
+```text
+stable prefix:
+  system: DEFAULT_RUNTIME_BASE_INSTRUCTIONS
+  system: project rules, if loaded by the explicit project-rules layer
 
-- [ ] **Step 4: Keep `compile_step_model_request` simple**
+append-only body:
+  prior user/assistant messages, if Task 5 has implemented message history
+  current user input
+  explicit checkpoint/context-policy projections
 
-In `crates/merry-runtime/src/step.rs`, preserve this shape:
-
-```rust
-system: DEFAULT_RUNTIME_BASE_INSTRUCTIONS
-optional system: compiled context snapshot
-user: current step input
-continuations: recent function_call/function_call_output pairs
-stable_prefix_message_count: 1
+hot protocol continuity:
+  recent function_call/function_call_output pairs
 ```
 
 Do not add a dynamic tail marker like `Runtime: pending tool result resolved`.
+Do not put ledger observations into the prompt just because they were recorded.
+Do not render full artifact payloads unless an explicit tool read/project operation requests them.
 
-- [ ] **Step 5: Run tests**
+- [ ] **Step 7: Run tests**
 
 Run:
 
 ```bash
 cargo test -p merry-runtime agent_loop
-cargo test -p merry-runtime context
+cargo test -p merry-runtime context_projection
 ```
 
-Expected: PASS. If `context` is not a valid filter for the intended tests, run the exact test names added in this task.
+Expected: PASS. If `context_projection` is not the final filter name, run the exact tests added in this task.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add crates/merry-llm/src/request.rs crates/merry-runtime/src/step.rs crates/merry-runtime/tests/agent_loop.rs crates/merry-runtime/src/runtime.rs
-git commit -m "test(runtime): lock context compiler projection boundaries"
+git add crates/merry-runtime/src/context.rs crates/merry-llm/src/request.rs crates/merry-runtime/src/step.rs crates/merry-runtime/src/runtime.rs crates/merry-runtime/tests/agent_loop.rs
+git commit -m "test(runtime): lock context projection boundaries"
 ```
 
 Only add files actually changed.
 
-## Task 5: Tighten Live Smoke Event Feedback
+## Task 5: Add Append-Only Message Body Or Mark It Out Of Scope
+
+**Files:**
+- Modify: `crates/merry-runtime/src/session.rs`
+- Modify: `crates/merry-runtime/src/runtime.rs`
+- Modify: `crates/merry-runtime/src/step.rs`
+- Modify: `crates/merry-runtime/tests/agent_loop.rs`
+
+- [ ] **Step 1: Choose implementation for this plan**
+
+Preferred implementation for this plan: add a minimal append-only user/assistant body because the spec acceptance says ordinary user messages remain append-only without a Task Anchor.
+
+If this is too large for the current coding-loop slice, explicitly edit this plan before implementation and mark append-only historical body as out-of-scope for this plan. Do not silently leave it ambiguous.
+
+- [ ] **Step 2: Add session-owned message history**
+
+Add a runtime-owned history shape in `SessionState`, not a provider-owned conversation id:
+
+```rust
+enum SessionMessage {
+    User { text: String },
+    Assistant { artifact_id: ArtifactId },
+}
+```
+
+Use owned runtime state and artifact references. Do not store provider response ids.
+
+- [ ] **Step 3: Record user input when a loop begins**
+
+When `run_agent_loop` begins an independent user task, append the user text exactly once to the session body. Avoid appending the generated continuation prompt text such as `DEFAULT_AGENT_LOOP_CONTINUATION_INPUT`; that is loop control text, not user conversation history.
+
+- [ ] **Step 4: Record assistant output after artifact write succeeds**
+
+When `record_assistant_text_output(text)` succeeds, append an assistant body item referencing that assistant output artifact. The body item must not claim the artifact before it is recorded.
+
+- [ ] **Step 5: Compile append-only body into request messages**
+
+Update `compile_step_model_request` to include previous user/assistant body messages before the current loop input where appropriate. If current code already passes the current user text separately, avoid duplicating it in the same request.
+
+The intended request body order is:
+
+```text
+stable prefix system messages
+optional explicit context/checkpoint projections
+prior append-only user/assistant messages
+current user or continuation control input
+hot function-call continuations
+```
+
+- [ ] **Step 6: Add tests**
+
+Add tests:
+
+```rust
+#[tokio::test(flavor = "current_thread")]
+async fn ordinary_user_messages_remain_append_only_without_task_anchor() {
+    // Run two completed loops against the same runtime.
+    // Assert the second provider request includes the first user message and assistant answer
+    // in dynamic messages, while stable_prefix_hash remains unchanged.
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn continuation_control_prompt_is_not_recorded_as_user_history() {
+    // Run a one-tool loop.
+    // Assert DEFAULT_AGENT_LOOP_CONTINUATION_INPUT is not stored as an append-only user message.
+}
+```
+
+- [ ] **Step 7: Run tests**
+
+Run:
+
+```bash
+cargo test -p merry-runtime agent_loop
+cargo test -p merry-runtime ordinary_user_messages_remain_append_only_without_task_anchor
+cargo test -p merry-runtime continuation_control_prompt_is_not_recorded_as_user_history
+```
+
+Expected: PASS.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add crates/merry-runtime/src/session.rs crates/merry-runtime/src/runtime.rs crates/merry-runtime/src/step.rs crates/merry-runtime/tests/agent_loop.rs
+git commit -m "feat(runtime): add append-only message body"
+```
+
+Only add files actually changed.
+
+## Task 6: Add Project Rules Stable Prefix Layer
+
+**Files:**
+- Modify: `crates/merry-runtime/src/context.rs`
+- Modify: `crates/merry-runtime/src/session.rs`
+- Modify: `crates/merry-runtime/src/step.rs`
+- Modify: `crates/merry-cli/src/main.rs`
+- Modify: `crates/merry-cli/tests/debug.rs`
+- Modify: `crates/merry-runtime/tests/agent_loop.rs`
+
+- [ ] **Step 1: Add a runtime-owned project rules projection**
+
+Add an explicit project-rules layer for stable project instructions such as `AGENTS.md`. This is not ledger projection and not a tool-result summary.
+
+Target shape:
+
+```rust
+pub struct ProjectRules {
+    source_path: String,
+    text: String,
+    content_hash: String,
+}
+```
+
+Keep construction validated: nonblank source path, nonblank text, no control characters except newline/tab.
+
+- [ ] **Step 2: Add rules to the stable prefix**
+
+Update `compile_step_model_request` so loaded project rules become a leading system message included in `stable_prefix_message_count`.
+
+Expected prefix:
+
+```text
+system: DEFAULT_RUNTIME_BASE_INSTRUCTIONS
+system: project rules from AGENTS.md, if explicitly loaded
+```
+
+Because project rules are part of the cacheable prefix, changing AGENTS.md changes `stable_prefix_hash`.
+
+- [ ] **Step 3: Load AGENTS.md for CLI coding-loop fixtures**
+
+For the debug coding-loop task smoke, the CLI may still require the model to inspect `AGENTS.md` through tools for realistic behavior. In addition, load the fixture `AGENTS.md` as project rules before the first provider call so stable instructions are cacheable.
+
+Do not recursively scan parent directories in this task unless already implemented. Use the known disposable fixture root.
+
+- [ ] **Step 4: Add stable-prefix tests**
+
+Add tests:
+
+```rust
+#[tokio::test(flavor = "current_thread")]
+async fn project_rules_enter_stable_prefix_and_affect_stable_hash() {
+    // Build two otherwise identical runtimes with different project rules text.
+    // Trigger one provider request each.
+    // Assert stable_prefix_hash differs.
+    // Assert dynamic_context_hash can remain the same for the same user input.
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn ledger_and_artifact_changes_do_not_change_project_rules_stable_hash() {
+    // Trigger tool/artifact/ledger changes with project rules loaded.
+    // Assert stable_prefix_hash remains stable across those dynamic changes.
+}
+```
+
+- [ ] **Step 5: Keep live smoke inspect requirement**
+
+Do not remove the live smoke assertion that the model reads `AGENTS.md`. Stable prefix rules help cache and baseline behavior; explicit inspection still proves the coding loop can read exact workspace evidence.
+
+- [ ] **Step 6: Run tests**
+
+Run:
+
+```bash
+cargo test -p merry-runtime project_rules
+cargo test -p merry-cli coding_loop_task
+```
+
+Expected: PASS.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add crates/merry-runtime/src/context.rs crates/merry-runtime/src/session.rs crates/merry-runtime/src/step.rs crates/merry-runtime/tests/agent_loop.rs crates/merry-cli/src/main.rs crates/merry-cli/tests/debug.rs
+git commit -m "feat(runtime): add project rules stable prefix"
+```
+
+Only add files actually changed.
+
+## Task 7: Tighten Live Smoke Event Feedback
 
 **Files:**
 - Modify: `crates/merry-cli/src/main.rs`
@@ -485,7 +731,7 @@ git add crates/merry-cli/src/main.rs crates/merry-cli/tests/debug.rs
 git commit -m "test(cli): tighten live coding smoke feedback"
 ```
 
-## Task 6: Rename And Document The Patch Tool Contract
+## Task 8: Rename And Document The Patch Tool Contract
 
 **Files:**
 - Modify: `crates/merry-tool-workspace/src/lib.rs`
@@ -539,7 +785,7 @@ cargo test -p merry-tool-workspace workspace_patch_spec
 cargo test -p merry-cli coding_loop_task_live_prompt_delegates_to_default_prompt_and_agents
 ```
 
-If the first filter finds no tests, run the exact workspace patch parser tests in Task 7 after adding them.
+If the first filter finds no tests, run the exact workspace patch parser tests in Task 9 after adding them.
 
 - [ ] **Step 5: Commit**
 
@@ -550,7 +796,7 @@ git commit -m "refactor(workspace): standardize workspace patch tool"
 
 Only add files actually changed.
 
-## Task 7: Add Workspace Patch Parser Tests For Standard Patch Shape
+## Task 9: Add Workspace Patch Parser Tests For Standard Patch Shape
 
 **Files:**
 - Modify: `crates/merry-tool-workspace/src/lib.rs`
@@ -634,7 +880,7 @@ git add crates/merry-tool-workspace/src/lib.rs
 git commit -m "test(workspace): cover workspace patch parser shape"
 ```
 
-## Task 8: Improve Hunk Matching For Repeated Text
+## Task 10: Improve Hunk Matching For Repeated Text
 
 **Files:**
 - Modify: `crates/merry-tool-workspace/src/lib.rs`
@@ -746,7 +992,7 @@ git add crates/merry-tool-workspace/src/lib.rs
 git commit -m "test(workspace): require unique patch hunk context"
 ```
 
-## Task 9: Add Multi-File Patch Execution Coverage
+## Task 11: Add Multi-File Patch Execution Coverage
 
 **Files:**
 - Modify: `crates/merry-tool-workspace/src/lib.rs`
@@ -821,7 +1067,7 @@ git add crates/merry-tool-workspace/src/lib.rs crates/merry-tool-workspace/tests
 git commit -m "test(workspace): cover multi-file workspace patches"
 ```
 
-## Task 10: Update Live Smoke Fixture To Exercise Patch Disambiguation
+## Task 12: Update Live Smoke Fixture To Exercise Patch Disambiguation
 
 **Files:**
 - Modify: `crates/merry-cli/src/main.rs`
@@ -907,7 +1153,7 @@ git add crates/merry-cli/src/main.rs crates/merry-cli/tests/debug.rs
 git commit -m "test(cli): make coding task patch disambiguation realistic"
 ```
 
-## Task 11: Add Context Budget Policy Types Without Compaction
+## Task 13: Add Context Budget Policy Types Without Compaction
 
 **Files:**
 - Modify: `crates/merry-runtime/src/context.rs`
@@ -930,7 +1176,9 @@ pub enum ContextBudgetPolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ContextBudget {
     effective_window_tokens: u64,
+    stable_prefix_tokens: u64,
     output_reserve_tokens: u64,
+    body_budget_tokens: u64,
     soft_water_tokens: u64,
     hard_water_tokens: u64,
 }
@@ -939,9 +1187,10 @@ pub struct ContextBudget {
 Add accessors. Validate:
 
 ```text
-effective_window_tokens > output_reserve_tokens
+effective_window_tokens > stable_prefix_tokens + output_reserve_tokens
+body_budget_tokens = effective_window_tokens - stable_prefix_tokens - output_reserve_tokens
 soft_water_tokens < hard_water_tokens
-hard_water_tokens <= effective_window_tokens - output_reserve_tokens
+hard_water_tokens <= body_budget_tokens
 ```
 
 - [ ] **Step 2: Add calculation function**
@@ -953,12 +1202,13 @@ impl ContextBudget {
     pub fn from_window(
         resolved_context_window_tokens: u64,
         effective_context_window_percent: u8,
+        stable_prefix_tokens: u64,
         output_reserve_tokens: u64,
         policy: ContextBudgetPolicy,
     ) -> Result<Self, ContextError> {
         // percent must be 1..=100
         // effective_window = window * percent / 100
-        // body_budget = effective_window - output_reserve
+        // body_budget = effective_window - stable_prefix_tokens - output_reserve
         // soft/hard ratios:
         // CostAware 60/80
         // Balanced 70/90
@@ -979,21 +1229,24 @@ fn context_budget_balanced_uses_large_windows_without_step_count_compaction() {
     let budget = ContextBudget::from_window(
         1_000_000,
         95,
+        120_000,
         32_000,
         ContextBudgetPolicy::Balanced,
     )
     .expect("budget should calculate");
 
     assert_eq!(budget.effective_window_tokens(), 950_000);
-    assert_eq!(budget.body_budget_tokens(), 918_000);
-    assert_eq!(budget.soft_water_tokens(), 642_600);
-    assert_eq!(budget.hard_water_tokens(), 826_200);
+    assert_eq!(budget.stable_prefix_tokens(), 120_000);
+    assert_eq!(budget.body_budget_tokens(), 798_000);
+    assert_eq!(budget.soft_water_tokens(), 558_600);
+    assert_eq!(budget.hard_water_tokens(), 718_200);
 }
 
 #[test]
 fn context_budget_rejects_invalid_percent_or_reserve() {
-    assert!(ContextBudget::from_window(1_000_000, 0, 32_000, ContextBudgetPolicy::Balanced).is_err());
-    assert!(ContextBudget::from_window(1_000, 95, 1_000, ContextBudgetPolicy::Balanced).is_err());
+    assert!(ContextBudget::from_window(1_000_000, 0, 0, 32_000, ContextBudgetPolicy::Balanced).is_err());
+    assert!(ContextBudget::from_window(1_000, 95, 100, 1_000, ContextBudgetPolicy::Balanced).is_err());
+    assert!(ContextBudget::from_window(1_000, 95, 950, 1, ContextBudgetPolicy::Balanced).is_err());
 }
 ```
 
@@ -1026,7 +1279,7 @@ git commit -m "feat(runtime): add context budget watermarks"
 
 Only add `lib.rs` if changed.
 
-## Task 12: Resolve Context Window Metadata Conservatively
+## Task 14: Resolve Context Window Metadata Conservatively
 
 **Files:**
 - Modify: `crates/merry-runtime/src/context.rs`
@@ -1127,12 +1380,14 @@ git add crates/merry-runtime/src/context.rs
 git commit -m "feat(runtime): resolve context window budgets"
 ```
 
-## Task 13: Add Checkpoint Trigger Decisions Without Checkpoint Content
+## Task 15: Add Checkpoint Trigger Decisions Without Checkpoint Content
 
 **Files:**
 - Modify: `crates/merry-runtime/src/context.rs`
 
 - [ ] **Step 1: Add trigger enum**
+
+This task is intentionally only a trigger skeleton. It does not implement checkpoint content generation, checkpoint prompt projection, removal of old raw function-call continuity after checkpoint, or model-assisted summary generation.
 
 Add:
 
@@ -1174,6 +1429,7 @@ fn checkpoint_decision_uses_watermarks_not_turn_counts() {
     let budget = ContextBudget::from_window(
         100_000,
         90,
+        8_000,
         10_000,
         ContextBudgetPolicy::Balanced,
     )
@@ -1193,7 +1449,16 @@ fn checkpoint_decision_uses_watermarks_not_turn_counts() {
 
 - [ ] **Step 4: Keep it unwired**
 
-Do not compact prompt history yet. This task only creates deterministic policy primitives for a later compiler integration.
+Do not compact prompt history yet. This task only creates deterministic policy primitives for a later compiler integration. It must not be marked as satisfying checkpoint/compaction acceptance from the spec.
+
+The later checkpoint-content plan must separately prove:
+
+```text
+checkpoint content is generated from runtime-owned state
+checkpoint text references artifacts/evidence instead of replacing exact evidence
+unresolved or still-hot function-call continuity remains exact
+old raw function-call continuity is removed only after checkpoint is recorded
+```
 
 - [ ] **Step 5: Run tests**
 
@@ -1212,7 +1477,7 @@ git add crates/merry-runtime/src/context.rs
 git commit -m "feat(runtime): add checkpoint watermark decisions"
 ```
 
-## Task 14: Final Integration Verification
+## Task 16: Final Integration Verification
 
 **Files:**
 - No required edits unless tests expose a regression.
@@ -1233,6 +1498,9 @@ Run:
 
 ```bash
 cargo test -p merry-runtime agent_loop
+cargo test -p merry-runtime context_projection
+cargo test -p merry-runtime ordinary_user_messages_remain_append_only_without_task_anchor
+cargo test -p merry-runtime project_rules
 cargo test -p merry-runtime context_budget
 cargo test -p merry-runtime context_window_resolver
 cargo test -p merry-runtime checkpoint_decision
