@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use std::{
     collections::BTreeMap,
-    env, fs, io,
+    env, fmt, fs, io,
     path::{Path, PathBuf},
 };
 use thiserror::Error;
@@ -180,15 +180,34 @@ impl MerryConfig {
         let provider = providers.named.get("openai-compatible").ok_or_else(|| {
             ConfigError::Invalid("[providers.openai-compatible] is required".to_owned())
         })?;
-        let api_key_file = match provider.api_key_file.as_deref() {
-            Some(path) => Some(resolve_config_relative_path(path, &self.config_dir)?),
-            None => None,
+        let api_key = match (
+            provider.api_key.as_deref(),
+            provider.api_key_file.as_deref(),
+        ) {
+            (Some(_), Some(_)) => {
+                return Err(ConfigError::Invalid(
+                    "providers.openai-compatible must not set both api_key and api_key_file; choose one".to_owned(),
+                ));
+            }
+            (Some(value), None) => {
+                validate_api_key_text("api_key", value)?;
+                EffectiveOpenAiApiKeySource::Inline(value.to_owned())
+            }
+            (None, Some(path)) => EffectiveOpenAiApiKeySource::File(resolve_config_relative_path(
+                path,
+                &self.config_dir,
+            )?),
+            (None, None) => {
+                return Err(ConfigError::Invalid(
+                    "providers.openai-compatible must set exactly one of api_key or api_key_file"
+                        .to_owned(),
+                ));
+            }
         };
         Ok(EffectiveOpenAiProviderConfig {
             model: Some(default.model.clone()),
             base_url: provider.base_url.clone(),
-            api_key_env: provider.api_key_env.clone(),
-            api_key_file,
+            api_key,
         })
     }
 }
@@ -229,46 +248,66 @@ pub struct EffectiveLogSettings {
     pub path: PathBuf,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct EffectiveOpenAiProviderConfig {
     pub model: Option<String>,
     pub base_url: Option<String>,
-    pub api_key_env: Option<String>,
-    pub api_key_file: Option<PathBuf>,
+    pub api_key: EffectiveOpenAiApiKeySource,
+}
+
+impl fmt::Debug for EffectiveOpenAiProviderConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EffectiveOpenAiProviderConfig")
+            .field("model", &self.model)
+            .field("base_url", &self.base_url)
+            .field("api_key", &self.api_key)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub enum EffectiveOpenAiApiKeySource {
+    Inline(String),
+    File(PathBuf),
+}
+
+impl fmt::Debug for EffectiveOpenAiApiKeySource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Inline(_) => formatter.write_str("Inline(<redacted>)"),
+            Self::File(path) => formatter.debug_tuple("File").field(path).finish(),
+        }
+    }
 }
 
 impl EffectiveOpenAiProviderConfig {
     pub fn resolve_api_key(&self) -> Result<String, ConfigError> {
-        if let Some(name) = self.api_key_env.as_deref() {
-            match env::var(name) {
-                Ok(value) if !value.trim().is_empty() => return Ok(value),
-                Ok(_) => return Err(ConfigError::Invalid(format!("{name} must not be blank"))),
-                Err(env::VarError::NotUnicode(_)) => {
-                    return Err(ConfigError::Invalid(format!("{name} must be valid UTF-8")));
-                }
-                Err(env::VarError::NotPresent) => {}
+        match &self.api_key {
+            EffectiveOpenAiApiKeySource::Inline(value) => Ok(value.clone()),
+            EffectiveOpenAiApiKeySource::File(path) => {
+                let value = fs::read_to_string(path).map_err(|source| ConfigError::Read {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
+                let value = value.trim().to_owned();
+                validate_api_key_text(&format!("api_key_file {}", path.display()), &value)?;
+                Ok(value)
             }
         }
-
-        if let Some(path) = self.api_key_file.as_deref() {
-            let value = fs::read_to_string(path).map_err(|source| ConfigError::Read {
-                path: path.to_path_buf(),
-                source,
-            })?;
-            let value = value.trim().to_owned();
-            if value.is_empty() {
-                return Err(ConfigError::Invalid(format!(
-                    "api_key_file {} must not be blank",
-                    path.display()
-                )));
-            }
-            return Ok(value);
-        }
-
-        Err(ConfigError::Invalid(
-            "providers.openai-compatible must set api_key_env or api_key_file".to_owned(),
-        ))
     }
+}
+
+fn validate_api_key_text(label: &str, value: &str) -> Result<(), ConfigError> {
+    if value.trim().is_empty() {
+        return Err(ConfigError::Invalid(format!("{label} must not be blank")));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(ConfigError::Invalid(format!(
+            "{label} must not contain control characters"
+        )));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -347,7 +386,7 @@ struct DefaultProviderToml {
 #[serde(deny_unknown_fields)]
 struct OpenAiCompatibleProviderToml {
     base_url: Option<String>,
-    api_key_env: Option<String>,
+    api_key: Option<String>,
     api_key_file: Option<String>,
 }
 
@@ -433,7 +472,6 @@ model = "gpt-4.1-mini"
 
 [providers.openai-compatible]
 base_url = "https://api.example.test/v1"
-api_key_env = "OPENAI_API_KEY"
 api_key_file = "secrets/openai.key"
 "#,
             ),
@@ -458,10 +496,11 @@ api_key_file = "secrets/openai.key"
             provider.base_url.as_deref(),
             Some("https://api.example.test/v1")
         );
-        assert_eq!(provider.api_key_env.as_deref(), Some("OPENAI_API_KEY"));
         assert_eq!(
-            provider.api_key_file.as_deref(),
-            Some(Path::new("/home/alice/.config/merry/secrets/openai.key"))
+            provider.api_key,
+            EffectiveOpenAiApiKeySource::File(PathBuf::from(
+                "/home/alice/.config/merry/secrets/openai.key"
+            ))
         );
     }
 
@@ -490,10 +529,11 @@ api_key_file = "secrets/openai.key"
             provider.base_url.as_deref(),
             Some("https://api.openai.com/v1")
         );
-        assert_eq!(provider.api_key_env.as_deref(), Some("OPENAI_API_KEY"));
         assert_eq!(
-            provider.api_key_file.as_deref(),
-            Some(Path::new("/home/alice/.config/merry/secrets/openai.key"))
+            provider.api_key,
+            EffectiveOpenAiApiKeySource::File(PathBuf::from(
+                "/home/alice/.config/merry/secrets/openai.key"
+            ))
         );
     }
 
@@ -554,17 +594,123 @@ format = "json"
     }
 
     #[test]
-    fn redacted_provider_debug_does_not_include_api_key_file_contents_or_env_value() {
+    fn parses_inline_api_key_and_redacts_debug_output() {
+        let paths = XdgPaths::from_parts(home(), None, None);
+        let config = MerryConfig::load_optional_from_text(
+            Some(
+                r#"
+[providers.default]
+provider = "openai-compatible"
+model = "gpt-test"
+
+[providers.openai-compatible]
+api_key = "sk-inline-secret"
+"#,
+            ),
+            &paths,
+        )
+        .expect("config should parse")
+        .expect("config should be present");
+        let provider = config
+            .openai_compatible_provider()
+            .expect("provider should validate");
+
+        assert_eq!(
+            provider.resolve_api_key().expect("key should resolve"),
+            "sk-inline-secret"
+        );
+        let debug = format!("{provider:?}");
+        assert!(debug.contains("Inline(<redacted>)"));
+        assert!(!debug.contains("sk-inline-secret"));
+    }
+
+    #[test]
+    fn rejects_missing_or_ambiguous_api_key_sources() {
+        let paths = XdgPaths::from_parts(home(), None, None);
+        let missing = MerryConfig::load_optional_from_text(
+            Some(
+                r#"
+[providers.default]
+provider = "openai-compatible"
+model = "gpt-test"
+
+[providers.openai-compatible]
+base_url = "https://api.example.test/v1"
+"#,
+            ),
+            &paths,
+        )
+        .expect("TOML should parse")
+        .expect("config should be present")
+        .openai_compatible_provider()
+        .expect_err("missing key source should fail");
+        assert!(
+            missing
+                .to_string()
+                .contains("exactly one of api_key or api_key_file")
+        );
+
+        let ambiguous = MerryConfig::load_optional_from_text(
+            Some(
+                r#"
+[providers.default]
+provider = "openai-compatible"
+model = "gpt-test"
+
+[providers.openai-compatible]
+api_key = "sk-inline-secret"
+api_key_file = "secrets/openai.key"
+"#,
+            ),
+            &paths,
+        )
+        .expect("TOML should parse")
+        .expect("config should be present")
+        .openai_compatible_provider()
+        .expect_err("ambiguous key source should fail");
+        assert!(
+            ambiguous
+                .to_string()
+                .contains("must not set both api_key and api_key_file")
+        );
+    }
+
+    #[test]
+    fn rejects_blank_or_control_character_inline_api_key() {
+        let paths = XdgPaths::from_parts(home(), None, None);
+        for api_key in ["  ", "sk-test\n"] {
+            let error = MerryConfig::load_optional_from_text(
+                Some(&format!(
+                    r#"
+[providers.default]
+provider = "openai-compatible"
+model = "gpt-test"
+
+[providers.openai-compatible]
+api_key = {api_key:?}
+"#
+                )),
+                &paths,
+            )
+            .expect("TOML should parse")
+            .expect("config should be present")
+            .openai_compatible_provider()
+            .expect_err("invalid key should fail");
+
+            assert!(error.to_string().contains("api_key"));
+        }
+    }
+
+    #[test]
+    fn redacted_provider_debug_does_not_include_api_key_file_contents() {
         let provider = EffectiveOpenAiProviderConfig {
             model: Some("gpt-test".to_owned()),
             base_url: Some("https://api.example.test/v1".to_owned()),
-            api_key_env: Some("OPENAI_API_KEY".to_owned()),
-            api_key_file: Some(PathBuf::from(
+            api_key: EffectiveOpenAiApiKeySource::File(PathBuf::from(
                 "/home/alice/.config/merry/secrets/openai.key",
             )),
         };
         let debug = format!("{provider:?}");
-        assert!(debug.contains("OPENAI_API_KEY"));
         assert!(debug.contains("openai.key"));
         assert!(!debug.contains("sk-"));
     }
