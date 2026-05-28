@@ -870,7 +870,27 @@ fn debug_coding_loop_task_live_smoke_runs_inside_real_bwrap_when_opted_in() {
         "task live smoke should not write stderr"
     );
     let stdout = std::str::from_utf8(&output.stdout).expect("stdout should be utf-8");
-    assert_eq!(stdout, "coding-loop-task-live-smoke: ok\n");
+    let mut lines = stdout.lines();
+    assert_eq!(lines.next(), Some("coding-loop-task-live-smoke: ok"));
+    let events = lines
+        .map(|line| serde_json::from_str::<Value>(line).expect("line should be JSON"))
+        .collect::<Vec<_>>();
+    assert!(
+        events.iter().any(|event| {
+            event.pointer("/kind/type").and_then(Value::as_str) == Some("tool_call_pending")
+                && event.pointer("/kind/call/name").and_then(Value::as_str)
+                    == Some("workspace_patch_file")
+                && event
+                    .pointer("/kind/call/arguments/old_text")
+                    .and_then(Value::as_str)
+                    .is_some()
+                && event
+                    .pointer("/kind/call/arguments/new_text")
+                    .and_then(Value::as_str)
+                    .is_some()
+        }),
+        "stdout should include runtime events with live patch tool arguments"
+    );
 }
 
 #[test]
