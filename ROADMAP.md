@@ -171,6 +171,19 @@ The OpenAI provider target is the Responses API only. The provider request path 
   shell/flag, byte count, fingerprint, status, output byte counts, and artifact
   references. This is still the existing result artifact path, not a separate
   pre-execution input artifact and not a real shell runner.
+- M2 pre-execution shell input artifact slice is implemented in
+  `merry-runtime`: admitted shell-wrapper process actions now record a
+  runtime-owned `process-input-*` JSON artifact before the process runner is
+  called. That artifact is the sole exact shell input carrier for the
+  execution, containing shell, flag, script text, byte count, and stable
+  fingerprint. The process result artifact references this input artifact via
+  `input_artifact` and no longer duplicates the script under `input_evidence`.
+  Compact ledger observations remain payload-free and refer to artifact ids plus
+  fingerprints; traces remain payload-free and carry shell/profile/status/output
+  metadata plus fingerprints instead of raw script text. Cancellation or runner
+  infrastructure failure after input recording leaves the pending call
+  unresolved, records no result artifact or action audit, but keeps the exact
+  input artifact/evidence available in runtime state.
 
 ### Active
 
@@ -191,12 +204,11 @@ The OpenAI provider target is the Responses API only. The provider request path 
 
 ### Next Active
 
-- Continue M2 from the implemented shell wrapper lane: decide and implement the
-  next artifact granularity before a real shell runner. The current slice keeps
-  exact shell script text in the process result artifact; the next slice should
-  decide whether shell input needs a standalone pre-execution artifact so
-  cancellation and started-command evidence are durable even when no output
-  artifact is produced.
+- Continue M2 from the implemented shell wrapper lane: now that exact shell
+  input is durable before runner execution, define the first reusable real shell
+  runner/profile boundary. Keep raw shell execution behind explicit runtime
+  construction and permission/session policy; do not make the narrow read-only
+  classifier a general authorization model.
 - Keep defining the shell-compatible runtime boundary as real command/script
   execution under explicit permission/session profiles, with command input,
   stdout/stderr/status, audit, ledger, cancellation, and trace records owned by
@@ -264,7 +276,7 @@ M1 Structured Process Boundary MVP:
 M2 Shell-Compatible Runtime Boundary:
 
 - Status: in progress; the read-only shell-wrapper admission slice and the
-  shell input evidence / payload-free trace+ledger metadata slice are
+  shell input artifact / payload-free trace+ledger metadata slices are
   implemented.
 - Add a shell-compatible execution boundary after the structured intent path is
   solid, but do not emulate full shell parsing in Merry.
@@ -275,12 +287,11 @@ M2 Shell-Compatible Runtime Boundary:
   request shape over this runtime boundary, not a parser that reclassifies
   shell grammar into structured argv for authorization.
 - Treat command/script text as execution input evidence. The current MVP stores
-  exact shell input in the process result artifact under `input_evidence` and
-  omits duplicate `intent.argv`; traces and compact ledger observations record
-  only shell, flag, byte count, and stable fingerprint. The next artifact
-  decision is whether this
-  should become a standalone pre-execution input artifact before real shell
-  runner work.
+  exact shell input in a standalone pre-execution `process-input-*` artifact and
+  omits duplicate `intent.argv` and result-artifact `input_evidence`; result
+  artifacts reference the input artifact by id/kind. Traces and compact ledger
+  observations record only shell, flag, byte count, stable fingerprint, status,
+  output metadata, and artifact references.
 - Execute shell syntax through a real shell runner inside explicit
   permission/session profiles. Pipelines, conditionals, and small scripts are
   allowed only when the selected profile and sandbox make their side effects

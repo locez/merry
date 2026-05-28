@@ -10,40 +10,49 @@ Current milestone or track:
 
 Session milestone:
 
-- Second implementation slice: preserve exact shell-wrapper script evidence in
-  artifacts while keeping traces and compact ledger observations payload-free.
+- Third implementation slice: record exact shell-wrapper input as a
+  pre-execution runtime artifact before runner execution.
 
 Task queue status:
 
-- Added shell input evidence helpers for shell-wrapper process intents.
-- Shell-wrapper result artifacts now include exact `input_evidence`: shell,
-  flag, script text, script byte count, and stable `fnv1a64` fingerprint.
-- Shell-wrapper result artifacts omit duplicate `intent.argv`, so exact shell
-  script text appears once in the provider-visible tool result payload.
+- Added session-owned `process-input-*` runtime artifact IDs and reserved them
+  from external artifact/result submission APIs.
+- Shell-wrapper process execution now records a `process-input-*` JSON artifact
+  before calling the process runner. It contains exact shell, flag, script text,
+  script byte count, stable `fnv1a64` fingerprint, tool call id/name,
+  permission profile, and intent summary/cwd.
+- Shell-wrapper result artifacts reference the input artifact via
+  `input_artifact` and no longer duplicate exact script text under
+  `input_evidence`.
 - Shell-wrapper process start/finish traces omit raw `argv` and script text;
   they record shell, flag, script byte count, script fingerprint, status, output
   byte counts, and other bounded metadata.
 - Shell-wrapper compact ledger observations omit raw script text and record the
-  shell profile, shell, flag, byte count, fingerprint, output byte counts, and
-  result artifact reference.
-- Added deterministic tests proving artifact exactness and trace/ledger payload
-  omission for `bash -lc "rg ProcessRunner | wc -l"`.
-- Updated `ROADMAP.md` and `DECISIONS.md` with this M2 evidence/metadata slice.
+  shell profile, shell, flag, byte count, fingerprint, output byte counts,
+  result artifact reference, and input artifact reference.
+- Added deterministic success, runner-cancel, and runner-failure tests proving
+  input artifact durability before output, evidence-ref readability, unresolved
+  pending calls on no-output paths, no result artifact before output, and no
+  action audit on runner cancel/failure.
+- Updated `ROADMAP.md` and `DECISIONS.md` with this M2 pre-execution input
+  artifact slice.
 
 Done condition:
 
-- The M2 shell-compatible boundary now preserves exact shell input in artifact
-  content and keeps shell execution traces plus compact ledger observations free
-  of raw script payloads. It still does not introduce a model-facing shell tool,
-  broad shell parser, standalone pre-execution input artifact, or real shell
-  runner.
+- The M2 shell-compatible boundary now preserves exact shell input in a
+  pre-execution runtime artifact and keeps shell execution traces plus compact
+  ledger observations free of raw script payloads. It still does not introduce a
+  model-facing shell tool, broad shell parser, approval/session semantics, or a
+  reusable real shell runner.
 
 ## What Changed
 
 Files changed:
 
-- `crates/merry-runtime/src/process.rs`
 - `crates/merry-runtime/src/runtime.rs`
+- `crates/merry-runtime/src/session.rs`
+- `crates/merry-runtime/tests/provider_boundary.rs`
+- `crates/merry-runtime/tests/runtime_flow.rs`
 - `DECISIONS.md`
 - `EXECUTION_STATE.md`
 - `HANDOFF.md`
@@ -51,13 +60,14 @@ Files changed:
 
 Summary:
 
-- Added shell-wrapper input evidence metadata and stable fingerprints.
-- Kept exact shell script text in the process result artifact.
-- Avoided duplicating shell script text inside the same result artifact.
+- Added pre-execution shell-wrapper input artifacts with exact script evidence
+  and stable fingerprints.
+- Removed raw script duplication from shell-wrapper process result artifacts;
+  results now reference `input_artifact`.
 - Removed raw shell argv/script text from shell process execution traces and
   compact ledger observations.
-- Recorded that this is still the existing result artifact path; a standalone
-  pre-execution command artifact remains the next M2 decision.
+- Preserved input evidence on runner cancellation/failure while keeping the
+  pending call unresolved and avoiding result/audit writes.
 
 ## Validation
 
@@ -79,15 +89,14 @@ Result:
 Decisions made:
 
 - Exact shell-wrapper script text is artifact payload, not trace payload.
+- Exact shell-wrapper script text belongs in a pre-execution `process-input-*`
+  artifact, not the process result artifact.
 - Shell-wrapper compact ledger observations use shell/profile/status/output
-  metadata, script byte count, stable fingerprint, and artifact reference.
-- The current implementation uses the process result artifact for exact shell
-  input evidence; it does not yet create a standalone command-start artifact.
+  metadata, script byte count, stable fingerprint, result artifact reference,
+  and input artifact reference.
 
 Pending decisions:
 
-- Whether shell command/script input should be recorded as a standalone
-  pre-execution artifact before runner execution.
 - Whether the first real shell runner uses the existing CLI process runner
   adapter or a runtime-owned shell runner wrapper.
 - Approval/session semantics for shell commands beyond the read-only wrapper
@@ -101,26 +110,23 @@ Blockers:
 
 Residual risk:
 
-- If a future shell runner is cancelled or fails before output, the current
-  result-artifact-only input evidence path cannot prove command-start evidence.
-  That is why the next slice should decide the standalone pre-execution input
-  artifact boundary.
+- The error return path still does not carry partial event vectors. If a runner
+  cancels/fails after input recording, callers must inspect runtime state to
+  discover the already-recorded input artifact.
 - No real shell runner was added in this lease; tests use fake runners.
 
 Next exact action:
 
-- Continue M2 by deciding and implementing the pre-execution shell input
-  artifact boundary, then add cancellation tests for execution cancelled or
-  failed before output. Keep real shell runner/admission profile work separate
-  until artifact ordering is proven.
+- Continue M2 by defining the first reusable real shell runner/profile boundary
+  on top of the proven input/output artifact ordering.
 
 ## Scope For Next Session
 
 Allowed edits:
 
 - Runtime shell/process artifact and trace boundary modules.
-- Focused tests for pre-execution command/script input evidence, output
-  artifacts, cancellation, and ledger reduction.
+- Focused tests for real shell runner/profile admission, output artifacts,
+  cancellation, and ledger reduction.
 - Public-safe roadmap/decision/continuity updates.
 
 Forbidden edits:
@@ -149,7 +155,7 @@ Status: committed
 
 Message:
 
-- feat(runtime): add shell input evidence metadata
+- feat(runtime): record shell input before runner
 
 No-commit reason:
 

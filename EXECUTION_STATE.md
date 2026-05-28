@@ -46,36 +46,36 @@ Current milestone or track:
 
 Session milestone:
 
-- Second implementation slice: keep exact shell-wrapper script evidence in
-  artifacts while making process execution traces and compact ledger
-  observations payload-free.
+- Third implementation slice: record exact shell-wrapper input as a
+  pre-execution runtime artifact before runner execution.
 
 Goal:
 
-- Prove that an admitted read-only shell-wrapper process preserves exact
-  command/script input in runtime-owned artifact content, while traces and
-  compact ledger observations carry only shell/profile/status/output metadata,
-  script byte counts, fingerprints, and artifact references.
+- Prove that an admitted read-only shell-wrapper process records exact
+  command/script input before runner execution, keeps result artifacts linked
+  to that input artifact, and preserves payload-free traces plus compact ledger
+  observations.
 
 Task queue status:
 
-- Added runtime-local shell input evidence helpers that derive shell, flag,
-  script byte count, and stable `fnv1a64` fingerprint from the already-validated
-  shell-wrapper process intent.
-- Extended process result artifact JSON for shell-wrapper executions with
-  exact `input_evidence` containing shell, flag, script text, script byte count,
-  and script fingerprint; shell artifacts omit duplicate `intent.argv` so the
-  exact script appears once in the provider-visible result payload.
-- Split process execution trace helpers so shell-wrapper start/finish traces do
-  not log raw `argv` or script text; they log shell, flag, script byte count,
-  script fingerprint, cwd, output limits, status, and output byte counts.
-- Updated shell process compact ledger observations so they omit raw script
-  text and include permission profile, shell, flag, script byte count,
-  fingerprint, output byte counts, and the result artifact reference.
-- Added deterministic runtime tests proving artifact exactness and trace/ledger
-  payload omission for `bash -lc "rg ProcessRunner | wc -l"`.
-- Updated `ROADMAP.md` and `DECISIONS.md` to record this M2 evidence/metadata
-  slice and its remaining pre-execution artifact gap.
+- Added session-owned `process-input-*` runtime artifact IDs and reserved them
+  from external `record_artifact` / `submit_tool_result` callers.
+- Shell-wrapper execution now records a JSON input artifact before runner
+  execution. It contains shell, flag, script text, script byte count, stable
+  `fnv1a64` fingerprint, tool call id/name, permission profile, and intent
+  summary/cwd.
+- Shell-wrapper result artifacts now reference the input artifact via
+  `input_artifact` and no longer duplicate exact script text under
+  `input_evidence`.
+- Shell process compact ledger observations include the result artifact and
+  input artifact ids plus payload-free shell/profile/status/output/fingerprint
+  metadata, but not raw script text.
+- Added deterministic success, runner-cancel, and runner-failure tests proving
+  input artifact durability, evidence-ref readability, unresolved pending calls
+  on no-output paths, no result artifact before output, and no action audit on
+  runner cancel/failure.
+- Updated `ROADMAP.md` and `DECISIONS.md` to record that the pre-execution shell
+  input artifact boundary is now implemented.
 
 Allowed expansion:
 
@@ -85,13 +85,15 @@ Allowed expansion:
 
 Done condition:
 
-- Admitted shell-wrapper result artifacts include exact script input evidence
-  and stable script fingerprint metadata without duplicating the script in
-  `intent.argv`.
-- Shell-wrapper process start/finish traces do not include raw `argv` or script
-  text.
-- Shell-wrapper compact ledger observations do not include raw script text and
-  include script byte/fingerprint metadata plus result artifact reference.
+- Admitted shell-wrapper execution records exact script input in a
+  pre-execution input artifact before the runner is called.
+- Shell-wrapper result artifacts reference the pre-execution input artifact and
+  do not duplicate raw script payload.
+- Runner cancellation or infrastructure failure after input recording keeps the
+  pending call unresolved, records no output/result artifact or action audit,
+  and leaves the input artifact/evidence readable.
+- Shell-wrapper traces and compact ledger observations remain free of raw
+  `argv` or script text.
 - Default validation passes and the lease is committed.
 
 Drift boundary:
@@ -103,7 +105,6 @@ Drift boundary:
   execution capability.
 - Do not add approval/session grants, long-running process sessions, stdin/env
   shell behavior, or real shell runner adapters in this slice.
-- Do not claim this slice added a standalone pre-execution shell input artifact.
 - Do not move private ignored notes into tracked files.
 - Do not commit `.superpowers/`, `.merry/`, `docs/`, or `merry-raw-docs`.
 - Do not make live provider behavior part of default tests.
@@ -112,12 +113,14 @@ Task type: code/docs
 
 Acceptance criteria:
 
-- Shell-wrapper process result artifacts include exact `input_evidence` for the
-  script and its stable fingerprint, while omitting duplicate `intent.argv`.
-- Trace tests prove shell-wrapper execution logs metadata without raw argv or
-  script text.
-- Ledger projection tests prove compact observations include artifact
-  references and fingerprint metadata without raw script text.
+- Shell-wrapper process execution records exact `input_evidence` in
+  `process-input-*` before runner execution.
+- Shell-wrapper result artifacts reference the input artifact and omit raw
+  script payload.
+- Cancellation and runner-failure tests prove input artifact durability without
+  output/result artifact or action audit.
+- Trace and ledger tests prove shell-wrapper metadata remains payload-free and
+  references artifacts/fingerprints instead of raw script text.
 - `cargo fmt --all --check`, `cargo clippy --all-targets --all-features -- -D warnings`,
   and `cargo test --all` pass.
 
@@ -125,10 +128,10 @@ Acceptance criteria:
 
 Allowed edits:
 
-- `crates/merry-runtime/src/process.rs`
-- `crates/merry-runtime/src/action_policy.rs`
 - `crates/merry-runtime/src/runtime.rs`
-- `crates/merry-runtime/src/lib.rs`
+- `crates/merry-runtime/src/session.rs`
+- `crates/merry-runtime/tests/runtime_flow.rs`
+- `crates/merry-runtime/tests/provider_boundary.rs`
 - `DECISIONS.md`
 - `EXECUTION_STATE.md`
 - `HANDOFF.md`
@@ -180,12 +183,10 @@ Research artifact:
 
 Next exact action:
 
-- Continue M2 by deciding and implementing the pre-execution shell input
-  artifact boundary: record exact command/script input before runner execution,
-  preserve payload-free trace/ledger metadata, and add cancellation tests for
-  the path where execution is cancelled or fails before an output artifact is
-  produced. Keep real shell runner/admission profile work separate until that
-  artifact ordering is proven.
+- Continue M2 by defining the first reusable real shell runner/profile boundary
+  on top of the now-proven artifact ordering. Keep raw shell execution behind
+  explicit runtime construction and permission/session policy; do not expand
+  the narrow classifier into a general shell authorization model.
 
 Do not reconsider:
 

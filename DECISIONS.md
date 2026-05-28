@@ -438,14 +438,19 @@ output artifact reduction are defined for shell execution.
 ## 2026-05-28 - Shell Script Payloads Stay In Artifacts, Not Trace Or Ledger
 
 Decision:
-Admitted shell-wrapper process results now include exact shell input evidence in
-the result artifact under `input_evidence`: shell, flag, script text, script
-byte count, and a stable `fnv1a64` script fingerprint. The shell result
-artifact omits duplicate `intent.argv` so the exact script appears once in the
-artifact. Runtime process traces and compact ledger observations for
-shell-wrapper executions do not include raw argv or script text; they include
-only payload-free metadata such as shell, flag, script byte count, script
-fingerprint, status, output byte counts, and the result artifact reference.
+Admitted shell-wrapper process execution records exact shell input evidence in
+runtime-owned artifacts, not in trace or compact ledger text. The first slice
+stored shell, flag, script text, script byte count, and a stable `fnv1a64`
+script fingerprint in the result artifact under `input_evidence`, while
+omitting duplicate `intent.argv`. The current implementation records that exact
+input in a standalone pre-execution `process-input-*` JSON artifact before the
+runner is called. The later result artifact references the input artifact via
+`input_artifact` and no longer duplicates the script under `input_evidence`.
+Runtime process traces and compact ledger observations for shell-wrapper
+executions do not include raw argv or script text; they include only
+payload-free metadata such as shell, flag, script byte count, script
+fingerprint, status, output byte counts, and artifact references where
+applicable.
 
 Reason:
 Merry needs exact command/script evidence for later replay, audit, and user
@@ -457,29 +462,33 @@ evidence as deliberately as artifacts do.
 
 Evidence:
 `read_only_shell_process_executes_under_shell_profile_when_opted_in` now asserts
-that the shell process result artifact contains exact `input_evidence` for
-`bash -lc "rg ProcessRunner | wc -l"` and that the compact ledger observation
-contains the shell profile, shell, flag, script byte count, stable fingerprint,
-and artifact id without the script text. `read_only_shell_process_traces_payload_free_input_metadata_when_opted_in`
+that `process-input-2` contains exact `input_evidence` for
+`bash -lc "rg ProcessRunner | wc -l"`, that the result artifact references this
+input artifact without duplicating the script, and that the compact ledger
+observation contains shell profile, shell, flag, script byte count, stable
+fingerprint, result artifact id, and input artifact id without the script text.
+`read_only_shell_process_runner_cancel_keeps_input_artifact_before_unresolved_pending`
+and `read_only_shell_process_runner_failure_keeps_input_artifact_before_unresolved_pending`
+prove that cancellation or runner infrastructure failure after input recording
+keeps the exact input artifact readable, leaves the pending call unresolved,
+and records no result artifact or action audit. `read_only_shell_process_traces_payload_free_input_metadata_when_opted_in`
 asserts that shell process start/finish traces include byte/fingerprint
-metadata and omit both the raw `argv` field and the script text. Full default
-validation passed with `cargo fmt --all --check`,
-`cargo clippy --all-targets --all-features -- -D warnings`, and
-`cargo test --all`.
+metadata and omit both the raw `argv` field and the script text.
 
 Tradeoff:
-This slice uses the existing process result artifact as the exact evidence
-carrier. It does not yet create a standalone pre-execution shell input artifact,
-so a cancellation or runner infrastructure failure before output still has no
-separate command-start artifact. That is acceptable for this slice because no
-real shell runner is being introduced yet.
+The runtime now preserves input evidence even when the runner produces no
+output, but it does not yet emit partial success events on the error return
+path. Callers that receive `ToolExecutionCancelled` or `ToolExecutionFailed`
+must inspect session state if they need the already-recorded input artifact.
+This keeps the existing error API narrow while proving the durable state
+ordering before a real shell runner is introduced.
 
 Reversible:
-Yes. A later shell runner can split exact command/script input into a separate
-pre-execution artifact while preserving the same payload-free trace and compact
-ledger metadata fields.
+Yes. The artifact schema can evolve as stdin, env policy, and richer shell
+profiles are added, while preserving the invariant that exact dynamic input is
+artifact-backed and traces/compact ledger entries remain payload-free.
 
 Follow-up:
-Before wiring a real shell runner, decide whether shell command/script input
-must be recorded as a standalone pre-execution artifact, then add cancellation
-tests for the no-output path.
+Wire the first reusable real shell runner/profile only after preserving this
+ordering: input artifact first, runner second, output artifact and action audit
+only after runner output exists.

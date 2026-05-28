@@ -24,7 +24,7 @@ use crate::{
         MemoryActivationSourceKind, MemoryScope, StoredMemoryActivationSource,
     },
     model_config::{ModelProviderConfig, RuntimeModelConfigs},
-    process::shell_process_input,
+    process::{ShellProcessInput, shell_process_input},
     session::{
         ProposedToolExecutionOutcome, SessionState, ToolResultLedgerObservation,
         is_runtime_reserved_artifact_id,
@@ -37,9 +37,9 @@ use crate::{
 };
 use futures_util::StreamExt;
 use merry_core::{
-    ArtifactId, ArtifactRef, CoreError, ErrorInfo, EvidenceLocator, EvidenceRef, PendingToolCall,
-    RuntimeEvent, RuntimeEventKind, SessionId, ToolCallArguments, ToolCallId, ToolCallResult,
-    ToolCallResultStatus,
+    ArtifactId, ArtifactKind, ArtifactRef, CoreError, ErrorInfo, EvidenceLocator, EvidenceRef,
+    PendingToolCall, RuntimeEvent, RuntimeEventKind, SessionId, ToolCallArguments, ToolCallId,
+    ToolCallResult, ToolCallResultStatus,
 };
 use merry_llm::{
     FinishReason, GenerationConfig, ModelError, ModelEvent, ModelName, ModelOutput, ModelProvider,
@@ -664,6 +664,25 @@ impl Runtime {
             });
         }
 
+        let shell_input_artifact = if let Some(shell_input) = shell_process_input(&intent) {
+            let input_content =
+                shell_input_artifact_content(shell_input, &intent, permission_profile_id, pending);
+            let mut session = self.inner.session.lock().await;
+            let recorded = session
+                .record_process_input_artifact(input_content)
+                .map_err(RuntimeError::from)?;
+            Some(recorded)
+        } else {
+            None
+        };
+
+        if context.cancellation_token().is_cancelled() {
+            return Err(RuntimeError::ToolExecutionCancelled {
+                session_id: self.inner.session_id.clone(),
+                call_id: pending.id().clone(),
+            });
+        }
+
         let runner_context = ProcessRunnerContext::new(context.cancellation_token().clone());
         trace_process_execution_start(
             &self.inner.session_id,
@@ -720,7 +739,15 @@ impl Runtime {
             permission_profile_id,
             &output,
         );
-        let content = process_output_artifact_content(&intent, &output, permission_profile_id);
+        let shell_input_artifact_ref = shell_input_artifact
+            .as_ref()
+            .map(|(artifact, _events)| artifact);
+        let content = process_output_artifact_content(
+            &intent,
+            &output,
+            permission_profile_id,
+            shell_input_artifact_ref,
+        );
         let status = if output.ok() {
             ToolCallResultStatus::Succeeded
         } else {
@@ -737,11 +764,16 @@ impl Runtime {
                 ),
             ))
         };
-        let observation =
-            process_result_ledger_observation(&intent, &output, status, permission_profile_id);
+        let observation = process_result_ledger_observation(
+            &intent,
+            &output,
+            status,
+            permission_profile_id,
+            shell_input_artifact_ref,
+        );
 
         let mut session = self.inner.session.lock().await;
-        session.submit_proposed_tool_execution_outcome_record(
+        let result_events = session.submit_proposed_tool_execution_outcome_record(
             ProposedToolExecutionOutcome::new(
                 proposal,
                 status,
@@ -751,7 +783,11 @@ impl Runtime {
                 ActionAuditPolicy::from_decision(&policy_decision),
             )
             .with_observation(observation),
-        )
+        )?;
+        Ok(merge_process_input_and_result_events(
+            shell_input_artifact.map(|(_artifact, events)| events),
+            result_events,
+        ))
     }
 
     /// Creates an exact evidence reference from artifact state owned by this session.
@@ -1035,10 +1071,40 @@ fn trace_process_execution_finish(
     );
 }
 
+fn shell_input_artifact_content(
+    shell_input: ShellProcessInput<'_>,
+    intent: &ProcessActionIntent,
+    permission_profile_id: ProcessPermissionProfileId,
+    pending: &PendingToolCall,
+) -> ArtifactContent {
+    ArtifactContent::json(
+        serde_json::json!({
+            "kind": "shell_command_input",
+            "permission_profile_id": permission_profile_id.as_str(),
+            "tool_call_id": pending.id().as_str(),
+            "tool_name": pending.name().as_str(),
+            "intent": {
+                "summary": intent.summary(),
+                "cwd": intent.cwd(),
+            },
+            "input_evidence": {
+                "kind": "shell_command_script",
+                "shell": shell_input.shell(),
+                "flag": shell_input.flag(),
+                "script": shell_input.script(),
+                "script_bytes": shell_input.script_bytes(),
+                "script_fingerprint": shell_input.script_fingerprint(),
+            },
+        })
+        .to_string(),
+    )
+}
+
 fn process_output_artifact_content(
     intent: &ProcessActionIntent,
     output: &ProcessRunnerOutput,
     permission_profile_id: ProcessPermissionProfileId,
+    input_artifact: Option<&ArtifactRef>,
 ) -> ArtifactContent {
     let shell_input = shell_process_input(intent);
     let intent_payload = if shell_input.is_some() {
@@ -1072,7 +1138,9 @@ fn process_output_artifact_content(
         }
     });
 
-    if let Some(shell_input) = shell_input {
+    if let Some(input_artifact) = input_artifact {
+        payload["input_artifact"] = artifact_ref_json(input_artifact);
+    } else if let Some(shell_input) = shell_input {
         payload["input_evidence"] = serde_json::json!({
             "kind": "shell_command_script",
             "shell": shell_input.shell(),
@@ -1091,6 +1159,7 @@ fn process_result_ledger_observation(
     output: &ProcessRunnerOutput,
     result_status: ToolCallResultStatus,
     permission_profile_id: ProcessPermissionProfileId,
+    input_artifact: Option<&ArtifactRef>,
 ) -> ToolResultLedgerObservation {
     let mut summary = if let Some(shell_input) = shell_process_input(intent) {
         format!(
@@ -1123,9 +1192,42 @@ fn process_result_ledger_observation(
     if output.stderr_truncated() {
         summary.push_str("; stderr_truncated=true");
     }
+    if let Some(input_artifact) = input_artifact {
+        summary.push_str("; input_artifact=");
+        summary.push_str(input_artifact.id().as_str());
+    }
 
     ToolResultLedgerObservation::new(crate::ledger::LedgerScope::Tool, summary)
         .expect("process result ledger summary is built from a non-empty static prefix")
+}
+
+fn artifact_ref_json(artifact: &ArtifactRef) -> serde_json::Value {
+    serde_json::json!({
+        "id": artifact.id().as_str(),
+        "kind": artifact_kind_label(artifact.kind()),
+    })
+}
+
+fn artifact_kind_label(kind: &ArtifactKind) -> &'static str {
+    match kind {
+        ArtifactKind::Text => "text",
+        ArtifactKind::Json => "json",
+        ArtifactKind::Binary => "binary",
+        ArtifactKind::Image => "image",
+        ArtifactKind::Other => "other",
+    }
+}
+
+fn merge_process_input_and_result_events(
+    input_events: Option<Vec<RuntimeEvent>>,
+    result_events: Vec<RuntimeEvent>,
+) -> Vec<RuntimeEvent> {
+    let Some(mut input_events) = input_events else {
+        return result_events;
+    };
+
+    input_events.extend(result_events);
+    input_events
 }
 
 fn process_result_status_label(status: ToolCallResultStatus) -> &'static str {
@@ -5390,6 +5492,12 @@ mod tests {
             ))
         }
 
+        fn infrastructure_failure(message: &str) -> Self {
+            Self::with_response(FakeProcessRunnerResponse::Error(
+                ProcessRunnerError::infrastructure(message),
+            ))
+        }
+
         fn succeeding_then_cancelling_token() -> Self {
             Self::with_response(FakeProcessRunnerResponse::SuccessThenCancel {
                 stdout_text: "runtime tests passed after token cancellation\n".to_owned(),
@@ -7019,7 +7127,47 @@ mod tests {
         assert_eq!(runner.call_count(), 1);
         assert_eq!(
             event_kind_names_for_tool_execution(&events),
-            ["ArtifactRecorded", "ToolCallResolved"]
+            ["ArtifactRecorded", "ArtifactRecorded", "ToolCallResolved"]
+        );
+        let RuntimeEventKind::ArtifactRecorded {
+            artifact: input_artifact,
+        } = &events[0].kind
+        else {
+            panic!("shell process input artifact should be recorded first");
+        };
+        assert_eq!(input_artifact.id().as_str(), "process-input-2");
+        let input_content = runtime
+            .read_artifact_content(input_artifact.id())
+            .await
+            .expect("shell process input artifact should be readable");
+        let input_payload: serde_json::Value = serde_json::from_str(
+            input_content
+                .as_text()
+                .expect("shell process input artifact should be textual JSON"),
+        )
+        .expect("shell process input artifact should parse as JSON");
+        assert_eq!(
+            input_payload,
+            json!({
+                "kind": "shell_command_input",
+                "permission_profile_id": "process.shell.read_only.v1",
+                "tool_call_id": "call-command-exec-shell-read-only-opt-in",
+                "tool_name": "policy_command_shell_read_only_opt_in",
+                "intent": {
+                    "summary": "process argv[0]=bash; argc=3; cwd=.",
+                    "cwd": ".",
+                },
+                "input_evidence": {
+                    "kind": "shell_command_script",
+                    "shell": "bash",
+                    "flag": "-lc",
+                    "script": "rg ProcessRunner | wc -l",
+                    "script_bytes": "rg ProcessRunner | wc -l".len(),
+                    "script_fingerprint": stable_process_input_fingerprint(
+                        "rg ProcessRunner | wc -l".as_bytes()
+                    ),
+                },
+            })
         );
         let result = resolved_tool_result(&events);
         assert_eq!(result.status(), merry_core::ToolCallResultStatus::Succeeded);
@@ -7040,18 +7188,13 @@ mod tests {
         );
         assert!(payload["intent"].get("argv").is_none());
         assert_eq!(
-            payload["input_evidence"],
+            payload["input_artifact"],
             json!({
-                "kind": "shell_command_script",
-                "shell": "bash",
-                "flag": "-lc",
-                "script": "rg ProcessRunner | wc -l",
-                "script_bytes": "rg ProcessRunner | wc -l".len(),
-                "script_fingerprint": stable_process_input_fingerprint(
-                    "rg ProcessRunner | wc -l".as_bytes()
-                ),
+                "id": input_artifact.id().as_str(),
+                "kind": "json",
             })
         );
+        assert!(payload.get("input_evidence").is_none());
         assert!(payload.get("provider").is_none());
         assert!(payload.get("wire").is_none());
 
@@ -7107,6 +7250,7 @@ mod tests {
         assert!(
             observation_text.contains(&format!("artifact={}", result.artifact().id().as_str()))
         );
+        assert!(observation_text.contains("input_artifact=process-input-2"));
         assert!(!observation_text.contains("rg ProcessRunner | wc -l"));
     }
 
@@ -7143,7 +7287,7 @@ mod tests {
 
         assert_eq!(
             event_kind_names_for_tool_execution(&events),
-            ["ArtifactRecorded", "ToolCallResolved"]
+            ["ArtifactRecorded", "ArtifactRecorded", "ToolCallResolved"]
         );
         assert_eq!(runner.call_count(), 1);
         assert!(logs.contains("\"event\":\"runtime.process.execute.start\""));
@@ -7448,6 +7592,181 @@ mod tests {
             )
             .await
             .expect_err("runner-cancelled process action must not record result artifact");
+        assert!(matches!(
+            evidence_err,
+            RuntimeError::Artifact {
+                source: ArtifactError::MissingArtifact { id }
+            } if id == expected_result_artifact_id
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn read_only_shell_process_runner_cancel_keeps_input_artifact_before_unresolved_pending()
+    {
+        let script = "rg ProcessRunner | wc -l";
+        let executor = ProcessProposingToolExecutor::with_argv(["bash", "-lc", script]);
+        let runner = FakeProcessRunner::cancelling();
+        let tool = RegisteredTool::new(
+            policy_tool_spec("policy_command_shell_runner_cancel"),
+            Arc::new(executor.clone()),
+            ToolActionKind::CommandExec,
+        )
+        .with_action_proposal();
+        let (runtime, pending) = register_policy_pending_registered_tool_with_builder(
+            "runtime-policy-command-exec-shell-runner-cancel",
+            "policy_command_shell_runner_cancel",
+            "call-command-exec-shell-runner-cancel",
+            tool,
+            |builder| {
+                builder
+                    .allow_read_only_shell_process_actions(Arc::new(runner.clone()))
+                    .build()
+            },
+        )
+        .await;
+
+        let err = runtime
+            .execute_tool_call(pending.id(), ToolExecutionContext::default())
+            .await
+            .expect_err("runner-cancelled shell process action should not resolve");
+
+        assert!(matches!(
+            err,
+            RuntimeError::ToolExecutionCancelled { call_id, .. } if call_id == *pending.id()
+        ));
+        assert_eq!(executor.propose_count(), 1);
+        assert_eq!(executor.execute_count(), 0);
+        assert_eq!(runner.call_count(), 1);
+        assert_eq!(runtime.pending_tool_calls().await, vec![pending]);
+        assert!(action_audit_records(&runtime).await.is_empty());
+
+        let input_content = runtime
+            .read_artifact_content(&artifact_id("process-input-2"))
+            .await
+            .expect("shell input artifact should be durable before runner output");
+        let input_payload: serde_json::Value = serde_json::from_str(
+            input_content
+                .as_text()
+                .expect("shell input artifact should be textual JSON"),
+        )
+        .expect("shell input artifact should parse as JSON");
+        assert_eq!(
+            input_payload["input_evidence"]["script"],
+            "rg ProcessRunner | wc -l"
+        );
+        assert_eq!(
+            input_payload["input_evidence"]["script_fingerprint"],
+            stable_process_input_fingerprint(script.as_bytes())
+        );
+        let input_evidence = runtime
+            .evidence_ref(
+                &artifact_id("process-input-2"),
+                EvidenceLocator::whole_artifact(),
+            )
+            .await
+            .expect("shell input artifact should have an exact evidence ref");
+        assert_eq!(input_evidence.artifact_id, artifact_id("process-input-2"));
+        assert!(
+            lifecycle_kinds(&runtime.ledger_projection().await)
+                .contains(&LedgerFactKind::ArtifactRecorded)
+        );
+
+        let expected_result_artifact_id = artifact_id("tool-result-3");
+        let evidence_err = runtime
+            .evidence_ref(
+                &expected_result_artifact_id,
+                EvidenceLocator::whole_artifact(),
+            )
+            .await
+            .expect_err("runner-cancelled shell action must not record result artifact");
+        assert!(matches!(
+            evidence_err,
+            RuntimeError::Artifact {
+                source: ArtifactError::MissingArtifact { id }
+            } if id == expected_result_artifact_id
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn read_only_shell_process_runner_failure_keeps_input_artifact_before_unresolved_pending()
+    {
+        let script = "rg ProcessRunner | wc -l";
+        let executor = ProcessProposingToolExecutor::with_argv(["bash", "-lc", script]);
+        let runner = FakeProcessRunner::infrastructure_failure("shell runner unavailable");
+        let tool = RegisteredTool::new(
+            policy_tool_spec("policy_command_shell_runner_failure"),
+            Arc::new(executor.clone()),
+            ToolActionKind::CommandExec,
+        )
+        .with_action_proposal();
+        let (runtime, pending) = register_policy_pending_registered_tool_with_builder(
+            "runtime-policy-command-exec-shell-runner-failure",
+            "policy_command_shell_runner_failure",
+            "call-command-exec-shell-runner-failure",
+            tool,
+            |builder| {
+                builder
+                    .allow_read_only_shell_process_actions(Arc::new(runner.clone()))
+                    .build()
+            },
+        )
+        .await;
+
+        let err = runtime
+            .execute_tool_call(pending.id(), ToolExecutionContext::default())
+            .await
+            .expect_err("infrastructure-failed shell process action should not resolve");
+
+        assert!(matches!(
+            err,
+            RuntimeError::ToolExecutionFailed { call_id, message, .. }
+                if call_id == *pending.id() && message == "shell runner unavailable"
+        ));
+        assert_eq!(executor.propose_count(), 1);
+        assert_eq!(executor.execute_count(), 0);
+        assert_eq!(runner.call_count(), 1);
+        assert_eq!(runtime.pending_tool_calls().await, vec![pending]);
+        assert!(action_audit_records(&runtime).await.is_empty());
+
+        let input_content = runtime
+            .read_artifact_content(&artifact_id("process-input-2"))
+            .await
+            .expect("shell input artifact should be durable before runner failure");
+        let input_payload: serde_json::Value = serde_json::from_str(
+            input_content
+                .as_text()
+                .expect("shell input artifact should be textual JSON"),
+        )
+        .expect("shell input artifact should parse as JSON");
+        assert_eq!(
+            input_payload["input_evidence"]["script"],
+            "rg ProcessRunner | wc -l"
+        );
+        assert_eq!(
+            input_payload["input_evidence"]["script_fingerprint"],
+            stable_process_input_fingerprint(script.as_bytes())
+        );
+        let input_evidence = runtime
+            .evidence_ref(
+                &artifact_id("process-input-2"),
+                EvidenceLocator::whole_artifact(),
+            )
+            .await
+            .expect("shell input artifact should have an exact evidence ref");
+        assert_eq!(input_evidence.artifact_id, artifact_id("process-input-2"));
+        assert!(
+            lifecycle_kinds(&runtime.ledger_projection().await)
+                .contains(&LedgerFactKind::ArtifactRecorded)
+        );
+
+        let expected_result_artifact_id = artifact_id("tool-result-3");
+        let evidence_err = runtime
+            .evidence_ref(
+                &expected_result_artifact_id,
+                EvidenceLocator::whole_artifact(),
+            )
+            .await
+            .expect_err("failed shell action must not record result artifact");
         assert!(matches!(
             evidence_err,
             RuntimeError::Artifact {
