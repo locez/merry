@@ -51,6 +51,28 @@ Agents must keep each round tied to the active delivery focus:
   requested tracked update, answer, or research result as that round's delivery
   focus and report it accurately.
 
+## Roadmap Change Control
+
+`ROADMAP.md` is a controlled planning artifact, not an agent scratchpad.
+Agents may update implementation status, completed evidence, validation notes,
+or a user-approved correction. Agents must not unilaterally change the active
+product priority, reorder major milestones, or promote a supporting design
+thread such as policy/profile/classifier work into the primary `Next Active`
+track without explicit user approval.
+
+When a roadmap change affects priority or milestone ordering:
+
+- State the current active goal and the proposed replacement before editing.
+- Name the user instruction or tracked change request that authorizes the
+  priority change.
+- Keep supporting architecture work subordinate to a runnable or testable
+  capability unless the user explicitly asked for planning/design only.
+- Record the reason in `DECISIONS.md` when the change corrects drift or changes
+  the near-term sequence.
+- If the only known next step is more taxonomy, policy, classifier, profile, or
+  roadmap work, stop and ask whether that should replace the current executable
+  acceptance target.
+
 ## Architecture Boundaries
 
 Merry is runtime-first. Keep these ownership boundaries clear:

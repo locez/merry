@@ -31,8 +31,10 @@ user task
 ```
 
 Safety remains mandatory, but it is a runtime property of the loop, not the
-loop's substitute. Policy, risk taxonomy, reviewer evidence, and role-scoped
-models should advance only when they unblock this executable acceptance target.
+loop's substitute. Policy, profile, classifier, risk taxonomy, reviewer
+evidence, and role-scoped model work should advance only when they unblock this
+executable acceptance target or when the user explicitly requests that planning
+work as the deliverable.
 
 Default `cargo test` must stay deterministic, offline, and fake-provider based.
 In addition, Merry needs explicit opt-in smoke lanes:
@@ -193,16 +195,25 @@ The OpenAI provider target is the Responses API only. The provider request path 
   raw script payload. This still does not add a broad model-facing shell tool,
   approval/session semantics, arbitrary env/stdin, or a general shell
   authorization model.
+- Roadmap drift correction is recorded: the shell/parser/profile direction was
+  useful support work, but it had been promoted too far into `Next Active`.
+  The active product proof is corrected back to testing coding-loop capability.
+  Future roadmap priority changes require explicit user approval or a tracked
+  change request; routine implementation status updates remain allowed.
 
 ### Active
 
 - P0: continue the Minimal Useful Coding Loop as the current MVP proof. The loop now has a deterministic fake-provider/fake-runner slice, a deterministic real `bwrap` process-runner smoke, a user-verified live-provider smoke command, and end-to-end config-backed log verification for the deterministic coding-loop smoke.
 - P0: keep the Runtime Coding Loop Harness executable against a disposable fixture repository. The default lane uses fake provider/fake runner for deterministic `cargo test`; the deterministic `bwrap` lane is an explicit ignored smoke; the live OpenAI-compatible lane is also explicit and ignored and has passed in the user's trusted configured environment.
-- P0: extend the runtime-owned shell/process boundary from structured argv
-  intents toward a real shell-compatible execution boundary, not a hand-rolled
-  shell parser. Structured argv remains the narrow typed lane; richer shell
-  syntax must run through a real interpreter inside explicit permission
-  profiles, session grants, and sandbox constraints.
+- P0: make the coding-loop smoke less scripted and more user-testable. The next
+  proof should let a user supply or select a disposable fixture task, then
+  require the model to inspect, read exact evidence, patch, verify, and answer
+  through runtime-owned tools and artifacts.
+- Supporting constraint: shell/process profile work remains subordinate to that
+  coding-loop proof. Structured argv remains the narrow typed lane; richer
+  shell syntax must run through a real interpreter inside explicit permission
+  profiles, session grants, and sandbox constraints, but that design is not the
+  next deliverable by itself.
 - P0: keep process output artifact-backed and context-friendly. Accepted process actions should record stdout/stderr/exit metadata as artifacts before observable events claim them, reduce large output into compact ledger facts plus exact evidence references, and keep dynamic evidence late in compiled context so stable prefixes remain cacheable.
 - P0: keep edit/write on the typed workspace patch path. The MVP loop should apply one constrained patch through `workspace_patch_file` or its runtime-owned successor, record artifact/audit/ledger evidence, and then run verification.
 - Keep safety tiered but subordinate to the executable acceptance target: read-only inspection automatic, constrained patch opt-in, verification in `bwrap`, high-risk or unknown process actions denied or escalated.
@@ -213,25 +224,49 @@ The OpenAI provider target is the Responses API only. The provider request path 
 
 ### Next Active
 
-- Continue M2 from the implemented shell wrapper lane: now that the reusable
-  Tokio runner adapter and pre-execution input artifacts are proven together,
-  define the next shell profile/session boundary, especially how broader shell
-  syntax receives explicit permission or approval without turning the narrow
-  read-only classifier into a general authorization model.
-- Keep defining the shell-compatible runtime boundary as real command/script
-  execution under explicit permission/session profiles, with command input,
-  stdout/stderr/status, audit, ledger, cancellation, and trace records owned by
-  runtime artifacts.
-- Keep static command classifiers as advisory or hard-deny signals only. They
-  may recognize obvious known-safe or forbidden shapes, but they must not be
-  the reason complex shell syntax is allowed.
-- Add a recorded reason when the stable cache prefix changes, now that stable
-  prefix hash, dynamic context hash, tool profile hash, and process
-  `permission_profile_id` are observable.
-- Continue moving coding-loop tool-set/profile registration toward reusable
-  runtime/library construction as M2 consumes the structured process boundary.
-- Keep the opt-in live OpenAI-compatible smoke as a regression lane; when it fails, inspect the failure as model/tool-contract evidence and tune only the smallest runtime/provider/tool fix needed.
-- Keep expanding the Runtime Coding Loop Harness only through executable acceptance slices.
+- Build a configurable disposable coding-loop smoke, not another profile-only
+  slice. The command/test should let the user choose or provide a small fixture
+  task, then run the same loop shape: inspect -> read exact source evidence ->
+  apply one constrained `workspace_patch_file` edit -> run verification ->
+  final answer.
+- First task design: add a non-default CLI/debug lane such as
+  `merry --with-sandbox debug coding-loop-task-smoke` that creates a disposable
+  Rust fixture with a failing assertion or wrong implementation, supplies the
+  model a natural task description, and verifies with a real command such as
+  `cargo test` inside the bwrap lane. The prompt may constrain tools and safety
+  rules, but must not reveal the exact patch as `old_text`/`new_text`.
+- Deterministic acceptance: keep a fake-provider test for the same fixture and
+  tool sequence so default `cargo test` stays offline and reproducible.
+- Live acceptance: keep the OpenAI-compatible lane explicit and ignored; use it
+  to evaluate whether a real model can solve the small fixture task. If it
+  fails, inspect the failure as model/tool-contract evidence and make the
+  smallest prompt/tool/runtime fix needed for that coding task.
+- Do not continue shell permission/session design as the next milestone unless
+  this configurable coding-loop task is blocked by that boundary and the user
+  explicitly approves changing the roadmap priority.
+- Roadmap priority changes require explicit user approval or a tracked change
+  request. Agents may update completion/status evidence, but must not promote
+  policy/profile/classifier work into `Next Active` on their own.
+
+### Drift Audit: 2026-05-28
+
+Roadmap history shows the drift point:
+
+- `5426896 project-continuity: recalibrate mvp roadmap` set the P0 to the
+  Minimal Useful Coding Loop.
+- `ca0a4b2 project-continuity: add coding loop harness`, `e53f721
+  project-continuity: add bwrap coding loop smoke`, and `3d0aeb9
+  project-continuity: add live coding loop smoke` advanced that executable
+  proof.
+- `e945ebc docs: reframe shell boundary away from parser allowlists` made a
+  correct architectural correction, but also moved `Next Active` toward M2
+  shell boundary work. From there, `32fd2af`, `d78c4ef`, and `7680eb3`
+  continued useful shell/profile support while the roadmap language made that
+  support look primary.
+
+Correction: keep the shell/process boundary work as supporting architecture and
+restore the next executable target to testing coding ability through a less
+scripted, user-testable coding-loop smoke.
 
 ### Next Milestone Ladder: Shell/Process Boundary With Artifact-Backed Context Reduction
 

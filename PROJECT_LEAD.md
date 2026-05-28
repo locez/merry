@@ -42,6 +42,12 @@ The current near-term product direction belongs in `ROADMAP.md`. The lead
 agent must read that current status before selecting milestones and must not
 turn one phase's delivery focus into a permanent lifecycle rule.
 
+The lead agent must not change `ROADMAP.md` priority or milestone ordering on
+its own. Status updates and user-approved corrections are allowed; changing the
+active product direction requires explicit user instruction or a tracked change
+request. If a supporting design thread starts displacing an executable MVP
+acceptance target, pause and correct the plan before continuing implementation.
+
 ## Non-Negotiable Boundaries
 
 - Do not commit private docs, strategy notes, or speculative design drafts.

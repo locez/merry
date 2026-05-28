@@ -22,9 +22,12 @@ observability for the runtime-owned tool and action surface that already proves
 the loop: XDG/TOML logging can show runtime loop boundaries, provider request
 metadata, tool choices, process execution, artifact IDs, diagnostics,
 cancellation, and final loop status while deterministic and live smokes run.
-The next boundary is a runtime-owned shell/process boundary with permission
-profiles, stable tool profiles, command classification, and artifact-backed
-context reduction rather than another one-off CLI assembly path.
+The next implementation target is to make that coding-loop smoke less scripted
+and more user-testable: use a disposable fixture task where the model must
+inspect, read exact evidence, patch, verify, and answer without the prompt
+handing it the exact patch text. Shell/process profiles, stable tool profiles,
+command classification, and artifact-backed context reduction remain supporting
+runtime work, not substitutes for the executable coding-loop proof.
 
 Shell/process remains the primary verification and inspection actuator under
 runtime control. A future model should be able to compose ordinary process

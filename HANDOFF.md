@@ -6,47 +6,42 @@ Status: complete
 
 Current milestone or track:
 
-- M2 Shell-Compatible Runtime Boundary.
+- Roadmap drift correction back to Minimal Useful Coding Loop.
 
 Session milestone:
 
-- Fourth implementation slice: make the first real shell runner adapter
-  runtime-owned and prove it against the shell input artifact boundary.
+- User-requested planning correction: audit ROADMAP history, identify where
+  profile/session work displaced the coding-loop MVP, restore the next step to
+  a testable coding capability, and document roadmap change control.
 
 Task queue status:
 
-- Added `merry-runtime::TokioProcessRunner`, a runtime-owned
-  `tokio::process::Command` adapter for the existing `ProcessRunner` trait.
-- The runner clears inherited environment, closes stdin, captures bounded
-  UTF-8 stdout/stderr, maps process status to `ProcessExitStatus`, and handles
-  cooperative cancellation by killing the child process.
-- Removed the duplicate CLI-private `TokioProcessRunner`; CLI shell/debug
-  paths now reuse the runtime-owned adapter.
-- Added a runtime provider-boundary test using real `bash -lc "echo
-  ProcessRunner | wc -l"` under explicit `process.shell.read_only.v1` opt-in.
-  The test proves `process-input-*` is recorded before the result artifact and
-  the result references `input_artifact` without duplicating raw script text.
-- Updated README, `ROADMAP.md`, and `DECISIONS.md` with this reusable real
-  runner adapter slice.
+- Audited `ROADMAP.md` history. The drift point is `e945ebc`: the correction
+  away from a subset shell parser was right, but it moved `Next Active` toward
+  shell profile/session work. Follow-up M2 commits then made supporting profile
+  work look primary.
+- Designed the next task as a configurable disposable coding-loop smoke: a
+  user-selectable or user-supplied tiny fixture task where the model must
+  inspect, read exact evidence, patch through `workspace_patch_file`, run
+  verification, and answer.
+- Updated `ROADMAP.md` to restore the next active track to coding-loop
+  capability and to record the drift audit.
+- Added roadmap change-control rules to `AGENTS.md` and `PROJECT_LEAD.md`.
+- Recorded the correction in `DECISIONS.md`.
 
 Done condition:
 
-- The M2 shell-compatible boundary now has a reusable runtime-owned real process
-  runner adapter and preserves the pre-execution shell input artifact ordering
-  when that adapter executes a real read-only shell wrapper. It still does not
-  introduce a model-facing shell tool, broad shell parser, approval/session
-  semantics, or broad shell admission.
+- The active roadmap is corrected back to a runnable/testable coding-loop
+  capability. Agents are now explicitly prohibited from unilaterally changing
+  roadmap priority or promoting profile/policy/classifier work into `Next
+  Active` without user approval or a tracked change request.
 
 ## What Changed
 
 Files changed:
 
-- `Cargo.toml`
-- `README.md`
-- `crates/merry-cli/src/main.rs`
-- `crates/merry-runtime/src/lib.rs`
-- `crates/merry-runtime/src/process_runner.rs`
-- `crates/merry-runtime/tests/provider_boundary.rs`
+- `AGENTS.md`
+- `PROJECT_LEAD.md`
 - `DECISIONS.md`
 - `EXECUTION_STATE.md`
 - `HANDOFF.md`
@@ -54,41 +49,35 @@ Files changed:
 
 Summary:
 
-- Moved the real Tokio process runner adapter into runtime and exported it.
-- Made CLI shell/debug paths reuse the runtime adapter.
-- Proved a real read-only shell wrapper pipeline still records
-  `process-input-*` first and result `input_artifact` second.
+- Identified where ROADMAP drifted from coding-loop proof into shell/profile
+  design.
+- Restored `Next Active` to a configurable disposable coding-loop smoke.
+- Wrote roadmap change-control guardrails into the repository contract.
 
 ## Validation
 
 Commands run:
 
 - `cargo fmt --all --check`
-- `cargo test -p merry-runtime --test provider_boundary tokio_process_runner_executes_read_only_shell_wrapper_with_input_artifact`
-- `cargo test -p merry-cli shell_`
-- `cargo clippy --all-targets --all-features -- -D warnings`
-- `cargo test --all`
+- `git diff --check`
 
 Result:
 
 - Passed.
-- `cargo test --all` did not run ignored live/bwrap smokes; those remain
-  explicit opt-in lanes.
 
 ## Decisions
 
 Decisions made:
 
-- `TokioProcessRunner` belongs to runtime, not CLI.
-- Runner availability is not authorization; permission/profile opt-in still
-  controls whether a process or shell action executes.
+- The active next step is a configurable disposable coding-loop smoke, not
+  shell profile/session design.
+- ROADMAP priority changes require explicit user approval or a tracked change
+  request.
 
 Pending decisions:
 
-- Approval/session semantics for shell commands beyond the read-only wrapper
-  lane.
-- How broader shell syntax is admitted without turning the read-only classifier
-  into a general authorization model.
+- Exact CLI flags and fixture-task schema for the configurable coding-loop
+  smoke.
 
 ## Blockers
 
@@ -98,23 +87,25 @@ Blockers:
 
 Residual risk:
 
-- `TokioProcessRunner` is not a sandbox and does not enforce filesystem/network
-  policy by itself. Sandbox/profile admission must remain outside the adapter.
-- The real shell test depends on host `bash` and `wc`; it skips when either is
-  unavailable.
+- This lease is documentation/planning correction only. It does not yet add the
+  configurable coding-loop command.
 
 Next exact action:
 
-- Continue M2 by defining the next shell permission/session boundary for
-  broader shell syntax and approval semantics.
+- Implement the configurable disposable coding-loop smoke. Start with a
+  non-default command or ignored integration test that creates/selects a tiny
+  Rust fixture task, gives the model a natural task description without exact
+  patch text, and validates inspect/read/patch/verify/final-answer through
+  runtime events and artifacts.
 
 ## Scope For Next Session
 
 Allowed edits:
 
-- Runtime shell/process artifact and trace boundary modules.
-- Focused tests for shell permission/session admission, output artifacts,
-  cancellation, and ledger reduction.
+- `crates/merry-cli/src/main.rs` and `crates/merry-cli/tests/debug.rs` for the
+  first configurable smoke.
+- Existing runtime/tool crates only if the coding-loop acceptance command
+  exposes a concrete blocker.
 - Public-safe roadmap/decision/continuity updates.
 
 Forbidden edits:
@@ -122,9 +113,9 @@ Forbidden edits:
 - Private raw docs.
 - Real credentials.
 - `.superpowers/`, `.merry/`, `docs/`, or `merry-raw-docs` content.
-- Broad model-facing shell tool before shell artifacts/traces are defined.
+- Roadmap priority changes without explicit user approval.
+- Broad model-facing shell tool or approval/session implementation.
 - A Merry-owned subset shell parser as the authorization model.
-- Approval/session implementation unless explicitly chosen as the next slice.
 - Full-screen TUI, REPL, or multi-turn UI.
 
 Do not reconsider:
@@ -133,6 +124,8 @@ Do not reconsider:
 - Shell compatibility must use real shell execution under explicit profiles;
   do not revive parser-first M2.
 - `process.shell.read_only.v1` must stay distinct from `process.read_only.v1`.
+- Profile/session design is not the next active milestone unless it blocks the
+  coding-loop smoke and the user explicitly approves the priority change.
 - Dynamic ledger/evidence/user context remains outside the stable prefix.
 - Default tests remain deterministic/offline; live provider and bwrap smoke are
   opt-in.
@@ -143,7 +136,7 @@ Status: committed
 
 Message:
 
-- feat(runtime): add tokio process runner adapter
+- docs: restore roadmap focus to coding loop
 
 No-commit reason:
 

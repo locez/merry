@@ -535,3 +535,47 @@ Follow-up:
 Define the next shell permission/session boundary for broader shell syntax and
 approval semantics. Do not expand the narrow read-only shell classifier into
 the general authorization model.
+
+## 2026-05-28 - Roadmap Drift Correction Back To Testable Coding Loop
+
+Decision:
+The active roadmap is corrected back to the Minimal Useful Coding Loop as the
+near-term product proof. Shell/process profile and session work remains
+valuable support, but it must not be the primary `Next Active` track unless the
+user explicitly asks for that planning/design work or it directly unlocks a
+coding-loop acceptance command.
+
+Reason:
+The project drifted when the correct architectural insight "do not build a
+subset shell parser as authorization" was promoted from a constraint into the
+main roadmap sequence. From commit `e945ebc` onward, `ROADMAP.md` began
+framing `Next Active` around M2 shell profile/session boundaries. Subsequent
+shell-input and runner-adapter slices were useful, but they made profile work
+look like the goal instead of support for testing real coding ability.
+
+Evidence:
+Commit `5426896` set the P0 direction to the Minimal Useful Coding Loop. Commits
+`ca0a4b2` and `3d0aeb9` advanced that path with deterministic and live
+coding-loop smokes. Commit `e945ebc` correctly reframed shell compatibility
+away from parser allowlists, but also moved `Next Active` to shell-compatible
+runtime boundary work. Commits `32fd2af`, `d78c4ef`, and `7680eb3` then
+continued implementing shell/profile support. The user explicitly challenged
+this drift and asked to review ROADMAP history, correct it, and document that
+agents must not change ROADMAP direction on their own.
+
+Tradeoff:
+This does not discard the shell/process boundary work already completed. It
+keeps those pieces as foundations and constraints, but prevents more profile or
+permission taxonomy from displacing a runnable coding capability milestone.
+
+Reversible:
+Yes, with explicit user approval. A future roadmap can prioritize
+profile/session work again if a concrete coding-loop acceptance target is
+blocked by that boundary and the priority change is recorded.
+
+Follow-up:
+Next implementation should make coding ability easier to test: add a
+configurable disposable coding-loop smoke where the user can supply or select a
+small fixture task, the live model must inspect/read/patch/verify it, and the
+acceptance command proves the loop without hard-coding the exact solution into
+the prompt.
