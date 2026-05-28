@@ -2277,7 +2277,7 @@ async fn submit_tool_result_rejects_reserved_artifact_ids_without_mutation() {
     let call = pending_tool_call(&pending_events).clone();
     let before = runtime.ledger_projection().await;
 
-    for reserved_id in ["tool-result-4", "assistant-output-4"] {
+    for reserved_id in ["tool-result-4", "assistant-output-4", "process-input-4"] {
         let artifact = ArtifactRef::new(artifact_id(reserved_id), ArtifactKind::Text);
         let result = ToolCallResult::succeeded(call.id().clone(), artifact.clone());
         let err = runtime

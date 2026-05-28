@@ -410,33 +410,43 @@ async fn record_artifact_rejects_reserved_assistant_output_id_without_mutation()
     let runtime = Runtime::builder(session_id())
         .build()
         .expect("runtime should build");
-    let artifact = ArtifactRef::new(artifact_id("assistant-output-3"), ArtifactKind::Text);
-    let before = runtime.ledger_projection().await;
-
-    let err = runtime
-        .record_artifact(
-            artifact.clone(),
+    for (reserved_id, artifact_kind, content) in [
+        (
+            "assistant-output-3",
+            ArtifactKind::Text,
             ArtifactContent::text("external shadow output\n"),
-        )
-        .await
-        .expect_err("external recording should not use runtime-owned assistant output ids");
-    let after = runtime.ledger_projection().await;
+        ),
+        (
+            "process-input-3",
+            ArtifactKind::Json,
+            ArtifactContent::json(r#"{"kind":"external-shadow"}"#),
+        ),
+    ] {
+        let artifact = ArtifactRef::new(artifact_id(reserved_id), artifact_kind);
+        let before = runtime.ledger_projection().await;
 
-    assert!(matches!(
-        err,
-        RuntimeError::ReservedArtifactId { artifact_id } if artifact_id == *artifact.id()
-    ));
-    assert_projection_unchanged(&before, &after);
-    let evidence_err = runtime
-        .evidence_ref(artifact.id(), EvidenceLocator::whole_artifact())
-        .await
-        .expect_err("reserved artifact must not be recorded");
-    assert!(matches!(
-        evidence_err,
-        RuntimeError::Artifact {
-            source: ArtifactError::MissingArtifact { id }
-        } if id == *artifact.id()
-    ));
+        let err = runtime
+            .record_artifact(artifact.clone(), content)
+            .await
+            .expect_err("external recording should not use runtime-owned artifact ids");
+        let after = runtime.ledger_projection().await;
+
+        assert!(matches!(
+            err,
+            RuntimeError::ReservedArtifactId { artifact_id } if artifact_id == *artifact.id()
+        ));
+        assert_projection_unchanged(&before, &after);
+        let evidence_err = runtime
+            .evidence_ref(artifact.id(), EvidenceLocator::whole_artifact())
+            .await
+            .expect_err("reserved artifact must not be recorded");
+        assert!(matches!(
+            evidence_err,
+            RuntimeError::Artifact {
+                source: ArtifactError::MissingArtifact { id }
+            } if id == *artifact.id()
+        ));
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]

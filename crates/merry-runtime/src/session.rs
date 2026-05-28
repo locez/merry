@@ -28,6 +28,7 @@ use merry_core::{
 use std::collections::BTreeSet;
 
 const ASSISTANT_OUTPUT_ARTIFACT_PREFIX: &str = "assistant-output-";
+const PROCESS_INPUT_ARTIFACT_PREFIX: &str = "process-input-";
 const TOOL_RESULT_ARTIFACT_PREFIX: &str = "tool-result-";
 
 /// Resolved tool call state that has not yet been compiled into a provider request.
@@ -212,6 +213,15 @@ impl SessionState {
         ));
 
         Ok(events)
+    }
+
+    pub(crate) fn record_process_input_artifact(
+        &mut self,
+        content: ArtifactContent,
+    ) -> Result<(ArtifactRef, Vec<RuntimeEvent>), ArtifactError> {
+        let artifact = ArtifactRef::new(process_input_id(self.next_sequence()), ArtifactKind::Json);
+        let events = self.record_artifact_events(artifact.clone(), content)?;
+        Ok((artifact, events))
     }
 
     pub(crate) fn record_assistant_text_output(
@@ -973,12 +983,20 @@ pub(crate) fn is_runtime_reserved_artifact_id(artifact_id: &ArtifactId) -> bool 
         .starts_with(ASSISTANT_OUTPUT_ARTIFACT_PREFIX)
         || artifact_id
             .as_str()
+            .starts_with(PROCESS_INPUT_ARTIFACT_PREFIX)
+        || artifact_id
+            .as_str()
             .starts_with(TOOL_RESULT_ARTIFACT_PREFIX)
 }
 
 fn assistant_output_id(sequence: u64) -> ArtifactId {
     ArtifactId::new(&format!("{ASSISTANT_OUTPUT_ARTIFACT_PREFIX}{sequence}"))
         .expect("assistant output artifact id uses a valid static prefix and sequence")
+}
+
+fn process_input_id(sequence: u64) -> ArtifactId {
+    ArtifactId::new(&format!("{PROCESS_INPUT_ARTIFACT_PREFIX}{sequence}"))
+        .expect("process input artifact id uses a valid static prefix and sequence")
 }
 
 fn tool_result_id(sequence: u64) -> ArtifactId {
