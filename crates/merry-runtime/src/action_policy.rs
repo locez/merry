@@ -321,8 +321,8 @@ mod tests {
     fn pending_tool_call() -> PendingToolCall {
         PendingToolCall::new(
             ToolCallId::new("call-risk-classifier").expect("valid call id"),
-            ToolName::new("patch_file").expect("valid tool name"),
-            ToolCallArguments::try_from(json!({ "path": "notes/proposed.txt" }))
+            ToolName::new("workspace_patch").expect("valid tool name"),
+            ToolCallArguments::try_from(json!({ "patch": "*** Begin Workspace Patch\n*** Update File: notes/proposed.txt\n-old\n+new\n*** End Workspace Patch" }))
                 .expect("object arguments are valid"),
         )
     }

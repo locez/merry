@@ -448,7 +448,7 @@ impl ActionProposal {
 /// Provider-neutral deterministic evidence attached to an action proposal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActionProposalEvidence {
-    /// A constrained single-file workspace patch proposal.
+    /// A constrained workspace patch proposal.
     WorkspacePatch(WorkspacePatchProposal),
     /// A typed local process action intent.
     ProcessAction(ProcessActionIntent),
@@ -471,7 +471,7 @@ impl ActionProposalEvidence {
 /// continuations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActionExecutionEvidence {
-    /// A constrained single-file workspace patch that was actually applied.
+    /// A constrained workspace patch that was actually applied.
     WorkspacePatch(WorkspacePatchExecutionEvidence),
     /// Evidence from a local process action execution.
     ProcessAction(ProcessExecutionEvidence),
@@ -487,12 +487,12 @@ impl ActionExecutionEvidence {
     }
 }
 
-/// Execute-time metadata for a constrained workspace patch.
+/// Per-file metadata for a constrained workspace patch change.
 ///
 /// This stores only relative workspace identity, byte counts, and stable
 /// non-cryptographic content fingerprints. It does not store old or new text.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WorkspacePatchExecutionEvidence {
+pub struct WorkspacePatchChangeEvidence {
     relative_path: String,
     preimage_bytes: usize,
     replacement_bytes: usize,
@@ -502,8 +502,8 @@ pub struct WorkspacePatchExecutionEvidence {
     file_fingerprint_after: String,
 }
 
-impl WorkspacePatchExecutionEvidence {
-    /// Creates validated execute-time metadata for a single workspace patch.
+impl WorkspacePatchChangeEvidence {
+    /// Creates validated metadata for one file change in a workspace patch.
     pub fn new(
         relative_path: impl Into<String>,
         preimage_bytes: usize,
@@ -583,21 +583,107 @@ impl WorkspacePatchExecutionEvidence {
     }
 }
 
+/// Execute-time metadata for a constrained workspace patch.
+///
+/// This stores one or more file changes. It intentionally does not store old or
+/// new text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspacePatchExecutionEvidence {
+    changes: Vec<WorkspacePatchChangeEvidence>,
+}
+
+impl WorkspacePatchExecutionEvidence {
+    /// Creates validated execute-time metadata for a single workspace patch.
+    pub fn new(
+        relative_path: impl Into<String>,
+        preimage_bytes: usize,
+        replacement_bytes: usize,
+        file_bytes_before: usize,
+        file_bytes_after: usize,
+        file_fingerprint_before: impl Into<String>,
+        file_fingerprint_after: impl Into<String>,
+    ) -> Result<Self, ActionProposalError> {
+        Self::from_changes(vec![WorkspacePatchChangeEvidence::new(
+            relative_path,
+            preimage_bytes,
+            replacement_bytes,
+            file_bytes_before,
+            file_bytes_after,
+            file_fingerprint_before,
+            file_fingerprint_after,
+        )?])
+    }
+
+    /// Creates execute-time metadata for a multi-file workspace patch.
+    pub fn from_changes(
+        changes: Vec<WorkspacePatchChangeEvidence>,
+    ) -> Result<Self, ActionProposalError> {
+        validate_workspace_patch_changes(&changes)?;
+        Ok(Self { changes })
+    }
+
+    /// Returns all file changes included in this patch.
+    #[must_use]
+    pub fn changes(&self) -> &[WorkspacePatchChangeEvidence] {
+        &self.changes
+    }
+
+    fn first_change(&self) -> &WorkspacePatchChangeEvidence {
+        self.changes
+            .first()
+            .expect("workspace patch execution evidence always has at least one change")
+    }
+
+    /// Returns the first workspace-relative path using `/` separators.
+    #[must_use]
+    pub fn relative_path(&self) -> &str {
+        self.first_change().relative_path()
+    }
+
+    /// Returns the byte length of the first matched preimage.
+    #[must_use]
+    pub fn preimage_bytes(&self) -> usize {
+        self.first_change().preimage_bytes()
+    }
+
+    /// Returns the byte length of the first replacement text.
+    #[must_use]
+    pub fn replacement_bytes(&self) -> usize {
+        self.first_change().replacement_bytes()
+    }
+
+    /// Returns the first file size immediately before replacement.
+    #[must_use]
+    pub fn file_bytes_before(&self) -> usize {
+        self.first_change().file_bytes_before()
+    }
+
+    /// Returns the first file size observed after replacement was written and read back.
+    #[must_use]
+    pub fn file_bytes_after(&self) -> usize {
+        self.first_change().file_bytes_after()
+    }
+
+    /// Returns the first stable non-cryptographic fingerprint before replacement.
+    #[must_use]
+    pub fn file_fingerprint_before(&self) -> &str {
+        self.first_change().file_fingerprint_before()
+    }
+
+    /// Returns the first stable non-cryptographic fingerprint after replacement.
+    #[must_use]
+    pub fn file_fingerprint_after(&self) -> &str {
+        self.first_change().file_fingerprint_after()
+    }
+}
+
 /// Deterministic metadata for a constrained workspace patch proposal.
 ///
-/// This stores only relative workspace identity, byte counts, and stable
-/// non-cryptographic content fingerprints needed for a future edit decision.
-/// It does not store old text, new text, host absolute paths, or provider wire
-/// data.
+/// This stores one or more file changes needed for a future edit decision. It
+/// does not store old text, new text, host absolute paths, or provider wire data.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspacePatchProposal {
-    relative_path: String,
-    preimage_bytes: usize,
-    replacement_bytes: usize,
-    file_bytes_before: usize,
-    file_bytes_after: usize,
-    file_fingerprint_before: String,
-    file_fingerprint_after: String,
+    changes: Vec<WorkspacePatchChangeEvidence>,
 }
 
 impl WorkspacePatchProposal {
@@ -611,23 +697,7 @@ impl WorkspacePatchProposal {
         file_fingerprint_before: impl Into<String>,
         file_fingerprint_after: impl Into<String>,
     ) -> Result<Self, ActionProposalError> {
-        let relative_path = validate_workspace_patch_relative_path(relative_path.into())?;
-        validate_workspace_patch_counts(
-            preimage_bytes,
-            replacement_bytes,
-            file_bytes_before,
-            file_bytes_after,
-        )?;
-        let file_fingerprint_before = validate_workspace_patch_fingerprint(
-            "file_fingerprint_before",
-            file_fingerprint_before.into(),
-        )?;
-        let file_fingerprint_after = validate_workspace_patch_fingerprint(
-            "file_fingerprint_after",
-            file_fingerprint_after.into(),
-        )?;
-
-        Ok(Self {
+        Self::from_changes(vec![WorkspacePatchChangeEvidence::new(
             relative_path,
             preimage_bytes,
             replacement_bytes,
@@ -635,50 +705,82 @@ impl WorkspacePatchProposal {
             file_bytes_after,
             file_fingerprint_before,
             file_fingerprint_after,
-        })
+        )?])
     }
 
-    /// Returns the workspace-relative path using `/` separators.
+    /// Creates proposal metadata for a multi-file workspace patch.
+    pub fn from_changes(
+        changes: Vec<WorkspacePatchChangeEvidence>,
+    ) -> Result<Self, ActionProposalError> {
+        validate_workspace_patch_changes(&changes)?;
+        Ok(Self { changes })
+    }
+
+    /// Returns all file changes included in this patch.
+    #[must_use]
+    pub fn changes(&self) -> &[WorkspacePatchChangeEvidence] {
+        &self.changes
+    }
+
+    fn first_change(&self) -> &WorkspacePatchChangeEvidence {
+        self.changes
+            .first()
+            .expect("workspace patch proposal always has at least one change")
+    }
+
+    /// Returns the first workspace-relative path using `/` separators.
     #[must_use]
     pub fn relative_path(&self) -> &str {
-        &self.relative_path
+        self.first_change().relative_path()
     }
 
-    /// Returns the byte length of the matched preimage.
+    /// Returns the byte length of the first matched preimage.
     #[must_use]
     pub fn preimage_bytes(&self) -> usize {
-        self.preimage_bytes
+        self.first_change().preimage_bytes()
     }
 
-    /// Returns the byte length of the replacement text.
+    /// Returns the byte length of the first replacement text.
     #[must_use]
     pub fn replacement_bytes(&self) -> usize {
-        self.replacement_bytes
+        self.first_change().replacement_bytes()
     }
 
-    /// Returns the file size before replacement.
+    /// Returns the first file size before replacement.
     #[must_use]
     pub fn file_bytes_before(&self) -> usize {
-        self.file_bytes_before
+        self.first_change().file_bytes_before()
     }
 
-    /// Returns the projected file size after replacement.
+    /// Returns the first projected file size after replacement.
     #[must_use]
     pub fn file_bytes_after(&self) -> usize {
-        self.file_bytes_after
+        self.first_change().file_bytes_after()
     }
 
-    /// Returns the stable non-cryptographic fingerprint before replacement.
+    /// Returns the first stable non-cryptographic fingerprint before replacement.
     #[must_use]
     pub fn file_fingerprint_before(&self) -> &str {
-        &self.file_fingerprint_before
+        self.first_change().file_fingerprint_before()
     }
 
-    /// Returns the projected stable non-cryptographic fingerprint after replacement.
+    /// Returns the first projected stable non-cryptographic fingerprint after replacement.
     #[must_use]
     pub fn file_fingerprint_after(&self) -> &str {
-        &self.file_fingerprint_after
+        self.first_change().file_fingerprint_after()
     }
+}
+
+fn validate_workspace_patch_changes(
+    changes: &[WorkspacePatchChangeEvidence],
+) -> Result<(), ActionProposalError> {
+    if changes.is_empty() {
+        return Err(ActionProposalError::InvalidWorkspacePatch {
+            field: "changes",
+            reason: "must contain at least one file change",
+        });
+    }
+    Ok(())
 }
 
 fn validate_workspace_patch_counts(
@@ -1232,7 +1334,7 @@ mod tests {
 
     #[test]
     fn action_proposal_rejects_read_only_and_blank_text() {
-        let call = pending_call("workspace_patch_file");
+        let call = pending_call("workspace_patch");
         let evidence = ActionProposalEvidence::WorkspacePatch(
             WorkspacePatchProposal::new(
                 "note.txt",

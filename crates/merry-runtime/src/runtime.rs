@@ -46,6 +46,7 @@ use merry_llm::{
     ModelStreamContext, ModelToolCall, ProviderErrorKind,
 };
 use std::{
+    collections::BTreeMap,
     num::NonZeroUsize,
     sync::{
         Arc,
@@ -67,7 +68,7 @@ const DIAGNOSTIC_TOOL_CALL_RESULT_REQUIRED: &str = "tool_call_result_required";
 const DIAGNOSTIC_TOOL_ACTION_POLICY_DENIED: &str = "action_policy_denied";
 const DIAGNOSTIC_TOOL_NOT_REGISTERED: &str = "tool_not_registered";
 const TOOL_ACTION_POLICY_DENIED_MESSAGE: &str = "tool action was blocked by runtime policy";
-const WORKSPACE_PATCH_FILE_TOOL_NAME: &str = "workspace_patch_file";
+const WORKSPACE_PATCH_TOOL_NAME: &str = "workspace_patch";
 
 /// Merry runtime handle for one session.
 ///
@@ -392,7 +393,7 @@ impl Runtime {
 
             if let Some(proposal) = proposal {
                 if self.inner.allow_low_risk_workspace_patches
-                    && pending.name().as_str() == WORKSPACE_PATCH_FILE_TOOL_NAME
+                    && pending.name().as_str() == WORKSPACE_PATCH_TOOL_NAME
                     && is_low_risk_workspace_patch_proposal(
                         registered_tool.action_kind(),
                         &proposal,
@@ -1292,15 +1293,7 @@ fn action_execution_evidence_matches_proposal(
         (
             ActionProposalEvidence::WorkspacePatch(proposed),
             ActionExecutionEvidence::WorkspacePatch(executed),
-        ) => {
-            proposed.relative_path() == executed.relative_path()
-                && proposed.preimage_bytes() == executed.preimage_bytes()
-                && proposed.replacement_bytes() == executed.replacement_bytes()
-                && proposed.file_bytes_before() == executed.file_bytes_before()
-                && proposed.file_bytes_after() == executed.file_bytes_after()
-                && proposed.file_fingerprint_before() == executed.file_fingerprint_before()
-                && proposed.file_fingerprint_after() == executed.file_fingerprint_after()
-        }
+        ) => proposed.changes() == executed.changes(),
         (
             ActionProposalEvidence::ProcessAction(proposed),
             ActionExecutionEvidence::ProcessAction(executed),
@@ -1323,7 +1316,7 @@ pub(crate) fn admit_action_to_generic_executor(
     let low_risk_workspace_patch_admitted = decision.is_allowed()
         && decision.action_kind() == crate::ToolActionKind::WorkspaceWrite
         && decision.risk_tier() == crate::action_policy::ActionRiskTier::EditLow
-        && pending.name().as_str() == WORKSPACE_PATCH_FILE_TOOL_NAME
+        && pending.name().as_str() == WORKSPACE_PATCH_TOOL_NAME
         && action_kind == crate::ToolActionKind::WorkspaceWrite
         && proposal
             .is_some_and(|proposal| is_low_risk_workspace_patch_proposal(action_kind, proposal));
@@ -1349,6 +1342,7 @@ pub struct RuntimeBuilder {
     event_buffer_size: NonZeroUsize,
     model_configs: RuntimeModelConfigs,
     registered_tools: Vec<RegisteredTool>,
+    initial_context_summaries: BTreeMap<String, String>,
     memory_activation_source: Arc<dyn MemoryActivationSource>,
     allow_low_risk_workspace_patches: bool,
     low_risk_process_runner: Option<Arc<dyn ProcessRunner>>,
@@ -1364,6 +1358,7 @@ impl RuntimeBuilder {
                 .expect("default event buffer size is non-zero"),
             model_configs: RuntimeModelConfigs::default(),
             registered_tools: Vec::new(),
+            initial_context_summaries: BTreeMap::new(),
             memory_activation_source: Arc::new(StoredMemoryActivationSource),
             allow_low_risk_workspace_patches: false,
             low_risk_process_runner: None,
@@ -1419,6 +1414,18 @@ impl RuntimeBuilder {
     #[must_use]
     pub fn register_tool(mut self, tool: RegisteredTool) -> Self {
         self.registered_tools.push(tool);
+        self
+    }
+
+    /// Seeds deterministic runtime context without emitting observable events.
+    ///
+    /// This is for startup-owned facts such as a compact project capability
+    /// summary. It is not a substitute for runtime artifacts produced during a
+    /// step, and repeated ids are replaced before build-time validation.
+    #[must_use]
+    pub fn initial_context_summary(mut self, id: &str, text: &str) -> Self {
+        self.initial_context_summaries
+            .insert(id.to_owned(), text.to_owned());
         self
     }
 
@@ -1484,10 +1491,15 @@ impl RuntimeBuilder {
                 }
             })?;
 
+        let mut session = SessionState::new(self.session_id.clone());
+        for (id, text) in self.initial_context_summaries {
+            session.seed_context_summary(&id, &text)?;
+        }
+
         Ok(Runtime {
             inner: Arc::new(RuntimeInner {
                 session_id: self.session_id.clone(),
-                session: Mutex::new(SessionState::new(self.session_id)),
+                session: Mutex::new(session),
                 active_step: Arc::new(AtomicBool::new(false)),
                 memory_projection_epoch: AtomicU64::new(0),
                 event_buffer_size: self.event_buffer_size,
@@ -2483,9 +2495,9 @@ async fn reserve_cancelled_event_slot<'a>(
 mod tests {
     use super::{
         DIAGNOSTIC_TOOL_ACTION_POLICY_DENIED, DIAGNOSTIC_TOOL_CALL_RESULT_REQUIRED, Runtime,
-        RuntimeBuilder, RuntimeInner, TOOL_ACTION_POLICY_DENIED_MESSAGE,
-        WORKSPACE_PATCH_FILE_TOOL_NAME, admit_action_to_generic_executor,
-        memory_activation_seed_from_step_input, send_cancelled_event,
+        RuntimeBuilder, RuntimeInner, TOOL_ACTION_POLICY_DENIED_MESSAGE, WORKSPACE_PATCH_TOOL_NAME,
+        admit_action_to_generic_executor, memory_activation_seed_from_step_input,
+        send_cancelled_event,
     };
     use crate::action_audit::ActionAuditStatus;
     use crate::action_policy::{
@@ -4156,9 +4168,11 @@ mod tests {
         assert_eq!(requests[0].messages().len(), 3);
         assert_eq!(requests[0].stable_prefix_message_count(), 1);
         assert_eq!(requests[0].messages()[0].role(), ModelMessageRole::System);
-        assert_eq!(
-            requests[0].messages()[0].content().as_text(),
-            "You are Merry."
+        assert!(
+            requests[0].messages()[0]
+                .content()
+                .as_text()
+                .contains("You are Merry, a pragmatic coding agent.")
         );
         assert_eq!(requests[0].messages()[1].role(), ModelMessageRole::System);
         assert_eq!(requests[0].messages()[2].role(), ModelMessageRole::User);
@@ -4218,9 +4232,11 @@ mod tests {
         assert_eq!(requests[0].messages().len(), 2);
         assert_eq!(requests[0].stable_prefix_message_count(), 1);
         assert_eq!(requests[0].messages()[0].role(), ModelMessageRole::System);
-        assert_eq!(
-            requests[0].messages()[0].content().as_text(),
-            "You are Merry."
+        assert!(
+            requests[0].messages()[0]
+                .content()
+                .as_text()
+                .contains("You are Merry, a pragmatic coding agent.")
         );
         assert_eq!(requests[0].messages()[1].role(), ModelMessageRole::User);
         assert_eq!(
@@ -4325,9 +4341,11 @@ mod tests {
         assert_eq!(requests[1].messages().len(), 2);
         assert_eq!(requests[1].stable_prefix_message_count(), 1);
         assert_eq!(requests[1].messages()[0].role(), ModelMessageRole::System);
-        assert_eq!(
-            requests[1].messages()[0].content().as_text(),
-            "You are Merry."
+        assert!(
+            requests[1].messages()[0]
+                .content()
+                .as_text()
+                .contains("You are Merry, a pragmatic coding agent.")
         );
         assert_eq!(requests[1].messages()[1].role(), ModelMessageRole::User);
         assert!(
@@ -5730,7 +5748,7 @@ mod tests {
     #[test]
     fn generic_executor_admission_allows_read_only_and_rejects_mutating_actions() {
         let session_id = SessionId::new("generic-executor-admission").expect("valid session id");
-        let pending = policy_pending_tool_call("call-admission", WORKSPACE_PATCH_FILE_TOOL_NAME);
+        let pending = policy_pending_tool_call("call-admission", WORKSPACE_PATCH_TOOL_NAME);
 
         let read_only_decision = DefaultActionPolicy.decide(ToolActionKind::ReadOnly);
         admit_action_to_generic_executor(
@@ -5810,7 +5828,7 @@ mod tests {
             Some(&proposal),
             &session_id,
         )
-        .expect_err("only workspace_patch_file may enter the low-risk patch lane");
+        .expect_err("only workspace_patch may enter the low-risk patch lane");
         assert!(matches!(
             err,
             crate::RuntimeError::MutatingActionCommitLifecycleRequired {
@@ -6037,14 +6055,14 @@ mod tests {
     async fn opt_in_workspace_write_patch_proposal_executes_and_records_execution_audit() {
         let executor = ProposingToolExecutor::immediate();
         let tool = RegisteredTool::new(
-            policy_tool_spec(WORKSPACE_PATCH_FILE_TOOL_NAME),
+            policy_tool_spec(WORKSPACE_PATCH_TOOL_NAME),
             Arc::new(executor.clone()),
             ToolActionKind::WorkspaceWrite,
         )
         .with_action_proposal();
         let (runtime, pending) = register_policy_pending_registered_tool_with_builder(
             "runtime-policy-proposed-workspace-write-opt-in",
-            WORKSPACE_PATCH_FILE_TOOL_NAME,
+            WORKSPACE_PATCH_TOOL_NAME,
             "call-workspace-write-opt-in",
             tool,
             |builder| builder.allow_low_risk_workspace_patches().build(),
@@ -6133,7 +6151,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn opt_in_workspace_write_patch_proposal_rejects_non_patch_file_tool_name() {
+    async fn opt_in_workspace_write_patch_proposal_rejects_non_patch_tool_name() {
         let executor = ProposingToolExecutor::immediate();
         let tool = RegisteredTool::new(
             policy_tool_spec("policy_write_opt_in"),
@@ -6185,14 +6203,14 @@ mod tests {
     async fn opt_in_workspace_write_patch_records_outcome_when_cancelled_after_side_effect() {
         let executor = CancellingOptInPatchExecutor::new();
         let tool = RegisteredTool::new(
-            policy_tool_spec(WORKSPACE_PATCH_FILE_TOOL_NAME),
+            policy_tool_spec(WORKSPACE_PATCH_TOOL_NAME),
             Arc::new(executor.clone()),
             ToolActionKind::WorkspaceWrite,
         )
         .with_action_proposal();
         let (runtime, pending) = register_policy_pending_registered_tool_with_builder(
             "runtime-policy-workspace-write-opt-in-cancel-after-side-effect",
-            WORKSPACE_PATCH_FILE_TOOL_NAME,
+            WORKSPACE_PATCH_TOOL_NAME,
             "call-workspace-write-opt-in-cancel-after-side-effect",
             tool,
             |builder| builder.allow_low_risk_workspace_patches().build(),
@@ -6239,14 +6257,14 @@ mod tests {
     async fn opt_in_workspace_write_patch_missing_execution_evidence_fails_closed() {
         let executor = ProposingToolExecutor::missing_execution_evidence();
         let tool = RegisteredTool::new(
-            policy_tool_spec(WORKSPACE_PATCH_FILE_TOOL_NAME),
+            policy_tool_spec(WORKSPACE_PATCH_TOOL_NAME),
             Arc::new(executor.clone()),
             ToolActionKind::WorkspaceWrite,
         )
         .with_action_proposal();
         let (runtime, pending) = register_policy_pending_registered_tool_with_builder(
             "runtime-policy-workspace-write-opt-in-missing-evidence",
-            WORKSPACE_PATCH_FILE_TOOL_NAME,
+            WORKSPACE_PATCH_TOOL_NAME,
             "call-workspace-write-opt-in-missing-evidence",
             tool,
             |builder| builder.allow_low_risk_workspace_patches().build(),

@@ -17,9 +17,9 @@ use merry_runtime::{
     ToolExecutionContext,
 };
 use merry_tool_workspace::{
-    ReadOnlyWorkspaceTools, WORKSPACE_LIST_DIR_TOOL, WORKSPACE_PATCH_FILE_TOOL,
+    ReadOnlyWorkspaceTools, WORKSPACE_LIST_DIR_TOOL, WORKSPACE_PATCH_TOOL,
     WORKSPACE_READ_FILE_TOOL, WORKSPACE_SEARCH_TEXT_TOOL, WorkspaceCodingLoopProfile,
-    WorkspaceToolsConfig,
+    WorkspaceToolLimits, WorkspaceToolsConfig,
 };
 use serde_json::{Map, Value};
 use std::{
@@ -117,12 +117,19 @@ fn pending_search_text_call(path: &str, query: &str) -> ModelEvent {
     )
 }
 
-fn pending_patch_file_call(path: &str, old_text: &str, new_text: &str) -> ModelEvent {
+fn pending_patch_call(path: &str, old_text: &str, new_text: &str) -> ModelEvent {
     let mut arguments = Map::new();
-    arguments.insert("path".to_owned(), Value::String(path.to_owned()));
-    arguments.insert("old_text".to_owned(), Value::String(old_text.to_owned()));
-    arguments.insert("new_text".to_owned(), Value::String(new_text.to_owned()));
-    pending_workspace_call("workspace-patch-call", WORKSPACE_PATCH_FILE_TOOL, arguments)
+    arguments.insert(
+        "patch".to_owned(),
+        Value::String(update_patch(path, old_text, new_text)),
+    );
+    pending_workspace_call("workspace-patch-call", WORKSPACE_PATCH_TOOL, arguments)
+}
+
+fn update_patch(path: &str, old_text: &str, new_text: &str) -> String {
+    format!(
+        "*** Begin Workspace Patch\n*** Update File: {path}\n-{old_text}\n+{new_text}\n*** End Workspace Patch"
+    )
 }
 
 fn pending_process_call(call_id: &str, argv: &[&str]) -> ModelEvent {
@@ -289,19 +296,22 @@ fn runtime_with_coding_loop_tools(
     provider: ScriptedModelProvider,
     runner: Arc<dyn ProcessRunner>,
 ) -> Runtime {
-    WorkspaceCodingLoopProfile::new(WorkspaceToolsConfig::new(vec![root.to_path_buf()]))
-        .expect("workspace coding loop profile should construct")
-        .with_patch_tool()
-        .with_cli_bwrap_process_runner(
-            AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
-            runner,
-        )
-        .register_on(
-            Runtime::builder(session_id()).model_provider(Arc::new(provider), model_name()),
-        )
-        .expect("workspace coding loop runtime should build")
-        .build()
-        .expect("runtime should build")
+    WorkspaceCodingLoopProfile::new(
+        WorkspaceToolsConfig::new(vec![root.to_path_buf()]).with_limits(WorkspaceToolLimits {
+            max_patch_bytes: 256,
+            ..WorkspaceToolLimits::default()
+        }),
+    )
+    .expect("workspace coding loop profile should construct")
+    .with_patch_tool()
+    .with_cli_bwrap_process_runner(
+        AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
+        runner,
+    )
+    .register_on(Runtime::builder(session_id()).model_provider(Arc::new(provider), model_name()))
+    .expect("workspace coding loop runtime should build")
+    .build()
+    .expect("runtime should build")
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -354,9 +364,58 @@ async fn workspace_coding_loop_profile_registers_expected_tools_and_process_lane
     assert!(
         !tool_names
             .iter()
-            .any(|tool| tool.name().as_str() == WORKSPACE_PATCH_FILE_TOOL),
+            .any(|tool| tool.name().as_str() == WORKSPACE_PATCH_TOOL),
         "patch tool should require the explicit with_patch lane"
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn workspace_coding_loop_profile_seeds_project_capability_context() {
+    let temp = TempWorkspace::new("coding-loop-profile-project-context");
+    temp.write_text("Cargo.toml", "[package]\nname = \"fixture\"\n");
+    temp.write_text("AGENTS.md", "Use fixture rules.\n");
+    let provider = ScriptedModelProvider::new(vec![vec![Ok(ModelEvent::Completed {
+        response: ModelResponse::new(
+            vec![ModelOutput::text("inspected")],
+            FinishReason::Stop,
+            None,
+        ),
+    })]]);
+    let provider_handle = provider.clone();
+    let runner = Arc::new(ScriptedProcessRunner::new(Vec::new()));
+    let runtime = runtime_with_coding_loop_tools(temp.path(), provider, runner);
+
+    let events = collect_step(&runtime, "inspect project").await;
+
+    assert_eq!(
+        event_kind_names(&events),
+        [
+            "SessionStarted",
+            "StepStarted",
+            "ArtifactRecorded",
+            "StepCompleted"
+        ],
+        "seeded project context should not emit startup artifact events"
+    );
+    let requests = provider_handle.recorded_requests();
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert_eq!(request.stable_prefix_message_count(), 1);
+    assert_eq!(request.messages().len(), 3);
+    let base_instructions = request.messages()[0].content().as_text();
+    assert!(base_instructions.contains("You are Merry, a pragmatic coding agent."));
+    assert!(base_instructions.contains("Respect project instructions such as AGENTS.md"));
+    let project_context = request.messages()[1].content().as_text();
+    assert!(project_context.contains("summary:project-capabilities"));
+    assert!(project_context.contains("Cargo.toml is present"));
+    assert!(project_context.contains("Detected AGENTS.md"));
+    assert!(project_context.contains("cargo fmt --all --check"));
+    assert!(project_context.contains("cargo test --all"));
+    assert!(
+        project_context
+            .contains("evidence:seeded runtime context:context-seed-project-capabilities:whole")
+    );
+    assert_eq!(request.messages()[2].content().as_text(), "inspect project");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -390,7 +449,7 @@ async fn workspace_coding_loop_profile_can_enable_patch_tool() {
     assert!(
         tool_names
             .iter()
-            .any(|tool| tool.name().as_str() == WORKSPACE_PATCH_FILE_TOOL)
+            .any(|tool| tool.name().as_str() == WORKSPACE_PATCH_TOOL)
     );
 }
 
@@ -880,12 +939,12 @@ async fn registered_search_text_domain_failure_records_failed_json_without_runti
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn registered_patch_file_tool_is_policy_denied_before_mutating_file() {
+async fn registered_workspace_patch_tool_is_policy_denied_before_mutating_file() {
     let temp = TempWorkspace::new("patch-policy-denied");
     temp.write_text("note.txt", "alpha\nold\nomega\n");
     let runtime = runtime_with_workspace_patch_tools(
         temp.path(),
-        pending_patch_file_call("note.txt", "old", "new"),
+        pending_patch_call("note.txt", "old", "new"),
     );
 
     let pending_events = collect_step(&runtime, "patch note").await;
@@ -925,12 +984,12 @@ async fn registered_patch_file_tool_is_policy_denied_before_mutating_file() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn denied_patch_file_leaves_file_unchanged_and_returns_sanitized_result() {
+async fn denied_workspace_patch_leaves_file_unchanged_and_returns_sanitized_result() {
     let temp = TempWorkspace::new("patch-policy-proposed");
     temp.write_text("note.txt", "alpha\nold\nomega\n");
     let runtime = runtime_with_workspace_patch_tools(
         temp.path(),
-        pending_patch_file_call("note.txt", "old", "new"),
+        pending_patch_call("note.txt", "old", "new"),
     );
     let _pending_events = collect_step(&runtime, "patch note").await;
     let pending = runtime
@@ -961,12 +1020,12 @@ async fn denied_patch_file_leaves_file_unchanged_and_returns_sanitized_result() 
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn opt_in_patch_file_tool_applies_patch_and_records_artifact_before_resolution() {
+async fn opt_in_workspace_patch_tool_applies_patch_and_records_artifact_before_resolution() {
     let temp = TempWorkspace::new("patch-opt-in-success");
     temp.write_text("note.txt", "alpha\nold\nomega\n");
     let runtime = runtime_with_opt_in_workspace_patch_tools(
         temp.path(),
-        pending_patch_file_call("note.txt", "old", "new"),
+        pending_patch_call("note.txt", "old", "new"),
     );
 
     let pending_events = collect_step(&runtime, "patch note").await;
@@ -1016,7 +1075,7 @@ async fn opt_in_patch_success_continuation_does_not_leak_internal_evidence() {
     let temp = TempWorkspace::new("patch-opt-in-no-leak");
     temp.write_text("note.txt", "alpha\nold\nomega\n");
     let provider = ScriptedModelProvider::new(vec![
-        vec![Ok(pending_patch_file_call("note.txt", "old", "new"))],
+        vec![Ok(pending_patch_call("note.txt", "old", "new"))],
         vec![Ok(ModelEvent::Completed {
             response: ModelResponse::new(
                 vec![ModelOutput::text("continued after patch")],
@@ -1065,7 +1124,7 @@ async fn patch_proposal_and_audit_do_not_leak_into_sanitized_result_or_continuat
         ReadOnlyWorkspaceTools::new(WorkspaceToolsConfig::new(vec![temp.path().to_path_buf()]))
             .expect("workspace tools should construct");
     let provider = ScriptedModelProvider::new(vec![
-        vec![Ok(pending_patch_file_call("note.txt", "old", "new"))],
+        vec![Ok(pending_patch_call("note.txt", "old", "new"))],
         vec![Ok(ModelEvent::Completed {
             response: ModelResponse::new(
                 vec![ModelOutput::text("continued after denial")],
@@ -1121,7 +1180,7 @@ async fn patch_proposal_and_audit_do_not_leak_into_sanitized_result_or_continuat
             .code(),
         "action_policy_denied"
     );
-    assert_patch_denial_json_sanitized(continuation_json, WORKSPACE_PATCH_FILE_TOOL);
+    assert_patch_denial_json_sanitized(continuation_json, WORKSPACE_PATCH_TOOL);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1129,7 +1188,7 @@ async fn coding_loop_harness_inspects_patches_verifies_and_completes() {
     let temp = TempWorkspace::new("coding-loop-harness");
     temp.write_text(
         "src/lib.rs",
-        "pub fn greeting() -> &'static str {\n    \"old\"\n}\n",
+        "pub const GREETING_LABEL: &str = \"old\";\n\npub fn greeting() -> &'static str {\n    GREETING_LABEL\n}\n\npub fn context_001() -> &'static str { \"context-001\" }\npub fn context_002() -> &'static str { \"context-002\" }\npub fn context_003() -> &'static str { \"context-003\" }\npub fn context_004() -> &'static str { \"context-004\" }\npub fn context_005() -> &'static str { \"context-005\" }\npub fn context_006() -> &'static str { \"context-006\" }\npub fn context_007() -> &'static str { \"context-007\" }\npub fn context_008() -> &'static str { \"context-008\" }\npub fn context_009() -> &'static str { \"context-009\" }\npub fn context_010() -> &'static str { \"context-010\" }\n",
     );
     let provider = ScriptedModelProvider::new(vec![
         vec![Ok(pending_process_call(
@@ -1137,10 +1196,10 @@ async fn coding_loop_harness_inspects_patches_verifies_and_completes() {
             &["rg", "--files"],
         ))],
         vec![Ok(pending_read_file_call("src/lib.rs"))],
-        vec![Ok(pending_patch_file_call(
+        vec![Ok(pending_patch_call(
             "src/lib.rs",
-            "\"old\"",
-            "\"new\"",
+            "pub const GREETING_LABEL: &str = \"old\";",
+            "pub const GREETING_LABEL: &str = \"new\";",
         ))],
         vec![Ok(pending_process_call(
             "coding-loop-cargo-test",
@@ -1178,7 +1237,7 @@ async fn coding_loop_harness_inspects_patches_verifies_and_completes() {
     assert_eq!(
         fs::read_to_string(temp.path().join("src/lib.rs"))
             .expect("patched workspace file should read"),
-        "pub fn greeting() -> &'static str {\n    \"new\"\n}\n"
+        "pub const GREETING_LABEL: &str = \"new\";\n\npub fn greeting() -> &'static str {\n    GREETING_LABEL\n}\n\npub fn context_001() -> &'static str { \"context-001\" }\npub fn context_002() -> &'static str { \"context-002\" }\npub fn context_003() -> &'static str { \"context-003\" }\npub fn context_004() -> &'static str { \"context-004\" }\npub fn context_005() -> &'static str { \"context-005\" }\npub fn context_006() -> &'static str { \"context-006\" }\npub fn context_007() -> &'static str { \"context-007\" }\npub fn context_008() -> &'static str { \"context-008\" }\npub fn context_009() -> &'static str { \"context-009\" }\npub fn context_010() -> &'static str { \"context-010\" }\n"
     );
 
     let observed_argv = runner

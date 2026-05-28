@@ -6,6 +6,7 @@
 
 use crate::ToolActionKind;
 use crate::artifact::{ArtifactContentKind, ArtifactError};
+use crate::context::ContextError;
 use merry_core::{ArtifactId, CoreError, SessionId, ToolCallId, ToolName};
 use thiserror::Error;
 
@@ -131,5 +132,13 @@ pub enum RuntimeError {
         /// Source artifact error.
         #[from]
         source: ArtifactError,
+    },
+
+    /// Context state could not be constructed or compiled.
+    #[error("context state error: {source}")]
+    Context {
+        /// Source context error.
+        #[from]
+        source: ContextError,
     },
 }

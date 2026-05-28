@@ -464,6 +464,7 @@ fn runtime_error_code(error: &RuntimeError) -> &'static str {
         RuntimeError::UnsupportedToolResultContent { .. } => "unsupported_tool_result_content",
         RuntimeError::Core { .. } => "core_error",
         RuntimeError::Artifact { .. } => "artifact_error",
+        RuntimeError::Context { .. } => "context_error",
     }
 }
 

@@ -682,9 +682,11 @@ async fn agent_loop_executes_one_tool_and_continues_to_final_completion() {
     let requests = provider.recorded_requests();
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[0].messages()[0].role(), ModelMessageRole::System);
-    assert_eq!(
-        requests[0].messages()[0].content().as_text(),
-        "You are Merry."
+    assert!(
+        requests[0].messages()[0]
+            .content()
+            .as_text()
+            .contains("You are Merry, a pragmatic coding agent.")
     );
     assert_eq!(requests[0].messages()[1].role(), ModelMessageRole::User);
     assert_eq!(
@@ -712,7 +714,7 @@ async fn agent_loop_executes_opt_in_workspace_patch_and_continues_to_final_compl
     let provider = ScriptedModelProvider::new(vec![
         vec![Ok(completed_tool_call_event(model_tool_call(
             "call-patch-success",
-            "workspace_patch_file",
+            "workspace_patch",
         )))],
         vec![Ok(completed_text_event("final after patch"))],
     ]);
@@ -720,7 +722,7 @@ async fn agent_loop_executes_opt_in_workspace_patch_and_continues_to_final_compl
     let runtime = Runtime::builder(session_id("agent-loop-opt-in-workspace-patch"))
         .register_tool(
             merry_runtime::RegisteredTool::new(
-                tool_spec("workspace_patch_file"),
+                tool_spec("workspace_patch"),
                 Arc::new(executor.clone()),
                 ToolActionKind::WorkspaceWrite,
             )

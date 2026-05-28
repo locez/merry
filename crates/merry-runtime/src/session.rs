@@ -185,6 +185,30 @@ impl SessionState {
         }
     }
 
+    pub(crate) fn seed_context_summary(
+        &mut self,
+        id: &str,
+        text: &str,
+    ) -> Result<(), RuntimeError> {
+        let artifact_id = ArtifactId::new(&format!("context-seed-{id}"))?;
+        let artifact = ArtifactRef::new(artifact_id.clone(), ArtifactKind::Text);
+        let content = ArtifactContent::text(text);
+        let recorded = self.artifacts.record(artifact, content)?;
+        let evidence = self
+            .artifacts
+            .evidence_ref(recorded.id(), EvidenceLocator::whole_artifact())?;
+        let summary = crate::ContextSummary::new(
+            id,
+            text,
+            vec![crate::ContextEvidence::new(
+                "seeded runtime context",
+                evidence,
+            )?],
+        )?;
+        self.record_checked_context_entry(ContextEntry::summary(summary))?;
+        Ok(())
+    }
+
     pub(crate) fn record_artifact_state(
         &mut self,
         artifact: ArtifactRef,
