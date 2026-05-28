@@ -15,9 +15,9 @@ use merry_runtime::{
     DEFAULT_AGENT_LOOP_CONTINUATION_INPUT, ProcessActionIntent, ProcessEnvPolicy,
     ProcessExitStatus, ProcessRunner, ProcessRunnerContext, ProcessRunnerError,
     ProcessRunnerFuture, ProcessRunnerOutput, Runtime, RuntimeError, StepContext, StepInput,
-    ToolActionKind, ToolActionProposalFuture, ToolExecutionContext, ToolExecutionError,
-    ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture, WorkspacePatchExecutionEvidence,
-    WorkspacePatchProposal, process_command_tool,
+    ToolActionKind, ToolActionPreflight, ToolActionProposalFuture, ToolExecutionContext,
+    ToolExecutionError, ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture,
+    WorkspacePatchExecutionEvidence, WorkspacePatchProposal, process_command_tool,
 };
 use schemars::Schema;
 use serde_json::{Map, Value, json};
@@ -398,7 +398,7 @@ impl ToolExecutor for ProposingPatchToolExecutor {
                 ActionProposalEvidence::WorkspacePatch(patch),
             )
             .map_err(|error| ToolExecutionError::infrastructure(error.to_string()))?;
-            Ok(Some(proposal))
+            Ok(ToolActionPreflight::Proposal(proposal))
         })
     }
 
@@ -710,6 +710,106 @@ async fn agent_loop_executes_one_tool_and_continues_to_final_completion() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn agent_loop_preserves_uncheckpointed_tool_continuations_until_compaction() {
+    let provider = ScriptedModelProvider::new(vec![
+        vec![Ok(completed_tool_call_event(model_tool_call(
+            "call-first",
+            "search_notes",
+        )))],
+        vec![Ok(completed_tool_call_event(model_tool_call(
+            "call-second",
+            "search_notes",
+        )))],
+        vec![Ok(completed_text_event("final after two tools"))],
+    ]);
+    let executor = ScriptedToolExecutor::succeeding_text("search result\n");
+    let runtime = runtime_with_tool(
+        "agent-loop-uncheckpointed-continuity",
+        provider.clone(),
+        executor,
+    );
+
+    let result = runtime
+        .run_agent_loop(
+            StepInput::user_text("Search twice, then answer.").expect("valid step input"),
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::new(4).expect("valid loop config"),
+        )
+        .await
+        .expect("agent loop should run");
+
+    assert_eq!(result.status(), &AgentLoopStatus::Completed);
+    assert_eq!(result.steps_run(), 3);
+    assert!(runtime.pending_tool_calls().await.is_empty());
+
+    let requests = provider.recorded_requests();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[0].continuations().is_empty());
+
+    assert_eq!(requests[1].continuations().len(), 1);
+    assert_eq!(
+        requests[1].continuations()[0].call().id().as_str(),
+        "call-first"
+    );
+
+    assert_eq!(requests[2].continuations().len(), 2);
+    assert_eq!(
+        requests[2]
+            .continuations()
+            .iter()
+            .map(|continuation| continuation.call().id().as_str())
+            .collect::<Vec<_>>(),
+        ["call-first", "call-second"]
+    );
+    assert!(
+        requests[1].dynamic_context_hash() != requests[2].dynamic_context_hash(),
+        "adding the second uncheckpointed continuation should change only dynamic request context"
+    );
+    assert_eq!(
+        requests[1].stable_prefix_hash(),
+        requests[2].stable_prefix_hash(),
+        "uncheckpointed continuation growth must not move the cacheable stable prefix"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn agent_loop_keeps_uncheckpointed_continuations_after_final_answer() {
+    let provider = ScriptedModelProvider::new(vec![
+        vec![Ok(completed_tool_call_event(model_tool_call(
+            "call-first",
+            "search_notes",
+        )))],
+        vec![Ok(completed_text_event("first final"))],
+        vec![Ok(completed_text_event("second final"))],
+    ]);
+    let executor = ScriptedToolExecutor::succeeding_text("search result\n");
+    let runtime = runtime_with_tool(
+        "agent-loop-uncheckpointed-continuity-final",
+        provider.clone(),
+        executor,
+    );
+
+    let first = run_default_loop(&runtime, "Search once.").await;
+    assert_eq!(first.status(), &AgentLoopStatus::Completed);
+
+    let second = run_default_loop(&runtime, "Answer without compaction.").await;
+    assert_eq!(second.status(), &AgentLoopStatus::Completed);
+
+    let requests = provider.recorded_requests();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[1].continuations().len(), 1);
+    assert_eq!(
+        requests[2].continuations().len(),
+        1,
+        "terminal assistant completion is not compaction; old continuations remain uncheckpointed"
+    );
+    assert_eq!(
+        requests[2].continuations()[0].call().id().as_str(),
+        "call-first"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn agent_loop_executes_opt_in_workspace_patch_and_continues_to_final_completion() {
     let provider = ScriptedModelProvider::new(vec![
         vec![Ok(completed_tool_call_event(model_tool_call(
@@ -903,6 +1003,64 @@ async fn agent_loop_process_command_tool_executes_and_continues() {
             "process continuation leaked internal {forbidden}"
         );
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn agent_loop_process_command_invalid_arguments_resolve_failed_and_continue() {
+    let provider = ScriptedModelProvider::new(vec![
+        vec![Ok(completed_tool_call_event(
+            model_tool_call_with_arguments(
+                "call-bad-process-argv",
+                "run_process",
+                json!({ "argv": "cargo test -p merry-runtime" }),
+            ),
+        ))],
+        vec![Ok(completed_text_event("final after bad process argv"))],
+    ]);
+    let runner = RecordingProcessRunner::succeeding("must not run\n");
+    let runtime = Runtime::builder(session_id("agent-loop-process-command-invalid-args"))
+        .register_tool(
+            process_command_tool(
+                ToolName::new("run_process").expect("valid tool name"),
+                "Run a local process from argv through runtime policy",
+            )
+            .expect("process command tool should build"),
+        )
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .allow_low_risk_process_actions(Arc::new(runner.clone()))
+        .build()
+        .expect("runtime should build");
+
+    let result = run_default_loop(&runtime, "Run process with malformed argv.").await;
+
+    assert_eq!(result.status(), &AgentLoopStatus::Completed);
+    assert_eq!(runner.observed_intents(), Vec::<ProcessActionIntent>::new());
+    assert!(runtime.pending_tool_calls().await.is_empty());
+
+    let requests = provider.recorded_requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1].continuations().len(), 1);
+    let continuation = &requests[1].continuations()[0];
+    assert_eq!(continuation.call().id().as_str(), "call-bad-process-argv");
+    assert_eq!(continuation.result().status(), ToolCallResultStatus::Failed);
+    assert_eq!(
+        continuation
+            .result()
+            .diagnostic()
+            .expect("invalid argv should include diagnostic")
+            .code(),
+        "process_command_invalid_arguments"
+    );
+    let content = continuation
+        .result()
+        .content()
+        .as_json()
+        .expect("invalid argv result should be JSON");
+    let value: Value = serde_json::from_str(content).expect("invalid argv JSON should parse");
+    assert_eq!(
+        value["error"]["message"],
+        "argv must be an array of strings"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -84,17 +84,18 @@ projected into the next model request.
 
 ### Function-Call Continuity
 
-Function-call continuity is the recent exact provider-visible sequence needed
-for the model to continue after a tool result:
+Function-call continuity is the uncheckpointed exact provider-visible sequence
+needed for the model to continue after a tool result:
 
 ```text
 function_call
 function_call_output
 ```
 
-It is protocol continuity, not task memory. It should be append-only while it is
-hot and should be removed from prompt context only through an explicit
-checkpoint or compaction boundary.
+It is protocol continuity, not task memory. It should be append-only until an
+explicit checkpoint or compaction boundary records which older exact
+continuity entries are covered. Before that boundary, all uncheckpointed
+function-call continuity remains provider-visible.
 
 ### Task Anchor
 
@@ -187,7 +188,8 @@ The compiler must treat runtime state and prompt projection separately:
 - Ledger facts are recorded by default.
 - Ledger facts are not projected by default.
 - Full artifacts are not projected by default.
-- Recent function-call continuity is projected while hot.
+- Uncheckpointed function-call continuity is projected in provider-visible
+  order.
 - Checkpoints are projected only from the checkpoint segment after an explicit
   checkpoint/compaction boundary.
 - Ledger deltas may be appended after the latest checkpoint only when an
@@ -259,7 +261,7 @@ A checkpoint should be generated from runtime-owned state:
 - task anchor, if present;
 - ledger facts selected by policy;
 - artifact refs and evidence refs;
-- recent unresolved or still-hot function-call continuity that must remain
+- recent unresolved or uncheckpointed function-call continuity that must remain
   exact.
 
 Checkpointing may use model assistance later, but the first reliable checkpoint

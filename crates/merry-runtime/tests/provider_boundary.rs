@@ -2514,7 +2514,7 @@ async fn submitted_tool_result_is_compiled_as_provider_neutral_continuation() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn successful_provider_step_consumes_sent_tool_continuation_without_replay() {
+async fn successful_provider_step_keeps_uncheckpointed_tool_continuation_until_compaction() {
     let provider = ScriptedModelProvider::new(vec![
         vec![Ok(completed_outputs_event(
             vec![ModelOutput::tool_call(model_tool_call())],
@@ -2523,24 +2523,26 @@ async fn successful_provider_step_consumes_sent_tool_continuation_without_replay
         vec![Ok(completed_text_event("used tool result"))],
         vec![Ok(completed_text_event("fresh request"))],
     ]);
-    let runtime =
-        runtime_with_scripted_provider("provider-tool-continuation-consume", provider.clone());
+    let runtime = runtime_with_scripted_provider(
+        "provider-tool-continuation-uncheckpointed-success",
+        provider.clone(),
+    );
     let pending_events = collect_step(&runtime, "Request a tool.").await;
     let call = pending_tool_call(&pending_events).clone();
     let result_artifact = ArtifactRef::new(
-        artifact_id("manual-result-consumed-on-success"),
+        artifact_id("manual-result-uncheckpointed-on-success"),
         ArtifactKind::Text,
     );
     runtime
         .submit_tool_result(
             ToolCallResult::succeeded(call.id().clone(), result_artifact),
-            ArtifactContent::text("result to consume\n"),
+            ArtifactContent::text("result remains uncheckpointed\n"),
         )
         .await
         .expect("tool result should resolve");
 
     let continuation_events = collect_step(&runtime, "Use tool result.").await;
-    let next_events = collect_step(&runtime, "Do not replay it.").await;
+    let next_events = collect_step(&runtime, "Continue without compaction.").await;
 
     assert_eq!(
         event_kind_names(&continuation_events),
@@ -2553,11 +2555,19 @@ async fn successful_provider_step_consumes_sent_tool_continuation_without_replay
     let requests = provider.recorded_requests();
     assert_eq!(requests.len(), 3);
     assert_eq!(requests[1].continuations().len(), 1);
-    assert!(requests[2].continuations().is_empty());
+    assert_eq!(
+        requests[2].continuations().len(),
+        1,
+        "successful provider completion is not checkpoint/compaction"
+    );
+    assert_eq!(
+        requests[2].continuations()[0].call().id().as_str(),
+        requests[1].continuations()[0].call().id().as_str()
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn sent_tool_continuation_is_consumed_when_provider_records_new_pending_call() {
+async fn new_pending_tool_call_keeps_prior_uncheckpointed_continuation() {
     let provider = ScriptedModelProvider::new(vec![
         vec![Ok(completed_outputs_event(
             vec![ModelOutput::tool_call(model_tool_call_with_id("call-old"))],
@@ -2567,6 +2577,7 @@ async fn sent_tool_continuation_is_consumed_when_provider_records_new_pending_ca
             vec![ModelOutput::tool_call(model_tool_call_with_id("call-new"))],
             FinishReason::ToolCalls,
         ))],
+        vec![Ok(completed_text_event("used both results"))],
     ]);
     let runtime =
         runtime_with_scripted_provider("provider-tool-continuation-new-pending", provider.clone());
@@ -2587,7 +2598,21 @@ async fn sent_tool_continuation_is_consumed_when_provider_records_new_pending_ca
         .expect("old tool result should resolve");
 
     let new_pending_events = collect_step(&runtime, "Use old result and request another.").await;
-    let blocked_events = collect_step(&runtime, "Do not replay old result.").await;
+    let new_call = pending_tool_call(&new_pending_events).clone();
+    runtime
+        .submit_tool_result(
+            ToolCallResult::succeeded(
+                new_call.id().clone(),
+                ArtifactRef::new(
+                    artifact_id("manual-result-after-new-pending"),
+                    ArtifactKind::Text,
+                ),
+            ),
+            ArtifactContent::text("new result\n"),
+        )
+        .await
+        .expect("new tool result should resolve");
+    let completed_events = collect_step(&runtime, "Use all uncheckpointed results.").await;
 
     assert_eq!(
         event_kind_names(&new_pending_events),
@@ -2597,32 +2622,31 @@ async fn sent_tool_continuation_is_consumed_when_provider_records_new_pending_ca
         pending_tool_call(&new_pending_events).id().as_str(),
         "call-new"
     );
-    assert_eq!(event_kind_names(&blocked_events), ["StepStarted", "Failed"]);
     assert_eq!(
-        failed_code(&blocked_events),
-        Some("tool_call_result_required")
+        event_kind_names(&completed_events),
+        ["StepStarted", "ArtifactRecorded", "StepCompleted"]
     );
-    assert_eq!(
-        runtime
-            .pending_tool_calls()
-            .await
-            .iter()
-            .map(|call| call.id().as_str().to_owned())
-            .collect::<Vec<_>>(),
-        vec!["call-new".to_owned()]
-    );
+    assert!(runtime.pending_tool_calls().await.is_empty());
 
     let requests = provider.recorded_requests();
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 3);
     assert_eq!(requests[1].continuations().len(), 1);
     assert_eq!(
         requests[1].continuations()[0].call().id().as_str(),
         "call-old"
     );
+    assert_eq!(
+        requests[2]
+            .continuations()
+            .iter()
+            .map(|continuation| continuation.call().id().as_str())
+            .collect::<Vec<_>>(),
+        ["call-old", "call-new"]
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn duplicate_new_tool_call_id_does_not_consume_sent_tool_continuation() {
+async fn duplicate_new_tool_call_id_keeps_uncheckpointed_continuation_for_retry() {
     let provider = ScriptedModelProvider::new(vec![
         vec![Ok(completed_outputs_event(
             vec![ModelOutput::tool_call(model_tool_call_with_id("call-old"))],
@@ -2632,7 +2656,7 @@ async fn duplicate_new_tool_call_id_does_not_consume_sent_tool_continuation() {
             vec![ModelOutput::tool_call(model_tool_call_with_id("call-old"))],
             FinishReason::ToolCalls,
         ))],
-        vec![Ok(completed_text_event("retry consumes old result"))],
+        vec![Ok(completed_text_event("retry uses old result"))],
     ]);
     let runtime = runtime_with_scripted_provider(
         "provider-tool-continuation-duplicate-new-id",
@@ -2683,7 +2707,7 @@ async fn duplicate_new_tool_call_id_does_not_consume_sent_tool_continuation() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn provider_error_does_not_consume_tool_continuation_and_retry_replays_it() {
+async fn provider_error_keeps_uncheckpointed_tool_continuation_for_retry() {
     let provider = ScriptedModelProvider::new(vec![
         vec![Ok(completed_outputs_event(
             vec![ModelOutput::tool_call(model_tool_call())],
@@ -2729,7 +2753,7 @@ async fn provider_error_does_not_consume_tool_continuation_and_retry_replays_it(
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn provider_setup_error_does_not_consume_tool_continuation_and_retry_replays_it() {
+async fn provider_setup_error_keeps_uncheckpointed_tool_continuation_for_retry() {
     let provider = ScriptedModelProvider::new_steps(vec![
         ScriptedProviderStep::Stream(vec![Ok(completed_outputs_event(
             vec![ModelOutput::tool_call(model_tool_call())],
@@ -2775,7 +2799,7 @@ async fn provider_setup_error_does_not_consume_tool_continuation_and_retry_repla
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn provider_cancel_does_not_consume_tool_continuation_and_retry_replays_it() {
+async fn provider_cancel_keeps_uncheckpointed_tool_continuation_for_retry() {
     let provider = ScriptedModelProvider::new(vec![
         vec![Ok(completed_outputs_event(
             vec![ModelOutput::tool_call(model_tool_call())],

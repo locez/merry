@@ -3272,7 +3272,12 @@ mod tests {
             .expect("coding-loop smoke result should validate");
         drop(guard);
 
-        let log = std::fs::read_to_string(&log_path).expect("log file should be written");
+        let raw_log = std::fs::read_to_string(&log_path).expect("log file should be written");
+        let log = raw_log
+            .lines()
+            .filter(|line| line.contains("coding-loop-smoke"))
+            .collect::<Vec<_>>()
+            .join("\n");
         for expected in [
             "\"event\":\"runtime.loop.start\"",
             "\"event\":\"runtime.provider.request\"",

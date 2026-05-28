@@ -81,8 +81,8 @@ pub use runtime::{Runtime, RuntimeBuilder};
 pub use step::{StepContext, StepInput};
 pub use tool::{
     ActionExecutionEvidence, ActionProposal, ActionProposalError, ActionProposalEvidence,
-    RegisteredTool, ToolActionKind, ToolActionProposalFuture, ToolActionProposalResult,
-    ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome, ToolExecutionResult,
-    ToolExecutor, ToolExecutorFuture, WorkspacePatchChangeEvidence,
+    RegisteredTool, ToolActionKind, ToolActionPreflight, ToolActionProposalFuture,
+    ToolActionProposalResult, ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome,
+    ToolExecutionResult, ToolExecutor, ToolExecutorFuture, WorkspacePatchChangeEvidence,
     WorkspacePatchExecutionEvidence, WorkspacePatchProposal,
 };

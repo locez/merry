@@ -1225,15 +1225,19 @@ fn validate_argv(argv: &[String]) -> Result<(), ProcessActionError> {
                 reason: "exceeds the byte limit",
             });
         }
-        if argument.chars().any(char::is_control) {
+        if argument.chars().any(disallowed_argv_control_character) {
             return Err(ProcessActionError::InvalidArgument {
                 index,
-                reason: "must not contain control characters",
+                reason: "must not contain control characters other than newline or tab",
             });
         }
     }
 
     Ok(())
+}
+
+fn disallowed_argv_control_character(character: char) -> bool {
+    character.is_control() && !matches!(character, '\n' | '\t')
 }
 
 fn validate_cwd(cwd: Option<String>) -> Result<Option<String>, ProcessActionError> {
@@ -1419,6 +1423,40 @@ mod tests {
             empty_arg,
             ProcessActionError::InvalidArgument { index: 1, .. }
         ));
+
+        let multiline_shell = ProcessActionIntent::new(
+            vec![
+                "bash".to_owned(),
+                "-lc".to_owned(),
+                "cargo check -p merry-runtime\ncargo test -p merry-runtime".to_owned(),
+            ],
+            Some(".".to_owned()),
+            ProcessEnvPolicy::empty(),
+            None,
+            1024,
+            1024,
+        )
+        .expect("shell argv may contain newline scripts");
+        assert_eq!(
+            multiline_shell.argv()[2],
+            "cargo check -p merry-runtime\ncargo test -p merry-runtime"
+        );
+
+        for bad_arg in ["bad\u{0}arg", "bad\rarg", "bad\u{7f}arg"] {
+            let error = ProcessActionIntent::new(
+                vec!["bash".to_owned(), "-lc".to_owned(), bad_arg.to_owned()],
+                None,
+                ProcessEnvPolicy::empty(),
+                None,
+                1024,
+                1024,
+            )
+            .expect_err("unsafe argv controls are rejected");
+            assert!(matches!(
+                error,
+                ProcessActionError::InvalidArgument { index: 2, .. }
+            ));
+        }
 
         for cwd in [
             Some("/tmp".to_owned()),

@@ -162,7 +162,7 @@ pub(crate) struct SessionState {
     action_audits: ActionAuditRegistry,
     pending_tool_calls: Vec<PendingToolCall>,
     resolved_tool_calls: BTreeSet<ToolCallId>,
-    unconsumed_tool_continuations: Vec<ResolvedToolContinuation>,
+    uncheckpointed_tool_continuations: Vec<ResolvedToolContinuation>,
 }
 
 impl SessionState {
@@ -181,7 +181,7 @@ impl SessionState {
             action_audits: ActionAuditRegistry::default(),
             pending_tool_calls: Vec::new(),
             resolved_tool_calls: BTreeSet::new(),
-            unconsumed_tool_continuations: Vec::new(),
+            uncheckpointed_tool_continuations: Vec::new(),
         }
     }
 
@@ -420,10 +420,15 @@ impl SessionState {
         !self.pending_tool_calls.is_empty()
     }
 
-    pub(crate) fn unconsumed_tool_continuation_snapshots(
+    /// Returns tool call/result pairs not yet covered by a checkpoint.
+    ///
+    /// These continuations are exact provider-visible protocol history for
+    /// stateless calls. They are not ledger projection; future checkpointing
+    /// owns when older entries can be removed from compiled context.
+    pub(crate) fn uncheckpointed_tool_continuation_snapshots(
         &self,
     ) -> Result<Vec<ResolvedToolContinuationSnapshot>, ArtifactError> {
-        self.unconsumed_tool_continuations
+        self.uncheckpointed_tool_continuations
             .iter()
             .map(|continuation| {
                 let content = self
@@ -437,11 +442,6 @@ impl SessionState {
                 ))
             })
             .collect()
-    }
-
-    pub(crate) fn consume_tool_continuations(&mut self, count: usize) {
-        let count = count.min(self.unconsumed_tool_continuations.len());
-        self.unconsumed_tool_continuations.drain(..count);
     }
 
     pub(crate) fn read_artifact_content(
@@ -531,7 +531,7 @@ impl SessionState {
 
         let pending = self.pending_tool_calls.remove(pending_index);
         self.resolved_tool_calls.insert(result.call_id().clone());
-        self.unconsumed_tool_continuations
+        self.uncheckpointed_tool_continuations
             .push(ResolvedToolContinuation::new(pending, result.clone()));
 
         let mut events = Vec::with_capacity(if self.session_started { 2 } else { 3 });
@@ -699,7 +699,7 @@ impl SessionState {
         Self::trace_artifact_record(self.session_id.as_str(), &recorded, content_bytes);
         debug_assert_eq!(&recorded, result.artifact());
         self.resolved_tool_calls.insert(result.call_id().clone());
-        self.unconsumed_tool_continuations
+        self.uncheckpointed_tool_continuations
             .push(ResolvedToolContinuation::new(pending, result.clone()));
 
         events.push(self.record_event(
@@ -775,7 +775,7 @@ impl SessionState {
             Self::trace_artifact_record(self.session_id.as_str(), &artifact, content_bytes);
             debug_assert_eq!(artifact, *result.artifact());
             self.resolved_tool_calls.insert(result.call_id().clone());
-            self.unconsumed_tool_continuations
+            self.uncheckpointed_tool_continuations
                 .push(ResolvedToolContinuation::new(pending, result.clone()));
             return Ok(vec![
                 started,
@@ -801,7 +801,7 @@ impl SessionState {
         Self::trace_artifact_record(self.session_id.as_str(), &artifact, content_bytes);
         debug_assert_eq!(artifact, *result.artifact());
         self.resolved_tool_calls.insert(result.call_id().clone());
-        self.unconsumed_tool_continuations
+        self.uncheckpointed_tool_continuations
             .push(ResolvedToolContinuation::new(pending, result.clone()));
         Ok(vec![
             self.record_event(

@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make the live coding-loop task behave like a real stateless-provider coding agent by preserving hot function-call continuity, keeping ledger/artifact state out of default prompt projection, improving patch reliability, and adding budget/checkpoint guardrails without turning provider conversation state into Merry runtime state.
+**Goal:** Make the live coding-loop task behave like a real stateless-provider coding agent by preserving uncheckpointed function-call continuity, keeping ledger/artifact state out of default prompt projection, improving patch reliability, and adding budget/checkpoint guardrails without turning provider conversation state into Merry runtime state.
 
-**Architecture:** Runtime remains the source of truth for session state, artifacts, ledger facts, continuations, context compilation, and projection policy. Provider calls stay stateless by default with `store=false`; Merry replays the recent function-call/output continuity required by the provider protocol while exact evidence remains artifact-backed. Context projection is allowlisted: ledger observations and artifact payloads do not enter prompt context by default, ordinary summaries cannot become an implicit reducer projection channel, and checkpoint/context-policy projections must be explicit low-frequency boundaries. The work is split into small vertical slices so each milestone has deterministic tests before live smoke validation.
+**Architecture:** Runtime remains the source of truth for session state, artifacts, ledger facts, continuations, context compilation, and projection policy. Provider calls stay stateless by default with `store=false`; Merry replays uncheckpointed function-call/output continuity required by the provider protocol while exact evidence remains artifact-backed. Context projection is allowlisted: ledger observations and artifact payloads do not enter prompt context by default, ordinary summaries cannot become an implicit reducer projection channel, and checkpoint/context-policy projections must be explicit low-frequency boundaries. The work is split into small vertical slices so each milestone has deterministic tests before live smoke validation.
 
 **Tech Stack:** Rust 2024, Tokio, `merry-runtime`, `merry-llm`, `merry-tool-workspace`, `merry-cli`, OpenAI-compatible Responses provider, deterministic fake providers/runners, opt-in `bwrap` and live-provider debug smokes.
 
@@ -34,16 +34,17 @@ The first version of this plan left too much room for a context projection bypas
 
 ## File Structure
 
-- Modify `crates/merry-runtime/src/session.rs`: rename or clarify hot continuation storage, preserve all hot resolved tool continuations across a single loop, expose clear/reset operations for terminal hot-continuity lifecycle boundaries, and add session-owned append-only message history support if not already present.
-- Modify `crates/merry-runtime/src/runtime.rs`: stop consuming tool continuations when the model emits the next tool call; clear hot continuations only after terminal assistant completion or explicit future checkpoint; keep terminal assistant completion documented as a hot protocol lifecycle boundary, not a checkpoint; extend provider request trace fields as needed.
+- Modify `crates/merry-runtime/src/session.rs`: rename the stored function-call continuity sequence to uncheckpointed tool continuations and preserve resolved tool continuations until a future checkpoint/compaction boundary covers them.
+- Modify `crates/merry-runtime/src/runtime.rs`: stop consuming tool continuations when the model emits the next tool call; do not clear provider-visible continuity at terminal assistant completion; checkpoint/compaction owns future trimming.
+- Modify `crates/merry-runtime/tests/provider_boundary.rs`: replace tests that asserted consume-on-success or consume-on-new-pending with uncheckpointed retention/retry coverage.
 - Modify `crates/merry-runtime/src/context.rs`: define projection policy boundaries for explicit checkpoint/context-policy projections, project rules, checkpoint segment assembly, append-only body assembly, and budget/checkpoint primitives.
-- Modify `crates/merry-runtime/src/step.rs`: assemble requests as stable runtime instructions plus stable project rules plus append-only body plus hot continuations; avoid default ledger/artifact projection and avoid unrestricted `ContextSummary` projection.
+- Modify `crates/merry-runtime/src/step.rs`: assemble requests as stable runtime instructions plus stable project rules plus append-only body plus uncheckpointed continuations; avoid default ledger/artifact projection and avoid unrestricted `ContextSummary` projection.
 - Modify `crates/merry-llm/src/request.rs`: expose any missing request diagnostics needed by compiler/cache tests, such as dynamic message hash versus continuation hash if required.
 - Modify `crates/merry-runtime/tests/agent_loop.rs`: add deterministic multi-tool continuity tests and context/cache diagnostic tests.
 - Modify `crates/merry-cli/src/main.rs`: keep debug smoke runtime-event printing for the live task smoke and tighten live-smoke assertions around realistic coding behavior.
 - Modify `crates/merry-cli/tests/debug.rs`: update deterministic CLI smoke tests when live-smoke acceptance changes affect shared helper behavior.
 - Modify `crates/merry-tool-workspace/src/lib.rs`: upgrade `workspace_patch` parser/planner/executor behavior for multi-file patch and disambiguated hunks.
-- Modify `crates/merry-tool-workspace/tests/runtime_integration.rs`: add runtime-level patch integration coverage for repeated text, multi-file patching, and failure behavior.
+- Modify `crates/merry-tool-workspace/tests/runtime_integration.rs`: add runtime-level patch integration coverage for repeated text, multi-file patching, failure behavior, and cumulative uncheckpointed continuation replay in the coding-loop harness.
 - Optional modify `crates/merry-provider-openai/src/render.rs`: only if rendering tests show the provider adapter loses function-call/output order.
 - Optional modify `examples/config.toml`: only if accepted config keys change. This plan should not introduce config keys until the budget policy slice.
 - Do not modify ignored `docs/` or `merry-raw-docs/`.
@@ -51,8 +52,8 @@ The first version of this plan left too much room for a context projection bypas
 
 ## Milestones
 
-1. **M1: Hot Function-Call Continuity**
-   Preserve exact recent tool call/output pairs across multiple model steps under `store=false`.
+1. **M1: Uncheckpointed Function-Call Continuity**
+   Preserve exact uncheckpointed tool call/output pairs across multiple model steps under `store=false`.
 2. **M2: Context Compiler Layer Contract**
    Lock in projection permissions, stable-prefix versus dynamic-body behavior, append-only message history, project rules, and proof that ledger/artifact updates are not projected by default.
 3. **M3: Live Coding Smoke Feedback Loop**
@@ -96,13 +97,13 @@ If a command cannot run in the current environment, record the exact reason in t
 **Files:**
 - Modify: `crates/merry-runtime/tests/agent_loop.rs`
 
-- [ ] **Step 1: Add the deterministic test**
+- [x] **Step 1: Add the deterministic test**
 
 Add this test near `agent_loop_executes_one_tool_and_continues_to_final_completion`:
 
 ```rust
 #[tokio::test(flavor = "current_thread")]
-async fn agent_loop_preserves_all_hot_tool_continuations_until_final_answer() {
+async fn agent_loop_preserves_uncheckpointed_tool_continuations_until_compaction() {
     let provider = ScriptedModelProvider::new(vec![
         vec![Ok(completed_tool_call_event(model_tool_call(
             "call-first",
@@ -115,7 +116,11 @@ async fn agent_loop_preserves_all_hot_tool_continuations_until_final_answer() {
         vec![Ok(completed_text_event("final after two tools"))],
     ]);
     let executor = ScriptedToolExecutor::succeeding_text("search result\n");
-    let runtime = runtime_with_tool("agent-loop-hot-continuity", provider.clone(), executor);
+    let runtime = runtime_with_tool(
+        "agent-loop-uncheckpointed-continuity",
+        provider.clone(),
+        executor,
+    );
 
     let result = runtime
         .run_agent_loop(
@@ -151,54 +156,50 @@ async fn agent_loop_preserves_all_hot_tool_continuations_until_final_answer() {
     );
     assert!(
         requests[1].dynamic_context_hash() != requests[2].dynamic_context_hash(),
-        "adding the second hot continuation should change only dynamic request context"
+        "adding the second uncheckpointed continuation should change only dynamic request context"
     );
     assert_eq!(
         requests[1].stable_prefix_hash(),
         requests[2].stable_prefix_hash(),
-        "hot continuation growth must not move the cacheable stable prefix"
+        "uncheckpointed continuation growth must not move the cacheable stable prefix"
     );
 }
 ```
 
-- [ ] **Step 2: Run the focused test and confirm it fails**
+- [x] **Step 2: Run the focused test and confirm it fails**
 
 Run:
 
 ```bash
-cargo test -p merry-runtime agent_loop_preserves_all_hot_tool_continuations_until_final_answer
+cargo test -p merry-runtime agent_loop_preserves_uncheckpointed_tool_continuations_until_compaction
 ```
 
 Expected before implementation: FAIL because the third provider request only includes the latest continuation or otherwise does not include both prior call/result pairs.
 
-## Task 2: Preserve Hot Continuations Until Terminal Completion
+## Task 2: Preserve Uncheckpointed Continuations Until Compaction
 
 **Files:**
 - Modify: `crates/merry-runtime/src/session.rs`
 - Modify: `crates/merry-runtime/src/runtime.rs`
 - Modify: `crates/merry-runtime/tests/agent_loop.rs`
 
-- [ ] **Step 1: Clarify session continuation APIs**
+- [x] **Step 1: Clarify session continuation APIs**
 
-In `crates/merry-runtime/src/session.rs`, keep the existing storage initially, but add explicit methods so call sites describe the lifecycle:
+In `crates/merry-runtime/src/session.rs`, replace the old consume-oriented naming with uncheckpointed continuity naming:
 
 ```rust
-    pub(crate) fn hot_tool_continuation_snapshots(
+    pub(crate) fn uncheckpointed_tool_continuation_snapshots(
         &self,
     ) -> Result<Vec<ResolvedToolContinuationSnapshot>, ArtifactError> {
-        self.unconsumed_tool_continuation_snapshots()
-    }
-
-    pub(crate) fn clear_hot_tool_continuations(&mut self) {
-        self.unconsumed_tool_continuations.clear();
+        ...
     }
 ```
 
-Keep `unconsumed_tool_continuation_snapshots` and `consume_tool_continuations` for this task if removing them would create broad churn. Add a short comment above the new methods explaining that "hot" continuations are protocol continuity and not ledger projection.
+The private field should be named `uncheckpointed_tool_continuations`. Do not keep `consume_tool_continuations` or a terminal-completion clear method in this slice; those names encode the wrong lifecycle.
 
-- [ ] **Step 2: Use hot snapshots when compiling the provider request**
+- [x] **Step 2: Use uncheckpointed snapshots when compiling the provider request**
 
-In `crates/merry-runtime/src/runtime.rs`, replace:
+In `crates/merry-runtime/src/runtime.rs`, replace the old consume-oriented snapshot read:
 
 ```rust
 let continuations = match session.unconsumed_tool_continuation_snapshots() {
@@ -207,12 +208,12 @@ let continuations = match session.unconsumed_tool_continuation_snapshots() {
 with:
 
 ```rust
-let continuations = match session.hot_tool_continuation_snapshots() {
+let continuations = match session.uncheckpointed_tool_continuation_snapshots() {
 ```
 
-Expected behavior is unchanged at this point.
+This makes the provider-visible replay boundary explicit: continuations are retained until a checkpoint/compaction task defines trimming.
 
-- [ ] **Step 3: Stop clearing continuations when the model asks for another tool**
+- [x] **Step 3: Stop clearing continuations when the model asks for another tool**
 
 In `send_tool_call_pending_event`, remove the `sent_continuation_count` parameter from the function signature and call sites. Replace this block:
 
@@ -232,41 +233,31 @@ with:
 session.record_tool_call_pending(call)
 ```
 
-This is the core fix: a new pending tool call should not erase earlier resolved tool continuations while the loop is still hot.
+This is the core fix: a new pending tool call should not erase earlier resolved tool continuations while they are still uncheckpointed.
 
-- [ ] **Step 4: Clear hot continuations only after terminal assistant text is durably recorded**
+- [x] **Step 4: Do not clear continuity at terminal assistant completion**
 
-In `send_assistant_text_output_completed_events`, replace:
+In `send_assistant_text_output_completed_events`, remove any continuation consume/clear call. Terminal assistant completion records assistant output and step completion; it is not a checkpoint boundary.
 
-```rust
-session.consume_tool_continuations(sent_continuation_count);
-```
+- [x] **Step 5: Remove now-unused count plumbing**
 
-with:
-
-```rust
-session.clear_hot_tool_continuations();
-```
-
-Keep the clear after `record_assistant_text_output(text)` succeeds. If recording assistant output fails, do not clear the continuity state.
-
-- [ ] **Step 5: Remove now-unused count plumbing**
-
-If `sent_continuation_count` is only used for assistant completion, keep it there until the code compiles, then remove it if unused. The provider request trace should still record the count that was sent:
+Remove continuation count plumbing from function signatures that no longer need it. Keep the local count for provider request tracing:
 
 ```rust
 trace_provider_request(provider.name().as_str(), &request, sent_continuation_count);
 ```
 
-- [ ] **Step 6: Run focused runtime tests**
+- [x] **Step 6: Run focused runtime tests**
 
 Run:
 
 ```bash
-cargo test -p merry-runtime agent_loop_preserves_all_hot_tool_continuations_until_final_answer
+cargo test -p merry-runtime agent_loop_preserves_uncheckpointed_tool_continuations_until_compaction
 cargo test -p merry-runtime agent_loop_executes_one_tool_and_continues_to_final_completion
 cargo test -p merry-runtime unregistered_tool_resolves_failed_and_continues_once
 cargo test -p merry-runtime denied_registered_tool_resolves_failed_and_agent_loop_continues_once
+cargo test -p merry-runtime --test provider_boundary continuation
+cargo test -p merry-tool-workspace --test runtime_integration coding_loop_harness_inspects_patches_verifies_and_completes
 ```
 
 Expected: all PASS.
@@ -275,25 +266,25 @@ Expected: all PASS.
 
 ```bash
 git add crates/merry-runtime/src/session.rs crates/merry-runtime/src/runtime.rs crates/merry-runtime/tests/agent_loop.rs
-git commit -m "fix(runtime): preserve hot tool continuations"
+git commit -m "fix(runtime): preserve uncheckpointed tool continuations"
 ```
 
-## Task 3: Prove Hot Continuations Are Cleared After Final Answer
+## Task 3: Prove Terminal Completion Does Not Clear Uncheckpointed Continuations
 
 **Files:**
 - Modify: `crates/merry-runtime/tests/agent_loop.rs`
 
-- [ ] **Step 1: Document the lifecycle boundary in the test name and assertion**
+- [x] **Step 1: Document the lifecycle boundary in the test name and assertion**
 
-Terminal assistant completion is a hot protocol continuity lifecycle boundary. It is not a checkpoint and it does not erase evidence: exact tool inputs/results remain available through artifacts and ledger facts. The next independent loop should not replay old `function_call`/`function_call_output` pairs by default.
+Terminal assistant completion is not a checkpoint. Exact function-call continuity remains uncheckpointed until a checkpoint/compaction boundary records what it covers.
 
-- [ ] **Step 2: Add a post-final request test**
+- [x] **Step 2: Add a post-final request test**
 
 Add this test after the previous continuity test:
 
 ```rust
 #[tokio::test(flavor = "current_thread")]
-async fn agent_loop_clears_hot_tool_continuations_after_final_answer() {
+async fn agent_loop_keeps_uncheckpointed_continuations_after_final_answer() {
     let provider = ScriptedModelProvider::new(vec![
         vec![Ok(completed_tool_call_event(model_tool_call(
             "call-first",
@@ -303,30 +294,39 @@ async fn agent_loop_clears_hot_tool_continuations_after_final_answer() {
         vec![Ok(completed_text_event("second final"))],
     ]);
     let executor = ScriptedToolExecutor::succeeding_text("search result\n");
-    let runtime = runtime_with_tool("agent-loop-hot-continuity-clear", provider.clone(), executor);
+    let runtime = runtime_with_tool(
+        "agent-loop-uncheckpointed-continuity-final",
+        provider.clone(),
+        executor,
+    );
 
     let first = run_default_loop(&runtime, "Search once.").await;
     assert_eq!(first.status(), &AgentLoopStatus::Completed);
 
-    let second = run_default_loop(&runtime, "Answer without previous tool result.").await;
+    let second = run_default_loop(&runtime, "Answer without compaction.").await;
     assert_eq!(second.status(), &AgentLoopStatus::Completed);
 
     let requests = provider.recorded_requests();
     assert_eq!(requests.len(), 3);
     assert_eq!(requests[1].continuations().len(), 1);
-    assert!(
-        requests[2].continuations().is_empty(),
-        "terminal assistant completion is a hot protocol lifecycle boundary; the next independent loop must not replay old tool continuations"
+    assert_eq!(
+        requests[2].continuations().len(),
+        1,
+        "terminal assistant completion is not compaction; old continuations remain uncheckpointed"
+    );
+    assert_eq!(
+        requests[2].continuations()[0].call().id().as_str(),
+        "call-first"
     );
 }
 ```
 
-- [ ] **Step 3: Run the test**
+- [x] **Step 3: Run the test**
 
 Run:
 
 ```bash
-cargo test -p merry-runtime agent_loop_clears_hot_tool_continuations_after_final_answer
+cargo test -p merry-runtime agent_loop_keeps_uncheckpointed_continuations_after_final_answer
 ```
 
 Expected: PASS.
@@ -335,7 +335,7 @@ Expected: PASS.
 
 ```bash
 git add crates/merry-runtime/tests/agent_loop.rs
-git commit -m "test(runtime): cover hot continuation cleanup"
+git commit -m "test(runtime): cover uncheckpointed continuation retention"
 ```
 
 Skip this commit if Task 2 already committed this test.
@@ -452,7 +452,7 @@ append-only body:
   current user input
   explicit context-policy projections
 
-hot protocol continuity:
+uncheckpointed protocol continuity:
   recent function_call/function_call_output pairs
 ```
 
@@ -527,7 +527,7 @@ optional checkpoint segment, if present
 optional explicit context-policy projections
 prior append-only user/assistant messages
 current user or continuation control input
-hot function-call continuations
+uncheckpointed function-call continuations
 ```
 
 - [ ] **Step 6: Add tests**
@@ -1519,7 +1519,7 @@ The later checkpoint-content plan must separately prove:
 ```text
 checkpoint content is generated from runtime-owned state
 checkpoint text references artifacts/evidence instead of replacing exact evidence
-unresolved or still-hot function-call continuity remains exact
+unresolved or uncheckpointed function-call continuity remains exact
 old raw function-call continuity is removed only after checkpoint is recorded
 ```
 

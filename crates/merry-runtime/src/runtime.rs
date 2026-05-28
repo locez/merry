@@ -31,8 +31,8 @@ use crate::{
     },
     step::{StepContext, StepInput, compile_step_model_request},
     tool::{
-        ActionProposalEvidence, RegisteredTool, ToolExecutionContext, ToolExecutionError,
-        ToolRegistry,
+        ActionProposalEvidence, RegisteredTool, ToolActionPreflight, ToolExecutionContext,
+        ToolExecutionError, ToolRegistry,
     },
 };
 use futures_util::StreamExt;
@@ -356,7 +356,7 @@ impl Runtime {
                 }
 
                 match proposed {
-                    Ok(Some(proposal)) => {
+                    Ok(ToolActionPreflight::Proposal(proposal)) => {
                         validate_action_proposal(
                             &proposal,
                             &pending,
@@ -365,7 +365,29 @@ impl Runtime {
                         )?;
                         Some(proposal)
                     }
-                    Ok(None) => None,
+                    Ok(ToolActionPreflight::NoProposal) => None,
+                    Ok(ToolActionPreflight::Outcome(outcome)) => {
+                        let (status, content, diagnostic, execution_evidence) =
+                            outcome.into_parts();
+                        if status != ToolCallResultStatus::Failed {
+                            return Err(RuntimeError::Core {
+                                source: CoreError::InvalidToolCallResult {
+                                    reason: "preflight tool outcome must be failed",
+                                },
+                            });
+                        }
+                        debug_assert!(execution_evidence.is_none());
+                        let mut session = self.inner.session.lock().await;
+                        if context.cancellation_token().is_cancelled() {
+                            return Err(RuntimeError::ToolExecutionCancelled {
+                                session_id: self.inner.session_id.clone(),
+                                call_id: call_id.clone(),
+                            });
+                        }
+                        return session.submit_tool_execution_outcome(
+                            call_id, status, content, diagnostic, None,
+                        );
+                    }
                     Err(ToolExecutionError::Cancelled) => {
                         return Err(RuntimeError::ToolExecutionCancelled {
                             session_id: self.inner.session_id.clone(),
@@ -1717,7 +1739,7 @@ async fn run_provider_step(
             .memory_projection_epoch
             .fetch_add(1, Ordering::AcqRel)
             .wrapping_add(1);
-        let continuations = match session.unconsumed_tool_continuation_snapshots() {
+        let continuations = match session.uncheckpointed_tool_continuation_snapshots() {
             Ok(continuations) => continuations,
             Err(error) => {
                 session.replace_activated_memories(Vec::new());
@@ -1888,7 +1910,6 @@ async fn run_provider_step(
                             sender,
                             token,
                             text.clone(),
-                            sent_continuation_count,
                         )
                         .await
                         {
@@ -1912,15 +1933,7 @@ async fn run_provider_step(
                             streamed_tool_call.as_ref(),
                         ) {
                             Ok(call) => {
-                                if !send_tool_call_pending_event(
-                                    inner,
-                                    sender,
-                                    token,
-                                    call,
-                                    sent_continuation_count,
-                                )
-                                .await
-                                {
+                                if !send_tool_call_pending_event(inner, sender, token, call).await {
                                     let _ = send_cancelled_if_requested(inner, sender, token).await;
                                 }
                             }
@@ -2138,7 +2151,6 @@ async fn send_assistant_text_output_completed_events(
     sender: &mpsc::Sender<RuntimeEvent>,
     token: &CancellationToken,
     text: String,
-    sent_continuation_count: usize,
 ) -> bool {
     if token.is_cancelled() {
         return false;
@@ -2153,13 +2165,7 @@ async fn send_assistant_text_output_completed_events(
         if token.is_cancelled() {
             return false;
         }
-        match session.record_assistant_text_output(text) {
-            Ok(event) => {
-                session.consume_tool_continuations(sent_continuation_count);
-                Ok(event)
-            }
-            Err(error) => Err(error),
-        }
+        session.record_assistant_text_output(text)
     };
 
     let Ok(artifact_event) = artifact_event else {
@@ -2202,7 +2208,6 @@ async fn send_tool_call_pending_event(
     sender: &mpsc::Sender<RuntimeEvent>,
     token: &CancellationToken,
     call: PendingToolCall,
-    sent_continuation_count: usize,
 ) -> bool {
     if token.is_cancelled() {
         return false;
@@ -2217,13 +2222,7 @@ async fn send_tool_call_pending_event(
         if token.is_cancelled() {
             return false;
         }
-        match session.record_tool_call_pending(call) {
-            Ok(event) => {
-                session.consume_tool_continuations(sent_continuation_count);
-                Ok(event)
-            }
-            Err(diagnostic) => Err(diagnostic),
-        }
+        session.record_tool_call_pending(call)
     };
 
     match event {
@@ -2526,8 +2525,8 @@ mod tests {
     use crate::session::SessionState;
     use crate::tool::{
         ActionExecutionEvidence, ActionProposal, ActionProposalEvidence, RegisteredTool,
-        ToolActionKind, ToolActionProposalFuture, ToolExecutionContext, ToolExecutionError,
-        ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture, ToolRegistry,
+        ToolActionKind, ToolActionPreflight, ToolActionProposalFuture, ToolExecutionContext,
+        ToolExecutionError, ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture, ToolRegistry,
         WorkspacePatchExecutionEvidence, WorkspacePatchProposal,
     };
     use crate::{ArtifactError, RuntimeError, RuntimeModelRole};
@@ -5283,6 +5282,7 @@ mod tests {
         wait_for_cancel: bool,
         record_approved_proposal: Arc<StdMutex<Vec<bool>>>,
         attach_execution_evidence: bool,
+        preflight_outcome: Option<ToolExecutionOutcome>,
     }
 
     impl ProposingToolExecutor {
@@ -5293,6 +5293,7 @@ mod tests {
                 wait_for_cancel: false,
                 record_approved_proposal: Arc::new(StdMutex::new(Vec::new())),
                 attach_execution_evidence: true,
+                preflight_outcome: None,
             }
         }
 
@@ -5303,6 +5304,7 @@ mod tests {
                 wait_for_cancel: true,
                 record_approved_proposal: Arc::new(StdMutex::new(Vec::new())),
                 attach_execution_evidence: true,
+                preflight_outcome: None,
             }
         }
 
@@ -5313,6 +5315,18 @@ mod tests {
                 wait_for_cancel: false,
                 record_approved_proposal: Arc::new(StdMutex::new(Vec::new())),
                 attach_execution_evidence: false,
+                preflight_outcome: None,
+            }
+        }
+
+        fn with_preflight_outcome(outcome: ToolExecutionOutcome) -> Self {
+            Self {
+                execute_calls: Arc::new(AtomicUsize::new(0)),
+                propose_calls: Arc::new(AtomicUsize::new(0)),
+                wait_for_cancel: false,
+                record_approved_proposal: Arc::new(StdMutex::new(Vec::new())),
+                attach_execution_evidence: true,
+                preflight_outcome: Some(outcome),
             }
         }
 
@@ -5344,6 +5358,9 @@ mod tests {
                     context.cancellation_token().cancelled().await;
                     return Err(ToolExecutionError::Cancelled);
                 }
+                if let Some(outcome) = self.preflight_outcome.clone() {
+                    return Ok(ToolActionPreflight::Outcome(outcome));
+                }
 
                 let patch = WorkspacePatchProposal::new(
                     "notes/proposed.txt",
@@ -5355,7 +5372,7 @@ mod tests {
                     "fnv1a64:0000000000000002",
                 )
                 .expect("test proposal metadata is valid");
-                Ok(Some(
+                Ok(ToolActionPreflight::Proposal(
                     ActionProposal::new(
                         &call,
                         ToolActionKind::WorkspaceWrite,
@@ -5461,7 +5478,7 @@ mod tests {
                     16 * 1024,
                 )
                 .expect("test process intent is valid");
-                Ok(Some(
+                Ok(ToolActionPreflight::Proposal(
                     ActionProposal::new(
                         &call,
                         ToolActionKind::CommandExec,
@@ -5668,7 +5685,7 @@ mod tests {
                     "fnv1a64:0000000000000004",
                 )
                 .expect("test proposal metadata is valid");
-                Ok(Some(
+                Ok(ToolActionPreflight::Proposal(
                     ActionProposal::new(
                         &call,
                         ToolActionKind::WorkspaceWrite,
@@ -6049,6 +6066,50 @@ mod tests {
         assert!(audit_indexes[0] < audit_indexes[1]);
         assert!(audit_indexes[1] < artifact_index);
         assert!(artifact_index < resolved_index);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn preflight_outcome_must_be_failed_to_resolve_without_policy_bypass() {
+        let executor = ProposingToolExecutor::with_preflight_outcome(
+            ToolExecutionOutcome::succeeded_text("must not bypass policy\n"),
+        );
+        let tool = RegisteredTool::new(
+            policy_tool_spec("policy_write_preflight_success"),
+            Arc::new(executor.clone()),
+            ToolActionKind::WorkspaceWrite,
+        )
+        .with_action_proposal();
+        let (runtime, pending) = register_policy_pending_registered_tool(
+            "runtime-policy-preflight-success-rejected",
+            "policy_write_preflight_success",
+            "call-preflight-success-rejected",
+            tool,
+        )
+        .await;
+
+        let error = runtime
+            .execute_tool_call(pending.id(), ToolExecutionContext::default())
+            .await
+            .expect_err("successful preflight outcome must not bypass action policy");
+
+        match error {
+            RuntimeError::Core { source } => assert!(
+                source.to_string().contains("preflight tool outcome"),
+                "unexpected core error: {source}"
+            ),
+            other => panic!("expected core validation error, got {other:?}"),
+        }
+        assert_eq!(executor.propose_count(), 1);
+        assert_eq!(executor.execute_count(), 0);
+        assert_eq!(
+            runtime
+                .pending_tool_calls()
+                .await
+                .iter()
+                .map(|call| call.id().as_str().to_owned())
+                .collect::<Vec<_>>(),
+            vec![pending.id().as_str().to_owned()]
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
