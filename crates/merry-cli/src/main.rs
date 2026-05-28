@@ -43,6 +43,8 @@ const DEBUG_TOOL_NAME: &str = "debug_echo";
 const DEBUG_TOOL_CONTINUATION_INPUT: &str = "continue after debug tool";
 const CODING_LOOP_SMOKE_SESSION_ID: &str = "coding-loop-smoke";
 const CODING_LOOP_LIVE_SMOKE_SESSION_ID: &str = "coding-loop-live-smoke";
+const CODING_LOOP_TASK_SMOKE_SESSION_ID: &str = "coding-loop-task-smoke";
+const CODING_LOOP_TASK_LIVE_SMOKE_SESSION_ID: &str = "coding-loop-task-live-smoke";
 const CODING_LOOP_LIVE_SMOKE_INITIAL_VALUE: &str = "unfixed";
 const CODING_LOOP_LIVE_SMOKE_TARGET_VALUE: &str = "fixed-by-live-llm";
 const SHELL_TOOL_NAME: &str = "shell_command";
@@ -50,12 +52,17 @@ const SHELL_TOOL_CALL_ID: &str = "call-shell-command";
 const SHELL_STEP_INPUT: &str = "run shell command through Merry process protocol";
 const BWRAP_PROGRAM: &str = "bwrap";
 const DEFAULT_SANDBOX_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
-const SANDBOX_ETC_READ_ONLY_PATHS: &[&str] = &[
+const SANDBOX_ETC_READ_ONLY_FILE_PATHS: &[&str] = &[
     "/etc/ld.so.cache",
+    "/etc/ld.so.conf",
     "/etc/resolv.conf",
     "/etc/hosts",
     "/etc/nsswitch.conf",
+];
+const SANDBOX_ETC_READ_ONLY_DIR_PATHS: &[&str] = &[
+    "/etc/ld.so.conf.d",
     "/etc/ssl",
+    "/etc/ca-certificates",
     "/etc/pki",
 ];
 const MERRY_SANDBOX_ENV: &str = "MERRY_SANDBOX";
@@ -199,6 +206,16 @@ enum DebugCommand {
         about = "Run an opt-in sandboxed coding-loop smoke driven by a live OpenAI-compatible model"
     )]
     CodingLoopLiveSmoke(DebugCodingLoopLiveSmokeArgs),
+    #[command(
+        name = "coding-loop-task-smoke",
+        about = "Run an opt-in sandboxed coding-loop task smoke with deterministic model steps"
+    )]
+    CodingLoopTaskSmoke(DebugCodingLoopTaskSmokeArgs),
+    #[command(
+        name = "coding-loop-task-live-smoke",
+        about = "Run an opt-in sandboxed coding-loop task smoke driven by a live OpenAI-compatible model"
+    )]
+    CodingLoopTaskLiveSmoke(DebugCodingLoopTaskLiveSmokeArgs),
 }
 
 #[derive(Debug, Args)]
@@ -255,6 +272,50 @@ struct DebugCodingLoopLiveSmokeArgs {
         help = "Maximum output tokens per live model step"
     )]
     max_output_tokens: u64,
+}
+
+#[derive(Debug, Args)]
+struct DebugCodingLoopTaskSmokeArgs {
+    #[arg(
+        long,
+        value_enum,
+        default_value = "status-text",
+        help = "Disposable coding task fixture to run"
+    )]
+    task: CodingLoopTaskSmokeTask,
+}
+
+#[derive(Debug, Args)]
+struct DebugCodingLoopTaskLiveSmokeArgs {
+    #[arg(
+        long,
+        value_enum,
+        default_value = "status-text",
+        help = "Disposable coding task fixture to run"
+    )]
+    task: CodingLoopTaskSmokeTask,
+
+    #[arg(
+        long,
+        value_name = "MODEL",
+        allow_hyphen_values = true,
+        help = "Model name; overrides [providers.default].model"
+    )]
+    model: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "N",
+        value_parser = parse_max_output_tokens,
+        default_value_t = 768,
+        help = "Maximum output tokens for each live model step"
+    )]
+    max_output_tokens: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CodingLoopTaskSmokeTask {
+    StatusText,
 }
 
 fn main() -> CliExit {
@@ -380,6 +441,26 @@ async fn async_main(cli: Cli, merry_config: Option<MerryConfig>) -> CliExit {
             Err(CliError::Unexpected(message)) => CliExit::Unexpected(message),
         },
         CliCommand::Debug(DebugArgs {
+            command: Some(DebugCommand::CodingLoopTaskSmoke(args)),
+            ..
+        }) => match run_debug_coding_loop_task_smoke(sandbox_child_handoff, args.task).await {
+            Ok(()) => CliExit::Success,
+            Err(CliError::BrokenPipe) => CliExit::Success,
+            Err(CliError::DebugUsage(message)) => CliExit::Usage {
+                message,
+                usage: debug_usage(),
+            },
+            Err(CliError::DebugOpenAiUsage(message)) => CliExit::Usage {
+                message,
+                usage: debug_openai_usage(),
+            },
+            Err(CliError::ShellUsage(message)) => CliExit::Usage {
+                message,
+                usage: shell_usage(),
+            },
+            Err(CliError::Unexpected(message)) => CliExit::Unexpected(message),
+        },
+        CliCommand::Debug(DebugArgs {
             command:
                 Some(DebugCommand::CodingLoopLiveSmoke(DebugCodingLoopLiveSmokeArgs {
                     model,
@@ -403,6 +484,39 @@ async fn async_main(cli: Cli, merry_config: Option<MerryConfig>) -> CliExit {
             Err(CliError::DebugOpenAiUsage(message)) => CliExit::Usage {
                 message,
                 usage: debug_coding_loop_live_smoke_usage(),
+            },
+            Err(CliError::ShellUsage(message)) => CliExit::Usage {
+                message,
+                usage: shell_usage(),
+            },
+            Err(CliError::Unexpected(message)) => CliExit::Unexpected(message),
+        },
+        CliCommand::Debug(DebugArgs {
+            command:
+                Some(DebugCommand::CodingLoopTaskLiveSmoke(DebugCodingLoopTaskLiveSmokeArgs {
+                    task,
+                    model,
+                    max_output_tokens,
+                })),
+            ..
+        }) => match run_debug_coding_loop_task_live_smoke(
+            sandbox_child_handoff,
+            task,
+            model.as_deref(),
+            max_output_tokens,
+            merry_config.as_ref(),
+        )
+        .await
+        {
+            Ok(()) => CliExit::Success,
+            Err(CliError::BrokenPipe) => CliExit::Success,
+            Err(CliError::DebugUsage(message)) => CliExit::Usage {
+                message,
+                usage: debug_usage(),
+            },
+            Err(CliError::DebugOpenAiUsage(message)) => CliExit::Usage {
+                message,
+                usage: debug_coding_loop_task_live_smoke_usage(),
             },
             Err(CliError::ShellUsage(message)) => CliExit::Usage {
                 message,
@@ -604,8 +718,15 @@ fn build_sandbox_plan(host: &SandboxHost, path: OsString, bwrap: PathBuf) -> San
         os("/lib64"),
         os("/lib64"),
     ];
-    for path in SANDBOX_ETC_READ_ONLY_PATHS {
-        args.extend([os("--ro-bind-try"), os(path), os(path)]);
+    for path in SANDBOX_ETC_READ_ONLY_FILE_PATHS {
+        if Path::new(path).exists() {
+            append_bind_file_args(&mut args, OsStr::new(path), OsStr::new(path));
+        }
+    }
+    for path in SANDBOX_ETC_READ_ONLY_DIR_PATHS {
+        if Path::new(path).exists() {
+            append_bind_dir_args(&mut args, OsStr::new(path), OsStr::new(path));
+        }
     }
     args.extend([
         os("--bind"),
@@ -666,6 +787,34 @@ fn find_bwrap_in_path(path: &OsStr, file_exists: impl Fn(&Path) -> bool) -> Opti
     env::split_paths(path)
         .map(|directory| directory.join(BWRAP_PROGRAM))
         .find(|candidate| file_exists(candidate))
+}
+
+fn append_bind_file_args(args: &mut Vec<OsString>, source: &OsStr, destination: &OsStr) {
+    append_mount_parent_args(args, destination);
+    args.extend([os("--ro-bind"), source.to_owned(), destination.to_owned()]);
+}
+
+fn append_bind_dir_args(args: &mut Vec<OsString>, source: &OsStr, destination: &OsStr) {
+    append_mount_parent_args(args, destination);
+    args.extend([os("--ro-bind"), source.to_owned(), destination.to_owned()]);
+}
+
+fn append_mount_parent_args(args: &mut Vec<OsString>, destination: &OsStr) {
+    let Some(destination) = destination.to_str() else {
+        return;
+    };
+    let Some(parent) = Path::new(destination).parent() else {
+        return;
+    };
+    let mut parents = parent
+        .ancestors()
+        .take_while(|path| *path != Path::new("/"))
+        .collect::<Vec<_>>();
+    parents.reverse();
+
+    for parent in parents {
+        args.extend([os("--dir"), parent.as_os_str().to_owned()]);
+    }
 }
 
 fn sandbox_path(host: &SandboxHost) -> OsString {
@@ -931,6 +1080,98 @@ async fn run_debug_coding_loop_live_smoke(
     writer.flush().await.map_err(stdout_error)
 }
 
+async fn run_debug_coding_loop_task_smoke(
+    sandbox_child_handoff: Option<SandboxChildHandoff>,
+    task: CodingLoopTaskSmokeTask,
+) -> Result<(), CliError> {
+    let Some(admission) =
+        coding_loop_smoke_admission_from_current_process(sandbox_child_handoff).await
+    else {
+        return Err(coding_loop_smoke_requires_sandbox_error(
+            "coding-loop-task-smoke",
+        ));
+    };
+
+    let fixture = CodingLoopTaskSmokeFixture::for_task(task);
+    let smoke_root = prepare_coding_loop_task_fixture("coding-loop-task-smoke", fixture)?;
+    let relative_cwd = smoke_root_relative_cwd(&smoke_root)?;
+    let runtime = build_coding_loop_task_smoke_runtime(
+        &smoke_root,
+        relative_cwd.as_deref(),
+        admission,
+        Arc::new(TokioProcessRunner::new()),
+        fixture,
+    )?;
+
+    let result = runtime
+        .run_agent_loop(
+            StepInput::user_text(fixture.task_prompt()).map_err(unexpected)?,
+            StepContext::default(),
+            AgentLoopConfig::new(10).map_err(unexpected)?,
+        )
+        .await
+        .map_err(unexpected)?;
+
+    assert_coding_loop_task_smoke_result(&runtime, &result, &smoke_root, fixture).await?;
+
+    let mut writer = BufWriter::new(tokio::io::stdout());
+    writer
+        .write_all(b"coding-loop-task-smoke: ok\n")
+        .await
+        .map_err(stdout_error)?;
+    writer.flush().await.map_err(stdout_error)
+}
+
+async fn run_debug_coding_loop_task_live_smoke(
+    sandbox_child_handoff: Option<SandboxChildHandoff>,
+    task: CodingLoopTaskSmokeTask,
+    model_flag: Option<&str>,
+    max_output_tokens: u64,
+    merry_config: Option<&MerryConfig>,
+) -> Result<(), CliError> {
+    let Some(admission) =
+        coding_loop_smoke_admission_from_current_process(sandbox_child_handoff).await
+    else {
+        return Err(coding_loop_smoke_requires_sandbox_error(
+            "coding-loop-task-live-smoke",
+        ));
+    };
+    let config = debug_openai_config(model_flag, merry_config)?;
+
+    let fixture = CodingLoopTaskSmokeFixture::for_task(task);
+    let smoke_root = prepare_coding_loop_task_fixture("coding-loop-task-live-smoke", fixture)?;
+    let relative_cwd = smoke_root_relative_cwd(&smoke_root)?;
+    let runtime = build_coding_loop_task_live_smoke_runtime(
+        &smoke_root,
+        admission,
+        config,
+        Arc::new(TokioProcessRunner::new()),
+    )?;
+    let generation_config =
+        GenerationConfig::new(Some(max_output_tokens), false).map_err(debug_openai_usage_error)?;
+    let context = StepContext::default().with_generation_config(generation_config);
+
+    let result = runtime
+        .run_agent_loop(
+            StepInput::user_text(&fixture.live_task_prompt(relative_cwd.as_deref()))
+                .map_err(unexpected)?,
+            context,
+            AgentLoopConfig::new(12).map_err(unexpected)?,
+        )
+        .await
+        .map_err(unexpected)?;
+
+    assert_coding_loop_task_smoke_result(&runtime, &result, &smoke_root, fixture).await?;
+    assert_coding_loop_task_live_smoke_tool_sequence(&runtime, result.events()).await?;
+
+    let mut writer = BufWriter::new(tokio::io::stdout());
+    writer
+        .write_all(b"coding-loop-task-live-smoke: ok\n")
+        .await
+        .map_err(stdout_error)?;
+    writer.flush().await.map_err(stdout_error)
+}
+
 async fn coding_loop_smoke_admission_from_current_process(
     sandbox_child_handoff: Option<SandboxChildHandoff>,
 ) -> Option<AcceptedLocalWorkspaceProcessAdmission> {
@@ -989,6 +1230,58 @@ async fn assert_coding_loop_smoke_result(
     if patched != coding_loop_smoke_patched_source() {
         return Err(CliError::Unexpected(
             "coding-loop-smoke fixture was not patched as expected".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+async fn assert_coding_loop_task_smoke_result(
+    runtime: &Runtime,
+    result: &merry_runtime::AgentLoopResult,
+    smoke_root: &Path,
+    fixture: CodingLoopTaskSmokeFixture,
+) -> Result<(), CliError> {
+    if result.status() != &AgentLoopStatus::Completed {
+        return Err(CliError::Unexpected(format!(
+            "coding-loop-task-smoke did not complete: {:?}",
+            result.status()
+        )));
+    }
+    if !runtime.pending_tool_calls().await.is_empty() {
+        return Err(CliError::Unexpected(
+            "coding-loop-task-smoke left pending tool calls".to_owned(),
+        ));
+    }
+
+    let statuses = result
+        .events()
+        .iter()
+        .filter_map(|event| match &event.kind {
+            RuntimeEventKind::ToolCallResolved { result } => Some(result.status()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if statuses.len() != 5 {
+        return Err(CliError::Unexpected(format!(
+            "coding-loop-task-smoke expected 5 resolved tool calls, saw {}",
+            statuses.len()
+        )));
+    }
+    if !statuses.contains(&ToolCallResultStatus::Failed) {
+        return Err(CliError::Unexpected(
+            "coding-loop-task-smoke did not observe the initial failing verification".to_owned(),
+        ));
+    }
+    if statuses.last().copied() != Some(ToolCallResultStatus::Succeeded) {
+        return Err(CliError::Unexpected(
+            "coding-loop-task-smoke final verification did not succeed".to_owned(),
+        ));
+    }
+
+    let patched = fs::read_to_string(smoke_root.join("src/lib.rs")).map_err(unexpected)?;
+    if patched != fixture.patched_source() {
+        return Err(CliError::Unexpected(
+            "coding-loop-task-smoke fixture was not patched as expected".to_owned(),
         ));
     }
     Ok(())
@@ -1053,6 +1346,110 @@ fn prepare_coding_loop_smoke_fixture(name: &str) -> Result<PathBuf, CliError> {
     Ok(root)
 }
 
+#[derive(Debug, Clone, Copy)]
+struct CodingLoopTaskSmokeFixture {
+    task: CodingLoopTaskSmokeTask,
+}
+
+impl CodingLoopTaskSmokeFixture {
+    const fn for_task(task: CodingLoopTaskSmokeTask) -> Self {
+        Self { task }
+    }
+
+    const fn package_name(self) -> &'static str {
+        match self.task {
+            CodingLoopTaskSmokeTask::StatusText => "merry-coding-loop-task-status-text",
+        }
+    }
+
+    const fn initial_source(self) -> &'static str {
+        match self.task {
+            CodingLoopTaskSmokeTask::StatusText => {
+                "pub fn status() -> &'static str {\n    \"todo\"\n}\n"
+            }
+        }
+    }
+
+    const fn patched_source(self) -> &'static str {
+        match self.task {
+            CodingLoopTaskSmokeTask::StatusText => {
+                "pub fn status() -> &'static str {\n    \"done\"\n}\n"
+            }
+        }
+    }
+
+    const fn test_source(self) -> &'static str {
+        match self.task {
+            CodingLoopTaskSmokeTask::StatusText => {
+                "Expected behavior: src/lib.rs exposes status() returning the completed status text.\n"
+            }
+        }
+    }
+
+    const fn task_prompt(self) -> &'static str {
+        match self.task {
+            CodingLoopTaskSmokeTask::StatusText => {
+                "Fix the disposable Rust fixture so status() returns done. Inspect the workspace, verify the target text is initially missing with rg, read the source, apply one constrained patch, run rg again to verify, and then report the result."
+            }
+        }
+    }
+
+    fn live_task_prompt(self, relative_cwd: Option<&str>) -> String {
+        let cwd = relative_cwd.unwrap_or(".");
+        format!(
+            "\
+You are driving Merry's configurable coding-loop task smoke.
+
+Task: fix the disposable Rust fixture so `status()` returns `done`.
+
+Use the available tools, one tool call per step. Do not answer from memory.
+
+Required behavior:
+1. Inspect the fixture files with `{process_tool}` using argv `[\"rg\", \"--files\"]` and cwd `{cwd}`.
+2. Run verification with `{process_tool}` using argv `[\"rg\", \"done\"]` and cwd `{cwd}`. The first run is expected to fail because the target text is missing.
+3. Read exact source evidence with `{read_tool}` before editing.
+4. Apply exactly one constrained edit through `{patch_tool}`.
+5. Run `{process_tool}` again with argv `[\"rg\", \"done\"]` and cwd `{cwd}`.
+6. After verification succeeds, return a concise final answer.
+
+Constraints:
+- Do not use shell strings, scripts, pipelines, env, stdin, git, cargo, network tools, or any command except the exact `rg --files` and `rg done` argv values above.
+- Do not modify any file except `src/lib.rs` through `{patch_tool}`.
+- Do not include tool output in the final answer; just say whether the task was fixed and verified.
+",
+            process_tool = CODING_LOOP_PROCESS_TOOL,
+            read_tool = WORKSPACE_READ_FILE_TOOL,
+            patch_tool = WORKSPACE_PATCH_FILE_TOOL,
+        )
+    }
+}
+
+fn prepare_coding_loop_task_fixture(
+    name: &str,
+    fixture: CodingLoopTaskSmokeFixture,
+) -> Result<PathBuf, CliError> {
+    let root = env::current_dir()
+        .map_err(unexpected)?
+        .join(".merry")
+        .join("local")
+        .join(name);
+    if root.exists() {
+        fs::remove_dir_all(&root).map_err(unexpected)?;
+    }
+    fs::create_dir_all(root.join("src")).map_err(unexpected)?;
+    fs::write(
+        root.join("Cargo.toml"),
+        format!(
+            "[package]\nname = \"{}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[lib]\npath = \"src/lib.rs\"\n",
+            fixture.package_name()
+        ),
+    )
+    .map_err(unexpected)?;
+    fs::write(root.join("src/lib.rs"), fixture.initial_source()).map_err(unexpected)?;
+    fs::write(root.join("tests.md"), fixture.test_source()).map_err(unexpected)?;
+    Ok(root)
+}
+
 fn coding_loop_smoke_initial_source() -> &'static str {
     "pub fn greeting() -> &'static str {\n    \"unfixed\"\n}\n"
 }
@@ -1099,6 +1496,43 @@ fn build_coding_loop_live_smoke_runtime(
     let provider = OpenAiProvider::new(config.provider);
     build_coding_loop_runtime(
         CODING_LOOP_LIVE_SMOKE_SESSION_ID,
+        root,
+        admission,
+        Arc::new(provider),
+        ModelName::new(&config.model).map_err(debug_openai_usage_error)?,
+        runner,
+        true,
+    )
+}
+
+fn build_coding_loop_task_smoke_runtime(
+    root: &Path,
+    relative_cwd: Option<&str>,
+    admission: AcceptedLocalWorkspaceProcessAdmission,
+    runner: Arc<dyn ProcessRunner>,
+    fixture: CodingLoopTaskSmokeFixture,
+) -> Result<Runtime, CliError> {
+    let provider = CodingLoopTaskSmokeProvider::new(relative_cwd, fixture)?;
+    build_coding_loop_runtime(
+        CODING_LOOP_TASK_SMOKE_SESSION_ID,
+        root,
+        admission,
+        Arc::new(provider),
+        ModelName::new("merry-coding-loop-task-smoke").map_err(unexpected)?,
+        runner,
+        false,
+    )
+}
+
+fn build_coding_loop_task_live_smoke_runtime(
+    root: &Path,
+    admission: AcceptedLocalWorkspaceProcessAdmission,
+    config: DebugOpenAiConfig,
+    runner: Arc<dyn ProcessRunner>,
+) -> Result<Runtime, CliError> {
+    let provider = OpenAiProvider::new(config.provider);
+    build_coding_loop_runtime(
+        CODING_LOOP_TASK_LIVE_SMOKE_SESSION_ID,
         root,
         admission,
         Arc::new(provider),
@@ -1234,6 +1668,67 @@ async fn assert_coding_loop_live_smoke_tool_sequence(
     Ok(())
 }
 
+async fn assert_coding_loop_task_live_smoke_tool_sequence(
+    runtime: &Runtime,
+    events: &[RuntimeEvent],
+) -> Result<(), CliError> {
+    let mut pending_by_call_id = BTreeMap::new();
+    let mut resolved_tool_names = Vec::new();
+    let mut resolved_artifacts = Vec::new();
+    for event in events {
+        match &event.kind {
+            RuntimeEventKind::ToolCallPending { call } => {
+                pending_by_call_id.insert(call.id().clone(), call.clone());
+            }
+            RuntimeEventKind::ToolCallResolved { result } => {
+                let call = pending_by_call_id.get(result.call_id()).ok_or_else(|| {
+                    CliError::Unexpected(format!(
+                        "task live smoke resolved unknown tool call {}",
+                        result.call_id()
+                    ))
+                })?;
+                resolved_tool_names.push(call.name().as_str().to_owned());
+                resolved_artifacts.push(result.artifact().id().clone());
+            }
+            _ => {}
+        }
+    }
+
+    require_live_smoke_tool_name(&resolved_tool_names, CODING_LOOP_PROCESS_TOOL)?;
+    require_live_smoke_tool_name(&resolved_tool_names, WORKSPACE_READ_FILE_TOOL)?;
+    require_live_smoke_tool_name(&resolved_tool_names, WORKSPACE_PATCH_FILE_TOOL)?;
+
+    let mut saw_failed_verification = false;
+    let mut saw_successful_verification = false;
+    for artifact_id in &resolved_artifacts {
+        let Ok(content) = runtime.read_artifact_content(artifact_id).await else {
+            continue;
+        };
+        let Some(text) = content.as_text() else {
+            continue;
+        };
+        if !text.contains("\"kind\":\"process_action\"")
+            || !process_artifact_has_argv(text, ["rg", "done"])
+        {
+            continue;
+        }
+        saw_failed_verification |= text.contains("\"ok\":false");
+        saw_successful_verification |= text.contains("\"ok\":true");
+    }
+    if !saw_failed_verification {
+        return Err(CliError::Unexpected(
+            "task live smoke did not observe an initial failing rg verification".to_owned(),
+        ));
+    }
+    if !saw_successful_verification {
+        return Err(CliError::Unexpected(
+            "task live smoke did not observe a successful rg verification".to_owned(),
+        ));
+    }
+
+    Ok(())
+}
+
 fn require_live_smoke_tool_name(names: &[String], required: &str) -> Result<(), CliError> {
     if names.iter().any(|name| name == required) {
         Ok(())
@@ -1348,6 +1843,107 @@ impl ModelProvider for CodingLoopSmokeProvider {
                 .pop()
                 .ok_or_else(|| {
                     ModelError::invalid_request("coding-loop-smoke provider has no scripted step")
+                })?;
+            Ok(Box::pin(stream::iter([Ok(event)])) as ModelEventStream)
+        })
+    }
+}
+
+struct CodingLoopTaskSmokeProvider {
+    name: ProviderName,
+    capabilities: ModelCapabilities,
+    steps: Mutex<Vec<ModelEvent>>,
+}
+
+impl CodingLoopTaskSmokeProvider {
+    fn new(
+        relative_cwd: Option<&str>,
+        fixture: CodingLoopTaskSmokeFixture,
+    ) -> Result<Self, CliError> {
+        let steps = vec![
+            coding_loop_process_call(
+                "coding-loop-task-smoke-rg-files",
+                &["rg", "--files"],
+                relative_cwd,
+            )?,
+            coding_loop_process_call(
+                "coding-loop-task-smoke-verify-before",
+                &["rg", "done"],
+                relative_cwd,
+            )?,
+            coding_loop_workspace_call(
+                "coding-loop-task-smoke-read",
+                WORKSPACE_READ_FILE_TOOL,
+                [("path", serde_json::Value::String("src/lib.rs".to_owned()))],
+            )?,
+            coding_loop_workspace_call(
+                "coding-loop-task-smoke-patch",
+                WORKSPACE_PATCH_FILE_TOOL,
+                [
+                    ("path", serde_json::Value::String("src/lib.rs".to_owned())),
+                    (
+                        "old_text",
+                        serde_json::Value::String(fixture.initial_source().to_owned()),
+                    ),
+                    (
+                        "new_text",
+                        serde_json::Value::String(fixture.patched_source().to_owned()),
+                    ),
+                ],
+            )?,
+            coding_loop_process_call(
+                "coding-loop-task-smoke-verify-after",
+                &["rg", "done"],
+                relative_cwd,
+            )?,
+            ModelEvent::Completed {
+                response: ModelResponse::new(
+                    vec![ModelOutput::text(
+                        "coding-loop-task-smoke fixed the fixture and verified rg done",
+                    )],
+                    FinishReason::Stop,
+                    None,
+                ),
+            },
+        ];
+
+        Ok(Self {
+            name: ProviderName::new("merry-coding-loop-task-smoke-provider").map_err(unexpected)?,
+            capabilities: ModelCapabilities::new(true, true, false, true, None, None)
+                .map_err(unexpected)?,
+            steps: Mutex::new(steps.into_iter().rev().collect()),
+        })
+    }
+}
+
+impl ModelProvider for CodingLoopTaskSmokeProvider {
+    fn name(&self) -> &ProviderName {
+        &self.name
+    }
+
+    fn capabilities(&self) -> &ModelCapabilities {
+        &self.capabilities
+    }
+
+    fn stream_model<'a>(
+        &'a self,
+        _request: ModelRequest,
+        context: ModelStreamContext,
+    ) -> ModelProviderFuture<'a, Result<ModelEventStream, ModelError>> {
+        Box::pin(async move {
+            if context.cancellation_token().is_cancelled() {
+                return Err(ModelError::Cancelled);
+            }
+
+            let event = self
+                .steps
+                .lock()
+                .expect("coding loop task smoke steps mutex should not be poisoned")
+                .pop()
+                .ok_or_else(|| {
+                    ModelError::invalid_request(
+                        "coding-loop-task-smoke provider has no scripted step",
+                    )
                 })?;
             Ok(Box::pin(stream::iter([Ok(event)])) as ModelEventStream)
         })
@@ -1958,6 +2554,18 @@ fn debug_coding_loop_live_smoke_usage() -> String {
     command_usage(&mut command)
 }
 
+fn debug_coding_loop_task_live_smoke_usage() -> String {
+    let mut command = DebugCodingLoopTaskLiveSmokeArgs::augment_args(clap::Command::new(
+        "coding-loop-task-live-smoke",
+    ))
+    .bin_name("merry debug coding-loop-task-live-smoke")
+    .about(
+        "Run an opt-in sandboxed coding-loop task smoke driven by a live OpenAI-compatible model",
+    )
+    .after_help(OPENAI_ENV_HELP);
+    command_usage(&mut command)
+}
+
 fn command_usage(command: &mut clap::Command) -> String {
     let mut buffer = Vec::new();
     command
@@ -2046,6 +2654,7 @@ mod tests {
         shell_runtime_admission, shell_usage, write_debug_openai_tool_events,
     };
     use super::{DEBUG_TOOL_NAME, run_shell_to_writer, write_runtime_step_events};
+    use crate::CodingLoopTaskSmokeTask;
     use clap::Parser;
     use futures_util::stream;
     use merry_core::{ProviderName, RuntimeEvent, ToolCallResultStatus, ToolName};
@@ -2150,9 +2759,12 @@ mod tests {
                     assert_eq!(openai.max_output_tokens, Some(16));
                     assert_eq!(openai.debug_tool_result.as_deref(), Some("tool result"));
                 }
-                Some(DebugCommand::CodingLoopSmoke | DebugCommand::CodingLoopLiveSmoke(_)) => {
-                    panic!("expected debug openai subcommand");
-                }
+                Some(
+                    DebugCommand::CodingLoopSmoke
+                    | DebugCommand::CodingLoopLiveSmoke(_)
+                    | DebugCommand::CodingLoopTaskSmoke(_)
+                    | DebugCommand::CodingLoopTaskLiveSmoke(_),
+                ) => panic!("expected debug openai subcommand"),
                 None => panic!("expected debug openai subcommand"),
             },
             CliCommand::Shell(_) => panic!("expected debug subcommand"),
@@ -2167,9 +2779,13 @@ mod tests {
         match cli.command {
             CliCommand::Debug(debug) => match debug.command {
                 Some(DebugCommand::CodingLoopSmoke) => {}
-                Some(DebugCommand::OpenAi(_) | DebugCommand::CodingLoopLiveSmoke(_)) | None => {
-                    panic!("expected debug coding-loop-smoke subcommand")
-                }
+                Some(
+                    DebugCommand::OpenAi(_)
+                    | DebugCommand::CodingLoopLiveSmoke(_)
+                    | DebugCommand::CodingLoopTaskSmoke(_)
+                    | DebugCommand::CodingLoopTaskLiveSmoke(_),
+                )
+                | None => panic!("expected debug coding-loop-smoke subcommand"),
             },
             CliCommand::Shell(_) => panic!("expected debug subcommand"),
         }
@@ -2194,9 +2810,69 @@ mod tests {
                     assert_eq!(live.model.as_deref(), Some("gpt-test"));
                     assert_eq!(live.max_output_tokens, 384);
                 }
-                Some(DebugCommand::OpenAi(_) | DebugCommand::CodingLoopSmoke) | None => {
-                    panic!("expected debug coding-loop-live-smoke subcommand")
+                Some(
+                    DebugCommand::OpenAi(_)
+                    | DebugCommand::CodingLoopSmoke
+                    | DebugCommand::CodingLoopTaskSmoke(_)
+                    | DebugCommand::CodingLoopTaskLiveSmoke(_),
+                )
+                | None => panic!("expected debug coding-loop-live-smoke subcommand"),
+            },
+            CliCommand::Shell(_) => panic!("expected debug subcommand"),
+        }
+    }
+
+    #[test]
+    fn clap_parses_debug_coding_loop_task_smoke() {
+        let cli = Cli::try_parse_from(["merry", "debug", "coding-loop-task-smoke"])
+            .expect("debug coding-loop-task-smoke args should parse");
+
+        match cli.command {
+            CliCommand::Debug(debug) => match debug.command {
+                Some(DebugCommand::CodingLoopTaskSmoke(task)) => {
+                    assert_eq!(task.task, CodingLoopTaskSmokeTask::StatusText);
                 }
+                Some(
+                    DebugCommand::OpenAi(_)
+                    | DebugCommand::CodingLoopSmoke
+                    | DebugCommand::CodingLoopLiveSmoke(_)
+                    | DebugCommand::CodingLoopTaskLiveSmoke(_),
+                )
+                | None => panic!("expected debug coding-loop-task-smoke subcommand"),
+            },
+            CliCommand::Shell(_) => panic!("expected debug subcommand"),
+        }
+    }
+
+    #[test]
+    fn clap_parses_debug_coding_loop_task_live_smoke() {
+        let cli = Cli::try_parse_from([
+            "merry",
+            "debug",
+            "coding-loop-task-live-smoke",
+            "--task",
+            "status-text",
+            "--model",
+            "gpt-test",
+            "--max-output-tokens",
+            "384",
+        ])
+        .expect("debug coding-loop-task-live-smoke args should parse");
+
+        match cli.command {
+            CliCommand::Debug(debug) => match debug.command {
+                Some(DebugCommand::CodingLoopTaskLiveSmoke(live)) => {
+                    assert_eq!(live.task, CodingLoopTaskSmokeTask::StatusText);
+                    assert_eq!(live.model.as_deref(), Some("gpt-test"));
+                    assert_eq!(live.max_output_tokens, 384);
+                }
+                Some(
+                    DebugCommand::OpenAi(_)
+                    | DebugCommand::CodingLoopSmoke
+                    | DebugCommand::CodingLoopLiveSmoke(_)
+                    | DebugCommand::CodingLoopTaskSmoke(_),
+                )
+                | None => panic!("expected debug coding-loop-task-live-smoke subcommand"),
             },
             CliCommand::Shell(_) => panic!("expected debug subcommand"),
         }
@@ -2215,6 +2891,61 @@ mod tests {
             }
             _ => panic!("expected debug usage error"),
         }
+    }
+
+    #[tokio::test]
+    async fn coding_loop_task_smoke_patches_fixture_and_verifies_with_fake_runner() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let fixture =
+            super::CodingLoopTaskSmokeFixture::for_task(CodingLoopTaskSmokeTask::StatusText);
+        let smoke_root = temp.path().join("coding-loop-task-smoke-fixture");
+        std::fs::create_dir_all(smoke_root.join("src")).expect("fixture src dir should exist");
+        std::fs::write(
+            smoke_root.join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"{}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[lib]\npath = \"src/lib.rs\"\n",
+                fixture.package_name()
+            ),
+        )
+        .expect("fixture Cargo.toml should write");
+        std::fs::write(smoke_root.join("src/lib.rs"), fixture.initial_source())
+            .expect("fixture source should write");
+        std::fs::write(smoke_root.join("tests.md"), fixture.test_source())
+            .expect("fixture test note should write");
+
+        let runner = FakeProcessRunner::scripted([
+            FakeProcessRunnerStep::success("Cargo.toml\nsrc/lib.rs\ntests.md\n"),
+            FakeProcessRunnerStep::failure("pattern not found\n"),
+            FakeProcessRunnerStep::success("src/lib.rs:    \"done\"\n"),
+        ]);
+        let runtime = super::build_coding_loop_task_smoke_runtime(
+            &smoke_root,
+            None,
+            AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
+            Arc::new(runner.clone()),
+            fixture,
+        )
+        .expect("coding-loop task smoke runtime should build");
+
+        let result = runtime
+            .run_agent_loop(
+                StepInput::user_text(fixture.task_prompt()).expect("valid step input"),
+                StepContext::default(),
+                AgentLoopConfig::new(10).expect("valid loop config"),
+            )
+            .await
+            .expect("coding-loop task smoke should run");
+        super::assert_coding_loop_task_smoke_result(&runtime, &result, &smoke_root, fixture)
+            .await
+            .expect("coding-loop task smoke result should validate");
+        assert_eq!(
+            runner.observed_argv(),
+            [
+                vec!["rg".to_owned(), "--files".to_owned()],
+                vec!["rg".to_owned(), "done".to_owned()],
+                vec!["rg".to_owned(), "done".to_owned()],
+            ]
+        );
     }
 
     #[tokio::test]
@@ -2697,19 +3428,19 @@ api_key_file = "secrets/openai.key"
     struct FakeProcessRunner {
         calls: Arc<AtomicUsize>,
         observed_argv: Arc<Mutex<Vec<Vec<String>>>>,
-        stdout: String,
-        stderr: String,
-        status: ProcessExitStatus,
+        outputs: Arc<Mutex<Vec<FakeProcessRunnerStep>>>,
     }
 
     impl FakeProcessRunner {
         fn succeeding(stdout: impl Into<String>) -> Self {
+            Self::scripted([FakeProcessRunnerStep::success(stdout)])
+        }
+
+        fn scripted<const N: usize>(steps: [FakeProcessRunnerStep; N]) -> Self {
             Self {
                 calls: Arc::new(AtomicUsize::new(0)),
                 observed_argv: Arc::new(Mutex::new(Vec::new())),
-                stdout: stdout.into(),
-                stderr: String::new(),
-                status: ProcessExitStatus::Exited(0),
+                outputs: Arc::new(Mutex::new(steps.into_iter().rev().collect())),
             }
         }
 
@@ -2722,6 +3453,31 @@ api_key_file = "secrets/openai.key"
                 .lock()
                 .expect("observed argv mutex should not be poisoned")
                 .clone()
+        }
+    }
+
+    #[derive(Clone)]
+    struct FakeProcessRunnerStep {
+        status: ProcessExitStatus,
+        stdout: String,
+        stderr: String,
+    }
+
+    impl FakeProcessRunnerStep {
+        fn success(stdout: impl Into<String>) -> Self {
+            Self {
+                status: ProcessExitStatus::Exited(0),
+                stdout: stdout.into(),
+                stderr: String::new(),
+            }
+        }
+
+        fn failure(stderr: impl Into<String>) -> Self {
+            Self {
+                status: ProcessExitStatus::Exited(1),
+                stdout: String::new(),
+                stderr: stderr.into(),
+            }
         }
     }
 
@@ -2740,13 +3496,19 @@ api_key_file = "secrets/openai.key"
                 if context.cancellation_token().is_cancelled() {
                     return Err(ProcessRunnerError::Cancelled);
                 }
+                let output = self
+                    .outputs
+                    .lock()
+                    .expect("fake process outputs mutex should not be poisoned")
+                    .pop()
+                    .unwrap_or_else(|| FakeProcessRunnerStep::success(String::new()));
 
                 ProcessRunnerOutput::new(
                     &intent,
-                    self.status,
-                    self.stdout.clone(),
+                    output.status,
+                    output.stdout,
                     false,
-                    self.stderr.clone(),
+                    output.stderr,
                     false,
                 )
                 .map_err(|source| ProcessRunnerError::infrastructure(source.to_string()))
@@ -2850,6 +3612,7 @@ api_key_file = "secrets/openai.key"
             &args,
             &["--perms", "0700", "--dir", SANDBOX_HOME]
         ));
+        assert!(contains_sequence(&args, &["--dir", "/etc"]));
         assert!(contains_sequence(&args, &["--ro-bind", "/usr", "/usr"]));
         assert!(contains_sequence(&args, &["--ro-bind-try", "/bin", "/bin"]));
         assert!(contains_sequence(&args, &["--ro-bind-try", "/lib", "/lib"]));
@@ -2859,27 +3622,69 @@ api_key_file = "secrets/openai.key"
         ));
         assert!(contains_sequence(
             &args,
+            &[
+                "--dir",
+                "/etc",
+                "--ro-bind",
+                "/etc/ld.so.cache",
+                "/etc/ld.so.cache"
+            ]
+        ));
+        assert!(contains_sequence(
+            &args,
+            &[
+                "--dir",
+                "/etc",
+                "--ro-bind",
+                "/etc/ld.so.conf",
+                "/etc/ld.so.conf"
+            ]
+        ));
+        assert!(contains_sequence(
+            &args,
+            &[
+                "--dir",
+                "/etc",
+                "--ro-bind",
+                "/etc/resolv.conf",
+                "/etc/resolv.conf"
+            ]
+        ));
+        assert!(contains_sequence(
+            &args,
+            &["--dir", "/etc", "--ro-bind", "/etc/hosts", "/etc/hosts"]
+        ));
+        assert!(contains_sequence(
+            &args,
+            &[
+                "--dir",
+                "/etc",
+                "--ro-bind",
+                "/etc/nsswitch.conf",
+                "/etc/nsswitch.conf"
+            ]
+        ));
+        assert!(contains_sequence(
+            &args,
+            &[
+                "--dir",
+                "/etc",
+                "--ro-bind",
+                "/etc/ld.so.conf.d",
+                "/etc/ld.so.conf.d"
+            ]
+        ));
+        assert!(contains_sequence(
+            &args,
+            &["--dir", "/etc", "--ro-bind", "/etc/ssl", "/etc/ssl"]
+        ));
+        assert!(!contains_sequence(
+            &args,
             &["--ro-bind-try", "/etc/ld.so.cache", "/etc/ld.so.cache"]
         ));
-        assert!(contains_sequence(
+        assert!(!contains_sequence(
             &args,
             &["--ro-bind-try", "/etc/resolv.conf", "/etc/resolv.conf"]
-        ));
-        assert!(contains_sequence(
-            &args,
-            &["--ro-bind-try", "/etc/hosts", "/etc/hosts"]
-        ));
-        assert!(contains_sequence(
-            &args,
-            &["--ro-bind-try", "/etc/nsswitch.conf", "/etc/nsswitch.conf"]
-        ));
-        assert!(contains_sequence(
-            &args,
-            &["--ro-bind-try", "/etc/ssl", "/etc/ssl"]
-        ));
-        assert!(contains_sequence(
-            &args,
-            &["--ro-bind-try", "/etc/pki", "/etc/pki"]
         ));
         assert!(!contains_sequence(
             &args,

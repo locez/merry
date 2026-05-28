@@ -689,6 +689,8 @@ fn debug_help_writes_usage_to_stdout() {
     assert!(stdout.contains("openai"));
     assert!(stdout.contains("coding-loop-smoke"));
     assert!(stdout.contains("coding-loop-live-smoke"));
+    assert!(stdout.contains("coding-loop-task-smoke"));
+    assert!(stdout.contains("coding-loop-task-live-smoke"));
 }
 
 #[test]
@@ -724,6 +726,43 @@ fn debug_coding_loop_live_smoke_requires_with_sandbox_before_config_or_network()
     let stderr = std::str::from_utf8(&output.stderr).expect("stderr should be utf-8");
     assert!(stderr.contains("--with-sandbox"));
     assert!(stderr.contains("coding-loop-live-smoke"));
+    assert!(stderr.contains("Usage: merry debug"));
+    assert!(!stderr.contains("MERRY_OPENAI_API_KEY"));
+}
+
+#[test]
+fn debug_coding_loop_task_smoke_requires_with_sandbox() {
+    let output = merry_without_openai_env()
+        .args(["debug", "coding-loop-task-smoke"])
+        .output()
+        .expect("merry debug coding-loop-task-smoke should run");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        output.stdout.is_empty(),
+        "usage errors should not write stdout"
+    );
+    let stderr = std::str::from_utf8(&output.stderr).expect("stderr should be utf-8");
+    assert!(stderr.contains("--with-sandbox"));
+    assert!(stderr.contains("coding-loop-task-smoke"));
+    assert!(stderr.contains("Usage: merry debug"));
+}
+
+#[test]
+fn debug_coding_loop_task_live_smoke_requires_with_sandbox_before_config_or_network() {
+    let output = merry_without_openai_env()
+        .args(["debug", "coding-loop-task-live-smoke"])
+        .output()
+        .expect("merry debug coding-loop-task-live-smoke should run");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        output.stdout.is_empty(),
+        "usage errors should not write stdout"
+    );
+    let stderr = std::str::from_utf8(&output.stderr).expect("stderr should be utf-8");
+    assert!(stderr.contains("--with-sandbox"));
+    assert!(stderr.contains("coding-loop-task-live-smoke"));
     assert!(stderr.contains("Usage: merry debug"));
     assert!(!stderr.contains("MERRY_OPENAI_API_KEY"));
 }
@@ -786,6 +825,52 @@ fn debug_coding_loop_live_smoke_runs_inside_real_bwrap_when_opted_in() {
     );
     let stdout = std::str::from_utf8(&output.stdout).expect("stdout should be utf-8");
     assert_eq!(stdout, "coding-loop-live-smoke: ok\n");
+}
+
+#[test]
+#[ignore = "requires Linux bubblewrap and local sandbox support"]
+fn debug_coding_loop_task_smoke_runs_inside_real_bwrap_when_opted_in() {
+    let mut command = merry_without_openai_env();
+    let output = command
+        .current_dir(repo_root())
+        .args(["--with-sandbox", "debug", "coding-loop-task-smoke"])
+        .output()
+        .expect("merry --with-sandbox debug coding-loop-task-smoke should run");
+
+    assert!(
+        output.status.success(),
+        "coding-loop task smoke should exit successfully: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "task smoke should not write stderr"
+    );
+    let stdout = std::str::from_utf8(&output.stdout).expect("stdout should be utf-8");
+    assert_eq!(stdout, "coding-loop-task-smoke: ok\n");
+}
+
+#[test]
+#[ignore = "requires Linux bubblewrap, network access, and XDG OpenAI config"]
+fn debug_coding_loop_task_live_smoke_runs_inside_real_bwrap_when_opted_in() {
+    let mut command = merry_without_openai_env();
+    let output = command
+        .current_dir(repo_root())
+        .args(["--with-sandbox", "debug", "coding-loop-task-live-smoke"])
+        .output()
+        .expect("merry --with-sandbox debug coding-loop-task-live-smoke should run");
+
+    assert!(
+        output.status.success(),
+        "live coding-loop task smoke should exit successfully: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "task live smoke should not write stderr"
+    );
+    let stdout = std::str::from_utf8(&output.stdout).expect("stdout should be utf-8");
+    assert_eq!(stdout, "coding-loop-task-live-smoke: ok\n");
 }
 
 #[test]
