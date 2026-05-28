@@ -691,7 +691,12 @@ async fn runtime_step_with_provider_compiles_user_text_request_and_records_assis
     assert_eq!(request.messages().len(), 2);
     assert_eq!(request.stable_prefix_message_count(), 1);
     assert_eq!(request.messages()[0].role(), ModelMessageRole::System);
-    assert_eq!(request.messages()[0].content().as_text(), "You are Merry.");
+    assert!(
+        request.messages()[0]
+            .content()
+            .as_text()
+            .contains("You are Merry, a pragmatic coding agent.")
+    );
     assert_eq!(request.messages()[1].role(), ModelMessageRole::User);
     assert_eq!(
         request.messages()[1].content().as_text(),
@@ -796,7 +801,12 @@ async fn runtime_step_with_provider_includes_compiled_context_as_system_message(
     assert_eq!(request.messages().len(), 3);
     assert_eq!(request.stable_prefix_message_count(), 1);
     assert_eq!(request.messages()[0].role(), ModelMessageRole::System);
-    assert_eq!(request.messages()[0].content().as_text(), "You are Merry.");
+    assert!(
+        request.messages()[0]
+            .content()
+            .as_text()
+            .contains("You are Merry, a pragmatic coding agent.")
+    );
     assert_eq!(request.messages()[1].role(), ModelMessageRole::System);
     assert_eq!(request.messages()[1].content().as_text(), expected_snapshot);
     assert_eq!(request.messages()[2].role(), ModelMessageRole::User);
@@ -894,9 +904,11 @@ async fn second_provider_step_continues_sequences_and_does_not_replay_previous_a
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[1].messages().len(), 2);
     assert_eq!(requests[1].messages()[0].role(), ModelMessageRole::System);
-    assert_eq!(
-        requests[1].messages()[0].content().as_text(),
-        "You are Merry."
+    assert!(
+        requests[1].messages()[0]
+            .content()
+            .as_text()
+            .contains("You are Merry, a pragmatic coding agent.")
     );
     assert_eq!(requests[1].messages()[1].role(), ModelMessageRole::User);
     assert_eq!(

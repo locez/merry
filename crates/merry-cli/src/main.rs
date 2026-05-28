@@ -23,8 +23,8 @@ use merry_runtime::{
     ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture, process_command_tool,
 };
 use merry_tool_workspace::{
-    CODING_LOOP_PROCESS_TOOL, WORKSPACE_PATCH_FILE_TOOL, WORKSPACE_READ_FILE_TOOL,
-    WorkspaceCodingLoopProfile, WorkspaceToolsConfig,
+    CODING_LOOP_PROCESS_TOOL, WORKSPACE_PATCH_TOOL, WORKSPACE_READ_FILE_TOOL,
+    WorkspaceCodingLoopProfile, WorkspaceToolLimits, WorkspaceToolsConfig,
 };
 use std::{
     collections::BTreeMap,
@@ -47,6 +47,7 @@ const CODING_LOOP_TASK_SMOKE_SESSION_ID: &str = "coding-loop-task-smoke";
 const CODING_LOOP_TASK_LIVE_SMOKE_SESSION_ID: &str = "coding-loop-task-live-smoke";
 const CODING_LOOP_LIVE_SMOKE_INITIAL_VALUE: &str = "unfixed";
 const CODING_LOOP_LIVE_SMOKE_TARGET_VALUE: &str = "fixed-by-live-llm";
+const CODING_LOOP_TASK_SMOKE_MAX_PATCH_BYTES: usize = 256;
 const SHELL_TOOL_NAME: &str = "shell_command";
 const SHELL_TOOL_CALL_ID: &str = "call-shell-command";
 const SHELL_STEP_INPUT: &str = "run shell command through Merry process protocol";
@@ -1258,9 +1259,9 @@ async fn assert_coding_loop_task_smoke_result(
             _ => None,
         })
         .collect::<Vec<_>>();
-    if statuses.len() != 5 {
+    if statuses.len() < 5 {
         return Err(CliError::Unexpected(format!(
-            "coding-loop-task-smoke expected 5 resolved tool calls, saw {}",
+            "coding-loop-task-smoke expected at least 5 resolved tool calls, saw {}",
             statuses.len()
         )));
     }
@@ -1281,6 +1282,66 @@ async fn assert_coding_loop_task_smoke_result(
             "coding-loop-task-smoke fixture was not patched as expected".to_owned(),
         ));
     }
+    assert_coding_loop_task_smoke_uses_small_patch(result.events(), fixture)?;
+    Ok(())
+}
+
+fn assert_coding_loop_task_smoke_uses_small_patch(
+    events: &[RuntimeEvent],
+    fixture: CodingLoopTaskSmokeFixture,
+) -> Result<(), CliError> {
+    let mut pending_patch_args = BTreeMap::new();
+    for event in events {
+        if let RuntimeEventKind::ToolCallPending { call } = &event.kind
+            && call.name().as_str() == WORKSPACE_PATCH_TOOL
+        {
+            let arguments = call.arguments().as_object();
+            let Some(patch) = arguments.get("patch").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            pending_patch_args.insert(call.id().clone(), patch);
+        }
+    }
+
+    let Some(patch) = events.iter().find_map(|event| {
+        let RuntimeEventKind::ToolCallResolved { result } = &event.kind else {
+            return None;
+        };
+        if result.status() != ToolCallResultStatus::Succeeded {
+            return None;
+        }
+        pending_patch_args.get(result.call_id()).copied()
+    }) else {
+        return Err(CliError::Unexpected(
+            "coding-loop-task-smoke did not observe successful workspace patch arguments"
+                .to_owned(),
+        ));
+    };
+
+    let initial_source = fixture.initial_source();
+    let patched_source = fixture.patched_source();
+    if patch.contains(&initial_source) || patch.contains(&patched_source) {
+        return Err(CliError::Unexpected(
+            "coding-loop-task-smoke used whole-file workspace patch text".to_owned(),
+        ));
+    }
+
+    if !patch.starts_with("*** Begin Workspace Patch\n")
+        || !patch.contains("*** Update File: src/lib.rs\n")
+        || !patch.ends_with("*** End Workspace Patch")
+    {
+        return Err(CliError::Unexpected(
+            "coding-loop-task-smoke did not use a workspace patch envelope".to_owned(),
+        ));
+    }
+
+    if patch.len() > CODING_LOOP_TASK_SMOKE_MAX_PATCH_BYTES {
+        return Err(CliError::Unexpected(format!(
+            "coding-loop-task-smoke patch payload was too large: {} bytes",
+            patch.len()
+        )));
+    }
+
     Ok(())
 }
 
@@ -1359,20 +1420,40 @@ impl CodingLoopTaskSmokeFixture {
         }
     }
 
-    const fn initial_source(self) -> &'static str {
+    fn initial_source(self) -> String {
+        match self.task {
+            CodingLoopTaskSmokeTask::StatusText => status_text_fixture_source("todo"),
+        }
+    }
+
+    fn patched_source(self) -> String {
+        match self.task {
+            CodingLoopTaskSmokeTask::StatusText => status_text_fixture_source("done"),
+        }
+    }
+
+    const fn patch_remove_line(self) -> &'static str {
         match self.task {
             CodingLoopTaskSmokeTask::StatusText => {
-                "pub fn status() -> &'static str {\n    \"todo\"\n}\n"
+                "    Entry { key: \"status\", value: \"todo\" },"
             }
         }
     }
 
-    const fn patched_source(self) -> &'static str {
+    const fn patch_add_line(self) -> &'static str {
         match self.task {
             CodingLoopTaskSmokeTask::StatusText => {
-                "pub fn status() -> &'static str {\n    \"done\"\n}\n"
+                "    Entry { key: \"status\", value: \"done\" },"
             }
         }
+    }
+
+    fn patch_text(self) -> String {
+        format!(
+            "*** Begin Workspace Patch\n*** Update File: src/lib.rs\n-{}\n+{}\n*** End Workspace Patch",
+            self.patch_remove_line(),
+            self.patch_add_line()
+        )
     }
 
     const fn test_source(self) -> &'static str {
@@ -1405,26 +1486,45 @@ Required behavior:
 1. Inspect the fixture files with `{process_tool}` using argv `[\"rg\", \"--files\"]` and cwd `{cwd}`.
 2. Run verification with `{process_tool}` using argv `[\"rg\", \"done\"]` and cwd `{cwd}`. The first run is expected to fail because the target text is missing.
 3. Read exact source evidence with `{read_tool}` using path `src/lib.rs` before editing.
-4. Apply exactly one constrained edit through `{patch_tool}` using path `src/lib.rs`.
+4. Apply exactly one constrained edit through `{patch_tool}` using a patch argument with this envelope:
+   *** Begin Workspace Patch
+   *** Update File: src/lib.rs
+   -old line
+   +new line
+   *** End Workspace Patch
 5. Run `{process_tool}` again with argv `[\"rg\", \"done\"]` and cwd `{cwd}`.
 6. After verification succeeds, return a concise final answer.
 
 Path contract:
 - `{process_tool}` cwd values and workspace tool path values both resolve under the fixture workspace root.
 - Use `{process_tool}` cwd `{cwd}` for process commands.
-- Use `{read_tool}` and `{patch_tool}` path `src/lib.rs`; do not prefix a process cwd, repository path, or absolute host path.
+- Use `{read_tool}` path `src/lib.rs` and `{patch_tool}` header `*** Update File: src/lib.rs`; do not prefix a process cwd, repository path, or absolute host path.
 - If a workspace tool returns `workspace_file_not_found`, retry with the workspace-root-relative path shown by `rg --files`.
 
 Constraints:
 - Do not use shell strings, scripts, pipelines, env, stdin, git, cargo, network tools, or any command except the exact `rg --files` and `rg done` argv values above.
 - Do not modify any file except `src/lib.rs` through `{patch_tool}`.
+- The source file intentionally contains repeated placeholder text and unrelated helper behavior. Preserve unrelated behavior while making `status()` report the completed value.
+- For `{patch_tool}`, send one `patch` string. Use the smallest unique hunk needed for the behavior change; do not submit the whole file. If a patch fails because the hunk is ambiguous, retry with a larger unique hunk based on the source evidence.
 - Do not include tool output in the final answer; just say whether the task was fixed and verified.
 ",
             process_tool = CODING_LOOP_PROCESS_TOOL,
             read_tool = WORKSPACE_READ_FILE_TOOL,
-            patch_tool = WORKSPACE_PATCH_FILE_TOOL,
+            patch_tool = WORKSPACE_PATCH_TOOL,
         )
     }
+}
+
+fn status_text_fixture_source(status: &str) -> String {
+    let mut source = format!(
+        "#[derive(Debug, Clone, Copy)]\nstruct Entry {{\n    key: &'static str,\n    value: &'static str,\n}}\n\nconst ENTRIES: &[Entry] = &[\n    Entry {{ key: \"default\", value: \"todo\" }},\n    Entry {{ key: \"status\", value: \"{status}\" }},\n    Entry {{ key: \"preview\", value: \"todo\" }},\n];\n\npub fn default_status() -> &'static str {{\n    resolve(\"default\")\n}}\n\npub fn status() -> &'static str {{\n    resolve(\"status\")\n}}\n\npub fn preview_status() -> &'static str {{\n    resolve(\"preview\")\n}}\n\nfn resolve(key: &str) -> &'static str {{\n    ENTRIES\n        .iter()\n        .find(|entry| entry.key == key)\n        .map(|entry| entry.value)\n        .unwrap_or(\"missing\")\n}}\n\n"
+    );
+    for index in 1..=30 {
+        source.push_str(&format!(
+            "pub fn fixture_note_{index:03}() -> &'static str {{ \"context-{index:03}\" }}\n"
+        ));
+    }
+    source
 }
 
 fn prepare_coding_loop_task_fixture(
@@ -1546,7 +1646,17 @@ fn build_coding_loop_runtime(
 ) -> Result<Runtime, CliError> {
     WorkspaceCodingLoopProfile::new(
         WorkspaceToolsConfig::new(vec![root.to_path_buf()])
-            .with_allow_hidden(allow_hidden_workspace_paths),
+            .with_allow_hidden(allow_hidden_workspace_paths)
+            .with_limits(WorkspaceToolLimits {
+                max_patch_bytes: if session_id == CODING_LOOP_TASK_SMOKE_SESSION_ID
+                    || session_id == CODING_LOOP_TASK_LIVE_SMOKE_SESSION_ID
+                {
+                    CODING_LOOP_TASK_SMOKE_MAX_PATCH_BYTES
+                } else {
+                    WorkspaceToolLimits::default().max_patch_bytes
+                },
+                ..WorkspaceToolLimits::default()
+            }),
     )
     .map_err(unexpected)?
     .with_patch_tool()
@@ -1571,7 +1681,12 @@ Use the available tools, one tool call per step. Do not answer from memory.
 Required sequence:
 1. Call `{process_tool}` with argv `[\"rg\", \"--files\"]` and cwd `{cwd}` to inspect the fixture.
 2. Call `{read_tool}` with path `src/lib.rs` to read exact source.
-3. Call `{patch_tool}` with path `src/lib.rs`, old_text `\"{initial}\"`, and new_text `\"{target}\"`.
+3. Call `{patch_tool}` with one `patch` string:
+   *** Begin Workspace Patch
+   *** Update File: src/lib.rs
+   -    \"{initial}\"
+   +    \"{target}\"
+   *** End Workspace Patch
 4. Call `{process_tool}` with argv `[\"rg\", \"{target}\"]` and cwd `{cwd}` to verify.
 5. After verification succeeds, return a concise final answer.
 
@@ -1586,7 +1701,7 @@ pub fn greeting() -> &'static str {{
 ",
         process_tool = CODING_LOOP_PROCESS_TOOL,
         read_tool = WORKSPACE_READ_FILE_TOOL,
-        patch_tool = WORKSPACE_PATCH_FILE_TOOL,
+        patch_tool = WORKSPACE_PATCH_TOOL,
         initial = CODING_LOOP_LIVE_SMOKE_INITIAL_VALUE,
         target = CODING_LOOP_LIVE_SMOKE_TARGET_VALUE,
     )
@@ -1626,7 +1741,7 @@ async fn assert_coding_loop_live_smoke_tool_sequence(
 
     require_live_smoke_tool_name(&resolved_tool_names, CODING_LOOP_PROCESS_TOOL)?;
     require_live_smoke_tool_name(&resolved_tool_names, WORKSPACE_READ_FILE_TOOL)?;
-    require_live_smoke_tool_name(&resolved_tool_names, WORKSPACE_PATCH_FILE_TOOL)?;
+    require_live_smoke_tool_name(&resolved_tool_names, WORKSPACE_PATCH_TOOL)?;
 
     let mut process_artifact_texts = Vec::new();
     for artifact_id in &resolved_artifacts {
@@ -1689,7 +1804,7 @@ async fn assert_coding_loop_task_live_smoke_tool_sequence(
 
     require_live_smoke_tool_name(&resolved_tool_names, CODING_LOOP_PROCESS_TOOL)?;
     require_live_smoke_tool_name(&resolved_tool_names, WORKSPACE_READ_FILE_TOOL)?;
-    require_live_smoke_tool_name(&resolved_tool_names, WORKSPACE_PATCH_FILE_TOOL)?;
+    require_live_smoke_tool_name(&resolved_tool_names, WORKSPACE_PATCH_TOOL)?;
 
     let mut saw_failed_verification = false;
     let mut saw_successful_verification = false;
@@ -1768,22 +1883,13 @@ impl CodingLoopSmokeProvider {
             )?,
             coding_loop_workspace_call(
                 "coding-loop-smoke-patch",
-                WORKSPACE_PATCH_FILE_TOOL,
-                [
-                    ("path", serde_json::Value::String("src/lib.rs".to_owned())),
-                    (
-                        "old_text",
-                        serde_json::Value::String(format!(
-                            "\"{CODING_LOOP_LIVE_SMOKE_INITIAL_VALUE}\""
-                        )),
-                    ),
-                    (
-                        "new_text",
-                        serde_json::Value::String(format!(
-                            "\"{CODING_LOOP_LIVE_SMOKE_TARGET_VALUE}\""
-                        )),
-                    ),
-                ],
+                WORKSPACE_PATCH_TOOL,
+                [(
+                    "patch",
+                    serde_json::Value::String(format!(
+                        "*** Begin Workspace Patch\n*** Update File: src/lib.rs\n-    \"{CODING_LOOP_LIVE_SMOKE_INITIAL_VALUE}\"\n+    \"{CODING_LOOP_LIVE_SMOKE_TARGET_VALUE}\"\n*** End Workspace Patch"
+                    )),
+                )],
             )?,
             coding_loop_process_call(
                 "coding-loop-smoke-verify",
@@ -1871,18 +1977,8 @@ impl CodingLoopTaskSmokeProvider {
             )?,
             coding_loop_workspace_call(
                 "coding-loop-task-smoke-patch",
-                WORKSPACE_PATCH_FILE_TOOL,
-                [
-                    ("path", serde_json::Value::String("src/lib.rs".to_owned())),
-                    (
-                        "old_text",
-                        serde_json::Value::String(fixture.initial_source().to_owned()),
-                    ),
-                    (
-                        "new_text",
-                        serde_json::Value::String(fixture.patched_source().to_owned()),
-                    ),
-                ],
+                WORKSPACE_PATCH_TOOL,
+                [("patch", serde_json::Value::String(fixture.patch_text()))],
             )?,
             coding_loop_process_call(
                 "coding-loop-task-smoke-verify-after",
@@ -2952,9 +3048,56 @@ mod tests {
 
         assert!(prompt.contains("cwd `.`"));
         assert!(prompt.contains("path `src/lib.rs`"));
+        assert!(prompt.contains("*** Begin Workspace Patch"));
+        assert!(prompt.contains("*** Update File: src/lib.rs"));
         assert!(prompt.contains("both resolve under the fixture workspace root"));
         assert!(prompt.contains("do not prefix a process cwd"));
+        assert!(prompt.contains("repeated placeholder text"));
+        assert!(prompt.contains("Preserve unrelated behavior"));
+        assert!(prompt.contains("smallest unique hunk"));
+        assert!(prompt.contains("hunk is ambiguous"));
+        assert!(prompt.contains("do not submit the whole file"));
         assert!(!prompt.contains(".merry/local/coding-loop-task-live-smoke/src/lib.rs"));
+    }
+
+    #[test]
+    fn coding_loop_task_status_text_fixture_forces_disambiguated_localized_patch() {
+        let fixture =
+            super::CodingLoopTaskSmokeFixture::for_task(CodingLoopTaskSmokeTask::StatusText);
+
+        let initial_source = fixture.initial_source();
+        let patched_source = fixture.patched_source();
+
+        assert!(initial_source.len() > super::CODING_LOOP_TASK_SMOKE_MAX_PATCH_BYTES);
+        assert!(patched_source.len() > super::CODING_LOOP_TASK_SMOKE_MAX_PATCH_BYTES);
+        assert!(fixture.patch_text().len() < super::CODING_LOOP_TASK_SMOKE_MAX_PATCH_BYTES);
+        assert_eq!(initial_source.matches("value: \"todo\"").count(), 3);
+        assert_eq!(patched_source.matches("value: \"todo\"").count(), 2);
+        assert!(patched_source.contains("Entry { key: \"default\", value: \"todo\" },"));
+        assert!(patched_source.contains("Entry { key: \"status\", value: \"done\" },"));
+        assert!(patched_source.contains("Entry { key: \"preview\", value: \"todo\" },"));
+        assert!(
+            initial_source.contains("pub fn status() -> &'static str {\n    resolve(\"status\")")
+        );
+        assert!(initial_source.contains(fixture.patch_remove_line()));
+        assert_eq!(
+            initial_source.matches(fixture.patch_remove_line()).count(),
+            1
+        );
+        assert!(
+            fixture
+                .patch_text()
+                .starts_with("*** Begin Workspace Patch\n")
+        );
+        assert!(
+            fixture
+                .patch_text()
+                .contains("*** Update File: src/lib.rs\n")
+        );
+        assert_eq!(
+            initial_source.replacen(fixture.patch_remove_line(), fixture.patch_add_line(), 1),
+            patched_source
+        );
     }
 
     #[tokio::test]
@@ -3033,7 +3176,7 @@ mod tests {
             "\"session_id\":\"coding-loop-smoke\"",
             "\"tool_name\":\"run_process\"",
             "\"tool_name\":\"workspace_read_file\"",
-            "\"tool_name\":\"workspace_patch_file\"",
+            "\"tool_name\":\"workspace_patch\"",
             "\"status\":\"completed\"",
             "\"status\":\"succeeded\"",
             "\"diagnostic_code\"",

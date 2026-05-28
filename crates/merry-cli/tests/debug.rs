@@ -879,15 +879,11 @@ fn debug_coding_loop_task_live_smoke_runs_inside_real_bwrap_when_opted_in() {
         events.iter().any(|event| {
             event.pointer("/kind/type").and_then(Value::as_str) == Some("tool_call_pending")
                 && event.pointer("/kind/call/name").and_then(Value::as_str)
-                    == Some("workspace_patch_file")
+                    == Some("workspace_patch")
                 && event
-                    .pointer("/kind/call/arguments/old_text")
+                    .pointer("/kind/call/arguments/patch")
                     .and_then(Value::as_str)
-                    .is_some()
-                && event
-                    .pointer("/kind/call/arguments/new_text")
-                    .and_then(Value::as_str)
-                    .is_some()
+                    .is_some_and(|patch| patch.contains("*** Begin Workspace Patch"))
         }),
         "stdout should include runtime events with live patch tool arguments"
     );

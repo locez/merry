@@ -83,5 +83,6 @@ pub use tool::{
     ActionExecutionEvidence, ActionProposal, ActionProposalError, ActionProposalEvidence,
     RegisteredTool, ToolActionKind, ToolActionProposalFuture, ToolActionProposalResult,
     ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome, ToolExecutionResult,
-    ToolExecutor, ToolExecutorFuture, WorkspacePatchExecutionEvidence, WorkspacePatchProposal,
+    ToolExecutor, ToolExecutorFuture, WorkspacePatchChangeEvidence,
+    WorkspacePatchExecutionEvidence, WorkspacePatchProposal,
 };
