@@ -46,19 +46,20 @@ Current milestone or track:
 
 Session milestone:
 
-- Fix sandboxed live task smoke opt-in propagation so the user's
-  `MERRY_OPENAI_DEBUG=1 merry --with-sandbox debug coding-loop-task-live-smoke`
-  command reaches the live debug path, then correct the exposed
-  OpenAI-compatible config schema to use plain `api_key`/`api_key_file`
-  sources instead of the rejected `api_key_env` design.
+- Fix the coding-loop task live smoke path-coordinate blocker exposed by the
+  ignored `.merry/local/coding-loop-task-live-smoke` logs, using local Codex
+  source as feedback-design evidence.
 
 Goal:
 
-- Preserve only the non-secret `MERRY_OPENAI_DEBUG=1` marker across sandbox
-  self-reexec, while keeping API keys out of bwrap argv and generic environment
-  inheritance.
-- Treat `config.toml` as the credential source of truth: require exactly one of
-  `[providers.openai-compatible].api_key` or `api_key_file`.
+- Make task-smoke process cwd and workspace tool paths share one fixture-root
+  coordinate system so live models are not asked to mix repo-relative process
+  paths with fixture-relative workspace paths.
+- Make workspace-tool failures model-recoverable by returning a generic path
+  contract in failed JSON artifacts.
+- Keep the sandbox `/etc` allowlist aligned with the user's no-copy helper
+  decision: bind config files/directories directly, but do not bind
+  `/etc/ld.so.cache`.
 
 Task queue status:
 
@@ -84,9 +85,19 @@ Task queue status:
 - Corrected the bwrap `/etc` mount construction to match the user's existing
   helper semantics: file and directory allowlist paths create mount target
   parents first, then use direct read-only bind. No whole-`/etc` bind,
-  no staged copy, and no `LD_LIBRARY_PATH` fallback were kept.
+  no `/etc/ld.so.cache` bind, no staged copy, and no `LD_LIBRARY_PATH`
+  fallback were kept.
 - Updated `README.md` and `ROADMAP.md` to describe the bwrap file/directory
   helper semantics and record the new task smoke status.
+- Added `TokioProcessRunner::new_at_workspace_root` and switched CLI
+  coding-loop smoke commands to use it. The model-visible process cwd can now
+  stay `.` while the actual process executes under the disposable fixture root.
+- Tightened the live task prompt to say `run_process` cwd and workspace tool
+  `path` values both resolve under the fixture workspace root, and to use
+  `src/lib.rs` for `workspace_read_file` / `workspace_patch_file`.
+- Added a `recovery.path_contract` field to workspace tool failed JSON results
+  explaining that paths are workspace-root relative and must not be prefixed
+  with process cwd, repo root, or absolute host paths.
 
 Allowed expansion:
 
@@ -107,6 +118,10 @@ Done condition:
 - Sandbox plan tests assert file helper semantics instead of broad `/etc`
   binding.
 - User can run the real-bwrap ignored task smoke from an outer environment.
+- Live task prompt no longer contains `.merry/local/.../src/lib.rs`; it uses
+  cwd `.` and workspace path `src/lib.rs`.
+- Workspace failure continuations expose a generic path recovery contract
+  without host root leakage.
 - Continuity files point the next session at live/model coding capability,
   not profile/session design.
 - Changes are committed.
@@ -149,6 +164,9 @@ Allowed edits:
 - `crates/merry-cli/src/config.rs`
 - `crates/merry-cli/src/main.rs`
 - `crates/merry-cli/tests/debug.rs`
+- `crates/merry-runtime/src/process_runner.rs`
+- `crates/merry-tool-workspace/src/lib.rs`
+- `crates/merry-tool-workspace/tests/runtime_integration.rs`
 - `examples/config.toml`
 - `README.md`
 - `ROADMAP.md`
@@ -183,6 +201,8 @@ Validation command:
 - `cargo test -p merry-cli config::tests`
 - `cargo test -p merry-cli debug_openai`
 - `cargo test -p merry-cli coding_loop_task`
+- `cargo test -p merry-runtime process_current_dir`
+- `cargo test -p merry-tool-workspace registered_read_file_domain_failure_records_failed_json_before_resolving_pending_call`
 - `cargo test -p merry-cli sandbox_plan_mounts_runtime_paths_and_workspace`
 - `cargo clippy --all-targets --all-features -- -D warnings`
 - `cargo test --all`
@@ -197,14 +217,13 @@ Validation notes:
   `api_key`/`api_key_file` schema correction.
 - Full clippy and test suite passed locally for the current change.
 - The user reported the outer real-bwrap task smoke passed. Earlier nested
-  runs from inside this agent's environment failed on `/etc`/dynamic-linker
-  behavior, so they are not treated as the authoritative outer-environment
-  result.
-- A local no-network attempt to run the live task smoke from this nested agent
-  environment still hit the known second-level bwrap `/etc/ld.so.cache` bind
-  limitation before reaching the child. The fix is therefore verified by the
-  sandbox plan regression tests and must be live-checked from the user's outer
-  environment.
+  runs from inside this agent's environment failed on second-level bwrap
+  `/etc` file binds, so they are not treated as the authoritative
+  outer-environment result.
+- After removing `/etc/ld.so.cache` from the allowlist, the same nested ignored
+  real-bwrap task smoke advanced to a `/etc/resolv.conf` bind failure. That
+  path is kept because live provider DNS needs it and the user's helper binds
+  it directly in an outer environment. No staged copy fallback was added.
 
 ## Research
 
@@ -212,16 +231,19 @@ Research required: yes
 
 Research reason:
 
-- User asked to compare behavior against Codex/local bwrap scripts and then
-  supplied prior helper snippets. The implementation decision was whether to
-  broaden `/etc`, stage-copy special files, add `LD_LIBRARY_PATH`, or preserve
-  direct file bind semantics.
+- User asked to compare behavior against Codex/local source instead of only web
+  research. The implementation decision was whether the live smoke should keep
+  mixed path coordinate systems and rely on prompt wording, or fix the runtime
+  runner/rooting plus model-visible failure feedback.
 
 Research artifact:
 
-- Local code evidence from `.merry/codex/codex-rs/linux-sandbox/src/bwrap.rs`
-  and the user's prior shell helper snippets. No private raw findings were
-  copied into tracked source beyond the public-safe helper behavior summary.
+- Local code evidence from `.merry/codex/codex-rs`: Codex keeps command
+  execution cwd/workdir explicit and returns command output/status in
+  model-visible tool results. Merry's matching fix is to make cwd/root
+  explicit for the smoke path and include path-contract recovery in workspace
+  failure results. No private raw findings were copied into tracked source
+  beyond this public-safe behavior summary.
 
 ## Next Action
 

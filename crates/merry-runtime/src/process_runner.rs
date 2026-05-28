@@ -8,7 +8,11 @@ use crate::{
     ProcessActionIntent, ProcessExitStatus, ProcessRunner, ProcessRunnerContext,
     ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput,
 };
-use std::{io, process::Stdio};
+use std::{
+    io,
+    path::{Path, PathBuf},
+    process::Stdio,
+};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 /// Runtime-owned process runner backed by [`tokio::process::Command`].
@@ -18,14 +22,25 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 /// stdout/stderr up to the intent limits, and cooperatively cancels by killing
 /// the child process. Permission profiles and sandbox constraints are enforced
 /// by the runtime construction path that selects this runner, not by this type.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct TokioProcessRunner;
+#[derive(Debug, Default, Clone)]
+pub struct TokioProcessRunner {
+    cwd_root: Option<PathBuf>,
+}
 
 impl TokioProcessRunner {
     /// Creates a Tokio-backed process runner.
     #[must_use]
     pub const fn new() -> Self {
-        Self
+        Self { cwd_root: None }
+    }
+
+    /// Creates a Tokio-backed process runner whose process cwd values are
+    /// resolved under a stable workspace root.
+    #[must_use]
+    pub fn new_at_workspace_root(root: impl Into<PathBuf>) -> Self {
+        Self {
+            cwd_root: Some(root.into()),
+        }
     }
 }
 
@@ -35,13 +50,15 @@ impl ProcessRunner for TokioProcessRunner {
         intent: ProcessActionIntent,
         context: ProcessRunnerContext,
     ) -> ProcessRunnerFuture<'a> {
-        Box::pin(async move { run_tokio_process(intent, context).await })
+        let cwd_root = self.cwd_root.clone();
+        Box::pin(async move { run_tokio_process(intent, context, cwd_root.as_deref()).await })
     }
 }
 
 async fn run_tokio_process(
     intent: ProcessActionIntent,
     context: ProcessRunnerContext,
+    cwd_root: Option<&Path>,
 ) -> Result<ProcessRunnerOutput, ProcessRunnerError> {
     let Some((program, args)) = intent.argv().split_first() else {
         return Err(ProcessRunnerError::infrastructure(
@@ -56,7 +73,7 @@ async fn run_tokio_process(
     let mut command = tokio::process::Command::new(program);
     command
         .args(args)
-        .current_dir(intent.cwd().unwrap_or("."))
+        .current_dir(process_current_dir(cwd_root, &intent))
         .env_clear()
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -126,6 +143,18 @@ async fn run_tokio_process(
     .map_err(|source| ProcessRunnerError::infrastructure(source.to_string()))
 }
 
+fn process_current_dir(cwd_root: Option<&Path>, intent: &ProcessActionIntent) -> PathBuf {
+    let cwd = intent.cwd().unwrap_or(".");
+    let Some(root) = cwd_root else {
+        return PathBuf::from(cwd);
+    };
+    if cwd == "." {
+        root.to_path_buf()
+    } else {
+        root.join(cwd)
+    }
+}
+
 async fn join_bounded_output(
     task: tokio::task::JoinHandle<Result<BoundedOutput, ProcessRunnerError>>,
     stream_name: &'static str,
@@ -172,4 +201,48 @@ where
     }
 
     Ok(BoundedOutput { bytes, truncated })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::process_current_dir;
+    use crate::{ProcessActionIntent, ProcessEnvPolicy};
+    use std::path::{Path, PathBuf};
+
+    fn intent(cwd: Option<&str>) -> ProcessActionIntent {
+        ProcessActionIntent::new(
+            vec!["pwd".to_owned()],
+            cwd.map(str::to_owned),
+            ProcessEnvPolicy::empty(),
+            None,
+            1024,
+            1024,
+        )
+        .expect("process intent should be valid")
+    }
+
+    #[test]
+    fn process_current_dir_uses_workspace_root_for_default_cwd() {
+        let root = Path::new("/tmp/merry-workspace");
+
+        assert_eq!(
+            process_current_dir(Some(root), &intent(None)),
+            PathBuf::from("/tmp/merry-workspace")
+        );
+        assert_eq!(
+            process_current_dir(Some(root), &intent(Some("."))),
+            PathBuf::from("/tmp/merry-workspace")
+        );
+    }
+
+    #[test]
+    fn process_current_dir_joins_workspace_relative_cwd_under_root() {
+        assert_eq!(
+            process_current_dir(
+                Some(Path::new("/tmp/merry-workspace")),
+                &intent(Some("crates"))
+            ),
+            PathBuf::from("/tmp/merry-workspace/crates")
+        );
+    }
 }

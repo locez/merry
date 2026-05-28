@@ -66,6 +66,7 @@ const ERROR_READ_FAILED: &str = "workspace_read_failed";
 const ERROR_WRITE_FAILED: &str = "workspace_write_failed";
 const ERROR_PROPOSAL_MISMATCH: &str = "workspace_patch_approved_mismatch";
 const WORKSPACE_PATCH_PLAN_CHANGED_MESSAGE: &str = "workspace patch plan changed before execution";
+const WORKSPACE_PATH_CONTRACT: &str = "workspace tool path values are relative to a configured workspace root; do not prefix them with a process cwd, repository root, or absolute host path";
 const ERROR_PREIMAGE_ABSENT: &str = "workspace_patch_preimage_absent";
 const ERROR_PREIMAGE_AMBIGUOUS: &str = "workspace_patch_preimage_ambiguous";
 const TRACE_PATH_MAX_CHARS: usize = 96;
@@ -1311,6 +1312,7 @@ struct FailureEnvelope<'a> {
     ok: bool,
     tool: &'static str,
     error: FailureError<'a>,
+    recovery: FailureRecovery,
     #[serde(skip_serializing_if = "Option::is_none")]
     path: Option<&'a str>,
 }
@@ -1319,6 +1321,11 @@ struct FailureEnvelope<'a> {
 struct FailureError<'a> {
     code: &'a str,
     message: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct FailureRecovery {
+    path_contract: &'static str,
 }
 
 fn read_file_spec() -> ToolSpec {
@@ -3062,6 +3069,9 @@ fn failed_outcome(
             code,
             message: &message,
         },
+        recovery: FailureRecovery {
+            path_contract: WORKSPACE_PATH_CONTRACT,
+        },
         path: path.as_deref(),
     };
     ToolExecutionOutcome::failed_json(
@@ -3300,6 +3310,10 @@ mod tests {
         assert_eq!(payload["ok"], false);
         assert_eq!(payload["tool"], tool);
         assert_eq!(payload["error"]["code"], code);
+        assert_eq!(
+            payload["recovery"]["path_contract"],
+            WORKSPACE_PATH_CONTRACT
+        );
         if let Some(path) = path {
             assert_eq!(payload["path"], path);
         } else {

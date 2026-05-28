@@ -10,9 +10,9 @@ Current milestone or track:
 
 Session milestone:
 
-- Fix the sandboxed live task smoke opt-in propagation bug, then correct the
-  exposed OpenAI-compatible config schema after the user rejected
-  `api_key_env`.
+- Fix the coding-loop task live smoke path-coordinate blocker and make
+  workspace-tool failure feedback recoverable, after inspecting the ignored
+  smoke logs and local Codex source.
 
 Task queue status:
 
@@ -31,7 +31,14 @@ Task queue status:
   environment-based credential priority from the public config contract.
 - Fixed bwrap `/etc` planning to use file/directory helper semantics:
   create mount parents, then direct `--ro-bind`; no broad `/etc` bind, no
-  staged copy fallback, and no `LD_LIBRARY_PATH`.
+  `/etc/ld.so.cache` bind, no staged copy fallback, and no `LD_LIBRARY_PATH`.
+- Added `TokioProcessRunner::new_at_workspace_root` and switched coding-loop
+  smoke commands to keep model-visible process cwd at `.` while executing real
+  processes under the disposable fixture root.
+- Tightened the live task prompt so workspace tools use `src/lib.rs` and never
+  prefix process cwd/repo/host paths.
+- Workspace failed JSON results now include `recovery.path_contract`, making a
+  wrong path recoverable in the next model turn without exposing host roots.
 - Updated README/ROADMAP status and verification commands.
 
 Done condition:
@@ -49,6 +56,9 @@ Files changed:
 - `crates/merry-cli/src/config.rs`
 - `crates/merry-cli/src/main.rs`
 - `crates/merry-cli/tests/debug.rs`
+- `crates/merry-runtime/src/process_runner.rs`
+- `crates/merry-tool-workspace/src/lib.rs`
+- `crates/merry-tool-workspace/tests/runtime_integration.rs`
 - `EXECUTION_STATE.md`
 - `HANDOFF.md`
 
@@ -58,12 +68,15 @@ Summary:
   read/patch/process verification flow.
 - Sandboxed live task smoke no longer loses `MERRY_OPENAI_DEBUG=1` during
   bwrap re-exec.
+- Task live smoke no longer asks the model to mix `.merry/local/...` process
+  cwd with fixture-root workspace paths.
 - OpenAI-compatible credentials are now config-owned via `api_key` or
   `api_key_file`, with no `api_key_env` priority path.
 - Sandbox plan now mirrors the user's no-copy helper semantics for `/etc`
-  file/dir mounts.
-- The real bwrap task smoke was confirmed by the user from an outer
-  environment.
+  file/dir mounts and does not bind `/etc/ld.so.cache`.
+- The earlier real bwrap task smoke was confirmed by the user from an outer
+  environment; this nested agent environment still cannot prove second-level
+  bwrap file binds for `/etc/resolv.conf`.
 
 ## Validation
 
@@ -76,10 +89,19 @@ Commands run:
 - `cargo test -p merry-cli config::tests`
 - `cargo test -p merry-cli debug_openai`
 - `cargo test -p merry-cli coding_loop_task`
+- `cargo test -p merry-runtime process_current_dir`
+- `cargo test -p merry-tool-workspace registered_read_file_domain_failure_records_failed_json_before_resolving_pending_call`
 - `cargo test -p merry-cli sandbox_plan_mounts_runtime_paths_and_workspace`
 - `cargo clippy --all-targets --all-features -- -D warnings`
 - `cargo test --all`
 - `git diff --check`
+
+Nested-only attempted command:
+
+- `cargo test -p merry-cli debug_coding_loop_task_smoke_runs_inside_real_bwrap_when_opted_in -- --ignored`
+  now gets past `/etc/ld.so.cache` but still fails in this nested environment
+  on `/etc/resolv.conf` bind. Keep this as outer-environment validation, not a
+  default local proof.
 
 User-run validation:
 
@@ -89,8 +111,9 @@ Result:
 
 - Focused deterministic checks passed locally.
 - Full clippy and test suite passed locally.
-- `target/debug/merry` was rebuilt with the opt-in propagation fix.
-- User-run outer real-bwrap task smoke passed.
+- `target/debug/merry` was rebuilt with the cwd/root and prompt fixes.
+- User-run outer real-bwrap task smoke had passed before this round; rerun from
+  outer environment after this commit to validate the live task path.
 
 ## Decisions
 
@@ -99,8 +122,10 @@ Decisions made:
 - Keep `/etc` mounting as explicit file/dir helper binds; do not mount all of
   `/etc`.
 - Do not add `LD_LIBRARY_PATH`.
-- Do not stage-copy `/etc/ld.so.cache` or `/etc/resolv.conf`; the outer
-  environment passes with direct bind semantics.
+- Do not bind or stage-copy `/etc/ld.so.cache`; use `/etc/ld.so.conf` and
+  `/etc/ld.so.conf.d`.
+- Keep `/etc/resolv.conf` as direct file bind for live provider DNS; do not add
+  staged copy fallback.
 - Keep the current task verification on `rg done` so no process-admission
   broadening is needed.
 - Preserve only the exact `MERRY_OPENAI_DEBUG=1` marker across sandbox
@@ -127,15 +152,15 @@ Residual risk:
 - The deterministic scripted provider still supplies exact patch arguments.
   This proves the runtime/tool/sandbox path, but not yet real coding
   intelligence.
-- The live task smoke is opt-in and depends on local OpenAI-compatible config.
+- The live task smoke is opt-in and depends on local OpenAI-compatible config,
+  network, and outer-environment bwrap behavior.
 
 Next exact action:
 
 - Rerun
   `MERRY_OPENAI_DEBUG=1 ./target/debug/merry --with-sandbox debug coding-loop-task-live-smoke --task status-text`
-  from the outer environment. It should now retain the live-debug opt-in
-  inside bwrap; any remaining failure should be config/network/model behavior,
-  not immediate usage/help from a missing opt-in.
+  from the outer environment. It should now retain the live-debug opt-in and
+  present a single fixture-root coordinate system to the model.
 
 ## Scope For Next Session
 
@@ -173,11 +198,11 @@ Do not reconsider:
 
 ## Commit
 
-Status: pending
+Status: complete
 
 Message:
 
-- fix(cli): simplify OpenAI debug credential config
+- fix(cli): align coding smoke workspace paths
 
 No-commit reason:
 
