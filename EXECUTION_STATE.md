@@ -46,16 +46,19 @@ Current milestone or track:
 
 Session milestone:
 
-- Implement the first configurable disposable coding-loop task smoke so the
-  user can run a visible task completion path, while preserving the roadmap
-  guardrail against drifting back into profile-only work.
+- Fix sandboxed live task smoke opt-in propagation so the user's
+  `MERRY_OPENAI_DEBUG=1 merry --with-sandbox debug coding-loop-task-live-smoke`
+  command reaches the live debug path, then correct the exposed
+  OpenAI-compatible config schema to use plain `api_key`/`api_key_file`
+  sources instead of the rejected `api_key_env` design.
 
 Goal:
 
-- Add a non-default `merry --with-sandbox debug coding-loop-task-smoke` path
-  that creates a disposable task fixture, runs inspect/read/patch/verify/final
-  through runtime tools, and has deterministic default coverage plus an
-  explicit real-bwrap smoke.
+- Preserve only the non-secret `MERRY_OPENAI_DEBUG=1` marker across sandbox
+  self-reexec, while keeping API keys out of bwrap argv and generic environment
+  inheritance.
+- Treat `config.toml` as the credential source of truth: require exactly one of
+  `[providers.openai-compatible].api_key` or `api_key_file`.
 
 Task queue status:
 
@@ -66,6 +69,15 @@ Task queue status:
 - Added `debug coding-loop-task-live-smoke --task status-text` as the
   opt-in live-provider lane using the same disposable fixture and validation
   expectations.
+- Fixed sandbox self-reexec to pass `MERRY_OPENAI_DEBUG=1` into the bwrap
+  child only when the outer value is exactly `1`; non-opt-in values and API key
+  environment variables remain excluded.
+- Added sandbox-plan regression tests for preserving the live-debug opt-in and
+  rejecting non-opt-in values.
+- Replaced `api_key_env` config support with plain `api_key` and strict
+  `api_key`/`api_key_file` exclusivity, per user correction.
+- Updated `examples/config.toml`, README, and ROADMAP so public config docs no
+  longer describe environment-based credential priority.
 - Added CLI tests for help output, sandbox-required usage behavior, clap
   parsing, deterministic fake-runner task completion, and ignored real-bwrap
   task smoke paths.
@@ -78,13 +90,20 @@ Task queue status:
 
 Allowed expansion:
 
+- `crates/merry-cli/src/config.rs`
 - `crates/merry-cli/src/main.rs`
 - `crates/merry-cli/tests/debug.rs`
+- `examples/config.toml`
 - Public-safe README/roadmap/continuity updates
 
 Done condition:
 
 - Focused deterministic task-smoke tests pass.
+- Sandbox plan tests prove live-debug opt-in propagation without secret env
+  propagation.
+- Config tests prove `api_key` and `api_key_file` are exclusive, redact inline
+  secrets, and reject blank/control-character keys before provider setup.
+- `target/debug/merry` is rebuilt so the user's direct command uses the fix.
 - Sandbox plan tests assert file helper semantics instead of broad `/etc`
   binding.
 - User can run the real-bwrap ignored task smoke from an outer environment.
@@ -107,9 +126,18 @@ Task type: runtime/CLI implementation
 Acceptance criteria:
 
 - `cargo fmt --all --check` passes.
+- `cargo build -p merry-cli` passes.
+- `cargo test -p merry-cli sandbox_plan_preserves_openai_debug_opt_in_without_secret_env`
+  passes.
+- `cargo test -p merry-cli sandbox_plan_does_not_preserve_non_opt_in_openai_debug_values`
+  passes.
+- `cargo test -p merry-cli config::tests` passes.
+- `cargo test -p merry-cli debug_openai` passes.
 - `cargo test -p merry-cli coding_loop_task` passes.
 - `cargo test -p merry-cli sandbox_plan_mounts_runtime_paths_and_workspace`
   passes.
+- `cargo clippy --all-targets --all-features -- -D warnings` passes.
+- `cargo test --all` passes.
 - `git diff --check` passes.
 - Outer-environment real bwrap validation passes:
   `cargo test -p merry-cli debug_coding_loop_task_smoke_runs_inside_real_bwrap_when_opted_in -- --ignored`.
@@ -118,8 +146,10 @@ Acceptance criteria:
 
 Allowed edits:
 
+- `crates/merry-cli/src/config.rs`
 - `crates/merry-cli/src/main.rs`
 - `crates/merry-cli/tests/debug.rs`
+- `examples/config.toml`
 - `README.md`
 - `ROADMAP.md`
 - `EXECUTION_STATE.md`
@@ -147,18 +177,34 @@ Protected files:
 Validation command:
 
 - `cargo fmt --all --check`
+- `cargo build -p merry-cli`
+- `cargo test -p merry-cli sandbox_plan_preserves_openai_debug_opt_in_without_secret_env`
+- `cargo test -p merry-cli sandbox_plan_does_not_preserve_non_opt_in_openai_debug_values`
+- `cargo test -p merry-cli config::tests`
+- `cargo test -p merry-cli debug_openai`
 - `cargo test -p merry-cli coding_loop_task`
 - `cargo test -p merry-cli sandbox_plan_mounts_runtime_paths_and_workspace`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test --all`
 - `git diff --check`
 - User-run outer validation: `cargo test -p merry-cli debug_coding_loop_task_smoke_runs_inside_real_bwrap_when_opted_in -- --ignored`
 
 Validation notes:
 
-- All listed focused deterministic checks passed locally.
+- Focused live-debug opt-in and deterministic task-smoke checks passed
+  locally for the current change.
+- Focused config and debug OpenAI tests passed locally for the current
+  `api_key`/`api_key_file` schema correction.
+- Full clippy and test suite passed locally for the current change.
 - The user reported the outer real-bwrap task smoke passed. Earlier nested
   runs from inside this agent's environment failed on `/etc`/dynamic-linker
   behavior, so they are not treated as the authoritative outer-environment
   result.
+- A local no-network attempt to run the live task smoke from this nested agent
+  environment still hit the known second-level bwrap `/etc/ld.so.cache` bind
+  limitation before reaching the child. The fix is therefore verified by the
+  sandbox plan regression tests and must be live-checked from the user's outer
+  environment.
 
 ## Research
 
@@ -181,10 +227,11 @@ Research artifact:
 
 Next exact action:
 
-- Exercise the live/model task smoke path or replace the deterministic exact
-  patch script with a stricter fake/live sequence that proves the model can
-  infer the patch from read evidence rather than receiving exact
-  `old_text`/`new_text` from the scripted provider.
+- From the outer environment, rerun:
+  `MERRY_OPENAI_DEBUG=1 ./target/debug/merry --with-sandbox debug coding-loop-task-live-smoke --task status-text`.
+  It should now retain the live-debug opt-in inside bwrap; remaining failures,
+  if any, should be real config/network/model behavior rather than immediate
+  opt-in usage/help.
 
 Do not reconsider:
 

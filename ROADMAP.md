@@ -63,6 +63,11 @@ The legacy `.merry/secrets/openai.env` live-smoke config has been replaced for
 the CLI debug smoke path by XDG TOML provider config; the legacy `--config`
 flag is rejected. Config-relative `api_key_file` remains available so
 sandboxed live smoke credentials do not have to pass through bwrap argv.
+OpenAI-compatible config must set exactly one credential source: `api_key` or
+`api_key_file`.
+Sandbox self-reexec preserves the non-secret `MERRY_OPENAI_DEBUG=1` opt-in
+marker only when its outer value is exactly `1`; API keys remain outside argv
+and generic environment inheritance.
 The tracked copy-and-edit example is `examples/config.toml`; future accepted
 config-key changes should update that example in the same change and keep the
 example free of real secrets or host-private paths.
@@ -512,7 +517,7 @@ opt-in live provider smoke:
   reads XDG TOML provider config inside the sandbox
   requires `MERRY_OPENAI_DEBUG=1`
   requires `[providers.default]` model config unless `--model` overrides it
-  requires `[providers.openai-compatible]` with `api_key_env` or `api_key_file`
+  requires `[providers.openai-compatible]` with exactly one of `api_key` or `api_key_file`
   optionally uses `[providers.openai-compatible].base_url`
   is never part of default `cargo test`
 ```

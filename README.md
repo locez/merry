@@ -151,6 +151,11 @@ The existing `.merry/secrets/openai.env` live-smoke config is a transitional
 debug path from the first live proof. It is ignored and must not be committed.
 The `--with-sandbox` path should move toward mounting the resolved Merry config
 directory read-only, plus a log/state path only when file logging is enabled.
+Sandbox re-exec preserves only the non-secret `MERRY_OPENAI_DEBUG=1` live-debug
+opt-in marker. Provider credentials come from XDG config: set exactly one of
+`api_key` or `api_key_file`; for sandboxed smokes prefer `api_key_file` so the
+key stays in the mounted config directory instead of argv or generic
+environment inheritance.
 
 M8 runtime/provider/tool execution hardening has shifted into maintenance and foundation work: structured runtime state, artifact-backed model output, provider step boundaries, pending tool calls, tool result resolution, tool continuations, registered tool execution, public runtime API contract cleanup/review/alignment, and opt-in OpenAI Responses debug/tool flows remain the base for later runtime work.
 

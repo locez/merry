@@ -68,6 +68,7 @@ const SANDBOX_ETC_READ_ONLY_DIR_PATHS: &[&str] = &[
 const MERRY_SANDBOX_ENV: &str = "MERRY_SANDBOX";
 const MERRY_SANDBOX_VERSION_ENV: &str = "MERRY_SANDBOX_VERSION";
 const MERRY_SANDBOX_VERSION: &str = "1";
+const MERRY_OPENAI_DEBUG_ENV: &str = "MERRY_OPENAI_DEBUG";
 const SANDBOX_CHILD_HANDOFF_ARG: &str = "--merry-sandbox-child-handoff";
 const SANDBOX_CHILD_HANDOFF_CLI_BWRAP_V1: &str = "cli-bwrap-v1";
 const SANDBOX_HOME: &str = "/home/merry";
@@ -85,8 +86,9 @@ Environment:
 
 Provider/model/base URL/API key source come from
 `$XDG_CONFIG_HOME/merry/config.toml` or `~/.config/merry/config.toml`.
-For sandboxed live smokes, prefer a config-relative `api_key_file` such as
-`secrets/openai.key` so credentials are not passed through bwrap argv.
+Set exactly one of `[providers.openai-compatible].api_key` or `api_key_file`.
+For sandboxed live smokes, prefer config-relative `api_key_file =
+\"secrets/openai.key\"` so credentials are not passed through bwrap argv.
 ";
 
 #[derive(Debug, Parser)]
@@ -594,6 +596,7 @@ struct SandboxHost {
     current_exe: PathBuf,
     args: Vec<OsString>,
     path: Option<OsString>,
+    openai_debug: Option<OsString>,
     inside_sandbox: bool,
     xdg_paths: XdgPaths,
     log_settings: Option<EffectiveLogSettings>,
@@ -610,6 +613,7 @@ impl SandboxHost {
             current_exe: env::current_exe().map_err(SandboxError::CurrentExe)?,
             args,
             path: env::var_os("PATH"),
+            openai_debug: env::var_os(MERRY_OPENAI_DEBUG_ENV),
             // This marker is only a recursion guard for self-reexec. It is
             // not a security proof that the current process is confined.
             inside_sandbox: env::var_os(MERRY_SANDBOX_ENV).as_deref() == Some(OsStr::new("1")),
@@ -770,6 +774,11 @@ fn build_sandbox_plan(host: &SandboxHost, path: OsString, bwrap: PathBuf) -> San
         os("--setenv"),
         os(MERRY_SANDBOX_VERSION_ENV),
         os(MERRY_SANDBOX_VERSION),
+    ]);
+    if host.openai_debug.as_deref() == Some(OsStr::new("1")) {
+        args.extend([os("--setenv"), os(MERRY_OPENAI_DEBUG_ENV), os("1")]);
+    }
+    args.extend([
         current_exe,
         os(SANDBOX_CHILD_HANDOFF_ARG),
         os(SandboxChildHandoff::CliBwrapV1.as_cli_value()),
@@ -2463,7 +2472,7 @@ fn debug_openai_config_with_env(
     merry_config: Option<&MerryConfig>,
     env_value: impl Fn(&'static str) -> Result<Option<String>, CliError>,
 ) -> Result<DebugOpenAiConfig, CliError> {
-    if env_value("MERRY_OPENAI_DEBUG")?.as_deref() != Some("1") {
+    if env_value(MERRY_OPENAI_DEBUG_ENV)?.as_deref() != Some("1") {
         return Err(debug_openai_usage_error(
             "set MERRY_OPENAI_DEBUG=1 to enable live OpenAI-compatible debugging",
         ));
@@ -2643,15 +2652,16 @@ impl Termination for CliExit {
 mod tests {
     use super::{
         Cli, CliCommand, CliError, CliExit, DEBUG_TOOL_CONTINUATION_INPUT, DEFAULT_INPUT,
-        DEFAULT_SESSION_ID, DebugCommand, MERRY_SANDBOX_ENV, MERRY_SANDBOX_VERSION,
-        MERRY_SANDBOX_VERSION_ENV, SANDBOX_CHILD_HANDOFF_ARG, SANDBOX_CHILD_HANDOFF_CLI_BWRAP_V1,
-        SANDBOX_HOME, SANDBOX_MERRY_CONFIG_DIR, SANDBOX_MERRY_LOG_DIR, SANDBOX_TMPDIR,
-        SANDBOX_XDG_CONFIG_HOME, SANDBOX_XDG_STATE_HOME, SandboxBootstrap, SandboxChildHandoff,
-        SandboxError, SandboxHost, SandboxRuntimeProfile, args_without_sandbox_bootstrap_flags,
-        debug_echo_tool, debug_openai_config_with_env, debug_openai_usage, find_bwrap_in_path, os,
-        plan_sandbox_bootstrap_with_file_exists, report_cli_exit, run_debug_coding_loop_smoke,
-        sandbox_runtime_profile_from_evidence, shell_process_action_intent,
-        shell_runtime_admission, shell_usage, write_debug_openai_tool_events,
+        DEFAULT_SESSION_ID, DebugCommand, MERRY_OPENAI_DEBUG_ENV, MERRY_SANDBOX_ENV,
+        MERRY_SANDBOX_VERSION, MERRY_SANDBOX_VERSION_ENV, SANDBOX_CHILD_HANDOFF_ARG,
+        SANDBOX_CHILD_HANDOFF_CLI_BWRAP_V1, SANDBOX_HOME, SANDBOX_MERRY_CONFIG_DIR,
+        SANDBOX_MERRY_LOG_DIR, SANDBOX_TMPDIR, SANDBOX_XDG_CONFIG_HOME, SANDBOX_XDG_STATE_HOME,
+        SandboxBootstrap, SandboxChildHandoff, SandboxError, SandboxHost, SandboxRuntimeProfile,
+        args_without_sandbox_bootstrap_flags, debug_echo_tool, debug_openai_config_with_env,
+        debug_openai_usage, find_bwrap_in_path, os, plan_sandbox_bootstrap_with_file_exists,
+        report_cli_exit, run_debug_coding_loop_smoke, sandbox_runtime_profile_from_evidence,
+        shell_process_action_intent, shell_runtime_admission, shell_usage,
+        write_debug_openai_tool_events,
     };
     use super::{DEBUG_TOOL_NAME, run_shell_to_writer, write_runtime_step_events};
     use crate::CodingLoopTaskSmokeTask;
@@ -2691,6 +2701,7 @@ mod tests {
                 os("custom-session"),
             ],
             path: Some(os("/custom/bin:/usr/bin")),
+            openai_debug: None,
             inside_sandbox: false,
             xdg_paths: super::config::XdgPaths::from_parts(
                 PathBuf::from("/home/alice"),
@@ -3801,8 +3812,50 @@ api_key_file = "secrets/openai.key"
             &args,
             &["--setenv", MERRY_SANDBOX_VERSION_ENV, MERRY_SANDBOX_VERSION]
         ));
+        assert!(!contains_sequence(
+            &args,
+            &["--setenv", MERRY_OPENAI_DEBUG_ENV, "1"]
+        ));
         assert!(!args.iter().any(|arg| arg.contains("OPENAI_API_KEY")));
         assert!(!args.iter().any(|arg| arg.contains("MERRY_OPENAI_API_KEY")));
+    }
+
+    #[test]
+    fn sandbox_plan_preserves_openai_debug_opt_in_without_secret_env() {
+        let mut host = sandbox_host();
+        host.openai_debug = Some(os("1"));
+        let SandboxBootstrap::Reexec(plan) =
+            plan_sandbox(true, &host).expect("sandbox planning should succeed")
+        else {
+            panic!("expected sandbox reexec plan");
+        };
+        let args = plan_args(&plan);
+
+        assert!(contains_sequence(
+            &args,
+            &["--setenv", MERRY_OPENAI_DEBUG_ENV, "1"]
+        ));
+        assert!(!args.iter().any(|arg| arg.contains("OPENAI_API_KEY")));
+        assert!(!args.iter().any(|arg| arg.contains("MERRY_OPENAI_API_KEY")));
+    }
+
+    #[test]
+    fn sandbox_plan_does_not_preserve_non_opt_in_openai_debug_values() {
+        for value in ["0", "true", ""] {
+            let mut host = sandbox_host();
+            host.openai_debug = Some(os(value));
+            let SandboxBootstrap::Reexec(plan) =
+                plan_sandbox(true, &host).expect("sandbox planning should succeed")
+            else {
+                panic!("expected sandbox reexec plan");
+            };
+            let args = plan_args(&plan);
+
+            assert!(!contains_sequence(
+                &args,
+                &["--setenv", MERRY_OPENAI_DEBUG_ENV, "1"]
+            ));
+        }
     }
 
     #[test]

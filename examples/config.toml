@@ -6,8 +6,10 @@
 # Usually required edits:
 # - Set [providers.default].model for your provider.
 # - Set [providers.openai-compatible].base_url for non-OpenAI-compatible hosts.
-# - Export OPENAI_API_KEY, or write the key to:
-#     ~/.config/merry/secrets/openai.key
+# - Set exactly one credential source in [providers.openai-compatible]:
+#     api_key = "sk-..."
+#   or:
+#     api_key_file = "secrets/openai.key"
 #
 # Keep credentials out of this file when committing changes.
 
@@ -31,7 +33,6 @@ model = "gpt-4.1-mini"
 
 [providers.openai-compatible]
 base_url = "https://api.openai.com/v1"
-# Merry tries api_key_env first. In --with-sandbox live smokes the environment
-# is intentionally minimal, so api_key_file is the preferred fallback.
-api_key_env = "OPENAI_API_KEY"
+# Prefer api_key_file for local sandboxed smoke runs so the key stays in the
+# mounted config directory instead of argv or process environment.
 api_key_file = "secrets/openai.key"

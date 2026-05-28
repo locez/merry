@@ -10,8 +10,9 @@ Current milestone or track:
 
 Session milestone:
 
-- Implement the first configurable disposable coding-loop task smoke with
-  deterministic coverage and an opt-in real bwrap validation path.
+- Fix the sandboxed live task smoke opt-in propagation bug, then correct the
+  exposed OpenAI-compatible config schema after the user rejected
+  `api_key_env`.
 
 Task queue status:
 
@@ -20,6 +21,14 @@ Task queue status:
 - Added deterministic fake-provider/fake-runner coverage for inspect ->
   failing verification -> read -> patch -> successful verification -> final.
 - Added ignored real-bwrap task smoke tests for scripted and live paths.
+- Fixed sandbox self-reexec so `MERRY_OPENAI_DEBUG=1` survives into the bwrap
+  child as a non-secret opt-in marker; non-`1` values and API key env vars are
+  not propagated.
+- Added sandbox-plan regression tests for the opt-in propagation behavior.
+- Replaced `api_key_env` config support with plain `api_key`; config now
+  requires exactly one of `api_key` or `api_key_file`.
+- Updated `examples/config.toml`, README, and ROADMAP to remove
+  environment-based credential priority from the public config contract.
 - Fixed bwrap `/etc` planning to use file/directory helper semantics:
   create mount parents, then direct `--ro-bind`; no broad `/etc` bind, no
   staged copy fallback, and no `LD_LIBRARY_PATH`.
@@ -36,6 +45,8 @@ Files changed:
 
 - `README.md`
 - `ROADMAP.md`
+- `examples/config.toml`
+- `crates/merry-cli/src/config.rs`
 - `crates/merry-cli/src/main.rs`
 - `crates/merry-cli/tests/debug.rs`
 - `EXECUTION_STATE.md`
@@ -45,6 +56,10 @@ Summary:
 
 - New CLI debug task smoke creates a disposable fixture and proves runtime
   read/patch/process verification flow.
+- Sandboxed live task smoke no longer loses `MERRY_OPENAI_DEBUG=1` during
+  bwrap re-exec.
+- OpenAI-compatible credentials are now config-owned via `api_key` or
+  `api_key_file`, with no `api_key_env` priority path.
 - Sandbox plan now mirrors the user's no-copy helper semantics for `/etc`
   file/dir mounts.
 - The real bwrap task smoke was confirmed by the user from an outer
@@ -55,8 +70,15 @@ Summary:
 Commands run:
 
 - `cargo fmt --all --check`
+- `cargo build -p merry-cli`
+- `cargo test -p merry-cli sandbox_plan_preserves_openai_debug_opt_in_without_secret_env`
+- `cargo test -p merry-cli sandbox_plan_does_not_preserve_non_opt_in_openai_debug_values`
+- `cargo test -p merry-cli config::tests`
+- `cargo test -p merry-cli debug_openai`
 - `cargo test -p merry-cli coding_loop_task`
 - `cargo test -p merry-cli sandbox_plan_mounts_runtime_paths_and_workspace`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test --all`
 - `git diff --check`
 
 User-run validation:
@@ -66,6 +88,8 @@ User-run validation:
 Result:
 
 - Focused deterministic checks passed locally.
+- Full clippy and test suite passed locally.
+- `target/debug/merry` was rebuilt with the opt-in propagation fix.
 - User-run outer real-bwrap task smoke passed.
 
 ## Decisions
@@ -79,6 +103,12 @@ Decisions made:
   environment passes with direct bind semantics.
 - Keep the current task verification on `rg done` so no process-admission
   broadening is needed.
+- Preserve only the exact `MERRY_OPENAI_DEBUG=1` marker across sandbox
+  re-exec; keep credentials in XDG config/key files rather than argv or broad
+  environment inheritance.
+- Treat `config.toml` as the credential source of truth; `api_key` and
+  `api_key_file` are mutually exclusive and there is no implicit env/file
+  priority.
 
 Pending decisions:
 
@@ -101,9 +131,11 @@ Residual risk:
 
 Next exact action:
 
-- Exercise `debug coding-loop-task-live-smoke` with a real model, or add a
-  stricter deterministic/live acceptance that proves the model infers the
-  patch from file evidence instead of receiving exact `old_text`/`new_text`.
+- Rerun
+  `MERRY_OPENAI_DEBUG=1 ./target/debug/merry --with-sandbox debug coding-loop-task-live-smoke --task status-text`
+  from the outer environment. It should now retain the live-debug opt-in
+  inside bwrap; any remaining failure should be config/network/model behavior,
+  not immediate usage/help from a missing opt-in.
 
 ## Scope For Next Session
 
@@ -145,7 +177,7 @@ Status: pending
 
 Message:
 
-- feat(cli): add configurable coding loop task smoke
+- fix(cli): simplify OpenAI debug credential config
 
 No-commit reason:
 
