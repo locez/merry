@@ -718,6 +718,12 @@ async fn assert_failed_json_artifact_visible_in_next_model_request(
     assert_eq!(payload["tool"], expected_tool);
     assert_eq!(payload["error"]["code"], expected_code);
     assert!(
+        payload["recovery"]["path_contract"]
+            .as_str()
+            .expect("recovery path contract should be text")
+            .contains("relative to a configured workspace root")
+    );
+    assert!(
         !json.contains(host_root.to_str().expect("temp path utf8")),
         "failed JSON artifact must not include absolute host roots"
     );

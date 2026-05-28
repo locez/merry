@@ -53,7 +53,6 @@ const SHELL_STEP_INPUT: &str = "run shell command through Merry process protocol
 const BWRAP_PROGRAM: &str = "bwrap";
 const DEFAULT_SANDBOX_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
 const SANDBOX_ETC_READ_ONLY_FILE_PATHS: &[&str] = &[
-    "/etc/ld.so.cache",
     "/etc/ld.so.conf",
     "/etc/resolv.conf",
     "/etc/hosts",
@@ -1014,12 +1013,11 @@ async fn run_debug_coding_loop_smoke(
     };
 
     let smoke_root = prepare_coding_loop_smoke_fixture("coding-loop-smoke")?;
-    let relative_cwd = smoke_root_relative_cwd(&smoke_root)?;
     let runtime = build_coding_loop_smoke_runtime(
         &smoke_root,
-        relative_cwd.as_deref(),
+        None,
         admission,
-        Arc::new(TokioProcessRunner::new()),
+        Arc::new(TokioProcessRunner::new_at_workspace_root(&smoke_root)),
     )?;
 
     let result = runtime
@@ -1056,13 +1054,12 @@ async fn run_debug_coding_loop_live_smoke(
     };
     let config = debug_openai_config(model_flag, merry_config)?;
     let smoke_root = prepare_coding_loop_smoke_fixture("coding-loop-live-smoke")?;
-    let relative_cwd = smoke_root_relative_cwd(&smoke_root)?;
     let runtime = build_coding_loop_live_smoke_runtime(
         &smoke_root,
-        relative_cwd.as_deref(),
+        None,
         admission,
         config,
-        Arc::new(TokioProcessRunner::new()),
+        Arc::new(TokioProcessRunner::new_at_workspace_root(&smoke_root)),
     )?;
     let generation_config =
         GenerationConfig::new(Some(max_output_tokens), false).map_err(debug_openai_usage_error)?;
@@ -1070,8 +1067,7 @@ async fn run_debug_coding_loop_live_smoke(
 
     let result = runtime
         .run_agent_loop(
-            StepInput::user_text(&coding_loop_live_smoke_task(relative_cwd.as_deref()))
-                .map_err(unexpected)?,
+            StepInput::user_text(&coding_loop_live_smoke_task(None)).map_err(unexpected)?,
             context,
             AgentLoopConfig::new(10).map_err(unexpected)?,
         )
@@ -1103,12 +1099,11 @@ async fn run_debug_coding_loop_task_smoke(
 
     let fixture = CodingLoopTaskSmokeFixture::for_task(task);
     let smoke_root = prepare_coding_loop_task_fixture("coding-loop-task-smoke", fixture)?;
-    let relative_cwd = smoke_root_relative_cwd(&smoke_root)?;
     let runtime = build_coding_loop_task_smoke_runtime(
         &smoke_root,
-        relative_cwd.as_deref(),
+        None,
         admission,
-        Arc::new(TokioProcessRunner::new()),
+        Arc::new(TokioProcessRunner::new_at_workspace_root(&smoke_root)),
         fixture,
     )?;
 
@@ -1149,12 +1144,11 @@ async fn run_debug_coding_loop_task_live_smoke(
 
     let fixture = CodingLoopTaskSmokeFixture::for_task(task);
     let smoke_root = prepare_coding_loop_task_fixture("coding-loop-task-live-smoke", fixture)?;
-    let relative_cwd = smoke_root_relative_cwd(&smoke_root)?;
     let runtime = build_coding_loop_task_live_smoke_runtime(
         &smoke_root,
         admission,
         config,
-        Arc::new(TokioProcessRunner::new()),
+        Arc::new(TokioProcessRunner::new_at_workspace_root(&smoke_root)),
     )?;
     let generation_config =
         GenerationConfig::new(Some(max_output_tokens), false).map_err(debug_openai_usage_error)?;
@@ -1162,8 +1156,7 @@ async fn run_debug_coding_loop_task_live_smoke(
 
     let result = runtime
         .run_agent_loop(
-            StepInput::user_text(&fixture.live_task_prompt(relative_cwd.as_deref()))
-                .map_err(unexpected)?,
+            StepInput::user_text(&fixture.live_task_prompt(None)).map_err(unexpected)?,
             context,
             AgentLoopConfig::new(12).map_err(unexpected)?,
         )
@@ -1206,15 +1199,6 @@ fn coding_loop_smoke_requires_sandbox_error(command: &str) -> CliError {
     CliError::DebugUsage(format!(
         "{command} must run via `merry --with-sandbox debug {command}`"
     ))
-}
-
-fn smoke_root_relative_cwd(smoke_root: &Path) -> Result<Option<String>, CliError> {
-    let relative_cwd = smoke_root
-        .strip_prefix(env::current_dir().map_err(unexpected)?)
-        .map_err(|_| {
-            unexpected("coding-loop-smoke fixture must live under the current workspace")
-        })?;
-    path_to_process_cwd(relative_cwd)
 }
 
 async fn assert_coding_loop_smoke_result(
@@ -1416,10 +1400,16 @@ Use the available tools, one tool call per step. Do not answer from memory.
 Required behavior:
 1. Inspect the fixture files with `{process_tool}` using argv `[\"rg\", \"--files\"]` and cwd `{cwd}`.
 2. Run verification with `{process_tool}` using argv `[\"rg\", \"done\"]` and cwd `{cwd}`. The first run is expected to fail because the target text is missing.
-3. Read exact source evidence with `{read_tool}` before editing.
-4. Apply exactly one constrained edit through `{patch_tool}`.
+3. Read exact source evidence with `{read_tool}` using path `src/lib.rs` before editing.
+4. Apply exactly one constrained edit through `{patch_tool}` using path `src/lib.rs`.
 5. Run `{process_tool}` again with argv `[\"rg\", \"done\"]` and cwd `{cwd}`.
 6. After verification succeeds, return a concise final answer.
+
+Path contract:
+- `{process_tool}` cwd values and workspace tool path values both resolve under the fixture workspace root.
+- Use `{process_tool}` cwd `{cwd}` for process commands.
+- Use `{read_tool}` and `{patch_tool}` path `src/lib.rs`; do not prefix a process cwd, repository path, or absolute host path.
+- If a workspace tool returns `workspace_file_not_found`, retry with the workspace-root-relative path shown by `rg --files`.
 
 Constraints:
 - Do not use shell strings, scripts, pipelines, env, stdin, git, cargo, network tools, or any command except the exact `rg --files` and `rg done` argv values above.
@@ -1465,16 +1455,6 @@ fn coding_loop_smoke_initial_source() -> &'static str {
 
 fn coding_loop_smoke_patched_source() -> &'static str {
     "pub fn greeting() -> &'static str {\n    \"fixed-by-live-llm\"\n}\n"
-}
-
-fn path_to_process_cwd(path: &Path) -> Result<Option<String>, CliError> {
-    if path.as_os_str().is_empty() {
-        return Ok(None);
-    }
-    let value = path.to_str().ok_or_else(|| {
-        CliError::Unexpected("coding-loop-smoke fixture path must be UTF-8".to_owned())
-    })?;
-    Ok(Some(value.replace('\\', "/")))
 }
 
 fn build_coding_loop_smoke_runtime(
@@ -2957,6 +2937,20 @@ mod tests {
                 vec!["rg".to_owned(), "done".to_owned()],
             ]
         );
+        assert_eq!(runner.observed_cwd(), [None, None, None]);
+    }
+
+    #[test]
+    fn coding_loop_task_live_prompt_uses_single_workspace_coordinate_system() {
+        let fixture =
+            super::CodingLoopTaskSmokeFixture::for_task(CodingLoopTaskSmokeTask::StatusText);
+        let prompt = fixture.live_task_prompt(None);
+
+        assert!(prompt.contains("cwd `.`"));
+        assert!(prompt.contains("path `src/lib.rs`"));
+        assert!(prompt.contains("both resolve under the fixture workspace root"));
+        assert!(prompt.contains("do not prefix a process cwd"));
+        assert!(!prompt.contains(".merry/local/coding-loop-task-live-smoke/src/lib.rs"));
     }
 
     #[tokio::test]
@@ -3439,6 +3433,7 @@ api_key_file = "secrets/openai.key"
     struct FakeProcessRunner {
         calls: Arc<AtomicUsize>,
         observed_argv: Arc<Mutex<Vec<Vec<String>>>>,
+        observed_cwd: Arc<Mutex<Vec<Option<String>>>>,
         outputs: Arc<Mutex<Vec<FakeProcessRunnerStep>>>,
     }
 
@@ -3451,6 +3446,7 @@ api_key_file = "secrets/openai.key"
             Self {
                 calls: Arc::new(AtomicUsize::new(0)),
                 observed_argv: Arc::new(Mutex::new(Vec::new())),
+                observed_cwd: Arc::new(Mutex::new(Vec::new())),
                 outputs: Arc::new(Mutex::new(steps.into_iter().rev().collect())),
             }
         }
@@ -3463,6 +3459,13 @@ api_key_file = "secrets/openai.key"
             self.observed_argv
                 .lock()
                 .expect("observed argv mutex should not be poisoned")
+                .clone()
+        }
+
+        fn observed_cwd(&self) -> Vec<Option<String>> {
+            self.observed_cwd
+                .lock()
+                .expect("observed cwd mutex should not be poisoned")
                 .clone()
         }
     }
@@ -3504,6 +3507,10 @@ api_key_file = "secrets/openai.key"
                     .lock()
                     .expect("observed argv mutex should not be poisoned")
                     .push(intent.argv().to_vec());
+                self.observed_cwd
+                    .lock()
+                    .expect("observed cwd mutex should not be poisoned")
+                    .push(intent.cwd().map(str::to_owned));
                 if context.cancellation_token().is_cancelled() {
                     return Err(ProcessRunnerError::Cancelled);
                 }
@@ -3637,16 +3644,6 @@ api_key_file = "secrets/openai.key"
                 "--dir",
                 "/etc",
                 "--ro-bind",
-                "/etc/ld.so.cache",
-                "/etc/ld.so.cache"
-            ]
-        ));
-        assert!(contains_sequence(
-            &args,
-            &[
-                "--dir",
-                "/etc",
-                "--ro-bind",
                 "/etc/ld.so.conf",
                 "/etc/ld.so.conf"
             ]
@@ -3688,6 +3685,10 @@ api_key_file = "secrets/openai.key"
         assert!(contains_sequence(
             &args,
             &["--dir", "/etc", "--ro-bind", "/etc/ssl", "/etc/ssl"]
+        ));
+        assert!(!contains_sequence(
+            &args,
+            &["--ro-bind", "/etc/ld.so.cache", "/etc/ld.so.cache"]
         ));
         assert!(!contains_sequence(
             &args,
