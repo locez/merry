@@ -1172,6 +1172,9 @@ async fn run_debug_coding_loop_task_live_smoke(
         .write_all(b"coding-loop-task-live-smoke: ok\n")
         .await
         .map_err(stdout_error)?;
+    for event in result.events() {
+        write_runtime_event(event, &mut writer).await?;
+    }
     writer.flush().await.map_err(stdout_error)
 }
 
