@@ -1160,13 +1160,13 @@ async fn run_debug_coding_loop_task_live_smoke(
         .run_agent_loop(
             StepInput::user_text(&fixture.live_task_prompt(None)).map_err(unexpected)?,
             context,
-            AgentLoopConfig::new(12).map_err(unexpected)?,
+            AgentLoopConfig::new(16).map_err(unexpected)?,
         )
         .await
         .map_err(unexpected)?;
 
-    assert_coding_loop_task_smoke_result(&runtime, &result, &smoke_root, fixture).await?;
-    assert_coding_loop_task_live_smoke_tool_sequence(&runtime, result.events()).await?;
+    assert_coding_loop_task_live_smoke_result(&runtime, &result, &smoke_root, fixture).await?;
+    assert_coding_loop_task_live_smoke_tool_sequence(&runtime, result.events(), fixture).await?;
 
     let mut writer = BufWriter::new(tokio::io::stdout());
     writer
@@ -1280,6 +1280,35 @@ async fn assert_coding_loop_task_smoke_result(
     if patched != fixture.patched_source() {
         return Err(CliError::Unexpected(
             "coding-loop-task-smoke fixture was not patched as expected".to_owned(),
+        ));
+    }
+    assert_coding_loop_task_smoke_uses_small_patch(result.events(), fixture)?;
+    Ok(())
+}
+
+async fn assert_coding_loop_task_live_smoke_result(
+    runtime: &Runtime,
+    result: &merry_runtime::AgentLoopResult,
+    smoke_root: &Path,
+    fixture: CodingLoopTaskSmokeFixture,
+) -> Result<(), CliError> {
+    if result.status() != &AgentLoopStatus::Completed {
+        return Err(CliError::Unexpected(format!(
+            "coding-loop-task-live-smoke did not complete: {:?}",
+            result.status()
+        )));
+    }
+    if !runtime.pending_tool_calls().await.is_empty() {
+        return Err(CliError::Unexpected(
+            "coding-loop-task-live-smoke left pending tool calls".to_owned(),
+        ));
+    }
+
+    let patched = fs::read_to_string(smoke_root.join("src/lib.rs")).map_err(unexpected)?;
+    if !fixture.source_satisfies_task(&patched) {
+        return Err(CliError::Unexpected(
+            "coding-loop-task-live-smoke fixture source does not satisfy the status-text task"
+                .to_owned(),
         ));
     }
     assert_coding_loop_task_smoke_uses_small_patch(result.events(), fixture)?;
@@ -1420,6 +1449,12 @@ impl CodingLoopTaskSmokeFixture {
         }
     }
 
+    const fn crate_name(self) -> &'static str {
+        match self.task {
+            CodingLoopTaskSmokeTask::StatusText => "merry_coding_loop_task_status_text",
+        }
+    }
+
     fn initial_source(self) -> String {
         match self.task {
             CodingLoopTaskSmokeTask::StatusText => status_text_fixture_source("todo"),
@@ -1464,6 +1499,34 @@ impl CodingLoopTaskSmokeFixture {
         }
     }
 
+    fn agents_source(self) -> String {
+        format!(
+            "\
+# AGENTS.md
+
+This is a disposable Rust fixture used by Merry's live coding-loop smoke.
+
+Project rules:
+- Inspect the repository before editing.
+- Read `tests/status.rs` to understand the required behavior.
+- Fix implementation code in `src/lib.rs`; do not edit tests or `Cargo.toml`.
+- Use a localized source edit; do not rewrite whole files for small fixes.
+- After editing, run `cargo check -p {package}` and `cargo test -p {package}`.
+- Report the checks you ran and whether they passed.
+",
+            package = self.package_name()
+        )
+    }
+
+    fn integration_test_source(self) -> String {
+        match self.task {
+            CodingLoopTaskSmokeTask::StatusText => format!(
+                "use {}::{{default_status, preview_status, status}};\n\n#[test]\nfn status_returns_done_without_changing_related_entries() {{\n    assert_eq!(default_status(), \"todo\");\n    assert_eq!(status(), \"done\");\n    assert_eq!(preview_status(), \"todo\");\n}}\n",
+                self.crate_name()
+            ),
+        }
+    }
+
     const fn task_prompt(self) -> &'static str {
         match self.task {
             CodingLoopTaskSmokeTask::StatusText => {
@@ -1472,46 +1535,23 @@ impl CodingLoopTaskSmokeFixture {
         }
     }
 
-    fn live_task_prompt(self, relative_cwd: Option<&str>) -> String {
-        let cwd = relative_cwd.unwrap_or(".");
-        format!(
-            "\
-You are driving Merry's configurable coding-loop task smoke.
+    fn live_task_prompt(self, _relative_cwd: Option<&str>) -> String {
+        match self.task {
+            CodingLoopTaskSmokeTask::StatusText => {
+                "Fix this disposable Rust project so the required status-text behavior is implemented. Use the available tools to inspect, edit, and verify before reporting completion.".to_owned()
+            }
+        }
+    }
 
-Task: fix the disposable Rust fixture so `status()` returns `done`.
-
-Use the available tools, one tool call per step. Do not answer from memory.
-
-Required behavior:
-1. Inspect the fixture files with `{process_tool}` using argv `[\"rg\", \"--files\"]` and cwd `{cwd}`.
-2. Run verification with `{process_tool}` using argv `[\"rg\", \"done\"]` and cwd `{cwd}`. The first run is expected to fail because the target text is missing.
-3. Read exact source evidence with `{read_tool}` using path `src/lib.rs` before editing.
-4. Apply exactly one constrained edit through `{patch_tool}` using a patch argument with this envelope:
-   *** Begin Workspace Patch
-   *** Update File: src/lib.rs
-   -old line
-   +new line
-   *** End Workspace Patch
-5. Run `{process_tool}` again with argv `[\"rg\", \"done\"]` and cwd `{cwd}`.
-6. After verification succeeds, return a concise final answer.
-
-Path contract:
-- `{process_tool}` cwd values and workspace tool path values both resolve under the fixture workspace root.
-- Use `{process_tool}` cwd `{cwd}` for process commands.
-- Use `{read_tool}` path `src/lib.rs` and `{patch_tool}` header `*** Update File: src/lib.rs`; do not prefix a process cwd, repository path, or absolute host path.
-- If a workspace tool returns `workspace_file_not_found`, retry with the workspace-root-relative path shown by `rg --files`.
-
-Constraints:
-- Do not use shell strings, scripts, pipelines, env, stdin, git, cargo, network tools, or any command except the exact `rg --files` and `rg done` argv values above.
-- Do not modify any file except `src/lib.rs` through `{patch_tool}`.
-- The source file intentionally contains repeated placeholder text and unrelated helper behavior. Preserve unrelated behavior while making `status()` report the completed value.
-- For `{patch_tool}`, send one `patch` string. Use the smallest unique hunk needed for the behavior change; do not submit the whole file. If a patch fails because the hunk is ambiguous, retry with a larger unique hunk based on the source evidence.
-- Do not include tool output in the final answer; just say whether the task was fixed and verified.
-",
-            process_tool = CODING_LOOP_PROCESS_TOOL,
-            read_tool = WORKSPACE_READ_FILE_TOOL,
-            patch_tool = WORKSPACE_PATCH_TOOL,
-        )
+    fn source_satisfies_task(self, source: &str) -> bool {
+        match self.task {
+            CodingLoopTaskSmokeTask::StatusText => {
+                source.contains("Entry { key: \"default\", value: \"todo\" },")
+                    && source.contains("Entry { key: \"status\", value: \"done\" },")
+                    && source.contains("Entry { key: \"preview\", value: \"todo\" },")
+                    && !source.contains("Entry { key: \"status\", value: \"todo\" },")
+            }
+        }
     }
 }
 
@@ -1540,6 +1580,7 @@ fn prepare_coding_loop_task_fixture(
         fs::remove_dir_all(&root).map_err(unexpected)?;
     }
     fs::create_dir_all(root.join("src")).map_err(unexpected)?;
+    fs::create_dir_all(root.join("tests")).map_err(unexpected)?;
     fs::write(
         root.join("Cargo.toml"),
         format!(
@@ -1549,6 +1590,12 @@ fn prepare_coding_loop_task_fixture(
     )
     .map_err(unexpected)?;
     fs::write(root.join("src/lib.rs"), fixture.initial_source()).map_err(unexpected)?;
+    fs::write(root.join("AGENTS.md"), fixture.agents_source()).map_err(unexpected)?;
+    fs::write(
+        root.join("tests/status.rs"),
+        fixture.integration_test_source(),
+    )
+    .map_err(unexpected)?;
     fs::write(root.join("tests.md"), fixture.test_source()).map_err(unexpected)?;
     Ok(root)
 }
@@ -1779,10 +1826,12 @@ async fn assert_coding_loop_live_smoke_tool_sequence(
 async fn assert_coding_loop_task_live_smoke_tool_sequence(
     runtime: &Runtime,
     events: &[RuntimeEvent],
+    fixture: CodingLoopTaskSmokeFixture,
 ) -> Result<(), CliError> {
     let mut pending_by_call_id = BTreeMap::new();
     let mut resolved_tool_names = Vec::new();
     let mut resolved_artifacts = Vec::new();
+    let mut resolved_read_paths = Vec::new();
     for event in events {
         match &event.kind {
             RuntimeEventKind::ToolCallPending { call } => {
@@ -1796,6 +1845,16 @@ async fn assert_coding_loop_task_live_smoke_tool_sequence(
                     ))
                 })?;
                 resolved_tool_names.push(call.name().as_str().to_owned());
+                if result.status() == ToolCallResultStatus::Succeeded
+                    && call.name().as_str() == WORKSPACE_READ_FILE_TOOL
+                    && let Some(path) = call
+                        .arguments()
+                        .as_object()
+                        .get("path")
+                        .and_then(serde_json::Value::as_str)
+                {
+                    resolved_read_paths.push(path.to_owned());
+                }
                 resolved_artifacts.push(result.artifact().id().clone());
             }
             _ => {}
@@ -1806,8 +1865,19 @@ async fn assert_coding_loop_task_live_smoke_tool_sequence(
     require_live_smoke_tool_name(&resolved_tool_names, WORKSPACE_READ_FILE_TOOL)?;
     require_live_smoke_tool_name(&resolved_tool_names, WORKSPACE_PATCH_TOOL)?;
 
-    let mut saw_failed_verification = false;
-    let mut saw_successful_verification = false;
+    if !resolved_read_paths.iter().any(|path| path == "AGENTS.md") {
+        return Err(CliError::Unexpected(
+            "task live smoke did not read AGENTS.md before completing".to_owned(),
+        ));
+    }
+    if !resolved_read_paths.iter().any(|path| path == "src/lib.rs") {
+        return Err(CliError::Unexpected(
+            "task live smoke did not read src/lib.rs before patching".to_owned(),
+        ));
+    }
+
+    let mut saw_cargo_check = false;
+    let mut saw_cargo_test = false;
     for artifact_id in &resolved_artifacts {
         let Ok(content) = runtime.read_artifact_content(artifact_id).await else {
             continue;
@@ -1815,22 +1885,24 @@ async fn assert_coding_loop_task_live_smoke_tool_sequence(
         let Some(text) = content.as_text() else {
             continue;
         };
-        if !text.contains("\"kind\":\"process_action\"")
-            || !process_artifact_has_argv(text, ["rg", "done"])
-        {
+        if !text.contains("\"kind\":\"process_action\"") || !text.contains("\"ok\":true") {
             continue;
         }
-        saw_failed_verification |= text.contains("\"ok\":false");
-        saw_successful_verification |= text.contains("\"ok\":true");
+        saw_cargo_check |=
+            process_artifact_has_cargo_package_argv(text, "check", fixture.package_name());
+        saw_cargo_test |=
+            process_artifact_has_cargo_package_argv(text, "test", fixture.package_name());
     }
-    if !saw_failed_verification {
+    if !saw_cargo_check {
         return Err(CliError::Unexpected(
-            "task live smoke did not observe an initial failing rg verification".to_owned(),
+            "task live smoke did not observe a successful cargo check for the fixture package"
+                .to_owned(),
         ));
     }
-    if !saw_successful_verification {
+    if !saw_cargo_test {
         return Err(CliError::Unexpected(
-            "task live smoke did not observe a successful rg verification".to_owned(),
+            "task live smoke did not observe a successful cargo test for the fixture package"
+                .to_owned(),
         ));
     }
 
@@ -1860,6 +1932,27 @@ fn process_artifact_has_argv<const N: usize>(text: &str, expected: [&str; N]) ->
                 .filter_map(serde_json::Value::as_str)
                 .eq(expected)
         })
+}
+
+fn process_artifact_has_cargo_package_argv(text: &str, command: &str, package: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return false;
+    };
+    let Some(argv) = value
+        .get("intent")
+        .and_then(|intent| intent.get("argv"))
+        .and_then(serde_json::Value::as_array)
+    else {
+        return false;
+    };
+    matches!(
+        argv.as_slice(),
+        [cargo, actual_command, package_flag, actual_package]
+            if cargo.as_str() == Some("cargo")
+                && actual_command.as_str() == Some(command)
+                && matches!(package_flag.as_str(), Some("-p" | "--package"))
+                && actual_package.as_str() == Some(package)
+    )
 }
 
 struct CodingLoopSmokeProvider {
@@ -2991,6 +3084,7 @@ mod tests {
             super::CodingLoopTaskSmokeFixture::for_task(CodingLoopTaskSmokeTask::StatusText);
         let smoke_root = temp.path().join("coding-loop-task-smoke-fixture");
         std::fs::create_dir_all(smoke_root.join("src")).expect("fixture src dir should exist");
+        std::fs::create_dir_all(smoke_root.join("tests")).expect("fixture tests dir should exist");
         std::fs::write(
             smoke_root.join("Cargo.toml"),
             format!(
@@ -3001,11 +3095,20 @@ mod tests {
         .expect("fixture Cargo.toml should write");
         std::fs::write(smoke_root.join("src/lib.rs"), fixture.initial_source())
             .expect("fixture source should write");
+        std::fs::write(smoke_root.join("AGENTS.md"), fixture.agents_source())
+            .expect("fixture AGENTS.md should write");
+        std::fs::write(
+            smoke_root.join("tests/status.rs"),
+            fixture.integration_test_source(),
+        )
+        .expect("fixture integration test should write");
         std::fs::write(smoke_root.join("tests.md"), fixture.test_source())
             .expect("fixture test note should write");
 
         let runner = FakeProcessRunner::scripted([
-            FakeProcessRunnerStep::success("Cargo.toml\nsrc/lib.rs\ntests.md\n"),
+            FakeProcessRunnerStep::success(
+                "AGENTS.md\nCargo.toml\nsrc/lib.rs\ntests.md\ntests/status.rs\n",
+            ),
             FakeProcessRunnerStep::failure("pattern not found\n"),
             FakeProcessRunnerStep::success("src/lib.rs:    \"done\"\n"),
         ]);
@@ -3041,22 +3144,20 @@ mod tests {
     }
 
     #[test]
-    fn coding_loop_task_live_prompt_uses_single_workspace_coordinate_system() {
+    fn coding_loop_task_live_prompt_delegates_to_default_prompt_and_agents() {
         let fixture =
             super::CodingLoopTaskSmokeFixture::for_task(CodingLoopTaskSmokeTask::StatusText);
         let prompt = fixture.live_task_prompt(None);
 
-        assert!(prompt.contains("cwd `.`"));
-        assert!(prompt.contains("path `src/lib.rs`"));
-        assert!(prompt.contains("*** Begin Workspace Patch"));
-        assert!(prompt.contains("*** Update File: src/lib.rs"));
-        assert!(prompt.contains("both resolve under the fixture workspace root"));
-        assert!(prompt.contains("do not prefix a process cwd"));
-        assert!(prompt.contains("repeated placeholder text"));
-        assert!(prompt.contains("Preserve unrelated behavior"));
-        assert!(prompt.contains("smallest unique hunk"));
-        assert!(prompt.contains("hunk is ambiguous"));
-        assert!(prompt.contains("do not submit the whole file"));
+        assert!(prompt.contains("status-text behavior"));
+        assert!(prompt.contains("inspect, edit, and verify"));
+        assert!(!prompt.contains(super::CODING_LOOP_PROCESS_TOOL));
+        assert!(!prompt.contains(super::WORKSPACE_READ_FILE_TOOL));
+        assert!(!prompt.contains(super::WORKSPACE_PATCH_TOOL));
+        assert!(!prompt.contains("*** Begin Workspace Patch"));
+        assert!(!prompt.contains("src/lib.rs"));
+        assert!(!prompt.contains("cargo check"));
+        assert!(!prompt.contains("rg done"));
         assert!(!prompt.contains(".merry/local/coding-loop-task-live-smoke/src/lib.rs"));
     }
 
@@ -3076,6 +3177,17 @@ mod tests {
         assert!(patched_source.contains("Entry { key: \"default\", value: \"todo\" },"));
         assert!(patched_source.contains("Entry { key: \"status\", value: \"done\" },"));
         assert!(patched_source.contains("Entry { key: \"preview\", value: \"todo\" },"));
+        assert!(fixture.source_satisfies_task(&patched_source));
+        assert!(!fixture.source_satisfies_task(&initial_source));
+        assert_eq!(fixture.package_name(), "merry-coding-loop-task-status-text");
+        assert_eq!(fixture.crate_name(), "merry_coding_loop_task_status_text");
+        let agents_source = fixture.agents_source();
+        assert!(agents_source.contains("Read `tests/status.rs`"));
+        assert!(agents_source.contains("cargo check -p merry-coding-loop-task-status-text"));
+        assert!(agents_source.contains("cargo test -p merry-coding-loop-task-status-text"));
+        let integration_test = fixture.integration_test_source();
+        assert!(integration_test.contains("merry_coding_loop_task_status_text"));
+        assert!(integration_test.contains("assert_eq!(status(), \"done\")"));
         assert!(
             initial_source.contains("pub fn status() -> &'static str {\n    resolve(\"status\")")
         );
