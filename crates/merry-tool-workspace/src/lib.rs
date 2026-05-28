@@ -21,10 +21,10 @@ use merry_core::{
 use merry_runtime::{
     AcceptedLocalWorkspaceProcessAdmission, ActionExecutionEvidence, ActionProposal,
     ActionProposalError, ActionProposalEvidence, ProcessCommandToolError, ProcessRunner,
-    RegisteredTool, RuntimeBuilder, ToolActionKind, ToolActionProposalFuture, ToolExecutionContext,
-    ToolExecutionError, ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture,
-    WorkspacePatchChangeEvidence, WorkspacePatchExecutionEvidence, WorkspacePatchProposal,
-    process_command_tool,
+    RegisteredTool, RuntimeBuilder, ToolActionKind, ToolActionPreflight, ToolActionProposalFuture,
+    ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome, ToolExecutor,
+    ToolExecutorFuture, WorkspacePatchChangeEvidence, WorkspacePatchExecutionEvidence,
+    WorkspacePatchProposal, process_command_tool,
 };
 use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -914,7 +914,7 @@ impl ToolExecutor for WorkspacePatchExecutor {
 
             let args = match parse_workspace_patch_args(&call) {
                 Ok(args) => args,
-                Err(_) => return Ok(None),
+                Err(_) => return Ok(ToolActionPreflight::NoProposal),
             };
 
             let state = Arc::clone(&self.state);
@@ -2106,7 +2106,7 @@ fn propose_workspace_patch_blocking_checked(
     args: WorkspacePatchArgs,
     call: &PendingToolCall,
     is_cancelled: &dyn Fn() -> bool,
-) -> Result<Option<ActionProposal>, ToolExecutionError> {
+) -> Result<ToolActionPreflight, ToolExecutionError> {
     match plan_workspace_patch_blocking_checked(state, args, is_cancelled) {
         Ok(WorkspacePatchPlanOutcome::Planned(plan)) => {
             let changes = plan
@@ -2127,9 +2127,9 @@ fn propose_workspace_patch_blocking_checked(
                 ActionProposalEvidence::WorkspacePatch(patch),
             )
             .map_err(|error| ToolExecutionError::infrastructure(error.to_string()))?;
-            Ok(Some(proposal))
+            Ok(ToolActionPreflight::Proposal(proposal))
         }
-        Ok(WorkspacePatchPlanOutcome::Failure(_)) => Ok(None),
+        Ok(WorkspacePatchPlanOutcome::Failure(_)) => Ok(ToolActionPreflight::NoProposal),
         Err(error) => Err(error),
     }
 }
@@ -3699,13 +3699,17 @@ mod tests {
                 "patch": patch
             }),
         );
-        propose_workspace_patch_blocking_checked(
+        match propose_workspace_patch_blocking_checked(
             &tools.state,
             WorkspacePatchArgs { patch },
             &call,
             &|| false,
         )
         .expect("uncancelled workspace patch proposal should not return cancellation")
+        {
+            ToolActionPreflight::Proposal(proposal) => Some(proposal),
+            ToolActionPreflight::NoProposal | ToolActionPreflight::Outcome(_) => None,
+        }
     }
 
     fn update_patch(path: &str, old_text: &str, new_text: &str) -> String {

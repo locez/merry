@@ -1268,23 +1268,24 @@ async fn coding_loop_harness_inspects_patches_verifies_and_completes() {
             expected_continuation_input
         );
     }
-    let continuation_ids = requests
-        .iter()
-        .skip(1)
-        .map(|request| {
-            assert_eq!(request.continuations().len(), 1);
-            request.continuations()[0].call().id().as_str().to_owned()
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        continuation_ids,
-        [
-            "coding-loop-rg-files",
-            "workspace-read-call",
-            "workspace-patch-call",
-            "coding-loop-cargo-test",
-        ]
-    );
+    let expected_continuation_ids = [
+        "coding-loop-rg-files",
+        "workspace-read-call",
+        "workspace-patch-call",
+        "coding-loop-cargo-test",
+    ];
+    for (index, request) in requests.iter().skip(1).enumerate() {
+        let ids = request
+            .continuations()
+            .iter()
+            .map(|continuation| continuation.call().id().as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            expected_continuation_ids[..=index],
+            "request {index} should replay all uncheckpointed tool continuations in order"
+        );
+    }
 
     let lifecycle = lifecycle_kinds(&runtime.ledger_projection().await);
     let artifact_indexes = lifecycle

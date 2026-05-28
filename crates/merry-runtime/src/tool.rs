@@ -47,9 +47,10 @@ pub type ToolExecutionResult = Result<ToolExecutionOutcome, ToolExecutionError>;
 
 /// Optional proposal returned before a write-classified tool can be resolved by policy.
 ///
-/// `Ok(None)` means the executor cannot provide deterministic proposal evidence
-/// for this call and policy should continue with its normal decision path.
-pub type ToolActionProposalResult = Result<Option<ActionProposal>, ToolExecutionError>;
+/// `NoProposal` means the executor cannot provide deterministic proposal
+/// evidence for this call and policy should continue with its normal decision
+/// path.
+pub type ToolActionProposalResult = Result<ToolActionPreflight, ToolExecutionError>;
 
 /// Context passed to a tool executor.
 ///
@@ -124,7 +125,7 @@ pub trait ToolExecutor: Send + Sync {
         _call: PendingToolCall,
         _context: ToolExecutionContext,
     ) -> ToolActionProposalFuture<'a> {
-        Box::pin(async { Ok(None) })
+        Box::pin(async { Ok(ToolActionPreflight::NoProposal) })
     }
 
     /// Executes one pending model-requested tool call.
@@ -149,6 +150,23 @@ pub struct ToolExecutionOutcome {
     content: ArtifactContent,
     diagnostic: Option<ErrorInfo>,
     execution_evidence: Option<ActionExecutionEvidence>,
+}
+
+/// Result of a tool action preflight/proposal hook.
+///
+/// Mutating tools use this hook before runtime policy decides whether execution
+/// is allowed. Most tools return a proposal or no proposal. Tools may return a
+/// durable failed outcome for provider-supplied argument errors discovered
+/// during preflight, so the model receives actionable feedback instead of an
+/// infrastructure failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolActionPreflight {
+    /// The tool did not provide deterministic proposal evidence.
+    NoProposal,
+    /// The tool provided proposal evidence for policy review.
+    Proposal(ActionProposal),
+    /// The tool preflight produced a durable tool outcome.
+    Outcome(ToolExecutionOutcome),
 }
 
 impl ToolExecutionOutcome {
