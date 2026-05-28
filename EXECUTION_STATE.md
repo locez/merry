@@ -42,91 +42,95 @@ Style notes:
 
 Current milestone or track:
 
-- Roadmap drift correction back to Minimal Useful Coding Loop.
+- Minimal Useful Coding Loop.
 
 Session milestone:
 
-- User-requested planning correction: audit `ROADMAP.md` history, identify
-  where profile/session work displaced the coding-loop MVP, restore the next
-  step to a testable coding capability, and document roadmap change control.
+- Implement the first configurable disposable coding-loop task smoke so the
+  user can run a visible task completion path, while preserving the roadmap
+  guardrail against drifting back into profile-only work.
 
 Goal:
 
-- Prevent further drift by making the next milestone a configurable
-  disposable coding-loop smoke and by requiring explicit user approval before
-  agents change roadmap priority or milestone ordering.
+- Add a non-default `merry --with-sandbox debug coding-loop-task-smoke` path
+  that creates a disposable task fixture, runs inspect/read/patch/verify/final
+  through runtime tools, and has deterministic default coverage plus an
+  explicit real-bwrap smoke.
 
 Task queue status:
 
-- Audited `ROADMAP.md` history and identified the drift point: commit `e945ebc`
-  correctly rejected a subset shell parser as authorization, but promoted shell
-  boundary/profile work into `Next Active`; later M2 slices continued that
-  support work.
-- Designed the next task as a configurable disposable coding-loop smoke: a
-  user-selectable or user-supplied small fixture task where the model must
-  inspect, read exact evidence, patch through `workspace_patch_file`, run
-  verification, and answer.
-- Updated roadmap language so profile/session/classifier work is support for
-  coding-loop acceptance, not the primary next milestone.
-- Added roadmap change-control rules to `AGENTS.md` and `PROJECT_LEAD.md`.
-- Recorded the drift correction in `DECISIONS.md`.
+- Added `debug coding-loop-task-smoke --task status-text` with deterministic
+  scripted provider steps: `rg --files`, failing `rg done`, exact
+  `workspace_read_file`, constrained `workspace_patch_file`, successful
+  `rg done`, then final answer.
+- Added `debug coding-loop-task-live-smoke --task status-text` as the
+  opt-in live-provider lane using the same disposable fixture and validation
+  expectations.
+- Added CLI tests for help output, sandbox-required usage behavior, clap
+  parsing, deterministic fake-runner task completion, and ignored real-bwrap
+  task smoke paths.
+- Corrected the bwrap `/etc` mount construction to match the user's existing
+  helper semantics: file and directory allowlist paths create mount target
+  parents first, then use direct read-only bind. No whole-`/etc` bind,
+  no staged copy, and no `LD_LIBRARY_PATH` fallback were kept.
+- Updated `README.md` and `ROADMAP.md` to describe the bwrap file/directory
+  helper semantics and record the new task smoke status.
 
 Allowed expansion:
 
-- Public-safe roadmap, decision, lead, and continuity updates.
-- No runtime implementation in this correction lease unless needed to validate
-  documentation consistency.
+- `crates/merry-cli/src/main.rs`
+- `crates/merry-cli/tests/debug.rs`
+- Public-safe README/roadmap/continuity updates
 
 Done condition:
 
-- `ROADMAP.md` identifies the drift point and restores `Next Active` to a
-  concrete coding-loop capability task.
-- `AGENTS.md` records that agents must not unilaterally change roadmap
-  priority or milestone ordering.
-- `DECISIONS.md` records the drift correction and next task rationale.
-- Continuity files point the next session at the configurable coding-loop smoke
-  rather than profile/session design.
-- Documentation validation passes and the lease is committed.
+- Focused deterministic task-smoke tests pass.
+- Sandbox plan tests assert file helper semantics instead of broad `/etc`
+  binding.
+- User can run the real-bwrap ignored task smoke from an outer environment.
+- Continuity files point the next session at live/model coding capability,
+  not profile/session design.
+- Changes are committed.
 
 Drift boundary:
 
-- Do not implement runtime code in this correction slice.
-- Do not continue profile/session design as the next active task.
-- Do not change roadmap priority beyond the user-requested correction back to
-  coding-loop capability.
+- Do not broaden process admission to generic `cargo check`.
+- Do not mount the whole host `/etc`.
+- Do not add `LD_LIBRARY_PATH` or staged copy fallbacks without explicit user
+  approval.
 - Do not move private ignored notes into tracked files.
 - Do not commit `.superpowers/`, `.merry/`, `docs/`, or `merry-raw-docs`.
 - Do not make live provider behavior part of default tests.
 
-Task type: docs/planning correction
+Task type: runtime/CLI implementation
 
 Acceptance criteria:
 
-- `ROADMAP.md` `Next Active` names the configurable disposable coding-loop
-  smoke and includes a concrete deterministic and live acceptance path.
-- `ROADMAP.md` includes a drift audit naming the relevant commits.
-- `AGENTS.md` and `PROJECT_LEAD.md` forbid unilateral roadmap priority changes.
-- `DECISIONS.md` records why the roadmap is corrected.
-- `cargo fmt --all --check` and `git diff --check` pass.
+- `cargo fmt --all --check` passes.
+- `cargo test -p merry-cli coding_loop_task` passes.
+- `cargo test -p merry-cli sandbox_plan_mounts_runtime_paths_and_workspace`
+  passes.
+- `git diff --check` passes.
+- Outer-environment real bwrap validation passes:
+  `cargo test -p merry-cli debug_coding_loop_task_smoke_runs_inside_real_bwrap_when_opted_in -- --ignored`.
 
 ## Scope
 
 Allowed edits:
 
-- `AGENTS.md`
-- `PROJECT_LEAD.md`
+- `crates/merry-cli/src/main.rs`
+- `crates/merry-cli/tests/debug.rs`
 - `README.md`
-- `DECISIONS.md`
+- `ROADMAP.md`
 - `EXECUTION_STATE.md`
 - `HANDOFF.md`
-- `ROADMAP.md`
 
 Forbidden edits:
 
 - private ignored source material under `docs/` or `merry-raw-docs/`
 - real credentials or generated build artifacts
 - `.superpowers/`, `.merry/`, `docs/`, or `merry-raw-docs` content
-- runtime implementation files
+- process-admission broadening unrelated to the task smoke
 - profile/session implementation
 - full-screen TUI, REPL, or multi-turn UI scope
 
@@ -135,49 +139,62 @@ Protected files:
 - `SESSION_RUNBOOK.md`
 - `AGENT_ROLES.md`
 - `CHANGE_REQUESTS.md`
+- `AGENTS.md`
+- `PROJECT_LEAD.md`
 
 ## Validation
 
 Validation command:
 
 - `cargo fmt --all --check`
+- `cargo test -p merry-cli coding_loop_task`
+- `cargo test -p merry-cli sandbox_plan_mounts_runtime_paths_and_workspace`
 - `git diff --check`
+- User-run outer validation: `cargo test -p merry-cli debug_coding_loop_task_smoke_runs_inside_real_bwrap_when_opted_in -- --ignored`
 
 Validation notes:
 
-- Validation passed for this correction lease.
+- All listed focused deterministic checks passed locally.
+- The user reported the outer real-bwrap task smoke passed. Earlier nested
+  runs from inside this agent's environment failed on `/etc`/dynamic-linker
+  behavior, so they are not treated as the authoritative outer-environment
+  result.
 
 ## Research
 
-Research required: no
+Research required: yes
 
 Research reason:
 
-- User explicitly requested local `ROADMAP.md` history review before correction.
+- User asked to compare behavior against Codex/local bwrap scripts and then
+  supplied prior helper snippets. The implementation decision was whether to
+  broaden `/etc`, stage-copy special files, add `LD_LIBRARY_PATH`, or preserve
+  direct file bind semantics.
 
 Research artifact:
 
-- None.
+- Local code evidence from `.merry/codex/codex-rs/linux-sandbox/src/bwrap.rs`
+  and the user's prior shell helper snippets. No private raw findings were
+  copied into tracked source beyond the public-safe helper behavior summary.
 
 ## Next Action
 
 Next exact action:
 
-- Implement the configurable disposable coding-loop smoke. The first slice
-  should expose a non-default CLI/debug command or ignored integration test that
-  creates/selects a tiny fixture task, gives the model a natural task
-  description without exact `old_text`/`new_text`, requires
-  inspect/read/patch/verify/final-answer through runtime tools, and keeps live
-  provider behavior explicit opt-in.
+- Exercise the live/model task smoke path or replace the deterministic exact
+  patch script with a stricter fake/live sequence that proves the model can
+  infer the patch from read evidence rather than receiving exact
+  `old_text`/`new_text` from the scripted provider.
 
 Do not reconsider:
 
 - M1 Structured Process Boundary MVP is complete.
 - Do not make a Merry-owned subset shell parser the authorization model.
 - Do not merge `process.shell.read_only.v1` into `process.read_only.v1`.
-- Do not make event-first CLI the primary next milestone.
 - Do not make profile/session design the next milestone unless the coding-loop
   task is blocked by it and the user explicitly approves the priority change.
+- Do not mount all of `/etc`, add `LD_LIBRARY_PATH`, or add staged copy
+  fallbacks without explicit approval.
 - Do not start TUI or REPL before the coding-loop proof is more user-testable.
 - Do not move private Codex/raw-doc findings into tracked source text.
 - Dynamic ledger/evidence/user context remains outside the stable prefix.
