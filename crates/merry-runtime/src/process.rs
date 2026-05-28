@@ -578,6 +578,44 @@ pub enum ProcessIntentClass {
     Forbidden,
 }
 
+/// Exact shell-wrapper input plus payload-free metadata helpers.
+///
+/// This value recognizes only the validated wrapper shape used by the current
+/// shell read-only lane. It is not a shell parser and it does not authorize
+/// execution by itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ShellProcessInput<'a> {
+    shell: &'a str,
+    flag: &'a str,
+    script: &'a str,
+}
+
+impl<'a> ShellProcessInput<'a> {
+    pub(crate) const fn shell(self) -> &'a str {
+        self.shell
+    }
+
+    pub(crate) const fn flag(self) -> &'a str {
+        self.flag
+    }
+
+    pub(crate) const fn script(self) -> &'a str {
+        self.script
+    }
+
+    pub(crate) const fn script_bytes(self) -> usize {
+        self.script.len()
+    }
+
+    pub(crate) fn script_fingerprint(self) -> String {
+        stable_process_input_fingerprint(self.script.as_bytes())
+    }
+}
+
+pub(crate) fn shell_process_input(intent: &ProcessActionIntent) -> Option<ShellProcessInput<'_>> {
+    shell_process_input_from_argv(intent.argv())
+}
+
 /// Classifies a process intent using validated argv only.
 #[must_use]
 pub fn classify_process_intent(intent: &ProcessActionIntent) -> ProcessIntentClass {
@@ -653,14 +691,11 @@ fn is_read_only_direct_process_argv(argv: &[String]) -> bool {
 }
 
 fn is_read_only_plain_shell_process_argv(argv: &[String]) -> bool {
-    let [shell, flag, script] = argv else {
+    let Some(shell_input) = shell_process_input_from_argv(argv) else {
         return false;
     };
-    if !is_supported_plain_shell_token(shell) || !matches!(flag.as_str(), "-c" | "-lc") {
-        return false;
-    }
 
-    parse_plain_shell_command_sequence(script).is_some_and(|commands| {
+    parse_plain_shell_command_sequence(shell_input.script()).is_some_and(|commands| {
         !commands.is_empty()
             && commands
                 .iter()
@@ -668,8 +703,33 @@ fn is_read_only_plain_shell_process_argv(argv: &[String]) -> bool {
     })
 }
 
+fn shell_process_input_from_argv(argv: &[String]) -> Option<ShellProcessInput<'_>> {
+    let [shell, flag, script] = argv else {
+        return None;
+    };
+    if !is_supported_plain_shell_token(shell) || !matches!(flag.as_str(), "-c" | "-lc") {
+        return None;
+    }
+
+    Some(ShellProcessInput {
+        shell,
+        flag,
+        script,
+    })
+}
+
 fn is_supported_plain_shell_token(shell: &str) -> bool {
     matches!(shell, "bash" | "sh" | "zsh")
+}
+
+pub(crate) fn stable_process_input_fingerprint(bytes: &[u8]) -> String {
+    const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    let hash = bytes.iter().fold(FNV_OFFSET_BASIS, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(FNV_PRIME)
+    });
+    format!("fnv1a64:{hash:016x}")
 }
 
 fn is_read_only_echo_args(args: &[String]) -> bool {

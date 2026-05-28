@@ -24,6 +24,7 @@ use crate::{
         MemoryActivationSourceKind, MemoryScope, StoredMemoryActivationSource,
     },
     model_config::{ModelProviderConfig, RuntimeModelConfigs},
+    process::shell_process_input,
     session::{
         ProposedToolExecutionOutcome, SessionState, ToolResultLedgerObservation,
         is_runtime_reserved_artifact_id,
@@ -664,17 +665,11 @@ impl Runtime {
         }
 
         let runner_context = ProcessRunnerContext::new(context.cancellation_token().clone());
-        tracing::info!(
-            event = "runtime.process.execute.start",
-            session_id = self.inner.session_id.as_str(),
-            tool_call_id = pending.id().as_str(),
-            tool_name = pending.name().as_str(),
-            permission_profile_id = permission_profile_id.as_str(),
-            argv = ?intent.argv(),
-            cwd = intent.cwd().unwrap_or("."),
-            stdout_limit_bytes = intent.stdout_limit_bytes(),
-            stderr_limit_bytes = intent.stderr_limit_bytes(),
-            "runtime process execution start"
+        trace_process_execution_start(
+            &self.inner.session_id,
+            pending,
+            &intent,
+            permission_profile_id,
         );
         let output = tokio::select! {
             biased;
@@ -718,18 +713,12 @@ impl Runtime {
                 call_id: pending.id().clone(),
                 message: format!("process execution evidence did not match intent: {source}"),
             })?;
-        tracing::info!(
-            event = "runtime.process.execute.finish",
-            session_id = self.inner.session_id.as_str(),
-            tool_call_id = pending.id().as_str(),
-            tool_name = pending.name().as_str(),
-            permission_profile_id = permission_profile_id.as_str(),
-            status = %process_status_label(output.status()),
-            stdout_bytes = output.stdout_bytes(),
-            stderr_bytes = output.stderr_bytes(),
-            stdout_truncated = output.stdout_truncated(),
-            stderr_truncated = output.stderr_truncated(),
-            "runtime process execution finish"
+        trace_process_execution_finish(
+            &self.inner.session_id,
+            pending,
+            &intent,
+            permission_profile_id,
+            &output,
         );
         let content = process_output_artifact_content(&intent, &output, permission_profile_id);
         let status = if output.ok() {
@@ -961,21 +950,116 @@ fn tool_resolution_artifact_id(events: &[RuntimeEvent]) -> String {
         .unwrap_or_default()
 }
 
+fn trace_process_execution_start(
+    session_id: &SessionId,
+    pending: &PendingToolCall,
+    intent: &ProcessActionIntent,
+    permission_profile_id: ProcessPermissionProfileId,
+) {
+    if let Some(shell_input) = shell_process_input(intent) {
+        let script_fingerprint = shell_input.script_fingerprint();
+        tracing::info!(
+            event = "runtime.process.execute.start",
+            session_id = session_id.as_str(),
+            tool_call_id = pending.id().as_str(),
+            tool_name = pending.name().as_str(),
+            permission_profile_id = permission_profile_id.as_str(),
+            argv_count = intent.argv().len(),
+            shell = shell_input.shell(),
+            shell_flag = shell_input.flag(),
+            shell_script_bytes = shell_input.script_bytes(),
+            shell_script_fingerprint = script_fingerprint.as_str(),
+            cwd = intent.cwd().unwrap_or("."),
+            stdout_limit_bytes = intent.stdout_limit_bytes(),
+            stderr_limit_bytes = intent.stderr_limit_bytes(),
+            "runtime process execution start"
+        );
+        return;
+    }
+
+    tracing::info!(
+        event = "runtime.process.execute.start",
+        session_id = session_id.as_str(),
+        tool_call_id = pending.id().as_str(),
+        tool_name = pending.name().as_str(),
+        permission_profile_id = permission_profile_id.as_str(),
+        argv = ?intent.argv(),
+        cwd = intent.cwd().unwrap_or("."),
+        stdout_limit_bytes = intent.stdout_limit_bytes(),
+        stderr_limit_bytes = intent.stderr_limit_bytes(),
+        "runtime process execution start"
+    );
+}
+
+fn trace_process_execution_finish(
+    session_id: &SessionId,
+    pending: &PendingToolCall,
+    intent: &ProcessActionIntent,
+    permission_profile_id: ProcessPermissionProfileId,
+    output: &ProcessRunnerOutput,
+) {
+    if let Some(shell_input) = shell_process_input(intent) {
+        let script_fingerprint = shell_input.script_fingerprint();
+        tracing::info!(
+            event = "runtime.process.execute.finish",
+            session_id = session_id.as_str(),
+            tool_call_id = pending.id().as_str(),
+            tool_name = pending.name().as_str(),
+            permission_profile_id = permission_profile_id.as_str(),
+            shell = shell_input.shell(),
+            shell_flag = shell_input.flag(),
+            shell_script_bytes = shell_input.script_bytes(),
+            shell_script_fingerprint = script_fingerprint.as_str(),
+            status = %process_status_label(output.status()),
+            stdout_bytes = output.stdout_bytes(),
+            stderr_bytes = output.stderr_bytes(),
+            stdout_truncated = output.stdout_truncated(),
+            stderr_truncated = output.stderr_truncated(),
+            "runtime process execution finish"
+        );
+        return;
+    }
+
+    tracing::info!(
+        event = "runtime.process.execute.finish",
+        session_id = session_id.as_str(),
+        tool_call_id = pending.id().as_str(),
+        tool_name = pending.name().as_str(),
+        permission_profile_id = permission_profile_id.as_str(),
+        status = %process_status_label(output.status()),
+        stdout_bytes = output.stdout_bytes(),
+        stderr_bytes = output.stderr_bytes(),
+        stdout_truncated = output.stdout_truncated(),
+        stderr_truncated = output.stderr_truncated(),
+        "runtime process execution finish"
+    );
+}
+
 fn process_output_artifact_content(
     intent: &ProcessActionIntent,
     output: &ProcessRunnerOutput,
     permission_profile_id: ProcessPermissionProfileId,
 ) -> ArtifactContent {
-    let payload = serde_json::json!({
+    let shell_input = shell_process_input(intent);
+    let intent_payload = if shell_input.is_some() {
+        serde_json::json!({
+            "summary": intent.summary(),
+            "cwd": intent.cwd(),
+        })
+    } else {
+        serde_json::json!({
+            "summary": intent.summary(),
+            "argv": intent.argv(),
+            "cwd": intent.cwd(),
+        })
+    };
+
+    let mut payload = serde_json::json!({
         "ok": output.ok(),
         "kind": "process_action",
         "permission_profile_id": permission_profile_id.as_str(),
         "status": process_status_json(output.status()),
-        "intent": {
-            "summary": intent.summary(),
-            "argv": intent.argv(),
-            "cwd": intent.cwd(),
-        },
+        "intent": intent_payload,
         "stdout": {
             "text": output.stdout_text(),
             "bytes": output.stdout_bytes(),
@@ -988,6 +1072,17 @@ fn process_output_artifact_content(
         }
     });
 
+    if let Some(shell_input) = shell_input {
+        payload["input_evidence"] = serde_json::json!({
+            "kind": "shell_command_script",
+            "shell": shell_input.shell(),
+            "flag": shell_input.flag(),
+            "script": shell_input.script(),
+            "script_bytes": shell_input.script_bytes(),
+            "script_fingerprint": shell_input.script_fingerprint(),
+        });
+    }
+
     ArtifactContent::json(payload.to_string())
 }
 
@@ -997,15 +1092,30 @@ fn process_result_ledger_observation(
     result_status: ToolCallResultStatus,
     permission_profile_id: ProcessPermissionProfileId,
 ) -> ToolResultLedgerObservation {
-    let mut summary = format!(
-        "process action `{}` {}; permission_profile={}; result={}; stdout_bytes={}; stderr_bytes={}",
-        intent.argv().join(" "),
-        process_status_label(output.status()),
-        permission_profile_id.as_str(),
-        process_result_status_label(result_status),
-        output.stdout_bytes(),
-        output.stderr_bytes(),
-    );
+    let mut summary = if let Some(shell_input) = shell_process_input(intent) {
+        format!(
+            "shell process action {}; permission_profile={}; result={}; shell={}; shell_flag={}; shell_script_bytes={}; shell_script_fingerprint={}; stdout_bytes={}; stderr_bytes={}",
+            process_status_label(output.status()),
+            permission_profile_id.as_str(),
+            process_result_status_label(result_status),
+            shell_input.shell(),
+            shell_input.flag(),
+            shell_input.script_bytes(),
+            shell_input.script_fingerprint(),
+            output.stdout_bytes(),
+            output.stderr_bytes(),
+        )
+    } else {
+        format!(
+            "process action `{}` {}; permission_profile={}; result={}; stdout_bytes={}; stderr_bytes={}",
+            intent.argv().join(" "),
+            process_status_label(output.status()),
+            permission_profile_id.as_str(),
+            process_result_status_label(result_status),
+            output.stdout_bytes(),
+            output.stderr_bytes(),
+        )
+    };
 
     if output.stdout_truncated() {
         summary.push_str("; stdout_truncated=true");
@@ -2297,6 +2407,7 @@ mod tests {
         AcceptedLocalWorkspaceProcessAdmission, ProcessActionIntent, ProcessEnvPolicy,
         ProcessExecutionEvidence, ProcessExitStatus, ProcessPermissionProfileId, ProcessRunner,
         ProcessRunnerContext, ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput,
+        stable_process_input_fingerprint,
     };
     use crate::session::SessionState;
     use crate::tool::{
@@ -6927,9 +7038,19 @@ mod tests {
             payload["permission_profile_id"],
             "process.shell.read_only.v1"
         );
+        assert!(payload["intent"].get("argv").is_none());
         assert_eq!(
-            payload["intent"]["argv"],
-            json!(["bash", "-lc", "rg ProcessRunner | wc -l"])
+            payload["input_evidence"],
+            json!({
+                "kind": "shell_command_script",
+                "shell": "bash",
+                "flag": "-lc",
+                "script": "rg ProcessRunner | wc -l",
+                "script_bytes": "rg ProcessRunner | wc -l".len(),
+                "script_fingerprint": stable_process_input_fingerprint(
+                    "rg ProcessRunner | wc -l".as_bytes()
+                ),
+            })
         );
         assert!(payload.get("provider").is_none());
         assert!(payload.get("wire").is_none());
@@ -6961,6 +7082,82 @@ mod tests {
         };
         assert_eq!(runner.observed_intents(), vec![intent.clone()]);
         assert!(evidence.matches_intent(intent));
+
+        let projection = runtime.ledger_projection().await;
+        let observation_text = projection
+            .entries()
+            .iter()
+            .find_map(|entry| match entry {
+                LedgerProjection::Fact { text, .. }
+                    if text.starts_with("shell process action ") =>
+                {
+                    Some(text.as_str())
+                }
+                LedgerProjection::Fact { .. } | LedgerProjection::Lifecycle { .. } => None,
+            })
+            .expect("shell process result should reduce into a compact ledger observation");
+        assert!(observation_text.contains("permission_profile=process.shell.read_only.v1"));
+        assert!(observation_text.contains("shell=bash"));
+        assert!(observation_text.contains("shell_flag=-lc"));
+        assert!(observation_text.contains("shell_script_bytes=24"));
+        assert!(observation_text.contains(&format!(
+            "shell_script_fingerprint={}",
+            stable_process_input_fingerprint("rg ProcessRunner | wc -l".as_bytes())
+        )));
+        assert!(
+            observation_text.contains(&format!("artifact={}", result.artifact().id().as_str()))
+        );
+        assert!(!observation_text.contains("rg ProcessRunner | wc -l"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn read_only_shell_process_traces_payload_free_input_metadata_when_opted_in() {
+        let script = "rg ProcessRunner | wc -l";
+        let executor = ProcessProposingToolExecutor::with_argv(["bash", "-lc", script]);
+        let runner = FakeProcessRunner::succeeding();
+        let tool = RegisteredTool::new(
+            policy_tool_spec("policy_command_shell_read_only_trace"),
+            Arc::new(executor.clone()),
+            ToolActionKind::CommandExec,
+        )
+        .with_action_proposal();
+        let (runtime, pending) = register_policy_pending_registered_tool_with_builder(
+            "runtime-policy-command-exec-shell-read-only-trace",
+            "policy_command_shell_read_only_trace",
+            "call-command-exec-shell-read-only-trace",
+            tool,
+            |builder| {
+                builder
+                    .allow_read_only_shell_process_actions(Arc::new(runner.clone()))
+                    .build()
+            },
+        )
+        .await;
+
+        let (events, logs) = capture_traces_for(
+            "runtime-policy-command-exec-shell-read-only-trace",
+            runtime.execute_tool_call(pending.id(), ToolExecutionContext::default()),
+        )
+        .await;
+        let events = events.expect("opted-in read-only shell process action should execute");
+
+        assert_eq!(
+            event_kind_names_for_tool_execution(&events),
+            ["ArtifactRecorded", "ToolCallResolved"]
+        );
+        assert_eq!(runner.call_count(), 1);
+        assert!(logs.contains("\"event\":\"runtime.process.execute.start\""));
+        assert!(logs.contains("\"event\":\"runtime.process.execute.finish\""));
+        assert!(logs.contains("\"permission_profile_id\":\"process.shell.read_only.v1\""));
+        assert!(logs.contains("\"shell\":\"bash\""));
+        assert!(logs.contains("\"shell_flag\":\"-lc\""));
+        assert!(logs.contains("\"shell_script_bytes\":24"));
+        assert!(logs.contains(&format!(
+            "\"shell_script_fingerprint\":\"{}\"",
+            stable_process_input_fingerprint(script.as_bytes())
+        )));
+        assert!(!logs.contains("\"argv\""));
+        assert!(!logs.contains(script));
     }
 
     #[tokio::test(flavor = "current_thread")]
