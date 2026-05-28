@@ -13,12 +13,13 @@ use merry_llm::{
 use merry_runtime::{
     ArtifactContent, ArtifactContentKind, ArtifactError, ContextCompiler, ContextEvidence,
     ContextSummary, LedgerFactKind, LedgerProjection, RegisteredTool, Runtime, StepContext,
-    StepInput, ToolActionKind, ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome,
-    ToolExecutor, ToolExecutorFuture,
+    StepInput, TokioProcessRunner, ToolActionKind, ToolExecutionContext, ToolExecutionError,
+    ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture, process_command_tool,
 };
 use schemars::Schema;
 use serde_json::{Map, Value, json};
 use std::{
+    env,
     num::NonZeroUsize,
     sync::{Arc, Mutex},
 };
@@ -56,6 +57,20 @@ fn completed_outputs_event(outputs: Vec<ModelOutput>, finish_reason: FinishReaso
 
 fn model_tool_call() -> ModelToolCall {
     model_tool_call_with_args("call-1", "search_notes", Map::new())
+}
+
+fn shell_process_tool_call() -> ModelToolCall {
+    model_tool_call_with_args(
+        "call-real-shell",
+        "run_process",
+        Map::from_iter([
+            (
+                "argv".to_owned(),
+                json!(["bash", "-lc", "echo ProcessRunner | wc -l"]),
+            ),
+            ("cwd".to_owned(), json!(".")),
+        ]),
+    )
 }
 
 fn model_tool_call_with_id(id: &str) -> ModelToolCall {
@@ -197,6 +212,14 @@ async fn collect_step_with_context(
         .expect("step should start")
         .collect()
         .await
+}
+
+fn command_is_available(program: &str) -> bool {
+    let Some(path) = env::var_os("PATH") else {
+        return false;
+    };
+
+    env::split_paths(&path).any(|directory| directory.join(program).is_file())
 }
 
 fn event_kind_names(events: &[RuntimeEvent]) -> Vec<&'static str> {
@@ -1127,6 +1150,97 @@ async fn compiled_provider_request_stable_prefix_hash_tracks_base_instructions_a
         first_request.stable_prefix_hash(),
         changed_tools_provider.recorded_requests()[0].stable_prefix_hash()
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn tokio_process_runner_executes_read_only_shell_wrapper_with_input_artifact() {
+    if !command_is_available("bash") || !command_is_available("wc") {
+        return;
+    }
+
+    let provider = FakeModelProvider::new(vec![Ok(completed_outputs_event(
+        vec![ModelOutput::tool_call(shell_process_tool_call())],
+        FinishReason::ToolCalls,
+    ))]);
+    let runtime = Runtime::builder(session_id("provider-real-shell-runner"))
+        .model_provider(Arc::new(provider), model_name())
+        .register_tool(
+            process_command_tool(
+                ToolName::new("run_process").expect("valid tool name"),
+                "Run a local process from argv through runtime policy",
+            )
+            .expect("process command tool should build"),
+        )
+        .allow_read_only_shell_process_actions(Arc::new(TokioProcessRunner::new()))
+        .build()
+        .expect("runtime should build");
+
+    let pending_events = collect_step(&runtime, "Run read-only shell pipeline.").await;
+    let pending = pending_tool_call(&pending_events).clone();
+    let execution_events = runtime
+        .execute_tool_call(pending.id(), ToolExecutionContext::default())
+        .await
+        .expect("read-only shell wrapper should execute through the Tokio runner");
+
+    assert_eq!(
+        event_kind_names(&execution_events),
+        ["ArtifactRecorded", "ArtifactRecorded", "ToolCallResolved"]
+    );
+    let input_artifact = execution_events
+        .iter()
+        .find_map(|event| match &event.kind {
+            RuntimeEventKind::ArtifactRecorded { artifact }
+                if artifact.id().as_str().starts_with("process-input-") =>
+            {
+                Some(artifact)
+            }
+            _ => None,
+        })
+        .expect("shell input artifact should be recorded before result");
+    let result = resolved_tool_result(&execution_events);
+    assert_eq!(result.status(), ToolCallResultStatus::Succeeded);
+
+    let input_content = runtime
+        .read_artifact_content(input_artifact.id())
+        .await
+        .expect("input artifact should be readable");
+    let input_text = input_content
+        .as_text()
+        .expect("input artifact should be textual JSON");
+    let input_payload: Value = serde_json::from_str(input_text).expect("input JSON should parse");
+    assert_eq!(input_payload["kind"], "shell_command_input");
+    assert_eq!(
+        input_payload["permission_profile_id"],
+        "process.shell.read_only.v1"
+    );
+    assert_eq!(
+        input_payload["input_evidence"]["script"],
+        "echo ProcessRunner | wc -l"
+    );
+
+    let result_content = runtime
+        .read_artifact_content(result.artifact().id())
+        .await
+        .expect("result artifact should be readable");
+    let result_text = result_content
+        .as_text()
+        .expect("result artifact should be textual JSON");
+    let result_payload: Value =
+        serde_json::from_str(result_text).expect("result JSON should parse");
+    assert_eq!(
+        result_payload["permission_profile_id"],
+        "process.shell.read_only.v1"
+    );
+    assert_eq!(
+        result_payload["input_artifact"],
+        json!({
+            "id": input_artifact.id().as_str(),
+            "kind": "json",
+        })
+    );
+    assert!(result_payload.get("input_evidence").is_none());
+    assert_eq!(result_payload["stdout"]["text"], "1\n");
+    assert_eq!(result_payload["stderr"]["text"], "");
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -18,9 +18,8 @@ use merry_llm::{
 use merry_provider_openai::{OpenAiProvider, OpenAiProviderConfig};
 use merry_runtime::{
     AcceptedLocalWorkspaceProcessAdmission, AgentLoopConfig, AgentLoopStatus, ArtifactContent,
-    MAX_PROCESS_OUTPUT_LIMIT_BYTES, ProcessActionIntent, ProcessEnvPolicy, ProcessExitStatus,
-    ProcessRunner, ProcessRunnerContext, ProcessRunnerError, ProcessRunnerFuture,
-    ProcessRunnerOutput, RegisteredTool, Runtime, StepContext, StepInput, ToolExecutionContext,
+    MAX_PROCESS_OUTPUT_LIMIT_BYTES, ProcessActionIntent, ProcessEnvPolicy, ProcessRunner,
+    RegisteredTool, Runtime, StepContext, StepInput, TokioProcessRunner, ToolExecutionContext,
     ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture, process_command_tool,
 };
 use merry_tool_workspace::{
@@ -33,10 +32,10 @@ use std::{
     ffi::{OsStr, OsString},
     fmt, fs, io,
     path::{Path, PathBuf},
-    process::{ExitCode, Stdio, Termination},
+    process::{ExitCode, Termination},
     sync::{Arc, Mutex},
 };
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufWriter};
+use tokio::io::{AsyncWrite, AsyncWriteExt, BufWriter};
 
 const DEFAULT_SESSION_ID: &str = "debug-session";
 const DEFAULT_INPUT: &str = "debug step";
@@ -862,7 +861,7 @@ async fn run_debug_coding_loop_smoke(
         &smoke_root,
         relative_cwd.as_deref(),
         admission,
-        Arc::new(TokioProcessRunner),
+        Arc::new(TokioProcessRunner::new()),
     )?;
 
     let result = runtime
@@ -905,7 +904,7 @@ async fn run_debug_coding_loop_live_smoke(
         relative_cwd.as_deref(),
         admission,
         config,
-        Arc::new(TokioProcessRunner),
+        Arc::new(TokioProcessRunner::new()),
     )?;
     let generation_config =
         GenerationConfig::new(Some(max_output_tokens), false).map_err(debug_openai_usage_error)?;
@@ -1434,7 +1433,7 @@ async fn run_shell(
     run_shell_to_writer(
         intent,
         admission,
-        Arc::new(TokioProcessRunner),
+        Arc::new(TokioProcessRunner::new()),
         args.events_jsonl,
         tokio::io::stdout(),
     )
@@ -1854,153 +1853,6 @@ impl ModelProvider for ShellToolCallProvider {
             Ok(Box::pin(stream::iter(events)) as ModelEventStream)
         })
     }
-}
-
-struct TokioProcessRunner;
-
-impl ProcessRunner for TokioProcessRunner {
-    fn run<'a>(
-        &'a self,
-        intent: ProcessActionIntent,
-        context: ProcessRunnerContext,
-    ) -> ProcessRunnerFuture<'a> {
-        Box::pin(async move { run_tokio_process(intent, context).await })
-    }
-}
-
-async fn run_tokio_process(
-    intent: ProcessActionIntent,
-    context: ProcessRunnerContext,
-) -> Result<ProcessRunnerOutput, ProcessRunnerError> {
-    let Some((program, args)) = intent.argv().split_first() else {
-        return Err(ProcessRunnerError::infrastructure(
-            "validated process argv was unexpectedly empty",
-        ));
-    };
-
-    if context.cancellation_token().is_cancelled() {
-        return Err(ProcessRunnerError::Cancelled);
-    }
-
-    let mut command = tokio::process::Command::new(program);
-    command
-        .args(args)
-        .current_dir(intent.cwd().unwrap_or("."))
-        .env_clear()
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-
-    let mut child = command.spawn().map_err(|source| {
-        if source.kind() == io::ErrorKind::NotFound {
-            ProcessRunnerError::infrastructure(format!(
-                "process executable `{program}` was not found"
-            ))
-        } else {
-            ProcessRunnerError::infrastructure(format!(
-                "failed to start process executable `{program}`: {source}"
-            ))
-        }
-    })?;
-    let stdout = child.stdout.take().ok_or_else(|| {
-        ProcessRunnerError::infrastructure("process stdout pipe was not available")
-    })?;
-    let stderr = child.stderr.take().ok_or_else(|| {
-        ProcessRunnerError::infrastructure("process stderr pipe was not available")
-    })?;
-    let stdout_limit = intent.stdout_limit_bytes();
-    let stderr_limit = intent.stderr_limit_bytes();
-
-    let stdout_task = tokio::spawn(async move { read_bounded_output(stdout, stdout_limit).await });
-    let stderr_task = tokio::spawn(async move { read_bounded_output(stderr, stderr_limit).await });
-
-    let status = tokio::select! {
-        biased;
-        () = context.cancellation_token().cancelled() => {
-            let _ = child.start_kill();
-            let _ = child.wait().await;
-            stdout_task.abort();
-            stderr_task.abort();
-            return Err(ProcessRunnerError::Cancelled);
-        }
-        status = child.wait() => status,
-    };
-    let status = status.map_err(|source| {
-        ProcessRunnerError::infrastructure(format!(
-            "failed to wait for process executable `{program}`: {source}"
-        ))
-    })?;
-    let stdout = join_bounded_output(stdout_task, "stdout").await?;
-    let stderr = join_bounded_output(stderr_task, "stderr").await?;
-    let stdout_text = String::from_utf8(stdout.bytes).map_err(|source| {
-        ProcessRunnerError::infrastructure(format!("process stdout was not UTF-8: {source}"))
-    })?;
-    let stderr_text = String::from_utf8(stderr.bytes).map_err(|source| {
-        ProcessRunnerError::infrastructure(format!("process stderr was not UTF-8: {source}"))
-    })?;
-    let status = status
-        .code()
-        .map(ProcessExitStatus::Exited)
-        .unwrap_or(ProcessExitStatus::DomainFailed);
-
-    ProcessRunnerOutput::new(
-        &intent,
-        status,
-        stdout_text,
-        stdout.truncated,
-        stderr_text,
-        stderr.truncated,
-    )
-    .map_err(|source| ProcessRunnerError::infrastructure(source.to_string()))
-}
-
-async fn join_bounded_output(
-    task: tokio::task::JoinHandle<Result<BoundedOutput, ProcessRunnerError>>,
-    stream_name: &'static str,
-) -> Result<BoundedOutput, ProcessRunnerError> {
-    task.await.map_err(|source| {
-        ProcessRunnerError::infrastructure(format!(
-            "process {stream_name} reader task failed: {source}"
-        ))
-    })?
-}
-
-struct BoundedOutput {
-    bytes: Vec<u8>,
-    truncated: bool,
-}
-
-async fn read_bounded_output<R>(
-    mut reader: R,
-    limit: usize,
-) -> Result<BoundedOutput, ProcessRunnerError>
-where
-    R: AsyncRead + Unpin,
-{
-    let mut bytes = Vec::with_capacity(limit.min(8192));
-    let mut scratch = [0_u8; 8192];
-    let mut truncated = false;
-
-    loop {
-        let count = reader.read(&mut scratch).await.map_err(|source| {
-            ProcessRunnerError::infrastructure(format!("failed to read process output: {source}"))
-        })?;
-        if count == 0 {
-            break;
-        }
-
-        if bytes.len() < limit {
-            let remaining = limit - bytes.len();
-            let kept = count.min(remaining);
-            bytes.extend_from_slice(&scratch[..kept]);
-            truncated |= kept < count;
-        } else {
-            truncated = true;
-        }
-    }
-
-    Ok(BoundedOutput { bytes, truncated })
 }
 
 fn debug_openai_config(
