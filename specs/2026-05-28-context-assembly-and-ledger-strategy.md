@@ -127,11 +127,21 @@ Stable prefix:
 Optional stable-ish task anchor:
   user-pinned objective, if present
 
+Checkpoint segment:
+  latest ledger-derived checkpoint, if present
+  low-frequency, artifact/evidence refs only
+  replaces older append-only body ranges only after checkpoint/compaction
+
 Append-only body:
-  user messages
-  assistant messages
-  recent function_call/function_call_output continuity
-  low-frequency checkpoints
+  post-checkpoint user messages
+  post-checkpoint assistant messages
+  post-checkpoint recent function_call/function_call_output continuity
+  post-checkpoint ledger deltas only when an explicit context policy selects
+  them
+
+Ephemeral tail:
+  current step/status/pending-call details only when strictly necessary
+  avoid by default; do not use as a per-turn status marker
 
 No default ledger projection:
   ledger facts remain queryable runtime state
@@ -140,7 +150,10 @@ No default ledger projection:
 ```
 
 There should be no default per-turn tail marker. Recent function-call
-continuity already serves that role.
+continuity already carries the required provider-visible continuation in most
+cases. The checkpoint segment is part of the assembled context shape even before
+checkpoint content generation is implemented; an empty checkpoint segment should
+not render prompt text.
 
 ## Recording Rules
 
@@ -175,8 +188,11 @@ The compiler must treat runtime state and prompt projection separately:
 - Ledger facts are not projected by default.
 - Full artifacts are not projected by default.
 - Recent function-call continuity is projected while hot.
-- Checkpoints are projected only after an explicit checkpoint/compaction
-  boundary.
+- Checkpoints are projected only from the checkpoint segment after an explicit
+  checkpoint/compaction boundary.
+- Ledger deltas may be appended after the latest checkpoint only when an
+  explicit context policy selects them; do not render a full ledger projection
+  on every request.
 - Exact artifacts remain available through artifact or source-read tools when
   needed.
 
@@ -233,7 +249,10 @@ the provider's prompt cache makes append-only growth cheap.
 ## Checkpoint And Compaction
 
 Checkpointing is the low-frequency boundary where old append-only body content
-can be replaced by a compact statement.
+can be replaced by a compact statement. The compiled context should reserve a
+checkpoint segment for the latest checkpoint. This segment is more stable than
+the append-only body, but it is not part of the stable prefix because it changes
+as the task progresses.
 
 A checkpoint should be generated from runtime-owned state:
 
@@ -246,9 +265,15 @@ A checkpoint should be generated from runtime-owned state:
 Checkpointing may use model assistance later, but the first reliable checkpoint
 path should prefer deterministic reducers and artifact-backed facts.
 
-After checkpointing, raw function-call continuity older than the checkpoint may
-be removed from prompt context, provided exact evidence remains accessible
-through artifacts.
+After checkpointing, raw function-call continuity and append-only body entries
+older than the checkpoint may be removed from prompt context, provided exact
+evidence remains accessible through artifacts.
+
+An implementation may first add the checkpoint segment and watermark trigger
+without implementing checkpoint content generation. That partial slice must not
+claim to satisfy the full checkpoint/compaction acceptance criteria until
+checkpoint content, evidence refs, and removal boundaries are implemented and
+tested.
 
 ## Cache Rules
 
@@ -259,10 +284,11 @@ Stable prefix content should change rarely:
 - project rules change;
 - explicit task anchor revision changes.
 
-Dynamic content should be append-only until a checkpoint boundary. Avoid
-rendering a newly sorted, deduplicated, or rewritten ledger projection on every
-request because that moves changing text earlier than necessary and damages
-cache reuse.
+The checkpoint segment should change only at checkpoint/compaction boundaries.
+Dynamic body content after the checkpoint should be append-only until the next
+checkpoint boundary. Avoid rendering a newly sorted, deduplicated, or rewritten
+ledger projection on every request because that moves changing text earlier
+than necessary and damages cache reuse.
 
 The compiler should expose diagnostic hashes:
 
@@ -270,6 +296,7 @@ The compiler should expose diagnostic hashes:
 stable_prefix_hash
 tool_profile_hash
 task_anchor_hash
+checkpoint_hash
 append_body_hash
 dynamic_context_hash
 ```
@@ -284,6 +311,8 @@ dynamic_context_hash
 - Without a Task Anchor, ordinary user messages remain append-only.
 - Compaction is triggered by watermarks or explicit request, not by a fixed turn
   count.
+- The compiled context shape reserves a checkpoint segment; an absent
+  checkpoint renders nothing.
 - Checkpoint output references artifacts/evidence instead of replacing exact
   evidence.
 - Provider calls remain usable with `store=false` and no provider conversation

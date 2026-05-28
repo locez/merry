@@ -28,14 +28,15 @@ The first version of this plan left too much room for a context projection bypas
 - Ordinary ledger observations and artifact payloads must stay out of prompt context by default.
 - Append-only user/assistant body is either implemented in this plan or explicitly marked out-of-scope before implementation; it must not remain ambiguous.
 - `AGENTS.md`/project rules need a stable-prefix path if they are treated as durable project instructions.
+- The context compiler must reserve a checkpoint segment between TaskAnchor and append-only body; this plan may leave it empty but must not omit it from the structure.
 - Budget calculations must subtract `stable_prefix_tokens` before deriving body watermarks.
-- Checkpoint trigger primitives do not implement checkpoint content or projection semantics.
+- Checkpoint trigger primitives plus an empty checkpoint slot do not implement checkpoint content generation or compaction semantics.
 
 ## File Structure
 
 - Modify `crates/merry-runtime/src/session.rs`: rename or clarify hot continuation storage, preserve all hot resolved tool continuations across a single loop, expose clear/reset operations for terminal hot-continuity lifecycle boundaries, and add session-owned append-only message history support if not already present.
 - Modify `crates/merry-runtime/src/runtime.rs`: stop consuming tool continuations when the model emits the next tool call; clear hot continuations only after terminal assistant completion or explicit future checkpoint; keep terminal assistant completion documented as a hot protocol lifecycle boundary, not a checkpoint; extend provider request trace fields as needed.
-- Modify `crates/merry-runtime/src/context.rs`: define projection policy boundaries for explicit checkpoint/context-policy projections, project rules, append-only body assembly, and budget/checkpoint primitives.
+- Modify `crates/merry-runtime/src/context.rs`: define projection policy boundaries for explicit checkpoint/context-policy projections, project rules, checkpoint segment assembly, append-only body assembly, and budget/checkpoint primitives.
 - Modify `crates/merry-runtime/src/step.rs`: assemble requests as stable runtime instructions plus stable project rules plus append-only body plus hot continuations; avoid default ledger/artifact projection and avoid unrestricted `ContextSummary` projection.
 - Modify `crates/merry-llm/src/request.rs`: expose any missing request diagnostics needed by compiler/cache tests, such as dynamic message hash versus continuation hash if required.
 - Modify `crates/merry-runtime/tests/agent_loop.rs`: add deterministic multi-tool continuity tests and context/cache diagnostic tests.
@@ -58,8 +59,8 @@ The first version of this plan left too much room for a context projection bypas
    Use the realistic `status-text` task to verify inspect/read/patch/check/test/final behavior and print enough runtime events to debug failures.
 4. **M4: Diff-Style Workspace Patch Reliability**
    Make `workspace_patch` robust for localized edits, repeated text, and multi-file patches.
-5. **M5: Context Budget And Checkpoint Trigger Skeleton**
-   Add model-window-aware budget diagnostics and checkpoint trigger decisions without claiming checkpoint content/projection support.
+5. **M5: Checkpoint Segment And Trigger Skeleton**
+   Reserve the checkpoint segment in the compiler shape and add model-window-aware trigger decisions without claiming checkpoint content generation or compaction support.
 
 Each milestone must be committed separately unless the user says otherwise.
 
@@ -442,10 +443,14 @@ stable prefix:
   system: DEFAULT_RUNTIME_BASE_INSTRUCTIONS
   system: project rules, if loaded by the explicit project-rules layer
 
+checkpoint segment:
+  latest ledger-derived checkpoint, if present
+  empty checkpoint renders nothing in this plan
+
 append-only body:
   prior user/assistant messages, if Task 5 has implemented message history
   current user input
-  explicit checkpoint/context-policy projections
+  explicit context-policy projections
 
 hot protocol continuity:
   recent function_call/function_call_output pairs
@@ -518,7 +523,8 @@ The intended request body order is:
 
 ```text
 stable prefix system messages
-optional explicit context/checkpoint projections
+optional checkpoint segment, if present
+optional explicit context-policy projections
 prior append-only user/assistant messages
 current user or continuation control input
 hot function-call continuations
@@ -1380,12 +1386,48 @@ git add crates/merry-runtime/src/context.rs
 git commit -m "feat(runtime): resolve context window budgets"
 ```
 
-## Task 15: Add Checkpoint Trigger Decisions Without Checkpoint Content
+## Task 15: Add Checkpoint Segment And Trigger Decisions Without Checkpoint Content
 
 **Files:**
 - Modify: `crates/merry-runtime/src/context.rs`
+- Modify: `crates/merry-runtime/src/step.rs`
+- Modify: `crates/merry-llm/src/request.rs`
+- Modify: `crates/merry-runtime/tests/agent_loop.rs`
 
-- [ ] **Step 1: Add trigger enum**
+- [ ] **Step 1: Add an empty checkpoint segment to the compiler shape**
+
+Add a runtime-owned checkpoint slot to the compiled context shape. This slot exists between TaskAnchor/project rules and the append-only body. It may be empty in this plan.
+
+Target shape:
+
+```rust
+pub struct ContextCheckpointSegment {
+    // Empty for this plan, or an Option<ContextCheckpoint> if the local shape
+    // is clearer. Do not store full artifact payloads here.
+}
+```
+
+If a concrete checkpoint body type is too early, use:
+
+```rust
+checkpoint: Option<CompiledCheckpoint>
+```
+
+and leave it `None` throughout this implementation. The important acceptance point is structural: an absent checkpoint renders no prompt text, but the compiler has an explicit place where the latest ledger-derived checkpoint will later live.
+
+- [ ] **Step 2: Add checkpoint hash diagnostics**
+
+If `ModelRequest` diagnostics are expanded in this milestone, add a `checkpoint_hash` or make sure `dynamic_context_hash` test coverage can distinguish:
+
+```text
+empty checkpoint segment
+non-empty future checkpoint segment
+append-only body after checkpoint
+```
+
+If adding a public hash is premature, keep the slot internal and add a test that an empty checkpoint does not change request messages or stable prefix hash.
+
+- [ ] **Step 3: Add trigger enum**
 
 This task is intentionally only a trigger skeleton. It does not implement checkpoint content generation, checkpoint prompt projection, removal of old raw function-call continuity after checkpoint, or model-assisted summary generation.
 
@@ -1400,7 +1442,7 @@ pub enum CheckpointDecision {
 }
 ```
 
-- [ ] **Step 2: Add pure decision function**
+- [ ] **Step 4: Add pure decision function**
 
 Add:
 
@@ -1419,7 +1461,7 @@ pub fn decide_checkpoint(
 }
 ```
 
-- [ ] **Step 3: Add tests**
+- [ ] **Step 5: Add trigger tests**
 
 Add:
 
@@ -1447,7 +1489,28 @@ fn checkpoint_decision_uses_watermarks_not_turn_counts() {
 }
 ```
 
-- [ ] **Step 4: Keep it unwired**
+- [ ] **Step 6: Add empty-segment rendering tests**
+
+Add tests:
+
+```rust
+#[test]
+fn empty_checkpoint_segment_renders_no_prompt_text() {
+    // Compile a request with no checkpoint.
+    // Assert request messages contain no checkpoint marker text.
+    // Assert stable_prefix_hash is not affected by the absent checkpoint.
+}
+
+#[test]
+fn checkpoint_segment_is_separate_from_append_only_body() {
+    // If the local types expose this structure, assert the compiler can
+    // represent checkpoint and append-only body separately.
+    // If not exposed yet, keep this as a comment-level invariant in the
+    // context compiler tests added in this task.
+}
+```
+
+- [ ] **Step 7: Keep content generation unwired**
 
 Do not compact prompt history yet. This task only creates deterministic policy primitives for a later compiler integration. It must not be marked as satisfying checkpoint/compaction acceptance from the spec.
 
@@ -1460,21 +1523,22 @@ unresolved or still-hot function-call continuity remains exact
 old raw function-call continuity is removed only after checkpoint is recorded
 ```
 
-- [ ] **Step 5: Run tests**
+- [ ] **Step 8: Run tests**
 
 Run:
 
 ```bash
 cargo test -p merry-runtime checkpoint_decision
+cargo test -p merry-runtime checkpoint_segment
 ```
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
-git add crates/merry-runtime/src/context.rs
-git commit -m "feat(runtime): add checkpoint watermark decisions"
+git add crates/merry-runtime/src/context.rs crates/merry-runtime/src/step.rs crates/merry-llm/src/request.rs crates/merry-runtime/tests/agent_loop.rs
+git commit -m "feat(runtime): reserve checkpoint segment"
 ```
 
 ## Task 16: Final Integration Verification
