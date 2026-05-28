@@ -1004,8 +1004,16 @@ fn is_local_workspace_effect_process_argv(argv: &[String]) -> bool {
             if executable_token_is(cargo, "cargo")
                 && matches!(command.as_str(), "test" | "check")
                 && (package_flag.as_str() == "-p" || package_flag.as_str() == "--package")
-                && package.as_str() == "merry-runtime"
+                && is_safe_cargo_package_token(package)
     )
+}
+
+fn is_safe_cargo_package_token(package: &str) -> bool {
+    !package.is_empty()
+        && !package.starts_with('-')
+        && package
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
 fn is_forbidden_process_argv(argv: &[String]) -> bool {
@@ -1360,7 +1368,8 @@ mod tests {
         AcceptedLocalWorkspaceProcessAdmission, MAX_PROCESS_OUTPUT_LIMIT_BYTES, ProcessActionError,
         ProcessActionIntent, ProcessEnvPolicy, ProcessExecutionEvidence, ProcessExitStatus,
         ProcessIntentClass, ProcessPermissionProfileId, classify_process_intent,
-        is_low_risk_process_action_intent, required_process_permission_profile_id,
+        is_low_risk_process_action_intent, is_safe_cargo_package_token,
+        required_process_permission_profile_id,
     };
 
     fn intent() -> ProcessActionIntent {
@@ -1630,6 +1639,28 @@ mod tests {
     }
 
     #[test]
+    fn safe_cargo_package_token_allows_package_names_without_paths_or_flags() {
+        for package in [
+            "merry-runtime",
+            "other-crate",
+            "merry_coding_loop_task_status_text",
+            "crate123",
+        ] {
+            assert!(is_safe_cargo_package_token(package));
+        }
+
+        for package in [
+            "",
+            "-package",
+            "bad.package",
+            "../other-crate",
+            "crate/name",
+        ] {
+            assert!(!is_safe_cargo_package_token(package));
+        }
+    }
+
+    #[test]
     fn classifies_known_process_argv_shapes() {
         for argv in [
             vec!["rustc", "--version"],
@@ -1670,6 +1701,8 @@ mod tests {
             vec!["cargo", "test", "--package", "merry-runtime"],
             vec!["cargo", "check", "-p", "merry-runtime"],
             vec!["cargo", "check", "--package", "merry-runtime"],
+            vec!["cargo", "test", "-p", "other-crate"],
+            vec!["cargo", "check", "-p", "merry_coding_loop_task_status_text"],
         ] {
             let intent = ProcessActionIntent::new(
                 argv.into_iter().map(str::to_owned).collect(),
@@ -1741,7 +1774,9 @@ mod tests {
 
         for argv in [
             vec!["cargo", "test"],
-            vec!["cargo", "test", "-p", "other-crate"],
+            vec!["cargo", "test", "-p", "-package"],
+            vec!["cargo", "test", "-p", "bad.package"],
+            vec!["cargo", "test", "-p", "../other-crate"],
             vec!["/tmp/cargo", "test", "-p", "merry-runtime"],
             vec!["./cargo", "test", "-p", "merry-runtime"],
             vec!["../bin/cargo", "test", "-p", "merry-runtime"],
