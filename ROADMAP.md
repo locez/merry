@@ -122,6 +122,14 @@ The OpenAI provider target is the Responses API only. The provider request path 
 - Minimal Useful Coding Loop first deterministic slice is implemented in `merry-tool-workspace` integration tests. `coding_loop_harness_inspects_patches_verifies_and_completes` builds a runtime with workspace read/patch tools plus `process_command_tool`, runs `Runtime::run_agent_loop` for inspect -> exact read -> patch -> verification -> final answer, uses a fake provider and injected fake process runner, mutates only a temporary workspace fixture through `workspace_patch_file`, records exact process argv for `rg --files` and `cargo test -p merry-runtime`, verifies tool-result continuation flow, and checks artifact-before-resolution ledger ordering. This is not yet the real `bwrap` smoke or live provider lane.
 - Real `bwrap` coding-loop smoke is implemented in `merry-cli`: `merry --with-sandbox debug coding-loop-smoke` is an explicit non-default command that refuses to run without validated CLI bwrap child handoff evidence, creates a disposable fixture under `.merry/local/coding-loop-smoke`, composes a runtime with a deterministic scripted provider, workspace read/patch tools, and `process_command_tool`, then runs inspect -> exact read -> constrained patch -> real process verification -> final answer through `Runtime::run_agent_loop`. The process steps use runtime-owned `TokioProcessRunner` for real `rg --files` and `rg fixed-by-live-llm` inside the sandbox; the edit uses `workspace_patch_file`; the smoke validates `AgentLoopStatus::Completed`, no pending tool calls, four successful tool resolutions, and the patched fixture content. The integration test is ignored by default and passed in this environment with `cargo test -p merry-cli debug_coding_loop_smoke_runs_inside_real_bwrap_when_opted_in -- --ignored`. This is still deterministic-provider and CLI-owned harness assembly, not a complete sandbox hardening claim.
 - Configurable disposable coding-loop task smoke first slice is implemented in `merry-cli`: `merry --with-sandbox debug coding-loop-task-smoke --task status-text` creates a tiny disposable Rust fixture under `.merry/local/coding-loop-task-smoke`, drives inspect -> failing verification -> exact read -> constrained patch -> verification -> final answer through the runtime loop, and validates the final patched fixture. Default deterministic tests use a fake provider and fake process runner for `rg --files` / `rg done`; the real bwrap smoke remains explicit and ignored for outer-environment validation with `cargo test -p merry-cli debug_coding_loop_task_smoke_runs_inside_real_bwrap_when_opted_in -- --ignored`.
+- Minimal Useful Coding Loop continuity Tasks 13-16 are closed for the current
+  runtime foundation: request assembly has a stable prefix lane with project
+  rules and tool-profile hashing, context budget/window resolution helpers
+  exist, checkpoint decisions reserve a deterministic segment boundary, and
+  final deterministic verification passed. Real `bwrap` and live OpenAI smokes
+  remain explicit host-shell checks; nested `bwrap` inside Codex or another
+  outer sandbox is an expected environment limitation, not completion evidence
+  by itself.
 - The opt-in live LLM coding-loop smoke command is implemented as `merry --with-sandbox debug coding-loop-live-smoke`. It refuses to run without the real CLI bwrap child handoff, uses `OpenAiProvider` for model decisions, keeps `TokioProcessRunner` and `workspace_patch_file` for the real tool path, and validates runtime events for process inspection, exact source read, patch, process verification, loop completion, and patched fixture content. The user reported that the credentialed live smoke passed against their trusted configured server. That run exposed a provider HTTP metadata gap, now fixed by setting `User-Agent: merry/<crate version>` in `merry-provider-openai`; deterministic request-construction and loopback integration tests cover the header.
 - The first config-backed observability implementation slice is complete in
   `merry-cli`: XDG TOML config discovery, config-backed log settings, file
@@ -209,12 +217,12 @@ The OpenAI provider target is the Responses API only. The provider request path 
 
 ### Active
 
-- P0: continue the Minimal Useful Coding Loop as the current MVP proof. The loop now has a deterministic fake-provider/fake-runner slice, a deterministic real `bwrap` process-runner smoke, a user-verified live-provider smoke command, and end-to-end config-backed log verification for the deterministic coding-loop smoke.
+- P0: continue the Minimal Useful Coding Loop as the current MVP proof. The loop now has a deterministic fake-provider/fake-runner slice, a deterministic real `bwrap` process-runner smoke, a configurable disposable task smoke, a user-verified live-provider smoke command, end-to-end config-backed log verification, and stable-prefix/context-budget/checkpoint scaffolding needed for dynamic context assembly.
 - P0: keep the Runtime Coding Loop Harness executable against a disposable fixture repository. The default lane uses fake provider/fake runner for deterministic `cargo test`; the deterministic `bwrap` lane is an explicit ignored smoke; the live OpenAI-compatible lane is also explicit and ignored and has passed in the user's trusted configured environment.
-- P0: make the coding-loop smoke less scripted and more user-testable. The next
-  proof should let a user supply or select a disposable fixture task, then
-  require the model to inspect, read exact evidence, patch, verify, and answer
-  through runtime-owned tools and artifacts.
+- P0: move the next proof from smoke wiring to context fidelity. The
+  configurable task smoke is in place; the next acceptance target is dynamic
+  context assembly that keeps the stable prefix cacheable while projecting only
+  compact, evidence-backed runtime facts late in the request.
 - Supporting constraint: shell/process profile work remains subordinate to that
   coding-loop proof. Structured argv remains the narrow typed lane; richer
   shell syntax must run through a real interpreter inside explicit permission
@@ -225,32 +233,36 @@ The OpenAI provider target is the Responses API only. The provider request path 
 - Keep safety tiered but subordinate to the executable acceptance target: read-only inspection automatic, constrained patch opt-in, verification in `bwrap`, high-risk or unknown process actions denied or escalated.
 - Keep CLI shell as smoke/debug, not the design owner. The main contract is the runtime library and its registered tool/profile set.
 - Keep judgment advisory. Do not wire model-backed judgment to live provider, public events, ledger facts, or authorization until a concrete coding-loop acceptance test needs reviewer evidence.
-- Keep default verification deterministic and offline. Live provider and host/sandbox process smokes are explicit opt-in checks with local credentials and disposable workspaces.
+- Keep default verification deterministic and offline. Live provider and
+  host/sandbox process smokes are explicit opt-in host-shell checks with local
+  credentials and disposable workspaces; nested outer-sandbox `bwrap` failures
+  are not roadmap blockers by themselves.
 - Improve public docs as implementation status changes, while keeping private notes under `docs/` and `merry-raw-docs/` ignored.
 
 ### Next Active
 
-- Build a configurable disposable coding-loop smoke, not another profile-only
-  slice. The command/test should let the user choose or provide a small fixture
-  task, then run the same loop shape: inspect -> read exact source evidence ->
-  apply one constrained `workspace_patch_file` edit -> run verification ->
-  final answer.
-- First task design is started as a non-default CLI/debug lane:
-  `merry --with-sandbox debug coding-loop-task-smoke --task status-text`
-  creates a disposable Rust fixture with a wrong implementation, supplies the
-  model a natural task description, and verifies through `rg done` inside the
-  bwrap lane. The deterministic provider still supplies exact patch arguments;
-  a later live-provider iteration should test whether the model can infer that
-  patch from the task and read evidence.
-- Deterministic acceptance: keep a fake-provider test for the same fixture and
-  tool sequence so default `cargo test` stays offline and reproducible.
-- Live acceptance: keep the OpenAI-compatible lane explicit and ignored; use it
-  to evaluate whether a real model can solve the small fixture task. If it
-  fails, inspect the failure as model/tool-contract evidence and make the
-  smallest prompt/tool/runtime fix needed for that coding task.
-- Do not continue shell permission/session design as the next milestone unless
-  this configurable coding-loop task is blocked by that boundary and the user
-  explicitly approves changing the roadmap priority.
+- Prepare the Dynamic Context Assembly slice before coding it. The next
+  assistant turn should restate the intended implementation against
+  `plans/2026-05-28-minimal-useful-coding-loop-continuity.md`, the stable
+  prefix layout, and this roadmap, then wait for user confirmation before
+  runtime edits.
+- Implementation target: assemble the provider-request dynamic body from
+  runtime-owned state while preserving the stable prefix lane. Dynamic context
+  should include the current task/user request, append-only conversation body,
+  pending tool continuations, and compact ledger/artifact evidence references.
+- Keep large or exact payloads out of default prompt text. Process
+  stdout/stderr, source reads, patch payloads, provider wire payloads, and
+  artifact bodies stay in artifacts; the dynamic body carries bounded facts,
+  ids, diagnostics, fingerprints, and evidence locators.
+- Acceptance: deterministic runtime/provider-boundary tests prove dynamic
+  evidence changes do not change stable prefix hash, relevant facts appear late
+  in compiled context, soft/hard budget decisions use the existing
+  `ContextBudget` / `ResolvedContextWindow` / `CheckpointDecision` helpers,
+  and default `cargo test` remains offline.
+- Out of scope for this next slice: model-written checkpoint summaries,
+  provider conversation state, `previous_response_id`, live OpenAI judgment,
+  new shell/session authorization design, `/task` or TUI commands, arbitrary
+  absolute-path editing, and broader process permissions.
 - Roadmap priority changes require explicit user approval or a tracked change
   request. Agents may update completion/status evidence, but must not promote
   policy/profile/classifier work into `Next Active` on their own.
