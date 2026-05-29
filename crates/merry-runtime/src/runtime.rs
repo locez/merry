@@ -7,8 +7,8 @@
 
 use crate::{
     AcceptedLocalWorkspaceProcessAdmission, ActionExecutionEvidence, ActionProposal,
-    ArtifactContent, CheckpointDecision, ContextBudget, ContextBudgetPolicy, ContextCompiler,
-    ContextEntry, ContextProjection, ContextSummary, LedgerProjectionSnapshot, ProcessActionIntent,
+    ArtifactContent, CheckpointDecision, CompactedCheckpoint, ContextBudget, ContextBudgetPolicy,
+    ContextCompiler, ContextEntry, ContextSummary, LedgerProjectionSnapshot, ProcessActionIntent,
     ProcessExitStatus, ProcessPermissionProfileId, ProcessRunner, ProcessRunnerContext,
     ProcessRunnerError, ProcessRunnerOutput, ProjectRules, ResolvedContextWindow, RuntimeError,
     RuntimeEventStream, RuntimeModelRole, SessionContextSnapshot, TaskAnchor,
@@ -1373,7 +1373,7 @@ pub struct RuntimeBuilder {
     initial_context_summaries: BTreeMap<String, String>,
     project_rules: Option<ProjectRules>,
     task_anchor: Option<TaskAnchor>,
-    context_projections: Vec<ContextProjection>,
+    compacted_checkpoint: Option<CompactedCheckpoint>,
     memory_activation_source: Arc<dyn MemoryActivationSource>,
     allow_low_risk_workspace_patches: bool,
     low_risk_process_runner: Option<Arc<dyn ProcessRunner>>,
@@ -1392,7 +1392,7 @@ impl RuntimeBuilder {
             initial_context_summaries: BTreeMap::new(),
             project_rules: None,
             task_anchor: None,
-            context_projections: Vec::new(),
+            compacted_checkpoint: None,
             memory_activation_source: Arc::new(StoredMemoryActivationSource),
             allow_low_risk_workspace_patches: false,
             low_risk_process_runner: None,
@@ -1485,14 +1485,14 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Adds an explicit dynamic context projection.
+    /// Sets compacted checkpoint context for dynamic provider requests.
     ///
-    /// This is reserved for checkpoint/context-policy content selected by the
-    /// runtime. It does not project ordinary ledger facts, artifact payloads,
-    /// or tool-result observations.
+    /// This is selected by a checkpoint/compaction boundary. It does not
+    /// project ordinary ledger facts, artifact payloads, or tool-result
+    /// observations.
     #[must_use]
-    pub fn context_projection(mut self, projection: ContextProjection) -> Self {
-        self.context_projections.push(projection);
+    pub fn compacted_checkpoint(mut self, checkpoint: CompactedCheckpoint) -> Self {
+        self.compacted_checkpoint = Some(checkpoint);
         self
     }
 
@@ -1568,8 +1568,8 @@ impl RuntimeBuilder {
         if let Some(task_anchor) = self.task_anchor {
             session.set_task_anchor(task_anchor);
         }
-        for projection in self.context_projections {
-            session.add_context_projection(projection);
+        if let Some(checkpoint) = self.compacted_checkpoint {
+            session.set_compacted_checkpoint(checkpoint);
         }
 
         Ok(Runtime {
