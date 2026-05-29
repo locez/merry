@@ -1763,8 +1763,7 @@ Expected: stdout contains `coding-loop-smoke: ok`; the log file contains `runtim
 git add crates/merry-cli/src/main.rs crates/merry-cli/tests/debug.rs \
   crates/merry-runtime/src/agent_loop.rs crates/merry-runtime/src/runtime.rs \
   crates/merry-runtime/src/session.rs crates/merry-runtime/tests/agent_loop.rs \
-  plans/2026-05-23-config-backed-observability.md ROADMAP.md EXECUTION_STATE.md \
-  HANDOFF.md DECISIONS.md README.md
+  plans/2026-05-23-config-backed-observability.md ROADMAP.md DECISIONS.md README.md
 git commit -m "test(cli): cover config-backed log smokes"
 ```
 
