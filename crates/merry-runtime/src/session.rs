@@ -15,6 +15,7 @@ use crate::{
     },
     ledger::{CompactLedgerText, LedgerFactKind, LedgerScope, LedgerUpdateKind, TaskLedger},
     memory::{ActivatedMemory, MemoryError, MemoryItem, MemoryStore},
+    step::CompiledSessionMessage,
     summary_draft_promotion::{
         SummaryDraftPromotionAcceptanceResult, SummaryDraftPromotionAcceptanceStatus,
         SummaryDraftPromotionRegistry,
@@ -36,6 +37,12 @@ const TOOL_RESULT_ARTIFACT_PREFIX: &str = "tool-result-";
 pub(crate) struct ResolvedToolContinuation {
     call: PendingToolCall,
     result: ToolCallResult,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SessionMessage {
+    User { text: String },
+    Assistant { artifact_id: ArtifactId },
 }
 
 impl ResolvedToolContinuation {
@@ -160,6 +167,7 @@ pub(crate) struct SessionState {
     judgments: JudgmentRegistry,
     summary_draft_promotions: SummaryDraftPromotionRegistry,
     action_audits: ActionAuditRegistry,
+    append_only_body: Vec<SessionMessage>,
     pending_tool_calls: Vec<PendingToolCall>,
     resolved_tool_calls: BTreeSet<ToolCallId>,
     uncheckpointed_tool_continuations: Vec<ResolvedToolContinuation>,
@@ -179,6 +187,7 @@ impl SessionState {
             judgments: JudgmentRegistry::default(),
             summary_draft_promotions: SummaryDraftPromotionRegistry::default(),
             action_audits: ActionAuditRegistry::default(),
+            append_only_body: Vec::new(),
             pending_tool_calls: Vec::new(),
             resolved_tool_calls: BTreeSet::new(),
             uncheckpointed_tool_continuations: Vec::new(),
@@ -258,10 +267,19 @@ impl SessionState {
         let content_bytes = content.as_bytes().len();
         let recorded = self.record_artifact_state(artifact, content)?;
         Self::trace_artifact_record(self.session_id.as_str(), &recorded, content_bytes);
+        self.append_only_body.push(SessionMessage::Assistant {
+            artifact_id: recorded.id().clone(),
+        });
         Ok(self.record_event(
             RuntimeEventKind::ArtifactRecorded { artifact: recorded },
             LedgerFactKind::ArtifactRecorded,
         ))
+    }
+
+    pub(crate) fn record_user_message_body(&mut self, text: &str) {
+        self.append_only_body.push(SessionMessage::User {
+            text: text.to_owned(),
+        });
     }
 
     pub(crate) fn evidence_ref(
@@ -440,6 +458,32 @@ impl SessionState {
                     continuation.result.clone(),
                     content,
                 ))
+            })
+            .collect()
+    }
+
+    pub(crate) fn append_only_body_snapshot(
+        &self,
+    ) -> Result<Vec<CompiledSessionMessage>, ArtifactError> {
+        self.append_only_body
+            .iter()
+            .map(|message| match message {
+                SessionMessage::User { text } => {
+                    Ok(CompiledSessionMessage::User { text: text.clone() })
+                }
+                SessionMessage::Assistant { artifact_id } => {
+                    let content = self.read_artifact_content(artifact_id)?;
+                    let text =
+                        content
+                            .as_text()
+                            .ok_or_else(|| ArtifactError::InvalidEvidenceLocator {
+                                id: artifact_id.clone(),
+                                reason: "assistant history artifact is not textual",
+                            })?;
+                    Ok(CompiledSessionMessage::Assistant {
+                        text: text.to_owned(),
+                    })
+                }
             })
             .collect()
     }

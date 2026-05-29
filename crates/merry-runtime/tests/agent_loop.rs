@@ -629,6 +629,22 @@ fn continuation_input_for(original_task: &str) -> String {
     format!("{DEFAULT_AGENT_LOOP_CONTINUATION_INPUT}\n\nOriginal task:\n{original_task}")
 }
 
+fn assert_continuation_request_body(request: &ModelRequest, original_task: &str) {
+    let dynamic = request.dynamic_messages();
+    assert_eq!(
+        dynamic
+            .iter()
+            .map(|message| message.role())
+            .collect::<Vec<_>>(),
+        [ModelMessageRole::User, ModelMessageRole::User]
+    );
+    assert_eq!(dynamic[0].content().as_text(), original_task);
+    assert_eq!(
+        dynamic[1].content().as_text(),
+        continuation_input_for(original_task)
+    );
+}
+
 fn pending_tool_call(events: &[RuntimeEvent]) -> &PendingToolCall {
     events
         .iter()
@@ -694,10 +710,7 @@ async fn agent_loop_executes_one_tool_and_continues_to_final_completion() {
         "Search notes."
     );
     assert!(requests[0].continuations().is_empty());
-    assert_eq!(
-        requests[1].messages()[1].content().as_text(),
-        continuation_input_for("Search notes.")
-    );
+    assert_continuation_request_body(&requests[1], "Search notes.");
     assert_eq!(requests[1].continuations().len(), 1);
     assert_eq!(
         requests[1].continuations()[0].call().id().as_str(),
@@ -810,6 +823,93 @@ async fn agent_loop_keeps_uncheckpointed_continuations_after_final_answer() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn ordinary_user_and_assistant_messages_remain_append_only_without_task_anchor() {
+    let provider = ScriptedModelProvider::new(vec![
+        vec![Ok(completed_text_event("first final answer"))],
+        vec![Ok(completed_text_event("second final answer"))],
+    ]);
+    let runtime = Runtime::builder(session_id("agent-loop-append-only-body"))
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .build()
+        .expect("runtime should build");
+
+    let first = run_default_loop(&runtime, "First user task.").await;
+    assert_eq!(first.status(), &AgentLoopStatus::Completed);
+    let second = run_default_loop(&runtime, "Second user task.").await;
+    assert_eq!(second.status(), &AgentLoopStatus::Completed);
+
+    let requests = provider.recorded_requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].stable_prefix_message_count(), 1);
+    assert_eq!(requests[1].stable_prefix_message_count(), 1);
+    assert_eq!(
+        requests[0].stable_prefix_hash(),
+        requests[1].stable_prefix_hash(),
+        "append-only body growth must not move the stable prefix"
+    );
+    assert_ne!(
+        requests[0].dynamic_context_hash(),
+        requests[1].dynamic_context_hash(),
+        "append-only body growth should change only dynamic request context"
+    );
+
+    let dynamic = requests[1].dynamic_messages();
+    assert_eq!(
+        dynamic
+            .iter()
+            .map(|message| message.role())
+            .collect::<Vec<_>>(),
+        [
+            ModelMessageRole::User,
+            ModelMessageRole::Assistant,
+            ModelMessageRole::User
+        ]
+    );
+    assert_eq!(dynamic[0].content().as_text(), "First user task.");
+    assert_eq!(dynamic[1].content().as_text(), "first final answer");
+    assert_eq!(dynamic[2].content().as_text(), "Second user task.");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn continuation_control_prompt_is_not_recorded_as_user_history() {
+    let provider = ScriptedModelProvider::new(vec![
+        vec![Ok(completed_tool_call_event(model_tool_call(
+            "call-success",
+            "search_notes",
+        )))],
+        vec![Ok(completed_text_event("first final answer"))],
+        vec![Ok(completed_text_event("second final answer"))],
+    ]);
+    let executor = ScriptedToolExecutor::succeeding_text("search result\n");
+    let runtime = runtime_with_tool(
+        "agent-loop-control-prompt-not-history",
+        provider.clone(),
+        executor,
+    );
+
+    let first = run_default_loop(&runtime, "Search once.").await;
+    assert_eq!(first.status(), &AgentLoopStatus::Completed);
+    let second = run_default_loop(&runtime, "Second user task.").await;
+    assert_eq!(second.status(), &AgentLoopStatus::Completed);
+
+    let requests = provider.recorded_requests();
+    assert_eq!(requests.len(), 3);
+    let final_request_text = requests[2]
+        .messages()
+        .iter()
+        .map(|message| message.content().as_text())
+        .collect::<Vec<_>>()
+        .join("\n---\n");
+    assert!(
+        !final_request_text.contains(DEFAULT_AGENT_LOOP_CONTINUATION_INPUT),
+        "agent-loop continuation control prompt must not be recorded as user history"
+    );
+    assert!(final_request_text.contains("Search once."));
+    assert!(final_request_text.contains("first final answer"));
+    assert!(final_request_text.contains("Second user task."));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn agent_loop_executes_opt_in_workspace_patch_and_continues_to_final_completion() {
     let provider = ScriptedModelProvider::new(vec![
         vec![Ok(completed_tool_call_event(model_tool_call(
@@ -867,10 +967,7 @@ async fn agent_loop_executes_opt_in_workspace_patch_and_continues_to_final_compl
 
     let requests = provider.recorded_requests();
     assert_eq!(requests.len(), 2);
-    assert_eq!(
-        requests[1].messages()[1].content().as_text(),
-        continuation_input_for("Patch note.")
-    );
+    assert_continuation_request_body(&requests[1], "Patch note.");
     assert_eq!(requests[1].continuations().len(), 1);
     let continuation_result = requests[1].continuations()[0].result();
     assert_eq!(
@@ -972,10 +1069,7 @@ async fn agent_loop_process_command_tool_executes_and_continues() {
         "first model request should expose the registered process command tool"
     );
     assert!(requests[0].continuations().is_empty());
-    assert_eq!(
-        requests[1].messages()[1].content().as_text(),
-        continuation_input_for("Check rustc version.")
-    );
+    assert_continuation_request_body(&requests[1], "Check rustc version.");
     assert_eq!(requests[1].continuations().len(), 1);
     let continuation = &requests[1].continuations()[0];
     assert_eq!(continuation.call().id().as_str(), "call-rustc-version");
@@ -1165,10 +1259,7 @@ async fn agent_loop_process_command_tool_executes_rg_files_and_continues() {
     let requests = provider.recorded_requests();
     assert_eq!(requests.len(), 2);
     assert!(requests[0].continuations().is_empty());
-    assert_eq!(
-        requests[1].messages()[1].content().as_text(),
-        continuation_input_for("List tracked source files.")
-    );
+    assert_continuation_request_body(&requests[1], "List tracked source files.");
     assert_eq!(requests[1].continuations().len(), 1);
     let continuation = &requests[1].continuations()[0];
     assert_eq!(continuation.call().id().as_str(), "call-rg-files");

@@ -3,8 +3,11 @@
 //! The public MVP context model exposes summary sections only. A summary is
 //! navigation text, not the source of truth: exact evidence must remain readable
 //! from session-owned artifacts before the summary can enter compiled context.
-//! The runtime may also attach crate-internal projections, such as activated
-//! memory, to snapshots for provider request compilation.
+//! Ordinary ledger facts, tool-result observations, and artifact payloads are
+//! queryable runtime state; recording them is not permission to project them
+//! into provider prompts. The runtime may attach crate-internal projections,
+//! such as activated memory, when those projections have their own explicit
+//! justification.
 //!
 //! [`SessionContextSnapshot`] is intentionally opaque and created by the
 //! runtime session that owns both context entries and artifacts. The compiler
@@ -23,7 +26,7 @@ use std::{
 };
 use thiserror::Error;
 
-/// Compiles structured runtime state into a deterministic context snapshot.
+/// Compiles allowlisted structured runtime state into a deterministic context snapshot.
 ///
 /// Public callers must compile from a session-owned snapshot, not from an
 /// arbitrary entry list paired with an arbitrary artifact registry.
@@ -52,6 +55,9 @@ impl ContextCompiler {
     /// This enforces the runtime rule that summaries are navigation only:
     /// every linked exact evidence reference must resolve through recorded
     /// artifact content before summary text enters the compiled context.
+    /// Reducers must not use ordinary `ContextSummary` entries as a default
+    /// channel for projecting tool-result summaries, ledger observations, or
+    /// artifact payloads into prompts.
     ///
     /// Output ordering is deterministic for a given snapshot. The resulting
     /// [`CompiledContext`] is a runtime-owned intermediate, not a stable prompt

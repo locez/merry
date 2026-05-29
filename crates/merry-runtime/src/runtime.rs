@@ -1726,7 +1726,7 @@ async fn run_provider_step(
         "runtime memories activated"
     );
 
-    let (snapshot, continuations, activation_epoch) = {
+    let (snapshot, append_only_body, continuations, activation_epoch) = {
         let mut session = inner.session.lock().await;
         if token.is_cancelled() {
             drop(session);
@@ -1739,6 +1739,24 @@ async fn run_provider_step(
             .memory_projection_epoch
             .fetch_add(1, Ordering::AcqRel)
             .wrapping_add(1);
+        let append_only_body = match session.append_only_body_snapshot() {
+            Ok(body) => body,
+            Err(error) => {
+                session.replace_activated_memories(Vec::new());
+                inner.memory_projection_epoch.fetch_add(1, Ordering::AcqRel);
+                let diagnostic = diagnostic_from_text(
+                    "append_only_body_artifact",
+                    format!("append-only body artifact could not be read: {error}"),
+                );
+                drop(session);
+                trace_provider_step_failed(&diagnostic);
+                let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                return;
+            }
+        };
+        if input.should_record_user_history() {
+            session.record_user_message_body(input.text());
+        }
         let continuations = match session.uncheckpointed_tool_continuation_snapshots() {
             Ok(continuations) => continuations,
             Err(error) => {
@@ -1754,7 +1772,12 @@ async fn run_provider_step(
                 return;
             }
         };
-        (session.context_snapshot(), continuations, activation_epoch)
+        (
+            session.context_snapshot(),
+            append_only_body,
+            continuations,
+            activation_epoch,
+        )
     };
     let mut projection_guard =
         ActivationProjectionGuard::new(Arc::clone(inner), token.clone(), activation_epoch);
@@ -1782,6 +1805,7 @@ async fn run_provider_step(
         &input,
         provider_config.model(),
         &compiled_context,
+        &append_only_body,
         &continuations,
         tool_specs,
         generation_config,
@@ -4337,7 +4361,7 @@ mod tests {
                 .as_text()
                 .contains("memory:memory-stale")
         );
-        assert_eq!(requests[1].messages().len(), 2);
+        assert_eq!(requests[1].messages().len(), 4);
         assert_eq!(requests[1].stable_prefix_message_count(), 1);
         assert_eq!(requests[1].messages()[0].role(), ModelMessageRole::System);
         assert!(
@@ -4347,6 +4371,23 @@ mod tests {
                 .contains("You are Merry, a pragmatic coding agent.")
         );
         assert_eq!(requests[1].messages()[1].role(), ModelMessageRole::User);
+        assert_eq!(
+            requests[1].messages()[1].content().as_text(),
+            "First topic request."
+        );
+        assert_eq!(
+            requests[1].messages()[2].role(),
+            ModelMessageRole::Assistant
+        );
+        assert_eq!(
+            requests[1].messages()[2].content().as_text(),
+            "model result"
+        );
+        assert_eq!(requests[1].messages()[3].role(), ModelMessageRole::User);
+        assert_eq!(
+            requests[1].messages()[3].content().as_text(),
+            "Second topic request."
+        );
         assert!(
             requests[1]
                 .messages()
