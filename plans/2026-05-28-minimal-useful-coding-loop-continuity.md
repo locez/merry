@@ -636,7 +636,7 @@ Only add files actually changed.
 - Modify: `crates/merry-cli/tests/debug.rs`
 - Modify: `crates/merry-runtime/tests/agent_loop.rs`
 
-- [ ] **Step 1: Add a runtime-owned project rules projection**
+- [x] **Step 1: Add a runtime-owned project rules projection**
 
 Add an explicit project-rules layer for stable project instructions such as `AGENTS.md`. This is not ledger projection and not a tool-result summary.
 
@@ -652,7 +652,7 @@ pub struct ProjectRules {
 
 Keep construction validated: nonblank source path, nonblank text, no control characters except newline/tab.
 
-- [ ] **Step 2: Add rules to the stable prefix**
+- [x] **Step 2: Add rules to the stable prefix**
 
 Update `compile_step_model_request` so loaded project rules become a leading system message included in `stable_prefix_message_count`.
 
@@ -671,7 +671,12 @@ For the debug coding-loop task smoke, the CLI may still require the model to ins
 
 Do not recursively scan parent directories in this task unless already implemented. Use the known disposable fixture root.
 
-- [ ] **Step 4: Add stable-prefix tests**
+Implementation note: deferred in this slice. The runtime now supports explicit
+`ProjectRules`, but CLI fixture loading is intentionally left as a separate
+follow-up so request/compiler shape is not mixed with AGENTS discovery/loading
+behavior.
+
+- [x] **Step 4: Add stable-prefix tests**
 
 Add tests:
 
@@ -695,7 +700,7 @@ async fn ledger_and_artifact_changes_do_not_change_project_rules_stable_hash() {
 
 Do not remove the live smoke assertion that the model reads `AGENTS.md`. Stable prefix rules help cache and baseline behavior; explicit inspection still proves the coding loop can read exact workspace evidence.
 
-- [ ] **Step 6: Run tests**
+- [x] **Step 6: Run tests**
 
 Run:
 
@@ -706,10 +711,10 @@ cargo test -p merry-cli coding_loop_task
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
-git add crates/merry-runtime/src/context.rs crates/merry-runtime/src/session.rs crates/merry-runtime/src/step.rs crates/merry-runtime/tests/agent_loop.rs crates/merry-cli/src/main.rs crates/merry-cli/tests/debug.rs
+git add crates/merry-runtime/src/context.rs crates/merry-runtime/src/lib.rs crates/merry-runtime/src/runtime.rs crates/merry-runtime/src/session.rs crates/merry-runtime/src/step.rs crates/merry-runtime/tests/provider_boundary.rs plans/2026-05-28-minimal-useful-coding-loop-continuity.md
 git commit -m "feat(runtime): add project rules stable prefix"
 ```
 

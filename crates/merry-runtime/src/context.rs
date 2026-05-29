@@ -26,6 +26,9 @@ use std::{
 };
 use thiserror::Error;
 
+const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+const FNV_PRIME: u64 = 0x100000001b3;
+
 /// Compiles allowlisted structured runtime state into a deterministic context snapshot.
 ///
 /// Public callers must compile from a session-owned snapshot, not from an
@@ -118,6 +121,7 @@ fn compile_entries(
     Ok(CompiledContext {
         sections,
         memory_projection,
+        checkpoint: ContextCheckpointSegment,
     })
 }
 
@@ -240,6 +244,65 @@ impl ContextSummary {
     }
 }
 
+/// Stable project instructions explicitly loaded by runtime construction.
+///
+/// Project rules are durable prompt policy such as `AGENTS.md`. They are not
+/// ledger projection, context summaries, or tool-result observations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectRules {
+    source_path: String,
+    text: String,
+    content_hash: String,
+}
+
+impl ProjectRules {
+    /// Creates validated project rules for the stable request prefix.
+    pub fn new(
+        source_path: impl Into<String>,
+        text: impl Into<String>,
+    ) -> Result<Self, ContextError> {
+        let source_path = source_path.into();
+        validate_non_blank("project rules source path", &source_path)?;
+        validate_no_control_characters("project rules source path", &source_path)?;
+
+        let text = text.into();
+        validate_non_blank("project rules text", &text)?;
+        validate_no_control_characters("project rules text", &text)?;
+
+        let content_hash = stable_content_hash(text.as_bytes());
+        Ok(Self {
+            source_path,
+            text,
+            content_hash,
+        })
+    }
+
+    /// Project-relative source path or label for these rules.
+    #[must_use]
+    pub fn source_path(&self) -> &str {
+        &self.source_path
+    }
+
+    /// Exact project rules text.
+    #[must_use]
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// Stable non-cryptographic fingerprint of the rules text.
+    #[must_use]
+    pub fn content_hash(&self) -> &str {
+        &self.content_hash
+    }
+
+    pub(crate) fn to_stable_prefix_message_text(&self) -> String {
+        format!(
+            "project-rules-source:{}\nproject-rules-content-hash:{}\n{}",
+            self.source_path, self.content_hash, self.text
+        )
+    }
+}
+
 /// Exact evidence metadata linked from compiled context.
 ///
 /// Evidence metadata keeps the compiled context connected to exact artifact
@@ -289,6 +352,7 @@ impl ContextEvidence {
 pub struct CompiledContext {
     sections: Vec<CompiledContextSection>,
     memory_projection: Vec<CompiledMemory>,
+    checkpoint: ContextCheckpointSegment,
 }
 
 impl CompiledContext {
@@ -308,6 +372,8 @@ impl CompiledContext {
     #[must_use]
     pub fn to_snapshot(&self) -> String {
         let mut lines = Vec::new();
+
+        self.checkpoint.append_prompt_lines(&mut lines);
 
         for section in &self.sections {
             match section {
@@ -389,6 +455,13 @@ impl CompiledContext {
 
         lines.join("\n")
     }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ContextCheckpointSegment;
+
+impl ContextCheckpointSegment {
+    fn append_prompt_lines(&self, _lines: &mut Vec<String>) {}
 }
 
 /// A section in the compiled context snapshot.
@@ -576,6 +649,13 @@ pub enum ContextError {
         field: &'static str,
     },
 
+    /// A context field contained unsupported control characters.
+    #[error("{field} must not contain control characters other than newline or tab")]
+    InvalidControlCharacter {
+        /// Name of the invalid field.
+        field: &'static str,
+    },
+
     /// Summary text was provided without exact evidence metadata.
     #[error("context summary {id} has no exact evidence references")]
     SummaryWithoutEvidence {
@@ -621,6 +701,25 @@ fn validate_non_blank(field: &'static str, value: &str) -> Result<(), ContextErr
     }
 
     Ok(())
+}
+
+fn validate_no_control_characters(field: &'static str, value: &str) -> Result<(), ContextError> {
+    if value
+        .chars()
+        .any(|character| character.is_control() && character != '\n' && character != '\t')
+    {
+        return Err(ContextError::InvalidControlCharacter { field });
+    }
+
+    Ok(())
+}
+
+fn stable_content_hash(bytes: &[u8]) -> String {
+    let mut hash = FNV_OFFSET_BASIS;
+    for byte in bytes {
+        hash = (hash ^ u64::from(*byte)).wrapping_mul(FNV_PRIME);
+    }
+    format!("fnv1a64:{hash:016x}")
 }
 
 fn validate_evidence(
@@ -771,6 +870,33 @@ mod tests {
             ]
             .join("\n")
         );
+    }
+
+    #[test]
+    fn project_rules_validate_fields_and_hash_text() {
+        let rules =
+            ProjectRules::new("AGENTS.md", "Use project rules.\n").expect("valid project rules");
+
+        assert_eq!(rules.source_path(), "AGENTS.md");
+        assert_eq!(rules.text(), "Use project rules.\n");
+        assert!(rules.content_hash().starts_with("fnv1a64:"));
+        assert!(
+            rules
+                .to_stable_prefix_message_text()
+                .contains("project-rules-source:AGENTS.md")
+        );
+        assert!(matches!(
+            ProjectRules::new("", "Use project rules."),
+            Err(ContextError::BlankField {
+                field: "project rules source path"
+            })
+        ));
+        assert!(matches!(
+            ProjectRules::new("AGENTS.md", "bad\u{7}rules"),
+            Err(ContextError::InvalidControlCharacter {
+                field: "project rules text"
+            })
+        ));
     }
 
     #[test]

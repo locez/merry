@@ -12,9 +12,10 @@ use merry_llm::{
 };
 use merry_runtime::{
     ArtifactContent, ArtifactContentKind, ArtifactError, ContextCompiler, ContextEvidence,
-    ContextSummary, LedgerFactKind, LedgerProjection, RegisteredTool, Runtime, StepContext,
-    StepInput, TokioProcessRunner, ToolActionKind, ToolExecutionContext, ToolExecutionError,
-    ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture, process_command_tool,
+    ContextSummary, LedgerFactKind, LedgerProjection, ProjectRules, RegisteredTool, Runtime,
+    StepContext, StepInput, TokioProcessRunner, ToolActionKind, ToolExecutionContext,
+    ToolExecutionError, ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture,
+    process_command_tool,
 };
 use schemars::Schema;
 use serde_json::{Map, Value, json};
@@ -1168,6 +1169,136 @@ async fn compiled_provider_request_stable_prefix_hash_tracks_base_instructions_a
     assert_ne!(
         first_request.stable_prefix_hash(),
         changed_tools_provider.recorded_requests()[0].stable_prefix_hash()
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn project_rules_enter_stable_prefix_and_affect_stable_hash() {
+    let first_provider = FakeModelProvider::new(vec![Ok(completed_event())]);
+    let first_runtime = Runtime::builder(session_id("provider-project-rules-first"))
+        .project_rules(
+            ProjectRules::new("AGENTS.md", "Use fixture rule A.\n").expect("valid project rules"),
+        )
+        .model_provider(Arc::new(first_provider.clone()), model_name())
+        .build()
+        .expect("runtime should build");
+    collect_step(&first_runtime, "Inspect project.").await;
+    let first_request = first_provider.recorded_requests()[0].clone();
+
+    let changed_provider = FakeModelProvider::new(vec![Ok(completed_event())]);
+    let changed_runtime = Runtime::builder(session_id("provider-project-rules-changed"))
+        .project_rules(
+            ProjectRules::new("AGENTS.md", "Use fixture rule B.\n").expect("valid project rules"),
+        )
+        .model_provider(Arc::new(changed_provider.clone()), model_name())
+        .build()
+        .expect("runtime should build");
+    collect_step(&changed_runtime, "Inspect project.").await;
+    let changed_request = changed_provider.recorded_requests()[0].clone();
+
+    assert_eq!(first_request.stable_prefix_message_count(), 2);
+    assert_eq!(first_request.stable_prefix_messages().len(), 2);
+    assert_eq!(
+        first_request.stable_prefix_messages()[1].role(),
+        ModelMessageRole::System
+    );
+    assert!(
+        first_request.stable_prefix_messages()[1]
+            .content()
+            .as_text()
+            .contains("project-rules-source:AGENTS.md")
+    );
+    assert!(
+        first_request.stable_prefix_messages()[1]
+            .content()
+            .as_text()
+            .contains("Use fixture rule A.")
+    );
+    assert_ne!(
+        first_request.stable_prefix_hash(),
+        changed_request.stable_prefix_hash()
+    );
+    assert_eq!(
+        first_request.dynamic_context_hash(),
+        changed_request.dynamic_context_hash(),
+        "same user input with changed project rules should keep dynamic body unchanged"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn ledger_and_artifact_changes_do_not_change_project_rules_stable_hash() {
+    let provider = ScriptedModelProvider::new(vec![
+        vec![Ok(completed_outputs_event(
+            vec![ModelOutput::tool_call(model_tool_call())],
+            FinishReason::ToolCalls,
+        ))],
+        vec![Ok(completed_event())],
+    ]);
+    let runtime = Runtime::builder(session_id("provider-project-rules-dynamic-state"))
+        .project_rules(
+            ProjectRules::new("AGENTS.md", "Use stable project rules.\n")
+                .expect("valid project rules"),
+        )
+        .register_tool(RegisteredTool::read_only(
+            test_tool_spec("search_notes"),
+            Arc::new(ScriptedToolExecutor::succeeding_text(
+                "dynamic artifact payload\n",
+            )),
+        ))
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .build()
+        .expect("runtime should build");
+
+    let pending_events = collect_step(&runtime, "Request tool result.").await;
+    let first_hash = provider.recorded_requests()[0].stable_prefix_hash().clone();
+    let pending = pending_tool_call(&pending_events).clone();
+    runtime
+        .execute_tool_call(pending.id(), ToolExecutionContext::default())
+        .await
+        .expect("tool execution should resolve");
+    collect_step(&runtime, "Continue after tool result.").await;
+
+    let requests = provider.recorded_requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].stable_prefix_message_count(), 2);
+    assert_eq!(requests[1].stable_prefix_message_count(), 2);
+    assert_eq!(requests[1].stable_prefix_hash(), &first_hash);
+    assert_ne!(
+        requests[0].dynamic_context_hash(),
+        requests[1].dynamic_context_hash(),
+        "tool result continuations and append-only body remain dynamic"
+    );
+    assert!(
+        requests[1]
+            .stable_prefix_messages()
+            .iter()
+            .all(|message| !message
+                .content()
+                .as_text()
+                .contains("dynamic artifact payload")),
+        "ledger/artifact changes must not alter project-rules stable prefix"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn empty_checkpoint_slot_renders_no_prompt_text() {
+    let provider = FakeModelProvider::new(vec![Ok(completed_event())]);
+    let runtime = Runtime::builder(session_id("provider-empty-checkpoint-slot"))
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .build()
+        .expect("runtime should build");
+
+    collect_step(&runtime, "No saved state yet.").await;
+
+    let request = provider.recorded_requests()[0].clone();
+    assert_eq!(request.messages().len(), 2);
+    assert_eq!(request.stable_prefix_message_count(), 1);
+    assert!(
+        request
+            .messages()
+            .iter()
+            .all(|message| !message.content().as_text().contains("checkpoint:")),
+        "empty checkpoint segment must not render prompt text"
     );
 }
 
