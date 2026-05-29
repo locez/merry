@@ -7,16 +7,18 @@
 
 use crate::{
     AcceptedLocalWorkspaceProcessAdmission, ActionExecutionEvidence, ActionProposal,
-    ArtifactContent, ContextCompiler, ContextEntry, ContextSummary, LedgerProjectionSnapshot,
-    ProcessActionIntent, ProcessExitStatus, ProcessPermissionProfileId, ProcessRunner,
-    ProcessRunnerContext, ProcessRunnerError, ProcessRunnerOutput, ProjectRules, RuntimeError,
-    RuntimeEventStream, RuntimeModelRole, SessionContextSnapshot, TaskAnchor,
+    ArtifactContent, CheckpointDecision, ContextBudget, ContextBudgetPolicy, ContextCompiler,
+    ContextEntry, ContextSummary, LedgerProjectionSnapshot, ProcessActionIntent, ProcessExitStatus,
+    ProcessPermissionProfileId, ProcessRunner, ProcessRunnerContext, ProcessRunnerError,
+    ProcessRunnerOutput, ProjectRules, ResolvedContextWindow, RuntimeError, RuntimeEventStream,
+    RuntimeModelRole, SessionContextSnapshot, TaskAnchor,
     action_audit::ActionAuditPolicy,
     action_policy::{
         ActionPolicyDecision, DefaultActionPolicy, classify_tool_action_risk,
         is_local_workspace_effect_process_action_proposal, is_low_risk_process_action_proposal,
         is_low_risk_workspace_patch_proposal, is_read_only_shell_process_action_proposal,
     },
+    decide_checkpoint,
     event_stream::ActiveStepPermit,
     judgment::{JudgmentContext, JudgmentError, JudgmentRecord, JudgmentRequest, JudgmentSource},
     memory::{
@@ -25,6 +27,7 @@ use crate::{
     },
     model_config::{ModelProviderConfig, RuntimeModelConfigs},
     process::{ShellProcessInput, shell_process_input},
+    resolve_context_window,
     session::{
         ProposedToolExecutionOutcome, SessionState, ToolResultLedgerObservation,
         is_runtime_reserved_artifact_id,
@@ -69,6 +72,9 @@ const DIAGNOSTIC_TOOL_ACTION_POLICY_DENIED: &str = "action_policy_denied";
 const DIAGNOSTIC_TOOL_NOT_REGISTERED: &str = "tool_not_registered";
 const TOOL_ACTION_POLICY_DENIED_MESSAGE: &str = "tool action was blocked by runtime policy";
 const WORKSPACE_PATCH_TOOL_NAME: &str = "workspace_patch";
+const DEFAULT_CONTEXT_WINDOW_FALLBACK_TOKENS: u64 = 64_000;
+const DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT: u8 = 95;
+const DEFAULT_OUTPUT_RESERVE_TOKENS: u64 = 32_000;
 
 /// Merry runtime handle for one session.
 ///
@@ -1862,9 +1868,19 @@ async fn run_provider_step(
         }
     };
 
-    let stream_context = ModelStreamContext::new(token.clone());
     let provider = provider_config.provider();
-    trace_provider_request(provider.name().as_str(), &request, sent_continuation_count);
+    let request_budget = request_context_budget(provider.capabilities(), &request);
+    if let Err(error) = &request_budget {
+        trace_provider_request_budget_unavailable(provider.name().as_str(), &request, error);
+    }
+
+    let stream_context = ModelStreamContext::new(token.clone());
+    trace_provider_request(
+        provider.name().as_str(),
+        &request,
+        sent_continuation_count,
+        request_budget.as_ref().ok(),
+    );
     tracing::debug!(
         category = "provider_setup_start",
         "runtime provider stream setup started"
@@ -2093,22 +2109,136 @@ fn trace_provider_request(
     provider_name: &str,
     request: &merry_llm::ModelRequest,
     continuation_count: usize,
+    request_budget: Option<&RequestContextBudget>,
+) {
+    if let Some(request_budget) = request_budget {
+        tracing::debug!(
+            event = "runtime.provider.request",
+            provider_name,
+            model = request.model().as_str(),
+            message_count = request.messages().len(),
+            tool_count = request.tools().len(),
+            continuation_count,
+            stable_prefix_message_count = request.stable_prefix_message_count(),
+            tool_profile_hash = request.tool_profile_hash().as_str(),
+            stable_prefix_hash = request.stable_prefix_hash().as_str(),
+            dynamic_context_hash = request.dynamic_context_hash().as_str(),
+            context_window_tokens = request_budget.window.tokens(),
+            context_window_source = request_budget.window.source().as_str(),
+            context_budget_policy = request_budget.policy.as_str(),
+            dynamic_body_estimated_tokens = request_budget.dynamic_body_estimated_tokens,
+            body_budget_tokens = request_budget.budget.body_budget_tokens(),
+            soft_water_tokens = request_budget.budget.soft_water_tokens(),
+            hard_water_tokens = request_budget.budget.hard_water_tokens(),
+            checkpoint_decision = request_budget.decision.as_str(),
+            max_output_tokens = request.generation().max_output_tokens(),
+            allow_parallel_tool_calls = request.generation().allow_parallel_tool_calls(),
+            "runtime provider request metadata"
+        );
+    } else {
+        tracing::debug!(
+            event = "runtime.provider.request",
+            provider_name,
+            model = request.model().as_str(),
+            message_count = request.messages().len(),
+            tool_count = request.tools().len(),
+            continuation_count,
+            stable_prefix_message_count = request.stable_prefix_message_count(),
+            tool_profile_hash = request.tool_profile_hash().as_str(),
+            stable_prefix_hash = request.stable_prefix_hash().as_str(),
+            dynamic_context_hash = request.dynamic_context_hash().as_str(),
+            max_output_tokens = request.generation().max_output_tokens(),
+            allow_parallel_tool_calls = request.generation().allow_parallel_tool_calls(),
+            "runtime provider request metadata"
+        );
+    }
+}
+
+fn trace_provider_request_budget_unavailable(
+    provider_name: &str,
+    request: &merry_llm::ModelRequest,
+    error: &crate::ContextError,
 ) {
     tracing::debug!(
-        event = "runtime.provider.request",
+        event = "runtime.provider.request.context_budget_unavailable",
         provider_name,
         model = request.model().as_str(),
-        message_count = request.messages().len(),
-        tool_count = request.tools().len(),
-        continuation_count,
-        stable_prefix_message_count = request.stable_prefix_message_count(),
-        tool_profile_hash = request.tool_profile_hash().as_str(),
-        stable_prefix_hash = request.stable_prefix_hash().as_str(),
-        dynamic_context_hash = request.dynamic_context_hash().as_str(),
-        max_output_tokens = request.generation().max_output_tokens(),
-        allow_parallel_tool_calls = request.generation().allow_parallel_tool_calls(),
-        "runtime provider request metadata"
+        diagnostic_code = "context_budget",
+        diagnostic_message = error.to_string(),
+        "runtime provider request context budget unavailable"
     );
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RequestContextBudget {
+    window: ResolvedContextWindow,
+    policy: ContextBudgetPolicy,
+    budget: ContextBudget,
+    dynamic_body_estimated_tokens: u64,
+    decision: CheckpointDecision,
+}
+
+fn request_context_budget(
+    capabilities: &merry_llm::ModelCapabilities,
+    request: &merry_llm::ModelRequest,
+) -> Result<RequestContextBudget, crate::ContextError> {
+    let window = resolve_context_window(
+        None,
+        capabilities.max_input_tokens(),
+        None,
+        DEFAULT_CONTEXT_WINDOW_FALLBACK_TOKENS,
+    )?;
+    let output_reserve_tokens = request
+        .generation()
+        .max_output_tokens()
+        .or_else(|| capabilities.max_output_tokens())
+        .unwrap_or(DEFAULT_OUTPUT_RESERVE_TOKENS);
+    let policy = ContextBudgetPolicy::Balanced;
+    let stable_prefix_estimated_tokens =
+        estimate_model_message_tokens(request.stable_prefix_messages());
+    let budget = ContextBudget::from_window(
+        window.tokens(),
+        DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT,
+        stable_prefix_estimated_tokens,
+        output_reserve_tokens,
+        policy,
+    )?;
+    let dynamic_body_estimated_tokens = estimate_model_message_tokens(request.dynamic_messages())
+        + estimate_tool_continuation_tokens(request.continuations());
+    let decision = decide_checkpoint(dynamic_body_estimated_tokens, budget);
+
+    Ok(RequestContextBudget {
+        window,
+        policy,
+        budget,
+        dynamic_body_estimated_tokens,
+        decision,
+    })
+}
+
+fn estimate_model_message_tokens(messages: &[merry_llm::ModelMessage]) -> u64 {
+    messages
+        .iter()
+        .map(|message| estimate_text_tokens(message.content().as_text()))
+        .sum()
+}
+
+fn estimate_tool_continuation_tokens(continuations: &[merry_llm::ModelToolContinuation]) -> u64 {
+    continuations
+        .iter()
+        .map(|continuation| {
+            estimate_text_tokens(continuation.call().name().as_str())
+                + estimate_text_tokens(
+                    &serde_json::to_string(continuation.call().arguments().as_object())
+                        .expect("tool arguments must serialize for budget estimation"),
+                )
+                + estimate_text_tokens(continuation.result().content().as_str())
+        })
+        .sum()
+}
+
+fn estimate_text_tokens(text: &str) -> u64 {
+    u64::try_from(text.len().div_ceil(4)).expect("usize should fit in u64 on supported targets")
 }
 
 async fn clear_current_activated_memories(inner: &RuntimeInner) {
@@ -2556,7 +2686,7 @@ mod tests {
         DIAGNOSTIC_TOOL_ACTION_POLICY_DENIED, DIAGNOSTIC_TOOL_CALL_RESULT_REQUIRED, Runtime,
         RuntimeBuilder, RuntimeInner, TOOL_ACTION_POLICY_DENIED_MESSAGE, WORKSPACE_PATCH_TOOL_NAME,
         admit_action_to_generic_executor, memory_activation_seed_from_step_input,
-        send_cancelled_event,
+        request_context_budget, send_cancelled_event,
     };
     use crate::action_audit::ActionAuditStatus;
     use crate::action_policy::{
@@ -2589,7 +2719,9 @@ mod tests {
         ToolExecutionError, ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture, ToolRegistry,
         WorkspacePatchExecutionEvidence, WorkspacePatchProposal,
     };
-    use crate::{ArtifactError, RuntimeError, RuntimeModelRole};
+    use crate::{
+        ArtifactError, CheckpointDecision, ContextBudgetPolicy, RuntimeError, RuntimeModelRole,
+    };
     use futures_util::StreamExt;
     use merry_core::{
         ArtifactId, ArtifactKind, ArtifactRef, EvidenceLocator, EvidenceRef, PendingToolCall,
@@ -2597,10 +2729,10 @@ mod tests {
         ToolName, ToolSpec,
     };
     use merry_llm::{
-        FinishReason, ModelCapabilities, ModelError, ModelEvent, ModelEventStream,
-        ModelMessageRole, ModelName, ModelOutput, ModelProvider, ModelProviderFuture, ModelRequest,
-        ModelResponse, ModelStreamContext, ModelToolCall, ModelToolCallId, ProviderErrorKind,
-        ToolArguments,
+        FinishReason, GenerationConfig, ModelCapabilities, ModelContent, ModelError, ModelEvent,
+        ModelEventStream, ModelMessage, ModelMessageRole, ModelName, ModelOutput, ModelProvider,
+        ModelProviderFuture, ModelRequest, ModelResponse, ModelStreamContext, ModelToolCall,
+        ModelToolCallId, ProviderErrorKind, ToolArguments,
     };
     use schemars::Schema;
     use serde_json::json;
@@ -4186,6 +4318,45 @@ mod tests {
             assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
             assert!(provider.recorded_requests().is_empty());
         }
+    }
+
+    #[test]
+    fn request_context_budget_uses_dynamic_estimate_watermarks() {
+        let capabilities =
+            ModelCapabilities::new(true, true, false, true, Some(100_000), Some(10_000))
+                .expect("valid capabilities");
+        let request = ModelRequest::new_with_continuations_and_stable_prefix(
+            named_model("fake/budget-test"),
+            vec![
+                ModelMessage::new(
+                    ModelMessageRole::System,
+                    ModelContent::text("Base instructions.").expect("valid content"),
+                )
+                .expect("valid message"),
+                ModelMessage::new(
+                    ModelMessageRole::User,
+                    ModelContent::text(&"a".repeat(260_000)).expect("valid content"),
+                )
+                .expect("valid message"),
+            ],
+            Vec::new(),
+            Vec::new(),
+            GenerationConfig::new(Some(10_000), false).expect("valid generation"),
+            1,
+        )
+        .expect("valid request");
+
+        let budget =
+            request_context_budget(&capabilities, &request).expect("budget should calculate");
+
+        assert_eq!(
+            budget.window.source(),
+            crate::ContextWindowSource::ProviderCapabilities
+        );
+        assert_eq!(budget.policy, ContextBudgetPolicy::Balanced);
+        assert_eq!(budget.decision, CheckpointDecision::PlanCheckpoint);
+        assert!(budget.dynamic_body_estimated_tokens >= budget.budget.soft_water_tokens());
+        assert!(budget.dynamic_body_estimated_tokens < budget.budget.hard_water_tokens());
     }
 
     #[tokio::test(flavor = "current_thread")]
