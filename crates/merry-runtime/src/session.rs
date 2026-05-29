@@ -7,7 +7,7 @@ use crate::{
     action_audit::{ActionAuditPolicy, ActionAuditRegistry},
     action_policy::ActionPolicyDecision,
     artifact::{ArtifactContent, ArtifactError, ArtifactRegistry},
-    context::{ContextCompiler, ContextEntry, ContextError, SessionContextSnapshot},
+    context::{ContextCompiler, ContextEntry, ContextError, ProjectRules, SessionContextSnapshot},
     judgment::{
         JudgmentError, JudgmentEvidence, JudgmentOutcome, JudgmentRecord, JudgmentRegistry,
         JudgmentRequest, SummaryDraftPromotionError, SummaryDraftPromotionInput,
@@ -161,6 +161,7 @@ pub(crate) struct SessionState {
     ledger: TaskLedger,
     artifacts: ArtifactRegistry,
     memory_store: MemoryStore,
+    project_rules: Option<ProjectRules>,
     context_entries: Vec<ContextEntry>,
     activated_memories: Vec<ActivatedMemory>,
     #[allow(dead_code)]
@@ -182,6 +183,7 @@ impl SessionState {
             ledger: TaskLedger::default(),
             artifacts: ArtifactRegistry::default(),
             memory_store: MemoryStore::new(),
+            project_rules: None,
             context_entries: Vec::new(),
             activated_memories: Vec::new(),
             judgments: JudgmentRegistry::default(),
@@ -216,6 +218,14 @@ impl SessionState {
         )?;
         self.record_checked_context_entry(ContextEntry::summary(summary))?;
         Ok(())
+    }
+
+    pub(crate) fn set_project_rules(&mut self, project_rules: ProjectRules) {
+        self.project_rules = Some(project_rules);
+    }
+
+    pub(crate) fn project_rules(&self) -> Option<ProjectRules> {
+        self.project_rules.clone()
     }
 
     pub(crate) fn record_artifact_state(

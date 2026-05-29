@@ -9,7 +9,7 @@ use crate::{
     AcceptedLocalWorkspaceProcessAdmission, ActionExecutionEvidence, ActionProposal,
     ArtifactContent, ContextCompiler, ContextEntry, ContextSummary, LedgerProjectionSnapshot,
     ProcessActionIntent, ProcessExitStatus, ProcessPermissionProfileId, ProcessRunner,
-    ProcessRunnerContext, ProcessRunnerError, ProcessRunnerOutput, RuntimeError,
+    ProcessRunnerContext, ProcessRunnerError, ProcessRunnerOutput, ProjectRules, RuntimeError,
     RuntimeEventStream, RuntimeModelRole, SessionContextSnapshot,
     action_audit::ActionAuditPolicy,
     action_policy::{
@@ -29,7 +29,7 @@ use crate::{
         ProposedToolExecutionOutcome, SessionState, ToolResultLedgerObservation,
         is_runtime_reserved_artifact_id,
     },
-    step::{StepContext, StepInput, compile_step_model_request},
+    step::{StepContext, StepInput, StepModelRequestParts, compile_step_model_request},
     tool::{
         ActionProposalEvidence, RegisteredTool, ToolActionPreflight, ToolExecutionContext,
         ToolExecutionError, ToolRegistry,
@@ -1365,6 +1365,7 @@ pub struct RuntimeBuilder {
     model_configs: RuntimeModelConfigs,
     registered_tools: Vec<RegisteredTool>,
     initial_context_summaries: BTreeMap<String, String>,
+    project_rules: Option<ProjectRules>,
     memory_activation_source: Arc<dyn MemoryActivationSource>,
     allow_low_risk_workspace_patches: bool,
     low_risk_process_runner: Option<Arc<dyn ProcessRunner>>,
@@ -1381,6 +1382,7 @@ impl RuntimeBuilder {
             model_configs: RuntimeModelConfigs::default(),
             registered_tools: Vec::new(),
             initial_context_summaries: BTreeMap::new(),
+            project_rules: None,
             memory_activation_source: Arc::new(StoredMemoryActivationSource),
             allow_low_risk_workspace_patches: false,
             low_risk_process_runner: None,
@@ -1451,6 +1453,17 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Adds explicit project rules to the cacheable stable request prefix.
+    ///
+    /// This is a construction-time projection for durable project instructions
+    /// such as `AGENTS.md`. It does not scan the filesystem and is separate
+    /// from context summaries, ledger facts, and artifact payloads.
+    #[must_use]
+    pub fn project_rules(mut self, project_rules: ProjectRules) -> Self {
+        self.project_rules = Some(project_rules);
+        self
+    }
+
     /// Opts in to executing validated low-risk workspace patch proposals.
     ///
     /// This keeps the default policy conservative: workspace writes remain
@@ -1516,6 +1529,9 @@ impl RuntimeBuilder {
         let mut session = SessionState::new(self.session_id.clone());
         for (id, text) in self.initial_context_summaries {
             session.seed_context_summary(&id, &text)?;
+        }
+        if let Some(project_rules) = self.project_rules {
+            session.set_project_rules(project_rules);
         }
 
         Ok(Runtime {
@@ -1726,7 +1742,7 @@ async fn run_provider_step(
         "runtime memories activated"
     );
 
-    let (snapshot, append_only_body, continuations, activation_epoch) = {
+    let (snapshot, project_rules, append_only_body, continuations, activation_epoch) = {
         let mut session = inner.session.lock().await;
         if token.is_cancelled() {
             drop(session);
@@ -1774,6 +1790,7 @@ async fn run_provider_step(
         };
         (
             session.context_snapshot(),
+            session.project_rules(),
             append_only_body,
             continuations,
             activation_epoch,
@@ -1801,15 +1818,16 @@ async fn run_provider_step(
         }
     };
 
-    let request = match compile_step_model_request(
-        &input,
-        provider_config.model(),
-        &compiled_context,
-        &append_only_body,
-        &continuations,
+    let request = match compile_step_model_request(StepModelRequestParts {
+        input: &input,
+        model: provider_config.model(),
+        project_rules: project_rules.as_ref(),
+        context: &compiled_context,
+        append_only_body: &append_only_body,
+        continuations: &continuations,
         tool_specs,
         generation_config,
-    ) {
+    }) {
         Ok(request) => {
             tracing::debug!(
                 category = "model_request_compiled",

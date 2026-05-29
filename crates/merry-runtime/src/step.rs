@@ -5,7 +5,7 @@
 //! crates render those normalized requests into wire formats.
 
 use crate::{
-    CompiledContext, RuntimeError, artifact::ArtifactContent,
+    CompiledContext, ProjectRules, RuntimeError, artifact::ArtifactContent,
     session::ResolvedToolContinuationSnapshot,
 };
 use merry_core::{PendingToolCall, ToolCallResult, ToolCallResultStatus, ToolSpec};
@@ -159,18 +159,37 @@ fn validate_user_text(text: &str) -> Result<(), RuntimeError> {
     Ok(())
 }
 
+pub(crate) struct StepModelRequestParts<'a> {
+    pub(crate) input: &'a StepInput,
+    pub(crate) model: &'a ModelName,
+    pub(crate) project_rules: Option<&'a ProjectRules>,
+    pub(crate) context: &'a CompiledContext,
+    pub(crate) append_only_body: &'a [CompiledSessionMessage],
+    pub(crate) continuations: &'a [ResolvedToolContinuationSnapshot],
+    pub(crate) tool_specs: Vec<ToolSpec>,
+    pub(crate) generation_config: GenerationConfig,
+}
+
 pub(crate) fn compile_step_model_request(
-    input: &StepInput,
-    model: &ModelName,
-    context: &CompiledContext,
-    append_only_body: &[CompiledSessionMessage],
-    continuations: &[ResolvedToolContinuationSnapshot],
-    tool_specs: Vec<ToolSpec>,
-    generation_config: GenerationConfig,
+    parts: StepModelRequestParts<'_>,
 ) -> Result<ModelRequest, merry_llm::ModelError> {
+    let StepModelRequestParts {
+        input,
+        model,
+        project_rules,
+        context,
+        append_only_body,
+        continuations,
+        tool_specs,
+        generation_config,
+    } = parts;
+
     let context_snapshot = context.to_snapshot();
+    let stable_prefix_message_count = 1 + usize::from(project_rules.is_some());
     let mut messages = Vec::with_capacity(
-        if context_snapshot.is_empty() { 2 } else { 3 } + append_only_body.len(),
+        stable_prefix_message_count
+            + if context_snapshot.is_empty() { 1 } else { 2 }
+            + append_only_body.len(),
     );
 
     // Keep provider prompt projection allowlisted and ordered:
@@ -182,6 +201,13 @@ pub(crate) fn compile_step_model_request(
         ModelMessageRole::System,
         ModelContent::text(DEFAULT_RUNTIME_BASE_INSTRUCTIONS)?,
     )?);
+
+    if let Some(project_rules) = project_rules {
+        messages.push(ModelMessage::new(
+            ModelMessageRole::System,
+            ModelContent::text(&project_rules.to_stable_prefix_message_text())?,
+        )?);
+    }
 
     if !context_snapshot.is_empty() {
         messages.push(ModelMessage::new(
@@ -216,7 +242,7 @@ pub(crate) fn compile_step_model_request(
         tool_specs,
         continuations,
         generation_config,
-        1,
+        stable_prefix_message_count,
     )
 }
 
