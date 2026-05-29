@@ -1518,7 +1518,7 @@ git commit -m "feat(runtime): resolve context window budgets"
 - Modify: `crates/merry-llm/src/request.rs`
 - Modify: `crates/merry-runtime/tests/agent_loop.rs`
 
-- [ ] **Step 1: Add an empty checkpoint segment to the compiler shape**
+- [x] **Step 1: Add an empty checkpoint segment to the compiler shape**
 
 Add a runtime-owned checkpoint slot to the compiled context shape. This slot exists between TaskAnchor/project rules and the append-only body. It may be empty in this plan.
 
@@ -1539,7 +1539,12 @@ checkpoint: Option<CompiledCheckpoint>
 
 and leave it `None` throughout this implementation. The important acceptance point is structural: an absent checkpoint renders no prompt text, but the compiler has an explicit place where the latest ledger-derived checkpoint will later live.
 
-- [ ] **Step 2: Add checkpoint hash diagnostics**
+Implementation note: completed earlier in `e5130d6`. `CompiledContext` now has
+a runtime-owned empty checkpoint slot, and the provider-boundary test
+`empty_checkpoint_slot_renders_no_prompt_text` proves the absent checkpoint
+does not render prompt text.
+
+- [x] **Step 2: Add checkpoint hash diagnostics**
 
 If `ModelRequest` diagnostics are expanded in this milestone, add a `checkpoint_hash` or make sure `dynamic_context_hash` test coverage can distinguish:
 
@@ -1551,7 +1556,11 @@ append-only body after checkpoint
 
 If adding a public hash is premature, keep the slot internal and add a test that an empty checkpoint does not change request messages or stable prefix hash.
 
-- [ ] **Step 3: Add trigger enum**
+Implementation note: no public checkpoint hash was added. Existing request
+message and stable-prefix tests cover the empty checkpoint segment without
+expanding the public request diagnostics.
+
+- [x] **Step 3: Add trigger enum**
 
 This task is intentionally only a trigger skeleton. It does not implement checkpoint content generation, checkpoint prompt projection, removal of old raw function-call continuity after checkpoint, or model-assisted summary generation.
 
@@ -1566,7 +1575,7 @@ pub enum CheckpointDecision {
 }
 ```
 
-- [ ] **Step 4: Add pure decision function**
+- [x] **Step 4: Add pure decision function**
 
 Add:
 
@@ -1585,7 +1594,7 @@ pub fn decide_checkpoint(
 }
 ```
 
-- [ ] **Step 5: Add trigger tests**
+- [x] **Step 5: Add trigger tests**
 
 Add:
 
@@ -1613,7 +1622,7 @@ fn checkpoint_decision_uses_watermarks_not_turn_counts() {
 }
 ```
 
-- [ ] **Step 6: Add empty-segment rendering tests**
+- [x] **Step 6: Add empty-segment rendering tests**
 
 Add tests:
 
@@ -1634,7 +1643,11 @@ fn checkpoint_segment_is_separate_from_append_only_body() {
 }
 ```
 
-- [ ] **Step 7: Keep content generation unwired**
+Implementation note: covered by provider-boundary test
+`empty_checkpoint_slot_renders_no_prompt_text`; no checkpoint content body or
+separate checkpoint hash is exposed in this slice.
+
+- [x] **Step 7: Keep content generation unwired**
 
 Do not compact prompt history yet. This task only creates deterministic policy primitives for a later compiler integration. It must not be marked as satisfying checkpoint/compaction acceptance from the spec.
 
@@ -1647,7 +1660,7 @@ unresolved or uncheckpointed function-call continuity remains exact
 old raw function-call continuity is removed only after checkpoint is recorded
 ```
 
-- [ ] **Step 8: Run tests**
+- [x] **Step 8: Run tests**
 
 Run:
 
@@ -1658,7 +1671,7 @@ cargo test -p merry-runtime checkpoint_segment
 
 Expected: PASS.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add crates/merry-runtime/src/context.rs crates/merry-runtime/src/step.rs crates/merry-llm/src/request.rs crates/merry-runtime/tests/agent_loop.rs
