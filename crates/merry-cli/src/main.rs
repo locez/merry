@@ -722,6 +722,9 @@ fn build_sandbox_plan(host: &SandboxHost, path: OsString, bwrap: PathBuf) -> San
         os("--ro-bind-try"),
         os("/lib64"),
         os("/lib64"),
+        os("--ro-bind-try"),
+        os("/opt"),
+        os("/opt"),
     ];
     for path in SANDBOX_ETC_READ_ONLY_FILE_PATHS {
         if Path::new(path).exists() {
@@ -3902,6 +3905,7 @@ api_key_file = "secrets/openai.key"
             &args,
             &["--ro-bind-try", "/lib64", "/lib64"]
         ));
+        assert!(contains_sequence(&args, &["--ro-bind-try", "/opt", "/opt"]));
         assert!(contains_sequence(
             &args,
             &[
