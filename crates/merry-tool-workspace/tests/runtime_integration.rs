@@ -1071,6 +1071,35 @@ async fn opt_in_workspace_patch_tool_applies_patch_and_records_artifact_before_r
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn opt_in_workspace_patch_preflight_failure_resolves_with_patch_diagnostic() {
+    let temp = TempWorkspace::new("patch-opt-in-preflight-failure");
+    temp.write_text("note.txt", "alpha\nold\nomega\n");
+    let runtime = runtime_with_opt_in_workspace_patch_tools(
+        temp.path(),
+        pending_patch_call("note.txt", "missing", "new"),
+    );
+
+    let _pending_events = collect_step(&runtime, "patch note").await;
+    let pending = runtime
+        .pending_tool_calls()
+        .await
+        .into_iter()
+        .next()
+        .expect("pending call should be stored");
+
+    let execution_events = runtime
+        .execute_tool_call(pending.id(), ToolExecutionContext::default())
+        .await
+        .expect("patch preflight failure should resolve as a failed tool result");
+
+    assert_eq!(
+        fs::read_to_string(temp.path().join("note.txt")).expect("workspace file should read"),
+        "alpha\nold\nomega\n"
+    );
+    assert_failed_json_result(&execution_events, "workspace_patch_preimage_absent");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn opt_in_patch_success_continuation_does_not_leak_internal_evidence() {
     let temp = TempWorkspace::new("patch-opt-in-no-leak");
     temp.write_text("note.txt", "alpha\nold\nomega\n");
