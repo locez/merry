@@ -914,7 +914,14 @@ impl ToolExecutor for WorkspacePatchExecutor {
 
             let args = match parse_workspace_patch_args(&call) {
                 Ok(args) => args,
-                Err(_) => return Ok(ToolActionPreflight::NoProposal),
+                Err(message) => {
+                    return Ok(ToolActionPreflight::Outcome(failed_outcome(
+                        WORKSPACE_PATCH_TOOL,
+                        ERROR_INVALID_ARGUMENTS,
+                        message,
+                        None::<String>,
+                    )));
+                }
             };
 
             let state = Arc::clone(&self.state);
@@ -2129,7 +2136,9 @@ fn propose_workspace_patch_blocking_checked(
             .map_err(|error| ToolExecutionError::infrastructure(error.to_string()))?;
             Ok(ToolActionPreflight::Proposal(proposal))
         }
-        Ok(WorkspacePatchPlanOutcome::Failure(_)) => Ok(ToolActionPreflight::NoProposal),
+        Ok(WorkspacePatchPlanOutcome::Failure(outcome)) => {
+            Ok(ToolActionPreflight::Outcome(outcome))
+        }
         Err(error) => Err(error),
     }
 }
@@ -3692,6 +3701,18 @@ mod tests {
         old_text: &str,
         new_text: &str,
     ) -> Option<ActionProposal> {
+        match patch_preflight(tools, path, old_text, new_text) {
+            ToolActionPreflight::Proposal(proposal) => Some(proposal),
+            ToolActionPreflight::NoProposal | ToolActionPreflight::Outcome(_) => None,
+        }
+    }
+
+    fn patch_preflight(
+        tools: &ReadOnlyWorkspaceTools,
+        path: &str,
+        old_text: &str,
+        new_text: &str,
+    ) -> ToolActionPreflight {
         let patch = update_patch(path, old_text, new_text);
         let call = pending_call_for(
             WORKSPACE_PATCH_TOOL,
@@ -3699,17 +3720,13 @@ mod tests {
                 "patch": patch
             }),
         );
-        match propose_workspace_patch_blocking_checked(
+        propose_workspace_patch_blocking_checked(
             &tools.state,
             WorkspacePatchArgs { patch },
             &call,
             &|| false,
         )
         .expect("uncancelled workspace patch proposal should not return cancellation")
-        {
-            ToolActionPreflight::Proposal(proposal) => Some(proposal),
-            ToolActionPreflight::NoProposal | ToolActionPreflight::Outcome(_) => None,
-        }
     }
 
     fn update_patch(path: &str, old_text: &str, new_text: &str) -> String {
@@ -5125,19 +5142,37 @@ mod tests {
     }
 
     #[test]
-    fn workspace_patch_proposal_returns_none_for_invalid_or_stale_patch_without_mutation() {
+    fn workspace_patch_preflight_returns_failed_outcome_for_invalid_or_stale_patch_without_mutation()
+     {
         let temp = TempWorkspace::new("patch-proposal-none");
         temp.write_text("note.txt", "alpha\nold\nomega\n");
         let tools = tools_for(temp.path());
 
-        assert!(
-            patch_proposal(&tools, "note.txt", "missing", "new").is_none(),
-            "stale preimage should not produce proposal evidence"
+        let stale = patch_preflight(&tools, "note.txt", "missing", "new");
+        let ToolActionPreflight::Outcome(stale) = stale else {
+            panic!("stale preimage should produce a failed preflight outcome");
+        };
+        assert_failed_json_for_tool(
+            &stale,
+            WORKSPACE_PATCH_TOOL,
+            ERROR_PREIMAGE_ABSENT,
+            Some("note.txt"),
+            temp.path(),
         );
-        assert!(
-            patch_proposal(&tools, "../note.txt", "old", "new").is_none(),
-            "invalid path should not produce proposal evidence"
+        assert!(stale.execution_evidence().is_none());
+
+        let invalid = patch_preflight(&tools, "../note.txt", "old", "new");
+        let ToolActionPreflight::Outcome(invalid) = invalid else {
+            panic!("invalid path should produce a failed preflight outcome");
+        };
+        assert_failed_json_for_tool(
+            &invalid,
+            WORKSPACE_PATCH_TOOL,
+            ERROR_PATH_DENIED,
+            Some("../note.txt"),
+            temp.path(),
         );
+        assert!(invalid.execution_evidence().is_none());
         assert_eq!(
             read_text(&temp.path().join("note.txt")),
             "alpha\nold\nomega\n"

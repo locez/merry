@@ -1168,18 +1168,18 @@ async fn run_debug_coding_loop_task_live_smoke(
         .await
         .map_err(unexpected)?;
 
-    assert_coding_loop_task_live_smoke_result(&runtime, &result, &smoke_root, fixture).await?;
-    assert_coding_loop_task_live_smoke_tool_sequence(&runtime, result.events(), fixture).await?;
+    let assertion = async {
+        assert_coding_loop_task_live_smoke_result(&runtime, &result, &smoke_root, fixture).await?;
+        assert_coding_loop_task_live_smoke_tool_sequence(&runtime, result.events(), fixture).await
+    }
+    .await;
 
     let mut writer = BufWriter::new(tokio::io::stdout());
-    writer
-        .write_all(b"coding-loop-task-live-smoke: ok\n")
-        .await
-        .map_err(stdout_error)?;
-    for event in result.events() {
-        write_runtime_event(event, &mut writer).await?;
-    }
-    writer.flush().await.map_err(stdout_error)
+    write_coding_loop_task_live_smoke_report(assertion.is_ok(), result.events(), &mut writer)
+        .await?;
+    writer.flush().await.map_err(stdout_error)?;
+
+    assertion
 }
 
 async fn coding_loop_smoke_admission_from_current_process(
@@ -2467,10 +2467,37 @@ async fn write_runtime_events<W>(events: Vec<RuntimeEvent>, writer: &mut W) -> R
 where
     W: AsyncWrite + Unpin,
 {
+    write_runtime_event_slice(&events, writer).await
+}
+
+async fn write_runtime_event_slice<W>(
+    events: &[RuntimeEvent],
+    writer: &mut W,
+) -> Result<(), CliError>
+where
+    W: AsyncWrite + Unpin,
+{
     for event in events {
-        write_runtime_event(&event, writer).await?;
+        write_runtime_event(event, writer).await?;
     }
     Ok(())
+}
+
+async fn write_coding_loop_task_live_smoke_report<W>(
+    passed: bool,
+    events: &[RuntimeEvent],
+    writer: &mut W,
+) -> Result<(), CliError>
+where
+    W: AsyncWrite + Unpin,
+{
+    let header = if passed {
+        b"coding-loop-task-live-smoke: ok\n".as_slice()
+    } else {
+        b"coding-loop-task-live-smoke: failed\n".as_slice()
+    };
+    writer.write_all(header).await.map_err(stdout_error)?;
+    write_runtime_event_slice(events, writer).await
 }
 
 async fn write_shell_process_output<W>(
@@ -2837,7 +2864,7 @@ mod tests {
         debug_openai_usage, find_bwrap_in_path, os, plan_sandbox_bootstrap_with_file_exists,
         report_cli_exit, run_debug_coding_loop_smoke, sandbox_runtime_profile_from_evidence,
         shell_process_action_intent, shell_runtime_admission, shell_usage,
-        write_debug_openai_tool_events,
+        write_coding_loop_task_live_smoke_report, write_debug_openai_tool_events,
     };
     use super::{DEBUG_TOOL_NAME, run_shell_to_writer, write_runtime_step_events};
     use crate::CodingLoopTaskSmokeTask;
@@ -4811,5 +4838,32 @@ api_key_file = "secrets/openai.key"
         let requests = provider.recorded_requests();
         assert_eq!(requests.len(), 1);
         assert!(requests[0].continuations().is_empty());
+    }
+
+    #[tokio::test]
+    async fn task_live_smoke_report_preserves_runtime_events_on_failure() {
+        let event = RuntimeEvent::new(
+            merry_core::SessionId::new("coding-loop-task-live-smoke").unwrap(),
+            1,
+            merry_core::RuntimeEventKind::StepStarted,
+        );
+        let mut output = Vec::new();
+
+        write_coding_loop_task_live_smoke_report(false, &[event], &mut output)
+            .await
+            .unwrap_or_else(|_| panic!("task live smoke report should write"));
+
+        let text = String::from_utf8(output).expect("output should be utf-8");
+        let mut lines = text.lines();
+        assert_eq!(lines.next(), Some("coding-loop-task-live-smoke: failed"));
+        let event = lines
+            .next()
+            .map(|line| serde_json::from_str::<RuntimeEvent>(line).expect("event should parse"))
+            .expect("failure report should include runtime event JSONL");
+        assert!(matches!(
+            event.kind,
+            merry_core::RuntimeEventKind::StepStarted
+        ));
+        assert!(lines.next().is_none());
     }
 }
