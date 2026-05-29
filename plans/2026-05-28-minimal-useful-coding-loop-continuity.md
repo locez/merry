@@ -1683,7 +1683,7 @@ git commit -m "feat(runtime): reserve checkpoint segment"
 **Files:**
 - No required edits unless tests expose a regression.
 
-- [ ] **Step 1: Run formatting**
+- [x] **Step 1: Run formatting**
 
 Run:
 
@@ -1693,14 +1693,17 @@ cargo fmt --all --check
 
 Expected: PASS.
 
-- [ ] **Step 2: Run focused test suites**
+Result 2026-05-29: PASS.
+
+- [x] **Step 2: Run focused test suites**
 
 Run:
 
 ```bash
 cargo test -p merry-runtime agent_loop
-cargo test -p merry-runtime context_projection
-cargo test -p merry-runtime ordinary_user_messages_remain_append_only_without_task_anchor
+cargo test -p merry-runtime ledger_observations_do_not_enter_prompt_context_by_default
+cargo test -p merry-runtime artifact_payloads_do_not_enter_prompt_context_by_default
+cargo test -p merry-runtime ordinary_user_and_assistant_messages_remain_append_only_without_task_anchor
 cargo test -p merry-runtime project_rules
 cargo test -p merry-runtime context_budget
 cargo test -p merry-runtime context_window_resolver
@@ -1711,7 +1714,11 @@ cargo test -p merry-cli coding_loop_task
 
 Expected: PASS.
 
-- [ ] **Step 3: Run broad checks if time allows**
+Result 2026-05-29: PASS. Replaced stale filters `context_projection` and
+`ordinary_user_messages_remain_append_only_without_task_anchor` with concrete
+test names that currently match real tests.
+
+- [x] **Step 3: Run broad checks if time allows**
 
 Run:
 
@@ -1722,6 +1729,8 @@ cargo test --all
 
 Expected: PASS. If too slow, record that focused checks passed and broad checks remain.
 
+Result 2026-05-29: PASS.
+
 - [ ] **Step 4: Run ignored bwrap smoke when available**
 
 Run:
@@ -1731,6 +1740,11 @@ cargo test -p merry-cli debug_coding_loop_task_smoke_runs_inside_real_bwrap_when
 ```
 
 Expected: PASS in an environment where nested `bwrap` works.
+
+Result 2026-05-29: Not used as completion evidence from the Codex sandbox.
+Real-bwrap smokes are host-shell checks; nested `bwrap` mount/namespace setup
+inside an outer sandbox is an expected environment limitation, not by itself a
+product regression.
 
 - [ ] **Step 5: Run live smoke when credentials are available**
 
@@ -1746,6 +1760,9 @@ Expected:
 JSONL RuntimeEvent records show inspect/read/patch/check/test/final
 coding-loop-task-live-smoke: ok
 ```
+
+Result 2026-05-29: Not run. Live OpenAI opt-in environment/config was not
+present, and live real-bwrap smoke should be run from an unsandboxed host shell.
 
 - [ ] **Step 6: Update public status only with user approval**
 
