@@ -65,6 +65,36 @@ The first version of this plan left too much room for a context projection bypas
 
 Each milestone must be committed separately unless the user says otherwise.
 
+## Implementation Status Sync: 2026-05-29
+
+This plan was partially stale after manual corrections and implementation work.
+Use this sync section to avoid redoing completed smoke/patch work:
+
+- **M1 is complete.** Uncheckpointed tool continuation retention and
+  terminal-completion retention were implemented in
+  `beaa63a fix(runtime): preserve coding loop continuity`.
+- **M3 live/task smoke feedback is mostly complete.** Runtime JSONL reporting
+  for task live smoke exists in `write_coding_loop_task_live_smoke_report`,
+  and `assert_coding_loop_task_live_smoke_tool_sequence` checks required tools,
+  `AGENTS.md`, `src/lib.rs`, `workspace_patch`, `cargo check -p`, and
+  `cargo test -p`. Remaining optional tightening: explicitly require
+  `tests/status.rs` reads and add a compact failure summary with loop status,
+  step count, pending-call state, missing observations, and fixture path.
+- **M4 patch/fixture realism is substantially implemented.** The model-visible
+  patch tool is `workspace_patch`; standard patch envelope alias, multi-file
+  unit execution, ambiguous/stale preimage failures, localized patch size
+  checks, natural task live prompt, and repeated-`todo` status fixture are
+  covered in current code/tests, mainly across `897184e`,
+  `2adf538`, and `c8077a6`.
+- **Do not continue M3/M4 as the next milestone by default.** The next useful
+  implementation slice is M2 context/request assembly guardrails unless a new
+  live-smoke failure exposes a concrete blocker.
+- **Still open from this plan:** Task 4/5/6 context projection,
+  append-only body, and project-rules stable prefix; Task 13/14/15
+  budget/window/checkpoint skeleton. Dedicated parser-only duplicate-file
+  tests and runtime-level multi-file patch integration remain optional
+  hardening, not the next active blocker.
+
 ## Acceptance Commands
 
 Run these after each milestone that touches Rust behavior:
@@ -262,7 +292,9 @@ cargo test -p merry-tool-workspace --test runtime_integration coding_loop_harnes
 
 Expected: all PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
+
+Completed in `beaa63a fix(runtime): preserve coding loop continuity`.
 
 ```bash
 git add crates/merry-runtime/src/session.rs crates/merry-runtime/src/runtime.rs crates/merry-runtime/tests/agent_loop.rs
@@ -331,7 +363,9 @@ cargo test -p merry-runtime agent_loop_keeps_uncheckpointed_continuations_after_
 
 Expected: PASS.
 
-- [ ] **Step 4: Commit if this test was not included in Task 2**
+- [x] **Step 4: Commit if this test was not included in Task 2**
+
+Included in the M1 continuation commit `beaa63a`.
 
 ```bash
 git add crates/merry-runtime/tests/agent_loop.rs
@@ -665,7 +699,7 @@ Only add files actually changed.
 - Modify: `crates/merry-cli/src/main.rs`
 - Modify: `crates/merry-cli/tests/debug.rs`
 
-- [ ] **Step 1: Keep runtime event printing for the debug live smoke**
+- [x] **Step 1: Keep runtime event printing for the debug live smoke**
 
 Inspect the existing event writer:
 
@@ -676,6 +710,11 @@ rg -n "write_runtime_events|coding-loop-task-live-smoke|RuntimeEvent" crates/mer
 Ensure `run_debug_coding_loop_task_live_smoke` prints each `RuntimeEvent` as JSONL before or alongside the final `coding-loop-task-live-smoke: ok` line. Do not move this into production behavior; it is for debug smoke only.
 
 - [ ] **Step 2: Add assertions for realistic task behavior**
+
+Partially complete: current code checks required tools, `AGENTS.md`,
+`src/lib.rs`, `workspace_patch`, `cargo check -p`, and `cargo test -p`.
+It does not yet explicitly require reading `tests/status.rs`, so this remains
+unchecked as optional tightening.
 
 Keep or add assertions in `assert_coding_loop_task_live_smoke_tool_sequence` that prove the live model:
 
@@ -693,6 +732,11 @@ If the current assertion requires exact order and creates flakiness, prefer "mus
 
 - [ ] **Step 3: Ensure live smoke failure reports are useful**
 
+Partially complete: failed live task smoke writes a failed header, runtime
+event JSONL, and process artifact previews. It does not yet include the compact
+summary requested here: loop status, step count, pending-call state, missing
+observations, and fixture path.
+
 When the live smoke fails after running the loop, the error message should include:
 
 ```text
@@ -705,7 +749,10 @@ path to .merry/local/coding-loop-task-live-smoke
 
 Do not include API keys, provider payloads, or raw large file contents.
 
-- [ ] **Step 4: Run deterministic CLI tests**
+- [x] **Step 4: Run deterministic CLI tests**
+
+Covered by later implementation/verification commits for the current smoke
+shape, including `75152c9` and `2adf538`.
 
 Run:
 
@@ -716,7 +763,10 @@ cargo test -p merry-cli debug_coding_loop_task_live_smoke_requires_with_sandbox_
 
 Expected: PASS.
 
-- [ ] **Step 5: Run optional live smoke only when credentials are configured**
+- [x] **Step 5: Run optional live smoke only when credentials are configured**
+
+The live task lane was exercised during the smoke-correction work; rerun
+remains opt-in when credentials and outer bwrap are available.
 
 Run only if local XDG config and `MERRY_OPENAI_DEBUG=1` are intentionally available:
 
@@ -730,7 +780,10 @@ Expected: the command prints JSONL runtime events and ends with:
 coding-loop-task-live-smoke: ok
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
+
+Relevant commits: `75152c9 chore(cli): dump live task smoke runtime events`
+and `2adf538 test(cli): make live coding task smoke realistic`.
 
 ```bash
 git add crates/merry-cli/src/main.rs crates/merry-cli/tests/debug.rs
@@ -746,7 +799,7 @@ git commit -m "test(cli): tighten live coding smoke feedback"
 - Modify: `crates/merry-cli/tests/debug.rs`
 - Modify: `crates/merry-runtime/tests/agent_loop.rs`
 
-- [ ] **Step 1: Confirm current tool name and schema**
+- [x] **Step 1: Confirm current tool name and schema**
 
 Run:
 
@@ -762,7 +815,7 @@ workspace_patch
 
 If `workspace_patch_file` still exists in model-visible tool names, rename it to `workspace_patch` and update tests. If it is already `workspace_patch`, do not rename.
 
-- [ ] **Step 2: Keep one patch tool, not two**
+- [x] **Step 2: Keep one patch tool, not two**
 
 The only model-facing write tool for this slice should accept:
 
@@ -774,7 +827,7 @@ The only model-facing write tool for this slice should accept:
 
 Do not keep an old `path + old_text + new_text` tool alongside the patch tool unless a deterministic backwards-compatibility test proves the old shape is still used by public callers.
 
-- [ ] **Step 3: Update the tool description**
+- [x] **Step 3: Update the tool description**
 
 In `workspace_patch_spec()`, keep the description explicit:
 
@@ -782,7 +835,7 @@ In `workspace_patch_spec()`, keep the description explicit:
 "Apply one Merry workspace patch set to UTF-8 files under configured stable workspace roots. Use workspace-relative paths in *** Update File: ... headers. Include enough unchanged context lines in each hunk to make the preimage unique. Prefer localized hunks; do not submit whole-file content for small edits."
 ```
 
-- [ ] **Step 4: Run schema-related tests**
+- [x] **Step 4: Run schema-related tests**
 
 Run:
 
@@ -793,7 +846,11 @@ cargo test -p merry-cli coding_loop_task_live_prompt_delegates_to_default_prompt
 
 If the first filter finds no tests, run the exact workspace patch parser tests in Task 9 after adding them.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
+
+Current code has model-visible `workspace_patch`, the single `patch` string
+argument, and an explicit localized-edit description. Covered by
+`897184e Advance coding loop patch and context`.
 
 ```bash
 git add crates/merry-tool-workspace/src/lib.rs crates/merry-tool-workspace/tests/runtime_integration.rs crates/merry-cli/src/main.rs crates/merry-cli/tests/debug.rs crates/merry-runtime/tests/agent_loop.rs
@@ -808,6 +865,10 @@ Only add files actually changed.
 - Modify: `crates/merry-tool-workspace/src/lib.rs`
 
 - [ ] **Step 1: Add parser tests**
+
+Equivalent executor-level coverage exists for standard envelope alias and
+multi-file patch execution. Dedicated parser-only tests for duplicate update
+files and explicit `@@` markers were not found and remain optional hardening.
 
 Inside the existing `#[cfg(test)]` module in `crates/merry-tool-workspace/src/lib.rs`, add tests for:
 
@@ -871,6 +932,8 @@ Adjust exact helper names if the test module already has constructors for update
 
 - [ ] **Step 2: Run parser tests**
 
+No dedicated `workspace_patch_parser` test filter exists yet.
+
 Run:
 
 ```bash
@@ -880,6 +943,9 @@ cargo test -p merry-tool-workspace workspace_patch_parser
 Expected: PASS.
 
 - [ ] **Step 3: Commit**
+
+Parser-only coverage remains optional; do not treat this as the next blocker
+unless parser regressions appear.
 
 ```bash
 git add crates/merry-tool-workspace/src/lib.rs
@@ -891,7 +957,11 @@ git commit -m "test(workspace): cover workspace patch parser shape"
 **Files:**
 - Modify: `crates/merry-tool-workspace/src/lib.rs`
 
-- [ ] **Step 1: Add a failing repeated-text test**
+- [x] **Step 1: Add a failing repeated-text test**
+
+Repeated-text behavior is covered through executor-level ambiguous preimage
+tests and the CLI status fixture, which contains multiple plausible
+`value: "todo"` entries.
 
 Add a test that creates a temporary workspace file containing repeated target text and a hunk with surrounding context that should match only one location:
 
@@ -927,7 +997,7 @@ fn workspace_patch_applies_repeated_removed_text_when_context_is_unique() {
 
 Use existing helper names from the module instead of introducing duplicate helpers if available.
 
-- [ ] **Step 2: Run the test and confirm current behavior**
+- [x] **Step 2: Run the test and confirm current behavior**
 
 Run:
 
@@ -937,7 +1007,10 @@ cargo test -p merry-tool-workspace workspace_patch_applies_repeated_removed_text
 
 Expected: PASS if current context-based `old_text` already handles this. If it fails, fix in Step 3.
 
-- [ ] **Step 3: Fix only if needed**
+- [x] **Step 3: Fix only if needed**
+
+Current hunk matching builds preimage from context plus removed lines in
+`build_patch_replacement`, so no line-number parsing is needed for this slice.
 
 If the test fails because matching still sees ambiguity, update `build_patch_replacement`/`build_replacement` so the full hunk preimage includes context and removed lines, not only the removed line. The current implementation should already build `old_text` from context plus removed lines:
 
@@ -947,7 +1020,9 @@ WorkspacePatchLine::Context(text) | WorkspacePatchLine::Remove(text) => Some(tex
 
 Do not add line-number parsing unless a failing test proves context-only hunks are insufficient.
 
-- [ ] **Step 4: Add an ambiguity test when context is missing**
+- [x] **Step 4: Add an ambiguity test when context is missing**
+
+Covered by `workspace_patch_stale_and_ambiguous_preimages_fail_without_mutation`.
 
 Add:
 
@@ -980,7 +1055,7 @@ fn workspace_patch_rejects_repeated_removed_text_without_unique_context() {
 
 Adjust diagnostic code assertion to the current `ERROR_PREIMAGE_AMBIGUOUS` value.
 
-- [ ] **Step 5: Run tests**
+- [x] **Step 5: Run tests**
 
 Run:
 
@@ -991,7 +1066,10 @@ cargo test -p merry-tool-workspace workspace_patch
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
+
+Covered by `897184e Advance coding loop patch and context` and
+`2adf538 test(cli): make live coding task smoke realistic`.
 
 ```bash
 git add crates/merry-tool-workspace/src/lib.rs
@@ -1004,7 +1082,9 @@ git commit -m "test(workspace): require unique patch hunk context"
 - Modify: `crates/merry-tool-workspace/src/lib.rs`
 - Modify: `crates/merry-tool-workspace/tests/runtime_integration.rs`
 
-- [ ] **Step 1: Add unit test for multi-file execution**
+- [x] **Step 1: Add unit test for multi-file execution**
+
+Covered by `workspace_patch_executor_applies_multi_file_patch_and_records_each_change`.
 
 In `crates/merry-tool-workspace/src/lib.rs`, add a test that writes two files and applies one patch with two `*** Update File:` sections. Assert both files changed and result payload lists two changes.
 
@@ -1025,6 +1105,9 @@ Use this expected patch shape:
 
 - [ ] **Step 2: Add integration test through runtime tool execution**
 
+Runtime integration still covers single-file patch in the coding-loop harness.
+A dedicated multi-file runtime-tool integration test was not found.
+
 In `crates/merry-tool-workspace/tests/runtime_integration.rs`, add a fake-provider sequence:
 
 ```text
@@ -1041,7 +1124,12 @@ assert!(test changed);
 assert_eq!(patch result status, ToolCallResultStatus::Succeeded);
 ```
 
-- [ ] **Step 3: Decide partial-application behavior and lock it**
+- [x] **Step 3: Decide partial-application behavior and lock it**
+
+Current planner parses/resolves/reads/builds all file plans before execution.
+Execution-time stale/missing/ambiguous failures are covered by fail-without
+mutation tests for the relevant single-file cases. A dedicated multi-file
+partial-write failure test remains optional hardening.
 
 For this MVP, use all-or-nothing planning:
 
@@ -1055,7 +1143,7 @@ only then write files
 
 If current code writes earlier files before a later file fails, add a failing test and fix the planner/executor so no files are written until all file plans are valid.
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run:
 
@@ -1066,7 +1154,9 @@ cargo test -p merry-tool-workspace runtime_integration
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
+
+Unit-level multi-file coverage is included in `897184e`.
 
 ```bash
 git add crates/merry-tool-workspace/src/lib.rs crates/merry-tool-workspace/tests/runtime_integration.rs
@@ -1079,7 +1169,7 @@ git commit -m "test(workspace): cover multi-file workspace patches"
 - Modify: `crates/merry-cli/src/main.rs`
 - Modify: `crates/merry-cli/tests/debug.rs`
 
-- [ ] **Step 1: Inspect current fixture**
+- [x] **Step 1: Inspect current fixture**
 
 Run:
 
@@ -1087,7 +1177,7 @@ Run:
 rg -n "CodingLoopTaskSmokeTask|status-text|source_satisfies_task|tests/status.rs|AGENTS.md" crates/merry-cli/src/main.rs crates/merry-cli/tests/debug.rs
 ```
 
-- [ ] **Step 2: Make the source contain repeated ordinary text**
+- [x] **Step 2: Make the source contain repeated ordinary text**
 
 Update the `status-text` fixture so `src/lib.rs` contains at least two plausible `"todo"` occurrences, but only one function or entry affects `tests/status.rs`.
 
@@ -1115,7 +1205,7 @@ pub fn status_text() -> &'static str {
 
 The integration test should require only the `status` entry to become `"done"`.
 
-- [ ] **Step 3: Keep the prompt natural**
+- [x] **Step 3: Keep the prompt natural**
 
 Do not tell the model the exact path or symbol in the live prompt. Keep:
 
@@ -1125,7 +1215,7 @@ Fix this disposable Rust project so the required status-text behavior is impleme
 
 Project-specific details belong in `AGENTS.md` and tests, not the user prompt.
 
-- [ ] **Step 4: Update deterministic fake provider patch only if needed**
+- [x] **Step 4: Update deterministic fake provider patch only if needed**
 
 The deterministic fake provider can still provide the exact patch. Its patch should use context:
 
@@ -1141,7 +1231,7 @@ The deterministic fake provider can still provide the exact patch. Its patch sho
 *** End Workspace Patch
 ```
 
-- [ ] **Step 5: Run CLI deterministic tests**
+- [x] **Step 5: Run CLI deterministic tests**
 
 Run:
 
@@ -1152,7 +1242,9 @@ cargo test -p merry-cli coding_loop_task_smoke_patches_fixture_and_verifies_with
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
+
+Covered by `2adf538 test(cli): make live coding task smoke realistic`.
 
 ```bash
 git add crates/merry-cli/src/main.rs crates/merry-cli/tests/debug.rs
