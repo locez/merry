@@ -11,8 +11,8 @@ use merry_llm::{
     ToolArguments, testing::FakeModelProvider,
 };
 use merry_runtime::{
-    ArtifactContent, ArtifactContentKind, ArtifactError, ContextCompiler, ContextEvidence,
-    ContextProjection, ContextSummary, LedgerFactKind, LedgerProjection, ProjectRules,
+    ArtifactContent, ArtifactContentKind, ArtifactError, CompactedCheckpoint, ContextCompiler,
+    ContextEvidence, ContextSummary, LedgerFactKind, LedgerProjection, ProjectRules,
     RegisteredTool, Runtime, StepContext, StepInput, TaskAnchor, TokioProcessRunner,
     ToolActionKind, ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome, ToolExecutor,
     ToolExecutorFuture, process_command_tool,
@@ -1303,16 +1303,16 @@ async fn empty_checkpoint_slot_renders_no_prompt_text() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn explicit_context_projection_renders_after_task_anchor_before_append_only_body() {
+async fn compacted_checkpoint_renders_after_task_anchor_before_append_only_body() {
     let provider = FakeModelProvider::new(vec![
         Ok(completed_text_event("append-only assistant sentinel")),
         Ok(completed_event()),
     ]);
-    let runtime = Runtime::builder(session_id("provider-explicit-context-projection-order"))
+    let runtime = Runtime::builder(session_id("provider-compacted-checkpoint-order"))
         .task_anchor(TaskAnchor::new("task anchor sentinel").expect("valid task anchor"))
-        .context_projection(
-            ContextProjection::new("checkpoint", "explicit context projection sentinel")
-                .expect("valid projection"),
+        .compacted_checkpoint(
+            CompactedCheckpoint::new("compacted checkpoint sentinel")
+                .expect("valid compacted checkpoint"),
         )
         .model_provider(Arc::new(provider.clone()), model_name())
         .build()
@@ -1333,10 +1333,10 @@ async fn explicit_context_projection_renders_after_task_anchor_before_append_onl
         .iter()
         .position(|text| text.contains("task anchor sentinel"))
         .expect("task anchor should render");
-    let projection_index = messages
+    let checkpoint_index = messages
         .iter()
-        .position(|text| text.contains("explicit context projection sentinel"))
-        .expect("explicit projection should render");
+        .position(|text| text.contains("compacted checkpoint sentinel"))
+        .expect("compacted checkpoint should render");
     let append_user_index = messages
         .iter()
         .position(|text| text.contains("append-only user sentinel"))
@@ -1351,23 +1351,23 @@ async fn explicit_context_projection_renders_after_task_anchor_before_append_onl
         .expect("current user input should render");
 
     assert_eq!(requests[1].stable_prefix_message_count(), 1);
-    assert!(task_anchor_index < projection_index);
-    assert!(projection_index < append_user_index);
+    assert!(task_anchor_index < checkpoint_index);
+    assert!(checkpoint_index < append_user_index);
     assert!(append_user_index < append_assistant_index);
     assert!(append_assistant_index < current_user_index);
     assert!(
-        messages[projection_index].contains("context-projection:checkpoint"),
-        "projection should be marked as explicit context projection"
+        messages[checkpoint_index].contains("compacted-checkpoint:"),
+        "checkpoint should be marked as compacted checkpoint context"
     );
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn explicit_context_projection_does_not_project_unrelated_artifact_payloads() {
+async fn compacted_checkpoint_does_not_project_unrelated_artifact_payloads() {
     let provider = FakeModelProvider::new(vec![Ok(completed_event())]);
-    let runtime = Runtime::builder(session_id("provider-explicit-context-projection-boundary"))
-        .context_projection(
-            ContextProjection::new("checkpoint", "explicit projection payload")
-                .expect("valid projection"),
+    let runtime = Runtime::builder(session_id("provider-compacted-checkpoint-boundary"))
+        .compacted_checkpoint(
+            CompactedCheckpoint::new("compacted checkpoint payload")
+                .expect("valid compacted checkpoint"),
         )
         .model_provider(Arc::new(provider.clone()), model_name())
         .build()
@@ -1381,21 +1381,21 @@ async fn explicit_context_projection_does_not_project_unrelated_artifact_payload
         .await
         .expect("artifact should record");
 
-    collect_step(&runtime, "Answer with explicit projection only.").await;
+    collect_step(&runtime, "Answer with compacted checkpoint only.").await;
 
     let request = provider.recorded_requests()[0].clone();
     assert!(request.messages().iter().any(|message| {
         message
             .content()
             .as_text()
-            .contains("explicit projection payload")
+            .contains("compacted checkpoint payload")
     }));
     assert!(
         request
             .messages()
             .iter()
             .all(|message| !message.content().as_text().contains(payload)),
-        "explicit projection slot must not sweep unrelated artifact payloads into prompt"
+        "compacted checkpoint must not sweep unrelated artifact payloads into prompt"
     );
 }
 
@@ -1454,7 +1454,7 @@ async fn artifact_payloads_do_not_enter_prompt_context_by_default() {
         .await
         .expect("artifact should record");
 
-    collect_step(&runtime, "Answer without explicit context projection.").await;
+    collect_step(&runtime, "Answer without compacted checkpoint context.").await;
 
     let requests = provider.recorded_requests();
     assert_eq!(requests.len(), 1);

@@ -329,7 +329,7 @@ impl ContextCompiler {
             snapshot.entries(),
             snapshot.artifacts(),
             snapshot.memories(),
-            snapshot.projections(),
+            snapshot.compacted_checkpoint(),
         )
     }
 }
@@ -338,7 +338,7 @@ fn compile_entries(
     entries: &[ContextEntry],
     artifacts: &ArtifactRegistry,
     memories: &[ActivatedMemory],
-    projections: &[ContextProjection],
+    compacted_checkpoint: Option<&CompactedCheckpoint>,
 ) -> Result<CompiledContext, ContextError> {
     let mut sections = Vec::with_capacity(entries.len());
 
@@ -379,7 +379,7 @@ fn compile_entries(
     Ok(CompiledContext {
         sections,
         memory_projection,
-        checkpoint: ContextCheckpointSegment::new(projections.to_vec()),
+        checkpoint: ContextCheckpointSegment::new(compacted_checkpoint.cloned()),
     })
 }
 
@@ -406,7 +406,7 @@ pub struct SessionContextSnapshot {
     entries: Vec<ContextEntry>,
     artifacts: ArtifactRegistry,
     memories: Vec<ActivatedMemory>,
-    projections: Vec<ContextProjection>,
+    compacted_checkpoint: Option<CompactedCheckpoint>,
 }
 
 impl SessionContextSnapshot {
@@ -414,13 +414,13 @@ impl SessionContextSnapshot {
         entries: Vec<ContextEntry>,
         artifacts: ArtifactRegistry,
         memories: Vec<ActivatedMemory>,
-        projections: Vec<ContextProjection>,
+        compacted_checkpoint: Option<CompactedCheckpoint>,
     ) -> Self {
         Self {
             entries,
             artifacts,
             memories,
-            projections,
+            compacted_checkpoint,
         }
     }
 
@@ -436,8 +436,8 @@ impl SessionContextSnapshot {
         &self.memories
     }
 
-    fn projections(&self) -> &[ContextProjection] {
-        &self.projections
+    fn compacted_checkpoint(&self) -> Option<&CompactedCheckpoint> {
+        self.compacted_checkpoint.as_ref()
     }
 }
 
@@ -599,38 +599,28 @@ impl TaskAnchor {
     }
 }
 
-/// Explicit runtime-owned context projection for dynamic provider requests.
+/// Runtime-owned checkpoint left after compacting earlier dynamic state.
 ///
-/// This is the only prompt-facing context projection lane for checkpoint or
-/// context-policy content. It is intentionally separate from ledger facts,
-/// artifact payloads, and append-only chat history.
+/// This prompt-facing context is intentionally narrower than arbitrary context
+/// projection: ordinary ledger facts, artifact payloads, and tool-result
+/// observations must not enter through this path until a checkpoint/compaction
+/// boundary has selected and compacted them.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ContextProjection {
-    label: String,
+pub struct CompactedCheckpoint {
     text: String,
 }
 
-impl ContextProjection {
-    /// Creates a validated explicit context projection.
-    pub fn new(label: impl Into<String>, text: impl Into<String>) -> Result<Self, ContextError> {
-        let label = label.into();
-        validate_non_blank("context projection label", &label)?;
-        validate_no_control_characters("context projection label", &label)?;
-
+impl CompactedCheckpoint {
+    /// Creates validated compacted checkpoint text.
+    pub fn new(text: impl Into<String>) -> Result<Self, ContextError> {
         let text = text.into();
-        validate_non_blank("context projection text", &text)?;
-        validate_no_control_characters("context projection text", &text)?;
+        validate_non_blank("compacted checkpoint text", &text)?;
+        validate_no_control_characters("compacted checkpoint text", &text)?;
 
-        Ok(Self { label, text })
+        Ok(Self { text })
     }
 
-    /// Stable projection label, such as `checkpoint` or a context-policy name.
-    #[must_use]
-    pub fn label(&self) -> &str {
-        &self.label
-    }
-
-    /// Projection text selected by an explicit checkpoint/context-policy path.
+    /// Compacted checkpoint text selected by a checkpoint/compaction boundary.
     #[must_use]
     pub fn text(&self) -> &str {
         &self.text
@@ -793,19 +783,18 @@ impl CompiledContext {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct ContextCheckpointSegment {
-    projections: Vec<ContextProjection>,
+    checkpoint: Option<CompactedCheckpoint>,
 }
 
 impl ContextCheckpointSegment {
-    fn new(mut projections: Vec<ContextProjection>) -> Self {
-        projections.sort_by(|left, right| left.label.cmp(&right.label));
-        Self { projections }
+    fn new(checkpoint: Option<CompactedCheckpoint>) -> Self {
+        Self { checkpoint }
     }
 
     fn append_prompt_lines(&self, lines: &mut Vec<String>) {
-        for projection in &self.projections {
-            lines.push(format!("context-projection:{}", projection.label()));
-            lines.push(format!("text:{}", projection.text()));
+        if let Some(checkpoint) = &self.checkpoint {
+            lines.push("compacted-checkpoint:".to_owned());
+            lines.push(format!("text:{}", checkpoint.text()));
         }
     }
 }
@@ -1284,43 +1273,28 @@ mod tests {
     }
 
     #[test]
-    fn explicit_context_projection_validates_label_and_text() {
-        let projection =
-            ContextProjection::new("checkpoint", "Projection text.").expect("valid projection");
+    fn compacted_checkpoint_validates_text() {
+        let checkpoint =
+            CompactedCheckpoint::new("Checkpoint text.").expect("valid compacted checkpoint");
 
-        assert_eq!(projection.label(), "checkpoint");
-        assert_eq!(projection.text(), "Projection text.");
+        assert_eq!(checkpoint.text(), "Checkpoint text.");
         assert!(matches!(
-            ContextProjection::new("", "Projection text."),
+            CompactedCheckpoint::new("  "),
             Err(ContextError::BlankField {
-                field: "context projection label"
+                field: "compacted checkpoint text"
             })
         ));
         assert!(matches!(
-            ContextProjection::new("checkpoint", "  "),
-            Err(ContextError::BlankField {
-                field: "context projection text"
-            })
-        ));
-        assert!(matches!(
-            ContextProjection::new("bad\u{7}label", "Projection text."),
+            CompactedCheckpoint::new("bad\u{7}text"),
             Err(ContextError::InvalidControlCharacter {
-                field: "context projection label"
-            })
-        ));
-        assert!(matches!(
-            ContextProjection::new("checkpoint", "bad\u{7}text"),
-            Err(ContextError::InvalidControlCharacter {
-                field: "context projection text"
+                field: "compacted checkpoint text"
             })
         ));
     }
 
     #[test]
-    fn explicit_context_projections_render_before_summaries_and_memory() {
-        let projection_a =
-            ContextProjection::new("checkpoint", "Checkpoint projection.").expect("valid");
-        let projection_b = ContextProjection::new("policy", "Policy projection.").expect("valid");
+    fn compacted_checkpoint_renders_before_summaries_and_memory() {
+        let checkpoint = CompactedCheckpoint::new("Checkpoint context.").expect("valid");
         let memory = activated_memory(
             "memory-main",
             MemoryScope::Task,
@@ -1353,12 +1327,8 @@ mod tests {
             )
             .expect("summary fields are valid"),
         );
-        let snapshot = SessionContextSnapshot::new(
-            vec![summary],
-            artifacts,
-            vec![memory],
-            vec![projection_b, projection_a],
-        );
+        let snapshot =
+            SessionContextSnapshot::new(vec![summary], artifacts, vec![memory], Some(checkpoint));
 
         let compiled = ContextCompiler::new()
             .compile(&snapshot)
@@ -1366,10 +1336,9 @@ mod tests {
             .to_snapshot();
 
         assert!(
-            compiled.starts_with(
-                "context-projection:checkpoint\ntext:Checkpoint projection.\ncontext-projection:policy\ntext:Policy projection.\nsummary:summary-a"
-            ),
-            "explicit projections should render before summary and memory sections"
+            compiled
+                .starts_with("compacted-checkpoint:\ntext:Checkpoint context.\nsummary:summary-a"),
+            "compacted checkpoint should render before summary and memory sections"
         );
         assert!(compiled.contains("\nmemory:memory-main"));
     }
@@ -1812,7 +1781,7 @@ mod tests {
             Vec::new(),
             ArtifactRegistry::default(),
             vec![memory],
-            Vec::new(),
+            None,
         );
 
         let error = ContextCompiler::new()
@@ -1846,7 +1815,7 @@ mod tests {
             Vec::new(),
             ArtifactRegistry::default(),
             vec![memory],
-            Vec::new(),
+            None,
         );
 
         let error = ContextCompiler::new()
@@ -1882,7 +1851,7 @@ mod tests {
         );
         let mut artifacts = ArtifactRegistry::default();
         record_text_artifacts(&mut artifacts, std::slice::from_ref(&memory));
-        let snapshot = SessionContextSnapshot::new(Vec::new(), artifacts, vec![memory], Vec::new());
+        let snapshot = SessionContextSnapshot::new(Vec::new(), artifacts, vec![memory], None);
 
         let error = ContextCompiler::new()
             .compile(&snapshot)
@@ -2021,8 +1990,7 @@ mod tests {
             ranked_reasons(1, 0, 0.5),
         );
         record_text_artifacts(&mut artifacts, std::slice::from_ref(&memory));
-        let snapshot =
-            SessionContextSnapshot::new(vec![summary], artifacts, vec![memory], Vec::new());
+        let snapshot = SessionContextSnapshot::new(vec![summary], artifacts, vec![memory], None);
 
         let compiled = ContextCompiler::new()
             .compile(&snapshot)
@@ -2151,7 +2119,7 @@ mod tests {
     ) -> SessionContextSnapshot {
         let mut artifacts = ArtifactRegistry::default();
         record_text_artifacts(&mut artifacts, &memories);
-        SessionContextSnapshot::new(entries, artifacts, memories, Vec::new())
+        SessionContextSnapshot::new(entries, artifacts, memories, None)
     }
 
     fn record_text_artifacts(artifacts: &mut ArtifactRegistry, memories: &[ActivatedMemory]) {

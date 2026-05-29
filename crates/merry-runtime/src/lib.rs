@@ -56,9 +56,9 @@ pub use artifact::{
     ArtifactContent, ArtifactContentKind, ArtifactError, ArtifactRecord, ArtifactRegistry,
 };
 pub use context::{
-    CheckpointDecision, CompiledContext, CompiledContextSection, ContextBudget,
-    ContextBudgetPolicy, ContextCompiler, ContextEntry, ContextError, ContextEvidence,
-    ContextProjection, ContextSummary, ContextWindowSource, ProjectRules, ResolvedContextWindow,
+    CheckpointDecision, CompactedCheckpoint, CompiledContext, CompiledContextSection,
+    ContextBudget, ContextBudgetPolicy, ContextCompiler, ContextEntry, ContextError,
+    ContextEvidence, ContextSummary, ContextWindowSource, ProjectRules, ResolvedContextWindow,
     SessionContextSnapshot, TaskAnchor, decide_checkpoint, resolve_context_window,
 };
 pub use error::RuntimeError;
