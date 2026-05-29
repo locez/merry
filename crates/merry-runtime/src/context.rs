@@ -173,6 +173,66 @@ impl ContextBudgetPolicy {
     }
 }
 
+/// Source used to resolve a model context window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextWindowSource {
+    /// Explicit runtime or caller override.
+    ExplicitConfig,
+    /// Provider-neutral model capabilities.
+    ProviderCapabilities,
+    /// Bundled model catalog metadata.
+    BundledCatalog,
+    /// Conservative fallback when no metadata is available.
+    Fallback,
+}
+
+/// Resolved model context window and the metadata source that supplied it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedContextWindow {
+    tokens: u64,
+    source: ContextWindowSource,
+}
+
+impl ResolvedContextWindow {
+    /// Resolved context window size in tokens.
+    #[must_use]
+    pub fn tokens(&self) -> u64 {
+        self.tokens
+    }
+
+    /// Source that supplied the resolved context window.
+    #[must_use]
+    pub fn source(&self) -> ContextWindowSource {
+        self.source
+    }
+}
+
+/// Resolves context window metadata without provider probing.
+pub fn resolve_context_window(
+    explicit_override: Option<u64>,
+    provider_capability: Option<u64>,
+    bundled_catalog_value: Option<u64>,
+    fallback: u64,
+) -> Result<ResolvedContextWindow, ContextError> {
+    let (tokens, source) = if let Some(tokens) = explicit_override {
+        (tokens, ContextWindowSource::ExplicitConfig)
+    } else if let Some(tokens) = provider_capability {
+        (tokens, ContextWindowSource::ProviderCapabilities)
+    } else if let Some(tokens) = bundled_catalog_value {
+        (tokens, ContextWindowSource::BundledCatalog)
+    } else {
+        (fallback, ContextWindowSource::Fallback)
+    };
+
+    if tokens == 0 {
+        return Err(ContextError::InvalidContextWindow {
+            reason: "resolved context window must be greater than zero",
+        });
+    }
+
+    Ok(ResolvedContextWindow { tokens, source })
+}
+
 /// Compiles allowlisted structured runtime state into a deterministic context snapshot.
 ///
 /// Public callers must compile from a session-owned snapshot, not from an
@@ -807,6 +867,13 @@ pub enum ContextError {
         reason: &'static str,
     },
 
+    /// Context window metadata could not produce a valid window.
+    #[error("invalid context window: {reason}")]
+    InvalidContextWindow {
+        /// Actionable reason the window was rejected.
+        reason: &'static str,
+    },
+
     /// Summary text was provided without exact evidence metadata.
     #[error("context summary {id} has no exact evidence references")]
     SummaryWithoutEvidence {
@@ -1103,6 +1170,46 @@ mod tests {
         assert!(
             ContextBudget::from_window(1_000, 95, 950, 1, ContextBudgetPolicy::Balanced).is_err()
         );
+    }
+
+    #[test]
+    fn context_window_resolver_prefers_explicit_config() {
+        let resolved =
+            resolve_context_window(Some(1_000_000), Some(200_000), Some(128_000), 64_000)
+                .expect("window should resolve");
+
+        assert_eq!(resolved.tokens(), 1_000_000);
+        assert_eq!(resolved.source(), ContextWindowSource::ExplicitConfig);
+    }
+
+    #[test]
+    fn context_window_resolver_prefers_provider_then_catalog_before_fallback() {
+        let provider = resolve_context_window(None, Some(200_000), Some(128_000), 64_000)
+            .expect("provider window should resolve");
+        let catalog = resolve_context_window(None, None, Some(128_000), 64_000)
+            .expect("catalog window should resolve");
+
+        assert_eq!(provider.tokens(), 200_000);
+        assert_eq!(provider.source(), ContextWindowSource::ProviderCapabilities);
+        assert_eq!(catalog.tokens(), 128_000);
+        assert_eq!(catalog.source(), ContextWindowSource::BundledCatalog);
+    }
+
+    #[test]
+    fn context_window_resolver_falls_back_when_metadata_is_missing() {
+        let resolved =
+            resolve_context_window(None, None, None, 64_000).expect("window should resolve");
+
+        assert_eq!(resolved.tokens(), 64_000);
+        assert_eq!(resolved.source(), ContextWindowSource::Fallback);
+    }
+
+    #[test]
+    fn context_window_resolver_rejects_zero_values() {
+        assert!(resolve_context_window(Some(0), Some(200_000), Some(128_000), 64_000).is_err());
+        assert!(resolve_context_window(None, Some(0), Some(128_000), 64_000).is_err());
+        assert!(resolve_context_window(None, None, Some(0), 64_000).is_err());
+        assert!(resolve_context_window(None, None, None, 0).is_err());
     }
 
     #[test]
