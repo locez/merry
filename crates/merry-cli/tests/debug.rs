@@ -784,6 +784,10 @@ fn coding_loop_live_smoke_rejects_legacy_config_flag() {
     assert!(stderr.contains("unexpected argument") || stderr.contains("--config"));
 }
 
+// Real-bwrap smokes are host-shell checks. Inside Codex or another outer
+// sandbox, nested bwrap mount/namespace setup can fail for expected
+// environment reasons; reproduce from an unsandboxed shell before debugging as
+// a product regression.
 #[test]
 #[ignore = "requires Linux bubblewrap and local sandbox support"]
 fn debug_coding_loop_smoke_runs_inside_real_bwrap_when_opted_in() {
