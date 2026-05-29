@@ -1938,8 +1938,10 @@ impl WorkspacePatchParseError {
 }
 
 fn parse_workspace_patch(raw_patch: &str) -> Result<WorkspacePatch, WorkspacePatchParseError> {
-    const BEGIN: &str = "*** Begin Workspace Patch";
-    const END: &str = "*** End Workspace Patch";
+    const BEGIN_WORKSPACE: &str = "*** Begin Workspace Patch";
+    const END_WORKSPACE: &str = "*** End Workspace Patch";
+    const BEGIN_STANDARD: &str = "*** Begin Patch";
+    const END_STANDARD: &str = "*** End Patch";
     const UPDATE_PREFIX: &str = "*** Update File: ";
 
     let raw_patch = raw_patch.strip_prefix('\u{feff}').unwrap_or(raw_patch);
@@ -1947,12 +1949,16 @@ fn parse_workspace_patch(raw_patch: &str) -> Result<WorkspacePatch, WorkspacePat
     let mut index = 0;
     skip_blank_patch_lines(&lines, &mut index);
 
-    if patch_line(lines.get(index).copied()) != Some(BEGIN) {
-        return Err(WorkspacePatchParseError::new(
-            "workspace patch must start with *** Begin Workspace Patch",
-            None,
-        ));
-    }
+    let end = match patch_line(lines.get(index).copied()) {
+        Some(BEGIN_WORKSPACE) => END_WORKSPACE,
+        Some(BEGIN_STANDARD) => END_STANDARD,
+        _ => {
+            return Err(WorkspacePatchParseError::new(
+                "workspace patch must start with *** Begin Workspace Patch",
+                None,
+            ));
+        }
+    };
     index += 1;
 
     let mut files = Vec::new();
@@ -1965,7 +1971,7 @@ fn parse_workspace_patch(raw_patch: &str) -> Result<WorkspacePatch, WorkspacePat
                 None,
             ));
         };
-        if line == END {
+        if line == end {
             index += 1;
             skip_blank_patch_lines(&lines, &mut index);
             if index != lines.len() {
@@ -1998,7 +2004,7 @@ fn parse_workspace_patch(raw_patch: &str) -> Result<WorkspacePatch, WorkspacePat
         }
         index += 1;
 
-        let hunks = parse_workspace_patch_update_hunks(&lines, &mut index, &path)?;
+        let hunks = parse_workspace_patch_update_hunks(&lines, &mut index, &path, end)?;
         files.push(WorkspacePatchFile {
             path,
             operation: WorkspacePatchOperation::Update { hunks },
@@ -2019,14 +2025,14 @@ fn parse_workspace_patch_update_hunks(
     lines: &[&str],
     index: &mut usize,
     path: &str,
+    end: &str,
 ) -> Result<Vec<WorkspacePatchHunk>, WorkspacePatchParseError> {
-    const END: &str = "*** End Workspace Patch";
     const UPDATE_PREFIX: &str = "*** Update File: ";
 
     let mut hunks = Vec::new();
     let mut current = Vec::new();
     while let Some(line) = patch_line(lines.get(*index).copied()) {
-        if line == END || line.starts_with(UPDATE_PREFIX) {
+        if line == end || line.starts_with(UPDATE_PREFIX) {
             break;
         }
         if line.trim().is_empty() && current.is_empty() {
@@ -4950,6 +4956,27 @@ mod tests {
                 .expect("json content")
                 .contains(temp.path().to_str().expect("temp path utf8")),
             "tool output must not include absolute host roots"
+        );
+    }
+
+    #[test]
+    fn workspace_patch_executor_accepts_standard_patch_envelope_alias() {
+        let temp = TempWorkspace::new("patch-standard-envelope-alias");
+        temp.write_text("src/lib.rs", "alpha\nold value\nomega\n");
+        let tools = tools_for(temp.path());
+        let patch = "\
+*** Begin Patch
+*** Update File: src/lib.rs
+-old value
++new value
+*** End Patch";
+
+        let outcome = patch_text_outcome(&tools, patch);
+
+        assert_eq!(outcome.status(), ToolCallResultStatus::Succeeded);
+        assert_eq!(
+            read_text(&temp.path().join("src/lib.rs")),
+            "alpha\nnew value\nomega\n"
         );
     }
 

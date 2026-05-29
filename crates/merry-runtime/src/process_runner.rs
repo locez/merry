@@ -18,10 +18,11 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 /// Runtime-owned process runner backed by [`tokio::process::Command`].
 ///
 /// The runner executes the exact validated argv supplied by
-/// [`ProcessActionIntent`], clears inherited environment, closes stdin, captures
-/// stdout/stderr up to the intent limits, and cooperatively cancels by killing
-/// the child process. Permission profiles and sandbox constraints are enforced
-/// by the runtime construction path that selects this runner, not by this type.
+/// [`ProcessActionIntent`], inherits the current process environment, closes
+/// stdin, captures stdout/stderr up to the intent limits, and cooperatively
+/// cancels by killing the child process. Permission profiles and sandbox
+/// constraints are enforced by the runtime construction path that selects this
+/// runner, not by this type.
 #[derive(Debug, Default, Clone)]
 pub struct TokioProcessRunner {
     cwd_root: Option<PathBuf>,
@@ -74,7 +75,6 @@ async fn run_tokio_process(
     command
         .args(args)
         .current_dir(process_current_dir(cwd_root, &intent))
-        .env_clear()
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -205,9 +205,13 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::process_current_dir;
-    use crate::{ProcessActionIntent, ProcessEnvPolicy};
+    use super::{TokioProcessRunner, process_current_dir};
+    use crate::{
+        ProcessActionIntent, ProcessEnvPolicy, ProcessExitStatus, ProcessRunner,
+        ProcessRunnerContext,
+    };
     use std::path::{Path, PathBuf};
+    use tokio_util::sync::CancellationToken;
 
     fn intent(cwd: Option<&str>) -> ProcessActionIntent {
         ProcessActionIntent::new(
@@ -244,5 +248,36 @@ mod tests {
             ),
             PathBuf::from("/tmp/merry-workspace/crates")
         );
+    }
+
+    #[tokio::test]
+    async fn tokio_process_runner_inherits_current_process_environment() {
+        let Ok(path) = std::env::var("PATH") else {
+            return;
+        };
+        let Ok(home) = std::env::var("HOME") else {
+            return;
+        };
+        let intent = ProcessActionIntent::new(
+            vec![
+                "/bin/sh".to_owned(),
+                "-c".to_owned(),
+                "printf '%s\n%s' \"${PATH-}\" \"${HOME-}\"".to_owned(),
+            ],
+            None,
+            ProcessEnvPolicy::empty(),
+            None,
+            64 * 1024,
+            1024,
+        )
+        .expect("process intent should be valid");
+
+        let output = TokioProcessRunner::new()
+            .run(intent, ProcessRunnerContext::new(CancellationToken::new()))
+            .await
+            .expect("process should run");
+
+        assert_eq!(output.status(), ProcessExitStatus::Exited(0));
+        assert_eq!(output.stdout_text(), format!("{path}\n{home}"));
     }
 }

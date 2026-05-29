@@ -7430,7 +7430,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn opt_in_process_action_denies_unknown_argv_without_runner_call() {
+    async fn accepted_local_workspace_process_action_executes_unknown_argv_under_bwrap_profile() {
         let executor =
             ProcessProposingToolExecutor::with_argv(["unknown-readonly-ish", "--version"]);
         let runner = FakeProcessRunner::succeeding();
@@ -7460,18 +7460,18 @@ mod tests {
         let events = runtime
             .execute_tool_call(pending.id(), ToolExecutionContext::default())
             .await
-            .expect("unknown process proposal should be denied durably");
+            .expect("accepted unknown process proposal should execute through runner");
 
         assert_eq!(executor.propose_count(), 1);
         assert_eq!(executor.execute_count(), 0);
-        assert_eq!(runner.call_count(), 0);
+        assert_eq!(runner.call_count(), 1);
         assert_eq!(
             event_kind_names_for_tool_execution(&events),
             ["ArtifactRecorded", "ToolCallResolved"]
         );
         assert_eq!(
             resolved_tool_result(&events).status(),
-            merry_core::ToolCallResultStatus::Failed
+            merry_core::ToolCallResultStatus::Succeeded
         );
         assert!(runtime.pending_tool_calls().await.is_empty());
 
@@ -7486,12 +7486,16 @@ mod tests {
         };
         assert_eq!(intent.argv(), ["unknown-readonly-ish", "--version"]);
         assert_eq!(intent.stdin_text(), None);
-        assert_eq!(audits[1].status(), ActionAuditStatus::Denied);
+        assert_eq!(runner.observed_intents(), vec![intent.clone()]);
+        assert_eq!(audits[1].status(), ActionAuditStatus::Executed);
         let policy = audits[1]
             .policy()
-            .expect("denied audit should include policy");
-        assert_eq!(policy.risk_tier(), ActionRiskTier::ProcessHigh);
-        assert_eq!(policy.disposition(), ActionPolicyDisposition::Deny);
+            .expect("executed audit should include policy");
+        assert_eq!(
+            policy.risk_tier(),
+            ActionRiskTier::ProcessLocalWorkspaceEffect
+        );
+        assert_eq!(policy.disposition(), ActionPolicyDisposition::Allow);
     }
 
     #[tokio::test(flavor = "current_thread")]
