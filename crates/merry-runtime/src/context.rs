@@ -29,6 +29,150 @@ use thiserror::Error;
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x100000001b3;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextBudgetPolicy {
+    /// Earlier checkpoint planning to reduce prompt cost.
+    CostAware,
+    /// Default compromise between preserving context and avoiding late compaction.
+    Balanced,
+    /// Use more of the available body budget before checkpoint planning.
+    Capacity,
+}
+
+/// Derived context body budget and checkpoint watermarks.
+///
+/// The budget subtracts cacheable stable-prefix tokens and output reserve from
+/// an effective model context window before calculating dynamic-body
+/// watermarks. It does not perform token estimation or mutate runtime state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContextBudget {
+    effective_window_tokens: u64,
+    stable_prefix_tokens: u64,
+    output_reserve_tokens: u64,
+    body_budget_tokens: u64,
+    soft_water_tokens: u64,
+    hard_water_tokens: u64,
+}
+
+impl ContextBudget {
+    /// Calculates dynamic-body budget watermarks from a resolved context window.
+    pub fn from_window(
+        resolved_context_window_tokens: u64,
+        effective_context_window_percent: u8,
+        stable_prefix_tokens: u64,
+        output_reserve_tokens: u64,
+        policy: ContextBudgetPolicy,
+    ) -> Result<Self, ContextError> {
+        if !(1..=100).contains(&effective_context_window_percent) {
+            return Err(ContextError::InvalidBudget {
+                reason: "effective context window percent must be between 1 and 100",
+            });
+        }
+
+        let effective_window_tokens = resolved_context_window_tokens
+            .checked_mul(u64::from(effective_context_window_percent))
+            .and_then(|value| value.checked_div(100))
+            .ok_or(ContextError::InvalidBudget {
+                reason: "effective context window calculation overflowed",
+            })?;
+        let reserved_tokens = stable_prefix_tokens
+            .checked_add(output_reserve_tokens)
+            .ok_or(ContextError::InvalidBudget {
+                reason: "reserved context tokens overflowed",
+            })?;
+        let body_budget_tokens = effective_window_tokens.checked_sub(reserved_tokens).ok_or(
+            ContextError::InvalidBudget {
+                reason: "effective context window must exceed stable prefix and output reserve",
+            },
+        )?;
+        if body_budget_tokens == 0 {
+            return Err(ContextError::InvalidBudget {
+                reason: "body budget must be greater than zero",
+            });
+        }
+
+        let (soft_percent, hard_percent) = policy.watermark_percents();
+        let soft_water_tokens = body_budget_tokens
+            .checked_mul(soft_percent)
+            .and_then(|value| value.checked_div(100))
+            .ok_or(ContextError::InvalidBudget {
+                reason: "soft watermark calculation overflowed",
+            })?;
+        let hard_water_tokens = body_budget_tokens
+            .checked_mul(hard_percent)
+            .and_then(|value| value.checked_div(100))
+            .ok_or(ContextError::InvalidBudget {
+                reason: "hard watermark calculation overflowed",
+            })?;
+
+        if soft_water_tokens >= hard_water_tokens {
+            return Err(ContextError::InvalidBudget {
+                reason: "soft watermark must be below hard watermark",
+            });
+        }
+        if hard_water_tokens > body_budget_tokens {
+            return Err(ContextError::InvalidBudget {
+                reason: "hard watermark must not exceed body budget",
+            });
+        }
+
+        Ok(Self {
+            effective_window_tokens,
+            stable_prefix_tokens,
+            output_reserve_tokens,
+            body_budget_tokens,
+            soft_water_tokens,
+            hard_water_tokens,
+        })
+    }
+
+    /// Context window after applying the effective window percentage.
+    #[must_use]
+    pub fn effective_window_tokens(&self) -> u64 {
+        self.effective_window_tokens
+    }
+
+    /// Tokens reserved for cacheable stable-prefix messages and tool profile.
+    #[must_use]
+    pub fn stable_prefix_tokens(&self) -> u64 {
+        self.stable_prefix_tokens
+    }
+
+    /// Tokens reserved for model output.
+    #[must_use]
+    pub fn output_reserve_tokens(&self) -> u64 {
+        self.output_reserve_tokens
+    }
+
+    /// Remaining token budget for dynamic body content.
+    #[must_use]
+    pub fn body_budget_tokens(&self) -> u64 {
+        self.body_budget_tokens
+    }
+
+    /// Dynamic-body watermark where checkpoint planning should begin.
+    #[must_use]
+    pub fn soft_water_tokens(&self) -> u64 {
+        self.soft_water_tokens
+    }
+
+    /// Dynamic-body watermark where checkpointing should be required.
+    #[must_use]
+    pub fn hard_water_tokens(&self) -> u64 {
+        self.hard_water_tokens
+    }
+}
+
+impl ContextBudgetPolicy {
+    fn watermark_percents(self) -> (u64, u64) {
+        match self {
+            Self::CostAware => (60, 80),
+            Self::Balanced => (70, 90),
+            Self::Capacity => (85, 95),
+        }
+    }
+}
+
 /// Compiles allowlisted structured runtime state into a deterministic context snapshot.
 ///
 /// Public callers must compile from a session-owned snapshot, not from an
@@ -656,6 +800,13 @@ pub enum ContextError {
         field: &'static str,
     },
 
+    /// Context budget inputs could not produce a valid body budget.
+    #[error("invalid context budget: {reason}")]
+    InvalidBudget {
+        /// Actionable reason the budget was rejected.
+        reason: &'static str,
+    },
+
     /// Summary text was provided without exact evidence metadata.
     #[error("context summary {id} has no exact evidence references")]
     SummaryWithoutEvidence {
@@ -897,6 +1048,61 @@ mod tests {
                 field: "project rules text"
             })
         ));
+    }
+
+    #[test]
+    fn context_budget_balanced_uses_large_windows_without_step_count_compaction() {
+        let budget = ContextBudget::from_window(
+            1_000_000,
+            95,
+            120_000,
+            32_000,
+            ContextBudgetPolicy::Balanced,
+        )
+        .expect("budget should calculate");
+
+        assert_eq!(budget.effective_window_tokens(), 950_000);
+        assert_eq!(budget.stable_prefix_tokens(), 120_000);
+        assert_eq!(budget.output_reserve_tokens(), 32_000);
+        assert_eq!(budget.body_budget_tokens(), 798_000);
+        assert_eq!(budget.soft_water_tokens(), 558_600);
+        assert_eq!(budget.hard_water_tokens(), 718_200);
+    }
+
+    #[test]
+    fn context_budget_policy_ratios_use_body_budget() {
+        let cost_aware =
+            ContextBudget::from_window(10_000, 100, 1_000, 1_000, ContextBudgetPolicy::CostAware)
+                .expect("cost-aware budget should calculate");
+        let balanced =
+            ContextBudget::from_window(10_000, 100, 1_000, 1_000, ContextBudgetPolicy::Balanced)
+                .expect("balanced budget should calculate");
+        let capacity =
+            ContextBudget::from_window(10_000, 100, 1_000, 1_000, ContextBudgetPolicy::Capacity)
+                .expect("capacity budget should calculate");
+
+        assert_eq!(cost_aware.body_budget_tokens(), 8_000);
+        assert_eq!(cost_aware.soft_water_tokens(), 4_800);
+        assert_eq!(cost_aware.hard_water_tokens(), 6_400);
+        assert_eq!(balanced.soft_water_tokens(), 5_600);
+        assert_eq!(balanced.hard_water_tokens(), 7_200);
+        assert_eq!(capacity.soft_water_tokens(), 6_800);
+        assert_eq!(capacity.hard_water_tokens(), 7_600);
+    }
+
+    #[test]
+    fn context_budget_rejects_invalid_percent_or_reserve() {
+        assert!(
+            ContextBudget::from_window(1_000_000, 0, 0, 32_000, ContextBudgetPolicy::Balanced)
+                .is_err()
+        );
+        assert!(
+            ContextBudget::from_window(1_000, 95, 100, 1_000, ContextBudgetPolicy::Balanced)
+                .is_err()
+        );
+        assert!(
+            ContextBudget::from_window(1_000, 95, 950, 1, ContextBudgetPolicy::Balanced).is_err()
+        );
     }
 
     #[test]

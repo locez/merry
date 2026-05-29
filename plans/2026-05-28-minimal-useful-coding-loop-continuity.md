@@ -1286,7 +1286,7 @@ git commit -m "test(cli): make coding task patch disambiguation realistic"
 - Modify: `crates/merry-llm/src/capability.rs`
 - Modify: `crates/merry-runtime/tests/agent_loop.rs` or `crates/merry-runtime/src/context.rs`
 
-- [ ] **Step 1: Add runtime-owned budget policy types**
+- [x] **Step 1: Add runtime-owned budget policy types**
 
 In `crates/merry-runtime/src/context.rs`, add types near `ContextCompiler`:
 
@@ -1318,7 +1318,7 @@ soft_water_tokens < hard_water_tokens
 hard_water_tokens <= body_budget_tokens
 ```
 
-- [ ] **Step 2: Add calculation function**
+- [x] **Step 2: Add calculation function**
 
 Add:
 
@@ -1344,7 +1344,7 @@ impl ContextBudget {
 
 Keep this pure. Do not wire it into provider calls yet.
 
-- [ ] **Step 3: Add tests for ratios**
+- [x] **Step 3: Add tests for ratios**
 
 Add tests:
 
@@ -1375,7 +1375,7 @@ fn context_budget_rejects_invalid_percent_or_reserve() {
 }
 ```
 
-- [ ] **Step 4: Export only if needed**
+- [x] **Step 4: Export only if needed**
 
 If tests or downstream crates need these types, add to `crates/merry-runtime/src/lib.rs`:
 
@@ -1385,7 +1385,12 @@ pub use context::{ContextBudget, ContextBudgetPolicy};
 
 If they are crate-internal for now, keep them private.
 
-- [ ] **Step 5: Run tests**
+Implementation note: exported as public runtime budget primitives so later
+checkpoint decision work can consume the same type without introducing
+test-only dead code. This slice remains pure calculation only and is not wired
+into provider requests, token estimation, CLI config, or compaction.
+
+- [x] **Step 5: Run tests**
 
 Run:
 
@@ -1395,7 +1400,7 @@ cargo test -p merry-runtime context_budget
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/merry-runtime/src/context.rs crates/merry-runtime/src/lib.rs
