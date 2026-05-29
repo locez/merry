@@ -5,7 +5,7 @@
 //! crates render those normalized requests into wire formats.
 
 use crate::{
-    CompiledContext, ProjectRules, RuntimeError, artifact::ArtifactContent,
+    CompiledContext, ProjectRules, RuntimeError, TaskAnchor, artifact::ArtifactContent,
     session::ResolvedToolContinuationSnapshot,
 };
 use merry_core::{PendingToolCall, ToolCallResult, ToolCallResultStatus, ToolSpec};
@@ -163,6 +163,7 @@ pub(crate) struct StepModelRequestParts<'a> {
     pub(crate) input: &'a StepInput,
     pub(crate) model: &'a ModelName,
     pub(crate) project_rules: Option<&'a ProjectRules>,
+    pub(crate) task_anchor: Option<&'a TaskAnchor>,
     pub(crate) context: &'a CompiledContext,
     pub(crate) append_only_body: &'a [CompiledSessionMessage],
     pub(crate) continuations: &'a [ResolvedToolContinuationSnapshot],
@@ -177,6 +178,7 @@ pub(crate) fn compile_step_model_request(
         input,
         model,
         project_rules,
+        task_anchor,
         context,
         append_only_body,
         continuations,
@@ -188,15 +190,17 @@ pub(crate) fn compile_step_model_request(
     let stable_prefix_message_count = 1 + usize::from(project_rules.is_some());
     let mut messages = Vec::with_capacity(
         stable_prefix_message_count
+            + usize::from(task_anchor.is_some())
             + if context_snapshot.is_empty() { 1 } else { 2 }
             + append_only_body.len(),
     );
 
     // Keep provider prompt projection allowlisted and ordered:
-    // stable runtime instructions, explicit compiled context, prior
-    // append-only user/assistant body, then the current user or loop-control
-    // input. Tool continuations travel through provider-neutral continuation
-    // fields, not ad hoc ledger or artifact text rendered into messages.
+    // stable runtime instructions, task anchor control-plane context, explicit
+    // compiled context, prior append-only user/assistant body, then the current
+    // user or loop-control input. Tool continuations travel through
+    // provider-neutral continuation fields, not ad hoc ledger or artifact text
+    // rendered into messages.
     messages.push(ModelMessage::new(
         ModelMessageRole::System,
         ModelContent::text(DEFAULT_RUNTIME_BASE_INSTRUCTIONS)?,
@@ -206,6 +210,13 @@ pub(crate) fn compile_step_model_request(
         messages.push(ModelMessage::new(
             ModelMessageRole::System,
             ModelContent::text(&project_rules.to_stable_prefix_message_text())?,
+        )?);
+    }
+
+    if let Some(task_anchor) = task_anchor {
+        messages.push(ModelMessage::new(
+            ModelMessageRole::System,
+            ModelContent::text(&task_anchor.to_dynamic_control_message_text())?,
         )?);
     }
 

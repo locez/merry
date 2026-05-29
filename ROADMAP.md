@@ -228,7 +228,7 @@ The OpenAI provider target is the Responses API only. The provider request path 
   shell syntax must run through a real interpreter inside explicit permission
   profiles, session grants, and sandbox constraints, but that design is not the
   next deliverable by itself.
-- P0: keep process output artifact-backed and context-friendly. Accepted process actions should record stdout/stderr/exit metadata as artifacts before observable events claim them, reduce large output into compact ledger facts plus exact evidence references, and keep dynamic evidence late in compiled context so stable prefixes remain cacheable.
+- P0: keep process output artifact-backed and context-friendly. Accepted process actions should record stdout/stderr/exit metadata as artifacts before observable events claim them, reduce large output into compact ledger facts plus exact evidence references, and keep ordinary runtime evidence out of prompt projection unless an explicit checkpoint/context-policy path selects it.
 - P0: keep edit/write on the typed workspace patch path. The MVP loop should apply one constrained patch through `workspace_patch_file` or its runtime-owned successor, record artifact/audit/ledger evidence, and then run verification.
 - Keep safety tiered but subordinate to the executable acceptance target: read-only inspection automatic, constrained patch opt-in, verification in `bwrap`, high-risk or unknown process actions denied or escalated.
 - Keep CLI shell as smoke/debug, not the design owner. The main contract is the runtime library and its registered tool/profile set.
@@ -248,15 +248,17 @@ The OpenAI provider target is the Responses API only. The provider request path 
   runtime edits.
 - Implementation target: assemble the provider-request dynamic body from
   runtime-owned state while preserving the stable prefix lane. Dynamic context
-  should include the current task/user request, append-only conversation body,
-  pending tool continuations, and compact ledger/artifact evidence references.
+  should include the task anchor control slot, explicit checkpoint/context
+  projections, append-only conversation body, the current task/user request,
+  and pending tool continuations.
 - Keep large or exact payloads out of default prompt text. Process
   stdout/stderr, source reads, patch payloads, provider wire payloads, and
-  artifact bodies stay in artifacts; the dynamic body carries bounded facts,
-  ids, diagnostics, fingerprints, and evidence locators.
+  artifact bodies stay in artifacts. Ordinary ledger observations, artifact
+  metadata, and tool-result summaries remain runtime state unless explicitly
+  projected by a checkpoint/context-policy path.
 - Acceptance: deterministic runtime/provider-boundary tests prove dynamic
-  evidence changes do not change stable prefix hash, relevant facts appear late
-  in compiled context, soft/hard budget decisions use the existing
+  context changes do not change stable prefix hash, default ledger/artifact
+  updates do not enter prompt messages, soft/hard budget decisions use the existing
   `ContextBudget` / `ResolvedContextWindow` / `CheckpointDecision` helpers,
   and default `cargo test` remains offline.
 - Out of scope for this next slice: model-written checkpoint summaries,

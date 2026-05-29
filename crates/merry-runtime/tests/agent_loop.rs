@@ -14,10 +14,11 @@ use merry_runtime::{
     AgentLoopConfig, AgentLoopConfigError, AgentLoopStatus, ArtifactError, ContextSummary,
     DEFAULT_AGENT_LOOP_CONTINUATION_INPUT, ProcessActionIntent, ProcessEnvPolicy,
     ProcessExitStatus, ProcessRunner, ProcessRunnerContext, ProcessRunnerError,
-    ProcessRunnerFuture, ProcessRunnerOutput, Runtime, RuntimeError, StepContext, StepInput,
-    ToolActionKind, ToolActionPreflight, ToolActionProposalFuture, ToolExecutionContext,
-    ToolExecutionError, ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture,
-    WorkspacePatchExecutionEvidence, WorkspacePatchProposal, process_command_tool,
+    ProcessRunnerFuture, ProcessRunnerOutput, ProjectRules, Runtime, RuntimeError, StepContext,
+    StepInput, TaskAnchor, ToolActionKind, ToolActionPreflight, ToolActionProposalFuture,
+    ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome, ToolExecutor,
+    ToolExecutorFuture, WorkspacePatchExecutionEvidence, WorkspacePatchProposal,
+    process_command_tool,
 };
 use schemars::Schema;
 use serde_json::{Map, Value, json};
@@ -868,6 +869,96 @@ async fn ordinary_user_and_assistant_messages_remain_append_only_without_task_an
     assert_eq!(dynamic[0].content().as_text(), "First user task.");
     assert_eq!(dynamic[1].content().as_text(), "first final answer");
     assert_eq!(dynamic[2].content().as_text(), "Second user task.");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn task_anchor_is_dynamic_control_segment_before_append_only_body() {
+    let provider = ScriptedModelProvider::new(vec![
+        vec![Ok(completed_text_event("first final answer"))],
+        vec![Ok(completed_text_event("second final answer"))],
+    ]);
+    let runtime = Runtime::builder(session_id("agent-loop-task-anchor"))
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .task_anchor(TaskAnchor::new("Fix the status text fixture.").expect("valid task anchor"))
+        .build()
+        .expect("runtime should build");
+
+    let first = run_default_loop(&runtime, "Start work.").await;
+    assert_eq!(first.status(), &AgentLoopStatus::Completed);
+    let second = run_default_loop(&runtime, "Continue.").await;
+    assert_eq!(second.status(), &AgentLoopStatus::Completed);
+
+    let requests = provider.recorded_requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[0].stable_prefix_message_count(),
+        1,
+        "task anchor is dynamic control context, not stable prefix"
+    );
+    assert_eq!(
+        requests[0].stable_prefix_hash(),
+        requests[1].stable_prefix_hash(),
+        "append-only body growth must not move the stable prefix when task anchor is set"
+    );
+
+    let dynamic = requests[1].dynamic_messages();
+    assert_eq!(
+        dynamic
+            .iter()
+            .map(|message| message.role())
+            .collect::<Vec<_>>(),
+        [
+            ModelMessageRole::System,
+            ModelMessageRole::User,
+            ModelMessageRole::Assistant,
+            ModelMessageRole::User
+        ]
+    );
+    assert_eq!(
+        dynamic[0].content().as_text(),
+        "task-anchor:\nFix the status text fixture."
+    );
+    assert_eq!(dynamic[1].content().as_text(), "Start work.");
+    assert_eq!(dynamic[2].content().as_text(), "first final answer");
+    assert_eq!(dynamic[3].content().as_text(), "Continue.");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn task_anchor_does_not_join_project_rules_stable_prefix() {
+    let provider = ScriptedModelProvider::new(vec![vec![Ok(completed_text_event("final answer"))]]);
+    let runtime = Runtime::builder(session_id("agent-loop-task-anchor-project-rules"))
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .project_rules(ProjectRules::new("AGENTS.md", "Use project rules.").expect("valid rules"))
+        .task_anchor(TaskAnchor::new("Keep this task pinned.").expect("valid task anchor"))
+        .build()
+        .expect("runtime should build");
+
+    let result = run_default_loop(&runtime, "Work on the pinned task.").await;
+    assert_eq!(result.status(), &AgentLoopStatus::Completed);
+
+    let requests = provider.recorded_requests();
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert_eq!(
+        request.stable_prefix_message_count(),
+        2,
+        "only base instructions and project rules belong to the stable prefix"
+    );
+    assert!(
+        request.stable_prefix_messages()[1]
+            .content()
+            .as_text()
+            .contains("project-rules-source:AGENTS.md")
+    );
+
+    let dynamic = request.dynamic_messages();
+    assert_eq!(dynamic[0].role(), ModelMessageRole::System);
+    assert_eq!(
+        dynamic[0].content().as_text(),
+        "task-anchor:\nKeep this task pinned."
+    );
+    assert_eq!(dynamic[1].role(), ModelMessageRole::User);
+    assert_eq!(dynamic[1].content().as_text(), "Work on the pinned task.");
 }
 
 #[tokio::test(flavor = "current_thread")]

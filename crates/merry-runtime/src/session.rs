@@ -7,7 +7,10 @@ use crate::{
     action_audit::{ActionAuditPolicy, ActionAuditRegistry},
     action_policy::ActionPolicyDecision,
     artifact::{ArtifactContent, ArtifactError, ArtifactRegistry},
-    context::{ContextCompiler, ContextEntry, ContextError, ProjectRules, SessionContextSnapshot},
+    context::{
+        ContextCompiler, ContextEntry, ContextError, ProjectRules, SessionContextSnapshot,
+        TaskAnchor,
+    },
     judgment::{
         JudgmentError, JudgmentEvidence, JudgmentOutcome, JudgmentRecord, JudgmentRegistry,
         JudgmentRequest, SummaryDraftPromotionError, SummaryDraftPromotionInput,
@@ -162,6 +165,7 @@ pub(crate) struct SessionState {
     artifacts: ArtifactRegistry,
     memory_store: MemoryStore,
     project_rules: Option<ProjectRules>,
+    task_anchor: Option<TaskAnchor>,
     context_entries: Vec<ContextEntry>,
     activated_memories: Vec<ActivatedMemory>,
     #[allow(dead_code)]
@@ -184,6 +188,7 @@ impl SessionState {
             artifacts: ArtifactRegistry::default(),
             memory_store: MemoryStore::new(),
             project_rules: None,
+            task_anchor: None,
             context_entries: Vec::new(),
             activated_memories: Vec::new(),
             judgments: JudgmentRegistry::default(),
@@ -226,6 +231,14 @@ impl SessionState {
 
     pub(crate) fn project_rules(&self) -> Option<ProjectRules> {
         self.project_rules.clone()
+    }
+
+    pub(crate) fn set_task_anchor(&mut self, task_anchor: TaskAnchor) {
+        self.task_anchor = Some(task_anchor);
+    }
+
+    pub(crate) fn task_anchor(&self) -> Option<TaskAnchor> {
+        self.task_anchor.clone()
     }
 
     pub(crate) fn record_artifact_state(

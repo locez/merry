@@ -1782,7 +1782,8 @@ If all relevant checks pass and the user approves a status update, update `ROADM
 ## Open Follow-Ups After This Plan
 
 - Define the durable authorization-view model for temporary file and directory grants.
-- Decide whether Task Anchor lives in task ledger or a separate session control plane.
+- Task Anchor now has a reserved session control-plane slot. A future `/task`
+  command can set it, but this plan still does not add the command surface.
 - Design deterministic checkpoint content format backed by ledger facts and artifact refs.
 - Decide whether model-assisted checkpoint summaries are useful after deterministic reducers exist.
 - Design TUI commands for task pinning, grants, checkpoint visibility, and runtime-event inspection.
