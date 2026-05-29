@@ -25,15 +25,16 @@ pub const MAX_PROCESS_STDIN_TEXT_BYTES: usize = 64 * 1024;
 /// Maximum accepted captured byte limit per process output stream.
 pub const MAX_PROCESS_OUTPUT_LIMIT_BYTES: usize = 1024 * 1024;
 
-/// Minimal process environment policy for SP1.
+/// Minimal process environment override policy for SP1.
 ///
-/// `Empty` means no inherited environment and no runtime-supplied overrides.
-/// Future slices can add explicit allowlist or override variants without
-/// changing the process intent shape.
+/// This describes environment changes requested by the tool call. It does not
+/// decide whether the selected process runner inherits its own current
+/// environment; that is part of the runner/sandbox boundary chosen by the
+/// runtime builder.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ProcessEnvPolicy {
-    /// No inherited environment and no overrides.
+    /// No tool-requested environment overrides.
     #[default]
     Empty,
     /// Test-only stand-in for a future non-empty environment policy.
@@ -42,7 +43,7 @@ pub enum ProcessEnvPolicy {
 }
 
 impl ProcessEnvPolicy {
-    /// Creates the no-environment policy.
+    /// Creates the no environment override policy.
     #[must_use]
     pub const fn empty() -> Self {
         Self::Empty
@@ -1017,10 +1018,14 @@ fn is_safe_cargo_package_token(package: &str) -> bool {
 }
 
 fn is_forbidden_process_argv(argv: &[String]) -> bool {
-    if is_shell_wrapper_process_argv(argv) {
-        return !is_read_only_plain_shell_process_argv(argv);
+    if let Some(shell_input) = shell_like_process_input_from_argv(argv) {
+        return shell_script_contains_forbidden_process(shell_input.script());
     }
 
+    is_forbidden_direct_process_argv(argv)
+}
+
+fn is_forbidden_direct_process_argv(argv: &[String]) -> bool {
     let Some(executable) = argv.first().map(|argument| executable_name(argument)) else {
         return false;
     };
@@ -1035,11 +1040,79 @@ fn is_forbidden_process_argv(argv: &[String]) -> bool {
             .is_some_and(|subcommand| FORBIDDEN_GIT_SUBCOMMANDS.contains(&subcommand.as_str()))
 }
 
-fn is_shell_wrapper_process_argv(argv: &[String]) -> bool {
-    let [shell, flag, _script] = argv else {
+fn shell_script_contains_forbidden_process(script: &str) -> bool {
+    if let Some(commands) = parse_plain_shell_command_sequence(script) {
+        return commands.iter().any(|command| {
+            let command = shell_command_without_assignment_prefix(command);
+            !command.is_empty() && is_forbidden_direct_process_argv(command)
+        });
+    }
+
+    shell_script_contains_obvious_forbidden_text(script)
+}
+
+fn shell_like_process_input_from_argv(argv: &[String]) -> Option<ShellProcessInput<'_>> {
+    let [shell, flag, script] = argv else {
+        return None;
+    };
+    if !is_supported_shell_executable_name(shell) || !matches!(flag.as_str(), "-c" | "-lc") {
+        return None;
+    }
+
+    Some(ShellProcessInput {
+        shell,
+        flag,
+        script,
+    })
+}
+
+fn is_supported_shell_executable_name(shell: &str) -> bool {
+    matches!(executable_name(shell).as_str(), "bash" | "sh" | "zsh")
+}
+
+fn shell_command_without_assignment_prefix(command: &[String]) -> &[String] {
+    let executable_index = command
+        .iter()
+        .position(|word| !is_plain_shell_assignment_word(word))
+        .unwrap_or(command.len());
+    &command[executable_index..]
+}
+
+fn is_plain_shell_assignment_word(word: &str) -> bool {
+    let Some((name, value)) = word.split_once('=') else {
         return false;
     };
-    is_supported_plain_shell_token(shell) && matches!(flag.as_str(), "-c" | "-lc")
+    !name.is_empty()
+        && !value.is_empty()
+        && name.bytes().enumerate().all(|(index, byte)| {
+            byte == b'_' || byte.is_ascii_alphabetic() || (index > 0 && byte.is_ascii_digit())
+        })
+}
+
+fn shell_script_contains_obvious_forbidden_text(script: &str) -> bool {
+    let words = rough_shell_words(script);
+    words.iter().enumerate().any(|(index, word)| {
+        let executable = executable_name(word);
+        FORBIDDEN_PROCESS_EXECUTABLES.contains(&executable.as_str())
+            || (executable == "git"
+                && words.get(index + 1).is_some_and(|subcommand| {
+                    FORBIDDEN_GIT_SUBCOMMANDS.contains(&subcommand.as_str())
+                }))
+    })
+}
+
+fn rough_shell_words(script: &str) -> Vec<String> {
+    script
+        .split(|character: char| {
+            character.is_whitespace()
+                || matches!(
+                    character,
+                    ';' | '|' | '&' | '<' | '>' | '(' | ')' | '{' | '}' | '[' | ']' | '\'' | '"'
+                )
+        })
+        .filter(|word| !word.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 fn executable_name(argument: &str) -> String {
@@ -1055,32 +1128,19 @@ fn executable_token_is(argument: &str, expected: &str) -> bool {
 }
 
 const FORBIDDEN_PROCESS_EXECUTABLES: &[&str] = &[
-    "bash",
-    "chmod",
-    "chown",
     "cmd",
-    "cp",
     "curl",
-    "fish",
-    "mv",
     "nc",
     "netcat",
-    "node",
-    "perl",
     "powershell",
-    "python",
-    "python3",
     "pwsh",
     "rm",
     "rsync",
-    "ruby",
     "scp",
-    "sh",
     "ssh",
     "su",
     "sudo",
     "wget",
-    "zsh",
 ];
 
 const FORBIDDEN_GIT_SUBCOMMANDS: &[&str] = &[
@@ -1145,7 +1205,8 @@ pub(crate) fn required_process_permission_profile_id(
         ProcessIntentClass::LocalWorkspaceEffect => {
             Some(ProcessPermissionProfileId::LOCAL_WORKSPACE_BWRAP_V1)
         }
-        ProcessIntentClass::Unknown | ProcessIntentClass::Forbidden => None,
+        ProcessIntentClass::Unknown => Some(ProcessPermissionProfileId::LOCAL_WORKSPACE_BWRAP_V1),
+        ProcessIntentClass::Forbidden => None,
     }
 }
 
@@ -1603,7 +1664,10 @@ mod tests {
             1024,
         )
         .expect("unknown intent is syntactically valid");
-        assert_eq!(required_process_permission_profile_id(&unknown), None);
+        assert_eq!(
+            required_process_permission_profile_id(&unknown),
+            Some(ProcessPermissionProfileId::LOCAL_WORKSPACE_BWRAP_V1)
+        );
 
         let with_stdin = ProcessActionIntent::new(
             vec!["rg".to_owned(), "--files".to_owned()],
@@ -1632,6 +1696,24 @@ mod tests {
         assert_eq!(
             required_process_permission_profile_id(&shell_read_only),
             Some(ProcessPermissionProfileId::SHELL_READ_ONLY_V1)
+        );
+
+        let shell_workspace_effect = ProcessActionIntent::new(
+            vec![
+                "bash".to_owned(),
+                "-lc".to_owned(),
+                "HOME=.merry/local/home cargo check --all-targets -p merry-runtime".to_owned(),
+            ],
+            None,
+            ProcessEnvPolicy::empty(),
+            None,
+            1024,
+            1024,
+        )
+        .expect("shell workspace effect intent is valid");
+        assert_eq!(
+            required_process_permission_profile_id(&shell_workspace_effect),
+            Some(ProcessPermissionProfileId::LOCAL_WORKSPACE_BWRAP_V1)
         );
     }
 
@@ -1761,15 +1843,9 @@ mod tests {
             vec!["sh", "-c", "rm -rf target"],
             vec!["bash", "-lc", "rm -rf target"],
             vec!["zsh", "-c", "rm -rf target"],
-            vec!["fish", "-c", "echo unsafe"],
             vec!["cmd", "/C", "echo unsafe"],
             vec!["powershell", "-Command", "Write-Host unsafe"],
             vec!["pwsh", "-Command", "Write-Host unsafe"],
-            vec!["python", "-c", "print('unsafe')"],
-            vec!["python3", "script.py"],
-            vec!["perl", "-e", "print 'unsafe'"],
-            vec!["ruby", "-e", "puts 'unsafe'"],
-            vec!["node", "-e", "console.log('unsafe')"],
             vec!["curl", "https://example.invalid"],
             vec!["wget", "https://example.invalid"],
             vec!["ssh", "example.invalid"],
@@ -1779,21 +1855,12 @@ mod tests {
             vec!["netcat", "example.invalid", "443"],
             vec!["rm", "-rf", "target"],
             vec!["../bin/rm", "-rf", "target"],
-            vec!["mv", "a", "b"],
-            vec!["cp", "a", "b"],
-            vec!["chmod", "600", "file"],
-            vec!["chown", "user", "file"],
             vec!["git", "clean", "-fd"],
             vec!["git", "reset", "--hard"],
             vec!["git", "checkout", "--", "README.md"],
-            vec!["/tmp/sh", "-c", "echo unsafe"],
-            vec!["./bash", "-lc", "echo unsafe"],
-            vec!["bash", "-lc", "rg ProcessRunner > out.txt"],
-            vec!["bash", "-lc", "echo $(pwd)"],
-            vec!["bash", "-lc", "(pwd)"],
             vec!["bash", "-lc", "rg ProcessRunner | rm -rf target"],
-            vec!["bash", "-lc", "rg ProcessRunner | tee out.txt"],
-            vec!["/bin/bash", "-lc", "rg ProcessRunner | wc -l"],
+            vec!["bash", "-lc", "echo $(rm -rf target)"],
+            vec!["/bin/bash", "-lc", "rm -rf target"],
         ] {
             let intent = ProcessActionIntent::new(
                 argv.into_iter().map(str::to_owned).collect(),
@@ -1811,6 +1878,12 @@ mod tests {
         }
 
         for argv in [
+            vec!["fish", "-c", "echo unsafe"],
+            vec!["python", "-c", "print('workspace effect')"],
+            vec!["python3", "script.py"],
+            vec!["perl", "-e", "print 'workspace effect'"],
+            vec!["ruby", "-e", "puts 'workspace effect'"],
+            vec!["node", "-e", "console.log('workspace effect')"],
             vec!["cargo", "test"],
             vec!["cargo", "test", "-p", "-package"],
             vec!["cargo", "test", "-p", "bad.package"],
@@ -1840,6 +1913,18 @@ mod tests {
             vec!["unknown-readonly-ish", "--version"],
             vec!["python3.12", "-c", "print('unknown')"],
             vec!["docker", "run", "image"],
+            vec!["/tmp/sh", "-c", "echo unsafe"],
+            vec!["./bash", "-lc", "echo unsafe"],
+            vec!["bash", "-lc", "rg ProcessRunner > out.txt"],
+            vec!["bash", "-lc", "echo $(pwd)"],
+            vec!["bash", "-lc", "(pwd)"],
+            vec!["bash", "-lc", "rg ProcessRunner | tee out.txt"],
+            vec!["/bin/bash", "-lc", "rg ProcessRunner | wc -l"],
+            vec![
+                "bash",
+                "-lc",
+                "HOME=.merry/local/home cargo check --all-targets -p merry-runtime",
+            ],
         ] {
             let intent = ProcessActionIntent::new(
                 argv.into_iter().map(str::to_owned).collect(),

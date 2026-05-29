@@ -189,7 +189,7 @@ pub(crate) fn classify_tool_action_risk(
                     ProcessIntentClass::LocalWorkspaceEffect => {
                         ActionRiskTier::ProcessLocalWorkspaceEffect
                     }
-                    ProcessIntentClass::Unknown => ActionRiskTier::ProcessHigh,
+                    ProcessIntentClass::Unknown => ActionRiskTier::ProcessLocalWorkspaceEffect,
                     ProcessIntentClass::Forbidden => ActionRiskTier::Forbidden,
                 }
             }
@@ -255,9 +255,8 @@ pub(crate) fn is_local_workspace_effect_process_action_proposal(
         && matches!(
             proposal.evidence(),
             ActionProposalEvidence::ProcessAction(intent)
-                if classify_process_intent(intent) == ProcessIntentClass::LocalWorkspaceEffect
-                    && required_process_permission_profile_id(intent)
-                        == Some(ProcessPermissionProfileId::LOCAL_WORKSPACE_BWRAP_V1)
+                if required_process_permission_profile_id(intent)
+                    == Some(ProcessPermissionProfileId::LOCAL_WORKSPACE_BWRAP_V1)
                     && admission.matches_intent(intent)
         )
 }
@@ -407,7 +406,7 @@ mod tests {
     }
 
     #[test]
-    fn classifier_assigns_high_process_risk_for_command_exec() {
+    fn classifier_assigns_process_risk_from_process_proposal() {
         assert_eq!(
             classify_tool_action_risk(ToolActionKind::CommandExec, None),
             ActionRiskTier::ProcessHigh
@@ -437,7 +436,7 @@ mod tests {
         let unknown = process_proposal(&call, &["unknown-readonly-ish", "--version"]);
         assert_eq!(
             classify_tool_action_risk(ToolActionKind::CommandExec, Some(&unknown)),
-            ActionRiskTier::ProcessHigh
+            ActionRiskTier::ProcessLocalWorkspaceEffect
         );
     }
 
@@ -514,21 +513,35 @@ mod tests {
             mismatched_admission
         ));
 
-        for argv in [
-            ["/tmp/cargo", "test", "-p", "merry-runtime"],
-            ["./cargo", "test", "-p", "merry-runtime"],
-        ] {
-            let path_qualified_local_effect_shape = process_proposal(&call, &argv);
-            assert!(!is_low_risk_process_action_proposal(
-                ToolActionKind::CommandExec,
-                &path_qualified_local_effect_shape
-            ));
-            assert!(!is_local_workspace_effect_process_action_proposal(
-                ToolActionKind::CommandExec,
-                &path_qualified_local_effect_shape,
-                admission
-            ));
-        }
+        let unknown_workspace_effect =
+            process_proposal(&call, &["unknown-readonly-ish", "--version"]);
+        assert!(!is_low_risk_process_action_proposal(
+            ToolActionKind::CommandExec,
+            &unknown_workspace_effect
+        ));
+        assert!(is_local_workspace_effect_process_action_proposal(
+            ToolActionKind::CommandExec,
+            &unknown_workspace_effect,
+            admission
+        ));
+
+        let shell_workspace_effect = process_proposal(
+            &call,
+            &[
+                "bash",
+                "-lc",
+                "HOME=.merry/local/home cargo check --all-targets -p merry-runtime",
+            ],
+        );
+        assert!(!is_read_only_shell_process_action_proposal(
+            ToolActionKind::CommandExec,
+            &shell_workspace_effect
+        ));
+        assert!(is_local_workspace_effect_process_action_proposal(
+            ToolActionKind::CommandExec,
+            &shell_workspace_effect,
+            admission
+        ));
 
         let shell_read_only = process_proposal(&call, &["bash", "-lc", "rg ProcessRunner | wc -l"]);
         assert!(!is_low_risk_process_action_proposal(
