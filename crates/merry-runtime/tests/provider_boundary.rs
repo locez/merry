@@ -12,10 +12,10 @@ use merry_llm::{
 };
 use merry_runtime::{
     ArtifactContent, ArtifactContentKind, ArtifactError, ContextCompiler, ContextEvidence,
-    ContextSummary, LedgerFactKind, LedgerProjection, ProjectRules, RegisteredTool, Runtime,
-    StepContext, StepInput, TokioProcessRunner, ToolActionKind, ToolExecutionContext,
-    ToolExecutionError, ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture,
-    process_command_tool,
+    ContextProjection, ContextSummary, LedgerFactKind, LedgerProjection, ProjectRules,
+    RegisteredTool, Runtime, StepContext, StepInput, TaskAnchor, TokioProcessRunner,
+    ToolActionKind, ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome, ToolExecutor,
+    ToolExecutorFuture, process_command_tool,
 };
 use schemars::Schema;
 use serde_json::{Map, Value, json};
@@ -1299,6 +1299,103 @@ async fn empty_checkpoint_slot_renders_no_prompt_text() {
             .iter()
             .all(|message| !message.content().as_text().contains("checkpoint:")),
         "empty checkpoint segment must not render prompt text"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn explicit_context_projection_renders_after_task_anchor_before_append_only_body() {
+    let provider = FakeModelProvider::new(vec![
+        Ok(completed_text_event("append-only assistant sentinel")),
+        Ok(completed_event()),
+    ]);
+    let runtime = Runtime::builder(session_id("provider-explicit-context-projection-order"))
+        .task_anchor(TaskAnchor::new("task anchor sentinel").expect("valid task anchor"))
+        .context_projection(
+            ContextProjection::new("checkpoint", "explicit context projection sentinel")
+                .expect("valid projection"),
+        )
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .build()
+        .expect("runtime should build");
+
+    collect_step(&runtime, "append-only user sentinel").await;
+    collect_step(&runtime, "current user sentinel").await;
+
+    let requests = provider.recorded_requests();
+    assert_eq!(requests.len(), 2);
+    let messages = requests[1]
+        .messages()
+        .iter()
+        .map(|message| message.content().as_text())
+        .collect::<Vec<_>>();
+
+    let task_anchor_index = messages
+        .iter()
+        .position(|text| text.contains("task anchor sentinel"))
+        .expect("task anchor should render");
+    let projection_index = messages
+        .iter()
+        .position(|text| text.contains("explicit context projection sentinel"))
+        .expect("explicit projection should render");
+    let append_user_index = messages
+        .iter()
+        .position(|text| text.contains("append-only user sentinel"))
+        .expect("append-only user body should render");
+    let append_assistant_index = messages
+        .iter()
+        .position(|text| text.contains("append-only assistant sentinel"))
+        .expect("append-only assistant body should render");
+    let current_user_index = messages
+        .iter()
+        .position(|text| text.contains("current user sentinel"))
+        .expect("current user input should render");
+
+    assert_eq!(requests[1].stable_prefix_message_count(), 1);
+    assert!(task_anchor_index < projection_index);
+    assert!(projection_index < append_user_index);
+    assert!(append_user_index < append_assistant_index);
+    assert!(append_assistant_index < current_user_index);
+    assert!(
+        messages[projection_index].contains("context-projection:checkpoint"),
+        "projection should be marked as explicit context projection"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn explicit_context_projection_does_not_project_unrelated_artifact_payloads() {
+    let provider = FakeModelProvider::new(vec![Ok(completed_event())]);
+    let runtime = Runtime::builder(session_id("provider-explicit-context-projection-boundary"))
+        .context_projection(
+            ContextProjection::new("checkpoint", "explicit projection payload")
+                .expect("valid projection"),
+        )
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .build()
+        .expect("runtime should build");
+    let payload = "unrelated artifact payload sentinel must stay out";
+    runtime
+        .record_artifact(
+            ArtifactRef::new(artifact_id("unrelated-artifact"), ArtifactKind::Text),
+            ArtifactContent::text(payload),
+        )
+        .await
+        .expect("artifact should record");
+
+    collect_step(&runtime, "Answer with explicit projection only.").await;
+
+    let request = provider.recorded_requests()[0].clone();
+    assert!(request.messages().iter().any(|message| {
+        message
+            .content()
+            .as_text()
+            .contains("explicit projection payload")
+    }));
+    assert!(
+        request
+            .messages()
+            .iter()
+            .all(|message| !message.content().as_text().contains(payload)),
+        "explicit projection slot must not sweep unrelated artifact payloads into prompt"
     );
 }
 

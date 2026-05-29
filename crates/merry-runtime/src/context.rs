@@ -329,6 +329,7 @@ impl ContextCompiler {
             snapshot.entries(),
             snapshot.artifacts(),
             snapshot.memories(),
+            snapshot.projections(),
         )
     }
 }
@@ -337,6 +338,7 @@ fn compile_entries(
     entries: &[ContextEntry],
     artifacts: &ArtifactRegistry,
     memories: &[ActivatedMemory],
+    projections: &[ContextProjection],
 ) -> Result<CompiledContext, ContextError> {
     let mut sections = Vec::with_capacity(entries.len());
 
@@ -377,7 +379,7 @@ fn compile_entries(
     Ok(CompiledContext {
         sections,
         memory_projection,
-        checkpoint: ContextCheckpointSegment,
+        checkpoint: ContextCheckpointSegment::new(projections.to_vec()),
     })
 }
 
@@ -404,6 +406,7 @@ pub struct SessionContextSnapshot {
     entries: Vec<ContextEntry>,
     artifacts: ArtifactRegistry,
     memories: Vec<ActivatedMemory>,
+    projections: Vec<ContextProjection>,
 }
 
 impl SessionContextSnapshot {
@@ -411,11 +414,13 @@ impl SessionContextSnapshot {
         entries: Vec<ContextEntry>,
         artifacts: ArtifactRegistry,
         memories: Vec<ActivatedMemory>,
+        projections: Vec<ContextProjection>,
     ) -> Self {
         Self {
             entries,
             artifacts,
             memories,
+            projections,
         }
     }
 
@@ -429,6 +434,10 @@ impl SessionContextSnapshot {
 
     fn memories(&self) -> &[ActivatedMemory] {
         &self.memories
+    }
+
+    fn projections(&self) -> &[ContextProjection] {
+        &self.projections
     }
 }
 
@@ -590,6 +599,44 @@ impl TaskAnchor {
     }
 }
 
+/// Explicit runtime-owned context projection for dynamic provider requests.
+///
+/// This is the only prompt-facing context projection lane for checkpoint or
+/// context-policy content. It is intentionally separate from ledger facts,
+/// artifact payloads, and append-only chat history.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextProjection {
+    label: String,
+    text: String,
+}
+
+impl ContextProjection {
+    /// Creates a validated explicit context projection.
+    pub fn new(label: impl Into<String>, text: impl Into<String>) -> Result<Self, ContextError> {
+        let label = label.into();
+        validate_non_blank("context projection label", &label)?;
+        validate_no_control_characters("context projection label", &label)?;
+
+        let text = text.into();
+        validate_non_blank("context projection text", &text)?;
+        validate_no_control_characters("context projection text", &text)?;
+
+        Ok(Self { label, text })
+    }
+
+    /// Stable projection label, such as `checkpoint` or a context-policy name.
+    #[must_use]
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// Projection text selected by an explicit checkpoint/context-policy path.
+    #[must_use]
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+}
+
 /// Exact evidence metadata linked from compiled context.
 ///
 /// Evidence metadata keeps the compiled context connected to exact artifact
@@ -745,10 +792,22 @@ impl CompiledContext {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct ContextCheckpointSegment;
+struct ContextCheckpointSegment {
+    projections: Vec<ContextProjection>,
+}
 
 impl ContextCheckpointSegment {
-    fn append_prompt_lines(&self, _lines: &mut Vec<String>) {}
+    fn new(mut projections: Vec<ContextProjection>) -> Self {
+        projections.sort_by(|left, right| left.label.cmp(&right.label));
+        Self { projections }
+    }
+
+    fn append_prompt_lines(&self, lines: &mut Vec<String>) {
+        for projection in &self.projections {
+            lines.push(format!("context-projection:{}", projection.label()));
+            lines.push(format!("text:{}", projection.text()));
+        }
+    }
 }
 
 /// A section in the compiled context snapshot.
@@ -1225,6 +1284,97 @@ mod tests {
     }
 
     #[test]
+    fn explicit_context_projection_validates_label_and_text() {
+        let projection =
+            ContextProjection::new("checkpoint", "Projection text.").expect("valid projection");
+
+        assert_eq!(projection.label(), "checkpoint");
+        assert_eq!(projection.text(), "Projection text.");
+        assert!(matches!(
+            ContextProjection::new("", "Projection text."),
+            Err(ContextError::BlankField {
+                field: "context projection label"
+            })
+        ));
+        assert!(matches!(
+            ContextProjection::new("checkpoint", "  "),
+            Err(ContextError::BlankField {
+                field: "context projection text"
+            })
+        ));
+        assert!(matches!(
+            ContextProjection::new("bad\u{7}label", "Projection text."),
+            Err(ContextError::InvalidControlCharacter {
+                field: "context projection label"
+            })
+        ));
+        assert!(matches!(
+            ContextProjection::new("checkpoint", "bad\u{7}text"),
+            Err(ContextError::InvalidControlCharacter {
+                field: "context projection text"
+            })
+        ));
+    }
+
+    #[test]
+    fn explicit_context_projections_render_before_summaries_and_memory() {
+        let projection_a =
+            ContextProjection::new("checkpoint", "Checkpoint projection.").expect("valid");
+        let projection_b = ContextProjection::new("policy", "Policy projection.").expect("valid");
+        let memory = activated_memory(
+            "memory-main",
+            MemoryScope::Task,
+            "Memory projection.",
+            score(1, 0, 0.5),
+            ranked_reasons(1, 0, 0.5),
+        );
+        let mut artifacts = ArtifactRegistry::default();
+        artifacts
+            .record(
+                ArtifactRef::new(artifact_id("summary-artifact"), ArtifactKind::Text),
+                ArtifactContent::text("summary evidence"),
+            )
+            .expect("artifact records");
+        record_text_artifacts(&mut artifacts, std::slice::from_ref(&memory));
+        let summary = ContextEntry::summary(
+            ContextSummary::new(
+                "summary-a",
+                "Summary projection.",
+                vec![
+                    ContextEvidence::new(
+                        "whole",
+                        EvidenceRef::new(
+                            artifact_id("summary-artifact"),
+                            EvidenceLocator::whole_artifact(),
+                        ),
+                    )
+                    .expect("evidence metadata is valid"),
+                ],
+            )
+            .expect("summary fields are valid"),
+        );
+        let snapshot = SessionContextSnapshot::new(
+            vec![summary],
+            artifacts,
+            vec![memory],
+            vec![projection_b, projection_a],
+        );
+
+        let compiled = ContextCompiler::new()
+            .compile(&snapshot)
+            .expect("context compiles")
+            .to_snapshot();
+
+        assert!(
+            compiled.starts_with(
+                "context-projection:checkpoint\ntext:Checkpoint projection.\ncontext-projection:policy\ntext:Policy projection.\nsummary:summary-a"
+            ),
+            "explicit projections should render before summary and memory sections"
+        );
+        assert!(compiled.contains("\nmemory:memory-main"));
+    }
+
+    #[test]
     fn context_budget_balanced_uses_large_windows_without_step_count_compaction() {
         let budget = ContextBudget::from_window(
             1_000_000,
@@ -1658,8 +1808,12 @@ mod tests {
             provenance(),
         )
         .expect("activation can expose legacy bad memory for compiler validation");
-        let snapshot =
-            SessionContextSnapshot::new(Vec::new(), ArtifactRegistry::default(), vec![memory]);
+        let snapshot = SessionContextSnapshot::new(
+            Vec::new(),
+            ArtifactRegistry::default(),
+            vec![memory],
+            Vec::new(),
+        );
 
         let error = ContextCompiler::new()
             .compile(&snapshot)
@@ -1688,8 +1842,12 @@ mod tests {
             ranked_reasons(1, 0, 0.5),
             provenance(),
         );
-        let snapshot =
-            SessionContextSnapshot::new(Vec::new(), ArtifactRegistry::default(), vec![memory]);
+        let snapshot = SessionContextSnapshot::new(
+            Vec::new(),
+            ArtifactRegistry::default(),
+            vec![memory],
+            Vec::new(),
+        );
 
         let error = ContextCompiler::new()
             .compile(&snapshot)
@@ -1724,7 +1882,7 @@ mod tests {
         );
         let mut artifacts = ArtifactRegistry::default();
         record_text_artifacts(&mut artifacts, std::slice::from_ref(&memory));
-        let snapshot = SessionContextSnapshot::new(Vec::new(), artifacts, vec![memory]);
+        let snapshot = SessionContextSnapshot::new(Vec::new(), artifacts, vec![memory], Vec::new());
 
         let error = ContextCompiler::new()
             .compile(&snapshot)
@@ -1863,7 +2021,8 @@ mod tests {
             ranked_reasons(1, 0, 0.5),
         );
         record_text_artifacts(&mut artifacts, std::slice::from_ref(&memory));
-        let snapshot = SessionContextSnapshot::new(vec![summary], artifacts, vec![memory]);
+        let snapshot =
+            SessionContextSnapshot::new(vec![summary], artifacts, vec![memory], Vec::new());
 
         let compiled = ContextCompiler::new()
             .compile(&snapshot)
@@ -1992,7 +2151,7 @@ mod tests {
     ) -> SessionContextSnapshot {
         let mut artifacts = ArtifactRegistry::default();
         record_text_artifacts(&mut artifacts, &memories);
-        SessionContextSnapshot::new(entries, artifacts, memories)
+        SessionContextSnapshot::new(entries, artifacts, memories, Vec::new())
     }
 
     fn record_text_artifacts(artifacts: &mut ArtifactRegistry, memories: &[ActivatedMemory]) {
