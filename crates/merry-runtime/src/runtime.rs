@@ -10,7 +10,7 @@ use crate::{
     ArtifactContent, ContextCompiler, ContextEntry, ContextSummary, LedgerProjectionSnapshot,
     ProcessActionIntent, ProcessExitStatus, ProcessPermissionProfileId, ProcessRunner,
     ProcessRunnerContext, ProcessRunnerError, ProcessRunnerOutput, ProjectRules, RuntimeError,
-    RuntimeEventStream, RuntimeModelRole, SessionContextSnapshot,
+    RuntimeEventStream, RuntimeModelRole, SessionContextSnapshot, TaskAnchor,
     action_audit::ActionAuditPolicy,
     action_policy::{
         ActionPolicyDecision, DefaultActionPolicy, classify_tool_action_risk,
@@ -1366,6 +1366,7 @@ pub struct RuntimeBuilder {
     registered_tools: Vec<RegisteredTool>,
     initial_context_summaries: BTreeMap<String, String>,
     project_rules: Option<ProjectRules>,
+    task_anchor: Option<TaskAnchor>,
     memory_activation_source: Arc<dyn MemoryActivationSource>,
     allow_low_risk_workspace_patches: bool,
     low_risk_process_runner: Option<Arc<dyn ProcessRunner>>,
@@ -1383,6 +1384,7 @@ impl RuntimeBuilder {
             registered_tools: Vec::new(),
             initial_context_summaries: BTreeMap::new(),
             project_rules: None,
+            task_anchor: None,
             memory_activation_source: Arc::new(StoredMemoryActivationSource),
             allow_low_risk_workspace_patches: false,
             low_risk_process_runner: None,
@@ -1464,6 +1466,17 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Sets the current task objective control-plane anchor.
+    ///
+    /// This reserves the runtime context slot for future `/task` commands. It
+    /// is rendered as dynamic request context, not as project rules, ledger
+    /// projection, or append-only chat history.
+    #[must_use]
+    pub fn task_anchor(mut self, task_anchor: TaskAnchor) -> Self {
+        self.task_anchor = Some(task_anchor);
+        self
+    }
+
     /// Opts in to executing validated low-risk workspace patch proposals.
     ///
     /// This keeps the default policy conservative: workspace writes remain
@@ -1532,6 +1545,9 @@ impl RuntimeBuilder {
         }
         if let Some(project_rules) = self.project_rules {
             session.set_project_rules(project_rules);
+        }
+        if let Some(task_anchor) = self.task_anchor {
+            session.set_task_anchor(task_anchor);
         }
 
         Ok(Runtime {
@@ -1742,7 +1758,7 @@ async fn run_provider_step(
         "runtime memories activated"
     );
 
-    let (snapshot, project_rules, append_only_body, continuations, activation_epoch) = {
+    let (snapshot, project_rules, task_anchor, append_only_body, continuations, activation_epoch) = {
         let mut session = inner.session.lock().await;
         if token.is_cancelled() {
             drop(session);
@@ -1791,6 +1807,7 @@ async fn run_provider_step(
         (
             session.context_snapshot(),
             session.project_rules(),
+            session.task_anchor(),
             append_only_body,
             continuations,
             activation_epoch,
@@ -1822,6 +1839,7 @@ async fn run_provider_step(
         input: &input,
         model: provider_config.model(),
         project_rules: project_rules.as_ref(),
+        task_anchor: task_anchor.as_ref(),
         context: &compiled_context,
         append_only_body: &append_only_body,
         continuations: &continuations,

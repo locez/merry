@@ -530,6 +530,37 @@ impl ProjectRules {
     }
 }
 
+/// Current task objective pinned by a future `/task`-style control command.
+///
+/// A task anchor is session control-plane context. It is neither durable
+/// project policy nor ordinary append-only user chat, so request compilation
+/// renders it outside the stable prefix and before checkpoint/context/body
+/// projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskAnchor {
+    objective: String,
+}
+
+impl TaskAnchor {
+    /// Creates a validated task anchor objective.
+    pub fn new(objective: impl Into<String>) -> Result<Self, ContextError> {
+        let objective = objective.into();
+        validate_non_blank("task anchor objective", &objective)?;
+        validate_no_control_characters("task anchor objective", &objective)?;
+        Ok(Self { objective })
+    }
+
+    /// Current pinned task objective.
+    #[must_use]
+    pub fn objective(&self) -> &str {
+        &self.objective
+    }
+
+    pub(crate) fn to_dynamic_control_message_text(&self) -> String {
+        format!("task-anchor:\n{}", self.objective)
+    }
+}
+
 /// Exact evidence metadata linked from compiled context.
 ///
 /// Evidence metadata keeps the compiled context connected to exact artifact
@@ -1136,6 +1167,30 @@ mod tests {
             ProjectRules::new("AGENTS.md", "bad\u{7}rules"),
             Err(ContextError::InvalidControlCharacter {
                 field: "project rules text"
+            })
+        ));
+    }
+
+    #[test]
+    fn task_anchor_validates_objective_and_renders_dynamic_control_text() {
+        let anchor =
+            TaskAnchor::new("Fix the status text fixture.").expect("valid task anchor objective");
+
+        assert_eq!(anchor.objective(), "Fix the status text fixture.");
+        assert_eq!(
+            anchor.to_dynamic_control_message_text(),
+            "task-anchor:\nFix the status text fixture."
+        );
+        assert!(matches!(
+            TaskAnchor::new("  "),
+            Err(ContextError::BlankField {
+                field: "task anchor objective"
+            })
+        ));
+        assert!(matches!(
+            TaskAnchor::new("bad\u{7}task"),
+            Err(ContextError::InvalidControlCharacter {
+                field: "task anchor objective"
             })
         ));
     }

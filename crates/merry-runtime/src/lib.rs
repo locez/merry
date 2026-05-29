@@ -59,7 +59,7 @@ pub use context::{
     CheckpointDecision, CompiledContext, CompiledContextSection, ContextBudget,
     ContextBudgetPolicy, ContextCompiler, ContextEntry, ContextError, ContextEvidence,
     ContextSummary, ContextWindowSource, ProjectRules, ResolvedContextWindow,
-    SessionContextSnapshot, decide_checkpoint, resolve_context_window,
+    SessionContextSnapshot, TaskAnchor, decide_checkpoint, resolve_context_window,
 };
 pub use error::RuntimeError;
 pub use event_stream::RuntimeEventStream;
