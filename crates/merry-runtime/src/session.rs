@@ -8,8 +8,8 @@ use crate::{
     action_policy::ActionPolicyDecision,
     artifact::{ArtifactContent, ArtifactError, ArtifactRegistry},
     context::{
-        ContextCompiler, ContextEntry, ContextError, ProjectRules, SessionContextSnapshot,
-        TaskAnchor,
+        ContextCompiler, ContextEntry, ContextError, ContextProjection, ProjectRules,
+        SessionContextSnapshot, TaskAnchor,
     },
     judgment::{
         JudgmentError, JudgmentEvidence, JudgmentOutcome, JudgmentRecord, JudgmentRegistry,
@@ -166,6 +166,7 @@ pub(crate) struct SessionState {
     memory_store: MemoryStore,
     project_rules: Option<ProjectRules>,
     task_anchor: Option<TaskAnchor>,
+    context_projections: Vec<ContextProjection>,
     context_entries: Vec<ContextEntry>,
     activated_memories: Vec<ActivatedMemory>,
     #[allow(dead_code)]
@@ -189,6 +190,7 @@ impl SessionState {
             memory_store: MemoryStore::new(),
             project_rules: None,
             task_anchor: None,
+            context_projections: Vec::new(),
             context_entries: Vec::new(),
             activated_memories: Vec::new(),
             judgments: JudgmentRegistry::default(),
@@ -239,6 +241,10 @@ impl SessionState {
 
     pub(crate) fn task_anchor(&self) -> Option<TaskAnchor> {
         self.task_anchor.clone()
+    }
+
+    pub(crate) fn add_context_projection(&mut self, projection: ContextProjection) {
+        self.context_projections.push(projection);
     }
 
     pub(crate) fn record_artifact_state(
@@ -324,6 +330,7 @@ impl SessionState {
             candidate_entries,
             self.artifacts.clone(),
             self.activated_memories.clone(),
+            self.context_projections.clone(),
         );
         ContextCompiler::new().compile(&candidate_snapshot)?;
 
@@ -359,6 +366,7 @@ impl SessionState {
             self.context_entries.clone(),
             self.artifacts.clone(),
             self.activated_memories.clone(),
+            self.context_projections.clone(),
         )
     }
 

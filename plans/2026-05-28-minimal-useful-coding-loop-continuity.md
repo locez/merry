@@ -1547,7 +1547,11 @@ and leave it `None` throughout this implementation. The important acceptance poi
 Implementation note: completed earlier in `e5130d6`. `CompiledContext` now has
 a runtime-owned empty checkpoint slot, and the provider-boundary test
 `empty_checkpoint_slot_renders_no_prompt_text` proves the absent checkpoint
-does not render prompt text.
+does not render prompt text. A later follow-up populated that same runtime-owned
+dynamic slot with explicit `ContextProjection` entries supplied at construction
+time. Those projections render after `TaskAnchor` and before the append-only
+body, remain outside the stable prefix, and do not sweep ordinary ledger facts,
+tool-result observations, or unrelated artifact payloads into prompt text.
 
 - [x] **Step 2: Add checkpoint hash diagnostics**
 

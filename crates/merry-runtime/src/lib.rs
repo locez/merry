@@ -58,7 +58,7 @@ pub use artifact::{
 pub use context::{
     CheckpointDecision, CompiledContext, CompiledContextSection, ContextBudget,
     ContextBudgetPolicy, ContextCompiler, ContextEntry, ContextError, ContextEvidence,
-    ContextSummary, ContextWindowSource, ProjectRules, ResolvedContextWindow,
+    ContextProjection, ContextSummary, ContextWindowSource, ProjectRules, ResolvedContextWindow,
     SessionContextSnapshot, TaskAnchor, decide_checkpoint, resolve_context_window,
 };
 pub use error::RuntimeError;
