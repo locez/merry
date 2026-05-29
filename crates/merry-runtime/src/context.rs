@@ -233,6 +233,29 @@ pub fn resolve_context_window(
     Ok(ResolvedContextWindow { tokens, source })
 }
 
+/// Watermark-based checkpoint trigger decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckpointDecision {
+    /// Dynamic body remains below the checkpoint planning watermark.
+    Continue,
+    /// Dynamic body reached the soft watermark; plan a checkpoint soon.
+    PlanCheckpoint,
+    /// Dynamic body reached the hard watermark; require checkpointing before more growth.
+    RequireCheckpoint,
+}
+
+/// Decides whether dynamic body growth has reached checkpoint watermarks.
+#[must_use]
+pub fn decide_checkpoint(dynamic_body_tokens: u64, budget: ContextBudget) -> CheckpointDecision {
+    if dynamic_body_tokens >= budget.hard_water_tokens() {
+        CheckpointDecision::RequireCheckpoint
+    } else if dynamic_body_tokens >= budget.soft_water_tokens() {
+        CheckpointDecision::PlanCheckpoint
+    } else {
+        CheckpointDecision::Continue
+    }
+}
+
 /// Compiles allowlisted structured runtime state into a deterministic context snapshot.
 ///
 /// Public callers must compile from a session-owned snapshot, not from an
@@ -1210,6 +1233,31 @@ mod tests {
         assert!(resolve_context_window(None, Some(0), Some(128_000), 64_000).is_err());
         assert!(resolve_context_window(None, None, Some(0), 64_000).is_err());
         assert!(resolve_context_window(None, None, None, 0).is_err());
+    }
+
+    #[test]
+    fn checkpoint_decision_uses_watermarks_not_turn_counts() {
+        let budget =
+            ContextBudget::from_window(100_000, 90, 8_000, 10_000, ContextBudgetPolicy::Balanced)
+                .expect("budget should calculate");
+
+        assert_eq!(decide_checkpoint(1, budget), CheckpointDecision::Continue);
+        assert_eq!(
+            decide_checkpoint(budget.soft_water_tokens() - 1, budget),
+            CheckpointDecision::Continue
+        );
+        assert_eq!(
+            decide_checkpoint(budget.soft_water_tokens(), budget),
+            CheckpointDecision::PlanCheckpoint
+        );
+        assert_eq!(
+            decide_checkpoint(budget.hard_water_tokens() - 1, budget),
+            CheckpointDecision::PlanCheckpoint
+        );
+        assert_eq!(
+            decide_checkpoint(budget.hard_water_tokens(), budget),
+            CheckpointDecision::RequireCheckpoint
+        );
     }
 
     #[test]
