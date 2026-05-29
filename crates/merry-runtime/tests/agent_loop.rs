@@ -173,6 +173,11 @@ impl ScriptedModelProvider {
         }
     }
 
+    fn with_capabilities(mut self, capabilities: ModelCapabilities) -> Self {
+        self.capabilities = capabilities;
+        self
+    }
+
     fn recorded_requests(&self) -> Vec<ModelRequest> {
         self.recorded_requests
             .lock()
@@ -1304,6 +1309,86 @@ async fn agent_loop_traces_loop_steps_tool_process_and_terminal_status() {
     assert!(logs.contains("\"stdout_bytes\":13"));
     assert!(logs.contains("\"stderr_bytes\":0"));
     assert!(!logs.contains("rustc 1.85.0"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn provider_request_trace_includes_checkpoint_budget_diagnostics_without_prompt_projection() {
+    let provider = ScriptedModelProvider::new(vec![vec![Ok(completed_text_event("final answer"))]]);
+    let runtime = Runtime::builder(session_id("agent-loop-context-budget-trace"))
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .task_anchor(TaskAnchor::new("Keep budget diagnostics separate.").expect("valid anchor"))
+        .build()
+        .expect("runtime should build");
+
+    let (result, logs) = capture_traces_for(
+        "agent-loop-context-budget-trace",
+        runtime.run_agent_loop(
+            StepInput::user_text("Use a short request.").expect("valid step input"),
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::new(2).expect("valid config"),
+        ),
+    )
+    .await;
+
+    let result = result.expect("agent loop should run");
+    assert_eq!(result.status(), &AgentLoopStatus::Completed);
+    assert!(logs.contains("\"event\":\"runtime.provider.request\""));
+    assert!(logs.contains("\"context_window_source\":\"fallback\""));
+    assert!(logs.contains("\"context_budget_policy\":\"balanced\""));
+    assert!(logs.contains("\"checkpoint_decision\":\"continue\""));
+    assert!(logs.contains("\"dynamic_body_estimated_tokens\":"));
+    assert!(logs.contains("\"soft_water_tokens\":"));
+    assert!(logs.contains("\"hard_water_tokens\":"));
+
+    let requests = provider.recorded_requests();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0]
+            .messages()
+            .iter()
+            .all(|message| !message.content().as_text().contains("checkpoint_decision")),
+        "checkpoint diagnostics must not be projected into prompt messages"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn provider_request_still_runs_when_context_budget_diagnostic_is_unavailable() {
+    let provider = ScriptedModelProvider::new(vec![vec![Ok(completed_text_event("final answer"))]])
+        .with_capabilities(
+            ModelCapabilities::new(true, true, false, true, Some(100), Some(100))
+                .expect("valid capabilities"),
+        );
+    let runtime = Runtime::builder(session_id("agent-loop-context-budget-unavailable"))
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .build()
+        .expect("runtime should build");
+
+    let (result, logs) = capture_traces_for(
+        "agent-loop-context-budget-unavailable",
+        runtime.run_agent_loop(
+            StepInput::user_text("Use a short request.").expect("valid step input"),
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::new(2).expect("valid config"),
+        ),
+    )
+    .await;
+
+    let result = result.expect("agent loop should run");
+    assert_eq!(result.status(), &AgentLoopStatus::Completed);
+    assert!(logs.contains("\"event\":\"runtime.provider.request.context_budget_unavailable\""));
+    assert!(logs.contains("\"event\":\"runtime.provider.request\""));
+
+    let requests = provider.recorded_requests();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0].messages().iter().all(|message| {
+            !message
+                .content()
+                .as_text()
+                .contains("context_budget_unavailable")
+        }),
+        "budget diagnostics must remain trace-only"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

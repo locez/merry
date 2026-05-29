@@ -1387,8 +1387,13 @@ If they are crate-internal for now, keep them private.
 
 Implementation note: exported as public runtime budget primitives so later
 checkpoint decision work can consume the same type without introducing
-test-only dead code. This slice remains pure calculation only and is not wired
-into provider requests, token estimation, CLI config, or compaction.
+test-only dead code. The initial slice was pure calculation only. A later
+follow-up wires these primitives into provider-request trace diagnostics with a
+deterministic body-token estimate; it still does not project budget/checkpoint
+state into prompt messages, change provider wire fields, add CLI config, or
+perform compaction. Budget diagnostic derivation is non-admission-control: if
+metadata is insufficient for a valid budget, provider execution still proceeds
+and the runtime records a trace-only unavailable diagnostic.
 
 - [x] **Step 5: Run tests**
 

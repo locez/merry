@@ -130,6 +130,13 @@ The OpenAI provider target is the Responses API only. The provider request path 
   remain explicit host-shell checks; nested `bwrap` inside Codex or another
   outer sandbox is an expected environment limitation, not completion evidence
   by itself.
+- Runtime provider request tracing now consumes the context window/budget
+  helpers and emits deterministic checkpoint-watermark diagnostics, including
+  window source, balanced policy, dynamic-body token estimate, soft/hard
+  watermarks, and checkpoint decision. If budget metadata cannot be derived,
+  the runtime records a trace-only diagnostic and still sends the provider
+  request. This does not add checkpoint content, prompt projection, provider
+  wire fields, config keys, or compaction.
 - The opt-in live LLM coding-loop smoke command is implemented as `merry --with-sandbox debug coding-loop-live-smoke`. It refuses to run without the real CLI bwrap child handoff, uses `OpenAiProvider` for model decisions, keeps `TokioProcessRunner` and `workspace_patch_file` for the real tool path, and validates runtime events for process inspection, exact source read, patch, process verification, loop completion, and patched fixture content. The user reported that the credentialed live smoke passed against their trusted configured server. That run exposed a provider HTTP metadata gap, now fixed by setting `User-Agent: merry/<crate version>` in `merry-provider-openai`; deterministic request-construction and loopback integration tests cover the header.
 - The first config-backed observability implementation slice is complete in
   `merry-cli`: XDG TOML config discovery, config-backed log settings, file

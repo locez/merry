@@ -171,6 +171,14 @@ impl ContextBudgetPolicy {
             Self::Capacity => (85, 95),
         }
     }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::CostAware => "cost_aware",
+            Self::Balanced => "balanced",
+            Self::Capacity => "capacity",
+        }
+    }
 }
 
 /// Source used to resolve a model context window.
@@ -204,6 +212,17 @@ impl ResolvedContextWindow {
     #[must_use]
     pub fn source(&self) -> ContextWindowSource {
         self.source
+    }
+}
+
+impl ContextWindowSource {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::ExplicitConfig => "explicit_config",
+            Self::ProviderCapabilities => "provider_capabilities",
+            Self::BundledCatalog => "bundled_catalog",
+            Self::Fallback => "fallback",
+        }
     }
 }
 
@@ -242,6 +261,16 @@ pub enum CheckpointDecision {
     PlanCheckpoint,
     /// Dynamic body reached the hard watermark; require checkpointing before more growth.
     RequireCheckpoint,
+}
+
+impl CheckpointDecision {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Continue => "continue",
+            Self::PlanCheckpoint => "plan_checkpoint",
+            Self::RequireCheckpoint => "require_checkpoint",
+        }
+    }
 }
 
 /// Decides whether dynamic body growth has reached checkpoint watermarks.
