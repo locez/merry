@@ -34,6 +34,7 @@ Respect project instructions such as AGENTS.md when present. Treat those instruc
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StepInput {
     user_text: String,
+    history: StepInputHistory,
 }
 
 impl StepInput {
@@ -45,6 +46,15 @@ impl StepInput {
         validate_user_text(text)?;
         Ok(Self {
             user_text: text.to_owned(),
+            history: StepInputHistory::RecordUser,
+        })
+    }
+
+    pub(crate) fn loop_control_text(text: &str) -> Result<Self, RuntimeError> {
+        validate_user_text(text)?;
+        Ok(Self {
+            user_text: text.to_owned(),
+            history: StepInputHistory::ControlOnly,
         })
     }
 
@@ -53,6 +63,22 @@ impl StepInput {
     pub fn text(&self) -> &str {
         &self.user_text
     }
+
+    pub(crate) fn should_record_user_history(&self) -> bool {
+        self.history == StepInputHistory::RecordUser
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StepInputHistory {
+    RecordUser,
+    ControlOnly,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CompiledSessionMessage {
+    User { text: String },
+    Assistant { text: String },
 }
 
 /// Context shared with runtime step producers.
@@ -137,13 +163,21 @@ pub(crate) fn compile_step_model_request(
     input: &StepInput,
     model: &ModelName,
     context: &CompiledContext,
+    append_only_body: &[CompiledSessionMessage],
     continuations: &[ResolvedToolContinuationSnapshot],
     tool_specs: Vec<ToolSpec>,
     generation_config: GenerationConfig,
 ) -> Result<ModelRequest, merry_llm::ModelError> {
     let context_snapshot = context.to_snapshot();
-    let mut messages = Vec::with_capacity(if context_snapshot.is_empty() { 2 } else { 3 });
+    let mut messages = Vec::with_capacity(
+        if context_snapshot.is_empty() { 2 } else { 3 } + append_only_body.len(),
+    );
 
+    // Keep provider prompt projection allowlisted and ordered:
+    // stable runtime instructions, explicit compiled context, prior
+    // append-only user/assistant body, then the current user or loop-control
+    // input. Tool continuations travel through provider-neutral continuation
+    // fields, not ad hoc ledger or artifact text rendered into messages.
     messages.push(ModelMessage::new(
         ModelMessageRole::System,
         ModelContent::text(DEFAULT_RUNTIME_BASE_INSTRUCTIONS)?,
@@ -154,6 +188,16 @@ pub(crate) fn compile_step_model_request(
             ModelMessageRole::System,
             ModelContent::text(&context_snapshot)?,
         )?);
+    }
+
+    for message in append_only_body {
+        let (role, text) = match message {
+            CompiledSessionMessage::User { text } => (ModelMessageRole::User, text.as_str()),
+            CompiledSessionMessage::Assistant { text } => {
+                (ModelMessageRole::Assistant, text.as_str())
+            }
+        };
+        messages.push(ModelMessage::new(role, ModelContent::text(text)?)?);
     }
 
     messages.push(ModelMessage::new(

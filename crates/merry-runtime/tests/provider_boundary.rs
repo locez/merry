@@ -866,7 +866,7 @@ async fn provider_stop_success_with_single_slot_event_buffer_emits_artifact_and_
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn second_provider_step_continues_sequences_and_does_not_replay_previous_assistant_output() {
+async fn second_provider_step_continues_sequences_and_replays_append_only_body() {
     let provider = FakeModelProvider::new(vec![Ok(completed_event())]);
     let runtime = runtime_with_provider("provider-second-step", provider.clone());
 
@@ -902,7 +902,7 @@ async fn second_provider_step_continues_sequences_and_does_not_replay_previous_a
 
     let requests = provider.recorded_requests();
     assert_eq!(requests.len(), 2);
-    assert_eq!(requests[1].messages().len(), 2);
+    assert_eq!(requests[1].messages().len(), 4);
     assert_eq!(requests[1].messages()[0].role(), ModelMessageRole::System);
     assert!(
         requests[1].messages()[0]
@@ -913,13 +913,20 @@ async fn second_provider_step_continues_sequences_and_does_not_replay_previous_a
     assert_eq!(requests[1].messages()[1].role(), ModelMessageRole::User);
     assert_eq!(
         requests[1].messages()[1].content().as_text(),
-        "Second request."
+        "First request."
     );
-    assert!(
-        requests[1]
-            .messages()
-            .iter()
-            .all(|message| message.content().as_text() != "model result")
+    assert_eq!(
+        requests[1].messages()[2].role(),
+        ModelMessageRole::Assistant
+    );
+    assert_eq!(
+        requests[1].messages()[2].content().as_text(),
+        "model result"
+    );
+    assert_eq!(requests[1].messages()[3].role(), ModelMessageRole::User);
+    assert_eq!(
+        requests[1].messages()[3].content().as_text(),
+        "Second request."
     );
 }
 
@@ -1161,6 +1168,75 @@ async fn compiled_provider_request_stable_prefix_hash_tracks_base_instructions_a
     assert_ne!(
         first_request.stable_prefix_hash(),
         changed_tools_provider.recorded_requests()[0].stable_prefix_hash()
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn ledger_observations_do_not_enter_prompt_context_by_default() {
+    let provider = ScriptedModelProvider::new(vec![
+        vec![Ok(completed_outputs_event(
+            vec![ModelOutput::tool_call(model_tool_call())],
+            FinishReason::ToolCalls,
+        ))],
+        vec![Ok(completed_event())],
+    ]);
+    let runtime = Runtime::builder(session_id("provider-ledger-not-projected"))
+        .register_tool(RegisteredTool::read_only(
+            test_tool_spec("search_notes"),
+            Arc::new(ScriptedToolExecutor::succeeding_text(
+                "ledger projection sentinel must stay out of prompt\n",
+            )),
+        ))
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .build()
+        .expect("runtime should build");
+
+    let pending_events = collect_step(&runtime, "Request tool result.").await;
+    let pending = pending_tool_call(&pending_events).clone();
+    runtime
+        .execute_tool_call(pending.id(), ToolExecutionContext::default())
+        .await
+        .expect("tool execution should resolve");
+    collect_step(&runtime, "Continue after tool result.").await;
+
+    let requests = provider.recorded_requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1].stable_prefix_message_count(), 1);
+    assert!(
+        requests[1].messages().iter().all(|message| {
+            let text = message.content().as_text();
+            !text.contains("ledger projection sentinel")
+                && !text.contains("tool_result_observation")
+                && !text.contains("Ledger")
+        }),
+        "ledger/tool-result observations must not be rendered into prompt messages by default"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn artifact_payloads_do_not_enter_prompt_context_by_default() {
+    let provider = FakeModelProvider::new(vec![Ok(completed_event())]);
+    let runtime = runtime_with_provider("provider-artifact-not-projected", provider.clone());
+    let payload = "artifact payload sentinel must stay out of prompt";
+    runtime
+        .record_artifact(
+            ArtifactRef::new(artifact_id("artifact-not-projected"), ArtifactKind::Text),
+            ArtifactContent::text(payload),
+        )
+        .await
+        .expect("artifact should record");
+
+    collect_step(&runtime, "Answer without explicit context projection.").await;
+
+    let requests = provider.recorded_requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].stable_prefix_message_count(), 1);
+    assert!(
+        requests[0]
+            .messages()
+            .iter()
+            .all(|message| !message.content().as_text().contains(payload)),
+        "recorded artifact payload must not be rendered into prompt messages by default"
     );
 }
 

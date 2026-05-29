@@ -421,7 +421,7 @@ async fn collect_step_events(stream: RuntimeEventStream) -> Vec<RuntimeEvent> {
 }
 
 fn continuation_step_input(original_task: &str) -> Result<StepInput, RuntimeError> {
-    StepInput::user_text(&format!(
+    StepInput::loop_control_text(&format!(
         "{DEFAULT_AGENT_LOOP_CONTINUATION_INPUT}\n\n{ORIGINAL_TASK_CONTINUATION_LABEL}\n{original_task}"
     ))
 }

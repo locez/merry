@@ -4,8 +4,8 @@ use merry_core::{
     ToolCallResultStatus, ToolName,
 };
 use merry_llm::{
-    FinishReason, ModelCapabilities, ModelError, ModelEvent, ModelEventStream, ModelName,
-    ModelOutput, ModelProvider, ModelProviderFuture, ModelRequest, ModelResponse,
+    FinishReason, ModelCapabilities, ModelError, ModelEvent, ModelEventStream, ModelMessageRole,
+    ModelName, ModelOutput, ModelProvider, ModelProviderFuture, ModelRequest, ModelResponse,
     ModelStreamContext, ModelToolCall, ModelToolCallId, ModelToolResultContent, ToolArguments,
     testing::FakeModelProvider,
 };
@@ -225,6 +225,24 @@ async fn collect_step(runtime: &Runtime, text: &str) -> Vec<RuntimeEvent> {
 
 fn continuation_input_for(original_task: &str) -> String {
     format!("{DEFAULT_AGENT_LOOP_CONTINUATION_INPUT}\n\nOriginal task:\n{original_task}")
+}
+
+fn assert_continuation_request_body(request: &ModelRequest, original_task: &str) {
+    let dynamic = request.dynamic_messages();
+    assert!(
+        dynamic.len() >= 2,
+        "continuation requests should include append-only task body and loop-control input"
+    );
+    assert_eq!(dynamic[0].role(), ModelMessageRole::User);
+    assert_eq!(dynamic[0].content().as_text(), original_task);
+    assert_eq!(
+        dynamic.last().expect("dynamic message").role(),
+        ModelMessageRole::User
+    );
+    assert_eq!(
+        dynamic.last().expect("dynamic message").content().as_text(),
+        continuation_input_for(original_task)
+    );
 }
 
 fn runtime_with_workspace_tools(root: &Path, model_event: ModelEvent) -> Runtime {
@@ -1290,12 +1308,8 @@ async fn coding_loop_harness_inspects_patches_verifies_and_completes() {
     let requests = provider_handle.recorded_requests();
     assert_eq!(requests.len(), 5);
     assert!(requests[0].continuations().is_empty());
-    let expected_continuation_input = continuation_input_for("Fix the greeting and verify it.");
     for request in requests.iter().skip(1) {
-        assert_eq!(
-            request.messages()[1].content().as_text(),
-            expected_continuation_input
-        );
+        assert_continuation_request_body(request, "Fix the greeting and verify it.");
     }
     let expected_continuation_ids = [
         "coding-loop-rg-files",

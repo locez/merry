@@ -86,14 +86,21 @@ Use this sync section to avoid redoing completed smoke/patch work:
   checks, natural task live prompt, and repeated-`todo` status fixture are
   covered in current code/tests, mainly across `897184e`,
   `2adf538`, and `c8077a6`.
+- **M2 context/request assembly guardrails are partly complete.** The runtime
+  now has deterministic tests proving ledger observations and artifact payloads
+  are not projected into prompt messages by default, and provider request
+  assembly now replays a minimal runtime-owned append-only user/assistant body.
+  Agent-loop continuation control prompts are compiled for the current step but
+  are not recorded as user conversation history. No dedicated project-rules
+  stable-prefix layer, checkpoint segment, or context budget/window skeleton has
+  been implemented in this slice.
 - **Do not continue M3/M4 as the next milestone by default.** The next useful
-  implementation slice is M2 context/request assembly guardrails unless a new
-  live-smoke failure exposes a concrete blocker.
-- **Still open from this plan:** Task 4/5/6 context projection,
-  append-only body, and project-rules stable prefix; Task 13/14/15
-  budget/window/checkpoint skeleton. Dedicated parser-only duplicate-file
-  tests and runtime-level multi-file patch integration remain optional
-  hardening, not the next active blocker.
+  implementation slice is the remaining M2 stable project-rules/checkpoint
+  boundary work unless a new live-smoke failure exposes a concrete blocker.
+- **Still open from this plan:** Task 6 project-rules stable prefix and
+  Task 13/14/15 budget/window/checkpoint skeleton. Dedicated parser-only
+  duplicate-file tests and runtime-level multi-file patch integration remain
+  optional hardening, not the next active blocker.
 
 ## Acceptance Commands
 
@@ -383,7 +390,7 @@ Skip this commit if Task 2 already committed this test.
 - Modify: `crates/merry-runtime/src/runtime.rs`
 - Modify: `crates/merry-runtime/tests/agent_loop.rs`
 
-- [ ] **Step 1: Write down the projection contract in code comments**
+- [x] **Step 1: Write down the projection contract in code comments**
 
 Add or update comments near `ContextCompiler` and `compile_step_model_request` so the implementation contract is explicit:
 
@@ -395,7 +402,7 @@ Artifacts and ledger facts remain queryable runtime state and are not projected 
 
 If the current `record_context_summary` API remains public, document it as a manual/explicit context API, not a reducer default path.
 
-- [ ] **Step 2: Check whether extra hashes are needed**
+- [x] **Step 2: Check whether extra hashes are needed**
 
 Inspect `ModelRequest`:
 
@@ -405,7 +412,11 @@ rg -n "stable_prefix_hash|dynamic_context_hash|stable_prefix_message_count|conti
 
 If `stable_prefix_hash` and `dynamic_context_hash` are enough for the tests, do not add new public fields. Add extra `append_body_hash` or `continuation_hash` only if a deterministic test cannot state the required behavior clearly with existing hashes.
 
-- [ ] **Step 3: Add a test that ledger observation alone is not prompt projection**
+Implementation note: existing `stable_prefix_hash`,
+`dynamic_context_hash`, and `stable_prefix_message_count` diagnostics were
+enough. No new public request hash fields were added.
+
+- [x] **Step 3: Add a test that ledger observation alone is not prompt projection**
 
 Use a simple one-tool agent loop and inspect `provider.recorded_requests()[1].messages()`:
 
@@ -427,7 +438,7 @@ assert!(
 
 The exact forbidden strings can be adjusted to current ledger wording. The point is to lock the principle: recording is not projection.
 
-- [ ] **Step 4: Add a test that artifact recording alone is not prompt projection**
+- [x] **Step 4: Add a test that artifact recording alone is not prompt projection**
 
 Create a runtime-owned artifact, then compile or trigger a provider request without adding an explicit context entry. Assert the artifact payload is absent from request messages:
 
@@ -445,7 +456,7 @@ assert!(
 
 Use existing artifact helper functions in `crates/merry-runtime/src/runtime.rs` tests if integration-level access is not available from `tests/agent_loop.rs`.
 
-- [ ] **Step 5: Do not bless free-form ContextSummary as ordinary projection**
+- [x] **Step 5: Do not bless free-form ContextSummary as ordinary projection**
 
 Do not add a test that treats arbitrary `record_context_summary` as ordinary dynamic context. That would bless the wrong boundary.
 
@@ -468,7 +479,12 @@ Also assert the projected text is traceable to the explicit projection API, not 
 
 If no explicit projection API exists yet, do not invent one in this task. Record the absence as an implementation note and rely on the negative ledger/artifact projection tests plus Task 5 append-only body and Task 6 project-rules work for this milestone.
 
-- [ ] **Step 6: Keep `compile_step_model_request` projection allowlisted**
+Implementation note: no new explicit projection API was introduced in this
+slice. The current manual `record_context_summary` API remains documented as an
+explicit/raw context write path, while ledger/artifact negative projection tests
+cover the default boundary.
+
+- [x] **Step 6: Keep `compile_step_model_request` projection allowlisted**
 
 In `crates/merry-runtime/src/step.rs`, preserve this shape for this slice:
 
@@ -494,7 +510,7 @@ Do not add a dynamic tail marker like `Runtime: pending tool result resolved`.
 Do not put ledger observations into the prompt just because they were recorded.
 Do not render full artifact payloads unless an explicit tool read/project operation requests them.
 
-- [ ] **Step 7: Run tests**
+- [x] **Step 7: Run tests**
 
 Run:
 
@@ -505,7 +521,13 @@ cargo test -p merry-runtime context_projection
 
 Expected: PASS. If `context_projection` is not the final filter name, run the exact tests added in this task.
 
-- [ ] **Step 8: Commit**
+Implementation note: there is no `context_projection` filter yet; the exact
+added tests are
+`ledger_observations_do_not_enter_prompt_context_by_default` and
+`artifact_payloads_do_not_enter_prompt_context_by_default` in
+`crates/merry-runtime/tests/provider_boundary.rs`.
+
+- [x] **Step 8: Commit**
 
 ```bash
 git add crates/merry-runtime/src/context.rs crates/merry-llm/src/request.rs crates/merry-runtime/src/step.rs crates/merry-runtime/src/runtime.rs crates/merry-runtime/tests/agent_loop.rs
@@ -522,13 +544,13 @@ Only add files actually changed.
 - Modify: `crates/merry-runtime/src/step.rs`
 - Modify: `crates/merry-runtime/tests/agent_loop.rs`
 
-- [ ] **Step 1: Choose implementation for this plan**
+- [x] **Step 1: Choose implementation for this plan**
 
 Preferred implementation for this plan: add a minimal append-only user/assistant body because the spec acceptance says ordinary user messages remain append-only without a Task Anchor.
 
 If this is too large for the current coding-loop slice, explicitly edit this plan before implementation and mark append-only historical body as out-of-scope for this plan. Do not silently leave it ambiguous.
 
-- [ ] **Step 2: Add session-owned message history**
+- [x] **Step 2: Add session-owned message history**
 
 Add a runtime-owned history shape in `SessionState`, not a provider-owned conversation id:
 
@@ -541,15 +563,15 @@ enum SessionMessage {
 
 Use owned runtime state and artifact references. Do not store provider response ids.
 
-- [ ] **Step 3: Record user input when a loop begins**
+- [x] **Step 3: Record user input when a loop begins**
 
 When `run_agent_loop` begins an independent user task, append the user text exactly once to the session body. Avoid appending the generated continuation prompt text such as `DEFAULT_AGENT_LOOP_CONTINUATION_INPUT`; that is loop control text, not user conversation history.
 
-- [ ] **Step 4: Record assistant output after artifact write succeeds**
+- [x] **Step 4: Record assistant output after artifact write succeeds**
 
 When `record_assistant_text_output(text)` succeeds, append an assistant body item referencing that assistant output artifact. The body item must not claim the artifact before it is recorded.
 
-- [ ] **Step 5: Compile append-only body into request messages**
+- [x] **Step 5: Compile append-only body into request messages**
 
 Update `compile_step_model_request` to include previous user/assistant body messages before the current loop input where appropriate. If current code already passes the current user text separately, avoid duplicating it in the same request.
 
@@ -564,7 +586,7 @@ current user or continuation control input
 uncheckpointed function-call continuations
 ```
 
-- [ ] **Step 6: Add tests**
+- [x] **Step 6: Add tests**
 
 Add tests:
 
@@ -583,7 +605,7 @@ async fn continuation_control_prompt_is_not_recorded_as_user_history() {
 }
 ```
 
-- [ ] **Step 7: Run tests**
+- [x] **Step 7: Run tests**
 
 Run:
 
@@ -595,7 +617,7 @@ cargo test -p merry-runtime continuation_control_prompt_is_not_recorded_as_user_
 
 Expected: PASS.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add crates/merry-runtime/src/session.rs crates/merry-runtime/src/runtime.rs crates/merry-runtime/src/step.rs crates/merry-runtime/tests/agent_loop.rs
