@@ -56,8 +56,9 @@ pub use artifact::{
     ArtifactContent, ArtifactContentKind, ArtifactError, ArtifactRecord, ArtifactRegistry,
 };
 pub use context::{
-    CompiledContext, CompiledContextSection, ContextCompiler, ContextEntry, ContextError,
-    ContextEvidence, ContextSummary, ProjectRules, SessionContextSnapshot,
+    CompiledContext, CompiledContextSection, ContextBudget, ContextBudgetPolicy, ContextCompiler,
+    ContextEntry, ContextError, ContextEvidence, ContextSummary, ProjectRules,
+    SessionContextSnapshot,
 };
 pub use error::RuntimeError;
 pub use event_stream::RuntimeEventStream;
