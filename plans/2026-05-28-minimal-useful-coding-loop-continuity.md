@@ -1416,7 +1416,7 @@ Only add `lib.rs` if changed.
 - Modify: `crates/merry-llm/src/capability.rs`
 - Modify: `crates/merry-provider-openai/src/config.rs`
 
-- [ ] **Step 1: Use existing capabilities first**
+- [x] **Step 1: Use existing capabilities first**
 
 `ModelCapabilities` already has:
 
@@ -1427,7 +1427,7 @@ max_output_tokens: Option<u64>
 
 Do not add API probing in this milestone. Use explicit provider capabilities when available, otherwise fallback.
 
-- [ ] **Step 2: Add resolver**
+- [x] **Step 2: Add resolver**
 
 In `crates/merry-runtime/src/context.rs`, add:
 
@@ -1467,7 +1467,7 @@ bundled model catalog
 conservative fallback
 ```
 
-- [ ] **Step 3: Add resolver tests**
+- [x] **Step 3: Add resolver tests**
 
 Tests:
 
@@ -1489,11 +1489,11 @@ fn context_window_resolver_falls_back_when_metadata_is_missing() {
 }
 ```
 
-- [ ] **Step 4: Do not add new config keys yet**
+- [x] **Step 4: Do not add new config keys yet**
 
 Unless the user explicitly approves a config schema change, do not update `examples/config.toml`.
 
-- [ ] **Step 5: Run tests**
+- [x] **Step 5: Run tests**
 
 Run:
 
@@ -1503,7 +1503,7 @@ cargo test -p merry-runtime context_window_resolver
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/merry-runtime/src/context.rs
