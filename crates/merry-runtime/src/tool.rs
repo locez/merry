@@ -312,6 +312,8 @@ impl ToolExecutionError {
 pub enum ToolActionKind {
     /// Reads runtime or workspace state without changing it.
     ReadOnly,
+    /// Mutates runtime-owned control state without direct external side effects.
+    RuntimeControl,
     /// Writes files or other state in the configured workspace.
     WorkspaceWrite,
     /// Executes a local command or process.
@@ -321,7 +323,8 @@ pub enum ToolActionKind {
 }
 
 impl ToolActionKind {
-    /// Returns whether this action category can cause external side effects.
+    /// Returns whether this action category can cause external side effects
+    /// that require the mutating action commit lifecycle.
     #[must_use]
     pub fn is_mutating(self) -> bool {
         matches!(

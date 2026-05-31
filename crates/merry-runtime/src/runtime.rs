@@ -642,7 +642,15 @@ impl Runtime {
         let execution_context =
             context_with_approved_proposal(context.clone(), allowed_proposal.as_ref());
         let executor = registered_tool.executor();
-        let execution = if allowed_proposal.is_some() {
+        let preserves_control_state =
+            registered_tool.action_kind() == crate::ToolActionKind::RuntimeControl;
+        let execution = if allowed_proposal.is_some() || preserves_control_state {
+            if context.cancellation_token().is_cancelled() {
+                return Err(RuntimeError::ToolExecutionCancelled {
+                    session_id: self.inner.session_id.clone(),
+                    call_id: call_id.clone(),
+                });
+            }
             executor.execute(pending, execution_context).await
         } else {
             tokio::select! {
@@ -659,7 +667,10 @@ impl Runtime {
 
         let outcome = match execution {
             Ok(outcome) => {
-                if context.cancellation_token().is_cancelled() && allowed_proposal.is_none() {
+                if context.cancellation_token().is_cancelled()
+                    && allowed_proposal.is_none()
+                    && !preserves_control_state
+                {
                     return Err(RuntimeError::ToolExecutionCancelled {
                         session_id: self.inner.session_id.clone(),
                         call_id: call_id.clone(),
@@ -690,7 +701,10 @@ impl Runtime {
 
         let (status, content, diagnostic, execution_evidence) = outcome.into_parts();
         let mut session = self.inner.session.lock().await;
-        if context.cancellation_token().is_cancelled() && allowed_proposal.is_none() {
+        if context.cancellation_token().is_cancelled()
+            && allowed_proposal.is_none()
+            && !preserves_control_state
+        {
             return Err(RuntimeError::ToolExecutionCancelled {
                 session_id: self.inner.session_id.clone(),
                 call_id: call_id.clone(),
@@ -4677,6 +4691,18 @@ mod tests {
         assert_eq!(read_only.disposition(), ActionPolicyDisposition::Allow);
         assert!(read_only.is_allowed());
 
+        let runtime_control = policy.decide(ToolActionKind::RuntimeControl);
+        assert_eq!(
+            runtime_control.action_kind(),
+            ToolActionKind::RuntimeControl
+        );
+        assert_eq!(runtime_control.risk_tier(), ActionRiskTier::RuntimeControl);
+        assert_eq!(
+            runtime_control.disposition(),
+            ActionPolicyDisposition::Allow
+        );
+        assert!(runtime_control.is_allowed());
+
         for (action_kind, risk_tier) in [
             (ToolActionKind::WorkspaceWrite, ActionRiskTier::EditElevated),
             (ToolActionKind::CommandExec, ActionRiskTier::ProcessHigh),
@@ -6153,6 +6179,51 @@ mod tests {
     }
 
     #[derive(Clone)]
+    struct CancelDuringRuntimeControlExecutor {
+        calls: Arc<AtomicUsize>,
+        token_seen: Arc<StdMutex<Option<CancellationToken>>>,
+    }
+
+    impl CancelDuringRuntimeControlExecutor {
+        fn new() -> Self {
+            Self {
+                calls: Arc::new(AtomicUsize::new(0)),
+                token_seen: Arc::new(StdMutex::new(None)),
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+
+        fn token_seen(&self) -> CancellationToken {
+            self.token_seen
+                .lock()
+                .expect("token mutex is not poisoned")
+                .clone()
+                .expect("executor should capture token")
+        }
+    }
+
+    impl ToolExecutor for CancelDuringRuntimeControlExecutor {
+        fn execute<'a>(
+            &'a self,
+            _call: PendingToolCall,
+            context: ToolExecutionContext,
+        ) -> ToolExecutorFuture<'a> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                *self.token_seen.lock().expect("token mutex is not poisoned") =
+                    Some(context.cancellation_token().clone());
+                context.cancellation_token().cancel();
+                Ok(ToolExecutionOutcome::succeeded_text(
+                    "control state committed\n",
+                ))
+            })
+        }
+    }
+
+    #[derive(Clone)]
     struct ProposingToolExecutor {
         execute_calls: Arc<AtomicUsize>,
         propose_calls: Arc<AtomicUsize>,
@@ -6632,6 +6703,34 @@ mod tests {
                     _ => "Other",
                 })
                 .collect::<Vec<_>>(),
+            ["ArtifactRecorded", "ToolCallResolved"]
+        );
+        let result = resolved_tool_result(&events);
+        assert_eq!(result.status(), merry_core::ToolCallResultStatus::Succeeded);
+        assert!(runtime.pending_tool_calls().await.is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn runtime_control_tool_resolves_even_if_token_is_cancelled_during_execution() {
+        let executor = CancelDuringRuntimeControlExecutor::new();
+        let (runtime, pending) = register_policy_pending_tool(
+            "runtime-policy-runtime-control-cancel-race",
+            "policy_control",
+            "call-runtime-control",
+            ToolActionKind::RuntimeControl,
+            executor.clone(),
+        )
+        .await;
+
+        let events = runtime
+            .execute_tool_call(pending.id(), ToolExecutionContext::default())
+            .await
+            .expect("runtime control outcome should survive in-flight cancellation");
+
+        assert_eq!(executor.call_count(), 1);
+        assert!(executor.token_seen().is_cancelled());
+        assert_eq!(
+            event_kind_names_for_tool_execution(&events),
             ["ArtifactRecorded", "ToolCallResolved"]
         );
         let result = resolved_tool_result(&events);

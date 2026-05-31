@@ -102,7 +102,7 @@ pub use subagent::{
     RejectedSubagentView, SpawnSubagentTaskInput, SpawnSubagentsInput, SpawnSubagentsOutput,
     SpawnedSubagentStatusLabel, SpawnedSubagentView, SubagentConfig, SubagentError,
     SubagentManager, SubagentStatusLabel, SubagentStatusView, SubagentTaskSpec, WaitMode,
-    WaitSubagentsInput, WaitSubagentsOutput, subagent_tool_specs,
+    WaitSubagentsInput, WaitSubagentsOutput, subagent_registered_tools, subagent_tool_specs,
     validate_no_write_scope_conflicts,
 };
 pub use tool::{
