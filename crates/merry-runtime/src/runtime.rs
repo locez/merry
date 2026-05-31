@@ -40,6 +40,7 @@ use crate::{
         CompiledSessionMessage, StepContext, StepInput, StepModelRequestParts,
         compile_step_model_request,
     },
+    subagent::SubagentManager,
     tool::{
         ActionProposalEvidence, RegisteredTool, ToolActionPreflight, ToolExecutionContext,
         ToolExecutionError, ToolRegistry,
@@ -200,6 +201,14 @@ impl Runtime {
 
     pub(crate) fn session_id(&self) -> &SessionId {
         &self.inner.session_id
+    }
+
+    /// Returns a compact snapshot of managed subagent statuses when configured.
+    pub async fn subagent_snapshot(&self) -> Option<Vec<crate::SubagentStatusView>> {
+        match &self.inner.subagent_manager {
+            Some(manager) => Some(manager.snapshot().await),
+            None => None,
+        }
     }
 
     pub(crate) fn step_with_active_permit(
@@ -1515,6 +1524,7 @@ pub struct RuntimeBuilder {
     low_risk_process_runner: Option<Arc<dyn ProcessRunner>>,
     read_only_shell_process_runner: Option<Arc<dyn ProcessRunner>>,
     accepted_local_workspace_process_runner: Option<AcceptedLocalWorkspaceProcessRunner>,
+    subagent_manager: Option<SubagentManager>,
 }
 
 impl RuntimeBuilder {
@@ -1536,6 +1546,7 @@ impl RuntimeBuilder {
             low_risk_process_runner: None,
             read_only_shell_process_runner: None,
             accepted_local_workspace_process_runner: None,
+            subagent_manager: None,
         }
     }
 
@@ -1706,6 +1717,13 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Installs a runtime-owned subagent manager for future subagent tools.
+    #[must_use]
+    pub fn subagent_manager(mut self, manager: SubagentManager) -> Self {
+        self.subagent_manager = Some(manager);
+        self
+    }
+
     /// Builds the runtime.
     ///
     /// Duplicate tool names are rejected before the runtime is constructed.
@@ -1750,6 +1768,7 @@ impl RuntimeBuilder {
                 read_only_shell_process_runner: self.read_only_shell_process_runner,
                 accepted_local_workspace_process_runner: self
                     .accepted_local_workspace_process_runner,
+                subagent_manager: self.subagent_manager,
             }),
         })
     }
@@ -1769,6 +1788,7 @@ struct RuntimeInner {
     low_risk_process_runner: Option<Arc<dyn ProcessRunner>>,
     read_only_shell_process_runner: Option<Arc<dyn ProcessRunner>>,
     accepted_local_workspace_process_runner: Option<AcceptedLocalWorkspaceProcessRunner>,
+    subagent_manager: Option<SubagentManager>,
 }
 
 #[derive(Clone)]
@@ -3273,6 +3293,7 @@ mod tests {
             low_risk_process_runner: None,
             read_only_shell_process_runner: None,
             accepted_local_workspace_process_runner: None,
+            subagent_manager: None,
         }
     }
 
@@ -3947,6 +3968,7 @@ mod tests {
                 low_risk_process_runner: None,
                 read_only_shell_process_runner: None,
                 accepted_local_workspace_process_runner: None,
+                subagent_manager: None,
             }),
         }
     }
@@ -3967,6 +3989,7 @@ mod tests {
                 low_risk_process_runner: None,
                 read_only_shell_process_runner: None,
                 accepted_local_workspace_process_runner: None,
+                subagent_manager: None,
             }),
         }
     }
@@ -3990,6 +4013,7 @@ mod tests {
                 low_risk_process_runner: None,
                 read_only_shell_process_runner: None,
                 accepted_local_workspace_process_runner: None,
+                subagent_manager: None,
             }),
         }
     }

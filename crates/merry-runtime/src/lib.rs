@@ -98,10 +98,11 @@ pub use runtime::{AutomaticCompactionConfig, Runtime, RuntimeBuilder};
 pub use skill::{SkillCatalog, SkillError, SkillLoadWarning, SkillMetadata};
 pub use step::{StepContext, StepInput};
 pub use subagent::{
-    CancelSubagentsInput, DEFAULT_MAX_STEPS, RejectedSubagentView, SpawnSubagentTaskInput,
-    SpawnSubagentsInput, SpawnSubagentsOutput, SpawnedSubagentStatusLabel, SpawnedSubagentView,
-    SubagentConfig, SubagentError, SubagentStatusLabel, SubagentStatusView, SubagentTaskSpec,
-    WaitMode, WaitSubagentsInput, WaitSubagentsOutput, subagent_tool_specs,
+    CancelSubagentsInput, ChildRuntimeFactory, ChildRuntimeInput, DEFAULT_MAX_STEPS,
+    RejectedSubagentView, SpawnSubagentTaskInput, SpawnSubagentsInput, SpawnSubagentsOutput,
+    SpawnedSubagentStatusLabel, SpawnedSubagentView, SubagentConfig, SubagentError,
+    SubagentManager, SubagentStatusLabel, SubagentStatusView, SubagentTaskSpec, WaitMode,
+    WaitSubagentsInput, WaitSubagentsOutput, subagent_tool_specs,
     validate_no_write_scope_conflicts,
 };
 pub use tool::{
