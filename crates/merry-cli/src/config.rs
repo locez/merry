@@ -29,6 +29,7 @@ pub enum ConfigError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct XdgPaths {
+    home: PathBuf,
     config_dir: PathBuf,
     config_file: PathBuf,
     state_dir: PathBuf,
@@ -60,6 +61,7 @@ impl XdgPaths {
         let config_file = config_dir.join("config.toml");
         let default_log_file = state_dir.join("logs/merry.jsonl");
         Self {
+            home,
             config_dir,
             config_file,
             state_dir,
@@ -82,6 +84,10 @@ impl XdgPaths {
     pub fn default_log_file(&self) -> &Path {
         &self.default_log_file
     }
+
+    fn home(&self) -> &Path {
+        &self.home
+    }
 }
 
 fn absolute_or_default(value: Option<PathBuf>, default: PathBuf) -> PathBuf {
@@ -95,6 +101,7 @@ fn absolute_or_default(value: Option<PathBuf>, default: PathBuf) -> PathBuf {
 pub struct MerryConfig {
     raw: MerryConfigToml,
     config_dir: PathBuf,
+    home: PathBuf,
 }
 
 impl MerryConfig {
@@ -123,6 +130,7 @@ impl MerryConfig {
         Ok(Some(Self {
             raw,
             config_dir: paths.config_dir().to_path_buf(),
+            home: paths.home().to_path_buf(),
         }))
     }
 
@@ -143,7 +151,7 @@ impl MerryConfig {
         }
         let path = match log.path.as_deref() {
             None => paths.default_log_file().to_path_buf(),
-            Some(path) => resolve_user_path(path, &self.config_dir)?,
+            Some(path) => resolve_user_path(path, &self.config_dir, &self.home)?,
         };
         Ok(Some(EffectiveLogSettings {
             level: log.level,
@@ -167,6 +175,30 @@ impl MerryConfig {
         };
 
         auto_compaction.to_config()
+    }
+
+    pub fn skill_roots(&self) -> Result<Vec<PathBuf>, ConfigError> {
+        let Some(skills) = self.raw.skills.as_ref() else {
+            return Ok(Vec::new());
+        };
+        if !skills.enabled {
+            return Ok(Vec::new());
+        }
+
+        let mut roots = Vec::with_capacity(skills.roots.len());
+        for root in &skills.roots {
+            if root.trim().is_empty() {
+                return Err(ConfigError::Invalid(
+                    "skills.roots entries must not be blank".to_owned(),
+                ));
+            }
+            roots.push(resolve_config_relative_path(
+                root,
+                &self.config_dir,
+                &self.home,
+            )?);
+        }
+        Ok(roots)
     }
 
     pub fn runtime_models(&self) -> Result<EffectiveRuntimeModelsConfig, ConfigError> {
@@ -274,6 +306,7 @@ impl MerryConfig {
             (None, Some(path)) => EffectiveOpenAiApiKeySource::File(resolve_config_relative_path(
                 path,
                 &self.config_dir,
+                &self.home,
             )?),
             (None, None) => {
                 return Err(ConfigError::Invalid(
@@ -290,12 +323,8 @@ impl MerryConfig {
     }
 }
 
-fn resolve_user_path(value: &str, config_dir: &Path) -> Result<PathBuf, ConfigError> {
+fn resolve_user_path(value: &str, config_dir: &Path, home: &Path) -> Result<PathBuf, ConfigError> {
     if let Some(rest) = value.strip_prefix("~/") {
-        let home = env::var_os("HOME")
-            .map(PathBuf::from)
-            .filter(|path| path.is_absolute())
-            .ok_or(ConfigError::HomeMissingOrRelative)?;
         return Ok(home.join(rest));
     }
     let path = PathBuf::from(value);
@@ -308,12 +337,16 @@ fn resolve_user_path(value: &str, config_dir: &Path) -> Result<PathBuf, ConfigEr
     )))
 }
 
-fn resolve_config_relative_path(value: &str, config_dir: &Path) -> Result<PathBuf, ConfigError> {
+fn resolve_config_relative_path(
+    value: &str,
+    config_dir: &Path,
+    home: &Path,
+) -> Result<PathBuf, ConfigError> {
     let path = PathBuf::from(value);
     if path.is_absolute() {
         Ok(path)
     } else if value.starts_with("~/") {
-        resolve_user_path(value, config_dir)
+        resolve_user_path(value, config_dir, home)
     } else {
         Ok(config_dir.join(path))
     }
@@ -434,6 +467,7 @@ struct MerryConfigToml {
     #[serde(default)]
     global: GlobalToml,
     runtime: Option<RuntimeToml>,
+    skills: Option<SkillsToml>,
     models: Option<ModelsToml>,
     observability: Option<ObservabilityToml>,
     providers: Option<ProvidersToml>,
@@ -449,6 +483,15 @@ struct GlobalToml {
 #[serde(deny_unknown_fields)]
 struct RuntimeToml {
     auto_compaction: Option<AutoCompactionToml>,
+}
+
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct SkillsToml {
+    #[serde(default = "default_true")]
+    enabled: bool,
+    #[serde(default)]
+    roots: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
@@ -735,6 +778,56 @@ retained_raw_tail_items = 4
     }
 
     #[test]
+    fn parses_skill_config_roots() {
+        let paths = XdgPaths::from_parts(home(), None, None);
+        let config = MerryConfig::load_optional_from_text(
+            Some(
+                r#"
+[skills]
+enabled = true
+roots = ["skills", "~/shared-skills", "/opt/company/skills"]
+"#,
+            ),
+            &paths,
+        )
+        .expect("config should parse")
+        .expect("config should be present");
+
+        let skills = config.skill_roots().expect("skill roots should resolve");
+        assert_eq!(
+            skills,
+            vec![
+                PathBuf::from("/home/alice/.config/merry/skills"),
+                PathBuf::from("/home/alice/shared-skills"),
+                PathBuf::from("/opt/company/skills"),
+            ]
+        );
+    }
+
+    #[test]
+    fn disabled_or_missing_skills_return_no_roots() {
+        let paths = XdgPaths::from_parts(home(), None, None);
+        let missing = MerryConfig::load_optional_from_text(Some(""), &paths)
+            .expect("config should parse")
+            .expect("config should be present");
+        assert_eq!(
+            missing.skill_roots().expect("missing skills is valid"),
+            Vec::<PathBuf>::new()
+        );
+
+        let disabled = MerryConfig::load_optional_from_text(
+            Some("[skills]\nenabled = false\nroots = [\"skills\"]\n"),
+            &paths,
+        )
+        .expect("config should parse")
+        .expect("config should be present");
+        assert_eq!(
+            disabled.skill_roots().expect("disabled skills is valid"),
+            Vec::<PathBuf>::new()
+        );
+    }
+
+    #[test]
     fn context_compaction_model_role_defaults_to_default_provider() {
         let paths = XdgPaths::from_parts(home(), None, None);
         let config = MerryConfig::load_optional_from_text(
@@ -860,6 +953,12 @@ model = "gpt-compact"
         assert_eq!(policy.retained_raw_tail_items(), 2);
         assert_eq!(policy.max_ref_excerpt_bytes(), 1200);
         assert_eq!(policy.max_carried_prior_refs(), 16);
+        assert_eq!(
+            config
+                .skill_roots()
+                .expect("example skill roots should validate"),
+            Vec::<PathBuf>::new()
+        );
 
         let models = config
             .runtime_models()

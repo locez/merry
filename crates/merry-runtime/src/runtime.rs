@@ -14,7 +14,7 @@ use crate::{
     ProcessActionIntent, ProcessExitStatus, ProcessPermissionProfileId, ProcessRunner,
     ProcessRunnerContext, ProcessRunnerError, ProcessRunnerOutput, ProjectRules,
     ResolvedContextWindow, RuntimeError, RuntimeEventStream, RuntimeModelRole,
-    SessionContextSnapshot, TaskAnchor,
+    SessionContextSnapshot, SkillCatalog, TaskAnchor,
     action_audit::ActionAuditPolicy,
     action_policy::{
         ActionPolicyDecision, DefaultActionPolicy, classify_tool_action_risk,
@@ -1506,6 +1506,7 @@ pub struct RuntimeBuilder {
     automatic_compaction: AutomaticCompactionConfig,
     registered_tools: Vec<RegisteredTool>,
     initial_context_summaries: BTreeMap<String, String>,
+    skill_catalog: Option<SkillCatalog>,
     project_rules: Option<ProjectRules>,
     task_anchor: Option<TaskAnchor>,
     compacted_checkpoint: Option<CompactedCheckpoint>,
@@ -1526,6 +1527,7 @@ impl RuntimeBuilder {
             automatic_compaction: AutomaticCompactionConfig::default(),
             registered_tools: Vec::new(),
             initial_context_summaries: BTreeMap::new(),
+            skill_catalog: None,
             project_rules: None,
             task_anchor: None,
             compacted_checkpoint: None,
@@ -1621,6 +1623,16 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Adds available skill metadata to the cacheable stable request prefix.
+    ///
+    /// This projects only `SKILL.md` frontmatter metadata. Full skill bodies
+    /// remain on disk and must be read through registered workspace file tools.
+    #[must_use]
+    pub fn skill_catalog(mut self, skill_catalog: SkillCatalog) -> Self {
+        self.skill_catalog = Some(skill_catalog);
+        self
+    }
+
     /// Sets the current task objective control-plane anchor.
     ///
     /// This reserves the runtime context slot for future `/task` commands. It
@@ -1711,6 +1723,9 @@ impl RuntimeBuilder {
         }
         if let Some(project_rules) = self.project_rules {
             session.set_project_rules(project_rules);
+        }
+        if let Some(skill_catalog) = self.skill_catalog {
+            session.set_skill_catalog(skill_catalog);
         }
         if let Some(task_anchor) = self.task_anchor {
             session.set_task_anchor(task_anchor);
@@ -2389,6 +2404,7 @@ fn trace_provider_request_budget_unavailable(
 #[derive(Debug)]
 struct StepRequestInputs {
     snapshot: SessionContextSnapshot,
+    skill_catalog: Option<SkillCatalog>,
     project_rules: Option<ProjectRules>,
     task_anchor: Option<TaskAnchor>,
     append_only_body: Vec<CompiledSessionMessage>,
@@ -2403,6 +2419,7 @@ impl StepRequestInputs {
     ) -> Self {
         Self {
             snapshot: session.context_snapshot(),
+            skill_catalog: session.skill_catalog(),
             project_rules: session.project_rules(),
             task_anchor: session.task_anchor(),
             append_only_body,
@@ -2449,6 +2466,7 @@ fn compile_step_request_from_inputs(
     compile_step_model_request(StepModelRequestParts {
         input,
         model,
+        skill_catalog: inputs.skill_catalog.as_ref(),
         project_rules: inputs.project_rules.as_ref(),
         task_anchor: inputs.task_anchor.as_ref(),
         context: &compiled_context,
