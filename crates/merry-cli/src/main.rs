@@ -18,10 +18,11 @@ use merry_llm::{
 use merry_provider_openai::{OpenAiProvider, OpenAiProviderConfig};
 use merry_runtime::{
     AcceptedLocalWorkspaceProcessAdmission, AgentLoopConfig, AgentLoopStatus, ArtifactContent,
-    AutomaticCompactionConfig, MAX_PROCESS_OUTPUT_LIMIT_BYTES, ProcessActionIntent,
-    ProcessEnvPolicy, ProcessRunner, RegisteredTool, Runtime, RuntimeBuilder, RuntimeModelRole,
-    StepContext, StepInput, TokioProcessRunner, ToolExecutionContext, ToolExecutionOutcome,
-    ToolExecutor, ToolExecutorFuture, process_command_tool,
+    AutomaticCompactionConfig, ChildRuntimeFactory, ChildRuntimeInput,
+    MAX_PROCESS_OUTPUT_LIMIT_BYTES, ProcessActionIntent, ProcessEnvPolicy, ProcessRunner,
+    RegisteredTool, Runtime, RuntimeBuilder, RuntimeModelRole, StepContext, StepInput,
+    SubagentManager, TokioProcessRunner, ToolExecutionContext, ToolExecutionOutcome, ToolExecutor,
+    ToolExecutorFuture, process_command_tool, subagent_registered_tools,
 };
 use merry_tool_workspace::{
     CODING_LOOP_PROCESS_TOOL, WORKSPACE_PATCH_TOOL, WORKSPACE_READ_FILE_TOOL,
@@ -577,6 +578,7 @@ fn validate_loaded_config(
     };
     let _ = effective_log_settings(Some(config), paths)?;
     let _ = automatic_compaction_config(Some(config))?;
+    let _ = subagents_config(Some(config))?;
     let _ = config.skill_roots()?;
     let _ = config.runtime_models()?;
     let _ = config.profile();
@@ -599,6 +601,15 @@ fn automatic_compaction_config(
 ) -> Result<AutomaticCompactionConfig, config::ConfigError> {
     config
         .map(MerryConfig::automatic_compaction_config)
+        .transpose()
+        .map(Option::unwrap_or_default)
+}
+
+fn subagents_config(
+    config: Option<&MerryConfig>,
+) -> Result<config::SubagentsConfig, config::ConfigError> {
+    config
+        .map(MerryConfig::subagents_config)
         .transpose()
         .map(Option::unwrap_or_default)
 }
@@ -1104,12 +1115,14 @@ async fn run_debug_coding_loop_live_smoke(
         .unwrap_or_default();
     let runtime = build_coding_loop_live_smoke_runtime(
         &smoke_root,
-        None,
         admission,
         config,
         Arc::new(TokioProcessRunner::new_at_workspace_root(&smoke_root)),
-        automatic_compaction_config(merry_config).map_err(unexpected)?,
-        skill_roots,
+        CodingLoopLiveRuntimeOptions {
+            automatic_compaction: automatic_compaction_config(merry_config).map_err(unexpected)?,
+            skill_roots,
+            subagents: subagents_config(merry_config).map_err(unexpected)?,
+        },
     )?;
     let generation_config =
         GenerationConfig::new(Some(max_output_tokens), false).map_err(debug_openai_usage_error)?;
@@ -1207,8 +1220,11 @@ async fn run_debug_coding_loop_task_live_smoke(
         admission,
         config,
         Arc::new(TokioProcessRunner::new_at_workspace_root(&smoke_root)),
-        automatic_compaction,
-        skill_roots,
+        CodingLoopLiveRuntimeOptions {
+            automatic_compaction,
+            skill_roots,
+            subagents: subagents_config(merry_config).map_err(unexpected)?,
+        },
     )?;
     let generation_config =
         GenerationConfig::new(Some(max_output_tokens), false).map_err(debug_openai_usage_error)?;
@@ -1700,18 +1716,17 @@ fn build_coding_loop_smoke_runtime(
             automatic_compaction,
             context_compaction: None,
             skill_roots: Vec::new(),
+            subagents: config::SubagentsConfig::default(),
         },
     )
 }
 
 fn build_coding_loop_live_smoke_runtime(
     root: &Path,
-    _relative_cwd: Option<&str>,
     admission: AcceptedLocalWorkspaceProcessAdmission,
     config: DebugOpenAiRuntimeConfig,
     runner: Arc<dyn ProcessRunner>,
-    automatic_compaction: AutomaticCompactionConfig,
-    skill_roots: Vec<PathBuf>,
+    options: CodingLoopLiveRuntimeOptions,
 ) -> Result<Runtime, CliError> {
     let provider = OpenAiProvider::new(config.primary.provider);
     let context_compaction = config
@@ -1727,9 +1742,10 @@ fn build_coding_loop_live_smoke_runtime(
         runner,
         CodingLoopRuntimeOptions {
             allow_hidden_workspace_paths: true,
-            automatic_compaction,
+            automatic_compaction: options.automatic_compaction,
             context_compaction,
-            skill_roots,
+            skill_roots: options.skill_roots,
+            subagents: options.subagents,
         },
     )
 }
@@ -1755,6 +1771,7 @@ fn build_coding_loop_task_smoke_runtime(
             automatic_compaction,
             context_compaction: None,
             skill_roots: Vec::new(),
+            subagents: config::SubagentsConfig::default(),
         },
     )
 }
@@ -1764,8 +1781,7 @@ fn build_coding_loop_task_live_smoke_runtime(
     admission: AcceptedLocalWorkspaceProcessAdmission,
     config: DebugOpenAiRuntimeConfig,
     runner: Arc<dyn ProcessRunner>,
-    automatic_compaction: AutomaticCompactionConfig,
-    skill_roots: Vec<PathBuf>,
+    options: CodingLoopLiveRuntimeOptions,
 ) -> Result<Runtime, CliError> {
     let provider = OpenAiProvider::new(config.primary.provider);
     let context_compaction = config
@@ -1781,11 +1797,18 @@ fn build_coding_loop_task_live_smoke_runtime(
         runner,
         CodingLoopRuntimeOptions {
             allow_hidden_workspace_paths: true,
-            automatic_compaction,
+            automatic_compaction: options.automatic_compaction,
             context_compaction,
-            skill_roots,
+            skill_roots: options.skill_roots,
+            subagents: options.subagents,
         },
     )
+}
+
+struct CodingLoopLiveRuntimeOptions {
+    automatic_compaction: AutomaticCompactionConfig,
+    skill_roots: Vec<PathBuf>,
+    subagents: config::SubagentsConfig,
 }
 
 struct CodingLoopRuntimeOptions {
@@ -1793,12 +1816,122 @@ struct CodingLoopRuntimeOptions {
     automatic_compaction: AutomaticCompactionConfig,
     context_compaction: Option<RuntimeRoleProviderConfig>,
     skill_roots: Vec<PathBuf>,
+    subagents: config::SubagentsConfig,
 }
 
 struct RuntimeRoleProviderConfig {
     role: RuntimeModelRole,
     provider: Arc<dyn ModelProvider>,
     model: ModelName,
+}
+
+#[derive(Clone)]
+struct CodingLoopChildRuntimeFactory {
+    root: PathBuf,
+    admission: AcceptedLocalWorkspaceProcessAdmission,
+    provider: Arc<dyn ModelProvider>,
+    model: ModelName,
+    runner: Arc<dyn ProcessRunner>,
+    skill_roots: Vec<PathBuf>,
+    allow_hidden_workspace_paths: bool,
+}
+
+impl CodingLoopChildRuntimeFactory {
+    fn new(
+        root: &Path,
+        admission: AcceptedLocalWorkspaceProcessAdmission,
+        provider: Arc<dyn ModelProvider>,
+        model: ModelName,
+        runner: Arc<dyn ProcessRunner>,
+        skill_roots: Vec<PathBuf>,
+        allow_hidden_workspace_paths: bool,
+    ) -> Self {
+        Self {
+            root: root.to_path_buf(),
+            admission,
+            provider,
+            model,
+            runner,
+            skill_roots,
+            allow_hidden_workspace_paths,
+        }
+    }
+}
+
+impl ChildRuntimeFactory for CodingLoopChildRuntimeFactory {
+    fn build_child(
+        &self,
+        input: ChildRuntimeInput,
+    ) -> Result<Runtime, merry_runtime::RuntimeError> {
+        let allow_patch = input.allowed_tools.is_empty()
+            || input
+                .allowed_tools
+                .iter()
+                .any(|tool| tool.as_str() == WORKSPACE_PATCH_TOOL);
+        let allow_local_workspace_process = input.allowed_tools.is_empty()
+            || input
+                .allowed_tools
+                .iter()
+                .any(|tool| tool.as_str() == CODING_LOOP_PROCESS_TOOL);
+        let builder = Runtime::builder(input.session_id)
+            .task_anchor(input.task_anchor)
+            .model_provider(Arc::clone(&self.provider), self.model.clone());
+        let mut profile = WorkspaceCodingLoopProfile::new(
+            workspace_tools_config(
+                coding_loop_workspace_roots(&self.root, &self.skill_roots),
+                self.allow_hidden_workspace_paths,
+                false,
+                None,
+            )
+            .map_err(|_| merry_runtime::RuntimeError::InvalidStepInput {
+                reason: "child workspace tool config was invalid",
+            })?,
+        )
+        .map_err(|_| merry_runtime::RuntimeError::InvalidStepInput {
+            reason: "child workspace coding loop profile was invalid",
+        })?;
+        if allow_patch {
+            profile = profile.with_patch_tool();
+        }
+        profile = if allow_local_workspace_process {
+            profile.with_cli_bwrap_process_runner(self.admission, Arc::clone(&self.runner))
+        } else {
+            profile.with_read_only_process_runner(Arc::clone(&self.runner))
+        };
+        profile
+            .register_on(builder)
+            .map_err(|_| merry_runtime::RuntimeError::InvalidStepInput {
+                reason: "child workspace coding loop profile registration failed",
+            })?
+            .build()
+    }
+}
+
+fn coding_loop_workspace_roots(root: &Path, skill_roots: &[PathBuf]) -> Vec<PathBuf> {
+    let mut roots = vec![root.to_path_buf()];
+    roots.extend(skill_roots.iter().filter(|root| root.is_dir()).cloned());
+    roots
+}
+
+fn workspace_tools_config(
+    roots: Vec<PathBuf>,
+    allow_hidden_workspace_paths: bool,
+    task_smoke_patch_limit: bool,
+    max_patch_bytes_override: Option<usize>,
+) -> Result<WorkspaceToolsConfig, CliError> {
+    let max_patch_bytes = max_patch_bytes_override.unwrap_or_else(|| {
+        if task_smoke_patch_limit {
+            CODING_LOOP_TASK_SMOKE_MAX_PATCH_BYTES
+        } else {
+            WorkspaceToolLimits::default().max_patch_bytes
+        }
+    });
+    Ok(WorkspaceToolsConfig::new(roots)
+        .with_allow_hidden(allow_hidden_workspace_paths)
+        .with_limits(WorkspaceToolLimits {
+            max_patch_bytes,
+            ..WorkspaceToolLimits::default()
+        }))
 }
 
 fn build_coding_loop_runtime(
@@ -1810,9 +1943,10 @@ fn build_coding_loop_runtime(
     runner: Arc<dyn ProcessRunner>,
     options: CodingLoopRuntimeOptions,
 ) -> Result<Runtime, CliError> {
-    let mut builder = Runtime::builder(SessionId::new(session_id).map_err(unexpected)?)
+    let parent_session_id = SessionId::new(session_id).map_err(unexpected)?;
+    let mut builder = Runtime::builder(parent_session_id.clone())
         .automatic_compaction(options.automatic_compaction)
-        .model_provider(provider, model);
+        .model_provider(Arc::clone(&provider), model.clone());
     if let Some(role_provider) = options.context_compaction {
         builder = builder.model_provider_for_role(
             role_provider.role,
@@ -1851,29 +1985,44 @@ fn build_coding_loop_runtime(
         builder = builder.skill_catalog(catalog);
     }
 
-    let mut workspace_roots = vec![root.to_path_buf()];
-    workspace_roots.extend(
-        options
-            .skill_roots
-            .iter()
-            .filter(|root| root.is_dir())
-            .cloned(),
-    );
+    if options.subagents.is_enabled() {
+        let factory = CodingLoopChildRuntimeFactory::new(
+            root,
+            admission,
+            Arc::clone(&provider),
+            model.clone(),
+            Arc::clone(&runner),
+            options.skill_roots.clone(),
+            options.allow_hidden_workspace_paths,
+        );
+        let manager = SubagentManager::new(
+            parent_session_id.clone(),
+            options.subagents.limits(),
+            Arc::new(factory),
+        );
+        let [spawn_tool, wait_tool, cancel_tool] =
+            subagent_registered_tools(manager.clone()).map_err(unexpected)?;
+        builder = builder
+            .subagent_manager(manager)
+            .register_tool(spawn_tool)
+            .register_tool(wait_tool)
+            .register_tool(cancel_tool);
+        tracing::info!(
+            event = "runtime.subagents.enabled",
+            session_id,
+            max_threads = options.subagents.limits().max_threads(),
+            max_depth = options.subagents.limits().max_depth(),
+            "runtime subagent tools registered"
+        );
+    }
 
-    WorkspaceCodingLoopProfile::new(
-        WorkspaceToolsConfig::new(workspace_roots)
-            .with_allow_hidden(options.allow_hidden_workspace_paths)
-            .with_limits(WorkspaceToolLimits {
-                max_patch_bytes: if session_id == CODING_LOOP_TASK_SMOKE_SESSION_ID
-                    || session_id == CODING_LOOP_TASK_LIVE_SMOKE_SESSION_ID
-                {
-                    CODING_LOOP_TASK_SMOKE_MAX_PATCH_BYTES
-                } else {
-                    WorkspaceToolLimits::default().max_patch_bytes
-                },
-                ..WorkspaceToolLimits::default()
-            }),
-    )
+    WorkspaceCodingLoopProfile::new(workspace_tools_config(
+        coding_loop_workspace_roots(root, &options.skill_roots),
+        options.allow_hidden_workspace_paths,
+        session_id == CODING_LOOP_TASK_SMOKE_SESSION_ID
+            || session_id == CODING_LOOP_TASK_LIVE_SMOKE_SESSION_ID,
+        None,
+    )?)
     .map_err(unexpected)?
     .with_patch_tool()
     .with_cli_bwrap_process_runner(admission, runner)
@@ -3186,6 +3335,7 @@ mod tests {
     };
     use super::{DEBUG_TOOL_NAME, run_shell_to_writer, write_runtime_step_events};
     use crate::CodingLoopTaskSmokeTask;
+    use crate::config::SubagentsConfig;
     use clap::Parser;
     use futures_util::stream;
     use merry_core::{
@@ -3198,13 +3348,13 @@ mod tests {
         ModelResponse, ModelStreamContext, ModelToolCall, ModelToolCallId, ToolArguments,
     };
     use merry_runtime::{
-        AcceptedLocalWorkspaceProcessAdmission, AgentLoopConfig, CheckpointId, CheckpointRef,
-        CheckpointRefId, CheckpointRefManifest, CheckpointSequenceRange, CheckpointSourceKind,
-        CheckpointValidationPolicy, CitationBackedCheckpoint, CompactedCheckpoint,
-        CompactedCheckpointCandidate, MAX_PROCESS_OUTPUT_LIMIT_BYTES, ProcessActionIntent,
-        ProcessEnvPolicy, ProcessExitStatus, ProcessRunner, ProcessRunnerContext,
-        ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput, Runtime, StepContext,
-        StepInput, ToolExecutionContext,
+        AcceptedLocalWorkspaceProcessAdmission, AgentLoopConfig, AgentLoopStatus, CheckpointId,
+        CheckpointRef, CheckpointRefId, CheckpointRefManifest, CheckpointSequenceRange,
+        CheckpointSourceKind, CheckpointValidationPolicy, CitationBackedCheckpoint,
+        CompactedCheckpoint, CompactedCheckpointCandidate, MAX_PROCESS_OUTPUT_LIMIT_BYTES,
+        ProcessActionIntent, ProcessEnvPolicy, ProcessExitStatus, ProcessRunner,
+        ProcessRunnerContext, ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput,
+        Runtime, StepContext, StepInput, SubagentConfig, ToolExecutionContext,
     };
     use merry_tool_workspace::{
         WORKSPACE_PATCH_TOOL, WORKSPACE_READ_FILE_TOOL, WorkspaceCodingLoopProfile,
@@ -3551,6 +3701,7 @@ mod tests {
                 automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
                 context_compaction: None,
                 skill_roots: vec![skill_root.clone()],
+                subagents: SubagentsConfig::default(),
             },
         )
         .expect("runtime should build");
@@ -3608,6 +3759,7 @@ mod tests {
                 automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
                 context_compaction: None,
                 skill_roots: vec![skill_root],
+                subagents: SubagentsConfig::default(),
             },
         )
         .expect("runtime should build");
@@ -3661,6 +3813,7 @@ mod tests {
                 automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
                 context_compaction: None,
                 skill_roots: vec![skill_root.clone()],
+                subagents: SubagentsConfig::default(),
             },
         )
         .expect("runtime should build");
@@ -3704,6 +3857,7 @@ mod tests {
                 automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
                 context_compaction: None,
                 skill_roots: vec![missing_skill_root],
+                subagents: SubagentsConfig::default(),
             },
         )
         .expect("missing default skill root should not block runtime");
@@ -3724,6 +3878,208 @@ mod tests {
                 .iter()
                 .all(|message| !message.content().as_text().contains("## Skills"))
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn coding_loop_runtime_hides_subagent_tools_by_default() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("mkdir workspace");
+
+        let provider = ScriptedProvider::new(vec![vec![Ok(ModelEvent::Completed {
+            response: ModelResponse::new(vec![ModelOutput::text("done")], FinishReason::Stop, None),
+        })]]);
+        let runner = Arc::new(FakeProcessRunner::succeeding(""));
+        let runtime = super::build_coding_loop_runtime(
+            "coding-loop-subagents-default-off",
+            &workspace,
+            AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
+            Arc::new(provider.clone()),
+            ModelName::new("debug-model").unwrap(),
+            runner,
+            super::CodingLoopRuntimeOptions {
+                allow_hidden_workspace_paths: false,
+                automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
+                context_compaction: None,
+                skill_roots: Vec::new(),
+                subagents: SubagentsConfig::default(),
+            },
+        )
+        .expect("runtime should build");
+
+        collect_runtime_step_events(
+            &runtime,
+            StepInput::user_text("Inspect available tools.").expect("valid input"),
+            StepContext::default(),
+        )
+        .await
+        .expect("runtime step should complete");
+        let requests = provider.recorded_requests();
+        let tool_names = requests[0]
+            .tools()
+            .iter()
+            .map(|tool| tool.name().as_str())
+            .collect::<Vec<_>>();
+
+        assert!(!tool_names.contains(&"spawn_subagents"));
+        assert!(!tool_names.contains(&"wait_subagents"));
+        assert!(!tool_names.contains(&"cancel_subagents"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn coding_loop_runtime_exposes_subagent_tools_when_enabled() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("mkdir workspace");
+
+        let provider = ScriptedProvider::new(vec![vec![Ok(ModelEvent::Completed {
+            response: ModelResponse::new(vec![ModelOutput::text("done")], FinishReason::Stop, None),
+        })]]);
+        let runner = Arc::new(FakeProcessRunner::succeeding(""));
+        let runtime = super::build_coding_loop_runtime(
+            "coding-loop-subagents-enabled",
+            &workspace,
+            AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
+            Arc::new(provider.clone()),
+            ModelName::new("debug-model").unwrap(),
+            runner,
+            super::CodingLoopRuntimeOptions {
+                allow_hidden_workspace_paths: false,
+                automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
+                context_compaction: None,
+                skill_roots: Vec::new(),
+                subagents: SubagentsConfig::enabled_for_test(
+                    SubagentConfig::new(2, 1).expect("valid subagent config"),
+                ),
+            },
+        )
+        .expect("runtime should build");
+
+        collect_runtime_step_events(
+            &runtime,
+            StepInput::user_text("Inspect available tools.").expect("valid input"),
+            StepContext::default(),
+        )
+        .await
+        .expect("runtime step should complete");
+        let requests = provider.recorded_requests();
+        let tool_names = requests[0]
+            .tools()
+            .iter()
+            .map(|tool| tool.name().as_str())
+            .collect::<Vec<_>>();
+
+        assert!(tool_names.contains(&"spawn_subagents"));
+        assert!(tool_names.contains(&"wait_subagents"));
+        assert!(tool_names.contains(&"cancel_subagents"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn coding_loop_subagent_with_narrow_tools_keeps_read_only_profile() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("mkdir workspace");
+        std::fs::write(workspace.join("README.md"), "child fixture\n").expect("write fixture");
+
+        let provider = ScriptedProvider::new(vec![
+            vec![Ok(ModelEvent::Completed {
+                response: ModelResponse::new(
+                    vec![ModelOutput::tool_call(ModelToolCall::new(
+                        ModelToolCallId::new("call-spawn").expect("valid call id"),
+                        ToolName::new("spawn_subagents").expect("valid tool name"),
+                        ToolArguments::try_from(Value::Object(Map::from_iter([(
+                            "tasks".to_owned(),
+                            Value::Array(vec![Value::Object(Map::from_iter([
+                                (
+                                    "task".to_owned(),
+                                    Value::String("Inspect the fixture.".to_owned()),
+                                ),
+                                (
+                                    "max_steps".to_owned(),
+                                    Value::Number(serde_json::Number::from(1)),
+                                ),
+                                (
+                                    "allowed_tools".to_owned(),
+                                    Value::Array(vec![Value::String(
+                                        "workspace_read_file".to_owned(),
+                                    )]),
+                                ),
+                            ]))]),
+                        )])))
+                        .expect("valid spawn args"),
+                    ))],
+                    FinishReason::ToolCalls,
+                    None,
+                ),
+            })],
+            vec![Ok(ModelEvent::Completed {
+                response: ModelResponse::new(
+                    vec![ModelOutput::text("child done")],
+                    FinishReason::Stop,
+                    None,
+                ),
+            })],
+            vec![Ok(ModelEvent::Completed {
+                response: ModelResponse::new(
+                    vec![ModelOutput::text("parent done")],
+                    FinishReason::Stop,
+                    None,
+                ),
+            })],
+        ]);
+        let runtime = super::build_coding_loop_runtime(
+            "coding-loop-subagent-narrow-tools",
+            &workspace,
+            AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
+            Arc::new(provider.clone()),
+            ModelName::new("debug-model").unwrap(),
+            Arc::new(FakeProcessRunner::succeeding("")),
+            super::CodingLoopRuntimeOptions {
+                allow_hidden_workspace_paths: false,
+                automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
+                context_compaction: None,
+                skill_roots: Vec::new(),
+                subagents: SubagentsConfig::enabled_for_test(
+                    SubagentConfig::new(2, 1).expect("valid subagent config"),
+                ),
+            },
+        )
+        .expect("runtime should build");
+
+        let result = runtime
+            .run_agent_loop(
+                StepInput::user_text("Delegate fixture inspection.").expect("valid input"),
+                StepContext::default(),
+                AgentLoopConfig::new(3).expect("valid loop config"),
+            )
+            .await
+            .expect("agent loop should run");
+
+        assert_eq!(result.status(), &AgentLoopStatus::Completed);
+        let requests = provider.recorded_requests();
+        assert_eq!(requests.len(), 3);
+        let child_request = requests
+            .iter()
+            .find(|request| {
+                request
+                    .dynamic_messages()
+                    .iter()
+                    .any(|message| message.content().as_text().contains("Inspect the fixture."))
+            })
+            .expect("child request should be recorded");
+        let child_tool_names = child_request
+            .tools()
+            .iter()
+            .map(|tool| tool.name().as_str())
+            .collect::<Vec<_>>();
+        assert!(child_tool_names.contains(&"workspace_read_file"));
+        assert!(child_tool_names.contains(&"workspace_list_dir"));
+        assert!(child_tool_names.contains(&"workspace_search_text"));
+        assert!(child_tool_names.contains(&"run_process"));
+        assert!(!child_tool_names.contains(&"workspace_patch"));
+        assert!(!child_tool_names.contains(&"spawn_subagents"));
+        assert!(!child_tool_names.contains(&"wait_subagents"));
+        assert!(!child_tool_names.contains(&"cancel_subagents"));
     }
 
     #[test]
