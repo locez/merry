@@ -16,6 +16,14 @@
 [global]
 profile = "default"
 
+[skills]
+# Skill metadata is projected into the cacheable stable prefix. Full SKILL.md
+# bodies remain on disk and are read through workspace_read_file only when used.
+enabled = false
+roots = [
+  "skills",
+]
+
 [runtime.auto_compaction]
 # Automatic compaction runs when dynamic context crosses the runtime hard
 # watermark. Current user input is not included in the compaction input.

@@ -46,6 +46,7 @@ mod process_runner;
 mod process_tool;
 mod runtime;
 mod session;
+mod skill;
 mod step;
 mod summary_draft_promotion;
 mod tool;
@@ -93,6 +94,7 @@ pub use process::{
 pub use process_runner::TokioProcessRunner;
 pub use process_tool::{ProcessCommandToolError, process_command_tool};
 pub use runtime::{AutomaticCompactionConfig, Runtime, RuntimeBuilder};
+pub use skill::{SkillCatalog, SkillError, SkillLoadWarning, SkillMetadata};
 pub use step::{StepContext, StepInput};
 pub use tool::{
     ActionExecutionEvidence, ActionProposal, ActionProposalError, ActionProposalEvidence,

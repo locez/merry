@@ -5,8 +5,8 @@
 //! crates render those normalized requests into wire formats.
 
 use crate::{
-    CompiledContext, ProjectRules, RuntimeError, TaskAnchor, artifact::ArtifactContent,
-    session::ResolvedToolContinuationSnapshot,
+    CompiledContext, ProjectRules, RuntimeError, SkillCatalog, TaskAnchor,
+    artifact::ArtifactContent, session::ResolvedToolContinuationSnapshot,
 };
 use merry_core::{PendingToolCall, ToolCallResult, ToolCallResultStatus, ToolSpec};
 use merry_llm::{
@@ -162,6 +162,7 @@ fn validate_user_text(text: &str) -> Result<(), RuntimeError> {
 pub(crate) struct StepModelRequestParts<'a> {
     pub(crate) input: &'a StepInput,
     pub(crate) model: &'a ModelName,
+    pub(crate) skill_catalog: Option<&'a SkillCatalog>,
     pub(crate) project_rules: Option<&'a ProjectRules>,
     pub(crate) task_anchor: Option<&'a TaskAnchor>,
     pub(crate) context: &'a CompiledContext,
@@ -177,6 +178,7 @@ pub(crate) fn compile_step_model_request(
     let StepModelRequestParts {
         input,
         model,
+        skill_catalog,
         project_rules,
         task_anchor,
         context,
@@ -187,7 +189,9 @@ pub(crate) fn compile_step_model_request(
     } = parts;
 
     let context_snapshot = context.to_snapshot();
-    let stable_prefix_message_count = 1 + usize::from(project_rules.is_some());
+    let skill_metadata_text = skill_catalog.and_then(SkillCatalog::to_stable_prefix_message_text);
+    let stable_prefix_message_count =
+        1 + usize::from(skill_metadata_text.is_some()) + usize::from(project_rules.is_some());
     let mut messages = Vec::with_capacity(
         stable_prefix_message_count
             + usize::from(task_anchor.is_some())
@@ -196,15 +200,22 @@ pub(crate) fn compile_step_model_request(
     );
 
     // Keep provider prompt projection allowlisted and ordered:
-    // stable runtime instructions, task anchor control-plane context, explicit
-    // compiled context, prior append-only user/assistant body, then the current
-    // user or loop-control input. Tool continuations travel through
-    // provider-neutral continuation fields, not ad hoc ledger or artifact text
-    // rendered into messages.
+    // stable runtime instructions, available skill metadata, project rules,
+    // task anchor control-plane context, explicit compiled context, prior
+    // append-only user/assistant body, then the current user or loop-control
+    // input. Tool continuations travel through provider-neutral continuation
+    // fields, not ad hoc ledger or artifact text rendered into messages.
     messages.push(ModelMessage::new(
         ModelMessageRole::System,
         ModelContent::text(DEFAULT_RUNTIME_BASE_INSTRUCTIONS)?,
     )?);
+
+    if let Some(skill_metadata_text) = skill_metadata_text {
+        messages.push(ModelMessage::new(
+            ModelMessageRole::System,
+            ModelContent::text(&skill_metadata_text)?,
+        )?);
+    }
 
     if let Some(project_rules) = project_rules {
         messages.push(ModelMessage::new(

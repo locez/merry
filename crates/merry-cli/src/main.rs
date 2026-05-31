@@ -577,6 +577,7 @@ fn validate_loaded_config(
     };
     let _ = effective_log_settings(Some(config), paths)?;
     let _ = automatic_compaction_config(Some(config))?;
+    let _ = config.skill_roots()?;
     let _ = config.runtime_models()?;
     let _ = config.profile();
     config.validate_provider_settings_if_present()?;
@@ -1096,6 +1097,11 @@ async fn run_debug_coding_loop_live_smoke(
     };
     let config = debug_openai_config(model_flag, merry_config)?;
     let smoke_root = prepare_coding_loop_smoke_fixture("coding-loop-live-smoke")?;
+    let skill_roots = merry_config
+        .map(MerryConfig::skill_roots)
+        .transpose()
+        .map_err(unexpected)?
+        .unwrap_or_default();
     let runtime = build_coding_loop_live_smoke_runtime(
         &smoke_root,
         None,
@@ -1103,6 +1109,7 @@ async fn run_debug_coding_loop_live_smoke(
         config,
         Arc::new(TokioProcessRunner::new_at_workspace_root(&smoke_root)),
         automatic_compaction_config(merry_config).map_err(unexpected)?,
+        skill_roots,
     )?;
     let generation_config =
         GenerationConfig::new(Some(max_output_tokens), false).map_err(debug_openai_usage_error)?;
@@ -1190,12 +1197,18 @@ async fn run_debug_coding_loop_task_live_smoke(
     let fixture = CodingLoopTaskSmokeFixture::for_task(task);
     let smoke_root = prepare_coding_loop_task_fixture("coding-loop-task-live-smoke", fixture)?;
     let automatic_compaction = automatic_compaction_config(merry_config).map_err(unexpected)?;
+    let skill_roots = merry_config
+        .map(MerryConfig::skill_roots)
+        .transpose()
+        .map_err(unexpected)?
+        .unwrap_or_default();
     let runtime = build_coding_loop_task_live_smoke_runtime(
         &smoke_root,
         admission,
         config,
         Arc::new(TokioProcessRunner::new_at_workspace_root(&smoke_root)),
         automatic_compaction,
+        skill_roots,
     )?;
     let generation_config =
         GenerationConfig::new(Some(max_output_tokens), false).map_err(debug_openai_usage_error)?;
@@ -1686,6 +1699,7 @@ fn build_coding_loop_smoke_runtime(
             allow_hidden_workspace_paths: false,
             automatic_compaction,
             context_compaction: None,
+            skill_roots: Vec::new(),
         },
     )
 }
@@ -1697,6 +1711,7 @@ fn build_coding_loop_live_smoke_runtime(
     config: DebugOpenAiRuntimeConfig,
     runner: Arc<dyn ProcessRunner>,
     automatic_compaction: AutomaticCompactionConfig,
+    skill_roots: Vec<PathBuf>,
 ) -> Result<Runtime, CliError> {
     let provider = OpenAiProvider::new(config.primary.provider);
     let context_compaction = config
@@ -1714,6 +1729,7 @@ fn build_coding_loop_live_smoke_runtime(
             allow_hidden_workspace_paths: true,
             automatic_compaction,
             context_compaction,
+            skill_roots,
         },
     )
 }
@@ -1738,6 +1754,7 @@ fn build_coding_loop_task_smoke_runtime(
             allow_hidden_workspace_paths: false,
             automatic_compaction,
             context_compaction: None,
+            skill_roots: Vec::new(),
         },
     )
 }
@@ -1748,6 +1765,7 @@ fn build_coding_loop_task_live_smoke_runtime(
     config: DebugOpenAiRuntimeConfig,
     runner: Arc<dyn ProcessRunner>,
     automatic_compaction: AutomaticCompactionConfig,
+    skill_roots: Vec<PathBuf>,
 ) -> Result<Runtime, CliError> {
     let provider = OpenAiProvider::new(config.primary.provider);
     let context_compaction = config
@@ -1765,6 +1783,7 @@ fn build_coding_loop_task_live_smoke_runtime(
             allow_hidden_workspace_paths: true,
             automatic_compaction,
             context_compaction,
+            skill_roots,
         },
     )
 }
@@ -1773,6 +1792,7 @@ struct CodingLoopRuntimeOptions {
     allow_hidden_workspace_paths: bool,
     automatic_compaction: AutomaticCompactionConfig,
     context_compaction: Option<RuntimeRoleProviderConfig>,
+    skill_roots: Vec<PathBuf>,
 }
 
 struct RuntimeRoleProviderConfig {
@@ -1800,9 +1820,17 @@ fn build_coding_loop_runtime(
             role_provider.model,
         );
     }
+    if !options.skill_roots.is_empty() {
+        let catalog = merry_runtime::SkillCatalog::load_from_roots(options.skill_roots.clone())
+            .map_err(unexpected)?;
+        builder = builder.skill_catalog(catalog);
+    }
+
+    let mut workspace_roots = vec![root.to_path_buf()];
+    workspace_roots.extend(options.skill_roots.iter().cloned());
 
     WorkspaceCodingLoopProfile::new(
-        WorkspaceToolsConfig::new(vec![root.to_path_buf()])
+        WorkspaceToolsConfig::new(workspace_roots)
             .with_allow_hidden(options.allow_hidden_workspace_paths)
             .with_limits(WorkspaceToolLimits {
                 max_patch_bytes: if session_id == CODING_LOOP_TASK_SMOKE_SESSION_ID
@@ -3117,7 +3145,7 @@ mod tests {
         SANDBOX_CHILD_HANDOFF_CLI_BWRAP_V1, SANDBOX_HOME, SANDBOX_MERRY_CONFIG_DIR,
         SANDBOX_MERRY_LOG_DIR, SANDBOX_TMPDIR, SANDBOX_XDG_CONFIG_HOME, SANDBOX_XDG_STATE_HOME,
         SandboxBootstrap, SandboxChildHandoff, SandboxError, SandboxHost, SandboxRuntimeProfile,
-        args_without_sandbox_bootstrap_flags, coding_loop_process_call,
+        args_without_sandbox_bootstrap_flags, coding_loop_process_call, coding_loop_workspace_call,
         collect_runtime_step_events, debug_echo_tool, debug_openai_config_with_env,
         debug_openai_usage, find_bwrap_in_path, first_pending_tool_call, os,
         plan_sandbox_bootstrap_with_file_exists, report_cli_exit, run_debug_coding_loop_smoke,
@@ -3148,7 +3176,8 @@ mod tests {
         StepInput, ToolExecutionContext,
     };
     use merry_tool_workspace::{
-        WORKSPACE_PATCH_TOOL, WorkspaceCodingLoopProfile, WorkspaceToolsConfig,
+        WORKSPACE_PATCH_TOOL, WORKSPACE_READ_FILE_TOOL, WorkspaceCodingLoopProfile,
+        WorkspaceToolsConfig,
     };
     use serde_json::{Map, Value};
     use std::{
@@ -3440,6 +3469,116 @@ mod tests {
             ]
         );
         assert_eq!(runner.observed_cwd(), [None, None, None]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn coding_loop_runtime_projects_skill_metadata_without_body() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        let skill_root = temp.path().join("skills");
+        std::fs::create_dir_all(&workspace).expect("mkdir workspace");
+        std::fs::create_dir_all(skill_root.join("demo")).expect("mkdir skill");
+        std::fs::write(
+            skill_root.join("demo/SKILL.md"),
+            "---\nname: demo-skill\ndescription: Use for demo tasks.\n---\n# Demo\nbody sentinel\n",
+        )
+        .expect("write skill");
+
+        let provider = ScriptedProvider::new(vec![vec![Ok(ModelEvent::Completed {
+            response: ModelResponse::new(vec![ModelOutput::text("done")], FinishReason::Stop, None),
+        })]]);
+        let runner = Arc::new(FakeProcessRunner::succeeding(""));
+        let runtime = super::build_coding_loop_runtime(
+            "coding-loop-skill-prefix",
+            &workspace,
+            AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
+            Arc::new(provider.clone()),
+            ModelName::new("debug-model").unwrap(),
+            runner,
+            super::CodingLoopRuntimeOptions {
+                allow_hidden_workspace_paths: false,
+                automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
+                context_compaction: None,
+                skill_roots: vec![skill_root.clone()],
+            },
+        )
+        .expect("runtime should build");
+
+        collect_runtime_step_events(
+            &runtime,
+            StepInput::user_text("Inspect skills.").expect("valid input"),
+            StepContext::default(),
+        )
+        .await
+        .expect("runtime step should complete");
+        let request = provider.recorded_requests()[0].clone();
+        let stable_text = request
+            .stable_prefix_messages()
+            .iter()
+            .map(|message| message.content().as_text())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(stable_text.contains("demo-skill"));
+        assert!(stable_text.contains("Use for demo tasks."));
+        assert!(stable_text.contains("workspace_read_file"));
+        assert!(stable_text.contains("demo/SKILL.md"));
+        assert!(!stable_text.contains("body sentinel"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn coding_loop_runtime_includes_skill_roots_in_workspace_read_tools() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        let skill_root = temp.path().join("skills");
+        std::fs::create_dir_all(&workspace).expect("mkdir workspace");
+        std::fs::create_dir_all(skill_root.join("demo")).expect("mkdir skill");
+        std::fs::write(
+            skill_root.join("demo/SKILL.md"),
+            "---\nname: demo-skill\ndescription: Demo skill.\n---\n# Demo\n",
+        )
+        .expect("write skill");
+
+        let provider = ScriptedProvider::new(vec![vec![Ok(coding_loop_workspace_call(
+            "call-read-skill",
+            WORKSPACE_READ_FILE_TOOL,
+            [(
+                "path",
+                serde_json::Value::String("demo/SKILL.md".to_owned()),
+            )],
+        )
+        .expect("workspace read call should build"))]]);
+        let runner = Arc::new(FakeProcessRunner::succeeding(""));
+        let runtime = super::build_coding_loop_runtime(
+            "coding-loop-skill-root-read",
+            &workspace,
+            AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
+            Arc::new(provider.clone()),
+            ModelName::new("debug-model").unwrap(),
+            runner,
+            super::CodingLoopRuntimeOptions {
+                allow_hidden_workspace_paths: false,
+                automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
+                context_compaction: None,
+                skill_roots: vec![skill_root.clone()],
+            },
+        )
+        .expect("runtime should build");
+
+        let events = collect_runtime_step_events(
+            &runtime,
+            StepInput::user_text("Read demo skill.").expect("valid input"),
+            StepContext::default(),
+        )
+        .await
+        .expect("runtime step should collect pending skill read");
+        let pending = first_pending_tool_call(&events).expect("pending skill read");
+        let execution_events = runtime
+            .execute_tool_call(pending.id(), ToolExecutionContext::default())
+            .await
+            .expect("skill read should execute");
+        let result = resolved_tool_result(&execution_events);
+        assert_eq!(result.status(), ToolCallResultStatus::Succeeded);
     }
 
     #[test]

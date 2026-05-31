@@ -27,6 +27,7 @@ use crate::{
     },
     ledger::{CompactLedgerText, LedgerFactKind, LedgerScope, LedgerUpdateKind, TaskLedger},
     memory::{ActivatedMemory, MemoryError, MemoryItem, MemoryStore},
+    skill::SkillCatalog,
     step::CompiledSessionMessage,
     summary_draft_promotion::{
         SummaryDraftPromotionAcceptanceResult, SummaryDraftPromotionAcceptanceStatus,
@@ -269,6 +270,7 @@ pub(crate) struct SessionState {
     ledger: TaskLedger,
     artifacts: ArtifactRegistry,
     memory_store: MemoryStore,
+    skill_catalog: Option<SkillCatalog>,
     project_rules: Option<ProjectRules>,
     task_anchor: Option<TaskAnchor>,
     compacted_checkpoint: Option<CompactedCheckpoint>,
@@ -294,6 +296,7 @@ impl SessionState {
             ledger: TaskLedger::default(),
             artifacts: ArtifactRegistry::default(),
             memory_store: MemoryStore::new(),
+            skill_catalog: None,
             project_rules: None,
             task_anchor: None,
             compacted_checkpoint: None,
@@ -339,6 +342,14 @@ impl SessionState {
 
     pub(crate) fn project_rules(&self) -> Option<ProjectRules> {
         self.project_rules.clone()
+    }
+
+    pub(crate) fn set_skill_catalog(&mut self, skill_catalog: SkillCatalog) {
+        self.skill_catalog = Some(skill_catalog);
+    }
+
+    pub(crate) fn skill_catalog(&self) -> Option<SkillCatalog> {
+        self.skill_catalog.clone()
     }
 
     pub(crate) fn set_task_anchor(&mut self, task_anchor: TaskAnchor) {

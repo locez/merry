@@ -18,16 +18,17 @@ use merry_runtime::{
     CheckpointValidationPolicy, CitationBackedCheckpoint, CitationCompactionPolicy,
     CompactedCheckpoint, CompactedCheckpointCandidate, ContextCompiler, ContextEvidence,
     ContextSummary, LedgerFactKind, LedgerProjection, ProjectRules, RegisteredTool, Runtime,
-    RuntimeModelRole, StepContext, StepInput, TaskAnchor, TokioProcessRunner, ToolActionKind,
-    ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome, ToolExecutor,
-    ToolExecutorFuture, citation_compaction_response_schema, citation_compaction_system_prompt,
-    process_command_tool,
+    RuntimeModelRole, SkillCatalog, SkillMetadata, StepContext, StepInput, TaskAnchor,
+    TokioProcessRunner, ToolActionKind, ToolExecutionContext, ToolExecutionError,
+    ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture, citation_compaction_response_schema,
+    citation_compaction_system_prompt, process_command_tool,
 };
 use schemars::Schema;
 use serde_json::{Map, Value, json};
 use std::{
     env,
     num::NonZeroUsize,
+    path::PathBuf,
     sync::{Arc, Mutex},
 };
 use tokio_util::sync::CancellationToken;
@@ -1575,6 +1576,122 @@ async fn project_rules_enter_stable_prefix_and_affect_stable_hash() {
         first_request.dynamic_context_hash(),
         changed_request.dynamic_context_hash(),
         "same user input with changed project rules should keep dynamic body unchanged"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn compiled_provider_request_skill_metadata_enters_stable_prefix_before_project_rules() {
+    let provider = FakeModelProvider::new(vec![Ok(completed_event())]);
+    let skill_catalog = SkillCatalog::from_metadata(vec![
+        SkillMetadata::new(
+            "frontend-design",
+            "Use when building polished frontend UI.",
+            PathBuf::from("skills/frontend-design/SKILL.md"),
+            PathBuf::from("/workspace"),
+        )
+        .expect("valid skill metadata"),
+    ])
+    .expect("valid skill catalog");
+    let runtime = Runtime::builder(session_id("provider-skill-prefix"))
+        .skill_catalog(skill_catalog)
+        .project_rules(
+            ProjectRules::new("AGENTS.md", "Use project rules sentinel.\n")
+                .expect("valid project rules"),
+        )
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .build()
+        .expect("runtime should build");
+
+    collect_step(&runtime, "Use the skill list.").await;
+    let request = provider.recorded_requests()[0].clone();
+
+    assert_eq!(request.stable_prefix_message_count(), 3);
+    assert_eq!(request.stable_prefix_messages().len(), 3);
+    assert!(
+        request.stable_prefix_messages()[0]
+            .content()
+            .as_text()
+            .contains("You are Merry")
+    );
+    assert!(
+        request.stable_prefix_messages()[1]
+            .content()
+            .as_text()
+            .contains("## Skills")
+    );
+    assert!(
+        request.stable_prefix_messages()[1]
+            .content()
+            .as_text()
+            .contains("workspace_read_file")
+    );
+    assert!(
+        request.stable_prefix_messages()[1]
+            .content()
+            .as_text()
+            .contains("skills/frontend-design/SKILL.md")
+    );
+    assert!(
+        !request.stable_prefix_messages()[1]
+            .content()
+            .as_text()
+            .contains("full skill body sentinel")
+    );
+    assert!(
+        request.stable_prefix_messages()[2]
+            .content()
+            .as_text()
+            .contains("project-rules-source:AGENTS.md")
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn skill_metadata_changes_stable_prefix_but_not_dynamic_context() {
+    let first_provider = FakeModelProvider::new(vec![Ok(completed_event())]);
+    let first_catalog = SkillCatalog::from_metadata(vec![
+        SkillMetadata::new(
+            "frontend-design",
+            "Use for UI work.",
+            PathBuf::from("skills/frontend-design/SKILL.md"),
+            PathBuf::from("/workspace"),
+        )
+        .expect("valid skill metadata"),
+    ])
+    .expect("valid catalog");
+    let first_runtime = Runtime::builder(session_id("provider-skill-hash-first"))
+        .skill_catalog(first_catalog)
+        .model_provider(Arc::new(first_provider.clone()), model_name())
+        .build()
+        .expect("runtime should build");
+    collect_step(&first_runtime, "Same dynamic input.").await;
+    let first_request = first_provider.recorded_requests()[0].clone();
+
+    let changed_provider = FakeModelProvider::new(vec![Ok(completed_event())]);
+    let changed_catalog = SkillCatalog::from_metadata(vec![
+        SkillMetadata::new(
+            "frontend-design",
+            "Use for UI and responsive layout work.",
+            PathBuf::from("skills/frontend-design/SKILL.md"),
+            PathBuf::from("/workspace"),
+        )
+        .expect("valid skill metadata"),
+    ])
+    .expect("valid catalog");
+    let changed_runtime = Runtime::builder(session_id("provider-skill-hash-changed"))
+        .skill_catalog(changed_catalog)
+        .model_provider(Arc::new(changed_provider.clone()), model_name())
+        .build()
+        .expect("runtime should build");
+    collect_step(&changed_runtime, "Same dynamic input.").await;
+    let changed_request = changed_provider.recorded_requests()[0].clone();
+
+    assert_ne!(
+        first_request.stable_prefix_hash(),
+        changed_request.stable_prefix_hash()
+    );
+    assert_eq!(
+        first_request.dynamic_context_hash(),
+        changed_request.dynamic_context_hash()
     );
 }
 
