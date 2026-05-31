@@ -44,6 +44,7 @@ use std::collections::BTreeSet;
 const ASSISTANT_OUTPUT_ARTIFACT_PREFIX: &str = "assistant-output-";
 const PROCESS_INPUT_ARTIFACT_PREFIX: &str = "process-input-";
 const TOOL_RESULT_ARTIFACT_PREFIX: &str = "tool-result-";
+const WORKSPACE_READ_FILE_TOOL_NAME: &str = "workspace_read_file";
 
 /// Resolved tool call state that has not yet been compiled into a provider request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -947,6 +948,7 @@ impl SessionState {
         debug_assert_eq!(&recorded, result.artifact());
 
         let pending = self.pending_tool_calls.remove(pending_index);
+        let pending_for_skill_event = pending.clone();
         self.resolved_tool_calls.insert(result.call_id().clone());
         let history_id = self.next_history_id();
         self.uncheckpointed_tool_continuations
@@ -966,9 +968,14 @@ impl SessionState {
             LedgerFactKind::ArtifactRecorded,
         ));
         events.push(self.record_event(
-            RuntimeEventKind::ToolCallResolved { result },
+            RuntimeEventKind::ToolCallResolved {
+                result: result.clone(),
+            },
             LedgerFactKind::ToolCallResolved,
         ));
+        if let Some(event) = self.skill_used_event_for_read(&pending_for_skill_event, &result) {
+            events.push(event);
+        }
 
         Ok(events)
     }
@@ -1099,6 +1106,7 @@ impl SessionState {
             .ensure_recordable(result.artifact(), &content)?;
 
         let pending = self.pending_tool_calls.remove(pending_index);
+        let pending_for_skill_event = pending.clone();
         let mut events = Vec::with_capacity(if self.session_started { 2 } else { 3 });
         if let Some(started) = self.record_session_started_if_needed() {
             events.push(started);
@@ -1137,9 +1145,14 @@ impl SessionState {
             self.record_tool_result_observation(observation);
         }
         events.push(self.record_event(
-            RuntimeEventKind::ToolCallResolved { result },
+            RuntimeEventKind::ToolCallResolved {
+                result: result.clone(),
+            },
             LedgerFactKind::ToolCallResolved,
         ));
+        if let Some(event) = self.skill_used_event_for_read(&pending_for_skill_event, &result) {
+            events.push(event);
+        }
 
         Ok(events)
     }
@@ -1304,6 +1317,41 @@ impl SessionState {
         self.ledger.record(sequence, fact_kind);
         self.next_sequence += 1;
         RuntimeEvent::new(self.session_id.clone(), sequence, kind)
+    }
+
+    fn skill_used_event_for_read(
+        &mut self,
+        pending: &PendingToolCall,
+        result: &ToolCallResult,
+    ) -> Option<RuntimeEvent> {
+        if result.status() != ToolCallResultStatus::Succeeded {
+            return None;
+        }
+        if pending.name().as_str() != WORKSPACE_READ_FILE_TOOL_NAME {
+            return None;
+        }
+        let path = pending
+            .arguments()
+            .as_object()
+            .get("path")
+            .and_then(serde_json::Value::as_str)?;
+        let (skill_name, skill_md_path) = {
+            let skill = self.skill_catalog.as_ref()?.find_by_skill_md_path(path)?;
+            (
+                skill.name().to_owned(),
+                skill.skill_md_path().display().to_string(),
+            )
+        };
+
+        Some(self.record_event(
+            RuntimeEventKind::SkillUsed {
+                skill_name,
+                skill_md_path,
+                tool_call_id: pending.id().clone(),
+                artifact: result.artifact().clone(),
+            },
+            LedgerFactKind::SkillUsed,
+        ))
     }
 
     fn record_tool_result_observation(&mut self, observation: LedgerUpdateKind) {

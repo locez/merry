@@ -3325,6 +3325,7 @@ mod tests {
                 RuntimeEventKind::EvidenceReferenced { .. } => "EvidenceReferenced",
                 RuntimeEventKind::ToolCallPending { .. } => "ToolCallPending",
                 RuntimeEventKind::ToolCallResolved { .. } => "ToolCallResolved",
+                RuntimeEventKind::SkillUsed { .. } => "SkillUsed",
                 _ => "Unknown",
             })
             .collect()
@@ -6091,6 +6092,7 @@ mod tests {
                 RuntimeEventKind::Failed { .. } => "Failed",
                 RuntimeEventKind::ToolCallPending { .. } => "ToolCallPending",
                 RuntimeEventKind::EvidenceReferenced { .. } => "EvidenceReferenced",
+                RuntimeEventKind::SkillUsed { .. } => "SkillUsed",
                 _ => "Other",
             })
             .collect()

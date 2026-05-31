@@ -590,6 +590,7 @@ fn event_kind_names(events: &[RuntimeEvent]) -> Vec<&'static str> {
             RuntimeEventKind::EvidenceReferenced { .. } => "EvidenceReferenced",
             RuntimeEventKind::ToolCallPending { .. } => "ToolCallPending",
             RuntimeEventKind::ToolCallResolved { .. } => "ToolCallResolved",
+            RuntimeEventKind::SkillUsed { .. } => "SkillUsed",
             _ => "Unknown",
         })
         .collect()
@@ -2748,6 +2749,70 @@ async fn execute_registered_tool_success_records_artifact_resolves_and_compiles_
         continuation.result().content().as_text(),
         Some("search result\n")
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn reading_catalog_skill_file_emits_skill_used_event() {
+    let call = model_tool_call_with_args(
+        "call-read-skill",
+        "workspace_read_file",
+        Map::from_iter([("path".to_owned(), Value::String("demo/SKILL.md".to_owned()))]),
+    );
+    let provider = ScriptedModelProvider::new(vec![vec![Ok(completed_outputs_event(
+        vec![ModelOutput::tool_call(call)],
+        FinishReason::ToolCalls,
+    ))]]);
+    let catalog = SkillCatalog::from_metadata(vec![
+        SkillMetadata::new(
+            "demo-skill",
+            "Use for demo tasks.",
+            PathBuf::from("demo/SKILL.md"),
+            PathBuf::from("/skills"),
+        )
+        .expect("valid skill metadata"),
+    ])
+    .expect("valid skill catalog");
+    let runtime = Runtime::builder(session_id("provider-skill-used"))
+        .skill_catalog(catalog)
+        .register_tool(RegisteredTool::read_only(
+            test_tool_spec("workspace_read_file"),
+            Arc::new(ScriptedToolExecutor::succeeding_text("# Demo\n")),
+        ))
+        .model_provider(Arc::new(provider), model_name())
+        .build()
+        .expect("runtime should build");
+
+    let pending_events = collect_step(&runtime, "Use demo skill.").await;
+    let pending = pending_tool_call(&pending_events).clone();
+    let execution_events = runtime
+        .execute_tool_call(pending.id(), ToolExecutionContext::default())
+        .await
+        .expect("tool execution should resolve");
+
+    assert_eq!(
+        event_kind_names(&execution_events),
+        ["ArtifactRecorded", "ToolCallResolved", "SkillUsed"]
+    );
+    assert_eq!(
+        execution_events
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        vec![3, 4, 5]
+    );
+    let result = resolved_tool_result(&execution_events);
+    assert!(matches!(
+        &execution_events[2].kind,
+        RuntimeEventKind::SkillUsed {
+            skill_name,
+            skill_md_path,
+            tool_call_id,
+            artifact,
+        } if skill_name == "demo-skill"
+            && skill_md_path == "demo/SKILL.md"
+            && tool_call_id == pending.id()
+            && artifact == result.artifact()
+    ));
 }
 
 #[tokio::test(flavor = "current_thread")]

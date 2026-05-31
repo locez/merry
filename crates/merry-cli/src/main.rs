@@ -3220,6 +3220,7 @@ mod tests {
             atomic::{AtomicUsize, Ordering},
         },
     };
+    use tracing_subscriber::prelude::*;
 
     fn sandbox_host() -> SandboxHost {
         SandboxHost {
@@ -3241,6 +3242,25 @@ mod tests {
             ),
             log_settings: None,
         }
+    }
+
+    fn install_scoped_test_json_log(
+        log_path: &Path,
+    ) -> (
+        tracing::dispatcher::DefaultGuard,
+        tracing_appender::non_blocking::WorkerGuard,
+    ) {
+        let file = super::observability::open_log_file(log_path).expect("log file should open");
+        let (writer, worker_guard) = tracing_appender::non_blocking(file);
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .json()
+                .with_writer(writer)
+                .with_filter(tracing_subscriber::filter::LevelFilter::DEBUG),
+        );
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let default_guard = tracing::dispatcher::set_default(&dispatch);
+        (default_guard, worker_guard)
     }
 
     fn path_is_fake_bwrap(path: &Path) -> bool {
@@ -3557,7 +3577,7 @@ mod tests {
         assert!(!stable_text.contains("body sentinel"));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn coding_loop_runtime_logs_skill_catalog_load_without_body() {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("workspace");
@@ -3570,14 +3590,7 @@ mod tests {
             "---\nname: demo-skill\ndescription: Use for demo tasks.\n---\n# Demo\nbody sentinel\n",
         )
         .expect("write skill");
-        let log_settings = super::config::EffectiveLogSettings {
-            level: super::config::LogLevel::Debug,
-            format: super::config::LogFormat::Json,
-            path: log_path.clone(),
-        };
-        let guard = super::observability::init_observability(Some(&log_settings))
-            .expect("observability should initialize")
-            .expect("file logging should install a guard");
+        let (_default_guard, worker_guard) = install_scoped_test_json_log(&log_path);
 
         let provider = ScriptedProvider::new(vec![vec![Ok(ModelEvent::Completed {
             response: ModelResponse::new(vec![ModelOutput::text("done")], FinishReason::Stop, None),
@@ -3598,7 +3611,7 @@ mod tests {
             },
         )
         .expect("runtime should build");
-        drop(guard);
+        drop(worker_guard);
 
         let log = std::fs::read_to_string(&log_path).expect("log file should be written");
         assert!(log.contains("\"event\":\"runtime.skill_catalog.load\""));
@@ -3840,7 +3853,7 @@ mod tests {
             .expect("standard patch envelope alias should pass smoke patch assertion");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn coding_loop_smoke_writes_configured_json_log_records_without_payloads() {
         let temp = tempfile::tempdir().expect("tempdir should be created");
         let config_root = temp.path().join("config");
@@ -3860,9 +3873,7 @@ mod tests {
             .expect("log settings should validate")
             .expect("logging should be enabled");
         let log_path = log_settings.path.clone();
-        let guard = super::observability::init_observability(Some(&log_settings))
-            .expect("observability should initialize")
-            .expect("file logging should install a guard");
+        let (_default_guard, worker_guard) = install_scoped_test_json_log(&log_path);
 
         let smoke_root = temp.path().join("coding-loop-smoke-fixture");
         std::fs::create_dir_all(smoke_root.join("src")).expect("fixture src dir should exist");
@@ -3899,7 +3910,7 @@ mod tests {
         super::assert_coding_loop_smoke_result(&runtime, &result, &smoke_root)
             .await
             .expect("coding-loop smoke result should validate");
-        drop(guard);
+        drop(worker_guard);
 
         let raw_log = std::fs::read_to_string(&log_path).expect("log file should be written");
         let log = raw_log
