@@ -1,0 +1,111 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "text": "Compaction is required for long-running sessions; raw context will exceed the window."
+    },
+    {
+      "role": "assistant",
+      "text": "Maybe an artifact evidence graph should be the main solution."
+    },
+    {
+      "role": "user",
+      "text": "Do not make the artifact/evidence graph the current context-growth solution."
+    },
+    {
+      "role": "assistant",
+      "text": "Maybe runtime rules can determine exactly what semantic content to keep."
+    },
+    {
+      "role": "user",
+      "text": "Runtime has no general intelligence and cannot validate open semantic truth."
+    },
+    {
+      "role": "assistant",
+      "text": "Maybe storing every artifact and event forever will solve context drift."
+    },
+    {
+      "role": "user",
+      "text": "Artifacts are not the main solution to context growth; exact evidence can be read only when needed."
+    },
+    {
+      "role": "assistant",
+      "text": "Maybe function-call continuity can be summarized immediately after each tool result."
+    },
+    {
+      "role": "user",
+      "text": "Provider-visible function-call continuity remains raw until a checkpoint boundary replaces it."
+    },
+    {
+      "role": "user",
+      "text": "Retained raw tail must not be sent to the compactor."
+    },
+    {
+      "role": "user",
+      "text": "Working intent belongs as checkpoint footer content, not as a top-level control segment."
+    },
+    {
+      "role": "user",
+      "text": "Pins, modes, resource indexes, and artifact graphs were considered but are not the current core solution."
+    },
+    {
+      "role": "user",
+      "text": "Retained tail sentinel: discuss live smoke separately after deterministic compaction tests."
+    },
+    {
+      "role": "user",
+      "text": "Retained tail sentinel: the next user request should remain raw after checkpoint install."
+    }
+  ],
+  "candidate": {
+    "claims": [
+      {
+        "id": "c1",
+        "kind": "constraint",
+        "text": "Compaction is required for long-running sessions.",
+        "refs": ["r1"]
+      },
+      {
+        "id": "c2",
+        "kind": "rejected_path",
+        "text": "Do not use an artifact/evidence graph as the current context-growth solution; exact evidence can be read when needed.",
+        "refs": ["r2", "r3"]
+      },
+      {
+        "id": "c3",
+        "kind": "constraint",
+        "text": "Runtime cannot validate open-ended semantic truth.",
+        "refs": ["r4", "r5"]
+      },
+      {
+        "id": "c4",
+        "kind": "rejected_path",
+        "text": "Do not store every artifact and event forever as the answer to context drift.",
+        "refs": ["r6", "r7"]
+      },
+      {
+        "id": "c5",
+        "kind": "current_state",
+        "text": "Function-call continuity remains raw until compaction replaces the covered context.",
+        "refs": ["r8", "r9"]
+      },
+      {
+        "id": "c6",
+        "kind": "constraint",
+        "text": "Retained raw tail is not part of compaction input, and working intent belongs as checkpoint footer content.",
+        "refs": ["r11", "r13"]
+      },
+      {
+        "id": "c7",
+        "kind": "rejected_path",
+        "text": "Pins, modes, resource indexes, and artifact graphs are not the current core solution.",
+        "refs": ["r15"]
+      }
+    ],
+    "working_intent": {
+      "text": "Continue implementing citation-backed checkpoint claims and local ref lookup.",
+      "refs": ["r11", "r13"],
+      "confidence": 0.86
+    }
+  }
+}

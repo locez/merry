@@ -12,6 +12,8 @@ pub(crate) struct ResponsesRequest<'a> {
     pub(crate) parallel_tool_calls: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) max_output_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) text: Option<ResponsesText<'a>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) tools: Vec<ResponsesTool<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -98,6 +100,20 @@ pub(crate) struct ResponsesTool<'a> {
     pub(crate) name: &'a str,
     pub(crate) description: &'a str,
     pub(crate) parameters: &'a Value,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ResponsesText<'a> {
+    pub(crate) format: ResponsesTextFormat<'a>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ResponsesTextFormat<'a> {
+    #[serde(rename = "type")]
+    pub(crate) kind: &'static str,
+    pub(crate) name: &'a str,
+    pub(crate) strict: bool,
+    pub(crate) schema: &'a Value,
 }
 
 #[derive(Debug, Deserialize)]

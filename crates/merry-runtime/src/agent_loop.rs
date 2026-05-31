@@ -465,6 +465,12 @@ fn runtime_error_code(error: &RuntimeError) -> &'static str {
         RuntimeError::Core { .. } => "core_error",
         RuntimeError::Artifact { .. } => "artifact_error",
         RuntimeError::Context { .. } => "context_error",
+        RuntimeError::Checkpoint { .. } => "checkpoint_error",
+        RuntimeError::Compaction { .. } => "compaction_error",
+        RuntimeError::MissingModelProvider { .. } => "missing_model_provider",
+        RuntimeError::CompactionModelRequest { .. } => "compaction_model_request",
+        RuntimeError::CompactionModelSetup { .. } => "compaction_model_setup",
+        RuntimeError::CompactionModelStream { .. } => "compaction_model_stream",
     }
 }
 

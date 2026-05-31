@@ -7,6 +7,15 @@ use crate::{
     action_audit::{ActionAuditPolicy, ActionAuditRegistry},
     action_policy::ActionPolicyDecision,
     artifact::{ArtifactContent, ArtifactError, ArtifactRegistry},
+    checkpoint::{
+        CheckpointError, CheckpointId, CheckpointRefExcerpt, CheckpointRefId, CheckpointRefManifest,
+    },
+    compaction::{
+        CitationCompactionInput, CitationCompactionPolicy,
+        CitationCompactionPreviousCheckpointInput, CitationCompactionToolCall,
+        CitationCompactionToolResult, CitationCompactionWindowItem, CompactionError,
+        CompactionOutcome, checkpoint_from_candidate_json, previous_checkpoint_payload,
+    },
     context::{
         CompactedCheckpoint, ContextCompiler, ContextEntry, ContextError, ProjectRules,
         SessionContextSnapshot, TaskAnchor,
@@ -38,19 +47,38 @@ const TOOL_RESULT_ARTIFACT_PREFIX: &str = "tool-result-";
 /// Resolved tool call state that has not yet been compiled into a provider request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedToolContinuation {
+    history_id: u64,
     call: PendingToolCall,
     result: ToolCallResult,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SessionMessage {
-    User { text: String },
-    Assistant { artifact_id: ArtifactId },
+    User {
+        history_id: u64,
+        text: String,
+    },
+    Assistant {
+        history_id: u64,
+        artifact_id: ArtifactId,
+    },
 }
 
 impl ResolvedToolContinuation {
-    fn new(call: PendingToolCall, result: ToolCallResult) -> Self {
-        Self { call, result }
+    fn new(history_id: u64, call: PendingToolCall, result: ToolCallResult) -> Self {
+        Self {
+            history_id,
+            call,
+            result,
+        }
+    }
+}
+
+impl SessionMessage {
+    fn history_id(&self) -> u64 {
+        match self {
+            Self::User { history_id, .. } | Self::Assistant { history_id, .. } => *history_id,
+        }
     }
 }
 
@@ -155,12 +183,89 @@ impl ResolvedToolContinuationSnapshot {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CompactionHistoryItem {
+    history_id: u64,
+    kind: CompactionHistoryItemKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CompactionHistoryItemKind {
+    User {
+        text: String,
+    },
+    Assistant {
+        text: String,
+    },
+    ToolExchange {
+        call: Box<PendingToolCall>,
+        result: Box<ToolCallResult>,
+        content: Box<ArtifactContent>,
+    },
+}
+
+impl CompactionHistoryItem {
+    fn to_compaction_window_item(
+        &self,
+        ref_id: &str,
+        policy: CitationCompactionPolicy,
+    ) -> Result<CitationCompactionWindowItem, RuntimeError> {
+        let item = match &self.kind {
+            CompactionHistoryItemKind::User { text } => CitationCompactionWindowItem::user(
+                self.history_id,
+                ref_id.to_owned(),
+                crate::compaction::bounded_excerpt(text, policy.max_ref_excerpt_bytes()),
+            ),
+            CompactionHistoryItemKind::Assistant { text } => {
+                CitationCompactionWindowItem::assistant(
+                    self.history_id,
+                    ref_id.to_owned(),
+                    crate::compaction::bounded_excerpt(text, policy.max_ref_excerpt_bytes()),
+                )
+            }
+            CompactionHistoryItemKind::ToolExchange {
+                call,
+                result,
+                content,
+            } => {
+                let arguments_json =
+                    serde_json::to_string(call.arguments().as_object()).map_err(|error| {
+                        CompactionError::PayloadSerialization {
+                            message: error.to_string(),
+                        }
+                    })?;
+                let excerpt = format!(
+                    "tool_call:{}\narguments:{}\nresult_status:{}\nartifact:{}\ncontent:{}",
+                    call.name(),
+                    arguments_json,
+                    tool_call_result_status_label(result.status()),
+                    result.artifact().id(),
+                    artifact_content_preview(content, policy.max_ref_excerpt_bytes())
+                );
+                CitationCompactionWindowItem::tool_exchange(
+                    self.history_id,
+                    ref_id.to_owned(),
+                    crate::compaction::bounded_excerpt(&excerpt, policy.max_ref_excerpt_bytes()),
+                    CitationCompactionToolCall::new(
+                        call.name().as_str().to_owned(),
+                        arguments_json,
+                    ),
+                    CitationCompactionToolResult::new(result.status(), result.artifact().id()),
+                )
+            }
+        };
+
+        Ok(item)
+    }
+}
+
 /// Mutable runtime state for one session.
 #[derive(Debug)]
 pub(crate) struct SessionState {
     session_id: SessionId,
     next_sequence: u64,
     session_started: bool,
+    next_history_id: u64,
     ledger: TaskLedger,
     artifacts: ArtifactRegistry,
     memory_store: MemoryStore,
@@ -185,6 +290,7 @@ impl SessionState {
             session_id,
             next_sequence: 0,
             session_started: false,
+            next_history_id: 0,
             ledger: TaskLedger::default(),
             artifacts: ArtifactRegistry::default(),
             memory_store: MemoryStore::new(),
@@ -247,6 +353,70 @@ impl SessionState {
         self.compacted_checkpoint = Some(checkpoint);
     }
 
+    pub(crate) fn read_checkpoint_ref(
+        &self,
+        checkpoint_id: &CheckpointId,
+        ref_id: &CheckpointRefId,
+    ) -> Result<CheckpointRefExcerpt, CheckpointError> {
+        let Some(checkpoint) = &self.compacted_checkpoint else {
+            return Err(CheckpointError::RefNotFound {
+                checkpoint_id: checkpoint_id.as_str().to_owned(),
+                ref_id: ref_id.as_str().to_owned(),
+            });
+        };
+
+        checkpoint.read_checkpoint_ref(checkpoint_id, ref_id)
+    }
+
+    pub(crate) fn build_citation_compaction_input(
+        &self,
+        policy: CitationCompactionPolicy,
+    ) -> Result<Option<CitationCompactionInput>, RuntimeError> {
+        if !self.pending_tool_calls.is_empty() {
+            return Err(CompactionError::PendingToolCalls.into());
+        }
+
+        let history = self.compaction_history_items()?;
+        if history.len() <= policy.retained_raw_tail_items() {
+            return Ok(None);
+        }
+
+        let covered_count = history.len() - policy.retained_raw_tail_items();
+        let covered = &history[..covered_count];
+        self.citation_compaction_input_from_history(policy, covered)
+            .map(Some)
+    }
+
+    pub(crate) fn install_citation_compaction_candidate(
+        &mut self,
+        input: CitationCompactionInput,
+        candidate_json: &str,
+    ) -> Result<CompactionOutcome, RuntimeError> {
+        if !self.pending_tool_calls.is_empty() {
+            return Err(CompactionError::PendingToolCalls.into());
+        }
+        self.validate_compaction_window_is_current(&input)?;
+
+        let checkpoint_id = input.manifest().checkpoint_id().clone();
+        let citation =
+            checkpoint_from_candidate_json(checkpoint_id.clone(), &input, candidate_json)?;
+        let compacted = CompactedCheckpoint::from_citation_backed(citation)?;
+
+        let covered = input.covered_history_ids().clone();
+        let covered_count = covered.len();
+        self.append_only_body
+            .retain(|message| !covered.contains(&message.history_id()));
+        self.uncheckpointed_tool_continuations
+            .retain(|continuation| !covered.contains(&continuation.history_id));
+        self.compacted_checkpoint = Some(compacted);
+
+        Ok(CompactionOutcome::new(
+            checkpoint_id,
+            covered_count,
+            self.history_item_count(),
+        ))
+    }
+
     pub(crate) fn record_artifact_state(
         &mut self,
         artifact: ArtifactRef,
@@ -296,7 +466,9 @@ impl SessionState {
         let content_bytes = content.as_bytes().len();
         let recorded = self.record_artifact_state(artifact, content)?;
         Self::trace_artifact_record(self.session_id.as_str(), &recorded, content_bytes);
+        let history_id = self.next_history_id();
         self.append_only_body.push(SessionMessage::Assistant {
+            history_id,
             artifact_id: recorded.id().clone(),
         });
         Ok(self.record_event(
@@ -306,7 +478,9 @@ impl SessionState {
     }
 
     pub(crate) fn record_user_message_body(&mut self, text: &str) {
+        let history_id = self.next_history_id();
         self.append_only_body.push(SessionMessage::User {
+            history_id,
             text: text.to_owned(),
         });
     }
@@ -499,10 +673,10 @@ impl SessionState {
         self.append_only_body
             .iter()
             .map(|message| match message {
-                SessionMessage::User { text } => {
+                SessionMessage::User { text, .. } => {
                     Ok(CompiledSessionMessage::User { text: text.clone() })
                 }
-                SessionMessage::Assistant { artifact_id } => {
+                SessionMessage::Assistant { artifact_id, .. } => {
                     let content = self.read_artifact_content(artifact_id)?;
                     let text =
                         content
@@ -516,6 +690,157 @@ impl SessionState {
                     })
                 }
             })
+            .collect()
+    }
+
+    fn compaction_history_items(&self) -> Result<Vec<CompactionHistoryItem>, RuntimeError> {
+        let mut items = Vec::with_capacity(
+            self.append_only_body.len() + self.uncheckpointed_tool_continuations.len(),
+        );
+
+        for message in &self.append_only_body {
+            match message {
+                SessionMessage::User { history_id, text } => {
+                    items.push(CompactionHistoryItem {
+                        history_id: *history_id,
+                        kind: CompactionHistoryItemKind::User { text: text.clone() },
+                    });
+                }
+                SessionMessage::Assistant {
+                    history_id,
+                    artifact_id,
+                } => {
+                    let content = self.read_artifact_content(artifact_id)?;
+                    let text =
+                        content
+                            .as_text()
+                            .ok_or_else(|| ArtifactError::InvalidEvidenceLocator {
+                                id: artifact_id.clone(),
+                                reason: "assistant history artifact is not textual",
+                            })?;
+                    items.push(CompactionHistoryItem {
+                        history_id: *history_id,
+                        kind: CompactionHistoryItemKind::Assistant {
+                            text: text.to_owned(),
+                        },
+                    });
+                }
+            }
+        }
+
+        for continuation in &self.uncheckpointed_tool_continuations {
+            let content = self
+                .artifacts
+                .read_content(continuation.result.artifact().id())?
+                .clone();
+            items.push(CompactionHistoryItem {
+                history_id: continuation.history_id,
+                kind: CompactionHistoryItemKind::ToolExchange {
+                    call: Box::new(continuation.call.clone()),
+                    result: Box::new(continuation.result.clone()),
+                    content: Box::new(content),
+                },
+            });
+        }
+
+        items.sort_by_key(|item| item.history_id);
+        Ok(items)
+    }
+
+    fn citation_compaction_input_from_history(
+        &self,
+        policy: CitationCompactionPolicy,
+        covered: &[CompactionHistoryItem],
+    ) -> Result<CitationCompactionInput, RuntimeError> {
+        if covered.is_empty() {
+            return Err(CompactionError::NoCompressibleWindow.into());
+        }
+
+        let mut covered_history_ids = BTreeSet::new();
+        let checkpoint_id = crate::CheckpointId::new(&format!(
+            "checkpoint-{}-{}",
+            sanitize_checkpoint_component(self.session_id.as_str()),
+            self.next_history_id
+        ))?;
+        let previous_checkpoint = self.compacted_checkpoint.as_ref().map(|checkpoint| {
+            match checkpoint.citation_backed() {
+                Some(citation) => {
+                    CitationCompactionPreviousCheckpointInput::CitationBacked(citation)
+                }
+                None => CitationCompactionPreviousCheckpointInput::PlainText {
+                    text: checkpoint.text(),
+                },
+            }
+        });
+        let prior_refs = match previous_checkpoint {
+            Some(CitationCompactionPreviousCheckpointInput::CitationBacked(checkpoint)) => {
+                CheckpointRefManifest::from_prior_checkpoint_claims(
+                    checkpoint_id.clone(),
+                    checkpoint,
+                    policy.max_carried_prior_refs(),
+                )?
+                .refs()
+                .to_vec()
+            }
+            Some(CitationCompactionPreviousCheckpointInput::PlainText { .. }) | None => Vec::new(),
+        };
+        let mut refs = Vec::with_capacity(prior_refs.len() + covered.len());
+        refs.extend(prior_refs);
+        let mut window = Vec::with_capacity(covered.len());
+
+        for (index, item) in covered.iter().enumerate() {
+            covered_history_ids.insert(item.history_id);
+            let ref_id = format!("r{}", index + 1);
+            let window_item = item.to_compaction_window_item(&ref_id, policy)?;
+            refs.push(window_item.to_checkpoint_ref(policy.max_ref_excerpt_bytes())?);
+            window.push(window_item);
+        }
+
+        let manifest = crate::CheckpointRefManifest::new(checkpoint_id, refs)?;
+        let previous_checkpoint = previous_checkpoint.map(|checkpoint| {
+            previous_checkpoint_payload(checkpoint, policy.max_carried_prior_refs())
+        });
+
+        Ok(CitationCompactionInput::new(
+            policy,
+            self.task_anchor.clone(),
+            manifest,
+            covered_history_ids,
+            window,
+            previous_checkpoint,
+        ))
+    }
+
+    fn validate_compaction_window_is_current(
+        &self,
+        input: &CitationCompactionInput,
+    ) -> Result<(), RuntimeError> {
+        let current_ids = self.current_history_id_set();
+        let covered = input.covered_history_ids();
+        let Some(max_covered_id) = covered.iter().next_back().copied() else {
+            return Err(CompactionError::NoCompressibleWindow.into());
+        };
+
+        let current_prefix = current_ids
+            .into_iter()
+            .take_while(|history_id| *history_id <= max_covered_id)
+            .collect::<BTreeSet<_>>();
+        if &current_prefix != covered {
+            return Err(CompactionError::StaleWindow.into());
+        }
+
+        Ok(())
+    }
+
+    fn current_history_id_set(&self) -> BTreeSet<u64> {
+        self.append_only_body
+            .iter()
+            .map(SessionMessage::history_id)
+            .chain(
+                self.uncheckpointed_tool_continuations
+                    .iter()
+                    .map(|continuation| continuation.history_id),
+            )
             .collect()
     }
 
@@ -606,8 +931,13 @@ impl SessionState {
 
         let pending = self.pending_tool_calls.remove(pending_index);
         self.resolved_tool_calls.insert(result.call_id().clone());
+        let history_id = self.next_history_id();
         self.uncheckpointed_tool_continuations
-            .push(ResolvedToolContinuation::new(pending, result.clone()));
+            .push(ResolvedToolContinuation::new(
+                history_id,
+                pending,
+                result.clone(),
+            ));
 
         let mut events = Vec::with_capacity(if self.session_started { 2 } else { 3 });
         if let Some(started) = self.record_session_started_if_needed() {
@@ -774,8 +1104,13 @@ impl SessionState {
         Self::trace_artifact_record(self.session_id.as_str(), &recorded, content_bytes);
         debug_assert_eq!(&recorded, result.artifact());
         self.resolved_tool_calls.insert(result.call_id().clone());
+        let history_id = self.next_history_id();
         self.uncheckpointed_tool_continuations
-            .push(ResolvedToolContinuation::new(pending, result.clone()));
+            .push(ResolvedToolContinuation::new(
+                history_id,
+                pending,
+                result.clone(),
+            ));
 
         events.push(self.record_event(
             RuntimeEventKind::ArtifactRecorded { artifact: recorded },
@@ -850,8 +1185,13 @@ impl SessionState {
             Self::trace_artifact_record(self.session_id.as_str(), &artifact, content_bytes);
             debug_assert_eq!(artifact, *result.artifact());
             self.resolved_tool_calls.insert(result.call_id().clone());
+            let history_id = self.next_history_id();
             self.uncheckpointed_tool_continuations
-                .push(ResolvedToolContinuation::new(pending, result.clone()));
+                .push(ResolvedToolContinuation::new(
+                    history_id,
+                    pending,
+                    result.clone(),
+                ));
             return Ok(vec![
                 started,
                 self.record_event(
@@ -876,8 +1216,13 @@ impl SessionState {
         Self::trace_artifact_record(self.session_id.as_str(), &artifact, content_bytes);
         debug_assert_eq!(artifact, *result.artifact());
         self.resolved_tool_calls.insert(result.call_id().clone());
+        let history_id = self.next_history_id();
         self.uncheckpointed_tool_continuations
-            .push(ResolvedToolContinuation::new(pending, result.clone()));
+            .push(ResolvedToolContinuation::new(
+                history_id,
+                pending,
+                result.clone(),
+            ));
         Ok(vec![
             self.record_event(
                 RuntimeEventKind::ArtifactRecorded { artifact },
@@ -1003,6 +1348,51 @@ impl SessionState {
         self.next_sequence
     }
 
+    fn next_history_id(&mut self) -> u64 {
+        let id = self.next_history_id;
+        self.next_history_id = self.next_history_id.wrapping_add(1);
+        id
+    }
+
+    fn history_item_count(&self) -> usize {
+        self.append_only_body.len() + self.uncheckpointed_tool_continuations.len()
+    }
+
+    #[cfg(test)]
+    fn history_item_ids(&self) -> Vec<u64> {
+        let mut ids = self
+            .append_only_body
+            .iter()
+            .map(|message| match message {
+                SessionMessage::User { history_id, .. }
+                | SessionMessage::Assistant { history_id, .. } => *history_id,
+            })
+            .chain(
+                self.uncheckpointed_tool_continuations
+                    .iter()
+                    .map(|continuation| continuation.history_id),
+            )
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        ids
+    }
+
+    #[cfg(test)]
+    pub(crate) fn append_only_body_text_for_tests(&self) -> Vec<String> {
+        self.append_only_body
+            .iter()
+            .map(|message| match message {
+                SessionMessage::User { text, .. } => text.clone(),
+                SessionMessage::Assistant { artifact_id, .. } => self
+                    .read_artifact_content(artifact_id)
+                    .expect("assistant artifact should be readable")
+                    .as_text()
+                    .expect("assistant artifact should be text")
+                    .to_owned(),
+            })
+            .collect()
+    }
+
     fn next_tool_result_artifact_id(&self) -> ArtifactId {
         tool_result_id(self.next_sequence())
     }
@@ -1103,6 +1493,37 @@ fn tool_result_id(sequence: u64) -> ArtifactId {
         .expect("tool result artifact id uses a valid static prefix and sequence")
 }
 
+fn artifact_content_preview(content: &ArtifactContent, max_bytes: usize) -> String {
+    match content.as_text() {
+        Some(text) => crate::compaction::bounded_excerpt(text, max_bytes),
+        None => format!(
+            "{:?} content, {} bytes",
+            content.kind(),
+            content.as_bytes().len()
+        ),
+    }
+}
+
+fn sanitize_checkpoint_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | ':') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn tool_call_result_status_label(status: ToolCallResultStatus) -> &'static str {
+    match status {
+        ToolCallResultStatus::Succeeded => "succeeded",
+        ToolCallResultStatus::Failed => "failed",
+    }
+}
+
 fn duplicate_tool_call_diagnostic(call_id: &ToolCallId, state: &'static str) -> ErrorInfo {
     ErrorInfo::new(
         "tool_call_duplicate",
@@ -1115,11 +1536,16 @@ fn duplicate_tool_call_diagnostic(call_id: &ToolCallId, state: &'static str) -> 
 mod tests {
     use super::{ProposedToolExecutionOutcome, SessionState, ToolResultLedgerObservation};
     use crate::{
-        ActionExecutionEvidence, ActionProposal, ActionProposalEvidence,
-        WorkspacePatchExecutionEvidence, WorkspacePatchProposal,
+        ActionExecutionEvidence, ActionProposal, ActionProposalEvidence, CitationCompactionPolicy,
+        RuntimeError, TaskAnchor, WorkspacePatchExecutionEvidence, WorkspacePatchProposal,
         action_audit::{ActionAuditPolicy, ActionAuditStatus},
         action_policy::{ActionPolicyDisposition, ActionRiskTier, DefaultActionPolicy},
         artifact::{ArtifactContent, ArtifactError},
+        checkpoint::{
+            CheckpointId, CheckpointRef, CheckpointRefId, CheckpointRefManifest,
+            CheckpointSequenceRange, CheckpointSourceKind, CheckpointValidationPolicy,
+            CitationBackedCheckpoint, CompactedCheckpointCandidate,
+        },
         context::{ContextCompiler, ContextEntry, ContextError, ContextEvidence, ContextSummary},
         judgment::{
             JudgmentConfidence, JudgmentError, JudgmentEvidence, JudgmentOutcome,
@@ -1162,6 +1588,51 @@ mod tests {
             ToolCallArguments::try_from(json!({ "query": "value" }))
                 .expect("object arguments are valid"),
         )
+    }
+
+    fn citation_plain_runtime_checkpoint_for_tests(
+        checkpoint_id: &str,
+        text: &str,
+    ) -> crate::CompactedCheckpoint {
+        let manifest = CheckpointRefManifest::new(
+            CheckpointId::new(checkpoint_id).expect("valid checkpoint id"),
+            vec![
+                CheckpointRef::new(
+                    CheckpointRefId::new("r1").expect("valid ref id"),
+                    CheckpointSourceKind::UserMessage,
+                    "history:1",
+                    CheckpointSequenceRange::new(1, 1).expect("valid range"),
+                    "body[0]",
+                    text,
+                )
+                .expect("valid ref"),
+            ],
+        )
+        .expect("valid manifest");
+        let candidate = CompactedCheckpointCandidate::from_json(&format!(
+            r#"{{
+              "claims": [
+                {{
+                  "id": "c1",
+                  "kind": "constraint",
+                  "text": {text_json},
+                  "refs": ["r1"]
+                }}
+              ],
+              "working_intent": null
+            }}"#,
+            text_json = serde_json::to_string(text).expect("text serializes"),
+        ))
+        .expect("candidate parses");
+        let checkpoint = CitationBackedCheckpoint::from_candidate(
+            CheckpointId::new(checkpoint_id).expect("valid checkpoint id"),
+            candidate,
+            manifest,
+            CheckpointValidationPolicy::default(),
+        )
+        .expect("citation checkpoint builds");
+        crate::CompactedCheckpoint::from_citation_backed(checkpoint)
+            .expect("compacted checkpoint builds")
     }
 
     fn judgment_evidence(label: &str, id: &str, locator: EvidenceLocator) -> JudgmentEvidence {
@@ -1457,6 +1928,255 @@ mod tests {
             events.last().map(|event| &event.kind),
             Some(RuntimeEventKind::ToolCallResolved { result: resolved }) if resolved == &result
         ));
+    }
+
+    #[test]
+    fn session_history_ids_increase_across_messages_and_tool_continuations() {
+        let mut session =
+            SessionState::new(SessionId::new("history-order").expect("valid session id"));
+        session.record_user_message_body("first user");
+        session
+            .record_assistant_text_output("first assistant".to_owned())
+            .expect("assistant output records");
+
+        let call = pending_tool_call("call-history");
+        session
+            .record_tool_call_pending(call.clone())
+            .expect("tool call pending records");
+        let artifact = ArtifactRef::new(artifact_id("tool-result-history"), ArtifactKind::Text);
+        let result = ToolCallResult::succeeded(call.id().clone(), artifact);
+        session
+            .submit_tool_result(result, ArtifactContent::text("tool result"))
+            .expect("tool result records");
+
+        let ids = session.history_item_ids();
+        assert_eq!(ids, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn compaction_input_excludes_retained_raw_tail() {
+        let mut session =
+            SessionState::new(SessionId::new("compaction-input-tail").expect("valid session id"));
+        session.set_task_anchor(TaskAnchor::new("Keep the current task").expect("valid anchor"));
+        session.record_user_message_body("old user message to compact");
+        session
+            .record_assistant_text_output("old assistant message to compact".to_owned())
+            .expect("assistant records");
+        session.record_user_message_body("retained raw tail user sentinel");
+        session
+            .record_assistant_text_output("retained raw tail assistant sentinel".to_owned())
+            .expect("assistant records");
+
+        let policy =
+            CitationCompactionPolicy::new(128, None, 4096, 2, 1200, 16).expect("valid policy");
+        let input = session
+            .build_citation_compaction_input(policy)
+            .expect("input builds")
+            .expect("old prefix should be compressible");
+        let payload = input.to_model_payload_json().expect("payload serializes");
+
+        assert!(payload.contains("old user message to compact"));
+        assert!(payload.contains("old assistant message to compact"));
+        assert!(!payload.contains("retained raw tail user sentinel"));
+        assert!(!payload.contains("retained raw tail assistant sentinel"));
+        assert!(payload.contains("\"current_user_input_excluded\":true"));
+    }
+
+    #[test]
+    fn compaction_retained_raw_tail_is_policy_driven() {
+        let mut session =
+            SessionState::new(SessionId::new("retained-tail-policy").expect("valid session id"));
+        session.record_user_message_body("covered user sentinel");
+        session
+            .record_assistant_text_output("covered assistant sentinel".to_owned())
+            .expect("assistant records");
+        session.record_user_message_body("tail user one sentinel");
+        session
+            .record_assistant_text_output("tail assistant one sentinel".to_owned())
+            .expect("assistant records");
+        session.record_user_message_body("tail user two sentinel");
+        session
+            .record_assistant_text_output("tail assistant two sentinel".to_owned())
+            .expect("assistant records");
+
+        let input = session
+            .build_citation_compaction_input(
+                CitationCompactionPolicy::new(128, None, 4096, 4, 1200, 16).expect("valid policy"),
+            )
+            .expect("input builds")
+            .expect("old prefix should be compressible");
+        let payload = input.to_model_payload_json().expect("payload serializes");
+
+        assert!(payload.contains("covered user sentinel"));
+        assert!(payload.contains("covered assistant sentinel"));
+        assert!(!payload.contains("tail user one sentinel"));
+        assert!(!payload.contains("tail assistant one sentinel"));
+        assert!(!payload.contains("tail user two sentinel"));
+        assert!(!payload.contains("tail assistant two sentinel"));
+    }
+
+    #[test]
+    fn compaction_input_includes_previous_checkpoint_without_old_raw_body() {
+        let mut session =
+            SessionState::new(SessionId::new("rolling-input").expect("valid session id"));
+        let checkpoint = citation_plain_runtime_checkpoint_for_tests(
+            "checkpoint-existing",
+            "The prior direction rejected resource timelines.",
+        );
+        session.set_compacted_checkpoint(checkpoint);
+        session.record_user_message_body("new user message to compact");
+        session.record_user_message_body("retained tail");
+
+        let input = session
+            .build_citation_compaction_input(
+                CitationCompactionPolicy::new(128, None, 4096, 1, 1200, 16).expect("valid policy"),
+            )
+            .expect("input builds")
+            .expect("input exists");
+        let payload = input.to_model_payload_json().expect("payload serializes");
+
+        assert!(payload.contains("previous_checkpoint"));
+        assert!(payload.contains("The prior direction rejected resource timelines."));
+        assert!(payload.contains("new user message to compact"));
+        assert!(!payload.contains("retained tail"));
+    }
+
+    #[test]
+    fn rolling_compaction_candidate_can_cite_prior_claim_and_new_window_ref() {
+        let mut session =
+            SessionState::new(SessionId::new("rolling-install").expect("valid session id"));
+        let checkpoint = citation_plain_runtime_checkpoint_for_tests(
+            "checkpoint-existing",
+            "Runtime cannot validate open semantic truth.",
+        );
+        session.set_compacted_checkpoint(checkpoint);
+        session.record_user_message_body("new compacted work");
+        session.record_user_message_body("retained tail");
+
+        let input = session
+            .build_citation_compaction_input(
+                CitationCompactionPolicy::new(128, None, 4096, 1, 1200, 16).expect("valid policy"),
+            )
+            .expect("input builds")
+            .expect("input exists");
+        let checkpoint_id = input.manifest().checkpoint_id().clone();
+
+        session
+            .install_citation_compaction_candidate(
+                input,
+                r#"{
+                  "claims": [
+                    {
+                      "id": "c2",
+                      "kind": "constraint",
+                      "text": "Carry the prior semantic-validation constraint while adding new compacted work.",
+                      "refs": ["prior-c1", "r1"]
+                    }
+                  ],
+                  "working_intent": null
+                }"#,
+            )
+            .expect("install succeeds with prior and new refs");
+
+        let prior_excerpt = session
+            .read_checkpoint_ref(
+                &checkpoint_id,
+                &CheckpointRefId::new("prior-c1").expect("valid ref id"),
+            )
+            .expect("prior claim ref remains inspectable");
+        let new_excerpt = session
+            .read_checkpoint_ref(
+                &checkpoint_id,
+                &CheckpointRefId::new("r1").expect("valid ref id"),
+            )
+            .expect("new window ref remains inspectable");
+
+        assert_eq!(
+            prior_excerpt.source_kind(),
+            CheckpointSourceKind::PriorCheckpointClaim
+        );
+        assert!(prior_excerpt.excerpt().contains("open semantic truth"));
+        assert_eq!(new_excerpt.source_kind(), CheckpointSourceKind::UserMessage);
+        assert_eq!(new_excerpt.excerpt(), "new compacted work");
+    }
+
+    #[test]
+    fn installing_valid_checkpoint_removes_only_covered_history() {
+        let mut session =
+            SessionState::new(SessionId::new("install-checkpoint").expect("valid session id"));
+        session.record_user_message_body("old user");
+        session
+            .record_assistant_text_output("old assistant".to_owned())
+            .expect("assistant records");
+        session.record_user_message_body("tail user");
+
+        let policy =
+            CitationCompactionPolicy::new(128, None, 4096, 1, 1200, 16).expect("valid policy");
+        let input = session
+            .build_citation_compaction_input(policy)
+            .expect("input builds")
+            .expect("input exists");
+        let candidate_json = r#"{
+          "claims": [
+            {
+              "id": "c1",
+              "kind": "completed_action",
+              "text": "The older user and assistant messages were covered by compaction.",
+              "refs": ["r1", "r2"]
+            }
+          ],
+          "working_intent": null
+        }"#;
+
+        let outcome = session
+            .install_citation_compaction_candidate(input, candidate_json)
+            .expect("install succeeds");
+
+        assert_eq!(outcome.covered_history_item_count(), 2);
+        assert_eq!(session.append_only_body_text_for_tests(), vec!["tail user"]);
+        assert!(
+            session
+                .context_snapshot()
+                .compacted_checkpoint_for_tests()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn failed_checkpoint_install_keeps_history_unchanged() {
+        let mut session = SessionState::new(
+            SessionId::new("install-checkpoint-rollback").expect("valid session id"),
+        );
+        session.record_user_message_body("old user");
+        session.record_user_message_body("tail user");
+
+        let policy =
+            CitationCompactionPolicy::new(128, None, 4096, 1, 1200, 16).expect("valid policy");
+        let input = session
+            .build_citation_compaction_input(policy)
+            .expect("input builds")
+            .expect("input exists");
+        let bad_candidate_json = r#"{
+          "claims": [
+            {
+              "id": "c1",
+              "kind": "constraint",
+              "text": "This cites a missing ref.",
+              "refs": ["r-missing"]
+            }
+          ],
+          "working_intent": null
+        }"#;
+
+        let error = session
+            .install_citation_compaction_candidate(input, bad_candidate_json)
+            .expect_err("bad candidate must fail");
+
+        assert!(matches!(error, RuntimeError::Checkpoint { .. }));
+        assert_eq!(
+            session.append_only_body_text_for_tests(),
+            vec!["old user", "tail user"]
+        );
     }
 
     #[test]

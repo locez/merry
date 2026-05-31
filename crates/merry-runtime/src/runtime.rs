@@ -7,17 +7,20 @@
 
 use crate::{
     AcceptedLocalWorkspaceProcessAdmission, ActionExecutionEvidence, ActionProposal,
-    ArtifactContent, CheckpointDecision, CompactedCheckpoint, ContextBudget, ContextBudgetPolicy,
-    ContextCompiler, ContextEntry, ContextSummary, LedgerProjectionSnapshot, ProcessActionIntent,
-    ProcessExitStatus, ProcessPermissionProfileId, ProcessRunner, ProcessRunnerContext,
-    ProcessRunnerError, ProcessRunnerOutput, ProjectRules, ResolvedContextWindow, RuntimeError,
-    RuntimeEventStream, RuntimeModelRole, SessionContextSnapshot, TaskAnchor,
+    ArtifactContent, CheckpointDecision, CheckpointId, CheckpointRefExcerpt, CheckpointRefId,
+    CitationCompactionInput, CitationCompactionPolicy, CompactedCheckpoint, CompactionError,
+    CompactionOutcome, ContextBudget, ContextBudgetPolicy, ContextCompiler, ContextEntry,
+    ContextSummary, LedgerProjectionSnapshot, ProcessActionIntent, ProcessExitStatus,
+    ProcessPermissionProfileId, ProcessRunner, ProcessRunnerContext, ProcessRunnerError,
+    ProcessRunnerOutput, ProjectRules, ResolvedContextWindow, RuntimeError, RuntimeEventStream,
+    RuntimeModelRole, SessionContextSnapshot, TaskAnchor,
     action_audit::ActionAuditPolicy,
     action_policy::{
         ActionPolicyDecision, DefaultActionPolicy, classify_tool_action_risk,
         is_local_workspace_effect_process_action_proposal, is_low_risk_process_action_proposal,
         is_low_risk_workspace_patch_proposal, is_read_only_shell_process_action_proposal,
     },
+    compaction::compile_citation_compaction_model_request,
     decide_checkpoint,
     event_stream::ActiveStepPermit,
     judgment::{JudgmentContext, JudgmentError, JudgmentRecord, JudgmentRequest, JudgmentSource},
@@ -29,10 +32,13 @@ use crate::{
     process::{ShellProcessInput, shell_process_input},
     resolve_context_window,
     session::{
-        ProposedToolExecutionOutcome, SessionState, ToolResultLedgerObservation,
-        is_runtime_reserved_artifact_id,
+        ProposedToolExecutionOutcome, ResolvedToolContinuationSnapshot, SessionState,
+        ToolResultLedgerObservation, is_runtime_reserved_artifact_id,
     },
-    step::{StepContext, StepInput, StepModelRequestParts, compile_step_model_request},
+    step::{
+        CompiledSessionMessage, StepContext, StepInput, StepModelRequestParts,
+        compile_step_model_request,
+    },
     tool::{
         ActionProposalEvidence, RegisteredTool, ToolActionPreflight, ToolExecutionContext,
         ToolExecutionError, ToolRegistry,
@@ -75,6 +81,65 @@ const WORKSPACE_PATCH_TOOL_NAME: &str = "workspace_patch";
 const DEFAULT_CONTEXT_WINDOW_FALLBACK_TOKENS: u64 = 64_000;
 const DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT: u8 = 95;
 const DEFAULT_OUTPUT_RESERVE_TOKENS: u64 = 32_000;
+// MVP automatic compaction policy. Retaining two history items usually keeps
+// the latest completed user/assistant pair raw; it is a policy default, not a
+// semantic invariant.
+const DEFAULT_AUTO_COMPACTION_TARGET_OUTPUT_TOKENS: u64 = 192;
+const DEFAULT_AUTO_COMPACTION_MAX_OUTPUT_BYTES: usize = 8192;
+const DEFAULT_AUTO_COMPACTION_RETAINED_RAW_TAIL_ITEMS: usize = 2;
+const DEFAULT_AUTO_COMPACTION_MAX_REF_EXCERPT_BYTES: usize = 1200;
+const DEFAULT_AUTO_COMPACTION_MAX_CARRIED_PRIOR_REFS: usize = 16;
+
+/// Runtime-owned policy for automatic checkpoint compaction.
+///
+/// This controls the pre-provider hard-watermark compaction path. Manual
+/// [`Runtime::compact_context_once`] calls still take an explicit
+/// [`CitationCompactionPolicy`] so tests and callers can run one-off compaction
+/// passes without mutating runtime construction policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AutomaticCompactionConfig {
+    enabled: bool,
+    policy: CitationCompactionPolicy,
+}
+
+impl AutomaticCompactionConfig {
+    /// Enables automatic hard-watermark compaction with the provided policy.
+    #[must_use]
+    pub fn enabled(policy: CitationCompactionPolicy) -> Self {
+        Self {
+            enabled: true,
+            policy,
+        }
+    }
+
+    /// Disables automatic hard-watermark compaction.
+    ///
+    /// The policy remains populated with defaults so disabled configs can be
+    /// inspected or re-enabled by callers without constructing a dummy policy.
+    #[must_use]
+    pub fn disabled() -> Self {
+        Self {
+            enabled: false,
+            policy: default_automatic_compaction_policy(),
+        }
+    }
+
+    #[must_use]
+    pub fn is_enabled(self) -> bool {
+        self.enabled
+    }
+
+    #[must_use]
+    pub fn policy(self) -> CitationCompactionPolicy {
+        self.policy
+    }
+}
+
+impl Default for AutomaticCompactionConfig {
+    fn default() -> Self {
+        Self::enabled(default_automatic_compaction_policy())
+    }
+}
 
 /// Merry runtime handle for one session.
 ///
@@ -904,6 +969,68 @@ impl Runtime {
         session.context_snapshot()
     }
 
+    /// Reads a bounded source excerpt from the installed citation-backed checkpoint.
+    pub async fn read_checkpoint_ref(
+        &self,
+        checkpoint_id: &CheckpointId,
+        ref_id: &CheckpointRefId,
+    ) -> Result<CheckpointRefExcerpt, RuntimeError> {
+        let session = self.inner.session.lock().await;
+        session
+            .read_checkpoint_ref(checkpoint_id, ref_id)
+            .map_err(RuntimeError::from)
+    }
+
+    /// Builds a model-facing citation compaction input for the compressible history prefix.
+    pub async fn citation_compaction_input(
+        &self,
+        policy: CitationCompactionPolicy,
+    ) -> Result<Option<CitationCompactionInput>, RuntimeError> {
+        let _active_permit = ActiveStepPermit::acquire(Arc::clone(&self.inner.active_step))
+            .ok_or_else(|| RuntimeError::StepAlreadyActive {
+                session_id: self.inner.session_id.clone(),
+            })?;
+        let session = self.inner.session.lock().await;
+        session.build_citation_compaction_input(policy)
+    }
+
+    /// Installs a validated citation compaction candidate and removes the covered history prefix.
+    pub async fn install_citation_compaction_candidate(
+        &self,
+        input: CitationCompactionInput,
+        candidate_json: &str,
+    ) -> Result<CompactionOutcome, RuntimeError> {
+        let _active_permit = ActiveStepPermit::acquire(Arc::clone(&self.inner.active_step))
+            .ok_or_else(|| RuntimeError::StepAlreadyActive {
+                session_id: self.inner.session_id.clone(),
+            })?;
+        let mut session = self.inner.session.lock().await;
+        session.install_citation_compaction_candidate(input, candidate_json)
+    }
+
+    /// Runs one model-backed compaction pass when a compressible history prefix exists.
+    pub async fn compact_context_once(
+        &self,
+        policy: CitationCompactionPolicy,
+        context: StepContext,
+    ) -> Result<Option<CompactionOutcome>, RuntimeError> {
+        let _active_permit = ActiveStepPermit::acquire(Arc::clone(&self.inner.active_step))
+            .ok_or_else(|| RuntimeError::StepAlreadyActive {
+                session_id: self.inner.session_id.clone(),
+            })?;
+
+        let (token, _) = context.into_parts();
+        if token.is_cancelled() {
+            return Err(RuntimeError::Compaction {
+                source: CompactionError::InvalidModelResponseShape {
+                    reason: "compaction cancelled before input build",
+                },
+            });
+        }
+
+        compact_context_once_inner(&self.inner, policy, token).await
+    }
+
     /// Builds a read-only deterministic projection of the task ledger.
     ///
     /// This is the preferred public read path for lifecycle and compact ledger
@@ -1369,6 +1496,7 @@ pub struct RuntimeBuilder {
     session_id: SessionId,
     event_buffer_size: NonZeroUsize,
     model_configs: RuntimeModelConfigs,
+    automatic_compaction: AutomaticCompactionConfig,
     registered_tools: Vec<RegisteredTool>,
     initial_context_summaries: BTreeMap<String, String>,
     project_rules: Option<ProjectRules>,
@@ -1388,6 +1516,7 @@ impl RuntimeBuilder {
             event_buffer_size: NonZeroUsize::new(DEFAULT_EVENT_BUFFER_SIZE)
                 .expect("default event buffer size is non-zero"),
             model_configs: RuntimeModelConfigs::default(),
+            automatic_compaction: AutomaticCompactionConfig::default(),
             registered_tools: Vec::new(),
             initial_context_summaries: BTreeMap::new(),
             project_rules: None,
@@ -1437,6 +1566,17 @@ impl RuntimeBuilder {
         model: ModelName,
     ) -> Self {
         self.model_configs.insert(role, provider, model);
+        self
+    }
+
+    /// Sets the runtime policy for automatic hard-watermark compaction.
+    ///
+    /// Automatic compaction runs only when a compiled provider request crosses
+    /// the hard context watermark. The current step input is still outside the
+    /// compaction input and is projected raw after any installed checkpoint.
+    #[must_use]
+    pub fn automatic_compaction(mut self, config: AutomaticCompactionConfig) -> Self {
+        self.automatic_compaction = config;
         self
     }
 
@@ -1580,6 +1720,7 @@ impl RuntimeBuilder {
                 memory_projection_epoch: AtomicU64::new(0),
                 event_buffer_size: self.event_buffer_size,
                 model_configs: self.model_configs,
+                automatic_compaction: self.automatic_compaction,
                 tool_registry,
                 memory_activation_source: self.memory_activation_source,
                 allow_low_risk_workspace_patches: self.allow_low_risk_workspace_patches,
@@ -1599,6 +1740,7 @@ struct RuntimeInner {
     memory_projection_epoch: AtomicU64,
     event_buffer_size: NonZeroUsize,
     model_configs: RuntimeModelConfigs,
+    automatic_compaction: AutomaticCompactionConfig,
     tool_registry: ToolRegistry,
     memory_activation_source: Arc<dyn MemoryActivationSource>,
     allow_low_risk_workspace_patches: bool,
@@ -1780,7 +1922,7 @@ async fn run_provider_step(
         "runtime memories activated"
     );
 
-    let (snapshot, project_rules, task_anchor, append_only_body, continuations, activation_epoch) = {
+    let (mut request_inputs, activation_epoch) = {
         let mut session = inner.session.lock().await;
         if token.is_cancelled() {
             drop(session);
@@ -1808,9 +1950,6 @@ async fn run_provider_step(
                 return;
             }
         };
-        if input.should_record_user_history() {
-            session.record_user_message_body(input.text());
-        }
         let continuations = match session.uncheckpointed_tool_continuation_snapshots() {
             Ok(continuations) => continuations,
             Err(error) => {
@@ -1827,47 +1966,27 @@ async fn run_provider_step(
             }
         };
         (
-            session.context_snapshot(),
-            session.project_rules(),
-            session.task_anchor(),
-            append_only_body,
-            continuations,
+            StepRequestInputs::from_session(&session, append_only_body, continuations),
             activation_epoch,
         )
     };
     let mut projection_guard =
         ActivationProjectionGuard::new(Arc::clone(inner), token.clone(), activation_epoch);
-    let sent_continuation_count = continuations.len();
     let tool_specs = inner.tool_registry.tool_specs();
     tracing::debug!(
         category = "continuations_and_tools",
-        continuation_count = sent_continuation_count,
+        continuation_count = request_inputs.continuations.len(),
         tool_spec_count = tool_specs.len(),
         "runtime provider request inputs counted"
     );
 
-    let compiled_context = match ContextCompiler::new().compile(&snapshot) {
-        Ok(context) => context,
-        Err(error) => {
-            clear_current_activated_memories(inner).await;
-            let diagnostic = diagnostic_from_text("context_compile", error.to_string());
-            trace_provider_step_failed(&diagnostic);
-            let _ = send_failed_event(inner, sender, token, diagnostic).await;
-            return;
-        }
-    };
-
-    let request = match compile_step_model_request(StepModelRequestParts {
-        input: &input,
-        model: provider_config.model(),
-        project_rules: project_rules.as_ref(),
-        task_anchor: task_anchor.as_ref(),
-        context: &compiled_context,
-        append_only_body: &append_only_body,
-        continuations: &continuations,
-        tool_specs,
-        generation_config,
-    }) {
+    let mut request = match compile_step_request_from_inputs(
+        &input,
+        provider_config.model(),
+        &request_inputs,
+        tool_specs.clone(),
+        generation_config.clone(),
+    ) {
         Ok(request) => {
             tracing::debug!(
                 category = "model_request_compiled",
@@ -1877,7 +1996,7 @@ async fn run_provider_step(
         }
         Err(error) => {
             clear_current_activated_memories(inner).await;
-            let diagnostic = diagnostic_from_text("model_request", error.to_string());
+            let diagnostic = step_request_compile_diagnostic(&error);
             trace_provider_step_failed(&diagnostic);
             let _ = send_failed_event(inner, sender, token, diagnostic).await;
             return;
@@ -1885,9 +2004,84 @@ async fn run_provider_step(
     };
 
     let provider = provider_config.provider();
-    let request_budget = request_context_budget(provider.capabilities(), &request);
+    let mut request_budget = request_context_budget(provider.capabilities(), &request);
     if let Err(error) = &request_budget {
         trace_provider_request_budget_unavailable(provider.name().as_str(), &request, error);
+    }
+    if matches!(
+        request_budget.as_ref().map(|budget| budget.decision),
+        Ok(CheckpointDecision::RequireCheckpoint)
+    ) {
+        match compact_context_for_hard_watermark(inner, token).await {
+            Ok(Some(_outcome)) => {
+                let refreshed = {
+                    let session = inner.session.lock().await;
+                    match step_request_inputs_from_session(&session) {
+                        Ok(inputs) => inputs,
+                        Err(error) => {
+                            clear_current_activated_memories(inner).await;
+                            let diagnostic = diagnostic_from_text(
+                                "auto_compaction_projection",
+                                error.to_string(),
+                            );
+                            trace_provider_step_failed(&diagnostic);
+                            let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                            return;
+                        }
+                    }
+                };
+                request_inputs = refreshed;
+                request = match compile_step_request_from_inputs(
+                    &input,
+                    provider_config.model(),
+                    &request_inputs,
+                    tool_specs.clone(),
+                    generation_config.clone(),
+                ) {
+                    Ok(request) => request,
+                    Err(error) => {
+                        clear_current_activated_memories(inner).await;
+                        let diagnostic = step_request_compile_diagnostic(&error);
+                        trace_provider_step_failed(&diagnostic);
+                        let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                        return;
+                    }
+                };
+                request_budget = request_context_budget(provider.capabilities(), &request);
+                if let Err(error) = &request_budget {
+                    trace_provider_request_budget_unavailable(
+                        provider.name().as_str(),
+                        &request,
+                        error,
+                    );
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                clear_current_activated_memories(inner).await;
+                if token.is_cancelled() {
+                    trace_provider_step_cancelled();
+                    let _ = send_cancelled_event(inner, sender).await;
+                    return;
+                }
+                let diagnostic = diagnostic_from_text("auto_compaction", error.to_string());
+                trace_provider_step_failed(&diagnostic);
+                let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                return;
+            }
+        }
+    }
+    let sent_continuation_count = request_inputs.continuations.len();
+
+    if input.should_record_user_history() {
+        let mut session = inner.session.lock().await;
+        if token.is_cancelled() {
+            drop(session);
+            trace_provider_step_cancelled();
+            let _ = send_cancelled_event(inner, sender).await;
+            return;
+        }
+        session.record_user_message_body(input.text());
     }
 
     let stream_context = ModelStreamContext::new(token.clone());
@@ -2183,6 +2377,216 @@ fn trace_provider_request_budget_unavailable(
         diagnostic_message = error.to_string(),
         "runtime provider request context budget unavailable"
     );
+}
+
+#[derive(Debug)]
+struct StepRequestInputs {
+    snapshot: SessionContextSnapshot,
+    project_rules: Option<ProjectRules>,
+    task_anchor: Option<TaskAnchor>,
+    append_only_body: Vec<CompiledSessionMessage>,
+    continuations: Vec<ResolvedToolContinuationSnapshot>,
+}
+
+impl StepRequestInputs {
+    fn from_session(
+        session: &SessionState,
+        append_only_body: Vec<CompiledSessionMessage>,
+        continuations: Vec<ResolvedToolContinuationSnapshot>,
+    ) -> Self {
+        Self {
+            snapshot: session.context_snapshot(),
+            project_rules: session.project_rules(),
+            task_anchor: session.task_anchor(),
+            append_only_body,
+            continuations,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum StepRequestCompileError {
+    #[error("context compile error: {source}")]
+    Context {
+        #[from]
+        source: crate::ContextError,
+    },
+
+    #[error("model request error: {source}")]
+    Model {
+        #[from]
+        source: ModelError,
+    },
+}
+
+fn step_request_inputs_from_session(
+    session: &SessionState,
+) -> Result<StepRequestInputs, RuntimeError> {
+    let append_only_body = session.append_only_body_snapshot()?;
+    let continuations = session.uncheckpointed_tool_continuation_snapshots()?;
+    Ok(StepRequestInputs::from_session(
+        session,
+        append_only_body,
+        continuations,
+    ))
+}
+
+fn compile_step_request_from_inputs(
+    input: &StepInput,
+    model: &ModelName,
+    inputs: &StepRequestInputs,
+    tool_specs: Vec<merry_core::ToolSpec>,
+    generation_config: GenerationConfig,
+) -> Result<merry_llm::ModelRequest, StepRequestCompileError> {
+    let compiled_context = ContextCompiler::new().compile(&inputs.snapshot)?;
+    compile_step_model_request(StepModelRequestParts {
+        input,
+        model,
+        project_rules: inputs.project_rules.as_ref(),
+        task_anchor: inputs.task_anchor.as_ref(),
+        context: &compiled_context,
+        append_only_body: &inputs.append_only_body,
+        continuations: &inputs.continuations,
+        tool_specs,
+        generation_config,
+    })
+    .map_err(StepRequestCompileError::from)
+}
+
+fn step_request_compile_diagnostic(error: &StepRequestCompileError) -> ErrorInfo {
+    match error {
+        StepRequestCompileError::Context { .. } => {
+            diagnostic_from_text("context_compile", error.to_string())
+        }
+        StepRequestCompileError::Model { .. } => {
+            diagnostic_from_text("model_request", error.to_string())
+        }
+    }
+}
+
+fn default_automatic_compaction_policy() -> CitationCompactionPolicy {
+    CitationCompactionPolicy::new(
+        DEFAULT_AUTO_COMPACTION_TARGET_OUTPUT_TOKENS,
+        None,
+        DEFAULT_AUTO_COMPACTION_MAX_OUTPUT_BYTES,
+        DEFAULT_AUTO_COMPACTION_RETAINED_RAW_TAIL_ITEMS,
+        DEFAULT_AUTO_COMPACTION_MAX_REF_EXCERPT_BYTES,
+        DEFAULT_AUTO_COMPACTION_MAX_CARRIED_PRIOR_REFS,
+    )
+    .expect("static automatic compaction policy must be valid")
+}
+
+async fn compact_context_for_hard_watermark(
+    inner: &RuntimeInner,
+    token: &CancellationToken,
+) -> Result<Option<CompactionOutcome>, RuntimeError> {
+    let config = inner.automatic_compaction;
+    if !config.is_enabled() {
+        return Ok(None);
+    }
+
+    compact_context_once_inner(inner, config.policy(), token.clone()).await
+}
+
+async fn compact_context_once_inner(
+    inner: &RuntimeInner,
+    policy: CitationCompactionPolicy,
+    token: CancellationToken,
+) -> Result<Option<CompactionOutcome>, RuntimeError> {
+    if token.is_cancelled() {
+        return Err(RuntimeError::Compaction {
+            source: CompactionError::InvalidModelResponseShape {
+                reason: "compaction cancelled before input build",
+            },
+        });
+    }
+
+    let provider_config = inner
+        .model_configs
+        .get_with_primary_fallback(RuntimeModelRole::ContextCompaction)
+        .ok_or(RuntimeError::MissingModelProvider {
+            role: RuntimeModelRole::ContextCompaction.as_str(),
+        })?;
+
+    let input = {
+        let session = inner.session.lock().await;
+        session.build_citation_compaction_input(policy)?
+    };
+    let Some(input) = input else {
+        return Ok(None);
+    };
+
+    let request = compile_citation_compaction_model_request(&input, provider_config.model())
+        .map_err(|error| RuntimeError::CompactionModelRequest {
+            message: error.to_string(),
+        })?;
+    let stream_context = ModelStreamContext::new(token.clone());
+    let stream = provider_config
+        .provider()
+        .stream_model(request, stream_context)
+        .await
+        .map_err(|error| RuntimeError::CompactionModelSetup {
+            message: error.to_string(),
+        })?;
+    let candidate_json = collect_compaction_candidate_json(stream, token).await?;
+
+    let mut session = inner.session.lock().await;
+    session
+        .install_citation_compaction_candidate(input, &candidate_json)
+        .map(Some)
+}
+
+async fn collect_compaction_candidate_json(
+    mut stream: merry_llm::ModelEventStream,
+    token: CancellationToken,
+) -> Result<String, RuntimeError> {
+    loop {
+        let item = tokio::select! {
+            biased;
+            () = token.cancelled() => {
+                return Err(RuntimeError::CompactionModelStream {
+                    message: "compaction cancelled while reading model stream".to_owned(),
+                });
+            }
+            item = stream.next() => item,
+        };
+
+        match item {
+            Some(Ok(ModelEvent::Started)) => {}
+            Some(Ok(ModelEvent::OutputTextDelta { .. })) => {}
+            Some(Ok(ModelEvent::ToolCallRequested { .. })) => {
+                return Err(RuntimeError::CompactionModelStream {
+                    message: "compaction model requested a tool call".to_owned(),
+                });
+            }
+            Some(Ok(ModelEvent::Completed { response })) => {
+                if response.finish_reason() != FinishReason::Stop {
+                    return Err(RuntimeError::CompactionModelStream {
+                        message: format!(
+                            "compaction model finished with {:?}",
+                            response.finish_reason()
+                        ),
+                    });
+                }
+                let [ModelOutput::Text { text }] = response.outputs() else {
+                    return Err(RuntimeError::CompactionModelStream {
+                        message: "compaction model must return exactly one text output".to_owned(),
+                    });
+                };
+                return Ok(text.clone());
+            }
+            Some(Err(error)) => {
+                return Err(RuntimeError::CompactionModelStream {
+                    message: error.to_string(),
+                });
+            }
+            None => {
+                return Err(RuntimeError::CompactionModelStream {
+                    message: "compaction model stream ended before completion".to_owned(),
+                });
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2699,8 +3103,9 @@ async fn reserve_cancelled_event_slot<'a>(
 #[cfg(test)]
 mod tests {
     use super::{
-        DIAGNOSTIC_TOOL_ACTION_POLICY_DENIED, DIAGNOSTIC_TOOL_CALL_RESULT_REQUIRED, Runtime,
-        RuntimeBuilder, RuntimeInner, TOOL_ACTION_POLICY_DENIED_MESSAGE, WORKSPACE_PATCH_TOOL_NAME,
+        AutomaticCompactionConfig, DIAGNOSTIC_TOOL_ACTION_POLICY_DENIED,
+        DIAGNOSTIC_TOOL_CALL_RESULT_REQUIRED, Runtime, RuntimeBuilder, RuntimeInner,
+        TOOL_ACTION_POLICY_DENIED_MESSAGE, WORKSPACE_PATCH_TOOL_NAME,
         admit_action_to_generic_executor, memory_activation_seed_from_step_input,
         request_context_budget, send_cancelled_event,
     };
@@ -2736,7 +3141,8 @@ mod tests {
         WorkspacePatchExecutionEvidence, WorkspacePatchProposal,
     };
     use crate::{
-        ArtifactError, CheckpointDecision, ContextBudgetPolicy, RuntimeError, RuntimeModelRole,
+        ArtifactError, CheckpointDecision, CitationCompactionPolicy, ContextBudgetPolicy,
+        RuntimeError, RuntimeModelRole, StepContext,
     };
     use futures_util::StreamExt;
     use merry_core::{
@@ -2835,6 +3241,7 @@ mod tests {
             memory_projection_epoch: AtomicU64::new(0),
             event_buffer_size: NonZeroUsize::new(1).expect("non-zero buffer"),
             model_configs: RuntimeModelConfigs::default(),
+            automatic_compaction: AutomaticCompactionConfig::default(),
             tool_registry: ToolRegistry::default(),
             memory_activation_source: Arc::new(crate::memory::StoredMemoryActivationSource),
             allow_low_risk_workspace_patches: false,
@@ -3507,6 +3914,7 @@ mod tests {
                 memory_projection_epoch: AtomicU64::new(0),
                 event_buffer_size: NonZeroUsize::new(16).expect("non-zero buffer"),
                 model_configs: model_configs_with_primary(provider),
+                automatic_compaction: AutomaticCompactionConfig::default(),
                 tool_registry: ToolRegistry::default(),
                 memory_activation_source: Arc::new(source),
                 allow_low_risk_workspace_patches: false,
@@ -3526,6 +3934,7 @@ mod tests {
                 memory_projection_epoch: AtomicU64::new(0),
                 event_buffer_size: NonZeroUsize::new(16).expect("non-zero buffer"),
                 model_configs: model_configs_with_primary(provider),
+                automatic_compaction: AutomaticCompactionConfig::default(),
                 tool_registry: ToolRegistry::default(),
                 memory_activation_source: Arc::new(crate::memory::StoredMemoryActivationSource),
                 allow_low_risk_workspace_patches: false,
@@ -3548,6 +3957,7 @@ mod tests {
                 memory_projection_epoch: AtomicU64::new(0),
                 event_buffer_size: NonZeroUsize::new(16).expect("non-zero buffer"),
                 model_configs: RuntimeModelConfigs::default(),
+                automatic_compaction: AutomaticCompactionConfig::default(),
                 tool_registry: ToolRegistry::default(),
                 memory_activation_source: Arc::new(source),
                 allow_low_risk_workspace_patches: false,
@@ -4238,6 +4648,7 @@ mod tests {
         let tool_risk_model = named_model("fake/tool-risk-review");
         let approval_model = named_model("fake/approval-review");
         let summary_model = named_model("fake/summary-memory");
+        let compaction_model = named_model("fake/context-compaction");
 
         let runtime = Runtime::builder(session_id("runtime-role-model-config"))
             .model_provider(Arc::new(RecordingModelProvider::new()), first_primary_model)
@@ -4261,6 +4672,11 @@ mod tests {
                 summary_model.clone(),
             )
             .model_provider_for_role(
+                RuntimeModelRole::ContextCompaction,
+                Arc::new(RecordingModelProvider::new()),
+                compaction_model.clone(),
+            )
+            .model_provider_for_role(
                 RuntimeModelRole::ToolRiskReview,
                 Arc::new(RecordingModelProvider::new()),
                 tool_risk_model.clone(),
@@ -4273,6 +4689,7 @@ mod tests {
             (RuntimeModelRole::ToolRiskReview, &tool_risk_model),
             (RuntimeModelRole::ApprovalReview, &approval_model),
             (RuntimeModelRole::SummaryMemory, &summary_model),
+            (RuntimeModelRole::ContextCompaction, &compaction_model),
         ] {
             assert_eq!(
                 runtime.inner.model_configs.model_for_role(role),
@@ -4287,6 +4704,7 @@ mod tests {
         let tool_risk_review = RecordingModelProvider::new();
         let approval_review = RecordingModelProvider::new();
         let summary_memory = RecordingModelProvider::new();
+        let context_compaction = RecordingModelProvider::new();
         let runtime = Runtime::builder(session_id("runtime-step-primary-role-model"))
             .model_provider(Arc::new(primary.clone()), named_model("fake/primary-step"))
             .model_provider_for_role(
@@ -4303,6 +4721,11 @@ mod tests {
                 RuntimeModelRole::SummaryMemory,
                 Arc::new(summary_memory.clone()),
                 named_model("fake/summary-memory-step"),
+            )
+            .model_provider_for_role(
+                RuntimeModelRole::ContextCompaction,
+                Arc::new(context_compaction.clone()),
+                named_model("fake/context-compaction-step"),
             )
             .build()
             .expect("runtime should build");
@@ -4330,10 +4753,149 @@ mod tests {
             primary_requests[0].model(),
             &named_model("fake/primary-step")
         );
-        for provider in [&tool_risk_review, &approval_review, &summary_memory] {
+        for provider in [
+            &tool_risk_review,
+            &approval_review,
+            &summary_memory,
+            &context_compaction,
+        ] {
             assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
             assert!(provider.recorded_requests().is_empty());
         }
+    }
+
+    async fn seed_two_history_items_for_compaction(runtime: &Runtime) {
+        let events = collect_step(
+            runtime,
+            "old user message for compaction",
+            crate::StepContext::default(),
+        )
+        .await;
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event.kind, RuntimeEventKind::StepCompleted)),
+            "seed step should complete"
+        );
+        let events = collect_step(
+            runtime,
+            "retained tail user message",
+            crate::StepContext::default(),
+        )
+        .await;
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event.kind, RuntimeEventKind::StepCompleted)),
+            "tail seed step should complete"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn compaction_uses_context_compaction_role_when_configured() {
+        let primary = RecordingModelProvider::with_script(vec![
+            ScriptedModelProviderResponse::Stream(vec![Ok(completed_event())]),
+            ScriptedModelProviderResponse::Stream(vec![Ok(completed_event())]),
+        ]);
+        let compactor = RecordingModelProvider::with_script(vec![
+            ScriptedModelProviderResponse::Stream(vec![Ok(completed_event_with(
+                vec![ModelOutput::text(
+                    r#"{
+                      "claims": [
+                        {
+                          "id": "c1",
+                          "kind": "completed_action",
+                          "text": "Old history was compacted.",
+                          "refs": ["r1", "r2"]
+                        }
+                      ],
+                      "working_intent": null
+                    }"#,
+                )],
+                FinishReason::Stop,
+            ))]),
+        ]);
+        let runtime = Runtime::builder(session_id("compaction-role"))
+            .model_provider(Arc::new(primary.clone()), model_name())
+            .model_provider_for_role(
+                RuntimeModelRole::ContextCompaction,
+                Arc::new(compactor.clone()),
+                ModelName::new("compaction-model").expect("valid model"),
+            )
+            .build()
+            .expect("runtime builds");
+
+        seed_two_history_items_for_compaction(&runtime).await;
+        let primary_before = primary.recorded_requests().len();
+
+        let outcome = runtime
+            .compact_context_once(
+                CitationCompactionPolicy::new(128, None, 4096, 2, 1200, 16).expect("valid policy"),
+                StepContext::default(),
+            )
+            .await
+            .expect("compaction succeeds")
+            .expect("compaction happened");
+
+        assert_eq!(outcome.covered_history_item_count(), 2);
+        assert_eq!(primary.recorded_requests().len(), primary_before);
+        assert_eq!(compactor.recorded_requests().len(), 1);
+        assert_eq!(
+            compactor.recorded_requests()[0].model().as_str(),
+            "compaction-model"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn compaction_accepts_streamed_text_delta_before_completed_response() {
+        let primary = RecordingModelProvider::with_script(vec![
+            ScriptedModelProviderResponse::Stream(vec![Ok(completed_event())]),
+            ScriptedModelProviderResponse::Stream(vec![Ok(completed_event())]),
+        ]);
+        let candidate_json = r#"{
+          "claims": [
+            {
+              "id": "c1",
+              "kind": "completed_action",
+              "text": "Old history was compacted.",
+              "refs": ["r1", "r2"]
+            }
+          ],
+          "working_intent": null
+        }"#;
+        let compactor =
+            RecordingModelProvider::with_script(vec![ScriptedModelProviderResponse::Stream(vec![
+                Ok(ModelEvent::Started),
+                Ok(ModelEvent::OutputTextDelta {
+                    delta: candidate_json.to_owned(),
+                }),
+                Ok(completed_event_with(
+                    vec![ModelOutput::text(candidate_json)],
+                    FinishReason::Stop,
+                )),
+            ])]);
+        let runtime = Runtime::builder(session_id("compaction-streamed-delta"))
+            .model_provider(Arc::new(primary), model_name())
+            .model_provider_for_role(
+                RuntimeModelRole::ContextCompaction,
+                Arc::new(compactor),
+                ModelName::new("compaction-model").expect("valid model"),
+            )
+            .build()
+            .expect("runtime builds");
+
+        seed_two_history_items_for_compaction(&runtime).await;
+
+        let outcome = runtime
+            .compact_context_once(
+                CitationCompactionPolicy::new(128, None, 4096, 2, 1200, 16).expect("valid policy"),
+                StepContext::default(),
+            )
+            .await
+            .expect("compaction accepts streamed text delta")
+            .expect("compaction happened");
+
+        assert_eq!(outcome.covered_history_item_count(), 2);
     }
 
     #[test]

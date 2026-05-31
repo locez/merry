@@ -701,6 +701,7 @@ dependencies = [
  "futures-util",
  "merry-core",
  "merry-llm",
+ "merry-provider-openai",
  "schemars",
  "serde",
  "serde_json",

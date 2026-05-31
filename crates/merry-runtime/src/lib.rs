@@ -32,6 +32,8 @@ mod action_audit;
 mod action_policy;
 mod agent_loop;
 mod artifact;
+mod checkpoint;
+mod compaction;
 mod context;
 mod error;
 mod event_stream;
@@ -54,6 +56,16 @@ pub use agent_loop::{
 };
 pub use artifact::{
     ArtifactContent, ArtifactContentKind, ArtifactError, ArtifactRecord, ArtifactRegistry,
+};
+pub use checkpoint::{
+    CheckpointClaimId, CheckpointClaimKind, CheckpointError, CheckpointId, CheckpointRef,
+    CheckpointRefExcerpt, CheckpointRefId, CheckpointRefManifest, CheckpointSequenceRange,
+    CheckpointSourceKind, CheckpointValidationPolicy, CitationBackedCheckpoint,
+    CompactedCheckpointCandidate,
+};
+pub use compaction::{
+    CitationCompactionInput, CitationCompactionPolicy, CompactionError, CompactionOutcome,
+    citation_compaction_response_schema, citation_compaction_system_prompt,
 };
 pub use context::{
     CheckpointDecision, CompactedCheckpoint, CompiledContext, CompiledContextSection,
@@ -79,7 +91,7 @@ pub use process::{
 };
 pub use process_runner::TokioProcessRunner;
 pub use process_tool::{ProcessCommandToolError, process_command_tool};
-pub use runtime::{Runtime, RuntimeBuilder};
+pub use runtime::{AutomaticCompactionConfig, Runtime, RuntimeBuilder};
 pub use step::{StepContext, StepInput};
 pub use tool::{
     ActionExecutionEvidence, ActionProposal, ActionProposalError, ActionProposalEvidence,

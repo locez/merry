@@ -9,6 +9,7 @@ futures-core.workspace = true
 futures-util.workspace = true
 merry-core = { path = "../merry-core" }
 merry-llm = { path = "../merry-llm" }
+schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -22,7 +23,7 @@ futures-executor.workspace = true
 futures-util.workspace = true
 merry-core = { path = "../merry-core" }
 merry-llm = { path = "../merry-llm", features = ["test-utils"] }
-schemars.workspace = true
+merry-provider-openai = { path = "../merry-provider-openai" }
 tokio.workspace = true
 tokio-util.workspace = true
 tracing-subscriber.workspace = true

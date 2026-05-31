@@ -1,4 +1,4 @@
-use futures_util::stream;
+use futures_util::{StreamExt, stream};
 use merry_core::{
     ArtifactId, ArtifactKind, ArtifactRef, EvidenceLocator, PendingToolCall, ProviderName,
     RuntimeEvent, RuntimeEventKind, SessionId, ToolCallId, ToolCallResult, ToolCallResultStatus,
@@ -11,13 +11,14 @@ use merry_llm::{
 };
 use merry_runtime::{
     ActionExecutionEvidence, ActionProposal, ActionProposalEvidence, AgentLoopBlockedReason,
-    AgentLoopConfig, AgentLoopConfigError, AgentLoopStatus, ArtifactError, ContextSummary,
+    AgentLoopConfig, AgentLoopConfigError, AgentLoopStatus, ArtifactError,
+    AutomaticCompactionConfig, CitationCompactionPolicy, ContextSummary,
     DEFAULT_AGENT_LOOP_CONTINUATION_INPUT, ProcessActionIntent, ProcessEnvPolicy,
     ProcessExitStatus, ProcessRunner, ProcessRunnerContext, ProcessRunnerError,
-    ProcessRunnerFuture, ProcessRunnerOutput, ProjectRules, Runtime, RuntimeError, StepContext,
-    StepInput, TaskAnchor, ToolActionKind, ToolActionPreflight, ToolActionProposalFuture,
-    ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome, ToolExecutor,
-    ToolExecutorFuture, WorkspacePatchExecutionEvidence, WorkspacePatchProposal,
+    ProcessRunnerFuture, ProcessRunnerOutput, ProjectRules, Runtime, RuntimeError,
+    RuntimeModelRole, StepContext, StepInput, TaskAnchor, ToolActionKind, ToolActionPreflight,
+    ToolActionProposalFuture, ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome,
+    ToolExecutor, ToolExecutorFuture, WorkspacePatchExecutionEvidence, WorkspacePatchProposal,
     process_command_tool,
 };
 use schemars::Schema;
@@ -829,6 +830,77 @@ async fn agent_loop_keeps_uncheckpointed_continuations_after_final_answer() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn compaction_removes_only_covered_tool_continuations_after_successful_install() {
+    let provider = ScriptedModelProvider::new(vec![
+        vec![Ok(completed_tool_call_event(model_tool_call(
+            "call-old",
+            "search_notes",
+        )))],
+        vec![Ok(completed_text_event("tail assistant"))],
+        vec![Ok(completed_text_event(
+            r#"{
+              "claims": [
+                {
+                  "id": "c1",
+                  "kind": "completed_action",
+                  "text": "The old tool result was compacted.",
+                  "refs": ["r1", "r2"]
+                }
+              ],
+              "working_intent": null
+            }"#,
+        ))],
+        vec![Ok(completed_text_event("final answer"))],
+    ]);
+    let runtime = runtime_with_tool(
+        "agent-loop-compaction-removes-continuations",
+        provider.clone(),
+        ScriptedToolExecutor::succeeding_text("old search result"),
+    );
+
+    let result = runtime
+        .run_agent_loop(
+            StepInput::user_text("Use the tool once.").expect("valid input"),
+            StepContext::default(),
+            AgentLoopConfig::new(2).expect("valid config"),
+        )
+        .await
+        .expect("loop runs");
+    assert_eq!(result.status(), &AgentLoopStatus::Completed);
+
+    runtime
+        .compact_context_once(
+            CitationCompactionPolicy::new(128, None, 4096, 1, 1200, 16).expect("valid policy"),
+            StepContext::default(),
+        )
+        .await
+        .expect("compaction succeeds")
+        .expect("compaction runs");
+
+    let stream = runtime
+        .step(
+            StepInput::user_text("Continue after compaction.").expect("valid input"),
+            StepContext::default(),
+        )
+        .expect("step starts");
+    let _events: Vec<RuntimeEvent> = stream.collect().await;
+
+    let requests = provider.recorded_requests();
+    let final_request = requests.last().expect("final request exists");
+    assert!(
+        final_request.continuations().is_empty(),
+        "covered tool continuations should be removed only after successful compaction"
+    );
+    let final_text = final_request
+        .messages()
+        .iter()
+        .map(|message| message.content().as_text())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(final_text.contains("The old tool result was compacted."));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn ordinary_user_and_assistant_messages_remain_append_only_without_task_anchor() {
     let provider = ScriptedModelProvider::new(vec![
         vec![Ok(completed_text_event("first final answer"))],
@@ -1389,6 +1461,308 @@ async fn provider_request_still_runs_when_context_budget_diagnostic_is_unavailab
         }),
         "budget diagnostics must remain trace-only"
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn provider_step_auto_compacts_before_hard_watermark_request() {
+    let primary = ScriptedModelProvider::new(vec![
+        vec![Ok(completed_text_event("old assistant sentinel"))],
+        vec![Ok(completed_text_event("tail assistant sentinel"))],
+        vec![Ok(completed_text_event("final after automatic compaction"))],
+    ])
+    .with_capabilities(
+        ModelCapabilities::new(true, true, false, true, Some(400), Some(16))
+            .expect("valid capabilities"),
+    );
+    let compactor = ScriptedModelProvider::new(vec![vec![Ok(completed_text_event(
+        r#"{
+          "claims": [
+            {
+              "id": "c1",
+              "kind": "completed_action",
+              "text": "Old turn was compacted automatically.",
+              "refs": ["r1", "r2"]
+            }
+          ],
+          "working_intent": null
+        }"#,
+    ))]]);
+    let runtime = Runtime::builder(session_id("agent-loop-auto-compaction-hard-watermark"))
+        .model_provider(Arc::new(primary.clone()), model_name())
+        .model_provider_for_role(
+            RuntimeModelRole::ContextCompaction,
+            Arc::new(compactor.clone()),
+            ModelName::new("fake/compactor").expect("valid model"),
+        )
+        .build()
+        .expect("runtime should build");
+
+    let first = run_default_loop(&runtime, &"old user sentinel ".repeat(70)).await;
+    assert_eq!(first.status(), &AgentLoopStatus::Completed);
+    let second = run_default_loop(&runtime, "tail user sentinel").await;
+    assert_eq!(second.status(), &AgentLoopStatus::Completed);
+    let third = run_default_loop(&runtime, "current user sentinel").await;
+    assert_eq!(third.status(), &AgentLoopStatus::Completed);
+
+    assert_eq!(
+        compactor.recorded_requests().len(),
+        1,
+        "runtime should compact before sending the hard-watermark request"
+    );
+    let compaction_request_text = compactor.recorded_requests()[0]
+        .messages()
+        .iter()
+        .map(|message| message.content().as_text())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(compaction_request_text.contains("old user sentinel"));
+    assert!(!compaction_request_text.contains("tail user sentinel"));
+    assert!(!compaction_request_text.contains("current user sentinel"));
+
+    let primary_requests = primary.recorded_requests();
+    assert_eq!(primary_requests.len(), 3);
+    let final_request = primary_requests.last().expect("final request exists");
+    let final_text = final_request
+        .messages()
+        .iter()
+        .map(|message| message.content().as_text())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(final_text.contains("compacted-checkpoint:"));
+    assert!(final_text.contains("Old turn was compacted automatically."));
+    assert!(final_text.contains("tail user sentinel"));
+    assert!(final_text.contains("tail assistant sentinel"));
+    assert!(final_text.contains("current user sentinel"));
+    assert!(
+        !final_text.contains("old user sentinel"),
+        "covered raw history should be replaced by checkpoint projection"
+    );
+    assert!(
+        !final_text.contains("old assistant sentinel"),
+        "covered assistant history should be replaced by checkpoint projection"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn auto_compaction_config_controls_retained_raw_tail() {
+    let primary = ScriptedModelProvider::new(vec![
+        vec![Ok(completed_text_event("old assistant configurable tail"))],
+        vec![Ok(completed_text_event("tail one assistant"))],
+        vec![Ok(completed_text_event("tail two assistant"))],
+        vec![Ok(completed_text_event(
+            "final after configurable automatic compaction",
+        ))],
+    ])
+    .with_capabilities(
+        ModelCapabilities::new(true, true, false, true, Some(420), Some(16))
+            .expect("valid capabilities"),
+    );
+    let compactor = ScriptedModelProvider::new(vec![vec![Ok(completed_text_event(
+        r#"{
+          "claims": [
+            {
+              "id": "c1",
+              "kind": "completed_action",
+              "text": "Only the old configurable-tail turn was compacted.",
+              "refs": ["r1", "r2"]
+            }
+          ],
+          "working_intent": null
+        }"#,
+    ))]]);
+    let policy = CitationCompactionPolicy::new(192, None, 8192, 4, 1200, 16).expect("valid policy");
+    let runtime = Runtime::builder(session_id("agent-loop-auto-compaction-config-tail"))
+        .model_provider(Arc::new(primary.clone()), model_name())
+        .model_provider_for_role(
+            RuntimeModelRole::ContextCompaction,
+            Arc::new(compactor.clone()),
+            ModelName::new("fake/compactor").expect("valid model"),
+        )
+        .automatic_compaction(AutomaticCompactionConfig::enabled(policy))
+        .build()
+        .expect("runtime should build");
+
+    let first = run_default_loop(&runtime, &"old configurable tail user ".repeat(70)).await;
+    assert_eq!(first.status(), &AgentLoopStatus::Completed);
+    let second = run_default_loop(&runtime, "tail one user").await;
+    assert_eq!(second.status(), &AgentLoopStatus::Completed);
+    let third = run_default_loop(&runtime, "tail two user").await;
+    assert_eq!(third.status(), &AgentLoopStatus::Completed);
+    let fourth = run_default_loop(&runtime, "current configurable tail user").await;
+    assert_eq!(fourth.status(), &AgentLoopStatus::Completed);
+
+    assert_eq!(compactor.recorded_requests().len(), 1);
+    let compaction_request_text = compactor.recorded_requests()[0]
+        .messages()
+        .iter()
+        .map(|message| message.content().as_text())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(compaction_request_text.contains("old configurable tail user"));
+    assert!(!compaction_request_text.contains("tail one user"));
+    assert!(!compaction_request_text.contains("tail two user"));
+    assert!(!compaction_request_text.contains("current configurable tail user"));
+
+    let primary_requests = primary.recorded_requests();
+    assert_eq!(primary_requests.len(), 4);
+    let final_text = primary_requests
+        .last()
+        .expect("final request exists")
+        .messages()
+        .iter()
+        .map(|message| message.content().as_text())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(final_text.contains("Only the old configurable-tail turn was compacted."));
+    assert!(final_text.contains("tail one user"));
+    assert!(final_text.contains("tail one assistant"));
+    assert!(final_text.contains("tail two user"));
+    assert!(final_text.contains("tail two assistant"));
+    assert!(final_text.contains("current configurable tail user"));
+    assert!(!final_text.contains("old configurable tail user"));
+    assert!(!final_text.contains("old assistant configurable tail"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn auto_compacted_agent_loop_continuation_preserves_original_task_text() {
+    let original_task = format!(
+        "original long task sentinel {}",
+        "keep-this-exact-task ".repeat(80)
+    );
+    let primary = ScriptedModelProvider::new(vec![
+        vec![Ok(completed_tool_call_event(model_tool_call(
+            "call-auto-compact-continuation",
+            "search_notes",
+        )))],
+        vec![Ok(completed_text_event(
+            "final after compacted continuation",
+        ))],
+    ])
+    .with_capabilities(
+        ModelCapabilities::new(true, true, false, true, Some(520), Some(16))
+            .expect("valid capabilities"),
+    );
+    let compactor = ScriptedModelProvider::new(vec![vec![Ok(completed_text_event(
+        r#"{
+          "claims": [
+            {
+              "id": "c1",
+              "kind": "current_state",
+              "text": "The opening task turn was compacted before tool continuation.",
+              "refs": ["r1"]
+            }
+          ],
+          "working_intent": null
+        }"#,
+    ))]]);
+    let policy = CitationCompactionPolicy::new(192, None, 8192, 1, 1200, 16).expect("valid policy");
+    let runtime = Runtime::builder(session_id("agent-loop-auto-compaction-keeps-original-task"))
+        .register_tool(merry_runtime::RegisteredTool::read_only(
+            tool_spec("search_notes"),
+            Arc::new(ScriptedToolExecutor::succeeding_text(
+                "tool result sentinel\n",
+            )),
+        ))
+        .model_provider(Arc::new(primary.clone()), model_name())
+        .model_provider_for_role(
+            RuntimeModelRole::ContextCompaction,
+            Arc::new(compactor.clone()),
+            ModelName::new("fake/compactor").expect("valid model"),
+        )
+        .automatic_compaction(AutomaticCompactionConfig::enabled(policy))
+        .build()
+        .expect("runtime should build");
+
+    let result = runtime
+        .run_agent_loop(
+            StepInput::user_text(&original_task).expect("valid step input"),
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::new(2).expect("valid loop config"),
+        )
+        .await
+        .expect("agent loop should run");
+
+    assert_eq!(result.status(), &AgentLoopStatus::Completed);
+    assert_eq!(
+        compactor.recorded_requests().len(),
+        1,
+        "continuation request should compact the covered opening task turn"
+    );
+
+    let primary_requests = primary.recorded_requests();
+    assert_eq!(primary_requests.len(), 2);
+    let continuation_request_text = primary_requests[1]
+        .messages()
+        .iter()
+        .map(|message| message.content().as_text())
+        .collect::<Vec<_>>()
+        .join("\n---\n");
+    assert!(continuation_request_text.contains("compacted-checkpoint:"));
+    assert!(
+        continuation_request_text
+            .contains("The opening task turn was compacted before tool continuation.")
+    );
+    assert!(continuation_request_text.contains(DEFAULT_AGENT_LOOP_CONTINUATION_INPUT));
+    assert!(continuation_request_text.contains(&format!("Original task:\n{original_task}")));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn auto_compaction_config_can_disable_hard_watermark_compaction() {
+    let primary = ScriptedModelProvider::new(vec![
+        vec![Ok(completed_text_event("old assistant no auto compaction"))],
+        vec![Ok(completed_text_event(
+            "final without automatic compaction",
+        ))],
+    ])
+    .with_capabilities(
+        ModelCapabilities::new(true, true, false, true, Some(360), Some(16))
+            .expect("valid capabilities"),
+    );
+    let compactor = ScriptedModelProvider::new(vec![vec![Ok(completed_text_event(
+        r#"{
+          "claims": [
+            {
+              "id": "c1",
+              "kind": "completed_action",
+              "text": "This checkpoint should not be requested.",
+              "refs": ["r1"]
+            }
+          ],
+          "working_intent": null
+        }"#,
+    ))]]);
+    let runtime = Runtime::builder(session_id("agent-loop-auto-compaction-disabled"))
+        .model_provider(Arc::new(primary.clone()), model_name())
+        .model_provider_for_role(
+            RuntimeModelRole::ContextCompaction,
+            Arc::new(compactor.clone()),
+            ModelName::new("fake/compactor").expect("valid model"),
+        )
+        .automatic_compaction(AutomaticCompactionConfig::disabled())
+        .build()
+        .expect("runtime should build");
+
+    let first = run_default_loop(&runtime, &"old no auto compaction user ".repeat(70)).await;
+    assert_eq!(first.status(), &AgentLoopStatus::Completed);
+    let second = run_default_loop(&runtime, "current no auto compaction user").await;
+    assert_eq!(second.status(), &AgentLoopStatus::Completed);
+
+    assert!(
+        compactor.recorded_requests().is_empty(),
+        "disabled automatic compaction must not call the compactor"
+    );
+    let primary_requests = primary.recorded_requests();
+    assert_eq!(primary_requests.len(), 2);
+    let final_text = primary_requests[1]
+        .messages()
+        .iter()
+        .map(|message| message.content().as_text())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!final_text.contains("compacted-checkpoint:"));
+    assert!(final_text.contains("old no auto compaction user"));
+    assert!(final_text.contains("current no auto compaction user"));
 }
 
 #[tokio::test(flavor = "current_thread")]

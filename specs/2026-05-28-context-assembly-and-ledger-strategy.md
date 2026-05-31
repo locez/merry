@@ -31,6 +31,10 @@ Record aggressively. Project conservatively. Rewrite rarely.
 - Avoid projecting the full ledger into every model request.
 - Preserve stable prefix cache behavior.
 - Use model context window size to choose budgets and compaction watermarks.
+- Make compaction input explicit, structured, coverage-scoped, and small enough
+  to review.
+- Keep explicit task anchoring separate from model-inferred short-term working
+  intent.
 - Leave task pinning as an explicit future interaction, not automatic model
   inference.
 
@@ -46,6 +50,12 @@ Record aggressively. Project conservatively. Rewrite rarely.
   response ID as Merry task state.
 - Do not add model-generated summaries as trusted ledger facts.
 - Do not add dynamic runtime status markers to every request.
+- Do not let a compaction model decide the coverage window that will be
+  removed from prompt replay.
+- Do not put the retained raw tail into compaction input. The compactor sees
+  only the selected coverage window plus control context.
+- Do not treat model-inferred working intent as a Task Anchor or as durable task
+  state.
 
 ## Data Planes
 
@@ -114,6 +124,31 @@ Task Anchor is not automatic task detection. The model must not silently create
 or mutate it. Future model suggestions may propose a task anchor update, but
 runtime state changes require explicit user confirmation.
 
+### Working Intent
+
+Working Intent is a compact, model-assisted description of the user's current
+short-term intent when no explicit Task Anchor exists, or a subordinate current
+focus when a Task Anchor does exist.
+
+Working Intent is not a Task Anchor:
+
+- it is not user-pinned control-plane state;
+- it must cite source user-message evidence;
+- it may be omitted or marked uncertain when user intent is ambiguous;
+- it must not claim a task is complete, rewrite the objective, or introduce a
+  new objective;
+- current user input is never compressed into Working Intent.
+
+When there is no Task Anchor, compaction must not remove the raw user goal from
+provider-visible context unless a valid Working Intent is installed or the
+relevant raw user message remains in the post-checkpoint raw tail.
+
+Working Intent is checkpoint-adjacent dynamic context, not a higher-priority
+control-plane segment. If rendered, it belongs at the bottom of the checkpoint
+segment after the compacted checkpoint body and before raw post-checkpoint
+tail/current user input, so it reads as compressed prior context rather than as
+a replacement for the current user message.
+
 ## Context Layout
 
 The compiler should assemble model input in cache-aware layers.
@@ -129,7 +164,8 @@ Optional stable-ish task anchor:
   user-pinned objective, if present
 
 Checkpoint segment:
-  latest ledger-derived checkpoint, if present
+  compacted checkpoint body, if present
+  optional working-intent footer, if accepted and useful
   low-frequency, artifact/evidence refs only
   replaces older append-only body ranges only after checkpoint/compaction
 
@@ -256,16 +292,220 @@ checkpoint segment for the latest checkpoint. This segment is more stable than
 the append-only body, but it is not part of the stable prefix because it changes
 as the task progresses.
 
-A checkpoint should be generated from runtime-owned state:
+The useful compaction boundary is an install operation, not a cursor-only
+trimming operation. A checkpoint is installed only after runtime selects a
+coverage window, builds a structured compaction input, obtains a compact draft,
+validates the draft, and replaces the covered prompt replay prefix. Coverage
+cursors identify what may be removed, but they do not by themselves constitute
+compression.
 
-- task anchor, if present;
+### Compaction Model Role
+
+Compaction should use a role-scoped model configuration:
+
+```text
+RuntimeModelRole::ContextCompaction
+```
+
+If this role is configured, use its provider/model. If it is not configured,
+fall back to the primary provider/model. If no provider/model is available,
+compaction cannot run.
+
+The compaction role is a helper model role. Its output is not trusted ledger
+truth and does not decide coverage, task objective, or runtime policy.
+
+### Compaction Input
+
+`CompactionInput` is a runtime-assembled evidence pack. It is not a raw
+transcript and it must not include retained raw tail content.
+
+Suggested first shape:
+
+```text
+CompactionInput:
+  policy:
+    strategy: cost_aware | balanced | capacity
+    target_output_tokens
+    max_accepted_tokens
+    covered_estimated_tokens
+    body_budget_tokens
+
+  control:
+    task_anchor: optional, read-only
+    working_intent_required: bool
+    current_user_input_excluded: true
+
+  previous_checkpoint:
+    optional prior CompactedCheckpoint and WorkingIntent
+
+  coverage:
+    sequence_start
+    sequence_end
+    append_only_body_range
+    tool_continuation_range
+
+  evidence_pack:
+    structured selected evidence items from the coverage window
+```
+
+The retained raw tail is deliberately absent from `CompactionInput`. Runtime
+request assembly keeps the raw tail after the checkpoint, so the compactor must
+not summarize or duplicate it. The compactor sees only the selected coverage
+window and must not make claims about events outside that evidence pack.
+
+Evidence items should be structured by source:
+
+```text
+UserMessage:
+  id, sequence, text
+
+AssistantMessage:
+  id, sequence, excerpt
+
+ToolExchange:
+  call_id, tool_name, arguments, result_status, artifact_id,
+  sequence_range, selected_excerpt
+
+FileChange:
+  path, patch excerpt or full small patch, artifact_id, sequence_range
+
+ProcessResult:
+  argv, cwd, exit_status, stdout excerpt, stderr excerpt, artifact_id,
+  sequence_range
+```
+
+Bookkeeping events such as session start, step start, standalone
+artifact-recorded events, stable prefix text, tool schemas, pending tool calls,
+and current user input must not enter `CompactionInput`.
+
+Tool-specific selection rules:
+
+- Workspace patch evidence should include the full patch when it is small.
+- Workspace reads should include path plus selected excerpts, not full large
+  files by default.
+- Workspace search should include matched path, line, and snippet.
+- Directory listing should include path and bounded entries, not unbounded
+  trees.
+- Successful process results should include argv, cwd, exit status, and a
+  short output summary or excerpt.
+- Failed process results should include argv, cwd, exit status, and a larger
+  failure-focused excerpt around the actionable error.
+
+### Compaction Draft
+
+The compaction model should return structured JSON, not final provider prompt
+text. Runtime renders accepted drafts into prompt-facing checkpoint text.
+Although the draft has separate `working_intent` and `checkpoint` fields,
+accepted Working Intent is rendered as a footer inside the checkpoint segment,
+not as a separate top-level control segment or replacement user message.
+
+Suggested first output shape:
+
+```text
+CompactionDraft:
+  working_intent:
+    optional summary, confidence, source_user_refs
+
+  checkpoint:
+    current_state[]
+    completed_actions[]
+    decisions_or_constraints[]
+    changed_files[]
+    verification[]
+    open_items[]
+    risks_or_unknowns[]
+    evidence_refs[]
+```
+
+The draft must be concise and state-like, not a chronological transcript. It
+must cite evidence IDs for important claims. It must not copy full tool outputs,
+full files, or large command logs when artifact references can preserve exact
+evidence.
+
+The compaction prompt should make these rules explicit:
+
+```text
+The task anchor is read-only. Do not rewrite it or create a new objective.
+Use only provided evidence.
+Do not summarize events outside the coverage window.
+Do not summarize retained raw tail or current user input.
+Return JSON only.
+Keep output much shorter than the covered evidence.
+```
+
+### Output Budget
+
+Compaction output limits are derived from the same context budget policy that
+drives checkpoint watermarks. They are not fixed constants.
+
+The policy should consider:
+
+- covered window estimated tokens;
+- body budget after stable prefix and output reserve;
+- selected budget policy: cost-aware, balanced, or capacity;
+- configured absolute caps.
+
+Cost-aware mode should trigger earlier and accept shorter checkpoints. Capacity
+mode may allow larger checkpoints and a larger raw tail. Balanced is the
+default.
+
+Runtime must validate the returned draft after the model call. A draft that is
+too large, lacks required evidence refs, rewrites task intent, includes current
+input, or copies large raw outputs should be rejected. Rejection means no
+checkpoint install and no replay trimming.
+
+### Coverage And Install
+
+A compaction coverage window should be selected by runtime, not by the
+compaction model. The first implementation should compress only completed
+prefix windows:
+
+- no pending tool call inside the window;
+- every included tool call has a resolved result artifact;
+- current user input is outside the window;
+- Task Anchor is outside the window;
+- retained raw tail is outside the window;
+- artifacts and ledger facts remain durable even when prompt replay is trimmed.
+
+After successful install, provider request assembly becomes:
+
+```text
+stable prefix
+task anchor, if any
+checkpoint segment:
+  compacted checkpoint body
+  working-intent footer, if accepted and useful
+raw post-checkpoint tail
+current user input
+uncovered tool continuations
+```
+
+After failed compaction, request assembly remains unchanged.
+
+### Rolling Compaction
+
+The first implementation may run a single compaction chunk, but the data model
+must support rolling compaction:
+
+```text
+previous checkpoint + next coverage chunk -> new checkpoint
+```
+
+For that reason, `CompactionInput` always includes an optional previous
+checkpoint, and installed checkpoints should record metadata such as coverage
+range, source evidence IDs, estimated checkpoint tokens, and ordinal.
+
+A future multi-step executor can repeat the same operation across chunks. It
+should not require a new checkpoint format.
+
+A checkpoint should be generated from runtime-owned state and selected evidence:
+
+- task anchor, if present, as read-only control context rather than checkpoint
+  content;
 - ledger facts selected by policy;
 - artifact refs and evidence refs;
 - recent unresolved or uncheckpointed function-call continuity that must remain
   exact.
-
-Checkpointing may use model assistance later, but the first reliable checkpoint
-path should prefer deterministic reducers and artifact-backed facts.
 
 After checkpointing, raw function-call continuity and append-only body entries
 older than the checkpoint may be removed from prompt context, provided exact

@@ -14,10 +14,16 @@
 //! accepts snapshots rather than arbitrary caller-paired entries and registries
 //! so evidence validation is tied to the owning session.
 //!
-use crate::artifact::{ArtifactError, ArtifactRegistry};
 use crate::memory::{
     ActivatedMemory, MemoryActivationProvenance, MemoryActivationReason, MemoryActivationScore,
     MemoryEvidence, MemoryId, MemoryScope,
+};
+use crate::{
+    artifact::{ArtifactError, ArtifactRegistry},
+    checkpoint::{
+        CheckpointError, CheckpointId, CheckpointRefExcerpt, CheckpointRefId,
+        CitationBackedCheckpoint,
+    },
 };
 use merry_core::{ArtifactId, EvidenceLocator, EvidenceRef};
 use std::{
@@ -439,6 +445,11 @@ impl SessionContextSnapshot {
     fn compacted_checkpoint(&self) -> Option<&CompactedCheckpoint> {
         self.compacted_checkpoint.as_ref()
     }
+
+    #[cfg(test)]
+    pub(crate) fn compacted_checkpoint_for_tests(&self) -> Option<&CompactedCheckpoint> {
+        self.compacted_checkpoint.as_ref()
+    }
 }
 
 /// Structured input item for the public context compiler view.
@@ -608,6 +619,7 @@ impl TaskAnchor {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompactedCheckpoint {
     text: String,
+    citation_backed: Option<CitationBackedCheckpoint>,
 }
 
 impl CompactedCheckpoint {
@@ -617,13 +629,52 @@ impl CompactedCheckpoint {
         validate_non_blank("compacted checkpoint text", &text)?;
         validate_no_control_characters("compacted checkpoint text", &text)?;
 
-        Ok(Self { text })
+        Ok(Self {
+            text,
+            citation_backed: None,
+        })
+    }
+
+    /// Creates compacted checkpoint text from a validated citation-backed checkpoint.
+    pub fn from_citation_backed(
+        checkpoint: CitationBackedCheckpoint,
+    ) -> Result<Self, ContextError> {
+        let text = checkpoint.render_prompt_text();
+        validate_non_blank("compacted checkpoint text", &text)?;
+        validate_no_control_characters("compacted checkpoint text", &text)?;
+
+        Ok(Self {
+            text,
+            citation_backed: Some(checkpoint),
+        })
     }
 
     /// Compacted checkpoint text selected by a checkpoint/compaction boundary.
     #[must_use]
     pub fn text(&self) -> &str {
         &self.text
+    }
+
+    /// Structured citation-backed checkpoint state, when this checkpoint came from compaction.
+    #[must_use]
+    pub fn citation_backed(&self) -> Option<&CitationBackedCheckpoint> {
+        self.citation_backed.as_ref()
+    }
+
+    /// Reads a bounded checkpoint ref excerpt from the installed citation manifest.
+    pub fn read_checkpoint_ref(
+        &self,
+        checkpoint_id: &CheckpointId,
+        ref_id: &CheckpointRefId,
+    ) -> Result<CheckpointRefExcerpt, CheckpointError> {
+        let Some(checkpoint) = &self.citation_backed else {
+            return Err(CheckpointError::RefNotFound {
+                checkpoint_id: checkpoint_id.as_str().to_owned(),
+                ref_id: ref_id.as_str().to_owned(),
+            });
+        };
+
+        checkpoint.read_ref_for_checkpoint(checkpoint_id, ref_id)
     }
 }
 
@@ -1042,6 +1093,14 @@ pub enum ContextError {
         #[source]
         source: ArtifactError,
     },
+
+    /// Citation-backed checkpoint state failed validation.
+    #[error("checkpoint state error: {source}")]
+    Checkpoint {
+        /// Checkpoint validation source error.
+        #[from]
+        source: CheckpointError,
+    },
 }
 
 fn validate_non_blank(field: &'static str, value: &str) -> Result<(), ContextError> {
@@ -1167,6 +1226,11 @@ mod tests {
     use super::*;
     use crate::{
         artifact::ArtifactContent,
+        checkpoint::{
+            CheckpointId, CheckpointRef, CheckpointRefId, CheckpointRefManifest,
+            CheckpointSequenceRange, CheckpointSourceKind, CheckpointValidationPolicy,
+            CitationBackedCheckpoint, CompactedCheckpointCandidate,
+        },
         memory::{
             ActivatedMemory, MemoryActivationProvenance, MemoryActivationReason,
             MemoryActivationScore, MemoryActivationSourceKind, MemoryEvidence, MemoryItem,
@@ -1290,6 +1354,53 @@ mod tests {
                 field: "compacted checkpoint text"
             })
         ));
+    }
+
+    #[test]
+    fn compacted_checkpoint_can_wrap_citation_backed_checkpoint() {
+        let manifest = CheckpointRefManifest::new(
+            CheckpointId::new("checkpoint-context").expect("valid checkpoint id"),
+            vec![
+                CheckpointRef::new(
+                    CheckpointRefId::new("r1").expect("valid ref id"),
+                    CheckpointSourceKind::UserMessage,
+                    "history:1",
+                    CheckpointSequenceRange::new(1, 1).expect("valid range"),
+                    "body[0]",
+                    "user said citation-backed checkpointing is the current direction",
+                )
+                .expect("valid ref"),
+            ],
+        )
+        .expect("valid manifest");
+
+        let candidate = CompactedCheckpointCandidate::from_json(
+            r#"{
+              "claims": [
+                {
+                  "id": "c1",
+                  "kind": "current_state",
+                  "text": "Citation-backed checkpointing is the current direction.",
+                  "refs": ["r1"]
+                }
+              ],
+              "working_intent": null
+            }"#,
+        )
+        .expect("parseable candidate");
+        let citation = CitationBackedCheckpoint::from_candidate(
+            CheckpointId::new("checkpoint-context").expect("valid checkpoint id"),
+            candidate,
+            manifest,
+            CheckpointValidationPolicy::default(),
+        )
+        .expect("valid checkpoint");
+
+        let checkpoint =
+            CompactedCheckpoint::from_citation_backed(citation).expect("valid checkpoint");
+
+        assert!(checkpoint.citation_backed().is_some());
+        assert!(checkpoint.text().contains("current_state [r1]"));
     }
 
     #[test]

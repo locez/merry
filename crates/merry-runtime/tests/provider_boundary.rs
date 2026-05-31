@@ -5,17 +5,23 @@ use merry_core::{
     ToolCallResultStatus, ToolInputSchema, ToolName, ToolSpec,
 };
 use merry_llm::{
-    FinishReason, GenerationConfig, ModelCapabilities, ModelError, ModelEvent, ModelEventStream,
-    ModelMessageRole, ModelName, ModelOutput, ModelProvider, ModelProviderFuture, ModelRequest,
-    ModelResponse, ModelStreamContext, ModelToolCall, ModelToolCallId, ProviderErrorKind,
-    ToolArguments, testing::FakeModelProvider,
+    FinishReason, GenerationConfig, ModelCapabilities, ModelContent, ModelError, ModelEvent,
+    ModelEventStream, ModelMessage, ModelMessageRole, ModelName, ModelOutput, ModelProvider,
+    ModelProviderFuture, ModelRequest, ModelResponse, ModelResponseFormat, ModelStreamContext,
+    ModelStructuredOutputFormat, ModelToolCall, ModelToolCallId, ProviderErrorKind, ToolArguments,
+    testing::FakeModelProvider,
 };
+use merry_provider_openai::{OpenAiProvider, OpenAiProviderConfig};
 use merry_runtime::{
-    ArtifactContent, ArtifactContentKind, ArtifactError, CompactedCheckpoint, ContextCompiler,
-    ContextEvidence, ContextSummary, LedgerFactKind, LedgerProjection, ProjectRules,
-    RegisteredTool, Runtime, StepContext, StepInput, TaskAnchor, TokioProcessRunner,
-    ToolActionKind, ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome, ToolExecutor,
-    ToolExecutorFuture, process_command_tool,
+    ArtifactContent, ArtifactContentKind, ArtifactError, CheckpointId, CheckpointRef,
+    CheckpointRefId, CheckpointRefManifest, CheckpointSequenceRange, CheckpointSourceKind,
+    CheckpointValidationPolicy, CitationBackedCheckpoint, CitationCompactionPolicy,
+    CompactedCheckpoint, CompactedCheckpointCandidate, ContextCompiler, ContextEvidence,
+    ContextSummary, LedgerFactKind, LedgerProjection, ProjectRules, RegisteredTool, Runtime,
+    RuntimeModelRole, StepContext, StepInput, TaskAnchor, TokioProcessRunner, ToolActionKind,
+    ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome, ToolExecutor,
+    ToolExecutorFuture, citation_compaction_response_schema, citation_compaction_system_prompt,
+    process_command_tool,
 };
 use schemars::Schema;
 use serde_json::{Map, Value, json};
@@ -32,6 +38,53 @@ fn session_id(value: &str) -> SessionId {
 
 fn artifact_id(value: &str) -> ArtifactId {
     ArtifactId::new(value).expect("valid artifact id")
+}
+
+fn citation_checkpoint_for_provider_tests(
+    checkpoint_id: &str,
+    ref_id: &str,
+    excerpt: &str,
+) -> CompactedCheckpoint {
+    let manifest = CheckpointRefManifest::new(
+        CheckpointId::new(checkpoint_id).expect("valid checkpoint id"),
+        vec![
+            CheckpointRef::new(
+                CheckpointRefId::new(ref_id).expect("valid ref id"),
+                CheckpointSourceKind::UserMessage,
+                "history:1",
+                CheckpointSequenceRange::new(1, 1).expect("valid range"),
+                "body[0]",
+                excerpt,
+            )
+            .expect("valid ref"),
+        ],
+    )
+    .expect("valid manifest");
+    let candidate = CompactedCheckpointCandidate::from_json(&format!(
+        r#"{{
+          "claims": [
+            {{
+              "id": "c1",
+              "kind": "constraint",
+              "text": {excerpt_json},
+              "refs": [{ref_json}]
+            }}
+          ],
+          "working_intent": null
+        }}"#,
+        excerpt_json = serde_json::to_string(excerpt).expect("excerpt serializes"),
+        ref_json = serde_json::to_string(ref_id).expect("ref id serializes"),
+    ))
+    .expect("candidate parses");
+    let citation = CitationBackedCheckpoint::from_candidate(
+        CheckpointId::new(checkpoint_id).expect("valid checkpoint id"),
+        candidate,
+        manifest,
+        CheckpointValidationPolicy::default(),
+    )
+    .expect("citation checkpoint builds");
+
+    CompactedCheckpoint::from_citation_backed(citation).expect("checkpoint renders")
 }
 
 fn model_name() -> ModelName {
@@ -110,6 +163,67 @@ fn runtime_with_scripted_provider(session: &str, provider: ScriptedModelProvider
         .model_provider(Arc::new(provider), model_name())
         .build()
         .expect("runtime should build")
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct CitationCompactionFixture {
+    messages: Vec<FixtureMessage>,
+    candidate: serde_json::Value,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct FixtureMessage {
+    role: String,
+    text: String,
+}
+
+fn live_openai_provider_from_env() -> Option<(OpenAiProvider, ModelName)> {
+    if std::env::var("MERRY_OPENAI_LIVE_TESTS").ok().as_deref() != Some("1") {
+        eprintln!("skipping live compactor test: set MERRY_OPENAI_LIVE_TESTS=1");
+        return None;
+    }
+
+    let api_key = match std::env::var("MERRY_OPENAI_API_KEY")
+        .or_else(|_| std::env::var("OPENAI_API_KEY"))
+    {
+        Ok(value) => value,
+        Err(_) => {
+            eprintln!("skipping live compactor test: set MERRY_OPENAI_API_KEY or OPENAI_API_KEY");
+            return None;
+        }
+    };
+    let model = match std::env::var("MERRY_OPENAI_MODEL") {
+        Ok(value) => value,
+        Err(_) => {
+            eprintln!("skipping live compactor test: set MERRY_OPENAI_MODEL");
+            return None;
+        }
+    };
+    let mut config = match OpenAiProviderConfig::new(&api_key) {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("skipping live compactor test: invalid OpenAI config: {error}");
+            return None;
+        }
+    };
+    if let Ok(base_url) = std::env::var("MERRY_OPENAI_BASE_URL") {
+        config = match config.with_base_url(&base_url) {
+            Ok(config) => config,
+            Err(error) => {
+                eprintln!("skipping live compactor test: invalid MERRY_OPENAI_BASE_URL: {error}");
+                return None;
+            }
+        };
+    }
+    let model = match ModelName::new(&model) {
+        Ok(model) => model,
+        Err(error) => {
+            eprintln!("skipping live compactor test: invalid MERRY_OPENAI_MODEL: {error}");
+            return None;
+        }
+    };
+
+    Some((OpenAiProvider::new(config), model))
 }
 
 #[derive(Debug, Clone)]
@@ -213,6 +327,245 @@ async fn collect_step_with_context(
         .expect("step should start")
         .collect()
         .await
+}
+
+async fn seed_history_text_for_compaction(runtime: &Runtime, old_user: &str, retained_tail: &str) {
+    let first_events = collect_step(runtime, old_user).await;
+    assert!(
+        first_events
+            .iter()
+            .any(|event| matches!(event.kind, RuntimeEventKind::StepCompleted)),
+        "first seed step should complete"
+    );
+    let second_events = collect_step(runtime, retained_tail).await;
+    assert!(
+        second_events
+            .iter()
+            .any(|event| matches!(event.kind, RuntimeEventKind::StepCompleted)),
+        "tail seed step should complete"
+    );
+}
+
+fn fixture_provider_steps(
+    fixture: &CitationCompactionFixture,
+) -> Vec<Vec<Result<ModelEvent, ModelError>>> {
+    let mut assistant_texts = fixture
+        .messages
+        .iter()
+        .filter(|message| message.role == "assistant")
+        .map(|message| message.text.as_str());
+    let user_count = fixture
+        .messages
+        .iter()
+        .filter(|message| message.role == "user")
+        .count();
+    let mut steps = Vec::with_capacity(user_count + 1);
+    for _ in 0..user_count {
+        let text = assistant_texts.next().unwrap_or("fixture assistant ack");
+        steps.push(vec![Ok(completed_text_event(text))]);
+    }
+    steps.push(vec![Ok(completed_outputs_event(
+        vec![ModelOutput::text(
+            &serde_json::to_string(&fixture.candidate).expect("candidate serializes"),
+        )],
+        FinishReason::Stop,
+    ))]);
+    steps
+}
+
+async fn seed_fixture_messages(runtime: &Runtime, messages: &[FixtureMessage]) {
+    for message in messages {
+        match message.role.as_str() {
+            "user" => {
+                let events = collect_step(runtime, &message.text).await;
+                assert!(
+                    events
+                        .iter()
+                        .any(|event| matches!(event.kind, RuntimeEventKind::StepCompleted)),
+                    "fixture user message should complete"
+                );
+            }
+            "assistant" => {}
+            other => panic!("unsupported fixture role: {other}"),
+        }
+    }
+}
+
+fn messy_live_compaction_user_messages() -> Vec<String> {
+    vec![
+        concat!(
+            "We need compaction for long sessions, but the conversation keeps looping. ",
+            "A previous assistant suggested just keeping the full chat because it feels safer. ",
+            "That is not acceptable: raw context will eventually exceed the window, and the ",
+            "continuation should survive without replaying every correction and false start. ",
+            "Please remember that this is a runtime compaction problem, not a branding problem."
+        )
+        .to_owned(),
+        concat!(
+            "Here is a noisy correction. The artifact graph idea sounds attractive because it ",
+            "can attach evidence to everything, but it is not the current context-growth solution. ",
+            "For this slice, artifacts are exact reads and tool outputs; they are not a permanent ",
+            "semantic evidence graph. If the summary revives artifact graph as the main solution, ",
+            "the compactor has failed the design conversation."
+        )
+        .to_owned(),
+        concat!(
+            "Another detour: maybe runtime rules can decide what is important. That is wrong in ",
+            "the open-ended semantic case. Runtime can validate shape, refs, pending-call boundaries, ",
+            "byte budgets, and deterministic rendering. Runtime cannot know whether a nuanced design ",
+            "claim is semantically true. The LLM must summarize, and runtime must treat that output as ",
+            "a checkpoint candidate, not as proven truth."
+        )
+        .to_owned(),
+        concat!(
+            "Function-call continuity is especially annoying. Tool call and tool result pairs must ",
+            "remain provider-visible until a checkpoint replaces the covered window. Do not summarize ",
+            "a tool result immediately just because an artifact exists. The provider still needs protocol ",
+            "continuity until compaction. Once compaction succeeds, covered continuations may disappear ",
+            "from the next request and the checkpoint should carry only the needed claim with refs."
+        )
+        .to_owned(),
+        concat!(
+            "There was also a long argument about pins, modes, resource indexes, repository timelines, ",
+            "and tree-sitter scans. They may be future tools, but they are not the core short-term solution. ",
+            "The runtime has no intelligence; a pin suggestion might help a human, but automatic pinning ",
+            "would either be too rigid to generalize or too loose to mean anything. Keep this as a rejected ",
+            "or non-current path when it matters."
+        )
+        .to_owned(),
+        concat!(
+            "The retained raw tail must stay outside the compactor input. This is important because the ",
+            "current user message and recent tail will still be projected raw after the checkpoint. If the ",
+            "compactor summarizes the tail, the next prompt will duplicate it and the model may confuse old ",
+            "working intent with the actual current user message. Working intent, when present, belongs near ",
+            "the checkpoint footer, subordinate to task anchor and raw user text."
+        )
+        .to_owned(),
+        concat!(
+            "Messy filler with useful signal hidden inside: earlier we worried that citation refs might create ",
+            "a permanent database, then decided refs are local to the installed checkpoint. They should answer ",
+            "why a claim exists and allow bounded source inspection. They do not prove semantic truth. They should ",
+            "not force the runtime to keep every old prompt body forever. Rolling compaction may cite prior checkpoint ",
+            "claims with capped lineage."
+        )
+        .to_owned(),
+        concat!(
+            "More noise: if this were a coding agent over a git repo, exact file reads may be cheaper than storing ",
+            "file artifacts forever. If this were a general local agent with no stable files, artifacts may matter more. ",
+            "Do not let this distract the checkpoint. The current checkpoint should capture the execution and evidence ",
+            "context needed for continuation, and exact evidence should be re-read only when needed."
+        )
+        .to_owned(),
+        concat!(
+            "A deliberately rambling implementation note: someone says to add a reducer, someone else says that sounds ",
+            "like fake engineering, then the discussion circles back to the fact that the runtime can normalize tool events ",
+            "but cannot decide open semantic importance. There are examples about a repository task, a general assistant, ",
+            "a Python business workflow, and a game helper. Most of those examples are not decisions; they are pressure tests. ",
+            "The useful durable point is that checkpoint compaction should keep the current task direction small, inspectable, ",
+            "and subordinate to exact evidence reads. It should not transform every observed event into prompt text."
+        )
+        .to_owned(),
+        concat!(
+            "Another noisy paragraph about user decisions: durable decisions are hard unless a user explicitly confirms them. ",
+            "A model can suggest that a correction looks like a decision, but the runtime should not invent an authoritative ",
+            "user decision from ordinary conversation. In this checkpoint smoke, keep user corrections as cited constraints or ",
+            "rejected paths, not as a separate decision database. If a future slash command confirms a decision, that can be a ",
+            "different feature. For now, do not pretend the compactor has authority it does not have."
+        )
+        .to_owned(),
+        concat!(
+            "Yet more mixed context: there was confusion about stable prefix versus dynamic control context. Stable prefix is ",
+            "for cacheable instructions and tool descriptions. Task anchor, checkpoint, append-only body, tool continuations, ",
+            "and current user input are dynamic. Working intent is not a new top-level stable segment; it is checkpoint-adjacent ",
+            "footer content and must not compete with the current user message. This should survive the summary because it affects ",
+            "prompt assembly and prevents duplicated or stale intent."
+        )
+        .to_owned(),
+        concat!(
+            "A low-value but realistic tangent says maybe tree-sitter repository scans, resource keys, or file timelines could ",
+            "provide a compass. The conclusion was not to build that now. For git repositories, exact reads and tests often beat ",
+            "storing huge stale artifacts. For non-file agents, some durable storage may matter later. This is context, not the ",
+            "current implementation target. The checkpoint should compress it into a short non-current path if it matters, or drop ",
+            "it if it does not affect continuation."
+        )
+        .to_owned(),
+        concat!(
+            "There is also frustration in the conversation: summaries can hallucinate, previous assistant replies can be wrong, ",
+            "and model-generated plans can drift. A citation-backed checkpoint does not magically solve truth. It gives later turns ",
+            "a way to inspect why a claim entered the checkpoint. Claims with no ref should be rejected. Claims that cite irrelevant ",
+            "refs are still possible and must be evaluated in live smoke. That is exactly why this test wants a messy live compactor ",
+            "run, not only a scripted candidate."
+        )
+        .to_owned(),
+        concat!(
+            "One more process note before the actual tail: the live compactor quality test should call only the compaction model. ",
+            "It should not run a shell, patch files, or require bubblewrap. The seed history can use a scripted primary provider, ",
+            "while RuntimeModelRole::ContextCompaction points at the real OpenAI-compatible provider. The output should be printed ",
+            "with --nocapture so a human can inspect whether the summary preserved constraints, rejected paths, and local refs."
+        )
+        .to_owned(),
+        concat!(
+            "The final direction for this live compactor smoke: produce citation-backed checkpoint claims with local refs. ",
+            "Preserve rejected paths and corrected misunderstandings. Keep claims short. Do not include the retained tail. ",
+            "Do not invent completed implementation work. If evidence is ambiguous, write an open question instead of a fake fact."
+        )
+        .to_owned(),
+        concat!(
+            "Retained tail sentinel one: this recent note should remain raw after compaction and must not appear in the ",
+            "compactor input or the checkpoint candidate. It talks about running live smoke manually and should not be ",
+            "compressed into the durable checkpoint."
+        )
+        .to_owned(),
+        concat!(
+            "Retained tail sentinel two: the next request after compaction should still see this exact recent tail as raw ",
+            "history. If a checkpoint claim mentions this sentinel, the test should be treated as low quality."
+        )
+        .to_owned(),
+    ]
+}
+
+fn rough_token_count(text: &str) -> usize {
+    text.split_whitespace().count()
+}
+
+fn contains_any(haystack: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| haystack.contains(needle))
+}
+
+async fn collect_text_output(stream: ModelEventStream) -> Result<String, String> {
+    let mut stream = stream;
+    let mut saw_delta = false;
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(ModelEvent::Started) => {}
+            Ok(ModelEvent::OutputTextDelta { delta }) => {
+                if !delta.is_empty() {
+                    saw_delta = true;
+                }
+            }
+            Ok(ModelEvent::ToolCallRequested { .. }) => {
+                return Err("model requested a tool call".to_owned());
+            }
+            Ok(ModelEvent::Completed { response }) => {
+                if response.finish_reason() != FinishReason::Stop {
+                    return Err(format!(
+                        "model finished with {:?}",
+                        response.finish_reason()
+                    ));
+                }
+                let [ModelOutput::Text { text }] = response.outputs() else {
+                    return Err("model must return exactly one text output".to_owned());
+                };
+                if saw_delta {
+                    eprintln!("live compactor emitted streaming text deltas");
+                }
+                return Ok(text.clone());
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+
+    Err("model stream ended before completion".to_owned())
 }
 
 fn command_is_available(program: &str) -> bool {
@@ -1300,6 +1653,564 @@ async fn empty_checkpoint_slot_renders_no_prompt_text() {
             .all(|message| !message.content().as_text().contains("checkpoint:")),
         "empty checkpoint segment must not render prompt text"
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_reads_checkpoint_ref_by_checkpoint_and_ref_id() {
+    let checkpoint = citation_checkpoint_for_provider_tests(
+        "checkpoint-lookup",
+        "r1",
+        "user rejected resource timelines for this slice",
+    );
+    let runtime = Runtime::builder(session_id("checkpoint-ref-lookup"))
+        .compacted_checkpoint(checkpoint)
+        .build()
+        .expect("runtime should build");
+
+    let excerpt = runtime
+        .read_checkpoint_ref(
+            &CheckpointId::new("checkpoint-lookup").expect("valid checkpoint id"),
+            &CheckpointRefId::new("r1").expect("valid ref id"),
+        )
+        .await
+        .expect("ref should resolve");
+
+    assert_eq!(
+        excerpt.excerpt(),
+        "user rejected resource timelines for this slice"
+    );
+    assert_eq!(excerpt.source_kind(), CheckpointSourceKind::UserMessage);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_compaction_input_excludes_retained_raw_tail() {
+    let provider = FakeModelProvider::new(vec![
+        Ok(completed_text_event("old assistant message to compact")),
+        Ok(completed_text_event("retained raw tail assistant sentinel")),
+    ]);
+    let runtime = Runtime::builder(session_id("runtime-compaction-input-tail"))
+        .model_provider(Arc::new(provider), model_name())
+        .build()
+        .expect("runtime should build");
+
+    collect_step(&runtime, "old user message to compact").await;
+    collect_step(&runtime, "retained raw tail user sentinel").await;
+
+    let input = runtime
+        .citation_compaction_input(
+            CitationCompactionPolicy::new(128, None, 4096, 2, 1200, 16).expect("valid policy"),
+        )
+        .await
+        .expect("input builds")
+        .expect("old prefix should be compressible");
+    let payload = input.to_model_payload_json().expect("payload serializes");
+
+    assert!(payload.contains("old user message to compact"));
+    assert!(payload.contains("old assistant message to compact"));
+    assert!(!payload.contains("retained raw tail user sentinel"));
+    assert!(!payload.contains("retained raw tail assistant sentinel"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn citation_compaction_fixture_preserves_required_design_meanings() {
+    let fixture = include_str!("fixtures/citation_compaction_design_fixture.json");
+    let fixture: CitationCompactionFixture = serde_json::from_str(fixture).expect("fixture parses");
+    let provider = ScriptedModelProvider::new(fixture_provider_steps(&fixture));
+    let runtime = Runtime::builder(session_id("citation-fixture"))
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .build()
+        .expect("runtime builds");
+
+    seed_fixture_messages(&runtime, &fixture.messages).await;
+
+    let outcome = runtime
+        .compact_context_once(
+            CitationCompactionPolicy::new(384, None, 8192, 4, 1200, 16).expect("valid policy"),
+            StepContext::default(),
+        )
+        .await
+        .expect("compaction succeeds")
+        .expect("compaction runs");
+
+    assert!(
+        outcome.covered_history_item_count() >= 14,
+        "fixture should compact enough history to reveal checkpoint behavior"
+    );
+
+    let requests = provider.recorded_requests();
+    let compaction_request = requests.last().expect("compaction request exists");
+    let compaction_request_text = compaction_request
+        .messages()
+        .iter()
+        .map(|message| message.content().as_text())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(compaction_request_text.contains("Do not make the artifact/evidence graph"));
+    assert!(
+        !compaction_request_text.contains("Retained tail sentinel"),
+        "retained raw tail must stay out of the compactor request"
+    );
+
+    let snapshot = ContextCompiler::new()
+        .compile(&runtime.context_snapshot().await)
+        .expect("context compiles")
+        .to_snapshot();
+
+    for expected in [
+        "Compaction is required",
+        "Do not use an artifact/evidence graph",
+        "Runtime cannot validate open-ended semantic truth",
+        "Do not store every artifact and event forever",
+        "Function-call continuity remains raw until compaction",
+        "Retained raw tail is not part of compaction input",
+        "Pins, modes, resource indexes, and artifact graphs are not the current core solution",
+        "citation-backed checkpoint claims and local ref lookup",
+        "working_intent",
+    ] {
+        assert!(
+            snapshot.contains(expected),
+            "missing expected checkpoint meaning: {expected}"
+        );
+    }
+
+    let excerpt = runtime
+        .read_checkpoint_ref(
+            outcome.checkpoint_id(),
+            &CheckpointRefId::new("r3").expect("valid ref id"),
+        )
+        .await
+        .expect("ref resolves");
+    assert!(
+        excerpt
+            .excerpt()
+            .contains("Do not make the artifact/evidence graph")
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires live OpenAI-compatible compactor; set MERRY_OPENAI_LIVE_TESTS=1, MERRY_OPENAI_API_KEY or OPENAI_API_KEY, and MERRY_OPENAI_MODEL"]
+async fn live_compactor_summarizes_messy_1k_token_window_with_refs() {
+    let Some((compactor, compaction_model)) = live_openai_provider_from_env() else {
+        return;
+    };
+    let messages = messy_live_compaction_user_messages();
+    let source_text = messages.join("\n");
+    let source_tokens = rough_token_count(&source_text);
+    assert!(
+        source_tokens >= 1_000,
+        "live fixture must be large enough to judge compaction quality; got {source_tokens}"
+    );
+
+    let mut primary_steps = Vec::with_capacity(messages.len());
+    for index in 0..messages.len() {
+        primary_steps.push(vec![Ok(completed_text_event(&format!(
+            "acknowledged messy input {index}"
+        )))]);
+    }
+    let primary = ScriptedModelProvider::new(primary_steps);
+    let runtime = Runtime::builder(session_id("live-compactor-quality"))
+        .model_provider(Arc::new(primary), model_name())
+        .model_provider_for_role(
+            RuntimeModelRole::ContextCompaction,
+            Arc::new(compactor.clone()),
+            compaction_model.clone(),
+        )
+        .build()
+        .expect("runtime builds");
+
+    for message in &messages {
+        let events = collect_step(&runtime, message).await;
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event.kind, RuntimeEventKind::StepCompleted)),
+            "seed message should complete"
+        );
+    }
+
+    let policy =
+        CitationCompactionPolicy::new(420, None, 12_000, 4, 1200, 16).expect("valid policy");
+    let input = runtime
+        .citation_compaction_input(policy)
+        .await
+        .expect("compaction input builds")
+        .expect("compaction input exists");
+    let payload = input
+        .to_model_payload_json()
+        .expect("compaction payload serializes");
+    let response_format = ModelResponseFormat::StructuredOutput(
+        ModelStructuredOutputFormat::new(
+            "compacted_checkpoint_candidate",
+            citation_compaction_response_schema(),
+        )
+        .expect("structured output format is valid"),
+    );
+    let request = ModelRequest::new_with_continuations_and_stable_prefix_and_response_format(
+        compaction_model,
+        vec![
+            ModelMessage::new(
+                ModelMessageRole::System,
+                ModelContent::text(citation_compaction_system_prompt())
+                    .expect("system prompt is valid"),
+            )
+            .expect("system message is valid"),
+            ModelMessage::new(
+                ModelMessageRole::User,
+                ModelContent::text(&payload).expect("payload is valid model content"),
+            )
+            .expect("user message is valid"),
+        ],
+        Vec::new(),
+        Vec::new(),
+        GenerationConfig::new(policy.model_output_token_limit(), false)
+            .expect("generation config is valid"),
+        1,
+        Some(response_format),
+    )
+    .expect("compaction request is valid");
+    let stream = compactor
+        .stream_model(request, ModelStreamContext::new(CancellationToken::new()))
+        .await
+        .expect("live compactor stream starts");
+    let candidate_json = collect_text_output(stream)
+        .await
+        .expect("live compactor returns text");
+    eprintln!("live compactor raw candidate:\n{candidate_json}");
+    let outcome = runtime
+        .install_citation_compaction_candidate(input, &candidate_json)
+        .await
+        .expect("live compaction candidate installs");
+
+    let snapshot = ContextCompiler::new()
+        .compile(&runtime.context_snapshot().await)
+        .expect("context compiles")
+        .to_snapshot();
+    let checkpoint = snapshot
+        .split("append-only-body:")
+        .next()
+        .unwrap_or(snapshot.as_str());
+    let checkpoint_tokens = rough_token_count(checkpoint);
+
+    eprintln!("live compactor source_tokens={source_tokens}");
+    eprintln!(
+        "live compactor covered_history_items={}",
+        outcome.covered_history_item_count()
+    );
+    eprintln!("live compactor checkpoint_tokens={checkpoint_tokens}");
+    eprintln!("live compactor checkpoint:\n{checkpoint}");
+
+    assert!(
+        checkpoint_tokens * 3 < source_tokens,
+        "live checkpoint should approach 3x compression after prompt-budget tuning"
+    );
+    let claim_count = checkpoint.matches("\n- c").count();
+    assert!(
+        claim_count <= 8,
+        "live checkpoint should prefer 6-8 claims, got {claim_count}"
+    );
+    let checkpoint_lowercase = checkpoint.to_lowercase();
+    for (expected, alternatives) in [
+        ("artifact", &["artifact"][..]),
+        ("runtime", &["runtime"][..]),
+        (
+            "tool/function-call continuity",
+            &[
+                "function-call",
+                "function call",
+                "tool call",
+                "tool result",
+                "continuity",
+            ][..],
+        ),
+        ("retained raw tail", &["retained raw tail", "raw tail"][..]),
+        ("citation", &["citation", "ref", "refs"][..]),
+    ] {
+        assert!(
+            contains_any(&checkpoint_lowercase, alternatives),
+            "live checkpoint missed expected design signal: {expected}"
+        );
+    }
+    if let Some(working_intent) = checkpoint
+        .lines()
+        .find(|line| line.starts_with("working_intent "))
+    {
+        let working_intent = working_intent.to_lowercase();
+        for forbidden in [
+            "produce this checkpoint",
+            "checkpoint candidate",
+            "summarize the covered window",
+            "compactor",
+        ] {
+            assert!(
+                !working_intent.contains(forbidden),
+                "working_intent must describe main-agent continuation, not compactor work"
+            );
+        }
+    }
+    assert!(
+        !checkpoint.contains("Retained tail sentinel"),
+        "live checkpoint must not summarize retained raw tail"
+    );
+
+    let excerpt = runtime
+        .read_checkpoint_ref(
+            outcome.checkpoint_id(),
+            &CheckpointRefId::new("r3").expect("valid ref id"),
+        )
+        .await
+        .expect("ref resolves");
+    eprintln!("live compactor sample r3 excerpt:\n{}", excerpt.excerpt());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn installed_checkpoint_replaces_old_body_but_keeps_raw_tail_in_next_request() {
+    let provider = FakeModelProvider::new(vec![
+        Ok(completed_text_event("old assistant")),
+        Ok(completed_event()),
+        Ok(completed_event()),
+    ]);
+    let runtime = Runtime::builder(session_id("checkpoint-install-request"))
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .build()
+        .expect("runtime should build");
+
+    collect_step(&runtime, "old user").await;
+    collect_step(&runtime, "tail user").await;
+
+    let input = runtime
+        .citation_compaction_input(
+            CitationCompactionPolicy::new(128, None, 4096, 2, 1200, 16).expect("valid policy"),
+        )
+        .await
+        .expect("input builds")
+        .expect("input exists");
+
+    runtime
+        .install_citation_compaction_candidate(
+            input,
+            r#"{
+              "claims": [
+                {
+                  "id": "c1",
+                  "kind": "completed_action",
+                  "text": "The old request was compacted.",
+                  "refs": ["r1", "r2"]
+                }
+              ],
+              "working_intent": null
+            }"#,
+        )
+        .await
+        .expect("install succeeds");
+
+    collect_step(&runtime, "current user").await;
+    let requests = provider.recorded_requests();
+    let request = requests.last().expect("request exists");
+    let text = request
+        .messages()
+        .iter()
+        .map(|message| message.content().as_text())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(text.contains("compacted-checkpoint:"));
+    assert!(text.contains("The old request was compacted."));
+    assert!(text.contains("tail user"));
+    assert!(text.contains("current user"));
+    assert!(!text.contains("\nold user\n"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dynamic_context_projection_keeps_checkpoint_tail_and_current_input_outside_stable_prefix()
+{
+    let provider = ScriptedModelProvider::new(vec![
+        vec![Ok(completed_text_event("covered assistant sentinel"))],
+        vec![Ok(completed_text_event("tail assistant one sentinel"))],
+        vec![Ok(completed_text_event("tail assistant two sentinel"))],
+        vec![Ok(completed_event())],
+    ]);
+    let runtime = Runtime::builder(session_id("checkpoint-dynamic-projection"))
+        .project_rules(
+            ProjectRules::new("AGENTS.md", "Stable project rules sentinel.")
+                .expect("valid project rules"),
+        )
+        .task_anchor(
+            TaskAnchor::new("Keep implementing dynamic context projection.")
+                .expect("valid task anchor"),
+        )
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .build()
+        .expect("runtime should build");
+
+    collect_step(
+        &runtime,
+        "covered user sentinel should only remain reachable through checkpoint refs",
+    )
+    .await;
+    collect_step(&runtime, "tail user one sentinel").await;
+    collect_step(&runtime, "tail user two sentinel").await;
+
+    let input = runtime
+        .citation_compaction_input(
+            CitationCompactionPolicy::new(128, None, 4096, 4, 1200, 16).expect("valid policy"),
+        )
+        .await
+        .expect("input builds")
+        .expect("input exists");
+
+    let outcome = runtime
+        .install_citation_compaction_candidate(
+            input,
+            r#"{
+              "claims": [
+                {
+                  "id": "c1",
+                  "kind": "completed_action",
+                  "text": "The covered request was compacted.",
+                  "refs": ["r1", "r2"]
+                }
+              ],
+              "working_intent": null
+            }"#,
+        )
+        .await
+        .expect("install succeeds");
+
+    collect_step(&runtime, "current user sentinel").await;
+    let requests = provider.recorded_requests();
+    assert_eq!(requests.len(), 4);
+
+    let before_compaction = &requests[2];
+    let after_compaction = requests.last().expect("request exists");
+    assert_eq!(before_compaction.stable_prefix_message_count(), 2);
+    assert_eq!(after_compaction.stable_prefix_message_count(), 2);
+    assert_eq!(
+        before_compaction.stable_prefix_hash(),
+        after_compaction.stable_prefix_hash(),
+        "checkpoint, raw tail, and current input are dynamic context, not stable prefix"
+    );
+    assert_ne!(
+        before_compaction.dynamic_context_hash(),
+        after_compaction.dynamic_context_hash(),
+        "installing a checkpoint and adding current input should change dynamic context"
+    );
+
+    let stable_text = after_compaction
+        .stable_prefix_messages()
+        .iter()
+        .map(|message| message.content().as_text())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(stable_text.contains("Stable project rules sentinel."));
+    assert!(!stable_text.contains("compacted-checkpoint:"));
+    assert!(!stable_text.contains("tail user one sentinel"));
+    assert!(!stable_text.contains("current user sentinel"));
+
+    let dynamic = after_compaction.dynamic_messages();
+    assert_eq!(
+        dynamic
+            .iter()
+            .map(|message| message.role())
+            .collect::<Vec<_>>(),
+        [
+            ModelMessageRole::System,
+            ModelMessageRole::System,
+            ModelMessageRole::User,
+            ModelMessageRole::Assistant,
+            ModelMessageRole::User,
+            ModelMessageRole::Assistant,
+            ModelMessageRole::User,
+        ]
+    );
+
+    let dynamic_text = dynamic
+        .iter()
+        .map(|message| message.content().as_text())
+        .collect::<Vec<_>>();
+    assert!(dynamic_text[0].contains("task-anchor:"));
+    assert!(dynamic_text[1].contains("compacted-checkpoint:"));
+    assert!(dynamic_text[1].contains("The covered request was compacted."));
+    assert!(dynamic_text[1].contains("[r1,r2]"));
+    assert_eq!(dynamic_text[2], "tail user one sentinel");
+    assert_eq!(dynamic_text[3], "tail assistant one sentinel");
+    assert_eq!(dynamic_text[4], "tail user two sentinel");
+    assert_eq!(dynamic_text[5], "tail assistant two sentinel");
+    assert_eq!(dynamic_text[6], "current user sentinel");
+
+    let request_text = dynamic_text.join("\n");
+    assert!(!request_text.contains("covered user sentinel"));
+    assert!(!request_text.contains("covered assistant sentinel"));
+    assert!(after_compaction.continuations().is_empty());
+
+    let ref_excerpt = runtime
+        .read_checkpoint_ref(
+            outcome.checkpoint_id(),
+            &CheckpointRefId::new("r1").expect("valid ref id"),
+        )
+        .await
+        .expect("checkpoint ref resolves");
+    assert!(
+        ref_excerpt
+            .excerpt()
+            .contains("covered user sentinel should only remain reachable through checkpoint refs")
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn compaction_model_request_excludes_retained_tail_and_tools() {
+    let compactor = ScriptedModelProvider::new(vec![
+        vec![Ok(completed_text_event("old compacted assistant sentinel"))],
+        vec![Ok(completed_text_event("tail assistant sentinel"))],
+        vec![Ok(completed_outputs_event(
+            vec![ModelOutput::text(
+                r#"{
+                  "claims": [
+                    {
+                      "id": "c1",
+                      "kind": "completed_action",
+                      "text": "Old history was compacted.",
+                      "refs": ["r1", "r2"]
+                    }
+                  ],
+                  "working_intent": null
+                }"#,
+            )],
+            FinishReason::Stop,
+        ))],
+    ]);
+    let runtime = Runtime::builder(session_id("compaction-request-tail"))
+        .model_provider(Arc::new(compactor.clone()), model_name())
+        .build()
+        .expect("runtime builds");
+
+    seed_history_text_for_compaction(
+        &runtime,
+        "old compacted user sentinel",
+        "retained raw tail sentinel",
+    )
+    .await;
+
+    runtime
+        .compact_context_once(
+            CitationCompactionPolicy::new(128, None, 4096, 2, 1200, 16).expect("valid policy"),
+            StepContext::default(),
+        )
+        .await
+        .expect("compaction succeeds");
+
+    let requests = compactor.recorded_requests();
+    let request_text = requests[2]
+        .messages()
+        .iter()
+        .map(|message| message.content().as_text())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(request_text.contains("old compacted user sentinel"));
+    assert!(request_text.contains("old compacted assistant sentinel"));
+    assert!(!request_text.contains("retained raw tail sentinel"));
+    assert!(requests[2].tools().is_empty());
+    assert!(requests[2].continuations().is_empty());
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -334,6 +334,10 @@ If a check cannot be run, state exactly why and what remains unverified.
 ## Commit Hygiene
 
 - Keep commits focused.
+- Use Conventional Commit subjects consistent with the repository history, such
+  as `feat(runtime): add checkpoint compaction`, `fix(cli): reject invalid
+  config`, `docs(plan): record validation notes`, or `refactor(runtime): name
+  checkpoint context explicitly`.
 - Do not commit ignored private docs.
 - Do not commit generated build artifacts.
 - Do not include secrets, API keys, local machine paths, or unpublished product strategy in tracked files.

@@ -16,6 +16,21 @@
 [global]
 profile = "default"
 
+[runtime.auto_compaction]
+# Automatic compaction runs when dynamic context crosses the runtime hard
+# watermark. Current user input is not included in the compaction input.
+enabled = true
+# Soft output guidance for the compaction model; runtime still validates shape,
+# refs, and max_accepted_output_bytes.
+target_output_tokens = 192
+# Optional hard generation limit for the compaction model request.
+# model_output_token_limit = 256
+max_accepted_output_bytes = 8192
+# Retain the most recent history items raw after checkpoint installation.
+retained_raw_tail_items = 2
+max_ref_excerpt_bytes = 1200
+max_carried_prior_refs = 16
+
 [observability.log]
 # Enable this for smoke/debug runs that should write structured JSON logs.
 enabled = true
@@ -28,6 +43,12 @@ format = "json"
 # path = "~/.local/state/merry/logs/merry.jsonl"
 
 [providers.default]
+provider = "openai-compatible"
+model = "gpt-4.1-mini"
+
+[models.context_compaction]
+# Optional role override. Omit this table to use [providers.default] for
+# checkpoint compaction.
 provider = "openai-compatible"
 model = "gpt-4.1-mini"
 

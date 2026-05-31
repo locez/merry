@@ -4,7 +4,7 @@ mod config;
 mod observability;
 
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
-use config::{EffectiveLogSettings, MerryConfig, XdgPaths};
+use config::{EffectiveLogSettings, EffectiveOpenAiProviderConfig, MerryConfig, XdgPaths};
 use futures_util::{StreamExt, stream};
 use merry_core::{
     PendingToolCall, ProviderName, RuntimeEvent, RuntimeEventKind, SessionId, ToolCallResultStatus,
@@ -18,9 +18,10 @@ use merry_llm::{
 use merry_provider_openai::{OpenAiProvider, OpenAiProviderConfig};
 use merry_runtime::{
     AcceptedLocalWorkspaceProcessAdmission, AgentLoopConfig, AgentLoopStatus, ArtifactContent,
-    MAX_PROCESS_OUTPUT_LIMIT_BYTES, ProcessActionIntent, ProcessEnvPolicy, ProcessRunner,
-    RegisteredTool, Runtime, StepContext, StepInput, TokioProcessRunner, ToolExecutionContext,
-    ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture, process_command_tool,
+    AutomaticCompactionConfig, MAX_PROCESS_OUTPUT_LIMIT_BYTES, ProcessActionIntent,
+    ProcessEnvPolicy, ProcessRunner, RegisteredTool, Runtime, RuntimeBuilder, RuntimeModelRole,
+    StepContext, StepInput, TokioProcessRunner, ToolExecutionContext, ToolExecutionOutcome,
+    ToolExecutor, ToolExecutorFuture, process_command_tool,
 };
 use merry_tool_workspace::{
     CODING_LOOP_PROCESS_TOOL, WORKSPACE_PATCH_TOOL, WORKSPACE_READ_FILE_TOOL,
@@ -372,7 +373,7 @@ async fn async_main(cli: Cli, merry_config: Option<MerryConfig>) -> CliExit {
             session_id,
             input,
             command: None,
-        }) => match run_debug(&session_id, &input).await {
+        }) => match run_debug(&session_id, &input, merry_config.as_ref()).await {
             Ok(()) => CliExit::Success,
             Err(CliError::BrokenPipe) => CliExit::Success,
             Err(CliError::DebugUsage(message)) => CliExit::Usage {
@@ -426,7 +427,8 @@ async fn async_main(cli: Cli, merry_config: Option<MerryConfig>) -> CliExit {
         CliCommand::Debug(DebugArgs {
             command: Some(DebugCommand::CodingLoopSmoke),
             ..
-        }) => match run_debug_coding_loop_smoke(sandbox_child_handoff).await {
+        }) => match run_debug_coding_loop_smoke(sandbox_child_handoff, merry_config.as_ref()).await
+        {
             Ok(()) => CliExit::Success,
             Err(CliError::BrokenPipe) => CliExit::Success,
             Err(CliError::DebugUsage(message)) => CliExit::Usage {
@@ -446,7 +448,13 @@ async fn async_main(cli: Cli, merry_config: Option<MerryConfig>) -> CliExit {
         CliCommand::Debug(DebugArgs {
             command: Some(DebugCommand::CodingLoopTaskSmoke(args)),
             ..
-        }) => match run_debug_coding_loop_task_smoke(sandbox_child_handoff, args.task).await {
+        }) => match run_debug_coding_loop_task_smoke(
+            sandbox_child_handoff,
+            args.task,
+            merry_config.as_ref(),
+        )
+        .await
+        {
             Ok(()) => CliExit::Success,
             Err(CliError::BrokenPipe) => CliExit::Success,
             Err(CliError::DebugUsage(message)) => CliExit::Usage {
@@ -568,6 +576,8 @@ fn validate_loaded_config(
         return Ok(());
     };
     let _ = effective_log_settings(Some(config), paths)?;
+    let _ = automatic_compaction_config(Some(config))?;
+    let _ = config.runtime_models()?;
     let _ = config.profile();
     config.validate_provider_settings_if_present()?;
     Ok(())
@@ -581,6 +591,23 @@ fn effective_log_settings(
         .map(|config| config.effective_log_settings(paths))
         .transpose()
         .map(Option::flatten)
+}
+
+fn automatic_compaction_config(
+    config: Option<&MerryConfig>,
+) -> Result<AutomaticCompactionConfig, config::ConfigError> {
+    config
+        .map(MerryConfig::automatic_compaction_config)
+        .transpose()
+        .map(Option::unwrap_or_default)
+}
+
+fn configured_runtime_builder(
+    session_id: SessionId,
+    config: Option<&MerryConfig>,
+) -> Result<RuntimeBuilder, CliError> {
+    Ok(Runtime::builder(session_id)
+        .automatic_compaction(automatic_compaction_config(config).map_err(unexpected)?))
 }
 
 fn maybe_reexec_sandbox(cli: &Cli, args: Vec<OsString>) -> Result<(), SandboxError> {
@@ -970,9 +997,15 @@ impl fmt::Display for SandboxError {
     }
 }
 
-async fn run_debug(session_id: &str, input: &str) -> Result<(), CliError> {
+async fn run_debug(
+    session_id: &str,
+    input: &str,
+    merry_config: Option<&MerryConfig>,
+) -> Result<(), CliError> {
     let session_id = SessionId::new(session_id).map_err(usage_error)?;
-    let runtime = Runtime::builder(session_id).build().map_err(unexpected)?;
+    let runtime = configured_runtime_builder(session_id, merry_config)?
+        .build()
+        .map_err(unexpected)?;
     let input = StepInput::user_text(input).map_err(usage_error)?;
     write_runtime_step_events(&runtime, input, StepContext::default(), tokio::io::stdout()).await
 }
@@ -987,9 +1020,11 @@ async fn run_debug_openai(
     let config = debug_openai_config(model, merry_config)?;
 
     let session_id = SessionId::new(DEFAULT_SESSION_ID).map_err(debug_openai_usage_error)?;
-    let model = ModelName::new(&config.model).map_err(debug_openai_usage_error)?;
-    let provider = OpenAiProvider::new(config.provider);
-    let mut builder = Runtime::builder(session_id).model_provider(Arc::new(provider), model);
+    let model = ModelName::new(&config.primary.model).map_err(debug_openai_usage_error)?;
+    let provider = OpenAiProvider::new(config.primary.provider);
+    let mut builder = configured_runtime_builder(session_id, merry_config)?
+        .model_provider(Arc::new(provider), model);
+    builder = apply_openai_context_compaction_provider(builder, config.context_compaction)?;
     if let Some(result) = debug_tool_result {
         builder = builder.register_tool(debug_echo_tool(result)?);
     }
@@ -1008,6 +1043,7 @@ async fn run_debug_openai(
 
 async fn run_debug_coding_loop_smoke(
     sandbox_child_handoff: Option<SandboxChildHandoff>,
+    merry_config: Option<&MerryConfig>,
 ) -> Result<(), CliError> {
     let Some(admission) =
         coding_loop_smoke_admission_from_current_process(sandbox_child_handoff).await
@@ -1023,6 +1059,7 @@ async fn run_debug_coding_loop_smoke(
         None,
         admission,
         Arc::new(TokioProcessRunner::new_at_workspace_root(&smoke_root)),
+        automatic_compaction_config(merry_config).map_err(unexpected)?,
     )?;
 
     let result = runtime
@@ -1065,6 +1102,7 @@ async fn run_debug_coding_loop_live_smoke(
         admission,
         config,
         Arc::new(TokioProcessRunner::new_at_workspace_root(&smoke_root)),
+        automatic_compaction_config(merry_config).map_err(unexpected)?,
     )?;
     let generation_config =
         GenerationConfig::new(Some(max_output_tokens), false).map_err(debug_openai_usage_error)?;
@@ -1093,6 +1131,7 @@ async fn run_debug_coding_loop_live_smoke(
 async fn run_debug_coding_loop_task_smoke(
     sandbox_child_handoff: Option<SandboxChildHandoff>,
     task: CodingLoopTaskSmokeTask,
+    merry_config: Option<&MerryConfig>,
 ) -> Result<(), CliError> {
     let Some(admission) =
         coding_loop_smoke_admission_from_current_process(sandbox_child_handoff).await
@@ -1110,6 +1149,7 @@ async fn run_debug_coding_loop_task_smoke(
         admission,
         Arc::new(TokioProcessRunner::new_at_workspace_root(&smoke_root)),
         fixture,
+        automatic_compaction_config(merry_config).map_err(unexpected)?,
     )?;
 
     let result = runtime
@@ -1154,6 +1194,7 @@ async fn run_debug_coding_loop_task_live_smoke(
         admission,
         config,
         Arc::new(TokioProcessRunner::new_at_workspace_root(&smoke_root)),
+        automatic_compaction_config(merry_config).map_err(unexpected)?,
     )?;
     let generation_config =
         GenerationConfig::new(Some(max_output_tokens), false).map_err(debug_openai_usage_error)?;
@@ -1629,6 +1670,7 @@ fn build_coding_loop_smoke_runtime(
     relative_cwd: Option<&str>,
     admission: AcceptedLocalWorkspaceProcessAdmission,
     runner: Arc<dyn ProcessRunner>,
+    automatic_compaction: AutomaticCompactionConfig,
 ) -> Result<Runtime, CliError> {
     let provider = CodingLoopSmokeProvider::new(relative_cwd)?;
     build_coding_loop_runtime(
@@ -1638,7 +1680,11 @@ fn build_coding_loop_smoke_runtime(
         Arc::new(provider),
         ModelName::new("merry-coding-loop-smoke").map_err(unexpected)?,
         runner,
-        false,
+        CodingLoopRuntimeOptions {
+            allow_hidden_workspace_paths: false,
+            automatic_compaction,
+            context_compaction: None,
+        },
     )
 }
 
@@ -1646,18 +1692,27 @@ fn build_coding_loop_live_smoke_runtime(
     root: &Path,
     _relative_cwd: Option<&str>,
     admission: AcceptedLocalWorkspaceProcessAdmission,
-    config: DebugOpenAiConfig,
+    config: DebugOpenAiRuntimeConfig,
     runner: Arc<dyn ProcessRunner>,
+    automatic_compaction: AutomaticCompactionConfig,
 ) -> Result<Runtime, CliError> {
-    let provider = OpenAiProvider::new(config.provider);
+    let provider = OpenAiProvider::new(config.primary.provider);
+    let context_compaction = config
+        .context_compaction
+        .map(openai_role_provider)
+        .transpose()?;
     build_coding_loop_runtime(
         CODING_LOOP_LIVE_SMOKE_SESSION_ID,
         root,
         admission,
         Arc::new(provider),
-        ModelName::new(&config.model).map_err(debug_openai_usage_error)?,
+        ModelName::new(&config.primary.model).map_err(debug_openai_usage_error)?,
         runner,
-        true,
+        CodingLoopRuntimeOptions {
+            allow_hidden_workspace_paths: true,
+            automatic_compaction,
+            context_compaction,
+        },
     )
 }
 
@@ -1667,6 +1722,7 @@ fn build_coding_loop_task_smoke_runtime(
     admission: AcceptedLocalWorkspaceProcessAdmission,
     runner: Arc<dyn ProcessRunner>,
     fixture: CodingLoopTaskSmokeFixture,
+    automatic_compaction: AutomaticCompactionConfig,
 ) -> Result<Runtime, CliError> {
     let provider = CodingLoopTaskSmokeProvider::new(relative_cwd, fixture)?;
     build_coding_loop_runtime(
@@ -1676,26 +1732,51 @@ fn build_coding_loop_task_smoke_runtime(
         Arc::new(provider),
         ModelName::new("merry-coding-loop-task-smoke").map_err(unexpected)?,
         runner,
-        false,
+        CodingLoopRuntimeOptions {
+            allow_hidden_workspace_paths: false,
+            automatic_compaction,
+            context_compaction: None,
+        },
     )
 }
 
 fn build_coding_loop_task_live_smoke_runtime(
     root: &Path,
     admission: AcceptedLocalWorkspaceProcessAdmission,
-    config: DebugOpenAiConfig,
+    config: DebugOpenAiRuntimeConfig,
     runner: Arc<dyn ProcessRunner>,
+    automatic_compaction: AutomaticCompactionConfig,
 ) -> Result<Runtime, CliError> {
-    let provider = OpenAiProvider::new(config.provider);
+    let provider = OpenAiProvider::new(config.primary.provider);
+    let context_compaction = config
+        .context_compaction
+        .map(openai_role_provider)
+        .transpose()?;
     build_coding_loop_runtime(
         CODING_LOOP_TASK_LIVE_SMOKE_SESSION_ID,
         root,
         admission,
         Arc::new(provider),
-        ModelName::new(&config.model).map_err(debug_openai_usage_error)?,
+        ModelName::new(&config.primary.model).map_err(debug_openai_usage_error)?,
         runner,
-        true,
+        CodingLoopRuntimeOptions {
+            allow_hidden_workspace_paths: true,
+            automatic_compaction,
+            context_compaction,
+        },
     )
+}
+
+struct CodingLoopRuntimeOptions {
+    allow_hidden_workspace_paths: bool,
+    automatic_compaction: AutomaticCompactionConfig,
+    context_compaction: Option<RuntimeRoleProviderConfig>,
+}
+
+struct RuntimeRoleProviderConfig {
+    role: RuntimeModelRole,
+    provider: Arc<dyn ModelProvider>,
+    model: ModelName,
 }
 
 fn build_coding_loop_runtime(
@@ -1705,11 +1786,22 @@ fn build_coding_loop_runtime(
     provider: Arc<dyn ModelProvider>,
     model: ModelName,
     runner: Arc<dyn ProcessRunner>,
-    allow_hidden_workspace_paths: bool,
+    options: CodingLoopRuntimeOptions,
 ) -> Result<Runtime, CliError> {
+    let mut builder = Runtime::builder(SessionId::new(session_id).map_err(unexpected)?)
+        .automatic_compaction(options.automatic_compaction)
+        .model_provider(provider, model);
+    if let Some(role_provider) = options.context_compaction {
+        builder = builder.model_provider_for_role(
+            role_provider.role,
+            role_provider.provider,
+            role_provider.model,
+        );
+    }
+
     WorkspaceCodingLoopProfile::new(
         WorkspaceToolsConfig::new(vec![root.to_path_buf()])
-            .with_allow_hidden(allow_hidden_workspace_paths)
+            .with_allow_hidden(options.allow_hidden_workspace_paths)
             .with_limits(WorkspaceToolLimits {
                 max_patch_bytes: if session_id == CODING_LOOP_TASK_SMOKE_SESSION_ID
                     || session_id == CODING_LOOP_TASK_LIVE_SMOKE_SESSION_ID
@@ -1724,10 +1816,7 @@ fn build_coding_loop_runtime(
     .map_err(unexpected)?
     .with_patch_tool()
     .with_cli_bwrap_process_runner(admission, runner)
-    .register_on(
-        Runtime::builder(SessionId::new(session_id).map_err(unexpected)?)
-            .model_provider(provider, model),
-    )
+    .register_on(builder)
     .map_err(unexpected)?
     .build()
     .map_err(unexpected)
@@ -2724,7 +2813,7 @@ impl ModelProvider for ShellToolCallProvider {
 fn debug_openai_config(
     model_flag: Option<&str>,
     merry_config: Option<&MerryConfig>,
-) -> Result<DebugOpenAiConfig, CliError> {
+) -> Result<DebugOpenAiRuntimeConfig, CliError> {
     debug_openai_config_with_env(model_flag, merry_config, optional_env)
 }
 
@@ -2732,7 +2821,7 @@ fn debug_openai_config_with_env(
     model_flag: Option<&str>,
     merry_config: Option<&MerryConfig>,
     env_value: impl Fn(&'static str) -> Result<Option<String>, CliError>,
-) -> Result<DebugOpenAiConfig, CliError> {
+) -> Result<DebugOpenAiRuntimeConfig, CliError> {
     if env_value(MERRY_OPENAI_DEBUG_ENV)?.as_deref() != Some("1") {
         return Err(debug_openai_usage_error(
             "set MERRY_OPENAI_DEBUG=1 to enable live OpenAI-compatible debugging",
@@ -2750,7 +2839,7 @@ fn debug_openai_config_with_env(
     let api_key = provider_config
         .resolve_api_key()
         .map_err(debug_openai_usage_error)?;
-    let model = match model_flag {
+    let primary_model = match model_flag {
         Some(model) => model.to_owned(),
         None => provider_config.model.clone().ok_or_else(|| {
             debug_openai_usage_error(
@@ -2758,16 +2847,57 @@ fn debug_openai_config_with_env(
             )
         })?,
     };
+    let primary = debug_openai_provider_config(&provider_config, &api_key, primary_model)?;
 
-    let mut provider = OpenAiProviderConfig::new(&api_key).map_err(debug_openai_usage_error)?;
+    let runtime_models = merry_config
+        .runtime_models()
+        .map_err(debug_openai_usage_error)?;
+    let context_compaction = runtime_models
+        .context_compaction
+        .map(|model| debug_openai_provider_config(&provider_config, &api_key, model.model))
+        .transpose()?;
 
+    Ok(DebugOpenAiRuntimeConfig {
+        primary,
+        context_compaction,
+    })
+}
+
+fn debug_openai_provider_config(
+    provider_config: &EffectiveOpenAiProviderConfig,
+    api_key: &str,
+    model: String,
+) -> Result<DebugOpenAiConfig, CliError> {
+    let mut provider = OpenAiProviderConfig::new(api_key).map_err(debug_openai_usage_error)?;
     if let Some(base_url) = provider_config.base_url.as_deref() {
         provider = provider
             .with_base_url(base_url)
             .map_err(debug_openai_usage_error)?;
     }
-
     Ok(DebugOpenAiConfig { provider, model })
+}
+
+fn apply_openai_context_compaction_provider(
+    mut builder: RuntimeBuilder,
+    context_compaction: Option<DebugOpenAiConfig>,
+) -> Result<RuntimeBuilder, CliError> {
+    if let Some(config) = context_compaction {
+        let role_provider = openai_role_provider(config)?;
+        builder = builder.model_provider_for_role(
+            role_provider.role,
+            role_provider.provider,
+            role_provider.model,
+        );
+    }
+    Ok(builder)
+}
+
+fn openai_role_provider(config: DebugOpenAiConfig) -> Result<RuntimeRoleProviderConfig, CliError> {
+    Ok(RuntimeRoleProviderConfig {
+        role: RuntimeModelRole::ContextCompaction,
+        provider: Arc::new(OpenAiProvider::new(config.provider)),
+        model: ModelName::new(&config.model).map_err(debug_openai_usage_error)?,
+    })
 }
 
 fn optional_env(name: &'static str) -> Result<Option<String>, CliError> {
@@ -2786,6 +2916,11 @@ fn optional_env(name: &'static str) -> Result<Option<String>, CliError> {
 struct DebugOpenAiConfig {
     provider: OpenAiProviderConfig,
     model: String,
+}
+
+struct DebugOpenAiRuntimeConfig {
+    primary: DebugOpenAiConfig,
+    context_compaction: Option<DebugOpenAiConfig>,
 }
 
 fn debug_usage() -> String {
@@ -3160,7 +3295,7 @@ mod tests {
 
     #[tokio::test]
     async fn coding_loop_smoke_admission_requires_real_sandbox_handoff() {
-        let err = run_debug_coding_loop_smoke(None)
+        let err = run_debug_coding_loop_smoke(None, None)
             .await
             .expect_err("coding-loop-smoke should require real sandbox handoff");
 
@@ -3214,6 +3349,7 @@ mod tests {
             AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
             Arc::new(runner.clone()),
             fixture,
+            merry_runtime::AutomaticCompactionConfig::default(),
         )
         .expect("coding-loop task smoke runtime should build");
 
@@ -3409,6 +3545,7 @@ mod tests {
             Arc::new(FakeProcessRunner::succeeding(
                 "sensitive process stdout must not leak\n",
             )),
+            merry_runtime::AutomaticCompactionConfig::default(),
         )
         .expect("coding-loop smoke runtime should build");
 
@@ -3489,6 +3626,10 @@ model = "gpt-test"
 [providers.openai-compatible]
 base_url = "https://api.example.test/v1"
 api_key_file = "secrets/openai.key"
+
+[models.context_compaction]
+provider = "openai-compatible"
+model = "gpt-compact"
 "#,
             ),
             &paths,
@@ -3500,8 +3641,57 @@ api_key_file = "secrets/openai.key"
             Ok((name == "MERRY_OPENAI_DEBUG").then(|| "1".to_owned()))
         })
         .expect("debug config should load");
-        assert_eq!(loaded.model, "gpt-test");
-        assert_eq!(loaded.provider.base_url(), "https://api.example.test/v1");
+        assert_eq!(loaded.primary.model, "gpt-test");
+        assert_eq!(
+            loaded.primary.provider.base_url(),
+            "https://api.example.test/v1"
+        );
+        let context_compaction = loaded
+            .context_compaction
+            .expect("context compaction debug config should load");
+        assert_eq!(context_compaction.model, "gpt-compact");
+        assert_eq!(
+            context_compaction.provider.base_url(),
+            "https://api.example.test/v1"
+        );
+    }
+
+    #[test]
+    fn openai_debug_model_flag_overrides_only_primary_model() {
+        let paths = super::config::XdgPaths::from_parts(PathBuf::from("/home/alice"), None, None);
+        let config = super::config::MerryConfig::load_optional_from_text(
+            Some(
+                r#"
+[providers.default]
+provider = "openai-compatible"
+model = "gpt-primary"
+
+[providers.openai-compatible]
+api_key = "sk-inline-secret"
+
+[models.context_compaction]
+provider = "openai-compatible"
+model = "gpt-compact"
+"#,
+            ),
+            &paths,
+        )
+        .expect("config should parse")
+        .expect("config should be present");
+
+        let loaded = debug_openai_config_with_env(Some("gpt-flag"), Some(&config), |name| {
+            Ok((name == "MERRY_OPENAI_DEBUG").then(|| "1".to_owned()))
+        })
+        .expect("debug config should load");
+
+        assert_eq!(loaded.primary.model, "gpt-flag");
+        assert_eq!(
+            loaded
+                .context_compaction
+                .expect("context compaction debug config should load")
+                .model,
+            "gpt-compact"
+        );
     }
 
     #[test]
@@ -4595,6 +4785,11 @@ api_key_file = "secrets/openai.key"
             }
         }
 
+        fn with_capabilities(mut self, capabilities: ModelCapabilities) -> Self {
+            self.capabilities = capabilities;
+            self
+        }
+
         fn recorded_requests(&self) -> Vec<ModelRequest> {
             self.requests
                 .lock()
@@ -4699,6 +4894,138 @@ api_key_file = "secrets/openai.key"
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].generation().max_output_tokens(), Some(16));
         assert!(!requests[0].generation().allow_parallel_tool_calls());
+    }
+
+    #[tokio::test]
+    async fn configured_runtime_builder_applies_auto_compaction_config() {
+        let paths = super::config::XdgPaths::from_parts(PathBuf::from("/home/alice"), None, None);
+        let config = super::config::MerryConfig::load_optional_from_text(
+            Some(
+                r#"
+[runtime.auto_compaction]
+retained_raw_tail_items = 4
+"#,
+            ),
+            &paths,
+        )
+        .expect("config should parse")
+        .expect("config should be present");
+        let primary = ScriptedProvider::new(vec![
+            vec![Ok(ModelEvent::Completed {
+                response: ModelResponse::new(
+                    vec![ModelOutput::text("old assistant from configured builder")],
+                    FinishReason::Stop,
+                    None,
+                ),
+            })],
+            vec![Ok(ModelEvent::Completed {
+                response: ModelResponse::new(
+                    vec![ModelOutput::text(
+                        "tail one assistant from configured builder",
+                    )],
+                    FinishReason::Stop,
+                    None,
+                ),
+            })],
+            vec![Ok(ModelEvent::Completed {
+                response: ModelResponse::new(
+                    vec![ModelOutput::text(
+                        "tail two assistant from configured builder",
+                    )],
+                    FinishReason::Stop,
+                    None,
+                ),
+            })],
+            vec![Ok(ModelEvent::Completed {
+                response: ModelResponse::new(
+                    vec![ModelOutput::text("final after configured compaction")],
+                    FinishReason::Stop,
+                    None,
+                ),
+            })],
+        ])
+        .with_capabilities(
+            ModelCapabilities::new(true, true, false, true, Some(420), Some(16))
+                .expect("valid capabilities"),
+        );
+        let compactor = ScriptedProvider::new(vec![vec![Ok(ModelEvent::Completed {
+            response: ModelResponse::new(
+                vec![ModelOutput::text(
+                    r#"{
+                      "claims": [
+                        {
+                          "id": "c1",
+                          "kind": "completed_action",
+                          "text": "Configured builder compacted the old turn only.",
+                          "refs": ["r1", "r2"]
+                        }
+                      ],
+                      "working_intent": null
+                    }"#,
+                )],
+                FinishReason::Stop,
+                None,
+            ),
+        })]]);
+        let runtime = super::configured_runtime_builder(
+            merry_core::SessionId::new("configured-builder-auto-compaction").unwrap(),
+            Some(&config),
+        )
+        .expect("configured builder should build")
+        .model_provider(
+            Arc::new(primary.clone()),
+            ModelName::new("debug-model").unwrap(),
+        )
+        .model_provider_for_role(
+            merry_runtime::RuntimeModelRole::ContextCompaction,
+            Arc::new(compactor.clone()),
+            ModelName::new("debug-compactor").unwrap(),
+        )
+        .build()
+        .expect("runtime should build");
+
+        collect_runtime_step_events(
+            &runtime,
+            StepInput::user_text(&"old user from configured builder ".repeat(70))
+                .expect("valid input"),
+            StepContext::default(),
+        )
+        .await
+        .expect("old step should run");
+        collect_runtime_step_events(
+            &runtime,
+            StepInput::user_text("tail one user from configured builder").expect("valid input"),
+            StepContext::default(),
+        )
+        .await
+        .expect("tail one step should run");
+        collect_runtime_step_events(
+            &runtime,
+            StepInput::user_text("tail two user from configured builder").expect("valid input"),
+            StepContext::default(),
+        )
+        .await
+        .expect("tail two step should run");
+        collect_runtime_step_events(
+            &runtime,
+            StepInput::user_text("current user from configured builder").expect("valid input"),
+            StepContext::default(),
+        )
+        .await
+        .expect("current step should run");
+
+        let compactor_requests = compactor.recorded_requests();
+        assert_eq!(compactor_requests.len(), 1);
+        let compaction_text = compactor_requests[0]
+            .messages()
+            .iter()
+            .map(|message| message.content().as_text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(compaction_text.contains("old user from configured builder"));
+        assert!(!compaction_text.contains("tail one user from configured builder"));
+        assert!(!compaction_text.contains("tail two user from configured builder"));
+        assert!(!compaction_text.contains("current user from configured builder"));
     }
 
     #[tokio::test]
