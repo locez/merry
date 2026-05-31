@@ -307,9 +307,7 @@ fn scan_root(
     warnings: &mut Vec<SkillLoadWarning>,
 ) -> Result<(), SkillError> {
     if !root.exists() {
-        return Err(SkillError::RootNotFound {
-            root: root.display().to_string(),
-        });
+        return Ok(());
     }
     if !root.is_dir() {
         return Err(SkillError::RootNotDirectory {
@@ -594,5 +592,16 @@ full skill body sentinel
         assert_eq!(catalog.skills().len(), 1);
         assert_eq!(catalog.skills()[0].name(), "ok");
         assert_eq!(catalog.warnings().len(), 2);
+    }
+
+    #[test]
+    fn missing_skill_root_loads_empty_catalog() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("missing-skills");
+
+        let catalog = SkillCatalog::load_from_roots([root]).expect("missing root is empty");
+
+        assert!(catalog.is_empty());
+        assert!(catalog.warnings().is_empty());
     }
 }

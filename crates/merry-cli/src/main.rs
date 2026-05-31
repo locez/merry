@@ -1827,7 +1827,13 @@ fn build_coding_loop_runtime(
     }
 
     let mut workspace_roots = vec![root.to_path_buf()];
-    workspace_roots.extend(options.skill_roots.iter().cloned());
+    workspace_roots.extend(
+        options
+            .skill_roots
+            .iter()
+            .filter(|root| root.is_dir())
+            .cloned(),
+    );
 
     WorkspaceCodingLoopProfile::new(
         WorkspaceToolsConfig::new(workspace_roots)
@@ -3579,6 +3585,51 @@ mod tests {
             .expect("skill read should execute");
         let result = resolved_tool_result(&execution_events);
         assert_eq!(result.status(), ToolCallResultStatus::Succeeded);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn coding_loop_runtime_allows_missing_default_skill_root() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        let missing_skill_root = temp.path().join("config/merry/skills");
+        std::fs::create_dir_all(&workspace).expect("mkdir workspace");
+
+        let provider = ScriptedProvider::new(vec![vec![Ok(ModelEvent::Completed {
+            response: ModelResponse::new(vec![ModelOutput::text("done")], FinishReason::Stop, None),
+        })]]);
+        let runner = Arc::new(FakeProcessRunner::succeeding(""));
+        let runtime = super::build_coding_loop_runtime(
+            "coding-loop-missing-default-skill-root",
+            &workspace,
+            AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
+            Arc::new(provider.clone()),
+            ModelName::new("debug-model").unwrap(),
+            runner,
+            super::CodingLoopRuntimeOptions {
+                allow_hidden_workspace_paths: false,
+                automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
+                context_compaction: None,
+                skill_roots: vec![missing_skill_root],
+            },
+        )
+        .expect("missing default skill root should not block runtime");
+
+        collect_runtime_step_events(
+            &runtime,
+            StepInput::user_text("Run without configured skills.").expect("valid input"),
+            StepContext::default(),
+        )
+        .await
+        .expect("runtime step should complete");
+
+        let request = provider.recorded_requests()[0].clone();
+        assert_eq!(request.stable_prefix_message_count(), 1);
+        assert!(
+            request
+                .stable_prefix_messages()
+                .iter()
+                .all(|message| !message.content().as_text().contains("## Skills"))
+        );
     }
 
     #[test]

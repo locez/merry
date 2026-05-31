@@ -179,14 +179,20 @@ impl MerryConfig {
 
     pub fn skill_roots(&self) -> Result<Vec<PathBuf>, ConfigError> {
         let Some(skills) = self.raw.skills.as_ref() else {
-            return Ok(Vec::new());
+            return Ok(vec![self.config_dir.join("skills")]);
         };
         if !skills.enabled {
             return Ok(Vec::new());
         }
 
-        let mut roots = Vec::with_capacity(skills.roots.len());
-        for root in &skills.roots {
+        let configured_roots = if skills.roots.is_empty() {
+            vec!["skills".to_owned()]
+        } else {
+            skills.roots.clone()
+        };
+
+        let mut roots = Vec::with_capacity(configured_roots.len());
+        for root in &configured_roots {
             if root.trim().is_empty() {
                 return Err(ConfigError::Invalid(
                     "skills.roots entries must not be blank".to_owned(),
@@ -805,16 +811,20 @@ roots = ["skills", "~/shared-skills", "/opt/company/skills"]
     }
 
     #[test]
-    fn disabled_or_missing_skills_return_no_roots() {
+    fn missing_skills_config_uses_default_user_skill_root() {
         let paths = XdgPaths::from_parts(home(), None, None);
         let missing = MerryConfig::load_optional_from_text(Some(""), &paths)
             .expect("config should parse")
             .expect("config should be present");
         assert_eq!(
             missing.skill_roots().expect("missing skills is valid"),
-            Vec::<PathBuf>::new()
+            vec![PathBuf::from("/home/alice/.config/merry/skills")]
         );
+    }
 
+    #[test]
+    fn disabled_skills_return_no_roots() {
+        let paths = XdgPaths::from_parts(home(), None, None);
         let disabled = MerryConfig::load_optional_from_text(
             Some("[skills]\nenabled = false\nroots = [\"skills\"]\n"),
             &paths,
