@@ -18,6 +18,20 @@ pub enum RuntimeModelRole {
     ApprovalReview,
     /// Model reserved for future summary or memory work.
     SummaryMemory,
+    /// Model used to compact old dynamic context into citation-backed checkpoints.
+    ContextCompaction,
+}
+
+impl RuntimeModelRole {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Primary => "primary",
+            Self::ToolRiskReview => "tool_risk_review",
+            Self::ApprovalReview => "approval_review",
+            Self::SummaryMemory => "summary_memory",
+            Self::ContextCompaction => "context_compaction",
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -59,6 +73,14 @@ impl RuntimeModelConfigs {
 
     pub(crate) fn get(&self, role: RuntimeModelRole) -> Option<ModelProviderConfig> {
         self.configs.get(&role).cloned()
+    }
+
+    pub(crate) fn get_with_primary_fallback(
+        &self,
+        role: RuntimeModelRole,
+    ) -> Option<ModelProviderConfig> {
+        self.get(role)
+            .or_else(|| self.get(RuntimeModelRole::Primary))
     }
 
     pub(crate) fn contains_role(&self, role: RuntimeModelRole) -> bool {

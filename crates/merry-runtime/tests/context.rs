@@ -1,6 +1,9 @@
 use merry_core::{ArtifactId, ArtifactKind, ArtifactRef, EvidenceLocator, EvidenceRef, SessionId};
 use merry_runtime::{
-    ArtifactContent, ArtifactError, CompiledContextSection, ContextCompiler, ContextEntry,
+    ArtifactContent, ArtifactError, CheckpointId, CheckpointRef, CheckpointRefId,
+    CheckpointRefManifest, CheckpointSequenceRange, CheckpointSourceKind,
+    CheckpointValidationPolicy, CitationBackedCheckpoint, CompactedCheckpoint,
+    CompactedCheckpointCandidate, CompiledContextSection, ContextCompiler, ContextEntry,
     ContextError, ContextEvidence, ContextSummary, Runtime,
 };
 
@@ -31,6 +34,48 @@ fn runtime(value: &str) -> Runtime {
     Runtime::builder(session_id(value))
         .build()
         .expect("runtime should build")
+}
+
+fn citation_checkpoint_for_tests(checkpoint_id: &str, text: &str) -> CompactedCheckpoint {
+    let manifest = CheckpointRefManifest::new(
+        CheckpointId::new(checkpoint_id).expect("valid checkpoint id"),
+        vec![
+            CheckpointRef::new(
+                CheckpointRefId::new("r1").expect("valid ref id"),
+                CheckpointSourceKind::UserMessage,
+                "history:1",
+                CheckpointSequenceRange::new(1, 1).expect("valid range"),
+                "body[0]",
+                text,
+            )
+            .expect("valid ref"),
+        ],
+    )
+    .expect("valid manifest");
+    let escaped_text = serde_json::to_string(text).expect("test text serializes");
+    let candidate = CompactedCheckpointCandidate::from_json(&format!(
+        r#"{{
+          "claims": [
+            {{
+              "id": "c1",
+              "kind": "current_state",
+              "text": {escaped_text},
+              "refs": ["r1"]
+            }}
+          ],
+          "working_intent": null
+        }}"#
+    ))
+    .expect("parseable candidate");
+    let citation = CitationBackedCheckpoint::from_candidate(
+        CheckpointId::new(checkpoint_id).expect("valid checkpoint id"),
+        candidate,
+        manifest,
+        CheckpointValidationPolicy::default(),
+    )
+    .expect("citation checkpoint builds");
+
+    CompactedCheckpoint::from_citation_backed(citation).expect("checkpoint renders")
 }
 
 async fn record_text_artifact(runtime: &Runtime, id: &str, content: &str) {
@@ -210,6 +255,33 @@ async fn direct_record_context_summary_accepts_missing_evidence_until_compile() 
         ]
         .join("\n")
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn citation_backed_checkpoint_renders_before_summary_and_memory() {
+    let checkpoint = citation_checkpoint_for_tests(
+        "checkpoint-render-order",
+        "Citation-backed checkpointing is the current direction.",
+    );
+    let runtime = Runtime::builder(session_id("citation-context-render-order"))
+        .compacted_checkpoint(checkpoint)
+        .initial_context_summary(
+            "summary-a",
+            "Summary should render after the compacted checkpoint.",
+        )
+        .build()
+        .expect("runtime should build");
+
+    let snapshot = ContextCompiler::new()
+        .compile(&runtime.context_snapshot().await)
+        .expect("context compiles")
+        .to_snapshot();
+
+    assert!(snapshot.starts_with("compacted-checkpoint:\ntext:claims:\n"));
+    assert!(snapshot.contains(
+        "- c1 current_state [r1]: Citation-backed checkpointing is the current direction."
+    ));
+    assert!(snapshot.contains("\nsummary:summary-a"));
 }
 
 #[tokio::test(flavor = "current_thread")]

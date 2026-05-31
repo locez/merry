@@ -6,9 +6,9 @@ use merry_core::{
 use merry_llm::{
     FinishReason, GenerationConfig, ModelCapabilities, ModelContent, ModelError, ModelEvent,
     ModelEventStream, ModelMessage, ModelMessageRole, ModelName, ModelOutput, ModelProvider,
-    ModelProviderFuture, ModelRequest, ModelResponse, ModelStreamContext, ModelToolCall,
-    ModelToolCallId, ModelToolContinuation, ModelToolResult, ModelToolResultContent, ToolArguments,
-    Usage,
+    ModelProviderFuture, ModelRequest, ModelResponse, ModelResponseFormat, ModelStreamContext,
+    ModelStructuredOutputFormat, ModelToolCall, ModelToolCallId, ModelToolContinuation,
+    ModelToolResult, ModelToolResultContent, ToolArguments, Usage,
 };
 use schemars::{JsonSchema, Schema};
 use serde::{Serialize, de::DeserializeOwned};
@@ -402,6 +402,8 @@ fn schema_generation_compiles_for_public_protocol_types() {
     assert_schema_compiles::<ModelMessageRole>();
     assert_schema_compiles::<ModelMessage>();
     assert_schema_compiles::<GenerationConfig>();
+    assert_schema_compiles::<ModelStructuredOutputFormat>();
+    assert_schema_compiles::<ModelResponseFormat>();
     assert_schema_compiles::<ModelRequest>();
     assert_schema_compiles::<ModelOutput>();
     assert_schema_compiles::<FinishReason>();
@@ -687,6 +689,45 @@ fn model_request_constructors_preserve_compatibility_and_continuations() {
     }))
     .expect("old request JSON without continuations should deserialize");
     assert!(decoded_without_continuations.continuations().is_empty());
+}
+
+#[test]
+fn model_request_can_carry_structured_output_contract() {
+    let schema = Schema::try_from(json!({
+        "type": "object",
+        "properties": {
+            "answer": { "type": "string" }
+        },
+        "required": ["answer"],
+        "additionalProperties": false
+    }))
+    .expect("test schema should parse");
+    let format = ModelResponseFormat::StructuredOutput(
+        ModelStructuredOutputFormat::new("answer_payload", schema.clone())
+            .expect("valid structured output format"),
+    );
+    let request = ModelRequest::new_with_response_format(
+        ModelName::new("vendor/model-family:2025-04-14").expect("valid model name"),
+        vec![user_message("Answer as JSON.")],
+        Vec::new(),
+        GenerationConfig::default(),
+        Some(format.clone()),
+    )
+    .expect("valid structured request");
+
+    assert_eq!(request.response_format(), Some(&format));
+
+    let value = serde_json::to_value(&request).expect("request should serialize");
+    assert_eq!(value["response_format"]["type"], json!("structured_output"));
+    assert_eq!(value["response_format"]["name"], json!("answer_payload"));
+    assert_eq!(value["response_format"]["strict"], json!(true));
+    assert_eq!(
+        value["response_format"]["schema"],
+        serde_json::to_value(schema).expect("schema serializes")
+    );
+
+    let decoded = serde_json::from_value::<ModelRequest>(value).expect("request should decode");
+    assert_eq!(decoded.response_format(), Some(&format));
 }
 
 #[test]

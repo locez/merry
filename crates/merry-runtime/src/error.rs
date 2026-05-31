@@ -6,6 +6,8 @@
 
 use crate::ToolActionKind;
 use crate::artifact::{ArtifactContentKind, ArtifactError};
+use crate::checkpoint::CheckpointError;
+use crate::compaction::CompactionError;
 use crate::context::ContextError;
 use merry_core::{ArtifactId, CoreError, SessionId, ToolCallId, ToolName};
 use thiserror::Error;
@@ -140,5 +142,49 @@ pub enum RuntimeError {
         /// Source context error.
         #[from]
         source: ContextError,
+    },
+
+    /// Checkpoint state could not be inspected or validated.
+    #[error("checkpoint state error: {source}")]
+    Checkpoint {
+        /// Source checkpoint error.
+        #[from]
+        source: CheckpointError,
+    },
+
+    /// Compaction state could not be constructed or applied.
+    #[error("compaction state error: {source}")]
+    Compaction {
+        /// Source compaction error.
+        #[from]
+        source: CompactionError,
+    },
+
+    /// A runtime operation needed a model provider for a role that is not configured.
+    #[error("missing model provider for runtime role {role}")]
+    MissingModelProvider {
+        /// Missing model role.
+        role: &'static str,
+    },
+
+    /// Compaction model request construction failed.
+    #[error("compaction model request error: {message}")]
+    CompactionModelRequest {
+        /// Actionable model request error.
+        message: String,
+    },
+
+    /// Compaction model setup failed before a stream was returned.
+    #[error("compaction model setup error: {message}")]
+    CompactionModelSetup {
+        /// Actionable model setup error.
+        message: String,
+    },
+
+    /// Compaction model stream failed or returned an invalid candidate shape.
+    #[error("compaction model stream error: {message}")]
+    CompactionModelStream {
+        /// Actionable model stream error.
+        message: String,
     },
 }

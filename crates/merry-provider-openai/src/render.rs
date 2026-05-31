@@ -2,9 +2,14 @@
 
 use crate::{
     OpenAiProviderError,
-    wire::{ResponsesInputItem, ResponsesRequest, ResponsesTool},
+    wire::{
+        ResponsesInputItem, ResponsesRequest, ResponsesText, ResponsesTextFormat, ResponsesTool,
+    },
 };
-use merry_llm::{ModelMessageRole, ModelRequest, ModelToolContinuation};
+use merry_llm::{
+    ModelMessageRole, ModelRequest, ModelResponseFormat, ModelStructuredOutputFormat,
+    ModelToolContinuation,
+};
 use serde_json::{Map, Value};
 
 #[allow(dead_code)]
@@ -46,6 +51,7 @@ pub(crate) fn render_responses_request(
         store: false,
         parallel_tool_calls: false,
         max_output_tokens: request.generation().max_output_tokens(),
+        text: render_response_format(request.response_format())?,
         tool_choice: if tools.is_empty() { None } else { Some("auto") },
         tools,
     };
@@ -75,6 +81,37 @@ fn schema_as_value(tool: &merry_core::ToolSpec) -> Result<&Value, OpenAiProvider
     }
 
     Ok(schema.as_value())
+}
+
+fn render_response_format<'a>(
+    format: Option<&'a ModelResponseFormat>,
+) -> Result<Option<ResponsesText<'a>>, OpenAiProviderError> {
+    match format {
+        None => Ok(None),
+        Some(ModelResponseFormat::StructuredOutput(format)) => {
+            Ok(Some(render_structured_output_format(format)?))
+        }
+    }
+}
+
+fn render_structured_output_format<'a>(
+    format: &'a ModelStructuredOutputFormat,
+) -> Result<ResponsesText<'a>, OpenAiProviderError> {
+    if format.schema().as_object().is_none() {
+        return Err(OpenAiProviderError::invalid_request(format!(
+            "structured output {} schema must be a JSON object",
+            format.name()
+        )));
+    }
+
+    Ok(ResponsesText {
+        format: ResponsesTextFormat {
+            kind: "json_schema",
+            name: format.name(),
+            strict: format.strict(),
+            schema: format.schema().as_value(),
+        },
+    })
 }
 
 fn append_tool_continuation_input<'a>(

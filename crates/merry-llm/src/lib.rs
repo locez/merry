@@ -17,7 +17,7 @@ pub use event::ModelEvent;
 pub use provider::{ModelEventStream, ModelProvider, ModelProviderFuture, ModelStreamContext};
 pub use request::{
     GenerationConfig, ModelContent, ModelMessage, ModelMessageRole, ModelName, ModelRequest,
-    RequestContentHash, ToolProfileHash,
+    ModelResponseFormat, ModelStructuredOutputFormat, RequestContentHash, ToolProfileHash,
 };
 pub use response::{FinishReason, ModelOutput, ModelResponse};
 pub use tool::{

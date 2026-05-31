@@ -17,9 +17,9 @@ mod tests {
     use merry_core::{ToolCallResultStatus, ToolInputSchema, ToolName, ToolSpec};
     use merry_llm::{
         FinishReason, GenerationConfig, ModelContent, ModelEvent, ModelMessage, ModelMessageRole,
-        ModelName, ModelOutput, ModelRequest, ModelToolCall, ModelToolCallId,
-        ModelToolContinuation, ModelToolResult, ModelToolResultContent, ProviderErrorKind,
-        ToolArguments, Usage,
+        ModelName, ModelOutput, ModelRequest, ModelResponseFormat, ModelStructuredOutputFormat,
+        ModelToolCall, ModelToolCallId, ModelToolContinuation, ModelToolResult,
+        ModelToolResultContent, ProviderErrorKind, ToolArguments, Usage,
     };
     use serde_json::{Value, json};
 
@@ -67,6 +67,31 @@ mod tests {
             vec![message(ModelMessageRole::User, "Hello")],
             Vec::new(),
             GenerationConfig::default(),
+        )
+        .expect("valid model request")
+    }
+
+    fn request_with_structured_output() -> ModelRequest {
+        let schema = serde_json::from_value(json!({
+            "type": "object",
+            "properties": {
+                "answer": { "type": "string" }
+            },
+            "required": ["answer"],
+            "additionalProperties": false
+        }))
+        .expect("valid schema");
+        let format = ModelResponseFormat::StructuredOutput(
+            ModelStructuredOutputFormat::new("answer_payload", schema)
+                .expect("valid structured output format"),
+        );
+
+        ModelRequest::new_with_response_format(
+            ModelName::new("gpt-4.1-mini").expect("valid model name"),
+            vec![message(ModelMessageRole::User, "Hello")],
+            Vec::new(),
+            GenerationConfig::default(),
+            Some(format),
         )
         .expect("valid model request")
     }
@@ -294,6 +319,33 @@ mod tests {
         assert!(!object.contains_key("tools"));
         assert!(!object.contains_key("tool_choice"));
         assert!(!object.contains_key("max_output_tokens"));
+    }
+
+    #[test]
+    fn rendered_request_with_structured_output_uses_text_format_json_schema() {
+        let rendered = crate::render::render_responses_request(&request_with_structured_output())
+            .expect("request should render");
+
+        assert_eq!(
+            rendered["text"],
+            json!({
+                "format": {
+                    "type": "json_schema",
+                    "name": "answer_payload",
+                    "strict": true,
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "answer": { "type": "string" }
+                        },
+                        "required": ["answer"],
+                        "additionalProperties": false
+                    }
+                }
+            })
+        );
+        assert!(rendered.get("tools").is_none());
+        assert!(rendered.get("tool_choice").is_none());
     }
 
     #[test]
