@@ -957,7 +957,7 @@ model = "gpt-compact"
             config
                 .skill_roots()
                 .expect("example skill roots should validate"),
-            Vec::<PathBuf>::new()
+            vec![PathBuf::from("/home/alice/.config/merry/skills")]
         );
 
         let models = config

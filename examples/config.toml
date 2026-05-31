@@ -19,7 +19,7 @@ profile = "default"
 [skills]
 # Skill metadata is projected into the cacheable stable prefix. Full SKILL.md
 # bodies remain on disk and are read through workspace_read_file only when used.
-enabled = false
+enabled = true
 roots = [
   "skills",
 ]
