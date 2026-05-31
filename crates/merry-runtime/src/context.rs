@@ -622,6 +622,41 @@ pub struct CompactedCheckpoint {
     citation_backed: Option<CitationBackedCheckpoint>,
 }
 
+/// Payload-free checkpoint status for diagnostics and smoke reports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompactedCheckpointSummary {
+    checkpoint_id: Option<CheckpointId>,
+    citation_backed: bool,
+    claim_count: usize,
+    ref_count: usize,
+}
+
+impl CompactedCheckpointSummary {
+    /// Citation-backed checkpoint id, when the checkpoint came from structured compaction.
+    #[must_use]
+    pub fn checkpoint_id(&self) -> Option<&CheckpointId> {
+        self.checkpoint_id.as_ref()
+    }
+
+    /// Whether the installed checkpoint has structured citation metadata.
+    #[must_use]
+    pub fn citation_backed(&self) -> bool {
+        self.citation_backed
+    }
+
+    /// Number of claims in the structured checkpoint, or zero for plain checkpoints.
+    #[must_use]
+    pub fn claim_count(&self) -> usize {
+        self.claim_count
+    }
+
+    /// Number of local refs in the structured checkpoint manifest, or zero for plain checkpoints.
+    #[must_use]
+    pub fn ref_count(&self) -> usize {
+        self.ref_count
+    }
+}
+
 impl CompactedCheckpoint {
     /// Creates validated compacted checkpoint text.
     pub fn new(text: impl Into<String>) -> Result<Self, ContextError> {
@@ -659,6 +694,25 @@ impl CompactedCheckpoint {
     #[must_use]
     pub fn citation_backed(&self) -> Option<&CitationBackedCheckpoint> {
         self.citation_backed.as_ref()
+    }
+
+    /// Payload-free summary for diagnostics. This intentionally excludes claim text and ref excerpts.
+    #[must_use]
+    pub fn summary(&self) -> CompactedCheckpointSummary {
+        match &self.citation_backed {
+            Some(checkpoint) => CompactedCheckpointSummary {
+                checkpoint_id: Some(checkpoint.id().clone()),
+                citation_backed: true,
+                claim_count: checkpoint.claims().len(),
+                ref_count: checkpoint.manifest().refs().len(),
+            },
+            None => CompactedCheckpointSummary {
+                checkpoint_id: None,
+                citation_backed: false,
+                claim_count: 0,
+                ref_count: 0,
+            },
+        }
     }
 
     /// Reads a bounded checkpoint ref excerpt from the installed citation manifest.

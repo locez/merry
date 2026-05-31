@@ -17,8 +17,8 @@ use crate::{
         CompactionOutcome, checkpoint_from_candidate_json, previous_checkpoint_payload,
     },
     context::{
-        CompactedCheckpoint, ContextCompiler, ContextEntry, ContextError, ProjectRules,
-        SessionContextSnapshot, TaskAnchor,
+        CompactedCheckpoint, CompactedCheckpointSummary, ContextCompiler, ContextEntry,
+        ContextError, ProjectRules, SessionContextSnapshot, TaskAnchor,
     },
     judgment::{
         JudgmentError, JudgmentEvidence, JudgmentOutcome, JudgmentRecord, JudgmentRegistry,
@@ -351,6 +351,12 @@ impl SessionState {
 
     pub(crate) fn set_compacted_checkpoint(&mut self, checkpoint: CompactedCheckpoint) {
         self.compacted_checkpoint = Some(checkpoint);
+    }
+
+    pub(crate) fn compacted_checkpoint_summary(&self) -> Option<CompactedCheckpointSummary> {
+        self.compacted_checkpoint
+            .as_ref()
+            .map(CompactedCheckpoint::summary)
     }
 
     pub(crate) fn read_checkpoint_ref(

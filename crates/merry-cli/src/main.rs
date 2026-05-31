@@ -1189,12 +1189,13 @@ async fn run_debug_coding_loop_task_live_smoke(
 
     let fixture = CodingLoopTaskSmokeFixture::for_task(task);
     let smoke_root = prepare_coding_loop_task_fixture("coding-loop-task-live-smoke", fixture)?;
+    let automatic_compaction = automatic_compaction_config(merry_config).map_err(unexpected)?;
     let runtime = build_coding_loop_task_live_smoke_runtime(
         &smoke_root,
         admission,
         config,
         Arc::new(TokioProcessRunner::new_at_workspace_root(&smoke_root)),
-        automatic_compaction_config(merry_config).map_err(unexpected)?,
+        automatic_compaction,
     )?;
     let generation_config =
         GenerationConfig::new(Some(max_output_tokens), false).map_err(debug_openai_usage_error)?;
@@ -1218,6 +1219,7 @@ async fn run_debug_coding_loop_task_live_smoke(
     let mut writer = BufWriter::new(tokio::io::stdout());
     write_coding_loop_task_live_smoke_report(
         &runtime,
+        automatic_compaction,
         assertion.is_ok(),
         result.events(),
         &mut writer,
@@ -2587,6 +2589,7 @@ where
 
 async fn write_coding_loop_task_live_smoke_report<W>(
     runtime: &Runtime,
+    automatic_compaction: AutomaticCompactionConfig,
     passed: bool,
     events: &[RuntimeEvent],
     writer: &mut W,
@@ -2601,7 +2604,68 @@ where
     };
     writer.write_all(header).await.map_err(stdout_error)?;
     write_runtime_event_slice(events, writer).await?;
+    write_compaction_config_summary(automatic_compaction, writer).await?;
+    write_compaction_summary(runtime, writer).await?;
     write_process_artifact_previews(runtime, events, writer).await
+}
+
+async fn write_compaction_config_summary<W>(
+    automatic_compaction: AutomaticCompactionConfig,
+    writer: &mut W,
+) -> Result<(), CliError>
+where
+    W: AsyncWrite + Unpin,
+{
+    let policy = automatic_compaction.policy();
+    let line = serde_json::json!({
+        "type": "runtime_compaction_config_summary",
+        "auto_compaction_enabled": automatic_compaction.is_enabled(),
+        "target_output_tokens": policy.target_output_tokens(),
+        "model_output_token_limit": policy.model_output_token_limit(),
+        "max_accepted_output_bytes": policy.max_accepted_output_bytes(),
+        "retained_raw_tail_items": policy.retained_raw_tail_items(),
+        "max_ref_excerpt_bytes": policy.max_ref_excerpt_bytes(),
+        "max_carried_prior_refs": policy.max_carried_prior_refs(),
+    });
+    let line = serde_json::to_string(&line).map_err(unexpected)?;
+    writer
+        .write_all(line.as_bytes())
+        .await
+        .map_err(stdout_error)?;
+    writer.write_all(b"\n").await.map_err(stdout_error)?;
+    Ok(())
+}
+
+async fn write_compaction_summary<W>(runtime: &Runtime, writer: &mut W) -> Result<(), CliError>
+where
+    W: AsyncWrite + Unpin,
+{
+    let summary = runtime.compacted_checkpoint_summary().await;
+    let line = match summary {
+        Some(summary) => serde_json::json!({
+            "type": "runtime_compaction_summary",
+            "checkpoint_present": true,
+            "citation_backed": summary.citation_backed(),
+            "checkpoint_id": summary.checkpoint_id().map(merry_runtime::CheckpointId::as_str),
+            "claim_count": summary.claim_count(),
+            "ref_count": summary.ref_count(),
+        }),
+        None => serde_json::json!({
+            "type": "runtime_compaction_summary",
+            "checkpoint_present": false,
+            "citation_backed": false,
+            "checkpoint_id": null,
+            "claim_count": 0,
+            "ref_count": 0,
+        }),
+    };
+    let line = serde_json::to_string(&line).map_err(unexpected)?;
+    writer
+        .write_all(line.as_bytes())
+        .await
+        .map_err(stdout_error)?;
+    writer.write_all(b"\n").await.map_err(stdout_error)?;
+    Ok(())
 }
 
 async fn write_process_artifact_previews<W>(
@@ -3075,10 +3139,13 @@ mod tests {
         ModelResponse, ModelStreamContext, ModelToolCall, ModelToolCallId, ToolArguments,
     };
     use merry_runtime::{
-        AcceptedLocalWorkspaceProcessAdmission, AgentLoopConfig, MAX_PROCESS_OUTPUT_LIMIT_BYTES,
-        ProcessActionIntent, ProcessEnvPolicy, ProcessExitStatus, ProcessRunner,
-        ProcessRunnerContext, ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput,
-        Runtime, StepContext, StepInput, ToolExecutionContext,
+        AcceptedLocalWorkspaceProcessAdmission, AgentLoopConfig, CheckpointId, CheckpointRef,
+        CheckpointRefId, CheckpointRefManifest, CheckpointSequenceRange, CheckpointSourceKind,
+        CheckpointValidationPolicy, CitationBackedCheckpoint, CompactedCheckpoint,
+        CompactedCheckpointCandidate, MAX_PROCESS_OUTPUT_LIMIT_BYTES, ProcessActionIntent,
+        ProcessEnvPolicy, ProcessExitStatus, ProcessRunner, ProcessRunnerContext,
+        ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput, Runtime, StepContext,
+        StepInput, ToolExecutionContext,
     };
     use merry_tool_workspace::{
         WORKSPACE_PATCH_TOOL, WorkspaceCodingLoopProfile, WorkspaceToolsConfig,
@@ -5303,9 +5370,15 @@ retained_raw_tail_items = 4
         );
         let mut output = Vec::new();
 
-        write_coding_loop_task_live_smoke_report(&runtime, false, &[event], &mut output)
-            .await
-            .unwrap_or_else(|_| panic!("task live smoke report should write"));
+        write_coding_loop_task_live_smoke_report(
+            &runtime,
+            merry_runtime::AutomaticCompactionConfig::default(),
+            false,
+            &[event],
+            &mut output,
+        )
+        .await
+        .unwrap_or_else(|_| panic!("task live smoke report should write"));
 
         let text = String::from_utf8(output).expect("output should be utf-8");
         let mut lines = text.lines();
@@ -5318,6 +5391,23 @@ retained_raw_tail_items = 4
             event.kind,
             merry_core::RuntimeEventKind::StepStarted
         ));
+        let config_summary = lines
+            .next()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("line should parse"))
+            .expect("failure report should include compaction config summary");
+        assert_eq!(
+            config_summary["type"],
+            serde_json::Value::String("runtime_compaction_config_summary".to_owned())
+        );
+        let compaction_summary = lines
+            .next()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("line should parse"))
+            .expect("failure report should include compaction summary");
+        assert_eq!(
+            compaction_summary["type"],
+            serde_json::Value::String("runtime_compaction_summary".to_owned())
+        );
+        assert_eq!(compaction_summary["checkpoint_present"], false);
         assert!(lines.next().is_none());
     }
 
@@ -5362,14 +5452,131 @@ retained_raw_tail_items = 4
             .expect("process call should execute");
         let mut output = Vec::new();
 
-        write_coding_loop_task_live_smoke_report(&runtime, false, &execution_events, &mut output)
-            .await
-            .expect("task live smoke report should write");
+        write_coding_loop_task_live_smoke_report(
+            &runtime,
+            merry_runtime::AutomaticCompactionConfig::default(),
+            false,
+            &execution_events,
+            &mut output,
+        )
+        .await
+        .expect("task live smoke report should write");
 
         let text = String::from_utf8(output).expect("output should be utf-8");
         assert!(text.contains("\"type\":\"tool_call_resolved\""));
         assert!(text.contains("\"type\":\"process_artifact_preview\""));
         assert!(text.contains("\"call_id\":\"call-check\""));
         assert!(text.contains("\"stderr\":\"cargo failed\\n\""));
+    }
+
+    #[tokio::test]
+    async fn task_live_smoke_report_includes_compaction_summary_without_checkpoint_text() {
+        let manifest = CheckpointRefManifest::new(
+            CheckpointId::new("checkpoint-task-live-smoke").expect("valid checkpoint id"),
+            vec![
+                CheckpointRef::new(
+                    CheckpointRefId::new("r1").expect("valid ref id"),
+                    CheckpointSourceKind::UserMessage,
+                    "history:1",
+                    CheckpointSequenceRange::new(1, 1).expect("valid sequence range"),
+                    "body[0]",
+                    "sensitive old task detail should not appear in smoke report",
+                )
+                .expect("valid ref"),
+            ],
+        )
+        .expect("valid manifest");
+        let candidate = CompactedCheckpointCandidate::from_json(
+            r#"{
+              "claims": [
+                {
+                  "id": "c1",
+                  "kind": "current_state",
+                  "text": "The old task window was compacted.",
+                  "refs": ["r1"]
+                }
+              ],
+              "working_intent": null
+            }"#,
+        )
+        .expect("valid candidate");
+        let citation = CitationBackedCheckpoint::from_candidate(
+            CheckpointId::new("checkpoint-task-live-smoke").expect("valid checkpoint id"),
+            candidate,
+            manifest,
+            CheckpointValidationPolicy::default(),
+        )
+        .expect("valid citation-backed checkpoint");
+        let checkpoint =
+            CompactedCheckpoint::from_citation_backed(citation).expect("valid checkpoint");
+        let runtime =
+            Runtime::builder(merry_core::SessionId::new("coding-loop-task-live-smoke").unwrap())
+                .compacted_checkpoint(checkpoint)
+                .build()
+                .expect("runtime should build");
+        let mut output = Vec::new();
+
+        write_coding_loop_task_live_smoke_report(
+            &runtime,
+            merry_runtime::AutomaticCompactionConfig::default(),
+            true,
+            &[],
+            &mut output,
+        )
+        .await
+        .expect("task live smoke report should write");
+
+        let text = String::from_utf8(output).expect("output should be utf-8");
+        assert!(text.contains("\"type\":\"runtime_compaction_summary\""));
+        assert!(text.contains("\"checkpoint_present\":true"));
+        assert!(text.contains("\"citation_backed\":true"));
+        assert!(text.contains("\"checkpoint_id\":\"checkpoint-task-live-smoke\""));
+        assert!(text.contains("\"claim_count\":1"));
+        assert!(text.contains("\"ref_count\":1"));
+        assert!(!text.contains("The old task window was compacted."));
+        assert!(!text.contains("sensitive old task detail"));
+    }
+
+    #[tokio::test]
+    async fn task_live_smoke_report_includes_effective_compaction_config_from_toml() {
+        let paths = super::config::XdgPaths::from_parts(PathBuf::from("/home/alice"), None, None);
+        let config = super::config::MerryConfig::load_optional_from_text(
+            Some(
+                r#"
+[runtime.auto_compaction]
+enabled = true
+target_output_tokens = 144
+model_output_token_limit = 233
+max_accepted_output_bytes = 3456
+retained_raw_tail_items = 5
+max_ref_excerpt_bytes = 789
+max_carried_prior_refs = 10
+"#,
+            ),
+            &paths,
+        )
+        .expect("config should parse")
+        .expect("config should be present");
+        let auto_compaction = super::automatic_compaction_config(Some(&config))
+            .expect("auto compaction should validate");
+        let runtime =
+            Runtime::builder(merry_core::SessionId::new("coding-loop-task-live-smoke").unwrap())
+                .build()
+                .expect("runtime should build");
+        let mut output = Vec::new();
+
+        write_coding_loop_task_live_smoke_report(&runtime, auto_compaction, true, &[], &mut output)
+            .await
+            .expect("task live smoke report should write");
+
+        let text = String::from_utf8(output).expect("output should be utf-8");
+        assert!(text.contains("\"type\":\"runtime_compaction_config_summary\""));
+        assert!(text.contains("\"auto_compaction_enabled\":true"));
+        assert!(text.contains("\"target_output_tokens\":144"));
+        assert!(text.contains("\"model_output_token_limit\":233"));
+        assert!(text.contains("\"max_accepted_output_bytes\":3456"));
+        assert!(text.contains("\"retained_raw_tail_items\":5"));
+        assert!(text.contains("\"max_ref_excerpt_bytes\":789"));
+        assert!(text.contains("\"max_carried_prior_refs\":10"));
     }
 }

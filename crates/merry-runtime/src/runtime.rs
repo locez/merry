@@ -8,12 +8,13 @@
 use crate::{
     AcceptedLocalWorkspaceProcessAdmission, ActionExecutionEvidence, ActionProposal,
     ArtifactContent, CheckpointDecision, CheckpointId, CheckpointRefExcerpt, CheckpointRefId,
-    CitationCompactionInput, CitationCompactionPolicy, CompactedCheckpoint, CompactionError,
-    CompactionOutcome, ContextBudget, ContextBudgetPolicy, ContextCompiler, ContextEntry,
-    ContextSummary, LedgerProjectionSnapshot, ProcessActionIntent, ProcessExitStatus,
-    ProcessPermissionProfileId, ProcessRunner, ProcessRunnerContext, ProcessRunnerError,
-    ProcessRunnerOutput, ProjectRules, ResolvedContextWindow, RuntimeError, RuntimeEventStream,
-    RuntimeModelRole, SessionContextSnapshot, TaskAnchor,
+    CitationCompactionInput, CitationCompactionPolicy, CompactedCheckpoint,
+    CompactedCheckpointSummary, CompactionError, CompactionOutcome, ContextBudget,
+    ContextBudgetPolicy, ContextCompiler, ContextEntry, ContextSummary, LedgerProjectionSnapshot,
+    ProcessActionIntent, ProcessExitStatus, ProcessPermissionProfileId, ProcessRunner,
+    ProcessRunnerContext, ProcessRunnerError, ProcessRunnerOutput, ProjectRules,
+    ResolvedContextWindow, RuntimeError, RuntimeEventStream, RuntimeModelRole,
+    SessionContextSnapshot, TaskAnchor,
     action_audit::ActionAuditPolicy,
     action_policy::{
         ActionPolicyDecision, DefaultActionPolicy, classify_tool_action_risk,
@@ -967,6 +968,12 @@ impl Runtime {
     pub async fn context_snapshot(&self) -> SessionContextSnapshot {
         let session = self.inner.session.lock().await;
         session.context_snapshot()
+    }
+
+    /// Payload-free summary of the installed compacted checkpoint, if any.
+    pub async fn compacted_checkpoint_summary(&self) -> Option<CompactedCheckpointSummary> {
+        let session = self.inner.session.lock().await;
+        session.compacted_checkpoint_summary()
     }
 
     /// Reads a bounded source excerpt from the installed citation-backed checkpoint.
