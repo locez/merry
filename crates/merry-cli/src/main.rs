@@ -1823,6 +1823,19 @@ fn build_coding_loop_runtime(
     if !options.skill_roots.is_empty() {
         let catalog = merry_runtime::SkillCatalog::load_from_roots(options.skill_roots.clone())
             .map_err(unexpected)?;
+        tracing::info!(
+            event = "runtime.skill_catalog.load",
+            session_id,
+            configured_root_count = options.skill_roots.len(),
+            readable_root_count = options
+                .skill_roots
+                .iter()
+                .filter(|root| root.is_dir())
+                .count(),
+            skill_count = catalog.skills().len(),
+            warning_count = catalog.warnings().len(),
+            "runtime skill catalog loaded"
+        );
         builder = builder.skill_catalog(catalog);
     }
 
@@ -3530,6 +3543,59 @@ mod tests {
         assert!(stable_text.contains("workspace_read_file"));
         assert!(stable_text.contains("demo/SKILL.md"));
         assert!(!stable_text.contains("body sentinel"));
+    }
+
+    #[tokio::test]
+    async fn coding_loop_runtime_logs_skill_catalog_load_without_body() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        let skill_root = temp.path().join("skills");
+        let log_path = temp.path().join("state/merry/logs/merry.jsonl");
+        std::fs::create_dir_all(&workspace).expect("mkdir workspace");
+        std::fs::create_dir_all(skill_root.join("demo")).expect("mkdir skill");
+        std::fs::write(
+            skill_root.join("demo/SKILL.md"),
+            "---\nname: demo-skill\ndescription: Use for demo tasks.\n---\n# Demo\nbody sentinel\n",
+        )
+        .expect("write skill");
+        let log_settings = super::config::EffectiveLogSettings {
+            level: super::config::LogLevel::Debug,
+            format: super::config::LogFormat::Json,
+            path: log_path.clone(),
+        };
+        let guard = super::observability::init_observability(Some(&log_settings))
+            .expect("observability should initialize")
+            .expect("file logging should install a guard");
+
+        let provider = ScriptedProvider::new(vec![vec![Ok(ModelEvent::Completed {
+            response: ModelResponse::new(vec![ModelOutput::text("done")], FinishReason::Stop, None),
+        })]]);
+        let runner = Arc::new(FakeProcessRunner::succeeding(""));
+        let _runtime = super::build_coding_loop_runtime(
+            "coding-loop-skill-log",
+            &workspace,
+            AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
+            Arc::new(provider),
+            ModelName::new("debug-model").unwrap(),
+            runner,
+            super::CodingLoopRuntimeOptions {
+                allow_hidden_workspace_paths: false,
+                automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
+                context_compaction: None,
+                skill_roots: vec![skill_root],
+            },
+        )
+        .expect("runtime should build");
+        drop(guard);
+
+        let log = std::fs::read_to_string(&log_path).expect("log file should be written");
+        assert!(log.contains("\"event\":\"runtime.skill_catalog.load\""));
+        assert!(log.contains("\"session_id\":\"coding-loop-skill-log\""));
+        assert!(log.contains("\"configured_root_count\":1"));
+        assert!(log.contains("\"readable_root_count\":1"));
+        assert!(log.contains("\"skill_count\":1"));
+        assert!(log.contains("\"warning_count\":0"));
+        assert!(!log.contains("body sentinel"));
     }
 
     #[tokio::test(flavor = "current_thread")]
