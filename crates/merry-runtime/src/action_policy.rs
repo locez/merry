@@ -18,6 +18,8 @@ use crate::{
 pub(crate) enum ActionRiskTier {
     /// Reads runtime or workspace state without changing it.
     ReadOnly,
+    /// Mutates runtime-owned control state only.
+    RuntimeControl,
     /// Performs bounded, low-risk edits.
     EditLow,
     /// Performs broader or higher-impact edits.
@@ -169,6 +171,7 @@ pub(crate) fn classify_tool_action_risk(
 ) -> ActionRiskTier {
     match action_kind {
         ToolActionKind::ReadOnly => ActionRiskTier::ReadOnly,
+        ToolActionKind::RuntimeControl => ActionRiskTier::RuntimeControl,
         ToolActionKind::WorkspaceWrite => {
             if matches!(
                 proposal.map(ActionProposal::evidence),
@@ -279,6 +282,12 @@ impl DefaultActionPolicy {
                 classify_tool_action_risk(ToolActionKind::ReadOnly, None),
                 ActionPolicyDisposition::Allow,
                 "read-only tool actions are allowed by default policy",
+            ),
+            ToolActionKind::RuntimeControl => ActionPolicyDecision::new(
+                ToolActionKind::RuntimeControl,
+                classify_tool_action_risk(ToolActionKind::RuntimeControl, None),
+                ActionPolicyDisposition::Allow,
+                "runtime control tool actions are allowed by default policy",
             ),
             ToolActionKind::WorkspaceWrite => ActionPolicyDecision::new(
                 ToolActionKind::WorkspaceWrite,
