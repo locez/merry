@@ -1,7 +1,8 @@
 //! Runtime event protocol vocabulary.
 
 use crate::{
-    ArtifactRef, CoreError, EvidenceRef, PendingToolCall, SessionId, ToolCallId, ToolCallResult,
+    ArtifactRef, CoreError, EvidenceRef, PendingToolCall, SessionId, SubagentId, SubagentTaskId,
+    ToolCallId, ToolCallResult,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, de};
@@ -120,6 +121,43 @@ pub enum RuntimeEventKind {
         tool_call_id: ToolCallId,
         /// Artifact that contains the read result.
         artifact: ArtifactRef,
+    },
+    /// A subagent task was accepted for execution.
+    SubagentSpawned {
+        agent_id: SubagentId,
+        task_id: SubagentTaskId,
+        task_anchor: String,
+    },
+    /// A subagent started executing its assigned task.
+    SubagentStarted {
+        agent_id: SubagentId,
+        task_id: SubagentTaskId,
+    },
+    /// A subagent reported a provider-neutral status update.
+    SubagentStatusChanged {
+        agent_id: SubagentId,
+        task_id: SubagentTaskId,
+        status: String,
+    },
+    /// A subagent completed and reported compact references to its work.
+    SubagentCompleted {
+        agent_id: SubagentId,
+        task_id: SubagentTaskId,
+        summary: String,
+        output_paths: Vec<String>,
+        changed_paths: Vec<String>,
+    },
+    /// A subagent failed.
+    SubagentFailed {
+        agent_id: SubagentId,
+        task_id: SubagentTaskId,
+        diagnostic: ErrorInfo,
+    },
+    /// A subagent was cancelled.
+    SubagentCancelled {
+        agent_id: SubagentId,
+        task_id: SubagentTaskId,
+        diagnostic: ErrorInfo,
     },
     /// The runtime was cancelled.
     Cancelled { diagnostic: ErrorInfo },

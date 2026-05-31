@@ -160,6 +160,8 @@ macro_rules! define_id {
 define_id!(SessionId, "SessionId");
 define_id!(ArtifactId, "ArtifactId");
 define_id!(SkillId, "SkillId");
+define_id!(SubagentId, "SubagentId");
+define_id!(SubagentTaskId, "SubagentTaskId");
 define_id!(ProviderName, "ProviderName");
 define_id!(ToolCallId, "ToolCallId", MAX_TOOL_CALL_ID_LEN);
 
