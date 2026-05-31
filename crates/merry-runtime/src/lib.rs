@@ -48,6 +48,7 @@ mod runtime;
 mod session;
 mod skill;
 mod step;
+mod subagent;
 mod summary_draft_promotion;
 mod tool;
 
@@ -96,6 +97,13 @@ pub use process_tool::{ProcessCommandToolError, process_command_tool};
 pub use runtime::{AutomaticCompactionConfig, Runtime, RuntimeBuilder};
 pub use skill::{SkillCatalog, SkillError, SkillLoadWarning, SkillMetadata};
 pub use step::{StepContext, StepInput};
+pub use subagent::{
+    CancelSubagentsInput, DEFAULT_MAX_STEPS, RejectedSubagentView, SpawnSubagentTaskInput,
+    SpawnSubagentsInput, SpawnSubagentsOutput, SpawnedSubagentStatusLabel, SpawnedSubagentView,
+    SubagentConfig, SubagentError, SubagentStatusLabel, SubagentStatusView, SubagentTaskSpec,
+    WaitMode, WaitSubagentsInput, WaitSubagentsOutput, subagent_tool_specs,
+    validate_no_write_scope_conflicts,
+};
 pub use tool::{
     ActionExecutionEvidence, ActionProposal, ActionProposalError, ActionProposalEvidence,
     RegisteredTool, ToolActionKind, ToolActionPreflight, ToolActionProposalFuture,
