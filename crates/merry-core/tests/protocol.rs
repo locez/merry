@@ -1,8 +1,8 @@
 use merry_core::{
     ArtifactId, ArtifactKind, ArtifactRef, CoreError, ErrorInfo, EvidenceLocator, EvidenceRef,
-    PendingToolCall, ProviderName, RuntimeEvent, RuntimeEventKind, SessionId, SkillId,
-    ToolCallArguments, ToolCallId, ToolCallResult, ToolCallResultStatus, ToolInputSchema, ToolName,
-    ToolSpec,
+    PendingToolCall, ProviderName, RuntimeEvent, RuntimeEventKind, SessionId, SkillId, SubagentId,
+    SubagentTaskId, ToolCallArguments, ToolCallId, ToolCallResult, ToolCallResultStatus,
+    ToolInputSchema, ToolName, ToolSpec,
 };
 use schemars::{JsonSchema, Schema};
 use serde::{Serialize, de::DeserializeOwned};
@@ -62,6 +62,41 @@ fn ids_validate_and_round_trip_as_json_strings() {
     let overlong = "a".repeat(129);
     assert!(ArtifactId::new(&overlong).is_err());
     assert!(serde_json::from_value::<ArtifactId>(json!(overlong)).is_err());
+}
+
+#[test]
+fn subagent_ids_validate_and_round_trip_as_json_strings() {
+    let agent = SubagentId::new("subagent-1").expect("valid subagent id");
+    let task = SubagentTaskId::from_str("subagent-task_1").expect("valid subagent task id");
+
+    assert_eq!(agent.as_str(), "subagent-1");
+    assert_eq!(task.to_string(), "subagent-task_1");
+    assert_eq!(
+        serde_json::to_value(&agent).expect("subagent id serializes"),
+        json!("subagent-1")
+    );
+    assert_eq!(
+        serde_json::to_value(&task).expect("subagent task id serializes"),
+        json!("subagent-task_1")
+    );
+
+    assert_json_round_trip(&agent);
+    assert_json_round_trip(&task);
+
+    for invalid in ["", "   ", " has-leading", "has-trailing ", "has\nnewline"] {
+        assert!(
+            SubagentId::new(invalid).is_err(),
+            "{invalid:?} should reject"
+        );
+        assert!(
+            serde_json::from_value::<SubagentTaskId>(json!(invalid)).is_err(),
+            "{invalid:?} should reject during deserialize"
+        );
+    }
+
+    let overlong = "a".repeat(129);
+    assert!(SubagentId::new(&overlong).is_err());
+    assert!(serde_json::from_value::<SubagentTaskId>(json!(overlong)).is_err());
 }
 
 #[test]
@@ -553,6 +588,194 @@ fn skill_used_event_records_catalog_skill_read() {
         })
     );
     assert_json_round_trip(&event);
+}
+
+#[test]
+fn subagent_spawned_event_uses_snake_case_and_round_trips() {
+    let event = RuntimeEvent::new(
+        SessionId::new("session-1").expect("valid session id"),
+        12,
+        RuntimeEventKind::SubagentSpawned {
+            agent_id: SubagentId::new("agent-1").expect("valid subagent id"),
+            task_id: SubagentTaskId::new("task-1").expect("valid subagent task id"),
+            task_anchor: "crates/merry-runtime/src/subagent.rs".to_owned(),
+        },
+    );
+
+    assert_eq!(
+        serde_json::to_value(&event).expect("event serializes"),
+        json!({
+            "session_id": "session-1",
+            "sequence": 12,
+            "kind": {
+                "type": "subagent_spawned",
+                "agent_id": "agent-1",
+                "task_id": "task-1",
+                "task_anchor": "crates/merry-runtime/src/subagent.rs"
+            }
+        })
+    );
+    assert_json_round_trip(&event);
+}
+
+#[test]
+fn subagent_nonterminal_events_use_snake_case_and_round_trip() {
+    let started = RuntimeEvent::new(
+        SessionId::new("session-1").expect("valid session id"),
+        13,
+        RuntimeEventKind::SubagentStarted {
+            agent_id: SubagentId::new("agent-1").expect("valid subagent id"),
+            task_id: SubagentTaskId::new("task-1").expect("valid subagent task id"),
+        },
+    );
+    assert_eq!(
+        serde_json::to_value(&started).expect("started event serializes"),
+        json!({
+            "session_id": "session-1",
+            "sequence": 13,
+            "kind": {
+                "type": "subagent_started",
+                "agent_id": "agent-1",
+                "task_id": "task-1"
+            }
+        })
+    );
+    assert_json_round_trip(&started);
+
+    let status_changed = RuntimeEvent::new(
+        SessionId::new("session-1").expect("valid session id"),
+        14,
+        RuntimeEventKind::SubagentStatusChanged {
+            agent_id: SubagentId::new("agent-1").expect("valid subagent id"),
+            task_id: SubagentTaskId::new("task-1").expect("valid subagent task id"),
+            status: "running".to_owned(),
+        },
+    );
+    assert_eq!(
+        serde_json::to_value(&status_changed).expect("status event serializes"),
+        json!({
+            "session_id": "session-1",
+            "sequence": 14,
+            "kind": {
+                "type": "subagent_status_changed",
+                "agent_id": "agent-1",
+                "task_id": "task-1",
+                "status": "running"
+            }
+        })
+    );
+    assert_json_round_trip(&status_changed);
+}
+
+#[test]
+fn subagent_terminal_events_do_not_embed_large_payloads() {
+    let completed = RuntimeEvent::new(
+        SessionId::new("session-1").expect("valid session id"),
+        13,
+        RuntimeEventKind::SubagentCompleted {
+            agent_id: SubagentId::new("agent-1").expect("valid subagent id"),
+            task_id: SubagentTaskId::new("task-1").expect("valid subagent task id"),
+            summary: "Updated protocol tests and core event vocabulary.".to_owned(),
+            output_paths: vec!["artifacts/subagents/task-1/report.md".to_owned()],
+            changed_paths: vec!["crates/merry-core/src/event.rs".to_owned()],
+        },
+    );
+    let completed_json = serde_json::to_value(&completed).expect("completed event serializes");
+    assert_eq!(
+        completed_json,
+        json!({
+            "session_id": "session-1",
+            "sequence": 13,
+            "kind": {
+                "type": "subagent_completed",
+                "agent_id": "agent-1",
+                "task_id": "task-1",
+                "summary": "Updated protocol tests and core event vocabulary.",
+                "output_paths": ["artifacts/subagents/task-1/report.md"],
+                "changed_paths": ["crates/merry-core/src/event.rs"]
+            }
+        })
+    );
+    let completed_kind = completed_json
+        .get("kind")
+        .and_then(Value::as_object)
+        .expect("kind should be an object");
+    assert!(completed_kind.get("output").is_none());
+    assert!(completed_kind.get("payload").is_none());
+    assert!(completed_kind.get("artifact").is_none());
+    assert_json_round_trip(&completed);
+
+    let failed = RuntimeEvent::new(
+        SessionId::new("session-1").expect("valid session id"),
+        14,
+        RuntimeEventKind::SubagentFailed {
+            agent_id: SubagentId::new("agent-1").expect("valid subagent id"),
+            task_id: SubagentTaskId::new("task-1").expect("valid subagent task id"),
+            diagnostic: ErrorInfo::new("subagent_failed", "Subagent exited with status 1")
+                .expect("valid diagnostic"),
+        },
+    );
+    let failed_json = serde_json::to_value(&failed).expect("failed event serializes");
+    assert_eq!(
+        failed_json,
+        json!({
+            "session_id": "session-1",
+            "sequence": 14,
+            "kind": {
+                "type": "subagent_failed",
+                "agent_id": "agent-1",
+                "task_id": "task-1",
+                "diagnostic": {
+                    "code": "subagent_failed",
+                    "message": "Subagent exited with status 1"
+                }
+            }
+        })
+    );
+    let failed_kind = failed_json
+        .get("kind")
+        .and_then(Value::as_object)
+        .expect("kind should be an object");
+    assert!(failed_kind.get("output").is_none());
+    assert!(failed_kind.get("payload").is_none());
+    assert!(failed_kind.get("artifact").is_none());
+    assert_json_round_trip(&failed);
+
+    let cancelled = RuntimeEvent::new(
+        SessionId::new("session-1").expect("valid session id"),
+        15,
+        RuntimeEventKind::SubagentCancelled {
+            agent_id: SubagentId::new("agent-1").expect("valid subagent id"),
+            task_id: SubagentTaskId::new("task-1").expect("valid subagent task id"),
+            diagnostic: ErrorInfo::new("subagent_cancelled", "Cancellation token was dropped")
+                .expect("valid diagnostic"),
+        },
+    );
+    let cancelled_json = serde_json::to_value(&cancelled).expect("cancelled event serializes");
+    assert_eq!(
+        cancelled_json,
+        json!({
+            "session_id": "session-1",
+            "sequence": 15,
+            "kind": {
+                "type": "subagent_cancelled",
+                "agent_id": "agent-1",
+                "task_id": "task-1",
+                "diagnostic": {
+                    "code": "subagent_cancelled",
+                    "message": "Cancellation token was dropped"
+                }
+            }
+        })
+    );
+    let cancelled_kind = cancelled_json
+        .get("kind")
+        .and_then(Value::as_object)
+        .expect("kind should be an object");
+    assert!(cancelled_kind.get("output").is_none());
+    assert!(cancelled_kind.get("payload").is_none());
+    assert!(cancelled_kind.get("artifact").is_none());
+    assert_json_round_trip(&cancelled);
 }
 
 #[test]
