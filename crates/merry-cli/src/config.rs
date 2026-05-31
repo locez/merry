@@ -177,6 +177,19 @@ impl MerryConfig {
         auto_compaction.to_config()
     }
 
+    pub fn subagents_config(&self) -> Result<SubagentsConfig, ConfigError> {
+        let Some(subagents) = self
+            .raw
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.subagents.as_ref())
+        else {
+            return Ok(SubagentsConfig::default());
+        };
+
+        subagents.to_config()
+    }
+
     pub fn skill_roots(&self) -> Result<Vec<PathBuf>, ConfigError> {
         let Some(skills) = self.raw.skills.as_ref() else {
             return Ok(vec![self.config_dir.join("skills")]);
@@ -489,6 +502,7 @@ struct GlobalToml {
 #[serde(deny_unknown_fields)]
 struct RuntimeToml {
     auto_compaction: Option<AutoCompactionToml>,
+    subagents: Option<SubagentsToml>,
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
@@ -549,6 +563,56 @@ impl AutoCompactionToml {
         )
         .map_err(|error| ConfigError::Invalid(error.to_string()))?;
         Ok(AutomaticCompactionConfig::enabled(policy))
+    }
+}
+
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct SubagentsToml {
+    #[serde(default)]
+    enabled: bool,
+    max_threads: Option<usize>,
+    max_depth: Option<u8>,
+}
+
+impl SubagentsToml {
+    fn to_config(&self) -> Result<SubagentsConfig, ConfigError> {
+        let defaults = SubagentsConfig::default().limits;
+        let limits = merry_runtime::SubagentConfig::new(
+            self.max_threads.unwrap_or(defaults.max_threads()),
+            self.max_depth.unwrap_or(defaults.max_depth()),
+        )
+        .map_err(|error| ConfigError::Invalid(error.to_string()))?;
+        Ok(SubagentsConfig {
+            enabled: self.enabled,
+            limits,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SubagentsConfig {
+    enabled: bool,
+    limits: merry_runtime::SubagentConfig,
+}
+
+impl SubagentsConfig {
+    #[cfg(test)]
+    pub(crate) fn enabled_for_test(limits: merry_runtime::SubagentConfig) -> Self {
+        Self {
+            enabled: true,
+            limits,
+        }
+    }
+
+    #[must_use]
+    pub fn is_enabled(self) -> bool {
+        self.enabled
+    }
+
+    #[must_use]
+    pub fn limits(self) -> merry_runtime::SubagentConfig {
+        self.limits
     }
 }
 
@@ -781,6 +845,49 @@ retained_raw_tail_items = 4
             disabled.policy(),
             merry_runtime::AutomaticCompactionConfig::default().policy()
         );
+    }
+
+    #[test]
+    fn runtime_subagents_config_defaults_disabled_and_parses_limits() {
+        let paths = XdgPaths::from_parts(home(), None, None);
+        let missing = MerryConfig::load_optional_from_text(Some(""), &paths)
+            .expect("empty config should parse")
+            .expect("config should be present")
+            .subagents_config()
+            .expect("default subagents config should validate");
+        assert!(!missing.is_enabled());
+        assert_eq!(missing.limits(), merry_runtime::SubagentConfig::default());
+
+        let enabled = MerryConfig::load_optional_from_text(
+            Some(
+                r#"
+[runtime.subagents]
+enabled = true
+max_threads = 3
+max_depth = 1
+"#,
+            ),
+            &paths,
+        )
+        .expect("config should parse")
+        .expect("config should be present")
+        .subagents_config()
+        .expect("subagents config should validate");
+        assert!(enabled.is_enabled());
+        assert_eq!(
+            enabled.limits(),
+            merry_runtime::SubagentConfig::new(3, 1).expect("valid subagent config")
+        );
+
+        let invalid = MerryConfig::load_optional_from_text(
+            Some("[runtime.subagents]\nenabled = true\nmax_threads = 0\n"),
+            &paths,
+        )
+        .expect("config should parse")
+        .expect("config should be present")
+        .subagents_config()
+        .expect_err("zero max_threads should be invalid");
+        assert!(invalid.to_string().contains("max_threads"));
     }
 
     #[test]

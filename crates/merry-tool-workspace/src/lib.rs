@@ -391,13 +391,19 @@ impl ReadOnlyWorkspaceTools {
 /// bwrap admission through
 /// [`WorkspaceCodingLoopProfile::with_cli_bwrap_process_runner`].
 #[derive(Clone)]
+enum WorkspaceProcessRunner {
+    ReadOnly(Arc<dyn ProcessRunner>),
+    CliBwrap {
+        admission: AcceptedLocalWorkspaceProcessAdmission,
+        runner: Arc<dyn ProcessRunner>,
+    },
+}
+
+#[derive(Clone)]
 pub struct WorkspaceCodingLoopProfile {
     workspace_tools: ReadOnlyWorkspaceTools,
     include_patch_tool: bool,
-    process_runner: Option<(
-        AcceptedLocalWorkspaceProcessAdmission,
-        Arc<dyn ProcessRunner>,
-    )>,
+    process_runner: Option<WorkspaceProcessRunner>,
 }
 
 impl WorkspaceCodingLoopProfile {
@@ -417,14 +423,27 @@ impl WorkspaceCodingLoopProfile {
         self
     }
 
+    /// Includes read-only process execution lanes.
+    ///
+    /// This registers the process tool for direct read-only argv and validated
+    /// read-only shell wrappers only. It does not admit local workspace effects.
+    #[must_use]
+    pub fn with_read_only_process_runner(mut self, runner: Arc<dyn ProcessRunner>) -> Self {
+        self.process_runner = Some(WorkspaceProcessRunner::ReadOnly(runner));
+        self
+    }
+
     /// Includes process execution lanes for the declared CLI bubblewrap profile.
+    ///
+    /// This covers direct read-only argv, validated read-only shell wrappers,
+    /// and accepted local workspace effects under the injected runner.
     #[must_use]
     pub fn with_cli_bwrap_process_runner(
         mut self,
         admission: AcceptedLocalWorkspaceProcessAdmission,
         runner: Arc<dyn ProcessRunner>,
     ) -> Self {
-        self.process_runner = Some((admission, runner));
+        self.process_runner = Some(WorkspaceProcessRunner::CliBwrap { admission, runner });
         self
     }
 
@@ -445,14 +464,21 @@ impl WorkspaceCodingLoopProfile {
             builder = builder.allow_low_risk_workspace_patches();
         }
 
-        if let Some((admission, runner)) = self.process_runner {
+        if let Some(process_runner) = self.process_runner {
+            let (runner, accepted_admission) = match process_runner {
+                WorkspaceProcessRunner::ReadOnly(runner) => (runner, None),
+                WorkspaceProcessRunner::CliBwrap { admission, runner } => (runner, Some(admission)),
+            };
             builder = builder
                 .allow_low_risk_process_actions(Arc::clone(&runner))
-                .allow_accepted_local_workspace_process_actions(admission, runner)
-                .register_tool(process_command_tool(
-                    ToolName::new(CODING_LOOP_PROCESS_TOOL).expect("static tool name is valid"),
-                    "Run exact argv through Merry process policy for workspace inspection and verification.",
-                )?);
+                .allow_read_only_shell_process_actions(Arc::clone(&runner));
+            if let Some(admission) = accepted_admission {
+                builder = builder.allow_accepted_local_workspace_process_actions(admission, runner);
+            }
+            builder = builder.register_tool(process_command_tool(
+                ToolName::new(CODING_LOOP_PROCESS_TOOL).expect("static tool name is valid"),
+                "Run exact argv through Merry process policy for workspace inspection and verification.",
+            )?);
         }
 
         let tools = if self.include_patch_tool {

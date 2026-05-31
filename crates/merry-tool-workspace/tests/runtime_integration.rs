@@ -388,6 +388,72 @@ async fn workspace_coding_loop_profile_registers_expected_tools_and_process_lane
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn workspace_coding_loop_profile_executes_read_only_shell_lane() {
+    let temp = TempWorkspace::new("coding-loop-profile-read-only-shell");
+    let provider = ScriptedModelProvider::new(vec![vec![Ok(pending_process_call(
+        "call-read-only-shell",
+        &["bash", "-lc", "rg --files"],
+    ))]]);
+    let runner = Arc::new(ScriptedProcessRunner::new(vec![
+        ScriptedProcessResponse::success("src/lib.rs\n"),
+    ]));
+    let runtime = runtime_with_coding_loop_tools(temp.path(), provider, runner.clone());
+
+    let events = execute_first_pending_call(&runtime, "inspect with shell").await;
+
+    assert_eq!(
+        event_kind_names(&events),
+        ["ArtifactRecorded", "ArtifactRecorded", "ToolCallResolved"]
+    );
+    let result = resolved_tool_result(&events);
+    assert_eq!(result.status(), ToolCallResultStatus::Succeeded);
+    let content = runtime
+        .read_artifact_content(result.artifact().id())
+        .await
+        .expect("process result artifact should be readable");
+    let payload: Value = serde_json::from_str(
+        content
+            .as_text()
+            .expect("process result artifact should be textual JSON"),
+    )
+    .expect("process result artifact should parse as JSON");
+    assert_eq!(
+        payload["permission_profile_id"],
+        "process.shell.read_only.v1"
+    );
+    assert_eq!(payload["stdout"]["text"], "src/lib.rs\n");
+    assert_eq!(
+        runner.observed_intents()[0].argv(),
+        ["bash".to_owned(), "-lc".to_owned(), "rg --files".to_owned()]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn workspace_coding_loop_profile_read_only_process_runner_denies_local_workspace_effect() {
+    let temp = TempWorkspace::new("coding-loop-profile-read-only-process-runner");
+    let provider = ScriptedModelProvider::new(vec![vec![Ok(pending_process_call(
+        "call-local-effect",
+        &["cargo", "test"],
+    ))]]);
+    let runner = Arc::new(ScriptedProcessRunner::new(Vec::new()));
+    let runtime =
+        WorkspaceCodingLoopProfile::new(WorkspaceToolsConfig::new(vec![temp.path().to_path_buf()]))
+            .expect("workspace coding loop profile should construct")
+            .with_read_only_process_runner(runner.clone())
+            .register_on(
+                Runtime::builder(session_id()).model_provider(Arc::new(provider), model_name()),
+            )
+            .expect("workspace coding loop runtime should build")
+            .build()
+            .expect("runtime should build");
+
+    let events = execute_first_pending_call(&runtime, "run local effect").await;
+
+    assert_failed_json_result(&events, "action_policy_denied");
+    assert!(runner.observed_intents().is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn workspace_coding_loop_profile_seeds_project_capability_context() {
     let temp = TempWorkspace::new("coding-loop-profile-project-context");
     temp.write_text("Cargo.toml", "[package]\nname = \"fixture\"\n");

@@ -39,6 +39,13 @@ retained_raw_tail_items = 2
 max_ref_excerpt_bytes = 1200
 max_carried_prior_refs = 16
 
+[runtime.subagents]
+# Disabled by default. Enable this to expose spawn_subagents, wait_subagents,
+# and cancel_subagents to coding-loop runtimes.
+enabled = false
+max_threads = 6
+max_depth = 1
+
 [observability.log]
 # Enable this for smoke/debug runs that should write structured JSON logs.
 enabled = true
