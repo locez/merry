@@ -68,10 +68,11 @@ pub use compaction::{
     citation_compaction_response_schema, citation_compaction_system_prompt,
 };
 pub use context::{
-    CheckpointDecision, CompactedCheckpoint, CompiledContext, CompiledContextSection,
-    ContextBudget, ContextBudgetPolicy, ContextCompiler, ContextEntry, ContextError,
-    ContextEvidence, ContextSummary, ContextWindowSource, ProjectRules, ResolvedContextWindow,
-    SessionContextSnapshot, TaskAnchor, decide_checkpoint, resolve_context_window,
+    CheckpointDecision, CompactedCheckpoint, CompactedCheckpointSummary, CompiledContext,
+    CompiledContextSection, ContextBudget, ContextBudgetPolicy, ContextCompiler, ContextEntry,
+    ContextError, ContextEvidence, ContextSummary, ContextWindowSource, ProjectRules,
+    ResolvedContextWindow, SessionContextSnapshot, TaskAnchor, decide_checkpoint,
+    resolve_context_window,
 };
 pub use error::RuntimeError;
 pub use event_stream::RuntimeEventStream;
