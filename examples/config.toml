@@ -47,9 +47,9 @@ provider = "openai-compatible"
 model = "gpt-4.1-mini"
 
 [models.context_compaction]
-# Optional role override. Omit this table to use [providers.default] for
-# checkpoint compaction.
-provider = "openai-compatible"
+# Optional model override. Omit this table to use [providers.default] for
+# checkpoint compaction. If provider is omitted, [providers.default].provider is
+# reused.
 model = "gpt-4.1-mini"
 
 [providers.openai-compatible]

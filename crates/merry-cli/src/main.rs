@@ -3628,7 +3628,6 @@ base_url = "https://api.example.test/v1"
 api_key_file = "secrets/openai.key"
 
 [models.context_compaction]
-provider = "openai-compatible"
 model = "gpt-compact"
 "#,
             ),
