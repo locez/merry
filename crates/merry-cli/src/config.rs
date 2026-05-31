@@ -189,9 +189,23 @@ impl MerryConfig {
         model: &RuntimeModelToml,
     ) -> Result<EffectiveRuntimeModelConfig, ConfigError> {
         validate_model_text(&format!("models.{role}.model"), &model.model)?;
-        self.validate_runtime_model_provider(role, &model.provider)?;
+        let provider = match model.provider.as_deref() {
+            Some(provider) => provider,
+            None => self
+                .raw
+                .providers
+                .as_ref()
+                .and_then(|providers| providers.default.as_ref())
+                .map(|default| default.provider.as_str())
+                .ok_or_else(|| {
+                    ConfigError::Invalid(format!(
+                        "[providers.default] is required when [models.{role}].provider is omitted"
+                    ))
+                })?,
+        };
+        self.validate_runtime_model_provider(role, provider)?;
         Ok(EffectiveRuntimeModelConfig {
-            provider: model.provider.clone(),
+            provider: provider.to_owned(),
             model: model.model.clone(),
         })
     }
@@ -446,7 +460,7 @@ struct ModelsToml {
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct RuntimeModelToml {
-    provider: String,
+    provider: Option<String>,
     model: String,
 }
 
@@ -721,7 +735,7 @@ retained_raw_tail_items = 4
     }
 
     #[test]
-    fn parses_context_compaction_model_role_config() {
+    fn context_compaction_model_role_defaults_to_default_provider() {
         let paths = XdgPaths::from_parts(home(), None, None);
         let config = MerryConfig::load_optional_from_text(
             Some(
@@ -734,7 +748,6 @@ model = "gpt-primary"
 api_key = "sk-inline-secret"
 
 [models.context_compaction]
-provider = "openai-compatible"
 model = "gpt-compact"
 "#,
             ),
