@@ -92,6 +92,7 @@ fn event_kind_names(events: &[RuntimeEvent]) -> Vec<&'static str> {
             RuntimeEventKind::EvidenceReferenced { .. } => "EvidenceReferenced",
             RuntimeEventKind::ToolCallPending { .. } => "ToolCallPending",
             RuntimeEventKind::ToolCallResolved { .. } => "ToolCallResolved",
+            RuntimeEventKind::SkillUsed { .. } => "SkillUsed",
             _ => "Unknown",
         })
         .collect()

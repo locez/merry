@@ -519,6 +519,43 @@ fn tool_call_resolved_event_uses_snake_case_and_no_inline_payload() {
 }
 
 #[test]
+fn skill_used_event_records_catalog_skill_read() {
+    let event = RuntimeEvent::new(
+        SessionId::new("session-1").expect("valid session id"),
+        11,
+        RuntimeEventKind::SkillUsed {
+            skill_name: "demo-skill".to_owned(),
+            skill_md_path: "demo/SKILL.md".to_owned(),
+            tool_call_id: ToolCallId::new("call-read-skill").expect("valid call id"),
+            artifact: ArtifactRef::new(
+                ArtifactId::new("tool-result-1").expect("valid artifact id"),
+                ArtifactKind::Json,
+            ),
+        },
+    );
+
+    assert_eq!(
+        serde_json::to_value(&event).expect("event serializes"),
+        json!({
+            "session_id": "session-1",
+            "sequence": 11,
+            "kind": {
+                "type": "skill_used",
+                "skill_name": "demo-skill",
+                "skill_md_path": "demo/SKILL.md",
+                "tool_call_id": "call-read-skill",
+                "artifact": {
+                    "id": "tool-result-1",
+                    "kind": "json",
+                    "label": null
+                }
+            }
+        })
+    );
+    assert_json_round_trip(&event);
+}
+
+#[test]
 fn runtime_event_uses_stable_snake_case_tags_and_round_trips() {
     let event = RuntimeEvent::new(
         SessionId::new("session-1").expect("valid session id"),

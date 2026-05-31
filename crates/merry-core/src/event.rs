@@ -1,6 +1,8 @@
 //! Runtime event protocol vocabulary.
 
-use crate::{ArtifactRef, CoreError, EvidenceRef, PendingToolCall, SessionId, ToolCallResult};
+use crate::{
+    ArtifactRef, CoreError, EvidenceRef, PendingToolCall, SessionId, ToolCallId, ToolCallResult,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, de};
 
@@ -108,6 +110,17 @@ pub enum RuntimeEventKind {
     ToolCallPending { call: PendingToolCall },
     /// A pending tool call was resolved with an artifact-backed result.
     ToolCallResolved { result: ToolCallResult },
+    /// A model used a skill by successfully reading its catalog-listed `SKILL.md`.
+    SkillUsed {
+        /// Model-visible skill name from `SKILL.md` frontmatter.
+        skill_name: String,
+        /// Catalog-listed workspace-readable path to the skill body.
+        skill_md_path: String,
+        /// Tool call that read the skill body.
+        tool_call_id: ToolCallId,
+        /// Artifact that contains the read result.
+        artifact: ArtifactRef,
+    },
     /// The runtime was cancelled.
     Cancelled { diagnostic: ErrorInfo },
     /// The runtime failed.

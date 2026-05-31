@@ -350,6 +350,8 @@ The first vertical slice should prove:
 5. Tests verify body text is absent from the initial projection.
 6. Tests verify malformed skill files are reported and skipped.
 7. A smoke task can read a listed `SKILL.md` through `workspace_read_file`.
+8. Runtime emits `SkillUsed` after a successful `workspace_read_file` call
+   reads a catalog-listed `SKILL.md`.
 
 Suggested deterministic tests:
 
@@ -374,5 +376,3 @@ These should stay out of the MVP unless they become blockers:
 - Whether plugins should later bundle skills, MCP servers, apps, and config.
 - Whether explicit user syntax such as `$skill-name` should produce a direct
   body injection event instead of relying on the model to read the file.
-- Whether skill usage should emit a dedicated runtime event after the model
-  reads a skill body.

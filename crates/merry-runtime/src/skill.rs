@@ -212,6 +212,12 @@ impl SkillCatalog {
         &self.warnings
     }
 
+    pub(crate) fn find_by_skill_md_path(&self, path: &str) -> Option<&SkillMetadata> {
+        self.skills
+            .iter()
+            .find(|skill| skill.skill_md_path.to_string_lossy() == path)
+    }
+
     /// Renders this catalog as a cacheable stable-prefix message.
     ///
     /// The rendered text intentionally contains only metadata and usage rules.
