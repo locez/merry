@@ -1708,6 +1708,200 @@ async fn auto_compacted_agent_loop_continuation_preserves_original_task_text() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn auto_compacted_agent_loop_continuation_keeps_checkpoint_refs_and_stable_prefix() {
+    let original_task = format!(
+        "long coding loop task sentinel {}",
+        "inspect-read-patch-verify ".repeat(80)
+    );
+    let primary = ScriptedModelProvider::new(vec![
+        vec![Ok(completed_tool_call_event(model_tool_call(
+            "call-covered-search",
+            "search_notes",
+        )))],
+        vec![Ok(completed_tool_call_event(model_tool_call(
+            "call-retained-search",
+            "search_notes",
+        )))],
+        vec![Ok(completed_text_event(
+            "final after checkpointed continuation",
+        ))],
+    ])
+    .with_capabilities(
+        ModelCapabilities::new(true, true, false, true, Some(520), Some(16))
+            .expect("valid capabilities"),
+    );
+    let compactor = ScriptedModelProvider::new(vec![
+        vec![Ok(completed_text_event(
+            r#"{
+          "claims": [
+            {
+              "id": "c1",
+              "kind": "completed_action",
+              "text": "The covered opening task was checkpointed.",
+              "refs": ["r1"]
+            }
+          ],
+          "working_intent": {
+            "text": "Continue the original coding-loop task from the raw continuation request.",
+            "refs": ["r1"],
+            "confidence": 0.77
+          }
+        }"#,
+        ))],
+        vec![Ok(completed_text_event(
+            r#"{
+          "claims": [
+            {
+              "id": "c1",
+              "kind": "completed_action",
+              "text": "The prior checkpoint and first covered tool result were checkpointed.",
+              "refs": ["prior-c1", "r1"]
+            }
+          ],
+          "working_intent": null
+        }"#,
+        ))],
+    ]);
+    let policy = CitationCompactionPolicy::new(192, None, 8192, 1, 1200, 16).expect("valid policy");
+    let runtime = Runtime::builder(session_id("agent-loop-auto-compaction-checkpoint-refs"))
+        .project_rules(
+            ProjectRules::new("AGENTS.md", "Stable prefix rules sentinel.")
+                .expect("valid project rules"),
+        )
+        .task_anchor(
+            TaskAnchor::new("Complete the disposable coding-loop fixture.")
+                .expect("valid task anchor"),
+        )
+        .register_tool(merry_runtime::RegisteredTool::read_only(
+            tool_spec("search_notes"),
+            Arc::new(ScriptedToolExecutor::succeeding_text(
+                "covered tool result sentinel\n",
+            )),
+        ))
+        .model_provider(Arc::new(primary.clone()), model_name())
+        .model_provider_for_role(
+            RuntimeModelRole::ContextCompaction,
+            Arc::new(compactor.clone()),
+            ModelName::new("fake/compactor").expect("valid model"),
+        )
+        .automatic_compaction(AutomaticCompactionConfig::enabled(policy))
+        .build()
+        .expect("runtime should build");
+
+    let result = runtime
+        .run_agent_loop(
+            StepInput::user_text(&original_task).expect("valid step input"),
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::new(3).expect("valid loop config"),
+        )
+        .await
+        .expect("agent loop should run");
+
+    assert_eq!(result.status(), &AgentLoopStatus::Completed);
+    assert_eq!(result.steps_run(), 3);
+    assert_eq!(compactor.recorded_requests().len(), 2);
+
+    let compactor_requests = compactor.recorded_requests();
+    let first_compaction_request_text = compactor_requests[0]
+        .messages()
+        .iter()
+        .map(|message| message.content().as_text())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(first_compaction_request_text.contains("long coding loop task sentinel"));
+    assert!(!first_compaction_request_text.contains("covered tool result sentinel"));
+    assert!(!first_compaction_request_text.contains(DEFAULT_AGENT_LOOP_CONTINUATION_INPUT));
+
+    let second_compaction_request_text = compactor_requests[1]
+        .messages()
+        .iter()
+        .map(|message| message.content().as_text())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(second_compaction_request_text.contains("The covered opening task was checkpointed."));
+    assert!(second_compaction_request_text.contains("covered tool result sentinel"));
+    assert!(!second_compaction_request_text.contains("retained tool result sentinel"));
+    assert!(!second_compaction_request_text.contains(DEFAULT_AGENT_LOOP_CONTINUATION_INPUT));
+
+    let primary_requests = primary.recorded_requests();
+    assert_eq!(primary_requests.len(), 3);
+    let opening_request = &primary_requests[0];
+    let first_continuation_request = &primary_requests[1];
+    let final_continuation_request = &primary_requests[2];
+    assert_eq!(
+        opening_request.stable_prefix_hash(),
+        final_continuation_request.stable_prefix_hash(),
+        "auto-installed checkpoints and continuations must not move stable prefix"
+    );
+    assert!(
+        first_continuation_request.dynamic_context_hash()
+            != final_continuation_request.dynamic_context_hash(),
+        "checkpoint projection and continuation should change dynamic context"
+    );
+    assert!(
+        final_continuation_request
+            .continuations()
+            .iter()
+            .all(|continuation| continuation.call().id().as_str() != "call-covered-search"),
+        "covered tool continuation should be removed after successful auto compaction"
+    );
+    assert_eq!(
+        final_continuation_request.continuations().len(),
+        1,
+        "latest retained tool continuation should remain raw after compaction"
+    );
+    assert_eq!(
+        final_continuation_request.continuations()[0]
+            .call()
+            .id()
+            .as_str(),
+        "call-retained-search"
+    );
+
+    let stable_text = final_continuation_request
+        .stable_prefix_messages()
+        .iter()
+        .map(|message| message.content().as_text())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(stable_text.contains("Stable prefix rules sentinel."));
+    assert!(!stable_text.contains("compacted-checkpoint:"));
+
+    let dynamic_text = final_continuation_request
+        .dynamic_messages()
+        .iter()
+        .map(|message| message.content().as_text())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(dynamic_text.contains("task-anchor:"));
+    assert!(dynamic_text.contains("compacted-checkpoint:"));
+    assert!(
+        dynamic_text
+            .contains("The prior checkpoint and first covered tool result were checkpointed.")
+    );
+    assert!(!dynamic_text.contains("The covered opening task was checkpointed."));
+    assert!(dynamic_text.contains(DEFAULT_AGENT_LOOP_CONTINUATION_INPUT));
+    assert!(dynamic_text.contains(&format!("Original task:\n{original_task}")));
+    assert!(!dynamic_text.contains("covered tool result sentinel"));
+
+    let ref_excerpt = runtime
+        .read_checkpoint_ref(
+            &merry_runtime::CheckpointId::new(
+                "checkpoint-agent-loop-auto-compaction-checkpoint-refs-3",
+            )
+            .expect("valid checkpoint id"),
+            &merry_runtime::CheckpointRefId::new("r1").expect("valid ref id"),
+        )
+        .await
+        .expect("checkpoint ref resolves");
+    assert!(
+        ref_excerpt
+            .excerpt()
+            .contains("covered tool result sentinel")
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn auto_compaction_config_can_disable_hard_watermark_compaction() {
     let primary = ScriptedModelProvider::new(vec![
         vec![Ok(completed_text_event("old assistant no auto compaction"))],
