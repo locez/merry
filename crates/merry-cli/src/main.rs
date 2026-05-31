@@ -1823,6 +1823,16 @@ fn build_coding_loop_runtime(
     if !options.skill_roots.is_empty() {
         let catalog = merry_runtime::SkillCatalog::load_from_roots(options.skill_roots.clone())
             .map_err(unexpected)?;
+        let skill_names = catalog
+            .skills()
+            .iter()
+            .map(|skill| skill.name())
+            .collect::<Vec<_>>();
+        let skill_paths = catalog
+            .skills()
+            .iter()
+            .map(|skill| skill.skill_md_path().display().to_string())
+            .collect::<Vec<_>>();
         tracing::info!(
             event = "runtime.skill_catalog.load",
             session_id,
@@ -1834,6 +1844,8 @@ fn build_coding_loop_runtime(
                 .count(),
             skill_count = catalog.skills().len(),
             warning_count = catalog.warnings().len(),
+            skill_names = ?skill_names,
+            skill_paths = ?skill_paths,
             "runtime skill catalog loaded"
         );
         builder = builder.skill_catalog(catalog);
@@ -3595,6 +3607,9 @@ mod tests {
         assert!(log.contains("\"readable_root_count\":1"));
         assert!(log.contains("\"skill_count\":1"));
         assert!(log.contains("\"warning_count\":0"));
+        assert!(log.contains("demo-skill"));
+        assert!(log.contains("demo/SKILL.md"));
+        assert!(!log.contains("Use for demo tasks."));
         assert!(!log.contains("body sentinel"));
     }
 
