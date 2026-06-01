@@ -47,8 +47,12 @@ const CODING_LOOP_SMOKE_SESSION_ID: &str = "coding-loop-smoke";
 const CODING_LOOP_LIVE_SMOKE_SESSION_ID: &str = "coding-loop-live-smoke";
 const CODING_LOOP_TASK_SMOKE_SESSION_ID: &str = "coding-loop-task-smoke";
 const CODING_LOOP_TASK_LIVE_SMOKE_SESSION_ID: &str = "coding-loop-task-live-smoke";
+const CODING_LOOP_SUBAGENT_LIVE_SMOKE_SESSION_ID: &str = "coding-loop-subagent-live-smoke";
 const CODING_LOOP_LIVE_SMOKE_INITIAL_VALUE: &str = "unfixed";
 const CODING_LOOP_LIVE_SMOKE_TARGET_VALUE: &str = "fixed-by-live-llm";
+const CODING_LOOP_SUBAGENT_LIVE_SMOKE_FILE: &str = "subagent-output.txt";
+const CODING_LOOP_SUBAGENT_LIVE_SMOKE_INITIAL: &str = "status: pending\n";
+const CODING_LOOP_SUBAGENT_LIVE_SMOKE_TARGET: &str = "status: subagent-live-smoke-complete\n";
 const CODING_LOOP_TASK_SMOKE_MAX_PATCH_BYTES: usize = 256;
 const SHELL_TOOL_NAME: &str = "shell_command";
 const SHELL_TOOL_CALL_ID: &str = "call-shell-command";
@@ -221,6 +225,11 @@ enum DebugCommand {
         about = "Run an opt-in sandboxed coding-loop task smoke driven by a live OpenAI-compatible model"
     )]
     CodingLoopTaskLiveSmoke(DebugCodingLoopTaskLiveSmokeArgs),
+    #[command(
+        name = "coding-loop-subagent-live-smoke",
+        about = "Run an opt-in sandboxed coding-loop smoke that requires a live model to delegate to a child agent"
+    )]
+    CodingLoopSubagentLiveSmoke(DebugCodingLoopSubagentLiveSmokeArgs),
 }
 
 #[derive(Debug, Args)]
@@ -300,6 +309,26 @@ struct DebugCodingLoopTaskLiveSmokeArgs {
     )]
     task: CodingLoopTaskSmokeTask,
 
+    #[arg(
+        long,
+        value_name = "MODEL",
+        allow_hyphen_values = true,
+        help = "Model name; overrides [providers.default].model"
+    )]
+    model: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "N",
+        value_parser = parse_max_output_tokens,
+        default_value_t = 768,
+        help = "Maximum output tokens for each live model step"
+    )]
+    max_output_tokens: u64,
+}
+
+#[derive(Debug, Args)]
+struct DebugCodingLoopSubagentLiveSmokeArgs {
     #[arg(
         long,
         value_name = "MODEL",
@@ -529,6 +558,37 @@ async fn async_main(cli: Cli, merry_config: Option<MerryConfig>) -> CliExit {
             Err(CliError::DebugOpenAiUsage(message)) => CliExit::Usage {
                 message,
                 usage: debug_coding_loop_task_live_smoke_usage(),
+            },
+            Err(CliError::ShellUsage(message)) => CliExit::Usage {
+                message,
+                usage: shell_usage(),
+            },
+            Err(CliError::Unexpected(message)) => CliExit::Unexpected(message),
+        },
+        CliCommand::Debug(DebugArgs {
+            command:
+                Some(DebugCommand::CodingLoopSubagentLiveSmoke(DebugCodingLoopSubagentLiveSmokeArgs {
+                    model,
+                    max_output_tokens,
+                })),
+            ..
+        }) => match run_debug_coding_loop_subagent_live_smoke(
+            sandbox_child_handoff,
+            model.as_deref(),
+            max_output_tokens,
+            merry_config.as_ref(),
+        )
+        .await
+        {
+            Ok(()) => CliExit::Success,
+            Err(CliError::BrokenPipe) => CliExit::Success,
+            Err(CliError::DebugUsage(message)) => CliExit::Usage {
+                message,
+                usage: debug_usage(),
+            },
+            Err(CliError::DebugOpenAiUsage(message)) => CliExit::Usage {
+                message,
+                usage: debug_coding_loop_subagent_live_smoke_usage(),
             },
             Err(CliError::ShellUsage(message)) => CliExit::Usage {
                 message,
@@ -1259,6 +1319,69 @@ async fn run_debug_coding_loop_task_live_smoke(
     assertion
 }
 
+async fn run_debug_coding_loop_subagent_live_smoke(
+    sandbox_child_handoff: Option<SandboxChildHandoff>,
+    model_flag: Option<&str>,
+    max_output_tokens: u64,
+    merry_config: Option<&MerryConfig>,
+) -> Result<(), CliError> {
+    let Some(admission) =
+        coding_loop_smoke_admission_from_current_process(sandbox_child_handoff).await
+    else {
+        return Err(coding_loop_smoke_requires_sandbox_error(
+            "coding-loop-subagent-live-smoke",
+        ));
+    };
+    let config = debug_openai_config(model_flag, merry_config)?;
+
+    let smoke_root = prepare_coding_loop_subagent_live_smoke_fixture()?;
+    let automatic_compaction = automatic_compaction_config(merry_config).map_err(unexpected)?;
+    let skill_roots = merry_config
+        .map(MerryConfig::skill_roots)
+        .transpose()
+        .map_err(unexpected)?
+        .unwrap_or_default();
+    let runtime = build_coding_loop_subagent_live_smoke_runtime(
+        &smoke_root,
+        admission,
+        config,
+        Arc::new(TokioProcessRunner::new_at_workspace_root(&smoke_root)),
+        CodingLoopLiveRuntimeOptions {
+            automatic_compaction,
+            skill_roots,
+            subagents: coding_loop_subagent_live_smoke_config()?,
+        },
+    )?;
+    let generation_config =
+        GenerationConfig::new(Some(max_output_tokens), false).map_err(debug_openai_usage_error)?;
+    let context = StepContext::default().with_generation_config(generation_config);
+
+    let result = runtime
+        .run_agent_loop(
+            StepInput::user_text(&coding_loop_subagent_live_smoke_task()).map_err(unexpected)?,
+            context,
+            AgentLoopConfig::new(12).map_err(unexpected)?,
+        )
+        .await
+        .map_err(unexpected)?;
+
+    let assertion =
+        assert_coding_loop_subagent_live_smoke_result(&runtime, &result, &smoke_root).await;
+
+    let mut writer = BufWriter::new(tokio::io::stdout());
+    write_coding_loop_subagent_live_smoke_report(
+        &runtime,
+        assertion.is_ok(),
+        result.events(),
+        &smoke_root,
+        &mut writer,
+    )
+    .await?;
+    writer.flush().await.map_err(stdout_error)?;
+
+    assertion
+}
+
 async fn coding_loop_smoke_admission_from_current_process(
     sandbox_child_handoff: Option<SandboxChildHandoff>,
 ) -> Option<AcceptedLocalWorkspaceProcessAdmission> {
@@ -1395,6 +1518,34 @@ async fn assert_coding_loop_task_live_smoke_result(
     Ok(())
 }
 
+async fn assert_coding_loop_subagent_live_smoke_result(
+    runtime: &Runtime,
+    result: &merry_runtime::AgentLoopResult,
+    smoke_root: &Path,
+) -> Result<(), CliError> {
+    if result.status() != &AgentLoopStatus::Completed {
+        return Err(CliError::Unexpected(format!(
+            "coding-loop-subagent-live-smoke did not complete: {:?}",
+            result.status()
+        )));
+    }
+    if !runtime.pending_tool_calls().await.is_empty() {
+        return Err(CliError::Unexpected(
+            "coding-loop-subagent-live-smoke left pending tool calls".to_owned(),
+        ));
+    }
+
+    let patched = fs::read_to_string(smoke_root.join(CODING_LOOP_SUBAGENT_LIVE_SMOKE_FILE))
+        .map_err(unexpected)?;
+    if patched != CODING_LOOP_SUBAGENT_LIVE_SMOKE_TARGET {
+        return Err(CliError::Unexpected(format!(
+            "coding-loop-subagent-live-smoke fixture `{CODING_LOOP_SUBAGENT_LIVE_SMOKE_FILE}` was not patched by the child"
+        )));
+    }
+
+    assert_coding_loop_subagent_live_smoke_tool_sequence(runtime, result.events()).await
+}
+
 fn assert_coding_loop_task_smoke_uses_small_patch(
     events: &[RuntimeEvent],
     fixture: CodingLoopTaskSmokeFixture,
@@ -1458,6 +1609,204 @@ fn workspace_patch_envelope_is_accepted(patch: &str) -> bool {
         || (patch.starts_with("*** Begin Patch\n") && patch.ends_with("*** End Patch"))
 }
 
+async fn assert_coding_loop_subagent_live_smoke_tool_sequence(
+    runtime: &Runtime,
+    events: &[RuntimeEvent],
+) -> Result<(), CliError> {
+    let mut pending_by_call_id = BTreeMap::new();
+    let mut resolved_tool_names = Vec::new();
+    let mut resolved_read_paths = Vec::new();
+    let mut spawn_call_id = None;
+    let mut wait_call_id = None;
+    let mut parent_patch_call_seen = false;
+    for event in events {
+        match &event.kind {
+            RuntimeEventKind::ToolCallPending { call } => {
+                pending_by_call_id.insert(call.id().clone(), call.clone());
+                match call.name().as_str() {
+                    "spawn_subagents" => spawn_call_id = Some(call.id().clone()),
+                    "wait_subagents" => wait_call_id = Some(call.id().clone()),
+                    WORKSPACE_PATCH_TOOL => parent_patch_call_seen = true,
+                    _ => {}
+                }
+            }
+            RuntimeEventKind::ToolCallResolved { result } => {
+                if result.status() != ToolCallResultStatus::Succeeded {
+                    return Err(CliError::Unexpected(format!(
+                        "coding-loop-subagent-live-smoke tool call {} did not succeed",
+                        result.call_id()
+                    )));
+                }
+                let call = pending_by_call_id.get(result.call_id()).ok_or_else(|| {
+                    CliError::Unexpected(format!(
+                        "coding-loop-subagent-live-smoke resolved unknown tool call {}",
+                        result.call_id()
+                    ))
+                })?;
+                resolved_tool_names.push(call.name().as_str().to_owned());
+                if call.name().as_str() == WORKSPACE_READ_FILE_TOOL
+                    && result.status() == ToolCallResultStatus::Succeeded
+                    && let Some(path) = call
+                        .arguments()
+                        .as_object()
+                        .get("path")
+                        .and_then(serde_json::Value::as_str)
+                {
+                    resolved_read_paths.push(path.to_owned());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    require_live_smoke_tool_name(&resolved_tool_names, "spawn_subagents")?;
+    require_live_smoke_tool_name(&resolved_tool_names, "wait_subagents")?;
+    require_live_smoke_tool_name(&resolved_tool_names, WORKSPACE_READ_FILE_TOOL)?;
+    if !resolved_read_paths
+        .iter()
+        .any(|path| path == CODING_LOOP_SUBAGENT_LIVE_SMOKE_FILE)
+    {
+        return Err(CliError::Unexpected(
+            "coding-loop-subagent-live-smoke did not read back the child-edited fixture".to_owned(),
+        ));
+    }
+    if parent_patch_call_seen {
+        return Err(CliError::Unexpected(
+            "coding-loop-subagent-live-smoke parent should not patch the fixture".to_owned(),
+        ));
+    }
+
+    let Some(spawn_call_id) = spawn_call_id else {
+        return Err(CliError::Unexpected(
+            "coding-loop-subagent-live-smoke did not call spawn_subagents".to_owned(),
+        ));
+    };
+    let Some(wait_call_id) = wait_call_id else {
+        return Err(CliError::Unexpected(
+            "coding-loop-subagent-live-smoke did not call wait_subagents".to_owned(),
+        ));
+    };
+
+    let spawn_call = pending_by_call_id
+        .get(&spawn_call_id)
+        .ok_or_else(|| CliError::Unexpected("spawn_subagents call was not recorded".to_owned()))?;
+    let spawn_args = spawn_call.arguments().as_object();
+    let Some(tasks) = spawn_args
+        .get("tasks")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Err(CliError::Unexpected(
+            "coding-loop-subagent-live-smoke spawn args did not include tasks".to_owned(),
+        ));
+    };
+    if tasks.len() != 1 {
+        return Err(CliError::Unexpected(format!(
+            "coding-loop-subagent-live-smoke expected exactly one child task, saw {}",
+            tasks.len()
+        )));
+    }
+    let task = tasks[0].as_object().ok_or_else(|| {
+        CliError::Unexpected(
+            "coding-loop-subagent-live-smoke child task payload was not an object".to_owned(),
+        )
+    })?;
+    let read_scope = task
+        .get("read_scope")
+        .and_then(serde_json::Value::as_array)
+        .map(|paths| {
+            paths
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if !read_scope.contains(&CODING_LOOP_SUBAGENT_LIVE_SMOKE_FILE) {
+        return Err(CliError::Unexpected(
+            "coding-loop-subagent-live-smoke child task should be scoped to read the fixture file"
+                .to_owned(),
+        ));
+    }
+    let write_scope = task
+        .get("write_scope")
+        .and_then(serde_json::Value::as_array)
+        .map(|paths| {
+            paths
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if !write_scope.contains(&CODING_LOOP_SUBAGENT_LIVE_SMOKE_FILE) {
+        return Err(CliError::Unexpected(
+            "coding-loop-subagent-live-smoke child task should be scoped to the fixture file"
+                .to_owned(),
+        ));
+    }
+
+    let wait_call = pending_by_call_id
+        .get(&wait_call_id)
+        .ok_or_else(|| CliError::Unexpected("wait_subagents call was not recorded".to_owned()))?;
+    let wait_args = wait_call.arguments().as_object();
+    let Some(agent_ids) = wait_args
+        .get("agent_ids")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Err(CliError::Unexpected(
+            "coding-loop-subagent-live-smoke wait args did not include agent_ids".to_owned(),
+        ));
+    };
+    if agent_ids.len() != 1 {
+        return Err(CliError::Unexpected(format!(
+            "coding-loop-subagent-live-smoke expected exactly one waited child, saw {}",
+            agent_ids.len()
+        )));
+    }
+    let wait_mode = wait_args.get("mode").and_then(serde_json::Value::as_str);
+    if wait_mode != Some("all") {
+        return Err(CliError::Unexpected(
+            "coding-loop-subagent-live-smoke wait mode was not `all`".to_owned(),
+        ));
+    }
+    let Some(first_agent_id) = agent_ids.first().and_then(serde_json::Value::as_str) else {
+        return Err(CliError::Unexpected(
+            "coding-loop-subagent-live-smoke wait args did not contain a child agent id".to_owned(),
+        ));
+    };
+    if !first_agent_id.starts_with("agent-") {
+        return Err(CliError::Unexpected(
+            "coding-loop-subagent-live-smoke child agent id was not runtime-generated".to_owned(),
+        ));
+    }
+
+    let Some(snapshot) = runtime.subagent_snapshot().await else {
+        return Err(CliError::Unexpected(
+            "coding-loop-subagent-live-smoke runtime did not expose a subagent snapshot".to_owned(),
+        ));
+    };
+    if snapshot.len() != 1 {
+        return Err(CliError::Unexpected(format!(
+            "coding-loop-subagent-live-smoke expected one subagent in the snapshot, saw {}",
+            snapshot.len()
+        )));
+    }
+    let child = &snapshot[0];
+    if child.status.as_str() != "completed" {
+        return Err(CliError::Unexpected(format!(
+            "coding-loop-subagent-live-smoke child status was not completed: {:?}",
+            child.status
+        )));
+    }
+    if child.agent_id.as_str() != first_agent_id {
+        return Err(CliError::Unexpected(format!(
+            "coding-loop-subagent-live-smoke snapshot child id {} did not match wait target {}",
+            child.agent_id.as_str(),
+            first_agent_id
+        )));
+    }
+
+    Ok(())
+}
+
 fn assert_coding_loop_smoke_tool_results(events: &[RuntimeEvent]) -> Result<(), CliError> {
     let statuses = events
         .iter()
@@ -1514,6 +1863,16 @@ fn prepare_coding_loop_smoke_fixture(name: &str) -> Result<PathBuf, CliError> {
     )
     .map_err(unexpected)?;
     fs::write(root.join("src/lib.rs"), coding_loop_smoke_initial_source()).map_err(unexpected)?;
+    Ok(root)
+}
+
+fn prepare_coding_loop_subagent_live_smoke_fixture() -> Result<PathBuf, CliError> {
+    let root = prepare_coding_loop_smoke_fixture(CODING_LOOP_SUBAGENT_LIVE_SMOKE_SESSION_ID)?;
+    fs::write(
+        root.join(CODING_LOOP_SUBAGENT_LIVE_SMOKE_FILE),
+        CODING_LOOP_SUBAGENT_LIVE_SMOKE_INITIAL,
+    )
+    .map_err(unexpected)?;
     Ok(root)
 }
 
@@ -1805,6 +2164,41 @@ fn build_coding_loop_task_live_smoke_runtime(
     )
 }
 
+fn build_coding_loop_subagent_live_smoke_runtime(
+    root: &Path,
+    admission: AcceptedLocalWorkspaceProcessAdmission,
+    config: DebugOpenAiRuntimeConfig,
+    runner: Arc<dyn ProcessRunner>,
+    options: CodingLoopLiveRuntimeOptions,
+) -> Result<Runtime, CliError> {
+    let provider = OpenAiProvider::new(config.primary.provider);
+    let context_compaction = config
+        .context_compaction
+        .map(openai_role_provider)
+        .transpose()?;
+    build_coding_loop_runtime(
+        CODING_LOOP_SUBAGENT_LIVE_SMOKE_SESSION_ID,
+        root,
+        admission,
+        Arc::new(provider),
+        ModelName::new(&config.primary.model).map_err(debug_openai_usage_error)?,
+        runner,
+        CodingLoopRuntimeOptions {
+            allow_hidden_workspace_paths: false,
+            automatic_compaction: options.automatic_compaction,
+            context_compaction,
+            skill_roots: options.skill_roots,
+            subagents: options.subagents,
+        },
+    )
+}
+
+fn coding_loop_subagent_live_smoke_config() -> Result<config::SubagentsConfig, CliError> {
+    Ok(config::SubagentsConfig::enabled(
+        merry_runtime::SubagentConfig::new(2, 1).map_err(unexpected)?,
+    ))
+}
+
 struct CodingLoopLiveRuntimeOptions {
     automatic_compaction: AutomaticCompactionConfig,
     skill_roots: Vec<PathBuf>,
@@ -2066,6 +2460,37 @@ pub fn greeting() -> &'static str {{
         patch_tool = WORKSPACE_PATCH_TOOL,
         initial = CODING_LOOP_LIVE_SMOKE_INITIAL_VALUE,
         target = CODING_LOOP_LIVE_SMOKE_TARGET_VALUE,
+    )
+}
+
+fn coding_loop_subagent_live_smoke_task() -> String {
+    format!(
+        "\
+You are driving Merry's minimal live subagent smoke.
+
+You must delegate the work to a child agent before you finish.
+
+Required sequence:
+1. Call `spawn_subagents` with exactly one child task.
+2. The child task must use `workspace_read_file` and `workspace_patch` only.
+3. The child task must read `{file}` and patch it from:
+   {initial}to:
+   {target}
+4. The child task must declare `allowed_tools` as `[\"workspace_read_file\", \"workspace_patch\"]`.
+5. The child task must declare `read_scope` and `write_scope` as `[\"{file}\"]`.
+6. After spawning, call `wait_subagents` for the returned child id with mode `all`.
+7. After the child reports completion, call `workspace_read_file` on `{file}` and verify the exact final content.
+8. Return a concise final answer only after the verification read succeeds.
+
+Constraints:
+- The parent agent must not patch the fixture directly.
+- Do not use more than one child task.
+- Do not answer from memory.
+- Keep the final result short.
+",
+        file = CODING_LOOP_SUBAGENT_LIVE_SMOKE_FILE,
+        initial = CODING_LOOP_SUBAGENT_LIVE_SMOKE_INITIAL,
+        target = CODING_LOOP_SUBAGENT_LIVE_SMOKE_TARGET,
     )
 }
 
@@ -2817,6 +3242,69 @@ where
     write_process_artifact_previews(runtime, events, writer).await
 }
 
+async fn write_coding_loop_subagent_live_smoke_report<W>(
+    runtime: &Runtime,
+    passed: bool,
+    events: &[RuntimeEvent],
+    smoke_root: &Path,
+    writer: &mut W,
+) -> Result<(), CliError>
+where
+    W: AsyncWrite + Unpin,
+{
+    let header = if passed {
+        b"coding-loop-subagent-live-smoke: ok\n".as_slice()
+    } else {
+        b"coding-loop-subagent-live-smoke: failed\n".as_slice()
+    };
+    writer.write_all(header).await.map_err(stdout_error)?;
+    write_runtime_event_slice(events, writer).await?;
+    write_subagent_snapshot_summary(runtime, writer).await?;
+    write_subagent_fixture_summary(smoke_root, writer).await
+}
+
+async fn write_subagent_snapshot_summary<W>(
+    runtime: &Runtime,
+    writer: &mut W,
+) -> Result<(), CliError>
+where
+    W: AsyncWrite + Unpin,
+{
+    let line = serde_json::json!({
+        "type": "subagent_snapshot",
+        "agents": runtime.subagent_snapshot().await,
+    });
+    let line = serde_json::to_string(&line).map_err(unexpected)?;
+    writer
+        .write_all(line.as_bytes())
+        .await
+        .map_err(stdout_error)?;
+    writer.write_all(b"\n").await.map_err(stdout_error)
+}
+
+async fn write_subagent_fixture_summary<W>(
+    smoke_root: &Path,
+    writer: &mut W,
+) -> Result<(), CliError>
+where
+    W: AsyncWrite + Unpin,
+{
+    let content = fs::read_to_string(smoke_root.join(CODING_LOOP_SUBAGENT_LIVE_SMOKE_FILE))
+        .unwrap_or_else(|error| format!("unreadable fixture file: {error}"));
+    let line = serde_json::json!({
+        "type": "subagent_live_smoke_fixture",
+        "path": CODING_LOOP_SUBAGENT_LIVE_SMOKE_FILE,
+        "content": content,
+        "target_matched": content == CODING_LOOP_SUBAGENT_LIVE_SMOKE_TARGET,
+    });
+    let line = serde_json::to_string(&line).map_err(unexpected)?;
+    writer
+        .write_all(line.as_bytes())
+        .await
+        .map_err(stdout_error)?;
+    writer.write_all(b"\n").await.map_err(stdout_error)
+}
+
 async fn write_compaction_config_summary<W>(
     automatic_compaction: AutomaticCompactionConfig,
     writer: &mut W,
@@ -3243,6 +3731,18 @@ fn debug_coding_loop_task_live_smoke_usage() -> String {
     command_usage(&mut command)
 }
 
+fn debug_coding_loop_subagent_live_smoke_usage() -> String {
+    let mut command = DebugCodingLoopSubagentLiveSmokeArgs::augment_args(clap::Command::new(
+        "coding-loop-subagent-live-smoke",
+    ))
+    .bin_name("merry debug coding-loop-subagent-live-smoke")
+    .about(
+        "Run an opt-in sandboxed coding-loop smoke that requires a live model to delegate to a child agent",
+    )
+    .after_help(OPENAI_ENV_HELP);
+    command_usage(&mut command)
+}
+
 fn command_usage(command: &mut clap::Command) -> String {
     let mut buffer = Vec::new();
     command
@@ -3475,7 +3975,8 @@ mod tests {
                     DebugCommand::CodingLoopSmoke
                     | DebugCommand::CodingLoopLiveSmoke(_)
                     | DebugCommand::CodingLoopTaskSmoke(_)
-                    | DebugCommand::CodingLoopTaskLiveSmoke(_),
+                    | DebugCommand::CodingLoopTaskLiveSmoke(_)
+                    | DebugCommand::CodingLoopSubagentLiveSmoke(_),
                 ) => panic!("expected debug openai subcommand"),
                 None => panic!("expected debug openai subcommand"),
             },
@@ -3495,7 +3996,8 @@ mod tests {
                     DebugCommand::OpenAi(_)
                     | DebugCommand::CodingLoopLiveSmoke(_)
                     | DebugCommand::CodingLoopTaskSmoke(_)
-                    | DebugCommand::CodingLoopTaskLiveSmoke(_),
+                    | DebugCommand::CodingLoopTaskLiveSmoke(_)
+                    | DebugCommand::CodingLoopSubagentLiveSmoke(_),
                 )
                 | None => panic!("expected debug coding-loop-smoke subcommand"),
             },
@@ -3526,7 +4028,8 @@ mod tests {
                     DebugCommand::OpenAi(_)
                     | DebugCommand::CodingLoopSmoke
                     | DebugCommand::CodingLoopTaskSmoke(_)
-                    | DebugCommand::CodingLoopTaskLiveSmoke(_),
+                    | DebugCommand::CodingLoopTaskLiveSmoke(_)
+                    | DebugCommand::CodingLoopSubagentLiveSmoke(_),
                 )
                 | None => panic!("expected debug coding-loop-live-smoke subcommand"),
             },
@@ -3548,7 +4051,8 @@ mod tests {
                     DebugCommand::OpenAi(_)
                     | DebugCommand::CodingLoopSmoke
                     | DebugCommand::CodingLoopLiveSmoke(_)
-                    | DebugCommand::CodingLoopTaskLiveSmoke(_),
+                    | DebugCommand::CodingLoopTaskLiveSmoke(_)
+                    | DebugCommand::CodingLoopSubagentLiveSmoke(_),
                 )
                 | None => panic!("expected debug coding-loop-task-smoke subcommand"),
             },
@@ -3582,12 +4086,57 @@ mod tests {
                     DebugCommand::OpenAi(_)
                     | DebugCommand::CodingLoopSmoke
                     | DebugCommand::CodingLoopLiveSmoke(_)
-                    | DebugCommand::CodingLoopTaskSmoke(_),
+                    | DebugCommand::CodingLoopTaskSmoke(_)
+                    | DebugCommand::CodingLoopSubagentLiveSmoke(_),
                 )
                 | None => panic!("expected debug coding-loop-task-live-smoke subcommand"),
             },
             CliCommand::Shell(_) => panic!("expected debug subcommand"),
         }
+    }
+
+    #[test]
+    fn clap_parses_debug_coding_loop_subagent_live_smoke() {
+        let cli = Cli::try_parse_from([
+            "merry",
+            "debug",
+            "coding-loop-subagent-live-smoke",
+            "--model",
+            "gpt-test",
+            "--max-output-tokens",
+            "384",
+        ])
+        .expect("debug coding-loop-subagent-live-smoke args should parse");
+
+        match cli.command {
+            CliCommand::Debug(debug) => match debug.command {
+                Some(DebugCommand::CodingLoopSubagentLiveSmoke(live)) => {
+                    assert_eq!(live.model.as_deref(), Some("gpt-test"));
+                    assert_eq!(live.max_output_tokens, 384);
+                }
+                Some(
+                    DebugCommand::OpenAi(_)
+                    | DebugCommand::CodingLoopSmoke
+                    | DebugCommand::CodingLoopLiveSmoke(_)
+                    | DebugCommand::CodingLoopTaskSmoke(_)
+                    | DebugCommand::CodingLoopTaskLiveSmoke(_),
+                )
+                | None => panic!("expected debug coding-loop-subagent-live-smoke subcommand"),
+            },
+            CliCommand::Shell(_) => panic!("expected debug subcommand"),
+        }
+    }
+
+    #[test]
+    fn coding_loop_subagent_live_prompt_forces_parent_delegation_and_child_patch() {
+        let prompt = super::coding_loop_subagent_live_smoke_task();
+
+        assert!(prompt.contains("Call `spawn_subagents` with exactly one child task"));
+        assert!(prompt.contains("call `wait_subagents`"));
+        assert!(prompt.contains("The parent agent must not patch"));
+        assert!(prompt.contains("\"workspace_read_file\", \"workspace_patch\""));
+        assert!(prompt.contains("\"subagent-output.txt\""));
+        assert!(prompt.contains(super::CODING_LOOP_SUBAGENT_LIVE_SMOKE_TARGET.trim()));
     }
 
     #[tokio::test]

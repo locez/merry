@@ -597,12 +597,16 @@ pub struct SubagentsConfig {
 }
 
 impl SubagentsConfig {
-    #[cfg(test)]
-    pub(crate) fn enabled_for_test(limits: merry_runtime::SubagentConfig) -> Self {
+    pub(crate) fn enabled(limits: merry_runtime::SubagentConfig) -> Self {
         Self {
             enabled: true,
             limits,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn enabled_for_test(limits: merry_runtime::SubagentConfig) -> Self {
+        Self::enabled(limits)
     }
 
     #[must_use]
