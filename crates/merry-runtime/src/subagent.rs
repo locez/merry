@@ -1,12 +1,14 @@
 //! Runtime-owned parallel subagent tool contracts.
 
 use crate::{
-    AgentLoopConfig, AgentLoopStatus, RegisteredTool, Runtime, RuntimeError, StepContext,
-    StepInput, TaskAnchor, ToolActionKind, ToolExecutionContext, ToolExecutionError,
-    ToolExecutionOutcome, ToolExecutionResult, ToolExecutor, ToolExecutorFuture,
+    AgentLoopConfig, AgentLoopResult, AgentLoopStatus, ArtifactContent, RegisteredTool, Runtime,
+    RuntimeError, StepContext, StepInput, TaskAnchor, ToolActionKind, ToolExecutionContext,
+    ToolExecutionError, ToolExecutionOutcome, ToolExecutionResult, ToolExecutor,
+    ToolExecutorFuture,
 };
 use merry_core::{
-    ErrorInfo, PendingToolCall, SubagentId, SubagentTaskId, ToolInputSchema, ToolName, ToolSpec,
+    ErrorInfo, PendingToolCall, RuntimeEvent, RuntimeEventKind, SubagentId, SubagentTaskId,
+    ToolCallResultStatus, ToolInputSchema, ToolName, ToolSpec,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -29,6 +31,7 @@ pub(crate) const SPAWN_SUBAGENTS_TOOL_NAME: &str = "spawn_subagents";
 pub(crate) const WAIT_SUBAGENTS_TOOL_NAME: &str = "wait_subagents";
 /// Provider-visible tool name for cancelling child agents.
 pub(crate) const CANCEL_SUBAGENTS_TOOL_NAME: &str = "cancel_subagents";
+const WORKSPACE_PATCH_TOOL_NAME: &str = "workspace_patch";
 
 /// Maximum UTF-8 task text size accepted for one child task.
 pub(crate) const MAX_TASK_BYTES: usize = 16 * 1024;
@@ -520,12 +523,33 @@ pub struct SubagentStatusView {
     pub status: SubagentStatusLabel,
     /// Compact result or progress summary.
     pub summary: String,
+    /// Explicit child result reported by the child loop, when it reached one.
+    pub result: Option<SubagentResultView>,
     /// Shared-workspace output paths for exact follow-up reads.
     pub output_paths: Vec<String>,
     /// Shared-workspace paths changed by the child.
     pub changed_paths: Vec<String>,
     /// Optional compact failure/cancellation diagnostics.
     pub diagnostics: Option<ErrorInfo>,
+}
+
+/// Explicit result returned by a child agent to its parent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SubagentResultView {
+    /// Child-authored conclusion. This is not truncated by runtime.
+    pub conclusion: String,
+}
+
+impl SubagentResultView {
+    fn from_conclusion(conclusion: impl Into<String>) -> Option<Self> {
+        let conclusion = conclusion.into();
+        if conclusion.trim().is_empty() {
+            None
+        } else {
+            Some(Self { conclusion })
+        }
+    }
 }
 
 impl SubagentStatusView {
@@ -543,6 +567,7 @@ impl SubagentStatusView {
             task_id,
             status: SubagentStatusLabel::Completed,
             summary: summary.into(),
+            result: None,
             output_paths,
             changed_paths,
             diagnostics: None,
@@ -627,6 +652,7 @@ struct ManagedSubagent {
     task_anchor: TaskAnchor,
     status: SubagentStatusLabel,
     summary: String,
+    result: Option<SubagentResultView>,
     output_paths: Vec<String>,
     changed_paths: Vec<String>,
     diagnostics: Option<ErrorInfo>,
@@ -724,6 +750,7 @@ impl SubagentManager {
                 task_anchor: task_anchor.clone(),
                 status: managed_status.clone(),
                 summary: initial_summary(managed_status),
+                result: None,
                 output_paths: Vec::new(),
                 changed_paths: Vec::new(),
                 diagnostics: None,
@@ -956,6 +983,7 @@ impl ManagedSubagent {
             task_id: self.task_id.clone(),
             status: self.status.clone(),
             summary,
+            result: self.result.clone(),
             output_paths: self.output_paths.clone(),
             changed_paths: self.changed_paths.clone(),
             diagnostics: self.diagnostics.clone(),
@@ -1452,6 +1480,10 @@ fn spawn_child_loop(scheduler: ChildScheduler, launch: ChildLoopLaunch) {
             .runtime
             .run_agent_loop(input, StepContext::new(launch.token), config)
             .await;
+        let child_projection = match &loop_result {
+            Ok(result) => ChildLoopProjection::from_result(&launch.runtime, result).await,
+            Err(_) => ChildLoopProjection::default(),
+        };
 
         let mut state_guard = scheduler.state.lock().await;
         if let Some(agent) = state_guard.agents.get_mut(&launch.agent_id) {
@@ -1464,10 +1496,11 @@ fn spawn_child_loop(scheduler: ChildScheduler, launch: ChildLoopLaunch) {
                 return;
             }
             match loop_result {
-                Ok(result) => apply_loop_status(agent, result.status()),
+                Ok(result) => apply_loop_result(agent, &result, child_projection),
                 Err(error) => {
                     agent.status = SubagentStatusLabel::Failed;
                     agent.summary = "child runtime error".to_owned();
+                    agent.result = None;
                     agent.diagnostics =
                         Some(error_info("subagent_runtime_error", error.to_string()));
                 }
@@ -1514,8 +1547,39 @@ fn fallback_summary(status: SubagentStatusLabel, task: &SubagentTaskSpec) -> Str
     }
 }
 
-fn apply_loop_status(agent: &mut ManagedSubagent, status: &AgentLoopStatus) {
-    match status {
+#[derive(Debug, Default)]
+struct ChildLoopProjection {
+    result: Option<SubagentResultView>,
+    changed_paths: Vec<String>,
+}
+
+impl ChildLoopProjection {
+    async fn from_result(runtime: &Runtime, result: &AgentLoopResult) -> Self {
+        let explicit_result = match result.status() {
+            AgentLoopStatus::Completed => result
+                .final_output()
+                .and_then(SubagentResultView::from_conclusion),
+            AgentLoopStatus::Failed { .. }
+            | AgentLoopStatus::Cancelled { .. }
+            | AgentLoopStatus::Blocked { .. } => None,
+        };
+
+        Self {
+            result: explicit_result,
+            changed_paths: changed_paths_from_child_events(runtime, result.events()).await,
+        }
+    }
+}
+
+fn apply_loop_result(
+    agent: &mut ManagedSubagent,
+    result: &AgentLoopResult,
+    projection: ChildLoopProjection,
+) {
+    agent.result = projection.result;
+    agent.changed_paths = projection.changed_paths;
+
+    match result.status() {
         AgentLoopStatus::Completed => {
             agent.status = SubagentStatusLabel::Completed;
             agent.summary = "child completed".to_owned();
@@ -1535,6 +1599,65 @@ fn apply_loop_status(agent: &mut ManagedSubagent, status: &AgentLoopStatus) {
             agent.status = SubagentStatusLabel::Failed;
             agent.summary = format!("child blocked: {reason:?}");
             agent.diagnostics = Some(error_info("subagent_blocked", format!("{reason:?}")));
+        }
+    }
+}
+
+async fn changed_paths_from_child_events(
+    runtime: &Runtime,
+    events: &[RuntimeEvent],
+) -> Vec<String> {
+    let mut pending_tool_names = BTreeMap::new();
+    let mut paths = BTreeSet::new();
+
+    for event in events {
+        match &event.kind {
+            RuntimeEventKind::ToolCallPending { call } => {
+                pending_tool_names.insert(call.id().clone(), call.name().clone());
+            }
+            RuntimeEventKind::ToolCallResolved { result }
+                if result.status() == ToolCallResultStatus::Succeeded
+                    && pending_tool_names
+                        .get(result.call_id())
+                        .is_some_and(|tool_name| {
+                            tool_name.as_str() == WORKSPACE_PATCH_TOOL_NAME
+                        }) =>
+            {
+                let Ok(content) = runtime.read_artifact_content(result.artifact().id()).await
+                else {
+                    continue;
+                };
+                collect_workspace_patch_changed_paths(&content, &mut paths);
+            }
+            _ => {}
+        }
+    }
+
+    paths.into_iter().collect()
+}
+
+fn collect_workspace_patch_changed_paths(content: &ArtifactContent, paths: &mut BTreeSet<String>) {
+    let Some(text) = content.as_text() else {
+        return;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return;
+    };
+    if value.get("ok").and_then(serde_json::Value::as_bool) != Some(true)
+        || value.get("tool").and_then(serde_json::Value::as_str) != Some(WORKSPACE_PATCH_TOOL_NAME)
+    {
+        return;
+    }
+
+    let Some(changes) = value.get("changes").and_then(serde_json::Value::as_array) else {
+        return;
+    };
+    for change in changes {
+        let Some(path) = change.get("path").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if validate_scope_path(PathBuf::from(path)).is_ok() {
+            paths.insert(path.to_owned());
         }
     }
 }
@@ -1744,6 +1867,7 @@ mod tests {
                     "task_id": "task-1",
                     "status": "completed",
                     "summary": "Done.",
+                    "result": null,
                     "output_paths": ["shared/subagents/agent-1/result.md"],
                     "changed_paths": [],
                     "diagnostics": null
@@ -2085,11 +2209,21 @@ mod tool_tests {
 #[cfg(test)]
 mod manager_tests {
     use super::*;
-    use crate::Runtime;
-    use merry_core::SessionId;
+    use crate::{
+        RegisteredTool, Runtime, ToolExecutionContext, ToolExecutionOutcome, ToolExecutor,
+        ToolExecutorFuture,
+    };
+    use merry_core::{SessionId, ToolInputSchema, ToolName, ToolSpec};
+    use merry_llm::{
+        FinishReason, ModelCapabilities, ModelError, ModelEvent, ModelEventStream, ModelName,
+        ModelOutput, ModelProvider, ModelProviderFuture, ModelRequest, ModelResponse,
+        ModelStreamContext, ModelToolCall, ModelToolCallId, ToolArguments,
+    };
+    use schemars::Schema;
+    use serde_json::{Map, json};
     use std::{
         sync::{
-            Arc,
+            Arc, Mutex as StdMutex,
             atomic::{AtomicUsize, Ordering},
         },
         time::Duration,
@@ -2225,6 +2359,130 @@ mod manager_tests {
                 Ok(Box::pin(stream) as merry_llm::ModelEventStream)
             })
         }
+    }
+
+    struct ReportingChildFactory;
+
+    impl ChildRuntimeFactory for ReportingChildFactory {
+        fn build_child(&self, input: ChildRuntimeInput) -> Result<Runtime, crate::RuntimeError> {
+            let provider = ScriptedStepProvider::new(vec![
+                vec![Ok(ModelEvent::Completed {
+                    response: ModelResponse::new(
+                        vec![ModelOutput::tool_call(ModelToolCall::new(
+                            ModelToolCallId::new("call-child-patch").expect("valid call id"),
+                            ToolName::new("workspace_patch").expect("valid tool name"),
+                            ToolArguments::new(Map::new()),
+                        ))],
+                        FinishReason::ToolCalls,
+                        None,
+                    ),
+                })],
+                vec![Ok(ModelEvent::Completed {
+                    response: ModelResponse::new(
+                        vec![ModelOutput::text(
+                            "Patched subagent-output.txt to status: done.",
+                        )],
+                        FinishReason::Stop,
+                        None,
+                    ),
+                })],
+            ]);
+
+            Runtime::builder(input.session_id)
+                .task_anchor(input.task_anchor)
+                .model_provider(
+                    Arc::new(provider),
+                    ModelName::new("fake/reporting-child").expect("valid model name"),
+                )
+                .register_tool(RegisteredTool::read_only(
+                    workspace_patch_tool_spec(),
+                    Arc::new(FakeWorkspacePatchExecutor),
+                ))
+                .build()
+        }
+    }
+
+    type ScriptedStepEvents = Vec<Result<ModelEvent, ModelError>>;
+    type ScriptedStepResponses = Vec<ScriptedStepEvents>;
+
+    struct ScriptedStepProvider {
+        name: merry_core::ProviderName,
+        capabilities: ModelCapabilities,
+        responses: Arc<StdMutex<ScriptedStepResponses>>,
+    }
+
+    impl ScriptedStepProvider {
+        fn new(responses: ScriptedStepResponses) -> Self {
+            Self {
+                name: merry_core::ProviderName::new("scripted-step-provider")
+                    .expect("valid provider name"),
+                capabilities: ModelCapabilities::new(true, true, false, true, None, None)
+                    .expect("valid capabilities"),
+                responses: Arc::new(StdMutex::new(responses.into_iter().rev().collect())),
+            }
+        }
+    }
+
+    impl ModelProvider for ScriptedStepProvider {
+        fn name(&self) -> &merry_core::ProviderName {
+            &self.name
+        }
+
+        fn capabilities(&self) -> &ModelCapabilities {
+            &self.capabilities
+        }
+
+        fn stream_model<'a>(
+            &'a self,
+            request: ModelRequest,
+            _context: ModelStreamContext,
+        ) -> ModelProviderFuture<'a, Result<ModelEventStream, ModelError>> {
+            Box::pin(async move {
+                let _ = request;
+                let events = self
+                    .responses
+                    .lock()
+                    .expect("scripted provider response mutex should not be poisoned")
+                    .pop()
+                    .expect("scripted child provider should have a response for each step");
+                Ok(Box::pin(futures_util::stream::iter(events)) as ModelEventStream)
+            })
+        }
+    }
+
+    struct FakeWorkspacePatchExecutor;
+
+    impl ToolExecutor for FakeWorkspacePatchExecutor {
+        fn execute<'a>(
+            &'a self,
+            _call: PendingToolCall,
+            _context: ToolExecutionContext,
+        ) -> ToolExecutorFuture<'a> {
+            Box::pin(async {
+                Ok(ToolExecutionOutcome::succeeded_json(
+                    json!({
+                        "ok": true,
+                        "tool": "workspace_patch",
+                        "changes": [{
+                            "path": "subagent-output.txt",
+                            "hunks": 1
+                        }]
+                    })
+                    .to_string(),
+                ))
+            })
+        }
+    }
+
+    fn workspace_patch_tool_spec() -> ToolSpec {
+        let schema = Schema::try_from(json!({ "type": "object" }))
+            .expect("test schema should be a JSON schema");
+        ToolSpec::new(
+            ToolName::new("workspace_patch").expect("valid tool name"),
+            "Apply a workspace patch.",
+            ToolInputSchema::new(schema).expect("valid schema"),
+        )
+        .expect("valid tool spec")
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2644,6 +2902,48 @@ mod manager_tests {
             .expect("wait should return terminal child");
 
         assert_eq!(wait.agents[0].status, SubagentStatusLabel::Completed);
+        assert!(wait.agents[0].output_paths.is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn completed_child_reports_explicit_result_and_changed_paths() {
+        let manager = SubagentManager::new(
+            SessionId::new("parent").expect("valid id"),
+            SubagentConfig::default(),
+            Arc::new(ReportingChildFactory),
+        );
+        let output = manager
+            .spawn(
+                vec![SubagentTaskSpec::new("Patch the status file.", 4).expect("valid")],
+                Some(1),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("spawn should succeed");
+        let agent_id = output.spawned[0].agent_id.clone();
+
+        let wait = manager
+            .wait(
+                std::slice::from_ref(&agent_id),
+                WaitMode::All,
+                Some(Duration::from_millis(100)),
+            )
+            .await
+            .expect("wait should return terminal child");
+
+        assert_eq!(wait.agents[0].status, SubagentStatusLabel::Completed);
+        assert_eq!(wait.agents[0].summary, "child completed");
+        assert_eq!(
+            wait.agents[0]
+                .result
+                .as_ref()
+                .map(|result| result.conclusion.as_str()),
+            Some("Patched subagent-output.txt to status: done.")
+        );
+        assert_eq!(
+            wait.agents[0].changed_paths,
+            vec!["subagent-output.txt".to_owned()]
+        );
         assert!(wait.agents[0].output_paths.is_empty());
     }
 
