@@ -101,9 +101,9 @@ pub use subagent::{
     CancelSubagentsInput, ChildRuntimeFactory, ChildRuntimeInput, DEFAULT_MAX_STEPS,
     RejectedSubagentView, SpawnSubagentTaskInput, SpawnSubagentsInput, SpawnSubagentsOutput,
     SpawnedSubagentStatusLabel, SpawnedSubagentView, SubagentConfig, SubagentError,
-    SubagentManager, SubagentStatusLabel, SubagentStatusView, SubagentTaskSpec, WaitMode,
-    WaitSubagentsInput, WaitSubagentsOutput, subagent_registered_tools, subagent_tool_specs,
-    validate_no_write_scope_conflicts,
+    SubagentManager, SubagentResultView, SubagentStatusLabel, SubagentStatusView, SubagentTaskSpec,
+    WaitMode, WaitSubagentsInput, WaitSubagentsOutput, subagent_registered_tools,
+    subagent_tool_specs, validate_no_write_scope_conflicts,
 };
 pub use tool::{
     ActionExecutionEvidence, ActionProposal, ActionProposalError, ActionProposalEvidence,

@@ -9,7 +9,7 @@ use crate::{
 };
 use futures_util::StreamExt;
 use merry_core::{
-    ErrorInfo, PendingToolCall, RuntimeEvent, RuntimeEventKind, ToolCallResultStatus,
+    ArtifactKind, ErrorInfo, PendingToolCall, RuntimeEvent, RuntimeEventKind, ToolCallResultStatus,
 };
 use std::num::NonZeroUsize;
 use thiserror::Error;
@@ -75,14 +75,21 @@ pub struct AgentLoopResult {
     status: AgentLoopStatus,
     events: Vec<RuntimeEvent>,
     steps_run: usize,
+    final_output: Option<String>,
 }
 
 impl AgentLoopResult {
-    fn new(status: AgentLoopStatus, events: Vec<RuntimeEvent>, steps_run: usize) -> Self {
+    fn new(
+        status: AgentLoopStatus,
+        events: Vec<RuntimeEvent>,
+        steps_run: usize,
+        final_output: Option<String>,
+    ) -> Self {
         Self {
             status,
             events,
             steps_run,
+            final_output,
         }
     }
 
@@ -102,6 +109,12 @@ impl AgentLoopResult {
     #[must_use]
     pub fn steps_run(&self) -> usize {
         self.steps_run
+    }
+
+    /// Explicit final text returned by the model at loop completion, when present.
+    #[must_use]
+    pub fn final_output(&self) -> Option<&str> {
+        self.final_output.as_deref()
     }
 
     /// Consumes the result and returns the collected events.
@@ -245,6 +258,7 @@ impl Runtime {
             steps_run += 1;
 
             let mut step_events = collect_step_events(stream).await;
+            let step_final_output = final_assistant_output_from_step(self, &step_events).await;
             let outcome = classify_step_events(&step_events);
             events.append(&mut step_events);
 
@@ -255,6 +269,7 @@ impl Runtime {
                         AgentLoopStatus::Completed,
                         events,
                         steps_run,
+                        step_final_output,
                     ));
                 }
                 StepOutcome::Failed(diagnostic) => {
@@ -268,6 +283,7 @@ impl Runtime {
                         AgentLoopStatus::Failed { diagnostic },
                         events,
                         steps_run,
+                        None,
                     ));
                 }
                 StepOutcome::Cancelled(diagnostic) => {
@@ -281,6 +297,7 @@ impl Runtime {
                         AgentLoopStatus::Cancelled { diagnostic },
                         events,
                         steps_run,
+                        None,
                     ));
                 }
                 StepOutcome::Blocked(reason) => {
@@ -294,6 +311,7 @@ impl Runtime {
                         AgentLoopStatus::Blocked { reason },
                         events,
                         steps_run,
+                        None,
                     ));
                 }
                 StepOutcome::Pending(call) => {
@@ -312,6 +330,7 @@ impl Runtime {
                             },
                             events,
                             steps_run,
+                            None,
                         ));
                     }
 
@@ -370,6 +389,7 @@ impl Runtime {
                                 },
                                 events,
                                 steps_run,
+                                None,
                             ));
                         }
                         Err(source) => {
@@ -418,6 +438,28 @@ fn trace_loop_error(session_id: &str, steps_run: usize, source: &RuntimeError) {
 
 async fn collect_step_events(stream: RuntimeEventStream) -> Vec<RuntimeEvent> {
     stream.collect().await
+}
+
+async fn final_assistant_output_from_step(
+    runtime: &Runtime,
+    events: &[RuntimeEvent],
+) -> Option<String> {
+    for event in events.iter().rev() {
+        let RuntimeEventKind::ArtifactRecorded { artifact } = &event.kind else {
+            continue;
+        };
+        if artifact.kind() != &ArtifactKind::Text {
+            continue;
+        }
+        let Ok(content) = runtime.read_artifact_content(artifact.id()).await else {
+            continue;
+        };
+        if let Some(text) = content.as_text() {
+            return Some(text.to_owned());
+        }
+    }
+
+    None
 }
 
 fn continuation_step_input(original_task: &str) -> Result<StepInput, RuntimeError> {
