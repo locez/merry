@@ -1,8 +1,9 @@
 use merry_core::{
     ArtifactId, ArtifactKind, ArtifactRef, CoreError, ErrorInfo, EvidenceLocator, EvidenceRef,
-    PendingToolCall, ProviderName, RuntimeEvent, RuntimeEventKind, SessionId, SkillId, SubagentId,
-    SubagentTaskId, ToolCallArguments, ToolCallId, ToolCallResult, ToolCallResultStatus,
-    ToolInputSchema, ToolName, ToolSpec,
+    MerryErrorDomain, MerryErrorInfo, MerryRetryability, PendingToolCall, ProviderName,
+    RuntimeEvent, RuntimeEventKind, SessionId, SkillId, SubagentId, SubagentTaskId,
+    ToolCallArguments, ToolCallId, ToolCallResult, ToolCallResultStatus, ToolInputSchema, ToolName,
+    ToolSpec,
 };
 use schemars::{JsonSchema, Schema};
 use serde::{Serialize, de::DeserializeOwned};
@@ -513,6 +514,51 @@ fn tool_call_result_uses_status_constraints_and_artifact_reference_only() {
         }))
         .is_err()
     );
+}
+
+#[test]
+fn merry_error_info_serializes_stable_sdk_shape() {
+    let diagnostic = MerryErrorInfo::builder(
+        "tool.executor_exception",
+        MerryErrorDomain::Tool,
+        "Tool `lookup_order` raised an unexpected exception.",
+        MerryRetryability::NotRetryable,
+    )
+    .hint("Handle expected business failures inside the tool.")
+    .context("tool_name", "lookup_order")
+    .context("call_id", "call_123")
+    .build()
+    .expect("valid SDK error info");
+
+    assert_eq!(
+        serde_json::to_value(&diagnostic).expect("serializes"),
+        json!({
+            "code": "tool.executor_exception",
+            "domain": "tool",
+            "message": "Tool `lookup_order` raised an unexpected exception.",
+            "hint": "Handle expected business failures inside the tool.",
+            "retryability": "not_retryable",
+            "context": {
+                "call_id": "call_123",
+                "tool_name": "lookup_order"
+            }
+        })
+    );
+}
+
+#[test]
+fn merry_error_info_rejects_unbounded_or_sensitive_context_keys() {
+    let error = MerryErrorInfo::builder(
+        "provider.stream_failed",
+        MerryErrorDomain::Provider,
+        "Provider stream failed.",
+        MerryRetryability::Retryable,
+    )
+    .context("authorization", "Bearer secret")
+    .build()
+    .expect_err("authorization context must be rejected");
+
+    assert!(error.to_string().contains("context key is not allowed"));
 }
 
 #[test]

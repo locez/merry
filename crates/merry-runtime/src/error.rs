@@ -65,6 +65,13 @@ pub enum RuntimeError {
         name: ToolName,
     },
 
+    /// Runtime construction tried to register a bridge tool without explicit opt-in.
+    #[error("bridge tool {name} requires explicit bridge tool opt-in")]
+    BridgeToolsNotAllowed {
+        /// Bridge tool name.
+        name: ToolName,
+    },
+
     /// Tool execution was cancelled before producing a durable result.
     #[error("tool call {call_id} execution was cancelled in session {session_id}")]
     ToolExecutionCancelled {

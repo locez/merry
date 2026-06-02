@@ -918,6 +918,16 @@ impl SessionState {
         ))
     }
 
+    pub(crate) fn record_bridge_tool_call_requested(
+        &mut self,
+        call: PendingToolCall,
+    ) -> RuntimeEvent {
+        self.record_event(
+            RuntimeEventKind::BridgeToolCallRequested { call },
+            LedgerFactKind::BridgeToolCallRequested,
+        )
+    }
+
     pub(crate) fn submit_tool_result(
         &mut self,
         result: ToolCallResult,

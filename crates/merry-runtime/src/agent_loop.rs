@@ -6,13 +6,22 @@
 
 use crate::{
     Runtime, RuntimeError, RuntimeEventStream, StepContext, StepInput, ToolExecutionContext,
+    event_stream::ActiveStepPermit,
 };
+use futures_core::Stream;
 use futures_util::StreamExt;
 use merry_core::{
-    ArtifactKind, ErrorInfo, PendingToolCall, RuntimeEvent, RuntimeEventKind, ToolCallResultStatus,
+    ArtifactKind, ErrorInfo, PendingToolCall, RuntimeEvent, RuntimeEventKind, SessionId,
+    ToolCallId, ToolCallResult, ToolCallResultStatus, ToolName,
 };
-use std::num::NonZeroUsize;
+use std::{
+    num::NonZeroUsize,
+    pin::Pin,
+    task::{Context as TaskContext, Poll},
+};
 use thiserror::Error;
+use tokio::sync::{mpsc, oneshot};
+use tokio_stream::wrappers::ReceiverStream;
 
 const DEFAULT_AGENT_LOOP_MAX_STEPS: usize = 16;
 
@@ -124,6 +133,88 @@ impl AgentLoopResult {
     }
 }
 
+/// Live event stream for one runtime-owned agent loop.
+///
+/// Polling yields runtime events as they become observable. [`Self::result`]
+/// drains any unconsumed events before returning the collected loop result.
+pub struct AgentLoopEventStream {
+    session_id: SessionId,
+    events: RuntimeEventStream,
+    result_receiver: Option<oneshot::Receiver<Option<AgentLoopResult>>>,
+    bridge_sender: mpsc::Sender<BridgeToolResultCommand>,
+}
+
+impl AgentLoopEventStream {
+    fn new(
+        session_id: SessionId,
+        events: RuntimeEventStream,
+        result_receiver: oneshot::Receiver<Option<AgentLoopResult>>,
+        bridge_sender: mpsc::Sender<BridgeToolResultCommand>,
+    ) -> Self {
+        Self {
+            session_id,
+            events,
+            result_receiver: Some(result_receiver),
+            bridge_sender,
+        }
+    }
+
+    /// Submits a result for a bridge tool call requested by this stream.
+    ///
+    /// Bridge execution happens in host SDK code, but the runtime stream owns
+    /// the loop continuation. The submitted result is recorded under the same
+    /// active loop permit before the loop starts the next provider step.
+    pub async fn submit_bridge_tool_result(
+        &self,
+        result: ToolCallResult,
+        content: crate::ArtifactContent,
+    ) -> Result<(), RuntimeError> {
+        let call_id = result.call_id().clone();
+        let (ack_sender, ack_receiver) = oneshot::channel();
+        let command = BridgeToolResultCommand {
+            result,
+            content,
+            ack_sender,
+        };
+        self.bridge_sender
+            .send(command)
+            .await
+            .map_err(|_| RuntimeError::UnknownToolCall {
+                session_id: self.session_id.clone(),
+                call_id: call_id.clone(),
+            })?;
+        ack_receiver
+            .await
+            .map_err(|_| RuntimeError::UnknownToolCall {
+                session_id: self.session_id.clone(),
+                call_id,
+            })?
+    }
+
+    /// Returns the collected loop result once the stream has completed.
+    ///
+    /// Any unconsumed events are drained before waiting for the result.
+    pub async fn result(&mut self) -> Option<AgentLoopResult> {
+        while self.next().await.is_some() {}
+
+        self.result_receiver.take()?.await.ok().flatten()
+    }
+}
+
+struct BridgeToolResultCommand {
+    result: ToolCallResult,
+    content: crate::ArtifactContent,
+    ack_sender: oneshot::Sender<Result<(), RuntimeError>>,
+}
+
+impl Stream for AgentLoopEventStream {
+    type Item = RuntimeEvent;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
+        Pin::new(&mut self.events).poll_next(cx)
+    }
+}
+
 /// Terminal or blocked status for an agent loop run.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,6 +244,13 @@ pub enum AgentLoopBlockedReason {
     /// A step stream ended without a completion, failure, cancellation, or
     /// pending tool-call event.
     StepEndedWithoutTerminalEvent,
+    /// A pending tool call must be executed by an external bridge runner.
+    BridgeToolCallRequested {
+        /// Bridge tool call id.
+        call_id: ToolCallId,
+        /// Bridge tool name.
+        tool_name: ToolName,
+    },
 }
 
 /// Runtime method error returned while an agent loop was running.
@@ -314,7 +412,26 @@ impl Runtime {
                         None,
                     ));
                 }
-                StepOutcome::Pending(call) => {
+                StepOutcome::Pending(PendingLoopToolCall::Bridge(call)) => {
+                    trace_loop_finish(
+                        self.session_id().as_str(),
+                        "blocked",
+                        steps_run,
+                        Some("bridge_tool_call_requested"),
+                    );
+                    return Ok(AgentLoopResult::new(
+                        AgentLoopStatus::Blocked {
+                            reason: AgentLoopBlockedReason::BridgeToolCallRequested {
+                                call_id: call.id().clone(),
+                                tool_name: call.name().clone(),
+                            },
+                        },
+                        events,
+                        steps_run,
+                        None,
+                    ));
+                }
+                StepOutcome::Pending(PendingLoopToolCall::Runtime(call)) => {
                     if steps_run >= config.max_steps() {
                         trace_loop_finish(
                             self.session_id().as_str(),
@@ -409,6 +526,227 @@ impl Runtime {
             }
         }
     }
+
+    /// Starts a bounded, serial runtime-owned agent loop and returns live events.
+    ///
+    /// This has the same loop semantics as [`Runtime::run_agent_loop`], but it
+    /// yields each observed [`RuntimeEvent`] as soon as the underlying step or
+    /// tool execution produces it. Dropping the returned stream cancels the loop
+    /// token and aborts the loop producer.
+    pub fn run_agent_loop_stream(
+        &self,
+        input: StepInput,
+        context: StepContext,
+        config: AgentLoopConfig,
+    ) -> Result<AgentLoopEventStream, RuntimeError> {
+        let loop_permit = self.acquire_active_step_permit()?;
+        let (parent_token, generation_config) = context.into_parts();
+        let loop_token = parent_token.child_token();
+        let producer_token = loop_token.clone();
+        let (sender, receiver) = mpsc::channel(16);
+        let (result_sender, result_receiver) = oneshot::channel();
+        let (bridge_sender, bridge_receiver) = mpsc::channel(1);
+        let runtime = self.clone();
+        let session_id = self.session_id().clone();
+        let producer_handle = tokio::spawn(async move {
+            let result = run_agent_loop_stream_producer(AgentLoopStreamProducer {
+                runtime,
+                input,
+                loop_token: producer_token,
+                generation_config,
+                config,
+                loop_permit,
+                sender,
+                bridge_receiver,
+            })
+            .await;
+            let _ = result_sender.send(result);
+        });
+
+        let events =
+            RuntimeEventStream::new(ReceiverStream::new(receiver), loop_token, producer_handle);
+        Ok(AgentLoopEventStream::new(
+            session_id,
+            events,
+            result_receiver,
+            bridge_sender,
+        ))
+    }
+}
+
+struct AgentLoopStreamProducer {
+    runtime: Runtime,
+    input: StepInput,
+    loop_token: tokio_util::sync::CancellationToken,
+    generation_config: merry_llm::GenerationConfig,
+    config: AgentLoopConfig,
+    loop_permit: ActiveStepPermit,
+    sender: mpsc::Sender<RuntimeEvent>,
+    bridge_receiver: mpsc::Receiver<BridgeToolResultCommand>,
+}
+
+async fn run_agent_loop_stream_producer(
+    producer: AgentLoopStreamProducer,
+) -> Option<AgentLoopResult> {
+    let AgentLoopStreamProducer {
+        runtime,
+        input,
+        loop_token,
+        generation_config,
+        config,
+        loop_permit,
+        sender,
+        mut bridge_receiver,
+    } = producer;
+    let original_task = input.text().to_owned();
+    let mut next_input = Some(input);
+    let mut events = Vec::new();
+    let mut steps_run = 0;
+
+    while let Some(input) = next_input.take() {
+        if loop_token.is_cancelled() {
+            return None;
+        }
+
+        let step_context =
+            StepContext::new(loop_token.clone()).with_generation_config(generation_config.clone());
+        let Ok(stream) = runtime.step_with_active_permit(input, step_context, loop_permit.clone())
+        else {
+            return None;
+        };
+        steps_run += 1;
+
+        let mut step_events = Vec::new();
+        tokio::pin!(stream);
+        while let Some(event) = stream.next().await {
+            step_events.push(event.clone());
+            events.push(event.clone());
+            if sender.send(event).await.is_err() {
+                return None;
+            }
+        }
+
+        let step_final_output = final_assistant_output_from_step(&runtime, &step_events).await;
+        match classify_step_events(&step_events) {
+            StepOutcome::Completed => {
+                return Some(AgentLoopResult::new(
+                    AgentLoopStatus::Completed,
+                    events,
+                    steps_run,
+                    step_final_output,
+                ));
+            }
+            StepOutcome::Failed(diagnostic) => {
+                return Some(AgentLoopResult::new(
+                    AgentLoopStatus::Failed { diagnostic },
+                    events,
+                    steps_run,
+                    None,
+                ));
+            }
+            StepOutcome::Cancelled(diagnostic) => {
+                return Some(AgentLoopResult::new(
+                    AgentLoopStatus::Cancelled { diagnostic },
+                    events,
+                    steps_run,
+                    None,
+                ));
+            }
+            StepOutcome::Blocked(reason) => {
+                return Some(AgentLoopResult::new(
+                    AgentLoopStatus::Blocked { reason },
+                    events,
+                    steps_run,
+                    None,
+                ));
+            }
+            StepOutcome::Pending(call) => {
+                if steps_run >= config.max_steps() {
+                    return Some(AgentLoopResult::new(
+                        AgentLoopStatus::Blocked {
+                            reason: AgentLoopBlockedReason::MaxStepsReached {
+                                max_steps: config.max_steps(),
+                            },
+                        },
+                        events,
+                        steps_run,
+                        None,
+                    ));
+                }
+
+                let execution_events = match call {
+                    PendingLoopToolCall::Runtime(call) => {
+                        match runtime
+                            .execute_tool_call_with_active_permit(
+                                call.id(),
+                                ToolExecutionContext::new(loop_token.clone()),
+                                &loop_permit,
+                            )
+                            .await
+                        {
+                            Ok(events) => events,
+                            Err(RuntimeError::ToolExecutionCancelled { call_id, .. }) => {
+                                return Some(AgentLoopResult::new(
+                                    AgentLoopStatus::Cancelled {
+                                        diagnostic: tool_execution_cancelled_diagnostic(&call_id),
+                                    },
+                                    events,
+                                    steps_run,
+                                    None,
+                                ));
+                            }
+                            Err(_) => return None,
+                        }
+                    }
+                    PendingLoopToolCall::Bridge(call) => {
+                        let command =
+                            receive_bridge_tool_result(&mut bridge_receiver, &loop_token).await?;
+
+                        let call_id = command.result.call_id().clone();
+                        let result = if call_id == *call.id() {
+                            runtime
+                                .submit_tool_result_with_active_permit(
+                                    command.result,
+                                    command.content,
+                                    &loop_permit,
+                                )
+                                .await
+                        } else {
+                            Err(RuntimeError::UnknownToolCall {
+                                session_id: runtime.session_id().clone(),
+                                call_id,
+                            })
+                        };
+
+                        match result {
+                            Ok(events) => {
+                                let _ = command.ack_sender.send(Ok(()));
+                                events
+                            }
+                            Err(error) => {
+                                let _ = command.ack_sender.send(Err(error));
+                                return None;
+                            }
+                        }
+                    }
+                };
+
+                for event in execution_events {
+                    events.push(event.clone());
+                    if sender.send(event).await.is_err() {
+                        return None;
+                    }
+                }
+
+                let Ok(input) = continuation_step_input(&original_task) else {
+                    return None;
+                };
+                next_input = Some(input);
+            }
+        }
+    }
+
+    None
 }
 
 fn trace_loop_finish(
@@ -486,6 +824,7 @@ fn blocked_reason_code(reason: &AgentLoopBlockedReason) -> &'static str {
         AgentLoopBlockedReason::StepEndedWithoutTerminalEvent => {
             "step_ended_without_terminal_event"
         }
+        AgentLoopBlockedReason::BridgeToolCallRequested { .. } => "bridge_tool_call_requested",
     }
 }
 
@@ -497,6 +836,7 @@ fn runtime_error_code(error: &RuntimeError) -> &'static str {
         RuntimeError::UnknownToolCall { .. } => "unknown_tool_call",
         RuntimeError::ToolCallAlreadyResolved { .. } => "tool_call_already_resolved",
         RuntimeError::DuplicateToolRegistration { .. } => "duplicate_tool_registration",
+        RuntimeError::BridgeToolsNotAllowed { .. } => "bridge_tools_not_allowed",
         RuntimeError::ToolExecutionCancelled { .. } => "tool_execution_cancelled",
         RuntimeError::ToolExecutionFailed { .. } => "tool_execution_failed",
         RuntimeError::MissingActionExecutionEvidence { .. } => "missing_action_execution_evidence",
@@ -558,11 +898,23 @@ enum StepOutcome {
     Completed,
     Failed(ErrorInfo),
     Cancelled(ErrorInfo),
-    Pending(PendingToolCall),
+    Pending(PendingLoopToolCall),
     Blocked(AgentLoopBlockedReason),
 }
 
+enum PendingLoopToolCall {
+    Runtime(PendingToolCall),
+    Bridge(PendingToolCall),
+}
+
 fn classify_step_events(events: &[RuntimeEvent]) -> StepOutcome {
+    if let Some(call) = events.iter().rev().find_map(|event| match &event.kind {
+        RuntimeEventKind::BridgeToolCallRequested { call } => Some(call.clone()),
+        _ => None,
+    }) {
+        return StepOutcome::Pending(PendingLoopToolCall::Bridge(call));
+    }
+
     let mut pending = events
         .iter()
         .filter_map(|event| match &event.kind {
@@ -601,9 +953,21 @@ fn classify_step_events(events: &[RuntimeEvent]) -> StepOutcome {
 
     match pending.len() {
         0 => StepOutcome::Blocked(AgentLoopBlockedReason::StepEndedWithoutTerminalEvent),
-        1 => StepOutcome::Pending(pending.pop().expect("one pending call is present")),
+        1 => StepOutcome::Pending(PendingLoopToolCall::Runtime(
+            pending.pop().expect("one pending call is present"),
+        )),
         count => StepOutcome::Blocked(AgentLoopBlockedReason::MultiplePendingToolCalls {
             pending_count: count,
         }),
+    }
+}
+
+async fn receive_bridge_tool_result(
+    receiver: &mut mpsc::Receiver<BridgeToolResultCommand>,
+    token: &tokio_util::sync::CancellationToken,
+) -> Option<BridgeToolResultCommand> {
+    tokio::select! {
+        command = receiver.recv() => command,
+        () = token.cancelled() => None,
     }
 }

@@ -10,7 +10,9 @@ pub mod tool;
 
 pub use artifact::{ArtifactKind, ArtifactRef};
 pub use error::CoreError;
-pub use event::{ErrorInfo, RuntimeEvent, RuntimeEventKind};
+pub use event::{
+    ErrorInfo, MerryErrorDomain, MerryErrorInfo, MerryRetryability, RuntimeEvent, RuntimeEventKind,
+};
 pub use evidence::{EvidenceLocator, EvidenceRef};
 pub use id::{
     ArtifactId, ProviderName, SessionId, SkillId, SubagentId, SubagentTaskId, ToolCallId, ToolName,
