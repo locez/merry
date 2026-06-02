@@ -1,0 +1,249 @@
+import asyncio
+
+import pytest
+
+import merry
+from _support import runtime_with_scripted_tool_call
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class LookupOrderInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    order_id: str = Field(description="Stable order identifier to look up.")
+
+
+class LookupOrderOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    order_id: str = Field(description="Stable order identifier that was looked up.")
+    status: str = Field(description="Current fulfillment status for the order.")
+
+
+def test_runtime_config_constructs_openai_runtime():
+    config = merry.RuntimeConfig(
+        provider=merry.OpenAICompatibleProvider(
+            api_key="sk-test",
+            model="gpt-test",
+            base_url="https://api.example.test/v1",
+        ),
+    )
+
+    runtime = merry.Runtime(config=config)
+
+    assert isinstance(runtime, merry.Runtime)
+
+
+async def _assert_python_tool_executes_through_runtime_loop():
+    calls = []
+
+    async def lookup_order(args: LookupOrderInput) -> LookupOrderOutput:
+        calls.append(args)
+        return LookupOrderOutput(order_id=args.order_id, status="shipped")
+
+    runtime = runtime_with_scripted_tool_call(
+        tool_name="lookup_order",
+        arguments={"order_id": "A123"},
+        final_text="Order A123 shipped.",
+    )
+    runtime.register_tool(
+        merry.Tool.bridge(
+            lookup_order,
+            input_model=LookupOrderInput,
+            output_model=LookupOrderOutput,
+            name="lookup_order",
+            description="Look up an order by id.",
+        )
+    )
+
+    result = await runtime.run("Check order A123.")
+
+    assert result.status == "completed"
+    assert result.steps_run == 2
+    assert result.final_output == "Order A123 shipped."
+    assert calls == [LookupOrderInput(order_id="A123")]
+    resolved = [
+        event
+        for event in result.events
+        if event["kind"]["type"] == "tool_call_resolved"
+    ]
+    bridge_requests = [
+        event
+        for event in result.events
+        if event["kind"]["type"] == "bridge_tool_call_requested"
+    ]
+    assert len(bridge_requests) == 1
+    assert resolved[0]["kind"]["result"]["status"] == "succeeded"
+    event_types = [event["kind"]["type"] for event in result.events]
+    assert event_types == [
+        "session_started",
+        "step_started",
+        "tool_call_pending",
+        "bridge_tool_call_requested",
+        "artifact_recorded",
+        "tool_call_resolved",
+        "step_started",
+        "artifact_recorded",
+        "step_completed",
+    ]
+
+
+def test_python_tool_executes_through_runtime_loop():
+    asyncio.run(_assert_python_tool_executes_through_runtime_loop())
+
+
+async def _assert_runtime_stream_executes_python_tool_and_returns_final_result():
+    calls = []
+
+    async def lookup_order(args: LookupOrderInput) -> LookupOrderOutput:
+        """Look up an order by id."""
+        calls.append(args.order_id)
+        return LookupOrderOutput(order_id=args.order_id, status="shipped")
+
+    runtime = runtime_with_scripted_tool_call(
+        tool_name="lookup_order",
+        arguments={"order_id": "A123"},
+        final_text="Order A123 shipped.",
+    )
+    runtime.register_tool(lookup_order)
+
+    stream = runtime.stream("Check order A123.")
+    event_types = []
+    async for event in stream:
+        event_types.append(event["kind"]["type"])
+
+    result = await stream.result()
+
+    assert result.status == "completed"
+    assert result.steps_run == 2
+    assert result.final_output == "Order A123 shipped."
+    assert calls == ["A123"]
+    assert "bridge_tool_call_requested" in event_types
+    assert "tool_call_resolved" in event_types
+    assert event_types[-1] == "step_completed"
+
+
+def test_runtime_stream_executes_python_tool_and_returns_final_result():
+    asyncio.run(_assert_runtime_stream_executes_python_tool_and_returns_final_result())
+
+
+def test_pydantic_tool_schema_uses_field_descriptions():
+    async def lookup_order(args: LookupOrderInput) -> LookupOrderOutput:
+        return LookupOrderOutput(order_id=args.order_id, status="shipped")
+
+    tool = merry.Tool.bridge(
+        lookup_order,
+        input_model=LookupOrderInput,
+        output_model=LookupOrderOutput,
+        name="lookup_order",
+        description="Look up an order by id.",
+    )
+
+    assert tool.schema["properties"]["order_id"]["description"] == (
+        "Stable order identifier to look up."
+    )
+    assert tool.schema["additionalProperties"] is False
+    assert tool.output_model is LookupOrderOutput
+
+
+def test_pydantic_tool_requires_descriptions_for_all_fields():
+    class MissingDescriptionInput(BaseModel):
+        order_id: str
+
+    async def lookup_order(args: MissingDescriptionInput) -> LookupOrderOutput:
+        return LookupOrderOutput(order_id=args.order_id, status="shipped")
+
+    with pytest.raises(ValueError, match="MissingDescriptionInput.order_id"):
+        merry.Tool.bridge(
+            lookup_order,
+            input_model=MissingDescriptionInput,
+            output_model=LookupOrderOutput,
+            name="lookup_order",
+            description="Look up an order by id.",
+        )
+
+
+def test_pydantic_tool_requires_output_field_descriptions():
+    class MissingDescriptionOutput(BaseModel):
+        order_id: str
+
+    async def lookup_order(args: LookupOrderInput) -> MissingDescriptionOutput:
+        return MissingDescriptionOutput(order_id=args.order_id)
+
+    with pytest.raises(ValueError, match="MissingDescriptionOutput.order_id"):
+        merry.Tool.bridge(
+            lookup_order,
+            input_model=LookupOrderInput,
+            output_model=MissingDescriptionOutput,
+            name="lookup_order",
+            description="Look up an order by id.",
+        )
+
+
+def test_tool_from_function_infers_name_description_and_models():
+    async def lookup_order(args: LookupOrderInput) -> LookupOrderOutput:
+        """Look up an order by id.
+
+        Additional implementation notes do not enter the tool description.
+        """
+        return LookupOrderOutput(order_id=args.order_id, status="shipped")
+
+    tool = merry.Tool.from_function(lookup_order)
+
+    assert tool.name == "lookup_order"
+    assert tool.description == "Look up an order by id."
+    assert tool.input_model is LookupOrderInput
+    assert tool.output_model is LookupOrderOutput
+    assert tool.schema["properties"]["order_id"]["description"] == (
+        "Stable order identifier to look up."
+    )
+
+
+async def _assert_runtime_register_tool_accepts_function():
+    calls = []
+
+    async def lookup_order(args: LookupOrderInput) -> LookupOrderOutput:
+        """Look up an order by id."""
+        calls.append(args.order_id)
+        return LookupOrderOutput(order_id=args.order_id, status="shipped")
+
+    runtime = runtime_with_scripted_tool_call(
+        tool_name="lookup_order",
+        arguments={"order_id": "A123"},
+        final_text="Order A123 shipped.",
+    )
+    runtime.register_tool(lookup_order)
+
+    result = await runtime.run("Check order A123.")
+
+    assert result.status == "completed"
+    assert result.final_output == "Order A123 shipped."
+    assert calls == ["A123"]
+
+
+def test_runtime_register_tool_accepts_function():
+    asyncio.run(_assert_runtime_register_tool_accepts_function())
+
+
+async def _assert_runtime_tool_decorator_registers_function():
+    runtime = runtime_with_scripted_tool_call(
+        tool_name="lookup_order",
+        arguments={"order_id": "A123"},
+        final_text="Order A123 shipped.",
+    )
+    calls = []
+
+    @runtime.tool
+    async def lookup_order(args: LookupOrderInput) -> LookupOrderOutput:
+        """Look up an order by id."""
+        calls.append(args.order_id)
+        return LookupOrderOutput(order_id=args.order_id, status="shipped")
+
+    result = await runtime.run("Check order A123.")
+
+    assert result.status == "completed"
+    assert calls == ["A123"]
+
+
+def test_runtime_tool_decorator_registers_function():
+    asyncio.run(_assert_runtime_tool_decorator_registers_function())

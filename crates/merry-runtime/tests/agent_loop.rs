@@ -26,6 +26,7 @@ use serde_json::{Map, Value, json};
 use std::{
     future::Future,
     sync::{Arc, Mutex, OnceLock},
+    time::Duration,
 };
 use tokio::sync::{Mutex as AsyncMutex, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -585,6 +586,17 @@ fn runtime_with_tool_action(
         .expect("runtime should build")
 }
 
+fn runtime_with_bridge_tool(session: &str, provider: ScriptedModelProvider) -> Runtime {
+    Runtime::builder(session_id(session))
+        .allow_bridge_tools()
+        .register_tool(merry_runtime::RegisteredTool::bridge(tool_spec(
+            "search_notes",
+        )))
+        .model_provider(Arc::new(provider), model_name())
+        .build()
+        .expect("runtime should build")
+}
+
 fn assert_sanitized_policy_denial_json(value: &Value, tool_name: &str) {
     assert_eq!(
         value,
@@ -614,6 +626,111 @@ async fn run_default_loop(runtime: &Runtime, text: &str) -> merry_runtime::Agent
         .expect("agent loop should run")
 }
 
+#[tokio::test]
+async fn run_agent_loop_stream_yields_step_events_before_provider_finishes() {
+    let (started_tx, started_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let runtime = Runtime::builder(session_id("agent-loop-live-stream"))
+        .model_provider(
+            Arc::new(BlockingModelProvider::new(started_tx, release_rx)),
+            model_name(),
+        )
+        .build()
+        .expect("runtime should build");
+
+    let mut events = runtime
+        .run_agent_loop_stream(
+            StepInput::user_text("Wait for the provider.").expect("valid step input"),
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default(),
+        )
+        .expect("agent loop stream should start");
+
+    started_rx
+        .await
+        .expect("provider should start and wait for release");
+    let first = tokio::time::timeout(Duration::from_millis(100), events.next())
+        .await
+        .expect("stream should yield before provider finishes")
+        .expect("session-start event should be present");
+    let second = tokio::time::timeout(Duration::from_millis(100), events.next())
+        .await
+        .expect("stream should yield before provider finishes")
+        .expect("step-start event should be present");
+
+    assert_eq!(
+        event_kind_names(&[first, second]),
+        ["SessionStarted", "StepStarted"]
+    );
+
+    release_tx
+        .send(())
+        .expect("provider release receiver should still be waiting");
+    let remaining = events.collect::<Vec<_>>().await;
+    assert_eq!(
+        event_kind_names(&remaining),
+        ["ArtifactRecorded", "StepCompleted"]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn run_agent_loop_stream_resumes_same_loop_after_bridge_tool_result() {
+    let provider = ScriptedModelProvider::new(vec![
+        vec![Ok(completed_tool_call_event(model_tool_call(
+            "call-bridge",
+            "search_notes",
+        )))],
+        vec![Ok(completed_text_event("final answer"))],
+    ]);
+    let runtime = runtime_with_bridge_tool("agent-loop-stream-bridge-resume", provider);
+    let mut stream = runtime
+        .run_agent_loop_stream(
+            StepInput::user_text("Search notes.").expect("valid step input"),
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default(),
+        )
+        .expect("agent loop stream should start");
+
+    let mut events = Vec::new();
+    while let Some(event) = stream.next().await {
+        let is_bridge_request =
+            matches!(event.kind, RuntimeEventKind::BridgeToolCallRequested { .. });
+        events.push(event.clone());
+        if is_bridge_request {
+            let artifact = ArtifactRef::new(
+                ArtifactId::new("sdk-bridge-result").expect("valid artifact id"),
+                ArtifactKind::Json,
+            );
+            stream
+                .submit_bridge_tool_result(
+                    ToolCallResult::succeeded(tool_call_id("call-bridge"), artifact),
+                    merry_runtime::ArtifactContent::json(r#"{"ok":true}"#),
+                )
+                .await
+                .expect("bridge result should submit to the active loop");
+        }
+    }
+
+    let result = stream.result().await.expect("stream should produce result");
+
+    assert_eq!(result.status(), &AgentLoopStatus::Completed);
+    assert_eq!(result.steps_run(), 2);
+    assert_eq!(
+        event_kind_names(&events),
+        [
+            "SessionStarted",
+            "StepStarted",
+            "ToolCallPending",
+            "BridgeToolCallRequested",
+            "ArtifactRecorded",
+            "ToolCallResolved",
+            "StepStarted",
+            "ArtifactRecorded",
+            "StepCompleted",
+        ]
+    );
+}
+
 fn event_kind_names(events: &[RuntimeEvent]) -> Vec<&'static str> {
     events
         .iter()
@@ -626,6 +743,7 @@ fn event_kind_names(events: &[RuntimeEvent]) -> Vec<&'static str> {
             RuntimeEventKind::ArtifactRecorded { .. } => "ArtifactRecorded",
             RuntimeEventKind::EvidenceReferenced { .. } => "EvidenceReferenced",
             RuntimeEventKind::ToolCallPending { .. } => "ToolCallPending",
+            RuntimeEventKind::BridgeToolCallRequested { .. } => "BridgeToolCallRequested",
             RuntimeEventKind::ToolCallResolved { .. } => "ToolCallResolved",
             RuntimeEventKind::SkillUsed { .. } => "SkillUsed",
             _ => "Unknown",
@@ -661,6 +779,40 @@ fn pending_tool_call(events: &[RuntimeEvent]) -> &PendingToolCall {
             _ => None,
         })
         .expect("pending tool call should be emitted")
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn agent_loop_blocks_for_bridge_tool_runner_instead_of_executing_runtime_tool() {
+    let provider = ScriptedModelProvider::new(vec![vec![Ok(completed_tool_call_event(
+        model_tool_call("call-bridge", "search_notes"),
+    ))]]);
+    let runtime = runtime_with_bridge_tool("agent-loop-bridge-blocks", provider);
+
+    let result = run_default_loop(&runtime, "Search notes.").await;
+
+    assert_eq!(
+        result.status(),
+        &AgentLoopStatus::Blocked {
+            reason: AgentLoopBlockedReason::BridgeToolCallRequested {
+                call_id: tool_call_id("call-bridge"),
+                tool_name: ToolName::new("search_notes").expect("valid tool name"),
+            },
+        }
+    );
+    assert_eq!(result.steps_run(), 1);
+    assert_eq!(
+        event_kind_names(result.events()),
+        [
+            "SessionStarted",
+            "StepStarted",
+            "ToolCallPending",
+            "BridgeToolCallRequested",
+        ]
+    );
+    assert_eq!(
+        runtime.pending_tool_calls().await,
+        vec![pending_tool_call(result.events()).clone()]
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

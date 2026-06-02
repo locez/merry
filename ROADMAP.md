@@ -221,6 +221,17 @@ The OpenAI provider target is the Responses API only. The provider request path 
   The active product proof is corrected back to testing coding-loop capability.
   Future roadmap priority changes require explicit user approval or a tracked
   change request; routine implementation status updates remain allowed.
+- Python SDK MVP first slice is implemented as `merry-py` plus
+  `sdks/python/merry`: it exposes a PyO3-backed package import, live
+  OpenAI-compatible runtime construction through `Runtime.from_env()` and
+  `Runtime.with_openai_compatible(...)`, async `run`, incremental
+  `Runtime.stream(...)`, same-loop Python bridge tool continuation,
+  Pydantic/decorator tool registration, structured `MerryErrorInfo` Python
+  exceptions, private deterministic fake/scripted helpers for tool-boundary
+  tests, executor exception mapping to `MerryToolError`, and deterministic
+  Python/Rust tests. This proves Merry can be embedded from Python and can use
+  a real model provider from the SDK. It does not yet expose real workspace
+  tools, Python profile configuration, or structured final-output models.
 
 ### Active
 

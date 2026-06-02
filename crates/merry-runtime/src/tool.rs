@@ -52,6 +52,15 @@ pub type ToolExecutionResult = Result<ToolExecutionOutcome, ToolExecutionError>;
 /// path.
 pub type ToolActionProposalResult = Result<ToolActionPreflight, ToolExecutionError>;
 
+/// Where a registered tool is executed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolRunner {
+    /// Merry/Rust runtime owns execution through a [`ToolExecutor`].
+    Runtime,
+    /// An external SDK runner executes after Merry emits a bridge event.
+    Bridge,
+}
+
 /// Context passed to a tool executor.
 ///
 /// The context is intentionally small for the MVP: cancellation is cooperative
@@ -1035,6 +1044,7 @@ pub struct RegisteredTool {
     executor: Arc<dyn ToolExecutor>,
     action_kind: ToolActionKind,
     proposals_enabled: bool,
+    runner: ToolRunner,
 }
 
 impl RegisteredTool {
@@ -1054,6 +1064,7 @@ impl RegisteredTool {
             executor,
             action_kind,
             proposals_enabled: false,
+            runner: ToolRunner::Runtime,
         }
     }
 
@@ -1069,11 +1080,24 @@ impl RegisteredTool {
 
     /// Creates a registered read-only tool.
     ///
-    /// Use this only for tools that do not write workspace state, execute
-    /// commands, or access the network.
+    /// Use this only for tools that do not write workspace state or execute
+    /// commands. Network access is controlled by runtime profile, not by this
+    /// constructor.
     #[must_use]
     pub fn read_only(spec: ToolSpec, executor: Arc<dyn ToolExecutor>) -> Self {
         Self::new(spec, executor, ToolActionKind::ReadOnly)
+    }
+
+    /// Creates a tool whose execution is delegated to an external SDK bridge.
+    #[must_use]
+    pub fn bridge(spec: ToolSpec) -> Self {
+        Self {
+            spec,
+            executor: Arc::new(BridgeExecutor),
+            action_kind: ToolActionKind::ReadOnly,
+            proposals_enabled: false,
+            runner: ToolRunner::Bridge,
+        }
     }
 
     /// Borrows the provider-visible tool specification.
@@ -1088,6 +1112,12 @@ impl RegisteredTool {
         self.action_kind
     }
 
+    /// Returns where this tool is executed.
+    #[must_use]
+    pub fn runner(&self) -> ToolRunner {
+        self.runner
+    }
+
     /// Returns whether this tool opted into action proposal evidence.
     #[must_use]
     pub fn proposals_enabled(&self) -> bool {
@@ -1099,6 +1129,23 @@ impl RegisteredTool {
     }
 }
 
+struct BridgeExecutor;
+
+impl ToolExecutor for BridgeExecutor {
+    fn execute<'a>(
+        &'a self,
+        call: PendingToolCall,
+        _context: ToolExecutionContext,
+    ) -> ToolExecutorFuture<'a> {
+        Box::pin(async move {
+            Err(ToolExecutionError::infrastructure(format!(
+                "bridge tool {} must be executed by a bridge runner",
+                call.name().as_str()
+            )))
+        })
+    }
+}
+
 impl std::fmt::Debug for RegisteredTool {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -1106,6 +1153,7 @@ impl std::fmt::Debug for RegisteredTool {
             .field("spec", &self.spec)
             .field("action_kind", &self.action_kind)
             .field("proposals_enabled", &self.proposals_enabled)
+            .field("runner", &self.runner)
             .finish_non_exhaustive()
     }
 }
@@ -1139,6 +1187,12 @@ impl ToolRegistry {
     pub(crate) fn registered_tool(&self, name: &ToolName) -> Option<&RegisteredTool> {
         self.tools.get(name)
     }
+
+    pub(crate) fn first_bridge_tool_name(&self) -> Option<&ToolName> {
+        self.tools
+            .iter()
+            .find_map(|(name, tool)| (tool.runner() == ToolRunner::Bridge).then_some(name))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1151,7 +1205,7 @@ mod tests {
     use super::{
         ActionProposal, ActionProposalError, ActionProposalEvidence, RegisteredTool,
         ToolActionKind, ToolExecutionContext, ToolExecutionOutcome, ToolExecutor,
-        ToolExecutorFuture, WorkspacePatchExecutionEvidence, WorkspacePatchProposal,
+        ToolExecutorFuture, ToolRunner, WorkspacePatchExecutionEvidence, WorkspacePatchProposal,
     };
     use crate::{ProcessActionIntent, ProcessEnvPolicy};
     use merry_core::{
@@ -1198,6 +1252,22 @@ mod tests {
             RegisteredTool::read_only(tool_spec("read_only_tool"), Arc::new(StaticToolExecutor));
 
         assert_eq!(tool.action_kind(), ToolActionKind::ReadOnly);
+    }
+
+    #[test]
+    fn registered_tool_defaults_to_runtime_runner() {
+        let tool =
+            RegisteredTool::read_only(tool_spec("lookup_order"), Arc::new(StaticToolExecutor));
+
+        assert_eq!(tool.runner(), ToolRunner::Runtime);
+    }
+
+    #[test]
+    fn bridge_tool_carries_spec_without_runtime_executor() {
+        let tool = RegisteredTool::bridge(tool_spec("lookup_order"));
+
+        assert_eq!(tool.runner(), ToolRunner::Bridge);
+        assert_eq!(tool.spec().name().as_str(), "lookup_order");
     }
 
     #[test]

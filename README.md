@@ -197,6 +197,41 @@ Deterministic verification is based on fake providers and stored runtime state. 
 
 See [ROADMAP.md](ROADMAP.md) for the current public status.
 
+## Python SDK MVP
+
+The first Python binding slice exposes an embedded runtime through a PyO3
+extension module and pure Python wrappers:
+
+```python
+import asyncio
+import merry
+
+
+async def main() -> None:
+    runtime = merry.Runtime.from_env()
+    result = await runtime.run("Say hello from Merry.")
+    print(result.final_output)
+
+
+asyncio.run(main())
+```
+
+Run the example with a real OpenAI-compatible provider:
+
+```bash
+export MERRY_OPENAI_API_KEY=...
+export MERRY_OPENAI_MODEL=...
+python sdks/python/examples/basic_runtime.py
+```
+
+`MERRY_OPENAI_BASE_URL` is optional for non-default OpenAI-compatible
+endpoints. This slice proves the Python package shape, live provider config,
+async run plus incremental event streaming, same-loop Python bridge tool
+continuation, Pydantic/decorator tool registration, structured
+`MerryErrorInfo` exceptions, and private deterministic test helpers for
+tool-boundary behavior. Real workspace tools, Python profile configuration,
+and structured final-output models are later slices.
+
 ## Repository Notes
 
 - Engineering rules for agents and contributors live in [AGENTS.md](AGENTS.md).

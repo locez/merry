@@ -314,6 +314,16 @@ impl Runtime {
                 session_id: self.inner.session_id.clone(),
             })?;
 
+        self.submit_tool_result_with_active_permit(result, content, &_active_permit)
+            .await
+    }
+
+    pub(crate) async fn submit_tool_result_with_active_permit(
+        &self,
+        result: ToolCallResult,
+        content: ArtifactContent,
+        _active_permit: &ActiveStepPermit,
+    ) -> Result<Vec<RuntimeEvent>, RuntimeError> {
         if is_runtime_reserved_artifact_id(result.artifact().id()) {
             return Err(RuntimeError::ReservedArtifactId {
                 artifact_id: result.artifact().id().clone(),
@@ -1534,6 +1544,7 @@ pub struct RuntimeBuilder {
     task_anchor: Option<TaskAnchor>,
     compacted_checkpoint: Option<CompactedCheckpoint>,
     memory_activation_source: Arc<dyn MemoryActivationSource>,
+    allow_bridge_tools: bool,
     allow_low_risk_workspace_patches: bool,
     low_risk_process_runner: Option<Arc<dyn ProcessRunner>>,
     read_only_shell_process_runner: Option<Arc<dyn ProcessRunner>>,
@@ -1556,6 +1567,7 @@ impl RuntimeBuilder {
             task_anchor: None,
             compacted_checkpoint: None,
             memory_activation_source: Arc::new(StoredMemoryActivationSource),
+            allow_bridge_tools: false,
             allow_low_risk_workspace_patches: false,
             low_risk_process_runner: None,
             read_only_shell_process_runner: None,
@@ -1622,6 +1634,16 @@ impl RuntimeBuilder {
     #[must_use]
     pub fn register_tool(mut self, tool: RegisteredTool) -> Self {
         self.registered_tools.push(tool);
+        self
+    }
+
+    /// Allows bridge tools to be registered for this runtime.
+    ///
+    /// Bridge handlers run in host code outside Merry-managed sandboxing. This
+    /// opt-in is separate from [`RuntimeProfile`] capability policy.
+    #[must_use]
+    pub fn allow_bridge_tools(mut self) -> Self {
+        self.allow_bridge_tools = true;
         self
     }
 
@@ -1748,6 +1770,11 @@ impl RuntimeBuilder {
                     name: duplicate.name,
                 }
             })?;
+        if !self.allow_bridge_tools
+            && let Some(name) = tool_registry.first_bridge_tool_name()
+        {
+            return Err(RuntimeError::BridgeToolsNotAllowed { name: name.clone() });
+        }
 
         let mut session = SessionState::new(self.session_id.clone());
         for (id, text) in self.initial_context_summaries {
@@ -2062,7 +2089,12 @@ async fn run_provider_step(
     let provider = provider_config.provider();
     let mut request_budget = request_context_budget(provider.capabilities(), &request);
     if let Err(error) = &request_budget {
-        trace_provider_request_budget_unavailable(provider.name().as_str(), &request, error);
+        trace_provider_request_budget_unavailable(
+            inner.session_id.as_str(),
+            provider.name().as_str(),
+            &request,
+            error,
+        );
     }
     if matches!(
         request_budget.as_ref().map(|budget| budget.decision),
@@ -2106,6 +2138,7 @@ async fn run_provider_step(
                 request_budget = request_context_budget(provider.capabilities(), &request);
                 if let Err(error) = &request_budget {
                     trace_provider_request_budget_unavailable(
+                        inner.session_id.as_str(),
                         provider.name().as_str(),
                         &request,
                         error,
@@ -2142,6 +2175,7 @@ async fn run_provider_step(
 
     let stream_context = ModelStreamContext::new(token.clone());
     trace_provider_request(
+        inner.session_id.as_str(),
         provider.name().as_str(),
         &request,
         sent_continuation_count,
@@ -2372,6 +2406,7 @@ async fn run_provider_step(
 }
 
 fn trace_provider_request(
+    session_id: &str,
     provider_name: &str,
     request: &merry_llm::ModelRequest,
     continuation_count: usize,
@@ -2380,6 +2415,7 @@ fn trace_provider_request(
     if let Some(request_budget) = request_budget {
         tracing::debug!(
             event = "runtime.provider.request",
+            session_id,
             provider_name,
             model = request.model().as_str(),
             message_count = request.messages().len(),
@@ -2404,6 +2440,7 @@ fn trace_provider_request(
     } else {
         tracing::debug!(
             event = "runtime.provider.request",
+            session_id,
             provider_name,
             model = request.model().as_str(),
             message_count = request.messages().len(),
@@ -2421,12 +2458,14 @@ fn trace_provider_request(
 }
 
 fn trace_provider_request_budget_unavailable(
+    session_id: &str,
     provider_name: &str,
     request: &merry_llm::ModelRequest,
     error: &crate::ContextError,
 ) {
     tracing::debug!(
         event = "runtime.provider.request.context_budget_unavailable",
+        session_id,
         provider_name,
         model = request.model().as_str(),
         diagnostic_code = "context_budget",
@@ -2896,14 +2935,53 @@ async fn send_tool_call_pending_event(
 
     match event {
         Ok(event) => {
+            let bridge_call = match &event.kind {
+                RuntimeEventKind::ToolCallPending { call } => inner
+                    .tool_registry
+                    .registered_tool(call.name())
+                    .is_some_and(|tool| tool.runner() == crate::ToolRunner::Bridge)
+                    .then(|| call.clone()),
+                _ => None,
+            };
             permit.send(event);
-            true
+
+            if let Some(call) = bridge_call {
+                send_bridge_tool_call_requested_event(inner, sender, token, call).await
+            } else {
+                true
+            }
         }
         Err(diagnostic) => {
             drop(permit);
             send_failed_event(inner, sender, token, diagnostic).await
         }
     }
+}
+
+async fn send_bridge_tool_call_requested_event(
+    inner: &RuntimeInner,
+    sender: &mpsc::Sender<RuntimeEvent>,
+    token: &CancellationToken,
+    call: PendingToolCall,
+) -> bool {
+    if token.is_cancelled() {
+        return false;
+    }
+
+    let Some(permit) = reserve_normal_event_slot(sender, token).await else {
+        return false;
+    };
+
+    let event = {
+        let mut session = inner.session.lock().await;
+        if token.is_cancelled() {
+            return false;
+        }
+        session.record_bridge_tool_call_requested(call)
+    };
+
+    permit.send(event);
+    true
 }
 
 async fn send_failed_event(
@@ -3359,6 +3437,7 @@ mod tests {
                 RuntimeEventKind::ArtifactRecorded { .. } => "ArtifactRecorded",
                 RuntimeEventKind::EvidenceReferenced { .. } => "EvidenceReferenced",
                 RuntimeEventKind::ToolCallPending { .. } => "ToolCallPending",
+                RuntimeEventKind::BridgeToolCallRequested { .. } => "BridgeToolCallRequested",
                 RuntimeEventKind::ToolCallResolved { .. } => "ToolCallResolved",
                 RuntimeEventKind::SkillUsed { .. } => "SkillUsed",
                 _ => "Unknown",
@@ -4717,6 +4796,38 @@ mod tests {
     }
 
     #[test]
+    fn bridge_tool_registration_requires_explicit_builder_opt_in() {
+        let result = Runtime::builder(session_id("runtime-bridge-tool-gate-deny"))
+            .register_tool(RegisteredTool::bridge(policy_tool_spec("bridge_lookup")))
+            .build();
+
+        match result {
+            Ok(_) => panic!("bridge tools require explicit builder opt-in"),
+            Err(RuntimeError::BridgeToolsNotAllowed { name }) => {
+                assert_eq!(name.as_str(), "bridge_lookup");
+            }
+            Err(other) => panic!("expected bridge gate error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn allow_bridge_tools_accepts_bridge_registered_tool() {
+        let runtime = Runtime::builder(session_id("runtime-bridge-tool-gate-allow"))
+            .allow_bridge_tools()
+            .register_tool(RegisteredTool::bridge(policy_tool_spec("bridge_lookup")))
+            .build()
+            .expect("explicit bridge opt-in should allow bridge tool registration");
+
+        assert!(
+            runtime
+                .inner
+                .tool_registry
+                .registered_tool(&ToolName::new("bridge_lookup").expect("valid tool name"))
+                .is_some()
+        );
+    }
+
+    #[test]
     fn role_model_config_stores_all_roles_independently_and_overrides_same_role() {
         let first_primary_model = named_model("fake/primary-v1");
         let primary_model = named_model("fake/primary-v2");
@@ -5921,6 +6032,51 @@ mod tests {
             "Activated memory must survive a pending tool call and pending gate.",
         )
         .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bridge_tool_call_emits_bridge_request_event() {
+        let call = model_tool_call("call-bridge-tool");
+        let provider = RecordingModelProvider::with_script(vec![
+            ScriptedModelProviderResponse::Stream(vec![Ok(completed_event_with(
+                vec![ModelOutput::tool_call(call)],
+                FinishReason::ToolCalls,
+            ))]),
+        ]);
+        let runtime = Runtime::builder(session_id("runtime-bridge-tool-event"))
+            .allow_bridge_tools()
+            .model_provider(Arc::new(provider.clone()), model_name())
+            .register_tool(RegisteredTool::bridge(policy_tool_spec("lookup")))
+            .build()
+            .expect("bridge opt-in should allow bridge tool registration");
+
+        let events = collect_step(
+            &runtime,
+            "Topic request.",
+            crate::StepContext::new(CancellationToken::new()),
+        )
+        .await;
+
+        assert_eq!(
+            event_kind_names(&events),
+            [
+                "SessionStarted",
+                "StepStarted",
+                "ToolCallPending",
+                "BridgeToolCallRequested"
+            ]
+        );
+        assert!(events.iter().any(|event| matches!(
+            &event.kind,
+            RuntimeEventKind::BridgeToolCallRequested { call }
+                if call.id().as_str() == "call-bridge-tool"
+                    && call.name().as_str() == "lookup"
+        )));
+        assert_eq!(
+            runtime.pending_tool_calls().await,
+            vec![pending_tool_call("call-bridge-tool")]
+        );
+        assert_eq!(provider.recorded_requests().len(), 1);
     }
 
     #[tokio::test(flavor = "current_thread")]

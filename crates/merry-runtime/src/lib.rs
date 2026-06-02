@@ -44,6 +44,7 @@ mod model_config;
 mod process;
 mod process_runner;
 mod process_tool;
+mod profile;
 mod runtime;
 mod session;
 mod skill;
@@ -53,8 +54,8 @@ mod summary_draft_promotion;
 mod tool;
 
 pub use agent_loop::{
-    AgentLoopBlockedReason, AgentLoopConfig, AgentLoopConfigError, AgentLoopError, AgentLoopResult,
-    AgentLoopStatus, DEFAULT_AGENT_LOOP_CONTINUATION_INPUT,
+    AgentLoopBlockedReason, AgentLoopConfig, AgentLoopConfigError, AgentLoopError,
+    AgentLoopEventStream, AgentLoopResult, AgentLoopStatus, DEFAULT_AGENT_LOOP_CONTINUATION_INPUT,
 };
 pub use artifact::{
     ArtifactContent, ArtifactContentKind, ArtifactError, ArtifactRecord, ArtifactRegistry,
@@ -94,6 +95,7 @@ pub use process::{
 };
 pub use process_runner::TokioProcessRunner;
 pub use process_tool::{ProcessCommandToolError, process_command_tool};
+pub use profile::RuntimeProfile;
 pub use runtime::{AutomaticCompactionConfig, Runtime, RuntimeBuilder};
 pub use skill::{SkillCatalog, SkillError, SkillLoadWarning, SkillMetadata};
 pub use step::{StepContext, StepInput};
@@ -109,6 +111,6 @@ pub use tool::{
     ActionExecutionEvidence, ActionProposal, ActionProposalError, ActionProposalEvidence,
     RegisteredTool, ToolActionKind, ToolActionPreflight, ToolActionProposalFuture,
     ToolActionProposalResult, ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome,
-    ToolExecutionResult, ToolExecutor, ToolExecutorFuture, WorkspacePatchChangeEvidence,
-    WorkspacePatchExecutionEvidence, WorkspacePatchProposal,
+    ToolExecutionResult, ToolExecutor, ToolExecutorFuture, ToolRunner,
+    WorkspacePatchChangeEvidence, WorkspacePatchExecutionEvidence, WorkspacePatchProposal,
 };

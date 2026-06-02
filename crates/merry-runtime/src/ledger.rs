@@ -291,6 +291,8 @@ pub enum LedgerFactKind {
     StepCompleted,
     /// A model-requested tool call has been recorded as pending.
     ToolCallPending,
+    /// A bridge tool call request has been exposed to an external runner.
+    BridgeToolCallRequested,
     /// An internal runtime action audit has been recorded.
     ActionAuditRecorded,
     /// A pending tool call has been resolved with an artifact-backed result.
