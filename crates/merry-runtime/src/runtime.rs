@@ -217,7 +217,7 @@ impl Runtime {
         context: StepContext,
         active_permit: ActiveStepPermit,
     ) -> Result<RuntimeEventStream, RuntimeError> {
-        let (parent_token, generation_config) = context.into_parts();
+        let (parent_token, generation_config, final_output_contract) = context.into_parts();
         let step_token = parent_token.child_token();
         let producer_token = step_token.clone();
         let (sender, receiver) = mpsc::channel(self.inner.event_buffer_size.get());
@@ -242,6 +242,7 @@ impl Runtime {
                     producer_token,
                     input,
                     generation_config,
+                    final_output_contract,
                     active_permit,
                 )
                 .await;
@@ -332,6 +333,16 @@ impl Runtime {
 
         let mut session = self.inner.session.lock().await;
         session.submit_tool_result(result, content)
+    }
+
+    pub(crate) async fn record_final_output_tool_call(
+        &self,
+        call: PendingToolCall,
+    ) -> Result<(crate::FinalOutput, Vec<RuntimeEvent>), RuntimeError> {
+        let json = serde_json::to_string(call.arguments().as_object())
+            .expect("tool call arguments are JSON object values and must serialize");
+        let mut session = self.inner.session.lock().await;
+        session.record_final_output(call.id().clone(), json)
     }
 
     /// Executes one pending tool call through a runtime-registered executor.
@@ -1059,7 +1070,7 @@ impl Runtime {
                 session_id: self.inner.session_id.clone(),
             })?;
 
-        let (token, _) = context.into_parts();
+        let (token, _, _) = context.into_parts();
         if token.is_cancelled() {
             return Err(RuntimeError::Compaction {
                 source: CompactionError::InvalidModelResponseShape {
@@ -1844,6 +1855,7 @@ async fn run_step(
     token: CancellationToken,
     input: StepInput,
     generation_config: GenerationConfig,
+    final_output_contract: Option<crate::FinalOutputContract>,
     _active_permit: ActiveStepPermit,
 ) {
     tracing::debug!(category = "started", "runtime step started");
@@ -1911,6 +1923,7 @@ async fn run_step(
         &token,
         input,
         generation_config,
+        final_output_contract,
         provider_config,
     )
     .await;
@@ -1922,6 +1935,7 @@ async fn run_provider_step(
     token: &CancellationToken,
     input: StepInput,
     generation_config: GenerationConfig,
+    final_output_contract: Option<crate::FinalOutputContract>,
     provider_config: ModelProviderConfig,
 ) {
     if has_unresolved_pending_tool_calls(inner).await {
@@ -2055,7 +2069,10 @@ async fn run_provider_step(
     };
     let mut projection_guard =
         ActivationProjectionGuard::new(Arc::clone(inner), token.clone(), activation_epoch);
-    let tool_specs = inner.tool_registry.tool_specs();
+    let mut tool_specs = inner.tool_registry.tool_specs();
+    if let Some(contract) = &final_output_contract {
+        tool_specs.push(contract.tool_spec().clone());
+    }
     tracing::debug!(
         category = "continuations_and_tools",
         continuation_count = request_inputs.continuations.len(),

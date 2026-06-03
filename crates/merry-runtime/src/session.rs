@@ -42,6 +42,7 @@ use merry_core::{
 use std::collections::BTreeSet;
 
 const ASSISTANT_OUTPUT_ARTIFACT_PREFIX: &str = "assistant-output-";
+const FINAL_OUTPUT_ARTIFACT_PREFIX: &str = "final-output-";
 const PROCESS_INPUT_ARTIFACT_PREFIX: &str = "process-input-";
 const TOOL_RESULT_ARTIFACT_PREFIX: &str = "tool-result-";
 const WORKSPACE_READ_FILE_TOOL_NAME: &str = "workspace_read_file";
@@ -493,6 +494,59 @@ impl SessionState {
             RuntimeEventKind::ArtifactRecorded { artifact: recorded },
             LedgerFactKind::ArtifactRecorded,
         ))
+    }
+
+    pub(crate) fn record_final_output(
+        &mut self,
+        call_id: ToolCallId,
+        json: String,
+    ) -> Result<(crate::FinalOutput, Vec<RuntimeEvent>), RuntimeError> {
+        let Some(pending_index) = self
+            .pending_tool_calls
+            .iter()
+            .position(|call| call.id() == &call_id)
+        else {
+            return if self.resolved_tool_calls.contains(&call_id) {
+                Err(RuntimeError::ToolCallAlreadyResolved {
+                    session_id: self.session_id.clone(),
+                    call_id,
+                })
+            } else {
+                Err(RuntimeError::UnknownToolCall {
+                    session_id: self.session_id.clone(),
+                    call_id,
+                })
+            };
+        };
+
+        let artifact_sequence = self.next_sequence();
+        let artifact = ArtifactRef::new(final_output_id(artifact_sequence), ArtifactKind::Json);
+        let content = ArtifactContent::json(json.clone());
+        let content_bytes = content.as_bytes().len();
+        let recorded = self.record_artifact_state(artifact, content)?;
+        Self::trace_artifact_record(self.session_id.as_str(), &recorded, content_bytes);
+        self.pending_tool_calls.remove(pending_index);
+        self.resolved_tool_calls.insert(call_id.clone());
+
+        let mut events = Vec::with_capacity(if self.session_started { 2 } else { 3 });
+        if let Some(started) = self.record_session_started_if_needed() {
+            events.push(started);
+        }
+        events.push(self.record_event(
+            RuntimeEventKind::ArtifactRecorded {
+                artifact: recorded.clone(),
+            },
+            LedgerFactKind::ArtifactRecorded,
+        ));
+        events.push(self.record_event(
+            RuntimeEventKind::FinalOutputRecorded {
+                call_id: call_id.clone(),
+                artifact: recorded.clone(),
+            },
+            LedgerFactKind::FinalOutputRecorded,
+        ));
+
+        Ok((crate::FinalOutput::new(call_id, recorded, json), events))
     }
 
     pub(crate) fn record_user_message_body(&mut self, text: &str) {
@@ -1556,6 +1610,11 @@ pub(crate) fn is_runtime_reserved_artifact_id(artifact_id: &ArtifactId) -> bool 
 fn assistant_output_id(sequence: u64) -> ArtifactId {
     ArtifactId::new(&format!("{ASSISTANT_OUTPUT_ARTIFACT_PREFIX}{sequence}"))
         .expect("assistant output artifact id uses a valid static prefix and sequence")
+}
+
+fn final_output_id(sequence: u64) -> ArtifactId {
+    ArtifactId::new(&format!("{FINAL_OUTPUT_ARTIFACT_PREFIX}{sequence}"))
+        .expect("final output artifact id uses a valid static prefix and sequence")
 }
 
 fn process_input_id(sequence: u64) -> ArtifactId {

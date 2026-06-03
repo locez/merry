@@ -13,9 +13,9 @@ use merry_llm::{
 };
 use merry_provider_openai::{OpenAiProvider, OpenAiProviderConfig};
 use merry_runtime::{
-    AgentLoopConfig, AgentLoopResult, AgentLoopStatus, ArtifactContent, RegisteredTool, Runtime,
-    RuntimeBuilder, StepContext, StepInput, ToolExecutionContext, ToolExecutionError,
-    ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture, ToolRunner,
+    AgentLoopConfig, AgentLoopResult, AgentLoopStatus, ArtifactContent, FinalOutputContract,
+    RegisteredTool, Runtime, RuntimeBuilder, StepContext, StepInput, ToolExecutionContext,
+    ToolExecutionError, ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture, ToolRunner,
 };
 use pyo3::{prelude::*, types::PyDict};
 use schemars::Schema;
@@ -31,6 +31,8 @@ use tokio_util::sync::CancellationToken;
 const INVALID_SESSION_ID_HINT: &str =
     "Use a non-empty stable session id without surrounding whitespace.";
 const INVALID_SESSION_ID_MESSAGE: &str = "Invalid Merry runtime session id.";
+const FINAL_OUTPUT_SCHEMA_HINT: &str =
+    "Pass final_output_model as a Pydantic BaseModel with Field(description=...) on every field.";
 
 #[pyclass(name = "Runtime")]
 pub(crate) struct PyRuntime {
@@ -118,6 +120,16 @@ enum RuntimeScenario {
         arguments: Map<String, Value>,
         final_text: String,
     },
+    ScriptedToolCalls {
+        calls: Vec<ScriptedToolCallSpec>,
+        final_text: String,
+    },
+}
+
+#[derive(Clone)]
+struct ScriptedToolCallSpec {
+    tool_name: ToolName,
+    arguments: Map<String, Value>,
 }
 
 #[derive(Clone)]
@@ -285,6 +297,25 @@ impl PyRuntime {
         })
     }
 
+    #[staticmethod]
+    #[pyo3(name = "_with_scripted_tool_calls")]
+    fn with_scripted_tool_calls(calls_json: String, final_text: String) -> PyResult<Self> {
+        let calls = parse_scripted_tool_calls(&calls_json)?;
+        let session_id =
+            SessionId::new("python-sdk-scripted-tools").expect("static session id must be valid");
+        let scenario = RuntimeScenario::ScriptedToolCalls { calls, final_text };
+        let tools = Vec::new();
+        let runtime = build_runtime_from(session_id.clone(), &scenario, &tools)
+            .map_err(error::runtime_error_to_py)?;
+
+        Ok(Self {
+            session_id,
+            scenario,
+            tools,
+            runtime,
+        })
+    }
+
     #[pyo3(name = "_register_static_tool_failure")]
     fn register_static_tool_failure(
         &mut self,
@@ -326,13 +357,25 @@ impl PyRuntime {
         Ok(())
     }
 
-    fn run_blocking(&self, py: Python<'_>, task: String) -> PyResult<Py<PyAny>> {
+    #[pyo3(signature = (task, final_output_schema_json=None))]
+    fn run_blocking(
+        &self,
+        py: Python<'_>,
+        task: String,
+        final_output_schema_json: Option<String>,
+    ) -> PyResult<Py<PyAny>> {
         let runtime = self.runtime.clone();
-        let result = py.detach(move || run_agent_loop_blocking(runtime, task))?;
+        let result =
+            py.detach(move || run_agent_loop_blocking(runtime, task, final_output_schema_json))?;
         agent_loop_result_to_python(py, result)
     }
 
-    fn run_stream_blocking(&self, task: String) -> NativeRuntimeEventStream {
+    #[pyo3(signature = (task, final_output_schema_json=None))]
+    fn run_stream_blocking(
+        &self,
+        task: String,
+        final_output_schema_json: Option<String>,
+    ) -> NativeRuntimeEventStream {
         let runtime = self.runtime.clone();
         let (sender, receiver) = mpsc::channel();
         let (command_sender, command_receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -340,6 +383,7 @@ impl PyRuntime {
             if let Err(error) = run_agent_loop_event_stream_blocking(
                 runtime,
                 task,
+                final_output_schema_json,
                 sender.clone(),
                 command_receiver,
             ) {
@@ -602,6 +646,10 @@ fn configure_scenario(builder: RuntimeBuilder, scenario: &RuntimeScenario) -> Ru
             )),
             fake_model_name(),
         ),
+        RuntimeScenario::ScriptedToolCalls { calls, final_text } => builder.model_provider(
+            Arc::new(scripted_tool_calls_provider(calls, final_text)),
+            fake_model_name(),
+        ),
     }
 }
 
@@ -626,13 +674,32 @@ fn scripted_tool_call_provider(
     arguments: Map<String, Value>,
     final_text: &str,
 ) -> ScriptedModelProvider {
-    let call = ModelToolCall::new(
-        ModelToolCallId::new("call-python-tool").expect("static tool call id must be valid"),
-        tool_name,
-        ToolArguments::new(arguments),
-    );
-    ScriptedModelProvider::new(vec![
-        vec![
+    scripted_tool_calls_provider(
+        &[ScriptedToolCallSpec {
+            tool_name,
+            arguments,
+        }],
+        final_text,
+    )
+}
+
+fn scripted_tool_calls_provider(
+    calls: &[ScriptedToolCallSpec],
+    final_text: &str,
+) -> ScriptedModelProvider {
+    let mut responses = Vec::new();
+    for (index, call) in calls.iter().enumerate() {
+        let call_id = if calls.len() == 1 {
+            "call-python-tool".to_owned()
+        } else {
+            format!("call-python-tool-{}", index + 1)
+        };
+        let call = ModelToolCall::new(
+            ModelToolCallId::new(&call_id).expect("scripted tool call id must be valid"),
+            call.tool_name.clone(),
+            ToolArguments::new(call.arguments.clone()),
+        );
+        responses.push(vec![
             ModelEvent::Started,
             ModelEvent::Completed {
                 response: ModelResponse::new(
@@ -641,18 +708,20 @@ fn scripted_tool_call_provider(
                     None,
                 ),
             },
-        ],
-        vec![
-            ModelEvent::Started,
-            ModelEvent::Completed {
-                response: ModelResponse::new(
-                    vec![ModelOutput::text(final_text)],
-                    FinishReason::Stop,
-                    None,
-                ),
-            },
-        ],
-    ])
+        ]);
+    }
+    responses.push(vec![
+        ModelEvent::Started,
+        ModelEvent::Completed {
+            response: ModelResponse::new(
+                vec![ModelOutput::text(final_text)],
+                FinishReason::Stop,
+                None,
+            ),
+        },
+    ]);
+
+    ScriptedModelProvider::new(responses)
 }
 
 struct ScriptedModelProvider {
@@ -826,20 +895,22 @@ fn object_input_schema() -> Schema {
 }
 
 fn parse_schema(json_text: &str) -> PyResult<Schema> {
-    let value = serde_json::from_str::<Value>(json_text).map_err(|source| {
-        error::runtime_message_to_py(
-            "tool.schema_invalid",
-            &source.to_string(),
-            Some("Pass a JSON-serializable object JSON schema."),
-        )
-    })?;
-    Schema::try_from(value).map_err(|source| {
-        error::runtime_message_to_py(
-            "tool.schema_invalid",
-            &source.to_string(),
-            Some("Pass an object JSON schema."),
-        )
-    })
+    parse_schema_with_hint(
+        json_text,
+        "tool.schema_invalid",
+        "Pass a JSON-serializable object JSON schema.",
+    )
+    .map_err(SchemaMessage::into_py_error)
+}
+
+fn parse_schema_with_hint(
+    json_text: &str,
+    code: &'static str,
+    hint: &'static str,
+) -> Result<Schema, SchemaMessage> {
+    let value = serde_json::from_str::<Value>(json_text)
+        .map_err(|source| SchemaMessage::new(code, source.to_string(), hint))?;
+    Schema::try_from(value).map_err(|source| SchemaMessage::new(code, source.to_string(), hint))
 }
 
 fn parse_json_object(json_text: &str, code: &str) -> PyResult<Map<String, Value>> {
@@ -858,11 +929,79 @@ fn parse_json_object(json_text: &str, code: &str) -> PyResult<Map<String, Value>
     }
 }
 
+fn parse_scripted_tool_calls(json_text: &str) -> PyResult<Vec<ScriptedToolCallSpec>> {
+    let value = serde_json::from_str::<Value>(json_text).map_err(|source| {
+        error::runtime_message_to_py(
+            "tool.input_invalid",
+            &source.to_string(),
+            Some("Pass a JSON array of scripted tool call objects."),
+        )
+    })?;
+    let Value::Array(items) = value else {
+        return Err(error::runtime_message_to_py(
+            "tool.input_invalid",
+            "Scripted tool calls must be a JSON array.",
+            Some("Pass [{'name': ..., 'arguments': {...}}] from Python tests."),
+        ));
+    };
+
+    let mut calls = Vec::with_capacity(items.len());
+    for item in items {
+        let Value::Object(mut object) = item else {
+            return Err(error::runtime_message_to_py(
+                "tool.input_invalid",
+                "Each scripted tool call must be a JSON object.",
+                Some("Pass {'name': ..., 'arguments': {...}} for each call."),
+            ));
+        };
+        let Some(Value::String(name)) = object.remove("name") else {
+            return Err(error::runtime_message_to_py(
+                "tool.input_invalid",
+                "Each scripted tool call must include a string name.",
+                Some("Pass a provider-portable Merry tool name."),
+            ));
+        };
+        let Some(Value::Object(arguments)) = object.remove("arguments") else {
+            return Err(error::runtime_message_to_py(
+                "tool.input_invalid",
+                "Each scripted tool call must include object arguments.",
+                Some("Pass JSON-serializable mapping values."),
+            ));
+        };
+        if !object.is_empty() {
+            return Err(error::runtime_message_to_py(
+                "tool.input_invalid",
+                "Scripted tool call objects cannot include unknown fields.",
+                Some("Use only name and arguments."),
+            ));
+        }
+        let tool_name = ToolName::new(&name).map_err(|_error| {
+            error::runtime_message_to_py(
+                "tool.registration_invalid",
+                "Invalid Merry tool name.",
+                Some("Use a non-empty provider-portable tool name."),
+            )
+        })?;
+        calls.push(ScriptedToolCallSpec {
+            tool_name,
+            arguments,
+        });
+    }
+
+    Ok(calls)
+}
+
 fn fake_model_name() -> ModelName {
     ModelName::new("fake/python-sdk").expect("static model name must be valid")
 }
 
-fn run_agent_loop_blocking(runtime: Runtime, task: String) -> PyResult<AgentLoopResult> {
+fn run_agent_loop_blocking(
+    runtime: Runtime,
+    task: String,
+    final_output_schema_json: Option<String>,
+) -> PyResult<AgentLoopResult> {
+    let final_output_contract = final_output_contract_from_schema_json(final_output_schema_json)
+        .map_err(SchemaMessage::into_py_error)?;
     let tokio_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -878,7 +1017,7 @@ fn run_agent_loop_blocking(runtime: Runtime, task: String) -> PyResult<AgentLoop
         let input = StepInput::user_text(&task).map_err(error::runtime_error_to_py)?;
         let context = StepContext::new(CancellationToken::new());
         runtime
-            .run_agent_loop(input, context, AgentLoopConfig::default())
+            .run_agent_loop(input, context, agent_loop_config(final_output_contract))
             .await
             .map_err(error::agent_loop_error_to_py)
     })
@@ -887,9 +1026,11 @@ fn run_agent_loop_blocking(runtime: Runtime, task: String) -> PyResult<AgentLoop
 fn run_agent_loop_event_stream_blocking(
     runtime: Runtime,
     task: String,
+    final_output_schema_json: Option<String>,
     sender: mpsc::Sender<StreamRunnerMessage>,
     command_receiver: tokio::sync::mpsc::UnboundedReceiver<StreamRunnerCommand>,
 ) -> Result<(), StreamRunnerError> {
+    let final_output_contract = final_output_contract_from_schema_json(final_output_schema_json)?;
     let tokio_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -900,26 +1041,33 @@ fn run_agent_loop_event_stream_blocking(
         })?;
 
     tokio_runtime.block_on(async move {
-        run_agent_loop_event_stream(runtime, task, sender, command_receiver)
-            .await
-            .map_err(|message| StreamRunnerError {
-                code: "runtime.stream_failed",
-                message,
-                hint: Some("Retry the operation or use Runtime.run(...) for a collected result."),
-            })
+        run_agent_loop_event_stream(
+            runtime,
+            task,
+            final_output_contract,
+            sender,
+            command_receiver,
+        )
+        .await
+        .map_err(|message| StreamRunnerError {
+            code: "runtime.stream_failed",
+            message,
+            hint: Some("Retry the operation or use Runtime.run(...) for a collected result."),
+        })
     })
 }
 
 async fn run_agent_loop_event_stream(
     runtime: Runtime,
     task: String,
+    final_output_contract: Option<FinalOutputContract>,
     sender: mpsc::Sender<StreamRunnerMessage>,
     mut command_receiver: tokio::sync::mpsc::UnboundedReceiver<StreamRunnerCommand>,
 ) -> Result<(), String> {
     let input = StepInput::user_text(&task).map_err(|source| source.to_string())?;
     let context = StepContext::new(CancellationToken::new());
     let mut stream = runtime
-        .run_agent_loop_stream(input, context, AgentLoopConfig::default())
+        .run_agent_loop_stream(input, context, agent_loop_config(final_output_contract))
         .map_err(|source| source.to_string())?;
 
     loop {
@@ -997,6 +1145,75 @@ fn parse_stream_tool_success(
     ))
 }
 
+#[derive(Clone)]
+struct SchemaMessage {
+    code: &'static str,
+    message: String,
+    hint: &'static str,
+}
+
+impl SchemaMessage {
+    fn new(code: &'static str, message: String, hint: &'static str) -> Self {
+        Self {
+            code,
+            message,
+            hint,
+        }
+    }
+
+    fn into_py_error(self) -> PyErr {
+        error::runtime_message_to_py(self.code, &self.message, Some(self.hint))
+    }
+}
+
+impl From<SchemaMessage> for StreamRunnerError {
+    fn from(message: SchemaMessage) -> Self {
+        Self {
+            code: message.code,
+            message: message.message,
+            hint: Some(message.hint),
+        }
+    }
+}
+
+fn final_output_contract_from_schema_json(
+    schema_json: Option<String>,
+) -> Result<Option<FinalOutputContract>, SchemaMessage> {
+    let Some(schema_json) = schema_json else {
+        return Ok(None);
+    };
+
+    let schema = parse_schema_with_hint(
+        &schema_json,
+        "final_output.schema_invalid",
+        FINAL_OUTPUT_SCHEMA_HINT,
+    )?;
+    let input_schema = ToolInputSchema::new(schema).map_err(|source| {
+        SchemaMessage::new(
+            "final_output.schema_invalid",
+            source.to_string(),
+            FINAL_OUTPUT_SCHEMA_HINT,
+        )
+    })?;
+    FinalOutputContract::new(input_schema)
+        .map(Some)
+        .map_err(|source| {
+            SchemaMessage::new(
+                "final_output.schema_invalid",
+                source.to_string(),
+                FINAL_OUTPUT_SCHEMA_HINT,
+            )
+        })
+}
+
+fn agent_loop_config(final_output_contract: Option<FinalOutputContract>) -> AgentLoopConfig {
+    let config = AgentLoopConfig::default();
+    match final_output_contract {
+        Some(contract) => config.with_final_output_contract(contract),
+        None => config,
+    }
+}
+
 fn submit_tool_success_json_blocking(
     runtime: Runtime,
     call_id: String,
@@ -1045,6 +1262,12 @@ fn agent_loop_result_to_python(py: Python<'_>, result: AgentLoopResult) -> PyRes
     dict.set_item("status", status_label(result.status()))?;
     dict.set_item("steps_run", result.steps_run())?;
     dict.set_item("final_output", result.final_output())?;
+    dict.set_item(
+        "final_output_json",
+        result
+            .final_output_json()
+            .map(merry_runtime::FinalOutput::json),
+    )?;
 
     let events = serde_json::to_value(result.events()).expect("RuntimeEvent values must serialize");
     dict.set_item("events", json_to_py(py, &events)?)?;

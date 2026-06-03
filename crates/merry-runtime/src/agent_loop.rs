@@ -5,8 +5,8 @@
 //! [`Runtime::step`]. It is intentionally serial, provider-neutral, and bounded.
 
 use crate::{
-    Runtime, RuntimeError, RuntimeEventStream, StepContext, StepInput, ToolExecutionContext,
-    event_stream::ActiveStepPermit,
+    FinalOutput, FinalOutputContract, Runtime, RuntimeError, RuntimeEventStream, StepContext,
+    StepInput, ToolExecutionContext, event_stream::ActiveStepPermit,
 };
 use futures_core::Stream;
 use futures_util::StreamExt;
@@ -38,9 +38,10 @@ const ORIGINAL_TASK_CONTINUATION_LABEL: &str = "Original task:";
 /// `max_steps` bounds the number of [`Runtime::step`] calls made by one loop
 /// run. Tool execution is serial and only happens when budget remains for the
 /// following continuation step.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AgentLoopConfig {
     max_steps: NonZeroUsize,
+    final_output_contract: Option<FinalOutputContract>,
 }
 
 impl AgentLoopConfig {
@@ -50,13 +51,29 @@ impl AgentLoopConfig {
             return Err(AgentLoopConfigError::MaxStepsMustBeNonZero);
         };
 
-        Ok(Self { max_steps })
+        Ok(Self {
+            max_steps,
+            final_output_contract: None,
+        })
     }
 
     /// Maximum number of runtime steps this loop may start.
     #[must_use]
     pub fn max_steps(&self) -> usize {
         self.max_steps.get()
+    }
+
+    /// Adds a runtime-owned structured final-output contract.
+    #[must_use]
+    pub fn with_final_output_contract(mut self, contract: FinalOutputContract) -> Self {
+        self.final_output_contract = Some(contract);
+        self
+    }
+
+    /// Borrows the configured structured final-output contract.
+    #[must_use]
+    pub fn final_output_contract(&self) -> Option<&FinalOutputContract> {
+        self.final_output_contract.as_ref()
     }
 }
 
@@ -65,6 +82,7 @@ impl Default for AgentLoopConfig {
         Self {
             max_steps: NonZeroUsize::new(DEFAULT_AGENT_LOOP_MAX_STEPS)
                 .expect("default agent loop step budget is non-zero"),
+            final_output_contract: None,
         }
     }
 }
@@ -85,6 +103,7 @@ pub struct AgentLoopResult {
     events: Vec<RuntimeEvent>,
     steps_run: usize,
     final_output: Option<String>,
+    final_output_json: Option<FinalOutput>,
 }
 
 impl AgentLoopResult {
@@ -94,11 +113,22 @@ impl AgentLoopResult {
         steps_run: usize,
         final_output: Option<String>,
     ) -> Self {
+        Self::new_with_final_output_json(status, events, steps_run, final_output, None)
+    }
+
+    fn new_with_final_output_json(
+        status: AgentLoopStatus,
+        events: Vec<RuntimeEvent>,
+        steps_run: usize,
+        final_output: Option<String>,
+        final_output_json: Option<FinalOutput>,
+    ) -> Self {
         Self {
             status,
             events,
             steps_run,
             final_output,
+            final_output_json,
         }
     }
 
@@ -124,6 +154,12 @@ impl AgentLoopResult {
     #[must_use]
     pub fn final_output(&self) -> Option<&str> {
         self.final_output.as_deref()
+    }
+
+    /// Structured JSON final output recorded by the runtime final-output tool.
+    #[must_use]
+    pub fn final_output_json(&self) -> Option<&FinalOutput> {
+        self.final_output_json.as_ref()
     }
 
     /// Consumes the result and returns the collected events.
@@ -244,6 +280,8 @@ pub enum AgentLoopBlockedReason {
     /// A step stream ended without a completion, failure, cancellation, or
     /// pending tool-call event.
     StepEndedWithoutTerminalEvent,
+    /// The loop required the final-output tool but the model completed with text.
+    FinalOutputToolNotCalled,
     /// A pending tool call must be executed by an external bridge runner.
     BridgeToolCallRequested {
         /// Bridge tool call id.
@@ -343,8 +381,11 @@ impl Runtime {
                 step_index,
                 "runtime loop step start"
             );
-            let step_context = StepContext::new(loop_token.clone())
+            let mut step_context = StepContext::new(loop_token.clone())
                 .with_generation_config(generation_config.clone());
+            if let Some(contract) = config.final_output_contract().cloned() {
+                step_context = step_context.with_final_output_contract(contract);
+            }
             let stream =
                 match self.step_with_active_permit(input, step_context, loop_permit.clone()) {
                     Ok(stream) => stream,
@@ -357,7 +398,7 @@ impl Runtime {
 
             let mut step_events = collect_step_events(stream).await;
             let step_final_output = final_assistant_output_from_step(self, &step_events).await;
-            let outcome = classify_step_events(&step_events);
+            let outcome = classify_step_events(&step_events, config.final_output_contract());
             events.append(&mut step_events);
 
             match outcome {
@@ -429,6 +470,25 @@ impl Runtime {
                         events,
                         steps_run,
                         None,
+                    ));
+                }
+                StepOutcome::Pending(PendingLoopToolCall::FinalOutput(call)) => {
+                    let (final_output, mut final_events) =
+                        match record_final_output_tool_call(self, call).await {
+                            Ok(recorded) => recorded,
+                            Err(source) => {
+                                trace_loop_error(self.session_id().as_str(), steps_run, &source);
+                                return Err(AgentLoopError::new(events, source));
+                            }
+                        };
+                    events.append(&mut final_events);
+                    trace_loop_finish(self.session_id().as_str(), "completed", steps_run, None);
+                    return Ok(AgentLoopResult::new_with_final_output_json(
+                        AgentLoopStatus::Completed,
+                        events,
+                        steps_run,
+                        None,
+                        Some(final_output),
                     ));
                 }
                 StepOutcome::Pending(PendingLoopToolCall::Runtime(call)) => {
@@ -540,7 +600,7 @@ impl Runtime {
         config: AgentLoopConfig,
     ) -> Result<AgentLoopEventStream, RuntimeError> {
         let loop_permit = self.acquire_active_step_permit()?;
-        let (parent_token, generation_config) = context.into_parts();
+        let (parent_token, generation_config, _final_output_contract) = context.into_parts();
         let loop_token = parent_token.child_token();
         let producer_token = loop_token.clone();
         let (sender, receiver) = mpsc::channel(16);
@@ -608,8 +668,11 @@ async fn run_agent_loop_stream_producer(
             return None;
         }
 
-        let step_context =
+        let mut step_context =
             StepContext::new(loop_token.clone()).with_generation_config(generation_config.clone());
+        if let Some(contract) = config.final_output_contract().cloned() {
+            step_context = step_context.with_final_output_contract(contract);
+        }
         let Ok(stream) = runtime.step_with_active_permit(input, step_context, loop_permit.clone())
         else {
             return None;
@@ -627,7 +690,7 @@ async fn run_agent_loop_stream_producer(
         }
 
         let step_final_output = final_assistant_output_from_step(&runtime, &step_events).await;
-        match classify_step_events(&step_events) {
+        match classify_step_events(&step_events, config.final_output_contract()) {
             StepOutcome::Completed => {
                 return Some(AgentLoopResult::new(
                     AgentLoopStatus::Completed,
@@ -660,89 +723,114 @@ async fn run_agent_loop_stream_producer(
                     None,
                 ));
             }
-            StepOutcome::Pending(call) => {
-                if steps_run >= config.max_steps() {
-                    return Some(AgentLoopResult::new(
-                        AgentLoopStatus::Blocked {
-                            reason: AgentLoopBlockedReason::MaxStepsReached {
-                                max_steps: config.max_steps(),
-                            },
-                        },
+            StepOutcome::Pending(call) => match call {
+                PendingLoopToolCall::FinalOutput(call) => {
+                    let (final_output, events_for_final_output) =
+                        record_final_output_tool_call(&runtime, call).await.ok()?;
+                    for event in events_for_final_output {
+                        events.push(event.clone());
+                        if sender.send(event).await.is_err() {
+                            return None;
+                        }
+                    }
+                    return Some(AgentLoopResult::new_with_final_output_json(
+                        AgentLoopStatus::Completed,
                         events,
                         steps_run,
                         None,
+                        Some(final_output),
                     ));
                 }
-
-                let execution_events = match call {
-                    PendingLoopToolCall::Runtime(call) => {
-                        match runtime
-                            .execute_tool_call_with_active_permit(
-                                call.id(),
-                                ToolExecutionContext::new(loop_token.clone()),
-                                &loop_permit,
-                            )
-                            .await
-                        {
-                            Ok(events) => events,
-                            Err(RuntimeError::ToolExecutionCancelled { call_id, .. }) => {
-                                return Some(AgentLoopResult::new(
-                                    AgentLoopStatus::Cancelled {
-                                        diagnostic: tool_execution_cancelled_diagnostic(&call_id),
-                                    },
-                                    events,
-                                    steps_run,
-                                    None,
-                                ));
-                            }
-                            Err(_) => return None,
-                        }
+                call => {
+                    if steps_run >= config.max_steps() {
+                        return Some(AgentLoopResult::new(
+                            AgentLoopStatus::Blocked {
+                                reason: AgentLoopBlockedReason::MaxStepsReached {
+                                    max_steps: config.max_steps(),
+                                },
+                            },
+                            events,
+                            steps_run,
+                            None,
+                        ));
                     }
-                    PendingLoopToolCall::Bridge(call) => {
-                        let command =
-                            receive_bridge_tool_result(&mut bridge_receiver, &loop_token).await?;
 
-                        let call_id = command.result.call_id().clone();
-                        let result = if call_id == *call.id() {
-                            runtime
-                                .submit_tool_result_with_active_permit(
-                                    command.result,
-                                    command.content,
+                    let execution_events = match call {
+                        PendingLoopToolCall::Runtime(call) => {
+                            match runtime
+                                .execute_tool_call_with_active_permit(
+                                    call.id(),
+                                    ToolExecutionContext::new(loop_token.clone()),
                                     &loop_permit,
                                 )
                                 .await
-                        } else {
-                            Err(RuntimeError::UnknownToolCall {
-                                session_id: runtime.session_id().clone(),
-                                call_id,
-                            })
-                        };
-
-                        match result {
-                            Ok(events) => {
-                                let _ = command.ack_sender.send(Ok(()));
-                                events
-                            }
-                            Err(error) => {
-                                let _ = command.ack_sender.send(Err(error));
-                                return None;
+                            {
+                                Ok(events) => events,
+                                Err(RuntimeError::ToolExecutionCancelled { call_id, .. }) => {
+                                    return Some(AgentLoopResult::new(
+                                        AgentLoopStatus::Cancelled {
+                                            diagnostic: tool_execution_cancelled_diagnostic(
+                                                &call_id,
+                                            ),
+                                        },
+                                        events,
+                                        steps_run,
+                                        None,
+                                    ));
+                                }
+                                Err(_) => return None,
                             }
                         }
-                    }
-                };
+                        PendingLoopToolCall::Bridge(call) => {
+                            let command =
+                                receive_bridge_tool_result(&mut bridge_receiver, &loop_token)
+                                    .await?;
 
-                for event in execution_events {
-                    events.push(event.clone());
-                    if sender.send(event).await.is_err() {
+                            let call_id = command.result.call_id().clone();
+                            let result = if call_id == *call.id() {
+                                runtime
+                                    .submit_tool_result_with_active_permit(
+                                        command.result,
+                                        command.content,
+                                        &loop_permit,
+                                    )
+                                    .await
+                            } else {
+                                Err(RuntimeError::UnknownToolCall {
+                                    session_id: runtime.session_id().clone(),
+                                    call_id,
+                                })
+                            };
+
+                            match result {
+                                Ok(events) => {
+                                    let _ = command.ack_sender.send(Ok(()));
+                                    events
+                                }
+                                Err(error) => {
+                                    let _ = command.ack_sender.send(Err(error));
+                                    return None;
+                                }
+                            }
+                        }
+                        PendingLoopToolCall::FinalOutput(_) => {
+                            unreachable!("final-output call is handled before continuation budget")
+                        }
+                    };
+
+                    for event in execution_events {
+                        events.push(event.clone());
+                        if sender.send(event).await.is_err() {
+                            return None;
+                        }
+                    }
+
+                    let Ok(input) = continuation_step_input(&original_task) else {
                         return None;
-                    }
+                    };
+                    next_input = Some(input);
                 }
-
-                let Ok(input) = continuation_step_input(&original_task) else {
-                    return None;
-                };
-                next_input = Some(input);
-            }
+            },
         }
     }
 
@@ -800,6 +888,13 @@ async fn final_assistant_output_from_step(
     None
 }
 
+async fn record_final_output_tool_call(
+    runtime: &Runtime,
+    call: PendingToolCall,
+) -> Result<(FinalOutput, Vec<RuntimeEvent>), RuntimeError> {
+    runtime.record_final_output_tool_call(call).await
+}
+
 fn continuation_step_input(original_task: &str) -> Result<StepInput, RuntimeError> {
     StepInput::loop_control_text(&format!(
         "{DEFAULT_AGENT_LOOP_CONTINUATION_INPUT}\n\n{ORIGINAL_TASK_CONTINUATION_LABEL}\n{original_task}"
@@ -824,6 +919,7 @@ fn blocked_reason_code(reason: &AgentLoopBlockedReason) -> &'static str {
         AgentLoopBlockedReason::StepEndedWithoutTerminalEvent => {
             "step_ended_without_terminal_event"
         }
+        AgentLoopBlockedReason::FinalOutputToolNotCalled => "final_output_tool_not_called",
         AgentLoopBlockedReason::BridgeToolCallRequested { .. } => "bridge_tool_call_requested",
     }
 }
@@ -905,9 +1001,13 @@ enum StepOutcome {
 enum PendingLoopToolCall {
     Runtime(PendingToolCall),
     Bridge(PendingToolCall),
+    FinalOutput(PendingToolCall),
 }
 
-fn classify_step_events(events: &[RuntimeEvent]) -> StepOutcome {
+fn classify_step_events(
+    events: &[RuntimeEvent],
+    final_output_contract: Option<&FinalOutputContract>,
+) -> StepOutcome {
     if let Some(call) = events.iter().rev().find_map(|event| match &event.kind {
         RuntimeEventKind::BridgeToolCallRequested { call } => Some(call.clone()),
         _ => None,
@@ -943,6 +1043,9 @@ fn classify_step_events(events: &[RuntimeEvent]) -> StepOutcome {
 
     if completed {
         if pending.is_empty() {
+            if final_output_contract.is_some() {
+                return StepOutcome::Blocked(AgentLoopBlockedReason::FinalOutputToolNotCalled);
+            }
             return StepOutcome::Completed;
         }
 
@@ -953,9 +1056,14 @@ fn classify_step_events(events: &[RuntimeEvent]) -> StepOutcome {
 
     match pending.len() {
         0 => StepOutcome::Blocked(AgentLoopBlockedReason::StepEndedWithoutTerminalEvent),
-        1 => StepOutcome::Pending(PendingLoopToolCall::Runtime(
-            pending.pop().expect("one pending call is present"),
-        )),
+        1 => {
+            let call = pending.pop().expect("one pending call is present");
+            if final_output_contract.is_some_and(|contract| call.name() == contract.tool_name()) {
+                StepOutcome::Pending(PendingLoopToolCall::FinalOutput(call))
+            } else {
+                StepOutcome::Pending(PendingLoopToolCall::Runtime(call))
+            }
+        }
         count => StepOutcome::Blocked(AgentLoopBlockedReason::MultiplePendingToolCalls {
             pending_count: count,
         }),

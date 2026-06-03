@@ -5,7 +5,7 @@
 //! crates render those normalized requests into wire formats.
 
 use crate::{
-    CompiledContext, ProjectRules, RuntimeError, SkillCatalog, TaskAnchor,
+    CompiledContext, FinalOutputContract, ProjectRules, RuntimeError, SkillCatalog, TaskAnchor,
     artifact::ArtifactContent, session::ResolvedToolContinuationSnapshot,
 };
 use merry_core::{PendingToolCall, ToolCallResult, ToolCallResultStatus, ToolSpec};
@@ -89,6 +89,7 @@ pub(crate) enum CompiledSessionMessage {
 pub struct StepContext {
     cancellation_token: CancellationToken,
     generation_config: GenerationConfig,
+    final_output_contract: Option<FinalOutputContract>,
 }
 
 impl StepContext {
@@ -98,6 +99,7 @@ impl StepContext {
         Self {
             cancellation_token,
             generation_config: GenerationConfig::default(),
+            final_output_contract: None,
         }
     }
 
@@ -120,14 +122,31 @@ impl StepContext {
         self
     }
 
+    /// Adds a runtime-owned final-output contract to this step.
+    #[must_use]
+    pub fn with_final_output_contract(mut self, contract: FinalOutputContract) -> Self {
+        self.final_output_contract = Some(contract);
+        self
+    }
+
     /// Returns provider-neutral generation controls for this step.
     #[must_use]
     pub fn generation_config(&self) -> &GenerationConfig {
         &self.generation_config
     }
 
-    pub(crate) fn into_parts(self) -> (CancellationToken, GenerationConfig) {
-        (self.cancellation_token, self.generation_config)
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        CancellationToken,
+        GenerationConfig,
+        Option<FinalOutputContract>,
+    ) {
+        (
+            self.cancellation_token,
+            self.generation_config,
+            self.final_output_contract,
+        )
     }
 }
 
@@ -136,6 +155,7 @@ impl Default for StepContext {
         Self {
             cancellation_token: CancellationToken::new(),
             generation_config: GenerationConfig::default(),
+            final_output_contract: None,
         }
     }
 }

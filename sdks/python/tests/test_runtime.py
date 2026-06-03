@@ -88,7 +88,7 @@ async def _assert_runtime_run_stream_yields_before_stream_finishes():
             return self._events.pop(0)
 
     class SlowStreamingNativeRuntime:
-        def run_stream_blocking(self, _task):
+        def run_stream_blocking(self, _task, _final_output_schema_json=None):
             return SlowNativeStream()
 
     runtime._native = SlowStreamingNativeRuntime()
@@ -110,12 +110,13 @@ async def _assert_runtime_run_does_not_block_event_loop():
     runtime = merry.Runtime.__new__(merry.Runtime)
 
     class SlowNativeRuntime:
-        def run_blocking(self, _task):
+        def run_blocking(self, _task, _final_output_schema_json=None):
             time.sleep(0.05)
             return {
                 "status": "completed",
                 "steps_run": 1,
                 "final_output": "done",
+                "final_output_json": None,
                 "events": [],
             }
 
