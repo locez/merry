@@ -66,10 +66,13 @@ fn trace_output_buffer() -> &'static Arc<Mutex<Vec<u8>>> {
     })
 }
 
+static TRACE_CAPTURE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 async fn capture_traces_for<F, R>(trace_marker: &str, future: F) -> (R, String)
 where
     F: Future<Output = R>,
 {
+    let _capture_guard = TRACE_CAPTURE_LOCK.lock().await;
     let bytes = Arc::clone(trace_output_buffer());
     let start = bytes
         .lock()

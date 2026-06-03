@@ -18,11 +18,12 @@ use merry_llm::{
 use merry_provider_openai::{OpenAiProvider, OpenAiProviderConfig};
 use merry_runtime::{
     AcceptedLocalWorkspaceProcessAdmission, AgentLoopConfig, AgentLoopStatus, ArtifactContent,
-    AutomaticCompactionConfig, ChildRuntimeFactory, ChildRuntimeInput,
-    MAX_PROCESS_OUTPUT_LIMIT_BYTES, ProcessActionIntent, ProcessEnvPolicy, ProcessRunner,
-    RegisteredTool, Runtime, RuntimeBuilder, RuntimeModelRole, StepContext, StepInput,
-    SubagentManager, TokioProcessRunner, ToolExecutionContext, ToolExecutionOutcome, ToolExecutor,
-    ToolExecutorFuture, process_command_tool, subagent_registered_tools,
+    AutomaticCompactionConfig, BwrapProcessRunner, ChildRuntimeFactory, ChildRuntimeInput,
+    MAX_PROCESS_OUTPUT_LIMIT_BYTES, PathAccess, PathAccessRule, ProcessActionIntent,
+    ProcessEnvPolicy, ProcessRunner, RegisteredTool, Runtime, RuntimeBuilder, RuntimeModelRole,
+    StepContext, StepInput, SubagentManager, TokioProcessRunner, ToolExecutionContext,
+    ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture, process_command_tool,
+    subagent_registered_tools,
 };
 use merry_tool_workspace::{
     CODING_LOOP_PROCESS_TOOL, WORKSPACE_PATCH_TOOL, WORKSPACE_READ_FILE_TOOL,
@@ -596,23 +597,25 @@ async fn async_main(cli: Cli, merry_config: Option<MerryConfig>) -> CliExit {
             },
             Err(CliError::Unexpected(message)) => CliExit::Unexpected(message),
         },
-        CliCommand::Shell(args) => match run_shell(args, sandbox_child_handoff).await {
-            Ok(()) => CliExit::Success,
-            Err(CliError::BrokenPipe) => CliExit::Success,
-            Err(CliError::ShellUsage(message)) => CliExit::Usage {
-                message,
-                usage: shell_usage(),
-            },
-            Err(CliError::Unexpected(message)) => CliExit::Unexpected(message),
-            Err(CliError::DebugUsage(message)) => CliExit::Usage {
-                message,
-                usage: debug_usage(),
-            },
-            Err(CliError::DebugOpenAiUsage(message)) => CliExit::Usage {
-                message,
-                usage: debug_openai_usage(),
-            },
-        },
+        CliCommand::Shell(args) => {
+            match run_shell(args, sandbox_child_handoff, merry_config.as_ref()).await {
+                Ok(()) => CliExit::Success,
+                Err(CliError::BrokenPipe) => CliExit::Success,
+                Err(CliError::ShellUsage(message)) => CliExit::Usage {
+                    message,
+                    usage: shell_usage(),
+                },
+                Err(CliError::Unexpected(message)) => CliExit::Unexpected(message),
+                Err(CliError::DebugUsage(message)) => CliExit::Usage {
+                    message,
+                    usage: debug_usage(),
+                },
+                Err(CliError::DebugOpenAiUsage(message)) => CliExit::Usage {
+                    message,
+                    usage: debug_openai_usage(),
+                },
+            }
+        }
     }
 }
 
@@ -639,6 +642,7 @@ fn validate_loaded_config(
     let _ = effective_log_settings(Some(config), paths)?;
     let _ = automatic_compaction_config(Some(config))?;
     let _ = subagents_config(Some(config))?;
+    let _ = config.trusted_global_path_rules()?;
     let _ = config.skill_roots()?;
     let _ = config.runtime_models()?;
     let _ = config.profile();
@@ -700,6 +704,7 @@ struct SandboxHost {
     inside_sandbox: bool,
     xdg_paths: XdgPaths,
     log_settings: Option<EffectiveLogSettings>,
+    trusted_path_rules: Vec<PathAccessRule>,
 }
 
 impl SandboxHost {
@@ -708,6 +713,12 @@ impl SandboxHost {
         let merry_config = MerryConfig::load_optional(&xdg_paths).map_err(SandboxError::Config)?;
         let log_settings = effective_log_settings(merry_config.as_ref(), &xdg_paths)
             .map_err(SandboxError::Config)?;
+        let trusted_path_rules = merry_config
+            .as_ref()
+            .map(MerryConfig::trusted_global_path_rules)
+            .transpose()
+            .map_err(SandboxError::Config)?
+            .unwrap_or_default();
         Ok(Self {
             cwd: env::current_dir().map_err(SandboxError::CurrentDir)?,
             current_exe: env::current_exe().map_err(SandboxError::CurrentExe)?,
@@ -719,6 +730,7 @@ impl SandboxHost {
             inside_sandbox: env::var_os(MERRY_SANDBOX_ENV).as_deref() == Some(OsStr::new("1")),
             xdg_paths,
             log_settings,
+            trusted_path_rules,
         })
     }
 }
@@ -789,7 +801,6 @@ fn build_sandbox_plan(host: &SandboxHost, path: OsString, bwrap: PathBuf) -> San
         os("--unshare-pid"),
         os("--unshare-uts"),
         os("--unshare-cgroup-try"),
-        os("--disable-userns"),
         os("--die-with-parent"),
         os("--new-session"),
         os("--proc"),
@@ -851,6 +862,9 @@ fn build_sandbox_plan(host: &SandboxHost, path: OsString, bwrap: PathBuf) -> San
             os(SANDBOX_MERRY_LOG_DIR),
         ]);
     }
+    for rule in &host.trusted_path_rules {
+        append_sandbox_path_rule_args(&mut args, rule);
+    }
     args.extend([
         os("--clearenv"),
         os("--setenv"),
@@ -909,6 +923,24 @@ fn append_bind_file_args(args: &mut Vec<OsString>, source: &OsStr, destination: 
 fn append_bind_dir_args(args: &mut Vec<OsString>, source: &OsStr, destination: &OsStr) {
     append_mount_parent_args(args, destination);
     args.extend([os("--ro-bind"), source.to_owned(), destination.to_owned()]);
+}
+
+fn append_sandbox_path_rule_args(args: &mut Vec<OsString>, rule: &PathAccessRule) {
+    let path = rule.path().as_os_str();
+    match rule.access() {
+        PathAccess::ReadOnly => {
+            append_mount_parent_args(args, path);
+            args.extend([os("--ro-bind-try"), path.to_owned(), path.to_owned()]);
+        }
+        PathAccess::ReadWrite => {
+            append_mount_parent_args(args, path);
+            args.extend([os("--bind-try"), path.to_owned(), path.to_owned()]);
+        }
+        PathAccess::Deny => {
+            append_mount_parent_args(args, path);
+            args.extend([os("--tmpfs"), path.to_owned()]);
+        }
+    }
 }
 
 fn append_mount_parent_args(args: &mut Vec<OsString>, destination: &OsStr) {
@@ -1130,7 +1162,7 @@ async fn run_debug_coding_loop_smoke(
         &smoke_root,
         None,
         admission,
-        Arc::new(TokioProcessRunner::new_at_workspace_root(&smoke_root)),
+        action_process_runner(&smoke_root, merry_config)?,
         automatic_compaction_config(merry_config).map_err(unexpected)?,
     )?;
 
@@ -1177,7 +1209,7 @@ async fn run_debug_coding_loop_live_smoke(
         &smoke_root,
         admission,
         config,
-        Arc::new(TokioProcessRunner::new_at_workspace_root(&smoke_root)),
+        action_process_runner(&smoke_root, merry_config)?,
         CodingLoopLiveRuntimeOptions {
             automatic_compaction: automatic_compaction_config(merry_config).map_err(unexpected)?,
             skill_roots,
@@ -1227,7 +1259,7 @@ async fn run_debug_coding_loop_task_smoke(
         &smoke_root,
         None,
         admission,
-        Arc::new(TokioProcessRunner::new_at_workspace_root(&smoke_root)),
+        action_process_runner(&smoke_root, merry_config)?,
         fixture,
         automatic_compaction_config(merry_config).map_err(unexpected)?,
     )?;
@@ -1279,7 +1311,7 @@ async fn run_debug_coding_loop_task_live_smoke(
         &smoke_root,
         admission,
         config,
-        Arc::new(TokioProcessRunner::new_at_workspace_root(&smoke_root)),
+        action_process_runner(&smoke_root, merry_config)?,
         CodingLoopLiveRuntimeOptions {
             automatic_compaction,
             skill_roots,
@@ -1345,7 +1377,7 @@ async fn run_debug_coding_loop_subagent_live_smoke(
         &smoke_root,
         admission,
         config,
-        Arc::new(TokioProcessRunner::new_at_workspace_root(&smoke_root)),
+        action_process_runner(&smoke_root, merry_config)?,
         CodingLoopLiveRuntimeOptions {
             automatic_compaction,
             skill_roots,
@@ -1474,9 +1506,12 @@ async fn assert_coding_loop_task_smoke_result(
         ));
     }
     if statuses.last().copied() != Some(ToolCallResultStatus::Succeeded) {
-        return Err(CliError::Unexpected(
-            "coding-loop-task-smoke final verification did not succeed".to_owned(),
-        ));
+        return Err(CliError::Unexpected(format!(
+            "coding-loop-task-smoke final verification did not succeed{}",
+            failed_tool_result_summary(result.events())
+                .map(|summary| format!("; {summary}"))
+                .unwrap_or_default()
+        )));
     }
 
     let patched = fs::read_to_string(smoke_root.join("src/lib.rs")).map_err(unexpected)?;
@@ -1825,11 +1860,49 @@ fn assert_coding_loop_smoke_tool_results(events: &[RuntimeEvent]) -> Result<(), 
         .iter()
         .any(|status| *status != ToolCallResultStatus::Succeeded)
     {
-        return Err(CliError::Unexpected(
-            "coding-loop-smoke had a failed tool result".to_owned(),
-        ));
+        return Err(CliError::Unexpected(format!(
+            "coding-loop-smoke had a failed tool result{}",
+            failed_tool_result_summary(events)
+                .map(|summary| format!("; {summary}"))
+                .unwrap_or_default()
+        )));
     }
     Ok(())
+}
+
+fn failed_tool_result_summary(events: &[RuntimeEvent]) -> Option<String> {
+    let mut pending_by_call_id = BTreeMap::new();
+    for event in events {
+        if let RuntimeEventKind::ToolCallPending { call } = &event.kind {
+            pending_by_call_id.insert(call.id().clone(), call.name().clone());
+        }
+    }
+
+    events.iter().find_map(|event| {
+        let RuntimeEventKind::ToolCallResolved { result } = &event.kind else {
+            return None;
+        };
+        if result.status() != ToolCallResultStatus::Failed {
+            return None;
+        }
+        let tool_name = pending_by_call_id
+            .get(result.call_id())
+            .map_or("<unknown>", ToolName::as_str);
+        let diagnostic = result
+            .diagnostic()
+            .map(|diagnostic| {
+                format!(
+                    "diagnostic={} message={}",
+                    diagnostic.code(),
+                    diagnostic.message()
+                )
+            })
+            .unwrap_or_else(|| "diagnostic=<none>".to_owned());
+        Some(format!(
+            "tool={tool_name} call_id={} {diagnostic}",
+            result.call_id()
+        ))
+    })
 }
 
 fn coding_loop_smoke_admission(
@@ -1973,7 +2046,7 @@ Project rules:
     const fn task_prompt(self) -> &'static str {
         match self.task {
             CodingLoopTaskSmokeTask::StatusText => {
-                "Fix the disposable Rust fixture so status() returns done. Inspect the workspace, verify the target text is initially missing with rg, read the source, apply one constrained patch, run rg again to verify, and then report the result."
+                "Fix the disposable Rust fixture so status() returns done. Inspect the workspace, verify the target text is initially missing from src/lib.rs with rg, read the source, apply one constrained patch, run rg again on src/lib.rs to verify, and then report the result."
             }
         }
     }
@@ -2426,6 +2499,26 @@ fn build_coding_loop_runtime(
     .map_err(unexpected)
 }
 
+fn action_process_runner(
+    workspace_root: &Path,
+    merry_config: Option<&MerryConfig>,
+) -> Result<Arc<dyn ProcessRunner>, CliError> {
+    let path_rules = merry_config
+        .map(MerryConfig::trusted_global_path_rules)
+        .transpose()
+        .map_err(unexpected)?
+        .unwrap_or_default();
+    let mut runner =
+        BwrapProcessRunner::new_at_workspace_root(workspace_root).with_path_rules(path_rules);
+    if merry_config
+        .map(MerryConfig::permissions_network_allowed)
+        .unwrap_or(false)
+    {
+        runner = runner.allow_network();
+    }
+    Ok(Arc::new(runner))
+}
+
 fn coding_loop_live_smoke_task(relative_cwd: Option<&str>) -> String {
     let cwd = relative_cwd.unwrap_or(".");
     format!(
@@ -2800,7 +2893,7 @@ impl CodingLoopTaskSmokeProvider {
             )?,
             coding_loop_process_call(
                 "coding-loop-task-smoke-verify-before",
-                &["rg", "done"],
+                &["rg", "done", "src/lib.rs"],
                 relative_cwd,
             )?,
             coding_loop_workspace_call(
@@ -2815,7 +2908,7 @@ impl CodingLoopTaskSmokeProvider {
             )?,
             coding_loop_process_call(
                 "coding-loop-task-smoke-verify-after",
-                &["rg", "done"],
+                &["rg", "done", "src/lib.rs"],
                 relative_cwd,
             )?,
             ModelEvent::Completed {
@@ -2929,6 +3022,7 @@ fn coding_loop_tool_call(
 async fn run_shell(
     args: ShellArgs,
     sandbox_child_handoff: Option<SandboxChildHandoff>,
+    merry_config: Option<&MerryConfig>,
 ) -> Result<(), CliError> {
     let sandbox_marker = env::var_os(MERRY_SANDBOX_ENV);
     let sandbox_version = env::var_os(MERRY_SANDBOX_VERSION_ENV);
@@ -2948,10 +3042,20 @@ async fn run_shell(
         sandbox_version.as_deref(),
     );
     let intent = shell_process_action_intent(args.argv)?;
+    let current_dir = env::current_dir().map_err(|source| {
+        CliError::Unexpected(format!(
+            "failed to resolve current directory for shell action sandbox: {source}"
+        ))
+    })?;
+    let runner: Arc<dyn ProcessRunner> = if sandbox_child_handoff.is_some() {
+        action_process_runner(&current_dir, merry_config)?
+    } else {
+        Arc::new(TokioProcessRunner::new_at_workspace_root(&current_dir))
+    };
     run_shell_to_writer(
         intent,
         admission,
-        Arc::new(TokioProcessRunner::new()),
+        runner,
         args.events_jsonl,
         tokio::io::stdout(),
     )
@@ -3852,9 +3956,10 @@ mod tests {
         CheckpointRef, CheckpointRefId, CheckpointRefManifest, CheckpointSequenceRange,
         CheckpointSourceKind, CheckpointValidationPolicy, CitationBackedCheckpoint,
         CompactedCheckpoint, CompactedCheckpointCandidate, MAX_PROCESS_OUTPUT_LIMIT_BYTES,
-        ProcessActionIntent, ProcessEnvPolicy, ProcessExitStatus, ProcessRunner,
-        ProcessRunnerContext, ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput,
-        Runtime, StepContext, StepInput, SubagentConfig, ToolExecutionContext,
+        PathAccess, PathAccessRule, PathAccessRuleSource, ProcessActionIntent, ProcessEnvPolicy,
+        ProcessExitStatus, ProcessRunner, ProcessRunnerContext, ProcessRunnerError,
+        ProcessRunnerFuture, ProcessRunnerOutput, Runtime, StepContext, StepInput, SubagentConfig,
+        ToolExecutionContext,
     };
     use merry_tool_workspace::{
         WORKSPACE_PATCH_TOOL, WORKSPACE_READ_FILE_TOOL, WorkspaceCodingLoopProfile,
@@ -3870,7 +3975,6 @@ mod tests {
             atomic::{AtomicUsize, Ordering},
         },
     };
-    use tracing_subscriber::prelude::*;
 
     fn sandbox_host() -> SandboxHost {
         SandboxHost {
@@ -3891,26 +3995,8 @@ mod tests {
                 Some(PathBuf::from("/host/state")),
             ),
             log_settings: None,
+            trusted_path_rules: Vec::new(),
         }
-    }
-
-    fn install_scoped_test_json_log(
-        log_path: &Path,
-    ) -> (
-        tracing::dispatcher::DefaultGuard,
-        tracing_appender::non_blocking::WorkerGuard,
-    ) {
-        let file = super::observability::open_log_file(log_path).expect("log file should open");
-        let (writer, worker_guard) = tracing_appender::non_blocking(file);
-        let subscriber = tracing_subscriber::registry().with(
-            tracing_subscriber::fmt::layer()
-                .json()
-                .with_writer(writer)
-                .with_filter(tracing_subscriber::filter::LevelFilter::DEBUG),
-        );
-        let dispatch = tracing::Dispatch::new(subscriber);
-        let default_guard = tracing::dispatcher::set_default(&dispatch);
-        (default_guard, worker_guard)
     }
 
     fn path_is_fake_bwrap(path: &Path) -> bool {
@@ -4214,8 +4300,8 @@ mod tests {
             runner.observed_argv(),
             [
                 vec!["rg".to_owned(), "--files".to_owned()],
-                vec!["rg".to_owned(), "done".to_owned()],
-                vec!["rg".to_owned(), "done".to_owned()],
+                vec!["rg".to_owned(), "done".to_owned(), "src/lib.rs".to_owned()],
+                vec!["rg".to_owned(), "done".to_owned(), "src/lib.rs".to_owned()],
             ]
         );
         assert_eq!(runner.observed_cwd(), [None, None, None]);
@@ -4275,56 +4361,6 @@ mod tests {
         assert!(stable_text.contains("workspace_read_file"));
         assert!(stable_text.contains("demo/SKILL.md"));
         assert!(!stable_text.contains("body sentinel"));
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn coding_loop_runtime_logs_skill_catalog_load_without_body() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let workspace = temp.path().join("workspace");
-        let skill_root = temp.path().join("skills");
-        let log_path = temp.path().join("state/merry/logs/merry.jsonl");
-        std::fs::create_dir_all(&workspace).expect("mkdir workspace");
-        std::fs::create_dir_all(skill_root.join("demo")).expect("mkdir skill");
-        std::fs::write(
-            skill_root.join("demo/SKILL.md"),
-            "---\nname: demo-skill\ndescription: Use for demo tasks.\n---\n# Demo\nbody sentinel\n",
-        )
-        .expect("write skill");
-        let (_default_guard, worker_guard) = install_scoped_test_json_log(&log_path);
-
-        let provider = ScriptedProvider::new(vec![vec![Ok(ModelEvent::Completed {
-            response: ModelResponse::new(vec![ModelOutput::text("done")], FinishReason::Stop, None),
-        })]]);
-        let runner = Arc::new(FakeProcessRunner::succeeding(""));
-        let _runtime = super::build_coding_loop_runtime(
-            "coding-loop-skill-log",
-            &workspace,
-            AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
-            Arc::new(provider),
-            ModelName::new("debug-model").unwrap(),
-            runner,
-            super::CodingLoopRuntimeOptions {
-                allow_hidden_workspace_paths: false,
-                automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
-                context_compaction: None,
-                skill_roots: vec![skill_root],
-                subagents: SubagentsConfig::default(),
-            },
-        )
-        .expect("runtime should build");
-        drop(worker_guard);
-
-        let log = std::fs::read_to_string(&log_path).expect("log file should be written");
-        assert!(log.contains("\"event\":\"runtime.skill_catalog.load\""));
-        assert!(log.contains("\"session_id\":\"coding-loop-skill-log\""));
-        assert!(log.contains("\"configured_root_count\":1"));
-        assert!(log.contains("\"readable_root_count\":1"));
-        assert!(log.contains("\"skill_count\":1"));
-        assert!(log.contains("\"warning_count\":0"));
-        assert!(log.contains("demo-skill"));
-        assert!(log.contains("demo/SKILL.md"));
-        assert!(!log.contains("Use for demo tasks."));
-        assert!(!log.contains("body sentinel"));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -4759,10 +4795,11 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn coding_loop_smoke_writes_configured_json_log_records_without_payloads() {
+    async fn coding_loop_smoke_respects_configured_log_path_and_keeps_payloads_out_of_events() {
         let temp = tempfile::tempdir().expect("tempdir should be created");
         let config_root = temp.path().join("config");
         let state_root = temp.path().join("state");
+        let expected_log_path = state_root.join("merry/logs/merry.jsonl");
         let paths = super::config::XdgPaths::from_parts(
             PathBuf::from("/home/alice"),
             Some(config_root),
@@ -4777,9 +4814,7 @@ mod tests {
         let log_settings = super::effective_log_settings(Some(&config), &paths)
             .expect("log settings should validate")
             .expect("logging should be enabled");
-        let log_path = log_settings.path.clone();
-        let (_default_guard, worker_guard) = install_scoped_test_json_log(&log_path);
-
+        assert_eq!(log_settings.path, expected_log_path);
         let smoke_root = temp.path().join("coding-loop-smoke-fixture");
         std::fs::create_dir_all(smoke_root.join("src")).expect("fixture src dir should exist");
         std::fs::write(
@@ -4815,47 +4850,6 @@ mod tests {
         super::assert_coding_loop_smoke_result(&runtime, &result, &smoke_root)
             .await
             .expect("coding-loop smoke result should validate");
-        drop(worker_guard);
-
-        let raw_log = std::fs::read_to_string(&log_path).expect("log file should be written");
-        let log = raw_log
-            .lines()
-            .filter(|line| line.contains("coding-loop-smoke"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        for expected in [
-            "\"event\":\"runtime.loop.start\"",
-            "\"event\":\"runtime.provider.request\"",
-            "\"event\":\"runtime.tool.pending\"",
-            "\"event\":\"runtime.tool.execute.start\"",
-            "\"event\":\"runtime.workspace_tool.start\"",
-            "\"event\":\"runtime.workspace_tool.finish\"",
-            "\"event\":\"runtime.process.execute.start\"",
-            "\"event\":\"runtime.process.execute.finish\"",
-            "\"event\":\"runtime.artifact.record\"",
-            "\"event\":\"runtime.tool.execute.finish\"",
-            "\"event\":\"runtime.loop.finish\"",
-            "\"session_id\":\"coding-loop-smoke\"",
-            "\"tool_name\":\"run_process\"",
-            "\"tool_name\":\"workspace_read_file\"",
-            "\"tool_name\":\"workspace_patch\"",
-            "\"status\":\"completed\"",
-            "\"status\":\"succeeded\"",
-            "\"diagnostic_code\"",
-        ] {
-            assert!(log.contains(expected), "log missing {expected}");
-        }
-        for forbidden in [
-            "Run the sandboxed coding-loop smoke.",
-            "pub fn greeting",
-            "\"unfixed\"",
-            "sensitive process stdout must not leak",
-            "coding-loop-smoke patched greeting and verified it",
-            "sk-",
-            "provider_wire",
-        ] {
-            assert!(!log.contains(forbidden), "log leaked {forbidden}");
-        }
     }
 
     #[test]
@@ -5460,13 +5454,13 @@ model = "gpt-compact"
             "--unshare-pid",
             "--unshare-uts",
             "--unshare-cgroup-try",
-            "--disable-userns",
             "--die-with-parent",
             "--new-session",
             "--clearenv",
         ] {
             assert!(args.iter().any(|arg| arg == expected), "missing {expected}");
         }
+        assert!(!args.iter().any(|arg| arg == "--disable-userns"));
         assert!(!args.iter().any(|arg| arg == "--unshare-net"));
     }
 
@@ -5599,6 +5593,44 @@ model = "gpt-compact"
             &args,
             &["--setenv", "XDG_CONFIG_HOME", SANDBOX_XDG_CONFIG_HOME]
         ));
+    }
+
+    #[test]
+    fn sandbox_plan_applies_trusted_global_path_rules_as_outer_guard() {
+        let mut host = sandbox_host();
+        host.trusted_path_rules = vec![
+            PathAccessRule::new(
+                PathBuf::from("/var/log"),
+                PathAccess::ReadOnly,
+                PathAccessRuleSource::TrustedGlobalConfig,
+            ),
+            PathAccessRule::new(
+                PathBuf::from("/workspace/shared"),
+                PathAccess::ReadWrite,
+                PathAccessRuleSource::TrustedGlobalConfig,
+            ),
+            PathAccessRule::new(
+                PathBuf::from("/home/alice/.ssh"),
+                PathAccess::Deny,
+                PathAccessRuleSource::TrustedGlobalConfig,
+            ),
+        ];
+        let SandboxBootstrap::Reexec(plan) =
+            plan_sandbox(true, &host).expect("sandbox planning should succeed")
+        else {
+            panic!("expected sandbox reexec plan");
+        };
+        let args = plan_args(&plan);
+
+        assert!(contains_sequence(
+            &args,
+            &["--ro-bind-try", "/var/log", "/var/log"]
+        ));
+        assert!(contains_sequence(
+            &args,
+            &["--bind-try", "/workspace/shared", "/workspace/shared"]
+        ));
+        assert!(contains_sequence(&args, &["--tmpfs", "/home/alice/.ssh"]));
     }
 
     #[test]

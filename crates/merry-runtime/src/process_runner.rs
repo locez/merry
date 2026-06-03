@@ -5,15 +5,33 @@
 //! admitted; callers must still opt in through runtime permission profiles.
 
 use crate::{
-    ProcessActionIntent, ProcessExitStatus, ProcessRunner, ProcessRunnerContext,
-    ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput,
+    PathAccess, PathAccessRule, ProcessActionIntent, ProcessExitStatus, ProcessRunner,
+    ProcessRunnerContext, ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput,
 };
 use std::{
+    ffi::OsString,
     io,
     path::{Path, PathBuf},
     process::Stdio,
 };
 use tokio::io::{AsyncRead, AsyncReadExt};
+
+const BWRAP_PROGRAM: &str = "bwrap";
+const ACTION_SANDBOX_HOME: &str = "/home/merry";
+const ACTION_SANDBOX_TMPDIR: &str = "/tmp";
+const ACTION_SANDBOX_ETC_READ_ONLY_FILE_PATHS: &[&str] = &[
+    "/etc/ld.so.cache",
+    "/etc/ld.so.conf",
+    "/etc/resolv.conf",
+    "/etc/hosts",
+    "/etc/nsswitch.conf",
+];
+const ACTION_SANDBOX_ETC_READ_ONLY_DIR_PATHS: &[&str] = &[
+    "/etc/ld.so.conf.d",
+    "/etc/ssl",
+    "/etc/ca-certificates",
+    "/etc/pki",
+];
 
 /// Runtime-owned process runner backed by [`tokio::process::Command`].
 ///
@@ -45,6 +63,241 @@ impl TokioProcessRunner {
     }
 }
 
+/// Runtime-owned process runner that executes each process inside bubblewrap.
+///
+/// This is Merry's per-action sandbox backend for Linux. It is intentionally
+/// separate from the CLI outer sandbox: the outer sandbox protects the host
+/// from the Merry process, while this runner protects each process action from
+/// the runtime profile.
+#[derive(Debug, Clone)]
+pub struct BwrapProcessRunner {
+    cwd_root: PathBuf,
+    network_allowed: bool,
+    path_rules: Vec<PathAccessRule>,
+    bwrap_program: PathBuf,
+}
+
+impl BwrapProcessRunner {
+    /// Creates a per-action bubblewrap runner rooted at a workspace path.
+    #[must_use]
+    pub fn new_at_workspace_root(root: impl Into<PathBuf>) -> Self {
+        Self {
+            cwd_root: root.into(),
+            network_allowed: false,
+            path_rules: Vec::new(),
+            bwrap_program: PathBuf::from(BWRAP_PROGRAM),
+        }
+    }
+
+    /// Allows network access for child process actions.
+    #[must_use]
+    pub fn allow_network(mut self) -> Self {
+        self.network_allowed = true;
+        self
+    }
+
+    /// Installs trusted path rules for child process actions.
+    #[must_use]
+    pub fn with_path_rules(mut self, rules: impl IntoIterator<Item = PathAccessRule>) -> Self {
+        self.path_rules = rules.into_iter().collect();
+        self
+    }
+
+    #[cfg(test)]
+    fn with_bwrap_program(mut self, program: impl Into<PathBuf>) -> Self {
+        self.bwrap_program = program.into();
+        self
+    }
+}
+
+impl ProcessRunner for BwrapProcessRunner {
+    fn run<'a>(
+        &'a self,
+        intent: ProcessActionIntent,
+        context: ProcessRunnerContext,
+    ) -> ProcessRunnerFuture<'a> {
+        let plan = bwrap_process_plan(
+            &intent,
+            &self.cwd_root,
+            self.network_allowed,
+            &self.path_rules,
+            &self.bwrap_program,
+        );
+        Box::pin(async move { run_process_plan(plan, intent, context).await })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BwrapProcessPlan {
+    program: OsString,
+    args: Vec<OsString>,
+    cwd: PathBuf,
+}
+
+fn bwrap_process_plan(
+    intent: &ProcessActionIntent,
+    cwd_root: &Path,
+    network_allowed: bool,
+    path_rules: &[PathAccessRule],
+    bwrap_program: &Path,
+) -> BwrapProcessPlan {
+    let cwd = process_current_dir(Some(cwd_root), intent);
+    let mut args = vec![
+        os("--unshare-user"),
+        os("--unshare-ipc"),
+        os("--unshare-pid"),
+        os("--unshare-uts"),
+        os("--unshare-cgroup-try"),
+        os("--die-with-parent"),
+        os("--new-session"),
+        os("--proc"),
+        os("/proc"),
+        os("--dev"),
+        os("/dev"),
+        os("--perms"),
+        os("01777"),
+        os("--tmpfs"),
+        os(ACTION_SANDBOX_TMPDIR),
+        os("--tmpfs"),
+        os("/home"),
+        os("--perms"),
+        os("0700"),
+        os("--dir"),
+        os(ACTION_SANDBOX_HOME),
+        os("--ro-bind"),
+        os("/usr"),
+        os("/usr"),
+        os("--ro-bind-try"),
+        os("/bin"),
+        os("/bin"),
+        os("--ro-bind-try"),
+        os("/lib"),
+        os("/lib"),
+        os("--ro-bind-try"),
+        os("/lib64"),
+        os("/lib64"),
+        os("--ro-bind-try"),
+        os("/opt"),
+        os("/opt"),
+    ];
+    for path in ACTION_SANDBOX_ETC_READ_ONLY_FILE_PATHS {
+        if Path::new(path).exists() {
+            append_bwrap_file_bind_args(&mut args, Path::new(path), Path::new(path));
+        }
+    }
+    for path in ACTION_SANDBOX_ETC_READ_ONLY_DIR_PATHS {
+        if Path::new(path).exists() {
+            append_bwrap_dir_bind_args(&mut args, Path::new(path), Path::new(path));
+        }
+    }
+    if !network_allowed {
+        args.push(os("--unshare-net"));
+    }
+    append_bwrap_path_rule(&mut args, cwd_root, PathAccess::ReadWrite);
+    for rule in path_rules {
+        append_bwrap_path_rule(&mut args, rule.path(), rule.access());
+    }
+    args.extend([
+        os("--chdir"),
+        cwd.as_os_str().to_owned(),
+        os("--clearenv"),
+        os("--setenv"),
+        os("PATH"),
+        os("/usr/local/bin:/usr/bin:/bin"),
+        os("--setenv"),
+        os("HOME"),
+        os(ACTION_SANDBOX_HOME),
+        os("--setenv"),
+        os("TMPDIR"),
+        os(ACTION_SANDBOX_TMPDIR),
+        os("--setenv"),
+        os("PWD"),
+        cwd.as_os_str().to_owned(),
+        os("--"),
+    ]);
+    args.extend(intent.argv().iter().map(OsString::from));
+
+    BwrapProcessPlan {
+        program: bwrap_program.as_os_str().to_owned(),
+        args,
+        cwd,
+    }
+}
+
+fn append_bwrap_file_bind_args(args: &mut Vec<OsString>, source: &Path, destination: &Path) {
+    append_bwrap_mount_parent_args(args, destination);
+    args.extend([
+        os("--ro-bind"),
+        source.as_os_str().to_owned(),
+        destination.as_os_str().to_owned(),
+    ]);
+}
+
+fn append_bwrap_dir_bind_args(args: &mut Vec<OsString>, source: &Path, destination: &Path) {
+    append_bwrap_mount_parent_args(args, destination);
+    args.extend([
+        os("--ro-bind"),
+        source.as_os_str().to_owned(),
+        destination.as_os_str().to_owned(),
+    ]);
+}
+
+fn append_bwrap_path_rule(args: &mut Vec<OsString>, path: &Path, access: PathAccess) {
+    append_bwrap_mount_parent_args(args, path);
+    match access {
+        PathAccess::ReadOnly => args.extend([
+            os("--ro-bind-try"),
+            path.as_os_str().to_owned(),
+            path.as_os_str().to_owned(),
+        ]),
+        PathAccess::ReadWrite => args.extend([
+            os("--bind-try"),
+            path.as_os_str().to_owned(),
+            path.as_os_str().to_owned(),
+        ]),
+        PathAccess::Deny => {
+            args.extend([os("--tmpfs"), path.as_os_str().to_owned()]);
+        }
+    }
+}
+
+fn append_bwrap_mount_parent_args(args: &mut Vec<OsString>, destination: &Path) {
+    let Some(parent) = destination.parent() else {
+        return;
+    };
+    let mut parents = parent
+        .ancestors()
+        .take_while(|path| *path != Path::new("/"))
+        .collect::<Vec<_>>();
+    parents.reverse();
+
+    for parent in parents {
+        args.extend([os("--dir"), parent.as_os_str().to_owned()]);
+    }
+}
+
+async fn run_process_plan(
+    plan: BwrapProcessPlan,
+    intent: ProcessActionIntent,
+    context: ProcessRunnerContext,
+) -> Result<ProcessRunnerOutput, ProcessRunnerError> {
+    if context.cancellation_token().is_cancelled() {
+        return Err(ProcessRunnerError::Cancelled);
+    }
+
+    let mut command = tokio::process::Command::new(&plan.program);
+    command
+        .args(&plan.args)
+        .current_dir(&plan.cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+
+    let backend_program = plan.program.to_string_lossy().into_owned();
+    run_spawned_process(command, intent, context, backend_program).await
+}
+
 impl ProcessRunner for TokioProcessRunner {
     fn run<'a>(
         &'a self,
@@ -66,28 +319,40 @@ async fn run_tokio_process(
             "validated process argv was unexpectedly empty",
         ));
     };
+    let program = program.clone();
+    let program_for_error = program.clone();
+    let args = args.to_vec();
 
     if context.cancellation_token().is_cancelled() {
         return Err(ProcessRunnerError::Cancelled);
     }
 
-    let mut command = tokio::process::Command::new(program);
+    let mut command = tokio::process::Command::new(&program);
     command
-        .args(args)
+        .args(&args)
         .current_dir(process_current_dir(cwd_root, &intent))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
 
+    run_spawned_process(command, intent, context, program_for_error).await
+}
+
+async fn run_spawned_process(
+    mut command: tokio::process::Command,
+    intent: ProcessActionIntent,
+    context: ProcessRunnerContext,
+    program_for_error: String,
+) -> Result<ProcessRunnerOutput, ProcessRunnerError> {
     let mut child = command.spawn().map_err(|source| {
         if source.kind() == io::ErrorKind::NotFound {
             ProcessRunnerError::infrastructure(format!(
-                "process executable `{program}` was not found"
+                "process executable `{program_for_error}` was not found"
             ))
         } else {
             ProcessRunnerError::infrastructure(format!(
-                "failed to start process executable `{program}`: {source}"
+                "failed to start process executable `{program_for_error}`: {source}"
             ))
         }
     })?;
@@ -116,7 +381,7 @@ async fn run_tokio_process(
     };
     let status = status.map_err(|source| {
         ProcessRunnerError::infrastructure(format!(
-            "failed to wait for process executable `{program}`: {source}"
+            "failed to wait for process executable `{program_for_error}`: {source}"
         ))
     })?;
     let stdout = join_bounded_output(stdout_task, "stdout").await?;
@@ -153,6 +418,10 @@ fn process_current_dir(cwd_root: Option<&Path>, intent: &ProcessActionIntent) ->
     } else {
         root.join(cwd)
     }
+}
+
+fn os(value: &str) -> OsString {
+    OsString::from(value)
 }
 
 async fn join_bounded_output(
@@ -205,11 +474,12 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{TokioProcessRunner, process_current_dir};
+    use super::{BwrapProcessRunner, TokioProcessRunner, bwrap_process_plan, process_current_dir};
     use crate::{
-        ProcessActionIntent, ProcessEnvPolicy, ProcessExitStatus, ProcessRunner,
-        ProcessRunnerContext,
+        PathAccess, PathAccessRule, PathAccessRuleSource, ProcessActionIntent, ProcessEnvPolicy,
+        ProcessExitStatus, ProcessRunner, ProcessRunnerContext,
     };
+    use std::ffi::OsString;
     use std::path::{Path, PathBuf};
     use tokio_util::sync::CancellationToken;
 
@@ -250,6 +520,93 @@ mod tests {
         );
     }
 
+    #[test]
+    fn bwrap_process_plan_denies_network_by_default() {
+        let runner = BwrapProcessRunner::new_at_workspace_root("/workspace/merry")
+            .with_bwrap_program("/custom/bin/bwrap");
+        let plan = bwrap_process_plan(
+            &intent(Some("crates")),
+            &runner.cwd_root,
+            runner.network_allowed,
+            &runner.path_rules,
+            &runner.bwrap_program,
+        );
+        let args = os_args(&plan.args);
+
+        assert_eq!(plan.program, OsString::from("/custom/bin/bwrap"));
+        assert!(args.iter().any(|arg| arg == "--unshare-net"));
+        assert!(contains_sequence(
+            &args,
+            &["--bind-try", "/workspace/merry", "/workspace/merry"]
+        ));
+        if Path::new("/etc/ld.so.cache").exists() {
+            assert!(contains_sequence(
+                &args,
+                &["--ro-bind", "/etc/ld.so.cache", "/etc/ld.so.cache"]
+            ));
+        }
+        assert!(contains_sequence(
+            &args,
+            &["--chdir", "/workspace/merry/crates"]
+        ));
+        assert!(contains_sequence(&args, &["--", "pwd"]));
+    }
+
+    #[test]
+    fn bwrap_process_plan_allows_network_when_configured() {
+        let runner = BwrapProcessRunner::new_at_workspace_root("/workspace/merry").allow_network();
+        let plan = bwrap_process_plan(
+            &intent(None),
+            &runner.cwd_root,
+            runner.network_allowed,
+            &runner.path_rules,
+            &runner.bwrap_program,
+        );
+        let args = os_args(&plan.args);
+
+        assert!(!args.iter().any(|arg| arg == "--unshare-net"));
+    }
+
+    #[test]
+    fn bwrap_process_plan_applies_path_rules() {
+        let runner =
+            BwrapProcessRunner::new_at_workspace_root("/workspace/merry").with_path_rules([
+                PathAccessRule::new(
+                    PathBuf::from("/var/log"),
+                    PathAccess::ReadOnly,
+                    PathAccessRuleSource::TrustedGlobalConfig,
+                ),
+                PathAccessRule::new(
+                    PathBuf::from("/cache"),
+                    PathAccess::ReadWrite,
+                    PathAccessRuleSource::TrustedGlobalConfig,
+                ),
+                PathAccessRule::new(
+                    PathBuf::from("/home/merry/.ssh"),
+                    PathAccess::Deny,
+                    PathAccessRuleSource::TrustedGlobalConfig,
+                ),
+            ]);
+        let plan = bwrap_process_plan(
+            &intent(None),
+            &runner.cwd_root,
+            runner.network_allowed,
+            &runner.path_rules,
+            &runner.bwrap_program,
+        );
+        let args = os_args(&plan.args);
+
+        assert!(contains_sequence(
+            &args,
+            &["--ro-bind-try", "/var/log", "/var/log"]
+        ));
+        assert!(contains_sequence(
+            &args,
+            &["--bind-try", "/cache", "/cache"]
+        ));
+        assert!(contains_sequence(&args, &["--tmpfs", "/home/merry/.ssh"]));
+    }
+
     #[tokio::test]
     async fn tokio_process_runner_inherits_current_process_environment() {
         let Ok(path) = std::env::var("PATH") else {
@@ -279,5 +636,20 @@ mod tests {
 
         assert_eq!(output.status(), ProcessExitStatus::Exited(0));
         assert_eq!(output.stdout_text(), format!("{path}\n{home}"));
+    }
+
+    fn os_args(args: &[OsString]) -> Vec<String> {
+        args.iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn contains_sequence(args: &[String], expected: &[&str]) -> bool {
+        args.windows(expected.len()).any(|window| {
+            window
+                .iter()
+                .map(String::as_str)
+                .eq(expected.iter().copied())
+        })
     }
 }

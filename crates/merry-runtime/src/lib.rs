@@ -97,9 +97,9 @@ pub use process::{
     ProcessRunnerFuture, ProcessRunnerOutput, ProcessRunnerResult,
     is_low_risk_process_action_intent, is_read_only_shell_process_action_intent,
 };
-pub use process_runner::TokioProcessRunner;
+pub use process_runner::{BwrapProcessRunner, TokioProcessRunner};
 pub use process_tool::{ProcessCommandToolError, process_command_tool};
-pub use profile::RuntimeProfile;
+pub use profile::{PathAccess, PathAccessRule, PathAccessRuleSource, RuntimeProfile};
 pub use runtime::{AutomaticCompactionConfig, Runtime, RuntimeBuilder};
 pub use skill::{SkillCatalog, SkillError, SkillLoadWarning, SkillMetadata};
 pub use step::{StepContext, StepInput};
