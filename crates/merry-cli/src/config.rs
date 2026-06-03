@@ -1,4 +1,7 @@
-use merry_runtime::{AutomaticCompactionConfig, CitationCompactionPolicy};
+use merry_runtime::{
+    AutomaticCompactionConfig, CitationCompactionPolicy, PathAccess, PathAccessRule,
+    PathAccessRuleSource,
+};
 use serde::Deserialize;
 use std::{
     collections::BTreeMap,
@@ -190,6 +193,54 @@ impl MerryConfig {
         subagents.to_config()
     }
 
+    pub fn trusted_global_path_rules(&self) -> Result<Vec<PathAccessRule>, ConfigError> {
+        let Some(permissions) = self.raw.permissions.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let mut rules = Vec::new();
+        for path in &permissions.readonly_paths {
+            let path = resolve_path_access_rule_path(path, &self.config_dir, &self.home)?;
+            rules.push(PathAccessRule::new(
+                path,
+                PathAccess::ReadOnly,
+                PathAccessRuleSource::TrustedGlobalConfig,
+            ));
+        }
+        for path in &permissions.readwrite_paths {
+            let path = resolve_path_access_rule_path(path, &self.config_dir, &self.home)?;
+            rules.push(PathAccessRule::new(
+                path,
+                PathAccess::ReadWrite,
+                PathAccessRuleSource::TrustedGlobalConfig,
+            ));
+        }
+        for path in &permissions.deny_paths {
+            let path = resolve_path_access_rule_path(path, &self.config_dir, &self.home)?;
+            rules.push(PathAccessRule::new(
+                path,
+                PathAccess::Deny,
+                PathAccessRuleSource::TrustedGlobalConfig,
+            ));
+        }
+        for rule in &permissions.paths {
+            let path = resolve_path_access_rule_path(&rule.path, &self.config_dir, &self.home)?;
+            rules.push(PathAccessRule::new(
+                path,
+                rule.access.into(),
+                PathAccessRuleSource::TrustedGlobalConfig,
+            ));
+        }
+        Ok(rules)
+    }
+
+    pub fn permissions_network_allowed(&self) -> bool {
+        self.raw
+            .permissions
+            .as_ref()
+            .and_then(|permissions| permissions.network)
+            .unwrap_or(false)
+    }
+
     pub fn skill_roots(&self) -> Result<Vec<PathBuf>, ConfigError> {
         let Some(skills) = self.raw.skills.as_ref() else {
             return Ok(vec![self.config_dir.join("skills")]);
@@ -371,6 +422,39 @@ fn resolve_config_relative_path(
     }
 }
 
+fn resolve_path_access_rule_path(
+    value: &str,
+    config_dir: &Path,
+    home: &Path,
+) -> Result<PathBuf, ConfigError> {
+    if value.trim().is_empty() {
+        return Err(ConfigError::Invalid(
+            "permissions path entries must not be blank".to_owned(),
+        ));
+    }
+    let path = resolve_config_relative_path(value, config_dir, home)?;
+    Ok(normalize_path_lexically(&path))
+}
+
+fn normalize_path_lexically(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    let is_absolute = path.is_absolute();
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            std::path::Component::RootDir => normalized.push(component.as_os_str()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !normalized.pop() && !is_absolute {
+                    normalized.push("..");
+                }
+            }
+            std::path::Component::Normal(part) => normalized.push(part),
+        }
+    }
+    normalized
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EffectiveLogSettings {
     pub level: LogLevel,
@@ -485,6 +569,7 @@ pub enum LogFormat {
 struct MerryConfigToml {
     #[serde(default)]
     global: GlobalToml,
+    permissions: Option<PermissionsToml>,
     runtime: Option<RuntimeToml>,
     skills: Option<SkillsToml>,
     models: Option<ModelsToml>,
@@ -496,6 +581,47 @@ struct MerryConfigToml {
 #[serde(deny_unknown_fields)]
 struct GlobalToml {
     profile: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct PermissionsToml {
+    network: Option<bool>,
+    #[serde(default)]
+    readonly_paths: Vec<String>,
+    #[serde(default)]
+    readwrite_paths: Vec<String>,
+    #[serde(default)]
+    deny_paths: Vec<String>,
+    #[serde(default)]
+    paths: Vec<PathRuleToml>,
+}
+
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct PathRuleToml {
+    path: String,
+    access: PathAccessToml,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum PathAccessToml {
+    #[serde(alias = "readonly", alias = "read-only")]
+    Ro,
+    #[serde(alias = "readwrite", alias = "read-write")]
+    Rw,
+    Deny,
+}
+
+impl From<PathAccessToml> for PathAccess {
+    fn from(value: PathAccessToml) -> Self {
+        match value {
+            PathAccessToml::Ro => Self::ReadOnly,
+            PathAccessToml::Rw => Self::ReadWrite,
+            PathAccessToml::Deny => Self::Deny,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
@@ -895,6 +1021,86 @@ max_depth = 1
     }
 
     #[test]
+    fn parses_trusted_global_path_rules() {
+        let paths = XdgPaths::from_parts(home(), None, None);
+        let config = MerryConfig::load_optional_from_text(
+            Some(
+                r#"
+[permissions]
+network = true
+readonly_paths = ["/etc", "~/logs", "shared-readonly"]
+readwrite_paths = ["../foo"]
+deny_paths = ["~/.ssh"]
+
+[[permissions.paths]]
+path = "/var/log/foo"
+access = "ro"
+"#,
+            ),
+            &paths,
+        )
+        .expect("config should parse")
+        .expect("config should be present");
+
+        let rules = config
+            .trusted_global_path_rules()
+            .expect("trusted path rules should resolve");
+        assert!(config.permissions_network_allowed());
+        assert_eq!(rules.len(), 6);
+        assert_eq!(rules[0].path(), Path::new("/etc"));
+        assert_eq!(rules[0].access(), PathAccess::ReadOnly);
+        assert_eq!(rules[1].path(), Path::new("/home/alice/logs"));
+        assert_eq!(
+            rules[2].path(),
+            Path::new("/home/alice/.config/merry/shared-readonly")
+        );
+        assert_eq!(rules[3].path(), Path::new("/home/alice/.config/foo"));
+        assert_eq!(rules[3].access(), PathAccess::ReadWrite);
+        assert_eq!(rules[4].path(), Path::new("/home/alice/.ssh"));
+        assert_eq!(rules[4].access(), PathAccess::Deny);
+        assert_eq!(rules[5].path(), Path::new("/var/log/foo"));
+        assert_eq!(rules[5].access(), PathAccess::ReadOnly);
+        assert!(
+            rules
+                .iter()
+                .all(|rule| rule.source() == PathAccessRuleSource::TrustedGlobalConfig)
+        );
+    }
+
+    #[test]
+    fn permissions_network_defaults_to_false() {
+        let paths = XdgPaths::from_parts(home(), None, None);
+        let missing = MerryConfig::load_optional_from_text(Some(""), &paths)
+            .expect("config should parse")
+            .expect("config should be present");
+        let permissions_without_network =
+            MerryConfig::load_optional_from_text(Some("[permissions]\n"), &paths)
+                .expect("config should parse")
+                .expect("config should be present");
+
+        assert!(!missing.permissions_network_allowed());
+        assert!(!permissions_without_network.permissions_network_allowed());
+    }
+
+    #[test]
+    fn rejects_unknown_path_access() {
+        let paths = XdgPaths::from_parts(home(), None, None);
+        let error = MerryConfig::load_optional_from_text(
+            Some(
+                r#"
+[[permissions.paths]]
+path = "/etc"
+access = "write"
+"#,
+            ),
+            &paths,
+        )
+        .expect_err("unknown path access should fail parsing");
+
+        assert!(error.to_string().contains("access"));
+    }
+
+    #[test]
     fn parses_skill_config_roots() {
         let paths = XdgPaths::from_parts(home(), None, None);
         let config = MerryConfig::load_optional_from_text(
@@ -1080,6 +1286,27 @@ model = "gpt-compact"
                 .expect("example skill roots should validate"),
             vec![PathBuf::from("/home/alice/.config/merry/skills")]
         );
+        let trusted_path_rules = config
+            .trusted_global_path_rules()
+            .expect("example trusted path rules should validate");
+        assert!(!config.permissions_network_allowed());
+        assert_eq!(trusted_path_rules.len(), 5);
+        assert_eq!(trusted_path_rules[0].path(), Path::new("/etc"));
+        assert_eq!(trusted_path_rules[0].access(), PathAccess::ReadOnly);
+        assert_eq!(trusted_path_rules[1].path(), Path::new("/var/log"));
+        assert_eq!(trusted_path_rules[1].access(), PathAccess::ReadOnly);
+        assert_eq!(
+            trusted_path_rules[2].path(),
+            Path::new("/home/alice/.config/merry/company-readonly")
+        );
+        assert_eq!(trusted_path_rules[2].access(), PathAccess::ReadOnly);
+        assert_eq!(
+            trusted_path_rules[3].path(),
+            Path::new("/home/alice/.config/merry/company-work")
+        );
+        assert_eq!(trusted_path_rules[3].access(), PathAccess::ReadWrite);
+        assert_eq!(trusted_path_rules[4].path(), Path::new("/home/alice/.ssh"));
+        assert_eq!(trusted_path_rules[4].access(), PathAccess::Deny);
 
         let models = config
             .runtime_models()

@@ -16,6 +16,29 @@
 [global]
 profile = "default"
 
+[permissions]
+# Global config is user-trusted. These paths are granted to Merry-managed
+# runtime backends for every project. Project-local config should not be used
+# for silent host-wide grants because coding agents may edit the project tree.
+#
+# This controls Merry-managed action backends such as per-command sandboxed
+# process tools. It does not disable model provider HTTP calls.
+network = false
+
+readonly_paths = [
+  "/etc",
+  "/var/log",
+  "company-readonly",
+]
+
+readwrite_paths = [
+  "company-work",
+]
+
+deny_paths = [
+  "~/.ssh",
+]
+
 [skills]
 # Skill metadata is projected into the cacheable stable prefix. Full SKILL.md
 # bodies remain on disk and are read through workspace_read_file only when used.
