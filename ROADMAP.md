@@ -4,19 +4,26 @@ This roadmap is public-safe and implementation-focused. Private product strategy
 
 ## Current Phase
 
-Merry has enough foundation to stop treating policy and sandbox design as the
-main product output. Runtime/provider/tool execution hardening, Memory
-Activation MVP internals, read-only workspace tools, workspace patch tooling,
-the serial `Runtime::run_agent_loop`, OpenAI Responses provider wiring, process
-action intent/evidence, and the CLI `bwrap` sandbox bootstrap are now
-foundation for a real capability test.
+Merry has crossed the first runtime usability threshold. Runtime/provider/tool
+execution hardening, Memory Activation MVP internals, read-only workspace
+tools, workspace patch tooling, the serial and streaming
+`Runtime::run_agent_loop`, OpenAI Responses provider wiring, process action
+intent/evidence, structured final output, Python SDK embedding, the CLI outer
+`bwrap` sandbox, and the profile-backed inner action sandbox now form a usable
+foundation rather than a collection of debug-only experiments.
 
-The current P0 is the **Minimal Useful Coding Loop**: prove that Merry can run a
-small coding-style task through runtime-owned state, tools, artifacts,
-continuations, and verification. This is not because Merry's product identity is
-"coding shell". Coding is the hard benchmark that forces exact evidence,
-artifact-backed tool output, patch/write behavior, test loops, cancellation, and
-prompt/context stability to work together.
+The **Minimal Useful Coding Loop** has served its purpose as the hard benchmark:
+Merry can run small coding-style tasks through runtime-owned state, tools,
+artifacts, continuations, sandboxed verification, and final results. Coding
+remains the primary benchmark because it forces exact evidence,
+artifact-backed tool output, patch/write behavior, test loops, cancellation,
+and prompt/context stability to work together.
+
+The current P0 is now **Product Session Runner**: extract the live/debug
+coding-loop assembly into one reusable session-running path that can be
+consumed by a future thin `merry run` command, a TUI, and SDK surfaces. A
+full-screen TUI should not own runtime semantics; it should display and control
+the same event/result/session contract once that contract is product-shaped.
 
 The target loop is:
 
@@ -59,6 +66,10 @@ off by default and, when file-backed, should use XDG state paths such as
 `~/.local/state/merry/logs/merry.jsonl` as fallback when no path is configured.
 Opening or creating the configured/default log file should fail clearly instead
 of silently falling back to stderr.
+Global config also owns trusted action-sandbox permission defaults, including
+`[permissions].network = false` by default plus read-only, read-write, and deny
+path rules. These permissions constrain Merry-managed action backends such as
+inner process runners; they do not disable model-provider HTTP calls.
 The legacy `.merry/secrets/openai.env` live-smoke config has been replaced for
 the CLI debug smoke path by XDG TOML provider config; the legacy `--config`
 flag is rejected. Config-relative `api_key_file` remains available so
@@ -95,6 +106,20 @@ The OpenAI provider target is the Responses API only. The provider request path 
 - Opt-in OpenAI Responses debug/tool flow for manual provider integration checks.
 - Memory Activation MVP internal runtime integration with session-owned in-memory stored source, deterministic activation, evidence validation, provider-step timing, and lifecycle cleanup coverage.
 - Read-only workspace navigation/search foundation through `workspace_read_file`, `workspace_list_dir`, and `workspace_search_text` under explicitly configured trusted/stable roots.
+- Runtime-owned structured final output contract using a provider-visible final
+  output tool, artifact-backed final output recording, and Python SDK/Pydantic
+  model support.
+- Python SDK MVP with PyO3-backed `merry._merry`, ergonomic wrappers under
+  `sdks/python/merry`, live OpenAI-compatible runtime construction, async run
+  and stream APIs, same-loop bridge tool continuation, Pydantic/decorator tool
+  registration, examples, README, and deterministic tests.
+- Parallel subagent runtime foundation, control tools, CLI coding-loop wiring,
+  subagent live smoke, and parent-visible subagent result reporting.
+- Profile-backed action sandbox foundation: `RuntimeProfile` now carries
+  network and path-rule capability data, global XDG config parses trusted
+  `permissions` rules, `BwrapProcessRunner` executes process actions through
+  an inner Linux `bwrap` backend, CLI outer sandbox applies global path guards,
+  and coding-loop/debug shell smokes use the same action runner path.
 
 ### Recently Completed
 
@@ -117,10 +142,10 @@ The OpenAI provider target is the Responses API only. The provider request path 
 - Runtime agent loop contract hardening now gates public raw context writes behind active-step admission and maps loop-owned tool execution cancellation to a cancelled loop status without resolving the pending call.
 - Runtime Agent Loop MVP first slice is implemented in `merry-runtime`: a bounded serial public loop composes `Runtime::step`, registered tool execution, and continuation steps, returns ordered events with typed completed/failed/cancelled/blocked outcomes, and keeps provider wire formats and real FS/shell tools out of runtime.
 - `merry-tool-workspace` has moved from the read-file first slice into read-only workspace navigation/search as a separate tool crate exposing `workspace_read_file`, `workspace_list_dir`, and `workspace_search_text` under explicitly configured trusted/stable roots. It prevents ordinary path traversal and ordinary symlink traversal before read/list/search operations, and on Unix uses `O_NOFOLLOW` for file opens. It is not an OS sandbox and does not claim complete hardening against malicious concurrent filesystem mutation; residual TOCTOU risk remains. It is not a shell, write API, network API, or complete coding agent.
-- CLI Sandbox Bootstrap is implemented in `merry-cli`: the root `--with-sandbox` flag uses `clap` and performs Linux `bwrap` self-reexec with a minimal environment, `PATH` lookup for `bwrap`, plan-stage missing-`bwrap` handling, recursion avoidance, sandbox-local `/tmp`, the current repo/project as the primary read-write workspace, and a minimal `/etc` allowlist. `/etc` file paths such as `/etc/ld.so.cache`, resolver, host, NSS, and `/etc/ld.so.conf` are mounted through a file helper that creates mount target parents before read-only binding; SSL/PKI and `/etc/ld.so.conf.d` use the directory helper. v1 still allows network access and is not a complete security boundary. A real smoke of `target/debug/merry --with-sandbox debug` has passed.
+- CLI Sandbox Bootstrap is implemented in `merry-cli`: the root `--with-sandbox` flag uses `clap` and performs Linux `bwrap` self-reexec with a minimal environment, `PATH` lookup for `bwrap`, plan-stage missing-`bwrap` handling, recursion avoidance, sandbox-local `/tmp`, the current repo/project as the primary read-write workspace, and a minimal `/etc` allowlist. `/etc` file paths such as `/etc/ld.so.cache`, resolver, host, NSS, and `/etc/ld.so.conf` are mounted through a file helper that creates mount target parents before read-only binding; SSL/PKI and `/etc/ld.so.conf.d` use the directory helper. The outer sandbox preserves provider/debug config and leaves action-level network/path policy to the inner runner. It is not a complete security boundary. A real smoke of `target/debug/merry --with-sandbox debug` has passed.
 - Shell/Process SP1/SP2/SP3-A plus the latest CLI admission slices are implemented: `merry-runtime` has provider-neutral process intent/evidence, proposed/executed process action audit variants, explicit injected `ProcessRunner` boundaries, process intent classification, opt-in informational process admission, accepted local workspace process admission, bounded stdout/stderr result artifacts, payload-free proposal/execution evidence, default deny behavior, cancellation paths that keep pending calls unresolved until runner output exists, and deterministic fake-runner tests. `merry-runtime` now also exposes `TokioProcessRunner` as the runtime-owned Tokio process adapter; `merry-cli` reuses that adapter for the narrow debug/demo `merry shell -- <argv>` path. Informational `rustc --version` / `rg --version` can run, and exact `cargo test -p merry-runtime` requires accepted local workspace risk plus the CLI bwrap handoff and sandbox runtime evidence. This does not implement general shell/process/coding-agent capability, broad raw shell mode, arbitrary env/stdin, a complete sandbox proof, or a general approval/review admission UX.
 - Minimal Useful Coding Loop first deterministic slice is implemented in `merry-tool-workspace` integration tests. `coding_loop_harness_inspects_patches_verifies_and_completes` builds a runtime with workspace read/patch tools plus `process_command_tool`, runs `Runtime::run_agent_loop` for inspect -> exact read -> patch -> verification -> final answer, uses a fake provider and injected fake process runner, mutates only a temporary workspace fixture through `workspace_patch_file`, records exact process argv for `rg --files` and `cargo test -p merry-runtime`, verifies tool-result continuation flow, and checks artifact-before-resolution ledger ordering. This is not yet the real `bwrap` smoke or live provider lane.
-- Real `bwrap` coding-loop smoke is implemented in `merry-cli`: `merry --with-sandbox debug coding-loop-smoke` is an explicit non-default command that refuses to run without validated CLI bwrap child handoff evidence, creates a disposable fixture under `.merry/local/coding-loop-smoke`, composes a runtime with a deterministic scripted provider, workspace read/patch tools, and `process_command_tool`, then runs inspect -> exact read -> constrained patch -> real process verification -> final answer through `Runtime::run_agent_loop`. The process steps use runtime-owned `TokioProcessRunner` for real `rg --files` and `rg fixed-by-live-llm` inside the sandbox; the edit uses `workspace_patch_file`; the smoke validates `AgentLoopStatus::Completed`, no pending tool calls, four successful tool resolutions, and the patched fixture content. The integration test is ignored by default and passed in this environment with `cargo test -p merry-cli debug_coding_loop_smoke_runs_inside_real_bwrap_when_opted_in -- --ignored`. This is still deterministic-provider and CLI-owned harness assembly, not a complete sandbox hardening claim.
+- Real `bwrap` coding-loop smoke is implemented in `merry-cli`: `merry --with-sandbox debug coding-loop-smoke` is an explicit non-default command that refuses to run without validated CLI bwrap child handoff evidence, creates a disposable fixture under `.merry/local/coding-loop-smoke`, composes a runtime with a deterministic scripted provider, workspace read/patch tools, and `process_command_tool`, then runs inspect -> exact read -> constrained patch -> real process verification -> final answer through `Runtime::run_agent_loop`. The process steps use the runtime-owned `BwrapProcessRunner` action sandbox for real `rg --files` and verification; the edit uses `workspace_patch_file`; the smoke validates `AgentLoopStatus::Completed`, no pending tool calls, four successful tool resolutions, and the patched fixture content. The integration test is ignored by default and passed in this environment with `cargo test -p merry-cli debug_coding_loop_smoke_runs_inside_real_bwrap_when_opted_in -- --ignored`. This is still deterministic-provider and CLI-owned harness assembly, not a complete sandbox hardening claim.
 - Configurable disposable coding-loop task smoke first slice is implemented in `merry-cli`: `merry --with-sandbox debug coding-loop-task-smoke --task status-text` creates a tiny disposable Rust fixture under `.merry/local/coding-loop-task-smoke`, drives inspect -> failing verification -> exact read -> constrained patch -> verification -> final answer through the runtime loop, and validates the final patched fixture. Default deterministic tests use a fake provider and fake process runner for `rg --files` / `rg done`; the real bwrap smoke remains explicit and ignored for outer-environment validation with `cargo test -p merry-cli debug_coding_loop_task_smoke_runs_inside_real_bwrap_when_opted_in -- --ignored`.
 - Minimal Useful Coding Loop continuity Tasks 13-16 are closed for the current
   runtime foundation: request assembly has a stable prefix lane with project
@@ -137,7 +162,7 @@ The OpenAI provider target is the Responses API only. The provider request path 
   the runtime records a trace-only diagnostic and still sends the provider
   request. This does not add checkpoint content, prompt projection, provider
   wire fields, config keys, or compaction.
-- The opt-in live LLM coding-loop smoke command is implemented as `merry --with-sandbox debug coding-loop-live-smoke`. It refuses to run without the real CLI bwrap child handoff, uses `OpenAiProvider` for model decisions, keeps `TokioProcessRunner` and `workspace_patch_file` for the real tool path, and validates runtime events for process inspection, exact source read, patch, process verification, loop completion, and patched fixture content. The user reported that the credentialed live smoke passed against their trusted configured server. That run exposed a provider HTTP metadata gap, now fixed by setting `User-Agent: merry/<crate version>` in `merry-provider-openai`; deterministic request-construction and loopback integration tests cover the header.
+- The opt-in live LLM coding-loop smoke command is implemented as `merry --with-sandbox debug coding-loop-live-smoke`. It refuses to run without the real CLI bwrap child handoff and `MERRY_OPENAI_DEBUG=1`, uses `OpenAiProvider` for model decisions, keeps `BwrapProcessRunner` and `workspace_patch_file` for the real tool path, and validates runtime events for process inspection, exact source read, patch, process verification, loop completion, and patched fixture content. The user reported that the credentialed live smoke passed against their trusted configured server. That run exposed a provider HTTP metadata gap, now fixed by setting `User-Agent: merry/<crate version>` in `merry-provider-openai`; deterministic request-construction and loopback integration tests cover the header.
 - The first config-backed observability implementation slice is complete in
   `merry-cli`: XDG TOML config discovery, config-backed log settings, file
   tracing subscriber setup, sandbox config/log mount planning, host log
@@ -221,26 +246,57 @@ The OpenAI provider target is the Responses API only. The provider request path 
   The active product proof is corrected back to testing coding-loop capability.
   Future roadmap priority changes require explicit user approval or a tracked
   change request; routine implementation status updates remain allowed.
-- Python SDK MVP first slice is implemented as `merry-py` plus
-  `sdks/python/merry`: it exposes a PyO3-backed package import, live
-  OpenAI-compatible runtime construction through `Runtime.from_env()` and
+- Python SDK MVP is implemented as `merry-py` plus `sdks/python/merry`: it
+  exposes a PyO3-backed package import, live OpenAI-compatible runtime
+  construction through `Runtime.from_env()` and
   `Runtime.with_openai_compatible(...)`, async `run`, incremental
   `Runtime.stream(...)`, same-loop Python bridge tool continuation,
   Pydantic/decorator tool registration, structured `MerryErrorInfo` Python
   exceptions, private deterministic fake/scripted helpers for tool-boundary
-  tests, executor exception mapping to `MerryToolError`, and deterministic
-  Python/Rust tests. This proves Merry can be embedded from Python and can use
-  a real model provider from the SDK. It does not yet expose real workspace
-  tools, Python profile configuration, or structured final-output models.
+  tests, executor exception mapping to `MerryToolError`, Python examples, and
+  SDK README guidance. This proves Merry can be embedded from Python and can
+  use a real model provider from the SDK. It does not yet expose real workspace
+  tools or Python profile/action-sandbox configuration.
+- Structured final output is implemented in runtime and Python SDK. The runtime
+  supports a `FinalOutputContract`, exposes a provider-visible final output
+  tool, records final output as a runtime-owned artifact/result instead of raw
+  prompt text, and keeps strict structured output separate from ordinary text
+  completion. Python SDK examples cover Pydantic final output models.
+- Profile-backed action sandbox first slice is implemented. Global XDG TOML
+  config accepts `permissions.network`, `readonly_paths`, `readwrite_paths`,
+  `deny_paths`, and explicit `[[permissions.paths]]` entries. The CLI outer
+  sandbox mounts trusted config and applies global path guards. The runtime
+  inner `BwrapProcessRunner` executes each process action with workspace/path
+  rules, system runtime read-only mounts for dynamic executables, and
+  fail-closed network isolation by default. Real `--with-sandbox` shell,
+  `coding-loop-smoke`, and `coding-loop-task-smoke` pass with action-network
+  enabled in environments where nested `--unshare-net` is unavailable.
+- Subagent runtime first product slice is implemented. The runtime includes
+  subagent manager/control tools and parent result reporting; CLI coding-loop
+  can enable subagent tools through config and has a live smoke that delegates
+  fixture editing to a child. This remains a bounded runtime feature, not a
+  general multi-agent product UI.
 
 ### Active
 
-- P0: continue the Minimal Useful Coding Loop as the current MVP proof. The loop now has a deterministic fake-provider/fake-runner slice, a deterministic real `bwrap` process-runner smoke, a configurable disposable task smoke, a user-verified live-provider smoke command, end-to-end config-backed log verification, and stable-prefix/context-budget/checkpoint scaffolding needed for dynamic context assembly.
-- P0: keep the Runtime Coding Loop Harness executable against a disposable fixture repository. The default lane uses fake provider/fake runner for deterministic `cargo test`; the deterministic `bwrap` lane is an explicit ignored smoke; the live OpenAI-compatible lane is also explicit and ignored and has passed in the user's trusted configured environment.
-- P0: move the next proof from smoke wiring to context fidelity. The
-  configurable task smoke is in place; the next acceptance target is dynamic
-  context assembly that keeps the stable prefix cacheable while projecting only
-  compact, evidence-backed runtime facts late in the request.
+- P0: turn the proven coding-loop/debug paths into a reusable Product Session
+  Runner. The loop now has a deterministic fake-provider/fake-runner slice, a
+  deterministic real `bwrap` process-runner smoke, a configurable disposable
+  task smoke, a user-verified live-provider smoke command, end-to-end
+  config-backed log verification, Python SDK embedding, structured final
+  output, subagent wiring, and profile-backed action sandboxing. The next gap
+  is not another debug smoke; it is one reusable session-running contract for
+  CLI/TUI/SDK consumers.
+- P0: keep the Runtime Coding Loop Harness executable against a disposable
+  fixture repository while moving assembly out of ad hoc debug command paths.
+  The default lane uses fake provider/fake runner for deterministic
+  `cargo test`; the deterministic `bwrap` lane is an explicit ignored smoke;
+  the live OpenAI-compatible lane is explicit and ignored and has passed in the
+  user's trusted configured environment.
+- P0: keep context fidelity as a runner requirement, not a standalone planning
+  detour. Stable prefix/context-budget/checkpoint scaffolding exists; dynamic
+  runtime facts should be projected only through explicit, compact,
+  evidence-backed context policy when the session runner needs them.
 - Supporting constraint: shell/process profile work remains subordinate to that
   coding-loop proof. Structured argv remains the narrow typed lane; richer
   shell syntax must run through a real interpreter inside explicit permission
@@ -249,7 +305,9 @@ The OpenAI provider target is the Responses API only. The provider request path 
 - P0: keep process output artifact-backed and context-friendly. Accepted process actions should record stdout/stderr/exit metadata as artifacts before observable events claim them, reduce large output into compact ledger facts plus exact evidence references, and keep ordinary runtime evidence out of prompt projection unless an explicit checkpoint/context-policy path selects it.
 - P0: keep edit/write on the typed workspace patch path. The MVP loop should apply one constrained patch through `workspace_patch_file` or its runtime-owned successor, record artifact/audit/ledger evidence, and then run verification.
 - Keep safety tiered but subordinate to the executable acceptance target: read-only inspection automatic, constrained patch opt-in, verification in `bwrap`, high-risk or unknown process actions denied or escalated.
-- Keep CLI shell as smoke/debug, not the design owner. The main contract is the runtime library and its registered tool/profile set.
+- Keep CLI shell/debug commands as smoke/debug, not the design owner. The main
+  contract is the runtime library, registered tool/profile set, action sandbox,
+  event stream, and product session runner.
 - Keep judgment advisory. Do not wire model-backed judgment to live provider, public events, ledger facts, or authorization until a concrete coding-loop acceptance test needs reviewer evidence.
 - Keep default verification deterministic and offline. Live provider and
   host/sandbox process smokes are explicit opt-in host-shell checks with local
@@ -259,30 +317,30 @@ The OpenAI provider target is the Responses API only. The provider request path 
 
 ### Next Active
 
-- Prepare the Dynamic Context Assembly slice before coding it. The next
-  assistant turn should restate the intended implementation against
-  `plans/2026-05-28-minimal-useful-coding-loop-continuity.md`, the stable
-  prefix layout, and this roadmap, then wait for user confirmation before
-  runtime edits.
-- Implementation target: assemble the provider-request dynamic body from
-  runtime-owned state while preserving the stable prefix lane. Dynamic context
-  should include the task anchor control slot, explicit checkpoint/context
-  projections, append-only conversation body, the current task/user request,
-  and pending tool continuations.
-- Keep large or exact payloads out of default prompt text. Process
-  stdout/stderr, source reads, patch payloads, provider wire payloads, and
-  artifact bodies stay in artifacts. Ordinary ledger observations, artifact
-  metadata, and tool-result summaries remain runtime state unless explicitly
-  projected by a checkpoint/context-policy path.
-- Acceptance: deterministic runtime/provider-boundary tests prove dynamic
-  context changes do not change stable prefix hash, default ledger/artifact
-  updates do not enter prompt messages, soft/hard budget decisions use the existing
-  `ContextBudget` / `ResolvedContextWindow` / `CheckpointDecision` helpers,
-  and default `cargo test` remains offline.
-- Out of scope for this next slice: model-written checkpoint summaries,
-  provider conversation state, `previous_response_id`, live OpenAI judgment,
-  new shell/session authorization design, `/task` or TUI commands, arbitrary
-  absolute-path editing, and broader process permissions.
+- Implement the Product Session Runner first slice before building a TUI or
+  treating `merry run` as the product. The runner should be a reusable
+  CLI/library layer that accepts a task, loads config/provider/profile,
+  constructs the coding runtime/tool set, starts the runtime agent loop,
+  streams product-relevant events, handles blocked/failed/completed/final-output
+  outcomes, and returns a compact session result.
+- The first consumer can be a very thin headless CLI command if useful, but it
+  is not the architectural owner. `merry run "..."` is a validation wrapper for
+  the runner; a future TUI should consume the same runner/event/result contract
+  rather than duplicating debug smoke assembly.
+- Acceptance: deterministic tests cover runner construction from fake provider
+  and fake process runner, event streaming order, bridge/final-output outcomes
+  where applicable, profile/action-sandbox settings passed through to the
+  runner, and clear failed/blocked diagnostics without leaking raw prompt,
+  source, process stdout/stderr, provider wire payloads, or secrets. An explicit
+  real `bwrap` smoke may remain ignored/manual.
+- Keep dynamic context assembly scoped to what the runner actually needs. Large
+  or exact payloads remain artifacts; ordinary ledger observations and tool
+  result summaries remain runtime state unless an explicit context-policy path
+  selects compact evidence-backed facts.
+- Out of scope for this next slice: full-screen TUI, approval/session UX,
+  model-written checkpoint summaries, provider conversation state,
+  `previous_response_id`, live OpenAI judgment, new broad shell authorization,
+  arbitrary absolute-path editing, and broader process permissions.
 - Roadmap priority changes require explicit user approval or a tracked change
   request. Agents may update completion/status evidence, but must not promote
   policy/profile/classifier work into `Next Active` on their own.
@@ -556,10 +614,10 @@ opt-in live provider smoke:
 
 Tasks:
 
-- Add a fixture repository purpose-built for the loop, with a tiny failing behavior or deterministic text replacement target. The first deterministic slice uses a temporary workspace fixture in `merry-tool-workspace` tests; a reusable real bwrap fixture remains.
-- Add a harness command or integration test wrapper that builds a runtime with the coding-loop tool set. The first deterministic integration test exists; the first real bwrap CLI smoke wrapper exists.
-- Add a structured shell/process boundary or equivalent reusable admission layer for file listing, literal search, exact source slice retrieval, and local verification, with process output reduced into artifact-backed ledger/evidence.
-- Register the runtime-owned default coding-loop tools from library code, not by ad hoc CLI-only assembly.
+- Add a fixture repository purpose-built for the loop, with a tiny failing behavior or deterministic text replacement target. Deterministic and real `bwrap` disposable fixtures now exist for smoke/task lanes.
+- Add a harness command or integration test wrapper that builds a runtime with the coding-loop tool set. Deterministic integration tests, real bwrap CLI smokes, task smokes, and live-provider smokes now exist.
+- Add a structured shell/process boundary or equivalent reusable admission layer for file listing, literal search, exact source slice retrieval, and local verification, with process output reduced into artifact-backed ledger/evidence. The structured boundary and inner action sandbox first slice are now implemented.
+- Register the runtime-owned default coding-loop tools from a reusable construction path, not by ad hoc CLI-only assembly. This remains the main gap to close in the Product Session Runner slice.
 - Use `workspace_patch_file` or its successor for the edit step and keep shell side effects out of the edit path. The first deterministic slice now does this.
 - Add deterministic fake-provider/fake-runner tests for the full multi-step loop. The first slice now covers inspect, exact read, patch, verification, continuation, and final answer.
 - Keep XDG TOML config guidance for live provider credentials and base URL.
@@ -571,7 +629,7 @@ Non-goals:
 - Do not add arbitrary shell parsing, pipelines, inherited env, stdin, network tools, or broad filesystem writes.
 - Do not make live provider behavior a default test dependency.
 - Do not make risk taxonomy or reviewer models the milestone output unless they unblock this loop.
-- Do not build graph memory, skill VM, Python SDK, or subagent runtime in this milestone.
+- Do not build graph memory, skill VM, a full-screen TUI, or a general multi-agent product UI in this milestone. Python SDK and bounded subagent runtime foundations now exist, but they remain consumers/supporting runtime features rather than the product session runner itself.
 
 Verification:
 
@@ -627,7 +685,7 @@ Non-goals:
 - Do not replace ordinary shell/process composition with a growing catalog of built-in read/search/edit tools.
 - Do not treat the protocol as only a deny gate; it must also define auditable, cancellable, bounded execution for admitted actions.
 - Do not treat the CLI shell path as raw shell mode; it accepts exact argv only and does not support pipelines or scripts.
-- Do not treat the CLI sandbox/admission lane as complete containment or proof: repo-local destructive effects remain possible, v1 network access is allowed, and the current lane is not a general approval/review admission system.
+- Do not treat the CLI sandbox/admission lane as complete containment or proof: repo-local destructive effects remain possible, provider HTTP and action-sandbox network policy are distinct layers, and the current lane is not a general approval/review admission system.
 - Do not use live provider behavior, OpenAI state, network access, or provider conversation state as deterministic verification dependencies.
 - Do not deprecate the existing read-only workspace tools; they remain foundation, bootstrap, fallback, and maintenance capabilities.
 
@@ -642,10 +700,9 @@ Verification:
 - Production memory store, public Memory Activation APIs, external persistence, and stable activation contract.
 - Broaden OpenAI Responses API provider coverage beyond the first streaming/text/function-call slice as runtime policy expands.
 - Live LLM-backed judgment path, public judgment API, public runtime events/ledger facts for judgment or promotion, tool execution gate integration, automatic provider-context inclusion, automatic context mutation or promotion, and builder/runtime configured judgment source.
-- Python SDK and `merry-py`.
 - Rust facade crate `merry`.
 - Macro crate support for boilerplate generation.
-- Collaboration and subagent runtime support beyond reserved public contracts.
+- Collaboration and subagent runtime support beyond the bounded manager/tools/live-smoke slice.
 - Network workspace tools and full coding-agent runtime behavior. The current workspace tool slice remains read-only navigation/search only, write work moves through runtime-owned protocols first, and the implemented shell/process slice remains narrow rather than a general coding-agent capability.
 
 ## Adopted Engineering Decisions
@@ -660,12 +717,12 @@ Verification:
   - `merry-cli`
 - Deferred crates:
   - `merry-macros`
-  - `merry-py`
   - Rust facade crate `merry`
 - Tokio is the MVP async runtime.
 - Runtime event APIs are stream-first.
 - Public dyn async boundaries use explicit boxed futures/streams.
-- PyO3/maturin comes after the Rust event loop is stable.
+- `merry-py` now uses PyO3/maturin with a Rust `_merry` extension and
+  ergonomic Python wrappers under `sdks/python/merry`.
 - MVP OpenAI provider target is the Responses API through a Merry-owned adapter boundary and direct `reqwest`; the current provider implementation uses `/responses` with typed SSE parsing.
 
 ## Completed Milestones
@@ -849,11 +906,13 @@ Still absent:
 
 ## Deferred Milestones
 
-### Milestone 10: Python SDK Shell
+### Milestone 10: Python SDK MVP
 
 Goal: expose the runtime event API to Python.
 
-Tasks:
+Status: complete for the MVP embedding surface.
+
+Done:
 
 - Add `merry-py` crate.
 - Add mixed maturin layout.
@@ -861,6 +920,16 @@ Tasks:
 - Add Python package wrappers under `python/merry`.
 - Expose async event iteration as the primary Python API.
 - Keep Python tool execution as event bridging.
+- Add live OpenAI-compatible runtime construction, async `run`, incremental
+  stream consumption, same-loop bridge continuation, Pydantic/decorator tool
+  declaration, structured `MerryErrorInfo`, structured final-output model
+  support, examples, README, and deterministic Python/Rust tests.
+
+Still absent:
+
+- Python exposure of real workspace tools.
+- Python profile/action-sandbox configuration.
+- Stable packaging/release workflow beyond the local mixed maturin layout.
 
 ### Milestone 11: Collaboration Contract Skeleton
 
