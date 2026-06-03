@@ -600,6 +600,30 @@ fn tool_call_resolved_event_uses_snake_case_and_no_inline_payload() {
 }
 
 #[test]
+fn final_output_recorded_event_uses_artifact_ref_without_payload() {
+    let event = RuntimeEvent::new(
+        SessionId::new("final-output-session").expect("valid session id"),
+        3,
+        RuntimeEventKind::FinalOutputRecorded {
+            call_id: ToolCallId::new("call-final").expect("valid call id"),
+            artifact: ArtifactRef::new(
+                ArtifactId::new("final-output-3").expect("valid artifact id"),
+                ArtifactKind::Json,
+            ),
+        },
+    );
+
+    let value = serde_json::to_value(&event).expect("event serializes");
+
+    assert_eq!(value["kind"]["type"], json!("final_output_recorded"));
+    assert_eq!(value["kind"]["call_id"], json!("call-final"));
+    assert_eq!(value["kind"]["artifact"]["id"], json!("final-output-3"));
+    assert_eq!(value["kind"]["artifact"]["kind"], json!("json"));
+    assert!(value["kind"].get("content").is_none());
+    assert_json_round_trip(&event);
+}
+
+#[test]
 fn skill_used_event_records_catalog_skill_read() {
     let event = RuntimeEvent::new(
         SessionId::new("session-1").expect("valid session id"),

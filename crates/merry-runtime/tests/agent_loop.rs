@@ -13,13 +13,13 @@ use merry_runtime::{
     ActionExecutionEvidence, ActionProposal, ActionProposalEvidence, AgentLoopBlockedReason,
     AgentLoopConfig, AgentLoopConfigError, AgentLoopStatus, ArtifactError,
     AutomaticCompactionConfig, CitationCompactionPolicy, ContextSummary,
-    DEFAULT_AGENT_LOOP_CONTINUATION_INPUT, ProcessActionIntent, ProcessEnvPolicy,
-    ProcessExitStatus, ProcessRunner, ProcessRunnerContext, ProcessRunnerError,
-    ProcessRunnerFuture, ProcessRunnerOutput, ProjectRules, Runtime, RuntimeError,
-    RuntimeModelRole, StepContext, StepInput, TaskAnchor, ToolActionKind, ToolActionPreflight,
-    ToolActionProposalFuture, ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome,
-    ToolExecutor, ToolExecutorFuture, WorkspacePatchExecutionEvidence, WorkspacePatchProposal,
-    process_command_tool,
+    DEFAULT_AGENT_LOOP_CONTINUATION_INPUT, FINAL_OUTPUT_TOOL_NAME, FinalOutputContract,
+    ProcessActionIntent, ProcessEnvPolicy, ProcessExitStatus, ProcessRunner, ProcessRunnerContext,
+    ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput, ProjectRules, Runtime,
+    RuntimeError, RuntimeModelRole, StepContext, StepInput, TaskAnchor, ToolActionKind,
+    ToolActionPreflight, ToolActionProposalFuture, ToolExecutionContext, ToolExecutionError,
+    ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture, WorkspacePatchExecutionEvidence,
+    WorkspacePatchProposal, process_command_tool,
 };
 use schemars::Schema;
 use serde_json::{Map, Value, json};
@@ -120,6 +120,24 @@ fn tool_spec(name: &str) -> ToolSpec {
         ToolInputSchema::new(schema).expect("valid tool schema"),
     )
     .expect("valid tool spec")
+}
+
+fn final_output_contract() -> FinalOutputContract {
+    let schema = Schema::try_from(json!({
+        "type": "object",
+        "properties": {
+            "summary": {
+                "type": "string",
+                "description": "Short final summary."
+            }
+        },
+        "required": ["summary"],
+        "additionalProperties": false
+    }))
+    .expect("test schema should be a JSON schema");
+
+    FinalOutputContract::new(ToolInputSchema::new(schema).expect("valid final output schema"))
+        .expect("valid final output contract")
 }
 
 fn model_tool_call(id: &str, name: &str) -> ModelToolCall {
@@ -731,6 +749,174 @@ async fn run_agent_loop_stream_resumes_same_loop_after_bridge_tool_result() {
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn run_agent_loop_stream_completes_final_output_without_continuation_budget() {
+    let provider = ScriptedModelProvider::new(vec![vec![Ok(completed_tool_call_event(
+        model_tool_call_with_arguments(
+            "call-final",
+            FINAL_OUTPUT_TOOL_NAME,
+            json!({"summary": "Order A123 shipped."}),
+        ),
+    ))]]);
+    let runtime = runtime_with_provider("agent-loop-stream-final-output-budget", provider);
+    let mut stream = runtime
+        .run_agent_loop_stream(
+            StepInput::user_text("Return structured order status.").expect("valid step input"),
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::new(1)
+                .expect("valid non-zero budget")
+                .with_final_output_contract(final_output_contract()),
+        )
+        .expect("agent loop stream should start");
+
+    let mut events = Vec::new();
+    while let Some(event) = stream.next().await {
+        events.push(event);
+    }
+    let result = stream.result().await.expect("stream should produce result");
+
+    assert_eq!(result.status(), &AgentLoopStatus::Completed);
+    assert_eq!(result.steps_run(), 1);
+    assert_eq!(
+        result
+            .final_output_json()
+            .expect("structured final output should be recorded")
+            .json(),
+        r#"{"summary":"Order A123 shipped."}"#
+    );
+    assert_eq!(
+        event_kind_names(&events),
+        [
+            "SessionStarted",
+            "StepStarted",
+            "ToolCallPending",
+            "ArtifactRecorded",
+            "FinalOutputRecorded",
+        ]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn agent_loop_completes_when_model_calls_final_output_tool() {
+    let provider = ScriptedModelProvider::new(vec![vec![Ok(completed_tool_call_event(
+        model_tool_call_with_arguments(
+            "call-final",
+            FINAL_OUTPUT_TOOL_NAME,
+            json!({"summary": "Order A123 shipped."}),
+        ),
+    ))]]);
+    let runtime = runtime_with_provider("agent-loop-final-output", provider);
+
+    let result = runtime
+        .run_agent_loop(
+            StepInput::user_text("Return structured order status.").expect("valid step input"),
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default().with_final_output_contract(final_output_contract()),
+        )
+        .await
+        .expect("agent loop should run");
+
+    assert_eq!(result.status(), &AgentLoopStatus::Completed);
+    assert_eq!(result.steps_run(), 1);
+    assert_eq!(
+        result
+            .final_output_json()
+            .expect("structured final output should be recorded")
+            .json(),
+        r#"{"summary":"Order A123 shipped."}"#
+    );
+    assert_eq!(
+        event_kind_names(result.events()),
+        [
+            "SessionStarted",
+            "StepStarted",
+            "ToolCallPending",
+            "ArtifactRecorded",
+            "FinalOutputRecorded",
+        ]
+    );
+    assert!(runtime.pending_tool_calls().await.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn agent_loop_executes_runtime_tool_before_final_output_tool() {
+    let provider = ScriptedModelProvider::new(vec![
+        vec![Ok(completed_tool_call_event(model_tool_call(
+            "call-search",
+            "search_notes",
+        )))],
+        vec![Ok(completed_tool_call_event(
+            model_tool_call_with_arguments(
+                "call-final",
+                FINAL_OUTPUT_TOOL_NAME,
+                json!({"summary": "Order A123 shipped."}),
+            ),
+        ))],
+    ]);
+    let executor = ScriptedToolExecutor::succeeding_text("search result\n");
+    let runtime = runtime_with_tool("agent-loop-tool-then-final-output", provider, executor);
+
+    let result = runtime
+        .run_agent_loop(
+            StepInput::user_text("Search notes and return structured status.")
+                .expect("valid step input"),
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default().with_final_output_contract(final_output_contract()),
+        )
+        .await
+        .expect("agent loop should run");
+
+    assert_eq!(result.status(), &AgentLoopStatus::Completed);
+    assert_eq!(result.steps_run(), 2);
+    assert_eq!(
+        result
+            .final_output_json()
+            .expect("structured final output should be recorded")
+            .json(),
+        r#"{"summary":"Order A123 shipped."}"#
+    );
+    assert_eq!(
+        event_kind_names(result.events()),
+        [
+            "SessionStarted",
+            "StepStarted",
+            "ToolCallPending",
+            "ArtifactRecorded",
+            "ToolCallResolved",
+            "StepStarted",
+            "ToolCallPending",
+            "ArtifactRecorded",
+            "FinalOutputRecorded",
+        ]
+    );
+    assert!(runtime.pending_tool_calls().await.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn agent_loop_blocks_text_completion_when_final_output_contract_is_active() {
+    let provider =
+        ScriptedModelProvider::new(vec![vec![Ok(completed_text_event("Order A123 shipped."))]]);
+    let runtime = runtime_with_provider("agent-loop-final-output-text-blocked", provider);
+
+    let result = runtime
+        .run_agent_loop(
+            StepInput::user_text("Return structured order status.").expect("valid step input"),
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default().with_final_output_contract(final_output_contract()),
+        )
+        .await
+        .expect("agent loop should run");
+
+    assert_eq!(
+        result.status(),
+        &AgentLoopStatus::Blocked {
+            reason: AgentLoopBlockedReason::FinalOutputToolNotCalled,
+        }
+    );
+    assert!(result.final_output().is_none());
+    assert!(result.final_output_json().is_none());
+}
+
 fn event_kind_names(events: &[RuntimeEvent]) -> Vec<&'static str> {
     events
         .iter()
@@ -745,6 +931,7 @@ fn event_kind_names(events: &[RuntimeEvent]) -> Vec<&'static str> {
             RuntimeEventKind::ToolCallPending { .. } => "ToolCallPending",
             RuntimeEventKind::BridgeToolCallRequested { .. } => "BridgeToolCallRequested",
             RuntimeEventKind::ToolCallResolved { .. } => "ToolCallResolved",
+            RuntimeEventKind::FinalOutputRecorded { .. } => "FinalOutputRecorded",
             RuntimeEventKind::SkillUsed { .. } => "SkillUsed",
             _ => "Unknown",
         })

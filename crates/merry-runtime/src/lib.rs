@@ -37,6 +37,7 @@ mod compaction;
 mod context;
 mod error;
 mod event_stream;
+mod final_output;
 mod judgment;
 mod ledger;
 mod memory;
@@ -79,6 +80,9 @@ pub use context::{
 };
 pub use error::RuntimeError;
 pub use event_stream::RuntimeEventStream;
+pub use final_output::{
+    FINAL_OUTPUT_TOOL_NAME, FinalOutput, FinalOutputContract, FinalOutputContractError,
+};
 pub use ledger::{
     CompactLedgerText, LedgerFactKind, LedgerProjection, LedgerProjectionSnapshot, LedgerScope,
     LedgerUpdate, LedgerUpdateKind, LedgerValidationError, LifecycleFact, TaskLedger,

@@ -37,6 +37,23 @@ def runtime_with_scripted_tool_call(
     return runtime
 
 
+def runtime_with_scripted_tool_calls(
+    *,
+    calls: list[Mapping[str, object]],
+    final_text: str,
+) -> merry.Runtime:
+    runtime = merry.Runtime.__new__(merry.Runtime)
+    runtime._tools = {}
+    try:
+        runtime._native = _merry.Runtime._with_scripted_tool_calls(
+            json.dumps(calls, sort_keys=True),
+            final_text,
+        )
+    except NativeMerryError as error:
+        raise _decode_native_error(error) from error
+    return runtime
+
+
 def register_static_tool_failure(
     runtime: merry.Runtime,
     *,

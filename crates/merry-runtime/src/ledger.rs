@@ -297,6 +297,8 @@ pub enum LedgerFactKind {
     ActionAuditRecorded,
     /// A pending tool call has been resolved with an artifact-backed result.
     ToolCallResolved,
+    /// Structured terminal output has been recorded through the final-output tool.
+    FinalOutputRecorded,
     /// A model used a catalog skill by reading its `SKILL.md`.
     SkillUsed,
     /// Step cancellation has been recorded.

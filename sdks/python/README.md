@@ -115,6 +115,44 @@ registered handler, then Python submits the result back to the same Rust runtime
 session. Bridge handlers run in the host Python process; Merry profiles do not
 sandbox arbitrary host code.
 
+## Structured Final Output
+
+`final_output_model` asks the Rust runtime to expose a reserved terminal tool
+for the model to call when the task is complete. The model can still call normal
+runtime or bridge tools first; the run completes only when the reserved final
+output tool is called. Plain text completion is reported as `blocked` while this
+contract is active.
+
+```python
+class OrderStatusFinalOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    order_id: str = Field(description="Stable order identifier in the final answer.")
+    status: str = Field(description="Final fulfillment status for the order.")
+
+stream = runtime.stream(
+    "Use lookup_order with order_id A123, then submit the final structured order status.",
+    final_output_model=OrderStatusFinalOutput,
+)
+
+async for event in stream:
+    print(event["kind"]["type"])
+
+result = await stream.result()
+print(result.final_output.status)
+print(result.final_output_json)
+```
+
+`result.final_output` is an instance of the Pydantic model when
+`final_output_model` is provided. `result.final_output_json` keeps the exact JSON
+payload recorded by the Rust runtime.
+
+Run the live example:
+
+```bash
+uv run examples/final_output_model.py
+```
+
 ## Tests
 
 ```bash

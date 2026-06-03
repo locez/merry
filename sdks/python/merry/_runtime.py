@@ -24,14 +24,22 @@ _MERRY_TOOL_OPTIONS_ATTR = "__merry_tool_options__"
 class RunResult:
     status: str
     steps_run: int
-    final_output: str | None
+    final_output: str | BaseModel | None
+    final_output_json: str | None
     events: list[dict[str, Any]]
 
 
 class RuntimeStream:
-    def __init__(self, runtime: "Runtime", task: str) -> None:
+    def __init__(
+        self,
+        runtime: "Runtime",
+        task: str,
+        final_output_model: type[BaseModel] | None = None,
+    ) -> None:
         self._runtime = runtime
         self._task = task
+        self._final_output_model = final_output_model
+        self._final_output_schema_json = _final_output_schema_json(final_output_model)
         self._events: list[dict[str, Any]] = []
         self._result: RunResult | None = None
         self._started = False
@@ -50,6 +58,7 @@ class RuntimeStream:
         native_stream = await _run_in_worker(
             self._runtime._native.run_stream_blocking,
             self._task,
+            self._final_output_schema_json,
         )
 
         while True:
@@ -79,11 +88,15 @@ class RuntimeStream:
 
     async def _finish_from_native_result(self, native_stream: Any) -> None:
         raw = await _run_in_worker(native_stream.result_blocking)
-        result = _run_result_from_native(raw)
+        result = _run_result_from_native(
+            raw,
+            final_output_model=self._final_output_model,
+        )
         self._result = RunResult(
             status=result.status,
             steps_run=result.steps_run,
             final_output=result.final_output,
+            final_output_json=result.final_output_json,
             events=list(self._events),
         )
         self._finished = True
@@ -287,32 +300,59 @@ class Runtime:
             base_url=base_url,
         )
 
-    def run_blocking(self, task: str) -> RunResult:
-        return asyncio.run(self.run(task))
+    def run_blocking(
+        self,
+        task: str,
+        *,
+        final_output_model: type[BaseModel] | None = None,
+    ) -> RunResult:
+        return asyncio.run(self.run(task, final_output_model=final_output_model))
 
-    def _run_native_blocking(self, task: str) -> RunResult:
+    def _run_native_blocking(
+        self,
+        task: str,
+        final_output_model: type[BaseModel] | None,
+    ) -> RunResult:
         try:
-            raw = self._native.run_blocking(task)
+            raw = self._native.run_blocking(
+                task,
+                _final_output_schema_json(final_output_model),
+            )
         except NativeMerryError as error:
             raise _decode_native_error(error) from error
 
-        return _run_result_from_native(raw)
+        return _run_result_from_native(raw, final_output_model=final_output_model)
 
-    async def run(self, task: str) -> RunResult:
+    async def run(
+        self,
+        task: str,
+        *,
+        final_output_model: type[BaseModel] | None = None,
+    ) -> RunResult:
         if not getattr(self, "_tools", {}):
-            return await _run_in_worker(self._run_native_blocking, task)
+            return await _run_in_worker(self._run_native_blocking, task, final_output_model)
 
-        stream = self.stream(task)
+        stream = self.stream(task, final_output_model=final_output_model)
         async for _event in stream:
             pass
         return await stream.result()
 
-    async def run_stream(self, task: str) -> AsyncIterator[dict[str, Any]]:
-        async for event in self.stream(task):
+    async def run_stream(
+        self,
+        task: str,
+        *,
+        final_output_model: type[BaseModel] | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        async for event in self.stream(task, final_output_model=final_output_model):
             yield event
 
-    def stream(self, task: str) -> RuntimeStream:
-        return RuntimeStream(self, task)
+    def stream(
+        self,
+        task: str,
+        *,
+        final_output_model: type[BaseModel] | None = None,
+    ) -> RuntimeStream:
+        return RuntimeStream(self, task, final_output_model=final_output_model)
 
     def register_tool(
         self,
@@ -378,7 +418,11 @@ class Runtime:
         return list(events)
 
 
-def _run_result_from_native(raw: dict[str, Any]) -> RunResult:
+def _run_result_from_native(
+    raw: dict[str, Any],
+    *,
+    final_output_model: type[BaseModel] | None = None,
+) -> RunResult:
     status = raw["status"]
     if not isinstance(status, str):
         raise TypeError("native run result status must be a str")
@@ -388,18 +432,45 @@ def _run_result_from_native(raw: dict[str, Any]) -> RunResult:
     final_output = raw["final_output"]
     if final_output is not None and not isinstance(final_output, str):
         raise TypeError("native run result final_output must be a str or None")
+    final_output_json = raw.get("final_output_json")
+    if final_output_json is not None and not isinstance(final_output_json, str):
+        raise TypeError("native run result final_output_json must be a str or None")
     events = raw["events"]
     if not isinstance(events, list):
         raise TypeError("native run result events must be a list")
     if not all(isinstance(event, dict) for event in events):
         raise TypeError("native run result events must contain dict items")
 
+    structured_final_output = _validate_final_output_json(
+        final_output_json,
+        final_output_model,
+    )
+
     return RunResult(
         status=status,
         steps_run=steps_run,
-        final_output=final_output,
+        final_output=structured_final_output if final_output_model is not None else final_output,
+        final_output_json=final_output_json,
         events=list(events),
     )
+
+
+def _final_output_schema_json(model: type[BaseModel] | None) -> str | None:
+    if model is None:
+        return None
+    _validate_pydantic_model(model, "final_output_model")
+    return json.dumps(model.model_json_schema(), sort_keys=True)
+
+
+def _validate_final_output_json(
+    final_output_json: str | None,
+    final_output_model: type[BaseModel] | None,
+) -> BaseModel | None:
+    if final_output_model is None:
+        return None
+    if final_output_json is None:
+        return None
+    return final_output_model.model_validate_json(final_output_json)
 
 
 def _bridge_tool_call(events: list[dict[str, Any]]) -> dict[str, Any] | None:

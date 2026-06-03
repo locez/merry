@@ -316,6 +316,13 @@ pub enum RuntimeEventKind {
     BridgeToolCallRequested { call: PendingToolCall },
     /// A pending tool call was resolved with an artifact-backed result.
     ToolCallResolved { result: ToolCallResult },
+    /// A runtime-owned final-output tool call recorded structured terminal output.
+    FinalOutputRecorded {
+        /// Provider-originated call id for the final-output tool call.
+        call_id: ToolCallId,
+        /// JSON artifact containing the final structured output.
+        artifact: ArtifactRef,
+    },
     /// A model used a skill by successfully reading its catalog-listed `SKILL.md`.
     SkillUsed {
         /// Model-visible skill name from `SKILL.md` frontmatter.
