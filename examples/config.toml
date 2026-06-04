@@ -90,6 +90,11 @@ model = "gpt-4.1-mini"
 # reused.
 model = "gpt-4.1-mini"
 
+[models.approval_review]
+# Optional model override for permission admission review. Omit this table to
+# review with [providers.default].model.
+model = "gpt-4.1-mini"
+
 [providers.openai-compatible]
 base_url = "https://api.openai.com/v1"
 # Prefer api_key_file for local sandboxed smoke runs so the key stays in the

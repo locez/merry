@@ -30,6 +30,8 @@ pub(crate) enum ActionRiskTier {
     ProcessLocalWorkspaceEffect,
     /// Starts a read-only shell wrapper under explicit shell-runner admission.
     ProcessShellReadOnly,
+    /// Starts a process after explicit permission request admission.
+    ProcessPermissioned,
     /// Starts a higher-risk local process.
     ProcessHigh,
     /// Uses network access.
@@ -159,6 +161,17 @@ impl ActionPolicyDecision {
             ActionRiskTier::ProcessShellReadOnly,
             ActionPolicyDisposition::Allow,
             "read-only shell process actions are allowed only by explicit runtime opt-in for a shell runner profile",
+        )
+    }
+
+    /// Allows a process after explicit permission request admission.
+    #[must_use]
+    pub(crate) const fn allow_permissioned_process_action() -> Self {
+        Self::new(
+            ToolActionKind::CommandExec,
+            ActionRiskTier::ProcessPermissioned,
+            ActionPolicyDisposition::Allow,
+            "permissioned process actions are allowed only after explicit permission admission review",
         )
     }
 }

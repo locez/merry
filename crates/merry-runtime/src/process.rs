@@ -5,11 +5,13 @@
 //! classifiers for process argv and shell-wrapper command text, but those
 //! classifiers are not a shell interpreter.
 
+use crate::PermissionRequest;
 use std::{
     fmt,
     future::Future,
     path::{Component, Path},
     pin::Pin,
+    sync::Arc,
 };
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
@@ -126,6 +128,8 @@ impl ProcessPermissionProfileId {
     pub const LOCAL_WORKSPACE_BWRAP_V1: Self = Self("process.local_workspace.bwrap.v1");
     /// Read-only shell wrapper lane for plain command sequences under a real shell runner.
     pub const SHELL_READ_ONLY_V1: Self = Self("process.shell.read_only.v1");
+    /// Process lane admitted by an explicit permission request review.
+    pub const APPROVED_PERMISSION_REQUEST_V1: Self = Self("process.permission_request.approved.v1");
 
     /// Returns the stable profile identifier string.
     #[must_use]
@@ -181,6 +185,36 @@ pub trait ProcessRunner: Send + Sync {
         intent: ProcessActionIntent,
         context: ProcessRunnerContext,
     ) -> ProcessRunnerFuture<'a>;
+}
+
+/// Factory for runners scoped to one approved permission request.
+///
+/// Implementations translate a runtime-approved request into the concrete
+/// process backend/profile for that exact action. They must not grant reusable
+/// authority back to the model.
+pub trait PermissionedProcessRunnerFactory: Send + Sync {
+    /// Creates the process runner for one approved permission request.
+    fn runner_for(&self, request: &PermissionRequest) -> Arc<dyn ProcessRunner>;
+}
+
+/// Compatibility factory that always returns the same runner.
+#[derive(Clone)]
+pub struct StaticPermissionedProcessRunnerFactory {
+    runner: Arc<dyn ProcessRunner>,
+}
+
+impl StaticPermissionedProcessRunnerFactory {
+    /// Creates a static runner factory.
+    #[must_use]
+    pub fn new(runner: Arc<dyn ProcessRunner>) -> Self {
+        Self { runner }
+    }
+}
+
+impl PermissionedProcessRunnerFactory for StaticPermissionedProcessRunnerFactory {
+    fn runner_for(&self, _request: &PermissionRequest) -> Arc<dyn ProcessRunner> {
+        Arc::clone(&self.runner)
+    }
 }
 
 /// Provider-neutral, typed intent for a local process action.

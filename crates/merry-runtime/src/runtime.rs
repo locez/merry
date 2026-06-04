@@ -30,7 +30,18 @@ use crate::{
         MemoryActivationSourceKind, MemoryScope, StoredMemoryActivationSource,
     },
     model_config::{ModelProviderConfig, RuntimeModelConfigs},
-    process::{ShellProcessInput, shell_process_input},
+    permission::{
+        ModelBackedPermissionAdmissionSource, PermissionAdmissionContext,
+        PermissionAdmissionResult, PermissionAdmissionSource, PermissionReviewMode,
+        PermissionedAction, RuntimeTrustLevel, is_request_permissions_tool,
+        permission_blocked_outcome, permission_denied_outcome,
+        permission_invalid_arguments_outcome, permission_request_from_call,
+        permission_review_error_outcome,
+    },
+    process::{
+        PermissionedProcessRunnerFactory, ShellProcessInput,
+        StaticPermissionedProcessRunnerFactory, shell_process_input,
+    },
     resolve_context_window,
     session::{
         ProposedToolExecutionOutcome, ResolvedToolContinuationSnapshot, SessionState,
@@ -424,6 +435,14 @@ impl Runtime {
                 None,
             );
         };
+
+        if is_request_permissions_tool(pending.name())
+            && registered_tool.action_kind() == crate::ToolActionKind::RuntimeControl
+        {
+            return self
+                .execute_permission_request_tool_call(&pending, context)
+                .await;
+        }
 
         let mut policy_decision = DefaultActionPolicy.decide(registered_tool.action_kind());
         let mut allowed_proposal = None;
@@ -929,6 +948,164 @@ impl Runtime {
         ))
     }
 
+    async fn execute_permission_request_tool_call(
+        &self,
+        pending: &PendingToolCall,
+        context: ToolExecutionContext,
+    ) -> Result<Vec<RuntimeEvent>, RuntimeError> {
+        if context.cancellation_token().is_cancelled() {
+            return Err(RuntimeError::ToolExecutionCancelled {
+                session_id: self.inner.session_id.clone(),
+                call_id: pending.id().clone(),
+            });
+        }
+
+        let review_context = {
+            let session = self.inner.session.lock().await;
+            session.permission_review_context_snapshot()?
+        };
+        let request = match permission_request_from_call(pending, review_context) {
+            Ok(request) => request,
+            Err(error) => {
+                let outcome = permission_invalid_arguments_outcome(pending.name().as_str(), error);
+                let (status, content, diagnostic, execution_evidence) = outcome.into_parts();
+                debug_assert!(execution_evidence.is_none());
+                let mut session = self.inner.session.lock().await;
+                return session.submit_tool_execution_outcome(
+                    pending.id(),
+                    status,
+                    content,
+                    diagnostic,
+                    None,
+                );
+            }
+        };
+
+        let Some(runner_factory) = self.inner.permissioned_process_runner_factory.clone() else {
+            let outcome = permission_blocked_outcome(
+                pending,
+                "permissioned process execution is not configured for this runtime",
+            );
+            let (status, content, diagnostic, execution_evidence) = outcome.into_parts();
+            debug_assert!(execution_evidence.is_none());
+            let mut session = self.inner.session.lock().await;
+            return session.submit_tool_execution_outcome(
+                pending.id(),
+                status,
+                content,
+                diagnostic,
+                None,
+            );
+        };
+
+        let admission = self
+            .review_permission_request(request.clone(), &context)
+            .await;
+        let decision = match admission {
+            Ok(decision) => decision,
+            Err(error) => {
+                if matches!(error, crate::PermissionAdmissionError::Cancelled)
+                    || context.cancellation_token().is_cancelled()
+                {
+                    return Err(RuntimeError::ToolExecutionCancelled {
+                        session_id: self.inner.session_id.clone(),
+                        call_id: pending.id().clone(),
+                    });
+                }
+                let outcome = permission_review_error_outcome(pending, &error);
+                let (status, content, diagnostic, execution_evidence) = outcome.into_parts();
+                debug_assert!(execution_evidence.is_none());
+                let mut session = self.inner.session.lock().await;
+                return session.submit_tool_execution_outcome(
+                    pending.id(),
+                    status,
+                    content,
+                    diagnostic,
+                    None,
+                );
+            }
+        };
+
+        if !decision.is_approved() {
+            let outcome = permission_denied_outcome(pending, Some(decision.review()));
+            let (status, content, diagnostic, execution_evidence) = outcome.into_parts();
+            debug_assert!(execution_evidence.is_none());
+            let mut session = self.inner.session.lock().await;
+            return session.submit_tool_execution_outcome(
+                pending.id(),
+                status,
+                content,
+                diagnostic,
+                None,
+            );
+        }
+
+        let runner = runner_factory.runner_for(&request);
+        let PermissionedAction::Process(intent) = request.action().clone();
+        let proposal = ActionProposal::new(
+            pending,
+            crate::ToolActionKind::CommandExec,
+            "permissioned process",
+            "approved permission request",
+            format!(
+                "Run process with {} argv item(s) after permission admission review",
+                intent.argv().len()
+            ),
+            ActionProposalEvidence::ProcessAction(intent),
+        )
+        .map_err(|error| RuntimeError::ToolExecutionFailed {
+            session_id: self.inner.session_id.clone(),
+            call_id: pending.id().clone(),
+            message: error.to_string(),
+        })?;
+        self.execute_admitted_process_action(
+            pending,
+            proposal,
+            ActionPolicyDecision::allow_permissioned_process_action(),
+            ProcessPermissionProfileId::APPROVED_PERMISSION_REQUEST_V1,
+            runner,
+            context,
+        )
+        .await
+    }
+
+    async fn review_permission_request(
+        &self,
+        request: crate::PermissionRequest,
+        context: &ToolExecutionContext,
+    ) -> PermissionAdmissionResult {
+        if self
+            .inner
+            .permission_review_mode
+            .requires_model_review(self.inner.runtime_trust_level)
+        {
+            let Some(model_config) = self
+                .inner
+                .model_configs
+                .get_with_primary_fallback(RuntimeModelRole::ApprovalReview)
+            else {
+                return Err(crate::PermissionAdmissionError::ReviewModelUnavailable);
+            };
+            let source = ModelBackedPermissionAdmissionSource::from_config(model_config)?;
+            return source
+                .review(
+                    request,
+                    PermissionAdmissionContext::new(context.cancellation_token().clone()),
+                )
+                .await;
+        }
+
+        let Some(source) = self.inner.permission_admission_source.as_ref() else {
+            return Err(crate::PermissionAdmissionError::ReviewModelUnavailable);
+        };
+        source
+            .review(
+                request,
+                PermissionAdmissionContext::new(context.cancellation_token().clone()),
+            )
+            .await
+    }
+
     /// Creates an exact evidence reference from artifact state owned by this session.
     ///
     /// Prefer this facade over reading [`crate::ArtifactRegistry`] directly. The
@@ -1345,6 +1522,15 @@ fn process_output_artifact_content(
         }
     });
 
+    if output.stdout_truncated() || output.stderr_truncated() {
+        payload["guidance"] = serde_json::json!({
+            "kind": "process_output_truncated",
+            "message": "The captured process output was truncated. Do not assume omitted output is absent; rerun with a narrower command, filter, range, or targeted file inspection before drawing conclusions from the output.",
+            "stdout_truncated": output.stdout_truncated(),
+            "stderr_truncated": output.stderr_truncated(),
+        });
+    }
+
     if let Some(input_artifact) = input_artifact {
         payload["input_artifact"] = artifact_ref_json(input_artifact);
     } else if let Some(shell_input) = shell_input {
@@ -1560,6 +1746,10 @@ pub struct RuntimeBuilder {
     low_risk_process_runner: Option<Arc<dyn ProcessRunner>>,
     read_only_shell_process_runner: Option<Arc<dyn ProcessRunner>>,
     accepted_local_workspace_process_runner: Option<AcceptedLocalWorkspaceProcessRunner>,
+    runtime_trust_level: RuntimeTrustLevel,
+    permission_review_mode: PermissionReviewMode,
+    permission_admission_source: Option<Arc<dyn PermissionAdmissionSource>>,
+    permissioned_process_runner_factory: Option<Arc<dyn PermissionedProcessRunnerFactory>>,
     subagent_manager: Option<SubagentManager>,
 }
 
@@ -1583,6 +1773,10 @@ impl RuntimeBuilder {
             low_risk_process_runner: None,
             read_only_shell_process_runner: None,
             accepted_local_workspace_process_runner: None,
+            runtime_trust_level: RuntimeTrustLevel::Agent,
+            permission_review_mode: PermissionReviewMode::DefaultForTrust,
+            permission_admission_source: None,
+            permissioned_process_runner_factory: None,
             subagent_manager: None,
         }
     }
@@ -1764,6 +1958,65 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Sets the trust level used by permission request admission defaults.
+    ///
+    /// Agentic/coding-agent runtimes require review by default. Trusted SDK
+    /// hosts may explicitly choose host-only admission for business workflows
+    /// where the host already owns the action policy.
+    #[must_use]
+    pub fn runtime_trust_level(mut self, trust_level: RuntimeTrustLevel) -> Self {
+        self.runtime_trust_level = trust_level;
+        self
+    }
+
+    /// Sets how permission requests are reviewed before execution.
+    #[must_use]
+    pub fn permission_review_mode(mut self, mode: PermissionReviewMode) -> Self {
+        self.permission_review_mode = mode;
+        self
+    }
+
+    /// Installs a host-owned permission admission source.
+    ///
+    /// This is used for trusted SDK hosts or tests. Agentic runtimes should
+    /// normally use the model-backed review selected from
+    /// [`RuntimeModelRole::ApprovalReview`] with primary fallback.
+    #[must_use]
+    pub fn permission_admission_source(
+        mut self,
+        source: Arc<dyn PermissionAdmissionSource>,
+    ) -> Self {
+        self.permission_admission_source = Some(source);
+        self
+    }
+
+    /// Opts in to executing process actions approved by `request_permissions`.
+    ///
+    /// The runner should represent the backend/profile used for approved
+    /// permission requests. Runtime admission approves only the exact planned
+    /// action; it does not grant a reusable id back to the model.
+    #[must_use]
+    pub fn allow_permissioned_process_actions(mut self, runner: Arc<dyn ProcessRunner>) -> Self {
+        self.permissioned_process_runner_factory = Some(Arc::new(
+            StaticPermissionedProcessRunnerFactory::new(runner),
+        ));
+        self
+    }
+
+    /// Opts in to constructing a process runner per approved permission request.
+    ///
+    /// This is the preferred path for sandbox backends such as bubblewrap where
+    /// approved capabilities, currently network, should be materialized only
+    /// for the exact action being executed.
+    #[must_use]
+    pub fn permissioned_process_runner_factory(
+        mut self,
+        factory: Arc<dyn PermissionedProcessRunnerFactory>,
+    ) -> Self {
+        self.permissioned_process_runner_factory = Some(factory);
+        self
+    }
+
     /// Installs a runtime-owned subagent manager for future subagent tools.
     #[must_use]
     pub fn subagent_manager(mut self, manager: SubagentManager) -> Self {
@@ -1820,6 +2073,10 @@ impl RuntimeBuilder {
                 read_only_shell_process_runner: self.read_only_shell_process_runner,
                 accepted_local_workspace_process_runner: self
                     .accepted_local_workspace_process_runner,
+                runtime_trust_level: self.runtime_trust_level,
+                permission_review_mode: self.permission_review_mode,
+                permission_admission_source: self.permission_admission_source,
+                permissioned_process_runner_factory: self.permissioned_process_runner_factory,
                 subagent_manager: self.subagent_manager,
             }),
         })
@@ -1840,6 +2097,10 @@ struct RuntimeInner {
     low_risk_process_runner: Option<Arc<dyn ProcessRunner>>,
     read_only_shell_process_runner: Option<Arc<dyn ProcessRunner>>,
     accepted_local_workspace_process_runner: Option<AcceptedLocalWorkspaceProcessRunner>,
+    runtime_trust_level: RuntimeTrustLevel,
+    permission_review_mode: PermissionReviewMode,
+    permission_admission_source: Option<Arc<dyn PermissionAdmissionSource>>,
+    permissioned_process_runner_factory: Option<Arc<dyn PermissionedProcessRunnerFactory>>,
     subagent_manager: Option<SubagentManager>,
 }
 
@@ -3282,10 +3543,10 @@ mod tests {
     };
     use crate::model_config::RuntimeModelConfigs;
     use crate::process::{
-        AcceptedLocalWorkspaceProcessAdmission, ProcessActionIntent, ProcessEnvPolicy,
-        ProcessExecutionEvidence, ProcessExitStatus, ProcessPermissionProfileId, ProcessRunner,
-        ProcessRunnerContext, ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput,
-        stable_process_input_fingerprint,
+        AcceptedLocalWorkspaceProcessAdmission, PermissionedProcessRunnerFactory,
+        ProcessActionIntent, ProcessEnvPolicy, ProcessExecutionEvidence, ProcessExitStatus,
+        ProcessPermissionProfileId, ProcessRunner, ProcessRunnerContext, ProcessRunnerError,
+        ProcessRunnerFuture, ProcessRunnerOutput, stable_process_input_fingerprint,
     };
     use crate::session::SessionState;
     use crate::tool::{
@@ -3296,13 +3557,14 @@ mod tests {
     };
     use crate::{
         ArtifactError, CheckpointDecision, CitationCompactionPolicy, ContextBudgetPolicy,
-        RuntimeError, RuntimeModelRole, StepContext,
+        PermissionReviewMode, RuntimeError, RuntimeModelRole, RuntimeTrustLevel, StepContext,
+        request_permissions_tool,
     };
     use futures_util::StreamExt;
     use merry_core::{
         ArtifactId, ArtifactKind, ArtifactRef, EvidenceLocator, EvidenceRef, PendingToolCall,
-        RuntimeEvent, RuntimeEventKind, SessionId, ToolCallArguments, ToolCallId, ToolInputSchema,
-        ToolName, ToolSpec,
+        RuntimeEvent, RuntimeEventKind, SessionId, ToolCallArguments, ToolCallId,
+        ToolCallResultStatus, ToolInputSchema, ToolName, ToolSpec,
     };
     use merry_llm::{
         FinishReason, GenerationConfig, ModelCapabilities, ModelContent, ModelError, ModelEvent,
@@ -3402,6 +3664,10 @@ mod tests {
             low_risk_process_runner: None,
             read_only_shell_process_runner: None,
             accepted_local_workspace_process_runner: None,
+            runtime_trust_level: RuntimeTrustLevel::Agent,
+            permission_review_mode: PermissionReviewMode::DefaultForTrust,
+            permission_admission_source: None,
+            permissioned_process_runner_factory: None,
             subagent_manager: None,
         }
     }
@@ -3440,6 +3706,13 @@ mod tests {
         ModelEvent::Completed {
             response: ModelResponse::new(outputs, finish_reason, None),
         }
+    }
+
+    fn permission_review_completed_event(decision: &str, rationale: &str) -> ModelEvent {
+        let output = format!(
+            r#"{{"schema_version":"permission_review.v1","decision":"{decision}","risk":"low","user_authorization":"high","rationale":"{rationale}"}}"#
+        );
+        completed_event_with(vec![ModelOutput::text(&output)], FinishReason::Stop)
     }
 
     fn event_kind_names(events: &[RuntimeEvent]) -> Vec<&'static str> {
@@ -3748,6 +4021,38 @@ mod tests {
                 ArtifactContent::text(content),
             )
             .expect("memory artifact records");
+    }
+
+    fn record_prior_failed_tool_result(runtime: &Runtime, content: &str) {
+        let mut session = runtime
+            .inner
+            .session
+            .try_lock()
+            .expect("session lock is free");
+        let call = PendingToolCall::new(
+            ToolCallId::new("call-prior-process").expect("valid tool call id"),
+            ToolName::new("process_command").expect("valid tool name"),
+            ToolCallArguments::try_from(serde_json::json!({
+                "argv": ["cargo", "test"],
+                "cwd": "."
+            }))
+            .expect("valid arguments"),
+        );
+        session
+            .record_tool_call_pending(call.clone())
+            .expect("prior pending call records");
+        session
+            .submit_tool_execution_outcome(
+                call.id(),
+                ToolCallResultStatus::Failed,
+                ArtifactContent::json(content.to_owned()),
+                Some(
+                    merry_core::ErrorInfo::new("process_action_failed", "process action failed")
+                        .expect("valid diagnostic"),
+                ),
+                None,
+            )
+            .expect("prior failed tool result records");
     }
 
     fn record_memory_item(runtime: &Runtime, item: MemoryItem) {
@@ -4078,6 +4383,10 @@ mod tests {
                 low_risk_process_runner: None,
                 read_only_shell_process_runner: None,
                 accepted_local_workspace_process_runner: None,
+                runtime_trust_level: RuntimeTrustLevel::Agent,
+                permission_review_mode: PermissionReviewMode::DefaultForTrust,
+                permission_admission_source: None,
+                permissioned_process_runner_factory: None,
                 subagent_manager: None,
             }),
         }
@@ -4099,6 +4408,10 @@ mod tests {
                 low_risk_process_runner: None,
                 read_only_shell_process_runner: None,
                 accepted_local_workspace_process_runner: None,
+                runtime_trust_level: RuntimeTrustLevel::Agent,
+                permission_review_mode: PermissionReviewMode::DefaultForTrust,
+                permission_admission_source: None,
+                permissioned_process_runner_factory: None,
                 subagent_manager: None,
             }),
         }
@@ -4123,6 +4436,10 @@ mod tests {
                 low_risk_process_runner: None,
                 read_only_shell_process_runner: None,
                 accepted_local_workspace_process_runner: None,
+                runtime_trust_level: RuntimeTrustLevel::Agent,
+                permission_review_mode: PermissionReviewMode::DefaultForTrust,
+                permission_admission_source: None,
+                permissioned_process_runner_factory: None,
                 subagent_manager: None,
             }),
         }
@@ -6163,6 +6480,39 @@ mod tests {
         )
     }
 
+    fn permission_pending_tool_call(id: &str, reason: &str, argv: &[&str]) -> PendingToolCall {
+        PendingToolCall::new(
+            ToolCallId::new(id).expect("valid tool call id"),
+            ToolName::new("request_permissions").expect("valid tool name"),
+            ToolCallArguments::try_from(serde_json::json!({
+                "reason": reason,
+                "requested": { "network": true },
+                "for_action": {
+                    "kind": "process",
+                    "argv": argv,
+                    "cwd": ".",
+                }
+            }))
+            .expect("valid permission arguments"),
+        )
+    }
+
+    fn invalid_permission_pending_tool_call(id: &str) -> PendingToolCall {
+        PendingToolCall::new(
+            ToolCallId::new(id).expect("valid tool call id"),
+            ToolName::new("request_permissions").expect("valid tool name"),
+            ToolCallArguments::try_from(serde_json::json!({
+                "requested": {},
+                "for_action": {
+                    "kind": "process",
+                    "argv": ["cargo", "test"],
+                    "cwd": ".",
+                }
+            }))
+            .expect("valid JSON arguments"),
+        )
+    }
+
     fn resolved_tool_result(events: &[RuntimeEvent]) -> &merry_core::ToolCallResult {
         events
             .iter()
@@ -6219,6 +6569,34 @@ mod tests {
         {
             let mut session = runtime.inner.session.lock().await;
             session.record_session_started_if_needed();
+            session
+                .record_tool_call_pending(pending.clone())
+                .expect("pending call should record");
+        }
+        (runtime, pending)
+    }
+
+    async fn register_permission_pending_tool_with_builder(
+        session_id_value: &str,
+        call_id: &str,
+        configure: impl FnOnce(RuntimeBuilder) -> Result<Runtime, RuntimeError>,
+    ) -> (Runtime, PendingToolCall) {
+        let pending = permission_pending_tool_call(
+            call_id,
+            "Need network for this exact command.",
+            &["cargo", "test"],
+        );
+        let runtime = configure(
+            Runtime::builder(session_id(session_id_value))
+                .register_tool(request_permissions_tool().expect("permission tool builds")),
+        )
+        .expect("runtime should build");
+        {
+            let mut session = runtime.inner.session.lock().await;
+            session.record_session_started_if_needed();
+            session.record_user_message_body(
+                "Please run cargo test; if network is blocked, request network for that command.",
+            );
             session
                 .record_tool_call_pending(pending.clone())
                 .expect("pending call should record");
@@ -6638,7 +7016,18 @@ mod tests {
         fn succeeding() -> Self {
             Self::with_response(FakeProcessRunnerResponse::Success {
                 stdout_text: "runtime tests passed\n".to_owned(),
+                stdout_truncated: false,
                 stderr_text: String::new(),
+                stderr_truncated: false,
+            })
+        }
+
+        fn succeeding_with_truncated_stdout() -> Self {
+            Self::with_response(FakeProcessRunnerResponse::Success {
+                stdout_text: "partial runtime output\n".to_owned(),
+                stdout_truncated: true,
+                stderr_text: String::new(),
+                stderr_truncated: false,
             })
         }
 
@@ -6657,7 +7046,9 @@ mod tests {
         fn succeeding_then_cancelling_token() -> Self {
             Self::with_response(FakeProcessRunnerResponse::SuccessThenCancel {
                 stdout_text: "runtime tests passed after token cancellation\n".to_owned(),
+                stdout_truncated: false,
                 stderr_text: String::new(),
+                stderr_truncated: false,
             })
         }
 
@@ -6684,11 +7075,15 @@ mod tests {
     enum FakeProcessRunnerResponse {
         Success {
             stdout_text: String,
+            stdout_truncated: bool,
             stderr_text: String,
+            stderr_truncated: bool,
         },
         SuccessThenCancel {
             stdout_text: String,
+            stdout_truncated: bool,
             stderr_text: String,
+            stderr_truncated: bool,
         },
         Error(ProcessRunnerError),
     }
@@ -6718,27 +7113,31 @@ mod tests {
                 match response {
                     FakeProcessRunnerResponse::Success {
                         stdout_text,
+                        stdout_truncated,
                         stderr_text,
+                        stderr_truncated,
                     } => ProcessRunnerOutput::new(
                         &intent,
                         ProcessExitStatus::Exited(0),
                         stdout_text,
-                        false,
+                        stdout_truncated,
                         stderr_text,
-                        false,
+                        stderr_truncated,
                     )
                     .map_err(|source| ProcessRunnerError::infrastructure(source.to_string())),
                     FakeProcessRunnerResponse::SuccessThenCancel {
                         stdout_text,
+                        stdout_truncated,
                         stderr_text,
+                        stderr_truncated,
                     } => {
                         let output = ProcessRunnerOutput::new(
                             &intent,
                             ProcessExitStatus::Exited(0),
                             stdout_text,
-                            false,
+                            stdout_truncated,
                             stderr_text,
-                            false,
+                            stderr_truncated,
                         )
                         .map_err(|source| ProcessRunnerError::infrastructure(source.to_string()))?;
                         context.cancellation_token().cancel();
@@ -6746,6 +7145,77 @@ mod tests {
                     }
                     FakeProcessRunnerResponse::Error(error) => Err(error),
                 }
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct RecordingPermissionedProcessRunnerFactory {
+        runner: Arc<dyn ProcessRunner>,
+        calls: Arc<AtomicUsize>,
+        observed_network_requests: Arc<StdMutex<Vec<bool>>>,
+    }
+
+    impl RecordingPermissionedProcessRunnerFactory {
+        fn new(runner: Arc<dyn ProcessRunner>) -> Self {
+            Self {
+                runner,
+                calls: Arc::new(AtomicUsize::new(0)),
+                observed_network_requests: Arc::new(StdMutex::new(Vec::new())),
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+
+        fn observed_network_requests(&self) -> Vec<bool> {
+            self.observed_network_requests
+                .lock()
+                .expect("observed permission requests mutex should not be poisoned")
+                .clone()
+        }
+    }
+
+    impl PermissionedProcessRunnerFactory for RecordingPermissionedProcessRunnerFactory {
+        fn runner_for(&self, request: &crate::PermissionRequest) -> Arc<dyn ProcessRunner> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.observed_network_requests
+                .lock()
+                .expect("observed permission requests mutex should not be poisoned")
+                .push(request.requests_network());
+            Arc::clone(&self.runner)
+        }
+    }
+
+    #[derive(Clone)]
+    struct StaticPermissionAdmissionSource {
+        decision: crate::PermissionAdmissionDecision,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl StaticPermissionAdmissionSource {
+        fn approving() -> Self {
+            Self {
+                decision: crate::PermissionAdmissionDecision::approved("host approved"),
+                calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl crate::PermissionAdmissionSource for StaticPermissionAdmissionSource {
+        fn review<'a>(
+            &'a self,
+            _request: crate::PermissionRequest,
+            _context: crate::PermissionAdmissionContext,
+        ) -> crate::PermissionAdmissionFuture<'a> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(self.decision.clone())
             })
         }
     }
@@ -7674,6 +8144,336 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn request_permissions_invalid_arguments_skip_review_and_runner() {
+        let review_provider = RecordingModelProvider::with_script(vec![
+            ScriptedModelProviderResponse::Stream(vec![Ok(permission_review_completed_event(
+                "approve",
+                "Invalid arguments should not reach review.",
+            ))]),
+        ]);
+        let runner = FakeProcessRunner::succeeding();
+        let pending = invalid_permission_pending_tool_call("call-permission-invalid-arguments");
+        let runtime = Runtime::builder(session_id("runtime-permission-invalid-arguments"))
+            .register_tool(request_permissions_tool().expect("permission tool builds"))
+            .model_provider_for_role(
+                RuntimeModelRole::ApprovalReview,
+                Arc::new(review_provider.clone()),
+                named_model("fake/approval-review"),
+            )
+            .allow_permissioned_process_actions(Arc::new(runner.clone()))
+            .build()
+            .expect("runtime should build");
+        {
+            let mut session = runtime.inner.session.lock().await;
+            session.record_session_started_if_needed();
+            session
+                .record_tool_call_pending(pending.clone())
+                .expect("pending call should record");
+        }
+
+        let events = runtime
+            .execute_tool_call(pending.id(), ToolExecutionContext::default())
+            .await
+            .expect("invalid permission request should resolve failed tool result");
+
+        assert_eq!(runner.call_count(), 0);
+        assert!(
+            review_provider.recorded_requests().is_empty(),
+            "invalid permission arguments must not invoke review"
+        );
+        assert_eq!(
+            resolved_tool_result(&events).status(),
+            ToolCallResultStatus::Failed
+        );
+        let result = resolved_tool_result(&events);
+        assert_eq!(
+            result
+                .diagnostic()
+                .expect("invalid permission request should include diagnostic")
+                .code(),
+            "permission_request_invalid_arguments"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn request_permissions_approved_by_review_executes_exact_process_action() {
+        let review_provider = RecordingModelProvider::with_script(vec![
+            ScriptedModelProviderResponse::Stream(vec![Ok(permission_review_completed_event(
+                "approve",
+                "The user asked to run this command.",
+            ))]),
+        ]);
+        let runner = FakeProcessRunner::succeeding();
+        let runner_factory =
+            RecordingPermissionedProcessRunnerFactory::new(Arc::new(runner.clone()));
+        let (runtime, pending) = register_permission_pending_tool_with_builder(
+            "runtime-permission-approved-process",
+            "call-permission-approved-process",
+            |builder| {
+                builder
+                    .model_provider_for_role(
+                        RuntimeModelRole::ApprovalReview,
+                        Arc::new(review_provider.clone()),
+                        named_model("fake/approval-review"),
+                    )
+                    .permissioned_process_runner_factory(Arc::new(runner_factory.clone()))
+                    .build()
+            },
+        )
+        .await;
+
+        let events = runtime
+            .execute_tool_call(pending.id(), ToolExecutionContext::default())
+            .await
+            .expect("approved permission request should execute exact action");
+
+        assert_eq!(
+            event_kind_names_for_tool_execution(&events),
+            ["ArtifactRecorded", "ToolCallResolved"]
+        );
+        assert_eq!(runner_factory.call_count(), 1);
+        assert_eq!(runner_factory.observed_network_requests(), [true]);
+        assert_eq!(runner.call_count(), 1);
+        assert_eq!(runner.observed_intents()[0].argv(), ["cargo", "test"]);
+        assert_eq!(
+            resolved_tool_result(&events).status(),
+            ToolCallResultStatus::Succeeded
+        );
+        let result = resolved_tool_result(&events);
+        let content = runtime
+            .read_artifact_content(result.artifact().id())
+            .await
+            .expect("process artifact should be readable");
+        let payload: serde_json::Value = serde_json::from_str(
+            content
+                .as_text()
+                .expect("permissioned process result should be JSON"),
+        )
+        .expect("process artifact should parse as JSON");
+        assert_eq!(payload["kind"], "process_action");
+        assert_eq!(
+            payload["permission_profile_id"],
+            ProcessPermissionProfileId::APPROVED_PERMISSION_REQUEST_V1.as_str()
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn request_permissions_denied_by_review_does_not_execute_process() {
+        let review_provider = RecordingModelProvider::with_script(vec![
+            ScriptedModelProviderResponse::Stream(vec![Ok(permission_review_completed_event(
+                "deny",
+                "The requested network access is not authorized.",
+            ))]),
+        ]);
+        let runner = FakeProcessRunner::succeeding();
+        let (runtime, pending) = register_permission_pending_tool_with_builder(
+            "runtime-permission-denied-process",
+            "call-permission-denied-process",
+            |builder| {
+                builder
+                    .model_provider_for_role(
+                        RuntimeModelRole::ApprovalReview,
+                        Arc::new(review_provider.clone()),
+                        named_model("fake/approval-review"),
+                    )
+                    .allow_permissioned_process_actions(Arc::new(runner.clone()))
+                    .build()
+            },
+        )
+        .await;
+
+        let events = runtime
+            .execute_tool_call(pending.id(), ToolExecutionContext::default())
+            .await
+            .expect("denied permission request should resolve the tool call");
+
+        assert_eq!(runner.call_count(), 0);
+        assert_eq!(
+            resolved_tool_result(&events).status(),
+            ToolCallResultStatus::Failed
+        );
+        let result = resolved_tool_result(&events);
+        assert_eq!(
+            result
+                .diagnostic()
+                .expect("denied permission should include diagnostic")
+                .code(),
+            "permission_request_denied"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn request_permissions_review_uses_approval_role_and_runtime_context() {
+        let primary_provider = RecordingModelProvider::with_script(vec![
+            ScriptedModelProviderResponse::Stream(vec![Ok(permission_review_completed_event(
+                "approve",
+                "Primary should not be used.",
+            ))]),
+        ]);
+        let approval_provider = RecordingModelProvider::with_script(vec![
+            ScriptedModelProviderResponse::Stream(vec![Ok(permission_review_completed_event(
+                "deny",
+                "Review saw no sufficient authorization.",
+            ))]),
+        ]);
+        let runner = FakeProcessRunner::succeeding();
+        let (runtime, pending) = register_permission_pending_tool_with_builder(
+            "runtime-permission-review-role-context",
+            "call-permission-review-role-context",
+            |builder| {
+                builder
+                    .model_provider(
+                        Arc::new(primary_provider.clone()),
+                        named_model("fake/primary"),
+                    )
+                    .model_provider_for_role(
+                        RuntimeModelRole::ApprovalReview,
+                        Arc::new(approval_provider.clone()),
+                        named_model("fake/approval-review"),
+                    )
+                    .allow_permissioned_process_actions(Arc::new(runner.clone()))
+                    .build()
+            },
+        )
+        .await;
+        record_prior_failed_tool_result(
+            &runtime,
+            r#"{"ok":false,"stderr":{"text":"Could not resolve host: crates.io"}}"#,
+        );
+
+        let events = runtime
+            .execute_tool_call(pending.id(), ToolExecutionContext::default())
+            .await
+            .expect("review denial should resolve the tool call");
+
+        assert_eq!(runner.call_count(), 0);
+        assert_eq!(
+            resolved_tool_result(&events).status(),
+            ToolCallResultStatus::Failed
+        );
+        assert!(
+            primary_provider.recorded_requests().is_empty(),
+            "approval role should be preferred over primary when configured"
+        );
+        let approval_requests = approval_provider.recorded_requests();
+        assert_eq!(approval_requests.len(), 1);
+        assert_eq!(
+            approval_requests[0].model().as_str(),
+            "fake/approval-review"
+        );
+        let user_prompt = approval_requests[0].messages()[1].content().as_text();
+        assert!(user_prompt.contains(">>> RECENT RUNTIME CONTEXT START"));
+        assert!(user_prompt.contains("Please run cargo test"));
+        assert!(user_prompt.contains("Could not resolve host: crates.io"));
+        assert!(user_prompt.contains("\"network\":true"));
+        assert!(user_prompt.contains("\"argv\":[\"cargo\",\"test\"]"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn request_permissions_review_falls_back_to_primary_model() {
+        let primary_provider = RecordingModelProvider::with_script(vec![
+            ScriptedModelProviderResponse::Stream(vec![Ok(permission_review_completed_event(
+                "approve",
+                "Primary review approved because no approval role is configured.",
+            ))]),
+        ]);
+        let runner = FakeProcessRunner::succeeding();
+        let (runtime, pending) = register_permission_pending_tool_with_builder(
+            "runtime-permission-primary-review-fallback",
+            "call-permission-primary-review-fallback",
+            |builder| {
+                builder
+                    .model_provider(
+                        Arc::new(primary_provider.clone()),
+                        named_model("fake/primary"),
+                    )
+                    .allow_permissioned_process_actions(Arc::new(runner.clone()))
+                    .build()
+            },
+        )
+        .await;
+
+        let events = runtime
+            .execute_tool_call(pending.id(), ToolExecutionContext::default())
+            .await
+            .expect("primary fallback review should approve execution");
+
+        assert_eq!(runner.call_count(), 1);
+        assert_eq!(
+            resolved_tool_result(&events).status(),
+            ToolCallResultStatus::Succeeded
+        );
+        let requests = primary_provider.recorded_requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].model().as_str(), "fake/primary");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn request_permissions_default_agent_without_review_model_fails_closed() {
+        let runner = FakeProcessRunner::succeeding();
+        let (runtime, pending) = register_permission_pending_tool_with_builder(
+            "runtime-permission-no-review-model",
+            "call-permission-no-review-model",
+            |builder| {
+                builder
+                    .allow_permissioned_process_actions(Arc::new(runner.clone()))
+                    .build()
+            },
+        )
+        .await;
+
+        let events = runtime
+            .execute_tool_call(pending.id(), ToolExecutionContext::default())
+            .await
+            .expect("missing review model should durably resolve failed permission request");
+
+        assert_eq!(runner.call_count(), 0);
+        assert_eq!(
+            resolved_tool_result(&events).status(),
+            ToolCallResultStatus::Failed
+        );
+        let result = resolved_tool_result(&events);
+        assert_eq!(
+            result
+                .diagnostic()
+                .expect("blocked permission should include diagnostic")
+                .code(),
+            "permission_review_failed"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn request_permissions_trusted_sdk_host_decision_can_skip_model_review() {
+        let admission = StaticPermissionAdmissionSource::approving();
+        let runner = FakeProcessRunner::succeeding();
+        let (runtime, pending) = register_permission_pending_tool_with_builder(
+            "runtime-permission-trusted-host-decision",
+            "call-permission-trusted-host-decision",
+            |builder| {
+                builder
+                    .runtime_trust_level(RuntimeTrustLevel::TrustedSdk)
+                    .permission_review_mode(PermissionReviewMode::HostDecisionOnly)
+                    .permission_admission_source(Arc::new(admission.clone()))
+                    .allow_permissioned_process_actions(Arc::new(runner.clone()))
+                    .build()
+            },
+        )
+        .await;
+
+        let events = runtime
+            .execute_tool_call(pending.id(), ToolExecutionContext::default())
+            .await
+            .expect("trusted host admission should execute exact action");
+
+        assert_eq!(admission.call_count(), 1);
+        assert_eq!(runner.call_count(), 1);
+        assert_eq!(
+            resolved_tool_result(&events).status(),
+            ToolCallResultStatus::Succeeded
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn opt_in_process_action_uses_runner_and_records_execution_audit() {
         let executor = ProcessProposingToolExecutor::new();
         let runner = FakeProcessRunner::succeeding();
@@ -7872,6 +8672,59 @@ mod tests {
             observation_text.contains(&format!("artifact={}", result.artifact().id().as_str()))
         );
         assert!(!observation_text.contains("runtime tests passed"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn process_action_artifact_guides_model_when_output_is_truncated() {
+        let executor = ProcessProposingToolExecutor::new();
+        let runner = FakeProcessRunner::succeeding_with_truncated_stdout();
+        let tool = RegisteredTool::new(
+            policy_tool_spec("policy_command_truncated_output"),
+            Arc::new(executor.clone()),
+            ToolActionKind::CommandExec,
+        )
+        .with_action_proposal();
+        let (runtime, pending) = register_policy_pending_registered_tool_with_builder(
+            "runtime-policy-command-truncated-output",
+            "policy_command_truncated_output",
+            "call-command-truncated-output",
+            tool,
+            |builder| {
+                builder
+                    .allow_low_risk_process_actions(Arc::new(runner.clone()))
+                    .build()
+            },
+        )
+        .await;
+
+        let events = runtime
+            .execute_tool_call(pending.id(), ToolExecutionContext::default())
+            .await
+            .expect("process action should execute");
+
+        let result = resolved_tool_result(&events);
+        let content = runtime
+            .read_artifact_content(result.artifact().id())
+            .await
+            .expect("process result artifact should be readable");
+        let payload: serde_json::Value = serde_json::from_str(
+            content
+                .as_text()
+                .expect("process result artifact should be textual JSON"),
+        )
+        .expect("process result artifact should parse as JSON");
+
+        assert_eq!(payload["stdout"]["truncated"], true);
+        assert_eq!(payload["stderr"]["truncated"], false);
+        assert_eq!(payload["guidance"]["kind"], "process_output_truncated");
+        assert_eq!(payload["guidance"]["stdout_truncated"], true);
+        assert_eq!(payload["guidance"]["stderr_truncated"], false);
+        assert!(
+            payload["guidance"]["message"]
+                .as_str()
+                .expect("guidance message should be text")
+                .contains("rerun with a narrower command")
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

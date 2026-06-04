@@ -5,14 +5,16 @@
 //! admitted; callers must still opt in through runtime permission profiles.
 
 use crate::{
-    PathAccess, PathAccessRule, ProcessActionIntent, ProcessExitStatus, ProcessRunner,
-    ProcessRunnerContext, ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput,
+    PathAccess, PathAccessRule, PermissionRequest, PermissionedProcessRunnerFactory,
+    ProcessActionIntent, ProcessExitStatus, ProcessRunner, ProcessRunnerContext,
+    ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput,
 };
 use std::{
     ffi::OsString,
     io,
     path::{Path, PathBuf},
     process::Stdio,
+    sync::Arc,
 };
 use tokio::io::{AsyncRead, AsyncReadExt};
 
@@ -107,6 +109,69 @@ impl BwrapProcessRunner {
     fn with_bwrap_program(mut self, program: impl Into<PathBuf>) -> Self {
         self.bwrap_program = program.into();
         self
+    }
+}
+
+/// Builds a per-action bubblewrap runner from an approved permission request.
+///
+/// Filesystem access stays governed by the configured workspace/root path
+/// rules. The first materialized permission capability is network: approved
+/// `network=true` requests run without `--unshare-net`; other requests remain
+/// network-isolated.
+#[derive(Debug, Clone)]
+pub struct BwrapPermissionedProcessRunnerFactory {
+    cwd_root: PathBuf,
+    base_network_allowed: bool,
+    path_rules: Vec<PathAccessRule>,
+    bwrap_program: PathBuf,
+}
+
+impl BwrapPermissionedProcessRunnerFactory {
+    /// Creates a bubblewrap permissioned runner factory rooted at a workspace path.
+    #[must_use]
+    pub fn new_at_workspace_root(root: impl Into<PathBuf>) -> Self {
+        Self {
+            cwd_root: root.into(),
+            base_network_allowed: false,
+            path_rules: Vec::new(),
+            bwrap_program: PathBuf::from(BWRAP_PROGRAM),
+        }
+    }
+
+    /// Allows network capability in the base profile before per-request grants.
+    #[must_use]
+    pub fn allow_base_network(mut self) -> Self {
+        self.base_network_allowed = true;
+        self
+    }
+
+    /// Installs trusted path rules shared by each materialized runner.
+    #[must_use]
+    pub fn with_path_rules(mut self, rules: impl IntoIterator<Item = PathAccessRule>) -> Self {
+        self.path_rules = rules.into_iter().collect();
+        self
+    }
+
+    #[cfg(test)]
+    fn with_bwrap_program(mut self, program: impl Into<PathBuf>) -> Self {
+        self.bwrap_program = program.into();
+        self
+    }
+
+    fn build_runner(&self, request: &PermissionRequest) -> BwrapProcessRunner {
+        let mut runner = BwrapProcessRunner::new_at_workspace_root(self.cwd_root.clone())
+            .with_path_rules(self.path_rules.clone());
+        if self.base_network_allowed || request.requests_network() {
+            runner = runner.allow_network();
+        }
+        runner.bwrap_program = self.bwrap_program.clone();
+        runner
+    }
+}
+
+impl PermissionedProcessRunnerFactory for BwrapPermissionedProcessRunnerFactory {
+    fn runner_for(&self, request: &PermissionRequest) -> Arc<dyn ProcessRunner> {
+        Arc::new(self.build_runner(request))
     }
 }
 
@@ -476,9 +541,12 @@ where
 mod tests {
     use super::{BwrapProcessRunner, TokioProcessRunner, bwrap_process_plan, process_current_dir};
     use crate::{
-        PathAccess, PathAccessRule, PathAccessRuleSource, ProcessActionIntent, ProcessEnvPolicy,
-        ProcessExitStatus, ProcessRunner, ProcessRunnerContext,
+        PathAccess, PathAccessRule, PathAccessRuleSource, PermissionRequest, PermissionedAction,
+        ProcessActionIntent, ProcessEnvPolicy, ProcessExitStatus, ProcessRunner,
+        ProcessRunnerContext,
     };
+    use merry_core::{PendingToolCall, ToolCallArguments, ToolCallId, ToolName};
+    use serde_json::json;
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
     use tokio_util::sync::CancellationToken;
@@ -493,6 +561,21 @@ mod tests {
             1024,
         )
         .expect("process intent should be valid")
+    }
+
+    fn permission_request(arguments: serde_json::Value) -> PermissionRequest {
+        let call = PendingToolCall::new(
+            ToolCallId::new("call-permission").expect("valid call id"),
+            ToolName::new("request_permissions").expect("valid tool name"),
+            ToolCallArguments::try_from(arguments).expect("valid tool arguments"),
+        );
+        crate::permission::permission_request_from_call(&call, Vec::new())
+            .expect("permission request should parse")
+    }
+
+    fn request_process_intent(request: &PermissionRequest) -> &ProcessActionIntent {
+        let PermissionedAction::Process(intent) = request.action();
+        intent
     }
 
     #[test]
@@ -605,6 +688,73 @@ mod tests {
             &["--bind-try", "/cache", "/cache"]
         ));
         assert!(contains_sequence(&args, &["--tmpfs", "/home/merry/.ssh"]));
+    }
+
+    #[test]
+    fn bwrap_permissioned_factory_allows_network_only_when_requested() {
+        let factory =
+            super::BwrapPermissionedProcessRunnerFactory::new_at_workspace_root("/workspace/merry")
+                .with_bwrap_program("/custom/bin/bwrap");
+        let request_without_network = permission_request(json!({
+            "requested": {
+                "paths": [{ "path": "/workspace/merry", "access": "rw" }]
+            },
+            "for_action": { "kind": "process", "argv": ["cargo", "test"], "cwd": "." }
+        }));
+        let request_with_network = permission_request(json!({
+            "requested": { "network": true },
+            "for_action": { "kind": "process", "argv": ["cargo", "test"], "cwd": "." }
+        }));
+
+        let runner_without_network = factory.build_runner(&request_without_network);
+        let plan_without_network = bwrap_process_plan(
+            request_process_intent(&request_without_network),
+            &runner_without_network.cwd_root,
+            runner_without_network.network_allowed,
+            &runner_without_network.path_rules,
+            &runner_without_network.bwrap_program,
+        );
+        let runner_with_network = factory.build_runner(&request_with_network);
+        let plan_with_network = bwrap_process_plan(
+            request_process_intent(&request_with_network),
+            &runner_with_network.cwd_root,
+            runner_with_network.network_allowed,
+            &runner_with_network.path_rules,
+            &runner_with_network.bwrap_program,
+        );
+
+        assert!(os_args(&plan_without_network.args).contains(&"--unshare-net".to_owned()));
+        assert!(!os_args(&plan_with_network.args).contains(&"--unshare-net".to_owned()));
+    }
+
+    #[test]
+    fn bwrap_permissioned_factory_preserves_trusted_path_rules() {
+        let factory =
+            super::BwrapPermissionedProcessRunnerFactory::new_at_workspace_root("/workspace/merry")
+                .with_path_rules([PathAccessRule::new(
+                    PathBuf::from("/var/log"),
+                    PathAccess::ReadOnly,
+                    PathAccessRuleSource::TrustedGlobalConfig,
+                )]);
+        let request = permission_request(json!({
+            "requested": { "network": true },
+            "for_action": { "kind": "process", "argv": ["cargo", "test"], "cwd": "." }
+        }));
+
+        let runner = factory.build_runner(&request);
+        let plan = bwrap_process_plan(
+            request_process_intent(&request),
+            &runner.cwd_root,
+            runner.network_allowed,
+            &runner.path_rules,
+            &runner.bwrap_program,
+        );
+        let args = os_args(&plan.args);
+
+        assert!(contains_sequence(
+            &args,
+            &["--ro-bind-try", "/var/log", "/var/log"]
+        ));
     }
 
     #[tokio::test]

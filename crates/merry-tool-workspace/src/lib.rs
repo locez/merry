@@ -20,11 +20,13 @@ use merry_core::{
 };
 use merry_runtime::{
     AcceptedLocalWorkspaceProcessAdmission, ActionExecutionEvidence, ActionProposal,
-    ActionProposalError, ActionProposalEvidence, ProcessCommandToolError, ProcessRunner,
-    RegisteredTool, RuntimeBuilder, ToolActionKind, ToolActionPreflight, ToolActionProposalFuture,
-    ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome, ToolExecutor,
-    ToolExecutorFuture, WorkspacePatchChangeEvidence, WorkspacePatchExecutionEvidence,
-    WorkspacePatchProposal, process_command_tool,
+    ActionProposalError, ActionProposalEvidence, PermissionAdmissionError,
+    PermissionedProcessRunnerFactory, ProcessCommandToolError, ProcessRunner, RegisteredTool,
+    RuntimeBuilder, StaticPermissionedProcessRunnerFactory, ToolActionKind, ToolActionPreflight,
+    ToolActionProposalFuture, ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome,
+    ToolExecutor, ToolExecutorFuture, WorkspacePatchChangeEvidence,
+    WorkspacePatchExecutionEvidence, WorkspacePatchProposal, process_command_tool,
+    request_permissions_tool,
 };
 use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -72,6 +74,13 @@ const WORKSPACE_PATH_CONTRACT: &str = "workspace tool path values are relative t
 const ERROR_PREIMAGE_ABSENT: &str = "workspace_patch_preimage_absent";
 const ERROR_PREIMAGE_AMBIGUOUS: &str = "workspace_patch_preimage_ambiguous";
 const PROJECT_CAPABILITY_CONTEXT_ID: &str = "project-capabilities";
+const CODING_PROFILE_CAPABILITY_SUMMARY: &str = "\
+Workspace coding profile:
+- Workspace file tool paths are relative to configured workspace roots, not host-absolute paths.
+- Process execution runs through Merry runtime policy and the configured sandbox/profile, so filesystem and network access may be intentionally restricted.
+- The default process profile may block network access and paths outside the configured workspace or trusted path rules.
+- If an exact process action is blocked only because it needs additional filesystem or network capability for the current task, call request_permissions for that exact action after observing the failure.
+- request_permissions is not a reusable grant. It must name the exact planned action, request only the minimum needed capability, and the runtime may approve, deny, or fail the request.";
 const TRACE_PATH_MAX_CHARS: usize = 96;
 #[cfg(test)]
 static PATCH_TEST_AFTER_WRITE_HOOK: OnceLock<Mutex<Option<PatchTestAfterWriteHook>>> =
@@ -321,6 +330,13 @@ pub enum WorkspaceCodingLoopProfileError {
         #[from]
         source: ProcessCommandToolError,
     },
+    /// The request_permissions tool could not be constructed.
+    #[error(transparent)]
+    PermissionTool {
+        /// Source permission tool error.
+        #[from]
+        source: PermissionAdmissionError,
+    },
 }
 
 /// Read-only workspace tools that can be registered with `merry-runtime`.
@@ -396,6 +412,7 @@ enum WorkspaceProcessRunner {
     CliBwrap {
         admission: AcceptedLocalWorkspaceProcessAdmission,
         runner: Arc<dyn ProcessRunner>,
+        permissioned_factory: Option<Arc<dyn PermissionedProcessRunnerFactory>>,
     },
 }
 
@@ -443,7 +460,28 @@ impl WorkspaceCodingLoopProfile {
         admission: AcceptedLocalWorkspaceProcessAdmission,
         runner: Arc<dyn ProcessRunner>,
     ) -> Self {
-        self.process_runner = Some(WorkspaceProcessRunner::CliBwrap { admission, runner });
+        self.process_runner = Some(WorkspaceProcessRunner::CliBwrap {
+            admission,
+            runner,
+            permissioned_factory: None,
+        });
+        self
+    }
+
+    /// Includes process lanes for the declared CLI bubblewrap profile and
+    /// materializes approved permission requests through a per-action factory.
+    #[must_use]
+    pub fn with_cli_bwrap_permissioned_process_runner(
+        mut self,
+        admission: AcceptedLocalWorkspaceProcessAdmission,
+        runner: Arc<dyn ProcessRunner>,
+        permissioned_factory: Arc<dyn PermissionedProcessRunnerFactory>,
+    ) -> Self {
+        self.process_runner = Some(WorkspaceProcessRunner::CliBwrap {
+            admission,
+            runner,
+            permissioned_factory: Some(permissioned_factory),
+        });
         self
     }
 
@@ -456,29 +494,53 @@ impl WorkspaceCodingLoopProfile {
         self,
         mut builder: RuntimeBuilder,
     ) -> Result<RuntimeBuilder, WorkspaceCodingLoopProfileError> {
-        if let Some(summary) = self.workspace_tools.project_capability_summary() {
-            builder = builder.initial_context_summary(PROJECT_CAPABILITY_CONTEXT_ID, &summary);
-        }
+        builder = builder.initial_context_summary(
+            PROJECT_CAPABILITY_CONTEXT_ID,
+            &self.workspace_tools.project_capability_summary(),
+        );
 
         if self.include_patch_tool {
             builder = builder.allow_low_risk_workspace_patches();
         }
 
         if let Some(process_runner) = self.process_runner {
-            let (runner, accepted_admission) = match process_runner {
-                WorkspaceProcessRunner::ReadOnly(runner) => (runner, None),
-                WorkspaceProcessRunner::CliBwrap { admission, runner } => (runner, Some(admission)),
+            let (runner, accepted_admission, permissioned_factory) = match process_runner {
+                WorkspaceProcessRunner::ReadOnly(runner) => {
+                    let permissioned_factory = Arc::new(
+                        StaticPermissionedProcessRunnerFactory::new(Arc::clone(&runner)),
+                    );
+                    (
+                        runner,
+                        None,
+                        permissioned_factory as Arc<dyn PermissionedProcessRunnerFactory>,
+                    )
+                }
+                WorkspaceProcessRunner::CliBwrap {
+                    admission,
+                    runner,
+                    permissioned_factory,
+                } => {
+                    let permissioned_factory = permissioned_factory.unwrap_or_else(|| {
+                        Arc::new(StaticPermissionedProcessRunnerFactory::new(Arc::clone(
+                            &runner,
+                        )))
+                    });
+                    (runner, Some(admission), permissioned_factory)
+                }
             };
             builder = builder
                 .allow_low_risk_process_actions(Arc::clone(&runner))
-                .allow_read_only_shell_process_actions(Arc::clone(&runner));
+                .allow_read_only_shell_process_actions(Arc::clone(&runner))
+                .permissioned_process_runner_factory(permissioned_factory);
             if let Some(admission) = accepted_admission {
                 builder = builder.allow_accepted_local_workspace_process_actions(admission, runner);
             }
-            builder = builder.register_tool(process_command_tool(
-                ToolName::new(CODING_LOOP_PROCESS_TOOL).expect("static tool name is valid"),
-                "Run exact argv through Merry process policy for workspace inspection and verification.",
-            )?);
+            builder = builder
+                .register_tool(process_command_tool(
+                    ToolName::new(CODING_LOOP_PROCESS_TOOL).expect("static tool name is valid"),
+                    "Run exact argv through Merry process policy for workspace inspection and verification.",
+                )?)
+                .register_tool(request_permissions_tool()?);
         }
 
         let tools = if self.include_patch_tool {
@@ -536,15 +598,22 @@ impl WorkspaceToolState {
         })
     }
 
-    fn project_capability_summary(&self) -> Option<String> {
-        self.roots
+    fn project_capability_summary(&self) -> String {
+        match self
+            .roots
             .iter()
             .find_map(|root| project_capability_summary_for_root(root))
+        {
+            Some(project_summary) => {
+                format!("{CODING_PROFILE_CAPABILITY_SUMMARY}\n{project_summary}")
+            }
+            None => CODING_PROFILE_CAPABILITY_SUMMARY.to_owned(),
+        }
     }
 }
 
 impl ReadOnlyWorkspaceTools {
-    fn project_capability_summary(&self) -> Option<String> {
+    fn project_capability_summary(&self) -> String {
         self.state.project_capability_summary()
     }
 }

@@ -281,8 +281,16 @@ impl MerryConfig {
             .as_ref()
             .map(|model| self.effective_runtime_model("context_compaction", model))
             .transpose()?;
+        let approval_review = models
+            .approval_review
+            .as_ref()
+            .map(|model| self.effective_runtime_model("approval_review", model))
+            .transpose()?;
 
-        Ok(EffectiveRuntimeModelsConfig { context_compaction })
+        Ok(EffectiveRuntimeModelsConfig {
+            context_compaction,
+            approval_review,
+        })
     }
 
     fn effective_runtime_model(
@@ -471,6 +479,7 @@ pub struct EffectiveRuntimeModelConfig {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EffectiveRuntimeModelsConfig {
     pub context_compaction: Option<EffectiveRuntimeModelConfig>,
+    pub approval_review: Option<EffectiveRuntimeModelConfig>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -644,6 +653,7 @@ struct SkillsToml {
 #[serde(deny_unknown_fields)]
 struct ModelsToml {
     context_compaction: Option<RuntimeModelToml>,
+    approval_review: Option<RuntimeModelToml>,
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
@@ -1187,6 +1197,38 @@ model = "gpt-compact"
     }
 
     #[test]
+    fn approval_review_model_role_defaults_to_default_provider() {
+        let paths = XdgPaths::from_parts(home(), None, None);
+        let config = MerryConfig::load_optional_from_text(
+            Some(
+                r#"
+[providers.default]
+provider = "openai-compatible"
+model = "gpt-primary"
+
+[providers.openai-compatible]
+api_key = "sk-inline-secret"
+
+[models.approval_review]
+model = "gpt-review"
+"#,
+            ),
+            &paths,
+        )
+        .expect("config should parse")
+        .expect("config should be present");
+
+        let models = config
+            .runtime_models()
+            .expect("runtime model role config should validate");
+        let approval_review = models
+            .approval_review
+            .expect("approval review model role should be configured");
+        assert_eq!(approval_review.provider, "openai-compatible");
+        assert_eq!(approval_review.model, "gpt-review");
+    }
+
+    #[test]
     fn runtime_model_roles_default_to_no_overrides() {
         let paths = XdgPaths::from_parts(home(), None, None);
         let models = MerryConfig::load_optional_from_text(Some(""), &paths)
@@ -1196,6 +1238,7 @@ model = "gpt-compact"
             .expect("empty runtime model role config should validate");
 
         assert!(models.context_compaction.is_none());
+        assert!(models.approval_review.is_none());
     }
 
     #[test]
@@ -1316,6 +1359,11 @@ model = "gpt-compact"
             .expect("example should configure context compaction model role");
         assert_eq!(context_compaction.provider, "openai-compatible");
         assert_eq!(context_compaction.model, "gpt-4.1-mini");
+        let approval_review = models
+            .approval_review
+            .expect("example should configure approval review model role");
+        assert_eq!(approval_review.provider, "openai-compatible");
+        assert_eq!(approval_review.model, "gpt-4.1-mini");
     }
 
     #[test]
