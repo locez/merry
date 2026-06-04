@@ -899,6 +899,7 @@ impl ContextCheckpointSegment {
     fn append_prompt_lines(&self, lines: &mut Vec<String>) {
         if let Some(checkpoint) = &self.checkpoint {
             lines.push("compacted-checkpoint:".to_owned());
+            lines.push("guidance:Compacted checkpoint text is navigation, not exact evidence. Re-read cited artifacts or current workspace files before editing, verifying, or relying on summarized details.".to_owned());
             lines.push(format!("text:{}", checkpoint.text()));
         }
     }
@@ -1501,9 +1502,12 @@ mod tests {
             .to_snapshot();
 
         assert!(
-            compiled
-                .starts_with("compacted-checkpoint:\ntext:Checkpoint context.\nsummary:summary-a"),
+            compiled.starts_with("compacted-checkpoint:\nguidance:Compacted checkpoint text is navigation, not exact evidence."),
             "compacted checkpoint should render before summary and memory sections"
+        );
+        assert!(
+            compiled.contains("\ntext:Checkpoint context.\nsummary:summary-a"),
+            "checkpoint text should still render before summary sections"
         );
         assert!(compiled.contains("\nmemory:memory-main"));
     }

@@ -73,6 +73,13 @@ const WORKSPACE_PATCH_PLAN_CHANGED_MESSAGE: &str = "workspace patch plan changed
 const WORKSPACE_PATH_CONTRACT: &str = "workspace tool path values are relative to a configured workspace root; do not prefix them with a process cwd, repository root, or absolute host path";
 const ERROR_PREIMAGE_ABSENT: &str = "workspace_patch_preimage_absent";
 const ERROR_PREIMAGE_AMBIGUOUS: &str = "workspace_patch_preimage_ambiguous";
+const GUIDANCE_INVALID_ARGUMENTS: &str = "Fix the workspace tool arguments before retrying. Use the tool schema exactly; path fields must be workspace-relative and must not include host absolute paths, process cwd prefixes, or parent traversal.";
+const GUIDANCE_PATH_RECOVERY: &str = "Use workspace-relative paths from the configured root. If the target is unclear, list or search from \".\" to find the current relative path before retrying.";
+const GUIDANCE_FILE_TOO_LARGE: &str = "Do not assume omitted content or rejected patch content is irrelevant. Narrow the target, split the change, use workspace_search_text for discovery, or use an authorized process command for an exact range when needed.";
+const GUIDANCE_LIST_TRUNCATED: &str = "The directory listing was truncated. Narrow the path, list a child directory, or search for a specific filename before drawing conclusions from the returned entries.";
+const GUIDANCE_SEARCH_TRUNCATED: &str = "The search result was truncated or skipped oversized files. Narrow the query/path, inspect specific files, or use an authorized process command for targeted ranges before drawing conclusions.";
+const GUIDANCE_PATCH_PREIMAGE: &str = "Re-read the target file, then retry with a smaller unique preimage that matches the current file exactly. Do not guess file state from an old observation.";
+const GUIDANCE_PATCH_PLAN_CHANGED: &str = "The approved patch no longer matches current workspace state. Re-read the target file and submit a fresh localized patch.";
 const PROJECT_CAPABILITY_CONTEXT_ID: &str = "project-capabilities";
 const CODING_PROFILE_CAPABILITY_SUMMARY: &str = "\
 Workspace coding profile:
@@ -1401,6 +1408,8 @@ struct ListDirSuccess<'a> {
     path: &'a str,
     entries: Vec<ListDirEntry>,
     truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    guidance: Option<WorkspaceGuidance>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1430,6 +1439,8 @@ struct SearchTextSuccess<'a> {
     searched_files: usize,
     skipped: SearchSkipCounts,
     truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    guidance: Option<WorkspaceGuidance>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1471,7 +1482,15 @@ struct FailureEnvelope<'a> {
     error: FailureError<'a>,
     recovery: FailureRecovery,
     #[serde(skip_serializing_if = "Option::is_none")]
+    guidance: Option<WorkspaceGuidance>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     path: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+struct WorkspaceGuidance {
+    kind: &'static str,
+    message: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -1785,6 +1804,10 @@ fn list_resolved_dir(
         path: &relative.display,
         entries,
         truncated,
+        guidance: truncated.then_some(WorkspaceGuidance {
+            kind: "workspace_list_truncated",
+            message: GUIDANCE_LIST_TRUNCATED,
+        }),
     };
     Ok(ToolExecutionOutcome::succeeded_json(
         serde_json::to_string(&payload).expect("workspace list success envelope serializes"),
@@ -3014,6 +3037,7 @@ fn search_success(
     path: Option<String>,
     search: SearchRun<'_>,
 ) -> ToolExecutionOutcome {
+    let guidance = workspace_search_success_guidance(search.truncated, search.skipped.too_large);
     let payload = SearchTextSuccess {
         ok: true,
         tool: WORKSPACE_SEARCH_TEXT_TOOL,
@@ -3023,6 +3047,7 @@ fn search_success(
         searched_files: search.searched_files,
         skipped: search.skipped,
         truncated: search.truncated,
+        guidance,
     };
     ToolExecutionOutcome::succeeded_json(
         serde_json::to_string(&payload).expect("workspace search success envelope serializes"),
@@ -3612,12 +3637,50 @@ fn failed_outcome(
         recovery: FailureRecovery {
             path_contract: WORKSPACE_PATH_CONTRACT,
         },
+        guidance: workspace_failure_guidance(code),
         path: path.as_deref(),
     };
     ToolExecutionOutcome::failed_json(
         serde_json::to_string(&envelope).expect("workspace failure envelope serializes"),
         ErrorInfo::new(code, &message).expect("workspace diagnostic is valid"),
     )
+}
+
+fn workspace_failure_guidance(code: &str) -> Option<WorkspaceGuidance> {
+    match code {
+        ERROR_INVALID_ARGUMENTS => Some(WorkspaceGuidance {
+            kind: "workspace_invalid_arguments",
+            message: GUIDANCE_INVALID_ARGUMENTS,
+        }),
+        ERROR_PATH_DENIED | ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND | ERROR_NOT_FILE
+        | ERROR_NOT_DIRECTORY | ERROR_NOT_SEARCHABLE => Some(WorkspaceGuidance {
+            kind: "workspace_path_recovery",
+            message: GUIDANCE_PATH_RECOVERY,
+        }),
+        ERROR_FILE_TOO_LARGE => Some(WorkspaceGuidance {
+            kind: "workspace_file_too_large",
+            message: GUIDANCE_FILE_TOO_LARGE,
+        }),
+        ERROR_PREIMAGE_ABSENT | ERROR_PREIMAGE_AMBIGUOUS => Some(WorkspaceGuidance {
+            kind: "workspace_patch_preimage_mismatch",
+            message: GUIDANCE_PATCH_PREIMAGE,
+        }),
+        ERROR_PROPOSAL_MISMATCH => Some(WorkspaceGuidance {
+            kind: "workspace_patch_plan_changed",
+            message: GUIDANCE_PATCH_PLAN_CHANGED,
+        }),
+        _ => None,
+    }
+}
+
+fn workspace_search_success_guidance(
+    truncated: bool,
+    too_large_skipped: usize,
+) -> Option<WorkspaceGuidance> {
+    (truncated || too_large_skipped > 0).then_some(WorkspaceGuidance {
+        kind: "workspace_search_limited",
+        message: GUIDANCE_SEARCH_TRUNCATED,
+    })
 }
 
 #[cfg(test)]
@@ -3874,6 +3937,22 @@ mod tests {
             payload["recovery"]["path_contract"],
             WORKSPACE_PATH_CONTRACT
         );
+        if let Some(expected_guidance_kind) = expected_guidance_kind_for_code(code) {
+            assert_eq!(payload["guidance"]["kind"], expected_guidance_kind);
+            assert!(
+                payload["guidance"]["message"]
+                    .as_str()
+                    .expect("guidance should be text")
+                    .len()
+                    > 20,
+                "guidance should contain an actionable model hint"
+            );
+        } else {
+            assert!(
+                payload.get("guidance").is_none(),
+                "unexpected guidance for {code}"
+            );
+        }
         if let Some(path) = path {
             assert_eq!(payload["path"], path);
         } else {
@@ -3891,6 +3970,20 @@ mod tests {
                 .contains(host_root.to_str().expect("temp path utf8")),
             "tool output must not include absolute host roots"
         );
+    }
+
+    fn expected_guidance_kind_for_code(code: &str) -> Option<&'static str> {
+        match code {
+            ERROR_INVALID_ARGUMENTS => Some("workspace_invalid_arguments"),
+            ERROR_PATH_DENIED | ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND | ERROR_NOT_FILE
+            | ERROR_NOT_DIRECTORY | ERROR_NOT_SEARCHABLE => Some("workspace_path_recovery"),
+            ERROR_FILE_TOO_LARGE => Some("workspace_file_too_large"),
+            ERROR_PREIMAGE_ABSENT | ERROR_PREIMAGE_AMBIGUOUS => {
+                Some("workspace_patch_preimage_mismatch")
+            }
+            ERROR_PROPOSAL_MISMATCH => Some("workspace_patch_plan_changed"),
+            _ => None,
+        }
     }
 
     fn assert_no_provider_visible_patch_metadata(outcome: &ToolExecutionOutcome) {
@@ -4671,6 +4764,7 @@ mod tests {
         let payload = json_content(&outcome);
         assert_eq!(payload["path"], ".");
         assert_eq!(payload["truncated"], true);
+        assert_eq!(payload["guidance"]["kind"], "workspace_list_truncated");
         assert_eq!(
             payload["entries"],
             json!([
@@ -4863,6 +4957,7 @@ mod tests {
         assert_eq!(payload["searched_files"], 1);
         assert_eq!(payload["truncated"], true);
         assert_eq!(payload["matches"], json!([]));
+        assert_eq!(payload["guidance"]["kind"], "workspace_search_limited");
     }
 
     #[test]
@@ -4920,6 +5015,7 @@ mod tests {
         assert_eq!(payload["skipped"]["hidden"], 1);
         assert_eq!(payload["skipped"]["non_utf8"], 1);
         assert_eq!(payload["skipped"]["too_large"], 2);
+        assert_eq!(payload["guidance"]["kind"], "workspace_search_limited");
         #[cfg(unix)]
         assert_eq!(payload["skipped"]["symlink"], 1);
     }

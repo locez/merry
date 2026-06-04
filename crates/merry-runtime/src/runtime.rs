@@ -8193,6 +8193,20 @@ mod tests {
                 .code(),
             "permission_request_invalid_arguments"
         );
+        let content = runtime
+            .read_artifact_content(result.artifact().id())
+            .await
+            .expect("invalid permission artifact should be readable");
+        let payload: serde_json::Value = serde_json::from_str(
+            content
+                .as_text()
+                .expect("invalid permission result should be textual JSON"),
+        )
+        .expect("invalid permission artifact should parse as JSON");
+        assert_eq!(
+            payload["guidance"]["kind"],
+            "permission_request_invalid_arguments"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -8300,6 +8314,8 @@ mod tests {
                 .code(),
             "permission_request_denied"
         );
+        let payload = denied_action_content(&runtime, &events).await;
+        assert_eq!(payload["guidance"]["kind"], "permission_request_denied");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -8439,6 +8455,38 @@ mod tests {
                 .expect("blocked permission should include diagnostic")
                 .code(),
             "permission_review_failed"
+        );
+        let payload = denied_action_content(&runtime, &events).await;
+        assert_eq!(payload["guidance"]["kind"], "permission_review_failed");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn request_permissions_without_permissioned_runner_guides_model_to_stop_retrying() {
+        let (runtime, pending) = register_permission_pending_tool_with_builder(
+            "runtime-permission-no-runner",
+            "call-permission-no-runner",
+            RuntimeBuilder::build,
+        )
+        .await;
+
+        let events = runtime
+            .execute_tool_call(pending.id(), ToolExecutionContext::default())
+            .await
+            .expect("missing permissioned runner should resolve failed permission request");
+
+        let result = resolved_tool_result(&events);
+        assert_eq!(result.status(), ToolCallResultStatus::Failed);
+        assert_eq!(
+            result
+                .diagnostic()
+                .expect("blocked permission should include diagnostic")
+                .code(),
+            "permission_request_blocked"
+        );
+        let payload = denied_action_content(&runtime, &events).await;
+        assert_eq!(
+            payload["guidance"]["kind"],
+            "permission_request_unavailable"
         );
     }
 

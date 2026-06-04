@@ -543,7 +543,13 @@ pub(crate) fn permission_denied_outcome(
     pending: &PendingToolCall,
     review: Option<&PermissionAdmissionReview>,
 ) -> ToolExecutionOutcome {
-    let payload = permission_resolution_payload(false, "denied", pending, review);
+    let payload = permission_resolution_payload(
+        false,
+        "denied",
+        pending,
+        review,
+        Some(permission_denied_guidance()),
+    );
     ToolExecutionOutcome::failed_json(
         payload.to_string(),
         ErrorInfo::new(
@@ -566,6 +572,10 @@ pub(crate) fn permission_blocked_outcome(
         "error": {
             "code": "permission_request_blocked",
             "message": message,
+        },
+        "guidance": {
+            "kind": "permission_request_unavailable",
+            "message": "Do not repeat the same permission request in this runtime. Permissioned execution is unavailable here, so report the blocked capability or choose an already-authorized approach.",
         }
     });
     ToolExecutionOutcome::failed_json(
@@ -587,6 +597,10 @@ pub(crate) fn permission_review_error_outcome(
         "error": {
             "code": "permission_review_failed",
             "message": message,
+        },
+        "guidance": {
+            "kind": "permission_review_failed",
+            "message": "Do not assume the requested capability was granted. If the action is still necessary, make one narrower permission request with the exact action and minimum capabilities; otherwise report the blocker.",
         }
     });
     ToolExecutionOutcome::failed_json(
@@ -618,6 +632,7 @@ fn permission_resolution_payload(
     status: &str,
     pending: &PendingToolCall,
     review: Option<&PermissionAdmissionReview>,
+    guidance: Option<Value>,
 ) -> Value {
     let mut payload = json!({
         "ok": ok,
@@ -628,7 +643,17 @@ fn permission_resolution_payload(
     if let Some(review) = review {
         payload["review"] = permission_request_review_summary(review);
     }
+    if let Some(guidance) = guidance {
+        payload["guidance"] = guidance;
+    }
     payload
+}
+
+fn permission_denied_guidance() -> Value {
+    json!({
+        "kind": "permission_request_denied",
+        "message": "Do not repeat the same permission request. Either continue with an already-authorized method, ask for a narrower exact capability only if it is genuinely required, or report that the requested action is blocked by policy.",
+    })
 }
 
 #[derive(Debug)]
@@ -732,6 +757,10 @@ pub(crate) fn permission_invalid_arguments_outcome(
         "error": {
             "code": "permission_request_invalid_arguments",
             "message": message,
+        },
+        "guidance": {
+            "kind": "permission_request_invalid_arguments",
+            "message": "Fix the request_permissions arguments before retrying. Include requested and for_action, set for_action.kind to \"process\", provide the exact argv array, omit cwd or use a workspace-relative cwd such as \".\", and request only minimum network/path capability.",
         }
     });
     ToolExecutionOutcome::failed_json(
