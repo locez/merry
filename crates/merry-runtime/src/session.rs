@@ -27,6 +27,7 @@ use crate::{
     },
     ledger::{CompactLedgerText, LedgerFactKind, LedgerScope, LedgerUpdateKind, TaskLedger},
     memory::{ActivatedMemory, MemoryError, MemoryItem, MemoryStore},
+    permission::PermissionReviewContextEntry,
     skill::SkillCatalog,
     step::CompiledSessionMessage,
     summary_draft_promotion::{
@@ -46,6 +47,8 @@ const FINAL_OUTPUT_ARTIFACT_PREFIX: &str = "final-output-";
 const PROCESS_INPUT_ARTIFACT_PREFIX: &str = "process-input-";
 const TOOL_RESULT_ARTIFACT_PREFIX: &str = "tool-result-";
 const WORKSPACE_READ_FILE_TOOL_NAME: &str = "workspace_read_file";
+const PERMISSION_REVIEW_RECENT_CONTEXT_LIMIT: usize = 12;
+const PERMISSION_REVIEW_ENTRY_MAX_BYTES: usize = 2048;
 
 /// Resolved tool call state that has not yet been compiled into a provider request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -763,6 +766,19 @@ impl SessionState {
                 }
             })
             .collect()
+    }
+
+    pub(crate) fn permission_review_context_snapshot(
+        &self,
+    ) -> Result<Vec<PermissionReviewContextEntry>, RuntimeError> {
+        let items = self.compaction_history_items()?;
+        let start = items
+            .len()
+            .saturating_sub(PERMISSION_REVIEW_RECENT_CONTEXT_LIMIT);
+        Ok(items[start..]
+            .iter()
+            .map(permission_review_context_entry)
+            .collect())
     }
 
     fn compaction_history_items(&self) -> Result<Vec<CompactionHistoryItem>, RuntimeError> {
@@ -1635,6 +1651,39 @@ fn artifact_content_preview(content: &ArtifactContent, max_bytes: usize) -> Stri
             content.kind(),
             content.as_bytes().len()
         ),
+    }
+}
+
+fn permission_review_context_entry(item: &CompactionHistoryItem) -> PermissionReviewContextEntry {
+    match &item.kind {
+        CompactionHistoryItemKind::User { text } => PermissionReviewContextEntry::new(
+            "user",
+            crate::compaction::bounded_excerpt(text, PERMISSION_REVIEW_ENTRY_MAX_BYTES),
+        ),
+        CompactionHistoryItemKind::Assistant { text } => PermissionReviewContextEntry::new(
+            "assistant",
+            crate::compaction::bounded_excerpt(text, PERMISSION_REVIEW_ENTRY_MAX_BYTES),
+        ),
+        CompactionHistoryItemKind::ToolExchange {
+            call,
+            result,
+            content,
+        } => {
+            let arguments_json = serde_json::to_string(call.arguments().as_object())
+                .unwrap_or_else(|_| "<unserializable arguments>".to_owned());
+            let text = format!(
+                "tool_call:{} arguments:{} result_status:{} artifact:{} content:{}",
+                call.name(),
+                arguments_json,
+                tool_call_result_status_label(result.status()),
+                result.artifact().id(),
+                artifact_content_preview(content, PERMISSION_REVIEW_ENTRY_MAX_BYTES),
+            );
+            PermissionReviewContextEntry::new(
+                "tool",
+                crate::compaction::bounded_excerpt(&text, PERMISSION_REVIEW_ENTRY_MAX_BYTES),
+            )
+        }
     }
 }
 

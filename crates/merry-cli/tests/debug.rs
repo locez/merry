@@ -688,6 +688,7 @@ fn debug_help_writes_usage_to_stdout() {
     assert!(stdout.contains("--input <TEXT>"));
     assert!(stdout.contains("openai"));
     assert!(stdout.contains("coding-loop-smoke"));
+    assert!(stdout.contains("permission-network-smoke"));
     assert!(stdout.contains("coding-loop-live-smoke"));
     assert!(stdout.contains("coding-loop-task-smoke"));
     assert!(stdout.contains("coding-loop-task-live-smoke"));
@@ -709,6 +710,24 @@ fn debug_coding_loop_smoke_requires_with_sandbox() {
     let stderr = std::str::from_utf8(&output.stderr).expect("stderr should be utf-8");
     assert!(stderr.contains("--with-sandbox"));
     assert!(stderr.contains("coding-loop-smoke"));
+    assert!(stderr.contains("Usage: merry debug"));
+}
+
+#[test]
+fn debug_permission_network_smoke_requires_with_sandbox() {
+    let output = merry_without_openai_env()
+        .args(["debug", "permission-network-smoke"])
+        .output()
+        .expect("merry debug permission-network-smoke should run");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        output.stdout.is_empty(),
+        "usage errors should not write stdout"
+    );
+    let stderr = std::str::from_utf8(&output.stderr).expect("stderr should be utf-8");
+    assert!(stderr.contains("--with-sandbox"));
+    assert!(stderr.contains("permission-network-smoke"));
     assert!(stderr.contains("Usage: merry debug"));
 }
 
@@ -849,6 +868,59 @@ fn debug_coding_loop_live_smoke_runs_inside_real_bwrap_when_opted_in() {
     );
     let stdout = std::str::from_utf8(&output.stdout).expect("stdout should be utf-8");
     assert_eq!(stdout, "coding-loop-live-smoke: ok\n");
+}
+
+#[test]
+#[ignore = "requires Linux bubblewrap and local sandbox support"]
+fn debug_permission_network_smoke_runs_inside_real_bwrap_when_opted_in() {
+    let mut command = merry_without_openai_env();
+    let output = command
+        .current_dir(repo_root())
+        .args(["--with-sandbox", "debug", "permission-network-smoke"])
+        .output()
+        .expect("merry --with-sandbox debug permission-network-smoke should run");
+
+    assert!(
+        output.status.success(),
+        "permission network smoke should exit successfully: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "permission network smoke should not write stderr"
+    );
+    let stdout = std::str::from_utf8(&output.stdout).expect("stdout should be utf-8");
+    let mut lines = stdout.lines();
+    assert_eq!(lines.next(), Some("permission-network-smoke: ok"));
+    let events = lines
+        .map(|line| serde_json::from_str::<Value>(line).expect("line should be JSON"))
+        .collect::<Vec<_>>();
+    assert!(
+        events.iter().any(|event| {
+            event.pointer("/kind/type").and_then(Value::as_str) == Some("tool_call_pending")
+                && event.pointer("/kind/call/name").and_then(Value::as_str)
+                    == Some("request_permissions")
+                && event
+                    .pointer("/kind/call/arguments/requested/network")
+                    .and_then(Value::as_bool)
+                    == Some(true)
+        }),
+        "stdout should include the network permission request tool call"
+    );
+    assert!(
+        events.iter().any(|event| {
+            event.pointer("/type").and_then(Value::as_str) == Some("process_artifact_preview")
+                && event.pointer("/status").and_then(Value::as_str) == Some("succeeded")
+                && event
+                    .pointer("/content")
+                    .and_then(Value::as_str)
+                    .is_some_and(|content| {
+                        content.contains("\"kind\":\"process_action\"")
+                            && content.contains("\"argv\":[\"getent\",\"hosts\",\"example.com\"]")
+                    })
+        }),
+        "stdout should include the approved successful process artifact preview"
+    );
 }
 
 #[test]

@@ -358,11 +358,16 @@ async fn workspace_coding_loop_profile_registers_expected_tools_and_process_lane
     let requests = provider_handle.recorded_requests();
     assert_eq!(requests.len(), 1);
     let tool_names = requests[0].tools();
-    assert_eq!(tool_names.len(), 4);
+    assert_eq!(tool_names.len(), 5);
     assert!(
         tool_names
             .iter()
             .any(|tool| tool.name().as_str() == "run_process")
+    );
+    assert!(
+        tool_names
+            .iter()
+            .any(|tool| tool.name().as_str() == "request_permissions")
     );
     assert!(
         tool_names
@@ -529,11 +534,16 @@ async fn workspace_coding_loop_profile_can_enable_patch_tool() {
     let requests = provider_handle.recorded_requests();
     assert_eq!(requests.len(), 1);
     let tool_names = requests[0].tools();
-    assert_eq!(tool_names.len(), 5);
+    assert_eq!(tool_names.len(), 6);
     assert!(
         tool_names
             .iter()
             .any(|tool| tool.name().as_str() == WORKSPACE_PATCH_TOOL)
+    );
+    assert!(
+        tool_names
+            .iter()
+            .any(|tool| tool.name().as_str() == "request_permissions")
     );
 }
 

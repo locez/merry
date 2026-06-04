@@ -42,6 +42,7 @@ mod judgment;
 mod ledger;
 mod memory;
 mod model_config;
+mod permission;
 mod process;
 mod process_runner;
 mod process_tool;
@@ -88,16 +89,25 @@ pub use ledger::{
     LedgerUpdate, LedgerUpdateKind, LedgerValidationError, LifecycleFact, TaskLedger,
 };
 pub use model_config::RuntimeModelRole;
+pub use permission::{
+    PermissionAdmissionContext, PermissionAdmissionDecision, PermissionAdmissionError,
+    PermissionAdmissionFuture, PermissionAdmissionReview, PermissionAdmissionSource,
+    PermissionRequest, PermissionReviewMode, PermissionedAction, RequestedCapability,
+    RequestedPathCapability, RuntimeTrustLevel, request_permissions_tool,
+};
 pub use process::{
     AcceptedLocalWorkspaceProcessAdmission, LocalWorkspaceProcessSandboxProfile,
     MAX_PROCESS_ARG_BYTES, MAX_PROCESS_ARGV_ITEMS, MAX_PROCESS_CWD_BYTES,
-    MAX_PROCESS_OUTPUT_LIMIT_BYTES, MAX_PROCESS_STDIN_TEXT_BYTES, ProcessActionError,
-    ProcessActionIntent, ProcessEnvPolicy, ProcessExecutionEvidence, ProcessExitStatus,
-    ProcessPermissionProfileId, ProcessRunner, ProcessRunnerContext, ProcessRunnerError,
-    ProcessRunnerFuture, ProcessRunnerOutput, ProcessRunnerResult,
-    is_low_risk_process_action_intent, is_read_only_shell_process_action_intent,
+    MAX_PROCESS_OUTPUT_LIMIT_BYTES, MAX_PROCESS_STDIN_TEXT_BYTES, PermissionedProcessRunnerFactory,
+    ProcessActionError, ProcessActionIntent, ProcessEnvPolicy, ProcessExecutionEvidence,
+    ProcessExitStatus, ProcessPermissionProfileId, ProcessRunner, ProcessRunnerContext,
+    ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput, ProcessRunnerResult,
+    StaticPermissionedProcessRunnerFactory, is_low_risk_process_action_intent,
+    is_read_only_shell_process_action_intent,
 };
-pub use process_runner::{BwrapProcessRunner, TokioProcessRunner};
+pub use process_runner::{
+    BwrapPermissionedProcessRunnerFactory, BwrapProcessRunner, TokioProcessRunner,
+};
 pub use process_tool::{ProcessCommandToolError, process_command_tool};
 pub use profile::{PathAccess, PathAccessRule, PathAccessRuleSource, RuntimeProfile};
 pub use runtime::{AutomaticCompactionConfig, Runtime, RuntimeBuilder};

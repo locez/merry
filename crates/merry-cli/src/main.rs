@@ -18,12 +18,12 @@ use merry_llm::{
 use merry_provider_openai::{OpenAiProvider, OpenAiProviderConfig};
 use merry_runtime::{
     AcceptedLocalWorkspaceProcessAdmission, AgentLoopConfig, AgentLoopStatus, ArtifactContent,
-    AutomaticCompactionConfig, BwrapProcessRunner, ChildRuntimeFactory, ChildRuntimeInput,
-    MAX_PROCESS_OUTPUT_LIMIT_BYTES, PathAccess, PathAccessRule, ProcessActionIntent,
-    ProcessEnvPolicy, ProcessRunner, RegisteredTool, Runtime, RuntimeBuilder, RuntimeModelRole,
-    StepContext, StepInput, SubagentManager, TokioProcessRunner, ToolExecutionContext,
-    ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture, process_command_tool,
-    subagent_registered_tools,
+    AutomaticCompactionConfig, BwrapPermissionedProcessRunnerFactory, BwrapProcessRunner,
+    ChildRuntimeFactory, ChildRuntimeInput, MAX_PROCESS_OUTPUT_LIMIT_BYTES, PathAccess,
+    PathAccessRule, PermissionedProcessRunnerFactory, ProcessActionIntent, ProcessEnvPolicy,
+    ProcessRunner, RegisteredTool, Runtime, RuntimeBuilder, RuntimeModelRole, StepContext,
+    StepInput, SubagentManager, TokioProcessRunner, ToolExecutionContext, ToolExecutionOutcome,
+    ToolExecutor, ToolExecutorFuture, process_command_tool, subagent_registered_tools,
 };
 use merry_tool_workspace::{
     CODING_LOOP_PROCESS_TOOL, WORKSPACE_PATCH_TOOL, WORKSPACE_READ_FILE_TOOL,
@@ -49,6 +49,8 @@ const CODING_LOOP_LIVE_SMOKE_SESSION_ID: &str = "coding-loop-live-smoke";
 const CODING_LOOP_TASK_SMOKE_SESSION_ID: &str = "coding-loop-task-smoke";
 const CODING_LOOP_TASK_LIVE_SMOKE_SESSION_ID: &str = "coding-loop-task-live-smoke";
 const CODING_LOOP_SUBAGENT_LIVE_SMOKE_SESSION_ID: &str = "coding-loop-subagent-live-smoke";
+const PERMISSION_NETWORK_SMOKE_SESSION_ID: &str = "permission-network-smoke";
+const PERMISSION_NETWORK_SMOKE_ARGV: [&str; 3] = ["getent", "hosts", "example.com"];
 const CODING_LOOP_LIVE_SMOKE_INITIAL_VALUE: &str = "unfixed";
 const CODING_LOOP_LIVE_SMOKE_TARGET_VALUE: &str = "fixed-by-live-llm";
 const CODING_LOOP_SUBAGENT_LIVE_SMOKE_FILE: &str = "subagent-output.txt";
@@ -212,6 +214,12 @@ enum DebugCommand {
     )]
     CodingLoopSmoke,
     #[command(
+        name = "permission-network-smoke",
+        about = "Run an opt-in sandboxed permission review smoke driven by a live OpenAI-compatible model",
+        after_help = OPENAI_ENV_HELP
+    )]
+    PermissionNetworkSmoke(DebugPermissionNetworkSmokeArgs),
+    #[command(
         name = "coding-loop-live-smoke",
         about = "Run an opt-in sandboxed coding-loop smoke driven by a live OpenAI-compatible model"
     )]
@@ -285,6 +293,26 @@ struct DebugCodingLoopLiveSmokeArgs {
         value_parser = parse_max_output_tokens,
         default_value_t = 512,
         help = "Maximum output tokens per live model step"
+    )]
+    max_output_tokens: u64,
+}
+
+#[derive(Debug, Args)]
+struct DebugPermissionNetworkSmokeArgs {
+    #[arg(
+        long,
+        value_name = "MODEL",
+        allow_hyphen_values = true,
+        help = "Model name; overrides [providers.default].model"
+    )]
+    model: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "N",
+        value_parser = parse_max_output_tokens,
+        default_value_t = 768,
+        help = "Maximum output tokens for each live model step"
     )]
     max_output_tokens: u64,
 }
@@ -476,6 +504,39 @@ async fn async_main(cli: Cli, merry_config: Option<MerryConfig>) -> CliExit {
             },
             Err(CliError::Unexpected(message)) => CliExit::Unexpected(message),
         },
+        CliCommand::Debug(DebugArgs {
+            command:
+                Some(DebugCommand::PermissionNetworkSmoke(DebugPermissionNetworkSmokeArgs {
+                    model,
+                    max_output_tokens,
+                })),
+            ..
+        }) => {
+            match run_debug_permission_network_smoke(
+                sandbox_child_handoff,
+                model.as_deref(),
+                max_output_tokens,
+                merry_config.as_ref(),
+            )
+            .await
+            {
+                Ok(()) => CliExit::Success,
+                Err(CliError::BrokenPipe) => CliExit::Success,
+                Err(CliError::DebugUsage(message)) => CliExit::Usage {
+                    message,
+                    usage: debug_usage(),
+                },
+                Err(CliError::DebugOpenAiUsage(message)) => CliExit::Usage {
+                    message,
+                    usage: debug_openai_usage(),
+                },
+                Err(CliError::ShellUsage(message)) => CliExit::Usage {
+                    message,
+                    usage: shell_usage(),
+                },
+                Err(CliError::Unexpected(message)) => CliExit::Unexpected(message),
+            }
+        }
         CliCommand::Debug(DebugArgs {
             command: Some(DebugCommand::CodingLoopTaskSmoke(args)),
             ..
@@ -1158,11 +1219,13 @@ async fn run_debug_coding_loop_smoke(
     };
 
     let smoke_root = prepare_coding_loop_smoke_fixture("coding-loop-smoke")?;
+    let backend = action_process_runner(&smoke_root, merry_config)?;
     let runtime = build_coding_loop_smoke_runtime(
         &smoke_root,
         None,
         admission,
-        action_process_runner(&smoke_root, merry_config)?,
+        backend.runner(),
+        Some(backend.permissioned_factory()),
         automatic_compaction_config(merry_config).map_err(unexpected)?,
     )?;
 
@@ -1182,6 +1245,51 @@ async fn run_debug_coding_loop_smoke(
         .write_all(b"coding-loop-smoke: ok\n")
         .await
         .map_err(stdout_error)?;
+    writer.flush().await.map_err(stdout_error)
+}
+
+async fn run_debug_permission_network_smoke(
+    sandbox_child_handoff: Option<SandboxChildHandoff>,
+    model_flag: Option<&str>,
+    max_output_tokens: u64,
+    merry_config: Option<&MerryConfig>,
+) -> Result<(), CliError> {
+    let Some(admission) =
+        coding_loop_smoke_admission_from_current_process(sandbox_child_handoff).await
+    else {
+        return Err(coding_loop_smoke_requires_sandbox_error(
+            "permission-network-smoke",
+        ));
+    };
+
+    let config = debug_openai_config(model_flag, merry_config)?;
+    let smoke_root = prepare_coding_loop_smoke_fixture(PERMISSION_NETWORK_SMOKE_SESSION_ID)?;
+    let backend = permission_network_smoke_process_runner(&smoke_root, merry_config)?;
+    let runtime = build_permission_network_smoke_runtime(
+        &smoke_root,
+        admission,
+        config,
+        backend.runner(),
+        backend.permissioned_factory(),
+        automatic_compaction_config(merry_config).map_err(unexpected)?,
+    )?;
+    let generation_config =
+        GenerationConfig::new(Some(max_output_tokens), false).map_err(debug_openai_usage_error)?;
+    let context = StepContext::default().with_generation_config(generation_config);
+
+    let result = runtime
+        .run_agent_loop(
+            StepInput::user_text(&permission_network_live_smoke_task()).map_err(unexpected)?,
+            context,
+            AgentLoopConfig::new(6).map_err(unexpected)?,
+        )
+        .await
+        .map_err(unexpected)?;
+
+    assert_permission_network_smoke_result(&runtime, &result).await?;
+
+    let mut writer = BufWriter::new(tokio::io::stdout());
+    write_permission_network_smoke_report(&runtime, result.events(), &mut writer).await?;
     writer.flush().await.map_err(stdout_error)
 }
 
@@ -1205,11 +1313,13 @@ async fn run_debug_coding_loop_live_smoke(
         .transpose()
         .map_err(unexpected)?
         .unwrap_or_default();
+    let backend = action_process_runner(&smoke_root, merry_config)?;
     let runtime = build_coding_loop_live_smoke_runtime(
         &smoke_root,
         admission,
         config,
-        action_process_runner(&smoke_root, merry_config)?,
+        backend.runner(),
+        Some(backend.permissioned_factory()),
         CodingLoopLiveRuntimeOptions {
             automatic_compaction: automatic_compaction_config(merry_config).map_err(unexpected)?,
             skill_roots,
@@ -1255,11 +1365,13 @@ async fn run_debug_coding_loop_task_smoke(
 
     let fixture = CodingLoopTaskSmokeFixture::for_task(task);
     let smoke_root = prepare_coding_loop_task_fixture("coding-loop-task-smoke", fixture)?;
+    let backend = action_process_runner(&smoke_root, merry_config)?;
     let runtime = build_coding_loop_task_smoke_runtime(
         &smoke_root,
         None,
         admission,
-        action_process_runner(&smoke_root, merry_config)?,
+        backend.runner(),
+        Some(backend.permissioned_factory()),
         fixture,
         automatic_compaction_config(merry_config).map_err(unexpected)?,
     )?;
@@ -1307,11 +1419,13 @@ async fn run_debug_coding_loop_task_live_smoke(
         .transpose()
         .map_err(unexpected)?
         .unwrap_or_default();
+    let backend = action_process_runner(&smoke_root, merry_config)?;
     let runtime = build_coding_loop_task_live_smoke_runtime(
         &smoke_root,
         admission,
         config,
-        action_process_runner(&smoke_root, merry_config)?,
+        backend.runner(),
+        Some(backend.permissioned_factory()),
         CodingLoopLiveRuntimeOptions {
             automatic_compaction,
             skill_roots,
@@ -1373,11 +1487,13 @@ async fn run_debug_coding_loop_subagent_live_smoke(
         .transpose()
         .map_err(unexpected)?
         .unwrap_or_default();
+    let backend = action_process_runner(&smoke_root, merry_config)?;
     let runtime = build_coding_loop_subagent_live_smoke_runtime(
         &smoke_root,
         admission,
         config,
-        action_process_runner(&smoke_root, merry_config)?,
+        backend.runner(),
+        Some(backend.permissioned_factory()),
         CodingLoopLiveRuntimeOptions {
             automatic_compaction,
             skill_roots,
@@ -1465,6 +1581,81 @@ async fn assert_coding_loop_smoke_result(
             "coding-loop-smoke fixture was not patched as expected".to_owned(),
         ));
     }
+    Ok(())
+}
+
+async fn assert_permission_network_smoke_result(
+    runtime: &Runtime,
+    result: &merry_runtime::AgentLoopResult,
+) -> Result<(), CliError> {
+    if result.status() != &AgentLoopStatus::Completed {
+        return Err(CliError::Unexpected(format!(
+            "permission-network-smoke did not complete: {:?}",
+            result.status()
+        )));
+    }
+    if !runtime.pending_tool_calls().await.is_empty() {
+        return Err(CliError::Unexpected(
+            "permission-network-smoke left pending tool calls".to_owned(),
+        ));
+    }
+
+    let mut pending_by_call_id = BTreeMap::new();
+    let mut saw_initial_failed_network_attempt = false;
+    let mut saw_approved_successful_network_attempt = false;
+    for event in result.events() {
+        match &event.kind {
+            RuntimeEventKind::ToolCallPending { call } => {
+                pending_by_call_id.insert(call.id().clone(), call.clone());
+            }
+            RuntimeEventKind::ToolCallResolved { result } => {
+                let call = pending_by_call_id.get(result.call_id()).ok_or_else(|| {
+                    CliError::Unexpected(format!(
+                        "permission-network-smoke resolved unknown tool call {}",
+                        result.call_id()
+                    ))
+                })?;
+                let content = runtime
+                    .read_artifact_content(result.artifact().id())
+                    .await
+                    .map_err(unexpected)?;
+                let Some(text) = content.as_text() else {
+                    continue;
+                };
+                if !text.contains("\"kind\":\"process_action\"")
+                    || !process_artifact_has_argv(text, PERMISSION_NETWORK_SMOKE_ARGV)
+                {
+                    continue;
+                }
+
+                match (call.name().as_str(), result.status()) {
+                    (CODING_LOOP_PROCESS_TOOL, ToolCallResultStatus::Failed) => {
+                        saw_initial_failed_network_attempt = true;
+                    }
+                    ("request_permissions", ToolCallResultStatus::Succeeded) => {
+                        saw_approved_successful_network_attempt = true;
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if !saw_initial_failed_network_attempt {
+        return Err(CliError::Unexpected(
+            "permission-network-smoke did not observe the default sandbox blocking the initial network lookup".to_owned(),
+        ));
+    }
+    if !saw_approved_successful_network_attempt {
+        return Err(CliError::Unexpected(format!(
+            "permission-network-smoke did not observe the approved network lookup succeeding{}",
+            failed_tool_result_summary(result.events())
+                .map(|summary| format!("; {summary}"))
+                .unwrap_or_default()
+        )));
+    }
+
     Ok(())
 }
 
@@ -2133,6 +2324,7 @@ fn build_coding_loop_smoke_runtime(
     relative_cwd: Option<&str>,
     admission: AcceptedLocalWorkspaceProcessAdmission,
     runner: Arc<dyn ProcessRunner>,
+    permissioned_process_runner_factory: Option<Arc<dyn PermissionedProcessRunnerFactory>>,
     automatic_compaction: AutomaticCompactionConfig,
 ) -> Result<Runtime, CliError> {
     let provider = CodingLoopSmokeProvider::new(relative_cwd)?;
@@ -2145,8 +2337,10 @@ fn build_coding_loop_smoke_runtime(
         runner,
         CodingLoopRuntimeOptions {
             allow_hidden_workspace_paths: false,
+            approval_review: None,
             automatic_compaction,
             context_compaction: None,
+            permissioned_process_runner_factory,
             skill_roots: Vec::new(),
             subagents: config::SubagentsConfig::default(),
         },
@@ -2158,12 +2352,17 @@ fn build_coding_loop_live_smoke_runtime(
     admission: AcceptedLocalWorkspaceProcessAdmission,
     config: DebugOpenAiRuntimeConfig,
     runner: Arc<dyn ProcessRunner>,
+    permissioned_process_runner_factory: Option<Arc<dyn PermissionedProcessRunnerFactory>>,
     options: CodingLoopLiveRuntimeOptions,
 ) -> Result<Runtime, CliError> {
     let provider = OpenAiProvider::new(config.primary.provider);
     let context_compaction = config
         .context_compaction
-        .map(openai_role_provider)
+        .map(openai_context_compaction_provider)
+        .transpose()?;
+    let approval_review = config
+        .approval_review
+        .map(openai_approval_review_provider)
         .transpose()?;
     build_coding_loop_runtime(
         CODING_LOOP_LIVE_SMOKE_SESSION_ID,
@@ -2174,8 +2373,10 @@ fn build_coding_loop_live_smoke_runtime(
         runner,
         CodingLoopRuntimeOptions {
             allow_hidden_workspace_paths: true,
+            approval_review,
             automatic_compaction: options.automatic_compaction,
             context_compaction,
+            permissioned_process_runner_factory,
             skill_roots: options.skill_roots,
             subagents: options.subagents,
         },
@@ -2187,6 +2388,7 @@ fn build_coding_loop_task_smoke_runtime(
     relative_cwd: Option<&str>,
     admission: AcceptedLocalWorkspaceProcessAdmission,
     runner: Arc<dyn ProcessRunner>,
+    permissioned_process_runner_factory: Option<Arc<dyn PermissionedProcessRunnerFactory>>,
     fixture: CodingLoopTaskSmokeFixture,
     automatic_compaction: AutomaticCompactionConfig,
 ) -> Result<Runtime, CliError> {
@@ -2200,8 +2402,10 @@ fn build_coding_loop_task_smoke_runtime(
         runner,
         CodingLoopRuntimeOptions {
             allow_hidden_workspace_paths: false,
+            approval_review: None,
             automatic_compaction,
             context_compaction: None,
+            permissioned_process_runner_factory,
             skill_roots: Vec::new(),
             subagents: config::SubagentsConfig::default(),
         },
@@ -2213,12 +2417,17 @@ fn build_coding_loop_task_live_smoke_runtime(
     admission: AcceptedLocalWorkspaceProcessAdmission,
     config: DebugOpenAiRuntimeConfig,
     runner: Arc<dyn ProcessRunner>,
+    permissioned_process_runner_factory: Option<Arc<dyn PermissionedProcessRunnerFactory>>,
     options: CodingLoopLiveRuntimeOptions,
 ) -> Result<Runtime, CliError> {
     let provider = OpenAiProvider::new(config.primary.provider);
     let context_compaction = config
         .context_compaction
-        .map(openai_role_provider)
+        .map(openai_context_compaction_provider)
+        .transpose()?;
+    let approval_review = config
+        .approval_review
+        .map(openai_approval_review_provider)
         .transpose()?;
     build_coding_loop_runtime(
         CODING_LOOP_TASK_LIVE_SMOKE_SESSION_ID,
@@ -2229,8 +2438,10 @@ fn build_coding_loop_task_live_smoke_runtime(
         runner,
         CodingLoopRuntimeOptions {
             allow_hidden_workspace_paths: true,
+            approval_review,
             automatic_compaction: options.automatic_compaction,
             context_compaction,
+            permissioned_process_runner_factory,
             skill_roots: options.skill_roots,
             subagents: options.subagents,
         },
@@ -2242,12 +2453,17 @@ fn build_coding_loop_subagent_live_smoke_runtime(
     admission: AcceptedLocalWorkspaceProcessAdmission,
     config: DebugOpenAiRuntimeConfig,
     runner: Arc<dyn ProcessRunner>,
+    permissioned_process_runner_factory: Option<Arc<dyn PermissionedProcessRunnerFactory>>,
     options: CodingLoopLiveRuntimeOptions,
 ) -> Result<Runtime, CliError> {
     let provider = OpenAiProvider::new(config.primary.provider);
     let context_compaction = config
         .context_compaction
-        .map(openai_role_provider)
+        .map(openai_context_compaction_provider)
+        .transpose()?;
+    let approval_review = config
+        .approval_review
+        .map(openai_approval_review_provider)
         .transpose()?;
     build_coding_loop_runtime(
         CODING_LOOP_SUBAGENT_LIVE_SMOKE_SESSION_ID,
@@ -2258,12 +2474,112 @@ fn build_coding_loop_subagent_live_smoke_runtime(
         runner,
         CodingLoopRuntimeOptions {
             allow_hidden_workspace_paths: false,
+            approval_review,
             automatic_compaction: options.automatic_compaction,
             context_compaction,
+            permissioned_process_runner_factory,
             skill_roots: options.skill_roots,
             subagents: options.subagents,
         },
     )
+}
+
+fn build_permission_network_smoke_runtime(
+    root: &Path,
+    admission: AcceptedLocalWorkspaceProcessAdmission,
+    config: DebugOpenAiRuntimeConfig,
+    runner: Arc<dyn ProcessRunner>,
+    permissioned_process_runner_factory: Arc<dyn PermissionedProcessRunnerFactory>,
+    automatic_compaction: AutomaticCompactionConfig,
+) -> Result<Runtime, CliError> {
+    let session_id = SessionId::new(PERMISSION_NETWORK_SMOKE_SESSION_ID).map_err(unexpected)?;
+    let provider = OpenAiProvider::new(config.primary.provider);
+    let mut builder = Runtime::builder(session_id)
+        .automatic_compaction(automatic_compaction)
+        .model_provider(
+            Arc::new(provider),
+            ModelName::new(&config.primary.model).map_err(debug_openai_usage_error)?,
+        );
+    if let Some(role_provider) = config
+        .context_compaction
+        .map(openai_context_compaction_provider)
+        .transpose()?
+    {
+        builder = builder.model_provider_for_role(
+            role_provider.role,
+            role_provider.provider,
+            role_provider.model,
+        );
+    }
+    if let Some(role_provider) = config
+        .approval_review
+        .map(openai_approval_review_provider)
+        .transpose()?
+    {
+        builder = builder.model_provider_for_role(
+            role_provider.role,
+            role_provider.provider,
+            role_provider.model,
+        );
+    }
+
+    WorkspaceCodingLoopProfile::new(workspace_tools_config(
+        coding_loop_workspace_roots(root, &[]),
+        false,
+        false,
+        None,
+    )?)
+    .map_err(unexpected)?
+    .with_cli_bwrap_permissioned_process_runner(
+        admission,
+        runner,
+        permissioned_process_runner_factory,
+    )
+    .register_on(builder)
+    .map_err(unexpected)?
+    .build()
+    .map_err(unexpected)
+}
+
+#[cfg(test)]
+fn build_scripted_permission_network_smoke_runtime(
+    root: &Path,
+    admission: AcceptedLocalWorkspaceProcessAdmission,
+    runner: Arc<dyn ProcessRunner>,
+    permissioned_process_runner_factory: Arc<dyn PermissionedProcessRunnerFactory>,
+    automatic_compaction: AutomaticCompactionConfig,
+) -> Result<Runtime, CliError> {
+    let session_id = SessionId::new(PERMISSION_NETWORK_SMOKE_SESSION_ID).map_err(unexpected)?;
+    let provider = PermissionNetworkSmokeProvider::new()?;
+    let review_provider = PermissionNetworkSmokeReviewProvider::new()?;
+    let builder = Runtime::builder(session_id)
+        .automatic_compaction(automatic_compaction)
+        .model_provider(
+            Arc::new(provider),
+            ModelName::new("merry-permission-network-smoke-scripted").map_err(unexpected)?,
+        )
+        .model_provider_for_role(
+            RuntimeModelRole::ApprovalReview,
+            Arc::new(review_provider),
+            ModelName::new("merry-permission-network-smoke-review-scripted").map_err(unexpected)?,
+        );
+
+    WorkspaceCodingLoopProfile::new(workspace_tools_config(
+        coding_loop_workspace_roots(root, &[]),
+        false,
+        false,
+        None,
+    )?)
+    .map_err(unexpected)?
+    .with_cli_bwrap_permissioned_process_runner(
+        admission,
+        runner,
+        permissioned_process_runner_factory,
+    )
+    .register_on(builder)
+    .map_err(unexpected)?
+    .build()
+    .map_err(unexpected)
 }
 
 fn coding_loop_subagent_live_smoke_config() -> Result<config::SubagentsConfig, CliError> {
@@ -2280,8 +2596,10 @@ struct CodingLoopLiveRuntimeOptions {
 
 struct CodingLoopRuntimeOptions {
     allow_hidden_workspace_paths: bool,
+    approval_review: Option<RuntimeRoleProviderConfig>,
     automatic_compaction: AutomaticCompactionConfig,
     context_compaction: Option<RuntimeRoleProviderConfig>,
+    permissioned_process_runner_factory: Option<Arc<dyn PermissionedProcessRunnerFactory>>,
     skill_roots: Vec<PathBuf>,
     subagents: config::SubagentsConfig,
 }
@@ -2293,12 +2611,29 @@ struct RuntimeRoleProviderConfig {
 }
 
 #[derive(Clone)]
+struct ActionProcessBackend {
+    runner: Arc<dyn ProcessRunner>,
+    permissioned_factory: Arc<dyn PermissionedProcessRunnerFactory>,
+}
+
+impl ActionProcessBackend {
+    fn runner(&self) -> Arc<dyn ProcessRunner> {
+        Arc::clone(&self.runner)
+    }
+
+    fn permissioned_factory(&self) -> Arc<dyn PermissionedProcessRunnerFactory> {
+        Arc::clone(&self.permissioned_factory)
+    }
+}
+
+#[derive(Clone)]
 struct CodingLoopChildRuntimeFactory {
     root: PathBuf,
     admission: AcceptedLocalWorkspaceProcessAdmission,
     provider: Arc<dyn ModelProvider>,
     model: ModelName,
     runner: Arc<dyn ProcessRunner>,
+    permissioned_factory: Arc<dyn PermissionedProcessRunnerFactory>,
     skill_roots: Vec<PathBuf>,
     allow_hidden_workspace_paths: bool,
 }
@@ -2309,7 +2644,7 @@ impl CodingLoopChildRuntimeFactory {
         admission: AcceptedLocalWorkspaceProcessAdmission,
         provider: Arc<dyn ModelProvider>,
         model: ModelName,
-        runner: Arc<dyn ProcessRunner>,
+        process_backend: ActionProcessBackend,
         skill_roots: Vec<PathBuf>,
         allow_hidden_workspace_paths: bool,
     ) -> Self {
@@ -2318,7 +2653,8 @@ impl CodingLoopChildRuntimeFactory {
             admission,
             provider,
             model,
-            runner,
+            runner: process_backend.runner(),
+            permissioned_factory: process_backend.permissioned_factory(),
             skill_roots,
             allow_hidden_workspace_paths,
         }
@@ -2361,7 +2697,11 @@ impl ChildRuntimeFactory for CodingLoopChildRuntimeFactory {
             profile = profile.with_patch_tool();
         }
         profile = if allow_local_workspace_process {
-            profile.with_cli_bwrap_process_runner(self.admission, Arc::clone(&self.runner))
+            profile.with_cli_bwrap_permissioned_process_runner(
+                self.admission,
+                Arc::clone(&self.runner),
+                Arc::clone(&self.permissioned_factory),
+            )
         } else {
             profile.with_read_only_process_runner(Arc::clone(&self.runner))
         };
@@ -2411,10 +2751,24 @@ fn build_coding_loop_runtime(
     options: CodingLoopRuntimeOptions,
 ) -> Result<Runtime, CliError> {
     let parent_session_id = SessionId::new(session_id).map_err(unexpected)?;
+    let permissioned_factory = options
+        .permissioned_process_runner_factory
+        .unwrap_or_else(|| {
+            Arc::new(merry_runtime::StaticPermissionedProcessRunnerFactory::new(
+                Arc::clone(&runner),
+            ))
+        });
     let mut builder = Runtime::builder(parent_session_id.clone())
         .automatic_compaction(options.automatic_compaction)
         .model_provider(Arc::clone(&provider), model.clone());
     if let Some(role_provider) = options.context_compaction {
+        builder = builder.model_provider_for_role(
+            role_provider.role,
+            role_provider.provider,
+            role_provider.model,
+        );
+    }
+    if let Some(role_provider) = options.approval_review {
         builder = builder.model_provider_for_role(
             role_provider.role,
             role_provider.provider,
@@ -2458,7 +2812,10 @@ fn build_coding_loop_runtime(
             admission,
             Arc::clone(&provider),
             model.clone(),
-            Arc::clone(&runner),
+            ActionProcessBackend {
+                runner: Arc::clone(&runner),
+                permissioned_factory: Arc::clone(&permissioned_factory),
+            },
             options.skill_roots.clone(),
             options.allow_hidden_workspace_paths,
         );
@@ -2492,7 +2849,7 @@ fn build_coding_loop_runtime(
     )?)
     .map_err(unexpected)?
     .with_patch_tool()
-    .with_cli_bwrap_process_runner(admission, runner)
+    .with_cli_bwrap_permissioned_process_runner(admission, runner, permissioned_factory)
     .register_on(builder)
     .map_err(unexpected)?
     .build()
@@ -2502,21 +2859,80 @@ fn build_coding_loop_runtime(
 fn action_process_runner(
     workspace_root: &Path,
     merry_config: Option<&MerryConfig>,
-) -> Result<Arc<dyn ProcessRunner>, CliError> {
+) -> Result<ActionProcessBackend, CliError> {
     let path_rules = merry_config
         .map(MerryConfig::trusted_global_path_rules)
         .transpose()
         .map_err(unexpected)?
         .unwrap_or_default();
-    let mut runner =
-        BwrapProcessRunner::new_at_workspace_root(workspace_root).with_path_rules(path_rules);
-    if merry_config
+    let network_allowed = merry_config
         .map(MerryConfig::permissions_network_allowed)
-        .unwrap_or(false)
-    {
+        .unwrap_or(false);
+    let mut runner = BwrapProcessRunner::new_at_workspace_root(workspace_root)
+        .with_path_rules(path_rules.clone());
+    if network_allowed {
         runner = runner.allow_network();
     }
-    Ok(Arc::new(runner))
+    let mut permissioned_factory =
+        BwrapPermissionedProcessRunnerFactory::new_at_workspace_root(workspace_root)
+            .with_path_rules(path_rules);
+    if network_allowed {
+        permissioned_factory = permissioned_factory.allow_base_network();
+    }
+    Ok(ActionProcessBackend {
+        runner: Arc::new(runner),
+        permissioned_factory: Arc::new(permissioned_factory),
+    })
+}
+
+fn permission_network_smoke_process_runner(
+    workspace_root: &Path,
+    merry_config: Option<&MerryConfig>,
+) -> Result<ActionProcessBackend, CliError> {
+    let path_rules = merry_config
+        .map(MerryConfig::trusted_global_path_rules)
+        .transpose()
+        .map_err(unexpected)?
+        .unwrap_or_default();
+    let runner = BwrapProcessRunner::new_at_workspace_root(workspace_root)
+        .with_path_rules(path_rules.clone());
+    let permissioned_factory =
+        BwrapPermissionedProcessRunnerFactory::new_at_workspace_root(workspace_root)
+            .with_path_rules(path_rules);
+    Ok(ActionProcessBackend {
+        runner: Arc::new(runner),
+        permissioned_factory: Arc::new(permissioned_factory),
+    })
+}
+
+fn permission_network_live_smoke_task() -> String {
+    format!(
+        "\
+You are driving Merry's live permission-network smoke.
+
+Use the available tools, one tool call per step. Do not answer from memory.
+
+Required sequence:
+1. Call `{process_tool}` with exactly this argv: [\"{program}\", \"{arg1}\", \"{arg2}\"].
+2. The first process call is expected to fail because the default inner sandbox has no network.
+3. If that first process call fails, call `request_permissions` for the exact same process action with requested network access:
+   - reason: explain that the exact DNS lookup failed under the default inner sandbox and network is needed only for this smoke command.
+   - requested: {{\"network\": true}}
+   - for_action: {{\"kind\": \"process\", \"argv\": [\"{program}\", \"{arg1}\", \"{arg2}\"]}}
+4. After `request_permissions` resolves, inspect the tool result. It should execute the exact planned process action under the approved per-action network profile.
+5. Return a concise final answer only after the approved process result succeeds.
+
+Constraints:
+- Do not request any filesystem path permission.
+- Do not request network before the first process attempt fails.
+- Do not use shell strings, scripts, pipelines, env, stdin, git, cargo, curl, wget, or any command other than the exact argv above.
+- Do not call any workspace patch/write tool.
+",
+        process_tool = CODING_LOOP_PROCESS_TOOL,
+        program = PERMISSION_NETWORK_SMOKE_ARGV[0],
+        arg1 = PERMISSION_NETWORK_SMOKE_ARGV[1],
+        arg2 = PERMISSION_NETWORK_SMOKE_ARGV[2],
+    )
 }
 
 fn coding_loop_live_smoke_task(relative_cwd: Option<&str>) -> String {
@@ -2874,6 +3290,132 @@ impl ModelProvider for CodingLoopSmokeProvider {
     }
 }
 
+#[cfg(test)]
+struct PermissionNetworkSmokeProvider {
+    name: ProviderName,
+    capabilities: ModelCapabilities,
+    steps: Mutex<Vec<ModelEvent>>,
+}
+
+#[cfg(test)]
+impl PermissionNetworkSmokeProvider {
+    fn new() -> Result<Self, CliError> {
+        let steps = vec![
+            coding_loop_process_call(
+                "permission-network-smoke-initial-network",
+                &PERMISSION_NETWORK_SMOKE_ARGV,
+                None,
+            )?,
+            permission_network_smoke_request_call()?,
+            ModelEvent::Completed {
+                response: ModelResponse::new(
+                    vec![ModelOutput::text(
+                        "permission-network-smoke verified approved per-action network access",
+                    )],
+                    FinishReason::Stop,
+                    None,
+                ),
+            },
+        ];
+
+        Ok(Self {
+            name: ProviderName::new("merry-permission-network-smoke-provider")
+                .map_err(unexpected)?,
+            capabilities: ModelCapabilities::new(true, true, false, true, None, None)
+                .map_err(unexpected)?,
+            steps: Mutex::new(steps.into_iter().rev().collect()),
+        })
+    }
+}
+
+#[cfg(test)]
+impl ModelProvider for PermissionNetworkSmokeProvider {
+    fn name(&self) -> &ProviderName {
+        &self.name
+    }
+
+    fn capabilities(&self) -> &ModelCapabilities {
+        &self.capabilities
+    }
+
+    fn stream_model<'a>(
+        &'a self,
+        _request: ModelRequest,
+        context: ModelStreamContext,
+    ) -> ModelProviderFuture<'a, Result<ModelEventStream, ModelError>> {
+        Box::pin(async move {
+            if context.cancellation_token().is_cancelled() {
+                return Err(ModelError::Cancelled);
+            }
+
+            let event = self
+                .steps
+                .lock()
+                .expect("permission network smoke steps mutex should not be poisoned")
+                .pop()
+                .ok_or_else(|| {
+                    ModelError::invalid_request(
+                        "permission-network-smoke provider has no scripted step",
+                    )
+                })?;
+            Ok(Box::pin(stream::iter([Ok(event)])) as ModelEventStream)
+        })
+    }
+}
+
+#[cfg(test)]
+struct PermissionNetworkSmokeReviewProvider {
+    name: ProviderName,
+    capabilities: ModelCapabilities,
+}
+
+#[cfg(test)]
+impl PermissionNetworkSmokeReviewProvider {
+    fn new() -> Result<Self, CliError> {
+        Ok(Self {
+            name: ProviderName::new("merry-permission-network-smoke-review-provider")
+                .map_err(unexpected)?,
+            capabilities: ModelCapabilities::new(true, true, false, true, None, None)
+                .map_err(unexpected)?,
+        })
+    }
+}
+
+#[cfg(test)]
+impl ModelProvider for PermissionNetworkSmokeReviewProvider {
+    fn name(&self) -> &ProviderName {
+        &self.name
+    }
+
+    fn capabilities(&self) -> &ModelCapabilities {
+        &self.capabilities
+    }
+
+    fn stream_model<'a>(
+        &'a self,
+        _request: ModelRequest,
+        context: ModelStreamContext,
+    ) -> ModelProviderFuture<'a, Result<ModelEventStream, ModelError>> {
+        Box::pin(async move {
+            if context.cancellation_token().is_cancelled() {
+                return Err(ModelError::Cancelled);
+            }
+
+            let response = ModelResponse::new(
+                vec![ModelOutput::text(
+                    r#"{"schema_version":"permission_review.v1","decision":"approve","risk":"low","user_authorization":"high","rationale":"The debug smoke requested network only for the exact DNS lookup that just failed under the inner sandbox."}"#,
+                )],
+                FinishReason::Stop,
+                None,
+            );
+            Ok(
+                Box::pin(stream::iter([Ok(ModelEvent::Completed { response })]))
+                    as ModelEventStream,
+            )
+        })
+    }
+}
+
 struct CodingLoopTaskSmokeProvider {
     name: ProviderName,
     capabilities: ModelCapabilities,
@@ -2985,6 +3527,46 @@ fn coding_loop_process_call(
     coding_loop_tool_call(call_id, CODING_LOOP_PROCESS_TOOL, arguments)
 }
 
+#[cfg(test)]
+fn permission_network_smoke_request_call() -> Result<ModelEvent, CliError> {
+    let mut requested = serde_json::Map::new();
+    requested.insert("network".to_owned(), serde_json::Value::Bool(true));
+
+    let mut for_action = serde_json::Map::new();
+    for_action.insert(
+        "kind".to_owned(),
+        serde_json::Value::String("process".to_owned()),
+    );
+    for_action.insert(
+        "argv".to_owned(),
+        serde_json::Value::Array(
+            PERMISSION_NETWORK_SMOKE_ARGV
+                .iter()
+                .map(|argument| serde_json::Value::String((*argument).to_owned()))
+                .collect(),
+        ),
+    );
+
+    let mut arguments = serde_json::Map::new();
+    arguments.insert(
+        "reason".to_owned(),
+        serde_json::Value::String(
+            "The same DNS lookup failed under the default inner sandbox; request network for this exact debug smoke command."
+                .to_owned(),
+        ),
+    );
+    arguments.insert("requested".to_owned(), serde_json::Value::Object(requested));
+    arguments.insert(
+        "for_action".to_owned(),
+        serde_json::Value::Object(for_action),
+    );
+    coding_loop_tool_call(
+        "permission-network-smoke-request-network",
+        "request_permissions",
+        arguments,
+    )
+}
+
 fn coding_loop_workspace_call<const N: usize>(
     call_id: &str,
     tool_name: &str,
@@ -3048,7 +3630,7 @@ async fn run_shell(
         ))
     })?;
     let runner: Arc<dyn ProcessRunner> = if sandbox_child_handoff.is_some() {
-        action_process_runner(&current_dir, merry_config)?
+        action_process_runner(&current_dir, merry_config)?.runner()
     } else {
         Arc::new(TokioProcessRunner::new_at_workspace_root(&current_dir))
     };
@@ -3343,6 +3925,22 @@ where
     write_runtime_event_slice(events, writer).await?;
     write_compaction_config_summary(automatic_compaction, writer).await?;
     write_compaction_summary(runtime, writer).await?;
+    write_process_artifact_previews(runtime, events, writer).await
+}
+
+async fn write_permission_network_smoke_report<W>(
+    runtime: &Runtime,
+    events: &[RuntimeEvent],
+    writer: &mut W,
+) -> Result<(), CliError>
+where
+    W: AsyncWrite + Unpin,
+{
+    writer
+        .write_all(b"permission-network-smoke: ok\n")
+        .await
+        .map_err(stdout_error)?;
+    write_runtime_event_slice(events, writer).await?;
     write_process_artifact_previews(runtime, events, writer).await
 }
 
@@ -3720,10 +4318,15 @@ fn debug_openai_config_with_env(
         .context_compaction
         .map(|model| debug_openai_provider_config(&provider_config, &api_key, model.model))
         .transpose()?;
+    let approval_review = runtime_models
+        .approval_review
+        .map(|model| debug_openai_provider_config(&provider_config, &api_key, model.model))
+        .transpose()?;
 
     Ok(DebugOpenAiRuntimeConfig {
         primary,
         context_compaction,
+        approval_review,
     })
 }
 
@@ -3746,7 +4349,7 @@ fn apply_openai_context_compaction_provider(
     context_compaction: Option<DebugOpenAiConfig>,
 ) -> Result<RuntimeBuilder, CliError> {
     if let Some(config) = context_compaction {
-        let role_provider = openai_role_provider(config)?;
+        let role_provider = openai_context_compaction_provider(config)?;
         builder = builder.model_provider_for_role(
             role_provider.role,
             role_provider.provider,
@@ -3756,9 +4359,21 @@ fn apply_openai_context_compaction_provider(
     Ok(builder)
 }
 
-fn openai_role_provider(config: DebugOpenAiConfig) -> Result<RuntimeRoleProviderConfig, CliError> {
+fn openai_context_compaction_provider(
+    config: DebugOpenAiConfig,
+) -> Result<RuntimeRoleProviderConfig, CliError> {
     Ok(RuntimeRoleProviderConfig {
         role: RuntimeModelRole::ContextCompaction,
+        provider: Arc::new(OpenAiProvider::new(config.provider)),
+        model: ModelName::new(&config.model).map_err(debug_openai_usage_error)?,
+    })
+}
+
+fn openai_approval_review_provider(
+    config: DebugOpenAiConfig,
+) -> Result<RuntimeRoleProviderConfig, CliError> {
+    Ok(RuntimeRoleProviderConfig {
+        role: RuntimeModelRole::ApprovalReview,
         provider: Arc::new(OpenAiProvider::new(config.provider)),
         model: ModelName::new(&config.model).map_err(debug_openai_usage_error)?,
     })
@@ -3785,6 +4400,7 @@ struct DebugOpenAiConfig {
 struct DebugOpenAiRuntimeConfig {
     primary: DebugOpenAiConfig,
     context_compaction: Option<DebugOpenAiConfig>,
+    approval_review: Option<DebugOpenAiConfig>,
 }
 
 fn debug_usage() -> String {
@@ -3935,7 +4551,7 @@ mod tests {
         plan_sandbox_bootstrap_with_file_exists, report_cli_exit, run_debug_coding_loop_smoke,
         sandbox_runtime_profile_from_evidence, shell_process_action_intent,
         shell_runtime_admission, shell_usage, write_coding_loop_task_live_smoke_report,
-        write_debug_openai_tool_events,
+        write_debug_openai_tool_events, write_permission_network_smoke_report,
     };
     use super::{DEBUG_TOOL_NAME, run_shell_to_writer, write_runtime_step_events};
     use crate::CodingLoopTaskSmokeTask;
@@ -4059,6 +4675,7 @@ mod tests {
                 }
                 Some(
                     DebugCommand::CodingLoopSmoke
+                    | DebugCommand::PermissionNetworkSmoke(_)
                     | DebugCommand::CodingLoopLiveSmoke(_)
                     | DebugCommand::CodingLoopTaskSmoke(_)
                     | DebugCommand::CodingLoopTaskLiveSmoke(_)
@@ -4080,12 +4697,46 @@ mod tests {
                 Some(DebugCommand::CodingLoopSmoke) => {}
                 Some(
                     DebugCommand::OpenAi(_)
+                    | DebugCommand::PermissionNetworkSmoke(_)
                     | DebugCommand::CodingLoopLiveSmoke(_)
                     | DebugCommand::CodingLoopTaskSmoke(_)
                     | DebugCommand::CodingLoopTaskLiveSmoke(_)
                     | DebugCommand::CodingLoopSubagentLiveSmoke(_),
                 )
                 | None => panic!("expected debug coding-loop-smoke subcommand"),
+            },
+            CliCommand::Shell(_) => panic!("expected debug subcommand"),
+        }
+    }
+
+    #[test]
+    fn clap_parses_debug_permission_network_smoke() {
+        let cli = Cli::try_parse_from([
+            "merry",
+            "debug",
+            "permission-network-smoke",
+            "--model",
+            "gpt-test",
+            "--max-output-tokens",
+            "384",
+        ])
+        .expect("debug permission-network-smoke args should parse");
+
+        match cli.command {
+            CliCommand::Debug(debug) => match debug.command {
+                Some(DebugCommand::PermissionNetworkSmoke(smoke)) => {
+                    assert_eq!(smoke.model.as_deref(), Some("gpt-test"));
+                    assert_eq!(smoke.max_output_tokens, 384);
+                }
+                Some(
+                    DebugCommand::OpenAi(_)
+                    | DebugCommand::CodingLoopSmoke
+                    | DebugCommand::CodingLoopLiveSmoke(_)
+                    | DebugCommand::CodingLoopTaskSmoke(_)
+                    | DebugCommand::CodingLoopTaskLiveSmoke(_)
+                    | DebugCommand::CodingLoopSubagentLiveSmoke(_),
+                )
+                | None => panic!("expected debug permission-network-smoke subcommand"),
             },
             CliCommand::Shell(_) => panic!("expected debug subcommand"),
         }
@@ -4113,6 +4764,7 @@ mod tests {
                 Some(
                     DebugCommand::OpenAi(_)
                     | DebugCommand::CodingLoopSmoke
+                    | DebugCommand::PermissionNetworkSmoke(_)
                     | DebugCommand::CodingLoopTaskSmoke(_)
                     | DebugCommand::CodingLoopTaskLiveSmoke(_)
                     | DebugCommand::CodingLoopSubagentLiveSmoke(_),
@@ -4136,6 +4788,7 @@ mod tests {
                 Some(
                     DebugCommand::OpenAi(_)
                     | DebugCommand::CodingLoopSmoke
+                    | DebugCommand::PermissionNetworkSmoke(_)
                     | DebugCommand::CodingLoopLiveSmoke(_)
                     | DebugCommand::CodingLoopTaskLiveSmoke(_)
                     | DebugCommand::CodingLoopSubagentLiveSmoke(_),
@@ -4171,6 +4824,7 @@ mod tests {
                 Some(
                     DebugCommand::OpenAi(_)
                     | DebugCommand::CodingLoopSmoke
+                    | DebugCommand::PermissionNetworkSmoke(_)
                     | DebugCommand::CodingLoopLiveSmoke(_)
                     | DebugCommand::CodingLoopTaskSmoke(_)
                     | DebugCommand::CodingLoopSubagentLiveSmoke(_),
@@ -4203,6 +4857,7 @@ mod tests {
                 Some(
                     DebugCommand::OpenAi(_)
                     | DebugCommand::CodingLoopSmoke
+                    | DebugCommand::PermissionNetworkSmoke(_)
                     | DebugCommand::CodingLoopLiveSmoke(_)
                     | DebugCommand::CodingLoopTaskSmoke(_)
                     | DebugCommand::CodingLoopTaskLiveSmoke(_),
@@ -4280,6 +4935,7 @@ mod tests {
             None,
             AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
             Arc::new(runner.clone()),
+            None,
             fixture,
             merry_runtime::AutomaticCompactionConfig::default(),
         )
@@ -4333,8 +4989,10 @@ mod tests {
             runner,
             super::CodingLoopRuntimeOptions {
                 allow_hidden_workspace_paths: false,
+                approval_review: None,
                 automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
                 context_compaction: None,
+                permissioned_process_runner_factory: None,
                 skill_roots: vec![skill_root.clone()],
                 subagents: SubagentsConfig::default(),
             },
@@ -4355,11 +5013,21 @@ mod tests {
             .map(|message| message.content().as_text())
             .collect::<Vec<_>>()
             .join("\n");
+        let request_text = request
+            .messages()
+            .iter()
+            .map(|message| message.content().as_text())
+            .collect::<Vec<_>>()
+            .join("\n");
 
         assert!(stable_text.contains("demo-skill"));
         assert!(stable_text.contains("Use for demo tasks."));
-        assert!(stable_text.contains("workspace_read_file"));
         assert!(stable_text.contains("demo/SKILL.md"));
+        assert!(request_text.contains("workspace_read_file"));
+        assert!(request_text.contains("Workspace coding profile"));
+        assert!(request_text.contains("configured sandbox/profile"));
+        assert!(request_text.contains("network access may be intentionally restricted"));
+        assert!(request_text.contains("call request_permissions for that exact action"));
         assert!(!stable_text.contains("body sentinel"));
     }
 
@@ -4395,8 +5063,10 @@ mod tests {
             runner,
             super::CodingLoopRuntimeOptions {
                 allow_hidden_workspace_paths: false,
+                approval_review: None,
                 automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
                 context_compaction: None,
+                permissioned_process_runner_factory: None,
                 skill_roots: vec![skill_root.clone()],
                 subagents: SubagentsConfig::default(),
             },
@@ -4439,8 +5109,10 @@ mod tests {
             runner,
             super::CodingLoopRuntimeOptions {
                 allow_hidden_workspace_paths: false,
+                approval_review: None,
                 automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
                 context_compaction: None,
+                permissioned_process_runner_factory: None,
                 skill_roots: vec![missing_skill_root],
                 subagents: SubagentsConfig::default(),
             },
@@ -4484,8 +5156,10 @@ mod tests {
             runner,
             super::CodingLoopRuntimeOptions {
                 allow_hidden_workspace_paths: false,
+                approval_review: None,
                 automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
                 context_compaction: None,
+                permissioned_process_runner_factory: None,
                 skill_roots: Vec::new(),
                 subagents: SubagentsConfig::default(),
             },
@@ -4530,8 +5204,10 @@ mod tests {
             runner,
             super::CodingLoopRuntimeOptions {
                 allow_hidden_workspace_paths: false,
+                approval_review: None,
                 automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
                 context_compaction: None,
+                permissioned_process_runner_factory: None,
                 skill_roots: Vec::new(),
                 subagents: SubagentsConfig::enabled_for_test(
                     SubagentConfig::new(2, 1).expect("valid subagent config"),
@@ -4621,8 +5297,10 @@ mod tests {
             Arc::new(FakeProcessRunner::succeeding("")),
             super::CodingLoopRuntimeOptions {
                 allow_hidden_workspace_paths: false,
+                approval_review: None,
                 automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
                 context_compaction: None,
+                permissioned_process_runner_factory: None,
                 skill_roots: Vec::new(),
                 subagents: SubagentsConfig::enabled_for_test(
                     SubagentConfig::new(2, 1).expect("valid subagent config"),
@@ -4834,6 +5512,7 @@ mod tests {
             Arc::new(FakeProcessRunner::succeeding(
                 "sensitive process stdout must not leak\n",
             )),
+            None,
             merry_runtime::AutomaticCompactionConfig::default(),
         )
         .expect("coding-loop smoke runtime should build");
@@ -4877,6 +5556,9 @@ api_key_file = "secrets/openai.key"
 
 [models.context_compaction]
 model = "gpt-compact"
+
+[models.approval_review]
+model = "gpt-review"
 "#,
             ),
             &paths,
@@ -4901,6 +5583,14 @@ model = "gpt-compact"
             context_compaction.provider.base_url(),
             "https://api.example.test/v1"
         );
+        let approval_review = loaded
+            .approval_review
+            .expect("approval review debug config should load");
+        assert_eq!(approval_review.model, "gpt-review");
+        assert_eq!(
+            approval_review.provider.base_url(),
+            "https://api.example.test/v1"
+        );
     }
 
     #[test]
@@ -4919,6 +5609,10 @@ api_key = "sk-inline-secret"
 [models.context_compaction]
 provider = "openai-compatible"
 model = "gpt-compact"
+
+[models.approval_review]
+provider = "openai-compatible"
+model = "gpt-review"
 "#,
             ),
             &paths,
@@ -4938,6 +5632,13 @@ model = "gpt-compact"
                 .expect("context compaction debug config should load")
                 .model,
             "gpt-compact"
+        );
+        assert_eq!(
+            loaded
+                .approval_review
+                .expect("approval review debug config should load")
+                .model,
+            "gpt-review"
         );
     }
 
@@ -6686,6 +7387,55 @@ retained_raw_tail_items = 4
         assert!(text.contains("\"type\":\"process_artifact_preview\""));
         assert!(text.contains("\"call_id\":\"call-check\""));
         assert!(text.contains("\"stderr\":\"cargo failed\\n\""));
+    }
+
+    #[tokio::test]
+    async fn permission_network_smoke_report_includes_tool_calls_and_process_previews() {
+        let temp = tempfile::tempdir().expect("temp dir should be created");
+        let runner = Arc::new(FakeProcessRunner::scripted([
+            FakeProcessRunnerStep::failure("network unreachable\n"),
+            FakeProcessRunnerStep::success("93.184.216.34 example.com\n"),
+        ]));
+        let runtime = super::build_scripted_permission_network_smoke_runtime(
+            temp.path(),
+            AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
+            runner.clone(),
+            Arc::new(merry_runtime::StaticPermissionedProcessRunnerFactory::new(
+                runner,
+            )),
+            merry_runtime::AutomaticCompactionConfig::default(),
+        )
+        .expect("permission network smoke runtime should build");
+        let result = runtime
+            .run_agent_loop(
+                StepInput::user_text("run permission network smoke").expect("valid step input"),
+                StepContext::default(),
+                AgentLoopConfig::new(6).expect("valid loop config"),
+            )
+            .await
+            .expect("permission network smoke should run");
+        super::assert_permission_network_smoke_result(&runtime, &result)
+            .await
+            .expect("permission network smoke assertions should pass");
+
+        let mut output = Vec::new();
+        write_permission_network_smoke_report(&runtime, result.events(), &mut output)
+            .await
+            .expect("permission network smoke report should write");
+
+        let text = String::from_utf8(output).expect("output should be utf-8");
+        let mut lines = text.lines();
+        assert_eq!(lines.next(), Some("permission-network-smoke: ok"));
+        assert!(text.contains("\"type\":\"tool_call_pending\""));
+        assert!(text.contains("\"name\":\"run_process\""));
+        assert!(text.contains("\"name\":\"request_permissions\""));
+        assert!(text.contains("\"network\":true"));
+        assert!(text.contains("\"type\":\"tool_call_resolved\""));
+        assert!(text.contains("\"type\":\"process_artifact_preview\""));
+        assert!(text.contains("\"call_id\":\"permission-network-smoke-initial-network\""));
+        assert!(text.contains("\"call_id\":\"permission-network-smoke-request-network\""));
+        assert!(text.contains("\"stderr\":\"network unreachable\\n\""));
+        assert!(text.contains("\"stdout\":\"93.184.216.34 example.com\\n\""));
     }
 
     #[tokio::test]
