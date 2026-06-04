@@ -277,7 +277,10 @@ async fn citation_backed_checkpoint_renders_before_summary_and_memory() {
         .expect("context compiles")
         .to_snapshot();
 
-    assert!(snapshot.starts_with("compacted-checkpoint:\ntext:claims:\n"));
+    assert!(snapshot.starts_with(
+        "compacted-checkpoint:\nguidance:Compacted checkpoint text is navigation, not exact evidence."
+    ));
+    assert!(snapshot.contains("\ntext:claims:\n"));
     assert!(snapshot.contains(
         "- c1 current_state [r1]: Citation-backed checkpointing is the current direction."
     ));

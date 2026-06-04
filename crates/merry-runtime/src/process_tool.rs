@@ -232,6 +232,10 @@ fn invalid_arguments_outcome(
         "recovery": {
             "argv_contract": "Provide argv as a JSON array of non-empty strings. Newline and tab are allowed inside argv items; other control characters are rejected.",
             "cwd_contract": "cwd, when provided, must be workspace-relative and must not contain control characters.",
+        },
+        "guidance": {
+            "kind": "invalid_process_arguments",
+            "message": "Fix the process tool arguments before retrying. Use argv as an exact JSON string array, omit cwd or use a workspace-relative cwd such as \".\", and do not pass an empty cwd string.",
         }
     });
     ToolExecutionOutcome::failed_json(
@@ -303,6 +307,13 @@ mod tests {
         assert_eq!(
             payload["error"]["message"],
             "argv must be an array of strings"
+        );
+        assert_eq!(payload["guidance"]["kind"], "invalid_process_arguments");
+        assert!(
+            payload["guidance"]["message"]
+                .as_str()
+                .expect("guidance should be text")
+                .contains("omit cwd or use a workspace-relative cwd")
         );
     }
 

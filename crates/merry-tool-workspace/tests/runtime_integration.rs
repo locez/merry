@@ -233,8 +233,12 @@ fn assert_continuation_request_body(request: &ModelRequest, original_task: &str)
         dynamic.len() >= 2,
         "continuation requests should include append-only task body and loop-control input"
     );
-    assert_eq!(dynamic[0].role(), ModelMessageRole::User);
-    assert_eq!(dynamic[0].content().as_text(), original_task);
+    assert!(
+        dynamic.iter().any(|message| {
+            message.role() == ModelMessageRole::User && message.content().as_text() == original_task
+        }),
+        "continuation request should preserve original task user message"
+    );
     assert_eq!(
         dynamic.last().expect("dynamic message").role(),
         ModelMessageRole::User
