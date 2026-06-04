@@ -357,24 +357,27 @@ impl PyRuntime {
         Ok(())
     }
 
-    #[pyo3(signature = (task, final_output_schema_json=None))]
+    #[pyo3(signature = (task, final_output_schema_json=None, max_steps=None))]
     fn run_blocking(
         &self,
         py: Python<'_>,
         task: String,
         final_output_schema_json: Option<String>,
+        max_steps: Option<usize>,
     ) -> PyResult<Py<PyAny>> {
         let runtime = self.runtime.clone();
-        let result =
-            py.detach(move || run_agent_loop_blocking(runtime, task, final_output_schema_json))?;
+        let result = py.detach(move || {
+            run_agent_loop_blocking(runtime, task, final_output_schema_json, max_steps)
+        })?;
         agent_loop_result_to_python(py, result)
     }
 
-    #[pyo3(signature = (task, final_output_schema_json=None))]
+    #[pyo3(signature = (task, final_output_schema_json=None, max_steps=None))]
     fn run_stream_blocking(
         &self,
         task: String,
         final_output_schema_json: Option<String>,
+        max_steps: Option<usize>,
     ) -> NativeRuntimeEventStream {
         let runtime = self.runtime.clone();
         let (sender, receiver) = mpsc::channel();
@@ -384,6 +387,7 @@ impl PyRuntime {
                 runtime,
                 task,
                 final_output_schema_json,
+                max_steps,
                 sender.clone(),
                 command_receiver,
             ) {
@@ -999,9 +1003,13 @@ fn run_agent_loop_blocking(
     runtime: Runtime,
     task: String,
     final_output_schema_json: Option<String>,
+    max_steps: Option<usize>,
 ) -> PyResult<AgentLoopResult> {
     let final_output_contract = final_output_contract_from_schema_json(final_output_schema_json)
         .map_err(SchemaMessage::into_py_error)?;
+    let config = agent_loop_config(final_output_contract, max_steps).map_err(|message| {
+        error::runtime_message_to_py(message.code, &message.message, Some(message.hint))
+    })?;
     let tokio_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -1017,7 +1025,7 @@ fn run_agent_loop_blocking(
         let input = StepInput::user_text(&task).map_err(error::runtime_error_to_py)?;
         let context = StepContext::new(CancellationToken::new());
         runtime
-            .run_agent_loop(input, context, agent_loop_config(final_output_contract))
+            .run_agent_loop(input, context, config)
             .await
             .map_err(error::agent_loop_error_to_py)
     })
@@ -1027,10 +1035,12 @@ fn run_agent_loop_event_stream_blocking(
     runtime: Runtime,
     task: String,
     final_output_schema_json: Option<String>,
+    max_steps: Option<usize>,
     sender: mpsc::Sender<StreamRunnerMessage>,
     command_receiver: tokio::sync::mpsc::UnboundedReceiver<StreamRunnerCommand>,
 ) -> Result<(), StreamRunnerError> {
     let final_output_contract = final_output_contract_from_schema_json(final_output_schema_json)?;
+    let config = agent_loop_config(final_output_contract, max_steps)?;
     let tokio_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -1041,33 +1051,27 @@ fn run_agent_loop_event_stream_blocking(
         })?;
 
     tokio_runtime.block_on(async move {
-        run_agent_loop_event_stream(
-            runtime,
-            task,
-            final_output_contract,
-            sender,
-            command_receiver,
-        )
-        .await
-        .map_err(|message| StreamRunnerError {
-            code: "runtime.stream_failed",
-            message,
-            hint: Some("Retry the operation or use Runtime.run(...) for a collected result."),
-        })
+        run_agent_loop_event_stream(runtime, task, config, sender, command_receiver)
+            .await
+            .map_err(|message| StreamRunnerError {
+                code: "runtime.stream_failed",
+                message,
+                hint: Some("Retry the operation or use Runtime.run(...) for a collected result."),
+            })
     })
 }
 
 async fn run_agent_loop_event_stream(
     runtime: Runtime,
     task: String,
-    final_output_contract: Option<FinalOutputContract>,
+    config: AgentLoopConfig,
     sender: mpsc::Sender<StreamRunnerMessage>,
     mut command_receiver: tokio::sync::mpsc::UnboundedReceiver<StreamRunnerCommand>,
 ) -> Result<(), String> {
     let input = StepInput::user_text(&task).map_err(|source| source.to_string())?;
     let context = StepContext::new(CancellationToken::new());
     let mut stream = runtime
-        .run_agent_loop_stream(input, context, agent_loop_config(final_output_contract))
+        .run_agent_loop_stream(input, context, config)
         .map_err(|source| source.to_string())?;
 
     loop {
@@ -1206,11 +1210,23 @@ fn final_output_contract_from_schema_json(
         })
 }
 
-fn agent_loop_config(final_output_contract: Option<FinalOutputContract>) -> AgentLoopConfig {
-    let config = AgentLoopConfig::default();
+fn agent_loop_config(
+    final_output_contract: Option<FinalOutputContract>,
+    max_steps: Option<usize>,
+) -> Result<AgentLoopConfig, SchemaMessage> {
+    let config = match max_steps {
+        Some(max_steps) => AgentLoopConfig::new(max_steps).map_err(|source| {
+            SchemaMessage::new(
+                "runtime.max_steps_invalid",
+                source.to_string(),
+                "Pass max_steps as an integer greater than zero.",
+            )
+        })?,
+        None => AgentLoopConfig::default(),
+    };
     match final_output_contract {
-        Some(contract) => config.with_final_output_contract(contract),
-        None => config,
+        Some(contract) => Ok(config.with_final_output_contract(contract)),
+        None => Ok(config),
     }
 }
 

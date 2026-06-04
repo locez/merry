@@ -153,6 +153,19 @@ Run the live example:
 uv run examples/final_output_model.py
 ```
 
+## Agent Loop Budget
+
+SDK runs use the Rust runtime's bounded agent loop. The default step budget is
+small enough for normal tool use, but tasks that intentionally need many model
+turns or tool continuations should pass `max_steps` explicitly:
+
+```python
+stream = runtime.stream(
+    "Run a task that may need many tool continuations.",
+    max_steps=32,
+)
+```
+
 ## Tests
 
 ```bash

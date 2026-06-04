@@ -18,5 +18,13 @@ classifiers = [
 [tool.maturin]
 manifest-path = "../../crates/merry-py/Cargo.toml"
 python-source = "."
+python-packages = ["merry"]
 module-name = "merry._merry"
 bindings = "pyo3"
+exclude = [
+    "**/__pycache__/*",
+    "**/*.py[cod]",
+    "examples/**",
+    "probes/**",
+    "tests/**",
+]
