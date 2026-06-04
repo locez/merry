@@ -35,11 +35,13 @@ class RuntimeStream:
         runtime: "Runtime",
         task: str,
         final_output_model: type[BaseModel] | None = None,
+        max_steps: int | None = None,
     ) -> None:
         self._runtime = runtime
         self._task = task
         self._final_output_model = final_output_model
         self._final_output_schema_json = _final_output_schema_json(final_output_model)
+        self._max_steps = _validate_max_steps(max_steps)
         self._events: list[dict[str, Any]] = []
         self._result: RunResult | None = None
         self._started = False
@@ -59,6 +61,7 @@ class RuntimeStream:
             self._runtime._native.run_stream_blocking,
             self._task,
             self._final_output_schema_json,
+            self._max_steps,
         )
 
         while True:
@@ -73,7 +76,9 @@ class RuntimeStream:
 
             pending = _bridge_tool_call([event])
             if pending is not None:
-                await self._resolve_bridge_tool_call(native_stream, pending)
+                submitted = await self._resolve_bridge_tool_call(native_stream, pending)
+                if not submitted:
+                    continue
 
     async def result(self) -> RunResult:
         if not self._finished:
@@ -105,20 +110,27 @@ class RuntimeStream:
         self,
         native_stream: Any,
         pending: dict[str, Any],
-    ) -> None:
+    ) -> bool:
         tool = self._runtime._tools.get(pending["name"])
         if tool is None:
-            return
+            return True
 
         output = await _call_tool(tool, pending["arguments"])
         content_json = json.dumps(output, sort_keys=True)
         artifact_id = f"python-tool-result-{len(self._events) + 1}"
-        await _run_in_worker(
-            native_stream.submit_tool_success_json_blocking,
-            pending["id"],
-            artifact_id,
-            content_json,
-        )
+        try:
+            await _run_in_worker(
+                native_stream.submit_tool_success_json_blocking,
+                pending["id"],
+                artifact_id,
+                content_json,
+            )
+        except NativeMerryError as error:
+            decoded = _decode_native_error(error)
+            if decoded.code == "runtime.stream_closed":
+                return False
+            raise decoded from error
+        return True
 
 
 @dataclass(frozen=True)
@@ -305,18 +317,23 @@ class Runtime:
         task: str,
         *,
         final_output_model: type[BaseModel] | None = None,
+        max_steps: int | None = None,
     ) -> RunResult:
-        return asyncio.run(self.run(task, final_output_model=final_output_model))
+        return asyncio.run(
+            self.run(task, final_output_model=final_output_model, max_steps=max_steps)
+        )
 
     def _run_native_blocking(
         self,
         task: str,
         final_output_model: type[BaseModel] | None,
+        max_steps: int | None,
     ) -> RunResult:
         try:
             raw = self._native.run_blocking(
                 task,
                 _final_output_schema_json(final_output_model),
+                _validate_max_steps(max_steps),
             )
         except NativeMerryError as error:
             raise _decode_native_error(error) from error
@@ -328,11 +345,21 @@ class Runtime:
         task: str,
         *,
         final_output_model: type[BaseModel] | None = None,
+        max_steps: int | None = None,
     ) -> RunResult:
         if not getattr(self, "_tools", {}):
-            return await _run_in_worker(self._run_native_blocking, task, final_output_model)
+            return await _run_in_worker(
+                self._run_native_blocking,
+                task,
+                final_output_model,
+                max_steps,
+            )
 
-        stream = self.stream(task, final_output_model=final_output_model)
+        stream = self.stream(
+            task,
+            final_output_model=final_output_model,
+            max_steps=max_steps,
+        )
         async for _event in stream:
             pass
         return await stream.result()
@@ -342,8 +369,13 @@ class Runtime:
         task: str,
         *,
         final_output_model: type[BaseModel] | None = None,
+        max_steps: int | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
-        async for event in self.stream(task, final_output_model=final_output_model):
+        async for event in self.stream(
+            task,
+            final_output_model=final_output_model,
+            max_steps=max_steps,
+        ):
             yield event
 
     def stream(
@@ -351,8 +383,14 @@ class Runtime:
         task: str,
         *,
         final_output_model: type[BaseModel] | None = None,
+        max_steps: int | None = None,
     ) -> RuntimeStream:
-        return RuntimeStream(self, task, final_output_model=final_output_model)
+        return RuntimeStream(
+            self,
+            task,
+            final_output_model=final_output_model,
+            max_steps=max_steps,
+        )
 
     def register_tool(
         self,
@@ -471,6 +509,16 @@ def _validate_final_output_json(
     if final_output_json is None:
         return None
     return final_output_model.model_validate_json(final_output_json)
+
+
+def _validate_max_steps(max_steps: int | None) -> int | None:
+    if max_steps is None:
+        return None
+    if isinstance(max_steps, bool) or not isinstance(max_steps, int):
+        raise TypeError("max_steps must be an int greater than zero.")
+    if max_steps < 1:
+        raise ValueError("max_steps must be greater than zero.")
+    return max_steps
 
 
 def _bridge_tool_call(events: list[dict[str, Any]]) -> dict[str, Any] | None:

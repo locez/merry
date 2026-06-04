@@ -88,7 +88,7 @@ async def _assert_runtime_run_stream_yields_before_stream_finishes():
             return self._events.pop(0)
 
     class SlowStreamingNativeRuntime:
-        def run_stream_blocking(self, _task, _final_output_schema_json=None):
+        def run_stream_blocking(self, _task, _final_output_schema_json=None, _max_steps=None):
             return SlowNativeStream()
 
     runtime._native = SlowStreamingNativeRuntime()
@@ -110,7 +110,7 @@ async def _assert_runtime_run_does_not_block_event_loop():
     runtime = merry.Runtime.__new__(merry.Runtime)
 
     class SlowNativeRuntime:
-        def run_blocking(self, _task, _final_output_schema_json=None):
+        def run_blocking(self, _task, _final_output_schema_json=None, _max_steps=None):
             time.sleep(0.05)
             return {
                 "status": "completed",
@@ -137,6 +137,127 @@ async def _assert_runtime_run_does_not_block_event_loop():
 
 def test_runtime_run_does_not_block_event_loop():
     asyncio.run(_assert_runtime_run_does_not_block_event_loop())
+
+
+async def _assert_runtime_run_passes_max_steps_to_native():
+    runtime = merry.Runtime.__new__(merry.Runtime)
+    seen = {}
+
+    class NativeRuntime:
+        def run_blocking(self, task, final_output_schema_json=None, max_steps=None):
+            seen["task"] = task
+            seen["schema"] = final_output_schema_json
+            seen["max_steps"] = max_steps
+            return {
+                "status": "completed",
+                "steps_run": 1,
+                "final_output": "done",
+                "final_output_json": None,
+                "events": [],
+            }
+
+    runtime._native = NativeRuntime()
+    runtime._tools = {}
+
+    await runtime.run("Say done.", max_steps=32)
+
+    assert seen == {"task": "Say done.", "schema": None, "max_steps": 32}
+
+
+def test_runtime_run_passes_max_steps_to_native():
+    asyncio.run(_assert_runtime_run_passes_max_steps_to_native())
+
+
+def test_runtime_rejects_invalid_max_steps():
+    runtime = merry.Runtime.__new__(merry.Runtime)
+    runtime._native = object()
+    runtime._tools = {}
+
+    with pytest.raises(ValueError, match="max_steps"):
+        runtime.stream("Say streamed.", max_steps=0)
+
+    with pytest.raises(TypeError, match="max_steps"):
+        runtime.stream("Say streamed.", max_steps=True)
+
+
+async def _assert_stream_closed_after_bridge_result_returns_blocked_result():
+    runtime = merry.Runtime.__new__(merry.Runtime)
+    calls = []
+
+    class NativeStream:
+        def __init__(self):
+            self._events = [
+                {
+                    "kind": {
+                        "type": "bridge_tool_call_requested",
+                        "call": {
+                            "id": "call-bridge",
+                            "name": "probe_step",
+                            "arguments": {"value": "payload"},
+                        },
+                    }
+                },
+                None,
+            ]
+
+        def next_blocking(self):
+            return self._events.pop(0)
+
+        def submit_tool_success_json_blocking(self, _call_id, _artifact_id, _content_json):
+            raise merry.NativeMerryError(
+                '{"code":"runtime.stream_closed","domain":"runtime",'
+                '"message":"Runtime event stream closed before accepting the bridge tool result.",'
+                '"hint":"Consume bridge tool events from the active RuntimeStream.",'
+                '"retryability":"user_action_required","context":{}}'
+            )
+
+        def result_blocking(self):
+            return {
+                "status": "blocked",
+                "steps_run": 16,
+                "final_output": None,
+                "final_output_json": None,
+                "events": [
+                    {
+                        "kind": {
+                            "type": "bridge_tool_call_requested",
+                            "call": {
+                                "id": "call-bridge",
+                                "name": "probe_step",
+                                "arguments": {"value": "payload"},
+                            },
+                        }
+                    }
+                ],
+            }
+
+    class NativeRuntime:
+        def run_stream_blocking(self, _task, _final_output_schema_json=None, _max_steps=None):
+            return NativeStream()
+
+    runtime._native = NativeRuntime()
+
+    async def probe_step(value: str):
+        calls.append(value)
+        return {"ok": True}
+
+    runtime._tools = {"probe_step": merry.Tool.bridge(probe_step, description="Probe.", schema={})}
+
+    stream = runtime.stream("Run probe.", max_steps=16)
+    event_types = []
+    async for event in stream:
+        event_types.append(event["kind"]["type"])
+
+    result = await stream.result()
+
+    assert calls == ["payload"]
+    assert event_types == ["bridge_tool_call_requested"]
+    assert result.status == "blocked"
+    assert result.steps_run == 16
+
+
+def test_stream_closed_after_bridge_result_returns_blocked_result():
+    asyncio.run(_assert_stream_closed_after_bridge_result_returns_blocked_result())
 
 
 def test_runtime_default_constructor_returns_runtime_object():
