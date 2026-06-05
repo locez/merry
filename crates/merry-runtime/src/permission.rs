@@ -734,7 +734,8 @@ fn request_permissions_input_schema() -> Result<ToolInputSchema, PermissionAdmis
                     },
                     "cwd": {
                         "type": "string",
-                        "description": "Optional workspace-relative working directory for process actions."
+                        "minLength": 1,
+                        "description": "Optional workspace-relative working directory for process actions. For the workspace root, omit cwd or use \".\"; never pass an empty string."
                     }
                 },
                 "required": ["kind", "argv"]
@@ -921,6 +922,7 @@ fn argv_from_arguments(value: Option<&Value>) -> Result<Vec<String>, PermissionA
 fn cwd_from_arguments(value: Option<&Value>) -> Result<Option<String>, PermissionAdmissionError> {
     match value {
         None | Some(Value::Null) => Ok(None),
+        Some(Value::String(cwd)) if cwd.is_empty() => Ok(None),
         Some(Value::String(cwd)) => Ok(Some(cwd.clone())),
         Some(_) => Err(PermissionAdmissionError::InvalidArguments {
             message: "cwd must be a string when provided".to_owned(),
@@ -1235,6 +1237,41 @@ mod tests {
         let PermissionedAction::Process(intent) = request.action();
         assert_eq!(intent.argv(), ["cargo", "test"]);
         assert_eq!(intent.cwd(), Some("."));
+    }
+
+    #[test]
+    fn request_permissions_schema_rejects_empty_process_cwd() {
+        let tool = request_permissions_tool().expect("permission tool should build");
+        let schema = serde_json::to_value(tool.spec().input_schema().as_schema())
+            .expect("schema should serialize");
+
+        assert_eq!(
+            schema["properties"]["for_action"]["properties"]["cwd"]["minLength"],
+            1
+        );
+        assert!(
+            schema["properties"]["for_action"]["properties"]["cwd"]["description"]
+                .as_str()
+                .expect("cwd description should be text")
+                .contains("never pass an empty string")
+        );
+    }
+
+    #[test]
+    fn permission_request_treats_empty_process_cwd_as_workspace_root() {
+        let request = permission_request_from_call(
+            &call(json!({
+                "reason": "Need DNS lookup",
+                "requested": { "network": true },
+                "for_action": { "kind": "process", "argv": ["ping", "-c", "1", "baidu.com"], "cwd": "" }
+            })),
+            Vec::new(),
+        )
+        .expect("request should parse");
+
+        let PermissionedAction::Process(intent) = request.action();
+        assert_eq!(intent.argv(), ["ping", "-c", "1", "baidu.com"]);
+        assert_eq!(intent.cwd(), None);
     }
 
     #[test]

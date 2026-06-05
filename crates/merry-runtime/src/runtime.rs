@@ -228,6 +228,12 @@ impl Runtime {
         &self.inner.capabilities
     }
 
+    /// Returns whether this runtime asks the model for tool-progress commentary.
+    #[must_use]
+    pub fn progress_commentary(&self) -> bool {
+        self.inner.progress_commentary
+    }
+
     pub(crate) fn step_with_active_permit(
         &self,
         input: StepInput,
@@ -1741,6 +1747,7 @@ pub struct RuntimeBuilder {
     model_configs: RuntimeModelConfigs,
     automatic_compaction: AutomaticCompactionConfig,
     capabilities: RuntimeCapabilities,
+    progress_commentary: bool,
     registered_tools: Vec<RegisteredTool>,
     initial_context_summaries: BTreeMap<String, String>,
     skill_catalog: Option<SkillCatalog>,
@@ -1769,6 +1776,7 @@ impl RuntimeBuilder {
             model_configs: RuntimeModelConfigs::default(),
             automatic_compaction: AutomaticCompactionConfig::default(),
             capabilities: crate::RuntimeCapabilities::default(),
+            progress_commentary: false,
             registered_tools: Vec::new(),
             initial_context_summaries: BTreeMap::new(),
             skill_catalog: None,
@@ -1855,6 +1863,7 @@ impl RuntimeBuilder {
     pub fn with_profile(mut self, profile: RuntimeProfile) -> Result<Self, RuntimeError> {
         let parts = profile.into_parts();
         self.capabilities = parts.capabilities;
+        self.progress_commentary = parts.progress_commentary;
         for (id, text) in parts.initial_context_summaries {
             self = self.initial_context_summary(&id, &text);
         }
@@ -2131,6 +2140,7 @@ impl RuntimeBuilder {
                 model_configs: self.model_configs,
                 automatic_compaction: self.automatic_compaction,
                 capabilities: self.capabilities,
+                progress_commentary: self.progress_commentary,
                 tool_registry,
                 memory_activation_source: self.memory_activation_source,
                 allow_low_risk_workspace_patches: self.allow_low_risk_workspace_patches,
@@ -2157,6 +2167,7 @@ struct RuntimeInner {
     model_configs: RuntimeModelConfigs,
     automatic_compaction: AutomaticCompactionConfig,
     capabilities: RuntimeCapabilities,
+    progress_commentary: bool,
     tool_registry: ToolRegistry,
     memory_activation_source: Arc<dyn MemoryActivationSource>,
     allow_low_risk_workspace_patches: bool,
@@ -2413,6 +2424,7 @@ async fn run_provider_step(
         &request_inputs,
         tool_specs.clone(),
         generation_config.clone(),
+        inner.progress_commentary,
     ) {
         Ok(request) => {
             tracing::debug!(
@@ -2469,6 +2481,7 @@ async fn run_provider_step(
                     &request_inputs,
                     tool_specs.clone(),
                     generation_config.clone(),
+                    inner.progress_commentary,
                 ) {
                     Ok(request) => request,
                     Err(error) => {
@@ -2570,7 +2583,7 @@ async fn run_provider_step(
     };
     projection_guard.disarm();
 
-    let mut saw_non_empty_text_delta = false;
+    let mut commentary_text = String::new();
     let mut streamed_tool_call: Option<PendingToolCall> = None;
 
     loop {
@@ -2594,7 +2607,7 @@ async fn run_provider_step(
                         category = "output_text_delta_nonempty",
                         "runtime model stream event received"
                     );
-                    saw_non_empty_text_delta = true;
+                    commentary_text.push_str(&delta);
                 }
             }
             Some(Ok(ModelEvent::Completed { response })) => {
@@ -2638,21 +2651,21 @@ async fn run_provider_step(
                         return;
                     }
                     FinishReason::ToolCalls => {
-                        if saw_non_empty_text_delta {
-                            let diagnostic = diagnostic_from_text(
-                                DIAGNOSTIC_MODEL_TOOL_CALL_MIXED_OUTPUT,
-                                "model emitted text before requesting a tool call",
-                            );
-                            trace_provider_step_failed(&diagnostic);
-                            let _ = send_failed_event(inner, sender, token, diagnostic).await;
-                            return;
-                        }
-
                         match pending_tool_call_from_outputs(
                             response.outputs(),
                             streamed_tool_call.as_ref(),
                         ) {
                             Ok(call) => {
+                                if let Some(commentary) =
+                                    tool_call_commentary_text(response.outputs(), &commentary_text)
+                                    && !send_assistant_text_output_recorded_event(
+                                        inner, sender, token, commentary,
+                                    )
+                                    .await
+                                {
+                                    let _ = send_cancelled_if_requested(inner, sender, token).await;
+                                    return;
+                                }
                                 if !send_tool_call_pending_event(inner, sender, token, call).await {
                                     let _ = send_cancelled_if_requested(inner, sender, token).await;
                                 }
@@ -2694,16 +2707,6 @@ async fn run_provider_step(
                     category = "tool_call_requested",
                     "runtime model stream event received"
                 );
-                if saw_non_empty_text_delta {
-                    let diagnostic = diagnostic_from_text(
-                        DIAGNOSTIC_MODEL_TOOL_CALL_MIXED_OUTPUT,
-                        "model emitted text before requesting a tool call",
-                    );
-                    trace_provider_step_failed(&diagnostic);
-                    let _ = send_failed_event(inner, sender, token, diagnostic).await;
-                    return;
-                }
-
                 match pending_tool_call_from_model(&call)
                     .and_then(|call| record_streamed_tool_call(&mut streamed_tool_call, call))
                 {
@@ -2878,6 +2881,7 @@ fn compile_step_request_from_inputs(
     inputs: &StepRequestInputs,
     tool_specs: Vec<merry_core::ToolSpec>,
     generation_config: GenerationConfig,
+    progress_commentary: bool,
 ) -> Result<merry_llm::ModelRequest, StepRequestCompileError> {
     let compiled_context = ContextCompiler::new().compile(&inputs.snapshot)?;
     compile_step_model_request(StepModelRequestParts {
@@ -2891,6 +2895,7 @@ fn compile_step_request_from_inputs(
         continuations: &inputs.continuations,
         tool_specs,
         generation_config,
+        progress_commentary,
     })
     .map_err(StepRequestCompileError::from)
 }
@@ -3204,6 +3209,39 @@ async fn send_assistant_text_output_completed_events(
     token: &CancellationToken,
     text: String,
 ) -> bool {
+    if !send_assistant_text_output_recorded_event(inner, sender, token, text).await {
+        return false;
+    }
+
+    if token.is_cancelled() {
+        let _ = send_cancelled_event(inner, sender).await;
+        return false;
+    }
+
+    let Some(completed_permit) = reserve_normal_event_slot(sender, token).await else {
+        return false;
+    };
+
+    let completed_event = {
+        let mut session = inner.session.lock().await;
+        if token.is_cancelled() {
+            drop(completed_permit);
+            let _ = send_cancelled_event(inner, sender).await;
+            return false;
+        }
+        session.record_step_completed()
+    };
+
+    completed_permit.send(completed_event);
+    true
+}
+
+async fn send_assistant_text_output_recorded_event(
+    inner: &RuntimeInner,
+    sender: &mpsc::Sender<RuntimeEvent>,
+    token: &CancellationToken,
+    text: String,
+) -> bool {
     if token.is_cancelled() {
         return false;
     }
@@ -3231,27 +3269,6 @@ async fn send_assistant_text_output_completed_events(
     };
 
     artifact_permit.send(artifact_event);
-
-    if token.is_cancelled() {
-        let _ = send_cancelled_event(inner, sender).await;
-        return false;
-    }
-
-    let Some(completed_permit) = reserve_normal_event_slot(sender, token).await else {
-        return false;
-    };
-
-    let completed_event = {
-        let mut session = inner.session.lock().await;
-        if token.is_cancelled() {
-            drop(completed_permit);
-            let _ = send_cancelled_event(inner, sender).await;
-            return false;
-        }
-        session.record_step_completed()
-    };
-
-    completed_permit.send(completed_event);
     true
 }
 
@@ -3373,11 +3390,6 @@ fn pending_tool_call_from_outputs(
         .iter()
         .filter(|output| matches!(output, ModelOutput::ToolCall { .. }))
         .count();
-    let text_output_count = outputs
-        .iter()
-        .filter(|output| matches!(output, ModelOutput::Text { .. }))
-        .count();
-
     if tool_call_count == 0 {
         return Err(diagnostic_from_text(
             DIAGNOSTIC_MODEL_TOOL_CALL_MISSING,
@@ -3392,14 +3404,11 @@ fn pending_tool_call_from_outputs(
         ));
     }
 
-    if text_output_count > 0 || outputs.len() != 1 {
-        return Err(diagnostic_from_text(
-            DIAGNOSTIC_MODEL_TOOL_CALL_MIXED_OUTPUT,
-            "model returned text and a tool call in the same response",
-        ));
-    }
-
-    let [ModelOutput::ToolCall { call }] = outputs else {
+    let mut tool_calls = outputs.iter().filter_map(|output| match output {
+        ModelOutput::ToolCall { call } => Some(call),
+        ModelOutput::Text { .. } => None,
+    });
+    let Some(call) = tool_calls.next() else {
         return Err(diagnostic_from_text(
             DIAGNOSTIC_MODEL_TOOL_CALL_MISSING,
             "model finished with tool calls but returned no tool call output",
@@ -3415,6 +3424,23 @@ fn pending_tool_call_from_outputs(
         )),
         None => Ok(completed_call),
     }
+}
+
+fn tool_call_commentary_text(outputs: &[ModelOutput], streamed_text: &str) -> Option<String> {
+    if !streamed_text.is_empty() {
+        return Some(streamed_text.to_owned());
+    }
+
+    let mut text = String::new();
+    for output in outputs {
+        if let ModelOutput::Text { text: output_text } = output
+            && !output_text.is_empty()
+        {
+            text.push_str(output_text);
+        }
+    }
+
+    (!text.is_empty()).then_some(text)
 }
 
 fn pending_tool_call_from_model(call: &ModelToolCall) -> Result<PendingToolCall, ErrorInfo> {
@@ -3725,6 +3751,7 @@ mod tests {
             model_configs: RuntimeModelConfigs::default(),
             automatic_compaction: AutomaticCompactionConfig::default(),
             capabilities: crate::RuntimeCapabilities::default(),
+            progress_commentary: false,
             tool_registry: ToolRegistry::default(),
             memory_activation_source: Arc::new(crate::memory::StoredMemoryActivationSource),
             allow_low_risk_workspace_patches: false,
@@ -4451,6 +4478,7 @@ mod tests {
                 low_risk_process_runner: None,
                 read_only_shell_process_runner: None,
                 accepted_local_workspace_process_runner: None,
+                progress_commentary: false,
                 runtime_trust_level: RuntimeTrustLevel::Agent,
                 permission_review_mode: PermissionReviewMode::DefaultForTrust,
                 permission_admission_source: None,
@@ -4477,6 +4505,7 @@ mod tests {
                 low_risk_process_runner: None,
                 read_only_shell_process_runner: None,
                 accepted_local_workspace_process_runner: None,
+                progress_commentary: false,
                 runtime_trust_level: RuntimeTrustLevel::Agent,
                 permission_review_mode: PermissionReviewMode::DefaultForTrust,
                 permission_admission_source: None,
@@ -4506,6 +4535,7 @@ mod tests {
                 low_risk_process_runner: None,
                 read_only_shell_process_runner: None,
                 accepted_local_workspace_process_runner: None,
+                progress_commentary: false,
                 runtime_trust_level: RuntimeTrustLevel::Agent,
                 permission_review_mode: PermissionReviewMode::DefaultForTrust,
                 permission_admission_source: None,

@@ -7,8 +7,8 @@ use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use config::{EffectiveLogSettings, EffectiveOpenAiProviderConfig, MerryConfig, XdgPaths};
 use futures_util::{StreamExt, stream};
 use merry_core::{
-    PendingToolCall, ProviderName, RuntimeEvent, RuntimeEventKind, SessionId, ToolCallResultStatus,
-    ToolInputSchema, ToolName, ToolSpec,
+    ArtifactId, PendingToolCall, ProviderName, RuntimeEvent, RuntimeEventKind, SessionId,
+    ToolCallResultStatus, ToolInputSchema, ToolName, ToolSpec,
 };
 use merry_llm::{
     FinishReason, GenerationConfig, ModelCapabilities, ModelError, ModelEvent, ModelEventStream,
@@ -63,6 +63,7 @@ const CODING_LOOP_SUBAGENT_LIVE_SMOKE_FILE: &str = "subagent-output.txt";
 const CODING_LOOP_SUBAGENT_LIVE_SMOKE_INITIAL: &str = "status: pending\n";
 const CODING_LOOP_SUBAGENT_LIVE_SMOKE_TARGET: &str = "status: subagent-live-smoke-complete\n";
 const CODING_LOOP_TASK_SMOKE_MAX_PATCH_BYTES: usize = 256;
+const ASSISTANT_OUTPUT_ARTIFACT_PREFIX: &str = "assistant-output-";
 const SHELL_TOOL_NAME: &str = "shell_command";
 const SHELL_TOOL_CALL_ID: &str = "call-shell-command";
 const SHELL_STEP_INPUT: &str = "run shell command through Merry process protocol";
@@ -4163,14 +4164,20 @@ async fn write_run_agent_loop_output<W>(
 where
     W: AsyncWrite + Unpin,
 {
+    let mut writer = BufWriter::new(writer);
     let mut stream = runtime
         .run_agent_loop_stream(input, StepContext::default(), config)
         .map_err(unexpected)?;
-    while stream.next().await.is_some() {}
+    let mut pending_commentary = None;
+    while let Some(event) = stream.next().await {
+        write_run_progress_commentary_event(runtime, &event, &mut pending_commentary, &mut writer)
+            .await?;
+    }
     let result = stream.result().await.ok_or_else(|| {
         CliError::Unexpected("agent loop stream closed before producing a result".to_owned())
     })?;
-    write_run_agent_loop_summary(&result, writer).await
+    write_run_agent_loop_summary_to(&result, &mut writer).await?;
+    writer.flush().await.map_err(stdout_error)
 }
 
 async fn write_run_agent_loop_jsonl_output<W>(
@@ -4199,14 +4206,13 @@ where
     writer.flush().await.map_err(stdout_error)
 }
 
-async fn write_run_agent_loop_summary<W>(
+async fn write_run_agent_loop_summary_to<W>(
     result: &AgentLoopResult,
-    writer: W,
+    writer: &mut W,
 ) -> Result<(), CliError>
 where
     W: AsyncWrite + Unpin,
 {
-    let mut writer = BufWriter::new(writer);
     if let Some(output) = result.final_output() {
         writer
             .write_all(output.as_bytes())
@@ -4227,6 +4233,70 @@ where
             .await
             .map_err(stdout_error)?;
     }
+    Ok(())
+}
+
+async fn write_run_progress_commentary_event<W>(
+    runtime: &Runtime,
+    event: &RuntimeEvent,
+    pending_commentary: &mut Option<ArtifactId>,
+    writer: &mut W,
+) -> Result<(), CliError>
+where
+    W: AsyncWrite + Unpin,
+{
+    match &event.kind {
+        RuntimeEventKind::ArtifactRecorded { artifact }
+            if artifact
+                .id()
+                .as_str()
+                .starts_with(ASSISTANT_OUTPUT_ARTIFACT_PREFIX) =>
+        {
+            *pending_commentary = Some(artifact.id().clone());
+        }
+        RuntimeEventKind::ToolCallPending { .. }
+        | RuntimeEventKind::BridgeToolCallRequested { .. } => {
+            if let Some(artifact_id) = pending_commentary.take() {
+                write_run_progress_commentary_artifact(runtime, &artifact_id, writer).await?;
+            }
+        }
+        RuntimeEventKind::ArtifactRecorded { .. }
+        | RuntimeEventKind::StepCompleted
+        | RuntimeEventKind::Failed { .. }
+        | RuntimeEventKind::Cancelled { .. } => {
+            *pending_commentary = None;
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+async fn write_run_progress_commentary_artifact<W>(
+    runtime: &Runtime,
+    artifact_id: &ArtifactId,
+    writer: &mut W,
+) -> Result<(), CliError>
+where
+    W: AsyncWrite + Unpin,
+{
+    let content = runtime
+        .read_artifact_content(artifact_id)
+        .await
+        .map_err(unexpected)?;
+    let Some(text) = content.as_text() else {
+        return Ok(());
+    };
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(());
+    }
+
+    writer
+        .write_all(text.as_bytes())
+        .await
+        .map_err(stdout_error)?;
+    writer.write_all(b"\n\n").await.map_err(stdout_error)?;
     writer.flush().await.map_err(stdout_error)
 }
 
@@ -5920,6 +5990,72 @@ mod tests {
         let text = String::from_utf8(output).expect("output should be utf-8");
         assert_eq!(text, "done from run\n");
         assert!(!text.contains("\"type\":\"session_started\""));
+        assert!(!text.contains("\"type\":\"agent_loop_result\""));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn run_writer_streams_progress_commentary_before_final_output() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("mkdir workspace");
+        let provider = ScriptedProvider::new(vec![
+            vec![
+                Ok(ModelEvent::OutputTextDelta {
+                    delta: "我先解析 baidu.com 的 DNS。".to_owned(),
+                }),
+                Ok(coding_loop_process_call(
+                    "run-progress-dns",
+                    &["getent", "hosts", "baidu.com"],
+                    None,
+                )
+                .expect("valid process call")),
+            ],
+            vec![Ok(ModelEvent::Completed {
+                response: ModelResponse::new(
+                    vec![ModelOutput::text("baidu.com resolves to 110.242.74.102")],
+                    FinishReason::Stop,
+                    None,
+                ),
+            })],
+        ]);
+        let runner: Arc<dyn ProcessRunner> =
+            Arc::new(FakeProcessRunner::succeeding("110.242.74.102 baidu.com\n"));
+        let permissioned_factory = Arc::new(
+            merry_runtime::StaticPermissionedProcessRunnerFactory::new(Arc::clone(&runner)),
+        );
+        let runtime = super::build_headless_coding_runtime(super::HeadlessCodingRuntimeInput {
+            session_id: "run-progress-writer-test",
+            root: &workspace,
+            admission: AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
+            provider: Arc::new(provider),
+            model: ModelName::new("debug-model").expect("valid model name"),
+            runner,
+            permissioned_process_runner_factory: permissioned_factory,
+            allow_hidden_workspace_paths: false,
+            automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
+            context_compaction: None,
+            approval_review: None,
+            skill_roots: Vec::new(),
+            subagents: SubagentsConfig::default(),
+        })
+        .expect("runtime should build");
+
+        let mut output = Vec::new();
+        super::write_run_agent_loop_output(
+            &runtime,
+            StepInput::user_text("ping baidu.com").expect("valid input"),
+            AgentLoopConfig::new(DEFAULT_CODING_AGENT_MAX_MODEL_TURNS).expect("valid config"),
+            &mut output,
+        )
+        .await
+        .expect("run output should write");
+
+        let text = String::from_utf8(output).expect("output should be utf-8");
+        assert_eq!(
+            text,
+            "我先解析 baidu.com 的 DNS。\n\nbaidu.com resolves to 110.242.74.102\n"
+        );
+        assert!(!text.contains("\"type\":\"tool_call_pending\""));
         assert!(!text.contains("\"type\":\"agent_loop_result\""));
     }
 

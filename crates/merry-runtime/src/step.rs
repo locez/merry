@@ -26,6 +26,8 @@ After code changes, run the most relevant available checks unless the user asks 
 
 Respect project instructions such as AGENTS.md when present. Treat those instructions as project-specific policy layered on top of these runtime defaults."#;
 
+pub(crate) const PROGRESS_COMMENTARY_INSTRUCTIONS: &str = r#"When you are about to use tools, send a brief progress note first explaining the immediate next action. Keep these notes concise and use the user's current input language. For longer tool-driven work, provide occasional short progress updates. Do not include these progress notes in final structured output."#;
+
 /// Input snapshot for a runtime step.
 ///
 /// The MVP step input is user text only. Runtime state such as context,
@@ -190,6 +192,7 @@ pub(crate) struct StepModelRequestParts<'a> {
     pub(crate) continuations: &'a [ResolvedToolContinuationSnapshot],
     pub(crate) tool_specs: Vec<ToolSpec>,
     pub(crate) generation_config: GenerationConfig,
+    pub(crate) progress_commentary: bool,
 }
 
 pub(crate) fn compile_step_model_request(
@@ -206,12 +209,15 @@ pub(crate) fn compile_step_model_request(
         continuations,
         tool_specs,
         generation_config,
+        progress_commentary,
     } = parts;
 
     let context_snapshot = context.to_snapshot();
     let skill_metadata_text = skill_catalog.and_then(SkillCatalog::to_stable_prefix_message_text);
-    let stable_prefix_message_count =
-        1 + usize::from(skill_metadata_text.is_some()) + usize::from(project_rules.is_some());
+    let stable_prefix_message_count = 1
+        + usize::from(progress_commentary)
+        + usize::from(skill_metadata_text.is_some())
+        + usize::from(project_rules.is_some());
     let mut messages = Vec::with_capacity(
         stable_prefix_message_count
             + usize::from(task_anchor.is_some())
@@ -229,6 +235,13 @@ pub(crate) fn compile_step_model_request(
         ModelMessageRole::System,
         ModelContent::text(DEFAULT_RUNTIME_BASE_INSTRUCTIONS)?,
     )?);
+
+    if progress_commentary {
+        messages.push(ModelMessage::new(
+            ModelMessageRole::System,
+            ModelContent::text(PROGRESS_COMMENTARY_INSTRUCTIONS)?,
+        )?);
+    }
 
     if let Some(skill_metadata_text) = skill_metadata_text {
         messages.push(ModelMessage::new(

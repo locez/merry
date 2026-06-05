@@ -510,12 +510,15 @@ async fn workspace_coding_loop_profile_seeds_project_capability_context() {
     let requests = provider_handle.recorded_requests();
     assert_eq!(requests.len(), 1);
     let request = &requests[0];
-    assert_eq!(request.stable_prefix_message_count(), 1);
-    assert_eq!(request.messages().len(), 3);
+    assert_eq!(request.stable_prefix_message_count(), 2);
+    assert_eq!(request.messages().len(), 4);
     let base_instructions = request.messages()[0].content().as_text();
     assert!(base_instructions.contains("You are Merry, a pragmatic coding agent."));
     assert!(base_instructions.contains("Respect project instructions such as AGENTS.md"));
-    let project_context = request.messages()[1].content().as_text();
+    let progress_commentary = request.messages()[1].content().as_text();
+    assert!(progress_commentary.contains("brief progress note first"));
+    assert!(progress_commentary.contains("user's current input language"));
+    let project_context = request.messages()[2].content().as_text();
     assert!(project_context.contains("summary:project-capabilities"));
     assert!(project_context.contains("Cargo.toml is present"));
     assert!(project_context.contains("Detected AGENTS.md"));
@@ -525,7 +528,7 @@ async fn workspace_coding_loop_profile_seeds_project_capability_context() {
         project_context
             .contains("evidence:seeded runtime context:context-seed-project-capabilities:whole")
     );
-    assert_eq!(request.messages()[2].content().as_text(), "inspect project");
+    assert_eq!(request.messages()[3].content().as_text(), "inspect project");
 }
 
 #[tokio::test(flavor = "current_thread")]

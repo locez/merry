@@ -70,7 +70,8 @@ fn process_command_tool_input_schema() -> Result<ToolInputSchema, ProcessCommand
             },
             "cwd": {
                 "type": "string",
-                "description": "Optional workspace-relative working directory"
+                "minLength": 1,
+                "description": "Optional workspace-relative working directory. For the workspace root, omit cwd or use \".\"; never pass an empty string."
             }
         },
         "required": ["argv"]
@@ -192,6 +193,7 @@ fn cwd_from_arguments(
 ) -> Result<Option<String>, InvalidProcessCommandArguments> {
     match value {
         None | Some(Value::Null) => Ok(None),
+        Some(Value::String(cwd)) if cwd.is_empty() => Ok(None),
         Some(Value::String(cwd)) => Ok(Some(cwd.clone())),
         Some(_) => Err(InvalidProcessCommandArguments::new(
             "cwd must be a string when provided",
@@ -231,7 +233,7 @@ fn invalid_arguments_outcome(
         },
         "recovery": {
             "argv_contract": "Provide argv as a JSON array of non-empty strings. Newline and tab are allowed inside argv items; other control characters are rejected.",
-            "cwd_contract": "cwd, when provided, must be workspace-relative and must not contain control characters.",
+            "cwd_contract": "cwd, when provided, must be non-empty, workspace-relative, and must not contain control characters. For the workspace root, omit cwd or use \".\".",
         },
         "guidance": {
             "kind": "invalid_process_arguments",
@@ -275,6 +277,38 @@ mod tests {
         assert_eq!(intent.argv(), ["rustc", "--version"]);
         assert_eq!(intent.cwd(), Some("crates/merry-runtime"));
         assert!(intent.stdin_text().is_none());
+    }
+
+    #[test]
+    fn process_command_tool_schema_rejects_empty_cwd() {
+        let tool = super::process_command_tool(
+            ToolName::new("run_process").expect("valid tool name"),
+            "Run a process.",
+        )
+        .expect("process command tool should build");
+        let schema = serde_json::to_value(tool.spec().input_schema().as_schema())
+            .expect("schema should serialize");
+
+        assert_eq!(schema["properties"]["cwd"]["minLength"], 1);
+        assert!(
+            schema["properties"]["cwd"]["description"]
+                .as_str()
+                .expect("cwd description should be text")
+                .contains("never pass an empty string")
+        );
+    }
+
+    #[test]
+    fn process_intent_from_call_treats_empty_cwd_as_workspace_root() {
+        let call = pending_call(json!({
+            "argv": ["ping", "-c", "1", "baidu.com"],
+            "cwd": ""
+        }));
+
+        let intent = process_intent_from_call(&call).expect("process intent should parse");
+
+        assert_eq!(intent.argv(), ["ping", "-c", "1", "baidu.com"]);
+        assert_eq!(intent.cwd(), None);
     }
 
     #[tokio::test(flavor = "current_thread")]
