@@ -146,10 +146,35 @@ enum SandboxRuntimeProfile {
 
 #[derive(Debug, Subcommand)]
 enum CliCommand {
+    #[command(about = "Complete a coding task with Merry's headless agent")]
+    Run(RunArgs),
+    #[command(about = "Generate a shell command plan from a natural-language request")]
+    Cmd(CmdArgs),
     #[command(about = "Print deterministic runtime events or run opt-in provider debugging")]
     Debug(DebugArgs),
     #[command(about = "Run a local command through Merry's process action protocol")]
     Shell(ShellArgs),
+}
+
+#[derive(Debug, Args)]
+struct RunArgs {
+    #[arg(required = true, allow_hyphen_values = true, value_name = "TASK")]
+    task: String,
+}
+
+#[derive(Debug, Args)]
+struct CmdArgs {
+    #[arg(long, help = "Print only the structured CommandPlan JSON")]
+    json: bool,
+
+    #[arg(
+        long = "no-prompt",
+        help = "Do not ask to execute the generated shell command"
+    )]
+    no_prompt: bool,
+
+    #[arg(required = true, allow_hyphen_values = true, value_name = "REQUEST")]
+    request: String,
 }
 
 #[derive(Debug, Args)]
@@ -430,6 +455,44 @@ async fn async_main(cli: Cli, merry_config: Option<MerryConfig>) -> CliExit {
     let sandbox_child_handoff = cli.sandbox_child_handoff;
 
     match cli.command {
+        CliCommand::Run(args) => {
+            match run_merry_run(&args, sandbox_child_handoff, merry_config.as_ref()).await {
+                Ok(()) => CliExit::Success,
+                Err(CliError::BrokenPipe) => CliExit::Success,
+                Err(CliError::DebugUsage(message)) => CliExit::Usage {
+                    message,
+                    usage: debug_usage(),
+                },
+                Err(CliError::DebugOpenAiUsage(message)) => CliExit::Usage {
+                    message,
+                    usage: debug_openai_usage(),
+                },
+                Err(CliError::ShellUsage(message)) => CliExit::Usage {
+                    message,
+                    usage: shell_usage(),
+                },
+                Err(CliError::Unexpected(message)) => CliExit::Unexpected(message),
+            }
+        }
+        CliCommand::Cmd(args) => {
+            match run_merry_cmd(&args, sandbox_child_handoff, merry_config.as_ref()).await {
+                Ok(()) => CliExit::Success,
+                Err(CliError::BrokenPipe) => CliExit::Success,
+                Err(CliError::DebugUsage(message)) => CliExit::Usage {
+                    message,
+                    usage: debug_usage(),
+                },
+                Err(CliError::DebugOpenAiUsage(message)) => CliExit::Usage {
+                    message,
+                    usage: debug_openai_usage(),
+                },
+                Err(CliError::ShellUsage(message)) => CliExit::Usage {
+                    message,
+                    usage: shell_usage(),
+                },
+                Err(CliError::Unexpected(message)) => CliExit::Unexpected(message),
+            }
+        }
         CliCommand::Debug(DebugArgs {
             session_id,
             input,
@@ -1203,6 +1266,26 @@ async fn run_debug(
         .map_err(unexpected)?;
     let input = StepInput::user_text(input).map_err(usage_error)?;
     write_runtime_step_events(&runtime, input, StepContext::default(), tokio::io::stdout()).await
+}
+
+async fn run_merry_run(
+    _args: &RunArgs,
+    _sandbox_child_handoff: Option<SandboxChildHandoff>,
+    _merry_config: Option<&MerryConfig>,
+) -> Result<(), CliError> {
+    Err(CliError::Unexpected(
+        "merry run is not implemented yet".to_owned(),
+    ))
+}
+
+async fn run_merry_cmd(
+    _args: &CmdArgs,
+    _sandbox_child_handoff: Option<SandboxChildHandoff>,
+    _merry_config: Option<&MerryConfig>,
+) -> Result<(), CliError> {
+    Err(CliError::Unexpected(
+        "merry cmd is not implemented yet".to_owned(),
+    ))
 }
 
 async fn run_debug_openai(
@@ -4660,6 +4743,55 @@ mod tests {
     }
 
     #[test]
+    fn clap_parses_run_task() {
+        let cli = Cli::try_parse_from(["merry", "run", "fix the failing test"])
+            .expect("run args should parse");
+
+        match cli.command {
+            CliCommand::Run(args) => {
+                assert_eq!(args.task, "fix the failing test");
+            }
+            _ => panic!("expected run command"),
+        }
+    }
+
+    #[test]
+    fn clap_parses_cmd_request_defaults() {
+        let cli = Cli::try_parse_from(["merry", "cmd", "find all TypeScript tests"])
+            .expect("cmd args should parse");
+
+        match cli.command {
+            CliCommand::Cmd(args) => {
+                assert_eq!(args.request, "find all TypeScript tests");
+                assert!(!args.json);
+                assert!(!args.no_prompt);
+            }
+            _ => panic!("expected cmd command"),
+        }
+    }
+
+    #[test]
+    fn clap_parses_cmd_json_and_no_prompt() {
+        let cli = Cli::try_parse_from([
+            "merry",
+            "cmd",
+            "--json",
+            "--no-prompt",
+            "find all TypeScript tests",
+        ])
+        .expect("cmd args should parse");
+
+        match cli.command {
+            CliCommand::Cmd(args) => {
+                assert_eq!(args.request, "find all TypeScript tests");
+                assert!(args.json);
+                assert!(args.no_prompt);
+            }
+            _ => panic!("expected cmd command"),
+        }
+    }
+
+    #[test]
     fn clap_parses_debug_defaults() {
         let cli = Cli::try_parse_from(["merry", "debug"]).expect("debug args should parse");
 
@@ -4670,7 +4802,7 @@ mod tests {
                 assert_eq!(debug.input, DEFAULT_INPUT);
                 assert!(debug.command.is_none());
             }
-            CliCommand::Shell(_) => panic!("expected debug subcommand"),
+            _ => panic!("expected debug subcommand"),
         }
     }
 
@@ -4709,7 +4841,7 @@ mod tests {
                 ) => panic!("expected debug openai subcommand"),
                 None => panic!("expected debug openai subcommand"),
             },
-            CliCommand::Shell(_) => panic!("expected debug subcommand"),
+            _ => panic!("expected debug subcommand"),
         }
     }
 
@@ -4731,7 +4863,7 @@ mod tests {
                 )
                 | None => panic!("expected debug coding-loop-smoke subcommand"),
             },
-            CliCommand::Shell(_) => panic!("expected debug subcommand"),
+            _ => panic!("expected debug subcommand"),
         }
     }
 
@@ -4764,7 +4896,7 @@ mod tests {
                 )
                 | None => panic!("expected debug permission-network-smoke subcommand"),
             },
-            CliCommand::Shell(_) => panic!("expected debug subcommand"),
+            _ => panic!("expected debug subcommand"),
         }
     }
 
@@ -4797,7 +4929,7 @@ mod tests {
                 )
                 | None => panic!("expected debug coding-loop-live-smoke subcommand"),
             },
-            CliCommand::Shell(_) => panic!("expected debug subcommand"),
+            _ => panic!("expected debug subcommand"),
         }
     }
 
@@ -4821,7 +4953,7 @@ mod tests {
                 )
                 | None => panic!("expected debug coding-loop-task-smoke subcommand"),
             },
-            CliCommand::Shell(_) => panic!("expected debug subcommand"),
+            _ => panic!("expected debug subcommand"),
         }
     }
 
@@ -4857,7 +4989,7 @@ mod tests {
                 )
                 | None => panic!("expected debug coding-loop-task-live-smoke subcommand"),
             },
-            CliCommand::Shell(_) => panic!("expected debug subcommand"),
+            _ => panic!("expected debug subcommand"),
         }
     }
 
@@ -4890,7 +5022,7 @@ mod tests {
                 )
                 | None => panic!("expected debug coding-loop-subagent-live-smoke subcommand"),
             },
-            CliCommand::Shell(_) => panic!("expected debug subcommand"),
+            _ => panic!("expected debug subcommand"),
         }
     }
 
@@ -5678,7 +5810,7 @@ model = "gpt-review"
                 assert!(!shell.accept_local_workspace_process_risk);
                 assert_eq!(shell.argv, ["rustc", "--version"]);
             }
-            CliCommand::Debug(_) => panic!("expected shell subcommand"),
+            _ => panic!("expected shell subcommand"),
         }
     }
 
@@ -5701,7 +5833,7 @@ model = "gpt-review"
                 assert!(shell.accept_local_workspace_process_risk);
                 assert_eq!(shell.argv, ["cargo", "test", "-p", "merry-runtime"]);
             }
-            CliCommand::Debug(_) => panic!("expected shell subcommand"),
+            _ => panic!("expected shell subcommand"),
         }
     }
 
