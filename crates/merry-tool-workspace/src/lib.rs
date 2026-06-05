@@ -84,6 +84,7 @@ const PROJECT_CAPABILITY_CONTEXT_ID: &str = "project-capabilities";
 const CODING_PROFILE_CAPABILITY_SUMMARY: &str = "\
 Workspace coding profile:
 - Workspace file tool paths are relative to configured workspace roots, not host-absolute paths.
+- Respond in the user's current input language by default unless the user explicitly requests another language.
 - Process execution runs through Merry runtime policy and the configured sandbox/profile, so filesystem and network access may be intentionally restricted.
 - The default process profile may block network access and paths outside the configured workspace or trusted path rules.
 - If an exact process action is blocked only because it needs additional filesystem or network capability for the current task, call request_permissions for that exact action after observing the failure.
