@@ -13,13 +13,13 @@ use merry_runtime::{
     AcceptedLocalWorkspaceProcessAdmission, AgentLoopConfig, AgentLoopStatus,
     DEFAULT_AGENT_LOOP_CONTINUATION_INPUT, LedgerFactKind, LedgerProjection, ProcessActionIntent,
     ProcessExitStatus, ProcessRunner, ProcessRunnerContext, ProcessRunnerError,
-    ProcessRunnerFuture, ProcessRunnerOutput, Runtime, StepContext, StepInput,
+    ProcessRunnerFuture, ProcessRunnerOutput, Runtime, RuntimeProfile, StepContext, StepInput,
     ToolExecutionContext,
 };
 use merry_tool_workspace::{
     ReadOnlyWorkspaceTools, WORKSPACE_LIST_DIR_TOOL, WORKSPACE_PATCH_TOOL,
     WORKSPACE_READ_FILE_TOOL, WORKSPACE_SEARCH_TEXT_TOOL, WorkspaceCodingLoopProfile,
-    WorkspaceToolLimits, WorkspaceToolsConfig,
+    WorkspaceRuntimeProfileBuilderExt, WorkspaceToolLimits, WorkspaceToolsConfig,
 };
 use serde_json::{Map, Value};
 use std::{
@@ -318,7 +318,7 @@ fn runtime_with_coding_loop_tools(
     provider: ScriptedModelProvider,
     runner: Arc<dyn ProcessRunner>,
 ) -> Runtime {
-    WorkspaceCodingLoopProfile::new(
+    let profile = WorkspaceCodingLoopProfile::new(
         WorkspaceToolsConfig::new(vec![root.to_path_buf()]).with_limits(WorkspaceToolLimits {
             max_patch_bytes: 256,
             ..WorkspaceToolLimits::default()
@@ -329,11 +329,18 @@ fn runtime_with_coding_loop_tools(
     .with_cli_bwrap_process_runner(
         AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
         runner,
-    )
-    .register_on(Runtime::builder(session_id()).model_provider(Arc::new(provider), model_name()))
-    .expect("workspace coding loop runtime should build")
-    .build()
-    .expect("runtime should build")
+    );
+    let profile = RuntimeProfile::builder()
+        .with_workspace_coding_loop(profile)
+        .expect("workspace coding loop profile should apply")
+        .build()
+        .expect("runtime profile should build");
+    Runtime::builder(session_id())
+        .model_provider(Arc::new(provider), model_name())
+        .with_profile(profile)
+        .expect("runtime profile should apply")
+        .build()
+        .expect("runtime should build")
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -344,19 +351,24 @@ async fn workspace_coding_loop_profile_registers_expected_tools_and_process_lane
     })]]);
     let provider_handle = provider.clone();
     let runner = Arc::new(ScriptedProcessRunner::new(Vec::new()));
-    let runtime =
+    let profile =
         WorkspaceCodingLoopProfile::new(WorkspaceToolsConfig::new(vec![temp.path().to_path_buf()]))
             .expect("workspace coding loop profile should construct")
             .with_cli_bwrap_process_runner(
                 AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
                 runner,
-            )
-            .register_on(
-                Runtime::builder(session_id()).model_provider(Arc::new(provider), model_name()),
-            )
-            .expect("workspace coding loop runtime should build")
-            .build()
-            .expect("runtime should build");
+            );
+    let profile = RuntimeProfile::builder()
+        .with_workspace_coding_loop(profile)
+        .expect("workspace coding loop profile should apply")
+        .build()
+        .expect("runtime profile should build");
+    let runtime = Runtime::builder(session_id())
+        .model_provider(Arc::new(provider), model_name())
+        .with_profile(profile)
+        .expect("runtime profile should apply")
+        .build()
+        .expect("runtime should build");
 
     collect_step(&runtime, "inspect workspace").await;
     let requests = provider_handle.recorded_requests();
@@ -445,16 +457,21 @@ async fn workspace_coding_loop_profile_read_only_process_runner_denies_local_wor
         &["cargo", "test"],
     ))]]);
     let runner = Arc::new(ScriptedProcessRunner::new(Vec::new()));
-    let runtime =
+    let profile =
         WorkspaceCodingLoopProfile::new(WorkspaceToolsConfig::new(vec![temp.path().to_path_buf()]))
             .expect("workspace coding loop profile should construct")
-            .with_read_only_process_runner(runner.clone())
-            .register_on(
-                Runtime::builder(session_id()).model_provider(Arc::new(provider), model_name()),
-            )
-            .expect("workspace coding loop runtime should build")
-            .build()
-            .expect("runtime should build");
+            .with_read_only_process_runner(runner.clone());
+    let profile = RuntimeProfile::builder()
+        .with_workspace_coding_loop(profile)
+        .expect("workspace coding loop profile should apply")
+        .build()
+        .expect("runtime profile should build");
+    let runtime = Runtime::builder(session_id())
+        .model_provider(Arc::new(provider), model_name())
+        .with_profile(profile)
+        .expect("runtime profile should apply")
+        .build()
+        .expect("runtime should build");
 
     let events = execute_first_pending_call(&runtime, "run local effect").await;
 
@@ -519,20 +536,25 @@ async fn workspace_coding_loop_profile_can_enable_patch_tool() {
     })]]);
     let provider_handle = provider.clone();
     let runner = Arc::new(ScriptedProcessRunner::new(Vec::new()));
-    let runtime =
+    let profile =
         WorkspaceCodingLoopProfile::new(WorkspaceToolsConfig::new(vec![temp.path().to_path_buf()]))
             .expect("workspace coding loop profile should construct")
             .with_patch_tool()
             .with_cli_bwrap_process_runner(
                 AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
                 runner,
-            )
-            .register_on(
-                Runtime::builder(session_id()).model_provider(Arc::new(provider), model_name()),
-            )
-            .expect("workspace coding loop runtime should build")
-            .build()
-            .expect("runtime should build");
+            );
+    let profile = RuntimeProfile::builder()
+        .with_workspace_coding_loop(profile)
+        .expect("workspace coding loop profile should apply")
+        .build()
+        .expect("runtime profile should build");
+    let runtime = Runtime::builder(session_id())
+        .model_provider(Arc::new(provider), model_name())
+        .with_profile(profile)
+        .expect("runtime profile should apply")
+        .build()
+        .expect("runtime should build");
 
     collect_step(&runtime, "inspect workspace").await;
     let requests = provider_handle.recorded_requests();
