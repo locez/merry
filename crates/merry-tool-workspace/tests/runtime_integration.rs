@@ -1353,13 +1353,13 @@ async fn coding_loop_harness_inspects_patches_verifies_and_completes() {
         .run_agent_loop(
             StepInput::user_text("Fix the greeting and verify it.").expect("valid user task"),
             StepContext::new(CancellationToken::new()),
-            AgentLoopConfig::new(8).expect("valid step budget"),
+            AgentLoopConfig::new(8).expect("valid model-turn budget"),
         )
         .await
         .expect("coding loop should run");
 
     assert_eq!(result.status(), &AgentLoopStatus::Completed);
-    assert_eq!(result.steps_run(), 5);
+    assert_eq!(result.model_turns_run(), 5);
     assert!(runtime.pending_tool_calls().await.is_empty());
     assert_eq!(
         fs::read_to_string(temp.path().join("src/lib.rs"))

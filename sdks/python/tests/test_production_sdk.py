@@ -66,7 +66,7 @@ async def _assert_python_tool_executes_through_runtime_loop():
     result = await runtime.run("Check order A123.")
 
     assert result.status == "completed"
-    assert result.steps_run == 2
+    assert result.model_turns_run == 2
     assert result.final_output == "Order A123 shipped."
     assert calls == [LookupOrderInput(order_id="A123")]
     resolved = [
@@ -122,7 +122,7 @@ async def _assert_runtime_stream_executes_python_tool_and_returns_final_result()
     result = await stream.result()
 
     assert result.status == "completed"
-    assert result.steps_run == 2
+    assert result.model_turns_run == 2
     assert result.final_output == "Order A123 shipped."
     assert calls == ["A123"]
     assert "bridge_tool_call_requested" in event_types
@@ -147,7 +147,7 @@ async def _assert_runtime_run_returns_pydantic_final_output_model():
     )
 
     assert result.status == "completed"
-    assert result.steps_run == 1
+    assert result.model_turns_run == 1
     assert result.final_output == OrderStatusFinalOutput(order_id="A123", status="shipped")
     assert result.final_output_json == '{"order_id":"A123","status":"shipped"}'
     assert [event["kind"]["type"] for event in result.events] == [
@@ -194,7 +194,7 @@ async def _assert_runtime_stream_executes_python_tool_before_final_output_model(
     result = await stream.result()
 
     assert result.status == "completed"
-    assert result.steps_run == 2
+    assert result.model_turns_run == 2
     assert result.final_output == OrderStatusFinalOutput(order_id="A123", status="shipped")
     assert result.final_output_json == '{"order_id":"A123","status":"shipped"}'
     assert calls == ["A123"]

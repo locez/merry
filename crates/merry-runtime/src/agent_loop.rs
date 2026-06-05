@@ -23,7 +23,10 @@ use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 
-const DEFAULT_AGENT_LOOP_MAX_STEPS: usize = 16;
+/// Generic SDK/runtime default for one top-level agent run.
+pub const DEFAULT_AGENT_LOOP_MAX_MODEL_TURNS: usize = 128;
+/// Coding-agent default for one top-level user task.
+pub const DEFAULT_CODING_AGENT_MAX_MODEL_TURNS: usize = 1024;
 
 /// Fixed user input used for provider continuation steps after a tool result.
 ///
@@ -35,32 +38,32 @@ const ORIGINAL_TASK_CONTINUATION_LABEL: &str = "Original task:";
 
 /// Configuration for [`Runtime::run_agent_loop`].
 ///
-/// `max_steps` bounds the number of [`Runtime::step`] calls made by one loop
-/// run. Tool execution is serial and only happens when budget remains for the
-/// following continuation step.
+/// `max_model_turns` bounds the number of model turns started by one loop run.
+/// Context compaction may happen within the run, but it does not reset this
+/// control-flow and cost budget.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentLoopConfig {
-    max_steps: NonZeroUsize,
+    max_model_turns: NonZeroUsize,
     final_output_contract: Option<FinalOutputContract>,
 }
 
 impl AgentLoopConfig {
-    /// Creates loop configuration with a non-zero step budget.
-    pub fn new(max_steps: usize) -> Result<Self, AgentLoopConfigError> {
-        let Some(max_steps) = NonZeroUsize::new(max_steps) else {
-            return Err(AgentLoopConfigError::MaxStepsMustBeNonZero);
+    /// Creates loop configuration with a non-zero model-turn budget.
+    pub fn new(max_model_turns: usize) -> Result<Self, AgentLoopConfigError> {
+        let Some(max_model_turns) = NonZeroUsize::new(max_model_turns) else {
+            return Err(AgentLoopConfigError::MaxModelTurnsMustBeNonZero);
         };
 
         Ok(Self {
-            max_steps,
+            max_model_turns,
             final_output_contract: None,
         })
     }
 
-    /// Maximum number of runtime steps this loop may start.
+    /// Maximum number of model turns this loop may start.
     #[must_use]
-    pub fn max_steps(&self) -> usize {
-        self.max_steps.get()
+    pub fn max_model_turns(&self) -> usize {
+        self.max_model_turns.get()
     }
 
     /// Adds a runtime-owned structured final-output contract.
@@ -80,8 +83,8 @@ impl AgentLoopConfig {
 impl Default for AgentLoopConfig {
     fn default() -> Self {
         Self {
-            max_steps: NonZeroUsize::new(DEFAULT_AGENT_LOOP_MAX_STEPS)
-                .expect("default agent loop step budget is non-zero"),
+            max_model_turns: NonZeroUsize::new(DEFAULT_AGENT_LOOP_MAX_MODEL_TURNS)
+                .expect("default agent loop model-turn budget is non-zero"),
             final_output_contract: None,
         }
     }
@@ -90,10 +93,10 @@ impl Default for AgentLoopConfig {
 /// Invalid agent loop configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum AgentLoopConfigError {
-    /// A loop without a step budget would either do no useful work or hide a
-    /// caller configuration mistake.
-    #[error("agent loop max_steps must be greater than zero")]
-    MaxStepsMustBeNonZero,
+    /// A loop without a model-turn budget would either do no useful work or
+    /// hide a caller configuration mistake.
+    #[error("agent loop max_model_turns must be greater than zero")]
+    MaxModelTurnsMustBeNonZero,
 }
 
 /// Result of a completed or policy-blocked agent loop run.
@@ -101,7 +104,7 @@ pub enum AgentLoopConfigError {
 pub struct AgentLoopResult {
     status: AgentLoopStatus,
     events: Vec<RuntimeEvent>,
-    steps_run: usize,
+    model_turns_run: usize,
     final_output: Option<String>,
     final_output_json: Option<FinalOutput>,
 }
@@ -110,23 +113,23 @@ impl AgentLoopResult {
     fn new(
         status: AgentLoopStatus,
         events: Vec<RuntimeEvent>,
-        steps_run: usize,
+        model_turns_run: usize,
         final_output: Option<String>,
     ) -> Self {
-        Self::new_with_final_output_json(status, events, steps_run, final_output, None)
+        Self::new_with_final_output_json(status, events, model_turns_run, final_output, None)
     }
 
     fn new_with_final_output_json(
         status: AgentLoopStatus,
         events: Vec<RuntimeEvent>,
-        steps_run: usize,
+        model_turns_run: usize,
         final_output: Option<String>,
         final_output_json: Option<FinalOutput>,
     ) -> Self {
         Self {
             status,
             events,
-            steps_run,
+            model_turns_run,
             final_output,
             final_output_json,
         }
@@ -144,10 +147,10 @@ impl AgentLoopResult {
         &self.events
     }
 
-    /// Number of [`Runtime::step`] calls started by the loop.
+    /// Number of model turns started by the loop.
     #[must_use]
-    pub fn steps_run(&self) -> usize {
-        self.steps_run
+    pub fn model_turns_run(&self) -> usize {
+        self.model_turns_run
     }
 
     /// Explicit final text returned by the model at loop completion, when present.
@@ -271,8 +274,8 @@ pub enum AgentLoopStatus {
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentLoopBlockedReason {
-    /// The configured runtime-step budget has been reached.
-    MaxStepsReached { max_steps: usize },
+    /// The configured model-turn budget has been reached.
+    MaxModelTurnsReached { max_model_turns: usize },
     /// A step emitted more than one pending tool call. The MVP loop is serial.
     MultiplePendingToolCalls { pending_count: usize },
     /// A step emitted both completion and pending tool-call state.
@@ -361,12 +364,12 @@ impl Runtime {
         let original_task = input.text().to_owned();
         let mut next_input = Some(input);
         let mut events = Vec::new();
-        let mut steps_run = 0;
+        let mut model_turns_run = 0;
 
         tracing::info!(
             event = "runtime.loop.start",
             session_id = self.session_id().as_str(),
-            max_steps = config.max_steps(),
+            max_model_turns = config.max_model_turns(),
             "runtime loop start"
         );
 
@@ -374,7 +377,7 @@ impl Runtime {
             let input = next_input
                 .take()
                 .expect("agent loop always installs the next step input before continuing");
-            let step_index = steps_run + 1;
+            let step_index = model_turns_run + 1;
             tracing::info!(
                 event = "runtime.step.start",
                 session_id = self.session_id().as_str(),
@@ -390,11 +393,11 @@ impl Runtime {
                 match self.step_with_active_permit(input, step_context, loop_permit.clone()) {
                     Ok(stream) => stream,
                     Err(source) => {
-                        trace_loop_error(self.session_id().as_str(), steps_run, &source);
+                        trace_loop_error(self.session_id().as_str(), model_turns_run, &source);
                         return Err(AgentLoopError::new(events, source));
                     }
                 };
-            steps_run += 1;
+            model_turns_run += 1;
 
             let mut step_events = collect_step_events(stream).await;
             let step_final_output = final_assistant_output_from_step(self, &step_events).await;
@@ -403,11 +406,16 @@ impl Runtime {
 
             match outcome {
                 StepOutcome::Completed => {
-                    trace_loop_finish(self.session_id().as_str(), "completed", steps_run, None);
+                    trace_loop_finish(
+                        self.session_id().as_str(),
+                        "completed",
+                        model_turns_run,
+                        None,
+                    );
                     return Ok(AgentLoopResult::new(
                         AgentLoopStatus::Completed,
                         events,
-                        steps_run,
+                        model_turns_run,
                         step_final_output,
                     ));
                 }
@@ -415,13 +423,13 @@ impl Runtime {
                     trace_loop_finish(
                         self.session_id().as_str(),
                         "failed",
-                        steps_run,
+                        model_turns_run,
                         Some(diagnostic.code()),
                     );
                     return Ok(AgentLoopResult::new(
                         AgentLoopStatus::Failed { diagnostic },
                         events,
-                        steps_run,
+                        model_turns_run,
                         None,
                     ));
                 }
@@ -429,13 +437,13 @@ impl Runtime {
                     trace_loop_finish(
                         self.session_id().as_str(),
                         "cancelled",
-                        steps_run,
+                        model_turns_run,
                         Some(diagnostic.code()),
                     );
                     return Ok(AgentLoopResult::new(
                         AgentLoopStatus::Cancelled { diagnostic },
                         events,
-                        steps_run,
+                        model_turns_run,
                         None,
                     ));
                 }
@@ -443,13 +451,13 @@ impl Runtime {
                     trace_loop_finish(
                         self.session_id().as_str(),
                         "blocked",
-                        steps_run,
+                        model_turns_run,
                         Some(blocked_reason_code(&reason)),
                     );
                     return Ok(AgentLoopResult::new(
                         AgentLoopStatus::Blocked { reason },
                         events,
-                        steps_run,
+                        model_turns_run,
                         None,
                     ));
                 }
@@ -457,7 +465,7 @@ impl Runtime {
                     trace_loop_finish(
                         self.session_id().as_str(),
                         "blocked",
-                        steps_run,
+                        model_turns_run,
                         Some("bridge_tool_call_requested"),
                     );
                     return Ok(AgentLoopResult::new(
@@ -468,7 +476,7 @@ impl Runtime {
                             },
                         },
                         events,
-                        steps_run,
+                        model_turns_run,
                         None,
                     ));
                 }
@@ -477,36 +485,45 @@ impl Runtime {
                         match record_final_output_tool_call(self, call).await {
                             Ok(recorded) => recorded,
                             Err(source) => {
-                                trace_loop_error(self.session_id().as_str(), steps_run, &source);
+                                trace_loop_error(
+                                    self.session_id().as_str(),
+                                    model_turns_run,
+                                    &source,
+                                );
                                 return Err(AgentLoopError::new(events, source));
                             }
                         };
                     events.append(&mut final_events);
-                    trace_loop_finish(self.session_id().as_str(), "completed", steps_run, None);
+                    trace_loop_finish(
+                        self.session_id().as_str(),
+                        "completed",
+                        model_turns_run,
+                        None,
+                    );
                     return Ok(AgentLoopResult::new_with_final_output_json(
                         AgentLoopStatus::Completed,
                         events,
-                        steps_run,
+                        model_turns_run,
                         None,
                         Some(final_output),
                     ));
                 }
                 StepOutcome::Pending(PendingLoopToolCall::Runtime(call)) => {
-                    if steps_run >= config.max_steps() {
+                    if model_turns_run >= config.max_model_turns() {
                         trace_loop_finish(
                             self.session_id().as_str(),
                             "blocked",
-                            steps_run,
-                            Some("max_steps_reached"),
+                            model_turns_run,
+                            Some("max_model_turns_reached"),
                         );
                         return Ok(AgentLoopResult::new(
                             AgentLoopStatus::Blocked {
-                                reason: AgentLoopBlockedReason::MaxStepsReached {
-                                    max_steps: config.max_steps(),
+                                reason: AgentLoopBlockedReason::MaxModelTurnsReached {
+                                    max_model_turns: config.max_model_turns(),
                                 },
                             },
                             events,
-                            steps_run,
+                            model_turns_run,
                             None,
                         ));
                     }
@@ -514,7 +531,7 @@ impl Runtime {
                     tracing::info!(
                         event = "runtime.tool.pending",
                         session_id = self.session_id().as_str(),
-                        step_index = steps_run,
+                        step_index = model_turns_run,
                         tool_call_id = call.id().as_str(),
                         tool_name = call.name().as_str(),
                         "runtime loop saw pending tool"
@@ -522,7 +539,7 @@ impl Runtime {
                     tracing::info!(
                         event = "runtime.tool.execute.start",
                         session_id = self.session_id().as_str(),
-                        step_index = steps_run,
+                        step_index = model_turns_run,
                         tool_call_id = call.id().as_str(),
                         tool_name = call.name().as_str(),
                         "runtime loop tool execution start"
@@ -540,7 +557,7 @@ impl Runtime {
                                 tracing::info!(
                                     event = "runtime.tool.execute.finish",
                                     session_id = self.session_id().as_str(),
-                                    step_index = steps_run,
+                                    step_index = model_turns_run,
                                     tool_call_id = call.id().as_str(),
                                     tool_name = call.name().as_str(),
                                     status = tool_resolution_status(&execution_events),
@@ -557,7 +574,7 @@ impl Runtime {
                             trace_loop_finish(
                                 self.session_id().as_str(),
                                 "cancelled",
-                                steps_run,
+                                model_turns_run,
                                 Some("tool_execution_cancelled"),
                             );
                             return Ok(AgentLoopResult::new(
@@ -565,12 +582,12 @@ impl Runtime {
                                     diagnostic: tool_execution_cancelled_diagnostic(&call_id),
                                 },
                                 events,
-                                steps_run,
+                                model_turns_run,
                                 None,
                             ));
                         }
                         Err(source) => {
-                            trace_loop_error(self.session_id().as_str(), steps_run, &source);
+                            trace_loop_error(self.session_id().as_str(), model_turns_run, &source);
                             return Err(AgentLoopError::new(events, source));
                         }
                     }
@@ -578,7 +595,7 @@ impl Runtime {
                     next_input = Some(match continuation_step_input(&original_task) {
                         Ok(input) => input,
                         Err(source) => {
-                            trace_loop_error(self.session_id().as_str(), steps_run, &source);
+                            trace_loop_error(self.session_id().as_str(), model_turns_run, &source);
                             return Err(AgentLoopError::new(events, source));
                         }
                     });
@@ -661,7 +678,7 @@ async fn run_agent_loop_stream_producer(
     let original_task = input.text().to_owned();
     let mut next_input = Some(input);
     let mut events = Vec::new();
-    let mut steps_run = 0;
+    let mut model_turns_run = 0;
 
     while let Some(input) = next_input.take() {
         if loop_token.is_cancelled() {
@@ -677,7 +694,7 @@ async fn run_agent_loop_stream_producer(
         else {
             return None;
         };
-        steps_run += 1;
+        model_turns_run += 1;
 
         let mut step_events = Vec::new();
         tokio::pin!(stream);
@@ -695,7 +712,7 @@ async fn run_agent_loop_stream_producer(
                 return Some(AgentLoopResult::new(
                     AgentLoopStatus::Completed,
                     events,
-                    steps_run,
+                    model_turns_run,
                     step_final_output,
                 ));
             }
@@ -703,7 +720,7 @@ async fn run_agent_loop_stream_producer(
                 return Some(AgentLoopResult::new(
                     AgentLoopStatus::Failed { diagnostic },
                     events,
-                    steps_run,
+                    model_turns_run,
                     None,
                 ));
             }
@@ -711,7 +728,7 @@ async fn run_agent_loop_stream_producer(
                 return Some(AgentLoopResult::new(
                     AgentLoopStatus::Cancelled { diagnostic },
                     events,
-                    steps_run,
+                    model_turns_run,
                     None,
                 ));
             }
@@ -719,7 +736,7 @@ async fn run_agent_loop_stream_producer(
                 return Some(AgentLoopResult::new(
                     AgentLoopStatus::Blocked { reason },
                     events,
-                    steps_run,
+                    model_turns_run,
                     None,
                 ));
             }
@@ -736,21 +753,21 @@ async fn run_agent_loop_stream_producer(
                     return Some(AgentLoopResult::new_with_final_output_json(
                         AgentLoopStatus::Completed,
                         events,
-                        steps_run,
+                        model_turns_run,
                         None,
                         Some(final_output),
                     ));
                 }
                 call => {
-                    if steps_run >= config.max_steps() {
+                    if model_turns_run >= config.max_model_turns() {
                         return Some(AgentLoopResult::new(
                             AgentLoopStatus::Blocked {
-                                reason: AgentLoopBlockedReason::MaxStepsReached {
-                                    max_steps: config.max_steps(),
+                                reason: AgentLoopBlockedReason::MaxModelTurnsReached {
+                                    max_model_turns: config.max_model_turns(),
                                 },
                             },
                             events,
-                            steps_run,
+                            model_turns_run,
                             None,
                         ));
                     }
@@ -774,7 +791,7 @@ async fn run_agent_loop_stream_producer(
                                             ),
                                         },
                                         events,
-                                        steps_run,
+                                        model_turns_run,
                                         None,
                                     ));
                                 }
@@ -840,24 +857,24 @@ async fn run_agent_loop_stream_producer(
 fn trace_loop_finish(
     session_id: &str,
     status: &'static str,
-    steps_run: usize,
+    model_turns_run: usize,
     diagnostic_code: Option<&str>,
 ) {
     tracing::info!(
         event = "runtime.loop.finish",
         session_id,
         status,
-        steps_run,
+        model_turns_run,
         diagnostic_code = diagnostic_code.unwrap_or(""),
         "runtime loop finish"
     );
 }
 
-fn trace_loop_error(session_id: &str, steps_run: usize, source: &RuntimeError) {
+fn trace_loop_error(session_id: &str, model_turns_run: usize, source: &RuntimeError) {
     trace_loop_finish(
         session_id,
         "error",
-        steps_run,
+        model_turns_run,
         Some(runtime_error_code(source)),
     );
 }
@@ -911,7 +928,7 @@ fn tool_execution_cancelled_diagnostic(call_id: &merry_core::ToolCallId) -> Erro
 
 fn blocked_reason_code(reason: &AgentLoopBlockedReason) -> &'static str {
     match reason {
-        AgentLoopBlockedReason::MaxStepsReached { .. } => "max_steps_reached",
+        AgentLoopBlockedReason::MaxModelTurnsReached { .. } => "max_model_turns_reached",
         AgentLoopBlockedReason::MultiplePendingToolCalls { .. } => "multiple_pending_tool_calls",
         AgentLoopBlockedReason::StepCompletedWithPendingToolCall { .. } => {
             "step_completed_with_pending_tool_call"

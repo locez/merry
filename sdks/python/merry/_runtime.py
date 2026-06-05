@@ -23,7 +23,7 @@ _MERRY_TOOL_OPTIONS_ATTR = "__merry_tool_options__"
 @dataclass(frozen=True)
 class RunResult:
     status: str
-    steps_run: int
+    model_turns_run: int
     final_output: str | BaseModel | None
     final_output_json: str | None
     events: list[dict[str, Any]]
@@ -35,13 +35,13 @@ class RuntimeStream:
         runtime: "Runtime",
         task: str,
         final_output_model: type[BaseModel] | None = None,
-        max_steps: int | None = None,
+        max_model_turns: int | None = None,
     ) -> None:
         self._runtime = runtime
         self._task = task
         self._final_output_model = final_output_model
         self._final_output_schema_json = _final_output_schema_json(final_output_model)
-        self._max_steps = _validate_max_steps(max_steps)
+        self._max_model_turns = _validate_max_model_turns(max_model_turns)
         self._events: list[dict[str, Any]] = []
         self._result: RunResult | None = None
         self._started = False
@@ -61,7 +61,7 @@ class RuntimeStream:
             self._runtime._native.run_stream_blocking,
             self._task,
             self._final_output_schema_json,
-            self._max_steps,
+            self._max_model_turns,
         )
 
         while True:
@@ -99,7 +99,7 @@ class RuntimeStream:
         )
         self._result = RunResult(
             status=result.status,
-            steps_run=result.steps_run,
+            model_turns_run=result.model_turns_run,
             final_output=result.final_output,
             final_output_json=result.final_output_json,
             events=list(self._events),
@@ -317,23 +317,23 @@ class Runtime:
         task: str,
         *,
         final_output_model: type[BaseModel] | None = None,
-        max_steps: int | None = None,
+        max_model_turns: int | None = None,
     ) -> RunResult:
         return asyncio.run(
-            self.run(task, final_output_model=final_output_model, max_steps=max_steps)
+            self.run(task, final_output_model=final_output_model, max_model_turns=max_model_turns)
         )
 
     def _run_native_blocking(
         self,
         task: str,
         final_output_model: type[BaseModel] | None,
-        max_steps: int | None,
+        max_model_turns: int | None,
     ) -> RunResult:
         try:
             raw = self._native.run_blocking(
                 task,
                 _final_output_schema_json(final_output_model),
-                _validate_max_steps(max_steps),
+                _validate_max_model_turns(max_model_turns),
             )
         except NativeMerryError as error:
             raise _decode_native_error(error) from error
@@ -345,20 +345,20 @@ class Runtime:
         task: str,
         *,
         final_output_model: type[BaseModel] | None = None,
-        max_steps: int | None = None,
+        max_model_turns: int | None = None,
     ) -> RunResult:
         if not getattr(self, "_tools", {}):
             return await _run_in_worker(
                 self._run_native_blocking,
                 task,
                 final_output_model,
-                max_steps,
+                max_model_turns,
             )
 
         stream = self.stream(
             task,
             final_output_model=final_output_model,
-            max_steps=max_steps,
+            max_model_turns=max_model_turns,
         )
         async for _event in stream:
             pass
@@ -369,12 +369,12 @@ class Runtime:
         task: str,
         *,
         final_output_model: type[BaseModel] | None = None,
-        max_steps: int | None = None,
+        max_model_turns: int | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         async for event in self.stream(
             task,
             final_output_model=final_output_model,
-            max_steps=max_steps,
+            max_model_turns=max_model_turns,
         ):
             yield event
 
@@ -383,13 +383,13 @@ class Runtime:
         task: str,
         *,
         final_output_model: type[BaseModel] | None = None,
-        max_steps: int | None = None,
+        max_model_turns: int | None = None,
     ) -> RuntimeStream:
         return RuntimeStream(
             self,
             task,
             final_output_model=final_output_model,
-            max_steps=max_steps,
+            max_model_turns=max_model_turns,
         )
 
     def register_tool(
@@ -464,9 +464,9 @@ def _run_result_from_native(
     status = raw["status"]
     if not isinstance(status, str):
         raise TypeError("native run result status must be a str")
-    steps_run = raw["steps_run"]
-    if not isinstance(steps_run, int) or isinstance(steps_run, bool):
-        raise TypeError("native run result steps_run must be an int")
+    model_turns_run = raw["model_turns_run"]
+    if not isinstance(model_turns_run, int) or isinstance(model_turns_run, bool):
+        raise TypeError("native run result model_turns_run must be an int")
     final_output = raw["final_output"]
     if final_output is not None and not isinstance(final_output, str):
         raise TypeError("native run result final_output must be a str or None")
@@ -486,7 +486,7 @@ def _run_result_from_native(
 
     return RunResult(
         status=status,
-        steps_run=steps_run,
+        model_turns_run=model_turns_run,
         final_output=structured_final_output if final_output_model is not None else final_output,
         final_output_json=final_output_json,
         events=list(events),
@@ -511,14 +511,14 @@ def _validate_final_output_json(
     return final_output_model.model_validate_json(final_output_json)
 
 
-def _validate_max_steps(max_steps: int | None) -> int | None:
-    if max_steps is None:
+def _validate_max_model_turns(max_model_turns: int | None) -> int | None:
+    if max_model_turns is None:
         return None
-    if isinstance(max_steps, bool) or not isinstance(max_steps, int):
-        raise TypeError("max_steps must be an int greater than zero.")
-    if max_steps < 1:
-        raise ValueError("max_steps must be greater than zero.")
-    return max_steps
+    if isinstance(max_model_turns, bool) or not isinstance(max_model_turns, int):
+        raise TypeError("max_model_turns must be an int greater than zero.")
+    if max_model_turns < 1:
+        raise ValueError("max_model_turns must be greater than zero.")
+    return max_model_turns
 
 
 def _bridge_tool_call(events: list[dict[str, Any]]) -> dict[str, Any] | None:

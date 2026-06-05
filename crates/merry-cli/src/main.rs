@@ -19,11 +19,12 @@ use merry_provider_openai::{OpenAiProvider, OpenAiProviderConfig};
 use merry_runtime::{
     AcceptedLocalWorkspaceProcessAdmission, AgentLoopConfig, AgentLoopStatus, ArtifactContent,
     AutomaticCompactionConfig, BwrapPermissionedProcessRunnerFactory, BwrapProcessRunner,
-    ChildRuntimeFactory, ChildRuntimeInput, MAX_PROCESS_OUTPUT_LIMIT_BYTES, PathAccess,
-    PathAccessRule, PermissionedProcessRunnerFactory, ProcessActionIntent, ProcessEnvPolicy,
-    ProcessRunner, RegisteredTool, Runtime, RuntimeBuilder, RuntimeModelRole, StepContext,
-    StepInput, SubagentManager, TokioProcessRunner, ToolExecutionContext, ToolExecutionOutcome,
-    ToolExecutor, ToolExecutorFuture, process_command_tool, subagent_registered_tools,
+    ChildRuntimeFactory, ChildRuntimeInput, DEFAULT_CODING_AGENT_MAX_MODEL_TURNS,
+    MAX_PROCESS_OUTPUT_LIMIT_BYTES, PathAccess, PathAccessRule, PermissionedProcessRunnerFactory,
+    ProcessActionIntent, ProcessEnvPolicy, ProcessRunner, RegisteredTool, Runtime, RuntimeBuilder,
+    RuntimeModelRole, StepContext, StepInput, SubagentManager, TokioProcessRunner,
+    ToolExecutionContext, ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture,
+    process_command_tool, subagent_registered_tools,
 };
 use merry_tool_workspace::{
     CODING_LOOP_PROCESS_TOOL, WORKSPACE_PATCH_TOOL, WORKSPACE_READ_FILE_TOOL,
@@ -1206,6 +1207,10 @@ async fn run_debug_openai(
     }
 }
 
+fn coding_agent_loop_config() -> Result<AgentLoopConfig, CliError> {
+    AgentLoopConfig::new(DEFAULT_CODING_AGENT_MAX_MODEL_TURNS).map_err(unexpected)
+}
+
 async fn run_debug_coding_loop_smoke(
     sandbox_child_handoff: Option<SandboxChildHandoff>,
     merry_config: Option<&MerryConfig>,
@@ -1233,7 +1238,7 @@ async fn run_debug_coding_loop_smoke(
         .run_agent_loop(
             StepInput::user_text("Run the sandboxed coding-loop smoke.").map_err(unexpected)?,
             StepContext::default(),
-            AgentLoopConfig::new(8).map_err(unexpected)?,
+            coding_agent_loop_config()?,
         )
         .await
         .map_err(unexpected)?;
@@ -1334,7 +1339,7 @@ async fn run_debug_coding_loop_live_smoke(
         .run_agent_loop(
             StepInput::user_text(&coding_loop_live_smoke_task(None)).map_err(unexpected)?,
             context,
-            AgentLoopConfig::new(10).map_err(unexpected)?,
+            coding_agent_loop_config()?,
         )
         .await
         .map_err(unexpected)?;
@@ -1380,7 +1385,7 @@ async fn run_debug_coding_loop_task_smoke(
         .run_agent_loop(
             StepInput::user_text(fixture.task_prompt()).map_err(unexpected)?,
             StepContext::default(),
-            AgentLoopConfig::new(10).map_err(unexpected)?,
+            coding_agent_loop_config()?,
         )
         .await
         .map_err(unexpected)?;
@@ -1440,7 +1445,7 @@ async fn run_debug_coding_loop_task_live_smoke(
         .run_agent_loop(
             StepInput::user_text(&fixture.live_task_prompt(None)).map_err(unexpected)?,
             context,
-            AgentLoopConfig::new(16).map_err(unexpected)?,
+            coding_agent_loop_config()?,
         )
         .await
         .map_err(unexpected)?;
@@ -1508,7 +1513,7 @@ async fn run_debug_coding_loop_subagent_live_smoke(
         .run_agent_loop(
             StepInput::user_text(&coding_loop_subagent_live_smoke_task()).map_err(unexpected)?,
             context,
-            AgentLoopConfig::new(12).map_err(unexpected)?,
+            coding_agent_loop_config()?,
         )
         .await
         .map_err(unexpected)?;
@@ -5256,7 +5261,7 @@ mod tests {
                                     Value::String("Inspect the fixture.".to_owned()),
                                 ),
                                 (
-                                    "max_steps".to_owned(),
+                                    "max_model_turns".to_owned(),
                                     Value::Number(serde_json::Number::from(1)),
                                 ),
                                 (

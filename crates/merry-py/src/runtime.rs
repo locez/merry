@@ -357,27 +357,27 @@ impl PyRuntime {
         Ok(())
     }
 
-    #[pyo3(signature = (task, final_output_schema_json=None, max_steps=None))]
+    #[pyo3(signature = (task, final_output_schema_json=None, max_model_turns=None))]
     fn run_blocking(
         &self,
         py: Python<'_>,
         task: String,
         final_output_schema_json: Option<String>,
-        max_steps: Option<usize>,
+        max_model_turns: Option<usize>,
     ) -> PyResult<Py<PyAny>> {
         let runtime = self.runtime.clone();
         let result = py.detach(move || {
-            run_agent_loop_blocking(runtime, task, final_output_schema_json, max_steps)
+            run_agent_loop_blocking(runtime, task, final_output_schema_json, max_model_turns)
         })?;
         agent_loop_result_to_python(py, result)
     }
 
-    #[pyo3(signature = (task, final_output_schema_json=None, max_steps=None))]
+    #[pyo3(signature = (task, final_output_schema_json=None, max_model_turns=None))]
     fn run_stream_blocking(
         &self,
         task: String,
         final_output_schema_json: Option<String>,
-        max_steps: Option<usize>,
+        max_model_turns: Option<usize>,
     ) -> NativeRuntimeEventStream {
         let runtime = self.runtime.clone();
         let (sender, receiver) = mpsc::channel();
@@ -387,7 +387,7 @@ impl PyRuntime {
                 runtime,
                 task,
                 final_output_schema_json,
-                max_steps,
+                max_model_turns,
                 sender.clone(),
                 command_receiver,
             ) {
@@ -1003,11 +1003,11 @@ fn run_agent_loop_blocking(
     runtime: Runtime,
     task: String,
     final_output_schema_json: Option<String>,
-    max_steps: Option<usize>,
+    max_model_turns: Option<usize>,
 ) -> PyResult<AgentLoopResult> {
     let final_output_contract = final_output_contract_from_schema_json(final_output_schema_json)
         .map_err(SchemaMessage::into_py_error)?;
-    let config = agent_loop_config(final_output_contract, max_steps).map_err(|message| {
+    let config = agent_loop_config(final_output_contract, max_model_turns).map_err(|message| {
         error::runtime_message_to_py(message.code, &message.message, Some(message.hint))
     })?;
     let tokio_runtime = tokio::runtime::Builder::new_current_thread()
@@ -1035,12 +1035,12 @@ fn run_agent_loop_event_stream_blocking(
     runtime: Runtime,
     task: String,
     final_output_schema_json: Option<String>,
-    max_steps: Option<usize>,
+    max_model_turns: Option<usize>,
     sender: mpsc::Sender<StreamRunnerMessage>,
     command_receiver: tokio::sync::mpsc::UnboundedReceiver<StreamRunnerCommand>,
 ) -> Result<(), StreamRunnerError> {
     let final_output_contract = final_output_contract_from_schema_json(final_output_schema_json)?;
-    let config = agent_loop_config(final_output_contract, max_steps)?;
+    let config = agent_loop_config(final_output_contract, max_model_turns)?;
     let tokio_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -1212,14 +1212,14 @@ fn final_output_contract_from_schema_json(
 
 fn agent_loop_config(
     final_output_contract: Option<FinalOutputContract>,
-    max_steps: Option<usize>,
+    max_model_turns: Option<usize>,
 ) -> Result<AgentLoopConfig, SchemaMessage> {
-    let config = match max_steps {
-        Some(max_steps) => AgentLoopConfig::new(max_steps).map_err(|source| {
+    let config = match max_model_turns {
+        Some(max_model_turns) => AgentLoopConfig::new(max_model_turns).map_err(|source| {
             SchemaMessage::new(
-                "runtime.max_steps_invalid",
+                "runtime.max_model_turns_invalid",
                 source.to_string(),
-                "Pass max_steps as an integer greater than zero.",
+                "Pass max_model_turns as an integer greater than zero.",
             )
         })?,
         None => AgentLoopConfig::default(),
@@ -1276,7 +1276,7 @@ fn submit_tool_success_json_blocking(
 fn agent_loop_result_to_python(py: Python<'_>, result: AgentLoopResult) -> PyResult<Py<PyAny>> {
     let dict = PyDict::new(py);
     dict.set_item("status", status_label(result.status()))?;
-    dict.set_item("steps_run", result.steps_run())?;
+    dict.set_item("model_turns_run", result.model_turns_run())?;
     dict.set_item("final_output", result.final_output())?;
     dict.set_item(
         "final_output_json",

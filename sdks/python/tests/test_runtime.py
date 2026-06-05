@@ -14,9 +14,9 @@ async def _assert_runtime_run_returns_final_output_and_events():
 
     assert result.final_output == "done"
     assert result.status == "completed"
-    assert result.steps_run == 1
+    assert result.model_turns_run == 1
     assert isinstance(result.status, str)
-    assert isinstance(result.steps_run, int)
+    assert isinstance(result.model_turns_run, int)
     assert all(isinstance(event, dict) for event in result.events)
     assert [event["kind"]["type"] for event in result.events] == [
         "session_started",
@@ -63,7 +63,7 @@ async def _assert_runtime_stream_returns_result_after_events():
     result = await stream.result()
 
     assert result.status == "completed"
-    assert result.steps_run == 1
+    assert result.model_turns_run == 1
     assert result.final_output == "streamed result"
     assert [event["kind"]["type"] for event in result.events] == event_types
 
@@ -88,7 +88,7 @@ async def _assert_runtime_run_stream_yields_before_stream_finishes():
             return self._events.pop(0)
 
     class SlowStreamingNativeRuntime:
-        def run_stream_blocking(self, _task, _final_output_schema_json=None, _max_steps=None):
+        def run_stream_blocking(self, _task, _final_output_schema_json=None, _max_model_turns=None):
             return SlowNativeStream()
 
     runtime._native = SlowStreamingNativeRuntime()
@@ -110,11 +110,11 @@ async def _assert_runtime_run_does_not_block_event_loop():
     runtime = merry.Runtime.__new__(merry.Runtime)
 
     class SlowNativeRuntime:
-        def run_blocking(self, _task, _final_output_schema_json=None, _max_steps=None):
+        def run_blocking(self, _task, _final_output_schema_json=None, _max_model_turns=None):
             time.sleep(0.05)
             return {
                 "status": "completed",
-                "steps_run": 1,
+                "model_turns_run": 1,
                 "final_output": "done",
                 "final_output_json": None,
                 "events": [],
@@ -139,18 +139,18 @@ def test_runtime_run_does_not_block_event_loop():
     asyncio.run(_assert_runtime_run_does_not_block_event_loop())
 
 
-async def _assert_runtime_run_passes_max_steps_to_native():
+async def _assert_runtime_run_passes_max_model_turns_to_native():
     runtime = merry.Runtime.__new__(merry.Runtime)
     seen = {}
 
     class NativeRuntime:
-        def run_blocking(self, task, final_output_schema_json=None, max_steps=None):
+        def run_blocking(self, task, final_output_schema_json=None, max_model_turns=None):
             seen["task"] = task
             seen["schema"] = final_output_schema_json
-            seen["max_steps"] = max_steps
+            seen["max_model_turns"] = max_model_turns
             return {
                 "status": "completed",
-                "steps_run": 1,
+                "model_turns_run": 1,
                 "final_output": "done",
                 "final_output_json": None,
                 "events": [],
@@ -159,25 +159,25 @@ async def _assert_runtime_run_passes_max_steps_to_native():
     runtime._native = NativeRuntime()
     runtime._tools = {}
 
-    await runtime.run("Say done.", max_steps=32)
+    await runtime.run("Say done.", max_model_turns=32)
 
-    assert seen == {"task": "Say done.", "schema": None, "max_steps": 32}
-
-
-def test_runtime_run_passes_max_steps_to_native():
-    asyncio.run(_assert_runtime_run_passes_max_steps_to_native())
+    assert seen == {"task": "Say done.", "schema": None, "max_model_turns": 32}
 
 
-def test_runtime_rejects_invalid_max_steps():
+def test_runtime_run_passes_max_model_turns_to_native():
+    asyncio.run(_assert_runtime_run_passes_max_model_turns_to_native())
+
+
+def test_runtime_rejects_invalid_max_model_turns():
     runtime = merry.Runtime.__new__(merry.Runtime)
     runtime._native = object()
     runtime._tools = {}
 
-    with pytest.raises(ValueError, match="max_steps"):
-        runtime.stream("Say streamed.", max_steps=0)
+    with pytest.raises(ValueError, match="max_model_turns"):
+        runtime.stream("Say streamed.", max_model_turns=0)
 
-    with pytest.raises(TypeError, match="max_steps"):
-        runtime.stream("Say streamed.", max_steps=True)
+    with pytest.raises(TypeError, match="max_model_turns"):
+        runtime.stream("Say streamed.", max_model_turns=True)
 
 
 async def _assert_stream_closed_after_bridge_result_returns_blocked_result():
@@ -214,7 +214,7 @@ async def _assert_stream_closed_after_bridge_result_returns_blocked_result():
         def result_blocking(self):
             return {
                 "status": "blocked",
-                "steps_run": 16,
+                "model_turns_run": 16,
                 "final_output": None,
                 "final_output_json": None,
                 "events": [
@@ -232,7 +232,7 @@ async def _assert_stream_closed_after_bridge_result_returns_blocked_result():
             }
 
     class NativeRuntime:
-        def run_stream_blocking(self, _task, _final_output_schema_json=None, _max_steps=None):
+        def run_stream_blocking(self, _task, _final_output_schema_json=None, _max_model_turns=None):
             return NativeStream()
 
     runtime._native = NativeRuntime()
@@ -243,7 +243,7 @@ async def _assert_stream_closed_after_bridge_result_returns_blocked_result():
 
     runtime._tools = {"probe_step": merry.Tool.bridge(probe_step, description="Probe.", schema={})}
 
-    stream = runtime.stream("Run probe.", max_steps=16)
+    stream = runtime.stream("Run probe.", max_model_turns=16)
     event_types = []
     async for event in stream:
         event_types.append(event["kind"]["type"])
@@ -253,7 +253,7 @@ async def _assert_stream_closed_after_bridge_result_returns_blocked_result():
     assert calls == ["payload"]
     assert event_types == ["bridge_tool_call_requested"]
     assert result.status == "blocked"
-    assert result.steps_run == 16
+    assert result.model_turns_run == 16
 
 
 def test_stream_closed_after_bridge_result_returns_blocked_result():

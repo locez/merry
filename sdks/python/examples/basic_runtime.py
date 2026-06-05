@@ -45,7 +45,7 @@ async def main() -> None:
     result = await stream.result()
 
     print(f"status: {result.status}")
-    print(f"steps_run: {result.steps_run}")
+    print(f"model_turns_run: {result.model_turns_run}")
     print(f"final_output: {result.final_output}")
 
 
