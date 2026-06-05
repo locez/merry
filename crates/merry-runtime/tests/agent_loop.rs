@@ -735,7 +735,7 @@ async fn run_agent_loop_stream_resumes_same_loop_after_bridge_tool_result() {
     let result = stream.result().await.expect("stream should produce result");
 
     assert_eq!(result.status(), &AgentLoopStatus::Completed);
-    assert_eq!(result.steps_run(), 2);
+    assert_eq!(result.model_turns_run(), 2);
     assert_eq!(
         event_kind_names(&events),
         [
@@ -779,7 +779,7 @@ async fn run_agent_loop_stream_completes_final_output_without_continuation_budge
     let result = stream.result().await.expect("stream should produce result");
 
     assert_eq!(result.status(), &AgentLoopStatus::Completed);
-    assert_eq!(result.steps_run(), 1);
+    assert_eq!(result.model_turns_run(), 1);
     assert_eq!(
         result
             .final_output_json()
@@ -820,7 +820,7 @@ async fn agent_loop_completes_when_model_calls_final_output_tool() {
         .expect("agent loop should run");
 
     assert_eq!(result.status(), &AgentLoopStatus::Completed);
-    assert_eq!(result.steps_run(), 1);
+    assert_eq!(result.model_turns_run(), 1);
     assert_eq!(
         result
             .final_output_json()
@@ -870,7 +870,7 @@ async fn agent_loop_executes_runtime_tool_before_final_output_tool() {
         .expect("agent loop should run");
 
     assert_eq!(result.status(), &AgentLoopStatus::Completed);
-    assert_eq!(result.steps_run(), 2);
+    assert_eq!(result.model_turns_run(), 2);
     assert_eq!(
         result
             .final_output_json()
@@ -989,7 +989,7 @@ async fn agent_loop_blocks_for_bridge_tool_runner_instead_of_executing_runtime_t
             },
         }
     );
-    assert_eq!(result.steps_run(), 1);
+    assert_eq!(result.model_turns_run(), 1);
     assert_eq!(
         event_kind_names(result.events()),
         [
@@ -1020,7 +1020,7 @@ async fn agent_loop_executes_one_tool_and_continues_to_final_completion() {
     let result = run_default_loop(&runtime, "Search notes.").await;
 
     assert_eq!(result.status(), &AgentLoopStatus::Completed);
-    assert_eq!(result.steps_run(), 2);
+    assert_eq!(result.model_turns_run(), 2);
     assert_eq!(
         event_kind_names(result.events()),
         [
@@ -1102,7 +1102,7 @@ async fn agent_loop_preserves_uncheckpointed_tool_continuations_until_compaction
         .expect("agent loop should run");
 
     assert_eq!(result.status(), &AgentLoopStatus::Completed);
-    assert_eq!(result.steps_run(), 3);
+    assert_eq!(result.model_turns_run(), 3);
     assert!(runtime.pending_tool_calls().await.is_empty());
 
     let requests = provider.recorded_requests();
@@ -1447,7 +1447,7 @@ async fn agent_loop_executes_opt_in_workspace_patch_and_continues_to_final_compl
     let result = run_default_loop(&runtime, "Patch note.").await;
 
     assert_eq!(result.status(), &AgentLoopStatus::Completed);
-    assert_eq!(result.steps_run(), 2);
+    assert_eq!(result.model_turns_run(), 2);
     assert_eq!(
         event_kind_names(result.events()),
         [
@@ -1546,7 +1546,7 @@ async fn agent_loop_process_command_tool_executes_and_continues() {
     let result = run_default_loop(&runtime, "Check rustc version.").await;
 
     assert_eq!(result.status(), &AgentLoopStatus::Completed);
-    assert_eq!(result.steps_run(), 2);
+    assert_eq!(result.model_turns_run(), 2);
     assert_eq!(
         event_kind_names(result.events()),
         [
@@ -2141,7 +2141,7 @@ async fn auto_compacted_agent_loop_continuation_keeps_checkpoint_refs_and_stable
         .expect("agent loop should run");
 
     assert_eq!(result.status(), &AgentLoopStatus::Completed);
-    assert_eq!(result.steps_run(), 3);
+    assert_eq!(result.model_turns_run(), 3);
     assert_eq!(compactor.recorded_requests().len(), 2);
 
     let compactor_requests = compactor.recorded_requests();
@@ -2332,7 +2332,7 @@ async fn agent_loop_process_command_tool_executes_rg_files_and_continues() {
     let result = run_default_loop(&runtime, "List tracked source files.").await;
 
     assert_eq!(result.status(), &AgentLoopStatus::Completed);
-    assert_eq!(result.steps_run(), 2);
+    assert_eq!(result.model_turns_run(), 2);
     assert!(runtime.pending_tool_calls().await.is_empty());
 
     let observed_intents = runner.observed_intents();
@@ -2570,12 +2570,12 @@ async fn agent_loop_tool_execution_rejects_concurrent_context_entry_write() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn max_steps_blocks_before_infinite_tool_loop_and_leaves_pending() {
+async fn max_model_turns_blocks_before_infinite_tool_loop_and_leaves_pending() {
     let provider = ScriptedModelProvider::new(vec![vec![Ok(completed_tool_call_event(
         model_tool_call("call-loop", "search_notes"),
     ))]]);
     let executor = ScriptedToolExecutor::succeeding_text("should not run\n");
-    let runtime = runtime_with_tool("agent-loop-max-steps", provider, executor);
+    let runtime = runtime_with_tool("agent-loop-max-model-turns", provider, executor);
 
     let result = runtime
         .run_agent_loop(
@@ -2589,10 +2589,10 @@ async fn max_steps_blocks_before_infinite_tool_loop_and_leaves_pending() {
     assert_eq!(
         result.status(),
         &AgentLoopStatus::Blocked {
-            reason: AgentLoopBlockedReason::MaxStepsReached { max_steps: 1 },
+            reason: AgentLoopBlockedReason::MaxModelTurnsReached { max_model_turns: 1 },
         }
     );
-    assert_eq!(result.steps_run(), 1);
+    assert_eq!(result.model_turns_run(), 1);
     assert_eq!(
         event_kind_names(result.events()),
         ["SessionStarted", "StepStarted", "ToolCallPending"]
@@ -2604,10 +2604,10 @@ async fn max_steps_blocks_before_infinite_tool_loop_and_leaves_pending() {
 }
 
 #[test]
-fn agent_loop_config_rejects_zero_max_steps() {
+fn agent_loop_config_rejects_zero_max_model_turns() {
     let err = AgentLoopConfig::new(0).expect_err("zero budget should be rejected");
 
-    assert_eq!(err, AgentLoopConfigError::MaxStepsMustBeNonZero);
+    assert_eq!(err, AgentLoopConfigError::MaxModelTurnsMustBeNonZero);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -2822,7 +2822,7 @@ async fn agent_loop_tool_execution_cancellation_returns_cancelled_and_keeps_pend
         } if diagnostic.code() == "tool_execution_cancelled"
             && diagnostic.message().contains("call-loop-cancelled-tool")
     ));
-    assert_eq!(result.steps_run(), 1);
+    assert_eq!(result.model_turns_run(), 1);
     assert_eq!(
         event_kind_names(result.events()),
         ["SessionStarted", "StepStarted", "ToolCallPending"]
@@ -2871,7 +2871,7 @@ async fn no_provider_loop_completes_like_skeleton_step() {
     let result = run_default_loop(&runtime, "No provider.").await;
 
     assert_eq!(result.status(), &AgentLoopStatus::Completed);
-    assert_eq!(result.steps_run(), 1);
+    assert_eq!(result.model_turns_run(), 1);
     assert_eq!(
         event_kind_names(result.events()),
         ["SessionStarted", "StepStarted", "StepCompleted"]

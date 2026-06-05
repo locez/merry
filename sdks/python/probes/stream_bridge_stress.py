@@ -186,10 +186,10 @@ async def run_probe(args: argparse.Namespace) -> int:
     runtime, stats = make_runtime(payload_chars=args.payload_chars)
     if args.mode == "long-chain":
         prompt = long_chain_prompt(args.steps, args.payload_chars)
-        max_steps = args.max_steps or args.steps + 2
+        max_model_turns = args.max_model_turns or args.steps + 2
     else:
         prompt = control_chars_prompt(args.repeat)
-        max_steps = args.max_steps or 4
+        max_model_turns = args.max_model_turns or 4
 
     started = time.time()
     print(
@@ -200,7 +200,7 @@ async def run_probe(args: argparse.Namespace) -> int:
                 "steps": args.steps,
                 "payload_chars": args.payload_chars,
                 "repeat": args.repeat,
-                "max_steps": max_steps,
+                "max_model_turns": max_model_turns,
                 "model": os.environ.get("MERRY_OPENAI_MODEL")
                 or os.environ.get("OPENAI_MODEL")
                 or MODEL,
@@ -214,7 +214,7 @@ async def run_probe(args: argparse.Namespace) -> int:
         stream = runtime.stream(
             prompt,
             final_output_model=ProbeReport,
-            max_steps=max_steps,
+            max_model_turns=max_model_turns,
         )
         async for event in stream:
             print(short_event(event), flush=True)
@@ -301,11 +301,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Bad payload repeat count in control-chars mode.",
     )
     parser.add_argument(
-        "--max-steps",
+        "--max-model-turns",
         type=int,
         default=None,
         help=(
-            "Agent loop step budget. Defaults to steps + 2 for long-chain "
+            "Agent loop model-turn budget. Defaults to steps + 2 for long-chain "
             "and 4 for control-chars."
         ),
     )
@@ -316,8 +316,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--payload-chars must be >= 0")
     if args.repeat < 1:
         parser.error("--repeat must be >= 1")
-    if args.max_steps is not None and args.max_steps < 1:
-        parser.error("--max-steps must be >= 1")
+    if args.max_model_turns is not None and args.max_model_turns < 1:
+        parser.error("--max-model-turns must be >= 1")
     return args
 
 

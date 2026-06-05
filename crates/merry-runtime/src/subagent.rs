@@ -35,8 +35,8 @@ const WORKSPACE_PATCH_TOOL_NAME: &str = "workspace_patch";
 
 /// Maximum UTF-8 task text size accepted for one child task.
 pub(crate) const MAX_TASK_BYTES: usize = 16 * 1024;
-/// Default bounded child loop step count.
-pub const DEFAULT_MAX_STEPS: u32 = 8;
+/// Default bounded child loop model-turn count.
+pub const DEFAULT_MAX_MODEL_TURNS: u32 = 8;
 /// Default maximum number of concurrent child agents.
 pub(crate) const DEFAULT_MAX_THREADS: usize = 6;
 /// Default child delegation depth.
@@ -51,9 +51,9 @@ pub enum SubagentError {
     /// The delegated task text exceeded [`MAX_TASK_BYTES`].
     #[error("task is longer than the allowed maximum")]
     TaskTooLong,
-    /// The delegated task has no allowed runtime steps.
-    #[error("max_steps must be greater than zero")]
-    ZeroMaxSteps,
+    /// The delegated task has no allowed model turns.
+    #[error("max_model_turns must be greater than zero")]
+    ZeroMaxModelTurns,
     /// A path scope was not a normalized workspace-relative path.
     #[error("scope path must be relative and normalized: {path}")]
     InvalidScopePath {
@@ -127,7 +127,7 @@ impl Default for SubagentConfig {
 pub struct SubagentTaskSpec {
     display_name: Option<String>,
     task: String,
-    max_steps: u32,
+    max_model_turns: u32,
     allowed_tools: Vec<ToolName>,
     read_scope: Vec<PathBuf>,
     write_scope: Vec<PathBuf>,
@@ -136,17 +136,17 @@ pub struct SubagentTaskSpec {
 }
 
 impl SubagentTaskSpec {
-    /// Creates a child task specification from validated task text and step bound.
-    pub fn new(task: impl Into<String>, max_steps: u32) -> Result<Self, SubagentError> {
+    /// Creates a child task specification from validated task text and model-turn bound.
+    pub fn new(task: impl Into<String>, max_model_turns: u32) -> Result<Self, SubagentError> {
         let task = task.into();
         validate_task_text(&task)?;
-        if max_steps == 0 {
-            return Err(SubagentError::ZeroMaxSteps);
+        if max_model_turns == 0 {
+            return Err(SubagentError::ZeroMaxModelTurns);
         }
         Ok(Self {
             display_name: None,
             task,
-            max_steps,
+            max_model_turns,
             allowed_tools: Vec::new(),
             read_scope: Vec::new(),
             write_scope: Vec::new(),
@@ -161,10 +161,10 @@ impl SubagentTaskSpec {
         &self.task
     }
 
-    /// Returns the maximum number of bounded child runtime steps.
+    /// Returns the maximum number of bounded child model turns.
     #[must_use]
-    pub fn max_steps(&self) -> u32 {
-        self.max_steps
+    pub fn max_model_turns(&self) -> u32 {
+        self.max_model_turns
     }
 
     /// Returns the provider/tool names the child may use.
@@ -371,8 +371,8 @@ pub struct SpawnSubagentTaskInput {
     pub task: String,
     /// Optional compact display name.
     pub display_name: Option<String>,
-    /// Optional maximum child runtime steps.
-    pub max_steps: Option<u32>,
+    /// Optional maximum child model turns.
+    pub max_model_turns: Option<u32>,
     /// Optional provider/tool names the child may use.
     pub allowed_tools: Option<Vec<ToolName>>,
     /// Optional workspace-relative read scope.
@@ -1220,7 +1220,7 @@ fn task_spec_from_input(
     let SpawnSubagentTaskInput {
         task,
         display_name,
-        max_steps,
+        max_model_turns,
         allowed_tools,
         read_scope,
         write_scope,
@@ -1228,7 +1228,7 @@ fn task_spec_from_input(
         expected_output,
     } = input;
 
-    SubagentTaskSpec::new(task, max_steps.unwrap_or(DEFAULT_MAX_STEPS))
+    SubagentTaskSpec::new(task, max_model_turns.unwrap_or(DEFAULT_MAX_MODEL_TURNS))
         .map_err(InvalidSubagentToolArguments::from)?
         .with_display_name(display_name)
         .with_allowed_tools(allowed_tools.unwrap_or_default())
@@ -1459,7 +1459,7 @@ fn spawn_child_loop(scheduler: ChildScheduler, launch: ChildLoopLaunch) {
                 return;
             }
         };
-        let config = match AgentLoopConfig::new(launch.task.max_steps() as usize) {
+        let config = match AgentLoopConfig::new(launch.task.max_model_turns() as usize) {
             Ok(config) => config,
             Err(error) => {
                 let to_start = update_child_after_error(
@@ -1725,7 +1725,7 @@ mod tests {
             SubagentTaskSpec::new("Review src/lib.rs.", 0).expect_err("zero max steps should fail");
         assert!(
             zero.to_string()
-                .contains("max_steps must be greater than zero")
+                .contains("max_model_turns must be greater than zero")
         );
     }
 
@@ -1958,7 +1958,7 @@ mod tool_tests {
                 "tasks": [{
                     "task": "Review the runtime module.",
                     "display_name": "Runtime review",
-                    "max_steps": 3,
+                    "max_model_turns": 3,
                     "allowed_tools": ["workspace_read_file"],
                     "read_scope": ["crates/merry-runtime/src"],
                     "write_scope": ["tmp/subagent-output"],
@@ -1992,7 +1992,7 @@ mod tool_tests {
         );
         assert_eq!(captured.len(), 1);
         assert_eq!(captured[0].task.display_name(), Some("Runtime review"));
-        assert_eq!(captured[0].task.max_steps(), 3);
+        assert_eq!(captured[0].task.max_model_turns(), 3);
         assert_eq!(
             captured[0].task.allowed_tools(),
             &[ToolName::new("workspace_read_file").expect("valid tool name")]
@@ -2020,14 +2020,14 @@ mod tool_tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn spawn_tool_defaults_max_steps_when_omitted() {
+    async fn spawn_tool_defaults_max_model_turns_when_omitted() {
         let factory = Arc::new(CapturingChildFactory::default());
         let executor = SpawnSubagentsExecutor::new(manager(factory.clone()));
         let call = pending_call(
             SPAWN_SUBAGENTS_TOOL_NAME,
             json!({
                 "tasks": [{
-                    "task": "Use the default step limit."
+                    "task": "Use the default model-turn limit."
                 }]
             }),
         );
@@ -2039,7 +2039,7 @@ mod tool_tests {
         let captured = factory.inputs();
 
         assert_eq!(captured.len(), 1);
-        assert_eq!(captured[0].task.max_steps(), DEFAULT_MAX_STEPS);
+        assert_eq!(captured[0].task.max_model_turns(), DEFAULT_MAX_MODEL_TURNS);
     }
 
     #[tokio::test(flavor = "current_thread")]
