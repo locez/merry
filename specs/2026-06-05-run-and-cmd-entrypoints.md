@@ -102,7 +102,6 @@ First-version profile:
 - read-only process lane only
 - no workspace patch tool
 - no accepted local workspace process write/effect lane
-- no command execution of the generated final command
 - path access restricted by configured runtime capabilities
 - network disabled unless explicitly allowed by config/profile
 
@@ -117,21 +116,55 @@ The final output should be a typed command plan, not free text. A minimal shape:
 ```json
 {
   "cwd": ".",
-  "argv": ["rg", "--files", "-g", "*.{test,spec}.ts", "-g", "*.{test,spec}.tsx"],
   "shell_command": "rg --files -g '*.{test,spec}.ts' -g '*.{test,spec}.tsx'",
   "risk": "read_only",
   "assumptions": ["ripgrep is available on PATH"],
-  "notes": "Searches tracked and untracked files visible from the current directory."
+  "notes": ["Searches tracked and untracked files visible from the current directory."]
 }
 ```
 
 The exact Rust type name can be `CommandPlan`. It should use structured final
-output rather than relying on plain assistant text.
+output rather than relying on plain assistant text. `shell_command` is the
+single executable command representation. The first version should not split
+between argv execution and shell execution.
+
+After generating the plan, an interactive TTY may offer to execute the command:
+
+```text
+Command:
+  rg --files -g '*.{test,spec}.ts' -g '*.{test,spec}.tsx'
+
+Risk: read_only
+
+Notes:
+  - Searches tracked and untracked files visible from the current directory.
+
+Execute this shell command on your host? [y/N]
+```
+
+If the user confirms, the CLI executes the final command directly on the host:
+
+```rust
+Command::new("sh")
+    .arg("-c")
+    .arg(plan.shell_command)
+    .current_dir(plan.cwd)
+```
+
+Confirmed execution is not a runtime tool call. It does not use Merry process
+policy, does not create runtime artifacts, does not truncate output, and does
+not send execution output back to the model. Stdout and stderr should stream
+directly to the user's terminal. If Merry itself is running inside an outer
+sandbox, that outer sandbox still naturally constrains the host shell process.
+
+Non-interactive use must not prompt or execute by default. `--json` should emit
+only the `CommandPlan` JSON and must not prompt or execute.
 
 Non-goals:
 
 - do not implement `merry cmd --run` in the first version
-- do not allow the generated final command to execute implicitly
+- do not execute without explicit interactive confirmation
+- do not implement separate argv and shell execution paths
 - do not use `merry cmd` as a smaller `merry run`
 - do not expose raw provider output as the command plan
 
@@ -171,5 +204,9 @@ not execute the final command.
 - uses a read-only command-generation profile
 - runs a multi-turn loop when tools are requested
 - forces structured final output as `CommandPlan`
-- does not execute the generated final command
+- represents the executable plan as `shell_command`
+- prompts on interactive TTY before executing the generated command
+- executes confirmed commands through host `sh -c` without runtime artifacts or
+  truncation
+- never prompts or executes under `--json` or non-interactive stdout/stdin
 - has deterministic tests proving the final structured command plan
