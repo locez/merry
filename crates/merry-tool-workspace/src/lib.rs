@@ -86,6 +86,7 @@ Workspace coding profile:
 - Workspace file tool paths are relative to configured workspace roots, not host-absolute paths.
 - Respond in the user's current input language by default unless the user explicitly requests another language.
 - Process execution runs through Merry runtime policy and the configured sandbox/profile, so filesystem and network access may be intentionally restricted.
+- For run_process, omit cwd or set cwd=\".\" for the workspace root; do not pass an empty cwd string.
 - The default process profile may block network access and paths outside the configured workspace or trusted path rules.
 - If an exact process action is blocked only because it needs additional filesystem or network capability for the current task, call request_permissions for that exact action after observing the failure.
 - request_permissions is not a reusable grant. It must name the exact planned action, request only the minimum needed capability, and the runtime may approve, deny, or fail the request.";
@@ -501,6 +502,8 @@ impl WorkspaceCodingLoopProfile {
         self,
         mut builder: RuntimeProfileBuilder,
     ) -> Result<RuntimeProfileBuilder, WorkspaceCodingLoopProfileError> {
+        builder = builder.progress_commentary(true);
+
         builder = builder.initial_context_summary(
             PROJECT_CAPABILITY_CONTEXT_ID,
             &self.workspace_tools.project_capability_summary(),

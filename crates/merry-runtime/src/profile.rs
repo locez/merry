@@ -200,6 +200,7 @@ impl AcceptedLocalWorkspaceProcessRunnerProfile {
 #[derive(Clone)]
 pub struct RuntimeProfile {
     capabilities: RuntimeCapabilities,
+    progress_commentary: bool,
     initial_context_summaries: BTreeMap<String, String>,
     registered_tools: Vec<RegisteredTool>,
     allow_bridge_tools: bool,
@@ -228,6 +229,12 @@ impl RuntimeProfile {
     #[must_use]
     pub const fn capabilities(&self) -> &RuntimeCapabilities {
         &self.capabilities
+    }
+
+    /// Returns whether this profile asks the model for tool-progress commentary.
+    #[must_use]
+    pub const fn progress_commentary(&self) -> bool {
+        self.progress_commentary
     }
 
     /// Returns startup context summaries keyed by stable id.
@@ -335,6 +342,7 @@ impl RuntimeProfile {
     pub(crate) fn into_parts(self) -> RuntimeProfileParts {
         RuntimeProfileParts {
             capabilities: self.capabilities,
+            progress_commentary: self.progress_commentary,
             initial_context_summaries: self.initial_context_summaries,
             registered_tools: self.registered_tools,
             allow_bridge_tools: self.allow_bridge_tools,
@@ -356,6 +364,7 @@ impl RuntimeProfile {
 
 pub(crate) struct RuntimeProfileParts {
     pub(crate) capabilities: RuntimeCapabilities,
+    pub(crate) progress_commentary: bool,
     pub(crate) initial_context_summaries: BTreeMap<String, String>,
     pub(crate) registered_tools: Vec<RegisteredTool>,
     pub(crate) allow_bridge_tools: bool,
@@ -378,6 +387,7 @@ pub(crate) struct RuntimeProfileParts {
 /// Builder for a complete runtime profile.
 pub struct RuntimeProfileBuilder {
     capabilities: RuntimeCapabilities,
+    progress_commentary: bool,
     initial_context_summaries: BTreeMap<String, String>,
     registered_tools: Vec<RegisteredTool>,
     allow_bridge_tools: bool,
@@ -401,6 +411,7 @@ impl RuntimeProfileBuilder {
     pub fn new() -> Self {
         Self {
             capabilities: RuntimeCapabilities::default(),
+            progress_commentary: false,
             initial_context_summaries: BTreeMap::new(),
             registered_tools: Vec::new(),
             allow_bridge_tools: false,
@@ -423,6 +434,17 @@ impl RuntimeProfileBuilder {
     #[must_use]
     pub fn capabilities(mut self, capabilities: RuntimeCapabilities) -> Self {
         self.capabilities = capabilities;
+        self
+    }
+
+    /// Controls whether the profile asks the model to emit brief tool-progress commentary.
+    ///
+    /// This is prompt guidance only. Runtime state and final output remain
+    /// separate from commentary, and model-authored commentary is still recorded
+    /// if a provider emits it while this is disabled.
+    #[must_use]
+    pub fn progress_commentary(mut self, enabled: bool) -> Self {
+        self.progress_commentary = enabled;
         self
     }
 
@@ -556,6 +578,7 @@ impl RuntimeProfileBuilder {
 
         Ok(RuntimeProfile {
             capabilities: self.capabilities,
+            progress_commentary: self.progress_commentary,
             initial_context_summaries: self.initial_context_summaries,
             registered_tools: self.registered_tools,
             allow_bridge_tools: self.allow_bridge_tools,

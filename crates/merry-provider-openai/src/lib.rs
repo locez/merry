@@ -142,6 +142,25 @@ mod tests {
         .expect("valid model request")
     }
 
+    fn request_with_assistant_commentary_and_tool_continuation() -> ModelRequest {
+        ModelRequest::new_with_continuations(
+            ModelName::new("gpt-4.1-mini").expect("valid model name"),
+            vec![
+                message(ModelMessageRole::System, "You are concise."),
+                message(ModelMessageRole::User, "Weather in Shanghai?"),
+                message(
+                    ModelMessageRole::Assistant,
+                    "I will check the weather tool.",
+                ),
+                message(ModelMessageRole::User, "Continue after tool result."),
+            ],
+            vec![weather_tool()],
+            vec![tool_continuation_with_json_result()],
+            GenerationConfig::new(Some(256), false).expect("valid generation config"),
+        )
+        .expect("valid model request")
+    }
+
     #[test]
     fn config_validates_defaults_and_rejects_invalid_values() {
         let config = OpenAiProviderConfig::new("sk-test").expect("valid config");
@@ -423,6 +442,72 @@ mod tests {
         ] {
             assert!(!object.contains_key(field), "{field} should be omitted");
         }
+    }
+
+    #[test]
+    fn rendered_assistant_history_uses_responses_output_message_item() {
+        let rendered = crate::render::render_responses_request(
+            &request_with_assistant_commentary_and_tool_continuation(),
+        )
+        .expect("request should render");
+
+        assert_eq!(
+            rendered["input"],
+            json!([
+                {
+                    "role": "system",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "You are concise."
+                        }
+                    ]
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Weather in Shanghai?"
+                        }
+                    ]
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "I will check the weather tool.",
+                            "annotations": []
+                        }
+                    ]
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Continue after tool result."
+                        }
+                    ]
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_abc123",
+                    "name": "lookup_weather",
+                    "arguments": "{\"city\":\"Shanghai\",\"units\":\"metric\"}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_abc123",
+                    "output": "{\"temperature_c\":22,\"condition\":\"clear\"}"
+                }
+            ])
+        );
+
+        assert_eq!(rendered.get("store"), Some(&json!(false)));
+        assert!(rendered.get("previous_response_id").is_none());
     }
 
     #[test]

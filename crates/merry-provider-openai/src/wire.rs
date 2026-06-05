@@ -24,12 +24,21 @@ pub(crate) struct ResponsesRequest<'a> {
 #[serde(untagged)]
 pub(crate) enum ResponsesInputItem<'a> {
     Message(ResponsesMessageInputItem<'a>),
+    AssistantMessage(ResponsesAssistantMessageInputItem<'a>),
     FunctionCall(ResponsesFunctionCallInputItem<'a>),
     FunctionCallOutput(ResponsesFunctionCallOutputInputItem<'a>),
 }
 
 impl<'a> ResponsesInputItem<'a> {
     pub(crate) fn message(role: &'static str, text: &'a str) -> Self {
+        if role == "assistant" {
+            return Self::AssistantMessage(ResponsesAssistantMessageInputItem {
+                kind: "message",
+                role,
+                content: vec![ResponsesOutputMessageContent::output_text(text)],
+            });
+        }
+
         Self::Message(ResponsesMessageInputItem {
             role,
             content: vec![ResponsesInputContent::input_text(text)],
@@ -61,6 +70,14 @@ pub(crate) struct ResponsesMessageInputItem<'a> {
 }
 
 #[derive(Debug, Serialize)]
+pub(crate) struct ResponsesAssistantMessageInputItem<'a> {
+    #[serde(rename = "type")]
+    pub(crate) kind: &'static str,
+    pub(crate) role: &'static str,
+    pub(crate) content: Vec<ResponsesOutputMessageContent<'a>>,
+}
+
+#[derive(Debug, Serialize)]
 pub(crate) struct ResponsesInputContent<'a> {
     #[serde(rename = "type")]
     pub(crate) kind: &'static str,
@@ -72,6 +89,24 @@ impl<'a> ResponsesInputContent<'a> {
         Self {
             kind: "input_text",
             text,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ResponsesOutputMessageContent<'a> {
+    #[serde(rename = "type")]
+    pub(crate) kind: &'static str,
+    pub(crate) text: &'a str,
+    pub(crate) annotations: Vec<Value>,
+}
+
+impl<'a> ResponsesOutputMessageContent<'a> {
+    fn output_text(text: &'a str) -> Self {
+        Self {
+            kind: "output_text",
+            text,
+            annotations: Vec::new(),
         }
     }
 }
