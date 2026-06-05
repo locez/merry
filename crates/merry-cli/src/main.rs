@@ -162,6 +162,9 @@ enum CliCommand {
 
 #[derive(Debug, Args)]
 struct RunArgs {
+    #[arg(long, help = "Print runtime events and final result as JSONL")]
+    events_jsonl: bool,
+
     #[arg(required = true, allow_hyphen_values = true, value_name = "TASK")]
     task: String,
 }
@@ -1332,13 +1335,23 @@ async fn run_merry_run(
         subagents: subagents_config(merry_config).map_err(unexpected)?,
     })?;
     let input = StepInput::user_text(&args.task).map_err(unexpected)?;
-    write_run_agent_loop_output(
-        &runtime,
-        input,
-        coding_agent_loop_config()?,
-        tokio::io::stdout(),
-    )
-    .await
+    if args.events_jsonl {
+        write_run_agent_loop_jsonl_output(
+            &runtime,
+            input,
+            coding_agent_loop_config()?,
+            tokio::io::stdout(),
+        )
+        .await
+    } else {
+        write_run_agent_loop_output(
+            &runtime,
+            input,
+            coding_agent_loop_config()?,
+            tokio::io::stdout(),
+        )
+        .await
+    }
 }
 
 async fn run_merry_cmd(
@@ -4150,6 +4163,25 @@ async fn write_run_agent_loop_output<W>(
 where
     W: AsyncWrite + Unpin,
 {
+    let mut stream = runtime
+        .run_agent_loop_stream(input, StepContext::default(), config)
+        .map_err(unexpected)?;
+    while stream.next().await.is_some() {}
+    let result = stream.result().await.ok_or_else(|| {
+        CliError::Unexpected("agent loop stream closed before producing a result".to_owned())
+    })?;
+    write_run_agent_loop_summary(&result, writer).await
+}
+
+async fn write_run_agent_loop_jsonl_output<W>(
+    runtime: &Runtime,
+    input: StepInput,
+    config: AgentLoopConfig,
+    writer: W,
+) -> Result<(), CliError>
+where
+    W: AsyncWrite + Unpin,
+{
     let mut writer = BufWriter::new(writer);
     let mut stream = runtime
         .run_agent_loop_stream(input, StepContext::default(), config)
@@ -4163,6 +4195,37 @@ where
         CliError::Unexpected("agent loop stream closed before producing a result".to_owned())
     })?;
     write_agent_loop_result(&result, &mut writer).await?;
+    writer.flush().await.map_err(stdout_error)
+}
+
+async fn write_run_agent_loop_summary<W>(
+    result: &AgentLoopResult,
+    writer: W,
+) -> Result<(), CliError>
+where
+    W: AsyncWrite + Unpin,
+{
+    let mut writer = BufWriter::new(writer);
+    if let Some(output) = result.final_output() {
+        writer
+            .write_all(output.as_bytes())
+            .await
+            .map_err(stdout_error)?;
+        if !output.ends_with('\n') {
+            writer.write_all(b"\n").await.map_err(stdout_error)?;
+        }
+    } else if let Some(output) = result.final_output_json() {
+        writer
+            .write_all(output.json().as_bytes())
+            .await
+            .map_err(stdout_error)?;
+        writer.write_all(b"\n").await.map_err(stdout_error)?;
+    } else {
+        writer
+            .write_all(format!("status: {:?}\n", result.status()).as_bytes())
+            .await
+            .map_err(stdout_error)?;
+    }
     writer.flush().await.map_err(stdout_error)
 }
 
@@ -5226,6 +5289,21 @@ mod tests {
         match cli.command {
             CliCommand::Run(args) => {
                 assert_eq!(args.task, "fix the failing test");
+                assert!(!args.events_jsonl);
+            }
+            _ => panic!("expected run command"),
+        }
+    }
+
+    #[test]
+    fn clap_parses_run_events_jsonl() {
+        let cli = Cli::try_parse_from(["merry", "run", "--events-jsonl", "fix the failing test"])
+            .expect("run args should parse");
+
+        match cli.command {
+            CliCommand::Run(args) => {
+                assert_eq!(args.task, "fix the failing test");
+                assert!(args.events_jsonl);
             }
             _ => panic!("expected run command"),
         }
@@ -5766,7 +5844,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn run_writer_streams_agent_loop_result() {
+    async fn run_writer_prints_final_output_without_event_jsonl() {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("workspace");
         std::fs::create_dir_all(&workspace).expect("mkdir workspace");
@@ -5800,6 +5878,55 @@ mod tests {
 
         let mut output = Vec::new();
         super::write_run_agent_loop_output(
+            &runtime,
+            StepInput::user_text("finish").expect("valid input"),
+            AgentLoopConfig::new(DEFAULT_CODING_AGENT_MAX_MODEL_TURNS).expect("valid config"),
+            &mut output,
+        )
+        .await
+        .expect("run output should write");
+
+        let text = String::from_utf8(output).expect("output should be utf-8");
+        assert_eq!(text, "done from run\n");
+        assert!(!text.contains("\"type\":\"session_started\""));
+        assert!(!text.contains("\"type\":\"agent_loop_result\""));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn run_jsonl_writer_streams_agent_loop_result() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("mkdir workspace");
+        let provider = ScriptedProvider::new(vec![vec![Ok(ModelEvent::Completed {
+            response: ModelResponse::new(
+                vec![ModelOutput::text("done from run")],
+                FinishReason::Stop,
+                None,
+            ),
+        })]]);
+        let runner: Arc<dyn ProcessRunner> = Arc::new(FakeProcessRunner::succeeding(""));
+        let permissioned_factory = Arc::new(
+            merry_runtime::StaticPermissionedProcessRunnerFactory::new(Arc::clone(&runner)),
+        );
+        let runtime = super::build_headless_coding_runtime(super::HeadlessCodingRuntimeInput {
+            session_id: "run-jsonl-writer-test",
+            root: &workspace,
+            admission: AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
+            provider: Arc::new(provider),
+            model: ModelName::new("debug-model").expect("valid model name"),
+            runner,
+            permissioned_process_runner_factory: permissioned_factory,
+            allow_hidden_workspace_paths: false,
+            automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
+            context_compaction: None,
+            approval_review: None,
+            skill_roots: Vec::new(),
+            subagents: SubagentsConfig::default(),
+        })
+        .expect("runtime should build");
+
+        let mut output = Vec::new();
+        super::write_run_agent_loop_jsonl_output(
             &runtime,
             StepInput::user_text("finish").expect("valid input"),
             AgentLoopConfig::new(DEFAULT_CODING_AGENT_MAX_MODEL_TURNS).expect("valid config"),
