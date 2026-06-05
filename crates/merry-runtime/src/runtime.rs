@@ -1845,7 +1845,7 @@ impl RuntimeBuilder {
     /// Allows bridge tools to be registered for this runtime.
     ///
     /// Bridge handlers run in host code outside Merry-managed sandboxing. This
-    /// opt-in is separate from [`RuntimeProfile`] capability policy.
+    /// opt-in is separate from [`RuntimeCapabilities`] policy.
     #[must_use]
     pub fn allow_bridge_tools(mut self) -> Self {
         self.allow_bridge_tools = true;
