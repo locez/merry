@@ -1450,6 +1450,7 @@ Return the final answer by calling the structured final output tool.
 
 The shell_command field must contain exactly one shell command string for the human to review.
 Prefer portable, explicit commands. Include notes for assumptions and cautions for risks.
+Write notes and cautions in the user's current input language unless the user explicitly requests another language.
 For file listing/search requests, interpret current directory, under this directory, and similar wording as recursive by default.
 Use non-recursive limits such as find -maxdepth 1 only when the user explicitly asks for top-level files, direct children, or non-recursive search.
 
@@ -5307,6 +5308,7 @@ mod tests {
 
         assert!(prompt.contains("recursive by default"));
         assert!(prompt.contains("find -maxdepth 1 only when the user explicitly asks"));
+        assert!(prompt.contains("user's current input language"));
     }
 
     #[test]
@@ -5701,6 +5703,7 @@ mod tests {
         assert!(stable_text.contains("demo/SKILL.md"));
         assert!(request_text.contains("workspace_read_file"));
         assert!(request_text.contains("Workspace coding profile"));
+        assert!(request_text.contains("user's current input language"));
         assert!(request_text.contains("configured sandbox/profile"));
         assert!(request_text.contains("network access may be intentionally restricted"));
         assert!(request_text.contains("call request_permissions for that exact action"));
@@ -5753,6 +5756,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(request_text.contains("Workspace coding profile"));
+        assert!(request_text.contains("user's current input language"));
         assert!(
             request
                 .tools()
