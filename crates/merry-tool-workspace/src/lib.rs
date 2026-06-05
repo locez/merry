@@ -22,9 +22,9 @@ use merry_runtime::{
     AcceptedLocalWorkspaceProcessAdmission, ActionExecutionEvidence, ActionProposal,
     ActionProposalError, ActionProposalEvidence, PermissionAdmissionError,
     PermissionedProcessRunnerFactory, ProcessCommandToolError, ProcessRunner, RegisteredTool,
-    RuntimeBuilder, StaticPermissionedProcessRunnerFactory, ToolActionKind, ToolActionPreflight,
-    ToolActionProposalFuture, ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome,
-    ToolExecutor, ToolExecutorFuture, WorkspacePatchChangeEvidence,
+    RuntimeProfileBuilder, StaticPermissionedProcessRunnerFactory, ToolActionKind,
+    ToolActionPreflight, ToolActionProposalFuture, ToolExecutionContext, ToolExecutionError,
+    ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture, WorkspacePatchChangeEvidence,
     WorkspacePatchExecutionEvidence, WorkspacePatchProposal, process_command_tool,
     request_permissions_tool,
 };
@@ -413,6 +413,10 @@ impl ReadOnlyWorkspaceTools {
 /// workspace process effects require an injected runner plus explicit CLI
 /// bwrap admission through
 /// [`WorkspaceCodingLoopProfile::with_cli_bwrap_process_runner`].
+///
+/// Apply this to [`merry_runtime::RuntimeProfileBuilder`] through
+/// [`WorkspaceRuntimeProfileBuilderExt::with_workspace_coding_loop`], then pass
+/// the built runtime profile to `RuntimeBuilder::with_profile`.
 #[derive(Clone)]
 enum WorkspaceProcessRunner {
     ReadOnly(Arc<dyn ProcessRunner>),
@@ -492,15 +496,10 @@ impl WorkspaceCodingLoopProfile {
         self
     }
 
-    /// Registers this profile on an existing runtime builder.
-    ///
-    /// The returned builder is not built yet, so callers can still add model
-    /// providers or other runtime options around the reusable coding-loop
-    /// profile.
-    pub fn register_on(
+    fn apply_to_runtime_profile_builder(
         self,
-        mut builder: RuntimeBuilder,
-    ) -> Result<RuntimeBuilder, WorkspaceCodingLoopProfileError> {
+        mut builder: RuntimeProfileBuilder,
+    ) -> Result<RuntimeProfileBuilder, WorkspaceCodingLoopProfileError> {
         builder = builder.initial_context_summary(
             PROJECT_CAPABILITY_CONTEXT_ID,
             &self.workspace_tools.project_capability_summary(),
@@ -560,6 +559,24 @@ impl WorkspaceCodingLoopProfile {
         }
 
         Ok(builder)
+    }
+}
+
+/// Extension methods for adding workspace coding-loop tools to runtime profiles.
+pub trait WorkspaceRuntimeProfileBuilderExt {
+    /// Adds workspace coding-loop context, tools, and process lanes to a runtime profile.
+    fn with_workspace_coding_loop(
+        self,
+        profile: WorkspaceCodingLoopProfile,
+    ) -> Result<RuntimeProfileBuilder, WorkspaceCodingLoopProfileError>;
+}
+
+impl WorkspaceRuntimeProfileBuilderExt for RuntimeProfileBuilder {
+    fn with_workspace_coding_loop(
+        self,
+        profile: WorkspaceCodingLoopProfile,
+    ) -> Result<RuntimeProfileBuilder, WorkspaceCodingLoopProfileError> {
+        profile.apply_to_runtime_profile_builder(self)
     }
 }
 

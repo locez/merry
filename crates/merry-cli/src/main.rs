@@ -22,13 +22,14 @@ use merry_runtime::{
     ChildRuntimeFactory, ChildRuntimeInput, DEFAULT_CODING_AGENT_MAX_MODEL_TURNS,
     MAX_PROCESS_OUTPUT_LIMIT_BYTES, PathAccess, PathAccessRule, PermissionedProcessRunnerFactory,
     ProcessActionIntent, ProcessEnvPolicy, ProcessRunner, RegisteredTool, Runtime, RuntimeBuilder,
-    RuntimeModelRole, StepContext, StepInput, SubagentManager, TokioProcessRunner,
+    RuntimeModelRole, RuntimeProfile, StepContext, StepInput, SubagentManager, TokioProcessRunner,
     ToolExecutionContext, ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture,
     process_command_tool, subagent_registered_tools,
 };
 use merry_tool_workspace::{
     CODING_LOOP_PROCESS_TOOL, WORKSPACE_PATCH_TOOL, WORKSPACE_READ_FILE_TOOL,
-    WorkspaceCodingLoopProfile, WorkspaceToolLimits, WorkspaceToolsConfig,
+    WorkspaceCodingLoopProfile, WorkspaceRuntimeProfileBuilderExt, WorkspaceToolLimits,
+    WorkspaceToolsConfig,
 };
 use std::{
     collections::BTreeMap,
@@ -746,6 +747,34 @@ fn configured_runtime_builder(
 ) -> Result<RuntimeBuilder, CliError> {
     Ok(Runtime::builder(session_id)
         .automatic_compaction(automatic_compaction_config(config).map_err(unexpected)?))
+}
+
+fn with_workspace_coding_loop_profile(
+    builder: RuntimeBuilder,
+    profile: WorkspaceCodingLoopProfile,
+) -> Result<RuntimeBuilder, CliError> {
+    let profile = RuntimeProfile::builder()
+        .with_workspace_coding_loop(profile)
+        .map_err(unexpected)?
+        .build()
+        .map_err(unexpected)?;
+    builder.with_profile(profile).map_err(unexpected)
+}
+
+fn with_workspace_coding_loop_profile_for_child(
+    builder: RuntimeBuilder,
+    profile: WorkspaceCodingLoopProfile,
+) -> Result<RuntimeBuilder, merry_runtime::RuntimeError> {
+    let profile = RuntimeProfile::builder()
+        .with_workspace_coding_loop(profile)
+        .map_err(|_| merry_runtime::RuntimeError::InvalidStepInput {
+            reason: "child workspace coding loop profile application failed",
+        })?
+        .build()
+        .map_err(|_| merry_runtime::RuntimeError::InvalidStepInput {
+            reason: "child runtime profile build failed",
+        })?;
+    builder.with_profile(profile)
 }
 
 fn maybe_reexec_sandbox(cli: &Cli, args: Vec<OsString>) -> Result<(), SandboxError> {
@@ -2528,7 +2557,7 @@ fn build_permission_network_smoke_runtime(
         );
     }
 
-    WorkspaceCodingLoopProfile::new(workspace_tools_config(
+    let profile = WorkspaceCodingLoopProfile::new(workspace_tools_config(
         coding_loop_workspace_roots(root, &[]),
         false,
         false,
@@ -2539,11 +2568,10 @@ fn build_permission_network_smoke_runtime(
         admission,
         runner,
         permissioned_process_runner_factory,
-    )
-    .register_on(builder)
-    .map_err(unexpected)?
-    .build()
-    .map_err(unexpected)
+    );
+    with_workspace_coding_loop_profile(builder, profile)?
+        .build()
+        .map_err(unexpected)
 }
 
 #[cfg(test)]
@@ -2569,7 +2597,7 @@ fn build_scripted_permission_network_smoke_runtime(
             ModelName::new("merry-permission-network-smoke-review-scripted").map_err(unexpected)?,
         );
 
-    WorkspaceCodingLoopProfile::new(workspace_tools_config(
+    let profile = WorkspaceCodingLoopProfile::new(workspace_tools_config(
         coding_loop_workspace_roots(root, &[]),
         false,
         false,
@@ -2580,11 +2608,10 @@ fn build_scripted_permission_network_smoke_runtime(
         admission,
         runner,
         permissioned_process_runner_factory,
-    )
-    .register_on(builder)
-    .map_err(unexpected)?
-    .build()
-    .map_err(unexpected)
+    );
+    with_workspace_coding_loop_profile(builder, profile)?
+        .build()
+        .map_err(unexpected)
 }
 
 fn coding_loop_subagent_live_smoke_config() -> Result<config::SubagentsConfig, CliError> {
@@ -2710,12 +2737,7 @@ impl ChildRuntimeFactory for CodingLoopChildRuntimeFactory {
         } else {
             profile.with_read_only_process_runner(Arc::clone(&self.runner))
         };
-        profile
-            .register_on(builder)
-            .map_err(|_| merry_runtime::RuntimeError::InvalidStepInput {
-                reason: "child workspace coding loop profile registration failed",
-            })?
-            .build()
+        with_workspace_coding_loop_profile_for_child(builder, profile)?.build()
     }
 }
 
@@ -2845,7 +2867,7 @@ fn build_coding_loop_runtime(
         );
     }
 
-    WorkspaceCodingLoopProfile::new(workspace_tools_config(
+    let profile = WorkspaceCodingLoopProfile::new(workspace_tools_config(
         coding_loop_workspace_roots(root, &options.skill_roots),
         options.allow_hidden_workspace_paths,
         session_id == CODING_LOOP_TASK_SMOKE_SESSION_ID
@@ -2854,11 +2876,10 @@ fn build_coding_loop_runtime(
     )?)
     .map_err(unexpected)?
     .with_patch_tool()
-    .with_cli_bwrap_permissioned_process_runner(admission, runner, permissioned_factory)
-    .register_on(builder)
-    .map_err(unexpected)?
-    .build()
-    .map_err(unexpected)
+    .with_cli_bwrap_permissioned_process_runner(admission, runner, permissioned_factory);
+    with_workspace_coding_loop_profile(builder, profile)?
+        .build()
+        .map_err(unexpected)
 }
 
 fn action_process_runner(
@@ -4579,12 +4600,12 @@ mod tests {
         CompactedCheckpoint, CompactedCheckpointCandidate, MAX_PROCESS_OUTPUT_LIMIT_BYTES,
         PathAccess, PathAccessRule, PathAccessRuleSource, ProcessActionIntent, ProcessEnvPolicy,
         ProcessExitStatus, ProcessRunner, ProcessRunnerContext, ProcessRunnerError,
-        ProcessRunnerFuture, ProcessRunnerOutput, Runtime, StepContext, StepInput, SubagentConfig,
-        ToolExecutionContext,
+        ProcessRunnerFuture, ProcessRunnerOutput, Runtime, RuntimeProfile, StepContext, StepInput,
+        SubagentConfig, ToolExecutionContext,
     };
     use merry_tool_workspace::{
         WORKSPACE_PATCH_TOOL, WORKSPACE_READ_FILE_TOOL, WorkspaceCodingLoopProfile,
-        WorkspaceToolsConfig,
+        WorkspaceRuntimeProfileBuilderExt, WorkspaceToolsConfig,
     };
     use serde_json::{Map, Value};
     use std::{
@@ -7349,7 +7370,7 @@ retained_raw_tail_items = 4
             Runtime::builder(merry_core::SessionId::new("coding-loop-task-live-smoke").unwrap())
                 .model_provider(Arc::new(provider), ModelName::new("debug-model").unwrap());
         let temp = tempfile::tempdir().expect("temp dir should be created");
-        let runtime = WorkspaceCodingLoopProfile::new(WorkspaceToolsConfig::new(vec![
+        let profile = WorkspaceCodingLoopProfile::new(WorkspaceToolsConfig::new(vec![
             temp.path().to_path_buf(),
         ]))
         .expect("workspace profile should build")
@@ -7358,11 +7379,17 @@ retained_raw_tail_items = 4
             Arc::new(FakeProcessRunner::scripted([
                 FakeProcessRunnerStep::failure("cargo failed\n"),
             ])),
-        )
-        .register_on(runtime)
-        .expect("workspace profile should register")
-        .build()
-        .expect("runtime should build");
+        );
+        let profile = RuntimeProfile::builder()
+            .with_workspace_coding_loop(profile)
+            .expect("workspace profile should apply")
+            .build()
+            .expect("runtime profile should build");
+        let runtime = runtime
+            .with_profile(profile)
+            .expect("runtime profile should apply")
+            .build()
+            .expect("runtime should build");
         let events = collect_runtime_step_events(
             &runtime,
             StepInput::user_text("run check").expect("valid step input"),
