@@ -640,6 +640,7 @@ dependencies = [
  "merry-provider-openai",
  "merry-runtime",
  "merry-tool-workspace",
+ "schemars",
  "serde",
  "serde_json",
  "tempfile",

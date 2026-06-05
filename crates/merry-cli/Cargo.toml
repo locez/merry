@@ -12,6 +12,7 @@ merry-llm = { path = "../merry-llm" }
 merry-provider-openai = { path = "../merry-provider-openai" }
 merry-runtime = { path = "../merry-runtime" }
 merry-tool-workspace = { path = "../merry-tool-workspace" }
+schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
