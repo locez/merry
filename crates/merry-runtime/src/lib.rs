@@ -110,7 +110,10 @@ pub use process_runner::{
     BwrapPermissionedProcessRunnerFactory, BwrapProcessRunner, TokioProcessRunner,
 };
 pub use process_tool::{ProcessCommandToolError, process_command_tool};
-pub use profile::{PathAccess, PathAccessRule, PathAccessRuleSource, RuntimeCapabilities};
+pub use profile::{
+    AcceptedLocalWorkspaceProcessRunnerProfile, PathAccess, PathAccessRule, PathAccessRuleSource,
+    RuntimeCapabilities, RuntimeProfile, RuntimeProfileBuilder, RuntimeProfileError,
+};
 pub use runtime::{AutomaticCompactionConfig, Runtime, RuntimeBuilder};
 pub use skill::{SkillCatalog, SkillError, SkillLoadWarning, SkillMetadata};
 pub use step::{StepContext, StepInput};

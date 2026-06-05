@@ -75,6 +75,57 @@ fn assert_projection_unchanged(
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn runtime_builder_with_profile_applies_capabilities_context_and_tools() {
+    let profile = merry_runtime::RuntimeProfile::builder()
+        .capabilities(merry_runtime::RuntimeCapabilities::default().allow_network())
+        .initial_context_summary(
+            "profile-capabilities",
+            "RuntimeProfile applies complete runtime shape.",
+        )
+        .register_tool(RegisteredTool::read_only(
+            tool_spec("profile_tool"),
+            Arc::new(StaticToolExecutor),
+        ))
+        .build()
+        .expect("profile should build");
+
+    let runtime = Runtime::builder(session_id())
+        .with_profile(profile)
+        .expect("profile should apply")
+        .build()
+        .expect("runtime should build");
+    assert!(runtime.capabilities().network_allowed());
+
+    let compiled = ContextCompiler::new()
+        .compile(&runtime.context_snapshot().await)
+        .expect("context should compile");
+    assert!(
+        compiled
+            .to_snapshot()
+            .contains(&"summary:profile-capabilities".to_owned())
+    );
+}
+
+#[test]
+fn runtime_profile_rejects_duplicate_tool_names() {
+    let result = merry_runtime::RuntimeProfile::builder()
+        .register_tool(RegisteredTool::read_only(
+            tool_spec("duplicate_profile_tool"),
+            Arc::new(StaticToolExecutor),
+        ))
+        .register_tool(RegisteredTool::read_only(
+            tool_spec("duplicate_profile_tool"),
+            Arc::new(StaticToolExecutor),
+        ))
+        .build();
+
+    match result {
+        Err(merry_runtime::RuntimeProfileError::DuplicateToolRegistration { .. }) => {}
+        Ok(_) => panic!("duplicate profile tool names should be rejected"),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn runtime_records_context_state_and_builds_compilable_snapshot() {
     let runtime = Runtime::builder(session_id())
         .build()

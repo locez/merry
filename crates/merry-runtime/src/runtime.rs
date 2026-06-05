@@ -13,8 +13,8 @@ use crate::{
     ContextBudgetPolicy, ContextCompiler, ContextEntry, ContextSummary, LedgerProjectionSnapshot,
     ProcessActionIntent, ProcessExitStatus, ProcessPermissionProfileId, ProcessRunner,
     ProcessRunnerContext, ProcessRunnerError, ProcessRunnerOutput, ProjectRules,
-    ResolvedContextWindow, RuntimeError, RuntimeEventStream, RuntimeModelRole,
-    SessionContextSnapshot, SkillCatalog, TaskAnchor,
+    ResolvedContextWindow, RuntimeCapabilities, RuntimeError, RuntimeEventStream, RuntimeModelRole,
+    RuntimeProfile, SessionContextSnapshot, SkillCatalog, TaskAnchor,
     action_audit::ActionAuditPolicy,
     action_policy::{
         ActionPolicyDecision, DefaultActionPolicy, classify_tool_action_risk,
@@ -220,6 +220,12 @@ impl Runtime {
             Some(manager) => Some(manager.snapshot().await),
             None => None,
         }
+    }
+
+    /// Returns the low-level Merry-managed capabilities configured for this runtime.
+    #[must_use]
+    pub fn capabilities(&self) -> &RuntimeCapabilities {
+        &self.inner.capabilities
     }
 
     pub(crate) fn step_with_active_permit(
@@ -1734,6 +1740,7 @@ pub struct RuntimeBuilder {
     event_buffer_size: NonZeroUsize,
     model_configs: RuntimeModelConfigs,
     automatic_compaction: AutomaticCompactionConfig,
+    capabilities: RuntimeCapabilities,
     registered_tools: Vec<RegisteredTool>,
     initial_context_summaries: BTreeMap<String, String>,
     skill_catalog: Option<SkillCatalog>,
@@ -1761,6 +1768,7 @@ impl RuntimeBuilder {
                 .expect("default event buffer size is non-zero"),
             model_configs: RuntimeModelConfigs::default(),
             automatic_compaction: AutomaticCompactionConfig::default(),
+            capabilities: crate::RuntimeCapabilities::default(),
             registered_tools: Vec::new(),
             initial_context_summaries: BTreeMap::new(),
             skill_catalog: None,
@@ -1840,6 +1848,62 @@ impl RuntimeBuilder {
     pub fn register_tool(mut self, tool: RegisteredTool) -> Self {
         self.registered_tools.push(tool);
         self
+    }
+
+    /// Applies a complete runtime profile while keeping this builder as the
+    /// construction owner.
+    pub fn with_profile(mut self, profile: RuntimeProfile) -> Result<Self, RuntimeError> {
+        let parts = profile.into_parts();
+        self.capabilities = parts.capabilities;
+        for (id, text) in parts.initial_context_summaries {
+            self = self.initial_context_summary(&id, &text);
+        }
+        for tool in parts.registered_tools {
+            self = self.register_tool(tool);
+        }
+        if parts.allow_bridge_tools {
+            self = self.allow_bridge_tools();
+        }
+        if parts.allow_low_risk_workspace_patches {
+            self = self.allow_low_risk_workspace_patches();
+        }
+        if let Some(runner) = parts.low_risk_process_runner {
+            self = self.allow_low_risk_process_actions(runner);
+        }
+        if let Some(runner) = parts.read_only_shell_process_runner {
+            self = self.allow_read_only_shell_process_actions(runner);
+        }
+        if let Some(accepted) = parts.accepted_local_workspace_process_runner {
+            self = self.allow_accepted_local_workspace_process_actions(
+                accepted.admission(),
+                accepted.runner(),
+            );
+        }
+        if let Some(trust_level) = parts.runtime_trust_level {
+            self = self.runtime_trust_level(trust_level);
+        }
+        if let Some(mode) = parts.permission_review_mode {
+            self = self.permission_review_mode(mode);
+        }
+        if let Some(source) = parts.permission_admission_source {
+            self = self.permission_admission_source(source);
+        }
+        if let Some(factory) = parts.permissioned_process_runner_factory {
+            self = self.permissioned_process_runner_factory(factory);
+        }
+        if let Some(catalog) = parts.skill_catalog {
+            self = self.skill_catalog(catalog);
+        }
+        if let Some(project_rules) = parts.project_rules {
+            self = self.project_rules(project_rules);
+        }
+        if let Some(task_anchor) = parts.task_anchor {
+            self = self.task_anchor(task_anchor);
+        }
+        if let Some(manager) = parts.subagent_manager {
+            self = self.subagent_manager(manager);
+        }
+        Ok(self)
     }
 
     /// Allows bridge tools to be registered for this runtime.
@@ -2066,6 +2130,7 @@ impl RuntimeBuilder {
                 event_buffer_size: self.event_buffer_size,
                 model_configs: self.model_configs,
                 automatic_compaction: self.automatic_compaction,
+                capabilities: self.capabilities,
                 tool_registry,
                 memory_activation_source: self.memory_activation_source,
                 allow_low_risk_workspace_patches: self.allow_low_risk_workspace_patches,
@@ -2091,6 +2156,7 @@ struct RuntimeInner {
     event_buffer_size: NonZeroUsize,
     model_configs: RuntimeModelConfigs,
     automatic_compaction: AutomaticCompactionConfig,
+    capabilities: RuntimeCapabilities,
     tool_registry: ToolRegistry,
     memory_activation_source: Arc<dyn MemoryActivationSource>,
     allow_low_risk_workspace_patches: bool,
@@ -3658,6 +3724,7 @@ mod tests {
             event_buffer_size: NonZeroUsize::new(1).expect("non-zero buffer"),
             model_configs: RuntimeModelConfigs::default(),
             automatic_compaction: AutomaticCompactionConfig::default(),
+            capabilities: crate::RuntimeCapabilities::default(),
             tool_registry: ToolRegistry::default(),
             memory_activation_source: Arc::new(crate::memory::StoredMemoryActivationSource),
             allow_low_risk_workspace_patches: false,
@@ -4377,6 +4444,7 @@ mod tests {
                 event_buffer_size: NonZeroUsize::new(16).expect("non-zero buffer"),
                 model_configs: model_configs_with_primary(provider),
                 automatic_compaction: AutomaticCompactionConfig::default(),
+                capabilities: crate::RuntimeCapabilities::default(),
                 tool_registry: ToolRegistry::default(),
                 memory_activation_source: Arc::new(source),
                 allow_low_risk_workspace_patches: false,
@@ -4402,6 +4470,7 @@ mod tests {
                 event_buffer_size: NonZeroUsize::new(16).expect("non-zero buffer"),
                 model_configs: model_configs_with_primary(provider),
                 automatic_compaction: AutomaticCompactionConfig::default(),
+                capabilities: crate::RuntimeCapabilities::default(),
                 tool_registry: ToolRegistry::default(),
                 memory_activation_source: Arc::new(crate::memory::StoredMemoryActivationSource),
                 allow_low_risk_workspace_patches: false,
@@ -4430,6 +4499,7 @@ mod tests {
                 event_buffer_size: NonZeroUsize::new(16).expect("non-zero buffer"),
                 model_configs: RuntimeModelConfigs::default(),
                 automatic_compaction: AutomaticCompactionConfig::default(),
+                capabilities: crate::RuntimeCapabilities::default(),
                 tool_registry: ToolRegistry::default(),
                 memory_activation_source: Arc::new(source),
                 allow_low_risk_workspace_patches: false,
