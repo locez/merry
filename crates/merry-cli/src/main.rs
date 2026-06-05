@@ -1450,6 +1450,8 @@ Return the final answer by calling the structured final output tool.
 
 The shell_command field must contain exactly one shell command string for the human to review.
 Prefer portable, explicit commands. Include notes for assumptions and cautions for risks.
+For file listing/search requests, interpret current directory, under this directory, and similar wording as recursive by default.
+Use non-recursive limits such as find -maxdepth 1 only when the user explicitly asks for top-level files, direct children, or non-recursive search.
 
 User request:
 {request}"
@@ -5297,6 +5299,14 @@ mod tests {
         assert!(usage.contains("Usage: merry cmd"));
         assert!(usage.contains("--no-prompt"));
         assert!(!usage.contains("merry debug openai"));
+    }
+
+    #[test]
+    fn command_generation_prompt_treats_file_search_as_recursive_by_default() {
+        let prompt = super::command_generation_prompt("列出当前目录的 rs 文件");
+
+        assert!(prompt.contains("recursive by default"));
+        assert!(prompt.contains("find -maxdepth 1 only when the user explicitly asks"));
     }
 
     #[test]
