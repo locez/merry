@@ -2719,6 +2719,46 @@ struct CodingLoopRuntimeOptions {
     subagents: config::SubagentsConfig,
 }
 
+#[cfg(test)]
+struct HeadlessCodingRuntimeInput<'a> {
+    session_id: &'a str,
+    root: &'a Path,
+    admission: AcceptedLocalWorkspaceProcessAdmission,
+    provider: Arc<dyn ModelProvider>,
+    model: ModelName,
+    runner: Arc<dyn ProcessRunner>,
+    permissioned_process_runner_factory: Arc<dyn PermissionedProcessRunnerFactory>,
+    allow_hidden_workspace_paths: bool,
+    automatic_compaction: AutomaticCompactionConfig,
+    context_compaction: Option<RuntimeRoleProviderConfig>,
+    approval_review: Option<RuntimeRoleProviderConfig>,
+    skill_roots: Vec<PathBuf>,
+    subagents: config::SubagentsConfig,
+}
+
+#[cfg(test)]
+fn build_headless_coding_runtime(
+    input: HeadlessCodingRuntimeInput<'_>,
+) -> Result<Runtime, CliError> {
+    build_coding_loop_runtime(
+        input.session_id,
+        input.root,
+        input.admission,
+        input.provider,
+        input.model,
+        input.runner,
+        CodingLoopRuntimeOptions {
+            allow_hidden_workspace_paths: input.allow_hidden_workspace_paths,
+            approval_review: input.approval_review,
+            automatic_compaction: input.automatic_compaction,
+            context_compaction: input.context_compaction,
+            permissioned_process_runner_factory: Some(input.permissioned_process_runner_factory),
+            skill_roots: input.skill_roots,
+            subagents: input.subagents,
+        },
+    )
+}
+
 struct RuntimeRoleProviderConfig {
     role: RuntimeModelRole,
     provider: Arc<dyn ModelProvider>,
@@ -4687,8 +4727,8 @@ mod tests {
         SubagentConfig, ToolExecutionContext,
     };
     use merry_tool_workspace::{
-        WORKSPACE_PATCH_TOOL, WORKSPACE_READ_FILE_TOOL, WorkspaceCodingLoopProfile,
-        WorkspaceRuntimeProfileBuilderExt, WorkspaceToolsConfig,
+        CODING_LOOP_PROCESS_TOOL, WORKSPACE_PATCH_TOOL, WORKSPACE_READ_FILE_TOOL,
+        WorkspaceCodingLoopProfile, WorkspaceRuntimeProfileBuilderExt, WorkspaceToolsConfig,
     };
     use serde_json::{Map, Value};
     use std::{
@@ -5187,6 +5227,60 @@ mod tests {
         assert!(request_text.contains("network access may be intentionally restricted"));
         assert!(request_text.contains("call request_permissions for that exact action"));
         assert!(!stable_text.contains("body sentinel"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn headless_coding_runtime_uses_coding_agent_profile() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("mkdir workspace");
+        let provider = ScriptedProvider::new(vec![vec![Ok(ModelEvent::Completed {
+            response: ModelResponse::new(vec![ModelOutput::text("done")], FinishReason::Stop, None),
+        })]]);
+        let runner: Arc<dyn ProcessRunner> = Arc::new(FakeProcessRunner::succeeding(""));
+        let permissioned_factory = Arc::new(
+            merry_runtime::StaticPermissionedProcessRunnerFactory::new(Arc::clone(&runner)),
+        );
+
+        let runtime = super::build_headless_coding_runtime(super::HeadlessCodingRuntimeInput {
+            session_id: "headless-coding-runtime-profile",
+            root: &workspace,
+            admission: AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
+            provider: Arc::new(provider.clone()),
+            model: ModelName::new("debug-model").expect("valid model name"),
+            runner,
+            permissioned_process_runner_factory: permissioned_factory,
+            allow_hidden_workspace_paths: false,
+            automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
+            context_compaction: None,
+            approval_review: None,
+            skill_roots: Vec::new(),
+            subagents: SubagentsConfig::default(),
+        })
+        .expect("headless coding runtime should build");
+
+        collect_runtime_step_events(
+            &runtime,
+            StepInput::user_text("Inspect workspace.").expect("valid input"),
+            StepContext::default(),
+        )
+        .await
+        .expect("runtime step should complete");
+
+        let request = provider.recorded_requests()[0].clone();
+        let request_text = request
+            .messages()
+            .iter()
+            .map(|message| message.content().as_text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(request_text.contains("Workspace coding profile"));
+        assert!(
+            request
+                .tools()
+                .iter()
+                .any(|tool| tool.name().as_str() == CODING_LOOP_PROCESS_TOOL)
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
