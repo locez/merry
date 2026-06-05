@@ -4189,6 +4189,7 @@ where
 
     while let Some(event) = stream.next().await {
         write_runtime_event(&event, &mut writer).await?;
+        writer.flush().await.map_err(stdout_error)?;
     }
 
     let result = stream.result().await.ok_or_else(|| {
@@ -5232,13 +5233,43 @@ mod tests {
     use serde_json::{Map, Value};
     use std::{
         ffi::{OsStr, OsString},
+        io,
         path::{Path, PathBuf},
+        pin::Pin,
         process::ExitCode,
         sync::{
             Arc, Mutex,
             atomic::{AtomicUsize, Ordering},
         },
+        task::{Context, Poll},
     };
+    use tokio::io::AsyncWrite;
+
+    #[derive(Default)]
+    struct FlushCountingWriter {
+        bytes: Vec<u8>,
+        flushes: usize,
+    }
+
+    impl AsyncWrite for FlushCountingWriter {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            self.bytes.extend_from_slice(buf);
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            self.flushes += 1;
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
 
     fn sandbox_host() -> SandboxHost {
         SandboxHost {
@@ -5925,7 +5956,7 @@ mod tests {
         })
         .expect("runtime should build");
 
-        let mut output = Vec::new();
+        let mut output = FlushCountingWriter::default();
         super::write_run_agent_loop_jsonl_output(
             &runtime,
             StepInput::user_text("finish").expect("valid input"),
@@ -5935,7 +5966,11 @@ mod tests {
         .await
         .expect("run output should write");
 
-        let text = String::from_utf8(output).expect("output should be utf-8");
+        assert!(
+            output.flushes > 1,
+            "JSONL mode should flush as events arrive"
+        );
+        let text = String::from_utf8(output.bytes).expect("output should be utf-8");
         assert!(text.contains("\"type\":\"session_started\""));
         assert!(text.contains("\"type\":\"agent_loop_result\""));
         assert!(text.contains("\"status\":\"completed\""));
