@@ -74,18 +74,18 @@ impl PathAccessRule {
     }
 }
 
-/// Merry-managed runtime capability policy.
+/// Merry-managed low-level capability policy.
 ///
-/// This constrains capabilities owned by Merry-managed runners, such as future
-/// file/process access lanes and provider-side network use. It is not a trust
-/// label for arbitrary host code or in-process tool executors.
+/// This constrains capabilities owned by Merry-managed runners, such as file
+/// and process access lanes. It is not a complete product runtime profile or a
+/// trust label for arbitrary host code or in-process tool executors.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeProfile {
+pub struct RuntimeCapabilities {
     network_allowed: bool,
     path_rules: Vec<PathAccessRule>,
 }
 
-impl RuntimeProfile {
+impl RuntimeCapabilities {
     /// Creates the default capability policy.
     ///
     /// The default denies network and starts with no path grants.
@@ -138,7 +138,7 @@ impl RuntimeProfile {
     }
 }
 
-impl Default for RuntimeProfile {
+impl Default for RuntimeCapabilities {
     fn default() -> Self {
         Self::new()
     }
@@ -146,37 +146,40 @@ impl Default for RuntimeProfile {
 
 #[cfg(test)]
 mod tests {
-    use super::{PathAccess, PathAccessRule, PathAccessRuleSource, RuntimeProfile};
+    use super::{PathAccess, PathAccessRule, PathAccessRuleSource, RuntimeCapabilities};
     use std::path::Path;
 
     #[test]
-    fn runtime_profile_controls_network_without_tool_network_field() {
-        let profile = RuntimeProfile::default().allow_network();
+    fn runtime_capabilities_control_network_without_tool_network_field() {
+        let capabilities = RuntimeCapabilities::default().allow_network();
 
-        assert!(profile.network_allowed());
+        assert!(capabilities.network_allowed());
     }
 
     #[test]
-    fn runtime_profile_denies_network_by_default() {
-        let profile = RuntimeProfile::default();
+    fn runtime_capabilities_deny_network_by_default() {
+        let capabilities = RuntimeCapabilities::default();
 
-        assert!(!profile.network_allowed());
+        assert!(!capabilities.network_allowed());
     }
 
     #[test]
-    fn runtime_profile_carries_platform_neutral_path_rules() {
+    fn runtime_capabilities_carry_platform_neutral_path_rules() {
         let rule = PathAccessRule::new(
             "/var/log/foo",
             PathAccess::ReadOnly,
             PathAccessRuleSource::TrustedGlobalConfig,
         );
-        let profile = RuntimeProfile::default().with_path_rule(rule);
+        let capabilities = RuntimeCapabilities::default().with_path_rule(rule);
 
-        assert_eq!(profile.path_rules().len(), 1);
-        assert_eq!(profile.path_rules()[0].path(), Path::new("/var/log/foo"));
-        assert_eq!(profile.path_rules()[0].access(), PathAccess::ReadOnly);
+        assert_eq!(capabilities.path_rules().len(), 1);
         assert_eq!(
-            profile.path_rules()[0].source(),
+            capabilities.path_rules()[0].path(),
+            Path::new("/var/log/foo")
+        );
+        assert_eq!(capabilities.path_rules()[0].access(), PathAccess::ReadOnly);
+        assert_eq!(
+            capabilities.path_rules()[0].source(),
             PathAccessRuleSource::TrustedGlobalConfig
         );
     }
