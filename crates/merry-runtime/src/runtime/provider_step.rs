@@ -4,6 +4,11 @@ use super::events::{
     send_tool_call_pending_event, stream_model_with_retry_policy, trace_provider_step_cancelled,
     trace_provider_step_failed, wait_for_model_stream_item, wait_for_retrying_stream_setup,
 };
+use super::model_output::{
+    DIAGNOSTIC_MODEL_TOOL_CALL_MIXED_OUTPUT, diagnostic_from_model_error, is_cancelled_model_error,
+    pending_tool_call_from_model, pending_tool_call_from_outputs, record_streamed_tool_call,
+    tool_call_commentary_text,
+};
 use super::*;
 
 pub(super) async fn run_provider_step(
