@@ -7,15 +7,14 @@ mod debug;
 mod observability;
 mod provider_config;
 mod run;
+mod runtime_config;
 mod runtime_events;
 mod sandbox;
 #[cfg(test)]
 mod test_support;
 
 use clap::{Args, CommandFactory, Parser, Subcommand};
-use config::{EffectiveLogSettings, MerryConfig, XdgPaths};
-use merry_core::SessionId;
-use merry_runtime::{AutomaticCompactionConfig, Runtime, RuntimeBuilder};
+use config::{MerryConfig, XdgPaths};
 use merry_tool_workspace::{
     CODING_LOOP_PROCESS_TOOL, WORKSPACE_PATCH_TOOL, WORKSPACE_READ_FILE_TOOL,
 };
@@ -30,6 +29,7 @@ use debug::{
     CodingLoopTaskLiveSmokeArgs as DebugCodingLoopTaskLiveSmokeArgs, Command as DebugCommand,
     OpenAiArgs as DebugOpenAiArgs, PermissionNetworkSmokeArgs as DebugPermissionNetworkSmokeArgs,
 };
+use runtime_config::{effective_log_settings, validate_loaded_config};
 use sandbox::ChildHandoff as SandboxChildHandoff;
 
 const DEFAULT_SESSION_ID: &str = "debug-session";
@@ -444,61 +444,6 @@ fn parse_max_output_tokens(value: &str) -> Result<u64, String> {
     Ok(tokens)
 }
 
-fn validate_loaded_config(
-    config: Option<&MerryConfig>,
-    paths: &XdgPaths,
-) -> Result<(), config::ConfigError> {
-    let _ = paths.state_dir();
-    let Some(config) = config else {
-        return Ok(());
-    };
-    let _ = effective_log_settings(Some(config), paths)?;
-    let _ = automatic_compaction_config(Some(config))?;
-    let _ = subagents_config(Some(config))?;
-    let _ = config.trusted_global_path_rules()?;
-    let _ = config.skill_roots()?;
-    let _ = config.runtime_models()?;
-    let _ = config.profile();
-    config.validate_provider_settings_if_present()?;
-    Ok(())
-}
-
-fn effective_log_settings(
-    config: Option<&MerryConfig>,
-    paths: &XdgPaths,
-) -> Result<Option<EffectiveLogSettings>, config::ConfigError> {
-    config
-        .map(|config| config.effective_log_settings(paths))
-        .transpose()
-        .map(Option::flatten)
-}
-
-fn automatic_compaction_config(
-    config: Option<&MerryConfig>,
-) -> Result<AutomaticCompactionConfig, config::ConfigError> {
-    config
-        .map(MerryConfig::automatic_compaction_config)
-        .transpose()
-        .map(Option::unwrap_or_default)
-}
-
-fn subagents_config(
-    config: Option<&MerryConfig>,
-) -> Result<config::SubagentsConfig, config::ConfigError> {
-    config
-        .map(MerryConfig::subagents_config)
-        .transpose()
-        .map(Option::unwrap_or_default)
-}
-
-fn configured_runtime_builder(
-    session_id: SessionId,
-    config: Option<&MerryConfig>,
-) -> Result<RuntimeBuilder, CliError> {
-    Ok(Runtime::builder(session_id)
-        .automatic_compaction(automatic_compaction_config(config).map_err(unexpected)?))
-}
-
 fn debug_usage() -> String {
     let mut command = Cli::command();
     let command = command
@@ -681,6 +626,7 @@ mod tests {
         runtime_admission as shell_runtime_admission,
     };
     use crate::provider_config::MERRY_OPENAI_DEBUG_ENV;
+    use crate::runtime_config::{automatic_compaction_config, effective_log_settings};
     use crate::runtime_events::{collect_runtime_step_events, first_pending_tool_call};
     use crate::sandbox::{
         Bootstrap as SandboxBootstrap, Error as SandboxError, Host as SandboxHost,
@@ -699,8 +645,8 @@ mod tests {
         ToolCallResult, ToolCallResultStatus, ToolName,
     };
     use merry_llm::{
-        FinishReason, GenerationConfig, ModelCapabilities, ModelEvent, ModelName, ModelOutput,
-        ModelResponse, ModelToolCall, ModelToolCallId, ToolArguments,
+        FinishReason, GenerationConfig, ModelEvent, ModelName, ModelOutput, ModelResponse,
+        ModelToolCall, ModelToolCallId, ToolArguments,
     };
     use merry_runtime::{
         AcceptedLocalWorkspaceProcessAdmission, AgentLoopConfig, ArtifactContent, CheckpointId,
@@ -1606,7 +1552,7 @@ mod tests {
         )
         .expect("config should parse")
         .expect("config should be present");
-        let log_settings = super::effective_log_settings(Some(&config), &paths)
+        let log_settings = effective_log_settings(Some(&config), &paths)
             .expect("log settings should validate")
             .expect("logging should be enabled");
         assert_eq!(log_settings.path, expected_log_path);
@@ -2577,138 +2523,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn configured_runtime_builder_applies_auto_compaction_config() {
-        let paths = super::config::XdgPaths::from_parts(PathBuf::from("/home/alice"), None, None);
-        let config = super::config::MerryConfig::load_optional_from_text(
-            Some(
-                r#"
-[runtime.auto_compaction]
-retained_raw_tail_items = 4
-"#,
-            ),
-            &paths,
-        )
-        .expect("config should parse")
-        .expect("config should be present");
-        let primary = ScriptedProvider::new(vec![
-            vec![Ok(ModelEvent::Completed {
-                response: ModelResponse::new(
-                    vec![ModelOutput::text("old assistant from configured builder")],
-                    FinishReason::Stop,
-                    None,
-                ),
-            })],
-            vec![Ok(ModelEvent::Completed {
-                response: ModelResponse::new(
-                    vec![ModelOutput::text(
-                        "tail one assistant from configured builder",
-                    )],
-                    FinishReason::Stop,
-                    None,
-                ),
-            })],
-            vec![Ok(ModelEvent::Completed {
-                response: ModelResponse::new(
-                    vec![ModelOutput::text(
-                        "tail two assistant from configured builder",
-                    )],
-                    FinishReason::Stop,
-                    None,
-                ),
-            })],
-            vec![Ok(ModelEvent::Completed {
-                response: ModelResponse::new(
-                    vec![ModelOutput::text("final after configured compaction")],
-                    FinishReason::Stop,
-                    None,
-                ),
-            })],
-        ])
-        .with_capabilities(
-            ModelCapabilities::new(true, true, false, true, Some(420), Some(16))
-                .expect("valid capabilities"),
-        );
-        let compactor = ScriptedProvider::new(vec![vec![Ok(ModelEvent::Completed {
-            response: ModelResponse::new(
-                vec![ModelOutput::text(
-                    r#"{
-                      "claims": [
-                        {
-                          "id": "c1",
-                          "kind": "completed_action",
-                          "text": "Configured builder compacted the old turn only.",
-                          "refs": ["r1", "r2"]
-                        }
-                      ],
-                      "working_intent": null
-                    }"#,
-                )],
-                FinishReason::Stop,
-                None,
-            ),
-        })]]);
-        let runtime = super::configured_runtime_builder(
-            merry_core::SessionId::new("configured-builder-auto-compaction").unwrap(),
-            Some(&config),
-        )
-        .expect("configured builder should build")
-        .model_provider(
-            Arc::new(primary.clone()),
-            ModelName::new("debug-model").unwrap(),
-        )
-        .model_provider_for_role(
-            merry_runtime::RuntimeModelRole::ContextCompaction,
-            Arc::new(compactor.clone()),
-            ModelName::new("debug-compactor").unwrap(),
-        )
-        .build()
-        .expect("runtime should build");
-
-        collect_runtime_step_events(
-            &runtime,
-            StepInput::user_text(&"old user from configured builder ".repeat(70))
-                .expect("valid input"),
-            StepContext::default(),
-        )
-        .await
-        .expect("old step should run");
-        collect_runtime_step_events(
-            &runtime,
-            StepInput::user_text("tail one user from configured builder").expect("valid input"),
-            StepContext::default(),
-        )
-        .await
-        .expect("tail one step should run");
-        collect_runtime_step_events(
-            &runtime,
-            StepInput::user_text("tail two user from configured builder").expect("valid input"),
-            StepContext::default(),
-        )
-        .await
-        .expect("tail two step should run");
-        collect_runtime_step_events(
-            &runtime,
-            StepInput::user_text("current user from configured builder").expect("valid input"),
-            StepContext::default(),
-        )
-        .await
-        .expect("current step should run");
-
-        let compactor_requests = compactor.recorded_requests();
-        assert_eq!(compactor_requests.len(), 1);
-        let compaction_text = compactor_requests[0]
-            .messages()
-            .iter()
-            .map(|message| message.content().as_text())
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(compaction_text.contains("old user from configured builder"));
-        assert!(!compaction_text.contains("tail one user from configured builder"));
-        assert!(!compaction_text.contains("tail two user from configured builder"));
-        assert!(!compaction_text.contains("current user from configured builder"));
-    }
-
-    #[tokio::test]
     async fn debug_openai_tool_helper_executes_one_pending_call_and_continues() {
         let call = ModelToolCall::new(
             ModelToolCallId::new("call-debug").expect("valid tool call id"),
@@ -3226,8 +3040,8 @@ max_carried_prior_refs = 10
         )
         .expect("config should parse")
         .expect("config should be present");
-        let auto_compaction = super::automatic_compaction_config(Some(&config))
-            .expect("auto compaction should validate");
+        let auto_compaction =
+            automatic_compaction_config(Some(&config)).expect("auto compaction should validate");
         let runtime =
             Runtime::builder(merry_core::SessionId::new("coding-loop-task-live-smoke").unwrap())
                 .build()
