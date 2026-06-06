@@ -258,7 +258,6 @@ pub(crate) fn build_runtime(input: RuntimeInput<'_>) -> Result<Runtime, CliError
     let profile = WorkspaceCodingLoopProfile::new(workspace_tools_config(
         coding_loop_workspace_roots(input.root, &input.skill_roots),
         input.allow_hidden_workspace_paths,
-        false,
         None,
     )?)
     .map_err(unexpected)?;

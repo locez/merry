@@ -1,5 +1,4 @@
-use crate::cli_error::{CliError, unexpected};
-use crate::debug::coding_loop::CODING_LOOP_TASK_SMOKE_MAX_PATCH_BYTES;
+use super::CodingRuntimeError;
 use merry_runtime::{RuntimeBuilder, RuntimeProfile};
 use merry_tool_workspace::{
     WorkspaceCodingLoopProfile, WorkspaceRuntimeProfileBuilderExt, WorkspaceToolLimits,
@@ -10,13 +9,15 @@ use std::path::{Path, PathBuf};
 pub(crate) fn with_workspace_coding_loop_profile(
     builder: RuntimeBuilder,
     profile: WorkspaceCodingLoopProfile,
-) -> Result<RuntimeBuilder, CliError> {
+) -> Result<RuntimeBuilder, CodingRuntimeError> {
     let profile = RuntimeProfile::builder()
         .with_workspace_coding_loop(profile)
-        .map_err(unexpected)?
+        .map_err(CodingRuntimeError::from)?
         .build()
-        .map_err(unexpected)?;
-    builder.with_profile(profile).map_err(unexpected)
+        .map_err(CodingRuntimeError::from)?;
+    builder
+        .with_profile(profile)
+        .map_err(|source| CodingRuntimeError::RuntimeProfileApply { source })
 }
 
 pub(super) fn with_workspace_coding_loop_profile_for_child(
@@ -44,20 +45,10 @@ pub(crate) fn coding_loop_workspace_roots(root: &Path, skill_roots: &[PathBuf]) 
 pub(crate) fn workspace_tools_config(
     roots: Vec<PathBuf>,
     allow_hidden_workspace_paths: bool,
-    task_smoke_patch_limit: bool,
-    max_patch_bytes_override: Option<usize>,
-) -> Result<WorkspaceToolsConfig, CliError> {
-    let max_patch_bytes = max_patch_bytes_override.unwrap_or_else(|| {
-        if task_smoke_patch_limit {
-            CODING_LOOP_TASK_SMOKE_MAX_PATCH_BYTES
-        } else {
-            WorkspaceToolLimits::default().max_patch_bytes
-        }
-    });
+    limits_override: Option<WorkspaceToolLimits>,
+) -> Result<WorkspaceToolsConfig, CodingRuntimeError> {
+    let limits = limits_override.unwrap_or_default();
     Ok(WorkspaceToolsConfig::new(roots)
         .with_allow_hidden(allow_hidden_workspace_paths)
-        .with_limits(WorkspaceToolLimits {
-            max_patch_bytes,
-            ..WorkspaceToolLimits::default()
-        }))
+        .with_limits(limits))
 }

@@ -1,4 +1,5 @@
 use crate::cli_error::{CliError, unexpected};
+use crate::coding_runtime::ActionProcessBackendOptions;
 use crate::config::{self, EffectiveLogSettings, MerryConfig, XdgPaths};
 use merry_core::SessionId;
 use merry_runtime::{AutomaticCompactionConfig, Runtime, RuntimeBuilder};
@@ -48,6 +49,22 @@ pub(crate) fn subagents_config(
         .map(MerryConfig::subagents_config)
         .transpose()
         .map(Option::unwrap_or_default)
+}
+
+pub(crate) fn action_process_backend_options(
+    config: Option<&MerryConfig>,
+) -> Result<ActionProcessBackendOptions, config::ConfigError> {
+    let path_rules = config
+        .map(MerryConfig::trusted_global_path_rules)
+        .transpose()?
+        .unwrap_or_default();
+    let network_allowed = config
+        .map(MerryConfig::permissions_network_allowed)
+        .unwrap_or(false);
+    Ok(ActionProcessBackendOptions {
+        path_rules,
+        network_allowed,
+    })
 }
 
 pub(crate) fn configured_runtime_builder(

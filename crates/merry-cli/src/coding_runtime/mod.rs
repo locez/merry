@@ -1,15 +1,19 @@
 mod builder;
 mod child_runtime;
+mod error;
 mod process;
 mod profile;
 mod roles;
 mod sandbox;
 
 pub(crate) use builder::{
-    CodingLoopRuntimeOptions, HeadlessCodingRuntimeInput, build_coding_loop_runtime,
-    build_headless_coding_runtime, coding_agent_loop_config,
+    CodingLoopRuntimeOptions, CodingSubagentsConfig, HeadlessCodingRuntimeInput,
+    build_coding_loop_runtime, build_headless_coding_runtime, coding_agent_loop_config,
 };
-pub(crate) use process::{ActionProcessBackend, action_process_runner};
+pub(crate) use error::CodingRuntimeError;
+pub(crate) use process::{
+    ActionProcessBackend, ActionProcessBackendOptions, action_process_runner,
+};
 pub(crate) use profile::{
     coding_loop_workspace_roots, with_workspace_coding_loop_profile, workspace_tools_config,
 };

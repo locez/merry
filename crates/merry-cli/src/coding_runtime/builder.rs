@@ -1,19 +1,15 @@
+use super::CodingRuntimeError;
 use super::child_runtime::CodingLoopChildRuntimeFactory;
 use super::process::ActionProcessBackend;
 use super::profile::{
     coding_loop_workspace_roots, with_workspace_coding_loop_profile, workspace_tools_config,
 };
 use super::roles::RuntimeRoleProviderConfig;
-use crate::cli_error::{CliError, unexpected};
-use crate::config;
-use crate::debug::coding_loop::{
-    CODING_LOOP_TASK_LIVE_SMOKE_SESSION_ID, CODING_LOOP_TASK_SMOKE_SESSION_ID,
-};
 use merry_llm::{ModelName, ModelProvider, ModelRetryPolicy};
 use merry_runtime::{
     AcceptedLocalWorkspaceProcessAdmission, AutomaticCompactionConfig,
     DEFAULT_CODING_AGENT_MAX_MODEL_TURNS, PermissionedProcessRunnerFactory, ProcessRunner, Runtime,
-    SubagentManager, subagent_registered_tools,
+    SubagentConfig, SubagentManager, subagent_registered_tools,
 };
 use merry_tool_workspace::WorkspaceCodingLoopProfile;
 use std::{
@@ -21,8 +17,10 @@ use std::{
     sync::Arc,
 };
 
-pub(crate) fn coding_agent_loop_config() -> Result<merry_runtime::AgentLoopConfig, CliError> {
-    merry_runtime::AgentLoopConfig::new(DEFAULT_CODING_AGENT_MAX_MODEL_TURNS).map_err(unexpected)
+pub(crate) fn coding_agent_loop_config()
+-> Result<merry_runtime::AgentLoopConfig, CodingRuntimeError> {
+    merry_runtime::AgentLoopConfig::new(DEFAULT_CODING_AGENT_MAX_MODEL_TURNS)
+        .map_err(CodingRuntimeError::from)
 }
 
 pub(crate) struct CodingLoopRuntimeOptions {
@@ -34,7 +32,31 @@ pub(crate) struct CodingLoopRuntimeOptions {
     pub(crate) permissioned_process_runner_factory:
         Option<Arc<dyn PermissionedProcessRunnerFactory>>,
     pub(crate) skill_roots: Vec<PathBuf>,
-    pub(crate) subagents: config::SubagentsConfig,
+    pub(crate) subagents: CodingSubagentsConfig,
+    pub(crate) workspace_tool_limits: Option<merry_tool_workspace::WorkspaceToolLimits>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct CodingSubagentsConfig {
+    enabled: bool,
+    limits: SubagentConfig,
+}
+
+impl CodingSubagentsConfig {
+    pub(crate) fn enabled(limits: SubagentConfig) -> Self {
+        Self {
+            enabled: true,
+            limits,
+        }
+    }
+
+    pub(crate) fn is_enabled(self) -> bool {
+        self.enabled
+    }
+
+    pub(crate) fn limits(self) -> SubagentConfig {
+        self.limits
+    }
 }
 
 pub(crate) struct HeadlessCodingRuntimeInput<'a> {
@@ -51,12 +73,12 @@ pub(crate) struct HeadlessCodingRuntimeInput<'a> {
     pub(crate) context_compaction: Option<RuntimeRoleProviderConfig>,
     pub(crate) approval_review: Option<RuntimeRoleProviderConfig>,
     pub(crate) skill_roots: Vec<PathBuf>,
-    pub(crate) subagents: config::SubagentsConfig,
+    pub(crate) subagents: CodingSubagentsConfig,
 }
 
 pub(crate) fn build_headless_coding_runtime(
     input: HeadlessCodingRuntimeInput<'_>,
-) -> Result<Runtime, CliError> {
+) -> Result<Runtime, CodingRuntimeError> {
     build_coding_loop_runtime(
         input.session_id,
         input.root,
@@ -73,6 +95,7 @@ pub(crate) fn build_headless_coding_runtime(
             permissioned_process_runner_factory: Some(input.permissioned_process_runner_factory),
             skill_roots: input.skill_roots,
             subagents: input.subagents,
+            workspace_tool_limits: None,
         },
     )
 }
@@ -85,8 +108,8 @@ pub(crate) fn build_coding_loop_runtime(
     model: ModelName,
     runner: Arc<dyn ProcessRunner>,
     options: CodingLoopRuntimeOptions,
-) -> Result<Runtime, CliError> {
-    let parent_session_id = merry_core::SessionId::new(session_id).map_err(unexpected)?;
+) -> Result<Runtime, CodingRuntimeError> {
+    let parent_session_id = merry_core::SessionId::new(session_id)?;
     let permissioned_factory = options
         .permissioned_process_runner_factory
         .unwrap_or_else(|| {
@@ -112,8 +135,7 @@ pub(crate) fn build_coding_loop_runtime(
         );
     }
     if !options.skill_roots.is_empty() {
-        let catalog = merry_runtime::SkillCatalog::load_from_roots(options.skill_roots.clone())
-            .map_err(unexpected)?;
+        let catalog = merry_runtime::SkillCatalog::load_from_roots(options.skill_roots.clone())?;
         let skill_names = catalog
             .skills()
             .iter()
@@ -160,8 +182,7 @@ pub(crate) fn build_coding_loop_runtime(
             options.subagents.limits(),
             Arc::new(factory),
         );
-        let [spawn_tool, wait_tool, cancel_tool] =
-            subagent_registered_tools(manager.clone()).map_err(unexpected)?;
+        let [spawn_tool, wait_tool, cancel_tool] = subagent_registered_tools(manager.clone())?;
         builder = builder
             .subagent_manager(manager)
             .register_tool(spawn_tool)
@@ -179,16 +200,16 @@ pub(crate) fn build_coding_loop_runtime(
     let profile = WorkspaceCodingLoopProfile::new(workspace_tools_config(
         coding_loop_workspace_roots(root, &options.skill_roots),
         options.allow_hidden_workspace_paths,
-        session_id == CODING_LOOP_TASK_SMOKE_SESSION_ID
-            || session_id == CODING_LOOP_TASK_LIVE_SMOKE_SESSION_ID,
-        None,
+        options.workspace_tool_limits,
     )?)
-    .map_err(unexpected)?
+    .map_err(CodingRuntimeError::from)?
     .with_patch_tool()
     .with_cli_bwrap_permissioned_process_runner(admission, runner, permissioned_factory);
     let mut builder = with_workspace_coding_loop_profile(builder, profile)?;
     if let Some(policy) = options.retry_policy {
         builder = builder.model_retry_policy(policy);
     }
-    builder.build().map_err(unexpected)
+    builder
+        .build()
+        .map_err(|source| CodingRuntimeError::RuntimeBuild { source })
 }

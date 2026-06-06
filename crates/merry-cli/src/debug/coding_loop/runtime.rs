@@ -3,7 +3,6 @@ use crate::coding_runtime::{
     CodingLoopRuntimeOptions, build_coding_loop_runtime, coding_loop_workspace_roots,
     with_workspace_coding_loop_profile, workspace_tools_config,
 };
-use crate::config;
 use crate::provider_config::{
     OpenAiRuntimeConfig, openai_approval_review_provider, openai_context_compaction_provider,
 };
@@ -15,7 +14,7 @@ use merry_runtime::{
     AcceptedLocalWorkspaceProcessAdmission, AutomaticCompactionConfig,
     PermissionedProcessRunnerFactory, ProcessRunner, Runtime,
 };
-use merry_tool_workspace::WorkspaceCodingLoopProfile;
+use merry_tool_workspace::{WorkspaceCodingLoopProfile, WorkspaceToolLimits};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -39,7 +38,7 @@ pub(crate) fn build_coding_loop_smoke_runtime(
     automatic_compaction: AutomaticCompactionConfig,
 ) -> Result<Runtime, CliError> {
     let provider = CodingLoopSmokeProvider::new(relative_cwd)?;
-    build_coding_loop_runtime(
+    Ok(build_coding_loop_runtime(
         CODING_LOOP_SMOKE_SESSION_ID,
         root,
         admission,
@@ -54,9 +53,10 @@ pub(crate) fn build_coding_loop_smoke_runtime(
             context_compaction: None,
             permissioned_process_runner_factory,
             skill_roots: Vec::new(),
-            subagents: config::SubagentsConfig::default(),
+            subagents: Default::default(),
+            workspace_tool_limits: None,
         },
-    )
+    )?)
 }
 
 pub(crate) fn build_coding_loop_live_smoke_runtime(
@@ -76,7 +76,7 @@ pub(crate) fn build_coding_loop_live_smoke_runtime(
         .approval_review
         .map(openai_approval_review_provider)
         .transpose()?;
-    build_coding_loop_runtime(
+    Ok(build_coding_loop_runtime(
         CODING_LOOP_LIVE_SMOKE_SESSION_ID,
         root,
         admission,
@@ -92,8 +92,9 @@ pub(crate) fn build_coding_loop_live_smoke_runtime(
             permissioned_process_runner_factory,
             skill_roots: options.skill_roots,
             subagents: options.subagents,
+            workspace_tool_limits: None,
         },
-    )
+    )?)
 }
 
 pub(crate) fn build_coding_loop_task_smoke_runtime(
@@ -106,7 +107,7 @@ pub(crate) fn build_coding_loop_task_smoke_runtime(
     automatic_compaction: AutomaticCompactionConfig,
 ) -> Result<Runtime, CliError> {
     let provider = CodingLoopTaskSmokeProvider::new(relative_cwd, fixture)?;
-    build_coding_loop_runtime(
+    Ok(build_coding_loop_runtime(
         CODING_LOOP_TASK_SMOKE_SESSION_ID,
         root,
         admission,
@@ -121,9 +122,10 @@ pub(crate) fn build_coding_loop_task_smoke_runtime(
             context_compaction: None,
             permissioned_process_runner_factory,
             skill_roots: Vec::new(),
-            subagents: config::SubagentsConfig::default(),
+            subagents: Default::default(),
+            workspace_tool_limits: Some(task_smoke_workspace_tool_limits()),
         },
-    )
+    )?)
 }
 
 pub(crate) fn build_coding_loop_task_live_smoke_runtime(
@@ -143,7 +145,7 @@ pub(crate) fn build_coding_loop_task_live_smoke_runtime(
         .approval_review
         .map(openai_approval_review_provider)
         .transpose()?;
-    build_coding_loop_runtime(
+    Ok(build_coding_loop_runtime(
         CODING_LOOP_TASK_LIVE_SMOKE_SESSION_ID,
         root,
         admission,
@@ -159,8 +161,9 @@ pub(crate) fn build_coding_loop_task_live_smoke_runtime(
             permissioned_process_runner_factory,
             skill_roots: options.skill_roots,
             subagents: options.subagents,
+            workspace_tool_limits: Some(task_smoke_workspace_tool_limits()),
         },
-    )
+    )?)
 }
 
 pub(crate) fn build_coding_loop_subagent_live_smoke_runtime(
@@ -180,7 +183,7 @@ pub(crate) fn build_coding_loop_subagent_live_smoke_runtime(
         .approval_review
         .map(openai_approval_review_provider)
         .transpose()?;
-    build_coding_loop_runtime(
+    Ok(build_coding_loop_runtime(
         CODING_LOOP_SUBAGENT_LIVE_SMOKE_SESSION_ID,
         root,
         admission,
@@ -196,8 +199,9 @@ pub(crate) fn build_coding_loop_subagent_live_smoke_runtime(
             permissioned_process_runner_factory,
             skill_roots: options.skill_roots,
             subagents: options.subagents,
+            workspace_tool_limits: None,
         },
-    )
+    )?)
 }
 
 pub(crate) fn build_permission_network_smoke_runtime(
@@ -243,7 +247,6 @@ pub(crate) fn build_permission_network_smoke_runtime(
     let profile = WorkspaceCodingLoopProfile::new(workspace_tools_config(
         coding_loop_workspace_roots(root, &[]),
         false,
-        false,
         None,
     )?)
     .map_err(unexpected)?
@@ -286,7 +289,6 @@ pub(crate) fn build_scripted_permission_network_smoke_runtime(
     let profile = WorkspaceCodingLoopProfile::new(workspace_tools_config(
         coding_loop_workspace_roots(root, &[]),
         false,
-        false,
         None,
     )?)
     .map_err(unexpected)?
@@ -303,12 +305,19 @@ pub(crate) fn build_scripted_permission_network_smoke_runtime(
 pub(crate) struct CodingLoopLiveRuntimeOptions {
     pub(crate) automatic_compaction: AutomaticCompactionConfig,
     pub(crate) skill_roots: Vec<PathBuf>,
-    pub(crate) subagents: config::SubagentsConfig,
+    pub(crate) subagents: crate::coding_runtime::CodingSubagentsConfig,
 }
 
-pub(crate) fn coding_loop_subagent_live_smoke_config() -> Result<config::SubagentsConfig, CliError>
-{
-    Ok(config::SubagentsConfig::enabled(
+pub(crate) fn coding_loop_subagent_live_smoke_config()
+-> Result<crate::coding_runtime::CodingSubagentsConfig, CliError> {
+    Ok(crate::coding_runtime::CodingSubagentsConfig::enabled(
         merry_runtime::SubagentConfig::new(2, 1).map_err(unexpected)?,
     ))
+}
+
+fn task_smoke_workspace_tool_limits() -> WorkspaceToolLimits {
+    WorkspaceToolLimits {
+        max_patch_bytes: super::CODING_LOOP_TASK_SMOKE_MAX_PATCH_BYTES,
+        ..WorkspaceToolLimits::default()
+    }
 }

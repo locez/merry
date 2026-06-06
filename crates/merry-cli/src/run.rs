@@ -8,7 +8,9 @@ use crate::config::MerryConfig;
 use crate::provider_config::{
     OpenAiRuntimeConfig, openai_role_provider_config, openai_runtime_config,
 };
-use crate::runtime_config::{automatic_compaction_config, subagents_config};
+use crate::runtime_config::{
+    action_process_backend_options, automatic_compaction_config, subagents_config,
+};
 use crate::runtime_events::write_runtime_event;
 use crate::sandbox::ChildHandoff as SandboxChildHandoff;
 use futures_util::StreamExt;
@@ -52,7 +54,10 @@ pub(crate) async fn run(
         retry_policy,
     } = config;
     let root = env::current_dir().map_err(unexpected)?;
-    let backend = action_process_runner(&root, merry_config)?;
+    let backend = action_process_runner(
+        &root,
+        action_process_backend_options(merry_config).map_err(unexpected)?,
+    )?;
     let runtime = build_headless_coding_runtime(HeadlessCodingRuntimeInput {
         session_id: "run",
         root: &root,
@@ -79,7 +84,7 @@ pub(crate) async fn run(
             .transpose()
             .map_err(unexpected)?
             .unwrap_or_default(),
-        subagents: subagents_config(merry_config).map_err(unexpected)?,
+        subagents: subagents_config(merry_config).map_err(unexpected)?.into(),
     })?;
     let input = StepInput::user_text(&args.task).map_err(unexpected)?;
     if args.events_jsonl {
@@ -310,7 +315,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::{write_agent_loop_jsonl_output, write_agent_loop_output};
-    use crate::coding_runtime::{HeadlessCodingRuntimeInput, build_headless_coding_runtime};
+    use crate::coding_runtime::{
+        CodingSubagentsConfig, HeadlessCodingRuntimeInput, build_headless_coding_runtime,
+    };
     use crate::debug::coding_loop::coding_loop_process_call;
     use crate::testing::{FakeProcessRunner, ScriptedProvider, model_name};
     use merry_llm::{FinishReason, ModelEvent, ModelOutput, ModelResponse};
@@ -382,7 +389,7 @@ mod tests {
             context_compaction: None,
             approval_review: None,
             skill_roots: Vec::new(),
-            subagents: crate::config::SubagentsConfig::default(),
+            subagents: CodingSubagentsConfig::default(),
         })
         .expect("runtime should build");
 
@@ -446,7 +453,7 @@ mod tests {
             context_compaction: None,
             approval_review: None,
             skill_roots: Vec::new(),
-            subagents: crate::config::SubagentsConfig::default(),
+            subagents: CodingSubagentsConfig::default(),
         })
         .expect("runtime should build");
 
@@ -499,7 +506,7 @@ mod tests {
             context_compaction: None,
             approval_review: None,
             skill_roots: Vec::new(),
-            subagents: crate::config::SubagentsConfig::default(),
+            subagents: CodingSubagentsConfig::default(),
         })
         .expect("runtime should build");
 
