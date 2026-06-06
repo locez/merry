@@ -1,5 +1,6 @@
 //! Debug and demonstration CLI for Merry.
 
+mod cli_error;
 mod cmd;
 mod coding_runtime;
 mod config;
@@ -19,10 +20,11 @@ use merry_tool_workspace::{
     CODING_LOOP_PROCESS_TOOL, WORKSPACE_PATCH_TOOL, WORKSPACE_READ_FILE_TOOL,
 };
 use std::{
-    env, fmt, io,
+    env, io,
     process::{ExitCode, Termination},
 };
 
+use cli_error::CliError;
 use debug::{
     Args as DebugArgs, CodingLoopLiveSmokeArgs as DebugCodingLoopLiveSmokeArgs,
     CodingLoopSubagentLiveSmokeArgs as DebugCodingLoopSubagentLiveSmokeArgs,
@@ -531,39 +533,6 @@ fn command_usage(command: &mut clap::Command) -> String {
         .write_help(&mut buffer)
         .expect("clap help should render");
     String::from_utf8(buffer).expect("clap help should be utf-8")
-}
-
-fn unexpected(err: impl fmt::Display) -> CliError {
-    CliError::Unexpected(err.to_string())
-}
-
-fn usage_error(err: impl fmt::Display) -> CliError {
-    CliError::DebugUsage(err.to_string())
-}
-
-fn debug_openai_usage_error(err: impl fmt::Display) -> CliError {
-    CliError::DebugOpenAiUsage(err.to_string())
-}
-
-fn shell_usage_error(err: impl fmt::Display) -> CliError {
-    CliError::ShellUsage(err.to_string())
-}
-
-fn stdout_error(err: io::Error) -> CliError {
-    if err.kind() == io::ErrorKind::BrokenPipe {
-        CliError::BrokenPipe
-    } else {
-        CliError::Unexpected(err.to_string())
-    }
-}
-
-#[derive(Debug)]
-enum CliError {
-    BrokenPipe,
-    DebugUsage(String),
-    DebugOpenAiUsage(String),
-    ShellUsage(String),
-    Unexpected(String),
 }
 
 enum CliExit {

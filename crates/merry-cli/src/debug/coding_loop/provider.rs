@@ -1,7 +1,8 @@
+use crate::cli_error::{CliError, unexpected};
 use crate::debug::coding_loop::fixture::CodingLoopTaskSmokeFixture;
 use crate::{
     CODING_LOOP_LIVE_SMOKE_INITIAL_VALUE, CODING_LOOP_LIVE_SMOKE_TARGET_VALUE,
-    CODING_LOOP_PROCESS_TOOL, CliError, WORKSPACE_PATCH_TOOL, WORKSPACE_READ_FILE_TOOL, unexpected,
+    CODING_LOOP_PROCESS_TOOL, WORKSPACE_PATCH_TOOL, WORKSPACE_READ_FILE_TOOL,
 };
 use futures_util::stream;
 use merry_core::{ProviderName, ToolName};
