@@ -1,5 +1,10 @@
 use clap::{Subcommand, ValueEnum};
 
+pub(crate) mod basic;
+pub(crate) mod coding_loop;
+pub(crate) mod openai;
+pub(crate) mod shell;
+
 #[derive(Debug, clap::Args)]
 #[command(args_conflicts_with_subcommands = true)]
 pub(crate) struct Args {
