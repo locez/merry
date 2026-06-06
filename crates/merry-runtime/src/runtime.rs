@@ -6,12 +6,11 @@
 //! provider wire details behind the `merry-llm` provider boundary.
 
 use crate::{
-    AcceptedLocalWorkspaceProcessAdmission, ActionProposal, ArtifactContent, CheckpointDecision,
-    CheckpointId, CheckpointRefExcerpt, CheckpointRefId, CitationCompactionInput,
-    CitationCompactionPolicy, CompactedCheckpoint, CompactedCheckpointSummary, CompactionError,
-    CompactionOutcome, ContextBudget, ContextBudgetPolicy, ContextCompiler, ContextEntry,
-    ContextSummary, LedgerProjectionSnapshot, ProcessPermissionProfileId, ProcessRunner,
-    ProjectRules, ResolvedContextWindow, RuntimeCapabilities, RuntimeError, RuntimeEventStream,
+    AcceptedLocalWorkspaceProcessAdmission, ActionProposal, ArtifactContent, CheckpointId,
+    CheckpointRefExcerpt, CheckpointRefId, CitationCompactionInput, CitationCompactionPolicy,
+    CompactedCheckpoint, CompactedCheckpointSummary, CompactionError, CompactionOutcome,
+    ContextEntry, ContextSummary, LedgerProjectionSnapshot, ProcessPermissionProfileId,
+    ProcessRunner, ProjectRules, RuntimeCapabilities, RuntimeError, RuntimeEventStream,
     RuntimeModelRole, RuntimeProfile, SessionContextSnapshot, SkillCatalog, TaskAnchor,
     action_audit::ActionAuditPolicy,
     action_policy::{
@@ -19,14 +18,13 @@ use crate::{
         is_local_workspace_effect_process_action_proposal, is_low_risk_process_action_proposal,
         is_low_risk_workspace_patch_proposal, is_read_only_shell_process_action_proposal,
     },
-    decide_checkpoint,
     event_stream::ActiveStepPermit,
     judgment::{JudgmentContext, JudgmentError, JudgmentRecord, JudgmentRequest, JudgmentSource},
     memory::{
-        MemoryActivationContext, MemoryActivationSeed, MemoryActivationSource,
-        MemoryActivationSourceKind, MemoryScope, StoredMemoryActivationSource,
+        MemoryActivationSeed, MemoryActivationSource, MemoryActivationSourceKind, MemoryScope,
+        StoredMemoryActivationSource,
     },
-    model_config::{ModelProviderConfig, RuntimeModelConfigs},
+    model_config::RuntimeModelConfigs,
     permission::{
         ModelBackedPermissionAdmissionSource, PermissionAdmissionContext,
         PermissionAdmissionResult, PermissionAdmissionSource, PermissionReviewMode,
@@ -36,12 +34,8 @@ use crate::{
         permission_review_error_outcome,
     },
     process::{PermissionedProcessRunnerFactory, StaticPermissionedProcessRunnerFactory},
-    resolve_context_window,
-    session::{ResolvedToolContinuationSnapshot, SessionState, is_runtime_reserved_artifact_id},
-    step::{
-        CompiledSessionMessage, StepContext, StepInput, StepModelRequestParts,
-        compile_step_model_request,
-    },
+    session::{SessionState, is_runtime_reserved_artifact_id},
+    step::{StepContext, StepInput},
     subagent::SubagentManager,
     tool::{
         ActionProposalEvidence, RegisteredTool, ToolActionPreflight, ToolExecutionContext,
@@ -52,10 +46,7 @@ use merry_core::{
     ArtifactId, ArtifactRef, CoreError, ErrorInfo, EvidenceLocator, EvidenceRef, PendingToolCall,
     RuntimeEvent, SessionId, ToolCallId, ToolCallResult, ToolCallResultStatus,
 };
-use merry_llm::{
-    FinishReason, GenerationConfig, ModelError, ModelEvent, ModelName, ModelOutput, ModelProvider,
-    ModelRetryPolicy, ModelStreamContext,
-};
+use merry_llm::{GenerationConfig, ModelName, ModelProvider, ModelRetryPolicy};
 use std::{
     collections::BTreeMap,
     num::NonZeroUsize,
@@ -73,6 +64,7 @@ mod compaction;
 mod events;
 mod model_output;
 mod process_execution;
+mod provider_request;
 mod provider_step;
 mod tool_execution;
 
@@ -82,6 +74,8 @@ use self::events::{
     stream_model_with_retry_policy,
 };
 use self::process_execution::execute_admitted_process_action;
+#[cfg(test)]
+use self::provider_request::request_context_budget;
 use self::tool_execution::{
     action_execution_evidence_matches_proposal, admit_action_to_generic_executor,
     context_with_approved_proposal, denied_tool_action_outcome, trace_denied_tool_execution,
@@ -94,9 +88,6 @@ const DIAGNOSTIC_TOOL_ACTION_POLICY_DENIED: &str = "action_policy_denied";
 const DIAGNOSTIC_TOOL_NOT_REGISTERED: &str = "tool_not_registered";
 const TOOL_ACTION_POLICY_DENIED_MESSAGE: &str = "tool action was blocked by runtime policy";
 const WORKSPACE_PATCH_TOOL_NAME: &str = "workspace_patch";
-const DEFAULT_CONTEXT_WINDOW_FALLBACK_TOKENS: u64 = 64_000;
-const DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT: u8 = 95;
-const DEFAULT_OUTPUT_RESERVE_TOKENS: u64 = 32_000;
 // MVP automatic compaction policy. Retaining two history items usually keeps
 // the latest completed user/assistant pair raw; it is a policy default, not a
 // semantic invariant.
@@ -1737,237 +1728,6 @@ async fn run_step(
         provider_config,
     )
     .await;
-}
-
-fn trace_provider_request(
-    session_id: &str,
-    provider_name: &str,
-    request: &merry_llm::ModelRequest,
-    continuation_count: usize,
-    request_budget: Option<&RequestContextBudget>,
-) {
-    if let Some(request_budget) = request_budget {
-        tracing::debug!(
-            event = "runtime.provider.request",
-            session_id,
-            provider_name,
-            model = request.model().as_str(),
-            message_count = request.messages().len(),
-            tool_count = request.tools().len(),
-            continuation_count,
-            stable_prefix_message_count = request.stable_prefix_message_count(),
-            tool_profile_hash = request.tool_profile_hash().as_str(),
-            stable_prefix_hash = request.stable_prefix_hash().as_str(),
-            dynamic_context_hash = request.dynamic_context_hash().as_str(),
-            context_window_tokens = request_budget.window.tokens(),
-            context_window_source = request_budget.window.source().as_str(),
-            context_budget_policy = request_budget.policy.as_str(),
-            dynamic_body_estimated_tokens = request_budget.dynamic_body_estimated_tokens,
-            body_budget_tokens = request_budget.budget.body_budget_tokens(),
-            soft_water_tokens = request_budget.budget.soft_water_tokens(),
-            hard_water_tokens = request_budget.budget.hard_water_tokens(),
-            checkpoint_decision = request_budget.decision.as_str(),
-            max_output_tokens = request.generation().max_output_tokens(),
-            allow_parallel_tool_calls = request.generation().allow_parallel_tool_calls(),
-            "runtime provider request metadata"
-        );
-    } else {
-        tracing::debug!(
-            event = "runtime.provider.request",
-            session_id,
-            provider_name,
-            model = request.model().as_str(),
-            message_count = request.messages().len(),
-            tool_count = request.tools().len(),
-            continuation_count,
-            stable_prefix_message_count = request.stable_prefix_message_count(),
-            tool_profile_hash = request.tool_profile_hash().as_str(),
-            stable_prefix_hash = request.stable_prefix_hash().as_str(),
-            dynamic_context_hash = request.dynamic_context_hash().as_str(),
-            max_output_tokens = request.generation().max_output_tokens(),
-            allow_parallel_tool_calls = request.generation().allow_parallel_tool_calls(),
-            "runtime provider request metadata"
-        );
-    }
-}
-
-fn trace_provider_request_budget_unavailable(
-    session_id: &str,
-    provider_name: &str,
-    request: &merry_llm::ModelRequest,
-    error: &crate::ContextError,
-) {
-    tracing::debug!(
-        event = "runtime.provider.request.context_budget_unavailable",
-        session_id,
-        provider_name,
-        model = request.model().as_str(),
-        diagnostic_code = "context_budget",
-        diagnostic_message = error.to_string(),
-        "runtime provider request context budget unavailable"
-    );
-}
-
-#[derive(Debug)]
-struct StepRequestInputs {
-    snapshot: SessionContextSnapshot,
-    skill_catalog: Option<SkillCatalog>,
-    project_rules: Option<ProjectRules>,
-    task_anchor: Option<TaskAnchor>,
-    append_only_body: Vec<CompiledSessionMessage>,
-    continuations: Vec<ResolvedToolContinuationSnapshot>,
-}
-
-impl StepRequestInputs {
-    fn from_session(
-        session: &SessionState,
-        append_only_body: Vec<CompiledSessionMessage>,
-        continuations: Vec<ResolvedToolContinuationSnapshot>,
-    ) -> Self {
-        Self {
-            snapshot: session.context_snapshot(),
-            skill_catalog: session.skill_catalog(),
-            project_rules: session.project_rules(),
-            task_anchor: session.task_anchor(),
-            append_only_body,
-            continuations,
-        }
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-enum StepRequestCompileError {
-    #[error("context compile error: {source}")]
-    Context {
-        #[from]
-        source: crate::ContextError,
-    },
-
-    #[error("model request error: {source}")]
-    Model {
-        #[from]
-        source: ModelError,
-    },
-}
-
-fn step_request_inputs_from_session(
-    session: &SessionState,
-) -> Result<StepRequestInputs, RuntimeError> {
-    let append_only_body = session.append_only_body_snapshot()?;
-    let continuations = session.uncheckpointed_tool_continuation_snapshots()?;
-    Ok(StepRequestInputs::from_session(
-        session,
-        append_only_body,
-        continuations,
-    ))
-}
-
-fn compile_step_request_from_inputs(
-    input: &StepInput,
-    model: &ModelName,
-    inputs: &StepRequestInputs,
-    tool_specs: Vec<merry_core::ToolSpec>,
-    generation_config: GenerationConfig,
-    progress_commentary: bool,
-) -> Result<merry_llm::ModelRequest, StepRequestCompileError> {
-    let compiled_context = ContextCompiler::new().compile(&inputs.snapshot)?;
-    compile_step_model_request(StepModelRequestParts {
-        input,
-        model,
-        skill_catalog: inputs.skill_catalog.as_ref(),
-        project_rules: inputs.project_rules.as_ref(),
-        task_anchor: inputs.task_anchor.as_ref(),
-        context: &compiled_context,
-        append_only_body: &inputs.append_only_body,
-        continuations: &inputs.continuations,
-        tool_specs,
-        generation_config,
-        progress_commentary,
-    })
-    .map_err(StepRequestCompileError::from)
-}
-
-fn step_request_compile_diagnostic(error: &StepRequestCompileError) -> ErrorInfo {
-    match error {
-        StepRequestCompileError::Context { .. } => {
-            diagnostic_from_text("context_compile", error.to_string())
-        }
-        StepRequestCompileError::Model { .. } => {
-            diagnostic_from_text("model_request", error.to_string())
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct RequestContextBudget {
-    window: ResolvedContextWindow,
-    policy: ContextBudgetPolicy,
-    budget: ContextBudget,
-    dynamic_body_estimated_tokens: u64,
-    decision: CheckpointDecision,
-}
-
-fn request_context_budget(
-    capabilities: &merry_llm::ModelCapabilities,
-    request: &merry_llm::ModelRequest,
-) -> Result<RequestContextBudget, crate::ContextError> {
-    let window = resolve_context_window(
-        None,
-        capabilities.max_input_tokens(),
-        None,
-        DEFAULT_CONTEXT_WINDOW_FALLBACK_TOKENS,
-    )?;
-    let output_reserve_tokens = request
-        .generation()
-        .max_output_tokens()
-        .or_else(|| capabilities.max_output_tokens())
-        .unwrap_or(DEFAULT_OUTPUT_RESERVE_TOKENS);
-    let policy = ContextBudgetPolicy::Balanced;
-    let stable_prefix_estimated_tokens =
-        estimate_model_message_tokens(request.stable_prefix_messages());
-    let budget = ContextBudget::from_window(
-        window.tokens(),
-        DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT,
-        stable_prefix_estimated_tokens,
-        output_reserve_tokens,
-        policy,
-    )?;
-    let dynamic_body_estimated_tokens = estimate_model_message_tokens(request.dynamic_messages())
-        + estimate_tool_continuation_tokens(request.continuations());
-    let decision = decide_checkpoint(dynamic_body_estimated_tokens, budget);
-
-    Ok(RequestContextBudget {
-        window,
-        policy,
-        budget,
-        dynamic_body_estimated_tokens,
-        decision,
-    })
-}
-
-fn estimate_model_message_tokens(messages: &[merry_llm::ModelMessage]) -> u64 {
-    messages
-        .iter()
-        .map(|message| estimate_text_tokens(message.content().as_text()))
-        .sum()
-}
-
-fn estimate_tool_continuation_tokens(continuations: &[merry_llm::ModelToolContinuation]) -> u64 {
-    continuations
-        .iter()
-        .map(|continuation| {
-            estimate_text_tokens(continuation.call().name().as_str())
-                + estimate_text_tokens(
-                    &serde_json::to_string(continuation.call().arguments().as_object())
-                        .expect("tool arguments must serialize for budget estimation"),
-                )
-                + estimate_text_tokens(continuation.result().content().as_str())
-        })
-        .sum()
-}
-
-fn estimate_text_tokens(text: &str) -> u64 {
-    u64::try_from(text.len().div_ceil(4)).expect("usize should fit in u64 on supported targets")
 }
 
 async fn clear_current_activated_memories(inner: &RuntimeInner) {
