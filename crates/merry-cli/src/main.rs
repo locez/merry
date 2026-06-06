@@ -1,59 +1,42 @@
 //! Debug and demonstration CLI for Merry.
 
 mod cmd;
+mod coding_runtime;
 mod config;
 mod debug;
 mod observability;
+mod run;
 mod sandbox;
+#[cfg(test)]
+mod test_support;
 
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use config::{EffectiveLogSettings, EffectiveOpenAiProviderConfig, MerryConfig, XdgPaths};
 use futures_util::StreamExt;
-use merry_core::{ArtifactId, PendingToolCall, RuntimeEvent, RuntimeEventKind, SessionId};
-use merry_llm::{ModelName, ModelProvider, ModelRetryPolicy};
+use merry_core::{PendingToolCall, RuntimeEvent, RuntimeEventKind, SessionId};
+use merry_llm::{ModelName, ModelRetryPolicy};
 use merry_provider_openai::{OpenAiProvider, OpenAiProviderConfig};
 use merry_runtime::{
-    AcceptedLocalWorkspaceProcessAdmission, AgentLoopConfig, AgentLoopResult, AgentLoopStatus,
-    AutomaticCompactionConfig, BwrapPermissionedProcessRunnerFactory, BwrapProcessRunner,
-    ChildRuntimeFactory, ChildRuntimeInput, DEFAULT_CODING_AGENT_MAX_MODEL_TURNS,
-    PermissionedProcessRunnerFactory, ProcessRunner, Runtime, RuntimeBuilder, RuntimeModelRole,
-    RuntimeProfile, StepContext, StepInput, SubagentManager, subagent_registered_tools,
+    AutomaticCompactionConfig, Runtime, RuntimeBuilder, RuntimeModelRole, StepContext, StepInput,
 };
 use merry_tool_workspace::{
     CODING_LOOP_PROCESS_TOOL, WORKSPACE_PATCH_TOOL, WORKSPACE_READ_FILE_TOOL,
-    WorkspaceCodingLoopProfile, WorkspaceRuntimeProfileBuilderExt, WorkspaceToolLimits,
-    WorkspaceToolsConfig,
 };
 use std::{
-    env,
-    ffi::OsStr,
-    fmt, io,
-    path::{Path, PathBuf},
+    env, fmt, io,
     process::{ExitCode, Termination},
     sync::Arc,
 };
 use tokio::io::{AsyncWrite, AsyncWriteExt, BufWriter};
 
+use coding_runtime::RuntimeRoleProviderConfig;
 use debug::{
     Args as DebugArgs, CodingLoopLiveSmokeArgs as DebugCodingLoopLiveSmokeArgs,
     CodingLoopSubagentLiveSmokeArgs as DebugCodingLoopSubagentLiveSmokeArgs,
     CodingLoopTaskLiveSmokeArgs as DebugCodingLoopTaskLiveSmokeArgs, Command as DebugCommand,
     OpenAiArgs as DebugOpenAiArgs, PermissionNetworkSmokeArgs as DebugPermissionNetworkSmokeArgs,
 };
-use sandbox::{
-    ChildHandoff as SandboxChildHandoff, MERRY_SANDBOX_ENV, MERRY_SANDBOX_VERSION_ENV,
-    RuntimeProfile as SandboxRuntimeProfile, read_proc_self_mountinfo,
-    runtime_profile_from_evidence as sandbox_runtime_profile_from_evidence,
-};
-
-#[cfg(test)]
-use sandbox::{
-    Bootstrap as SandboxBootstrap, Error as SandboxError, Host as SandboxHost, Plan as SandboxPlan,
-    SANDBOX_CHILD_HANDOFF_ARG, SANDBOX_CHILD_HANDOFF_CLI_BWRAP_V1, SANDBOX_HOME,
-    SANDBOX_MERRY_CONFIG_DIR, SANDBOX_MERRY_LOG_DIR, SANDBOX_TMPDIR, SANDBOX_XDG_CONFIG_HOME,
-    SANDBOX_XDG_STATE_HOME, args_without_sandbox_bootstrap_flags, find_bwrap_in_path, os,
-    plan_bootstrap_with_file_exists as plan_sandbox_bootstrap_with_file_exists,
-};
+use sandbox::ChildHandoff as SandboxChildHandoff;
 
 const DEFAULT_SESSION_ID: &str = "debug-session";
 const DEFAULT_INPUT: &str = "debug step";
@@ -72,7 +55,6 @@ const CODING_LOOP_SUBAGENT_LIVE_SMOKE_FILE: &str = "subagent-output.txt";
 const CODING_LOOP_SUBAGENT_LIVE_SMOKE_INITIAL: &str = "status: pending\n";
 const CODING_LOOP_SUBAGENT_LIVE_SMOKE_TARGET: &str = "status: subagent-live-smoke-complete\n";
 const CODING_LOOP_TASK_SMOKE_MAX_PATCH_BYTES: usize = 256;
-const ASSISTANT_OUTPUT_ARTIFACT_PREFIX: &str = "assistant-output-";
 const MERRY_OPENAI_DEBUG_ENV: &str = "MERRY_OPENAI_DEBUG";
 const OPENAI_ENV_HELP: &str = "\
 Environment:
@@ -111,20 +93,11 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum CliCommand {
     #[command(about = "Complete a coding task with Merry's headless agent")]
-    Run(RunArgs),
+    Run(run::Args),
     #[command(about = "Generate a shell command plan from a natural-language request")]
     Cmd(cmd::Args),
     #[command(about = "Print deterministic runtime events or run opt-in provider debugging")]
     Debug(DebugArgs),
-}
-
-#[derive(Debug, Args)]
-struct RunArgs {
-    #[arg(long, help = "Print runtime events and final result as JSONL")]
-    events_jsonl: bool,
-
-    #[arg(required = true, allow_hyphen_values = true, value_name = "TASK")]
-    task: String,
 }
 
 fn main() -> CliExit {
@@ -177,7 +150,7 @@ async fn async_main(cli: Cli, merry_config: Option<MerryConfig>) -> CliExit {
 
     match cli.command {
         CliCommand::Run(args) => {
-            match run_merry_run(&args, sandbox_child_handoff, merry_config.as_ref()).await {
+            match run::run(&args, sandbox_child_handoff, merry_config.as_ref()).await {
                 Ok(()) => CliExit::Success,
                 Err(CliError::BrokenPipe) => CliExit::Success,
                 Err(CliError::DebugUsage(message)) => CliExit::Usage {
@@ -533,476 +506,6 @@ fn configured_runtime_builder(
         .automatic_compaction(automatic_compaction_config(config).map_err(unexpected)?))
 }
 
-fn with_workspace_coding_loop_profile(
-    builder: RuntimeBuilder,
-    profile: WorkspaceCodingLoopProfile,
-) -> Result<RuntimeBuilder, CliError> {
-    let profile = RuntimeProfile::builder()
-        .with_workspace_coding_loop(profile)
-        .map_err(unexpected)?
-        .build()
-        .map_err(unexpected)?;
-    builder.with_profile(profile).map_err(unexpected)
-}
-
-fn with_workspace_coding_loop_profile_for_child(
-    builder: RuntimeBuilder,
-    profile: WorkspaceCodingLoopProfile,
-) -> Result<RuntimeBuilder, merry_runtime::RuntimeError> {
-    let profile = RuntimeProfile::builder()
-        .with_workspace_coding_loop(profile)
-        .map_err(|_| merry_runtime::RuntimeError::InvalidStepInput {
-            reason: "child workspace coding loop profile application failed",
-        })?
-        .build()
-        .map_err(|_| merry_runtime::RuntimeError::InvalidStepInput {
-            reason: "child runtime profile build failed",
-        })?;
-    builder.with_profile(profile)
-}
-
-async fn run_merry_run(
-    args: &RunArgs,
-    sandbox_child_handoff: Option<SandboxChildHandoff>,
-    merry_config: Option<&MerryConfig>,
-) -> Result<(), CliError> {
-    let Some(admission) =
-        coding_loop_smoke_admission_from_current_process(sandbox_child_handoff).await
-    else {
-        return Err(coding_agent_requires_sandbox_error("run"));
-    };
-
-    let config = openai_runtime_config(None, merry_config, debug_openai_usage_error)?;
-    let OpenAiRuntimeConfig {
-        primary,
-        context_compaction,
-        approval_review,
-        retry_policy,
-    } = config;
-    let root = env::current_dir().map_err(unexpected)?;
-    let backend = action_process_runner(&root, merry_config)?;
-    let runtime = build_headless_coding_runtime(HeadlessCodingRuntimeInput {
-        session_id: "run",
-        root: &root,
-        admission,
-        provider: Arc::new(OpenAiProvider::new(primary.provider)),
-        model: ModelName::new(&primary.model).map_err(unexpected)?,
-        runner: backend.runner(),
-        permissioned_process_runner_factory: backend.permissioned_factory(),
-        allow_hidden_workspace_paths: false,
-        automatic_compaction: automatic_compaction_config(merry_config).map_err(unexpected)?,
-        retry_policy,
-        context_compaction: context_compaction
-            .map(|config| {
-                openai_role_provider_config(RuntimeModelRole::ContextCompaction, config, unexpected)
-            })
-            .transpose()?,
-        approval_review: approval_review
-            .map(|config| {
-                openai_role_provider_config(RuntimeModelRole::ApprovalReview, config, unexpected)
-            })
-            .transpose()?,
-        skill_roots: merry_config
-            .map(MerryConfig::skill_roots)
-            .transpose()
-            .map_err(unexpected)?
-            .unwrap_or_default(),
-        subagents: subagents_config(merry_config).map_err(unexpected)?,
-    })?;
-    let input = StepInput::user_text(&args.task).map_err(unexpected)?;
-    if args.events_jsonl {
-        write_run_agent_loop_jsonl_output(
-            &runtime,
-            input,
-            coding_agent_loop_config()?,
-            tokio::io::stdout(),
-        )
-        .await
-    } else {
-        write_run_agent_loop_output(
-            &runtime,
-            input,
-            coding_agent_loop_config()?,
-            tokio::io::stdout(),
-        )
-        .await
-    }
-}
-
-fn coding_agent_loop_config() -> Result<AgentLoopConfig, CliError> {
-    AgentLoopConfig::new(DEFAULT_CODING_AGENT_MAX_MODEL_TURNS).map_err(unexpected)
-}
-
-async fn coding_loop_smoke_admission_from_current_process(
-    sandbox_child_handoff: Option<SandboxChildHandoff>,
-) -> Option<AcceptedLocalWorkspaceProcessAdmission> {
-    let sandbox_marker = env::var_os(MERRY_SANDBOX_ENV);
-    let sandbox_version = env::var_os(MERRY_SANDBOX_VERSION_ENV);
-    let home = env::var_os("HOME");
-    let tmpdir = env::var_os("TMPDIR");
-    let mountinfo = read_proc_self_mountinfo().await;
-    let sandbox_runtime_profile = sandbox_runtime_profile_from_evidence(
-        home.as_deref(),
-        tmpdir.as_deref(),
-        mountinfo.as_deref(),
-    );
-    coding_loop_smoke_admission(
-        sandbox_child_handoff,
-        sandbox_runtime_profile,
-        sandbox_marker.as_deref(),
-        sandbox_version.as_deref(),
-    )
-}
-
-fn coding_agent_requires_sandbox_error(command: &str) -> CliError {
-    CliError::DebugUsage(format!(
-        "merry {command} must run via `merry --with-sandbox {command}`"
-    ))
-}
-
-fn coding_loop_smoke_admission(
-    sandbox_child_handoff: Option<SandboxChildHandoff>,
-    sandbox_runtime_profile: Option<SandboxRuntimeProfile>,
-    sandbox: Option<&OsStr>,
-    version: Option<&OsStr>,
-) -> Option<AcceptedLocalWorkspaceProcessAdmission> {
-    debug::shell::runtime_admission(
-        true,
-        sandbox_child_handoff,
-        sandbox_runtime_profile,
-        sandbox,
-        version,
-    )
-}
-
-struct CodingLoopRuntimeOptions {
-    allow_hidden_workspace_paths: bool,
-    approval_review: Option<RuntimeRoleProviderConfig>,
-    automatic_compaction: AutomaticCompactionConfig,
-    retry_policy: Option<ModelRetryPolicy>,
-    context_compaction: Option<RuntimeRoleProviderConfig>,
-    permissioned_process_runner_factory: Option<Arc<dyn PermissionedProcessRunnerFactory>>,
-    skill_roots: Vec<PathBuf>,
-    subagents: config::SubagentsConfig,
-}
-
-struct HeadlessCodingRuntimeInput<'a> {
-    session_id: &'a str,
-    root: &'a Path,
-    admission: AcceptedLocalWorkspaceProcessAdmission,
-    provider: Arc<dyn ModelProvider>,
-    model: ModelName,
-    runner: Arc<dyn ProcessRunner>,
-    permissioned_process_runner_factory: Arc<dyn PermissionedProcessRunnerFactory>,
-    allow_hidden_workspace_paths: bool,
-    automatic_compaction: AutomaticCompactionConfig,
-    retry_policy: Option<ModelRetryPolicy>,
-    context_compaction: Option<RuntimeRoleProviderConfig>,
-    approval_review: Option<RuntimeRoleProviderConfig>,
-    skill_roots: Vec<PathBuf>,
-    subagents: config::SubagentsConfig,
-}
-
-fn build_headless_coding_runtime(
-    input: HeadlessCodingRuntimeInput<'_>,
-) -> Result<Runtime, CliError> {
-    build_coding_loop_runtime(
-        input.session_id,
-        input.root,
-        input.admission,
-        input.provider,
-        input.model,
-        input.runner,
-        CodingLoopRuntimeOptions {
-            allow_hidden_workspace_paths: input.allow_hidden_workspace_paths,
-            approval_review: input.approval_review,
-            automatic_compaction: input.automatic_compaction,
-            retry_policy: input.retry_policy,
-            context_compaction: input.context_compaction,
-            permissioned_process_runner_factory: Some(input.permissioned_process_runner_factory),
-            skill_roots: input.skill_roots,
-            subagents: input.subagents,
-        },
-    )
-}
-
-struct RuntimeRoleProviderConfig {
-    role: RuntimeModelRole,
-    provider: Arc<dyn ModelProvider>,
-    model: ModelName,
-}
-
-#[derive(Clone)]
-struct ActionProcessBackend {
-    runner: Arc<dyn ProcessRunner>,
-    permissioned_factory: Arc<dyn PermissionedProcessRunnerFactory>,
-}
-
-impl ActionProcessBackend {
-    fn runner(&self) -> Arc<dyn ProcessRunner> {
-        Arc::clone(&self.runner)
-    }
-
-    fn permissioned_factory(&self) -> Arc<dyn PermissionedProcessRunnerFactory> {
-        Arc::clone(&self.permissioned_factory)
-    }
-}
-
-#[derive(Clone)]
-struct CodingLoopChildRuntimeFactory {
-    root: PathBuf,
-    admission: AcceptedLocalWorkspaceProcessAdmission,
-    provider: Arc<dyn ModelProvider>,
-    model: ModelName,
-    runner: Arc<dyn ProcessRunner>,
-    permissioned_factory: Arc<dyn PermissionedProcessRunnerFactory>,
-    skill_roots: Vec<PathBuf>,
-    allow_hidden_workspace_paths: bool,
-}
-
-impl CodingLoopChildRuntimeFactory {
-    fn new(
-        root: &Path,
-        admission: AcceptedLocalWorkspaceProcessAdmission,
-        provider: Arc<dyn ModelProvider>,
-        model: ModelName,
-        process_backend: ActionProcessBackend,
-        skill_roots: Vec<PathBuf>,
-        allow_hidden_workspace_paths: bool,
-    ) -> Self {
-        Self {
-            root: root.to_path_buf(),
-            admission,
-            provider,
-            model,
-            runner: process_backend.runner(),
-            permissioned_factory: process_backend.permissioned_factory(),
-            skill_roots,
-            allow_hidden_workspace_paths,
-        }
-    }
-}
-
-impl ChildRuntimeFactory for CodingLoopChildRuntimeFactory {
-    fn build_child(
-        &self,
-        input: ChildRuntimeInput,
-    ) -> Result<Runtime, merry_runtime::RuntimeError> {
-        let allow_patch = input.allowed_tools.is_empty()
-            || input
-                .allowed_tools
-                .iter()
-                .any(|tool| tool.as_str() == WORKSPACE_PATCH_TOOL);
-        let allow_local_workspace_process = input.allowed_tools.is_empty()
-            || input
-                .allowed_tools
-                .iter()
-                .any(|tool| tool.as_str() == CODING_LOOP_PROCESS_TOOL);
-        let builder = Runtime::builder(input.session_id)
-            .task_anchor(input.task_anchor)
-            .model_provider(Arc::clone(&self.provider), self.model.clone());
-        let mut profile = WorkspaceCodingLoopProfile::new(
-            workspace_tools_config(
-                coding_loop_workspace_roots(&self.root, &self.skill_roots),
-                self.allow_hidden_workspace_paths,
-                false,
-                None,
-            )
-            .map_err(|_| merry_runtime::RuntimeError::InvalidStepInput {
-                reason: "child workspace tool config was invalid",
-            })?,
-        )
-        .map_err(|_| merry_runtime::RuntimeError::InvalidStepInput {
-            reason: "child workspace coding loop profile was invalid",
-        })?;
-        if allow_patch {
-            profile = profile.with_patch_tool();
-        }
-        profile = if allow_local_workspace_process {
-            profile.with_cli_bwrap_permissioned_process_runner(
-                self.admission,
-                Arc::clone(&self.runner),
-                Arc::clone(&self.permissioned_factory),
-            )
-        } else {
-            profile.with_read_only_process_runner(Arc::clone(&self.runner))
-        };
-        with_workspace_coding_loop_profile_for_child(builder, profile)?.build()
-    }
-}
-
-fn coding_loop_workspace_roots(root: &Path, skill_roots: &[PathBuf]) -> Vec<PathBuf> {
-    let mut roots = vec![root.to_path_buf()];
-    roots.extend(skill_roots.iter().filter(|root| root.is_dir()).cloned());
-    roots
-}
-
-fn workspace_tools_config(
-    roots: Vec<PathBuf>,
-    allow_hidden_workspace_paths: bool,
-    task_smoke_patch_limit: bool,
-    max_patch_bytes_override: Option<usize>,
-) -> Result<WorkspaceToolsConfig, CliError> {
-    let max_patch_bytes = max_patch_bytes_override.unwrap_or_else(|| {
-        if task_smoke_patch_limit {
-            CODING_LOOP_TASK_SMOKE_MAX_PATCH_BYTES
-        } else {
-            WorkspaceToolLimits::default().max_patch_bytes
-        }
-    });
-    Ok(WorkspaceToolsConfig::new(roots)
-        .with_allow_hidden(allow_hidden_workspace_paths)
-        .with_limits(WorkspaceToolLimits {
-            max_patch_bytes,
-            ..WorkspaceToolLimits::default()
-        }))
-}
-
-fn build_coding_loop_runtime(
-    session_id: &str,
-    root: &Path,
-    admission: AcceptedLocalWorkspaceProcessAdmission,
-    provider: Arc<dyn ModelProvider>,
-    model: ModelName,
-    runner: Arc<dyn ProcessRunner>,
-    options: CodingLoopRuntimeOptions,
-) -> Result<Runtime, CliError> {
-    let parent_session_id = SessionId::new(session_id).map_err(unexpected)?;
-    let permissioned_factory = options
-        .permissioned_process_runner_factory
-        .unwrap_or_else(|| {
-            Arc::new(merry_runtime::StaticPermissionedProcessRunnerFactory::new(
-                Arc::clone(&runner),
-            ))
-        });
-    let mut builder = Runtime::builder(parent_session_id.clone())
-        .automatic_compaction(options.automatic_compaction)
-        .model_provider(Arc::clone(&provider), model.clone());
-    if let Some(role_provider) = options.context_compaction {
-        builder = builder.model_provider_for_role(
-            role_provider.role,
-            role_provider.provider,
-            role_provider.model,
-        );
-    }
-    if let Some(role_provider) = options.approval_review {
-        builder = builder.model_provider_for_role(
-            role_provider.role,
-            role_provider.provider,
-            role_provider.model,
-        );
-    }
-    if !options.skill_roots.is_empty() {
-        let catalog = merry_runtime::SkillCatalog::load_from_roots(options.skill_roots.clone())
-            .map_err(unexpected)?;
-        let skill_names = catalog
-            .skills()
-            .iter()
-            .map(|skill| skill.name())
-            .collect::<Vec<_>>();
-        let skill_paths = catalog
-            .skills()
-            .iter()
-            .map(|skill| skill.skill_md_path().display().to_string())
-            .collect::<Vec<_>>();
-        tracing::info!(
-            event = "runtime.skill_catalog.load",
-            session_id,
-            configured_root_count = options.skill_roots.len(),
-            readable_root_count = options
-                .skill_roots
-                .iter()
-                .filter(|root| root.is_dir())
-                .count(),
-            skill_count = catalog.skills().len(),
-            warning_count = catalog.warnings().len(),
-            skill_names = ?skill_names,
-            skill_paths = ?skill_paths,
-            "runtime skill catalog loaded"
-        );
-        builder = builder.skill_catalog(catalog);
-    }
-
-    if options.subagents.is_enabled() {
-        let factory = CodingLoopChildRuntimeFactory::new(
-            root,
-            admission,
-            Arc::clone(&provider),
-            model.clone(),
-            ActionProcessBackend {
-                runner: Arc::clone(&runner),
-                permissioned_factory: Arc::clone(&permissioned_factory),
-            },
-            options.skill_roots.clone(),
-            options.allow_hidden_workspace_paths,
-        );
-        let manager = SubagentManager::new(
-            parent_session_id.clone(),
-            options.subagents.limits(),
-            Arc::new(factory),
-        );
-        let [spawn_tool, wait_tool, cancel_tool] =
-            subagent_registered_tools(manager.clone()).map_err(unexpected)?;
-        builder = builder
-            .subagent_manager(manager)
-            .register_tool(spawn_tool)
-            .register_tool(wait_tool)
-            .register_tool(cancel_tool);
-        tracing::info!(
-            event = "runtime.subagents.enabled",
-            session_id,
-            max_threads = options.subagents.limits().max_threads(),
-            max_depth = options.subagents.limits().max_depth(),
-            "runtime subagent tools registered"
-        );
-    }
-
-    let profile = WorkspaceCodingLoopProfile::new(workspace_tools_config(
-        coding_loop_workspace_roots(root, &options.skill_roots),
-        options.allow_hidden_workspace_paths,
-        session_id == CODING_LOOP_TASK_SMOKE_SESSION_ID
-            || session_id == CODING_LOOP_TASK_LIVE_SMOKE_SESSION_ID,
-        None,
-    )?)
-    .map_err(unexpected)?
-    .with_patch_tool()
-    .with_cli_bwrap_permissioned_process_runner(admission, runner, permissioned_factory);
-    let mut builder = with_workspace_coding_loop_profile(builder, profile)?;
-    if let Some(policy) = options.retry_policy {
-        builder = builder.model_retry_policy(policy);
-    }
-    builder.build().map_err(unexpected)
-}
-
-fn action_process_runner(
-    workspace_root: &Path,
-    merry_config: Option<&MerryConfig>,
-) -> Result<ActionProcessBackend, CliError> {
-    let path_rules = merry_config
-        .map(MerryConfig::trusted_global_path_rules)
-        .transpose()
-        .map_err(unexpected)?
-        .unwrap_or_default();
-    let network_allowed = merry_config
-        .map(MerryConfig::permissions_network_allowed)
-        .unwrap_or(false);
-    let mut runner = BwrapProcessRunner::new_at_workspace_root(workspace_root)
-        .with_path_rules(path_rules.clone());
-    if network_allowed {
-        runner = runner.allow_network();
-    }
-    let mut permissioned_factory =
-        BwrapPermissionedProcessRunnerFactory::new_at_workspace_root(workspace_root)
-            .with_path_rules(path_rules);
-    if network_allowed {
-        permissioned_factory = permissioned_factory.allow_base_network();
-    }
-    Ok(ActionProcessBackend {
-        runner: Arc::new(runner),
-        permissioned_factory: Arc::new(permissioned_factory),
-    })
-}
-
 async fn write_runtime_step_events<W>(
     runtime: &Runtime,
     input: StepInput,
@@ -1014,151 +517,6 @@ where
 {
     let mut writer = BufWriter::new(writer);
     write_runtime_step_events_to(runtime, input, context, &mut writer).await?;
-    writer.flush().await.map_err(stdout_error)
-}
-
-async fn write_run_agent_loop_output<W>(
-    runtime: &Runtime,
-    input: StepInput,
-    config: AgentLoopConfig,
-    writer: W,
-) -> Result<(), CliError>
-where
-    W: AsyncWrite + Unpin,
-{
-    let mut writer = BufWriter::new(writer);
-    let mut stream = runtime
-        .run_agent_loop_stream(input, StepContext::default(), config)
-        .map_err(unexpected)?;
-    let mut pending_commentary = None;
-    while let Some(event) = stream.next().await {
-        write_run_progress_commentary_event(runtime, &event, &mut pending_commentary, &mut writer)
-            .await?;
-    }
-    let result = stream.result().await.ok_or_else(|| {
-        CliError::Unexpected("agent loop stream closed before producing a result".to_owned())
-    })?;
-    write_run_agent_loop_summary_to(&result, &mut writer).await?;
-    writer.flush().await.map_err(stdout_error)
-}
-
-async fn write_run_agent_loop_jsonl_output<W>(
-    runtime: &Runtime,
-    input: StepInput,
-    config: AgentLoopConfig,
-    writer: W,
-) -> Result<(), CliError>
-where
-    W: AsyncWrite + Unpin,
-{
-    let mut writer = BufWriter::new(writer);
-    let mut stream = runtime
-        .run_agent_loop_stream(input, StepContext::default(), config)
-        .map_err(unexpected)?;
-
-    while let Some(event) = stream.next().await {
-        write_runtime_event(&event, &mut writer).await?;
-        writer.flush().await.map_err(stdout_error)?;
-    }
-
-    let result = stream.result().await.ok_or_else(|| {
-        CliError::Unexpected("agent loop stream closed before producing a result".to_owned())
-    })?;
-    write_agent_loop_result(&result, &mut writer).await?;
-    writer.flush().await.map_err(stdout_error)
-}
-
-async fn write_run_agent_loop_summary_to<W>(
-    result: &AgentLoopResult,
-    writer: &mut W,
-) -> Result<(), CliError>
-where
-    W: AsyncWrite + Unpin,
-{
-    if let Some(output) = result.final_output() {
-        writer
-            .write_all(output.as_bytes())
-            .await
-            .map_err(stdout_error)?;
-        if !output.ends_with('\n') {
-            writer.write_all(b"\n").await.map_err(stdout_error)?;
-        }
-    } else if let Some(output) = result.final_output_json() {
-        writer
-            .write_all(output.json().as_bytes())
-            .await
-            .map_err(stdout_error)?;
-        writer.write_all(b"\n").await.map_err(stdout_error)?;
-    } else {
-        writer
-            .write_all(format!("status: {:?}\n", result.status()).as_bytes())
-            .await
-            .map_err(stdout_error)?;
-    }
-    Ok(())
-}
-
-async fn write_run_progress_commentary_event<W>(
-    runtime: &Runtime,
-    event: &RuntimeEvent,
-    pending_commentary: &mut Option<ArtifactId>,
-    writer: &mut W,
-) -> Result<(), CliError>
-where
-    W: AsyncWrite + Unpin,
-{
-    match &event.kind {
-        RuntimeEventKind::ArtifactRecorded { artifact }
-            if artifact
-                .id()
-                .as_str()
-                .starts_with(ASSISTANT_OUTPUT_ARTIFACT_PREFIX) =>
-        {
-            *pending_commentary = Some(artifact.id().clone());
-        }
-        RuntimeEventKind::ToolCallPending { .. }
-        | RuntimeEventKind::BridgeToolCallRequested { .. } => {
-            if let Some(artifact_id) = pending_commentary.take() {
-                write_run_progress_commentary_artifact(runtime, &artifact_id, writer).await?;
-            }
-        }
-        RuntimeEventKind::ArtifactRecorded { .. }
-        | RuntimeEventKind::StepCompleted
-        | RuntimeEventKind::Failed { .. }
-        | RuntimeEventKind::Cancelled { .. } => {
-            *pending_commentary = None;
-        }
-        _ => {}
-    }
-
-    Ok(())
-}
-
-async fn write_run_progress_commentary_artifact<W>(
-    runtime: &Runtime,
-    artifact_id: &ArtifactId,
-    writer: &mut W,
-) -> Result<(), CliError>
-where
-    W: AsyncWrite + Unpin,
-{
-    let content = runtime
-        .read_artifact_content(artifact_id)
-        .await
-        .map_err(unexpected)?;
-    let Some(text) = content.as_text() else {
-        return Ok(());
-    };
-    let text = text.trim();
-    if text.is_empty() {
-        return Ok(());
-    }
-
-    writer
-        .write_all(text.as_bytes())
-        .await
-        .map_err(stdout_error)?;
-    writer.write_all(b"\n\n").await.map_err(stdout_error)?;
     writer.flush().await.map_err(stdout_error)
 }
 
@@ -1210,68 +568,10 @@ where
     Ok(())
 }
 
-async fn write_agent_loop_result<W>(
-    result: &AgentLoopResult,
+pub(crate) async fn write_runtime_event<W>(
+    event: &RuntimeEvent,
     writer: &mut W,
 ) -> Result<(), CliError>
-where
-    W: AsyncWrite + Unpin,
-{
-    let line = match result.status() {
-        AgentLoopStatus::Completed => serde_json::json!({
-            "type": "agent_loop_result",
-            "status": "completed",
-            "model_turns_run": result.model_turns_run(),
-            "final_output": result.final_output(),
-            "final_output_json": result.final_output_json().map(merry_runtime::FinalOutput::json),
-        }),
-        AgentLoopStatus::Failed { diagnostic } => serde_json::json!({
-            "type": "agent_loop_result",
-            "status": "failed",
-            "model_turns_run": result.model_turns_run(),
-            "final_output": result.final_output(),
-            "final_output_json": result.final_output_json().map(merry_runtime::FinalOutput::json),
-            "diagnostic": {
-                "code": diagnostic.code(),
-                "message": diagnostic.message(),
-            },
-        }),
-        AgentLoopStatus::Cancelled { diagnostic } => serde_json::json!({
-            "type": "agent_loop_result",
-            "status": "cancelled",
-            "model_turns_run": result.model_turns_run(),
-            "final_output": result.final_output(),
-            "final_output_json": result.final_output_json().map(merry_runtime::FinalOutput::json),
-            "diagnostic": {
-                "code": diagnostic.code(),
-                "message": diagnostic.message(),
-            },
-        }),
-        AgentLoopStatus::Blocked { reason } => serde_json::json!({
-            "type": "agent_loop_result",
-            "status": "blocked",
-            "model_turns_run": result.model_turns_run(),
-            "final_output": result.final_output(),
-            "final_output_json": result.final_output_json().map(merry_runtime::FinalOutput::json),
-            "blocked_reason": format!("{reason:?}"),
-        }),
-        _ => serde_json::json!({
-            "type": "agent_loop_result",
-            "status": "unknown",
-            "model_turns_run": result.model_turns_run(),
-            "final_output": result.final_output(),
-            "final_output_json": result.final_output_json().map(merry_runtime::FinalOutput::json),
-        }),
-    };
-    let line = serde_json::to_string(&line).map_err(unexpected)?;
-    writer
-        .write_all(line.as_bytes())
-        .await
-        .map_err(stdout_error)?;
-    writer.write_all(b"\n").await.map_err(stdout_error)
-}
-
-async fn write_runtime_event<W>(event: &RuntimeEvent, writer: &mut W) -> Result<(), CliError>
 where
     W: AsyncWrite + Unpin,
 {
@@ -1283,7 +583,7 @@ where
     writer.write_all(b"\n").await.map_err(stdout_error)
 }
 
-fn first_pending_tool_call(events: &[RuntimeEvent]) -> Option<PendingToolCall> {
+pub(crate) fn first_pending_tool_call(events: &[RuntimeEvent]) -> Option<PendingToolCall> {
     events.iter().find_map(|event| match &event.kind {
         RuntimeEventKind::ToolCallPending { call } => Some(call.clone()),
         _ => None,
@@ -1590,17 +890,11 @@ impl Termination for CliExit {
 mod tests {
     use super::{
         Cli, CliCommand, CliError, CliExit, DEBUG_TOOL_CONTINUATION_INPUT, DEFAULT_INPUT,
-        DEFAULT_SESSION_ID, DebugCommand, MERRY_OPENAI_DEBUG_ENV, MERRY_SANDBOX_ENV,
-        MERRY_SANDBOX_VERSION_ENV, SANDBOX_CHILD_HANDOFF_ARG, SANDBOX_CHILD_HANDOFF_CLI_BWRAP_V1,
-        SANDBOX_HOME, SANDBOX_MERRY_CONFIG_DIR, SANDBOX_MERRY_LOG_DIR, SANDBOX_TMPDIR,
-        SANDBOX_XDG_CONFIG_HOME, SANDBOX_XDG_STATE_HOME, SandboxBootstrap, SandboxChildHandoff,
-        SandboxError, SandboxHost, SandboxRuntimeProfile, args_without_sandbox_bootstrap_flags,
-        collect_runtime_step_events, debug_openai_usage, find_bwrap_in_path,
-        first_pending_tool_call, os, plan_sandbox_bootstrap_with_file_exists, report_cli_exit,
-        sandbox_runtime_profile_from_evidence, shell_usage,
+        DEFAULT_SESSION_ID, DebugCommand, MERRY_OPENAI_DEBUG_ENV, SandboxChildHandoff,
+        collect_runtime_step_events, debug_openai_usage, first_pending_tool_call, report_cli_exit,
+        shell_usage,
     };
-    use super::{DEBUG_TOOL_NAME, DEFAULT_CODING_AGENT_MAX_MODEL_TURNS, write_runtime_step_events};
-    use crate::config::SubagentsConfig;
+    use super::{DEBUG_TOOL_NAME, write_runtime_step_events};
     use crate::debug::CodingLoopTaskSmokeTask;
     use crate::debug::coding_loop::{
         CodingLoopTaskSmokeFixture, assert_coding_loop_smoke_result,
@@ -1621,27 +915,36 @@ mod tests {
         process_action_intent as shell_process_action_intent, run_to_writer as run_shell_to_writer,
         runtime_admission as shell_runtime_admission,
     };
-    use crate::sandbox::MERRY_SANDBOX_VERSION;
+    use crate::sandbox::{
+        Bootstrap as SandboxBootstrap, Error as SandboxError, Host as SandboxHost,
+        MERRY_SANDBOX_ENV, MERRY_SANDBOX_VERSION, MERRY_SANDBOX_VERSION_ENV, Plan as SandboxPlan,
+        RuntimeProfile as SandboxRuntimeProfile, SANDBOX_CHILD_HANDOFF_ARG,
+        SANDBOX_CHILD_HANDOFF_CLI_BWRAP_V1, SANDBOX_HOME, SANDBOX_MERRY_CONFIG_DIR,
+        SANDBOX_MERRY_LOG_DIR, SANDBOX_TMPDIR, SANDBOX_XDG_CONFIG_HOME, SANDBOX_XDG_STATE_HOME,
+        args_without_sandbox_bootstrap_flags, find_bwrap_in_path, os,
+        plan_bootstrap_with_file_exists as plan_sandbox_bootstrap_with_file_exists,
+        runtime_profile_from_evidence as sandbox_runtime_profile_from_evidence,
+    };
+    use crate::test_support::{
+        CompletingProvider, FakeProcessRunner, FakeProcessRunnerStep, RecordingProvider,
+        ScriptedProvider,
+    };
     use clap::Parser;
-    use futures_util::stream;
     use merry_core::{
-        ArtifactKind, ArtifactRef, PendingToolCall, ProviderName, RuntimeEvent, RuntimeEventKind,
-        ToolCallId, ToolCallResult, ToolCallResultStatus, ToolName,
+        ArtifactKind, ArtifactRef, PendingToolCall, RuntimeEvent, RuntimeEventKind, ToolCallId,
+        ToolCallResult, ToolCallResultStatus, ToolName,
     };
     use merry_llm::{
-        FinishReason, GenerationConfig, ModelCapabilities, ModelError, ModelEvent,
-        ModelEventStream, ModelName, ModelOutput, ModelProvider, ModelProviderFuture, ModelRequest,
-        ModelResponse, ModelStreamContext, ModelToolCall, ModelToolCallId, ToolArguments,
+        FinishReason, GenerationConfig, ModelCapabilities, ModelEvent, ModelName, ModelOutput,
+        ModelResponse, ModelToolCall, ModelToolCallId, ToolArguments,
     };
     use merry_runtime::{
-        AcceptedLocalWorkspaceProcessAdmission, AgentLoopConfig, AgentLoopStatus, ArtifactContent,
-        CheckpointId, CheckpointRef, CheckpointRefId, CheckpointRefManifest,
-        CheckpointSequenceRange, CheckpointSourceKind, CheckpointValidationPolicy,
-        CitationBackedCheckpoint, CompactedCheckpoint, CompactedCheckpointCandidate,
-        MAX_PROCESS_OUTPUT_LIMIT_BYTES, PathAccess, PathAccessRule, PathAccessRuleSource,
-        ProcessActionIntent, ProcessEnvPolicy, ProcessExitStatus, ProcessRunner,
-        ProcessRunnerContext, ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput,
-        Runtime, RuntimeProfile, StepContext, StepInput, SubagentConfig, ToolExecutionContext,
+        AcceptedLocalWorkspaceProcessAdmission, AgentLoopConfig, ArtifactContent, CheckpointId,
+        CheckpointRef, CheckpointRefId, CheckpointRefManifest, CheckpointSequenceRange,
+        CheckpointSourceKind, CheckpointValidationPolicy, CitationBackedCheckpoint,
+        CompactedCheckpoint, CompactedCheckpointCandidate, MAX_PROCESS_OUTPUT_LIMIT_BYTES,
+        PathAccess, PathAccessRule, PathAccessRuleSource, ProcessEnvPolicy, Runtime,
+        RuntimeProfile, StepContext, StepInput, ToolExecutionContext,
     };
     use merry_tool_workspace::{
         CODING_LOOP_PROCESS_TOOL, WORKSPACE_PATCH_TOOL, WORKSPACE_READ_FILE_TOOL,
@@ -1654,10 +957,7 @@ mod tests {
         path::{Path, PathBuf},
         pin::Pin,
         process::ExitCode,
-        sync::{
-            Arc, Mutex,
-            atomic::{AtomicUsize, Ordering},
-        },
+        sync::Arc,
         task::{Context, Poll},
     };
     use tokio::io::AsyncWrite;
@@ -1722,7 +1022,7 @@ mod tests {
         plan_sandbox_bootstrap_with_file_exists(with_sandbox, host, path_is_fake_bwrap)
     }
 
-    fn plan_args(plan: &super::SandboxPlan) -> Vec<String> {
+    fn plan_args(plan: &SandboxPlan) -> Vec<String> {
         plan.args
             .iter()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -2179,304 +1479,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn coding_loop_runtime_projects_skill_metadata_without_body() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let workspace = temp.path().join("workspace");
-        let skill_root = temp.path().join("skills");
-        std::fs::create_dir_all(&workspace).expect("mkdir workspace");
-        std::fs::create_dir_all(skill_root.join("demo")).expect("mkdir skill");
-        std::fs::write(
-            skill_root.join("demo/SKILL.md"),
-            "---\nname: demo-skill\ndescription: Use for demo tasks.\n---\n# Demo\nbody sentinel\n",
-        )
-        .expect("write skill");
-
-        let provider = ScriptedProvider::new(vec![vec![Ok(ModelEvent::Completed {
-            response: ModelResponse::new(vec![ModelOutput::text("done")], FinishReason::Stop, None),
-        })]]);
-        let runner = Arc::new(FakeProcessRunner::succeeding(""));
-        let runtime = super::build_coding_loop_runtime(
-            "coding-loop-skill-prefix",
-            &workspace,
-            AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
-            Arc::new(provider.clone()),
-            ModelName::new("debug-model").unwrap(),
-            runner,
-            super::CodingLoopRuntimeOptions {
-                allow_hidden_workspace_paths: false,
-                approval_review: None,
-                automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
-                retry_policy: None,
-                context_compaction: None,
-                permissioned_process_runner_factory: None,
-                skill_roots: vec![skill_root.clone()],
-                subagents: SubagentsConfig::default(),
-            },
-        )
-        .expect("runtime should build");
-
-        collect_runtime_step_events(
-            &runtime,
-            StepInput::user_text("Inspect skills.").expect("valid input"),
-            StepContext::default(),
-        )
-        .await
-        .expect("runtime step should complete");
-        let request = provider.recorded_requests()[0].clone();
-        let stable_text = request
-            .stable_prefix_messages()
-            .iter()
-            .map(|message| message.content().as_text())
-            .collect::<Vec<_>>()
-            .join("\n");
-        let request_text = request
-            .messages()
-            .iter()
-            .map(|message| message.content().as_text())
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        assert!(stable_text.contains("demo-skill"));
-        assert!(stable_text.contains("Use for demo tasks."));
-        assert!(stable_text.contains("demo/SKILL.md"));
-        assert!(request_text.contains("workspace_read_file"));
-        assert!(request_text.contains("Workspace coding profile"));
-        assert!(request_text.contains("user's current input language"));
-        assert!(request_text.contains("configured sandbox/profile"));
-        assert!(request_text.contains("network access may be intentionally restricted"));
-        assert!(request_text.contains("call request_permissions for that exact action"));
-        assert!(!stable_text.contains("body sentinel"));
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn headless_coding_runtime_uses_coding_agent_profile() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let workspace = temp.path().join("workspace");
-        std::fs::create_dir_all(&workspace).expect("mkdir workspace");
-        let provider = ScriptedProvider::new(vec![vec![Ok(ModelEvent::Completed {
-            response: ModelResponse::new(vec![ModelOutput::text("done")], FinishReason::Stop, None),
-        })]]);
-        let runner: Arc<dyn ProcessRunner> = Arc::new(FakeProcessRunner::succeeding(""));
-        let permissioned_factory = Arc::new(
-            merry_runtime::StaticPermissionedProcessRunnerFactory::new(Arc::clone(&runner)),
-        );
-
-        let runtime = super::build_headless_coding_runtime(super::HeadlessCodingRuntimeInput {
-            session_id: "headless-coding-runtime-profile",
-            root: &workspace,
-            admission: AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
-            provider: Arc::new(provider.clone()),
-            model: ModelName::new("debug-model").expect("valid model name"),
-            runner,
-            permissioned_process_runner_factory: permissioned_factory,
-            allow_hidden_workspace_paths: false,
-            automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
-            retry_policy: None,
-            context_compaction: None,
-            approval_review: None,
-            skill_roots: Vec::new(),
-            subagents: SubagentsConfig::default(),
-        })
-        .expect("headless coding runtime should build");
-
-        collect_runtime_step_events(
-            &runtime,
-            StepInput::user_text("Inspect workspace.").expect("valid input"),
-            StepContext::default(),
-        )
-        .await
-        .expect("runtime step should complete");
-
-        let request = provider.recorded_requests()[0].clone();
-        let request_text = request
-            .messages()
-            .iter()
-            .map(|message| message.content().as_text())
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(request_text.contains("Workspace coding profile"));
-        assert!(request_text.contains("user's current input language"));
-        assert!(
-            request
-                .tools()
-                .iter()
-                .any(|tool| tool.name().as_str() == CODING_LOOP_PROCESS_TOOL)
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn run_writer_prints_final_output_without_event_jsonl() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let workspace = temp.path().join("workspace");
-        std::fs::create_dir_all(&workspace).expect("mkdir workspace");
-        let provider = ScriptedProvider::new(vec![vec![Ok(ModelEvent::Completed {
-            response: ModelResponse::new(
-                vec![ModelOutput::text("done from run")],
-                FinishReason::Stop,
-                None,
-            ),
-        })]]);
-        let runner: Arc<dyn ProcessRunner> = Arc::new(FakeProcessRunner::succeeding(""));
-        let permissioned_factory = Arc::new(
-            merry_runtime::StaticPermissionedProcessRunnerFactory::new(Arc::clone(&runner)),
-        );
-        let runtime = super::build_headless_coding_runtime(super::HeadlessCodingRuntimeInput {
-            session_id: "run-writer-test",
-            root: &workspace,
-            admission: AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
-            provider: Arc::new(provider),
-            model: ModelName::new("debug-model").expect("valid model name"),
-            runner,
-            permissioned_process_runner_factory: permissioned_factory,
-            allow_hidden_workspace_paths: false,
-            automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
-            retry_policy: None,
-            context_compaction: None,
-            approval_review: None,
-            skill_roots: Vec::new(),
-            subagents: SubagentsConfig::default(),
-        })
-        .expect("runtime should build");
-
-        let mut output = Vec::new();
-        super::write_run_agent_loop_output(
-            &runtime,
-            StepInput::user_text("finish").expect("valid input"),
-            AgentLoopConfig::new(DEFAULT_CODING_AGENT_MAX_MODEL_TURNS).expect("valid config"),
-            &mut output,
-        )
-        .await
-        .expect("run output should write");
-
-        let text = String::from_utf8(output).expect("output should be utf-8");
-        assert_eq!(text, "done from run\n");
-        assert!(!text.contains("\"type\":\"session_started\""));
-        assert!(!text.contains("\"type\":\"agent_loop_result\""));
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn run_writer_streams_progress_commentary_before_final_output() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let workspace = temp.path().join("workspace");
-        std::fs::create_dir_all(&workspace).expect("mkdir workspace");
-        let provider = ScriptedProvider::new(vec![
-            vec![
-                Ok(ModelEvent::OutputTextDelta {
-                    delta: "我先解析 baidu.com 的 DNS。".to_owned(),
-                }),
-                Ok(coding_loop_process_call(
-                    "run-progress-dns",
-                    &["getent", "hosts", "baidu.com"],
-                    None,
-                )
-                .expect("valid process call")),
-            ],
-            vec![Ok(ModelEvent::Completed {
-                response: ModelResponse::new(
-                    vec![ModelOutput::text("baidu.com resolves to 110.242.74.102")],
-                    FinishReason::Stop,
-                    None,
-                ),
-            })],
-        ]);
-        let runner: Arc<dyn ProcessRunner> =
-            Arc::new(FakeProcessRunner::succeeding("110.242.74.102 baidu.com\n"));
-        let permissioned_factory = Arc::new(
-            merry_runtime::StaticPermissionedProcessRunnerFactory::new(Arc::clone(&runner)),
-        );
-        let runtime = super::build_headless_coding_runtime(super::HeadlessCodingRuntimeInput {
-            session_id: "run-progress-writer-test",
-            root: &workspace,
-            admission: AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
-            provider: Arc::new(provider),
-            model: ModelName::new("debug-model").expect("valid model name"),
-            runner,
-            permissioned_process_runner_factory: permissioned_factory,
-            allow_hidden_workspace_paths: false,
-            automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
-            retry_policy: None,
-            context_compaction: None,
-            approval_review: None,
-            skill_roots: Vec::new(),
-            subagents: SubagentsConfig::default(),
-        })
-        .expect("runtime should build");
-
-        let mut output = Vec::new();
-        super::write_run_agent_loop_output(
-            &runtime,
-            StepInput::user_text("ping baidu.com").expect("valid input"),
-            AgentLoopConfig::new(DEFAULT_CODING_AGENT_MAX_MODEL_TURNS).expect("valid config"),
-            &mut output,
-        )
-        .await
-        .expect("run output should write");
-
-        let text = String::from_utf8(output).expect("output should be utf-8");
-        assert_eq!(
-            text,
-            "我先解析 baidu.com 的 DNS。\n\nbaidu.com resolves to 110.242.74.102\n"
-        );
-        assert!(!text.contains("\"type\":\"tool_call_pending\""));
-        assert!(!text.contains("\"type\":\"agent_loop_result\""));
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn run_jsonl_writer_streams_agent_loop_result() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let workspace = temp.path().join("workspace");
-        std::fs::create_dir_all(&workspace).expect("mkdir workspace");
-        let provider = ScriptedProvider::new(vec![vec![Ok(ModelEvent::Completed {
-            response: ModelResponse::new(
-                vec![ModelOutput::text("done from run")],
-                FinishReason::Stop,
-                None,
-            ),
-        })]]);
-        let runner: Arc<dyn ProcessRunner> = Arc::new(FakeProcessRunner::succeeding(""));
-        let permissioned_factory = Arc::new(
-            merry_runtime::StaticPermissionedProcessRunnerFactory::new(Arc::clone(&runner)),
-        );
-        let runtime = super::build_headless_coding_runtime(super::HeadlessCodingRuntimeInput {
-            session_id: "run-jsonl-writer-test",
-            root: &workspace,
-            admission: AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
-            provider: Arc::new(provider),
-            model: ModelName::new("debug-model").expect("valid model name"),
-            runner,
-            permissioned_process_runner_factory: permissioned_factory,
-            allow_hidden_workspace_paths: false,
-            automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
-            retry_policy: None,
-            context_compaction: None,
-            approval_review: None,
-            skill_roots: Vec::new(),
-            subagents: SubagentsConfig::default(),
-        })
-        .expect("runtime should build");
-
-        let mut output = FlushCountingWriter::default();
-        super::write_run_agent_loop_jsonl_output(
-            &runtime,
-            StepInput::user_text("finish").expect("valid input"),
-            AgentLoopConfig::new(DEFAULT_CODING_AGENT_MAX_MODEL_TURNS).expect("valid config"),
-            &mut output,
-        )
-        .await
-        .expect("run output should write");
-
-        assert!(
-            output.flushes > 1,
-            "JSONL mode should flush as events arrive"
-        );
-        let text = String::from_utf8(output.bytes).expect("output should be utf-8");
-        assert!(text.contains("\"type\":\"session_started\""));
-        assert!(text.contains("\"type\":\"agent_loop_result\""));
-        assert!(text.contains("\"status\":\"completed\""));
-        assert!(text.contains("done from run"));
-    }
-
-    #[tokio::test(flavor = "current_thread")]
     async fn command_generation_runtime_is_read_only_workspace_only() {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("workspace");
@@ -2698,324 +1700,6 @@ mod tests {
         let text = String::from_utf8(output.bytes).expect("utf8");
         assert!(text.contains("stdout-line\n"));
         assert!(text.contains("stderr-line\n"));
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn coding_loop_runtime_includes_skill_roots_in_workspace_read_tools() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let workspace = temp.path().join("workspace");
-        let skill_root = temp.path().join("skills");
-        std::fs::create_dir_all(&workspace).expect("mkdir workspace");
-        std::fs::create_dir_all(skill_root.join("demo")).expect("mkdir skill");
-        std::fs::write(
-            skill_root.join("demo/SKILL.md"),
-            "---\nname: demo-skill\ndescription: Demo skill.\n---\n# Demo\n",
-        )
-        .expect("write skill");
-
-        let provider = ScriptedProvider::new(vec![vec![Ok(coding_loop_workspace_call(
-            "call-read-skill",
-            WORKSPACE_READ_FILE_TOOL,
-            [(
-                "path",
-                serde_json::Value::String("demo/SKILL.md".to_owned()),
-            )],
-        )
-        .expect("workspace read call should build"))]]);
-        let runner = Arc::new(FakeProcessRunner::succeeding(""));
-        let runtime = super::build_coding_loop_runtime(
-            "coding-loop-skill-root-read",
-            &workspace,
-            AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
-            Arc::new(provider.clone()),
-            ModelName::new("debug-model").unwrap(),
-            runner,
-            super::CodingLoopRuntimeOptions {
-                allow_hidden_workspace_paths: false,
-                approval_review: None,
-                automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
-                retry_policy: None,
-                context_compaction: None,
-                permissioned_process_runner_factory: None,
-                skill_roots: vec![skill_root.clone()],
-                subagents: SubagentsConfig::default(),
-            },
-        )
-        .expect("runtime should build");
-
-        let events = collect_runtime_step_events(
-            &runtime,
-            StepInput::user_text("Read demo skill.").expect("valid input"),
-            StepContext::default(),
-        )
-        .await
-        .expect("runtime step should collect pending skill read");
-        let pending = first_pending_tool_call(&events).expect("pending skill read");
-        let execution_events = runtime
-            .execute_tool_call(pending.id(), ToolExecutionContext::default())
-            .await
-            .expect("skill read should execute");
-        let result = resolved_tool_result(&execution_events);
-        assert_eq!(result.status(), ToolCallResultStatus::Succeeded);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn coding_loop_runtime_allows_missing_default_skill_root() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let workspace = temp.path().join("workspace");
-        let missing_skill_root = temp.path().join("config/merry/skills");
-        std::fs::create_dir_all(&workspace).expect("mkdir workspace");
-
-        let provider = ScriptedProvider::new(vec![vec![Ok(ModelEvent::Completed {
-            response: ModelResponse::new(vec![ModelOutput::text("done")], FinishReason::Stop, None),
-        })]]);
-        let runner = Arc::new(FakeProcessRunner::succeeding(""));
-        let runtime = super::build_coding_loop_runtime(
-            "coding-loop-missing-default-skill-root",
-            &workspace,
-            AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
-            Arc::new(provider.clone()),
-            ModelName::new("debug-model").unwrap(),
-            runner,
-            super::CodingLoopRuntimeOptions {
-                allow_hidden_workspace_paths: false,
-                approval_review: None,
-                automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
-                retry_policy: None,
-                context_compaction: None,
-                permissioned_process_runner_factory: None,
-                skill_roots: vec![missing_skill_root],
-                subagents: SubagentsConfig::default(),
-            },
-        )
-        .expect("missing default skill root should not block runtime");
-
-        collect_runtime_step_events(
-            &runtime,
-            StepInput::user_text("Run without configured skills.").expect("valid input"),
-            StepContext::default(),
-        )
-        .await
-        .expect("runtime step should complete");
-
-        let request = provider.recorded_requests()[0].clone();
-        assert!(
-            request
-                .stable_prefix_messages()
-                .iter()
-                .all(|message| !message.content().as_text().contains("## Skills"))
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn coding_loop_runtime_hides_subagent_tools_by_default() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let workspace = temp.path().join("workspace");
-        std::fs::create_dir_all(&workspace).expect("mkdir workspace");
-
-        let provider = ScriptedProvider::new(vec![vec![Ok(ModelEvent::Completed {
-            response: ModelResponse::new(vec![ModelOutput::text("done")], FinishReason::Stop, None),
-        })]]);
-        let runner = Arc::new(FakeProcessRunner::succeeding(""));
-        let runtime = super::build_coding_loop_runtime(
-            "coding-loop-subagents-default-off",
-            &workspace,
-            AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
-            Arc::new(provider.clone()),
-            ModelName::new("debug-model").unwrap(),
-            runner,
-            super::CodingLoopRuntimeOptions {
-                allow_hidden_workspace_paths: false,
-                approval_review: None,
-                automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
-                retry_policy: None,
-                context_compaction: None,
-                permissioned_process_runner_factory: None,
-                skill_roots: Vec::new(),
-                subagents: SubagentsConfig::default(),
-            },
-        )
-        .expect("runtime should build");
-
-        collect_runtime_step_events(
-            &runtime,
-            StepInput::user_text("Inspect available tools.").expect("valid input"),
-            StepContext::default(),
-        )
-        .await
-        .expect("runtime step should complete");
-        let requests = provider.recorded_requests();
-        let tool_names = requests[0]
-            .tools()
-            .iter()
-            .map(|tool| tool.name().as_str())
-            .collect::<Vec<_>>();
-
-        assert!(!tool_names.contains(&"spawn_subagents"));
-        assert!(!tool_names.contains(&"wait_subagents"));
-        assert!(!tool_names.contains(&"cancel_subagents"));
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn coding_loop_runtime_exposes_subagent_tools_when_enabled() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let workspace = temp.path().join("workspace");
-        std::fs::create_dir_all(&workspace).expect("mkdir workspace");
-
-        let provider = ScriptedProvider::new(vec![vec![Ok(ModelEvent::Completed {
-            response: ModelResponse::new(vec![ModelOutput::text("done")], FinishReason::Stop, None),
-        })]]);
-        let runner = Arc::new(FakeProcessRunner::succeeding(""));
-        let runtime = super::build_coding_loop_runtime(
-            "coding-loop-subagents-enabled",
-            &workspace,
-            AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
-            Arc::new(provider.clone()),
-            ModelName::new("debug-model").unwrap(),
-            runner,
-            super::CodingLoopRuntimeOptions {
-                allow_hidden_workspace_paths: false,
-                approval_review: None,
-                automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
-                retry_policy: None,
-                context_compaction: None,
-                permissioned_process_runner_factory: None,
-                skill_roots: Vec::new(),
-                subagents: SubagentsConfig::enabled_for_test(
-                    SubagentConfig::new(2, 1).expect("valid subagent config"),
-                ),
-            },
-        )
-        .expect("runtime should build");
-
-        collect_runtime_step_events(
-            &runtime,
-            StepInput::user_text("Inspect available tools.").expect("valid input"),
-            StepContext::default(),
-        )
-        .await
-        .expect("runtime step should complete");
-        let requests = provider.recorded_requests();
-        let tool_names = requests[0]
-            .tools()
-            .iter()
-            .map(|tool| tool.name().as_str())
-            .collect::<Vec<_>>();
-
-        assert!(tool_names.contains(&"spawn_subagents"));
-        assert!(tool_names.contains(&"wait_subagents"));
-        assert!(tool_names.contains(&"cancel_subagents"));
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn coding_loop_subagent_with_narrow_tools_keeps_read_only_profile() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let workspace = temp.path().join("workspace");
-        std::fs::create_dir_all(&workspace).expect("mkdir workspace");
-        std::fs::write(workspace.join("README.md"), "child fixture\n").expect("write fixture");
-
-        let provider = ScriptedProvider::new(vec![
-            vec![Ok(ModelEvent::Completed {
-                response: ModelResponse::new(
-                    vec![ModelOutput::tool_call(ModelToolCall::new(
-                        ModelToolCallId::new("call-spawn").expect("valid call id"),
-                        ToolName::new("spawn_subagents").expect("valid tool name"),
-                        ToolArguments::try_from(Value::Object(Map::from_iter([(
-                            "tasks".to_owned(),
-                            Value::Array(vec![Value::Object(Map::from_iter([
-                                (
-                                    "task".to_owned(),
-                                    Value::String("Inspect the fixture.".to_owned()),
-                                ),
-                                (
-                                    "max_model_turns".to_owned(),
-                                    Value::Number(serde_json::Number::from(1)),
-                                ),
-                                (
-                                    "allowed_tools".to_owned(),
-                                    Value::Array(vec![Value::String(
-                                        "workspace_read_file".to_owned(),
-                                    )]),
-                                ),
-                            ]))]),
-                        )])))
-                        .expect("valid spawn args"),
-                    ))],
-                    FinishReason::ToolCalls,
-                    None,
-                ),
-            })],
-            vec![Ok(ModelEvent::Completed {
-                response: ModelResponse::new(
-                    vec![ModelOutput::text("child done")],
-                    FinishReason::Stop,
-                    None,
-                ),
-            })],
-            vec![Ok(ModelEvent::Completed {
-                response: ModelResponse::new(
-                    vec![ModelOutput::text("parent done")],
-                    FinishReason::Stop,
-                    None,
-                ),
-            })],
-        ]);
-        let runtime = super::build_coding_loop_runtime(
-            "coding-loop-subagent-narrow-tools",
-            &workspace,
-            AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
-            Arc::new(provider.clone()),
-            ModelName::new("debug-model").unwrap(),
-            Arc::new(FakeProcessRunner::succeeding("")),
-            super::CodingLoopRuntimeOptions {
-                allow_hidden_workspace_paths: false,
-                approval_review: None,
-                automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
-                retry_policy: None,
-                context_compaction: None,
-                permissioned_process_runner_factory: None,
-                skill_roots: Vec::new(),
-                subagents: SubagentsConfig::enabled_for_test(
-                    SubagentConfig::new(2, 1).expect("valid subagent config"),
-                ),
-            },
-        )
-        .expect("runtime should build");
-
-        let result = runtime
-            .run_agent_loop(
-                StepInput::user_text("Delegate fixture inspection.").expect("valid input"),
-                StepContext::default(),
-                AgentLoopConfig::new(3).expect("valid loop config"),
-            )
-            .await
-            .expect("agent loop should run");
-
-        assert_eq!(result.status(), &AgentLoopStatus::Completed);
-        let requests = provider.recorded_requests();
-        assert_eq!(requests.len(), 3);
-        let child_request = requests
-            .iter()
-            .find(|request| {
-                request
-                    .dynamic_messages()
-                    .iter()
-                    .any(|message| message.content().as_text().contains("Inspect the fixture."))
-            })
-            .expect("child request should be recorded");
-        let child_tool_names = child_request
-            .tools()
-            .iter()
-            .map(|tool| tool.name().as_str())
-            .collect::<Vec<_>>();
-        assert!(child_tool_names.contains(&"workspace_read_file"));
-        assert!(child_tool_names.contains(&"workspace_list_dir"));
-        assert!(child_tool_names.contains(&"workspace_search_text"));
-        assert!(child_tool_names.contains(&"run_process"));
-        assert!(!child_tool_names.contains(&"workspace_patch"));
-        assert!(!child_tool_names.contains(&"spawn_subagents"));
-        assert!(!child_tool_names.contains(&"wait_subagents"));
-        assert!(!child_tool_names.contains(&"cancel_subagents"));
     }
 
     #[test]
@@ -3662,111 +2346,6 @@ model = "gpt-review"
         );
     }
 
-    #[derive(Clone)]
-    struct FakeProcessRunner {
-        calls: Arc<AtomicUsize>,
-        observed_argv: Arc<Mutex<Vec<Vec<String>>>>,
-        observed_cwd: Arc<Mutex<Vec<Option<String>>>>,
-        outputs: Arc<Mutex<Vec<FakeProcessRunnerStep>>>,
-    }
-
-    impl FakeProcessRunner {
-        fn succeeding(stdout: impl Into<String>) -> Self {
-            Self::scripted([FakeProcessRunnerStep::success(stdout)])
-        }
-
-        fn scripted<const N: usize>(steps: [FakeProcessRunnerStep; N]) -> Self {
-            Self {
-                calls: Arc::new(AtomicUsize::new(0)),
-                observed_argv: Arc::new(Mutex::new(Vec::new())),
-                observed_cwd: Arc::new(Mutex::new(Vec::new())),
-                outputs: Arc::new(Mutex::new(steps.into_iter().rev().collect())),
-            }
-        }
-
-        fn call_count(&self) -> usize {
-            self.calls.load(Ordering::SeqCst)
-        }
-
-        fn observed_argv(&self) -> Vec<Vec<String>> {
-            self.observed_argv
-                .lock()
-                .expect("observed argv mutex should not be poisoned")
-                .clone()
-        }
-
-        fn observed_cwd(&self) -> Vec<Option<String>> {
-            self.observed_cwd
-                .lock()
-                .expect("observed cwd mutex should not be poisoned")
-                .clone()
-        }
-    }
-
-    #[derive(Clone)]
-    struct FakeProcessRunnerStep {
-        status: ProcessExitStatus,
-        stdout: String,
-        stderr: String,
-    }
-
-    impl FakeProcessRunnerStep {
-        fn success(stdout: impl Into<String>) -> Self {
-            Self {
-                status: ProcessExitStatus::Exited(0),
-                stdout: stdout.into(),
-                stderr: String::new(),
-            }
-        }
-
-        fn failure(stderr: impl Into<String>) -> Self {
-            Self {
-                status: ProcessExitStatus::Exited(1),
-                stdout: String::new(),
-                stderr: stderr.into(),
-            }
-        }
-    }
-
-    impl ProcessRunner for FakeProcessRunner {
-        fn run<'a>(
-            &'a self,
-            intent: ProcessActionIntent,
-            context: ProcessRunnerContext,
-        ) -> ProcessRunnerFuture<'a> {
-            Box::pin(async move {
-                self.calls.fetch_add(1, Ordering::SeqCst);
-                self.observed_argv
-                    .lock()
-                    .expect("observed argv mutex should not be poisoned")
-                    .push(intent.argv().to_vec());
-                self.observed_cwd
-                    .lock()
-                    .expect("observed cwd mutex should not be poisoned")
-                    .push(intent.cwd().map(str::to_owned));
-                if context.cancellation_token().is_cancelled() {
-                    return Err(ProcessRunnerError::Cancelled);
-                }
-                let output = self
-                    .outputs
-                    .lock()
-                    .expect("fake process outputs mutex should not be poisoned")
-                    .pop()
-                    .unwrap_or_else(|| FakeProcessRunnerStep::success(String::new()));
-
-                ProcessRunnerOutput::new(
-                    &intent,
-                    output.status,
-                    output.stdout,
-                    false,
-                    output.stderr,
-                    false,
-                )
-                .map_err(|source| ProcessRunnerError::infrastructure(source.to_string()))
-            })
-        }
-    }
-
     fn parse_runtime_events(text: &str) -> Vec<RuntimeEvent> {
         assert!(
             text.ends_with('\n'),
@@ -4342,155 +2921,6 @@ model = "gpt-review"
         assert!(stderr.starts_with("--input requires a value\n\n"));
         assert!(stderr.contains("Usage: merry debug openai"));
         assert!(stderr.contains("MERRY_OPENAI_DEBUG=1"));
-    }
-
-    struct CompletingProvider {
-        name: ProviderName,
-        capabilities: ModelCapabilities,
-    }
-
-    impl CompletingProvider {
-        fn new() -> Self {
-            Self {
-                name: ProviderName::new("debug-test-provider").expect("valid provider name"),
-                capabilities: ModelCapabilities::new(true, true, false, true, None, None)
-                    .expect("valid capabilities"),
-            }
-        }
-    }
-
-    impl ModelProvider for CompletingProvider {
-        fn name(&self) -> &ProviderName {
-            &self.name
-        }
-
-        fn capabilities(&self) -> &ModelCapabilities {
-            &self.capabilities
-        }
-
-        fn stream_model<'a>(
-            &'a self,
-            _request: ModelRequest,
-            _context: ModelStreamContext,
-        ) -> ModelProviderFuture<'a, Result<ModelEventStream, ModelError>> {
-            Box::pin(async {
-                let response = ModelResponse::new(
-                    vec![ModelOutput::text("hidden from runtime events")],
-                    FinishReason::Stop,
-                    None,
-                );
-                let events = vec![
-                    Ok(ModelEvent::Started),
-                    Ok(ModelEvent::OutputTextDelta {
-                        delta: "hidden".to_owned(),
-                    }),
-                    Ok(ModelEvent::Completed { response }),
-                ];
-                Ok(Box::pin(stream::iter(events)) as ModelEventStream)
-            })
-        }
-    }
-
-    struct RecordingProvider {
-        inner: CompletingProvider,
-        requests: Arc<Mutex<Vec<ModelRequest>>>,
-    }
-
-    impl RecordingProvider {
-        fn new() -> Self {
-            Self {
-                inner: CompletingProvider::new(),
-                requests: Arc::new(Mutex::new(Vec::new())),
-            }
-        }
-    }
-
-    impl ModelProvider for RecordingProvider {
-        fn name(&self) -> &ProviderName {
-            self.inner.name()
-        }
-
-        fn capabilities(&self) -> &ModelCapabilities {
-            self.inner.capabilities()
-        }
-
-        fn stream_model<'a>(
-            &'a self,
-            request: ModelRequest,
-            context: ModelStreamContext,
-        ) -> ModelProviderFuture<'a, Result<ModelEventStream, ModelError>> {
-            self.requests
-                .lock()
-                .expect("request mutex should not be poisoned")
-                .push(request.clone());
-            self.inner.stream_model(request, context)
-        }
-    }
-
-    type ScriptedStep = Vec<Result<ModelEvent, ModelError>>;
-
-    #[derive(Debug, Clone)]
-    struct ScriptedProvider {
-        name: ProviderName,
-        capabilities: ModelCapabilities,
-        steps: Arc<Mutex<Vec<ScriptedStep>>>,
-        requests: Arc<Mutex<Vec<ModelRequest>>>,
-    }
-
-    impl ScriptedProvider {
-        fn new(scripts: Vec<ScriptedStep>) -> Self {
-            Self {
-                name: ProviderName::new("debug-scripted-provider").expect("valid provider name"),
-                capabilities: ModelCapabilities::new(true, true, false, true, None, None)
-                    .expect("valid capabilities"),
-                steps: Arc::new(Mutex::new(scripts.into_iter().rev().collect())),
-                requests: Arc::new(Mutex::new(Vec::new())),
-            }
-        }
-
-        fn with_capabilities(mut self, capabilities: ModelCapabilities) -> Self {
-            self.capabilities = capabilities;
-            self
-        }
-
-        fn recorded_requests(&self) -> Vec<ModelRequest> {
-            self.requests
-                .lock()
-                .expect("request mutex should not be poisoned")
-                .clone()
-        }
-    }
-
-    impl ModelProvider for ScriptedProvider {
-        fn name(&self) -> &ProviderName {
-            &self.name
-        }
-
-        fn capabilities(&self) -> &ModelCapabilities {
-            &self.capabilities
-        }
-
-        fn stream_model<'a>(
-            &'a self,
-            request: ModelRequest,
-            _context: ModelStreamContext,
-        ) -> ModelProviderFuture<'a, Result<ModelEventStream, ModelError>> {
-            Box::pin(async move {
-                self.requests
-                    .lock()
-                    .expect("request mutex should not be poisoned")
-                    .push(request);
-
-                let script = self
-                    .steps
-                    .lock()
-                    .expect("step mutex should not be poisoned")
-                    .pop()
-                    .unwrap_or_default();
-
-                Ok(Box::pin(stream::iter(script)) as ModelEventStream)
-            })
-        }
     }
 
     #[tokio::test]
