@@ -12,14 +12,14 @@ use crate::provider_config::{
 };
 use crate::runtime_config::{automatic_compaction_config, subagents_config};
 use crate::sandbox::ChildHandoff as SandboxChildHandoff;
-use crate::{
+pub(crate) use constants::{
     CODING_LOOP_LIVE_SMOKE_INITIAL_VALUE, CODING_LOOP_LIVE_SMOKE_SESSION_ID,
-    CODING_LOOP_LIVE_SMOKE_TARGET_VALUE, CODING_LOOP_PROCESS_TOOL, CODING_LOOP_SMOKE_SESSION_ID,
+    CODING_LOOP_LIVE_SMOKE_TARGET_VALUE, CODING_LOOP_SMOKE_SESSION_ID,
     CODING_LOOP_SUBAGENT_LIVE_SMOKE_FILE, CODING_LOOP_SUBAGENT_LIVE_SMOKE_INITIAL,
     CODING_LOOP_SUBAGENT_LIVE_SMOKE_SESSION_ID, CODING_LOOP_SUBAGENT_LIVE_SMOKE_TARGET,
     CODING_LOOP_TASK_LIVE_SMOKE_SESSION_ID, CODING_LOOP_TASK_SMOKE_MAX_PATCH_BYTES,
     CODING_LOOP_TASK_SMOKE_SESSION_ID, PERMISSION_NETWORK_SMOKE_ARGV,
-    PERMISSION_NETWORK_SMOKE_SESSION_ID, WORKSPACE_PATCH_TOOL, WORKSPACE_READ_FILE_TOOL,
+    PERMISSION_NETWORK_SMOKE_SESSION_ID,
 };
 use merry_core::{RuntimeEvent, RuntimeEventKind, SessionId, ToolCallResultStatus, ToolName};
 use merry_llm::{GenerationConfig, ModelName};
@@ -39,11 +39,17 @@ use std::{
 };
 use tokio::io::{AsyncWriteExt, BufWriter};
 
-use merry_tool_workspace::WorkspaceCodingLoopProfile;
+use merry_tool_workspace::{
+    CODING_LOOP_PROCESS_TOOL, WORKSPACE_PATCH_TOOL, WORKSPACE_READ_FILE_TOOL,
+    WorkspaceCodingLoopProfile,
+};
 
+mod constants;
 mod fixture;
 mod provider;
 mod report;
+#[cfg(test)]
+mod tests;
 
 pub(crate) use fixture::{
     CodingLoopTaskSmokeFixture, coding_loop_smoke_patched_source,

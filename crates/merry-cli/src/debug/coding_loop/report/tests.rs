@@ -6,7 +6,7 @@ use crate::debug::coding_loop::{
 };
 use crate::runtime_config::automatic_compaction_config;
 use crate::runtime_events::{collect_runtime_step_events, first_pending_tool_call};
-use crate::test_support::{FakeProcessRunner, FakeProcessRunnerStep, ScriptedProvider};
+use crate::testing::{FakeProcessRunner, FakeProcessRunnerStep, ScriptedProvider};
 use merry_core::RuntimeEvent;
 use merry_llm::ModelName;
 use merry_runtime::{

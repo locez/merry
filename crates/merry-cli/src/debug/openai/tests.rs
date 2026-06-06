@@ -1,6 +1,5 @@
 use super::*;
-use crate::test_support::ScriptedProvider;
-use crate::{DEBUG_TOOL_CONTINUATION_INPUT, DEBUG_TOOL_NAME};
+use crate::testing::ScriptedProvider;
 use merry_core::{RuntimeEvent, ToolCallResultStatus, ToolName};
 use merry_llm::{
     FinishReason, GenerationConfig, ModelEvent, ModelOutput, ModelResponse, ModelToolCall,

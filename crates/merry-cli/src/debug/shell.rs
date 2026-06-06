@@ -1,8 +1,7 @@
-use crate::DEFAULT_SESSION_ID;
 use crate::cli_error::{CliError, shell_usage_error, stdout_error, unexpected};
 use crate::coding_runtime::action_process_runner;
 use crate::config::MerryConfig;
-use crate::debug::ShellArgs;
+use crate::debug::{DEFAULT_SESSION_ID, ShellArgs};
 use crate::runtime_events::{
     collect_runtime_step_events, first_pending_tool_call, write_runtime_events,
     write_runtime_step_events_to,

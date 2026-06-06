@@ -63,7 +63,7 @@ mod tests {
     use super::configured_runtime_builder;
     use crate::config::{MerryConfig, XdgPaths};
     use crate::runtime_events::collect_runtime_step_events;
-    use crate::test_support::ScriptedProvider;
+    use crate::testing::ScriptedProvider;
     use merry_llm::{
         FinishReason, ModelCapabilities, ModelEvent, ModelName, ModelOutput, ModelResponse,
     };

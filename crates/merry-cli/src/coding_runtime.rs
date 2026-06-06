@@ -1,15 +1,14 @@
 use crate::cli_error::{CliError, unexpected};
 use crate::config::{self, MerryConfig};
 use crate::debug;
+use crate::debug::coding_loop::{
+    CODING_LOOP_TASK_LIVE_SMOKE_SESSION_ID, CODING_LOOP_TASK_SMOKE_MAX_PATCH_BYTES,
+    CODING_LOOP_TASK_SMOKE_SESSION_ID,
+};
 use crate::sandbox::{
     ChildHandoff as SandboxChildHandoff, MERRY_SANDBOX_ENV, MERRY_SANDBOX_VERSION_ENV,
     RuntimeProfile as SandboxRuntimeProfile, read_proc_self_mountinfo,
     runtime_profile_from_evidence as sandbox_runtime_profile_from_evidence,
-};
-use crate::{
-    CODING_LOOP_PROCESS_TOOL, CODING_LOOP_TASK_LIVE_SMOKE_SESSION_ID,
-    CODING_LOOP_TASK_SMOKE_MAX_PATCH_BYTES, CODING_LOOP_TASK_SMOKE_SESSION_ID,
-    WORKSPACE_PATCH_TOOL,
 };
 use merry_llm::{ModelName, ModelProvider, ModelRetryPolicy};
 use merry_runtime::{
@@ -20,8 +19,8 @@ use merry_runtime::{
     subagent_registered_tools,
 };
 use merry_tool_workspace::{
-    WorkspaceCodingLoopProfile, WorkspaceRuntimeProfileBuilderExt, WorkspaceToolLimits,
-    WorkspaceToolsConfig,
+    CODING_LOOP_PROCESS_TOOL, WORKSPACE_PATCH_TOOL, WorkspaceCodingLoopProfile,
+    WorkspaceRuntimeProfileBuilderExt, WorkspaceToolLimits, WorkspaceToolsConfig,
 };
 use std::{
     env,
@@ -451,8 +450,7 @@ mod tests {
     };
     use crate::debug::coding_loop::coding_loop_workspace_call;
     use crate::runtime_events::{collect_runtime_step_events, first_pending_tool_call};
-    use crate::test_support::{FakeProcessRunner, ScriptedProvider, model_name};
-    use crate::{CODING_LOOP_PROCESS_TOOL, WORKSPACE_READ_FILE_TOOL};
+    use crate::testing::{FakeProcessRunner, ScriptedProvider, model_name};
     use merry_core::{RuntimeEvent, ToolCallResult, ToolCallResultStatus, ToolName};
     use merry_llm::{
         FinishReason, ModelEvent, ModelOutput, ModelResponse, ModelToolCall, ModelToolCallId,
@@ -462,6 +460,7 @@ mod tests {
         AcceptedLocalWorkspaceProcessAdmission, AgentLoopConfig, AgentLoopStatus, ProcessRunner,
         StepContext, StepInput, SubagentConfig, ToolExecutionContext,
     };
+    use merry_tool_workspace::{CODING_LOOP_PROCESS_TOOL, WORKSPACE_READ_FILE_TOOL};
     use serde_json::{Map, Value};
     use std::sync::Arc;
 
