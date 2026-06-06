@@ -218,9 +218,9 @@ fn debug_accepts_custom_session_id_and_input() {
 #[test]
 fn shell_help_writes_usage_to_stdout() {
     let output = merry()
-        .args(["shell", "--help"])
+        .args(["debug", "shell", "--help"])
         .output()
-        .expect("merry shell --help should run");
+        .expect("merry debug shell --help should run");
 
     assert!(
         output.status.success(),
@@ -231,7 +231,7 @@ fn shell_help_writes_usage_to_stdout() {
         "shell help should not write stderr"
     );
     let stdout = std::str::from_utf8(&output.stdout).expect("stdout should be utf-8");
-    assert!(stdout.contains("Usage: merry shell"));
+    assert!(stdout.contains("Usage: merry debug shell"));
     assert!(stdout.contains("-- <ARGV>") || stdout.contains("[-- <ARGV>]"));
     assert!(stdout.contains("ARGV"));
 }
@@ -239,9 +239,9 @@ fn shell_help_writes_usage_to_stdout() {
 #[test]
 fn shell_requires_argv() {
     let output = merry()
-        .arg("shell")
+        .args(["debug", "shell"])
         .output()
-        .expect("merry shell should run");
+        .expect("merry debug shell should run");
 
     assert_eq!(output.status.code(), Some(2));
     assert!(
@@ -249,16 +249,16 @@ fn shell_requires_argv() {
         "usage errors should not write stdout"
     );
     let stderr = std::str::from_utf8(&output.stderr).expect("stderr should be utf-8");
-    assert!(stderr.contains("Usage: merry shell"));
+    assert!(stderr.contains("Usage: merry debug shell"));
     assert!(stderr.contains("ARGV") || stderr.contains("required"));
 }
 
 #[test]
 fn shell_rejects_argv_without_separator() {
     let output = merry()
-        .args(["shell", "rustc", "--version"])
+        .args(["debug", "shell", "rustc", "--version"])
         .output()
-        .expect("merry shell should run");
+        .expect("merry debug shell should run");
 
     assert_eq!(output.status.code(), Some(2));
     assert!(
@@ -266,16 +266,16 @@ fn shell_rejects_argv_without_separator() {
         "usage errors should not write stdout"
     );
     let stderr = std::str::from_utf8(&output.stderr).expect("stderr should be utf-8");
-    assert!(stderr.contains("Usage: merry shell") || stderr.contains("unexpected argument"));
+    assert!(stderr.contains("Usage: merry debug shell") || stderr.contains("unexpected argument"));
     assert!(stderr.contains("rustc") || stderr.contains("ARGV"));
 }
 
 #[test]
 fn shell_rustc_version_prints_process_stdout() {
     let output = merry()
-        .args(["shell", "--", "rustc", "--version"])
+        .args(["debug", "shell", "--", "rustc", "--version"])
         .output()
-        .expect("merry shell should run");
+        .expect("merry debug shell should run");
 
     assert!(output.status.success(), "shell should exit successfully");
     assert!(output.stderr.is_empty(), "shell should not write stderr");
@@ -288,9 +288,9 @@ fn shell_rustc_version_prints_process_stdout() {
 #[test]
 fn shell_events_jsonl_records_exact_argv_and_resolves_success() {
     let output = merry()
-        .args(["shell", "--events-jsonl", "--", "rg", "--files"])
+        .args(["debug", "shell", "--events-jsonl", "--", "rg", "--files"])
         .output()
-        .expect("merry shell should run");
+        .expect("merry debug shell should run");
 
     assert!(output.status.success(), "shell should exit successfully");
     assert!(output.stderr.is_empty(), "shell should not write stderr");
@@ -323,9 +323,9 @@ fn shell_events_jsonl_records_exact_argv_and_resolves_success() {
 #[test]
 fn shell_rg_files_prints_process_stdout() {
     let output = merry()
-        .args(["shell", "--", "rg", "--files"])
+        .args(["debug", "shell", "--", "rg", "--files"])
         .output()
-        .expect("merry shell should run");
+        .expect("merry debug shell should run");
 
     assert!(output.status.success(), "shell should exit successfully");
     assert!(output.stderr.is_empty(), "shell should not write stderr");
@@ -338,9 +338,17 @@ fn shell_rg_files_prints_process_stdout() {
 #[test]
 fn shell_forbidden_command_denies_without_running_raw_command() {
     let output = merry()
-        .args(["shell", "--events-jsonl", "--", "sh", "-c", "echo bad"])
+        .args([
+            "debug",
+            "shell",
+            "--events-jsonl",
+            "--",
+            "sh",
+            "-c",
+            "echo bad",
+        ])
         .output()
-        .expect("merry shell should run");
+        .expect("merry debug shell should run");
 
     assert!(
         output.status.success(),
@@ -370,6 +378,7 @@ fn shell_forbidden_command_denies_without_running_raw_command() {
 fn shell_local_workspace_effect_denies_without_sandbox_admission_or_raw_cargo_output() {
     let output = merry()
         .args([
+            "debug",
             "shell",
             "--events-jsonl",
             "--",
@@ -381,7 +390,7 @@ fn shell_local_workspace_effect_denies_without_sandbox_admission_or_raw_cargo_ou
         .env_remove("MERRY_SANDBOX")
         .env_remove("MERRY_SANDBOX_VERSION")
         .output()
-        .expect("merry shell should run");
+        .expect("merry debug shell should run");
 
     assert!(
         output.status.success(),
@@ -421,6 +430,7 @@ fn shell_local_workspace_effect_denies_without_sandbox_admission_or_raw_cargo_ou
 fn shell_spoofed_sandbox_markers_do_not_enable_local_workspace_effect() {
     let output = merry()
         .args([
+            "debug",
             "shell",
             "--events-jsonl",
             "--",
@@ -432,7 +442,7 @@ fn shell_spoofed_sandbox_markers_do_not_enable_local_workspace_effect() {
         .env("MERRY_SANDBOX", "1")
         .env("MERRY_SANDBOX_VERSION", "1")
         .output()
-        .expect("merry shell should run");
+        .expect("merry debug shell should run");
 
     assert!(
         output.status.success(),
@@ -467,6 +477,7 @@ fn shell_spoofed_sandbox_markers_do_not_enable_local_workspace_effect() {
 fn shell_spoofed_sandbox_markers_with_explicit_accept_do_not_enable_local_workspace_effect() {
     let output = merry()
         .args([
+            "debug",
             "shell",
             "--accept-local-workspace-process-risk",
             "--events-jsonl",
@@ -479,7 +490,7 @@ fn shell_spoofed_sandbox_markers_with_explicit_accept_do_not_enable_local_worksp
         .env("MERRY_SANDBOX", "1")
         .env("MERRY_SANDBOX_VERSION", "1")
         .output()
-        .expect("merry shell should run");
+        .expect("merry debug shell should run");
 
     assert!(
         output.status.success(),
@@ -516,6 +527,7 @@ fn shell_forged_hidden_handoff_markers_and_accept_do_not_enable_local_workspace_
         .args([
             "--merry-sandbox-child-handoff",
             "cli-bwrap-v1",
+            "debug",
             "shell",
             "--accept-local-workspace-process-risk",
             "--events-jsonl",
@@ -530,7 +542,7 @@ fn shell_forged_hidden_handoff_markers_and_accept_do_not_enable_local_workspace_
         .env("HOME", "/home/merry")
         .env("TMPDIR", "/tmp")
         .output()
-        .expect("merry shell should run");
+        .expect("merry debug shell should run");
 
     assert!(
         output.status.success(),
