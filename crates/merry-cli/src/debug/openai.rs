@@ -1,10 +1,12 @@
 use crate::config::MerryConfig;
+use crate::provider_config::{
+    MERRY_OPENAI_DEBUG_ENV, OpenAiRuntimeConfig, apply_openai_context_compaction_provider,
+    openai_runtime_config, optional_env,
+};
 use crate::{
     CliError, DEBUG_TOOL_CONTINUATION_INPUT, DEBUG_TOOL_NAME, DEFAULT_SESSION_ID,
-    MERRY_OPENAI_DEBUG_ENV, OpenAiRuntimeConfig, apply_openai_context_compaction_provider,
-    configured_runtime_builder, debug_openai_usage_error, first_pending_tool_call,
-    openai_runtime_config, optional_env, stdout_error, unexpected, write_runtime_events,
-    write_runtime_step_events, write_runtime_step_events_to,
+    configured_runtime_builder, debug_openai_usage_error, first_pending_tool_call, stdout_error,
+    unexpected, write_runtime_events, write_runtime_step_events, write_runtime_step_events_to,
 };
 use merry_core::{PendingToolCall, SessionId, ToolInputSchema, ToolName, ToolSpec};
 use merry_llm::{GenerationConfig, ModelName};
