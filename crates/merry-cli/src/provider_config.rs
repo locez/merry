@@ -1,7 +1,7 @@
 use crate::cli_error::{CliError, debug_openai_usage_error};
 use crate::coding_runtime::RuntimeRoleProviderConfig;
 use crate::config::{EffectiveOpenAiProviderConfig, MerryConfig};
-use merry_llm::{ModelName, ModelRetryPolicy};
+use merry_llm::{ModelName, ModelProvider, ModelRetryPolicy};
 use merry_provider_openai::{OpenAiProvider, OpenAiProviderConfig};
 use merry_runtime::{RuntimeBuilder, RuntimeModelRole};
 use std::{env, sync::Arc};
@@ -103,16 +103,6 @@ pub(crate) fn openai_context_compaction_provider(
     )
 }
 
-pub(crate) fn openai_approval_review_provider(
-    config: OpenAiConfig,
-) -> Result<RuntimeRoleProviderConfig, CliError> {
-    openai_role_provider_config(
-        RuntimeModelRole::ApprovalReview,
-        config,
-        debug_openai_usage_error,
-    )
-}
-
 pub(crate) fn openai_role_provider_config(
     role: RuntimeModelRole,
     config: OpenAiConfig,
@@ -120,6 +110,46 @@ pub(crate) fn openai_role_provider_config(
 ) -> Result<RuntimeRoleProviderConfig, CliError> {
     Ok(RuntimeRoleProviderConfig {
         role,
+        provider: Arc::new(OpenAiProvider::new(config.provider)),
+        model: ModelName::new(&config.model).map_err(|error| map_usage_error(error.to_string()))?,
+    })
+}
+
+pub(crate) fn openai_runtime_provider_bundle(
+    config: OpenAiRuntimeConfig,
+    map_usage_error: fn(String) -> CliError,
+) -> Result<RuntimeProviderBundle, CliError> {
+    Ok(RuntimeProviderBundle {
+        primary: openai_primary_provider(config.primary, map_usage_error)?,
+        context_compaction: config
+            .context_compaction
+            .map(|config| {
+                openai_role_provider_config(
+                    RuntimeModelRole::ContextCompaction,
+                    config,
+                    map_usage_error,
+                )
+            })
+            .transpose()?,
+        approval_review: config
+            .approval_review
+            .map(|config| {
+                openai_role_provider_config(
+                    RuntimeModelRole::ApprovalReview,
+                    config,
+                    map_usage_error,
+                )
+            })
+            .transpose()?,
+        retry_policy: config.retry_policy,
+    })
+}
+
+fn openai_primary_provider(
+    config: OpenAiConfig,
+    map_usage_error: fn(String) -> CliError,
+) -> Result<RuntimePrimaryProviderConfig, CliError> {
+    Ok(RuntimePrimaryProviderConfig {
         provider: Arc::new(OpenAiProvider::new(config.provider)),
         model: ModelName::new(&config.model).map_err(|error| map_usage_error(error.to_string()))?,
     })
@@ -150,10 +180,23 @@ pub(crate) struct OpenAiRuntimeConfig {
     pub(crate) retry_policy: Option<ModelRetryPolicy>,
 }
 
+pub(crate) struct RuntimePrimaryProviderConfig {
+    pub(crate) provider: Arc<dyn ModelProvider>,
+    pub(crate) model: ModelName,
+}
+
+pub(crate) struct RuntimeProviderBundle {
+    pub(crate) primary: RuntimePrimaryProviderConfig,
+    pub(crate) context_compaction: Option<RuntimeRoleProviderConfig>,
+    pub(crate) approval_review: Option<RuntimeRoleProviderConfig>,
+    pub(crate) retry_policy: Option<ModelRetryPolicy>,
+}
+
 #[cfg(test)]
 mod tests {
     use crate::config::{MerryConfig, XdgPaths};
     use crate::debug::openai::config_with_env;
+    use merry_runtime::RuntimeModelRole;
     use std::path::PathBuf;
 
     #[test]
@@ -264,6 +307,64 @@ model = "gpt-review"
                 .expect("approval review debug config should load")
                 .model,
             "gpt-review"
+        );
+    }
+
+    #[test]
+    fn openai_runtime_provider_bundle_materializes_models_and_roles() {
+        let paths = XdgPaths::from_parts(PathBuf::from("/home/alice"), None, None);
+        let config = MerryConfig::load_optional_from_text(
+            Some(
+                r#"
+[providers.default]
+provider = "openai-compatible"
+model = "gpt-primary"
+
+[providers.openai-compatible]
+api_key = "sk-inline-secret"
+
+[providers.retry]
+enabled = true
+max_attempts = 3
+
+[models.context_compaction]
+model = "gpt-compact"
+
+[models.approval_review]
+model = "gpt-review"
+"#,
+            ),
+            &paths,
+        )
+        .expect("config should parse")
+        .expect("config should be present");
+        let runtime_config = super::openai_runtime_config(None, Some(&config), |message| {
+            crate::cli_error::CliError::Unexpected(message)
+        })
+        .expect("runtime config should load");
+
+        let bundle = super::openai_runtime_provider_bundle(runtime_config, |message| {
+            crate::cli_error::CliError::Unexpected(message)
+        })
+        .expect("runtime provider bundle should build");
+
+        assert_eq!(bundle.primary.model.as_str(), "gpt-primary");
+        let context_compaction = bundle
+            .context_compaction
+            .expect("context compaction provider should be materialized");
+        assert_eq!(context_compaction.role, RuntimeModelRole::ContextCompaction);
+        assert_eq!(context_compaction.model.as_str(), "gpt-compact");
+        let approval_review = bundle
+            .approval_review
+            .expect("approval review provider should be materialized");
+        assert_eq!(approval_review.role, RuntimeModelRole::ApprovalReview);
+        assert_eq!(approval_review.model.as_str(), "gpt-review");
+        assert_eq!(
+            bundle
+                .retry_policy
+                .expect("retry policy should be materialized")
+                .max_attempts(),
+            3
         );
     }
 }

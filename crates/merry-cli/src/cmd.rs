@@ -5,16 +5,16 @@ use crate::coding_runtime::{
 };
 use crate::config::MerryConfig;
 use crate::provider_config::{
-    OpenAiRuntimeConfig, openai_role_provider_config, openai_runtime_config,
+    RuntimePrimaryProviderConfig, RuntimeProviderBundle, openai_runtime_config,
+    openai_runtime_provider_bundle,
 };
 use crate::runtime_config::automatic_compaction_config;
 use merry_core::{ErrorInfo, PendingToolCall, ToolInputSchema, ToolName, ToolSpec};
 use merry_llm::{ModelName, ModelProvider, ModelRetryPolicy};
-use merry_provider_openai::OpenAiProvider;
 use merry_runtime::{
     AgentLoopConfig, AgentLoopStatus, AutomaticCompactionConfig, RegisteredTool, Runtime,
-    RuntimeModelRole, StepContext, StepInput, ToolExecutionContext, ToolExecutionOutcome,
-    ToolExecutor, ToolExecutorFuture,
+    StepContext, StepInput, ToolExecutionContext, ToolExecutionOutcome, ToolExecutor,
+    ToolExecutorFuture,
 };
 use merry_tool_workspace::WorkspaceCodingLoopProfile;
 use schemars::JsonSchema;
@@ -66,28 +66,25 @@ pub(crate) struct CommandPlan {
 
 pub(crate) async fn run(args: &Args, merry_config: Option<&MerryConfig>) -> Result<(), CliError> {
     let config = openai_runtime_config(None, merry_config, debug_openai_usage_error)?;
-    let OpenAiRuntimeConfig {
+    let RuntimeProviderBundle {
         primary,
         context_compaction,
         retry_policy,
         ..
-    } = config;
+    } = openai_runtime_provider_bundle(config, unexpected)?;
+    let RuntimePrimaryProviderConfig { provider, model } = primary;
     let root = env::current_dir().map_err(unexpected)?;
     let environment = CommandGenerationEnvironment::detect(&root);
     let runtime = build_runtime(RuntimeInput {
         session_id: "cmd",
         root: &root,
         environment: environment.clone(),
-        provider: Arc::new(OpenAiProvider::new(primary.provider)),
-        model: ModelName::new(&primary.model).map_err(unexpected)?,
+        provider,
+        model,
         allow_hidden_workspace_paths: false,
         automatic_compaction: automatic_compaction_config(merry_config).map_err(unexpected)?,
         retry_policy,
-        context_compaction: context_compaction
-            .map(|config| {
-                openai_role_provider_config(RuntimeModelRole::ContextCompaction, config, unexpected)
-            })
-            .transpose()?,
+        context_compaction,
         skill_roots: merry_config
             .map(MerryConfig::skill_roots)
             .transpose()
