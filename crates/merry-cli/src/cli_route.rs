@@ -15,10 +15,8 @@ pub(crate) async fn run(cli: Cli, merry_config: Option<MerryConfig>) -> CliExit 
     let sandbox_child_handoff = cli.sandbox_child_handoff;
 
     match cli.command {
-        CliCommand::Run(args) => map_result(
+        CliCommand::Run(args) => map_run_result(
             run_command::run(&args, sandbox_child_handoff, merry_config.as_ref()).await,
-            cli::run_usage,
-            cli::run_usage,
         ),
         CliCommand::Cmd(args) => map_result(
             cmd::run(&args, merry_config.as_ref()).await,
@@ -180,6 +178,26 @@ fn map_result(
     }
 }
 
+fn map_run_result(result: Result<run_command::RunExitStatus, CliError>) -> CliExit {
+    match result {
+        Ok(run_command::RunExitStatus::Completed) | Err(CliError::BrokenPipe) => CliExit::Success,
+        Ok(run_command::RunExitStatus::Incomplete) => CliExit::Failure,
+        Err(CliError::DebugUsage(message)) => CliExit::Usage {
+            message,
+            usage: cli::run_usage(),
+        },
+        Err(CliError::DebugOpenAiUsage(message)) => CliExit::Usage {
+            message,
+            usage: cli::run_usage(),
+        },
+        Err(CliError::ShellUsage(message)) => CliExit::Usage {
+            message,
+            usage: cli::shell_usage(),
+        },
+        Err(CliError::Unexpected(message)) => CliExit::Unexpected(message),
+    }
+}
+
 fn map_debug_openai_result(result: Result<(), CliError>) -> CliExit {
     match result {
         Ok(()) | Err(CliError::BrokenPipe) => CliExit::Success,
@@ -215,5 +233,28 @@ fn map_shell_result(result: Result<(), CliError>) -> CliExit {
             usage: cli::debug_openai_usage(),
         },
         Err(CliError::Unexpected(message)) => CliExit::Unexpected(message),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::map_run_result;
+    use crate::cli_exit::CliExit;
+    use crate::run::RunExitStatus;
+
+    #[test]
+    fn run_incomplete_maps_to_failure_exit() {
+        assert!(matches!(
+            map_run_result(Ok(RunExitStatus::Incomplete)),
+            CliExit::Failure
+        ));
+    }
+
+    #[test]
+    fn run_completed_maps_to_success_exit() {
+        assert!(matches!(
+            map_run_result(Ok(RunExitStatus::Completed)),
+            CliExit::Success
+        ));
     }
 }
