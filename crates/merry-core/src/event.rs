@@ -304,6 +304,35 @@ pub enum RuntimeEventKind {
     SessionStarted,
     /// A runtime step started.
     StepStarted,
+    /// A model provider attempt started.
+    ModelRetryAttemptStarted {
+        /// 1-based attempt number.
+        attempt: usize,
+        /// Maximum attempts configured for this model turn.
+        max_attempts: usize,
+    },
+    /// A retryable model provider failure scheduled another attempt.
+    ModelRetryScheduled {
+        /// 1-based failed attempt number.
+        attempt: usize,
+        /// 1-based next attempt number.
+        next_attempt: usize,
+        /// Maximum attempts configured for this model turn.
+        max_attempts: usize,
+        /// Delay before the next attempt, in milliseconds.
+        delay_ms: u64,
+        /// Provider-neutral error category.
+        error_kind: String,
+    },
+    /// A retryable model provider failure exhausted retry budget.
+    ModelRetryExhausted {
+        /// Number of attempts that ran.
+        attempts_run: usize,
+        /// Maximum attempts configured for this model turn.
+        max_attempts: usize,
+        /// Provider-neutral error category.
+        error_kind: String,
+    },
     /// A runtime step completed.
     StepCompleted,
     /// An artifact reference was recorded.

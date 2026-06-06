@@ -955,6 +955,10 @@ impl SessionState {
         self.record_event(RuntimeEventKind::StepStarted, LedgerFactKind::StepStarted)
     }
 
+    pub(crate) fn record_model_retry_event(&mut self, kind: RuntimeEventKind) -> RuntimeEvent {
+        self.record_event(kind, LedgerFactKind::ModelRetry)
+    }
+
     pub(crate) fn record_step_completed(&mut self) -> RuntimeEvent {
         self.record_event(
             RuntimeEventKind::StepCompleted,

@@ -6,6 +6,7 @@ pub mod event;
 pub mod provider;
 pub mod request;
 pub mod response;
+pub mod retry;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod testing;
 pub mod tool;
@@ -20,6 +21,10 @@ pub use request::{
     ModelResponseFormat, ModelStructuredOutputFormat, RequestContentHash, ToolProfileHash,
 };
 pub use response::{FinishReason, ModelOutput, ModelResponse};
+pub use retry::{
+    ModelRetryEvent, ModelRetryEventStream, ModelRetryPolicy, ModelRetryPolicyError,
+    RetryModelStreamContext, RetryingModelProvider,
+};
 pub use tool::{
     ModelToolCall, ModelToolCallId, ModelToolContinuation, ModelToolResult, ModelToolResultContent,
     ToolArguments,

@@ -1,6 +1,7 @@
 //! OpenAI-compatible provider errors.
 
 use merry_llm::{ModelError, ProviderErrorKind};
+use std::time::Duration;
 use thiserror::Error;
 
 /// Errors returned by the OpenAI-compatible provider adapter.
@@ -22,6 +23,8 @@ pub enum OpenAiProviderError {
         kind: ProviderErrorKind,
         /// Actionable provider-neutral message.
         message: String,
+        /// Optional provider-supplied retry-after delay.
+        retry_after: Option<Duration>,
     },
 }
 
@@ -50,6 +53,19 @@ impl OpenAiProviderError {
         Self::Provider {
             kind,
             message: message.into(),
+            retry_after: None,
+        }
+    }
+
+    pub(crate) fn provider_with_retry_after(
+        kind: ProviderErrorKind,
+        message: impl Into<String>,
+        retry_after: Option<Duration>,
+    ) -> Self {
+        Self::Provider {
+            kind,
+            message: message.into(),
+            retry_after,
         }
     }
 }
@@ -62,7 +78,11 @@ impl From<OpenAiProviderError> for ModelError {
             OpenAiProviderError::Protocol { reason } => {
                 Self::provider(ProviderErrorKind::Protocol, reason)
             }
-            OpenAiProviderError::Provider { kind, message } => Self::provider(kind, message),
+            OpenAiProviderError::Provider {
+                kind,
+                message,
+                retry_after,
+            } => Self::provider_with_retry_after(kind, message, retry_after),
         }
     }
 }

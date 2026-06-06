@@ -13,7 +13,7 @@ use merry_core::{
 use merry_llm::{
     FinishReason, GenerationConfig, ModelCapabilities, ModelError, ModelEvent, ModelEventStream,
     ModelName, ModelOutput, ModelProvider, ModelProviderFuture, ModelRequest, ModelResponse,
-    ModelStreamContext, ModelToolCall, ModelToolCallId, ToolArguments,
+    ModelRetryPolicy, ModelStreamContext, ModelToolCall, ModelToolCallId, ToolArguments,
 };
 use merry_provider_openai::{OpenAiProvider, OpenAiProviderConfig};
 use merry_runtime::{
@@ -1305,6 +1305,7 @@ async fn run_merry_run(
         primary,
         context_compaction,
         approval_review,
+        retry_policy,
     } = config;
     let root = env::current_dir().map_err(unexpected)?;
     let backend = action_process_runner(&root, merry_config)?;
@@ -1318,6 +1319,7 @@ async fn run_merry_run(
         permissioned_process_runner_factory: backend.permissioned_factory(),
         allow_hidden_workspace_paths: false,
         automatic_compaction: automatic_compaction_config(merry_config).map_err(unexpected)?,
+        retry_policy,
         context_compaction: context_compaction
             .map(|config| {
                 openai_role_provider_config(RuntimeModelRole::ContextCompaction, config, unexpected)
@@ -1364,6 +1366,7 @@ async fn run_merry_cmd(
     let OpenAiRuntimeConfig {
         primary,
         context_compaction,
+        retry_policy,
         ..
     } = config;
     let root = env::current_dir().map_err(unexpected)?;
@@ -1374,6 +1377,7 @@ async fn run_merry_cmd(
         model: ModelName::new(&primary.model).map_err(unexpected)?,
         allow_hidden_workspace_paths: false,
         automatic_compaction: automatic_compaction_config(merry_config).map_err(unexpected)?,
+        retry_policy,
         context_compaction: context_compaction
             .map(|config| {
                 openai_role_provider_config(RuntimeModelRole::ContextCompaction, config, unexpected)
@@ -2612,6 +2616,7 @@ fn build_coding_loop_smoke_runtime(
             allow_hidden_workspace_paths: false,
             approval_review: None,
             automatic_compaction,
+            retry_policy: None,
             context_compaction: None,
             permissioned_process_runner_factory,
             skill_roots: Vec::new(),
@@ -2648,6 +2653,7 @@ fn build_coding_loop_live_smoke_runtime(
             allow_hidden_workspace_paths: true,
             approval_review,
             automatic_compaction: options.automatic_compaction,
+            retry_policy: config.retry_policy,
             context_compaction,
             permissioned_process_runner_factory,
             skill_roots: options.skill_roots,
@@ -2677,6 +2683,7 @@ fn build_coding_loop_task_smoke_runtime(
             allow_hidden_workspace_paths: false,
             approval_review: None,
             automatic_compaction,
+            retry_policy: None,
             context_compaction: None,
             permissioned_process_runner_factory,
             skill_roots: Vec::new(),
@@ -2713,6 +2720,7 @@ fn build_coding_loop_task_live_smoke_runtime(
             allow_hidden_workspace_paths: true,
             approval_review,
             automatic_compaction: options.automatic_compaction,
+            retry_policy: config.retry_policy,
             context_compaction,
             permissioned_process_runner_factory,
             skill_roots: options.skill_roots,
@@ -2749,6 +2757,7 @@ fn build_coding_loop_subagent_live_smoke_runtime(
             allow_hidden_workspace_paths: false,
             approval_review,
             automatic_compaction: options.automatic_compaction,
+            retry_policy: config.retry_policy,
             context_compaction,
             permissioned_process_runner_factory,
             skill_roots: options.skill_roots,
@@ -2808,9 +2817,11 @@ fn build_permission_network_smoke_runtime(
         runner,
         permissioned_process_runner_factory,
     );
-    with_workspace_coding_loop_profile(builder, profile)?
-        .build()
-        .map_err(unexpected)
+    let mut builder = with_workspace_coding_loop_profile(builder, profile)?;
+    if let Some(policy) = config.retry_policy {
+        builder = builder.model_retry_policy(policy);
+    }
+    builder.build().map_err(unexpected)
 }
 
 #[cfg(test)]
@@ -2869,6 +2880,7 @@ struct CodingLoopRuntimeOptions {
     allow_hidden_workspace_paths: bool,
     approval_review: Option<RuntimeRoleProviderConfig>,
     automatic_compaction: AutomaticCompactionConfig,
+    retry_policy: Option<ModelRetryPolicy>,
     context_compaction: Option<RuntimeRoleProviderConfig>,
     permissioned_process_runner_factory: Option<Arc<dyn PermissionedProcessRunnerFactory>>,
     skill_roots: Vec<PathBuf>,
@@ -2885,6 +2897,7 @@ struct HeadlessCodingRuntimeInput<'a> {
     permissioned_process_runner_factory: Arc<dyn PermissionedProcessRunnerFactory>,
     allow_hidden_workspace_paths: bool,
     automatic_compaction: AutomaticCompactionConfig,
+    retry_policy: Option<ModelRetryPolicy>,
     context_compaction: Option<RuntimeRoleProviderConfig>,
     approval_review: Option<RuntimeRoleProviderConfig>,
     skill_roots: Vec<PathBuf>,
@@ -2898,6 +2911,7 @@ struct CommandGenerationRuntimeInput<'a> {
     model: ModelName,
     allow_hidden_workspace_paths: bool,
     automatic_compaction: AutomaticCompactionConfig,
+    retry_policy: Option<ModelRetryPolicy>,
     context_compaction: Option<RuntimeRoleProviderConfig>,
     skill_roots: Vec<PathBuf>,
 }
@@ -2916,6 +2930,7 @@ fn build_headless_coding_runtime(
             allow_hidden_workspace_paths: input.allow_hidden_workspace_paths,
             approval_review: input.approval_review,
             automatic_compaction: input.automatic_compaction,
+            retry_policy: input.retry_policy,
             context_compaction: input.context_compaction,
             permissioned_process_runner_factory: Some(input.permissioned_process_runner_factory),
             skill_roots: input.skill_roots,
@@ -2931,6 +2946,9 @@ fn build_command_generation_runtime(
     let mut builder = Runtime::builder(session_id)
         .automatic_compaction(input.automatic_compaction)
         .model_provider(input.provider, input.model);
+    if let Some(policy) = input.retry_policy {
+        builder = builder.model_retry_policy(policy);
+    }
     if let Some(role_provider) = input.context_compaction {
         builder = builder.model_provider_for_role(
             role_provider.role,
@@ -3191,9 +3209,11 @@ fn build_coding_loop_runtime(
     .map_err(unexpected)?
     .with_patch_tool()
     .with_cli_bwrap_permissioned_process_runner(admission, runner, permissioned_factory);
-    with_workspace_coding_loop_profile(builder, profile)?
-        .build()
-        .map_err(unexpected)
+    let mut builder = with_workspace_coding_loop_profile(builder, profile)?;
+    if let Some(policy) = options.retry_policy {
+        builder = builder.model_retry_policy(policy);
+    }
+    builder.build().map_err(unexpected)
 }
 
 fn action_process_runner(
@@ -4994,6 +5014,9 @@ fn openai_runtime_config(
     let runtime_models = merry_config
         .runtime_models()
         .map_err(|error| map_usage_error(error.to_string()))?;
+    let retry_policy = merry_config
+        .provider_retry_policy()
+        .map_err(|error| map_usage_error(error.to_string()))?;
     let context_compaction = runtime_models
         .context_compaction
         .map(|model| {
@@ -5011,6 +5034,7 @@ fn openai_runtime_config(
         primary,
         context_compaction,
         approval_review,
+        retry_policy,
     })
 }
 
@@ -5099,6 +5123,7 @@ struct OpenAiRuntimeConfig {
     primary: OpenAiConfig,
     context_compaction: Option<OpenAiConfig>,
     approval_review: Option<OpenAiConfig>,
+    retry_policy: Option<ModelRetryPolicy>,
 }
 
 fn debug_usage() -> String {
@@ -5848,6 +5873,7 @@ mod tests {
                 allow_hidden_workspace_paths: false,
                 approval_review: None,
                 automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
+                retry_policy: None,
                 context_compaction: None,
                 permissioned_process_runner_factory: None,
                 skill_roots: vec![skill_root.clone()],
@@ -5912,6 +5938,7 @@ mod tests {
             permissioned_process_runner_factory: permissioned_factory,
             allow_hidden_workspace_paths: false,
             automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
+            retry_policy: None,
             context_compaction: None,
             approval_review: None,
             skill_roots: Vec::new(),
@@ -5970,6 +5997,7 @@ mod tests {
             permissioned_process_runner_factory: permissioned_factory,
             allow_hidden_workspace_paths: false,
             automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
+            retry_policy: None,
             context_compaction: None,
             approval_review: None,
             skill_roots: Vec::new(),
@@ -6033,6 +6061,7 @@ mod tests {
             permissioned_process_runner_factory: permissioned_factory,
             allow_hidden_workspace_paths: false,
             automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
+            retry_policy: None,
             context_compaction: None,
             approval_review: None,
             skill_roots: Vec::new(),
@@ -6085,6 +6114,7 @@ mod tests {
             permissioned_process_runner_factory: permissioned_factory,
             allow_hidden_workspace_paths: false,
             automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
+            retry_policy: None,
             context_compaction: None,
             approval_review: None,
             skill_roots: Vec::new(),
@@ -6130,6 +6160,7 @@ mod tests {
                 model: ModelName::new("debug-model").expect("valid model name"),
                 allow_hidden_workspace_paths: false,
                 automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
+                retry_policy: None,
                 context_compaction: None,
                 skill_roots: Vec::new(),
             })
@@ -6188,6 +6219,7 @@ mod tests {
                 model: ModelName::new("debug-model").expect("valid model name"),
                 allow_hidden_workspace_paths: false,
                 automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
+                retry_policy: None,
                 context_compaction: None,
                 skill_roots: Vec::new(),
             })
@@ -6273,6 +6305,7 @@ mod tests {
                 allow_hidden_workspace_paths: false,
                 approval_review: None,
                 automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
+                retry_policy: None,
                 context_compaction: None,
                 permissioned_process_runner_factory: None,
                 skill_roots: vec![skill_root.clone()],
@@ -6319,6 +6352,7 @@ mod tests {
                 allow_hidden_workspace_paths: false,
                 approval_review: None,
                 automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
+                retry_policy: None,
                 context_compaction: None,
                 permissioned_process_runner_factory: None,
                 skill_roots: vec![missing_skill_root],
@@ -6366,6 +6400,7 @@ mod tests {
                 allow_hidden_workspace_paths: false,
                 approval_review: None,
                 automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
+                retry_policy: None,
                 context_compaction: None,
                 permissioned_process_runner_factory: None,
                 skill_roots: Vec::new(),
@@ -6414,6 +6449,7 @@ mod tests {
                 allow_hidden_workspace_paths: false,
                 approval_review: None,
                 automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
+                retry_policy: None,
                 context_compaction: None,
                 permissioned_process_runner_factory: None,
                 skill_roots: Vec::new(),
@@ -6507,6 +6543,7 @@ mod tests {
                 allow_hidden_workspace_paths: false,
                 approval_review: None,
                 automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
+                retry_policy: None,
                 context_compaction: None,
                 permissioned_process_runner_factory: None,
                 skill_roots: Vec::new(),

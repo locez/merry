@@ -1,3 +1,4 @@
+use merry_llm::{ModelRetryPolicy, ModelRetryPolicyError};
 use merry_runtime::{
     AutomaticCompactionConfig, CitationCompactionPolicy, PathAccess, PathAccessRule,
     PathAccessRuleSource,
@@ -399,6 +400,17 @@ impl MerryConfig {
             api_key,
         })
     }
+
+    pub fn provider_retry_policy(&self) -> Result<Option<ModelRetryPolicy>, ConfigError> {
+        let Some(providers) = self.raw.providers.as_ref() else {
+            return Ok(None);
+        };
+        providers
+            .retry
+            .as_ref()
+            .map(ProviderRetryToml::to_policy)
+            .transpose()
+    }
 }
 
 fn resolve_user_path(value: &str, config_dir: &Path, home: &Path) -> Result<PathBuf, ConfigError> {
@@ -789,6 +801,7 @@ fn default_log_format() -> LogFormat {
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
 struct ProvidersToml {
     default: Option<DefaultProviderToml>,
+    retry: Option<ProviderRetryToml>,
     #[serde(flatten)]
     named: BTreeMap<String, OpenAiCompatibleProviderToml>,
 }
@@ -806,6 +819,51 @@ struct OpenAiCompatibleProviderToml {
     base_url: Option<String>,
     api_key: Option<String>,
     api_key_file: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct ProviderRetryToml {
+    #[serde(default = "default_true")]
+    enabled: bool,
+    max_attempts: Option<usize>,
+    initial_delay_ms: Option<u64>,
+    max_delay_ms: Option<u64>,
+    max_elapsed_ms: Option<u64>,
+    jitter: Option<bool>,
+}
+
+impl ProviderRetryToml {
+    fn to_policy(&self) -> Result<ModelRetryPolicy, ConfigError> {
+        let defaults = ModelRetryPolicy::coding_agent_default();
+        let policy = ModelRetryPolicy::new(
+            self.enabled,
+            self.max_attempts.unwrap_or(defaults.max_attempts()),
+            std::time::Duration::from_millis(
+                self.initial_delay_ms
+                    .unwrap_or_else(|| duration_millis_u64(defaults.initial_delay())),
+            ),
+            std::time::Duration::from_millis(
+                self.max_delay_ms
+                    .unwrap_or_else(|| duration_millis_u64(defaults.max_delay())),
+            ),
+            std::time::Duration::from_millis(
+                self.max_elapsed_ms
+                    .unwrap_or_else(|| duration_millis_u64(defaults.max_elapsed())),
+            ),
+            self.jitter.unwrap_or_else(|| defaults.jitter()),
+        )
+        .map_err(provider_retry_policy_error)?;
+        Ok(policy)
+    }
+}
+
+fn duration_millis_u64(duration: std::time::Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+fn provider_retry_policy_error(error: ModelRetryPolicyError) -> ConfigError {
+    ConfigError::Invalid(format!("providers.retry is invalid: {error}"))
 }
 
 #[cfg(test)]
@@ -891,6 +949,14 @@ model = "gpt-4.1-mini"
 [providers.openai-compatible]
 base_url = "https://api.example.test/v1"
 api_key_file = "secrets/openai.key"
+
+[providers.retry]
+enabled = true
+max_attempts = 7
+initial_delay_ms = 500
+max_delay_ms = 120000
+max_elapsed_ms = 300000
+jitter = true
 "#,
             ),
             &paths,
@@ -920,6 +986,16 @@ api_key_file = "secrets/openai.key"
                 "/home/alice/.config/merry/secrets/openai.key"
             ))
         );
+        let retry = config
+            .provider_retry_policy()
+            .expect("retry policy should validate")
+            .expect("retry policy should be configured");
+        assert!(retry.enabled());
+        assert_eq!(retry.max_attempts(), 7);
+        assert_eq!(retry.initial_delay(), std::time::Duration::from_millis(500));
+        assert_eq!(retry.max_delay(), std::time::Duration::from_secs(120));
+        assert_eq!(retry.max_elapsed(), std::time::Duration::from_secs(300));
+        assert!(retry.jitter());
     }
 
     #[test]
@@ -1312,6 +1388,15 @@ model = "gpt-compact"
                 "/home/alice/.config/merry/secrets/openai.key"
             ))
         );
+        let retry = config
+            .provider_retry_policy()
+            .expect("example retry policy should validate")
+            .expect("example retry policy should be configured");
+        assert!(retry.enabled());
+        assert_eq!(retry.max_attempts(), 6);
+        assert_eq!(retry.max_delay(), std::time::Duration::from_secs(120));
+        assert_eq!(retry.max_elapsed(), std::time::Duration::from_secs(300));
+        assert!(retry.jitter());
         let auto_compaction = config
             .automatic_compaction_config()
             .expect("example auto compaction config should validate");

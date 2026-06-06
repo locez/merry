@@ -134,10 +134,21 @@ class RuntimeStream:
 
 
 @dataclass(frozen=True)
+class ProviderRetryConfig:
+    enabled: bool = True
+    max_attempts: int = 6
+    initial_delay_ms: int = 1000
+    max_delay_ms: int = 120000
+    max_elapsed_ms: int = 300000
+    jitter: bool = True
+
+
+@dataclass(frozen=True)
 class OpenAICompatibleProvider:
     api_key: str
     model: str
     base_url: str | None = None
+    retry: ProviderRetryConfig | None = None
 
 
 @dataclass(frozen=True)
@@ -263,6 +274,7 @@ class Runtime:
             api_key=config.provider.api_key,
             model=config.provider.model,
             base_url=config.provider.base_url,
+            retry=config.provider.retry,
         )
         self._native = runtime._native
         self._tools = {}
@@ -276,6 +288,7 @@ class Runtime:
         api_key: str,
         model: str,
         base_url: str | None = None,
+        retry: ProviderRetryConfig | None = None,
     ) -> Runtime:
         instance = cls.__new__(cls)
         instance._tools = {}
@@ -284,6 +297,7 @@ class Runtime:
                 api_key,
                 model,
                 base_url,
+                None if retry is None else _provider_retry_dict(retry),
             )
         except NativeMerryError as error:
             raise _decode_native_error(error) from error
@@ -491,6 +505,17 @@ def _run_result_from_native(
         final_output_json=final_output_json,
         events=list(events),
     )
+
+
+def _provider_retry_dict(retry: ProviderRetryConfig) -> dict[str, object]:
+    return {
+        "enabled": retry.enabled,
+        "max_attempts": retry.max_attempts,
+        "initial_delay_ms": retry.initial_delay_ms,
+        "max_delay_ms": retry.max_delay_ms,
+        "max_elapsed_ms": retry.max_elapsed_ms,
+        "jitter": retry.jitter,
+    }
 
 
 def _final_output_schema_json(model: type[BaseModel] | None) -> str | None:

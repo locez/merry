@@ -1,5 +1,6 @@
 //! Provider-boundary errors.
 
+use std::time::Duration;
 use thiserror::Error;
 
 /// Broad provider error category for policy and retry decisions.
@@ -37,6 +38,8 @@ pub enum ModelError {
         kind: ProviderErrorKind,
         /// Actionable provider-neutral error message.
         message: String,
+        /// Optional provider-supplied retry-after delay.
+        retry_after: Option<Duration>,
     },
 }
 
@@ -53,6 +56,21 @@ impl ModelError {
         Self::Provider {
             kind,
             message: message.into(),
+            retry_after: None,
+        }
+    }
+
+    /// Creates a provider error with a provider-neutral category, message, and
+    /// optional provider-supplied retry-after delay.
+    pub fn provider_with_retry_after(
+        kind: ProviderErrorKind,
+        message: impl Into<String>,
+        retry_after: Option<Duration>,
+    ) -> Self {
+        Self::Provider {
+            kind,
+            message: message.into(),
+            retry_after,
         }
     }
 
@@ -63,6 +81,15 @@ impl ModelError {
             Self::InvalidRequest { .. } => ProviderErrorKind::InvalidRequest,
             Self::Cancelled => ProviderErrorKind::Cancelled,
             Self::Provider { kind, .. } => *kind,
+        }
+    }
+
+    /// Returns a provider-supplied retry-after delay when available.
+    #[must_use]
+    pub fn retry_after(&self) -> Option<Duration> {
+        match self {
+            Self::Provider { retry_after, .. } => *retry_after,
+            Self::InvalidRequest { .. } | Self::Cancelled => None,
         }
     }
 }

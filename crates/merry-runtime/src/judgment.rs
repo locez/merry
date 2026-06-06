@@ -1636,7 +1636,7 @@ fn model_error_parts(error: ModelError) -> (ProviderErrorKind, String) {
             ProviderErrorKind::Cancelled,
             "model stream cancelled".to_owned(),
         ),
-        ModelError::Provider { kind, message } => (kind, message),
+        ModelError::Provider { kind, message, .. } => (kind, message),
     }
 }
 

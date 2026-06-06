@@ -101,7 +101,7 @@ impl From<Result<ModelEvent, ModelError>> for FakeStreamItem {
                 Self::Error(FakeErrorItem::InvalidRequest(reason))
             }
             Err(ModelError::Cancelled) => Self::Error(FakeErrorItem::Cancelled),
-            Err(ModelError::Provider { kind, message }) => {
+            Err(ModelError::Provider { kind, message, .. }) => {
                 Self::Error(FakeErrorItem::Provider(kind, message))
             }
         }

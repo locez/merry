@@ -9,6 +9,7 @@ use merry_llm::{
 };
 use serde_json::Value;
 use std::collections::VecDeque;
+use std::time::Duration;
 use tracing::Instrument;
 
 const AUTHORIZATION_HEADER: &str = "Authorization";
@@ -394,6 +395,10 @@ async fn map_status_error(
     kind: ProviderErrorKind,
 ) -> ModelError {
     let status = response.status();
+    let retry_after = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(parse_retry_after_header);
     let body = tokio::select! {
         () = cancellation_token.cancelled() => return ModelError::Cancelled,
         body = response.text() => body.unwrap_or_else(|error| {
@@ -405,7 +410,11 @@ async fn map_status_error(
         truncate_for_error(body.trim())
     );
 
-    ModelError::from(OpenAiProviderError::provider(kind, message))
+    ModelError::from(OpenAiProviderError::provider_with_retry_after(
+        kind,
+        message,
+        retry_after,
+    ))
 }
 
 fn model_event_category(event: &ModelEvent) -> &'static str {
@@ -431,6 +440,11 @@ fn map_transport_error(error: reqwest::Error) -> ModelError {
         ProviderErrorKind::Unavailable,
         format!("OpenAI Responses transport failed: {error}"),
     ))
+}
+
+fn parse_retry_after_header(value: &reqwest::header::HeaderValue) -> Option<Duration> {
+    let seconds = value.to_str().ok()?.trim().parse::<u64>().ok()?;
+    Some(Duration::from_secs(seconds))
 }
 
 fn truncate_for_error(value: &str) -> String {

@@ -33,6 +33,7 @@ def test_runtime_config_constructs_openai_runtime():
             api_key="sk-test",
             model="gpt-test",
             base_url="https://api.example.test/v1",
+            retry=merry.ProviderRetryConfig(max_attempts=2, initial_delay_ms=1, max_delay_ms=1),
         ),
     )
 

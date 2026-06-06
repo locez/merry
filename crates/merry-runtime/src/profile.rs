@@ -6,6 +6,7 @@ use crate::{
     RuntimeTrustLevel, SkillCatalog, SubagentManager, TaskAnchor,
 };
 use merry_core::ToolName;
+use merry_llm::ModelRetryPolicy;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
@@ -200,6 +201,7 @@ impl AcceptedLocalWorkspaceProcessRunnerProfile {
 #[derive(Clone)]
 pub struct RuntimeProfile {
     capabilities: RuntimeCapabilities,
+    model_retry_policy: Option<ModelRetryPolicy>,
     progress_commentary: bool,
     initial_context_summaries: BTreeMap<String, String>,
     registered_tools: Vec<RegisteredTool>,
@@ -229,6 +231,12 @@ impl RuntimeProfile {
     #[must_use]
     pub const fn capabilities(&self) -> &RuntimeCapabilities {
         &self.capabilities
+    }
+
+    /// Returns the profile model retry policy override.
+    #[must_use]
+    pub const fn model_retry_policy(&self) -> Option<ModelRetryPolicy> {
+        self.model_retry_policy
     }
 
     /// Returns whether this profile asks the model for tool-progress commentary.
@@ -342,6 +350,7 @@ impl RuntimeProfile {
     pub(crate) fn into_parts(self) -> RuntimeProfileParts {
         RuntimeProfileParts {
             capabilities: self.capabilities,
+            model_retry_policy: self.model_retry_policy,
             progress_commentary: self.progress_commentary,
             initial_context_summaries: self.initial_context_summaries,
             registered_tools: self.registered_tools,
@@ -364,6 +373,7 @@ impl RuntimeProfile {
 
 pub(crate) struct RuntimeProfileParts {
     pub(crate) capabilities: RuntimeCapabilities,
+    pub(crate) model_retry_policy: Option<ModelRetryPolicy>,
     pub(crate) progress_commentary: bool,
     pub(crate) initial_context_summaries: BTreeMap<String, String>,
     pub(crate) registered_tools: Vec<RegisteredTool>,
@@ -387,6 +397,7 @@ pub(crate) struct RuntimeProfileParts {
 /// Builder for a complete runtime profile.
 pub struct RuntimeProfileBuilder {
     capabilities: RuntimeCapabilities,
+    model_retry_policy: Option<ModelRetryPolicy>,
     progress_commentary: bool,
     initial_context_summaries: BTreeMap<String, String>,
     registered_tools: Vec<RegisteredTool>,
@@ -411,6 +422,7 @@ impl RuntimeProfileBuilder {
     pub fn new() -> Self {
         Self {
             capabilities: RuntimeCapabilities::default(),
+            model_retry_policy: None,
             progress_commentary: false,
             initial_context_summaries: BTreeMap::new(),
             registered_tools: Vec::new(),
@@ -434,6 +446,13 @@ impl RuntimeProfileBuilder {
     #[must_use]
     pub fn capabilities(mut self, capabilities: RuntimeCapabilities) -> Self {
         self.capabilities = capabilities;
+        self
+    }
+
+    /// Sets provider-neutral model retry policy for runtimes using this profile.
+    #[must_use]
+    pub fn model_retry_policy(mut self, policy: ModelRetryPolicy) -> Self {
+        self.model_retry_policy = Some(policy);
         self
     }
 
@@ -578,6 +597,7 @@ impl RuntimeProfileBuilder {
 
         Ok(RuntimeProfile {
             capabilities: self.capabilities,
+            model_retry_policy: self.model_retry_policy,
             progress_commentary: self.progress_commentary,
             initial_context_summaries: self.initial_context_summaries,
             registered_tools: self.registered_tools,
