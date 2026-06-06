@@ -1,3 +1,4 @@
+use crate::coding_runtime::action_process_runner;
 use crate::config::MerryConfig;
 use crate::debug::ShellArgs;
 use crate::sandbox::{
@@ -6,8 +7,8 @@ use crate::sandbox::{
     runtime_profile_from_evidence as sandbox_runtime_profile_from_evidence,
 };
 use crate::{
-    CliError, DEFAULT_SESSION_ID, action_process_runner, collect_runtime_step_events,
-    first_pending_tool_call, shell_usage_error, stdout_error, unexpected, write_runtime_events,
+    CliError, DEFAULT_SESSION_ID, collect_runtime_step_events, first_pending_tool_call,
+    shell_usage_error, stdout_error, unexpected, write_runtime_events,
     write_runtime_step_events_to,
 };
 use futures_util::stream;

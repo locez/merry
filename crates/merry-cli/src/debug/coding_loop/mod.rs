@@ -1,20 +1,23 @@
+use crate::coding_runtime::{
+    ActionProcessBackend, CodingLoopRuntimeOptions, action_process_runner,
+    build_coding_loop_runtime, coding_agent_loop_config,
+    coding_loop_smoke_admission_from_current_process, coding_loop_workspace_roots,
+    with_workspace_coding_loop_profile, workspace_tools_config,
+};
 use crate::config::{self, MerryConfig};
 use crate::debug::CodingLoopTaskSmokeTask;
 use crate::sandbox::ChildHandoff as SandboxChildHandoff;
 use crate::{
-    ActionProcessBackend, CODING_LOOP_LIVE_SMOKE_INITIAL_VALUE, CODING_LOOP_LIVE_SMOKE_SESSION_ID,
+    CODING_LOOP_LIVE_SMOKE_INITIAL_VALUE, CODING_LOOP_LIVE_SMOKE_SESSION_ID,
     CODING_LOOP_LIVE_SMOKE_TARGET_VALUE, CODING_LOOP_PROCESS_TOOL, CODING_LOOP_SMOKE_SESSION_ID,
     CODING_LOOP_SUBAGENT_LIVE_SMOKE_FILE, CODING_LOOP_SUBAGENT_LIVE_SMOKE_INITIAL,
     CODING_LOOP_SUBAGENT_LIVE_SMOKE_SESSION_ID, CODING_LOOP_SUBAGENT_LIVE_SMOKE_TARGET,
     CODING_LOOP_TASK_LIVE_SMOKE_SESSION_ID, CODING_LOOP_TASK_SMOKE_MAX_PATCH_BYTES,
-    CODING_LOOP_TASK_SMOKE_SESSION_ID, CliError, CodingLoopRuntimeOptions, OpenAiRuntimeConfig,
+    CODING_LOOP_TASK_SMOKE_SESSION_ID, CliError, OpenAiRuntimeConfig,
     PERMISSION_NETWORK_SMOKE_ARGV, PERMISSION_NETWORK_SMOKE_SESSION_ID, WORKSPACE_PATCH_TOOL,
-    WORKSPACE_READ_FILE_TOOL, action_process_runner, automatic_compaction_config,
-    build_coding_loop_runtime, coding_agent_loop_config,
-    coding_loop_smoke_admission_from_current_process, coding_loop_workspace_roots,
-    debug_openai_usage_error, openai_approval_review_provider, openai_context_compaction_provider,
-    stdout_error, subagents_config, unexpected, with_workspace_coding_loop_profile,
-    workspace_tools_config,
+    WORKSPACE_READ_FILE_TOOL, automatic_compaction_config, debug_openai_usage_error,
+    openai_approval_review_provider, openai_context_compaction_provider, stdout_error,
+    subagents_config, unexpected,
 };
 use merry_core::{RuntimeEvent, RuntimeEventKind, SessionId, ToolCallResultStatus, ToolName};
 use merry_llm::{GenerationConfig, ModelName};
@@ -1221,10 +1224,10 @@ fn permission_network_smoke_process_runner(
     let permissioned_factory =
         BwrapPermissionedProcessRunnerFactory::new_at_workspace_root(workspace_root)
             .with_path_rules(path_rules);
-    Ok(ActionProcessBackend {
-        runner: Arc::new(runner),
-        permissioned_factory: Arc::new(permissioned_factory),
-    })
+    Ok(ActionProcessBackend::from_parts(
+        Arc::new(runner),
+        Arc::new(permissioned_factory),
+    ))
 }
 
 fn permission_network_live_smoke_task() -> String {
