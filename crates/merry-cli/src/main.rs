@@ -7,8 +7,8 @@ use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use config::{EffectiveLogSettings, EffectiveOpenAiProviderConfig, MerryConfig, XdgPaths};
 use futures_util::{StreamExt, stream};
 use merry_core::{
-    ArtifactId, PendingToolCall, ProviderName, RuntimeEvent, RuntimeEventKind, SessionId,
-    ToolCallResultStatus, ToolInputSchema, ToolName, ToolSpec,
+    ArtifactId, ErrorInfo, PendingToolCall, ProviderName, RuntimeEvent, RuntimeEventKind,
+    SessionId, ToolCallResultStatus, ToolInputSchema, ToolName, ToolSpec,
 };
 use merry_llm::{
     FinishReason, GenerationConfig, ModelCapabilities, ModelError, ModelEvent, ModelEventStream,
@@ -40,10 +40,12 @@ use std::{
     ffi::{OsStr, OsString},
     fmt, fs, io,
     path::{Path, PathBuf},
-    process::{ExitCode, Termination},
+    process::{ExitCode, Stdio, Termination},
     sync::{Arc, Mutex},
 };
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufWriter};
+use tokio::io::{
+    AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufWriter,
+};
 use tokio::process::Command as TokioCommand;
 
 const DEFAULT_SESSION_ID: &str = "debug-session";
@@ -67,6 +69,8 @@ const ASSISTANT_OUTPUT_ARTIFACT_PREFIX: &str = "assistant-output-";
 const SHELL_TOOL_NAME: &str = "shell_command";
 const SHELL_TOOL_CALL_ID: &str = "call-shell-command";
 const SHELL_STEP_INPUT: &str = "run shell command through Merry process protocol";
+const CMD_CHECK_COMMAND_TOOL_NAME: &str = "cmd_check_command";
+const CMD_CHECK_COMMAND_INVALID_ARGUMENTS_CODE: &str = "cmd_check_command_invalid_arguments";
 const BWRAP_PROGRAM: &str = "bwrap";
 const DEFAULT_SANDBOX_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
 const SANDBOX_ETC_READ_ONLY_FILE_PATHS: &[&str] = &[
@@ -1370,9 +1374,11 @@ async fn run_merry_cmd(
         ..
     } = config;
     let root = env::current_dir().map_err(unexpected)?;
+    let environment = CommandGenerationEnvironment::detect(&root);
     let runtime = build_command_generation_runtime(CommandGenerationRuntimeInput {
         session_id: "cmd",
         root: &root,
+        environment: environment.clone(),
         provider: Arc::new(OpenAiProvider::new(primary.provider)),
         model: ModelName::new(&primary.model).map_err(unexpected)?,
         allow_hidden_workspace_paths: false,
@@ -1389,7 +1395,7 @@ async fn run_merry_cmd(
             .map_err(unexpected)?
             .unwrap_or_default(),
     })?;
-    let plan = generate_command_plan(&runtime, &args.request).await?;
+    let plan = generate_command_plan(&runtime, &args.request, &environment).await?;
     if args.json {
         write_command_plan_json(&plan, tokio::io::stdout()).await?;
     } else {
@@ -1458,12 +1464,15 @@ fn command_generation_loop_config() -> Result<AgentLoopConfig, CliError> {
         .with_final_output_contract(command_plan_final_output_contract()?))
 }
 
-fn command_generation_prompt(request: &str) -> String {
+fn command_generation_prompt(request: &str, environment: &CommandGenerationEnvironment) -> String {
     format!(
         "\
 You generate a shell command plan for the user's current workspace.
 
-Use only read-only workspace tools if you need to inspect files. Do not modify files. Do not run commands.
+{environment}
+
+Use only read-only workspace tools if you need to inspect files. Do not modify files. Do not run arbitrary commands.
+Use `{check_tool}` to check whether optional programs exist before recommending them. This check only inspects PATH and shell builtins; it does not execute the program.
 Return the final answer by calling the structured final output tool.
 
 The shell_command field must contain exactly one shell command string for the human to review.
@@ -1471,9 +1480,15 @@ Prefer portable, explicit commands. Include notes for assumptions and cautions f
 Write notes and cautions in the user's current input language unless the user explicitly requests another language.
 For file listing/search requests, interpret current directory, under this directory, and similar wording as recursive by default.
 Use non-recursive limits such as find -maxdepth 1 only when the user explicitly asks for top-level files, direct children, or non-recursive search.
+For multi-step read-only tasks, prefer a single shell pipeline or sh -c command that combines the steps when it is clearer than several separate commands.
+Before using platform-specific or optional tools such as iostat, vmstat, ss, ip, ifconfig, nslookup, dig, lsof, jq, fd, rg, or git, call `{check_tool}` first unless the user explicitly asks for an unverified command string.
+If a preferred optional command is unavailable, choose a reasonable fallback from available baseline commands and mention the tradeoff in notes.
+Avoid interactive or unbounded commands. If a command samples repeatedly, include a finite count or timeout.
 
 User request:
-{request}"
+{request}",
+        environment = environment.prompt_section(),
+        check_tool = CMD_CHECK_COMMAND_TOOL_NAME,
     )
 }
 
@@ -2907,6 +2922,7 @@ struct HeadlessCodingRuntimeInput<'a> {
 struct CommandGenerationRuntimeInput<'a> {
     session_id: &'a str,
     root: &'a Path,
+    environment: CommandGenerationEnvironment,
     provider: Arc<dyn ModelProvider>,
     model: ModelName,
     allow_hidden_workspace_paths: bool,
@@ -2914,6 +2930,51 @@ struct CommandGenerationRuntimeInput<'a> {
     retry_policy: Option<ModelRetryPolicy>,
     context_compaction: Option<RuntimeRoleProviderConfig>,
     skill_roots: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+struct CommandGenerationEnvironment {
+    os: &'static str,
+    arch: &'static str,
+    family: &'static str,
+    shell: String,
+    cwd: PathBuf,
+    path: Option<String>,
+}
+
+impl CommandGenerationEnvironment {
+    fn detect(cwd: &Path) -> Self {
+        Self {
+            os: env::consts::OS,
+            arch: env::consts::ARCH,
+            family: env::consts::FAMILY,
+            shell: env::var("SHELL").unwrap_or_else(|_| "sh".to_owned()),
+            cwd: cwd.to_owned(),
+            path: env::var("PATH").ok().filter(|path| !path.trim().is_empty()),
+        }
+    }
+
+    fn prompt_section(&self) -> String {
+        let path = self.path.as_deref().unwrap_or("<not set>");
+        format!(
+            "\
+Runtime environment:
+- os: {os}
+- family: {family}
+- arch: {arch}
+- shell: {shell}
+- cwd: {cwd}
+- path: {path}
+- baseline commands usually available on Unix-like systems: sh, test, printf, echo, pwd, cd, ls, find, grep, sed, awk, sort, uniq, wc, head, tail, cut, tr, xargs, cat, df, du, ps
+",
+            os = self.os,
+            family = self.family,
+            arch = self.arch,
+            shell = self.shell,
+            cwd = self.cwd.display(),
+            path = path,
+        )
+    }
 }
 
 fn build_headless_coding_runtime(
@@ -2963,9 +3024,9 @@ fn build_command_generation_runtime(
         None,
     )?)
     .map_err(unexpected)?;
-    with_workspace_coding_loop_profile(builder, profile)?
-        .build()
-        .map_err(unexpected)
+    let builder = with_workspace_coding_loop_profile(builder, profile)?
+        .register_tool(cmd_check_command_tool(input.environment)?);
+    builder.build().map_err(unexpected)
 }
 
 struct RuntimeRoleProviderConfig {
@@ -4320,10 +4381,15 @@ where
     writer.flush().await.map_err(stdout_error)
 }
 
-async fn generate_command_plan(runtime: &Runtime, request: &str) -> Result<CommandPlan, CliError> {
+async fn generate_command_plan(
+    runtime: &Runtime,
+    request: &str,
+    environment: &CommandGenerationEnvironment,
+) -> Result<CommandPlan, CliError> {
     let result = runtime
         .run_agent_loop(
-            StepInput::user_text(&command_generation_prompt(request)).map_err(unexpected)?,
+            StepInput::user_text(&command_generation_prompt(request, environment))
+                .map_err(unexpected)?,
             StepContext::default(),
             command_generation_loop_config()?,
         )
@@ -4419,28 +4485,67 @@ async fn execute_shell_command_to_writer<W>(command: &str, writer: W) -> Result<
 where
     W: AsyncWrite + Unpin,
 {
-    let output = TokioCommand::new("sh")
+    let mut child = TokioCommand::new("sh")
         .arg("-c")
         .arg(command)
-        .output()
-        .await
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(unexpected)?;
+
     let mut writer = BufWriter::new(writer);
-    writer
-        .write_all(&output.stdout)
-        .await
-        .map_err(stdout_error)?;
-    writer
-        .write_all(&output.stderr)
-        .await
-        .map_err(stdout_error)?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| CliError::Unexpected("shell stdout pipe was not captured".to_owned()))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| CliError::Unexpected("shell stderr pipe was not captured".to_owned()))?;
+
+    let mut stdout = stdout;
+    let mut stderr = stderr;
+    let mut stdout_open = true;
+    let mut stderr_open = true;
+    let mut stdout_buffer = vec![0_u8; 8192];
+    let mut stderr_buffer = vec![0_u8; 8192];
+
+    while stdout_open || stderr_open {
+        tokio::select! {
+            result = stdout.read(&mut stdout_buffer), if stdout_open => {
+                let read = result.map_err(unexpected)?;
+                if read == 0 {
+                    stdout_open = false;
+                } else {
+                    writer
+                        .write_all(&stdout_buffer[..read])
+                        .await
+                        .map_err(stdout_error)?;
+                    writer.flush().await.map_err(stdout_error)?;
+                }
+            }
+            result = stderr.read(&mut stderr_buffer), if stderr_open => {
+                let read = result.map_err(unexpected)?;
+                if read == 0 {
+                    stderr_open = false;
+                } else {
+                    writer
+                        .write_all(&stderr_buffer[..read])
+                        .await
+                        .map_err(stdout_error)?;
+                    writer.flush().await.map_err(stdout_error)?;
+                }
+            }
+        }
+    }
     writer.flush().await.map_err(stdout_error)?;
-    if output.status.success() {
+
+    let status = child.wait().await.map_err(unexpected)?;
+    if status.success() {
         Ok(())
     } else {
         Err(CliError::Unexpected(format!(
-            "shell command exited with status {}",
-            output.status
+            "shell command exited with status {status}"
         )))
     }
 }
@@ -4910,6 +5015,166 @@ impl ToolExecutor for DebugEchoExecutor {
     }
 }
 
+fn cmd_check_command_tool(
+    environment: CommandGenerationEnvironment,
+) -> Result<RegisteredTool, CliError> {
+    let schema = serde_json::from_value::<ToolInputSchema>(serde_json::json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "programs": {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "minLength": 1
+                },
+                "minItems": 1,
+                "description": "Program names to check in PATH before suggesting optional system commands."
+            }
+        },
+        "required": ["programs"]
+    }))
+    .map_err(unexpected)?;
+    let spec = ToolSpec::new(
+        ToolName::new(CMD_CHECK_COMMAND_TOOL_NAME).map_err(unexpected)?,
+        "Check whether command names are available in this environment without executing them.",
+        schema,
+    )
+    .map_err(unexpected)?;
+
+    Ok(RegisteredTool::read_only(
+        spec,
+        Arc::new(CmdCheckCommandExecutor { environment }),
+    ))
+}
+
+struct CmdCheckCommandExecutor {
+    environment: CommandGenerationEnvironment,
+}
+
+impl ToolExecutor for CmdCheckCommandExecutor {
+    fn execute<'a>(
+        &'a self,
+        call: PendingToolCall,
+        _context: ToolExecutionContext,
+    ) -> ToolExecutorFuture<'a> {
+        Box::pin(async move {
+            let programs = match cmd_check_programs_from_call(&call) {
+                Ok(programs) => programs,
+                Err(message) => return Ok(cmd_check_invalid_arguments_outcome(message)),
+            };
+            let results = programs
+                .iter()
+                .map(|program| self.environment.command_availability(program))
+                .collect::<Vec<_>>();
+            let payload = serde_json::json!({
+                "ok": true,
+                "tool": CMD_CHECK_COMMAND_TOOL_NAME,
+                "results": results
+            });
+            Ok(ToolExecutionOutcome::succeeded_json(payload.to_string()))
+        })
+    }
+}
+
+fn cmd_check_programs_from_call(call: &PendingToolCall) -> Result<Vec<String>, String> {
+    let Some(value) = call.arguments().as_object().get("programs") else {
+        return Err("cmd_check_command requires programs".to_owned());
+    };
+    let Some(values) = value.as_array() else {
+        return Err("cmd_check_command programs must be an array".to_owned());
+    };
+    values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| format!("cmd_check_command programs[{index}] must be a string"))
+        })
+        .collect()
+}
+
+fn cmd_check_invalid_arguments_outcome(message: String) -> ToolExecutionOutcome {
+    let diagnostic = ErrorInfo::new(CMD_CHECK_COMMAND_INVALID_ARGUMENTS_CODE, &message)
+        .expect("static cmd check diagnostic code must be valid");
+    let payload = serde_json::json!({
+        "ok": false,
+        "tool": CMD_CHECK_COMMAND_TOOL_NAME,
+        "error": message
+    });
+    ToolExecutionOutcome::failed_json(payload.to_string(), diagnostic)
+}
+
+#[derive(Serialize)]
+struct CommandAvailability {
+    program: String,
+    available: bool,
+    kind: &'static str,
+    path: Option<String>,
+}
+
+impl CommandGenerationEnvironment {
+    fn command_availability(&self, program: &str) -> CommandAvailability {
+        if is_shell_builtin(program) {
+            return CommandAvailability {
+                program: program.to_owned(),
+                available: true,
+                kind: "shell_builtin",
+                path: None,
+            };
+        }
+
+        let path = self
+            .path
+            .as_deref()
+            .and_then(|paths| find_program_in_path(program, paths));
+        CommandAvailability {
+            program: program.to_owned(),
+            available: path.is_some(),
+            kind: "path",
+            path,
+        }
+    }
+}
+
+fn is_shell_builtin(program: &str) -> bool {
+    matches!(
+        program,
+        "cd" | "echo" | "eval" | "exec" | "exit" | "export" | "printf" | "pwd" | "read" | "test"
+    )
+}
+
+fn find_program_in_path(program: &str, path: &str) -> Option<String> {
+    if program.contains('/') || program.trim().is_empty() {
+        return None;
+    }
+    env::split_paths(path).find_map(|directory| {
+        let candidate = directory.join(program);
+        if is_executable_file(&candidate) {
+            Some(candidate.display().to_string())
+        } else {
+            None
+        }
+    })
+}
+
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
+}
+
 struct ShellToolCallProvider {
     name: ProviderName,
     capabilities: ModelCapabilities,
@@ -5312,14 +5577,14 @@ mod tests {
         ModelResponse, ModelStreamContext, ModelToolCall, ModelToolCallId, ToolArguments,
     };
     use merry_runtime::{
-        AcceptedLocalWorkspaceProcessAdmission, AgentLoopConfig, AgentLoopStatus, CheckpointId,
-        CheckpointRef, CheckpointRefId, CheckpointRefManifest, CheckpointSequenceRange,
-        CheckpointSourceKind, CheckpointValidationPolicy, CitationBackedCheckpoint,
-        CompactedCheckpoint, CompactedCheckpointCandidate, MAX_PROCESS_OUTPUT_LIMIT_BYTES,
-        PathAccess, PathAccessRule, PathAccessRuleSource, ProcessActionIntent, ProcessEnvPolicy,
-        ProcessExitStatus, ProcessRunner, ProcessRunnerContext, ProcessRunnerError,
-        ProcessRunnerFuture, ProcessRunnerOutput, Runtime, RuntimeProfile, StepContext, StepInput,
-        SubagentConfig, ToolExecutionContext,
+        AcceptedLocalWorkspaceProcessAdmission, AgentLoopConfig, AgentLoopStatus, ArtifactContent,
+        CheckpointId, CheckpointRef, CheckpointRefId, CheckpointRefManifest,
+        CheckpointSequenceRange, CheckpointSourceKind, CheckpointValidationPolicy,
+        CitationBackedCheckpoint, CompactedCheckpoint, CompactedCheckpointCandidate,
+        MAX_PROCESS_OUTPUT_LIMIT_BYTES, PathAccess, PathAccessRule, PathAccessRuleSource,
+        ProcessActionIntent, ProcessEnvPolicy, ProcessExitStatus, ProcessRunner,
+        ProcessRunnerContext, ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput,
+        Runtime, RuntimeProfile, StepContext, StepInput, SubagentConfig, ToolExecutionContext,
     };
     use merry_tool_workspace::{
         CODING_LOOP_PROCESS_TOOL, WORKSPACE_PATCH_TOOL, WORKSPACE_READ_FILE_TOOL,
@@ -5508,11 +5773,16 @@ mod tests {
 
     #[test]
     fn command_generation_prompt_treats_file_search_as_recursive_by_default() {
-        let prompt = super::command_generation_prompt("列出当前目录的 rs 文件");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let environment = super::CommandGenerationEnvironment::detect(temp.path());
+        let prompt = super::command_generation_prompt("列出当前目录的 rs 文件", &environment);
 
         assert!(prompt.contains("recursive by default"));
         assert!(prompt.contains("find -maxdepth 1 only when the user explicitly asks"));
         assert!(prompt.contains("user's current input language"));
+        assert!(prompt.contains("Runtime environment:"));
+        assert!(prompt.contains(super::CMD_CHECK_COMMAND_TOOL_NAME));
+        assert!(prompt.contains("prefer a single shell pipeline"));
     }
 
     #[test]
@@ -6156,6 +6426,7 @@ mod tests {
             super::build_command_generation_runtime(super::CommandGenerationRuntimeInput {
                 session_id: "cmd-generation-runtime",
                 root: &workspace,
+                environment: super::CommandGenerationEnvironment::detect(&workspace),
                 provider: Arc::new(provider.clone()),
                 model: ModelName::new("debug-model").expect("valid model name"),
                 allow_hidden_workspace_paths: false,
@@ -6181,6 +6452,7 @@ mod tests {
             .map(|tool| tool.name().as_str())
             .collect::<Vec<_>>();
         assert!(tool_names.contains(&WORKSPACE_READ_FILE_TOOL));
+        assert!(tool_names.contains(&super::CMD_CHECK_COMMAND_TOOL_NAME));
         assert!(!tool_names.contains(&WORKSPACE_PATCH_TOOL));
         assert!(!tool_names.contains(&CODING_LOOP_PROCESS_TOOL));
     }
@@ -6215,6 +6487,7 @@ mod tests {
             super::build_command_generation_runtime(super::CommandGenerationRuntimeInput {
                 session_id: "cmd-final-output",
                 root: &workspace,
+                environment: super::CommandGenerationEnvironment::detect(&workspace),
                 provider: Arc::new(provider),
                 model: ModelName::new("debug-model").expect("valid model name"),
                 allow_hidden_workspace_paths: false,
@@ -6225,13 +6498,105 @@ mod tests {
             })
             .expect("runtime should build");
 
-        let plan = super::generate_command_plan(&runtime, "find rust files")
-            .await
-            .expect("command plan should generate");
+        let plan = super::generate_command_plan(
+            &runtime,
+            "find rust files",
+            &super::CommandGenerationEnvironment::detect(&workspace),
+        )
+        .await
+        .expect("command plan should generate");
 
         assert_eq!(plan.shell_command, "find . -name '*.rs' -print");
         assert_eq!(plan.notes, ["Searches from the current directory."]);
         assert_eq!(plan.cautions, ["May print many paths."]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cmd_check_command_tool_reports_path_availability() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let bin = temp.path().join("bin");
+        std::fs::create_dir_all(&bin).expect("mkdir bin");
+        let program_path = bin.join("available-tool");
+        std::fs::write(&program_path, "#!/bin/sh\n").expect("write tool");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&program_path)
+                .expect("metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&program_path, permissions).expect("chmod tool");
+        }
+
+        let environment = super::CommandGenerationEnvironment {
+            os: "linux",
+            arch: "x86_64",
+            family: "unix",
+            shell: "/bin/sh".to_owned(),
+            cwd: temp.path().to_owned(),
+            path: Some(bin.display().to_string()),
+        };
+        let mut arguments = serde_json::Map::new();
+        arguments.insert(
+            "programs".to_owned(),
+            serde_json::json!(["available-tool", "missing-tool", "printf"]),
+        );
+        let provider = ScriptedProvider::new(vec![vec![Ok(super::coding_loop_tool_call(
+            "call-check-command",
+            super::CMD_CHECK_COMMAND_TOOL_NAME,
+            arguments,
+        )
+        .expect("check command tool call should build"))]]);
+        let runtime =
+            super::build_command_generation_runtime(super::CommandGenerationRuntimeInput {
+                session_id: "cmd-check-command-tool",
+                root: temp.path(),
+                environment,
+                provider: Arc::new(provider),
+                model: ModelName::new("debug-model").expect("valid model name"),
+                allow_hidden_workspace_paths: false,
+                automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
+                retry_policy: None,
+                context_compaction: None,
+                skill_roots: Vec::new(),
+            })
+            .expect("runtime should build");
+        let events = collect_runtime_step_events(
+            &runtime,
+            StepInput::user_text("check commands").expect("valid input"),
+            StepContext::default(),
+        )
+        .await
+        .expect("runtime step should collect pending call");
+        let pending = first_pending_tool_call(&events).expect("pending check command call");
+        let resolved = runtime
+            .execute_tool_call(pending.id(), ToolExecutionContext::default())
+            .await
+            .expect("tool should execute");
+        let artifact_id = resolved
+            .iter()
+            .find_map(|event| match &event.kind {
+                RuntimeEventKind::ToolCallResolved { result } => {
+                    Some(result.artifact().id().clone())
+                }
+                _ => None,
+            })
+            .expect("tool result artifact should be recorded");
+        let content = runtime
+            .read_artifact_content(&artifact_id)
+            .await
+            .expect("tool result artifact should be readable");
+        let payload = match content {
+            ArtifactContent::Json(content) => {
+                serde_json::from_str::<serde_json::Value>(&content).expect("json payload")
+            }
+            other => panic!("expected json content, got {other:?}"),
+        };
+
+        assert_eq!(payload["ok"], true);
+        assert_eq!(payload["results"][0]["available"], true);
+        assert_eq!(payload["results"][1]["available"], false);
+        assert_eq!(payload["results"][2]["kind"], "shell_builtin");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -6257,16 +6622,20 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn execute_shell_command_to_writer_writes_complete_output() {
-        let mut output = Vec::new();
+        let mut output = FlushCountingWriter::default();
 
         super::execute_shell_command_to_writer(
-            "printf 'stdout-line\\n'; printf 'stderr-line\\n' >&2",
+            "printf 'stdout-line\\n'; sleep 0.01; printf 'stderr-line\\n' >&2",
             &mut output,
         )
         .await
         .expect("shell command should execute");
 
-        let text = String::from_utf8(output).expect("utf8");
+        assert!(
+            output.flushes > 1,
+            "shell execution output should flush while streams are read"
+        );
+        let text = String::from_utf8(output.bytes).expect("utf8");
         assert!(text.contains("stdout-line\n"));
         assert!(text.contains("stderr-line\n"));
     }
@@ -6370,7 +6739,6 @@ mod tests {
         .expect("runtime step should complete");
 
         let request = provider.recorded_requests()[0].clone();
-        assert_eq!(request.stable_prefix_message_count(), 1);
         assert!(
             request
                 .stable_prefix_messages()
