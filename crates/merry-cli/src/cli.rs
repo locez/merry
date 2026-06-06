@@ -158,12 +158,13 @@ mod tests {
         debug_coding_loop_subagent_live_smoke_usage, debug_coding_loop_task_live_smoke_usage,
         debug_openai_usage, shell_usage,
     };
-    use crate::debug::{CodingLoopTaskSmokeTask, Command as DebugCommand};
+    use crate::debug::{
+        CodingLoopTaskSmokeTask, Command as DebugCommand, DEFAULT_INPUT, DEFAULT_SESSION_ID,
+    };
     use crate::sandbox::{
         ChildHandoff as SandboxChildHandoff, SANDBOX_CHILD_HANDOFF_ARG,
         SANDBOX_CHILD_HANDOFF_CLI_BWRAP_V1,
     };
-    use crate::{DEFAULT_INPUT, DEFAULT_SESSION_ID};
     use clap::Parser;
 
     #[test]

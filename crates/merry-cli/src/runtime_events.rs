@@ -94,7 +94,7 @@ pub(crate) fn first_pending_tool_call(events: &[RuntimeEvent]) -> Option<Pending
 #[cfg(test)]
 mod tests {
     use super::write_runtime_step_events;
-    use crate::test_support::{CompletingProvider, RecordingProvider};
+    use crate::testing::{CompletingProvider, RecordingProvider};
     use merry_llm::{GenerationConfig, ModelName};
     use merry_runtime::{Runtime, StepContext, StepInput};
     use serde_json::Value;

@@ -1,6 +1,6 @@
 use crate::cli_error::{CliError, unexpected};
 use crate::debug::CodingLoopTaskSmokeTask;
-use crate::{
+use crate::debug::coding_loop::{
     CODING_LOOP_SUBAGENT_LIVE_SMOKE_FILE, CODING_LOOP_SUBAGENT_LIVE_SMOKE_INITIAL,
     CODING_LOOP_SUBAGENT_LIVE_SMOKE_SESSION_ID,
 };

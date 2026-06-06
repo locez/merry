@@ -1,8 +1,9 @@
 use crate::cli_error::{CliError, unexpected};
+#[cfg(test)]
+use crate::debug::coding_loop::PERMISSION_NETWORK_SMOKE_ARGV;
 use crate::debug::coding_loop::fixture::CodingLoopTaskSmokeFixture;
-use crate::{
+use crate::debug::coding_loop::{
     CODING_LOOP_LIVE_SMOKE_INITIAL_VALUE, CODING_LOOP_LIVE_SMOKE_TARGET_VALUE,
-    CODING_LOOP_PROCESS_TOOL, WORKSPACE_PATCH_TOOL, WORKSPACE_READ_FILE_TOOL,
 };
 use futures_util::stream;
 use merry_core::{ProviderName, ToolName};
@@ -10,6 +11,9 @@ use merry_llm::{
     FinishReason, ModelCapabilities, ModelError, ModelEvent, ModelEventStream, ModelOutput,
     ModelProvider, ModelProviderFuture, ModelRequest, ModelResponse, ModelStreamContext,
     ModelToolCall, ModelToolCallId, ToolArguments,
+};
+use merry_tool_workspace::{
+    CODING_LOOP_PROCESS_TOOL, WORKSPACE_PATCH_TOOL, WORKSPACE_READ_FILE_TOOL,
 };
 use std::sync::Mutex;
 
@@ -109,8 +113,6 @@ pub(crate) struct PermissionNetworkSmokeProvider {
 #[cfg(test)]
 impl PermissionNetworkSmokeProvider {
     pub(crate) fn new() -> Result<Self, CliError> {
-        use crate::PERMISSION_NETWORK_SMOKE_ARGV;
-
         let steps = vec![
             coding_loop_process_call(
                 "permission-network-smoke-initial-network",
@@ -340,8 +342,6 @@ pub(crate) fn coding_loop_process_call(
 
 #[cfg(test)]
 pub(crate) fn permission_network_smoke_request_call() -> Result<ModelEvent, CliError> {
-    use crate::PERMISSION_NETWORK_SMOKE_ARGV;
-
     let mut requested = serde_json::Map::new();
     requested.insert("network".to_owned(), serde_json::Value::Bool(true));
 

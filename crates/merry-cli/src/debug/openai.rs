@@ -1,5 +1,6 @@
 use crate::cli_error::{CliError, debug_openai_usage_error, stdout_error, unexpected};
 use crate::config::MerryConfig;
+use crate::debug::DEFAULT_SESSION_ID;
 use crate::provider_config::{
     MERRY_OPENAI_DEBUG_ENV, OpenAiRuntimeConfig, apply_openai_context_compaction_provider,
     openai_runtime_config, optional_env,
@@ -9,7 +10,6 @@ use crate::runtime_events::{
     first_pending_tool_call, write_runtime_events, write_runtime_step_events,
     write_runtime_step_events_to,
 };
-use crate::{DEBUG_TOOL_CONTINUATION_INPUT, DEBUG_TOOL_NAME, DEFAULT_SESSION_ID};
 use merry_core::{PendingToolCall, SessionId, ToolInputSchema, ToolName, ToolSpec};
 use merry_llm::{GenerationConfig, ModelName};
 use merry_provider_openai::OpenAiProvider;
@@ -22,6 +22,9 @@ use tokio::io::{AsyncWrite, AsyncWriteExt, BufWriter};
 
 #[cfg(test)]
 mod tests;
+
+const DEBUG_TOOL_NAME: &str = "debug_echo";
+const DEBUG_TOOL_CONTINUATION_INPUT: &str = "continue after debug tool";
 
 pub(crate) async fn run(
     input: &str,

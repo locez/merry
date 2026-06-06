@@ -5,13 +5,16 @@ pub(crate) mod coding_loop;
 pub(crate) mod openai;
 pub(crate) mod shell;
 
+pub(crate) const DEFAULT_SESSION_ID: &str = "debug-session";
+pub(crate) const DEFAULT_INPUT: &str = "debug step";
+
 #[derive(Debug, clap::Args)]
 #[command(args_conflicts_with_subcommands = true)]
 pub(crate) struct Args {
     #[arg(
         long,
         value_name = "SESSION_ID",
-        default_value = crate::DEFAULT_SESSION_ID,
+        default_value = DEFAULT_SESSION_ID,
         allow_hyphen_values = true,
         help = "Session id to use"
     )]
@@ -20,7 +23,7 @@ pub(crate) struct Args {
     #[arg(
         long,
         value_name = "TEXT",
-        default_value = crate::DEFAULT_INPUT,
+        default_value = DEFAULT_INPUT,
         allow_hyphen_values = true,
         help = "User text input"
     )]

@@ -312,7 +312,7 @@ mod tests {
     use super::{write_agent_loop_jsonl_output, write_agent_loop_output};
     use crate::coding_runtime::{HeadlessCodingRuntimeInput, build_headless_coding_runtime};
     use crate::debug::coding_loop::coding_loop_process_call;
-    use crate::test_support::{FakeProcessRunner, ScriptedProvider, model_name};
+    use crate::testing::{FakeProcessRunner, ScriptedProvider, model_name};
     use merry_llm::{FinishReason, ModelEvent, ModelOutput, ModelResponse};
     use merry_runtime::DEFAULT_CODING_AGENT_MAX_MODEL_TURNS;
     use merry_runtime::{

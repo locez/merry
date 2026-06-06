@@ -1,7 +1,7 @@
 use super::*;
 use crate::debug::coding_loop::{coding_loop_tool_call, coding_loop_workspace_call};
 use crate::runtime_events::{collect_runtime_step_events, first_pending_tool_call};
-use crate::test_support::ScriptedProvider;
+use crate::testing::ScriptedProvider;
 use merry_core::RuntimeEventKind;
 use merry_llm::{FinishReason, ModelEvent, ModelName, ModelOutput, ModelResponse};
 use merry_runtime::{ArtifactContent, StepContext, StepInput, ToolExecutionContext};
