@@ -35,7 +35,7 @@ pub(crate) enum Command {
     #[command(
         name = "openai",
         about = "Run opt-in OpenAI-compatible model debugging",
-        after_help = crate::OPENAI_ENV_HELP
+        after_help = crate::cli::OPENAI_ENV_HELP
     )]
     OpenAi(OpenAiArgs),
     #[command(
@@ -51,7 +51,7 @@ pub(crate) enum Command {
     #[command(
         name = "permission-network-smoke",
         about = "Run an opt-in sandboxed permission review smoke driven by a live OpenAI-compatible model",
-        after_help = crate::OPENAI_ENV_HELP
+        after_help = crate::cli::OPENAI_ENV_HELP
     )]
     PermissionNetworkSmoke(PermissionNetworkSmokeArgs),
     #[command(
@@ -98,7 +98,7 @@ pub(crate) struct OpenAiArgs {
     #[arg(
         long,
         value_name = "N",
-        value_parser = crate::parse_max_output_tokens,
+        value_parser = crate::cli::parse_max_output_tokens,
         help = "Optional maximum output tokens for this step"
     )]
     pub(crate) max_output_tokens: Option<u64>,
@@ -150,7 +150,7 @@ pub(crate) struct CodingLoopLiveSmokeArgs {
     #[arg(
         long,
         value_name = "N",
-        value_parser = crate::parse_max_output_tokens,
+        value_parser = crate::cli::parse_max_output_tokens,
         default_value_t = 512,
         help = "Maximum output tokens per live model step"
     )]
@@ -170,7 +170,7 @@ pub(crate) struct PermissionNetworkSmokeArgs {
     #[arg(
         long,
         value_name = "N",
-        value_parser = crate::parse_max_output_tokens,
+        value_parser = crate::cli::parse_max_output_tokens,
         default_value_t = 768,
         help = "Maximum output tokens for each live model step"
     )]
@@ -209,7 +209,7 @@ pub(crate) struct CodingLoopTaskLiveSmokeArgs {
     #[arg(
         long,
         value_name = "N",
-        value_parser = crate::parse_max_output_tokens,
+        value_parser = crate::cli::parse_max_output_tokens,
         default_value_t = 768,
         help = "Maximum output tokens for each live model step"
     )]
@@ -229,7 +229,7 @@ pub(crate) struct CodingLoopSubagentLiveSmokeArgs {
     #[arg(
         long,
         value_name = "N",
-        value_parser = crate::parse_max_output_tokens,
+        value_parser = crate::cli::parse_max_output_tokens,
         default_value_t = 768,
         help = "Maximum output tokens for each live model step"
     )]

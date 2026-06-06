@@ -1,5 +1,6 @@
 //! Debug and demonstration CLI for Merry.
 
+mod cli;
 mod cli_error;
 mod cmd;
 mod coding_runtime;
@@ -14,7 +15,7 @@ mod sandbox;
 #[cfg(test)]
 mod test_support;
 
-use clap::{Args, CommandFactory, Parser, Subcommand};
+use clap::Parser;
 use config::{MerryConfig, XdgPaths};
 use merry_tool_workspace::{
     CODING_LOOP_PROCESS_TOOL, WORKSPACE_PATCH_TOOL, WORKSPACE_READ_FILE_TOOL,
@@ -24,6 +25,7 @@ use std::{
     process::{ExitCode, Termination},
 };
 
+use cli::{Cli, CliCommand};
 use cli_error::CliError;
 use debug::{
     Args as DebugArgs, CodingLoopLiveSmokeArgs as DebugCodingLoopLiveSmokeArgs,
@@ -32,7 +34,6 @@ use debug::{
     OpenAiArgs as DebugOpenAiArgs, PermissionNetworkSmokeArgs as DebugPermissionNetworkSmokeArgs,
 };
 use runtime_config::{effective_log_settings, validate_loaded_config};
-use sandbox::ChildHandoff as SandboxChildHandoff;
 
 const DEFAULT_SESSION_ID: &str = "debug-session";
 const DEFAULT_INPUT: &str = "debug step";
@@ -51,50 +52,6 @@ const CODING_LOOP_SUBAGENT_LIVE_SMOKE_FILE: &str = "subagent-output.txt";
 const CODING_LOOP_SUBAGENT_LIVE_SMOKE_INITIAL: &str = "status: pending\n";
 const CODING_LOOP_SUBAGENT_LIVE_SMOKE_TARGET: &str = "status: subagent-live-smoke-complete\n";
 const CODING_LOOP_TASK_SMOKE_MAX_PATCH_BYTES: usize = 256;
-const OPENAI_ENV_HELP: &str = "\
-Environment:
-  MERRY_OPENAI_DEBUG=1       Required opt-in before any network attempt
-  XDG_CONFIG_HOME            Optional base for merry/config.toml
-
-Provider/model/base URL/API key source come from
-`$XDG_CONFIG_HOME/merry/config.toml` or `~/.config/merry/config.toml`.
-Set exactly one of `[providers.openai-compatible].api_key` or `api_key_file`.
-For sandboxed live smokes, prefer config-relative `api_key_file =
-\"secrets/openai.key\"` so credentials are not passed through bwrap argv.
-";
-
-#[derive(Debug, Parser)]
-#[command(
-    name = "merry",
-    about = "Debug and demonstration CLI for Merry.",
-    disable_version_flag = true
-)]
-struct Cli {
-    #[arg(long, help = "Run the command inside Merry's bubblewrap sandbox")]
-    with_sandbox: bool,
-
-    #[arg(
-        long = "merry-sandbox-child-handoff",
-        hide = true,
-        value_enum,
-        value_name = "PROFILE"
-    )]
-    sandbox_child_handoff: Option<SandboxChildHandoff>,
-
-    #[command(subcommand)]
-    command: CliCommand,
-}
-
-#[derive(Debug, Subcommand)]
-enum CliCommand {
-    #[command(about = "Complete a coding task with Merry's headless agent")]
-    Run(run::Args),
-    #[command(about = "Generate a shell command plan from a natural-language request")]
-    Cmd(cmd::Args),
-    #[command(about = "Print deterministic runtime events or run opt-in provider debugging")]
-    Debug(DebugArgs),
-}
-
 fn main() -> CliExit {
     let argv = env::args_os().collect::<Vec<_>>();
     let cli = match Cli::try_parse_from(argv.clone()) {
@@ -150,15 +107,15 @@ async fn async_main(cli: Cli, merry_config: Option<MerryConfig>) -> CliExit {
                 Err(CliError::BrokenPipe) => CliExit::Success,
                 Err(CliError::DebugUsage(message)) => CliExit::Usage {
                     message,
-                    usage: run_usage(),
+                    usage: cli::run_usage(),
                 },
                 Err(CliError::DebugOpenAiUsage(message)) => CliExit::Usage {
                     message,
-                    usage: run_usage(),
+                    usage: cli::run_usage(),
                 },
                 Err(CliError::ShellUsage(message)) => CliExit::Usage {
                     message,
-                    usage: shell_usage(),
+                    usage: cli::shell_usage(),
                 },
                 Err(CliError::Unexpected(message)) => CliExit::Unexpected(message),
             }
@@ -168,15 +125,15 @@ async fn async_main(cli: Cli, merry_config: Option<MerryConfig>) -> CliExit {
             Err(CliError::BrokenPipe) => CliExit::Success,
             Err(CliError::DebugUsage(message)) => CliExit::Usage {
                 message,
-                usage: cmd_usage(),
+                usage: cli::cmd_usage(),
             },
             Err(CliError::DebugOpenAiUsage(message)) => CliExit::Usage {
                 message,
-                usage: cmd_usage(),
+                usage: cli::cmd_usage(),
             },
             Err(CliError::ShellUsage(message)) => CliExit::Usage {
                 message,
-                usage: shell_usage(),
+                usage: cli::shell_usage(),
             },
             Err(CliError::Unexpected(message)) => CliExit::Unexpected(message),
         },
@@ -189,15 +146,15 @@ async fn async_main(cli: Cli, merry_config: Option<MerryConfig>) -> CliExit {
             Err(CliError::BrokenPipe) => CliExit::Success,
             Err(CliError::DebugUsage(message)) => CliExit::Usage {
                 message,
-                usage: debug_usage(),
+                usage: cli::debug_usage(),
             },
             Err(CliError::DebugOpenAiUsage(message)) => CliExit::Usage {
                 message,
-                usage: debug_openai_usage(),
+                usage: cli::debug_openai_usage(),
             },
             Err(CliError::ShellUsage(message)) => CliExit::Usage {
                 message,
-                usage: shell_usage(),
+                usage: cli::shell_usage(),
             },
             Err(CliError::Unexpected(message)) => CliExit::Unexpected(message),
         },
@@ -223,16 +180,16 @@ async fn async_main(cli: Cli, merry_config: Option<MerryConfig>) -> CliExit {
             Err(CliError::BrokenPipe) => CliExit::Success,
             Err(CliError::DebugOpenAiUsage(message)) => CliExit::Usage {
                 message,
-                usage: debug_openai_usage(),
+                usage: cli::debug_openai_usage(),
             },
             Err(CliError::Unexpected(message)) => CliExit::Unexpected(message),
             Err(CliError::DebugUsage(message)) => CliExit::Usage {
                 message,
-                usage: debug_usage(),
+                usage: cli::debug_usage(),
             },
             Err(CliError::ShellUsage(message)) => CliExit::Usage {
                 message,
-                usage: shell_usage(),
+                usage: cli::shell_usage(),
             },
         },
         CliCommand::Debug(DebugArgs {
@@ -243,16 +200,16 @@ async fn async_main(cli: Cli, merry_config: Option<MerryConfig>) -> CliExit {
             Err(CliError::BrokenPipe) => CliExit::Success,
             Err(CliError::ShellUsage(message)) => CliExit::Usage {
                 message,
-                usage: shell_usage(),
+                usage: cli::shell_usage(),
             },
             Err(CliError::Unexpected(message)) => CliExit::Unexpected(message),
             Err(CliError::DebugUsage(message)) => CliExit::Usage {
                 message,
-                usage: debug_usage(),
+                usage: cli::debug_usage(),
             },
             Err(CliError::DebugOpenAiUsage(message)) => CliExit::Usage {
                 message,
-                usage: debug_openai_usage(),
+                usage: cli::debug_openai_usage(),
             },
         },
         CliCommand::Debug(DebugArgs {
@@ -265,15 +222,15 @@ async fn async_main(cli: Cli, merry_config: Option<MerryConfig>) -> CliExit {
             Err(CliError::BrokenPipe) => CliExit::Success,
             Err(CliError::DebugUsage(message)) => CliExit::Usage {
                 message,
-                usage: debug_usage(),
+                usage: cli::debug_usage(),
             },
             Err(CliError::DebugOpenAiUsage(message)) => CliExit::Usage {
                 message,
-                usage: debug_openai_usage(),
+                usage: cli::debug_openai_usage(),
             },
             Err(CliError::ShellUsage(message)) => CliExit::Usage {
                 message,
-                usage: shell_usage(),
+                usage: cli::shell_usage(),
             },
             Err(CliError::Unexpected(message)) => CliExit::Unexpected(message),
         },
@@ -297,15 +254,15 @@ async fn async_main(cli: Cli, merry_config: Option<MerryConfig>) -> CliExit {
                 Err(CliError::BrokenPipe) => CliExit::Success,
                 Err(CliError::DebugUsage(message)) => CliExit::Usage {
                     message,
-                    usage: debug_usage(),
+                    usage: cli::debug_usage(),
                 },
                 Err(CliError::DebugOpenAiUsage(message)) => CliExit::Usage {
                     message,
-                    usage: debug_openai_usage(),
+                    usage: cli::debug_openai_usage(),
                 },
                 Err(CliError::ShellUsage(message)) => CliExit::Usage {
                     message,
-                    usage: shell_usage(),
+                    usage: cli::shell_usage(),
                 },
                 Err(CliError::Unexpected(message)) => CliExit::Unexpected(message),
             }
@@ -324,15 +281,15 @@ async fn async_main(cli: Cli, merry_config: Option<MerryConfig>) -> CliExit {
             Err(CliError::BrokenPipe) => CliExit::Success,
             Err(CliError::DebugUsage(message)) => CliExit::Usage {
                 message,
-                usage: debug_usage(),
+                usage: cli::debug_usage(),
             },
             Err(CliError::DebugOpenAiUsage(message)) => CliExit::Usage {
                 message,
-                usage: debug_openai_usage(),
+                usage: cli::debug_openai_usage(),
             },
             Err(CliError::ShellUsage(message)) => CliExit::Usage {
                 message,
-                usage: shell_usage(),
+                usage: cli::shell_usage(),
             },
             Err(CliError::Unexpected(message)) => CliExit::Unexpected(message),
         },
@@ -355,15 +312,15 @@ async fn async_main(cli: Cli, merry_config: Option<MerryConfig>) -> CliExit {
             Err(CliError::BrokenPipe) => CliExit::Success,
             Err(CliError::DebugUsage(message)) => CliExit::Usage {
                 message,
-                usage: debug_usage(),
+                usage: cli::debug_usage(),
             },
             Err(CliError::DebugOpenAiUsage(message)) => CliExit::Usage {
                 message,
-                usage: debug_coding_loop_live_smoke_usage(),
+                usage: cli::debug_coding_loop_live_smoke_usage(),
             },
             Err(CliError::ShellUsage(message)) => CliExit::Usage {
                 message,
-                usage: shell_usage(),
+                usage: cli::shell_usage(),
             },
             Err(CliError::Unexpected(message)) => CliExit::Unexpected(message),
         },
@@ -388,15 +345,15 @@ async fn async_main(cli: Cli, merry_config: Option<MerryConfig>) -> CliExit {
             Err(CliError::BrokenPipe) => CliExit::Success,
             Err(CliError::DebugUsage(message)) => CliExit::Usage {
                 message,
-                usage: debug_usage(),
+                usage: cli::debug_usage(),
             },
             Err(CliError::DebugOpenAiUsage(message)) => CliExit::Usage {
                 message,
-                usage: debug_coding_loop_task_live_smoke_usage(),
+                usage: cli::debug_coding_loop_task_live_smoke_usage(),
             },
             Err(CliError::ShellUsage(message)) => CliExit::Usage {
                 message,
-                usage: shell_usage(),
+                usage: cli::shell_usage(),
             },
             Err(CliError::Unexpected(message)) => CliExit::Unexpected(message),
         },
@@ -419,120 +376,19 @@ async fn async_main(cli: Cli, merry_config: Option<MerryConfig>) -> CliExit {
             Err(CliError::BrokenPipe) => CliExit::Success,
             Err(CliError::DebugUsage(message)) => CliExit::Usage {
                 message,
-                usage: debug_usage(),
+                usage: cli::debug_usage(),
             },
             Err(CliError::DebugOpenAiUsage(message)) => CliExit::Usage {
                 message,
-                usage: debug_coding_loop_subagent_live_smoke_usage(),
+                usage: cli::debug_coding_loop_subagent_live_smoke_usage(),
             },
             Err(CliError::ShellUsage(message)) => CliExit::Usage {
                 message,
-                usage: shell_usage(),
+                usage: cli::shell_usage(),
             },
             Err(CliError::Unexpected(message)) => CliExit::Unexpected(message),
         },
     }
-}
-
-fn parse_max_output_tokens(value: &str) -> Result<u64, String> {
-    let tokens = value
-        .parse::<u64>()
-        .map_err(|error| format!("must be a positive integer: {error}"))?;
-
-    if tokens == 0 {
-        return Err("must be greater than zero".to_owned());
-    }
-
-    Ok(tokens)
-}
-
-fn debug_usage() -> String {
-    let mut command = Cli::command();
-    let command = command
-        .find_subcommand_mut("debug")
-        .expect("debug subcommand should exist");
-    command.set_bin_name("merry debug");
-    command_usage(command)
-}
-
-fn run_usage() -> String {
-    let mut command = Cli::command();
-    let command = command
-        .find_subcommand_mut("run")
-        .expect("run subcommand should exist");
-    command.set_bin_name("merry run");
-    command_usage(command)
-}
-
-fn cmd_usage() -> String {
-    let mut command = Cli::command();
-    let command = command
-        .find_subcommand_mut("cmd")
-        .expect("cmd subcommand should exist");
-    command.set_bin_name("merry cmd");
-    command_usage(command)
-}
-
-fn shell_usage() -> String {
-    let mut command = Cli::command();
-    let debug_command = command
-        .find_subcommand_mut("debug")
-        .expect("debug subcommand should exist");
-    let command = debug_command
-        .find_subcommand_mut("shell")
-        .expect("shell subcommand should exist");
-    command.set_bin_name("merry debug shell");
-    command_usage(command)
-}
-
-fn debug_openai_usage() -> String {
-    let mut command = DebugOpenAiArgs::augment_args(clap::Command::new("openai"))
-        .bin_name("merry debug openai")
-        .about("Run opt-in OpenAI-compatible model debugging")
-        .after_help(OPENAI_ENV_HELP);
-    command_usage(&mut command)
-}
-
-fn debug_coding_loop_live_smoke_usage() -> String {
-    let mut command = DebugCodingLoopLiveSmokeArgs::augment_args(clap::Command::new(
-        "coding-loop-live-smoke",
-    ))
-    .bin_name("merry debug coding-loop-live-smoke")
-    .about("Run an opt-in sandboxed coding-loop smoke driven by a live OpenAI-compatible model")
-    .after_help(OPENAI_ENV_HELP);
-    command_usage(&mut command)
-}
-
-fn debug_coding_loop_task_live_smoke_usage() -> String {
-    let mut command = DebugCodingLoopTaskLiveSmokeArgs::augment_args(clap::Command::new(
-        "coding-loop-task-live-smoke",
-    ))
-    .bin_name("merry debug coding-loop-task-live-smoke")
-    .about(
-        "Run an opt-in sandboxed coding-loop task smoke driven by a live OpenAI-compatible model",
-    )
-    .after_help(OPENAI_ENV_HELP);
-    command_usage(&mut command)
-}
-
-fn debug_coding_loop_subagent_live_smoke_usage() -> String {
-    let mut command = DebugCodingLoopSubagentLiveSmokeArgs::augment_args(clap::Command::new(
-        "coding-loop-subagent-live-smoke",
-    ))
-    .bin_name("merry debug coding-loop-subagent-live-smoke")
-    .about(
-        "Run an opt-in sandboxed coding-loop smoke that requires a live model to delegate to a child agent",
-    )
-    .after_help(OPENAI_ENV_HELP);
-    command_usage(&mut command)
-}
-
-fn command_usage(command: &mut clap::Command) -> String {
-    let mut buffer = Vec::new();
-    command
-        .write_help(&mut buffer)
-        .expect("clap help should render");
-    String::from_utf8(buffer).expect("clap help should be utf-8")
 }
 
 enum CliExit {
@@ -570,11 +426,8 @@ impl Termination for CliExit {
 #[cfg(test)]
 mod tests {
     use super::DEBUG_TOOL_NAME;
-    use super::{
-        Cli, CliCommand, CliError, CliExit, DEBUG_TOOL_CONTINUATION_INPUT, DEFAULT_INPUT,
-        DEFAULT_SESSION_ID, DebugCommand, SandboxChildHandoff, debug_openai_usage, report_cli_exit,
-        shell_usage,
-    };
+    use super::{CliError, CliExit, DEBUG_TOOL_CONTINUATION_INPUT, report_cli_exit};
+    use crate::cli;
     use crate::debug::CodingLoopTaskSmokeTask;
     use crate::debug::coding_loop::{
         CodingLoopTaskSmokeFixture, assert_coding_loop_smoke_result,
@@ -598,9 +451,9 @@ mod tests {
     use crate::runtime_config::{automatic_compaction_config, effective_log_settings};
     use crate::runtime_events::{collect_runtime_step_events, first_pending_tool_call};
     use crate::sandbox::{
-        Bootstrap as SandboxBootstrap, Error as SandboxError, Host as SandboxHost,
-        MERRY_SANDBOX_ENV, MERRY_SANDBOX_VERSION, MERRY_SANDBOX_VERSION_ENV, Plan as SandboxPlan,
-        RuntimeProfile as SandboxRuntimeProfile, SANDBOX_CHILD_HANDOFF_ARG,
+        Bootstrap as SandboxBootstrap, ChildHandoff as SandboxChildHandoff, Error as SandboxError,
+        Host as SandboxHost, MERRY_SANDBOX_ENV, MERRY_SANDBOX_VERSION, MERRY_SANDBOX_VERSION_ENV,
+        Plan as SandboxPlan, RuntimeProfile as SandboxRuntimeProfile, SANDBOX_CHILD_HANDOFF_ARG,
         SANDBOX_CHILD_HANDOFF_CLI_BWRAP_V1, SANDBOX_HOME, SANDBOX_MERRY_CONFIG_DIR,
         SANDBOX_MERRY_LOG_DIR, SANDBOX_TMPDIR, SANDBOX_XDG_CONFIG_HOME, SANDBOX_XDG_STATE_HOME,
         args_without_sandbox_bootstrap_flags, find_bwrap_in_path, os,
@@ -608,7 +461,6 @@ mod tests {
         runtime_profile_from_evidence as sandbox_runtime_profile_from_evidence,
     };
     use crate::test_support::{FakeProcessRunner, FakeProcessRunnerStep, ScriptedProvider};
-    use clap::Parser;
     use merry_core::{
         ArtifactKind, ArtifactRef, PendingToolCall, RuntimeEvent, RuntimeEventKind, ToolCallId,
         ToolCallResult, ToolCallResultStatus, ToolName,
@@ -709,70 +561,6 @@ mod tests {
     }
 
     #[test]
-    fn clap_parses_run_task() {
-        let cli = Cli::try_parse_from(["merry", "run", "fix the failing test"])
-            .expect("run args should parse");
-
-        match cli.command {
-            CliCommand::Run(args) => {
-                assert_eq!(args.task, "fix the failing test");
-                assert!(!args.events_jsonl);
-            }
-            _ => panic!("expected run command"),
-        }
-    }
-
-    #[test]
-    fn clap_parses_run_events_jsonl() {
-        let cli = Cli::try_parse_from(["merry", "run", "--events-jsonl", "fix the failing test"])
-            .expect("run args should parse");
-
-        match cli.command {
-            CliCommand::Run(args) => {
-                assert_eq!(args.task, "fix the failing test");
-                assert!(args.events_jsonl);
-            }
-            _ => panic!("expected run command"),
-        }
-    }
-
-    #[test]
-    fn clap_parses_cmd_request_defaults() {
-        let cli = Cli::try_parse_from(["merry", "cmd", "find all TypeScript tests"])
-            .expect("cmd args should parse");
-
-        match cli.command {
-            CliCommand::Cmd(args) => {
-                assert_eq!(args.request, "find all TypeScript tests");
-                assert!(!args.json);
-                assert!(!args.no_prompt);
-            }
-            _ => panic!("expected cmd command"),
-        }
-    }
-
-    #[test]
-    fn clap_parses_cmd_json_and_no_prompt() {
-        let cli = Cli::try_parse_from([
-            "merry",
-            "cmd",
-            "--json",
-            "--no-prompt",
-            "find all TypeScript tests",
-        ])
-        .expect("cmd args should parse");
-
-        match cli.command {
-            CliCommand::Cmd(args) => {
-                assert_eq!(args.request, "find all TypeScript tests");
-                assert!(args.json);
-                assert!(args.no_prompt);
-            }
-            _ => panic!("expected cmd command"),
-        }
-    }
-
-    #[test]
     fn command_plan_final_output_contract_has_described_fields() {
         let contract = super::cmd::command_plan_final_output_contract()
             .expect("command plan final output contract should build");
@@ -799,15 +587,6 @@ mod tests {
     }
 
     #[test]
-    fn cmd_usage_renders_cmd_help() {
-        let usage = super::cmd_usage();
-
-        assert!(usage.contains("Usage: merry cmd"));
-        assert!(usage.contains("--no-prompt"));
-        assert!(!usage.contains("merry debug openai"));
-    }
-
-    #[test]
     fn command_generation_prompt_treats_file_search_as_recursive_by_default() {
         let temp = tempfile::tempdir().expect("tempdir");
         let environment = super::cmd::CommandGenerationEnvironment::detect(temp.path());
@@ -819,248 +598,6 @@ mod tests {
         assert!(prompt.contains("Runtime environment:"));
         assert!(prompt.contains(super::cmd::CHECK_COMMAND_TOOL_NAME));
         assert!(prompt.contains("prefer a single shell pipeline"));
-    }
-
-    #[test]
-    fn clap_parses_debug_defaults() {
-        let cli = Cli::try_parse_from(["merry", "debug"]).expect("debug args should parse");
-
-        match cli.command {
-            CliCommand::Debug(debug) => {
-                assert!(!cli.with_sandbox);
-                assert_eq!(debug.session_id, DEFAULT_SESSION_ID);
-                assert_eq!(debug.input, DEFAULT_INPUT);
-                assert!(debug.command.is_none());
-            }
-            _ => panic!("expected debug subcommand"),
-        }
-    }
-
-    #[test]
-    fn clap_parses_debug_openai_options() {
-        let cli = Cli::try_parse_from([
-            "merry",
-            "debug",
-            "openai",
-            "--input",
-            "hello",
-            "--model",
-            "gpt-test",
-            "--max-output-tokens",
-            "16",
-            "--debug-tool-result",
-            "tool result",
-        ])
-        .expect("debug openai args should parse");
-
-        match cli.command {
-            CliCommand::Debug(debug) => match debug.command {
-                Some(DebugCommand::OpenAi(openai)) => {
-                    assert_eq!(openai.input, "hello");
-                    assert_eq!(openai.model.as_deref(), Some("gpt-test"));
-                    assert_eq!(openai.max_output_tokens, Some(16));
-                    assert_eq!(openai.debug_tool_result.as_deref(), Some("tool result"));
-                }
-                Some(
-                    DebugCommand::Shell(_)
-                    | DebugCommand::CodingLoopSmoke
-                    | DebugCommand::PermissionNetworkSmoke(_)
-                    | DebugCommand::CodingLoopLiveSmoke(_)
-                    | DebugCommand::CodingLoopTaskSmoke(_)
-                    | DebugCommand::CodingLoopTaskLiveSmoke(_)
-                    | DebugCommand::CodingLoopSubagentLiveSmoke(_),
-                ) => panic!("expected debug openai subcommand"),
-                None => panic!("expected debug openai subcommand"),
-            },
-            _ => panic!("expected debug subcommand"),
-        }
-    }
-
-    #[test]
-    fn clap_parses_debug_coding_loop_smoke() {
-        let cli = Cli::try_parse_from(["merry", "debug", "coding-loop-smoke"])
-            .expect("debug coding-loop-smoke args should parse");
-
-        match cli.command {
-            CliCommand::Debug(debug) => match debug.command {
-                Some(DebugCommand::CodingLoopSmoke) => {}
-                Some(
-                    DebugCommand::OpenAi(_)
-                    | DebugCommand::Shell(_)
-                    | DebugCommand::PermissionNetworkSmoke(_)
-                    | DebugCommand::CodingLoopLiveSmoke(_)
-                    | DebugCommand::CodingLoopTaskSmoke(_)
-                    | DebugCommand::CodingLoopTaskLiveSmoke(_)
-                    | DebugCommand::CodingLoopSubagentLiveSmoke(_),
-                )
-                | None => panic!("expected debug coding-loop-smoke subcommand"),
-            },
-            _ => panic!("expected debug subcommand"),
-        }
-    }
-
-    #[test]
-    fn clap_parses_debug_permission_network_smoke() {
-        let cli = Cli::try_parse_from([
-            "merry",
-            "debug",
-            "permission-network-smoke",
-            "--model",
-            "gpt-test",
-            "--max-output-tokens",
-            "384",
-        ])
-        .expect("debug permission-network-smoke args should parse");
-
-        match cli.command {
-            CliCommand::Debug(debug) => match debug.command {
-                Some(DebugCommand::PermissionNetworkSmoke(smoke)) => {
-                    assert_eq!(smoke.model.as_deref(), Some("gpt-test"));
-                    assert_eq!(smoke.max_output_tokens, 384);
-                }
-                Some(
-                    DebugCommand::OpenAi(_)
-                    | DebugCommand::Shell(_)
-                    | DebugCommand::CodingLoopSmoke
-                    | DebugCommand::CodingLoopLiveSmoke(_)
-                    | DebugCommand::CodingLoopTaskSmoke(_)
-                    | DebugCommand::CodingLoopTaskLiveSmoke(_)
-                    | DebugCommand::CodingLoopSubagentLiveSmoke(_),
-                )
-                | None => panic!("expected debug permission-network-smoke subcommand"),
-            },
-            _ => panic!("expected debug subcommand"),
-        }
-    }
-
-    #[test]
-    fn clap_parses_debug_coding_loop_live_smoke() {
-        let cli = Cli::try_parse_from([
-            "merry",
-            "debug",
-            "coding-loop-live-smoke",
-            "--model",
-            "gpt-test",
-            "--max-output-tokens",
-            "384",
-        ])
-        .expect("debug coding-loop-live-smoke args should parse");
-
-        match cli.command {
-            CliCommand::Debug(debug) => match debug.command {
-                Some(DebugCommand::CodingLoopLiveSmoke(live)) => {
-                    assert_eq!(live.model.as_deref(), Some("gpt-test"));
-                    assert_eq!(live.max_output_tokens, 384);
-                }
-                Some(
-                    DebugCommand::OpenAi(_)
-                    | DebugCommand::Shell(_)
-                    | DebugCommand::CodingLoopSmoke
-                    | DebugCommand::PermissionNetworkSmoke(_)
-                    | DebugCommand::CodingLoopTaskSmoke(_)
-                    | DebugCommand::CodingLoopTaskLiveSmoke(_)
-                    | DebugCommand::CodingLoopSubagentLiveSmoke(_),
-                )
-                | None => panic!("expected debug coding-loop-live-smoke subcommand"),
-            },
-            _ => panic!("expected debug subcommand"),
-        }
-    }
-
-    #[test]
-    fn clap_parses_debug_coding_loop_task_smoke() {
-        let cli = Cli::try_parse_from(["merry", "debug", "coding-loop-task-smoke"])
-            .expect("debug coding-loop-task-smoke args should parse");
-
-        match cli.command {
-            CliCommand::Debug(debug) => match debug.command {
-                Some(DebugCommand::CodingLoopTaskSmoke(task)) => {
-                    assert_eq!(task.task, CodingLoopTaskSmokeTask::StatusText);
-                }
-                Some(
-                    DebugCommand::OpenAi(_)
-                    | DebugCommand::Shell(_)
-                    | DebugCommand::CodingLoopSmoke
-                    | DebugCommand::PermissionNetworkSmoke(_)
-                    | DebugCommand::CodingLoopLiveSmoke(_)
-                    | DebugCommand::CodingLoopTaskLiveSmoke(_)
-                    | DebugCommand::CodingLoopSubagentLiveSmoke(_),
-                )
-                | None => panic!("expected debug coding-loop-task-smoke subcommand"),
-            },
-            _ => panic!("expected debug subcommand"),
-        }
-    }
-
-    #[test]
-    fn clap_parses_debug_coding_loop_task_live_smoke() {
-        let cli = Cli::try_parse_from([
-            "merry",
-            "debug",
-            "coding-loop-task-live-smoke",
-            "--task",
-            "status-text",
-            "--model",
-            "gpt-test",
-            "--max-output-tokens",
-            "384",
-        ])
-        .expect("debug coding-loop-task-live-smoke args should parse");
-
-        match cli.command {
-            CliCommand::Debug(debug) => match debug.command {
-                Some(DebugCommand::CodingLoopTaskLiveSmoke(live)) => {
-                    assert_eq!(live.task, CodingLoopTaskSmokeTask::StatusText);
-                    assert_eq!(live.model.as_deref(), Some("gpt-test"));
-                    assert_eq!(live.max_output_tokens, 384);
-                }
-                Some(
-                    DebugCommand::OpenAi(_)
-                    | DebugCommand::Shell(_)
-                    | DebugCommand::CodingLoopSmoke
-                    | DebugCommand::PermissionNetworkSmoke(_)
-                    | DebugCommand::CodingLoopLiveSmoke(_)
-                    | DebugCommand::CodingLoopTaskSmoke(_)
-                    | DebugCommand::CodingLoopSubagentLiveSmoke(_),
-                )
-                | None => panic!("expected debug coding-loop-task-live-smoke subcommand"),
-            },
-            _ => panic!("expected debug subcommand"),
-        }
-    }
-
-    #[test]
-    fn clap_parses_debug_coding_loop_subagent_live_smoke() {
-        let cli = Cli::try_parse_from([
-            "merry",
-            "debug",
-            "coding-loop-subagent-live-smoke",
-            "--model",
-            "gpt-test",
-            "--max-output-tokens",
-            "384",
-        ])
-        .expect("debug coding-loop-subagent-live-smoke args should parse");
-
-        match cli.command {
-            CliCommand::Debug(debug) => match debug.command {
-                Some(DebugCommand::CodingLoopSubagentLiveSmoke(live)) => {
-                    assert_eq!(live.model.as_deref(), Some("gpt-test"));
-                    assert_eq!(live.max_output_tokens, 384);
-                }
-                Some(
-                    DebugCommand::OpenAi(_)
-                    | DebugCommand::Shell(_)
-                    | DebugCommand::CodingLoopSmoke
-                    | DebugCommand::PermissionNetworkSmoke(_)
-                    | DebugCommand::CodingLoopLiveSmoke(_)
-                    | DebugCommand::CodingLoopTaskSmoke(_)
-                    | DebugCommand::CodingLoopTaskLiveSmoke(_),
-                )
-                | None => panic!("expected debug coding-loop-subagent-live-smoke subcommand"),
-            },
-            _ => panic!("expected debug subcommand"),
-        }
     }
 
     #[test]
@@ -1564,83 +1101,6 @@ mod tests {
     }
 
     #[test]
-    fn clap_parses_shell_argv() {
-        let cli = Cli::try_parse_from(["merry", "debug", "shell", "--", "rustc", "--version"])
-            .expect("shell args should parse");
-
-        match cli.command {
-            CliCommand::Debug(debug) => match debug.command {
-                Some(DebugCommand::Shell(shell)) => {
-                    assert!(!shell.accept_local_workspace_process_risk);
-                    assert_eq!(shell.argv, ["rustc", "--version"]);
-                }
-                _ => panic!("expected shell subcommand"),
-            },
-            _ => panic!("expected shell subcommand"),
-        }
-    }
-
-    #[test]
-    fn clap_parses_shell_local_workspace_process_risk_acceptance() {
-        let cli = Cli::try_parse_from([
-            "merry",
-            "debug",
-            "shell",
-            "--accept-local-workspace-process-risk",
-            "--",
-            "cargo",
-            "test",
-            "-p",
-            "merry-runtime",
-        ])
-        .expect("shell args should parse");
-
-        match cli.command {
-            CliCommand::Debug(debug) => match debug.command {
-                Some(DebugCommand::Shell(shell)) => {
-                    assert!(shell.accept_local_workspace_process_risk);
-                    assert_eq!(shell.argv, ["cargo", "test", "-p", "merry-runtime"]);
-                }
-                _ => panic!("expected shell subcommand"),
-            },
-            _ => panic!("expected shell subcommand"),
-        }
-    }
-
-    #[test]
-    fn clap_parses_hidden_sandbox_child_handoff() {
-        let cli = Cli::try_parse_from([
-            "merry",
-            SANDBOX_CHILD_HANDOFF_ARG,
-            SANDBOX_CHILD_HANDOFF_CLI_BWRAP_V1,
-            "debug",
-            "shell",
-            "--",
-            "rustc",
-            "--version",
-        ])
-        .expect("hidden sandbox handoff args should parse");
-
-        assert_eq!(
-            cli.sandbox_child_handoff,
-            Some(SandboxChildHandoff::CliBwrapV1)
-        );
-    }
-
-    #[test]
-    fn clap_rejects_shell_argv_without_separator() {
-        let error = Cli::try_parse_from(["merry", "debug", "shell", "rustc", "--version"])
-            .expect_err("shell argv should require `--` separator");
-
-        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
-    }
-
-    #[test]
-    fn shell_usage_contains_shell_usage() {
-        assert!(shell_usage().contains("Usage: merry debug shell [OPTIONS] -- <ARGV>..."));
-    }
-
-    #[test]
     fn shell_process_action_intent_uses_exact_cli_argv_and_empty_env() {
         let intent =
             match shell_process_action_intent(vec!["rustc".to_owned(), "--version".to_owned()]) {
@@ -1932,14 +1392,6 @@ mod tests {
                 _ => None,
             })
             .expect("shell command should resolve a tool call")
-    }
-
-    #[test]
-    fn clap_parses_root_with_sandbox_flag() {
-        let cli =
-            Cli::try_parse_from(["merry", "--with-sandbox", "debug"]).expect("args should parse");
-
-        assert!(cli.with_sandbox);
     }
 
     #[test]
@@ -2479,7 +1931,7 @@ mod tests {
         let exit_code = report_cli_exit(
             CliExit::Usage {
                 message: "--input requires a value".to_owned(),
-                usage: debug_openai_usage(),
+                usage: cli::debug_openai_usage(),
             },
             &mut stderr,
         );
