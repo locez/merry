@@ -30,6 +30,9 @@ use tokio::io::{
 };
 use tokio::process::Command as TokioCommand;
 
+#[cfg(test)]
+mod tests;
+
 pub(crate) const CHECK_COMMAND_TOOL_NAME: &str = "cmd_check_command";
 const CHECK_COMMAND_INVALID_ARGUMENTS_CODE: &str = "cmd_check_command_invalid_arguments";
 
