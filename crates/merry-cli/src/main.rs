@@ -442,15 +442,8 @@ mod tests {
     use crate::debug::openai::{
         echo_tool as debug_echo_tool, write_tool_events as write_debug_openai_tool_events,
     };
-    use crate::debug::shell::{
-        process_action_intent as shell_process_action_intent, run_to_writer as run_shell_to_writer,
-        runtime_admission as shell_runtime_admission,
-    };
     use crate::runtime_config::{automatic_compaction_config, effective_log_settings};
     use crate::runtime_events::{collect_runtime_step_events, first_pending_tool_call};
-    use crate::sandbox::{
-        ChildHandoff as SandboxChildHandoff, RuntimeProfile as SandboxRuntimeProfile, os,
-    };
     use crate::test_support::{FakeProcessRunner, FakeProcessRunnerStep, ScriptedProvider};
     use merry_core::{
         ArtifactKind, ArtifactRef, PendingToolCall, RuntimeEvent, RuntimeEventKind, ToolCallId,
@@ -464,15 +457,15 @@ mod tests {
         AcceptedLocalWorkspaceProcessAdmission, AgentLoopConfig, CheckpointId, CheckpointRef,
         CheckpointRefId, CheckpointRefManifest, CheckpointSequenceRange, CheckpointSourceKind,
         CheckpointValidationPolicy, CitationBackedCheckpoint, CompactedCheckpoint,
-        CompactedCheckpointCandidate, MAX_PROCESS_OUTPUT_LIMIT_BYTES, ProcessEnvPolicy, Runtime,
-        RuntimeProfile, StepContext, StepInput, ToolExecutionContext,
+        CompactedCheckpointCandidate, Runtime, RuntimeProfile, StepContext, StepInput,
+        ToolExecutionContext,
     };
     use merry_tool_workspace::{
         WORKSPACE_PATCH_TOOL, WorkspaceCodingLoopProfile, WorkspaceRuntimeProfileBuilderExt,
         WorkspaceToolsConfig,
     };
     use serde_json::{Map, Value};
-    use std::{ffi::OsStr, path::PathBuf, process::ExitCode, sync::Arc};
+    use std::{path::PathBuf, process::ExitCode, sync::Arc};
 
     #[test]
     fn coding_loop_subagent_live_prompt_forces_parent_delegation_and_child_patch() {
@@ -748,228 +741,6 @@ mod tests {
         assert_coding_loop_smoke_result(&runtime, &result, &smoke_root)
             .await
             .expect("coding-loop smoke result should validate");
-    }
-
-    #[test]
-    fn shell_process_action_intent_uses_exact_cli_argv_and_empty_env() {
-        let intent =
-            match shell_process_action_intent(vec!["rustc".to_owned(), "--version".to_owned()]) {
-                Ok(intent) => intent,
-                Err(_) => panic!("shell process intent should be valid"),
-            };
-
-        assert_eq!(intent.argv(), ["rustc", "--version"]);
-        assert_eq!(intent.cwd(), Some("."));
-        assert_eq!(intent.env_policy(), ProcessEnvPolicy::empty());
-        assert!(intent.stdin_text().is_none());
-        assert_eq!(intent.stdout_limit_bytes(), MAX_PROCESS_OUTPUT_LIMIT_BYTES);
-        assert_eq!(intent.stderr_limit_bytes(), MAX_PROCESS_OUTPUT_LIMIT_BYTES);
-    }
-
-    #[test]
-    fn shell_runtime_admission_requires_accept_handoff_and_exact_sandbox_markers() {
-        assert_eq!(
-            shell_runtime_admission(
-                true,
-                Some(SandboxChildHandoff::CliBwrapV1),
-                Some(SandboxRuntimeProfile::CliBwrapV1),
-                Some(OsStr::new("1")),
-                Some(OsStr::new("1")),
-            ),
-            Some(AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1())
-        );
-
-        for (accept, handoff, profile, sandbox, version) in [
-            (
-                false,
-                Some(SandboxChildHandoff::CliBwrapV1),
-                Some(SandboxRuntimeProfile::CliBwrapV1),
-                Some(os("1")),
-                Some(os("1")),
-            ),
-            (
-                true,
-                Some(SandboxChildHandoff::CliBwrapV1),
-                None,
-                Some(os("1")),
-                Some(os("1")),
-            ),
-            (true, None, None, None, None),
-            (
-                false,
-                Some(SandboxChildHandoff::CliBwrapV1),
-                None,
-                None,
-                None,
-            ),
-            (
-                true,
-                None,
-                Some(SandboxRuntimeProfile::CliBwrapV1),
-                Some(os("1")),
-                Some(os("1")),
-            ),
-            (
-                false,
-                None,
-                Some(SandboxRuntimeProfile::CliBwrapV1),
-                Some(os("1")),
-                Some(os("1")),
-            ),
-            (
-                true,
-                Some(SandboxChildHandoff::CliBwrapV1),
-                Some(SandboxRuntimeProfile::CliBwrapV1),
-                None,
-                Some(os("1")),
-            ),
-            (
-                true,
-                Some(SandboxChildHandoff::CliBwrapV1),
-                Some(SandboxRuntimeProfile::CliBwrapV1),
-                Some(os("1")),
-                None,
-            ),
-            (
-                true,
-                Some(SandboxChildHandoff::CliBwrapV1),
-                Some(SandboxRuntimeProfile::CliBwrapV1),
-                Some(os("0")),
-                Some(os("1")),
-            ),
-            (
-                true,
-                Some(SandboxChildHandoff::CliBwrapV1),
-                Some(SandboxRuntimeProfile::CliBwrapV1),
-                Some(os("1")),
-                Some(os("2")),
-            ),
-            (
-                true,
-                Some(SandboxChildHandoff::CliBwrapV1),
-                Some(SandboxRuntimeProfile::CliBwrapV1),
-                Some(os("true")),
-                Some(os("1")),
-            ),
-            (
-                true,
-                Some(SandboxChildHandoff::CliBwrapV1),
-                Some(SandboxRuntimeProfile::CliBwrapV1),
-                Some(os("1")),
-                Some(os("")),
-            ),
-        ] {
-            assert_eq!(
-                shell_runtime_admission(
-                    accept,
-                    handoff,
-                    profile,
-                    sandbox.as_deref(),
-                    version.as_deref(),
-                ),
-                None
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn shell_helper_simulated_sandbox_runs_local_workspace_effect_with_fake_runner() {
-        let intent = shell_process_action_intent(vec![
-            "cargo".to_owned(),
-            "test".to_owned(),
-            "-p".to_owned(),
-            "merry-runtime".to_owned(),
-        ])
-        .unwrap_or_else(|_| panic!("shell process intent should be valid"));
-        let admission = shell_runtime_admission(
-            true,
-            Some(SandboxChildHandoff::CliBwrapV1),
-            Some(SandboxRuntimeProfile::CliBwrapV1),
-            Some(OsStr::new("1")),
-            Some(OsStr::new("1")),
-        );
-        let runner = FakeProcessRunner::succeeding("simulated cargo success\n");
-        let mut output = Vec::new();
-
-        run_shell_to_writer(
-            intent,
-            admission,
-            Arc::new(runner.clone()),
-            false,
-            &mut output,
-        )
-        .await
-        .unwrap_or_else(|_| panic!("accepted local workspace shell command should resolve"));
-
-        assert_eq!(runner.call_count(), 1);
-        assert_eq!(
-            runner.observed_argv(),
-            vec![vec!["cargo", "test", "-p", "merry-runtime"]]
-        );
-        let text = String::from_utf8(output).expect("output should be utf-8");
-        assert_eq!(text, "simulated cargo success\n");
-    }
-
-    #[tokio::test]
-    async fn shell_helper_simulated_sandbox_marker_still_denies_forbidden_command() {
-        let intent = shell_process_action_intent(vec![
-            "sh".to_owned(),
-            "-c".to_owned(),
-            "echo bad".to_owned(),
-        ])
-        .unwrap_or_else(|_| panic!("shell process intent should be valid"));
-        let admission = shell_runtime_admission(
-            true,
-            Some(SandboxChildHandoff::CliBwrapV1),
-            Some(SandboxRuntimeProfile::CliBwrapV1),
-            Some(OsStr::new("1")),
-            Some(OsStr::new("1")),
-        );
-        let runner = FakeProcessRunner::succeeding("bad\n");
-        let mut output = Vec::new();
-
-        run_shell_to_writer(
-            intent,
-            admission,
-            Arc::new(runner.clone()),
-            true,
-            &mut output,
-        )
-        .await
-        .unwrap_or_else(|_| panic!("forbidden command should resolve as a policy denial"));
-
-        assert_eq!(runner.call_count(), 0);
-        let text = String::from_utf8(output).expect("output should be utf-8");
-        let events = parse_runtime_events(&text);
-        let resolved = resolved_tool_result(&events);
-        assert_eq!(resolved.status(), ToolCallResultStatus::Failed);
-        assert_eq!(
-            resolved
-                .diagnostic()
-                .expect("denied result should include a diagnostic")
-                .code(),
-            "action_policy_denied"
-        );
-    }
-
-    fn parse_runtime_events(text: &str) -> Vec<RuntimeEvent> {
-        assert!(
-            text.ends_with('\n'),
-            "runtime JSONL should end with newline"
-        );
-        text.lines()
-            .map(|line| serde_json::from_str::<RuntimeEvent>(line).expect("line should be JSON"))
-            .collect()
-    }
-
-    fn resolved_tool_result(events: &[RuntimeEvent]) -> &merry_core::ToolCallResult {
-        events
-            .iter()
-            .find_map(|event| match &event.kind {
-                merry_core::RuntimeEventKind::ToolCallResolved { result } => Some(result),
-                _ => None,
-            })
-            .expect("shell command should resolve a tool call")
     }
 
     #[test]

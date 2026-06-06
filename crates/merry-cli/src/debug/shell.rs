@@ -27,6 +27,9 @@ use merry_runtime::{
 use std::{env, ffi::OsStr, sync::Arc};
 use tokio::io::{AsyncWrite, AsyncWriteExt, BufWriter};
 
+#[cfg(test)]
+mod tests;
+
 const TOOL_NAME: &str = "shell_command";
 const TOOL_CALL_ID: &str = "call-shell-command";
 const STEP_INPUT: &str = "run shell command through Merry process protocol";
