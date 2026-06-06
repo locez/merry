@@ -20,6 +20,9 @@ use merry_runtime::{
 use std::sync::Arc;
 use tokio::io::{AsyncWrite, AsyncWriteExt, BufWriter};
 
+#[cfg(test)]
+mod tests;
+
 pub(crate) async fn run(
     input: &str,
     model: Option<&str>,
