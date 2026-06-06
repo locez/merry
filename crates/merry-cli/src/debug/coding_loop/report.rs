@@ -6,6 +6,9 @@ use merry_runtime::{ArtifactContent, AutomaticCompactionConfig, Runtime};
 use std::{fs, path::Path};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
+#[cfg(test)]
+mod tests;
+
 async fn write_subagent_snapshot_summary<W>(
     runtime: &Runtime,
     writer: &mut W,
