@@ -5,6 +5,7 @@ use std::{
 
 pub(crate) enum CliExit {
     Success,
+    Failure,
     Usage { message: String, usage: String },
     Clap(clap::Error),
     Unexpected(String),
@@ -13,6 +14,7 @@ pub(crate) enum CliExit {
 fn report_cli_exit<W: io::Write>(exit: CliExit, stderr: &mut W) -> ExitCode {
     match exit {
         CliExit::Success => ExitCode::SUCCESS,
+        CliExit::Failure => ExitCode::FAILURE,
         CliExit::Usage { message, usage } => {
             writeln!(stderr, "{message}\n\n{usage}").expect("failed to write usage to stderr");
             ExitCode::from(2)

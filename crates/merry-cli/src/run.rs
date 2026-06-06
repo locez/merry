@@ -26,6 +26,24 @@ use tokio::io::{AsyncWrite, AsyncWriteExt, BufWriter};
 
 const ASSISTANT_OUTPUT_ARTIFACT_PREFIX: &str = "assistant-output-";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RunExitStatus {
+    Completed,
+    Incomplete,
+}
+
+impl RunExitStatus {
+    fn from_agent_loop_result(result: &AgentLoopResult) -> Self {
+        match result.status() {
+            AgentLoopStatus::Completed => Self::Completed,
+            AgentLoopStatus::Failed { .. }
+            | AgentLoopStatus::Cancelled { .. }
+            | AgentLoopStatus::Blocked { .. }
+            | _ => Self::Incomplete,
+        }
+    }
+}
+
 #[derive(Debug, clap::Args)]
 pub(crate) struct Args {
     #[arg(long, help = "Print runtime events and final result as JSONL")]
@@ -39,7 +57,7 @@ pub(crate) async fn run(
     args: &Args,
     sandbox_child_handoff: Option<SandboxChildHandoff>,
     merry_config: Option<&MerryConfig>,
-) -> Result<(), CliError> {
+) -> Result<RunExitStatus, CliError> {
     let Some(admission) =
         coding_loop_smoke_admission_from_current_process(sandbox_child_handoff).await
     else {
@@ -111,7 +129,7 @@ pub(crate) async fn write_agent_loop_output<W>(
     input: StepInput,
     config: AgentLoopConfig,
     writer: W,
-) -> Result<(), CliError>
+) -> Result<RunExitStatus, CliError>
 where
     W: AsyncWrite + Unpin,
 {
@@ -128,7 +146,8 @@ where
         CliError::Unexpected("agent loop stream closed before producing a result".to_owned())
     })?;
     write_agent_loop_summary_to(&result, &mut writer).await?;
-    writer.flush().await.map_err(stdout_error)
+    writer.flush().await.map_err(stdout_error)?;
+    Ok(RunExitStatus::from_agent_loop_result(&result))
 }
 
 pub(crate) async fn write_agent_loop_jsonl_output<W>(
@@ -136,7 +155,7 @@ pub(crate) async fn write_agent_loop_jsonl_output<W>(
     input: StepInput,
     config: AgentLoopConfig,
     writer: W,
-) -> Result<(), CliError>
+) -> Result<RunExitStatus, CliError>
 where
     W: AsyncWrite + Unpin,
 {
@@ -153,8 +172,10 @@ where
     let result = stream.result().await.ok_or_else(|| {
         CliError::Unexpected("agent loop stream closed before producing a result".to_owned())
     })?;
+    let status = RunExitStatus::from_agent_loop_result(&result);
     write_agent_loop_result(&result, &mut writer).await?;
-    writer.flush().await.map_err(stdout_error)
+    writer.flush().await.map_err(stdout_error)?;
+    Ok(status)
 }
 
 async fn write_agent_loop_summary_to<W>(
@@ -314,13 +335,17 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{write_agent_loop_jsonl_output, write_agent_loop_output};
+    use super::{RunExitStatus, write_agent_loop_jsonl_output, write_agent_loop_output};
     use crate::coding_runtime::{
         CodingSubagentsConfig, HeadlessCodingRuntimeInput, build_headless_coding_runtime,
     };
     use crate::debug::coding_loop::coding_loop_process_call;
     use crate::testing::{FakeProcessRunner, ScriptedProvider, model_name};
-    use merry_llm::{FinishReason, ModelEvent, ModelOutput, ModelResponse};
+    use merry_core::ToolName;
+    use merry_llm::{
+        FinishReason, ModelEvent, ModelOutput, ModelResponse, ModelToolCall, ModelToolCallId,
+        ToolArguments,
+    };
     use merry_runtime::DEFAULT_CODING_AGENT_MAX_MODEL_TURNS;
     use merry_runtime::{
         AcceptedLocalWorkspaceProcessAdmission, AgentLoopConfig, ProcessRunner, StepInput,
@@ -394,7 +419,7 @@ mod tests {
         .expect("runtime should build");
 
         let mut output = Vec::new();
-        write_agent_loop_output(
+        let status = write_agent_loop_output(
             &runtime,
             StepInput::user_text("finish").expect("valid input"),
             AgentLoopConfig::new(DEFAULT_CODING_AGENT_MAX_MODEL_TURNS).expect("valid config"),
@@ -403,6 +428,7 @@ mod tests {
         .await
         .expect("run output should write");
 
+        assert_eq!(status, RunExitStatus::Completed);
         let text = String::from_utf8(output).expect("output should be utf-8");
         assert_eq!(text, "done from run\n");
         assert!(!text.contains("\"type\":\"session_started\""));
@@ -458,7 +484,7 @@ mod tests {
         .expect("runtime should build");
 
         let mut output = Vec::new();
-        write_agent_loop_output(
+        let status = write_agent_loop_output(
             &runtime,
             StepInput::user_text("ping baidu.com").expect("valid input"),
             AgentLoopConfig::new(DEFAULT_CODING_AGENT_MAX_MODEL_TURNS).expect("valid config"),
@@ -467,6 +493,7 @@ mod tests {
         .await
         .expect("run output should write");
 
+        assert_eq!(status, RunExitStatus::Completed);
         let text = String::from_utf8(output).expect("output should be utf-8");
         assert_eq!(
             text,
@@ -511,7 +538,7 @@ mod tests {
         .expect("runtime should build");
 
         let mut output = FlushCountingWriter::default();
-        write_agent_loop_jsonl_output(
+        let status = write_agent_loop_jsonl_output(
             &runtime,
             StepInput::user_text("finish").expect("valid input"),
             AgentLoopConfig::new(DEFAULT_CODING_AGENT_MAX_MODEL_TURNS).expect("valid config"),
@@ -520,6 +547,7 @@ mod tests {
         .await
         .expect("run output should write");
 
+        assert_eq!(status, RunExitStatus::Completed);
         assert!(
             output.flushes > 1,
             "JSONL mode should flush as events arrive"
@@ -529,5 +557,60 @@ mod tests {
         assert!(text.contains("\"type\":\"agent_loop_result\""));
         assert!(text.contains("\"status\":\"completed\""));
         assert!(text.contains("done from run"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn writer_returns_incomplete_when_agent_loop_blocks() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("mkdir workspace");
+        let provider = ScriptedProvider::new(vec![vec![Ok(ModelEvent::Completed {
+            response: ModelResponse::new(
+                vec![ModelOutput::tool_call(ModelToolCall::new(
+                    ModelToolCallId::new("call-read").expect("valid call id"),
+                    ToolName::new("workspace_read_file").expect("valid tool name"),
+                    ToolArguments::try_from(serde_json::json!({"path": "README.md"}))
+                        .expect("valid args"),
+                ))],
+                FinishReason::ToolCalls,
+                None,
+            ),
+        })]]);
+        let runner: Arc<dyn ProcessRunner> = Arc::new(FakeProcessRunner::succeeding(""));
+        let permissioned_factory = Arc::new(
+            merry_runtime::StaticPermissionedProcessRunnerFactory::new(Arc::clone(&runner)),
+        );
+        let runtime = build_headless_coding_runtime(HeadlessCodingRuntimeInput {
+            session_id: "run-blocked-writer-test",
+            root: &workspace,
+            admission: AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
+            provider: Arc::new(provider),
+            model: model_name(),
+            runner,
+            permissioned_process_runner_factory: permissioned_factory,
+            allow_hidden_workspace_paths: false,
+            automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
+            retry_policy: None,
+            context_compaction: None,
+            approval_review: None,
+            skill_roots: Vec::new(),
+            subagents: CodingSubagentsConfig::default(),
+        })
+        .expect("runtime should build");
+
+        let mut output = Vec::new();
+        let status = write_agent_loop_output(
+            &runtime,
+            StepInput::user_text("read README").expect("valid input"),
+            AgentLoopConfig::new(1).expect("valid config"),
+            &mut output,
+        )
+        .await
+        .expect("run output should write");
+
+        assert_eq!(status, RunExitStatus::Incomplete);
+        let text = String::from_utf8(output).expect("output should be utf-8");
+        assert!(text.contains("status: Blocked"));
+        assert!(text.contains("MaxModelTurnsReached"));
     }
 }
