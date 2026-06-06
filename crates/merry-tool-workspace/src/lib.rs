@@ -18,6 +18,7 @@
 use merry_core::{
     ErrorInfo, PendingToolCall, ToolCallResultStatus, ToolInputSchema, ToolName, ToolSpec,
 };
+use merry_llm::ModelRetryPolicy;
 use merry_runtime::{
     AcceptedLocalWorkspaceProcessAdmission, ActionExecutionEvidence, ActionProposal,
     ActionProposalError, ActionProposalEvidence, PermissionAdmissionError,
@@ -502,7 +503,9 @@ impl WorkspaceCodingLoopProfile {
         self,
         mut builder: RuntimeProfileBuilder,
     ) -> Result<RuntimeProfileBuilder, WorkspaceCodingLoopProfileError> {
-        builder = builder.progress_commentary(true);
+        builder = builder
+            .model_retry_policy(ModelRetryPolicy::coding_agent_default())
+            .progress_commentary(true);
 
         builder = builder.initial_context_summary(
             PROJECT_CAPABILITY_CONTEXT_ID,

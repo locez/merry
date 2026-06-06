@@ -84,6 +84,15 @@ format = "json"
 provider = "openai-compatible"
 model = "gpt-4.1-mini"
 
+[providers.retry]
+# Provider-neutral retry policy for transient model setup or stream failures.
+enabled = true
+max_attempts = 6
+initial_delay_ms = 1000
+max_delay_ms = 120000
+max_elapsed_ms = 300000
+jitter = true
+
 [models.context_compaction]
 # Optional model override. Omit this table to use [providers.default] for
 # checkpoint compaction. If provider is omitted, [providers.default].provider is

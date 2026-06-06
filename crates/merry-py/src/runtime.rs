@@ -7,7 +7,7 @@ use merry_core::{
 };
 use merry_llm::{
     FinishReason, ModelCapabilities, ModelError, ModelEvent, ModelEventStream, ModelName,
-    ModelOutput, ModelProvider, ModelProviderFuture, ModelRequest, ModelResponse,
+    ModelOutput, ModelProvider, ModelProviderFuture, ModelRequest, ModelResponse, ModelRetryPolicy,
     ModelStreamContext, ModelToolCall, ModelToolCallId, ProviderErrorKind, ToolArguments,
     testing::FakeModelProvider,
 };
@@ -17,7 +17,10 @@ use merry_runtime::{
     RegisteredTool, Runtime, RuntimeBuilder, StepContext, StepInput, ToolExecutionContext,
     ToolExecutionError, ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture, ToolRunner,
 };
-use pyo3::{prelude::*, types::PyDict};
+use pyo3::{
+    prelude::*,
+    types::{PyAny, PyDict},
+};
 use schemars::Schema;
 use serde_json::{Map, Value, json};
 use std::{
@@ -25,6 +28,7 @@ use std::{
     sync::{Arc, Mutex, mpsc},
     task::{Context, Poll},
     thread,
+    time::Duration,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -111,6 +115,7 @@ enum RuntimeScenario {
     OpenAiCompatible {
         config: OpenAiProviderConfig,
         model: ModelName,
+        retry_policy: Option<ModelRetryPolicy>,
     },
     FakeResponse {
         final_text: String,
@@ -206,6 +211,7 @@ impl PyRuntime {
         api_key: String,
         model: String,
         base_url: Option<String>,
+        retry: Option<Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
         let mut config = OpenAiProviderConfig::new(&api_key).map_err(|source| {
             error::config_message_to_py(
@@ -232,7 +238,12 @@ impl PyRuntime {
         })?;
         let session_id =
             SessionId::new("python-sdk-openai").expect("static session id must be valid");
-        let scenario = RuntimeScenario::OpenAiCompatible { config, model };
+        let retry_policy = py_retry_policy(retry.as_ref())?;
+        let scenario = RuntimeScenario::OpenAiCompatible {
+            config,
+            model,
+            retry_policy,
+        };
         let tools = Vec::new();
         let runtime = build_runtime_from(session_id.clone(), &scenario, &tools)
             .map_err(error::runtime_error_to_py)?;
@@ -628,11 +639,86 @@ fn build_runtime_from(
     builder.build()
 }
 
+fn py_retry_policy(retry: Option<&Bound<'_, PyDict>>) -> PyResult<Option<ModelRetryPolicy>> {
+    let Some(retry) = retry else {
+        return Ok(None);
+    };
+    let defaults = ModelRetryPolicy::coding_agent_default();
+    let policy = ModelRetryPolicy::new(
+        py_optional_bool(retry, "enabled")?.unwrap_or(true),
+        py_optional_usize(retry, "max_attempts")?.unwrap_or(defaults.max_attempts()),
+        Duration::from_millis(
+            py_optional_u64(retry, "initial_delay_ms")?
+                .unwrap_or_else(|| duration_millis_u64(defaults.initial_delay())),
+        ),
+        Duration::from_millis(
+            py_optional_u64(retry, "max_delay_ms")?
+                .unwrap_or_else(|| duration_millis_u64(defaults.max_delay())),
+        ),
+        Duration::from_millis(
+            py_optional_u64(retry, "max_elapsed_ms")?
+                .unwrap_or_else(|| duration_millis_u64(defaults.max_elapsed())),
+        ),
+        py_optional_bool(retry, "jitter")?.unwrap_or_else(|| defaults.jitter()),
+    )
+    .map_err(|source| {
+        error::config_message_to_py(
+            "config.retry_invalid",
+            &source.to_string(),
+            Some("Pass positive retry values where max_delay and max_elapsed cover the initial delay."),
+        )
+    })?;
+    Ok(Some(policy))
+}
+
+fn py_optional_bool(dict: &Bound<'_, PyDict>, key: &'static str) -> PyResult<Option<bool>> {
+    py_optional_retry_value(dict, key, |value| value.extract::<bool>())
+}
+
+fn py_optional_usize(dict: &Bound<'_, PyDict>, key: &'static str) -> PyResult<Option<usize>> {
+    py_optional_retry_value(dict, key, |value| value.extract::<usize>())
+}
+
+fn py_optional_u64(dict: &Bound<'_, PyDict>, key: &'static str) -> PyResult<Option<u64>> {
+    py_optional_retry_value(dict, key, |value| value.extract::<u64>())
+}
+
+fn py_optional_retry_value<T>(
+    dict: &Bound<'_, PyDict>,
+    key: &'static str,
+    extract: impl FnOnce(&Bound<'_, PyAny>) -> PyResult<T>,
+) -> PyResult<Option<T>> {
+    let Some(value) = dict.get_item(key)? else {
+        return Ok(None);
+    };
+    extract(&value).map(Some).map_err(|source| {
+        error::config_message_to_py(
+            "config.retry_invalid",
+            &format!("retry.{key} has an invalid value: {source}"),
+            Some("Use ProviderRetryConfig or pass retry=None to disable SDK-level provider retry."),
+        )
+    })
+}
+
+fn duration_millis_u64(duration: Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
+}
+
 fn configure_scenario(builder: RuntimeBuilder, scenario: &RuntimeScenario) -> RuntimeBuilder {
     match scenario {
         RuntimeScenario::Empty => builder,
-        RuntimeScenario::OpenAiCompatible { config, model } => {
-            builder.model_provider(Arc::new(OpenAiProvider::new(config.clone())), model.clone())
+        RuntimeScenario::OpenAiCompatible {
+            config,
+            model,
+            retry_policy,
+        } => {
+            let builder = builder
+                .model_provider(Arc::new(OpenAiProvider::new(config.clone())), model.clone());
+            if let Some(policy) = retry_policy {
+                builder.model_retry_policy(*policy)
+            } else {
+                builder
+            }
         }
         RuntimeScenario::FakeResponse { final_text } => builder.model_provider(
             Arc::new(fake_response_provider(final_text)),

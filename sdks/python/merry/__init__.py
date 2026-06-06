@@ -16,6 +16,7 @@ from ._errors import (
 )
 from ._runtime import (
     OpenAICompatibleProvider,
+    ProviderRetryConfig,
     RunResult,
     Runtime,
     RuntimeConfig,
@@ -42,6 +43,7 @@ __all__ = [
     "MerryTurnError",
     "NativeMerryError",
     "OpenAICompatibleProvider",
+    "ProviderRetryConfig",
     "RunResult",
     "Runtime",
     "RuntimeConfig",

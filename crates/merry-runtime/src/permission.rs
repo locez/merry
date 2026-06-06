@@ -1198,7 +1198,7 @@ fn is_cancelled_permission_model_error(error: &ModelError) -> bool {
 
 fn model_error_parts(error: ModelError) -> (ProviderErrorKind, String) {
     match error {
-        ModelError::Provider { kind, message } => (kind, message),
+        ModelError::Provider { kind, message, .. } => (kind, message),
         ModelError::InvalidRequest { reason } => (ProviderErrorKind::InvalidRequest, reason),
         ModelError::Cancelled => (ProviderErrorKind::Cancelled, "cancelled".to_owned()),
     }

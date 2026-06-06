@@ -65,11 +65,14 @@ use merry_core::{
 };
 use merry_llm::{
     FinishReason, GenerationConfig, ModelError, ModelEvent, ModelName, ModelOutput, ModelProvider,
-    ModelStreamContext, ModelToolCall, ProviderErrorKind,
+    ModelRetryEvent, ModelRetryPolicy, ModelStreamContext, ModelToolCall, ProviderErrorKind,
+    RetryModelStreamContext, RetryingModelProvider,
 };
 use std::{
     collections::BTreeMap,
+    future::Future,
     num::NonZeroUsize,
+    pin::Pin,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -1745,6 +1748,7 @@ pub struct RuntimeBuilder {
     session_id: SessionId,
     event_buffer_size: NonZeroUsize,
     model_configs: RuntimeModelConfigs,
+    model_retry_policy: ModelRetryPolicy,
     automatic_compaction: AutomaticCompactionConfig,
     capabilities: RuntimeCapabilities,
     progress_commentary: bool,
@@ -1774,6 +1778,7 @@ impl RuntimeBuilder {
             event_buffer_size: NonZeroUsize::new(DEFAULT_EVENT_BUFFER_SIZE)
                 .expect("default event buffer size is non-zero"),
             model_configs: RuntimeModelConfigs::default(),
+            model_retry_policy: ModelRetryPolicy::default(),
             automatic_compaction: AutomaticCompactionConfig::default(),
             capabilities: crate::RuntimeCapabilities::default(),
             progress_commentary: false,
@@ -1815,8 +1820,12 @@ impl RuntimeBuilder {
     /// in runtime state.
     #[must_use]
     pub fn model_provider(mut self, provider: Arc<dyn ModelProvider>, model: ModelName) -> Self {
-        self.model_configs
-            .insert(RuntimeModelRole::Primary, provider, model);
+        self.model_configs.insert(
+            RuntimeModelRole::Primary,
+            provider,
+            model,
+            self.model_retry_policy,
+        );
         self
     }
 
@@ -1832,7 +1841,17 @@ impl RuntimeBuilder {
         provider: Arc<dyn ModelProvider>,
         model: ModelName,
     ) -> Self {
-        self.model_configs.insert(role, provider, model);
+        self.model_configs
+            .insert(role, provider, model, self.model_retry_policy);
+        self
+    }
+
+    /// Sets the retry policy applied to configured and subsequently configured
+    /// model providers.
+    #[must_use]
+    pub fn model_retry_policy(mut self, policy: ModelRetryPolicy) -> Self {
+        self.model_retry_policy = policy;
+        self.model_configs.set_retry_policy(policy);
         self
     }
 
@@ -1863,6 +1882,9 @@ impl RuntimeBuilder {
     pub fn with_profile(mut self, profile: RuntimeProfile) -> Result<Self, RuntimeError> {
         let parts = profile.into_parts();
         self.capabilities = parts.capabilities;
+        if let Some(policy) = parts.model_retry_policy {
+            self = self.model_retry_policy(policy);
+        }
         self.progress_commentary = parts.progress_commentary;
         for (id, text) in parts.initial_context_summaries {
             self = self.initial_context_summary(&id, &text);
@@ -2531,6 +2553,7 @@ async fn run_provider_step(
     }
 
     let stream_context = ModelStreamContext::new(token.clone());
+    let (retry_event_sender, mut retry_event_receiver) = mpsc::channel(8);
     trace_provider_request(
         inner.session_id.as_str(),
         provider.name().as_str(),
@@ -2542,15 +2565,29 @@ async fn run_provider_step(
         category = "provider_setup_start",
         "runtime provider stream setup started"
     );
-    let stream_result = tokio::select! {
-        biased;
-        () = token.cancelled() => {
+    let stream_result = wait_for_retrying_stream_setup(
+        inner,
+        sender,
+        token,
+        stream_model_with_retry_policy(
+            provider,
+            provider_config.retry_policy(),
+            request,
+            stream_context,
+            Some(retry_event_sender),
+        ),
+        &mut retry_event_receiver,
+    )
+    .await;
+
+    let stream_result = match stream_result {
+        Some(result) => result,
+        None => {
             clear_current_activated_memories(inner).await;
             trace_provider_step_cancelled();
             let _ = send_cancelled_event(inner, sender).await;
             return;
         }
-        result = provider.stream_model(request, stream_context) => result,
     };
 
     let mut stream = match stream_result {
@@ -2587,14 +2624,22 @@ async fn run_provider_step(
     let mut streamed_tool_call: Option<PendingToolCall> = None;
 
     loop {
-        let item = tokio::select! {
-            biased;
-            () = token.cancelled() => {
+        let item = wait_for_model_stream_item(
+            inner,
+            sender,
+            token,
+            &mut stream,
+            &mut retry_event_receiver,
+        )
+        .await;
+
+        let item = match item {
+            Some(item) => item,
+            None => {
                 trace_provider_step_cancelled();
                 let _ = send_cancelled_event(inner, sender).await;
                 return;
             }
-            item = stream.next() => item,
         };
 
         match item {
@@ -2968,13 +3013,18 @@ async fn compact_context_once_inner(
             message: error.to_string(),
         })?;
     let stream_context = ModelStreamContext::new(token.clone());
-    let stream = provider_config
-        .provider()
-        .stream_model(request, stream_context)
-        .await
-        .map_err(|error| RuntimeError::CompactionModelSetup {
-            message: error.to_string(),
-        })?;
+    let provider = provider_config.provider();
+    let stream = stream_model_with_retry_policy(
+        provider,
+        provider_config.retry_policy(),
+        request,
+        stream_context,
+        None,
+    )
+    .await
+    .map_err(|error| RuntimeError::CompactionModelSetup {
+        message: error.to_string(),
+    })?;
     let candidate_json = collect_compaction_candidate_json(stream, token).await?;
 
     let mut session = inner.session.lock().await;
@@ -3345,6 +3395,98 @@ async fn send_bridge_tool_call_requested_event(
     true
 }
 
+async fn wait_for_retrying_stream_setup<F>(
+    inner: &RuntimeInner,
+    sender: &mpsc::Sender<RuntimeEvent>,
+    token: &CancellationToken,
+    setup: F,
+    retry_events: &mut mpsc::Receiver<ModelRetryEvent>,
+) -> Option<Result<merry_llm::ModelEventStream, ModelError>>
+where
+    F: Future<Output = Result<merry_llm::ModelEventStream, ModelError>>,
+{
+    tokio::pin!(setup);
+    loop {
+        tokio::select! {
+            biased;
+            () = token.cancelled() => return None,
+            Some(event) = retry_events.recv() => {
+                if !send_model_retry_event(inner, sender, token, event).await {
+                    return None;
+                }
+            }
+            result = &mut setup => return Some(result),
+        }
+    }
+}
+
+async fn stream_model_with_retry_policy(
+    provider: Arc<dyn ModelProvider>,
+    retry_policy: ModelRetryPolicy,
+    request: merry_llm::ModelRequest,
+    stream_context: ModelStreamContext,
+    retry_events: Option<mpsc::Sender<ModelRetryEvent>>,
+) -> Result<merry_llm::ModelEventStream, ModelError> {
+    if retry_policy.can_retry() {
+        let provider = RetryingModelProvider::new(provider, retry_policy);
+        let mut context = RetryModelStreamContext::new(stream_context);
+        if let Some(events) = retry_events {
+            context = context.with_retry_events(events);
+        }
+        provider
+            .stream_model_with_retry_events(request, context)
+            .await
+    } else {
+        provider.stream_model(request, stream_context).await
+    }
+}
+
+async fn wait_for_model_stream_item(
+    inner: &RuntimeInner,
+    sender: &mpsc::Sender<RuntimeEvent>,
+    token: &CancellationToken,
+    stream: &mut Pin<Box<dyn futures_core::Stream<Item = Result<ModelEvent, ModelError>> + Send>>,
+    retry_events: &mut mpsc::Receiver<ModelRetryEvent>,
+) -> Option<Option<Result<ModelEvent, ModelError>>> {
+    loop {
+        tokio::select! {
+            biased;
+            () = token.cancelled() => return None,
+            Some(event) = retry_events.recv() => {
+                if !send_model_retry_event(inner, sender, token, event).await {
+                    return None;
+                }
+            }
+            item = stream.next() => return Some(item),
+        }
+    }
+}
+
+async fn send_model_retry_event(
+    inner: &RuntimeInner,
+    sender: &mpsc::Sender<RuntimeEvent>,
+    token: &CancellationToken,
+    event: ModelRetryEvent,
+) -> bool {
+    if token.is_cancelled() {
+        return false;
+    }
+
+    let Some(permit) = reserve_normal_event_slot(sender, token).await else {
+        return false;
+    };
+    let kind = runtime_event_kind_from_model_retry_event(event);
+    let event = {
+        let mut session = inner.session.lock().await;
+        if token.is_cancelled() {
+            return false;
+        }
+        session.record_model_retry_event(kind)
+    };
+    permit.send(event);
+    true
+}
+
 async fn send_failed_event(
     inner: &RuntimeInner,
     sender: &mpsc::Sender<RuntimeEvent>,
@@ -3458,6 +3600,56 @@ fn tool_call_conversion_diagnostic(error: CoreError) -> ErrorInfo {
 
 fn is_cancelled_model_error(error: &ModelError) -> bool {
     error.kind() == ProviderErrorKind::Cancelled
+}
+
+fn runtime_event_kind_from_model_retry_event(event: ModelRetryEvent) -> RuntimeEventKind {
+    match event {
+        ModelRetryEvent::AttemptStarted {
+            attempt,
+            max_attempts,
+        } => RuntimeEventKind::ModelRetryAttemptStarted {
+            attempt,
+            max_attempts,
+        },
+        ModelRetryEvent::RetryScheduled {
+            attempt,
+            next_attempt,
+            max_attempts,
+            delay,
+            error_kind,
+        } => RuntimeEventKind::ModelRetryScheduled {
+            attempt,
+            next_attempt,
+            max_attempts,
+            delay_ms: duration_millis_u64(delay),
+            error_kind: provider_error_kind_label(error_kind).to_owned(),
+        },
+        ModelRetryEvent::RetryExhausted {
+            attempts_run,
+            max_attempts,
+            error_kind,
+        } => RuntimeEventKind::ModelRetryExhausted {
+            attempts_run,
+            max_attempts,
+            error_kind: provider_error_kind_label(error_kind).to_owned(),
+        },
+    }
+}
+
+fn duration_millis_u64(duration: std::time::Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+fn provider_error_kind_label(kind: ProviderErrorKind) -> &'static str {
+    match kind {
+        ProviderErrorKind::InvalidRequest => "invalid_request",
+        ProviderErrorKind::Cancelled => "cancelled",
+        ProviderErrorKind::Authentication => "authentication",
+        ProviderErrorKind::RateLimited => "rate_limited",
+        ProviderErrorKind::Unavailable => "unavailable",
+        ProviderErrorKind::Protocol => "protocol",
+        ProviderErrorKind::Other => "other",
+    }
 }
 
 fn diagnostic_from_model_error(error: ModelError) -> ErrorInfo {
@@ -3661,8 +3853,8 @@ mod tests {
     use merry_llm::{
         FinishReason, GenerationConfig, ModelCapabilities, ModelContent, ModelError, ModelEvent,
         ModelEventStream, ModelMessage, ModelMessageRole, ModelName, ModelOutput, ModelProvider,
-        ModelProviderFuture, ModelRequest, ModelResponse, ModelStreamContext, ModelToolCall,
-        ModelToolCallId, ProviderErrorKind, ToolArguments,
+        ModelProviderFuture, ModelRequest, ModelResponse, ModelRetryPolicy, ModelStreamContext,
+        ModelToolCall, ModelToolCallId, ProviderErrorKind, ToolArguments,
     };
     use schemars::Schema;
     use serde_json::json;
@@ -3736,7 +3928,12 @@ mod tests {
 
     fn model_configs_with_primary(provider: RecordingModelProvider) -> RuntimeModelConfigs {
         let mut configs = RuntimeModelConfigs::default();
-        configs.insert(RuntimeModelRole::Primary, Arc::new(provider), model_name());
+        configs.insert(
+            RuntimeModelRole::Primary,
+            Arc::new(provider),
+            model_name(),
+            ModelRetryPolicy::default(),
+        );
         configs
     }
 
@@ -3815,6 +4012,9 @@ mod tests {
             .map(|event| match event.kind {
                 RuntimeEventKind::SessionStarted => "SessionStarted",
                 RuntimeEventKind::StepStarted => "StepStarted",
+                RuntimeEventKind::ModelRetryAttemptStarted { .. } => "ModelRetryAttemptStarted",
+                RuntimeEventKind::ModelRetryScheduled { .. } => "ModelRetryScheduled",
+                RuntimeEventKind::ModelRetryExhausted { .. } => "ModelRetryExhausted",
                 RuntimeEventKind::StepCompleted => "StepCompleted",
                 RuntimeEventKind::Cancelled { .. } => "Cancelled",
                 RuntimeEventKind::Failed { .. } => "Failed",
@@ -6085,6 +6285,80 @@ mod tests {
         assert_eq!(source.call_count(), 1);
         assert_eq!(provider.recorded_requests().len(), 0);
         assert_activated_memory_projection_cleared(&runtime).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn model_retry_events_are_emitted_and_failed_attempt_output_is_not_recorded() {
+        let provider = RecordingModelProvider::with_script(vec![
+            ScriptedModelProviderResponse::Stream(vec![
+                Ok(ModelEvent::Started),
+                Ok(ModelEvent::OutputTextDelta {
+                    delta: "partial attempt".to_owned(),
+                }),
+                Err(ModelError::provider(
+                    ProviderErrorKind::Unavailable,
+                    "stream interrupted",
+                )),
+            ]),
+            ScriptedModelProviderResponse::Stream(vec![
+                Ok(ModelEvent::Started),
+                Ok(ModelEvent::OutputTextDelta {
+                    delta: "successful attempt".to_owned(),
+                }),
+                Ok(completed_event_with(
+                    vec![ModelOutput::text("successful attempt")],
+                    FinishReason::Stop,
+                )),
+            ]),
+        ]);
+        let runtime = Runtime::builder(session_id("runtime-model-retry-events"))
+            .model_retry_policy(
+                ModelRetryPolicy::new(
+                    true,
+                    3,
+                    std::time::Duration::from_millis(1),
+                    std::time::Duration::from_millis(1),
+                    std::time::Duration::from_millis(100),
+                    false,
+                )
+                .expect("valid retry policy"),
+            )
+            .model_provider(Arc::new(provider.clone()), model_name())
+            .build()
+            .expect("runtime should build");
+
+        let events = collect_step(
+            &runtime,
+            "Retry provider stream.",
+            crate::StepContext::default(),
+        )
+        .await;
+
+        assert_eq!(provider.recorded_requests().len(), 2);
+        assert_eq!(
+            event_kind_names(&events),
+            [
+                "SessionStarted",
+                "StepStarted",
+                "ModelRetryAttemptStarted",
+                "ModelRetryScheduled",
+                "ModelRetryAttemptStarted",
+                "ArtifactRecorded",
+                "StepCompleted",
+            ]
+        );
+        let artifact_id = events
+            .iter()
+            .find_map(|event| match &event.kind {
+                RuntimeEventKind::ArtifactRecorded { artifact } => Some(artifact.id().clone()),
+                _ => None,
+            })
+            .expect("assistant output artifact should be recorded");
+        let content = runtime
+            .read_artifact_content(&artifact_id)
+            .await
+            .expect("artifact should be readable");
+        assert_eq!(content.as_text(), Some("successful attempt"));
     }
 
     #[tokio::test(flavor = "current_thread")]

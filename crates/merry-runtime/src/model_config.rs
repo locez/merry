@@ -4,7 +4,7 @@
 //! provider step uses only the primary role; review roles are stored for later
 //! gates without affecting provider-visible request shapes.
 
-use merry_llm::{ModelName, ModelProvider};
+use merry_llm::{ModelName, ModelProvider, ModelRetryPolicy};
 use std::{collections::BTreeMap, sync::Arc};
 
 /// Runtime model role for a configured provider/model pair.
@@ -38,11 +38,20 @@ impl RuntimeModelRole {
 pub(crate) struct ModelProviderConfig {
     provider: Arc<dyn ModelProvider>,
     model: ModelName,
+    retry_policy: ModelRetryPolicy,
 }
 
 impl ModelProviderConfig {
-    pub(crate) fn new(provider: Arc<dyn ModelProvider>, model: ModelName) -> Self {
-        Self { provider, model }
+    pub(crate) fn new(
+        provider: Arc<dyn ModelProvider>,
+        model: ModelName,
+        retry_policy: ModelRetryPolicy,
+    ) -> Self {
+        Self {
+            provider,
+            model,
+            retry_policy,
+        }
     }
 
     pub(crate) fn provider(&self) -> Arc<dyn ModelProvider> {
@@ -51,6 +60,14 @@ impl ModelProviderConfig {
 
     pub(crate) fn model(&self) -> &ModelName {
         &self.model
+    }
+
+    pub(crate) fn retry_policy(&self) -> ModelRetryPolicy {
+        self.retry_policy
+    }
+
+    pub(crate) fn set_retry_policy(&mut self, retry_policy: ModelRetryPolicy) {
+        self.retry_policy = retry_policy;
     }
 }
 
@@ -66,9 +83,12 @@ impl RuntimeModelConfigs {
         role: RuntimeModelRole,
         provider: Arc<dyn ModelProvider>,
         model: ModelName,
+        retry_policy: ModelRetryPolicy,
     ) {
-        self.configs
-            .insert(role, ModelProviderConfig::new(provider, model));
+        self.configs.insert(
+            role,
+            ModelProviderConfig::new(provider, model, retry_policy),
+        );
     }
 
     pub(crate) fn get(&self, role: RuntimeModelRole) -> Option<ModelProviderConfig> {
@@ -85,6 +105,12 @@ impl RuntimeModelConfigs {
 
     pub(crate) fn contains_role(&self, role: RuntimeModelRole) -> bool {
         self.configs.contains_key(&role)
+    }
+
+    pub(crate) fn set_retry_policy(&mut self, retry_policy: ModelRetryPolicy) {
+        for config in self.configs.values_mut() {
+            config.set_retry_policy(retry_policy);
+        }
     }
 
     #[cfg(test)]

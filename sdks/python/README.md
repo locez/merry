@@ -57,10 +57,21 @@ runtime = merry.Runtime(
             api_key="...",
             model="...",
             base_url="https://api.example.test/v1",
+            retry=merry.ProviderRetryConfig(
+                max_attempts=6,
+                initial_delay_ms=1000,
+                max_delay_ms=120000,
+                max_elapsed_ms=300000,
+                jitter=True,
+            ),
         )
     )
 )
 ```
+
+Python SDK retry is opt-in. When enabled, Merry retries transient provider
+setup or stream failures by replaying the whole model turn; partial failed
+attempt output is not exposed as runtime state.
 
 ## Bridge Tool Example
 

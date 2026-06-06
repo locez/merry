@@ -287,6 +287,8 @@ pub enum LedgerFactKind {
     ArtifactRecorded,
     /// Step start has been recorded.
     StepStarted,
+    /// Provider-neutral model retry status has been recorded.
+    ModelRetry,
     /// Step completion has been recorded.
     StepCompleted,
     /// A model-requested tool call has been recorded as pending.
