@@ -5,6 +5,10 @@ use super::events::{
     send_tool_call_pending_event, stream_model_with_retry_policy, trace_provider_step_cancelled,
     trace_provider_step_failed, wait_for_model_stream_item, wait_for_retrying_stream_setup,
 };
+use super::memory_activation::{
+    ActivationProjectionGuard, clear_current_activated_memories,
+    memory_activation_seed_from_step_input,
+};
 use super::model_output::{
     DIAGNOSTIC_MODEL_TOOL_CALL_MIXED_OUTPUT, diagnostic_from_model_error, is_cancelled_model_error,
     pending_tool_call_from_model, pending_tool_call_from_outputs, record_streamed_tool_call,
@@ -15,11 +19,7 @@ use super::provider_request::{
     step_request_compile_diagnostic, step_request_inputs_from_session, trace_provider_request,
     trace_provider_request_budget_unavailable,
 };
-use super::{
-    ActivationProjectionGuard, DIAGNOSTIC_TOOL_CALL_RESULT_REQUIRED, RuntimeInner,
-    clear_current_activated_memories, diagnostic_from_text, has_unresolved_pending_tool_calls,
-    memory_activation_seed_from_step_input,
-};
+use super::{DIAGNOSTIC_TOOL_CALL_RESULT_REQUIRED, RuntimeInner, diagnostic_from_text};
 use crate::{
     CheckpointDecision, memory::MemoryActivationContext, model_config::ModelProviderConfig,
     step::StepInput,
@@ -29,6 +29,11 @@ use merry_llm::{FinishReason, GenerationConfig, ModelEvent, ModelOutput, ModelSt
 use std::sync::{Arc, atomic::Ordering};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+
+async fn has_unresolved_pending_tool_calls(inner: &RuntimeInner) -> bool {
+    let session = inner.session.lock().await;
+    session.has_pending_tool_calls()
+}
 
 pub(super) async fn run_provider_step(
     inner: &Arc<RuntimeInner>,

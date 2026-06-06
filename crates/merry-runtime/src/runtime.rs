@@ -20,10 +20,7 @@ use crate::{
     },
     event_stream::ActiveStepPermit,
     judgment::{JudgmentContext, JudgmentError, JudgmentRecord, JudgmentRequest, JudgmentSource},
-    memory::{
-        MemoryActivationSeed, MemoryActivationSource, MemoryActivationSourceKind, MemoryScope,
-        StoredMemoryActivationSource,
-    },
+    memory::{MemoryActivationSource, StoredMemoryActivationSource},
     model_config::RuntimeModelConfigs,
     permission::{
         ModelBackedPermissionAdmissionSource, PermissionAdmissionContext,
@@ -52,7 +49,7 @@ use std::{
     num::NonZeroUsize,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64},
     },
 };
 use tokio::sync::{Mutex, mpsc};
@@ -62,6 +59,7 @@ use tracing::Instrument;
 
 mod compaction;
 mod events;
+mod memory_activation;
 mod model_output;
 mod process_execution;
 mod provider_request;
@@ -73,6 +71,8 @@ use self::events::{
     send_cancelled_event, send_cancelled_if_requested, send_normal_event,
     stream_model_with_retry_policy,
 };
+#[cfg(test)]
+use self::memory_activation::memory_activation_seed_from_step_input;
 use self::process_execution::execute_admitted_process_action;
 #[cfg(test)]
 use self::provider_request::request_context_budget;
@@ -1728,101 +1728,6 @@ async fn run_step(
         provider_config,
     )
     .await;
-}
-
-async fn clear_current_activated_memories(inner: &RuntimeInner) {
-    let mut session = inner.session.lock().await;
-    session.replace_activated_memories(Vec::new());
-    inner.memory_projection_epoch.fetch_add(1, Ordering::AcqRel);
-}
-
-async fn has_unresolved_pending_tool_calls(inner: &RuntimeInner) -> bool {
-    let session = inner.session.lock().await;
-    session.has_pending_tool_calls()
-}
-
-/// Clears pre-commit memory activation if the producer is aborted before the
-/// provider has returned an event stream.
-struct ActivationProjectionGuard {
-    inner: Arc<RuntimeInner>,
-    token: CancellationToken,
-    epoch: u64,
-    armed: bool,
-}
-
-impl ActivationProjectionGuard {
-    fn new(inner: Arc<RuntimeInner>, token: CancellationToken, epoch: u64) -> Self {
-        Self {
-            inner,
-            token,
-            epoch,
-            armed: true,
-        }
-    }
-
-    fn disarm(&mut self) {
-        self.armed = false;
-    }
-}
-
-impl Drop for ActivationProjectionGuard {
-    fn drop(&mut self) {
-        if !self.armed || !self.token.is_cancelled() {
-            return;
-        }
-
-        if self.inner.memory_projection_epoch.load(Ordering::Acquire) != self.epoch {
-            return;
-        }
-
-        if clear_activated_memories_if_epoch_matches(&self.inner, self.epoch) {
-            return;
-        }
-
-        let inner = Arc::clone(&self.inner);
-        let epoch = self.epoch;
-        tokio::spawn(async move {
-            if inner.memory_projection_epoch.load(Ordering::Acquire) != epoch {
-                return;
-            }
-
-            let mut session = inner.session.lock().await;
-            if inner
-                .memory_projection_epoch
-                .compare_exchange(epoch, epoch + 1, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                session.replace_activated_memories(Vec::new());
-            }
-        });
-    }
-}
-
-fn clear_activated_memories_if_epoch_matches(inner: &RuntimeInner, epoch: u64) -> bool {
-    let Ok(mut session) = inner.session.try_lock() else {
-        return false;
-    };
-
-    if inner
-        .memory_projection_epoch
-        .compare_exchange(epoch, epoch + 1, Ordering::AcqRel, Ordering::Acquire)
-        .is_ok()
-    {
-        session.replace_activated_memories(Vec::new());
-    }
-
-    true
-}
-
-fn memory_activation_seed_from_step_input(
-    input: &StepInput,
-) -> Result<MemoryActivationSeed, crate::memory::MemoryError> {
-    MemoryActivationSeed::new(
-        input.text(),
-        vec![MemoryScope::Session, MemoryScope::Task, MemoryScope::Step],
-        MemoryActivationSourceKind::UserQuery,
-        "step input",
-    )
 }
 
 fn diagnostic_from_text(code: &'static str, message: impl AsRef<str>) -> ErrorInfo {
