@@ -14,13 +14,16 @@ use crate::runtime_config::{
 use crate::runtime_events::write_runtime_event;
 use crate::sandbox::ChildHandoff as SandboxChildHandoff;
 use futures_util::StreamExt;
-use merry_core::{ArtifactId, RuntimeEvent, RuntimeEventKind};
+use merry_core::{
+    ArtifactId, ErrorInfo, PendingToolCall, RuntimeEvent, RuntimeEventKind, ToolCallResultStatus,
+};
 use merry_llm::ModelName;
 use merry_provider_openai::OpenAiProvider;
 use merry_runtime::{
-    AgentLoopConfig, AgentLoopResult, AgentLoopStatus, Runtime, RuntimeModelRole, StepContext,
-    StepInput,
+    AgentLoopBlockedReason, AgentLoopConfig, AgentLoopResult, AgentLoopStatus, Runtime,
+    RuntimeModelRole, StepContext, StepInput,
 };
+use serde_json::{Map, Value};
 use std::{env, sync::Arc};
 use tokio::io::{AsyncWrite, AsyncWriteExt, BufWriter};
 
@@ -139,8 +142,7 @@ where
         .map_err(unexpected)?;
     let mut pending_commentary = None;
     while let Some(event) = stream.next().await {
-        write_progress_commentary_event(runtime, &event, &mut pending_commentary, &mut writer)
-            .await?;
+        write_human_progress_event(runtime, &event, &mut pending_commentary, &mut writer).await?;
     }
     let result = stream.result().await.ok_or_else(|| {
         CliError::Unexpected("agent loop stream closed before producing a result".to_owned())
@@ -200,15 +202,75 @@ where
             .map_err(stdout_error)?;
         writer.write_all(b"\n").await.map_err(stdout_error)?;
     } else {
-        writer
-            .write_all(format!("status: {:?}\n", result.status()).as_bytes())
-            .await
-            .map_err(stdout_error)?;
+        write_agent_loop_status_summary_to(result, writer).await?;
     }
     Ok(())
 }
 
-async fn write_progress_commentary_event<W>(
+async fn write_agent_loop_status_summary_to<W>(
+    result: &AgentLoopResult,
+    writer: &mut W,
+) -> Result<(), CliError>
+where
+    W: AsyncWrite + Unpin,
+{
+    let summary = match result.status() {
+        AgentLoopStatus::Completed => "status: completed\n".to_owned(),
+        AgentLoopStatus::Failed { diagnostic } => format_diagnostic_status("failed", diagnostic),
+        AgentLoopStatus::Cancelled { diagnostic } => {
+            format_diagnostic_status("cancelled", diagnostic)
+        }
+        AgentLoopStatus::Blocked { reason } => {
+            format!(
+                "status: blocked\nreason: {}\n",
+                format_blocked_reason(reason)
+            )
+        }
+        _ => format!("status: {:?}\n", result.status()),
+    };
+    writer
+        .write_all(summary.as_bytes())
+        .await
+        .map_err(stdout_error)
+}
+
+fn format_diagnostic_status(status: &str, diagnostic: &ErrorInfo) -> String {
+    format!(
+        "status: {status}\nerror: {}: {}\n",
+        diagnostic.code(),
+        diagnostic.message()
+    )
+}
+
+fn format_blocked_reason(reason: &AgentLoopBlockedReason) -> String {
+    match reason {
+        AgentLoopBlockedReason::MaxModelTurnsReached { max_model_turns } => {
+            format!("max model turns reached ({max_model_turns})")
+        }
+        AgentLoopBlockedReason::MultiplePendingToolCalls { pending_count } => {
+            format!("multiple pending tool calls ({pending_count})")
+        }
+        AgentLoopBlockedReason::StepCompletedWithPendingToolCall { pending_count } => {
+            format!("step completed with pending tool calls ({pending_count})")
+        }
+        AgentLoopBlockedReason::StepEndedWithoutTerminalEvent => {
+            "step ended without a terminal event".to_owned()
+        }
+        AgentLoopBlockedReason::FinalOutputToolNotCalled => {
+            "final output tool was not called".to_owned()
+        }
+        AgentLoopBlockedReason::BridgeToolCallRequested { call_id, tool_name } => {
+            format!(
+                "bridge tool call requested: {} ({})",
+                tool_name.as_str(),
+                call_id.as_str()
+            )
+        }
+        _ => format!("{reason:?}"),
+    }
+}
+
+async fn write_human_progress_event<W>(
     runtime: &Runtime,
     event: &RuntimeEvent,
     pending_commentary: &mut Option<ArtifactId>,
@@ -226,11 +288,56 @@ where
         {
             *pending_commentary = Some(artifact.id().clone());
         }
-        RuntimeEventKind::ToolCallPending { .. }
-        | RuntimeEventKind::BridgeToolCallRequested { .. } => {
+        RuntimeEventKind::ToolCallPending { call } => {
             if let Some(artifact_id) = pending_commentary.take() {
                 write_progress_commentary_artifact(runtime, &artifact_id, writer).await?;
             }
+            write_human_progress_line(writer, format_tool_call_progress("tool", call)).await?;
+        }
+        RuntimeEventKind::BridgeToolCallRequested { call } => {
+            if let Some(artifact_id) = pending_commentary.take() {
+                write_progress_commentary_artifact(runtime, &artifact_id, writer).await?;
+            }
+            write_human_progress_line(writer, format_tool_call_progress("bridge tool", call))
+                .await?;
+        }
+        RuntimeEventKind::ToolCallResolved { result }
+            if result.status() == ToolCallResultStatus::Failed =>
+        {
+            let line = result.diagnostic().map_or_else(
+                || "tool failed".to_owned(),
+                |diagnostic| {
+                    format!(
+                        "tool failed: {}: {}",
+                        diagnostic.code(),
+                        diagnostic.message()
+                    )
+                },
+            );
+            write_human_progress_line(writer, line).await?;
+        }
+        RuntimeEventKind::ModelRetryScheduled {
+            attempt,
+            next_attempt,
+            max_attempts,
+            delay_ms,
+            error_kind,
+        } => {
+            let line = format!(
+                "model retry: attempt {attempt}/{max_attempts} failed with {error_kind}; retrying attempt {next_attempt}/{max_attempts} in {}",
+                format_delay_ms(*delay_ms)
+            );
+            write_human_progress_line(writer, line).await?;
+        }
+        RuntimeEventKind::ModelRetryExhausted {
+            attempts_run,
+            max_attempts,
+            error_kind,
+        } => {
+            let line = format!(
+                "model retry exhausted: {attempts_run}/{max_attempts} attempts failed with {error_kind}"
+            );
+            write_human_progress_line(writer, line).await?;
         }
         RuntimeEventKind::ArtifactRecorded { .. }
         | RuntimeEventKind::StepCompleted
@@ -242,6 +349,190 @@ where
     }
 
     Ok(())
+}
+
+async fn write_human_progress_line<W>(writer: &mut W, line: String) -> Result<(), CliError>
+where
+    W: AsyncWrite + Unpin,
+{
+    let line = line.trim();
+    if line.is_empty() {
+        return Ok(());
+    }
+
+    writer
+        .write_all(line.as_bytes())
+        .await
+        .map_err(stdout_error)?;
+    writer.write_all(b"\n\n").await.map_err(stdout_error)?;
+    writer.flush().await.map_err(stdout_error)
+}
+
+fn format_tool_call_progress(prefix: &str, call: &PendingToolCall) -> String {
+    let name = call.name().as_str();
+    let detail = format_tool_call_detail(name, call.arguments().as_object());
+    if name == "request_permissions" {
+        return join_progress_parts("permission: request", detail.as_deref());
+    }
+    join_progress_parts(&format!("{prefix}: {name}"), detail.as_deref())
+}
+
+fn join_progress_parts(prefix: &str, detail: Option<&str>) -> String {
+    match detail {
+        Some(detail) if !detail.is_empty() => format!("{prefix} {detail}"),
+        _ => prefix.to_owned(),
+    }
+}
+
+fn format_tool_call_detail(name: &str, arguments: &Map<String, Value>) -> Option<String> {
+    match name {
+        "run_process" => format_process_call_detail(arguments),
+        "request_permissions" => format_permission_call_detail(arguments),
+        _ => format_generic_tool_call_detail(arguments),
+    }
+}
+
+fn format_process_call_detail(arguments: &Map<String, Value>) -> Option<String> {
+    let argv = arguments.get("argv")?.as_array()?;
+    let mut detail = format_argv(argv)?;
+    if let Some(cwd) = arguments
+        .get("cwd")
+        .and_then(Value::as_str)
+        .filter(|cwd| !cwd.is_empty())
+    {
+        detail.push_str(" (cwd: ");
+        detail.push_str(&compact_inline(cwd, 80));
+        detail.push(')');
+    }
+    Some(detail)
+}
+
+fn format_permission_call_detail(arguments: &Map<String, Value>) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(requested) = arguments.get("requested").and_then(Value::as_object) {
+        if let Some(network) = requested.get("network").and_then(Value::as_bool) {
+            parts.push(format!("network={network}"));
+        }
+        if let Some(paths) = requested.get("paths").and_then(Value::as_array) {
+            let paths = format_permission_paths(paths);
+            if !paths.is_empty() {
+                parts.push(format!("paths={paths}"));
+            }
+        }
+    }
+    if let Some(argv) = arguments
+        .get("for_action")
+        .and_then(Value::as_object)
+        .and_then(|action| action.get("argv"))
+        .and_then(Value::as_array)
+        .and_then(|argv| format_argv(argv))
+    {
+        parts.push(format!("for: {argv}"));
+    }
+    non_empty_parts(parts)
+}
+
+fn format_permission_paths(paths: &[Value]) -> String {
+    let mut formatted = paths
+        .iter()
+        .take(3)
+        .filter_map(|path| {
+            let object = path.as_object()?;
+            let path = object.get("path")?.as_str()?;
+            let access = object.get("access").and_then(Value::as_str);
+            Some(match access {
+                Some(access) => {
+                    format!("{}:{access}", compact_inline(path, 80))
+                }
+                None => compact_inline(path, 80),
+            })
+        })
+        .collect::<Vec<_>>();
+    if paths.len() > formatted.len() {
+        formatted.push(format!("+{}", paths.len() - formatted.len()));
+    }
+    formatted.join(",")
+}
+
+fn format_generic_tool_call_detail(arguments: &Map<String, Value>) -> Option<String> {
+    let mut parts = Vec::new();
+    for key in ["path", "cwd", "query", "pattern", "target", "command"] {
+        if let Some(value) = arguments.get(key).and_then(format_inline_value) {
+            parts.push(format!("{key}={value}"));
+        }
+    }
+    if parts.is_empty() && !arguments.is_empty() {
+        parts.push(format!("args={}", arguments.len()));
+    }
+    non_empty_parts(parts)
+}
+
+fn format_argv(argv: &[Value]) -> Option<String> {
+    let words = argv
+        .iter()
+        .filter_map(Value::as_str)
+        .map(compact_shell_word)
+        .collect::<Vec<_>>();
+    non_empty_parts(words)
+}
+
+fn format_inline_value(value: &Value) -> Option<String> {
+    match value {
+        Value::String(value) => Some(compact_shell_word(value)),
+        Value::Bool(value) => Some(value.to_string()),
+        Value::Number(value) => Some(value.to_string()),
+        Value::Array(values) => Some(format!("[{} items]", values.len())),
+        Value::Object(values) => Some(format!("{{{} fields}}", values.len())),
+        Value::Null => None,
+    }
+}
+
+fn non_empty_parts(parts: Vec<String>) -> Option<String> {
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" "))
+    }
+}
+
+fn compact_shell_word(value: &str) -> String {
+    let value = compact_inline(value, 120);
+    if value.is_empty() {
+        return "\"\"".to_owned();
+    }
+    if value.bytes().all(is_safe_shell_word_byte) {
+        value
+    } else {
+        format!("{value:?}")
+    }
+}
+
+fn compact_inline(value: &str, max_chars: usize) -> String {
+    let mut output = value
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(max_chars)
+        .collect::<String>();
+    if value.chars().count() > max_chars {
+        output.push_str("...");
+    }
+    output
+}
+
+fn is_safe_shell_word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'_' | b'-' | b'.' | b'/' | b':' | b'=' | b'@' | b'%' | b'+'
+        )
+}
+
+fn format_delay_ms(delay_ms: u64) -> String {
+    if delay_ms >= 1000 && delay_ms % 1000 == 0 {
+        format!("{}s", delay_ms / 1000)
+    } else {
+        format!("{delay_ms}ms")
+    }
 }
 
 async fn write_progress_commentary_artifact<W>(
@@ -497,7 +788,7 @@ mod tests {
         let text = String::from_utf8(output).expect("output should be utf-8");
         assert_eq!(
             text,
-            "我先解析 baidu.com 的 DNS。\n\nbaidu.com resolves to 110.242.74.102\n"
+            "我先解析 baidu.com 的 DNS。\n\ntool: run_process getent hosts baidu.com\n\nbaidu.com resolves to 110.242.74.102\n"
         );
         assert!(!text.contains("\"type\":\"tool_call_pending\""));
         assert!(!text.contains("\"type\":\"agent_loop_result\""));
@@ -610,7 +901,8 @@ mod tests {
 
         assert_eq!(status, RunExitStatus::Incomplete);
         let text = String::from_utf8(output).expect("output should be utf-8");
-        assert!(text.contains("status: Blocked"));
-        assert!(text.contains("MaxModelTurnsReached"));
+        assert!(text.contains("tool: workspace_read_file path=README.md"));
+        assert!(text.contains("status: blocked"));
+        assert!(text.contains("reason: max model turns reached (1)"));
     }
 }
