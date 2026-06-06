@@ -45,6 +45,7 @@ mod compaction;
 mod events;
 mod memory_activation;
 mod model_output;
+mod permission_execution;
 mod process_execution;
 mod provider_request;
 mod provider_step;
