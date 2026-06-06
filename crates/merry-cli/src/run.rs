@@ -7,6 +7,7 @@ use crate::config::MerryConfig;
 use crate::provider_config::{
     OpenAiRuntimeConfig, openai_role_provider_config, openai_runtime_config,
 };
+use crate::runtime_events::write_runtime_event;
 use crate::sandbox::ChildHandoff as SandboxChildHandoff;
 use crate::{
     CliError, automatic_compaction_config, debug_openai_usage_error, stdout_error,
@@ -142,7 +143,7 @@ where
         .map_err(unexpected)?;
 
     while let Some(event) = stream.next().await {
-        crate::write_runtime_event(&event, &mut writer).await?;
+        write_runtime_event(&event, &mut writer).await?;
         writer.flush().await.map_err(stdout_error)?;
     }
 

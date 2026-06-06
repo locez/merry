@@ -1,5 +1,6 @@
 use crate::config::MerryConfig;
-use crate::{CliError, configured_runtime_builder, usage_error, write_runtime_step_events};
+use crate::runtime_events::write_runtime_step_events;
+use crate::{CliError, configured_runtime_builder, usage_error};
 use merry_core::SessionId;
 use merry_runtime::{StepContext, StepInput};
 
