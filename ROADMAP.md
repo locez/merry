@@ -19,11 +19,21 @@ remains the primary benchmark because it forces exact evidence,
 artifact-backed tool output, patch/write behavior, test loops, cancellation,
 and prompt/context stability to work together.
 
-The current P0 is now **Product Session Runner**: extract the live/debug
-coding-loop assembly into one reusable session-running path that can be
-consumed by a future thin `merry run` command, a TUI, and SDK surfaces. A
-full-screen TUI should not own runtime semantics; it should display and control
-the same event/result/session contract once that contract is product-shaped.
+The current P0 is now **Headless Product Hardening**. The previous "Product
+Session Runner" wording has been retired: `Runtime` already owns execution and
+`RuntimeBuilder::with_profile` now owns profile-driven construction. `merry
+run` and `merry cmd` are thin headless consumers of that runtime/profile path.
+The next gap is product correctness around those entrypoints: predictable exit
+status, human-readable failed/blocked/cancelled output, config/docs guidance,
+and a small smoke checklist before any full-screen TUI work.
+
+### Roadmap Correction: 2026-06-06
+
+`SessionRunner` / `RuntimeFactory` was removed from the near-term plan because
+it would have rewrapped `Runtime` without adding resume semantics. The accepted
+direction is to complete the runtime builder/profile surface first and harden
+the existing headless consumers on top of it. This correction is recorded here
+as the tracked planning source of truth.
 
 The target loop is:
 
@@ -115,11 +125,13 @@ The OpenAI provider target is the Responses API only. The provider request path 
   registration, examples, README, and deterministic tests.
 - Parallel subagent runtime foundation, control tools, CLI coding-loop wiring,
   subagent live smoke, and parent-visible subagent result reporting.
-- Profile-backed action sandbox foundation: `RuntimeProfile` now carries
-  network and path-rule capability data, global XDG config parses trusted
-  `permissions` rules, `BwrapProcessRunner` executes process actions through
-  an inner Linux `bwrap` backend, CLI outer sandbox applies global path guards,
-  and coding-loop/debug shell smokes use the same action runner path.
+- Profile-backed action sandbox and profile-driven runtime construction
+  foundation: low-level network/path grants live in `RuntimeCapabilities`,
+  `RuntimeProfile` applies complete builder-owned runtime shape through
+  `RuntimeBuilder::with_profile`, global XDG config parses trusted
+  `permissions` rules, `BwrapProcessRunner` executes process actions through an
+  inner Linux `bwrap` backend, CLI outer sandbox applies global path guards, and
+  coding-loop/debug shell/headless entrypoints use the same action runner path.
 
 ### Recently Completed
 
@@ -276,27 +288,41 @@ The OpenAI provider target is the Responses API only. The provider request path 
   can enable subagent tools through config and has a live smoke that delegates
   fixture editing to a child. This remains a bounded runtime feature, not a
   general multi-agent product UI.
+- Runtime Builder Completion is implemented. The rejected `SessionRunner`,
+  `RuntimeFactory`, `RuntimeBuilderInstaller`, and `CodingRuntimeFactory`
+  abstractions are documented in
+  `specs/2026-06-05-runtime-builder-completion.md`; `RuntimeCapabilities`
+  owns low-level network/path grants, `RuntimeProfile` owns a complete
+  construction-time shape, and `RuntimeBuilder::with_profile(profile)` is the
+  canonical application point. Debug coding-loop commands now consume the
+  profile path instead of owning generic runtime assembly.
+- Headless `merry run` and `merry cmd` first slices are implemented as product
+  entrypoints. `merry run` builds the coding-agent profile path and streams
+  progress commentary plus final output; `merry cmd` builds a read-only command
+  generation profile, returns structured `CommandPlan` output, and only executes
+  a generated shell command after explicit interactive confirmation.
 
 ### Active
 
-- P0: turn the proven coding-loop/debug paths into a reusable Product Session
-  Runner. The loop now has a deterministic fake-provider/fake-runner slice, a
-  deterministic real `bwrap` process-runner smoke, a configurable disposable
-  task smoke, a user-verified live-provider smoke command, end-to-end
-  config-backed log verification, Python SDK embedding, structured final
-  output, subagent wiring, and profile-backed action sandboxing. The next gap
-  is not another debug smoke; it is one reusable session-running contract for
-  CLI/TUI/SDK consumers.
+- P0: harden the headless product entrypoints now that runtime/profile
+  construction is no longer debug-owned. The loop has deterministic
+  fake-provider/fake-runner coverage, real `bwrap` smoke coverage, configurable
+  disposable task smokes, a user-verified live-provider lane, config-backed log
+  verification, Python SDK embedding, structured final output, subagent wiring,
+  profile-backed action sandboxing, and thin `merry run` / `merry cmd`
+  consumers. The next gap is not another abstraction or debug smoke; it is
+  product-grade CLI behavior around these entrypoints.
 - P0: keep the Runtime Coding Loop Harness executable against a disposable
   fixture repository while moving assembly out of ad hoc debug command paths.
   The default lane uses fake provider/fake runner for deterministic
   `cargo test`; the deterministic `bwrap` lane is an explicit ignored smoke;
   the live OpenAI-compatible lane is explicit and ignored and has passed in the
   user's trusted configured environment.
-- P0: keep context fidelity as a runner requirement, not a standalone planning
+- P0: keep context fidelity as a headless entrypoint requirement, not a standalone planning
   detour. Stable prefix/context-budget/checkpoint scaffolding exists; dynamic
   runtime facts should be projected only through explicit, compact,
-  evidence-backed context policy when the session runner needs them.
+  evidence-backed context policy when `merry run`, `merry cmd`, SDK, or a future
+  TUI needs them.
 - Supporting constraint: shell/process profile work remains subordinate to that
   coding-loop proof. Structured argv remains the narrow typed lane; richer
   shell syntax must run through a real interpreter inside explicit permission
@@ -307,7 +333,7 @@ The OpenAI provider target is the Responses API only. The provider request path 
 - Keep safety tiered but subordinate to the executable acceptance target: read-only inspection automatic, constrained patch opt-in, verification in `bwrap`, high-risk or unknown process actions denied or escalated.
 - Keep CLI shell/debug commands as smoke/debug, not the design owner. The main
   contract is the runtime library, registered tool/profile set, action sandbox,
-  event stream, and product session runner.
+  event stream, and headless product entrypoints.
 - Keep judgment advisory. Do not wire model-backed judgment to live provider, public events, ledger facts, or authorization until a concrete coding-loop acceptance test needs reviewer evidence.
 - Keep default verification deterministic and offline. Live provider and
   host/sandbox process smokes are explicit opt-in host-shell checks with local
@@ -317,30 +343,27 @@ The OpenAI provider target is the Responses API only. The provider request path 
 
 ### Next Active
 
-- Implement the Product Session Runner first slice before building a TUI or
-  treating `merry run` as the product. The runner should be a reusable
-  CLI/library layer that accepts a task, loads config/provider/profile,
-  constructs the coding runtime/tool set, starts the runtime agent loop,
-  streams product-relevant events, handles blocked/failed/completed/final-output
-  outcomes, and returns a compact session result.
-- The first consumer can be a very thin headless CLI command if useful, but it
-  is not the architectural owner. `merry run "..."` is a validation wrapper for
-  the runner; a future TUI should consume the same runner/event/result contract
-  rather than duplicating debug smoke assembly.
-- Acceptance: deterministic tests cover runner construction from fake provider
-  and fake process runner, event streaming order, bridge/final-output outcomes
-  where applicable, profile/action-sandbox settings passed through to the
-  runner, and clear failed/blocked diagnostics without leaking raw prompt,
-  source, process stdout/stderr, provider wire payloads, or secrets. An explicit
-  real `bwrap` smoke may remain ignored/manual.
-- Keep dynamic context assembly scoped to what the runner actually needs. Large
-  or exact payloads remain artifacts; ordinary ledger observations and tool
+- Harden `merry run` terminal behavior first. Completed runs should exit 0;
+  failed, blocked, and cancelled runs should exit non-zero; plain output should
+  avoid Rust `Debug` status dumps; `--events-jsonl` should keep its
+  machine-readable final `agent_loop_result`; and diagnostics must remain
+  payload-safe without leaking raw prompt, source, process stdout/stderr,
+  provider wire payloads, or secrets.
+- Then update the public headless usage docs around `merry run`, `merry cmd`,
+  XDG config, sandbox expectations, provider config, and common failure modes.
+  `examples/config.toml` remains the tracked copy-and-edit config example.
+- Maintain a small smoke checklist for the product entrypoints: deterministic
+  fake-provider tests for terminal status/output, an explicit real `bwrap`
+  smoke where useful, and manual live-provider checks with local credentials.
+- Keep dynamic context assembly scoped to what headless entrypoints actually
+  need. Large or exact payloads remain artifacts; ordinary ledger observations and tool
   result summaries remain runtime state unless an explicit context-policy path
   selects compact evidence-backed facts.
 - Out of scope for this next slice: full-screen TUI, approval/session UX,
-  model-written checkpoint summaries, provider conversation state,
-  `previous_response_id`, live OpenAI judgment, new broad shell authorization,
-  arbitrary absolute-path editing, and broader process permissions.
+  session resume, model-written checkpoint summaries, provider conversation
+  state, `previous_response_id`, live OpenAI judgment, new broad shell
+  authorization, arbitrary absolute-path editing, and broader process
+  permissions.
 - Roadmap priority changes require explicit user approval or a tracked change
   request. Agents may update completion/status evidence, but must not promote
   policy/profile/classifier work into `Next Active` on their own.
@@ -617,7 +640,7 @@ Tasks:
 - Add a fixture repository purpose-built for the loop, with a tiny failing behavior or deterministic text replacement target. Deterministic and real `bwrap` disposable fixtures now exist for smoke/task lanes.
 - Add a harness command or integration test wrapper that builds a runtime with the coding-loop tool set. Deterministic integration tests, real bwrap CLI smokes, task smokes, and live-provider smokes now exist.
 - Add a structured shell/process boundary or equivalent reusable admission layer for file listing, literal search, exact source slice retrieval, and local verification, with process output reduced into artifact-backed ledger/evidence. The structured boundary and inner action sandbox first slice are now implemented.
-- Register the runtime-owned default coding-loop tools from a reusable construction path, not by ad hoc CLI-only assembly. This remains the main gap to close in the Product Session Runner slice.
+- Register the runtime-owned default coding-loop tools from a reusable construction path, not by ad hoc CLI-only assembly. The RuntimeProfile / `RuntimeBuilder::with_profile` path now covers this construction shape; remaining work is product hardening in headless consumers.
 - Use `workspace_patch_file` or its successor for the edit step and keep shell side effects out of the edit path. The first deterministic slice now does this.
 - Add deterministic fake-provider/fake-runner tests for the full multi-step loop. The first slice now covers inspect, exact read, patch, verification, continuation, and final answer.
 - Keep XDG TOML config guidance for live provider credentials and base URL.
@@ -629,7 +652,7 @@ Non-goals:
 - Do not add arbitrary shell parsing, pipelines, inherited env, stdin, network tools, or broad filesystem writes.
 - Do not make live provider behavior a default test dependency.
 - Do not make risk taxonomy or reviewer models the milestone output unless they unblock this loop.
-- Do not build graph memory, skill VM, a full-screen TUI, or a general multi-agent product UI in this milestone. Python SDK and bounded subagent runtime foundations now exist, but they remain consumers/supporting runtime features rather than the product session runner itself.
+- Do not build graph memory, skill VM, a full-screen TUI, or a general multi-agent product UI in this milestone. Python SDK and bounded subagent runtime foundations now exist, but they remain consumers/supporting runtime features rather than the headless product entrypoints themselves.
 
 Verification:
 

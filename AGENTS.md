@@ -52,8 +52,8 @@ When a roadmap change affects priority or milestone ordering:
   priority change.
 - Keep supporting architecture work subordinate to a runnable or testable
   capability unless the user explicitly asked for planning/design only.
-- Record the reason in `DECISIONS.md` when the change corrects drift or changes
-  the near-term sequence.
+- Record the reason in `ROADMAP.md` or a tracked spec when the change corrects
+  drift or changes the near-term sequence.
 - If the only known next step is more taxonomy, policy, classifier, profile, or
   roadmap work, stop and ask whether that should replace the current executable
   acceptance target.
