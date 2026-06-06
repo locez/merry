@@ -1,8 +1,4 @@
-use super::{
-    DEFAULT_AUTO_COMPACTION_MAX_CARRIED_PRIOR_REFS, DEFAULT_AUTO_COMPACTION_MAX_OUTPUT_BYTES,
-    DEFAULT_AUTO_COMPACTION_MAX_REF_EXCERPT_BYTES, DEFAULT_AUTO_COMPACTION_RETAINED_RAW_TAIL_ITEMS,
-    DEFAULT_AUTO_COMPACTION_TARGET_OUTPUT_TOKENS, RuntimeInner, stream_model_with_retry_policy,
-};
+use super::{RuntimeInner, stream_model_with_retry_policy};
 use crate::{
     CitationCompactionPolicy, CompactionError, CompactionOutcome, RuntimeError, RuntimeModelRole,
     compaction::compile_citation_compaction_model_request,
@@ -10,6 +6,15 @@ use crate::{
 use futures_util::StreamExt;
 use merry_llm::{FinishReason, ModelEvent, ModelOutput, ModelStreamContext};
 use tokio_util::sync::CancellationToken;
+
+// MVP automatic compaction policy. Retaining two history items usually keeps
+// the latest completed user/assistant pair raw; it is a policy default, not a
+// semantic invariant.
+const DEFAULT_AUTO_COMPACTION_TARGET_OUTPUT_TOKENS: u64 = 192;
+const DEFAULT_AUTO_COMPACTION_MAX_OUTPUT_BYTES: usize = 8192;
+const DEFAULT_AUTO_COMPACTION_RETAINED_RAW_TAIL_ITEMS: usize = 2;
+const DEFAULT_AUTO_COMPACTION_MAX_REF_EXCERPT_BYTES: usize = 1200;
+const DEFAULT_AUTO_COMPACTION_MAX_CARRIED_PRIOR_REFS: usize = 16;
 
 pub(super) fn default_automatic_compaction_policy() -> CitationCompactionPolicy {
     CitationCompactionPolicy::new(
