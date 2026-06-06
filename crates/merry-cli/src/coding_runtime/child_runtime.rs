@@ -73,7 +73,6 @@ impl ChildRuntimeFactory for CodingLoopChildRuntimeFactory {
             workspace_tools_config(
                 coding_loop_workspace_roots(&self.root, &self.skill_roots),
                 self.allow_hidden_workspace_paths,
-                false,
                 None,
             )
             .map_err(|_| merry_runtime::RuntimeError::InvalidStepInput {

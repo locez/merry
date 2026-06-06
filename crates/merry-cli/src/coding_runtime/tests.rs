@@ -1,6 +1,6 @@
 use super::{
-    CodingLoopRuntimeOptions, HeadlessCodingRuntimeInput, build_coding_loop_runtime,
-    build_headless_coding_runtime,
+    CodingLoopRuntimeOptions, CodingSubagentsConfig, HeadlessCodingRuntimeInput,
+    build_coding_loop_runtime, build_headless_coding_runtime,
 };
 use crate::debug::coding_loop::coding_loop_workspace_call;
 use crate::runtime_events::{collect_runtime_step_events, first_pending_tool_call};
@@ -49,7 +49,8 @@ async fn projects_skill_metadata_without_body() {
             context_compaction: None,
             permissioned_process_runner_factory: None,
             skill_roots: vec![skill_root.clone()],
-            subagents: crate::config::SubagentsConfig::default(),
+            subagents: CodingSubagentsConfig::default(),
+            workspace_tool_limits: None,
         },
     )
     .expect("runtime should build");
@@ -114,7 +115,7 @@ async fn headless_runtime_uses_coding_agent_profile() {
         context_compaction: None,
         approval_review: None,
         skill_roots: Vec::new(),
-        subagents: crate::config::SubagentsConfig::default(),
+        subagents: CodingSubagentsConfig::default(),
     })
     .expect("headless coding runtime should build");
 
@@ -180,7 +181,8 @@ async fn includes_skill_roots_in_workspace_read_tools() {
             context_compaction: None,
             permissioned_process_runner_factory: None,
             skill_roots: vec![skill_root.clone()],
-            subagents: crate::config::SubagentsConfig::default(),
+            subagents: CodingSubagentsConfig::default(),
+            workspace_tool_limits: None,
         },
     )
     .expect("runtime should build");
@@ -226,7 +228,8 @@ async fn allows_missing_default_skill_root() {
             context_compaction: None,
             permissioned_process_runner_factory: None,
             skill_roots: vec![missing_skill_root],
-            subagents: crate::config::SubagentsConfig::default(),
+            subagents: CodingSubagentsConfig::default(),
+            workspace_tool_limits: None,
         },
     )
     .expect("missing default skill root should not block runtime");
@@ -272,7 +275,8 @@ async fn hides_subagent_tools_by_default() {
             context_compaction: None,
             permissioned_process_runner_factory: None,
             skill_roots: Vec::new(),
-            subagents: crate::config::SubagentsConfig::default(),
+            subagents: CodingSubagentsConfig::default(),
+            workspace_tool_limits: None,
         },
     )
     .expect("runtime should build");
@@ -320,9 +324,10 @@ async fn exposes_subagent_tools_when_enabled() {
             context_compaction: None,
             permissioned_process_runner_factory: None,
             skill_roots: Vec::new(),
-            subagents: crate::config::SubagentsConfig::enabled_for_test(
+            subagents: CodingSubagentsConfig::enabled(
                 SubagentConfig::new(2, 1).expect("valid subagent config"),
             ),
+            workspace_tool_limits: None,
         },
     )
     .expect("runtime should build");
@@ -412,9 +417,10 @@ async fn subagent_with_narrow_tools_keeps_read_only_profile() {
             context_compaction: None,
             permissioned_process_runner_factory: None,
             skill_roots: Vec::new(),
-            subagents: crate::config::SubagentsConfig::enabled_for_test(
+            subagents: CodingSubagentsConfig::enabled(
                 SubagentConfig::new(2, 1).expect("valid subagent config"),
             ),
+            workspace_tool_limits: None,
         },
     )
     .expect("runtime should build");

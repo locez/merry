@@ -1,8 +1,7 @@
-use crate::cli_error::{CliError, unexpected};
-use crate::config::MerryConfig;
+use super::CodingRuntimeError;
 use merry_runtime::{
-    BwrapPermissionedProcessRunnerFactory, BwrapProcessRunner, PermissionedProcessRunnerFactory,
-    ProcessRunner,
+    BwrapPermissionedProcessRunnerFactory, BwrapProcessRunner, PathAccessRule,
+    PermissionedProcessRunnerFactory, ProcessRunner,
 };
 use std::{path::Path, sync::Arc};
 
@@ -10,6 +9,12 @@ use std::{path::Path, sync::Arc};
 pub(crate) struct ActionProcessBackend {
     runner: Arc<dyn ProcessRunner>,
     permissioned_factory: Arc<dyn PermissionedProcessRunnerFactory>,
+}
+
+#[derive(Default)]
+pub(crate) struct ActionProcessBackendOptions {
+    pub(crate) path_rules: Vec<PathAccessRule>,
+    pub(crate) network_allowed: bool,
 }
 
 impl ActionProcessBackend {
@@ -34,16 +39,12 @@ impl ActionProcessBackend {
 
 pub(crate) fn action_process_runner(
     workspace_root: &Path,
-    merry_config: Option<&MerryConfig>,
-) -> Result<ActionProcessBackend, CliError> {
-    let path_rules = merry_config
-        .map(MerryConfig::trusted_global_path_rules)
-        .transpose()
-        .map_err(unexpected)?
-        .unwrap_or_default();
-    let network_allowed = merry_config
-        .map(MerryConfig::permissions_network_allowed)
-        .unwrap_or(false);
+    options: ActionProcessBackendOptions,
+) -> Result<ActionProcessBackend, CodingRuntimeError> {
+    let ActionProcessBackendOptions {
+        path_rules,
+        network_allowed,
+    } = options;
     let mut runner = BwrapProcessRunner::new_at_workspace_root(workspace_root)
         .with_path_rules(path_rules.clone());
     if network_allowed {

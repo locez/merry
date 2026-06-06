@@ -5,7 +5,9 @@ use crate::coding_runtime::{
 };
 use crate::config::MerryConfig;
 use crate::debug::CodingLoopTaskSmokeTask;
-use crate::runtime_config::{automatic_compaction_config, subagents_config};
+use crate::runtime_config::{
+    action_process_backend_options, automatic_compaction_config, subagents_config,
+};
 use crate::sandbox::ChildHandoff as SandboxChildHandoff;
 use merry_llm::GenerationConfig;
 use merry_runtime::{AgentLoopConfig, StepContext, StepInput};
@@ -40,7 +42,10 @@ pub(crate) async fn run_smoke(
     };
 
     let smoke_root = prepare_coding_loop_smoke_fixture("coding-loop-smoke")?;
-    let backend = action_process_runner(&smoke_root, merry_config)?;
+    let backend = action_process_runner(
+        &smoke_root,
+        action_process_backend_options(merry_config).map_err(unexpected)?,
+    )?;
     let runtime = build_coding_loop_smoke_runtime(
         &smoke_root,
         None,
@@ -134,7 +139,10 @@ pub(crate) async fn run_live_smoke(
         .transpose()
         .map_err(unexpected)?
         .unwrap_or_default();
-    let backend = action_process_runner(&smoke_root, merry_config)?;
+    let backend = action_process_runner(
+        &smoke_root,
+        action_process_backend_options(merry_config).map_err(unexpected)?,
+    )?;
     let runtime = build_coding_loop_live_smoke_runtime(
         &smoke_root,
         admission,
@@ -144,7 +152,7 @@ pub(crate) async fn run_live_smoke(
         CodingLoopLiveRuntimeOptions {
             automatic_compaction: automatic_compaction_config(merry_config).map_err(unexpected)?,
             skill_roots,
-            subagents: subagents_config(merry_config).map_err(unexpected)?,
+            subagents: subagents_config(merry_config).map_err(unexpected)?.into(),
         },
     )?;
     let generation_config =
@@ -186,7 +194,10 @@ pub(crate) async fn run_task_smoke(
 
     let fixture = super::CodingLoopTaskSmokeFixture::for_task(task);
     let smoke_root = prepare_coding_loop_task_fixture("coding-loop-task-smoke", fixture)?;
-    let backend = action_process_runner(&smoke_root, merry_config)?;
+    let backend = action_process_runner(
+        &smoke_root,
+        action_process_backend_options(merry_config).map_err(unexpected)?,
+    )?;
     let runtime = build_coding_loop_task_smoke_runtime(
         &smoke_root,
         None,
@@ -240,7 +251,10 @@ pub(crate) async fn run_task_live_smoke(
         .transpose()
         .map_err(unexpected)?
         .unwrap_or_default();
-    let backend = action_process_runner(&smoke_root, merry_config)?;
+    let backend = action_process_runner(
+        &smoke_root,
+        action_process_backend_options(merry_config).map_err(unexpected)?,
+    )?;
     let runtime = build_coding_loop_task_live_smoke_runtime(
         &smoke_root,
         admission,
@@ -250,7 +264,7 @@ pub(crate) async fn run_task_live_smoke(
         CodingLoopLiveRuntimeOptions {
             automatic_compaction,
             skill_roots,
-            subagents: subagents_config(merry_config).map_err(unexpected)?,
+            subagents: subagents_config(merry_config).map_err(unexpected)?.into(),
         },
     )?;
     let generation_config =
@@ -308,7 +322,10 @@ pub(crate) async fn run_subagent_live_smoke(
         .transpose()
         .map_err(unexpected)?
         .unwrap_or_default();
-    let backend = action_process_runner(&smoke_root, merry_config)?;
+    let backend = action_process_runner(
+        &smoke_root,
+        action_process_backend_options(merry_config).map_err(unexpected)?,
+    )?;
     let runtime = build_coding_loop_subagent_live_smoke_runtime(
         &smoke_root,
         admission,

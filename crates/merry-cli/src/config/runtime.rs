@@ -191,18 +191,6 @@ pub struct SubagentsConfig {
 }
 
 impl SubagentsConfig {
-    pub(crate) fn enabled(limits: merry_runtime::SubagentConfig) -> Self {
-        Self {
-            enabled: true,
-            limits,
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn enabled_for_test(limits: merry_runtime::SubagentConfig) -> Self {
-        Self::enabled(limits)
-    }
-
     #[must_use]
     pub fn is_enabled(self) -> bool {
         self.enabled
@@ -211,6 +199,16 @@ impl SubagentsConfig {
     #[must_use]
     pub fn limits(self) -> merry_runtime::SubagentConfig {
         self.limits
+    }
+}
+
+impl From<SubagentsConfig> for crate::coding_runtime::CodingSubagentsConfig {
+    fn from(config: SubagentsConfig) -> Self {
+        if config.is_enabled() {
+            crate::coding_runtime::CodingSubagentsConfig::enabled(config.limits())
+        } else {
+            crate::coding_runtime::CodingSubagentsConfig::default()
+        }
     }
 }
 

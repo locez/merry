@@ -2,6 +2,7 @@ use crate::cli_error::{CliError, shell_usage_error, stdout_error, unexpected};
 use crate::coding_runtime::action_process_runner;
 use crate::config::MerryConfig;
 use crate::debug::{DEFAULT_SESSION_ID, ShellArgs};
+use crate::runtime_config::action_process_backend_options;
 use crate::runtime_events::{
     collect_runtime_step_events, first_pending_tool_call, write_runtime_events,
     write_runtime_step_events_to,
@@ -62,7 +63,11 @@ pub(crate) async fn run(
         ))
     })?;
     let runner: Arc<dyn ProcessRunner> = if sandbox_child_handoff.is_some() {
-        action_process_runner(&current_dir, merry_config)?.runner()
+        action_process_runner(
+            &current_dir,
+            action_process_backend_options(merry_config).map_err(unexpected)?,
+        )?
+        .runner()
     } else {
         Arc::new(TokioProcessRunner::new_at_workspace_root(&current_dir))
     };
