@@ -5,10 +5,8 @@ use crate::coding_runtime::{
 use crate::provider_config::{
     OpenAiRuntimeConfig, openai_role_provider_config, openai_runtime_config,
 };
-use crate::{
-    CliError, MerryConfig, automatic_compaction_config, debug_openai_usage_error, stdout_error,
-    unexpected,
-};
+use crate::runtime_config::automatic_compaction_config;
+use crate::{CliError, MerryConfig, debug_openai_usage_error, stdout_error, unexpected};
 use merry_core::{ErrorInfo, PendingToolCall, ToolInputSchema, ToolName, ToolSpec};
 use merry_llm::{ModelName, ModelProvider, ModelRetryPolicy};
 use merry_provider_openai::OpenAiProvider;

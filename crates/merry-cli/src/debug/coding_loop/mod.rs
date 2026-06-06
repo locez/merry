@@ -9,6 +9,7 @@ use crate::debug::CodingLoopTaskSmokeTask;
 use crate::provider_config::{
     OpenAiRuntimeConfig, openai_approval_review_provider, openai_context_compaction_provider,
 };
+use crate::runtime_config::{automatic_compaction_config, subagents_config};
 use crate::sandbox::ChildHandoff as SandboxChildHandoff;
 use crate::{
     CODING_LOOP_LIVE_SMOKE_INITIAL_VALUE, CODING_LOOP_LIVE_SMOKE_SESSION_ID,
@@ -18,8 +19,7 @@ use crate::{
     CODING_LOOP_TASK_LIVE_SMOKE_SESSION_ID, CODING_LOOP_TASK_SMOKE_MAX_PATCH_BYTES,
     CODING_LOOP_TASK_SMOKE_SESSION_ID, CliError, PERMISSION_NETWORK_SMOKE_ARGV,
     PERMISSION_NETWORK_SMOKE_SESSION_ID, WORKSPACE_PATCH_TOOL, WORKSPACE_READ_FILE_TOOL,
-    automatic_compaction_config, debug_openai_usage_error, stdout_error, subagents_config,
-    unexpected,
+    debug_openai_usage_error, stdout_error, unexpected,
 };
 use merry_core::{RuntimeEvent, RuntimeEventKind, SessionId, ToolCallResultStatus, ToolName};
 use merry_llm::{GenerationConfig, ModelName};
