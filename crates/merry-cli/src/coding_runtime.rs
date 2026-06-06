@@ -1,3 +1,4 @@
+use crate::cli_error::{CliError, unexpected};
 use crate::config::{self, MerryConfig};
 use crate::debug;
 use crate::sandbox::{
@@ -7,8 +8,8 @@ use crate::sandbox::{
 };
 use crate::{
     CODING_LOOP_PROCESS_TOOL, CODING_LOOP_TASK_LIVE_SMOKE_SESSION_ID,
-    CODING_LOOP_TASK_SMOKE_MAX_PATCH_BYTES, CODING_LOOP_TASK_SMOKE_SESSION_ID, CliError,
-    WORKSPACE_PATCH_TOOL, unexpected,
+    CODING_LOOP_TASK_SMOKE_MAX_PATCH_BYTES, CODING_LOOP_TASK_SMOKE_SESSION_ID,
+    WORKSPACE_PATCH_TOOL,
 };
 use merry_llm::{ModelName, ModelProvider, ModelRetryPolicy};
 use merry_runtime::{

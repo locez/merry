@@ -1,7 +1,8 @@
+use crate::cli_error::{CliError, unexpected};
 use crate::debug::CodingLoopTaskSmokeTask;
 use crate::{
     CODING_LOOP_SUBAGENT_LIVE_SMOKE_FILE, CODING_LOOP_SUBAGENT_LIVE_SMOKE_INITIAL,
-    CODING_LOOP_SUBAGENT_LIVE_SMOKE_SESSION_ID, CliError, unexpected,
+    CODING_LOOP_SUBAGENT_LIVE_SMOKE_SESSION_ID,
 };
 use std::{env, fs, path::PathBuf};
 

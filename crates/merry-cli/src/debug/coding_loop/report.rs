@@ -1,8 +1,6 @@
+use crate::cli_error::{CliError, stdout_error, unexpected};
 use crate::runtime_events::write_runtime_event_slice;
-use crate::{
-    CODING_LOOP_SUBAGENT_LIVE_SMOKE_FILE, CODING_LOOP_SUBAGENT_LIVE_SMOKE_TARGET, CliError,
-    stdout_error, unexpected,
-};
+use crate::{CODING_LOOP_SUBAGENT_LIVE_SMOKE_FILE, CODING_LOOP_SUBAGENT_LIVE_SMOKE_TARGET};
 use merry_core::{RuntimeEvent, RuntimeEventKind};
 use merry_runtime::{ArtifactContent, AutomaticCompactionConfig, Runtime};
 use std::{fs, path::Path};

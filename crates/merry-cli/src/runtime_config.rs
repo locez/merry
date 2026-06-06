@@ -1,5 +1,5 @@
+use crate::cli_error::{CliError, unexpected};
 use crate::config::{self, EffectiveLogSettings, MerryConfig, XdgPaths};
-use crate::{CliError, unexpected};
 use merry_core::SessionId;
 use merry_runtime::{AutomaticCompactionConfig, Runtime, RuntimeBuilder};
 

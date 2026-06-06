@@ -1,3 +1,5 @@
+use crate::DEFAULT_SESSION_ID;
+use crate::cli_error::{CliError, shell_usage_error, stdout_error, unexpected};
 use crate::coding_runtime::action_process_runner;
 use crate::config::MerryConfig;
 use crate::debug::ShellArgs;
@@ -10,7 +12,6 @@ use crate::sandbox::{
     MERRY_SANDBOX_VERSION_ENV, RuntimeProfile as SandboxRuntimeProfile, read_proc_self_mountinfo,
     runtime_profile_from_evidence as sandbox_runtime_profile_from_evidence,
 };
-use crate::{CliError, DEFAULT_SESSION_ID, shell_usage_error, stdout_error, unexpected};
 use futures_util::stream;
 use merry_core::{ProviderName, RuntimeEvent, RuntimeEventKind, SessionId, ToolName};
 use merry_llm::{

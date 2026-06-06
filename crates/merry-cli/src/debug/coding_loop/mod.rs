@@ -1,3 +1,4 @@
+use crate::cli_error::{CliError, debug_openai_usage_error, stdout_error, unexpected};
 use crate::coding_runtime::{
     ActionProcessBackend, CodingLoopRuntimeOptions, action_process_runner,
     build_coding_loop_runtime, coding_agent_loop_config,
@@ -17,9 +18,8 @@ use crate::{
     CODING_LOOP_SUBAGENT_LIVE_SMOKE_FILE, CODING_LOOP_SUBAGENT_LIVE_SMOKE_INITIAL,
     CODING_LOOP_SUBAGENT_LIVE_SMOKE_SESSION_ID, CODING_LOOP_SUBAGENT_LIVE_SMOKE_TARGET,
     CODING_LOOP_TASK_LIVE_SMOKE_SESSION_ID, CODING_LOOP_TASK_SMOKE_MAX_PATCH_BYTES,
-    CODING_LOOP_TASK_SMOKE_SESSION_ID, CliError, PERMISSION_NETWORK_SMOKE_ARGV,
+    CODING_LOOP_TASK_SMOKE_SESSION_ID, PERMISSION_NETWORK_SMOKE_ARGV,
     PERMISSION_NETWORK_SMOKE_SESSION_ID, WORKSPACE_PATCH_TOOL, WORKSPACE_READ_FILE_TOOL,
-    debug_openai_usage_error, stdout_error, unexpected,
 };
 use merry_core::{RuntimeEvent, RuntimeEventKind, SessionId, ToolCallResultStatus, ToolName};
 use merry_llm::{GenerationConfig, ModelName};

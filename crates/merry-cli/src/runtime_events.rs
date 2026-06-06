@@ -1,4 +1,4 @@
-use crate::{CliError, stdout_error, unexpected};
+use crate::cli_error::{CliError, stdout_error, unexpected};
 use futures_util::StreamExt;
 use merry_core::{PendingToolCall, RuntimeEvent, RuntimeEventKind};
 use merry_runtime::{Runtime, StepContext, StepInput};
