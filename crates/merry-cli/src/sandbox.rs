@@ -8,6 +8,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[cfg(test)]
+mod tests;
+
 const BWRAP_PROGRAM: &str = "bwrap";
 const DEFAULT_SANDBOX_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
 const SANDBOX_ETC_READ_ONLY_FILE_PATHS: &[&str] = &[
