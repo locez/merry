@@ -2,9 +2,11 @@ use crate::coding_runtime::{
     RuntimeRoleProviderConfig, coding_loop_workspace_roots, with_workspace_coding_loop_profile,
     workspace_tools_config,
 };
+use crate::provider_config::{
+    OpenAiRuntimeConfig, openai_role_provider_config, openai_runtime_config,
+};
 use crate::{
-    CliError, MerryConfig, OpenAiRuntimeConfig, automatic_compaction_config,
-    debug_openai_usage_error, openai_role_provider_config, openai_runtime_config, stdout_error,
+    CliError, MerryConfig, automatic_compaction_config, debug_openai_usage_error, stdout_error,
     unexpected,
 };
 use merry_core::{ErrorInfo, PendingToolCall, ToolInputSchema, ToolName, ToolSpec};

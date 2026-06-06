@@ -4,10 +4,13 @@ use crate::coding_runtime::{
     coding_loop_smoke_admission_from_current_process,
 };
 use crate::config::MerryConfig;
+use crate::provider_config::{
+    OpenAiRuntimeConfig, openai_role_provider_config, openai_runtime_config,
+};
 use crate::sandbox::ChildHandoff as SandboxChildHandoff;
 use crate::{
-    CliError, OpenAiRuntimeConfig, automatic_compaction_config, debug_openai_usage_error,
-    openai_role_provider_config, openai_runtime_config, stdout_error, subagents_config, unexpected,
+    CliError, automatic_compaction_config, debug_openai_usage_error, stdout_error,
+    subagents_config, unexpected,
 };
 use futures_util::StreamExt;
 use merry_core::{ArtifactId, RuntimeEvent, RuntimeEventKind};

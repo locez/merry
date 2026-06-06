@@ -1,5 +1,5 @@
-use crate::MERRY_OPENAI_DEBUG_ENV;
 use crate::config::{self, EffectiveLogSettings, MerryConfig, XdgPaths};
+use crate::provider_config::MERRY_OPENAI_DEBUG_ENV;
 use merry_runtime::{PathAccess, PathAccessRule};
 use std::{
     env,
