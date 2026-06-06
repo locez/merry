@@ -449,6 +449,7 @@ mod tests {
         build_headless_coding_runtime,
     };
     use crate::debug::coding_loop::coding_loop_workspace_call;
+    use crate::runtime_events::{collect_runtime_step_events, first_pending_tool_call};
     use crate::test_support::{FakeProcessRunner, ScriptedProvider, model_name};
     use crate::{CODING_LOOP_PROCESS_TOOL, WORKSPACE_READ_FILE_TOOL};
     use merry_core::{RuntimeEvent, ToolCallResult, ToolCallResultStatus, ToolName};
@@ -499,7 +500,7 @@ mod tests {
         )
         .expect("runtime should build");
 
-        crate::collect_runtime_step_events(
+        collect_runtime_step_events(
             &runtime,
             StepInput::user_text("Inspect skills.").expect("valid input"),
             StepContext::default(),
@@ -563,7 +564,7 @@ mod tests {
         })
         .expect("headless coding runtime should build");
 
-        crate::collect_runtime_step_events(
+        collect_runtime_step_events(
             &runtime,
             StepInput::user_text("Inspect workspace.").expect("valid input"),
             StepContext::default(),
@@ -630,14 +631,14 @@ mod tests {
         )
         .expect("runtime should build");
 
-        let events = crate::collect_runtime_step_events(
+        let events = collect_runtime_step_events(
             &runtime,
             StepInput::user_text("Read demo skill.").expect("valid input"),
             StepContext::default(),
         )
         .await
         .expect("runtime step should collect pending skill read");
-        let pending = crate::first_pending_tool_call(&events).expect("pending skill read");
+        let pending = first_pending_tool_call(&events).expect("pending skill read");
         let execution_events = runtime
             .execute_tool_call(pending.id(), ToolExecutionContext::default())
             .await
@@ -676,7 +677,7 @@ mod tests {
         )
         .expect("missing default skill root should not block runtime");
 
-        crate::collect_runtime_step_events(
+        collect_runtime_step_events(
             &runtime,
             StepInput::user_text("Run without configured skills.").expect("valid input"),
             StepContext::default(),
@@ -722,7 +723,7 @@ mod tests {
         )
         .expect("runtime should build");
 
-        crate::collect_runtime_step_events(
+        collect_runtime_step_events(
             &runtime,
             StepInput::user_text("Inspect available tools.").expect("valid input"),
             StepContext::default(),
@@ -772,7 +773,7 @@ mod tests {
         )
         .expect("runtime should build");
 
-        crate::collect_runtime_step_events(
+        collect_runtime_step_events(
             &runtime,
             StepInput::user_text("Inspect available tools.").expect("valid input"),
             StepContext::default(),
