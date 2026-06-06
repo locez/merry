@@ -1,0 +1,519 @@
+use super::compaction::default_automatic_compaction_policy;
+use super::{AcceptedLocalWorkspaceProcessRunner, Runtime, RuntimeInner};
+use crate::{
+    AcceptedLocalWorkspaceProcessAdmission, CitationCompactionPolicy, CompactedCheckpoint,
+    ProcessRunner, ProjectRules, RuntimeCapabilities, RuntimeError, RuntimeModelRole,
+    RuntimeProfile, SkillCatalog, TaskAnchor,
+    memory::{MemoryActivationSource, StoredMemoryActivationSource},
+    model_config::RuntimeModelConfigs,
+    permission::{PermissionAdmissionSource, PermissionReviewMode, RuntimeTrustLevel},
+    process::{PermissionedProcessRunnerFactory, StaticPermissionedProcessRunnerFactory},
+    session::SessionState,
+    subagent::SubagentManager,
+    tool::{RegisteredTool, ToolRegistry},
+};
+use merry_core::SessionId;
+use merry_llm::{ModelName, ModelProvider, ModelRetryPolicy};
+use std::{
+    collections::BTreeMap,
+    num::NonZeroUsize,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64},
+    },
+};
+use tokio::sync::Mutex;
+
+const DEFAULT_EVENT_BUFFER_SIZE: usize = 16;
+
+/// Runtime-owned policy for automatic checkpoint compaction.
+///
+/// This controls the pre-provider hard-watermark compaction path. Manual
+/// [`Runtime::compact_context_once`] calls still take an explicit
+/// [`CitationCompactionPolicy`] so tests and callers can run one-off compaction
+/// passes without mutating runtime construction policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AutomaticCompactionConfig {
+    enabled: bool,
+    policy: CitationCompactionPolicy,
+}
+
+impl AutomaticCompactionConfig {
+    /// Enables automatic hard-watermark compaction with the provided policy.
+    #[must_use]
+    pub fn enabled(policy: CitationCompactionPolicy) -> Self {
+        Self {
+            enabled: true,
+            policy,
+        }
+    }
+
+    /// Disables automatic hard-watermark compaction.
+    ///
+    /// The policy remains populated with defaults so disabled configs can be
+    /// inspected or re-enabled by callers without constructing a dummy policy.
+    #[must_use]
+    pub fn disabled() -> Self {
+        Self {
+            enabled: false,
+            policy: default_automatic_compaction_policy(),
+        }
+    }
+
+    #[must_use]
+    pub fn is_enabled(self) -> bool {
+        self.enabled
+    }
+
+    #[must_use]
+    pub fn policy(self) -> CitationCompactionPolicy {
+        self.policy
+    }
+}
+
+impl Default for AutomaticCompactionConfig {
+    fn default() -> Self {
+        Self::enabled(default_automatic_compaction_policy())
+    }
+}
+
+/// Builder for a Merry runtime.
+///
+/// The builder wires provider-neutral runtime configuration: event buffering,
+/// one optional model provider, and zero or more runtime-owned tool executors.
+/// Provider integrations stay outside this crate behind [`ModelProvider`].
+pub struct RuntimeBuilder {
+    session_id: SessionId,
+    event_buffer_size: NonZeroUsize,
+    model_configs: RuntimeModelConfigs,
+    model_retry_policy: ModelRetryPolicy,
+    automatic_compaction: AutomaticCompactionConfig,
+    capabilities: RuntimeCapabilities,
+    progress_commentary: bool,
+    registered_tools: Vec<RegisteredTool>,
+    initial_context_summaries: BTreeMap<String, String>,
+    skill_catalog: Option<SkillCatalog>,
+    project_rules: Option<ProjectRules>,
+    task_anchor: Option<TaskAnchor>,
+    compacted_checkpoint: Option<CompactedCheckpoint>,
+    memory_activation_source: Arc<dyn MemoryActivationSource>,
+    allow_bridge_tools: bool,
+    allow_low_risk_workspace_patches: bool,
+    low_risk_process_runner: Option<Arc<dyn ProcessRunner>>,
+    read_only_shell_process_runner: Option<Arc<dyn ProcessRunner>>,
+    accepted_local_workspace_process_runner: Option<AcceptedLocalWorkspaceProcessRunner>,
+    runtime_trust_level: RuntimeTrustLevel,
+    permission_review_mode: PermissionReviewMode,
+    permission_admission_source: Option<Arc<dyn PermissionAdmissionSource>>,
+    permissioned_process_runner_factory: Option<Arc<dyn PermissionedProcessRunnerFactory>>,
+    subagent_manager: Option<SubagentManager>,
+}
+
+impl RuntimeBuilder {
+    pub(super) fn new(session_id: SessionId) -> Self {
+        Self {
+            session_id,
+            event_buffer_size: NonZeroUsize::new(DEFAULT_EVENT_BUFFER_SIZE)
+                .expect("default event buffer size is non-zero"),
+            model_configs: RuntimeModelConfigs::default(),
+            model_retry_policy: ModelRetryPolicy::default(),
+            automatic_compaction: AutomaticCompactionConfig::default(),
+            capabilities: RuntimeCapabilities::default(),
+            progress_commentary: false,
+            registered_tools: Vec::new(),
+            initial_context_summaries: BTreeMap::new(),
+            skill_catalog: None,
+            project_rules: None,
+            task_anchor: None,
+            compacted_checkpoint: None,
+            memory_activation_source: Arc::new(StoredMemoryActivationSource),
+            allow_bridge_tools: false,
+            allow_low_risk_workspace_patches: false,
+            low_risk_process_runner: None,
+            read_only_shell_process_runner: None,
+            accepted_local_workspace_process_runner: None,
+            runtime_trust_level: RuntimeTrustLevel::Agent,
+            permission_review_mode: PermissionReviewMode::DefaultForTrust,
+            permission_admission_source: None,
+            permissioned_process_runner_factory: None,
+            subagent_manager: None,
+        }
+    }
+
+    /// Sets the bounded event channel buffer size.
+    ///
+    /// Runtime event production uses a bounded channel. Backpressure is part of
+    /// the state-before-event contract: producers reserve an event slot before
+    /// mutating durable session state for the corresponding event.
+    #[must_use]
+    pub fn event_buffer_size(mut self, event_buffer_size: NonZeroUsize) -> Self {
+        self.event_buffer_size = event_buffer_size;
+        self
+    }
+
+    /// Sets the provider and model used by runtime steps.
+    ///
+    /// The provider receives normalized model requests and returns normalized
+    /// model events from `merry-llm`. Provider response formats are not stored
+    /// in runtime state.
+    #[must_use]
+    pub fn model_provider(mut self, provider: Arc<dyn ModelProvider>, model: ModelName) -> Self {
+        self.model_configs.insert(
+            RuntimeModelRole::Primary,
+            provider,
+            model,
+            self.model_retry_policy,
+        );
+        self
+    }
+
+    /// Sets the provider and model for a runtime model role.
+    ///
+    /// Only [`RuntimeModelRole::Primary`] is used by normal runtime steps today.
+    /// Non-primary roles are stored as runtime-owned configuration for future
+    /// review gates and do not alter provider request compilation.
+    #[must_use]
+    pub fn model_provider_for_role(
+        mut self,
+        role: RuntimeModelRole,
+        provider: Arc<dyn ModelProvider>,
+        model: ModelName,
+    ) -> Self {
+        self.model_configs
+            .insert(role, provider, model, self.model_retry_policy);
+        self
+    }
+
+    /// Sets the retry policy applied to configured and subsequently configured
+    /// model providers.
+    #[must_use]
+    pub fn model_retry_policy(mut self, policy: ModelRetryPolicy) -> Self {
+        self.model_retry_policy = policy;
+        self.model_configs.set_retry_policy(policy);
+        self
+    }
+
+    /// Sets the runtime policy for automatic hard-watermark compaction.
+    ///
+    /// Automatic compaction runs only when a compiled provider request crosses
+    /// the hard context watermark. The current step input is still outside the
+    /// compaction input and is projected raw after any installed checkpoint.
+    #[must_use]
+    pub fn automatic_compaction(mut self, config: AutomaticCompactionConfig) -> Self {
+        self.automatic_compaction = config;
+        self
+    }
+
+    /// Registers a runtime-owned tool executor.
+    ///
+    /// Registering a tool makes its spec available to provider requests and
+    /// lets [`Runtime::execute_tool_call`] resolve matching pending calls. It
+    /// does not start an automatic tool loop.
+    #[must_use]
+    pub fn register_tool(mut self, tool: RegisteredTool) -> Self {
+        self.registered_tools.push(tool);
+        self
+    }
+
+    /// Applies a complete runtime profile while keeping this builder as the
+    /// construction owner.
+    pub fn with_profile(mut self, profile: RuntimeProfile) -> Result<Self, RuntimeError> {
+        let parts = profile.into_parts();
+        self.capabilities = parts.capabilities;
+        if let Some(policy) = parts.model_retry_policy {
+            self = self.model_retry_policy(policy);
+        }
+        self.progress_commentary = parts.progress_commentary;
+        for (id, text) in parts.initial_context_summaries {
+            self = self.initial_context_summary(&id, &text);
+        }
+        for tool in parts.registered_tools {
+            self = self.register_tool(tool);
+        }
+        if parts.allow_bridge_tools {
+            self = self.allow_bridge_tools();
+        }
+        if parts.allow_low_risk_workspace_patches {
+            self = self.allow_low_risk_workspace_patches();
+        }
+        if let Some(runner) = parts.low_risk_process_runner {
+            self = self.allow_low_risk_process_actions(runner);
+        }
+        if let Some(runner) = parts.read_only_shell_process_runner {
+            self = self.allow_read_only_shell_process_actions(runner);
+        }
+        if let Some(accepted) = parts.accepted_local_workspace_process_runner {
+            self = self.allow_accepted_local_workspace_process_actions(
+                accepted.admission(),
+                accepted.runner(),
+            );
+        }
+        if let Some(trust_level) = parts.runtime_trust_level {
+            self = self.runtime_trust_level(trust_level);
+        }
+        if let Some(mode) = parts.permission_review_mode {
+            self = self.permission_review_mode(mode);
+        }
+        if let Some(source) = parts.permission_admission_source {
+            self = self.permission_admission_source(source);
+        }
+        if let Some(factory) = parts.permissioned_process_runner_factory {
+            self = self.permissioned_process_runner_factory(factory);
+        }
+        if let Some(catalog) = parts.skill_catalog {
+            self = self.skill_catalog(catalog);
+        }
+        if let Some(project_rules) = parts.project_rules {
+            self = self.project_rules(project_rules);
+        }
+        if let Some(task_anchor) = parts.task_anchor {
+            self = self.task_anchor(task_anchor);
+        }
+        if let Some(manager) = parts.subagent_manager {
+            self = self.subagent_manager(manager);
+        }
+        Ok(self)
+    }
+
+    /// Allows bridge tools to be registered for this runtime.
+    ///
+    /// Bridge handlers run in host code outside Merry-managed sandboxing. This
+    /// opt-in is separate from [`RuntimeCapabilities`] policy.
+    #[must_use]
+    pub fn allow_bridge_tools(mut self) -> Self {
+        self.allow_bridge_tools = true;
+        self
+    }
+
+    /// Seeds deterministic runtime context without emitting observable events.
+    ///
+    /// This is for startup-owned facts such as a compact project capability
+    /// summary. It is not a substitute for runtime artifacts produced during a
+    /// step, and repeated ids are replaced before build-time validation.
+    #[must_use]
+    pub fn initial_context_summary(mut self, id: &str, text: &str) -> Self {
+        self.initial_context_summaries
+            .insert(id.to_owned(), text.to_owned());
+        self
+    }
+
+    /// Adds explicit project rules to the cacheable stable request prefix.
+    ///
+    /// This is a construction-time projection for durable project instructions
+    /// such as `AGENTS.md`. It does not scan the filesystem and is separate
+    /// from context summaries, ledger facts, and artifact payloads.
+    #[must_use]
+    pub fn project_rules(mut self, project_rules: ProjectRules) -> Self {
+        self.project_rules = Some(project_rules);
+        self
+    }
+
+    /// Adds available skill metadata to the cacheable stable request prefix.
+    ///
+    /// This projects only `SKILL.md` frontmatter metadata. Full skill bodies
+    /// remain on disk and must be read through registered workspace file tools.
+    #[must_use]
+    pub fn skill_catalog(mut self, skill_catalog: SkillCatalog) -> Self {
+        self.skill_catalog = Some(skill_catalog);
+        self
+    }
+
+    /// Sets the current task objective control-plane anchor.
+    ///
+    /// This reserves the runtime context slot for future `/task` commands. It
+    /// is rendered as dynamic request context, not as project rules, ledger
+    /// projection, or append-only chat history.
+    #[must_use]
+    pub fn task_anchor(mut self, task_anchor: TaskAnchor) -> Self {
+        self.task_anchor = Some(task_anchor);
+        self
+    }
+
+    /// Sets compacted checkpoint context for dynamic provider requests.
+    ///
+    /// This is selected by a checkpoint/compaction boundary. It does not
+    /// project ordinary ledger facts, artifact payloads, or tool-result
+    /// observations.
+    #[must_use]
+    pub fn compacted_checkpoint(mut self, checkpoint: CompactedCheckpoint) -> Self {
+        self.compacted_checkpoint = Some(checkpoint);
+        self
+    }
+
+    /// Opts in to executing validated low-risk workspace patch proposals.
+    ///
+    /// This keeps the default policy conservative: workspace writes remain
+    /// denied unless the tool provides valid workspace patch proposal evidence
+    /// and runtime construction explicitly enables this lane.
+    #[must_use]
+    pub fn allow_low_risk_workspace_patches(mut self) -> Self {
+        self.allow_low_risk_workspace_patches = true;
+        self
+    }
+
+    /// Opts in to executing validated low-risk process action proposals.
+    ///
+    /// The default policy remains deny. This lane is available only for command
+    /// execution proposals with provider-neutral process evidence, an injected
+    /// runtime runner, and the narrow SP2 low-risk predicate.
+    #[must_use]
+    pub fn allow_low_risk_process_actions(mut self, runner: Arc<dyn ProcessRunner>) -> Self {
+        self.low_risk_process_runner = Some(runner);
+        self
+    }
+
+    /// Opts in to executing validated read-only shell wrapper proposals.
+    ///
+    /// This lane is intentionally separate from the structured low-risk argv
+    /// lane. It accepts only a narrow `bash`/`sh`/`zsh -c|-lc` plain command
+    /// sequence classifier and requires an injected runner selected for the
+    /// shell read-only profile. It does not authorize arbitrary shell syntax.
+    #[must_use]
+    pub fn allow_read_only_shell_process_actions(mut self, runner: Arc<dyn ProcessRunner>) -> Self {
+        self.read_only_shell_process_runner = Some(runner);
+        self
+    }
+
+    /// Opts in to executing validated local workspace effect process proposals.
+    ///
+    /// Runner injection alone is not a sandbox or an authorization source. This
+    /// lane requires explicit runtime construction-time admission that declares
+    /// the sandbox profile and accepted local workspace process risk for the
+    /// narrow classified process intent.
+    #[must_use]
+    pub fn allow_accepted_local_workspace_process_actions(
+        mut self,
+        admission: AcceptedLocalWorkspaceProcessAdmission,
+        runner: Arc<dyn ProcessRunner>,
+    ) -> Self {
+        self.accepted_local_workspace_process_runner =
+            Some(AcceptedLocalWorkspaceProcessRunner { admission, runner });
+        self
+    }
+
+    /// Sets the trust level used by permission request admission defaults.
+    ///
+    /// Agentic/coding-agent runtimes require review by default. Trusted SDK
+    /// hosts may explicitly choose host-only admission for business workflows
+    /// where the host already owns the action policy.
+    #[must_use]
+    pub fn runtime_trust_level(mut self, trust_level: RuntimeTrustLevel) -> Self {
+        self.runtime_trust_level = trust_level;
+        self
+    }
+
+    /// Sets how permission requests are reviewed before execution.
+    #[must_use]
+    pub fn permission_review_mode(mut self, mode: PermissionReviewMode) -> Self {
+        self.permission_review_mode = mode;
+        self
+    }
+
+    /// Installs a host-owned permission admission source.
+    ///
+    /// This is used for trusted SDK hosts or tests. Agentic runtimes should
+    /// normally use the model-backed review selected from
+    /// [`RuntimeModelRole::ApprovalReview`] with primary fallback.
+    #[must_use]
+    pub fn permission_admission_source(
+        mut self,
+        source: Arc<dyn PermissionAdmissionSource>,
+    ) -> Self {
+        self.permission_admission_source = Some(source);
+        self
+    }
+
+    /// Opts in to executing process actions approved by `request_permissions`.
+    ///
+    /// The runner should represent the backend/profile used for approved
+    /// permission requests. Runtime admission approves only the exact planned
+    /// action; it does not grant a reusable id back to the model.
+    #[must_use]
+    pub fn allow_permissioned_process_actions(mut self, runner: Arc<dyn ProcessRunner>) -> Self {
+        self.permissioned_process_runner_factory = Some(Arc::new(
+            StaticPermissionedProcessRunnerFactory::new(runner),
+        ));
+        self
+    }
+
+    /// Opts in to constructing a process runner per approved permission request.
+    ///
+    /// This is the preferred path for sandbox backends such as bubblewrap where
+    /// approved capabilities, currently network, should be materialized only
+    /// for the exact action being executed.
+    #[must_use]
+    pub fn permissioned_process_runner_factory(
+        mut self,
+        factory: Arc<dyn PermissionedProcessRunnerFactory>,
+    ) -> Self {
+        self.permissioned_process_runner_factory = Some(factory);
+        self
+    }
+
+    /// Installs a runtime-owned subagent manager for future subagent tools.
+    #[must_use]
+    pub fn subagent_manager(mut self, manager: SubagentManager) -> Self {
+        self.subagent_manager = Some(manager);
+        self
+    }
+
+    /// Builds the runtime.
+    ///
+    /// Duplicate tool names are rejected before the runtime is constructed.
+    pub fn build(self) -> Result<Runtime, RuntimeError> {
+        let tool_registry =
+            ToolRegistry::from_registered(self.registered_tools).map_err(|duplicate| {
+                RuntimeError::DuplicateToolRegistration {
+                    name: duplicate.name,
+                }
+            })?;
+        if !self.allow_bridge_tools
+            && let Some(name) = tool_registry.first_bridge_tool_name()
+        {
+            return Err(RuntimeError::BridgeToolsNotAllowed { name: name.clone() });
+        }
+
+        let mut session = SessionState::new(self.session_id.clone());
+        for (id, text) in self.initial_context_summaries {
+            session.seed_context_summary(&id, &text)?;
+        }
+        if let Some(project_rules) = self.project_rules {
+            session.set_project_rules(project_rules);
+        }
+        if let Some(skill_catalog) = self.skill_catalog {
+            session.set_skill_catalog(skill_catalog);
+        }
+        if let Some(task_anchor) = self.task_anchor {
+            session.set_task_anchor(task_anchor);
+        }
+        if let Some(checkpoint) = self.compacted_checkpoint {
+            session.set_compacted_checkpoint(checkpoint);
+        }
+
+        Ok(Runtime {
+            inner: Arc::new(RuntimeInner {
+                session_id: self.session_id.clone(),
+                session: Mutex::new(session),
+                active_step: Arc::new(AtomicBool::new(false)),
+                memory_projection_epoch: AtomicU64::new(0),
+                event_buffer_size: self.event_buffer_size,
+                model_configs: self.model_configs,
+                automatic_compaction: self.automatic_compaction,
+                capabilities: self.capabilities,
+                progress_commentary: self.progress_commentary,
+                tool_registry,
+                memory_activation_source: self.memory_activation_source,
+                allow_low_risk_workspace_patches: self.allow_low_risk_workspace_patches,
+                low_risk_process_runner: self.low_risk_process_runner,
+                read_only_shell_process_runner: self.read_only_shell_process_runner,
+                accepted_local_workspace_process_runner: self
+                    .accepted_local_workspace_process_runner,
+                runtime_trust_level: self.runtime_trust_level,
+                permission_review_mode: self.permission_review_mode,
+                permission_admission_source: self.permission_admission_source,
+                permissioned_process_runner_factory: self.permissioned_process_runner_factory,
+                subagent_manager: self.subagent_manager,
+            }),
+        })
+    }
+}
