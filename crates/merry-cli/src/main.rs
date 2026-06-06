@@ -3,6 +3,7 @@
 mod cmd;
 mod config;
 mod observability;
+mod sandbox;
 
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use config::{EffectiveLogSettings, EffectiveOpenAiProviderConfig, MerryConfig, XdgPaths};
@@ -21,12 +22,11 @@ use merry_runtime::{
     AcceptedLocalWorkspaceProcessAdmission, AgentLoopConfig, AgentLoopResult, AgentLoopStatus,
     ArtifactContent, AutomaticCompactionConfig, BwrapPermissionedProcessRunnerFactory,
     BwrapProcessRunner, ChildRuntimeFactory, ChildRuntimeInput,
-    DEFAULT_CODING_AGENT_MAX_MODEL_TURNS, MAX_PROCESS_OUTPUT_LIMIT_BYTES, PathAccess,
-    PathAccessRule, PermissionedProcessRunnerFactory, ProcessActionIntent, ProcessEnvPolicy,
-    ProcessRunner, RegisteredTool, Runtime, RuntimeBuilder, RuntimeModelRole, RuntimeProfile,
-    StepContext, StepInput, SubagentManager, TokioProcessRunner, ToolExecutionContext,
-    ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture, process_command_tool,
-    subagent_registered_tools,
+    DEFAULT_CODING_AGENT_MAX_MODEL_TURNS, MAX_PROCESS_OUTPUT_LIMIT_BYTES,
+    PermissionedProcessRunnerFactory, ProcessActionIntent, ProcessEnvPolicy, ProcessRunner,
+    RegisteredTool, Runtime, RuntimeBuilder, RuntimeModelRole, RuntimeProfile, StepContext,
+    StepInput, SubagentManager, TokioProcessRunner, ToolExecutionContext, ToolExecutionOutcome,
+    ToolExecutor, ToolExecutorFuture, process_command_tool, subagent_registered_tools,
 };
 use merry_tool_workspace::{
     CODING_LOOP_PROCESS_TOOL, WORKSPACE_PATCH_TOOL, WORKSPACE_READ_FILE_TOOL,
@@ -36,13 +36,28 @@ use merry_tool_workspace::{
 use std::{
     collections::BTreeMap,
     env,
-    ffi::{OsStr, OsString},
+    ffi::OsStr,
     fmt, fs, io,
     path::{Path, PathBuf},
     process::{ExitCode, Termination},
     sync::{Arc, Mutex},
 };
 use tokio::io::{AsyncWrite, AsyncWriteExt, BufWriter};
+
+use sandbox::{
+    ChildHandoff as SandboxChildHandoff, MERRY_SANDBOX_ENV, MERRY_SANDBOX_VERSION,
+    MERRY_SANDBOX_VERSION_ENV, RuntimeProfile as SandboxRuntimeProfile, read_proc_self_mountinfo,
+    runtime_profile_from_evidence as sandbox_runtime_profile_from_evidence,
+};
+
+#[cfg(test)]
+use sandbox::{
+    Bootstrap as SandboxBootstrap, Error as SandboxError, Host as SandboxHost, Plan as SandboxPlan,
+    SANDBOX_CHILD_HANDOFF_ARG, SANDBOX_CHILD_HANDOFF_CLI_BWRAP_V1, SANDBOX_HOME,
+    SANDBOX_MERRY_CONFIG_DIR, SANDBOX_MERRY_LOG_DIR, SANDBOX_TMPDIR, SANDBOX_XDG_CONFIG_HOME,
+    SANDBOX_XDG_STATE_HOME, args_without_sandbox_bootstrap_flags, find_bwrap_in_path, os,
+    plan_bootstrap_with_file_exists as plan_sandbox_bootstrap_with_file_exists,
+};
 
 const DEFAULT_SESSION_ID: &str = "debug-session";
 const DEFAULT_INPUT: &str = "debug step";
@@ -65,35 +80,7 @@ const ASSISTANT_OUTPUT_ARTIFACT_PREFIX: &str = "assistant-output-";
 const SHELL_TOOL_NAME: &str = "shell_command";
 const SHELL_TOOL_CALL_ID: &str = "call-shell-command";
 const SHELL_STEP_INPUT: &str = "run shell command through Merry process protocol";
-const BWRAP_PROGRAM: &str = "bwrap";
-const DEFAULT_SANDBOX_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
-const SANDBOX_ETC_READ_ONLY_FILE_PATHS: &[&str] = &[
-    "/etc/ld.so.cache",
-    "/etc/ld.so.conf",
-    "/etc/resolv.conf",
-    "/etc/hosts",
-    "/etc/nsswitch.conf",
-];
-const SANDBOX_ETC_READ_ONLY_DIR_PATHS: &[&str] = &[
-    "/etc/ld.so.conf.d",
-    "/etc/ssl",
-    "/etc/ca-certificates",
-    "/etc/pki",
-];
-const MERRY_SANDBOX_ENV: &str = "MERRY_SANDBOX";
-const MERRY_SANDBOX_VERSION_ENV: &str = "MERRY_SANDBOX_VERSION";
-const MERRY_SANDBOX_VERSION: &str = "1";
 const MERRY_OPENAI_DEBUG_ENV: &str = "MERRY_OPENAI_DEBUG";
-const SANDBOX_CHILD_HANDOFF_ARG: &str = "--merry-sandbox-child-handoff";
-const SANDBOX_CHILD_HANDOFF_CLI_BWRAP_V1: &str = "cli-bwrap-v1";
-const SANDBOX_HOME: &str = "/home/merry";
-const SANDBOX_TMPDIR: &str = "/tmp";
-// These are sandbox-child paths. Host paths are resolved separately before
-// re-exec; inside bwrap, HOME is intentionally set to SANDBOX_HOME.
-const SANDBOX_XDG_CONFIG_HOME: &str = "/home/merry/.config";
-const SANDBOX_XDG_STATE_HOME: &str = "/home/merry/.local/state";
-const SANDBOX_MERRY_CONFIG_DIR: &str = "/home/merry/.config/merry";
-const SANDBOX_MERRY_LOG_DIR: &str = "/home/merry/.local/state/merry/logs";
 const OPENAI_ENV_HELP: &str = "\
 Environment:
   MERRY_OPENAI_DEBUG=1       Required opt-in before any network attempt
@@ -126,25 +113,6 @@ struct Cli {
 
     #[command(subcommand)]
     command: CliCommand,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum SandboxChildHandoff {
-    #[value(name = "cli-bwrap-v1")]
-    CliBwrapV1,
-}
-
-impl SandboxChildHandoff {
-    fn as_cli_value(self) -> &'static str {
-        match self {
-            Self::CliBwrapV1 => SANDBOX_CHILD_HANDOFF_CLI_BWRAP_V1,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SandboxRuntimeProfile {
-    CliBwrapV1,
 }
 
 #[derive(Debug, Subcommand)]
@@ -422,7 +390,9 @@ fn main() -> CliExit {
         Err(error) => return CliExit::Unexpected(error.to_string()),
     };
 
-    if let Err(error) = maybe_reexec_sandbox(&cli, argv.iter().skip(1).cloned().collect()) {
+    if let Err(error) =
+        sandbox::maybe_reexec(cli.with_sandbox, argv.iter().skip(1).cloned().collect())
+    {
         return CliExit::Unexpected(error.to_string());
     }
 
@@ -827,421 +797,6 @@ fn with_workspace_coding_loop_profile_for_child(
             reason: "child runtime profile build failed",
         })?;
     builder.with_profile(profile)
-}
-
-fn maybe_reexec_sandbox(cli: &Cli, args: Vec<OsString>) -> Result<(), SandboxError> {
-    let host = SandboxHost::from_env(args)?;
-    match plan_sandbox_bootstrap(cli.with_sandbox, &host)? {
-        SandboxBootstrap::Disabled | SandboxBootstrap::AlreadyInside => Ok(()),
-        SandboxBootstrap::Reexec(plan) => exec_sandbox(plan),
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SandboxHost {
-    cwd: PathBuf,
-    current_exe: PathBuf,
-    args: Vec<OsString>,
-    path: Option<OsString>,
-    openai_debug: Option<OsString>,
-    inside_sandbox: bool,
-    xdg_paths: XdgPaths,
-    log_settings: Option<EffectiveLogSettings>,
-    trusted_path_rules: Vec<PathAccessRule>,
-}
-
-impl SandboxHost {
-    fn from_env(args: Vec<OsString>) -> Result<Self, SandboxError> {
-        let xdg_paths = XdgPaths::from_env().map_err(SandboxError::Config)?;
-        let merry_config = MerryConfig::load_optional(&xdg_paths).map_err(SandboxError::Config)?;
-        let log_settings = effective_log_settings(merry_config.as_ref(), &xdg_paths)
-            .map_err(SandboxError::Config)?;
-        let trusted_path_rules = merry_config
-            .as_ref()
-            .map(MerryConfig::trusted_global_path_rules)
-            .transpose()
-            .map_err(SandboxError::Config)?
-            .unwrap_or_default();
-        Ok(Self {
-            cwd: env::current_dir().map_err(SandboxError::CurrentDir)?,
-            current_exe: env::current_exe().map_err(SandboxError::CurrentExe)?,
-            args,
-            path: env::var_os("PATH"),
-            openai_debug: env::var_os(MERRY_OPENAI_DEBUG_ENV),
-            // This marker is only a recursion guard for self-reexec. It is
-            // not a security proof that the current process is confined.
-            inside_sandbox: env::var_os(MERRY_SANDBOX_ENV).as_deref() == Some(OsStr::new("1")),
-            xdg_paths,
-            log_settings,
-            trusted_path_rules,
-        })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SandboxPlan {
-    program: OsString,
-    args: Vec<OsString>,
-    env: Vec<(OsString, OsString)>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum SandboxBootstrap {
-    Disabled,
-    AlreadyInside,
-    Reexec(SandboxPlan),
-}
-
-fn plan_sandbox_bootstrap(
-    with_sandbox: bool,
-    host: &SandboxHost,
-) -> Result<SandboxBootstrap, SandboxError> {
-    plan_sandbox_bootstrap_with_file_exists(with_sandbox, host, Path::exists)
-}
-
-fn plan_sandbox_bootstrap_with_file_exists(
-    with_sandbox: bool,
-    host: &SandboxHost,
-    file_exists: impl Fn(&Path) -> bool,
-) -> Result<SandboxBootstrap, SandboxError> {
-    if !with_sandbox {
-        return Ok(SandboxBootstrap::Disabled);
-    }
-
-    if host.inside_sandbox {
-        return Ok(SandboxBootstrap::AlreadyInside);
-    }
-
-    let path = sandbox_path(host);
-    let bwrap = find_bwrap_in_path(&path, file_exists).ok_or(SandboxError::MissingBubblewrap)?;
-    ensure_host_log_directory(host)?;
-
-    Ok(SandboxBootstrap::Reexec(build_sandbox_plan(
-        host, path, bwrap,
-    )))
-}
-
-fn ensure_host_log_directory(host: &SandboxHost) -> Result<(), SandboxError> {
-    let Some(log_settings) = host.log_settings.as_ref() else {
-        return Ok(());
-    };
-    let Some(log_dir) = log_settings.path.parent() else {
-        return Ok(());
-    };
-    fs::create_dir_all(log_dir).map_err(|source| SandboxError::LogDirectory {
-        path: log_dir.to_path_buf(),
-        source,
-    })
-}
-
-fn build_sandbox_plan(host: &SandboxHost, path: OsString, bwrap: PathBuf) -> SandboxPlan {
-    let cwd = host.cwd.as_os_str().to_owned();
-    let current_exe = host.current_exe.as_os_str().to_owned();
-
-    let mut args = vec![
-        os("--unshare-user"),
-        os("--unshare-ipc"),
-        os("--unshare-pid"),
-        os("--unshare-uts"),
-        os("--unshare-cgroup-try"),
-        os("--die-with-parent"),
-        os("--new-session"),
-        os("--proc"),
-        os("/proc"),
-        os("--dev"),
-        os("/dev"),
-        os("--perms"),
-        os("01777"),
-        os("--tmpfs"),
-        os(SANDBOX_TMPDIR),
-        os("--tmpfs"),
-        os("/home"),
-        os("--perms"),
-        os("0700"),
-        os("--dir"),
-        os(SANDBOX_HOME),
-        os("--ro-bind-try"),
-        host.xdg_paths.config_dir().as_os_str().to_owned(),
-        os(SANDBOX_MERRY_CONFIG_DIR),
-        os("--ro-bind"),
-        os("/usr"),
-        os("/usr"),
-        os("--ro-bind-try"),
-        os("/bin"),
-        os("/bin"),
-        os("--ro-bind-try"),
-        os("/lib"),
-        os("/lib"),
-        os("--ro-bind-try"),
-        os("/lib64"),
-        os("/lib64"),
-        os("--ro-bind-try"),
-        os("/opt"),
-        os("/opt"),
-    ];
-    for path in SANDBOX_ETC_READ_ONLY_FILE_PATHS {
-        if Path::new(path).exists() {
-            append_bind_file_args(&mut args, OsStr::new(path), OsStr::new(path));
-        }
-    }
-    for path in SANDBOX_ETC_READ_ONLY_DIR_PATHS {
-        if Path::new(path).exists() {
-            append_bind_dir_args(&mut args, OsStr::new(path), OsStr::new(path));
-        }
-    }
-    args.extend([
-        os("--bind"),
-        cwd.clone(),
-        cwd.clone(),
-        os("--chdir"),
-        cwd.clone(),
-    ]);
-    if let Some(log_settings) = host.log_settings.as_ref()
-        && let Some(host_log_dir) = log_settings.path.parent()
-    {
-        args.extend([
-            os("--bind"),
-            host_log_dir.as_os_str().to_owned(),
-            os(SANDBOX_MERRY_LOG_DIR),
-        ]);
-    }
-    for rule in &host.trusted_path_rules {
-        append_sandbox_path_rule_args(&mut args, rule);
-    }
-    args.extend([
-        os("--clearenv"),
-        os("--setenv"),
-        os("PATH"),
-        path.clone(),
-        os("--setenv"),
-        os("HOME"),
-        os(SANDBOX_HOME),
-        os("--setenv"),
-        os("TMPDIR"),
-        os(SANDBOX_TMPDIR),
-        os("--setenv"),
-        os("XDG_CONFIG_HOME"),
-        os(SANDBOX_XDG_CONFIG_HOME),
-        os("--setenv"),
-        os("XDG_STATE_HOME"),
-        os(SANDBOX_XDG_STATE_HOME),
-        os("--setenv"),
-        os("PWD"),
-        cwd,
-        os("--setenv"),
-        os(MERRY_SANDBOX_ENV),
-        os("1"),
-        os("--setenv"),
-        os(MERRY_SANDBOX_VERSION_ENV),
-        os(MERRY_SANDBOX_VERSION),
-    ]);
-    if host.openai_debug.as_deref() == Some(OsStr::new("1")) {
-        args.extend([os("--setenv"), os(MERRY_OPENAI_DEBUG_ENV), os("1")]);
-    }
-    args.extend([
-        current_exe,
-        os(SANDBOX_CHILD_HANDOFF_ARG),
-        os(SandboxChildHandoff::CliBwrapV1.as_cli_value()),
-    ]);
-    args.extend(args_without_sandbox_bootstrap_flags(&host.args));
-
-    SandboxPlan {
-        program: bwrap.as_os_str().to_owned(),
-        args,
-        env: vec![(os("PATH"), path)],
-    }
-}
-
-fn find_bwrap_in_path(path: &OsStr, file_exists: impl Fn(&Path) -> bool) -> Option<PathBuf> {
-    env::split_paths(path)
-        .map(|directory| directory.join(BWRAP_PROGRAM))
-        .find(|candidate| file_exists(candidate))
-}
-
-fn append_bind_file_args(args: &mut Vec<OsString>, source: &OsStr, destination: &OsStr) {
-    append_mount_parent_args(args, destination);
-    args.extend([os("--ro-bind"), source.to_owned(), destination.to_owned()]);
-}
-
-fn append_bind_dir_args(args: &mut Vec<OsString>, source: &OsStr, destination: &OsStr) {
-    append_mount_parent_args(args, destination);
-    args.extend([os("--ro-bind"), source.to_owned(), destination.to_owned()]);
-}
-
-fn append_sandbox_path_rule_args(args: &mut Vec<OsString>, rule: &PathAccessRule) {
-    let path = rule.path().as_os_str();
-    match rule.access() {
-        PathAccess::ReadOnly => {
-            append_mount_parent_args(args, path);
-            args.extend([os("--ro-bind-try"), path.to_owned(), path.to_owned()]);
-        }
-        PathAccess::ReadWrite => {
-            append_mount_parent_args(args, path);
-            args.extend([os("--bind-try"), path.to_owned(), path.to_owned()]);
-        }
-        PathAccess::Deny => {
-            append_mount_parent_args(args, path);
-            args.extend([os("--tmpfs"), path.to_owned()]);
-        }
-    }
-}
-
-fn append_mount_parent_args(args: &mut Vec<OsString>, destination: &OsStr) {
-    let Some(destination) = destination.to_str() else {
-        return;
-    };
-    let Some(parent) = Path::new(destination).parent() else {
-        return;
-    };
-    let mut parents = parent
-        .ancestors()
-        .take_while(|path| *path != Path::new("/"))
-        .collect::<Vec<_>>();
-    parents.reverse();
-
-    for parent in parents {
-        args.extend([os("--dir"), parent.as_os_str().to_owned()]);
-    }
-}
-
-fn sandbox_path(host: &SandboxHost) -> OsString {
-    host.path
-        .as_ref()
-        .filter(|value| !value.is_empty())
-        .cloned()
-        .unwrap_or_else(|| os(DEFAULT_SANDBOX_PATH))
-}
-
-fn args_without_sandbox_bootstrap_flags(args: &[OsString]) -> Vec<OsString> {
-    let mut removed = false;
-    let mut sanitized = Vec::with_capacity(args.len());
-    let mut index = 0;
-    let mut scanning_root_flags = true;
-
-    while index < args.len() {
-        let arg = &args[index];
-
-        if scanning_root_flags {
-            if !removed && arg == OsStr::new("--with-sandbox") {
-                removed = true;
-                index += 1;
-                continue;
-            }
-
-            if arg == OsStr::new(SANDBOX_CHILD_HANDOFF_ARG) {
-                index += 1;
-                if index < args.len() {
-                    index += 1;
-                }
-                continue;
-            }
-
-            if is_sandbox_child_handoff_assignment(arg) {
-                index += 1;
-                continue;
-            }
-
-            scanning_root_flags = false;
-        }
-
-        sanitized.push(arg.clone());
-        index += 1;
-    }
-
-    sanitized
-}
-
-fn is_sandbox_child_handoff_assignment(arg: &OsStr) -> bool {
-    arg.to_str().is_some_and(|value| {
-        value
-            .strip_prefix(SANDBOX_CHILD_HANDOFF_ARG)
-            .is_some_and(|suffix| suffix.starts_with('='))
-    })
-}
-
-fn os(value: &str) -> OsString {
-    OsString::from(value)
-}
-
-fn exec_sandbox(plan: SandboxPlan) -> Result<(), SandboxError> {
-    #[cfg(target_os = "linux")]
-    {
-        let error = exec_sandbox_plan(&plan);
-        if error.kind() == io::ErrorKind::NotFound {
-            Err(SandboxError::MissingBubblewrap)
-        } else {
-            Err(SandboxError::Exec(error))
-        }
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = plan;
-        Err(SandboxError::UnsupportedPlatform)
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn exec_sandbox_plan(plan: &SandboxPlan) -> io::Error {
-    use std::os::unix::process::CommandExt;
-
-    let mut command = std::process::Command::new(&plan.program);
-    command.args(&plan.args).env_clear().envs(plan.env.clone());
-    command.exec()
-}
-
-#[derive(Debug)]
-enum SandboxError {
-    CurrentDir(io::Error),
-    CurrentExe(io::Error),
-    Config(config::ConfigError),
-    LogDirectory {
-        path: PathBuf,
-        source: io::Error,
-    },
-    #[cfg(not(target_os = "linux"))]
-    UnsupportedPlatform,
-    MissingBubblewrap,
-    Exec(io::Error),
-}
-
-impl fmt::Display for SandboxError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            SandboxError::CurrentDir(error) => write!(
-                formatter,
-                "failed to read current directory before sandbox bootstrap: {error}"
-            ),
-            SandboxError::CurrentExe(error) => write!(
-                formatter,
-                "failed to locate current executable before sandbox bootstrap: {error}"
-            ),
-            SandboxError::Config(error) => write!(
-                formatter,
-                "failed to load Merry config before sandbox bootstrap: {error}"
-            ),
-            SandboxError::LogDirectory { path, source } => write!(
-                formatter,
-                "failed to create host log directory {} before sandbox bootstrap: {source}",
-                path.display()
-            ),
-            #[cfg(not(target_os = "linux"))]
-            SandboxError::UnsupportedPlatform => write!(
-                formatter,
-                "merry --with-sandbox is only supported on Linux with bubblewrap (bwrap)"
-            ),
-            SandboxError::MissingBubblewrap => write!(
-                formatter,
-                "bubblewrap executable `bwrap` was not found in PATH; install bubblewrap or run without --with-sandbox"
-            ),
-            SandboxError::Exec(error) => {
-                write!(
-                    formatter,
-                    "failed to execute bubblewrap sandbox bootstrap: {error}"
-                )
-            }
-        }
-    }
 }
 
 async fn run_debug(
@@ -3846,13 +3401,6 @@ async fn run_shell(
     .await
 }
 
-async fn read_proc_self_mountinfo() -> Option<String> {
-    tokio::task::spawn_blocking(|| std::fs::read_to_string("/proc/self/mountinfo"))
-        .await
-        .ok()?
-        .ok()
-}
-
 async fn run_shell_to_writer<W>(
     intent: ProcessActionIntent,
     admission: Option<AcceptedLocalWorkspaceProcessAdmission>,
@@ -3942,53 +3490,6 @@ fn shell_runtime_admission(
     } else {
         None
     }
-}
-
-fn sandbox_runtime_profile_from_evidence(
-    home: Option<&OsStr>,
-    tmpdir: Option<&OsStr>,
-    mountinfo: Option<&str>,
-) -> Option<SandboxRuntimeProfile> {
-    if home == Some(OsStr::new(SANDBOX_HOME))
-        && tmpdir == Some(OsStr::new(SANDBOX_TMPDIR))
-        && mountinfo_has_tmpfs_mounts(mountinfo?, ["/home", SANDBOX_TMPDIR])
-    {
-        Some(SandboxRuntimeProfile::CliBwrapV1)
-    } else {
-        None
-    }
-}
-
-fn mountinfo_has_tmpfs_mounts(mountinfo: &str, mount_points: [&str; 2]) -> bool {
-    mount_points
-        .into_iter()
-        .all(|mount_point| mountinfo_has_tmpfs_mount(mountinfo, mount_point))
-}
-
-fn mountinfo_has_tmpfs_mount(mountinfo: &str, mount_point: &str) -> bool {
-    mountinfo
-        .lines()
-        .filter_map(parse_mountinfo_mount)
-        .any(|mount| mount.mount_point == mount_point && mount.fs_type == "tmpfs")
-}
-
-fn parse_mountinfo_mount(line: &str) -> Option<MountInfoMount<'_>> {
-    let fields = line.split_whitespace().collect::<Vec<_>>();
-    let separator_index = fields.iter().position(|field| *field == "-")?;
-    if separator_index < 5 || fields.len() <= separator_index + 1 {
-        return None;
-    }
-
-    Some(MountInfoMount {
-        mount_point: fields[4],
-        fs_type: fields[separator_index + 1],
-    })
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct MountInfoMount<'a> {
-    mount_point: &'a str,
-    fs_type: &'a str,
 }
 
 fn shell_process_action_intent(argv: Vec<String>) -> Result<ProcessActionIntent, CliError> {
