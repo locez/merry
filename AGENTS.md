@@ -179,6 +179,15 @@ Future subagent support should use explicit task contracts, artifact references,
 
 These rules are intentionally concrete. Passing the compiler is not enough; code should read like idiomatic Rust written by someone who understands ownership, allocation, and API boundaries.
 
+### File Size And Module Structure
+
+- Keep source files focused and structurally readable. A single source file should usually stay under 1000 lines.
+- Treat files approaching 1000 lines as a design smell to inspect before adding more code.
+- Do not split files mechanically just to satisfy a line count. Extract modules around real ownership boundaries, such as command handlers, configuration loading, provider setup, output formatting, fixtures, or focused test support.
+- Top-level entrypoint files such as `main.rs` should stay small and route work to modules instead of owning command implementation details.
+- Large test blocks are not a reason to let production files grow indefinitely. Prefer moving tests into focused `tests` modules, sibling test modules, or integration tests when test code dominates the file.
+- When a file must exceed 1000 lines temporarily, state why in the final report and name the follow-up split that would restore a reasonable structure.
+
 ### Unsafe
 
 - `unsafe` is forbidden by default.
