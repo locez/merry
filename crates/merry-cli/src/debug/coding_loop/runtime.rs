@@ -1,13 +1,13 @@
-use crate::cli_error::{CliError, debug_openai_usage_error, unexpected};
+use crate::cli_error::{CliError, unexpected};
 use crate::coding_runtime::{
     CodingLoopRuntimeOptions, build_coding_loop_runtime, coding_loop_workspace_roots,
     with_workspace_coding_loop_profile, workspace_tools_config,
 };
 use crate::provider_config::{
-    OpenAiRuntimeConfig, openai_approval_review_provider, openai_context_compaction_provider,
+    OpenAiRuntimeConfig, RuntimePrimaryProviderConfig, RuntimeProviderBundle,
+    openai_runtime_provider_bundle,
 };
 use merry_llm::ModelName;
-use merry_provider_openai::OpenAiProvider;
 #[cfg(test)]
 use merry_runtime::RuntimeModelRole;
 use merry_runtime::{
@@ -67,28 +67,20 @@ pub(crate) fn build_coding_loop_live_smoke_runtime(
     permissioned_process_runner_factory: Option<Arc<dyn PermissionedProcessRunnerFactory>>,
     options: CodingLoopLiveRuntimeOptions,
 ) -> Result<Runtime, CliError> {
-    let provider = OpenAiProvider::new(config.primary.provider);
-    let context_compaction = config
-        .context_compaction
-        .map(openai_context_compaction_provider)
-        .transpose()?;
-    let approval_review = config
-        .approval_review
-        .map(openai_approval_review_provider)
-        .transpose()?;
+    let providers = openai_runtime_provider_bundle(config, unexpected)?;
     Ok(build_coding_loop_runtime(
         CODING_LOOP_LIVE_SMOKE_SESSION_ID,
         root,
         admission,
-        Arc::new(provider),
-        ModelName::new(&config.primary.model).map_err(debug_openai_usage_error)?,
+        providers.primary.provider,
+        providers.primary.model,
         runner,
         CodingLoopRuntimeOptions {
             allow_hidden_workspace_paths: true,
-            approval_review,
+            approval_review: providers.approval_review,
             automatic_compaction: options.automatic_compaction,
-            retry_policy: config.retry_policy,
-            context_compaction,
+            retry_policy: providers.retry_policy,
+            context_compaction: providers.context_compaction,
             permissioned_process_runner_factory,
             skill_roots: options.skill_roots,
             subagents: options.subagents,
@@ -136,28 +128,20 @@ pub(crate) fn build_coding_loop_task_live_smoke_runtime(
     permissioned_process_runner_factory: Option<Arc<dyn PermissionedProcessRunnerFactory>>,
     options: CodingLoopLiveRuntimeOptions,
 ) -> Result<Runtime, CliError> {
-    let provider = OpenAiProvider::new(config.primary.provider);
-    let context_compaction = config
-        .context_compaction
-        .map(openai_context_compaction_provider)
-        .transpose()?;
-    let approval_review = config
-        .approval_review
-        .map(openai_approval_review_provider)
-        .transpose()?;
+    let providers = openai_runtime_provider_bundle(config, unexpected)?;
     Ok(build_coding_loop_runtime(
         CODING_LOOP_TASK_LIVE_SMOKE_SESSION_ID,
         root,
         admission,
-        Arc::new(provider),
-        ModelName::new(&config.primary.model).map_err(debug_openai_usage_error)?,
+        providers.primary.provider,
+        providers.primary.model,
         runner,
         CodingLoopRuntimeOptions {
             allow_hidden_workspace_paths: true,
-            approval_review,
+            approval_review: providers.approval_review,
             automatic_compaction: options.automatic_compaction,
-            retry_policy: config.retry_policy,
-            context_compaction,
+            retry_policy: providers.retry_policy,
+            context_compaction: providers.context_compaction,
             permissioned_process_runner_factory,
             skill_roots: options.skill_roots,
             subagents: options.subagents,
@@ -174,28 +158,20 @@ pub(crate) fn build_coding_loop_subagent_live_smoke_runtime(
     permissioned_process_runner_factory: Option<Arc<dyn PermissionedProcessRunnerFactory>>,
     options: CodingLoopLiveRuntimeOptions,
 ) -> Result<Runtime, CliError> {
-    let provider = OpenAiProvider::new(config.primary.provider);
-    let context_compaction = config
-        .context_compaction
-        .map(openai_context_compaction_provider)
-        .transpose()?;
-    let approval_review = config
-        .approval_review
-        .map(openai_approval_review_provider)
-        .transpose()?;
+    let providers = openai_runtime_provider_bundle(config, unexpected)?;
     Ok(build_coding_loop_runtime(
         CODING_LOOP_SUBAGENT_LIVE_SMOKE_SESSION_ID,
         root,
         admission,
-        Arc::new(provider),
-        ModelName::new(&config.primary.model).map_err(debug_openai_usage_error)?,
+        providers.primary.provider,
+        providers.primary.model,
         runner,
         CodingLoopRuntimeOptions {
             allow_hidden_workspace_paths: false,
-            approval_review,
+            approval_review: providers.approval_review,
             automatic_compaction: options.automatic_compaction,
-            retry_policy: config.retry_policy,
-            context_compaction,
+            retry_policy: providers.retry_policy,
+            context_compaction: providers.context_compaction,
             permissioned_process_runner_factory,
             skill_roots: options.skill_roots,
             subagents: options.subagents,
@@ -214,29 +190,24 @@ pub(crate) fn build_permission_network_smoke_runtime(
 ) -> Result<Runtime, CliError> {
     let session_id =
         merry_core::SessionId::new(PERMISSION_NETWORK_SMOKE_SESSION_ID).map_err(unexpected)?;
-    let provider = OpenAiProvider::new(config.primary.provider);
+    let RuntimeProviderBundle {
+        primary,
+        context_compaction,
+        approval_review,
+        retry_policy,
+    } = openai_runtime_provider_bundle(config, unexpected)?;
+    let RuntimePrimaryProviderConfig { provider, model } = primary;
     let mut builder = Runtime::builder(session_id)
         .automatic_compaction(automatic_compaction)
-        .model_provider(
-            Arc::new(provider),
-            ModelName::new(&config.primary.model).map_err(debug_openai_usage_error)?,
-        );
-    if let Some(role_provider) = config
-        .context_compaction
-        .map(openai_context_compaction_provider)
-        .transpose()?
-    {
+        .model_provider(provider, model);
+    if let Some(role_provider) = context_compaction {
         builder = builder.model_provider_for_role(
             role_provider.role,
             role_provider.provider,
             role_provider.model,
         );
     }
-    if let Some(role_provider) = config
-        .approval_review
-        .map(openai_approval_review_provider)
-        .transpose()?
-    {
+    if let Some(role_provider) = approval_review {
         builder = builder.model_provider_for_role(
             role_provider.role,
             role_provider.provider,
@@ -256,7 +227,7 @@ pub(crate) fn build_permission_network_smoke_runtime(
         permissioned_process_runner_factory,
     );
     let mut builder = with_workspace_coding_loop_profile(builder, profile)?;
-    if let Some(policy) = config.retry_policy {
+    if let Some(policy) = retry_policy {
         builder = builder.model_retry_policy(policy);
     }
     builder.build().map_err(unexpected)

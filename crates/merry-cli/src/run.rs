@@ -6,7 +6,8 @@ use crate::coding_runtime::{
 };
 use crate::config::MerryConfig;
 use crate::provider_config::{
-    OpenAiRuntimeConfig, openai_role_provider_config, openai_runtime_config,
+    RuntimePrimaryProviderConfig, RuntimeProviderBundle, openai_runtime_config,
+    openai_runtime_provider_bundle,
 };
 use crate::runtime_config::{
     action_process_backend_options, automatic_compaction_config, subagents_config,
@@ -17,14 +18,12 @@ use futures_util::StreamExt;
 use merry_core::{
     ArtifactId, ErrorInfo, PendingToolCall, RuntimeEvent, RuntimeEventKind, ToolCallResultStatus,
 };
-use merry_llm::ModelName;
-use merry_provider_openai::OpenAiProvider;
 use merry_runtime::{
     AgentLoopBlockedReason, AgentLoopConfig, AgentLoopResult, AgentLoopStatus, Runtime,
-    RuntimeModelRole, StepContext, StepInput,
+    StepContext, StepInput,
 };
 use serde_json::{Map, Value};
-use std::{env, sync::Arc};
+use std::env;
 use tokio::io::{AsyncWrite, AsyncWriteExt, BufWriter};
 
 const ASSISTANT_OUTPUT_ARTIFACT_PREFIX: &str = "assistant-output-";
@@ -68,12 +67,13 @@ pub(crate) async fn run(
     };
 
     let config = openai_runtime_config(None, merry_config, debug_openai_usage_error)?;
-    let OpenAiRuntimeConfig {
+    let RuntimeProviderBundle {
         primary,
         context_compaction,
         approval_review,
         retry_policy,
-    } = config;
+    } = openai_runtime_provider_bundle(config, unexpected)?;
+    let RuntimePrimaryProviderConfig { provider, model } = primary;
     let root = env::current_dir().map_err(unexpected)?;
     let backend = action_process_runner(
         &root,
@@ -83,23 +83,15 @@ pub(crate) async fn run(
         session_id: "run",
         root: &root,
         admission,
-        provider: Arc::new(OpenAiProvider::new(primary.provider)),
-        model: ModelName::new(&primary.model).map_err(unexpected)?,
+        provider,
+        model,
         runner: backend.runner(),
         permissioned_process_runner_factory: backend.permissioned_factory(),
         allow_hidden_workspace_paths: false,
         automatic_compaction: automatic_compaction_config(merry_config).map_err(unexpected)?,
         retry_policy,
-        context_compaction: context_compaction
-            .map(|config| {
-                openai_role_provider_config(RuntimeModelRole::ContextCompaction, config, unexpected)
-            })
-            .transpose()?,
-        approval_review: approval_review
-            .map(|config| {
-                openai_role_provider_config(RuntimeModelRole::ApprovalReview, config, unexpected)
-            })
-            .transpose()?,
+        context_compaction,
+        approval_review,
         skill_roots: merry_config
             .map(MerryConfig::skill_roots)
             .transpose()
