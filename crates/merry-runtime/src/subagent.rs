@@ -57,8 +57,48 @@ pub struct ChildRuntimeInput {
     pub task: SubagentTaskSpec,
     /// Tool names allowed for this child.
     pub allowed_tools: Vec<ToolName>,
+    /// Workspace scope declared for this child.
+    pub workspace_scope: ChildWorkspaceScope,
     /// Delegation depth assigned to this child.
     pub depth: u8,
+}
+
+/// Parent-authored workspace scope carried into child runtime construction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChildWorkspaceScope {
+    read_scope: Vec<PathBuf>,
+    write_scope: Vec<PathBuf>,
+    forbidden_paths: Vec<PathBuf>,
+}
+
+impl ChildWorkspaceScope {
+    /// Creates a workspace scope snapshot from a validated subagent task spec.
+    #[must_use]
+    pub fn from_task(task: &SubagentTaskSpec) -> Self {
+        Self {
+            read_scope: task.read_scope().to_vec(),
+            write_scope: task.write_scope().to_vec(),
+            forbidden_paths: task.forbidden_paths().to_vec(),
+        }
+    }
+
+    /// Returns the advisory workspace-relative read scope.
+    #[must_use]
+    pub fn read_scope(&self) -> &[PathBuf] {
+        &self.read_scope
+    }
+
+    /// Returns the workspace-relative write scope.
+    #[must_use]
+    pub fn write_scope(&self) -> &[PathBuf] {
+        &self.write_scope
+    }
+
+    /// Returns workspace-relative paths the child must not access.
+    #[must_use]
+    pub fn forbidden_paths(&self) -> &[PathBuf] {
+        &self.forbidden_paths
+    }
 }
 
 /// Object-safe factory for constructing bounded child runtimes.
@@ -350,6 +390,7 @@ impl SubagentManager {
             task_anchor,
             task: task.clone(),
             allowed_tools: task.allowed_tools().to_vec(),
+            workspace_scope: ChildWorkspaceScope::from_task(&task),
             depth: 1,
         }) {
             Ok(runtime) => runtime,
@@ -581,6 +622,7 @@ fn spawn_reserved_child(
         task_anchor: start.task_anchor.clone(),
         task: start.task.clone(),
         allowed_tools: start.task.allowed_tools().to_vec(),
+        workspace_scope: ChildWorkspaceScope::from_task(&start.task),
         depth: 1,
     })?;
 

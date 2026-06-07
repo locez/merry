@@ -253,6 +253,35 @@ Test placement:
 - Workspace path-rule tests live in `merry-tool-workspace` if enforcement is
   implemented there.
 
+## Implementation Status
+
+Completed in the first enforcement slice:
+
+- `merry-runtime` now carries an explicit `ChildWorkspaceScope` in
+  `ChildRuntimeInput`.
+- Spawned child factory inputs are populated from `SubagentTaskSpec` read,
+  write, and forbidden path scopes.
+- `merry-tool-workspace` supports optional `workspace_patch` write scope and
+  forbidden path boundaries.
+- `workspace_patch` rejects writes outside configured scope before mutation.
+- Forbidden patch paths override allowed write scopes.
+- `merry-cli` child runtimes pass child scopes into workspace tool config.
+- `merry-cli` child runtimes with explicit workspace boundaries do not receive
+  the permissioned process lane, so process execution cannot bypass the first
+  write-scope boundary.
+
+Still pending:
+
+- Strict read-scope enforcement remains intentionally out of scope.
+- Process write/effect scoping can be revisited when process permission grants
+  can be constrained to child workspace rules precisely.
+- The broad module split stopped at `spec.rs`, `protocol.rs`, and `tools.rs`;
+  `manager.rs` and `child_loop.rs` remain future cleanup.
+- A dedicated CLI child factory unit test can be added later if the factory
+  gains injectable inspection points; current verification compiles the CLI
+  factory and tests the actual workspace patch boundary in
+  `merry-tool-workspace`.
+
 ## Non-Goals
 
 - Do not implement strict read-scope enforcement in the first slice.

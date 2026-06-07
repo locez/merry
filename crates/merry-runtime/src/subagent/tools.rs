@@ -444,11 +444,23 @@ mod tests {
             &[PathBuf::from("crates/merry-runtime/src")]
         );
         assert_eq!(
+            captured[0].workspace_scope.read_scope(),
+            &[PathBuf::from("crates/merry-runtime/src")]
+        );
+        assert_eq!(
             captured[0].task.write_scope(),
             &[PathBuf::from("tmp/subagent-output")]
         );
         assert_eq!(
+            captured[0].workspace_scope.write_scope(),
+            &[PathBuf::from("tmp/subagent-output")]
+        );
+        assert_eq!(
             captured[0].task.forbidden_paths(),
+            &[PathBuf::from(".git"), PathBuf::from("target")]
+        );
+        assert_eq!(
+            captured[0].workspace_scope.forbidden_paths(),
             &[PathBuf::from(".git"), PathBuf::from("target")]
         );
         assert_eq!(
