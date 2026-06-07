@@ -1,4 +1,4 @@
-use super::compaction::compact_context_for_hard_watermark;
+use super::auto_compaction::compact_context_for_hard_watermark;
 use super::events::{
     send_assistant_text_output_completed_events, send_assistant_text_output_recorded_event,
     send_cancelled_event, send_cancelled_if_requested, send_failed_event,
