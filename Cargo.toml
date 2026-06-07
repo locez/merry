@@ -6,6 +6,7 @@ members = [
     "crates/merry-runtime",
     "crates/merry-tool-workspace",
     "crates/merry-provider-openai",
+    "crates/merry",
     "crates/merry-cli",
     "crates/merry-py",
 ]
@@ -15,6 +16,7 @@ default-members = [
     "crates/merry-runtime",
     "crates/merry-tool-workspace",
     "crates/merry-provider-openai",
+    "crates/merry",
     "crates/merry-cli",
     "crates/merry-py",
 ]

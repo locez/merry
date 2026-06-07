@@ -1,4 +1,5 @@
 use super::*;
+use std::time::Duration;
 
 #[test]
 fn role_model_config_stores_all_roles_independently_and_overrides_same_role() {
@@ -56,6 +57,62 @@ fn role_model_config_stores_all_roles_independently_and_overrides_same_role() {
             Some(expected_model)
         );
     }
+}
+
+#[test]
+fn role_scoped_retry_policy_does_not_rewrite_existing_model_configs() {
+    let initial_policy = ModelRetryPolicy::new(
+        false,
+        1,
+        Duration::from_millis(1),
+        Duration::from_millis(1),
+        Duration::from_millis(1),
+        false,
+    )
+    .expect("valid policy");
+    let later_policy = ModelRetryPolicy::new(
+        true,
+        2,
+        Duration::from_millis(1),
+        Duration::from_millis(1),
+        Duration::from_millis(1),
+        false,
+    )
+    .expect("valid policy");
+
+    let runtime = Runtime::builder(session_id("runtime-role-scoped-retry"))
+        .model_retry_policy(initial_policy)
+        .model_provider(
+            Arc::new(RecordingModelProvider::new()),
+            named_model("fake/primary"),
+        )
+        .model_provider_for_role_with_retry(
+            RuntimeModelRole::ToolRiskReview,
+            Arc::new(RecordingModelProvider::new()),
+            named_model("fake/tool-risk"),
+            later_policy,
+        )
+        .build()
+        .expect("runtime should build");
+
+    assert_eq!(
+        runtime
+            .inner
+            .model_configs
+            .get(RuntimeModelRole::Primary)
+            .expect("primary config should exist")
+            .retry_policy(),
+        initial_policy
+    );
+    assert_eq!(
+        runtime
+            .inner
+            .model_configs
+            .get(RuntimeModelRole::ToolRiskReview)
+            .expect("tool-risk config should exist")
+            .retry_policy(),
+        later_policy
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

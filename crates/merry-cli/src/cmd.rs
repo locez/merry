@@ -5,8 +5,8 @@ use crate::coding_runtime::{
 };
 use crate::config::MerryConfig;
 use crate::provider_config::{
-    RuntimePrimaryProviderConfig, RuntimeProviderBundle, openai_runtime_config,
-    openai_runtime_provider_bundle,
+    RuntimePrimaryProviderConfig, RuntimeProviderBundle, openai_provider_bundle,
+    openai_provider_config_bundle,
 };
 use crate::runtime_config::automatic_compaction_config;
 use merry_core::{ErrorInfo, PendingToolCall, ToolInputSchema, ToolName, ToolSpec};
@@ -65,13 +65,13 @@ pub(crate) struct CommandPlan {
 }
 
 pub(crate) async fn run(args: &Args, merry_config: Option<&MerryConfig>) -> Result<(), CliError> {
-    let config = openai_runtime_config(None, merry_config, debug_openai_usage_error)?;
+    let config = openai_provider_config_bundle(None, merry_config, debug_openai_usage_error)?;
     let RuntimeProviderBundle {
         primary,
         context_compaction,
         retry_policy,
         ..
-    } = openai_runtime_provider_bundle(config, unexpected)?;
+    } = openai_provider_bundle(config, unexpected)?;
     let RuntimePrimaryProviderConfig { provider, model } = primary;
     let root = env::current_dir().map_err(unexpected)?;
     let environment = CommandGenerationEnvironment::detect(&root);

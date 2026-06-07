@@ -1,6 +1,7 @@
 use crate::{error, serde_py::json_to_py};
 use futures_core::Stream;
 use futures_util::StreamExt;
+use merry::providers::{OpenAiProviderConfig, RuntimeBuilderProviderExt, openai_compatible};
 use merry_core::{
     ArtifactId, ArtifactKind, ArtifactRef, ErrorInfo, ProviderName, SessionId, ToolCallId,
     ToolInputSchema, ToolName, ToolSpec,
@@ -11,7 +12,6 @@ use merry_llm::{
     ModelStreamContext, ModelToolCall, ModelToolCallId, ProviderErrorKind, ToolArguments,
     testing::FakeModelProvider,
 };
-use merry_provider_openai::{OpenAiProvider, OpenAiProviderConfig};
 use merry_runtime::{
     AgentLoopConfig, AgentLoopResult, AgentLoopStatus, ArtifactContent, FinalOutputContract,
     RegisteredTool, Runtime, RuntimeBuilder, StepContext, StepInput, ToolExecutionContext,
@@ -628,8 +628,7 @@ fn build_runtime_from(
     scenario: &RuntimeScenario,
     tools: &[RegisteredTool],
 ) -> Result<Runtime, merry_runtime::RuntimeError> {
-    let mut builder = Runtime::builder(session_id);
-    builder = configure_scenario(builder, scenario);
+    let mut builder = runtime_builder_for_scenario(session_id, scenario);
     if tools.iter().any(|tool| tool.runner() == ToolRunner::Bridge) {
         builder = builder.allow_bridge_tools();
     }
@@ -704,22 +703,35 @@ fn duration_millis_u64(duration: Duration) -> u64 {
     duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
 
-fn configure_scenario(builder: RuntimeBuilder, scenario: &RuntimeScenario) -> RuntimeBuilder {
+fn runtime_builder_for_scenario(
+    session_id: SessionId,
+    scenario: &RuntimeScenario,
+) -> RuntimeBuilder {
     match scenario {
-        RuntimeScenario::Empty => builder,
         RuntimeScenario::OpenAiCompatible {
             config,
             model,
             retry_policy,
         } => {
-            let builder = builder
-                .model_provider(Arc::new(OpenAiProvider::new(config.clone())), model.clone());
+            let mut provider = openai_compatible()
+                .provider_config(config.clone())
+                .model(model.clone());
             if let Some(policy) = retry_policy {
-                builder.model_retry_policy(*policy)
-            } else {
-                builder
+                provider = provider.retry_policy(*policy);
             }
+            Runtime::builder(session_id).with_provider(
+                provider
+                    .build()
+                    .expect("validated OpenAI-compatible scenario must build"),
+            )
         }
+        _ => configure_scenario(Runtime::builder(session_id), scenario),
+    }
+}
+
+fn configure_scenario(builder: RuntimeBuilder, scenario: &RuntimeScenario) -> RuntimeBuilder {
+    match scenario {
+        RuntimeScenario::Empty | RuntimeScenario::OpenAiCompatible { .. } => builder,
         RuntimeScenario::FakeResponse { final_text } => builder.model_provider(
             Arc::new(fake_response_provider(final_text)),
             fake_model_name(),

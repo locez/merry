@@ -270,6 +270,20 @@ class Runtime:
             raise _decode_native_error(error) from error
 
     def _init_from_config(self, config: RuntimeConfig) -> None:
+        if config.workspace is not None:
+            raise MerryConfigError(
+                MerryErrorInfo(
+                    code="config.workspace_unsupported",
+                    domain="config",
+                    message="RuntimeConfig.workspace is not wired to native workspace tools yet.",
+                    hint=(
+                        "Register Python bridge tools explicitly for now, or use the Rust CLI "
+                        "workspace profile until Python workspace support is implemented."
+                    ),
+                    retryability="user_action_required",
+                )
+            )
+
         runtime = self.with_openai_compatible(
             api_key=config.provider.api_key,
             model=config.provider.model,

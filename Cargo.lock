@@ -630,6 +630,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
+name = "merry"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "merry-core",
+ "merry-llm",
+ "merry-provider-openai",
+ "merry-runtime",
+ "merry-tool-workspace",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "merry-cli"
 version = "0.1.0"
 dependencies = [
@@ -701,9 +715,9 @@ dependencies = [
  "futures-core",
  "futures-executor",
  "futures-util",
+ "merry",
  "merry-core",
  "merry-llm",
- "merry-provider-openai",
  "merry-runtime",
  "pyo3",
  "schemars",

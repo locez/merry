@@ -42,6 +42,23 @@ def test_runtime_config_constructs_openai_runtime():
     assert isinstance(runtime, merry.Runtime)
 
 
+def test_runtime_config_rejects_unwired_workspace_config():
+    config = merry.RuntimeConfig(
+        provider=merry.OpenAICompatibleProvider(
+            api_key="sk-test",
+            model="gpt-test",
+            base_url="https://api.example.test/v1",
+        ),
+        workspace=merry.WorkspaceConfig(root="."),
+    )
+
+    with pytest.raises(merry.MerryConfigError) as raised:
+        merry.Runtime(config=config)
+
+    assert raised.value.code == "config.workspace_unsupported"
+    assert raised.value.retryability == "user_action_required"
+
+
 async def _assert_python_tool_executes_through_runtime_loop():
     calls = []
 
