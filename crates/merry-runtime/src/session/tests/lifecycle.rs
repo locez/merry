@@ -1,0 +1,90 @@
+use super::*;
+
+#[test]
+fn session_start_is_recorded_once_before_step_lifecycle() {
+    let mut session = SessionState::new(session_id());
+
+    let first = session
+        .record_session_started_if_needed()
+        .expect("first start should emit");
+    let second = session.record_session_started_if_needed();
+    let started = session.record_step_started();
+    let completed = session.record_step_completed();
+
+    assert!(matches!(first.kind, RuntimeEventKind::SessionStarted));
+    assert!(second.is_none());
+    assert_eq!(started.sequence, 1);
+    assert_eq!(completed.sequence, 2);
+}
+
+#[test]
+fn assistant_output_artifact_id_uses_artifact_event_sequence() {
+    let mut session = SessionState::new(session_id());
+    let _started = session
+        .record_session_started_if_needed()
+        .expect("start should emit");
+    let _step_started = session.record_step_started();
+
+    let artifact = session
+        .record_assistant_text_output("hello".to_owned())
+        .expect("assistant output should record");
+    let completed = session.record_step_completed();
+
+    match artifact.kind {
+        RuntimeEventKind::ArtifactRecorded { artifact } => {
+            assert_eq!(artifact.id().as_str(), "assistant-output-2");
+            assert_eq!(artifact.kind(), &ArtifactKind::Text);
+        }
+        other => panic!("expected artifact event, got {other:?}"),
+    }
+    assert_eq!(artifact.sequence, 2);
+    assert_eq!(completed.sequence, 3);
+}
+
+#[test]
+fn submit_tool_result_stores_exact_content_before_resolved_event() {
+    let mut session = SessionState::new(session_id());
+    let call = pending_tool_call("call-1");
+    session
+        .record_tool_call_pending(call.clone())
+        .expect("pending call should record");
+    let artifact = ArtifactRef::new(artifact_id("tool-result-exact"), ArtifactKind::Text);
+    let result = ToolCallResult::succeeded(call.id().clone(), artifact.clone());
+
+    let events = session
+        .submit_tool_result(result.clone(), ArtifactContent::text("exact result\n"))
+        .expect("tool result should submit");
+
+    assert_eq!(
+        session
+            .read_artifact_content(artifact.id())
+            .expect("recorded content should be readable"),
+        ArtifactContent::text("exact result\n")
+    );
+    assert!(matches!(
+        events.last().map(|event| &event.kind),
+        Some(RuntimeEventKind::ToolCallResolved { result: resolved }) if resolved == &result
+    ));
+}
+
+#[test]
+fn session_history_ids_increase_across_messages_and_tool_continuations() {
+    let mut session = SessionState::new(SessionId::new("history-order").expect("valid session id"));
+    session.record_user_message_body("first user");
+    session
+        .record_assistant_text_output("first assistant".to_owned())
+        .expect("assistant output records");
+
+    let call = pending_tool_call("call-history");
+    session
+        .record_tool_call_pending(call.clone())
+        .expect("tool call pending records");
+    let artifact = ArtifactRef::new(artifact_id("tool-result-history"), ArtifactKind::Text);
+    let result = ToolCallResult::succeeded(call.id().clone(), artifact);
+    session
+        .submit_tool_result(result, ArtifactContent::text("tool result"))
+        .expect("tool result records");
+
+    let ids = session.history_item_ids();
+    assert_eq!(ids, vec![0, 1, 2]);
+}
