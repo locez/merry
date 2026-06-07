@@ -33,7 +33,7 @@ use merry_core::{
 use std::collections::BTreeSet;
 
 mod artifacts;
-mod compaction;
+mod checkpoint_window;
 mod history;
 mod tool_result;
 

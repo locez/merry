@@ -1,4 +1,4 @@
-use super::compaction::default_automatic_compaction_policy;
+use super::auto_compaction::default_automatic_compaction_policy;
 use super::{AcceptedLocalWorkspaceProcessRunner, Runtime, RuntimeInner};
 use crate::{
     AcceptedLocalWorkspaceProcessAdmission, CitationCompactionPolicy, CompactedCheckpoint,

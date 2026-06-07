@@ -35,8 +35,8 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
+mod auto_compaction;
 mod builder;
-mod compaction;
 mod diagnostics;
 mod events;
 mod memory_activation;
@@ -48,8 +48,8 @@ mod provider_step;
 mod session_access;
 mod tool_execution;
 
+use self::auto_compaction::compact_context_once_inner;
 pub use self::builder::{AutomaticCompactionConfig, RuntimeBuilder};
-use self::compaction::compact_context_once_inner;
 use self::diagnostics::{
     DIAGNOSTIC_TOOL_ACTION_POLICY_DENIED, DIAGNOSTIC_TOOL_CALL_RESULT_REQUIRED,
     DIAGNOSTIC_TOOL_NOT_REGISTERED, TOOL_ACTION_POLICY_DENIED_MESSAGE, WORKSPACE_PATCH_TOOL_NAME,
