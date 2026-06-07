@@ -1,0 +1,326 @@
+use merry_core::ToolName;
+use std::{
+    collections::BTreeSet,
+    path::{Component, Path, PathBuf},
+};
+use thiserror::Error;
+
+/// Maximum UTF-8 task text size accepted for one child task.
+pub(crate) const MAX_TASK_BYTES: usize = 16 * 1024;
+/// Default bounded child loop model-turn count.
+pub const DEFAULT_MAX_MODEL_TURNS: u32 = 8;
+/// Default maximum number of concurrent child agents.
+pub(crate) const DEFAULT_MAX_THREADS: usize = 6;
+/// Default child delegation depth.
+pub(crate) const DEFAULT_MAX_DEPTH: u8 = 1;
+
+/// Validation errors for subagent task contracts and configuration.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum SubagentError {
+    /// The delegated task text was blank.
+    #[error("task must not be blank")]
+    BlankTask,
+    /// The delegated task text exceeded [`MAX_TASK_BYTES`].
+    #[error("task is longer than the allowed maximum")]
+    TaskTooLong,
+    /// The delegated task has no allowed model turns.
+    #[error("max_model_turns must be greater than zero")]
+    ZeroMaxModelTurns,
+    /// A path scope was not a normalized workspace-relative path.
+    #[error("scope path must be relative and normalized: {path}")]
+    InvalidScopePath {
+        /// Rejected path display string.
+        path: String,
+    },
+    /// Two child tasks may write the same path tree.
+    #[error("overlapping write scope between task {first_index} and task {second_index}: {path}")]
+    OverlappingWriteScope {
+        /// Index of the first conflicting task.
+        first_index: usize,
+        /// Index of the second conflicting task.
+        second_index: usize,
+        /// Conflicting write path from the first task.
+        path: String,
+    },
+    /// The subagent runtime was configured with no possible concurrency.
+    #[error("subagent max_threads must be greater than zero")]
+    ZeroMaxThreads,
+    /// The subagent runtime was configured with no child depth.
+    #[error("subagent max_depth must be greater than zero")]
+    ZeroMaxDepth,
+}
+
+/// Runtime configuration for subagent delegation limits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SubagentConfig {
+    max_threads: usize,
+    max_depth: u8,
+}
+
+impl SubagentConfig {
+    /// Creates validated subagent limit configuration.
+    pub fn new(max_threads: usize, max_depth: u8) -> Result<Self, SubagentError> {
+        if max_threads == 0 {
+            return Err(SubagentError::ZeroMaxThreads);
+        }
+        if max_depth == 0 {
+            return Err(SubagentError::ZeroMaxDepth);
+        }
+        Ok(Self {
+            max_threads,
+            max_depth,
+        })
+    }
+
+    /// Returns the maximum number of child agents allowed to run concurrently.
+    #[must_use]
+    pub fn max_threads(self) -> usize {
+        self.max_threads
+    }
+
+    /// Returns the maximum allowed child delegation depth.
+    #[must_use]
+    pub fn max_depth(self) -> u8 {
+        self.max_depth
+    }
+}
+
+impl Default for SubagentConfig {
+    fn default() -> Self {
+        Self {
+            max_threads: DEFAULT_MAX_THREADS,
+            max_depth: DEFAULT_MAX_DEPTH,
+        }
+    }
+}
+
+/// Parent-authored specification for a bounded child agent task.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubagentTaskSpec {
+    display_name: Option<String>,
+    task: String,
+    max_model_turns: u32,
+    allowed_tools: Vec<ToolName>,
+    read_scope: Vec<PathBuf>,
+    write_scope: Vec<PathBuf>,
+    forbidden_paths: Vec<PathBuf>,
+    expected_output: Option<String>,
+}
+
+impl SubagentTaskSpec {
+    /// Creates a child task specification from validated task text and model-turn bound.
+    pub fn new(task: impl Into<String>, max_model_turns: u32) -> Result<Self, SubagentError> {
+        let task = task.into();
+        validate_task_text(&task)?;
+        if max_model_turns == 0 {
+            return Err(SubagentError::ZeroMaxModelTurns);
+        }
+        Ok(Self {
+            display_name: None,
+            task,
+            max_model_turns,
+            allowed_tools: Vec::new(),
+            read_scope: Vec::new(),
+            write_scope: Vec::new(),
+            forbidden_paths: Vec::new(),
+            expected_output: None,
+        })
+    }
+
+    /// Returns the child task prompt.
+    #[must_use]
+    pub fn task(&self) -> &str {
+        &self.task
+    }
+
+    /// Returns the maximum number of bounded child model turns.
+    #[must_use]
+    pub fn max_model_turns(&self) -> u32 {
+        self.max_model_turns
+    }
+
+    /// Returns the provider/tool names the child may use.
+    #[must_use]
+    pub fn allowed_tools(&self) -> &[ToolName] {
+        &self.allowed_tools
+    }
+
+    /// Returns the optional compact display name.
+    #[must_use]
+    pub fn display_name(&self) -> Option<&str> {
+        self.display_name.as_deref()
+    }
+
+    /// Returns the workspace-relative read scope.
+    #[must_use]
+    pub fn read_scope(&self) -> &[PathBuf] {
+        &self.read_scope
+    }
+
+    /// Returns the workspace-relative write scope.
+    #[must_use]
+    pub fn write_scope(&self) -> &[PathBuf] {
+        &self.write_scope
+    }
+
+    /// Returns workspace-relative paths the child must not access.
+    #[must_use]
+    pub fn forbidden_paths(&self) -> &[PathBuf] {
+        &self.forbidden_paths
+    }
+
+    /// Returns the optional expected-output instruction.
+    #[must_use]
+    pub fn expected_output(&self) -> Option<&str> {
+        self.expected_output.as_deref()
+    }
+
+    /// Replaces the child's allowed tool list.
+    #[must_use]
+    pub fn with_allowed_tools<I>(mut self, tools: I) -> Self
+    where
+        I: IntoIterator<Item = ToolName>,
+    {
+        self.allowed_tools = tools.into_iter().collect();
+        self
+    }
+
+    /// Replaces the optional display name, treating blank names as absent.
+    #[must_use]
+    pub fn with_display_name(mut self, display_name: Option<String>) -> Self {
+        self.display_name = display_name.filter(|value| !value.trim().is_empty());
+        self
+    }
+
+    /// Replaces the read scope after validating each path.
+    pub fn with_read_scope<I, P>(mut self, paths: I) -> Result<Self, SubagentError>
+    where
+        I: IntoIterator<Item = P>,
+        P: Into<PathBuf>,
+    {
+        self.read_scope = validate_scope_paths(paths)?;
+        Ok(self)
+    }
+
+    /// Replaces the write scope after validating each path.
+    pub fn with_write_scope<I, P>(mut self, paths: I) -> Result<Self, SubagentError>
+    where
+        I: IntoIterator<Item = P>,
+        P: Into<PathBuf>,
+    {
+        self.write_scope = validate_scope_paths(paths)?;
+        Ok(self)
+    }
+
+    /// Replaces the forbidden path scope after validating each path.
+    pub fn with_forbidden_paths<I, P>(mut self, paths: I) -> Result<Self, SubagentError>
+    where
+        I: IntoIterator<Item = P>,
+        P: Into<PathBuf>,
+    {
+        self.forbidden_paths = validate_scope_paths(paths)?;
+        Ok(self)
+    }
+
+    /// Replaces the optional expected-output instruction, treating blank text as absent.
+    #[must_use]
+    pub fn with_expected_output(mut self, expected_output: Option<String>) -> Self {
+        self.expected_output = expected_output.filter(|value| !value.trim().is_empty());
+        self
+    }
+}
+
+fn validate_task_text(task: &str) -> Result<(), SubagentError> {
+    if task.trim().is_empty() {
+        return Err(SubagentError::BlankTask);
+    }
+    if task.len() > MAX_TASK_BYTES {
+        return Err(SubagentError::TaskTooLong);
+    }
+    Ok(())
+}
+
+fn validate_scope_paths<I, P>(paths: I) -> Result<Vec<PathBuf>, SubagentError>
+where
+    I: IntoIterator<Item = P>,
+    P: Into<PathBuf>,
+{
+    let paths = paths
+        .into_iter()
+        .map(|path| validate_scope_path(path.into()))
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    Ok(paths.into_iter().collect())
+}
+
+pub(super) fn validate_scope_path(path: PathBuf) -> Result<PathBuf, SubagentError> {
+    let path_label = path.display().to_string();
+    let Some(path_text) = path.to_str() else {
+        return Err(SubagentError::InvalidScopePath { path: path_label });
+    };
+
+    if path_text.is_empty()
+        || path.is_absolute()
+        || path_text.contains('\\')
+        || path_text.chars().any(char::is_control)
+    {
+        return Err(SubagentError::InvalidScopePath { path: path_label });
+    }
+
+    if path_text
+        .split('/')
+        .any(|segment| matches!(segment, "" | "." | ".."))
+    {
+        return Err(SubagentError::InvalidScopePath { path: path_label });
+    }
+
+    let mut saw_component = false;
+    for component in path.components() {
+        match component {
+            Component::Normal(value) => {
+                if value.to_str().is_none() {
+                    return Err(SubagentError::InvalidScopePath { path: path_label });
+                }
+                saw_component = true;
+            }
+            Component::CurDir
+            | Component::ParentDir
+            | Component::RootDir
+            | Component::Prefix(_) => {
+                return Err(SubagentError::InvalidScopePath { path: path_label });
+            }
+        }
+    }
+
+    if !saw_component {
+        return Err(SubagentError::InvalidScopePath { path: path_label });
+    }
+
+    Ok(path)
+}
+
+/// Rejects child batches where two write scopes overlap.
+pub fn validate_no_write_scope_conflicts(tasks: &[SubagentTaskSpec]) -> Result<(), SubagentError> {
+    for (first_index, first) in tasks.iter().enumerate() {
+        for (second_offset, second) in tasks[first_index + 1..].iter().enumerate() {
+            let second_index = first_index + 1 + second_offset;
+            for first_path in first.write_scope() {
+                for second_path in second.write_scope() {
+                    if paths_overlap(first_path, second_path) {
+                        return Err(SubagentError::OverlappingWriteScope {
+                            first_index,
+                            second_index,
+                            path: first_path.display().to_string(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Returns true when two relative paths name the same path or parent/child trees.
+#[must_use]
+fn paths_overlap(first: &Path, second: &Path) -> bool {
+    first == second || first.starts_with(second) || second.starts_with(first)
+}
