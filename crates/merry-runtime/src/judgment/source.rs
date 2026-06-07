@@ -1,6 +1,11 @@
+#![cfg_attr(not(test), allow(dead_code))]
+
 use super::{
-    JudgmentConfidence, JudgmentError, JudgmentOutcome, JudgmentProvenance, JudgmentRecommendation,
-    JudgmentRequest, JudgmentSourceKind,
+    core::{
+        JudgmentConfidence, JudgmentOutcome, JudgmentProvenance, JudgmentRecommendation,
+        JudgmentRequest, JudgmentSourceKind,
+    },
+    error::JudgmentError,
 };
 use std::{future::Future, pin::Pin};
 use tokio_util::sync::CancellationToken;
