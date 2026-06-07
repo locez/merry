@@ -1,8 +1,13 @@
+#![cfg_attr(not(test), allow(dead_code))]
+
 use super::source::{JudgmentContext, JudgmentFuture, JudgmentSource};
 use super::{
-    JudgmentConfidence, JudgmentError, JudgmentEvidence, JudgmentOutcome, JudgmentProvenance,
-    JudgmentPurpose, JudgmentRecommendation, JudgmentRequest, JudgmentRiskLevel,
-    JudgmentSourceKind, push_evidence, push_field, push_list,
+    core::{
+        JudgmentConfidence, JudgmentEvidence, JudgmentOutcome, JudgmentProvenance, JudgmentPurpose,
+        JudgmentRecommendation, JudgmentRequest, JudgmentRiskLevel, JudgmentSourceKind,
+    },
+    error::JudgmentError,
+    payload::{push_evidence, push_field, push_list},
 };
 use futures_util::StreamExt;
 use merry_llm::{
