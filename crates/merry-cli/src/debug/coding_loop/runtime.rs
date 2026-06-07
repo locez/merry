@@ -4,8 +4,8 @@ use crate::coding_runtime::{
     with_workspace_coding_loop_profile, workspace_tools_config,
 };
 use crate::provider_config::{
-    OpenAiRuntimeConfig, RuntimePrimaryProviderConfig, RuntimeProviderBundle,
-    openai_runtime_provider_bundle,
+    OpenAiProviderConfigBundle, RuntimePrimaryProviderConfig, RuntimeProviderBundle,
+    openai_provider_bundle,
 };
 use merry_llm::ModelName;
 #[cfg(test)]
@@ -62,12 +62,12 @@ pub(crate) fn build_coding_loop_smoke_runtime(
 pub(crate) fn build_coding_loop_live_smoke_runtime(
     root: &Path,
     admission: AcceptedLocalWorkspaceProcessAdmission,
-    config: OpenAiRuntimeConfig,
+    config: OpenAiProviderConfigBundle,
     runner: Arc<dyn ProcessRunner>,
     permissioned_process_runner_factory: Option<Arc<dyn PermissionedProcessRunnerFactory>>,
     options: CodingLoopLiveRuntimeOptions,
 ) -> Result<Runtime, CliError> {
-    let providers = openai_runtime_provider_bundle(config, unexpected)?;
+    let providers = openai_provider_bundle(config, unexpected)?;
     Ok(build_coding_loop_runtime(
         CODING_LOOP_LIVE_SMOKE_SESSION_ID,
         root,
@@ -123,12 +123,12 @@ pub(crate) fn build_coding_loop_task_smoke_runtime(
 pub(crate) fn build_coding_loop_task_live_smoke_runtime(
     root: &Path,
     admission: AcceptedLocalWorkspaceProcessAdmission,
-    config: OpenAiRuntimeConfig,
+    config: OpenAiProviderConfigBundle,
     runner: Arc<dyn ProcessRunner>,
     permissioned_process_runner_factory: Option<Arc<dyn PermissionedProcessRunnerFactory>>,
     options: CodingLoopLiveRuntimeOptions,
 ) -> Result<Runtime, CliError> {
-    let providers = openai_runtime_provider_bundle(config, unexpected)?;
+    let providers = openai_provider_bundle(config, unexpected)?;
     Ok(build_coding_loop_runtime(
         CODING_LOOP_TASK_LIVE_SMOKE_SESSION_ID,
         root,
@@ -153,12 +153,12 @@ pub(crate) fn build_coding_loop_task_live_smoke_runtime(
 pub(crate) fn build_coding_loop_subagent_live_smoke_runtime(
     root: &Path,
     admission: AcceptedLocalWorkspaceProcessAdmission,
-    config: OpenAiRuntimeConfig,
+    config: OpenAiProviderConfigBundle,
     runner: Arc<dyn ProcessRunner>,
     permissioned_process_runner_factory: Option<Arc<dyn PermissionedProcessRunnerFactory>>,
     options: CodingLoopLiveRuntimeOptions,
 ) -> Result<Runtime, CliError> {
-    let providers = openai_runtime_provider_bundle(config, unexpected)?;
+    let providers = openai_provider_bundle(config, unexpected)?;
     Ok(build_coding_loop_runtime(
         CODING_LOOP_SUBAGENT_LIVE_SMOKE_SESSION_ID,
         root,
@@ -183,7 +183,7 @@ pub(crate) fn build_coding_loop_subagent_live_smoke_runtime(
 pub(crate) fn build_permission_network_smoke_runtime(
     root: &Path,
     admission: AcceptedLocalWorkspaceProcessAdmission,
-    config: OpenAiRuntimeConfig,
+    config: OpenAiProviderConfigBundle,
     runner: Arc<dyn ProcessRunner>,
     permissioned_process_runner_factory: Arc<dyn PermissionedProcessRunnerFactory>,
     automatic_compaction: AutomaticCompactionConfig,
@@ -195,7 +195,7 @@ pub(crate) fn build_permission_network_smoke_runtime(
         context_compaction,
         approval_review,
         retry_policy,
-    } = openai_runtime_provider_bundle(config, unexpected)?;
+    } = openai_provider_bundle(config, unexpected)?;
     let RuntimePrimaryProviderConfig { provider, model } = primary;
     let mut builder = Runtime::builder(session_id)
         .automatic_compaction(automatic_compaction)

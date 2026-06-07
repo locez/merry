@@ -1,0 +1,21 @@
+[package]
+name = "merry"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+merry-core = { path = "../merry-core" }
+merry-llm = { path = "../merry-llm" }
+merry-provider-openai = { path = "../merry-provider-openai" }
+merry-runtime = { path = "../merry-runtime" }
+merry-tool-workspace = { path = "../merry-tool-workspace" }
+thiserror.workspace = true
+
+[dev-dependencies]
+futures-util.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

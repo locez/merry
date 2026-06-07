@@ -6,8 +6,8 @@ use crate::coding_runtime::{
 };
 use crate::config::MerryConfig;
 use crate::provider_config::{
-    RuntimePrimaryProviderConfig, RuntimeProviderBundle, openai_runtime_config,
-    openai_runtime_provider_bundle,
+    RuntimePrimaryProviderConfig, RuntimeProviderBundle, openai_provider_bundle,
+    openai_provider_config_bundle,
 };
 use crate::runtime_config::{
     action_process_backend_options, automatic_compaction_config, subagents_config,
@@ -66,13 +66,13 @@ pub(crate) async fn run(
         return Err(coding_agent_requires_sandbox_error("run"));
     };
 
-    let config = openai_runtime_config(None, merry_config, debug_openai_usage_error)?;
+    let config = openai_provider_config_bundle(None, merry_config, debug_openai_usage_error)?;
     let RuntimeProviderBundle {
         primary,
         context_compaction,
         approval_review,
         retry_policy,
-    } = openai_runtime_provider_bundle(config, unexpected)?;
+    } = openai_provider_bundle(config, unexpected)?;
     let RuntimePrimaryProviderConfig { provider, model } = primary;
     let root = env::current_dir().map_err(unexpected)?;
     let backend = action_process_runner(

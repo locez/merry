@@ -2,8 +2,8 @@ use crate::cli_error::{CliError, debug_openai_usage_error, stdout_error, unexpec
 use crate::config::MerryConfig;
 use crate::debug::DEFAULT_SESSION_ID;
 use crate::provider_config::{
-    MERRY_OPENAI_DEBUG_ENV, OpenAiRuntimeConfig, apply_openai_context_compaction_provider,
-    openai_runtime_config, optional_env,
+    MERRY_OPENAI_DEBUG_ENV, OpenAiProviderConfigBundle, apply_openai_context_compaction_provider,
+    openai_provider_config_bundle, optional_env,
 };
 use crate::runtime_config::configured_runtime_builder;
 use crate::runtime_events::{
@@ -130,7 +130,7 @@ pub(crate) fn echo_tool(result: &str) -> Result<RegisteredTool, CliError> {
 pub(crate) fn debug_config(
     model_flag: Option<&str>,
     merry_config: Option<&MerryConfig>,
-) -> Result<OpenAiRuntimeConfig, CliError> {
+) -> Result<OpenAiProviderConfigBundle, CliError> {
     config_with_env(model_flag, merry_config, optional_env)
 }
 
@@ -138,14 +138,14 @@ pub(crate) fn config_with_env(
     model_flag: Option<&str>,
     merry_config: Option<&MerryConfig>,
     env_value: impl Fn(&'static str) -> Result<Option<String>, CliError>,
-) -> Result<OpenAiRuntimeConfig, CliError> {
+) -> Result<OpenAiProviderConfigBundle, CliError> {
     if env_value(MERRY_OPENAI_DEBUG_ENV)?.as_deref() != Some("1") {
         return Err(debug_openai_usage_error(
             "set MERRY_OPENAI_DEBUG=1 to enable live OpenAI-compatible debugging",
         ));
     }
 
-    openai_runtime_config(model_flag, merry_config, debug_openai_usage_error)
+    openai_provider_config_bundle(model_flag, merry_config, debug_openai_usage_error)
 }
 
 struct DebugEchoExecutor {

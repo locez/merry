@@ -8,11 +8,11 @@ use std::{env, sync::Arc};
 
 pub(crate) const MERRY_OPENAI_DEBUG_ENV: &str = "MERRY_OPENAI_DEBUG";
 
-pub(crate) fn openai_runtime_config(
+pub(crate) fn openai_provider_config_bundle(
     model_flag: Option<&str>,
     merry_config: Option<&MerryConfig>,
     map_usage_error: fn(String) -> CliError,
-) -> Result<OpenAiRuntimeConfig, CliError> {
+) -> Result<OpenAiProviderConfigBundle, CliError> {
     let merry_config = merry_config.ok_or_else(|| {
         map_usage_error(
             "Merry XDG provider config is required for OpenAI-compatible runtime".to_owned(),
@@ -54,7 +54,7 @@ pub(crate) fn openai_runtime_config(
         })
         .transpose()?;
 
-    Ok(OpenAiRuntimeConfig {
+    Ok(OpenAiProviderConfigBundle {
         primary,
         context_compaction,
         approval_review,
@@ -115,8 +115,8 @@ pub(crate) fn openai_role_provider_config(
     })
 }
 
-pub(crate) fn openai_runtime_provider_bundle(
-    config: OpenAiRuntimeConfig,
+pub(crate) fn openai_provider_bundle(
+    config: OpenAiProviderConfigBundle,
     map_usage_error: fn(String) -> CliError,
 ) -> Result<RuntimeProviderBundle, CliError> {
     Ok(RuntimeProviderBundle {
@@ -173,7 +173,7 @@ pub(crate) struct OpenAiConfig {
     pub(crate) model: String,
 }
 
-pub(crate) struct OpenAiRuntimeConfig {
+pub(crate) struct OpenAiProviderConfigBundle {
     pub(crate) primary: OpenAiConfig,
     pub(crate) context_compaction: Option<OpenAiConfig>,
     pub(crate) approval_review: Option<OpenAiConfig>,
@@ -311,7 +311,7 @@ model = "gpt-review"
     }
 
     #[test]
-    fn openai_runtime_provider_bundle_materializes_models_and_roles() {
+    fn openai_provider_bundle_materializes_models_and_roles() {
         let paths = XdgPaths::from_parts(PathBuf::from("/home/alice"), None, None);
         let config = MerryConfig::load_optional_from_text(
             Some(
@@ -338,12 +338,12 @@ model = "gpt-review"
         )
         .expect("config should parse")
         .expect("config should be present");
-        let runtime_config = super::openai_runtime_config(None, Some(&config), |message| {
+        let runtime_config = super::openai_provider_config_bundle(None, Some(&config), |message| {
             crate::cli_error::CliError::Unexpected(message)
         })
         .expect("runtime config should load");
 
-        let bundle = super::openai_runtime_provider_bundle(runtime_config, |message| {
+        let bundle = super::openai_provider_bundle(runtime_config, |message| {
             crate::cli_error::CliError::Unexpected(message)
         })
         .expect("runtime provider bundle should build");

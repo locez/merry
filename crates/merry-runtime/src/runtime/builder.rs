@@ -184,6 +184,24 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Sets the provider, model, and retry policy for a runtime model role.
+    ///
+    /// This is useful for higher-level construction layers that treat provider
+    /// config as a component. Unlike [`RuntimeBuilder::model_retry_policy`],
+    /// this method does not alter already configured providers.
+    #[must_use]
+    pub fn model_provider_for_role_with_retry(
+        mut self,
+        role: RuntimeModelRole,
+        provider: Arc<dyn ModelProvider>,
+        model: ModelName,
+        retry_policy: ModelRetryPolicy,
+    ) -> Self {
+        self.model_configs
+            .insert(role, provider, model, retry_policy);
+        self
+    }
+
     /// Sets the retry policy applied to configured and subsequently configured
     /// model providers.
     #[must_use]
