@@ -21,31 +21,32 @@ use crate::{
     artifact::ArtifactError,
     context::{ContextError, ContextEvidence, ContextSummary},
 };
-use futures_util::StreamExt;
 use merry_core::{ArtifactId, EvidenceLocator, EvidenceRef};
-use merry_llm::{
-    FinishReason, GenerationConfig, ModelContent, ModelError, ModelEvent, ModelMessage,
-    ModelMessageRole, ModelName, ModelOutput, ModelProvider, ModelRequest, ModelResponse,
-    ModelStreamContext, ProviderErrorKind,
-};
-use serde::Deserialize;
+use merry_llm::ProviderErrorKind;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     fmt::{self, Write as _},
-    future::Future,
-    pin::Pin,
-    sync::Arc,
 };
 use thiserror::Error;
-use tokio_util::sync::CancellationToken;
+
+mod source;
+mod tool_risk_review;
+
+pub(crate) use self::source::{JudgmentContext, JudgmentSource};
+
+#[cfg(test)]
+pub(crate) use self::{
+    source::{JudgmentFuture, NoopJudgmentSource},
+    tool_risk_review::{
+        MODEL_BACKED_JUDGMENT_MAX_OUTPUT_TOKENS, MODEL_JUDGMENT_OUTPUT_SCHEMA_VERSION,
+        MODEL_JUDGMENT_TOOL_RISK_EXPECTED_RISK, ModelBackedJudgmentSource,
+        parse_tool_risk_review_model_judgment_output,
+    },
+};
 
 const JUDGMENT_PAYLOAD_SCHEMA_VERSION: &str = "merry.judgment.audit.v1";
 const JUDGMENT_RECORD_ID_PREFIX: &str = "judgment-record-";
 const JUDGMENT_RECORD_ID_ORDER_DIGITS: usize = 20;
-const MODEL_JUDGMENT_OUTPUT_SCHEMA_VERSION: &str = "merry.model_judgment_output.v1";
-const MODEL_JUDGMENT_TOOL_RISK_RECOMMENDATION_KIND: &str = "tool_risk_review";
-const MODEL_JUDGMENT_TOOL_RISK_EXPECTED_RISK: &str = "low, medium, high, or unknown";
-const MODEL_BACKED_JUDGMENT_MAX_OUTPUT_TOKENS: u64 = 512;
 
 /// Semantic purpose for an internal advisory judgment request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -708,251 +709,6 @@ impl JudgmentRegistry {
     }
 }
 
-/// Result returned by a crate-internal advisory judgment source.
-pub(crate) type JudgmentResult = Result<JudgmentOutcome, JudgmentError>;
-
-/// Boxed judgment future used for object-safe async boundaries.
-pub(crate) type JudgmentFuture<'a> = Pin<Box<dyn Future<Output = JudgmentResult> + Send + 'a>>;
-
-/// Parse strict model-produced JSON for a tool risk review advisory outcome.
-///
-/// This is a pure converter. It does not record the judgment, mutate session
-/// state, inspect context, emit events, or grant runtime authority.
-pub(crate) fn parse_tool_risk_review_model_judgment_output(
-    output: &str,
-    request: &JudgmentRequest,
-    source_label: &str,
-) -> Result<JudgmentOutcome, JudgmentError> {
-    if request.purpose() != JudgmentPurpose::ToolRiskReview {
-        return Err(JudgmentError::ModelJudgmentPurposeRequired {
-            actual_purpose: request.purpose(),
-        });
-    }
-
-    let output = serde_json::from_str::<ModelJudgmentOutput>(output)
-        .map_err(|_| JudgmentError::InvalidModelJudgmentOutput)?;
-
-    output.into_tool_risk_review_outcome(request, source_label)
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ModelJudgmentOutput {
-    schema_version: String,
-    purpose: String,
-    recommendation: ModelToolRiskReviewRecommendation,
-    confidence: f32,
-    evidence: Vec<ModelJudgmentEvidenceCitation>,
-    rationale: String,
-    uncertainty: String,
-}
-
-impl ModelJudgmentOutput {
-    fn into_tool_risk_review_outcome(
-        self,
-        request: &JudgmentRequest,
-        source_label: &str,
-    ) -> Result<JudgmentOutcome, JudgmentError> {
-        validate_model_judgment_literal(
-            "schema_version",
-            &self.schema_version,
-            MODEL_JUDGMENT_OUTPUT_SCHEMA_VERSION,
-        )?;
-        validate_model_judgment_literal(
-            "purpose",
-            &self.purpose,
-            JudgmentPurpose::ToolRiskReview.as_str(),
-        )?;
-        validate_model_judgment_literal(
-            "recommendation.kind",
-            &self.recommendation.kind,
-            MODEL_JUDGMENT_TOOL_RISK_RECOMMENDATION_KIND,
-        )?;
-
-        let risk = parse_model_judgment_tool_risk_level(&self.recommendation.risk)?;
-        let evidence = select_model_judgment_evidence(self.evidence, request)?;
-        let provenance = JudgmentProvenance::new(JudgmentSourceKind::Llm, source_label)?;
-
-        JudgmentOutcome::new(
-            JudgmentPurpose::ToolRiskReview,
-            JudgmentRecommendation::ToolRiskReview {
-                risk,
-                concerns: self.recommendation.concerns,
-            },
-            JudgmentConfidence::new(self.confidence)?,
-            evidence,
-            self.rationale,
-            self.uncertainty,
-            provenance,
-        )
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ModelToolRiskReviewRecommendation {
-    kind: String,
-    risk: String,
-    concerns: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ModelJudgmentEvidenceCitation {
-    index: usize,
-    label: String,
-}
-
-/// Context passed to an advisory judgment source.
-#[derive(Debug, Clone)]
-pub(crate) struct JudgmentContext {
-    cancellation_token: CancellationToken,
-}
-
-impl JudgmentContext {
-    #[must_use]
-    pub(crate) fn new(cancellation_token: CancellationToken) -> Self {
-        Self { cancellation_token }
-    }
-
-    #[must_use]
-    pub(crate) fn cancellation_token(&self) -> &CancellationToken {
-        &self.cancellation_token
-    }
-}
-
-/// Object-safe crate-internal advisory judgment source boundary.
-pub(crate) trait JudgmentSource: Send + Sync {
-    fn judge<'a>(
-        &'a self,
-        request: JudgmentRequest,
-        context: JudgmentContext,
-    ) -> JudgmentFuture<'a>;
-}
-
-/// Provider-neutral model-backed advisory source for tool risk review.
-pub(crate) struct ModelBackedJudgmentSource {
-    provider: Arc<dyn ModelProvider>,
-    model: ModelName,
-    source_label: String,
-    generation_config: GenerationConfig,
-}
-
-impl ModelBackedJudgmentSource {
-    pub(crate) fn new(
-        provider: Arc<dyn ModelProvider>,
-        model: ModelName,
-        source_label: impl Into<String>,
-    ) -> Result<Self, JudgmentError> {
-        let provenance = JudgmentProvenance::new(JudgmentSourceKind::Llm, source_label)?;
-        let generation_config =
-            GenerationConfig::new(Some(MODEL_BACKED_JUDGMENT_MAX_OUTPUT_TOKENS), false)
-                .map_err(map_model_judgment_request_error)?;
-
-        Ok(Self {
-            provider,
-            model,
-            source_label: provenance.source_label().to_owned(),
-            generation_config,
-        })
-    }
-}
-
-impl JudgmentSource for ModelBackedJudgmentSource {
-    fn judge<'a>(
-        &'a self,
-        request: JudgmentRequest,
-        context: JudgmentContext,
-    ) -> JudgmentFuture<'a> {
-        Box::pin(async move {
-            if request.purpose() != JudgmentPurpose::ToolRiskReview {
-                return Err(JudgmentError::ModelJudgmentPurposeRequired {
-                    actual_purpose: request.purpose(),
-                });
-            }
-
-            let token = context.cancellation_token().clone();
-            if token.is_cancelled() {
-                return Err(JudgmentError::Cancelled);
-            }
-
-            let model_request = compile_model_backed_judgment_request(
-                &request,
-                &self.model,
-                self.generation_config.clone(),
-            )?;
-            let stream_context = ModelStreamContext::new(token.clone());
-            let stream_result = tokio::select! {
-                biased;
-                () = token.cancelled() => return Err(JudgmentError::Cancelled),
-                result = self.provider.stream_model(model_request, stream_context) => result,
-            };
-            let mut stream = stream_result.map_err(map_model_judgment_setup_error)?;
-
-            loop {
-                let item = tokio::select! {
-                    biased;
-                    () = token.cancelled() => return Err(JudgmentError::Cancelled),
-                    item = stream.next() => item,
-                };
-
-                match item {
-                    Some(Ok(ModelEvent::Started | ModelEvent::OutputTextDelta { .. })) => {}
-                    Some(Ok(ModelEvent::ToolCallRequested { .. })) => {
-                        return Err(JudgmentError::InvalidModelJudgmentResponseShape {
-                            reason: "model judgment stream must not request tools",
-                        });
-                    }
-                    Some(Ok(ModelEvent::Completed { response })) => {
-                        let text = model_judgment_text_from_completed_response(&response)?;
-                        return parse_tool_risk_review_model_judgment_output(
-                            text,
-                            &request,
-                            &self.source_label,
-                        );
-                    }
-                    Some(Err(error)) => {
-                        return Err(map_model_judgment_stream_error(error));
-                    }
-                    None => {
-                        return Err(JudgmentError::InvalidModelJudgmentResponseShape {
-                            reason: "model judgment stream ended before completed event",
-                        });
-                    }
-                }
-            }
-        })
-    }
-}
-
-/// Deterministic placeholder source that produces no semantic recommendation.
-#[derive(Debug, Default)]
-pub(crate) struct NoopJudgmentSource;
-
-impl JudgmentSource for NoopJudgmentSource {
-    fn judge<'a>(
-        &'a self,
-        request: JudgmentRequest,
-        context: JudgmentContext,
-    ) -> JudgmentFuture<'a> {
-        Box::pin(async move {
-            if context.cancellation_token().is_cancelled() {
-                return Err(JudgmentError::Cancelled);
-            }
-
-            JudgmentOutcome::new(
-                request.purpose(),
-                JudgmentRecommendation::NoRecommendation,
-                JudgmentConfidence::new(0.0)?,
-                Vec::new(),
-                "No judgment source is configured; runtime policy must make any hard decision without this advisory signal.",
-                "No semantic recommendation was produced.",
-                JudgmentProvenance::new(JudgmentSourceKind::Deterministic, "noop judgment source")?,
-            )
-        })
-    }
-}
-
 /// Authority allowed to explicitly accept a summary draft for context promotion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SummaryDraftAcceptanceAuthority {
@@ -1443,203 +1199,6 @@ fn validate_record_purpose(
     Ok(())
 }
 
-fn validate_model_judgment_literal(
-    field: &'static str,
-    actual: &str,
-    expected: &'static str,
-) -> Result<(), JudgmentError> {
-    if actual != expected {
-        return Err(JudgmentError::InvalidModelJudgmentLiteral {
-            field,
-            expected,
-            actual: actual.to_owned(),
-        });
-    }
-
-    Ok(())
-}
-
-fn parse_model_judgment_tool_risk_level(value: &str) -> Result<JudgmentRiskLevel, JudgmentError> {
-    match value {
-        "low" => Ok(JudgmentRiskLevel::Low),
-        "medium" => Ok(JudgmentRiskLevel::Medium),
-        "high" => Ok(JudgmentRiskLevel::High),
-        "unknown" => Ok(JudgmentRiskLevel::Unknown),
-        actual => Err(JudgmentError::InvalidModelJudgmentLiteral {
-            field: "recommendation.risk",
-            expected: MODEL_JUDGMENT_TOOL_RISK_EXPECTED_RISK,
-            actual: actual.to_owned(),
-        }),
-    }
-}
-
-fn select_model_judgment_evidence(
-    citations: Vec<ModelJudgmentEvidenceCitation>,
-    request: &JudgmentRequest,
-) -> Result<Vec<JudgmentEvidence>, JudgmentError> {
-    let mut selected = Vec::with_capacity(citations.len());
-    let mut seen = BTreeSet::new();
-
-    for citation in citations {
-        if !seen.insert(citation.index) {
-            return Err(JudgmentError::DuplicateModelJudgmentEvidenceCitation {
-                index: citation.index,
-            });
-        }
-
-        let request_evidence = request.evidence().get(citation.index).ok_or(
-            JudgmentError::ModelJudgmentEvidenceIndexOutOfRange {
-                index: citation.index,
-            },
-        )?;
-
-        if request_evidence.label() != citation.label {
-            return Err(JudgmentError::ModelJudgmentEvidenceLabelMismatch {
-                index: citation.index,
-                expected: request_evidence.label().to_owned(),
-                actual: citation.label,
-            });
-        }
-
-        selected.push(request_evidence.clone());
-    }
-
-    Ok(selected)
-}
-
-fn compile_model_backed_judgment_request(
-    request: &JudgmentRequest,
-    model: &ModelName,
-    generation_config: GenerationConfig,
-) -> Result<ModelRequest, JudgmentError> {
-    let messages = vec![
-        ModelMessage::new(
-            ModelMessageRole::System,
-            ModelContent::text(&model_backed_judgment_system_prompt())
-                .map_err(map_model_judgment_request_error)?,
-        )
-        .map_err(map_model_judgment_request_error)?,
-        ModelMessage::new(
-            ModelMessageRole::User,
-            ModelContent::text(&model_backed_judgment_user_prompt(request))
-                .map_err(map_model_judgment_request_error)?,
-        )
-        .map_err(map_model_judgment_request_error)?,
-    ];
-
-    ModelRequest::new(model.clone(), messages, Vec::new(), generation_config)
-        .map_err(map_model_judgment_request_error)
-}
-
-fn model_backed_judgment_system_prompt() -> String {
-    format!(
-        concat!(
-            "You are a provider-neutral internal advisory judgment source.\n",
-            "Return exactly one JSON object and no other text.\n",
-            "The result is advisory only and must not authorize tools, actions, context mutation, ledger writes, or events.\n",
-            "Use schema_version {schema_version} and purpose {purpose}.\n",
-            "Required JSON shape: ",
-            "{{\"schema_version\":\"{schema_version}\",\"purpose\":\"{purpose}\",",
-            "\"recommendation\":{{\"kind\":\"{purpose}\",\"risk\":\"low|medium|high|unknown\",\"concerns\":[\"...\"]}},",
-            "\"confidence\":0.0,\"evidence\":[{{\"index\":0,\"label\":\"exact supplied label\"}}],",
-            "\"rationale\":\"...\",\"uncertainty\":\"...\"}}.\n",
-            "Cite only supplied evidence by exact index and label."
-        ),
-        schema_version = MODEL_JUDGMENT_OUTPUT_SCHEMA_VERSION,
-        purpose = JudgmentPurpose::ToolRiskReview.as_str(),
-    )
-}
-
-fn model_backed_judgment_user_prompt(request: &JudgmentRequest) -> String {
-    let mut prompt = String::new();
-    push_field(
-        &mut prompt,
-        "schema_version",
-        MODEL_JUDGMENT_OUTPUT_SCHEMA_VERSION,
-    );
-    push_field(
-        &mut prompt,
-        "purpose",
-        JudgmentPurpose::ToolRiskReview.as_str(),
-    );
-    push_field(&mut prompt, "subject", request.subject());
-    push_field(&mut prompt, "input", request.input());
-    push_list(&mut prompt, "constraints", request.constraints());
-    push_evidence(&mut prompt, "evidence", request.evidence());
-    prompt
-}
-
-fn model_judgment_text_from_completed_response(
-    response: &ModelResponse,
-) -> Result<&str, JudgmentError> {
-    if response.finish_reason() == FinishReason::Cancelled {
-        return Err(JudgmentError::Cancelled);
-    }
-
-    if response.finish_reason() != FinishReason::Stop {
-        return Err(JudgmentError::InvalidModelJudgmentResponseShape {
-            reason: "model judgment completed without stop finish reason",
-        });
-    }
-
-    let [ModelOutput::Text { text }] = response.outputs() else {
-        return Err(JudgmentError::InvalidModelJudgmentResponseShape {
-            reason: "model judgment stop output must contain exactly one text item",
-        });
-    };
-
-    Ok(text)
-}
-
-fn map_model_judgment_request_error(error: ModelError) -> JudgmentError {
-    if is_cancelled_model_judgment_error(&error) {
-        return JudgmentError::Cancelled;
-    }
-
-    let (kind, message) = model_error_parts(error);
-    JudgmentError::ModelJudgmentRequest { kind, message }
-}
-
-fn map_model_judgment_setup_error(error: ModelError) -> JudgmentError {
-    if is_cancelled_model_judgment_error(&error) {
-        return JudgmentError::Cancelled;
-    }
-
-    let (kind, message) = model_error_parts(error);
-    JudgmentError::ModelJudgmentProviderSetup { kind, message }
-}
-
-fn map_model_judgment_stream_error(error: ModelError) -> JudgmentError {
-    if is_cancelled_model_judgment_error(&error) {
-        return JudgmentError::Cancelled;
-    }
-
-    let (kind, message) = model_error_parts(error);
-    JudgmentError::ModelJudgmentProviderStream { kind, message }
-}
-
-fn is_cancelled_model_judgment_error(error: &ModelError) -> bool {
-    matches!(error, ModelError::Cancelled)
-        || matches!(
-            error,
-            ModelError::Provider {
-                kind: ProviderErrorKind::Cancelled,
-                ..
-            }
-        )
-}
-
-fn model_error_parts(error: ModelError) -> (ProviderErrorKind, String) {
-    match error {
-        ModelError::InvalidRequest { reason } => (ProviderErrorKind::InvalidRequest, reason),
-        ModelError::Cancelled => (
-            ProviderErrorKind::Cancelled,
-            "model stream cancelled".to_owned(),
-        ),
-        ModelError::Provider { kind, message, .. } => (kind, message),
-    }
-}
-
 pub(crate) fn validate_summary_draft_record_purpose(
     request: &JudgmentRequest,
     outcome: &JudgmentOutcome,
@@ -1901,11 +1460,14 @@ mod tests {
     use super::*;
     use merry_core::{ArtifactId, EvidenceLocator, ProviderName, ToolName};
     use merry_llm::{
-        ModelCapabilities, ModelEventStream, ModelProviderFuture, ModelToolCall, ModelToolCallId,
+        FinishReason, ModelCapabilities, ModelError, ModelEvent, ModelEventStream,
+        ModelMessageRole, ModelName, ModelOutput, ModelProvider, ModelProviderFuture, ModelRequest,
+        ModelResponse, ModelStreamContext, ModelToolCall, ModelToolCallId, ProviderErrorKind,
         ToolArguments, testing::FakeModelProvider,
     };
     use serde_json::json;
     use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
 
     #[test]
     fn confidence_rejects_nan_infinity_and_out_of_range_values() {
