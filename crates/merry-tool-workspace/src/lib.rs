@@ -242,6 +242,8 @@ pub struct WorkspaceToolsConfig {
     roots: Vec<PathBuf>,
     allow_hidden: bool,
     limits: WorkspaceToolLimits,
+    patch_write_scope: Option<Vec<PathBuf>>,
+    forbidden_paths: Vec<PathBuf>,
 }
 
 impl WorkspaceToolsConfig {
@@ -252,6 +254,8 @@ impl WorkspaceToolsConfig {
             roots,
             allow_hidden: false,
             limits: WorkspaceToolLimits::default(),
+            patch_write_scope: None,
+            forbidden_paths: Vec::new(),
         }
     }
 
@@ -280,10 +284,39 @@ impl WorkspaceToolsConfig {
         &self.limits
     }
 
+    /// Returns the optional workspace-relative write scope for `workspace_patch`.
+    #[must_use]
+    pub fn patch_write_scope(&self) -> Option<&[PathBuf]> {
+        self.patch_write_scope.as_deref()
+    }
+
+    /// Returns workspace-relative paths forbidden to `workspace_patch`.
+    #[must_use]
+    pub fn forbidden_paths(&self) -> &[PathBuf] {
+        &self.forbidden_paths
+    }
+
     /// Sets workspace tool limits.
     #[must_use]
     pub fn with_limits(mut self, limits: WorkspaceToolLimits) -> Self {
         self.limits = limits;
+        self
+    }
+
+    /// Sets the optional workspace-relative write scope for `workspace_patch`.
+    ///
+    /// `None` preserves existing unrestricted patch behavior under configured
+    /// roots. `Some([])` makes the patch tool read-only by denying all writes.
+    #[must_use]
+    pub fn with_patch_write_scope(mut self, paths: Option<Vec<PathBuf>>) -> Self {
+        self.patch_write_scope = paths;
+        self
+    }
+
+    /// Sets workspace-relative paths forbidden to `workspace_patch`.
+    #[must_use]
+    pub fn with_forbidden_paths(mut self, paths: Vec<PathBuf>) -> Self {
+        self.forbidden_paths = paths;
         self
     }
 }
@@ -320,6 +353,12 @@ pub enum WorkspaceToolConfigError {
     InvalidLimit {
         /// Limit name.
         name: &'static str,
+    },
+    /// A workspace tool scope path was not relative and normalized.
+    #[error("workspace tool scope path must be relative and normalized: {path}")]
+    InvalidScopePath {
+        /// Rejected scope path.
+        path: PathBuf,
     },
 }
 
@@ -592,6 +631,8 @@ struct WorkspaceToolState {
     roots: Vec<PathBuf>,
     allow_hidden: bool,
     limits: WorkspaceToolLimits,
+    patch_write_scope: Option<Vec<String>>,
+    forbidden_paths: Vec<String>,
 }
 
 impl WorkspaceToolState {
@@ -622,10 +663,18 @@ impl WorkspaceToolState {
             roots.push(canonical);
         }
 
+        let patch_write_scope = match config.patch_write_scope {
+            Some(paths) => Some(normalize_scope_paths(paths)?),
+            None => None,
+        };
+        let forbidden_paths = normalize_scope_paths(config.forbidden_paths)?;
+
         Ok(Self {
             roots,
             allow_hidden: config.allow_hidden,
             limits: config.limits,
+            patch_write_scope,
+            forbidden_paths,
         })
     }
 
@@ -647,6 +696,73 @@ impl ReadOnlyWorkspaceTools {
     fn project_capability_summary(&self) -> String {
         self.state.project_capability_summary()
     }
+}
+
+fn normalize_scope_paths(paths: Vec<PathBuf>) -> Result<Vec<String>, WorkspaceToolConfigError> {
+    let paths = paths
+        .into_iter()
+        .map(normalize_scope_path)
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    Ok(paths.into_iter().collect())
+}
+
+fn normalize_scope_path(path: PathBuf) -> Result<String, WorkspaceToolConfigError> {
+    let Some(path_text) = path.to_str() else {
+        return Err(WorkspaceToolConfigError::InvalidScopePath { path });
+    };
+
+    if path_text == "." {
+        return Ok(String::new());
+    }
+
+    if path_text.is_empty()
+        || path.is_absolute()
+        || path_text.contains('\\')
+        || path_text.chars().any(char::is_control)
+        || path_text
+            .split('/')
+            .any(|segment| matches!(segment, "" | "." | ".."))
+    {
+        return Err(WorkspaceToolConfigError::InvalidScopePath { path });
+    }
+
+    let mut components = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(value) => {
+                let Some(value) = value.to_str() else {
+                    return Err(WorkspaceToolConfigError::InvalidScopePath { path });
+                };
+                components.push(value.to_owned());
+            }
+            Component::CurDir
+            | Component::ParentDir
+            | Component::RootDir
+            | Component::Prefix(_) => {
+                return Err(WorkspaceToolConfigError::InvalidScopePath { path });
+            }
+        }
+    }
+
+    if components.is_empty() {
+        return Err(WorkspaceToolConfigError::InvalidScopePath { path });
+    }
+
+    Ok(components.join("/"))
+}
+
+fn matches_any_scope_path(relative: &str, scope_paths: &[String]) -> bool {
+    scope_paths
+        .iter()
+        .any(|scope_path| matches_scope_path(relative, scope_path))
+}
+
+fn matches_scope_path(relative: &str, scope_path: &str) -> bool {
+    scope_path.is_empty()
+        || relative == scope_path
+        || relative
+            .strip_prefix(scope_path)
+            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 fn validate_limits(limits: &WorkspaceToolLimits) -> Result<(), WorkspaceToolConfigError> {
@@ -2504,6 +2620,12 @@ fn plan_workspace_patch_file(
         WorkspacePatchOperation::Update { hunks } => {
             let relative = validate_relative_path(&file_patch.path, state.allow_hidden)
                 .map_err(WorkspacePatchFilePlanError::Path)?;
+            validate_patch_write_boundary(state, &relative).map_err(|error| {
+                WorkspacePatchFilePlanError::Domain {
+                    error,
+                    path: file_patch.path.clone(),
+                }
+            })?;
 
             for root in &state.roots {
                 if is_cancelled() {
@@ -2544,6 +2666,30 @@ fn plan_workspace_patch_file(
                 path: relative.display,
             })
         }
+    }
+}
+
+fn validate_patch_write_boundary(
+    state: &WorkspaceToolState,
+    relative: &ValidatedRelativePath,
+) -> Result<(), DomainError> {
+    if matches_any_scope_path(&relative.display, &state.forbidden_paths) {
+        return Err(DomainError::new(
+            ERROR_PATH_DENIED,
+            "workspace patch path is forbidden by the child workspace scope",
+        ));
+    }
+
+    let Some(write_scope) = &state.patch_write_scope else {
+        return Ok(());
+    };
+    if matches_any_scope_path(&relative.display, write_scope) {
+        Ok(())
+    } else {
+        Err(DomainError::new(
+            ERROR_PATH_DENIED,
+            "workspace patch path is outside the child write scope",
+        ))
     }
 }
 
@@ -4200,6 +4346,25 @@ mod tests {
     }
 
     #[test]
+    fn config_rejects_invalid_patch_scope_paths() {
+        let temp = TempWorkspace::new("invalid-patch-scope");
+
+        for config in [
+            WorkspaceToolsConfig::new(vec![temp.path().to_path_buf()])
+                .with_patch_write_scope(Some(vec![PathBuf::from("../outside")])),
+            WorkspaceToolsConfig::new(vec![temp.path().to_path_buf()])
+                .with_forbidden_paths(vec![PathBuf::from("bad\npath")]),
+        ] {
+            let err =
+                ReadOnlyWorkspaceTools::new(config).expect_err("invalid scope should be rejected");
+            assert!(matches!(
+                err,
+                WorkspaceToolConfigError::InvalidScopePath { .. }
+            ));
+        }
+    }
+
+    #[test]
     fn into_registered_tools_exposes_read_list_and_search() {
         let temp = TempWorkspace::new("registered-tools");
         let tools = tools_for(temp.path()).into_registered_tools();
@@ -5171,6 +5336,63 @@ mod tests {
                 .expect("json content")
                 .contains(temp.path().to_str().expect("temp path utf8")),
             "tool output must not include absolute host roots"
+        );
+    }
+
+    #[test]
+    fn workspace_patch_respects_configured_write_scope() {
+        let temp = TempWorkspace::new("patch-write-scope");
+        temp.write_text("allowed/note.txt", "alpha\nold\nomega\n");
+        temp.write_text("denied/note.txt", "alpha\nold\nomega\n");
+        let tools = ReadOnlyWorkspaceTools::new(
+            WorkspaceToolsConfig::new(vec![temp.path().to_path_buf()])
+                .with_patch_write_scope(Some(vec![PathBuf::from("allowed")])),
+        )
+        .expect("workspace tools should construct");
+
+        let allowed = patch_outcome(&tools, "allowed/note.txt", "old", "new");
+        assert_eq!(allowed.status(), ToolCallResultStatus::Succeeded);
+
+        let denied = patch_outcome(&tools, "denied/note.txt", "old", "new");
+        assert_failed_json_for_tool(
+            &denied,
+            WORKSPACE_PATCH_TOOL,
+            ERROR_PATH_DENIED,
+            Some("denied/note.txt"),
+            temp.path(),
+        );
+        assert_eq!(
+            read_text(&temp.path().join("denied/note.txt")),
+            "alpha\nold\nomega\n"
+        );
+    }
+
+    #[test]
+    fn workspace_patch_forbidden_paths_override_write_scope() {
+        let temp = TempWorkspace::new("patch-forbidden-scope");
+        temp.write_text("allowed/public.txt", "alpha\nold\nomega\n");
+        temp.write_text("allowed/secret.txt", "alpha\nold\nomega\n");
+        let tools = ReadOnlyWorkspaceTools::new(
+            WorkspaceToolsConfig::new(vec![temp.path().to_path_buf()])
+                .with_patch_write_scope(Some(vec![PathBuf::from("allowed")]))
+                .with_forbidden_paths(vec![PathBuf::from("allowed/secret.txt")]),
+        )
+        .expect("workspace tools should construct");
+
+        let public = patch_outcome(&tools, "allowed/public.txt", "old", "new");
+        assert_eq!(public.status(), ToolCallResultStatus::Succeeded);
+
+        let forbidden = patch_outcome(&tools, "allowed/secret.txt", "old", "new");
+        assert_failed_json_for_tool(
+            &forbidden,
+            WORKSPACE_PATCH_TOOL,
+            ERROR_PATH_DENIED,
+            Some("allowed/secret.txt"),
+            temp.path(),
+        );
+        assert_eq!(
+            read_text(&temp.path().join("allowed/secret.txt")),
+            "alpha\nold\nomega\n"
         );
     }
 

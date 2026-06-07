@@ -69,12 +69,20 @@ impl ChildRuntimeFactory for CodingLoopChildRuntimeFactory {
         let builder = Runtime::builder(input.session_id)
             .task_anchor(input.task_anchor)
             .model_provider(Arc::clone(&self.provider), self.model.clone());
+        let workspace_scope = input.workspace_scope;
+        let has_child_workspace_boundary = !workspace_scope.write_scope().is_empty()
+            || !workspace_scope.forbidden_paths().is_empty();
         let mut profile = WorkspaceCodingLoopProfile::new(
             workspace_tools_config(
                 coding_loop_workspace_roots(&self.root, &self.skill_roots),
                 self.allow_hidden_workspace_paths,
                 None,
             )
+            .map(|config| {
+                config
+                    .with_patch_write_scope(Some(workspace_scope.write_scope().to_vec()))
+                    .with_forbidden_paths(workspace_scope.forbidden_paths().to_vec())
+            })
             .map_err(|_| merry_runtime::RuntimeError::InvalidStepInput {
                 reason: "child workspace tool config was invalid",
             })?,
@@ -85,7 +93,7 @@ impl ChildRuntimeFactory for CodingLoopChildRuntimeFactory {
         if allow_patch {
             profile = profile.with_patch_tool();
         }
-        profile = if allow_local_workspace_process {
+        profile = if allow_local_workspace_process && !has_child_workspace_boundary {
             profile.with_cli_bwrap_permissioned_process_runner(
                 self.admission,
                 Arc::clone(&self.runner),
