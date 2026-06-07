@@ -1,0 +1,89 @@
+    fn runtime_with_provider_and_memory_source<S>(
+        session: &str,
+        provider: RecordingModelProvider,
+        source: S,
+    ) -> Runtime
+    where
+        S: MemoryActivationSource + 'static,
+    {
+        Runtime {
+            inner: Arc::new(RuntimeInner {
+                session_id: session_id(session),
+                session: Mutex::new(SessionState::new(session_id(session))),
+                active_step: Arc::new(AtomicBool::new(false)),
+                memory_projection_epoch: AtomicU64::new(0),
+                event_buffer_size: NonZeroUsize::new(16).expect("non-zero buffer"),
+                model_configs: model_configs_with_primary(provider),
+                automatic_compaction: AutomaticCompactionConfig::default(),
+                capabilities: crate::RuntimeCapabilities::default(),
+                tool_registry: ToolRegistry::default(),
+                memory_activation_source: Arc::new(source),
+                allow_low_risk_workspace_patches: false,
+                low_risk_process_runner: None,
+                read_only_shell_process_runner: None,
+                accepted_local_workspace_process_runner: None,
+                progress_commentary: false,
+                runtime_trust_level: RuntimeTrustLevel::Agent,
+                permission_review_mode: PermissionReviewMode::DefaultForTrust,
+                permission_admission_source: None,
+                permissioned_process_runner_factory: None,
+                subagent_manager: None,
+            }),
+        }
+    }
+    fn runtime_with_provider(session: &str, provider: RecordingModelProvider) -> Runtime {
+        Runtime {
+            inner: Arc::new(RuntimeInner {
+                session_id: session_id(session),
+                session: Mutex::new(SessionState::new(session_id(session))),
+                active_step: Arc::new(AtomicBool::new(false)),
+                memory_projection_epoch: AtomicU64::new(0),
+                event_buffer_size: NonZeroUsize::new(16).expect("non-zero buffer"),
+                model_configs: model_configs_with_primary(provider),
+                automatic_compaction: AutomaticCompactionConfig::default(),
+                capabilities: crate::RuntimeCapabilities::default(),
+                tool_registry: ToolRegistry::default(),
+                memory_activation_source: Arc::new(crate::memory::StoredMemoryActivationSource),
+                allow_low_risk_workspace_patches: false,
+                low_risk_process_runner: None,
+                read_only_shell_process_runner: None,
+                accepted_local_workspace_process_runner: None,
+                progress_commentary: false,
+                runtime_trust_level: RuntimeTrustLevel::Agent,
+                permission_review_mode: PermissionReviewMode::DefaultForTrust,
+                permission_admission_source: None,
+                permissioned_process_runner_factory: None,
+                subagent_manager: None,
+            }),
+        }
+    }
+
+    fn runtime_without_provider_with_memory_source<S>(session: &str, source: S) -> Runtime
+    where
+        S: MemoryActivationSource + 'static,
+    {
+        Runtime {
+            inner: Arc::new(RuntimeInner {
+                session_id: session_id(session),
+                session: Mutex::new(SessionState::new(session_id(session))),
+                active_step: Arc::new(AtomicBool::new(false)),
+                memory_projection_epoch: AtomicU64::new(0),
+                event_buffer_size: NonZeroUsize::new(16).expect("non-zero buffer"),
+                model_configs: RuntimeModelConfigs::default(),
+                automatic_compaction: AutomaticCompactionConfig::default(),
+                capabilities: crate::RuntimeCapabilities::default(),
+                tool_registry: ToolRegistry::default(),
+                memory_activation_source: Arc::new(source),
+                allow_low_risk_workspace_patches: false,
+                low_risk_process_runner: None,
+                read_only_shell_process_runner: None,
+                accepted_local_workspace_process_runner: None,
+                progress_commentary: false,
+                runtime_trust_level: RuntimeTrustLevel::Agent,
+                permission_review_mode: PermissionReviewMode::DefaultForTrust,
+                permission_admission_source: None,
+                permissioned_process_runner_factory: None,
+                subagent_manager: None,
+            }),
+        }
+    }
