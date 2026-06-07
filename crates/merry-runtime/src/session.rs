@@ -12,9 +12,8 @@ use crate::{
     },
     compaction::{
         CitationCompactionInput, CitationCompactionPolicy,
-        CitationCompactionPreviousCheckpointInput, CitationCompactionToolCall,
-        CitationCompactionToolResult, CitationCompactionWindowItem, CompactionError,
-        CompactionOutcome, checkpoint_from_candidate_json, previous_checkpoint_payload,
+        CitationCompactionPreviousCheckpointInput, CompactionError, CompactionOutcome,
+        checkpoint_from_candidate_json, previous_checkpoint_payload,
     },
     context::{
         CompactedCheckpoint, CompactedCheckpointSummary, ContextCompiler, ContextEntry,
@@ -25,7 +24,7 @@ use crate::{
         JudgmentRequest, SummaryDraftPromotionError, SummaryDraftPromotionInput,
         context_summary_from_accepted_summary_draft, validate_summary_draft_record_purpose,
     },
-    ledger::{CompactLedgerText, LedgerFactKind, LedgerScope, LedgerUpdateKind, TaskLedger},
+    ledger::{LedgerFactKind, LedgerUpdateKind, TaskLedger},
     memory::{ActivatedMemory, MemoryError, MemoryItem, MemoryStore},
     permission::PermissionReviewContextEntry,
     skill::SkillCatalog,
@@ -42,228 +41,25 @@ use merry_core::{
 };
 use std::collections::BTreeSet;
 
-const ASSISTANT_OUTPUT_ARTIFACT_PREFIX: &str = "assistant-output-";
-const FINAL_OUTPUT_ARTIFACT_PREFIX: &str = "final-output-";
-const PROCESS_INPUT_ARTIFACT_PREFIX: &str = "process-input-";
-const TOOL_RESULT_ARTIFACT_PREFIX: &str = "tool-result-";
+mod artifacts;
+mod history;
+mod tool_result;
+
+pub(crate) use self::{
+    artifacts::is_runtime_reserved_artifact_id,
+    history::ResolvedToolContinuationSnapshot,
+    tool_result::{ProposedToolExecutionOutcome, ToolResultLedgerObservation},
+};
+use self::{
+    artifacts::{assistant_output_id, final_output_id, process_input_id, tool_result_id},
+    history::{
+        CompactionHistoryItem, ResolvedToolContinuation, SessionMessage,
+        permission_review_context_entry,
+    },
+};
+
 const WORKSPACE_READ_FILE_TOOL_NAME: &str = "workspace_read_file";
 const PERMISSION_REVIEW_RECENT_CONTEXT_LIMIT: usize = 12;
-const PERMISSION_REVIEW_ENTRY_MAX_BYTES: usize = 2048;
-
-/// Resolved tool call state that has not yet been compiled into a provider request.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ResolvedToolContinuation {
-    history_id: u64,
-    call: PendingToolCall,
-    result: ToolCallResult,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum SessionMessage {
-    User {
-        history_id: u64,
-        text: String,
-    },
-    Assistant {
-        history_id: u64,
-        artifact_id: ArtifactId,
-    },
-}
-
-impl ResolvedToolContinuation {
-    fn new(history_id: u64, call: PendingToolCall, result: ToolCallResult) -> Self {
-        Self {
-            history_id,
-            call,
-            result,
-        }
-    }
-}
-
-impl SessionMessage {
-    fn history_id(&self) -> u64 {
-        match self {
-            Self::User { history_id, .. } | Self::Assistant { history_id, .. } => *history_id,
-        }
-    }
-}
-
-/// Tool continuation data read from session state for one request compilation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ResolvedToolContinuationSnapshot {
-    call: PendingToolCall,
-    result: ToolCallResult,
-    content: ArtifactContent,
-}
-
-/// Compact ledger fact to record after a tool result artifact is durable.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ToolResultLedgerObservation {
-    scope: LedgerScope,
-    summary: CompactLedgerText,
-}
-
-impl ToolResultLedgerObservation {
-    pub(crate) fn new(
-        scope: LedgerScope,
-        summary: impl Into<String>,
-    ) -> Result<Self, crate::ledger::LedgerValidationError> {
-        Ok(Self {
-            scope,
-            summary: CompactLedgerText::try_from(summary.into())?,
-        })
-    }
-
-    fn into_update_for_artifact(self, artifact: &ArtifactRef) -> LedgerUpdateKind {
-        let summary = CompactLedgerText::try_from(format!(
-            "{}; artifact={}",
-            self.summary.as_str(),
-            artifact.id().as_str()
-        ))
-        .expect("validated compact ledger text remains non-empty after appending artifact id");
-
-        LedgerUpdateKind::Observation {
-            scope: self.scope,
-            summary,
-        }
-    }
-}
-
-/// Complete proposed action execution outcome before session state is mutated.
-#[derive(Debug)]
-pub(crate) struct ProposedToolExecutionOutcome {
-    proposal: ActionProposal,
-    status: ToolCallResultStatus,
-    content: ArtifactContent,
-    diagnostic: Option<ErrorInfo>,
-    execution_evidence: Option<ActionExecutionEvidence>,
-    policy: ActionAuditPolicy,
-    observation: Option<ToolResultLedgerObservation>,
-}
-
-impl ProposedToolExecutionOutcome {
-    pub(crate) fn new(
-        proposal: ActionProposal,
-        status: ToolCallResultStatus,
-        content: ArtifactContent,
-        diagnostic: Option<ErrorInfo>,
-        execution_evidence: Option<ActionExecutionEvidence>,
-        policy: ActionAuditPolicy,
-    ) -> Self {
-        Self {
-            proposal,
-            status,
-            content,
-            diagnostic,
-            execution_evidence,
-            policy,
-            observation: None,
-        }
-    }
-
-    pub(crate) fn with_observation(mut self, observation: ToolResultLedgerObservation) -> Self {
-        self.observation = Some(observation);
-        self
-    }
-}
-
-impl ResolvedToolContinuationSnapshot {
-    fn new(call: PendingToolCall, result: ToolCallResult, content: ArtifactContent) -> Self {
-        Self {
-            call,
-            result,
-            content,
-        }
-    }
-
-    pub(crate) fn call(&self) -> &PendingToolCall {
-        &self.call
-    }
-
-    pub(crate) fn result(&self) -> &ToolCallResult {
-        &self.result
-    }
-
-    pub(crate) fn content(&self) -> &ArtifactContent {
-        &self.content
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct CompactionHistoryItem {
-    history_id: u64,
-    kind: CompactionHistoryItemKind,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum CompactionHistoryItemKind {
-    User {
-        text: String,
-    },
-    Assistant {
-        text: String,
-    },
-    ToolExchange {
-        call: Box<PendingToolCall>,
-        result: Box<ToolCallResult>,
-        content: Box<ArtifactContent>,
-    },
-}
-
-impl CompactionHistoryItem {
-    fn to_compaction_window_item(
-        &self,
-        ref_id: &str,
-        policy: CitationCompactionPolicy,
-    ) -> Result<CitationCompactionWindowItem, RuntimeError> {
-        let item = match &self.kind {
-            CompactionHistoryItemKind::User { text } => CitationCompactionWindowItem::user(
-                self.history_id,
-                ref_id.to_owned(),
-                crate::compaction::bounded_excerpt(text, policy.max_ref_excerpt_bytes()),
-            ),
-            CompactionHistoryItemKind::Assistant { text } => {
-                CitationCompactionWindowItem::assistant(
-                    self.history_id,
-                    ref_id.to_owned(),
-                    crate::compaction::bounded_excerpt(text, policy.max_ref_excerpt_bytes()),
-                )
-            }
-            CompactionHistoryItemKind::ToolExchange {
-                call,
-                result,
-                content,
-            } => {
-                let arguments_json =
-                    serde_json::to_string(call.arguments().as_object()).map_err(|error| {
-                        CompactionError::PayloadSerialization {
-                            message: error.to_string(),
-                        }
-                    })?;
-                let excerpt = format!(
-                    "tool_call:{}\narguments:{}\nresult_status:{}\nartifact:{}\ncontent:{}",
-                    call.name(),
-                    arguments_json,
-                    tool_call_result_status_label(result.status()),
-                    result.artifact().id(),
-                    artifact_content_preview(content, policy.max_ref_excerpt_bytes())
-                );
-                CitationCompactionWindowItem::tool_exchange(
-                    self.history_id,
-                    ref_id.to_owned(),
-                    crate::compaction::bounded_excerpt(&excerpt, policy.max_ref_excerpt_bytes()),
-                    CitationCompactionToolCall::new(
-                        call.name().as_str().to_owned(),
-                        arguments_json,
-                    ),
-                    CitationCompactionToolResult::new(result.status(), result.artifact().id()),
-                )
-            }
-        };
-
-        Ok(item)
-    }
-}
 
 /// Mutable runtime state for one session.
 #[derive(Debug)]
@@ -489,10 +285,8 @@ impl SessionState {
         let recorded = self.record_artifact_state(artifact, content)?;
         Self::trace_artifact_record(self.session_id.as_str(), &recorded, content_bytes);
         let history_id = self.next_history_id();
-        self.append_only_body.push(SessionMessage::Assistant {
-            history_id,
-            artifact_id: recorded.id().clone(),
-        });
+        self.append_only_body
+            .push(SessionMessage::assistant(history_id, recorded.id().clone()));
         Ok(self.record_event(
             RuntimeEventKind::ArtifactRecorded { artifact: recorded },
             LedgerFactKind::ArtifactRecorded,
@@ -554,10 +348,8 @@ impl SessionState {
 
     pub(crate) fn record_user_message_body(&mut self, text: &str) {
         let history_id = self.next_history_id();
-        self.append_only_body.push(SessionMessage::User {
-            history_id,
-            text: text.to_owned(),
-        });
+        self.append_only_body
+            .push(SessionMessage::user(history_id, text.to_owned()));
     }
 
     pub(crate) fn evidence_ref(
@@ -789,10 +581,7 @@ impl SessionState {
         for message in &self.append_only_body {
             match message {
                 SessionMessage::User { history_id, text } => {
-                    items.push(CompactionHistoryItem {
-                        history_id: *history_id,
-                        kind: CompactionHistoryItemKind::User { text: text.clone() },
-                    });
+                    items.push(CompactionHistoryItem::user(*history_id, text.clone()));
                 }
                 SessionMessage::Assistant {
                     history_id,
@@ -806,12 +595,10 @@ impl SessionState {
                                 id: artifact_id.clone(),
                                 reason: "assistant history artifact is not textual",
                             })?;
-                    items.push(CompactionHistoryItem {
-                        history_id: *history_id,
-                        kind: CompactionHistoryItemKind::Assistant {
-                            text: text.to_owned(),
-                        },
-                    });
+                    items.push(CompactionHistoryItem::assistant(
+                        *history_id,
+                        text.to_owned(),
+                    ));
                 }
             }
         }
@@ -821,14 +608,12 @@ impl SessionState {
                 .artifacts
                 .read_content(continuation.result.artifact().id())?
                 .clone();
-            items.push(CompactionHistoryItem {
-                history_id: continuation.history_id,
-                kind: CompactionHistoryItemKind::ToolExchange {
-                    call: Box::new(continuation.call.clone()),
-                    result: Box::new(continuation.result.clone()),
-                    content: Box::new(content),
-                },
-            });
+            items.push(CompactionHistoryItem::tool_exchange(
+                continuation.history_id,
+                continuation.call.clone(),
+                continuation.result.clone(),
+                content,
+            ));
         }
 
         items.sort_by_key(|item| item.history_id);
@@ -1615,82 +1400,6 @@ impl SessionState {
     }
 }
 
-pub(crate) fn is_runtime_reserved_artifact_id(artifact_id: &ArtifactId) -> bool {
-    artifact_id
-        .as_str()
-        .starts_with(ASSISTANT_OUTPUT_ARTIFACT_PREFIX)
-        || artifact_id
-            .as_str()
-            .starts_with(PROCESS_INPUT_ARTIFACT_PREFIX)
-        || artifact_id
-            .as_str()
-            .starts_with(TOOL_RESULT_ARTIFACT_PREFIX)
-}
-
-fn assistant_output_id(sequence: u64) -> ArtifactId {
-    ArtifactId::new(&format!("{ASSISTANT_OUTPUT_ARTIFACT_PREFIX}{sequence}"))
-        .expect("assistant output artifact id uses a valid static prefix and sequence")
-}
-
-fn final_output_id(sequence: u64) -> ArtifactId {
-    ArtifactId::new(&format!("{FINAL_OUTPUT_ARTIFACT_PREFIX}{sequence}"))
-        .expect("final output artifact id uses a valid static prefix and sequence")
-}
-
-fn process_input_id(sequence: u64) -> ArtifactId {
-    ArtifactId::new(&format!("{PROCESS_INPUT_ARTIFACT_PREFIX}{sequence}"))
-        .expect("process input artifact id uses a valid static prefix and sequence")
-}
-
-fn tool_result_id(sequence: u64) -> ArtifactId {
-    ArtifactId::new(&format!("{TOOL_RESULT_ARTIFACT_PREFIX}{sequence}"))
-        .expect("tool result artifact id uses a valid static prefix and sequence")
-}
-
-fn artifact_content_preview(content: &ArtifactContent, max_bytes: usize) -> String {
-    match content.as_text() {
-        Some(text) => crate::compaction::bounded_excerpt(text, max_bytes),
-        None => format!(
-            "{:?} content, {} bytes",
-            content.kind(),
-            content.as_bytes().len()
-        ),
-    }
-}
-
-fn permission_review_context_entry(item: &CompactionHistoryItem) -> PermissionReviewContextEntry {
-    match &item.kind {
-        CompactionHistoryItemKind::User { text } => PermissionReviewContextEntry::new(
-            "user",
-            crate::compaction::bounded_excerpt(text, PERMISSION_REVIEW_ENTRY_MAX_BYTES),
-        ),
-        CompactionHistoryItemKind::Assistant { text } => PermissionReviewContextEntry::new(
-            "assistant",
-            crate::compaction::bounded_excerpt(text, PERMISSION_REVIEW_ENTRY_MAX_BYTES),
-        ),
-        CompactionHistoryItemKind::ToolExchange {
-            call,
-            result,
-            content,
-        } => {
-            let arguments_json = serde_json::to_string(call.arguments().as_object())
-                .unwrap_or_else(|_| "<unserializable arguments>".to_owned());
-            let text = format!(
-                "tool_call:{} arguments:{} result_status:{} artifact:{} content:{}",
-                call.name(),
-                arguments_json,
-                tool_call_result_status_label(result.status()),
-                result.artifact().id(),
-                artifact_content_preview(content, PERMISSION_REVIEW_ENTRY_MAX_BYTES),
-            );
-            PermissionReviewContextEntry::new(
-                "tool",
-                crate::compaction::bounded_excerpt(&text, PERMISSION_REVIEW_ENTRY_MAX_BYTES),
-            )
-        }
-    }
-}
-
 fn sanitize_checkpoint_component(value: &str) -> String {
     value
         .chars()
@@ -1702,13 +1411,6 @@ fn sanitize_checkpoint_component(value: &str) -> String {
             }
         })
         .collect()
-}
-
-fn tool_call_result_status_label(status: ToolCallResultStatus) -> &'static str {
-    match status {
-        ToolCallResultStatus::Succeeded => "succeeded",
-        ToolCallResultStatus::Failed => "failed",
-    }
 }
 
 fn duplicate_tool_call_diagnostic(call_id: &ToolCallId, state: &'static str) -> ErrorInfo {
