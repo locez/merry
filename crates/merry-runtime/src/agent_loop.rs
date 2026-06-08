@@ -15,6 +15,7 @@ use merry_core::{
     ToolCallId, ToolCallResult, ToolCallResultStatus, ToolName,
 };
 use std::{
+    collections::BTreeSet,
     num::NonZeroUsize,
     pin::Pin,
     task::{Context as TaskContext, Poll},
@@ -471,7 +472,76 @@ impl Runtime {
                         None,
                     ));
                 }
+                StepOutcome::ToolResultRecorded => {
+                    if model_turns_run >= config.max_model_turns() {
+                        trace_loop_finish(
+                            self.session_id().as_str(),
+                            "blocked",
+                            model_turns_run,
+                            Some("max_model_turns_reached"),
+                        );
+                        return Ok(AgentLoopResult::new(
+                            AgentLoopStatus::Blocked {
+                                reason: AgentLoopBlockedReason::MaxModelTurnsReached {
+                                    max_model_turns: config.max_model_turns(),
+                                },
+                            },
+                            events,
+                            model_turns_run,
+                            None,
+                        ));
+                    }
+
+                    next_input = Some(continuation_step_input());
+                }
                 StepOutcome::Pending(PendingLoopToolCall::FinalOutput(call)) => {
+                    if let Some(Err(error)) = config
+                        .final_output_contract()
+                        .map(|contract| contract.validate_call(&call))
+                    {
+                        let mut failure_events = match self
+                            .submit_tool_input_validation_failure_with_active_permit(
+                                &call,
+                                error,
+                                &loop_permit,
+                            )
+                            .await
+                        {
+                            Ok(events) => events,
+                            Err(source) => {
+                                trace_loop_error(
+                                    self.session_id().as_str(),
+                                    model_turns_run,
+                                    &source,
+                                );
+                                return Err(AgentLoopError::new(events, source));
+                            }
+                        };
+                        events.append(&mut failure_events);
+
+                        if model_turns_run >= config.max_model_turns() {
+                            trace_loop_finish(
+                                self.session_id().as_str(),
+                                "blocked",
+                                model_turns_run,
+                                Some("max_model_turns_reached"),
+                            );
+                            return Ok(AgentLoopResult::new(
+                                AgentLoopStatus::Blocked {
+                                    reason: AgentLoopBlockedReason::MaxModelTurnsReached {
+                                        max_model_turns: config.max_model_turns(),
+                                    },
+                                },
+                                events,
+                                model_turns_run,
+                                None,
+                            ));
+                        }
+
+                        next_input = Some(continuation_step_input());
+                        continue;
+                    }
+
                     let (final_output, mut final_events) =
                         match record_final_output_tool_call(self, call).await {
                             Ok(recorded) => recorded,
@@ -724,8 +794,61 @@ async fn run_agent_loop_stream_producer(
                     None,
                 ));
             }
+            StepOutcome::ToolResultRecorded => {
+                if model_turns_run >= config.max_model_turns() {
+                    return Some(AgentLoopResult::new(
+                        AgentLoopStatus::Blocked {
+                            reason: AgentLoopBlockedReason::MaxModelTurnsReached {
+                                max_model_turns: config.max_model_turns(),
+                            },
+                        },
+                        events,
+                        model_turns_run,
+                        None,
+                    ));
+                }
+
+                next_input = Some(continuation_step_input());
+            }
             StepOutcome::Pending(call) => match call {
                 PendingLoopToolCall::FinalOutput(call) => {
+                    if let Some(Err(error)) = config
+                        .final_output_contract()
+                        .map(|contract| contract.validate_call(&call))
+                    {
+                        let failure_events = runtime
+                            .submit_tool_input_validation_failure_with_active_permit(
+                                &call,
+                                error,
+                                &loop_permit,
+                            )
+                            .await
+                            .ok()?;
+
+                        for event in failure_events {
+                            events.push(event.clone());
+                            if sender.send(event).await.is_err() {
+                                return None;
+                            }
+                        }
+
+                        if model_turns_run >= config.max_model_turns() {
+                            return Some(AgentLoopResult::new(
+                                AgentLoopStatus::Blocked {
+                                    reason: AgentLoopBlockedReason::MaxModelTurnsReached {
+                                        max_model_turns: config.max_model_turns(),
+                                    },
+                                },
+                                events,
+                                model_turns_run,
+                                None,
+                            ));
+                        }
+
+                        next_input = Some(continuation_step_input());
+                        continue;
+                    }
+
                     let (final_output, events_for_final_output) =
                         record_final_output_tool_call(&runtime, call).await.ok()?;
                     for event in events_for_final_output {
@@ -928,6 +1051,7 @@ fn runtime_error_code(error: &RuntimeError) -> &'static str {
         RuntimeError::UnknownToolCall { .. } => "unknown_tool_call",
         RuntimeError::ToolCallAlreadyResolved { .. } => "tool_call_already_resolved",
         RuntimeError::DuplicateToolRegistration { .. } => "duplicate_tool_registration",
+        RuntimeError::InvalidToolInputSchema { .. } => "invalid_tool_input_schema",
         RuntimeError::BridgeToolsNotAllowed { .. } => "bridge_tools_not_allowed",
         RuntimeError::ToolExecutionCancelled { .. } => "tool_execution_cancelled",
         RuntimeError::ToolExecutionFailed { .. } => "tool_execution_failed",
@@ -991,6 +1115,7 @@ enum StepOutcome {
     Completed,
     Failed(ErrorInfo),
     Cancelled(ErrorInfo),
+    ToolResultRecorded,
     Pending(PendingLoopToolCall),
     Blocked(AgentLoopBlockedReason),
 }
@@ -1012,10 +1137,23 @@ fn classify_step_events(
         return StepOutcome::Pending(PendingLoopToolCall::Bridge(call));
     }
 
+    let resolved_call_ids = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            RuntimeEventKind::ToolCallResolved { result } => Some(result.call_id().clone()),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let resolved_tool_result_recorded = !resolved_call_ids.is_empty();
+
     let mut pending = events
         .iter()
         .filter_map(|event| match &event.kind {
-            RuntimeEventKind::ToolCallPending { call } => Some(call.clone()),
+            RuntimeEventKind::ToolCallPending { call }
+                if !resolved_call_ids.contains(call.id()) =>
+            {
+                Some(call.clone())
+            }
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -1052,6 +1190,7 @@ fn classify_step_events(
     }
 
     match pending.len() {
+        0 if resolved_tool_result_recorded => StepOutcome::ToolResultRecorded,
         0 => StepOutcome::Blocked(AgentLoopBlockedReason::StepEndedWithoutTerminalEvent),
         1 => {
             let call = pending.pop().expect("one pending call is present");

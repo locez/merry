@@ -21,7 +21,7 @@ use merry_runtime::{
     WorkspacePatchExecutionEvidence, WorkspacePatchProposal, process_command_tool,
 };
 use schemars::Schema;
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use std::{
     future::Future,
     sync::{Arc, Mutex, OnceLock},
@@ -146,11 +146,7 @@ fn final_output_contract() -> FinalOutputContract {
 }
 
 fn model_tool_call(id: &str, name: &str) -> ModelToolCall {
-    ModelToolCall::new(
-        ModelToolCallId::new(id).expect("valid model tool call id"),
-        ToolName::new(name).expect("valid tool name"),
-        ToolArguments::new(Map::<String, Value>::new()),
-    )
+    model_tool_call_with_arguments(id, name, json!({"query": "test query"}))
 }
 
 fn model_tool_call_with_arguments(id: &str, name: &str, arguments: Value) -> ModelToolCall {
@@ -914,6 +910,79 @@ async fn final_output_tool_call_is_not_replayed_into_next_step_transcript() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn invalid_final_output_tool_arguments_retry_as_failed_tool_result() {
+    let provider = ScriptedModelProvider::new(vec![
+        vec![Ok(completed_tool_call_event(
+            model_tool_call_with_arguments("call-final-invalid", FINAL_OUTPUT_TOOL_NAME, json!({})),
+        ))],
+        vec![Ok(completed_tool_call_event(
+            model_tool_call_with_arguments(
+                "call-final-valid",
+                FINAL_OUTPUT_TOOL_NAME,
+                json!({"summary": "Order A123 shipped."}),
+            ),
+        ))],
+    ]);
+    let runtime = runtime_with_provider("agent-loop-final-output-invalid-retry", provider.clone());
+
+    let result = runtime
+        .run_agent_loop(
+            StepInput::user_text("Return structured order status.").expect("valid step input"),
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default().with_final_output_contract(final_output_contract()),
+        )
+        .await
+        .expect("agent loop should run");
+
+    assert_eq!(result.status(), &AgentLoopStatus::Completed);
+    assert_eq!(result.model_turns_run(), 2);
+    assert_eq!(
+        result
+            .final_output_json()
+            .expect("structured final output should be recorded")
+            .json(),
+        r#"{"summary":"Order A123 shipped."}"#
+    );
+    assert_eq!(
+        event_kind_names(result.events()),
+        [
+            "SessionStarted",
+            "StepStarted",
+            "ToolCallPending",
+            "ArtifactRecorded",
+            "ToolCallResolved",
+            "StepStarted",
+            "ToolCallPending",
+            "ArtifactRecorded",
+            "FinalOutputRecorded",
+        ]
+    );
+    assert!(runtime.pending_tool_calls().await.is_empty());
+
+    let requests = provider.recorded_requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1].continuations().len(), 1);
+    let continuation = &requests[1].continuations()[0];
+    assert_eq!(continuation.call().id().as_str(), "call-final-invalid");
+    assert_eq!(continuation.result().status(), ToolCallResultStatus::Failed);
+    assert_eq!(
+        continuation
+            .result()
+            .diagnostic()
+            .expect("schema failure should carry diagnostic")
+            .code(),
+        "tool_input_schema_invalid"
+    );
+    assert!(
+        continuation
+            .result()
+            .content()
+            .as_str()
+            .contains("tool_input_schema_invalid")
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn agent_loop_executes_runtime_tool_before_final_output_tool() {
     let provider = ScriptedModelProvider::new(vec![
         vec![Ok(completed_tool_call_event(model_tool_call(
@@ -1073,6 +1142,102 @@ async fn agent_loop_blocks_for_bridge_tool_runner_instead_of_executing_runtime_t
     assert_eq!(
         runtime.pending_tool_calls().await,
         vec![pending_tool_call(result.events()).clone()]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn agent_loop_continues_after_invalid_bridge_tool_arguments_are_resolved() {
+    let provider = ScriptedModelProvider::new(vec![
+        vec![Ok(completed_tool_call_event(
+            model_tool_call_with_arguments("call-invalid-bridge", "search_notes", json!({})),
+        ))],
+        vec![Ok(completed_text_event("final after invalid bridge args"))],
+    ]);
+    let runtime = runtime_with_bridge_tool("agent-loop-invalid-bridge-continues", provider.clone());
+
+    let result = run_default_loop(&runtime, "Search notes.").await;
+
+    assert_eq!(result.status(), &AgentLoopStatus::Completed);
+    assert_eq!(result.model_turns_run(), 2);
+    assert_eq!(
+        event_kind_names(result.events()),
+        [
+            "SessionStarted",
+            "StepStarted",
+            "ToolCallPending",
+            "ArtifactRecorded",
+            "ToolCallResolved",
+            "StepStarted",
+            "ArtifactRecorded",
+            "StepCompleted",
+        ]
+    );
+    assert!(runtime.pending_tool_calls().await.is_empty());
+
+    let requests = provider.recorded_requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1].continuations().len(), 1);
+    let continuation = &requests[1].continuations()[0];
+    assert_eq!(continuation.call().id().as_str(), "call-invalid-bridge");
+    assert_eq!(continuation.result().status(), ToolCallResultStatus::Failed);
+    assert_eq!(
+        continuation
+            .result()
+            .diagnostic()
+            .expect("schema failure should carry diagnostic")
+            .code(),
+        "tool_input_schema_invalid"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn agent_loop_stream_continues_after_invalid_bridge_tool_arguments_are_resolved() {
+    let provider = ScriptedModelProvider::new(vec![
+        vec![Ok(completed_tool_call_event(
+            model_tool_call_with_arguments("call-invalid-bridge", "search_notes", json!({})),
+        ))],
+        vec![Ok(completed_text_event("final after invalid bridge args"))],
+    ]);
+    let runtime = runtime_with_bridge_tool(
+        "agent-loop-stream-invalid-bridge-continues",
+        provider.clone(),
+    );
+    let mut stream = runtime
+        .run_agent_loop_stream(
+            StepInput::user_text("Search notes.").expect("valid step input"),
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default(),
+        )
+        .expect("agent loop stream should start");
+
+    let mut events = Vec::new();
+    while let Some(event) = stream.next().await {
+        events.push(event);
+    }
+    let result = stream.result().await.expect("stream should produce result");
+
+    assert_eq!(result.status(), &AgentLoopStatus::Completed);
+    assert_eq!(result.model_turns_run(), 2);
+    assert_eq!(
+        event_kind_names(&events),
+        [
+            "SessionStarted",
+            "StepStarted",
+            "ToolCallPending",
+            "ArtifactRecorded",
+            "ToolCallResolved",
+            "StepStarted",
+            "ArtifactRecorded",
+            "StepCompleted",
+        ]
+    );
+
+    let requests = provider.recorded_requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1].continuations().len(), 1);
+    assert_eq!(
+        requests[1].continuations()[0].result().status(),
+        ToolCallResultStatus::Failed
     );
 }
 
@@ -2376,7 +2541,8 @@ async fn agent_loop_rejects_concurrent_pending_consumption_during_tool_execution
         vec![PendingToolCall::new(
             merry_core::ToolCallId::new("call-inter-operation").expect("valid tool call id"),
             ToolName::new("search_notes").expect("valid tool name"),
-            merry_core::ToolCallArguments::new(Map::new()),
+            merry_core::ToolCallArguments::try_from(json!({"query": "test query"}))
+                .expect("valid tool arguments"),
         )]
     );
     assert_eq!(executor.calls().len(), 1);

@@ -10,7 +10,7 @@ use crate::{
     process::{PermissionedProcessRunnerFactory, StaticPermissionedProcessRunnerFactory},
     session::SessionState,
     subagent::SubagentManager,
-    tool::{RegisteredTool, ToolRegistry},
+    tool::{RegisteredTool, ToolRegistry, ToolRegistryError},
 };
 use merry_core::SessionId;
 use merry_llm::{ModelName, ModelProvider, ModelRetryPolicy};
@@ -480,9 +480,12 @@ impl RuntimeBuilder {
     /// Duplicate tool names are rejected before the runtime is constructed.
     pub fn build(self) -> Result<Runtime, RuntimeError> {
         let tool_registry =
-            ToolRegistry::from_registered(self.registered_tools).map_err(|duplicate| {
-                RuntimeError::DuplicateToolRegistration {
-                    name: duplicate.name,
+            ToolRegistry::from_registered(self.registered_tools).map_err(|error| match error {
+                ToolRegistryError::DuplicateName { name } => {
+                    RuntimeError::DuplicateToolRegistration { name }
+                }
+                ToolRegistryError::InvalidToolInputSchema { name, message } => {
+                    RuntimeError::InvalidToolInputSchema { name, message }
                 }
             })?;
         if !self.allow_bridge_tools

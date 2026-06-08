@@ -19,6 +19,24 @@
         .expect("valid tool spec")
     }
 
+    fn required_query_tool_spec(name: &str) -> ToolSpec {
+        let schema = Schema::try_from(json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string" }
+            },
+            "required": ["query"],
+            "additionalProperties": false
+        }))
+        .expect("test schema should be a JSON schema");
+        ToolSpec::new(
+            ToolName::new(name).expect("valid tool name"),
+            "Validated test tool",
+            ToolInputSchema::new(schema).expect("valid tool schema"),
+        )
+        .expect("valid tool spec")
+    }
+
     fn policy_pending_tool_call(id: &str, name: &str) -> PendingToolCall {
         PendingToolCall::new(
             ToolCallId::new(id).expect("valid tool call id"),

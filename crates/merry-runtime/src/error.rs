@@ -65,6 +65,15 @@ pub enum RuntimeError {
         name: ToolName,
     },
 
+    /// Runtime construction received a tool schema that JSON Schema validation cannot compile.
+    #[error("tool {name} input schema is invalid: {message}")]
+    InvalidToolInputSchema {
+        /// Tool with the invalid input schema.
+        name: ToolName,
+        /// Actionable schema compiler detail.
+        message: String,
+    },
+
     /// Runtime construction tried to register a bridge tool without explicit opt-in.
     #[error("bridge tool {name} requires explicit bridge tool opt-in")]
     BridgeToolsNotAllowed {

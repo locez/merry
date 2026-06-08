@@ -1,6 +1,11 @@
 //! Runtime-owned structured final output contract.
 
-use merry_core::{ArtifactRef, CoreError, ToolCallId, ToolInputSchema, ToolName, ToolSpec};
+use crate::tool_input_validation::{
+    CompiledToolInputValidator, ToolInputValidationError, ToolInputValidatorError,
+};
+use merry_core::{
+    ArtifactRef, CoreError, PendingToolCall, ToolCallId, ToolInputSchema, ToolName, ToolSpec,
+};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -8,9 +13,16 @@ use thiserror::Error;
 pub const FINAL_OUTPUT_TOOL_NAME: &str = "merry_final_output";
 
 /// Runtime-owned final-output contract rendered as a synthetic tool.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct FinalOutputContract {
     tool_spec: ToolSpec,
+    input_validator: CompiledToolInputValidator,
+}
+
+impl PartialEq for FinalOutputContract {
+    fn eq(&self, other: &Self) -> bool {
+        self.tool_spec == other.tool_spec
+    }
 }
 
 impl FinalOutputContract {
@@ -27,8 +39,12 @@ impl FinalOutputContract {
             "Submit the final structured output when the task is complete.",
             schema,
         )?;
+        let input_validator = CompiledToolInputValidator::compile(tool_spec.input_schema())?;
 
-        Ok(Self { tool_spec })
+        Ok(Self {
+            tool_spec,
+            input_validator,
+        })
     }
 
     /// Borrows the reserved tool name.
@@ -41,6 +57,13 @@ impl FinalOutputContract {
     #[must_use]
     pub fn tool_spec(&self) -> &ToolSpec {
         &self.tool_spec
+    }
+
+    pub(crate) fn validate_call(
+        &self,
+        call: &PendingToolCall,
+    ) -> Result<(), ToolInputValidationError> {
+        self.input_validator.validate_call(call)
     }
 }
 
@@ -89,9 +112,20 @@ pub enum FinalOutputContractError {
     /// Schema serialization failed.
     #[error("final output schema could not be serialized: {message}")]
     SchemaSerialization { message: String },
+    /// Schema compilation failed.
+    #[error("final output schema could not be compiled: {message}")]
+    SchemaCompilation { message: String },
     /// A top-level object field is missing a useful description.
     #[error("final output schema field {field} must include a description")]
     MissingFieldDescription { field: String },
+}
+
+impl From<ToolInputValidatorError> for FinalOutputContractError {
+    fn from(source: ToolInputValidatorError) -> Self {
+        Self::SchemaCompilation {
+            message: source.to_string(),
+        }
+    }
 }
 
 fn validate_schema_field_descriptions(value: &Value) -> Result<(), FinalOutputContractError> {

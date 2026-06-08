@@ -2,11 +2,11 @@ use super::{Runtime, RuntimeError};
 use crate::{
     ArtifactContent, ContextEntry, ContextSummary, LedgerProjectionSnapshot,
     SessionContextSnapshot, event_stream::ActiveStepPermit,
-    session::is_runtime_reserved_artifact_id,
+    session::is_runtime_reserved_artifact_id, tool_input_validation::ToolInputValidationError,
 };
 use merry_core::{
     ArtifactId, ArtifactRef, EvidenceLocator, EvidenceRef, PendingToolCall, RuntimeEvent,
-    ToolCallResult,
+    ToolCallResult, ToolCallResultStatus,
 };
 use std::sync::Arc;
 
@@ -97,6 +97,24 @@ impl Runtime {
             .expect("tool call arguments are JSON object values and must serialize");
         let mut session = self.inner.session.lock().await;
         session.record_final_output(call.id().clone(), json)
+    }
+
+    pub(crate) async fn submit_tool_input_validation_failure_with_active_permit(
+        &self,
+        call: &PendingToolCall,
+        error: ToolInputValidationError,
+        _active_permit: &ActiveStepPermit,
+    ) -> Result<Vec<RuntimeEvent>, RuntimeError> {
+        let content = error.content_for_call(call);
+        let diagnostic = error.diagnostic();
+        let mut session = self.inner.session.lock().await;
+        session.submit_tool_execution_outcome(
+            call.id(),
+            ToolCallResultStatus::Failed,
+            content,
+            Some(diagnostic),
+            None,
+        )
     }
 
     /// Creates an exact evidence reference from artifact state owned by this session.

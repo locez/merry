@@ -114,7 +114,7 @@ fn completed_outputs_event(outputs: Vec<ModelOutput>, finish_reason: FinishReaso
 }
 
 fn model_tool_call() -> ModelToolCall {
-    model_tool_call_with_args("call-1", "search_notes", Map::new())
+    model_tool_call_with_id("call-1")
 }
 
 fn shell_process_tool_call() -> ModelToolCall {
@@ -132,7 +132,11 @@ fn shell_process_tool_call() -> ModelToolCall {
 }
 
 fn model_tool_call_with_id(id: &str) -> ModelToolCall {
-    model_tool_call_with_args(id, "search_notes", Map::new())
+    model_tool_call_with_args(
+        id,
+        "search_notes",
+        Map::from_iter([("query".to_owned(), json!("test query"))]),
+    )
 }
 
 fn model_tool_call_with_args(id: &str, name: &str, arguments: Map<String, Value>) -> ModelToolCall {
@@ -739,6 +743,25 @@ fn test_tool_spec(name: &str) -> ToolSpec {
     ToolSpec::new(
         ToolName::new(name).expect("valid tool name"),
         "Search test notes",
+        ToolInputSchema::new(schema).expect("valid tool schema"),
+    )
+    .expect("valid tool spec")
+}
+
+fn path_tool_spec(name: &str) -> ToolSpec {
+    let schema = Schema::try_from(json!({
+        "type": "object",
+        "properties": {
+            "path": { "type": "string" }
+        },
+        "required": ["path"],
+        "additionalProperties": false
+    }))
+    .expect("test schema should be a JSON schema");
+
+    ToolSpec::new(
+        ToolName::new(name).expect("valid tool name"),
+        "Read a workspace file",
         ToolInputSchema::new(schema).expect("valid tool schema"),
     )
     .expect("valid tool spec")
@@ -2820,7 +2843,7 @@ async fn reading_catalog_skill_file_emits_skill_used_event() {
     let runtime = Runtime::builder(session_id("provider-skill-used"))
         .skill_catalog(catalog)
         .register_tool(RegisteredTool::read_only(
-            test_tool_spec("workspace_read_file"),
+            path_tool_spec("workspace_read_file"),
             Arc::new(ScriptedToolExecutor::succeeding_text("# Demo\n")),
         ))
         .model_provider(Arc::new(provider), model_name())
@@ -3313,7 +3336,7 @@ async fn unregistered_pending_tool_name_resolves_failed_with_tool_not_registered
 
 #[tokio::test(flavor = "current_thread")]
 async fn denied_registered_tool_result_is_compiled_as_failed_provider_neutral_continuation() {
-    let call = model_tool_call_with_args("call-policy-denied", "search_notes", Map::new());
+    let call = model_tool_call_with_id("call-policy-denied");
     let provider = ScriptedModelProvider::new(vec![
         vec![Ok(completed_outputs_event(
             vec![ModelOutput::tool_call(call)],
@@ -3386,7 +3409,7 @@ async fn denied_registered_tool_result_is_compiled_as_failed_provider_neutral_co
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn execute_tool_with_bad_or_missing_args_still_reaches_executor() {
+async fn execute_tool_with_bad_or_missing_args_resolves_schema_failure_before_executor() {
     let call = model_tool_call_with_args("call-bad-args", "search_notes", Map::new());
     let provider = ScriptedModelProvider::new(vec![vec![Ok(completed_outputs_event(
         vec![ModelOutput::tool_call(call)],
@@ -3401,15 +3424,22 @@ async fn execute_tool_with_bad_or_missing_args_still_reaches_executor() {
     let pending_events = collect_step(&runtime, "Search with missing args.").await;
     let pending = pending_tool_call(&pending_events).clone();
 
-    runtime
+    let execution_events = runtime
         .execute_tool_call(pending.id(), ToolExecutionContext::default())
         .await
-        .expect("runtime should not schema-validate tool arguments");
+        .expect("schema failure should resolve the pending call");
 
     let calls = executor.calls();
-    assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].id().as_str(), "call-bad-args");
-    assert!(calls[0].arguments().as_object().is_empty());
+    assert_eq!(calls.len(), 0);
+    let result = resolved_tool_result(&execution_events);
+    assert_eq!(result.status(), ToolCallResultStatus::Failed);
+    assert_eq!(
+        result
+            .diagnostic()
+            .expect("schema failure should carry diagnostic")
+            .code(),
+        "tool_input_schema_invalid"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -4563,7 +4593,11 @@ async fn submit_tool_result_rejects_unsupported_content_kind_without_mutation() 
 #[tokio::test(flavor = "current_thread")]
 async fn provider_completed_with_empty_tool_call_args_succeeds() {
     let provider = FakeModelProvider::new(vec![Ok(completed_outputs_event(
-        vec![ModelOutput::tool_call(model_tool_call())],
+        vec![ModelOutput::tool_call(model_tool_call_with_args(
+            "call-1",
+            "search_notes",
+            Map::new(),
+        ))],
         FinishReason::ToolCalls,
     ))]);
     let runtime = runtime_with_provider("provider-tool-call-empty-args", provider);

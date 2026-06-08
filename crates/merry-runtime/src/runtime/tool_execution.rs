@@ -77,6 +77,32 @@ pub(super) async fn execute_tool_call_with_active_permit(
         );
     };
 
+    if let Some(Err(error)) = inner.tool_registry.validate_tool_input(&pending) {
+        if context.cancellation_token().is_cancelled() {
+            return Err(RuntimeError::ToolExecutionCancelled {
+                session_id: inner.session_id.clone(),
+                call_id: call_id.clone(),
+            });
+        }
+
+        let content = error.content_for_call(&pending);
+        let diagnostic = error.diagnostic();
+        let mut session = inner.session.lock().await;
+        if context.cancellation_token().is_cancelled() {
+            return Err(RuntimeError::ToolExecutionCancelled {
+                session_id: inner.session_id.clone(),
+                call_id: call_id.clone(),
+            });
+        }
+        return session.submit_tool_execution_outcome(
+            call_id,
+            ToolCallResultStatus::Failed,
+            content,
+            Some(diagnostic),
+            None,
+        );
+    }
+
     if is_request_permissions_tool(pending.name())
         && registered_tool.action_kind() == crate::ToolActionKind::RuntimeControl
     {

@@ -1,7 +1,9 @@
 use super::{RuntimeInner, diagnostic_from_text};
-use crate::session::SessionState;
+use crate::{session::SessionState, tool_input_validation::ToolInputValidationError};
 use futures_util::StreamExt;
-use merry_core::{ErrorInfo, PendingToolCall, RuntimeEvent, RuntimeEventKind};
+use merry_core::{
+    ErrorInfo, PendingToolCall, RuntimeEvent, RuntimeEventKind, ToolCallResultStatus,
+};
 use merry_llm::{
     ModelError, ModelEvent, ModelEventStream, ModelProvider, ModelRequest, ModelRetryEvent,
     ModelRetryPolicy, ModelStreamContext, ProviderErrorKind, RetryModelStreamContext,
@@ -115,6 +117,13 @@ pub(super) async fn send_tool_call_pending_event(
             permit.send(event);
 
             if let Some(call) = bridge_call {
+                if let Some(Err(error)) = inner.tool_registry.validate_tool_input(&call) {
+                    return send_bridge_tool_input_validation_failure_events(
+                        inner, sender, token, &call, error,
+                    )
+                    .await;
+                }
+
                 send_bridge_tool_call_requested_event(inner, sender, token, call).await
             } else {
                 true
@@ -151,6 +160,61 @@ async fn send_bridge_tool_call_requested_event(
 
     permit.send(event);
     true
+}
+
+async fn send_bridge_tool_input_validation_failure_events(
+    inner: &RuntimeInner,
+    sender: &mpsc::Sender<RuntimeEvent>,
+    token: &CancellationToken,
+    call: &PendingToolCall,
+    error: ToolInputValidationError,
+) -> bool {
+    if token.is_cancelled() {
+        return false;
+    }
+
+    let result = {
+        let mut session = inner.session.lock().await;
+        if token.is_cancelled() {
+            return false;
+        }
+        session.submit_tool_execution_outcome(
+            call.id(),
+            ToolCallResultStatus::Failed,
+            error.content_for_call(call),
+            Some(error.diagnostic()),
+            None,
+        )
+    };
+
+    match result {
+        Ok(events) => {
+            let mut events = events.into_iter();
+            let Some(artifact_event) = events.next() else {
+                return false;
+            };
+            let Some(resolved_event) = events.next() else {
+                return false;
+            };
+            debug_assert!(events.next().is_none());
+
+            let Some(artifact_permit) = reserve_normal_event_slot(sender, token).await else {
+                return false;
+            };
+            artifact_permit.send(artifact_event);
+
+            let Some(resolved_permit) = reserve_normal_event_slot(sender, token).await else {
+                return false;
+            };
+            resolved_permit.send(resolved_event);
+            true
+        }
+        Err(error) => {
+            let diagnostic =
+                diagnostic_from_text("tool_input_validation_result", error.to_string());
+            send_failed_event(inner, sender, token, diagnostic).await
+        }
+    }
 }
 
 pub(super) async fn wait_for_retrying_stream_setup<F>(
