@@ -6,12 +6,12 @@
 
 use crate::{
     CompiledContext, FinalOutputContract, ProjectRules, RuntimeError, SkillCatalog, TaskAnchor,
-    artifact::ArtifactContent, session::ResolvedToolContinuationSnapshot,
+    artifact::ArtifactContent, session::TranscriptItemSnapshot,
 };
 use merry_core::{PendingToolCall, ToolCallResult, ToolCallResultStatus, ToolSpec};
 use merry_llm::{
-    GenerationConfig, ModelContent, ModelMessage, ModelMessageRole, ModelName, ModelRequest,
-    ModelToolCall, ModelToolCallId, ModelToolContinuation, ModelToolResult, ModelToolResultContent,
+    GenerationConfig, ModelContent, ModelInputItem, ModelMessage, ModelMessageRole, ModelName,
+    ModelRequest, ModelToolCall, ModelToolCallId, ModelToolResult, ModelToolResultContent,
     ToolArguments,
 };
 use tokio_util::sync::CancellationToken;
@@ -35,7 +35,7 @@ pub(crate) const PROGRESS_COMMENTARY_INSTRUCTIONS: &str = r#"When you are about 
 /// session rather than passed as raw chat history.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StepInput {
-    user_text: String,
+    user_text: Option<String>,
     history: StepInputHistory,
 }
 
@@ -47,27 +47,49 @@ impl StepInput {
     pub fn user_text(text: &str) -> Result<Self, RuntimeError> {
         validate_user_text(text)?;
         Ok(Self {
-            user_text: text.to_owned(),
+            user_text: Some(text.to_owned()),
             history: StepInputHistory::RecordUser,
         })
     }
 
+    #[allow(dead_code)]
     pub(crate) fn loop_control_text(text: &str) -> Result<Self, RuntimeError> {
         validate_user_text(text)?;
         Ok(Self {
-            user_text: text.to_owned(),
+            user_text: Some(text.to_owned()),
             history: StepInputHistory::ControlOnly,
         })
+    }
+
+    pub(crate) fn no_new_user_input() -> Self {
+        Self {
+            user_text: None,
+            history: StepInputHistory::ControlOnly,
+        }
     }
 
     /// Borrows the user text for this step.
     #[must_use]
     pub fn text(&self) -> &str {
-        &self.user_text
+        self.user_text
+            .as_deref()
+            .expect("StepInput::text is available only for user text inputs")
     }
 
-    pub(crate) fn should_record_user_history(&self) -> bool {
-        self.history == StepInputHistory::RecordUser
+    pub(crate) fn user_text_for_request(&self) -> Option<&str> {
+        self.user_text.as_deref()
+    }
+
+    pub(crate) fn user_text_for_history(&self) -> Option<&str> {
+        if self.history == StepInputHistory::RecordUser {
+            self.user_text.as_deref()
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn memory_activation_query(&self) -> Option<&str> {
+        self.user_text.as_deref()
     }
 }
 
@@ -75,12 +97,6 @@ impl StepInput {
 enum StepInputHistory {
     RecordUser,
     ControlOnly,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum CompiledSessionMessage {
-    User { text: String },
-    Assistant { text: String },
 }
 
 /// Context shared with runtime step producers.
@@ -188,8 +204,7 @@ pub(crate) struct StepModelRequestParts<'a> {
     pub(crate) project_rules: Option<&'a ProjectRules>,
     pub(crate) task_anchor: Option<&'a TaskAnchor>,
     pub(crate) context: &'a CompiledContext,
-    pub(crate) append_only_body: &'a [CompiledSessionMessage],
-    pub(crate) continuations: &'a [ResolvedToolContinuationSnapshot],
+    pub(crate) transcript: &'a [TranscriptItemSnapshot],
     pub(crate) tool_specs: Vec<ToolSpec>,
     pub(crate) generation_config: GenerationConfig,
     pub(crate) progress_commentary: bool,
@@ -205,8 +220,7 @@ pub(crate) fn compile_step_model_request(
         project_rules,
         task_anchor,
         context,
-        append_only_body,
-        continuations,
+        transcript,
         tool_specs,
         generation_config,
         progress_commentary,
@@ -222,91 +236,98 @@ pub(crate) fn compile_step_model_request(
         stable_prefix_message_count
             + usize::from(task_anchor.is_some())
             + if context_snapshot.is_empty() { 1 } else { 2 }
-            + append_only_body.len(),
+            + transcript.len()
+            + 1,
     );
 
     // Keep provider prompt projection allowlisted and ordered:
     // stable runtime instructions, available skill metadata, project rules,
     // task anchor control-plane context, explicit compiled context, prior
-    // append-only user/assistant body, then the current user or loop-control
-    // input. Tool continuations travel through provider-neutral continuation
-    // fields, not ad hoc ledger or artifact text rendered into messages.
-    messages.push(ModelMessage::new(
+    // ordered transcript, then the current user or loop-control input.
+    messages.push(ModelInputItem::Message(ModelMessage::new(
         ModelMessageRole::System,
         ModelContent::text(DEFAULT_RUNTIME_BASE_INSTRUCTIONS)?,
-    )?);
+    )?));
 
     if progress_commentary {
-        messages.push(ModelMessage::new(
+        messages.push(ModelInputItem::Message(ModelMessage::new(
             ModelMessageRole::System,
             ModelContent::text(PROGRESS_COMMENTARY_INSTRUCTIONS)?,
-        )?);
+        )?));
     }
 
     if let Some(skill_metadata_text) = skill_metadata_text {
-        messages.push(ModelMessage::new(
+        messages.push(ModelInputItem::Message(ModelMessage::new(
             ModelMessageRole::System,
             ModelContent::text(&skill_metadata_text)?,
-        )?);
+        )?));
     }
 
     if let Some(project_rules) = project_rules {
-        messages.push(ModelMessage::new(
+        messages.push(ModelInputItem::Message(ModelMessage::new(
             ModelMessageRole::System,
             ModelContent::text(&project_rules.to_stable_prefix_message_text())?,
-        )?);
+        )?));
     }
 
     if let Some(task_anchor) = task_anchor {
-        messages.push(ModelMessage::new(
+        messages.push(ModelInputItem::Message(ModelMessage::new(
             ModelMessageRole::System,
             ModelContent::text(&task_anchor.to_dynamic_control_message_text())?,
-        )?);
+        )?));
     }
 
     if !context_snapshot.is_empty() {
-        messages.push(ModelMessage::new(
+        messages.push(ModelInputItem::Message(ModelMessage::new(
             ModelMessageRole::System,
             ModelContent::text(&context_snapshot)?,
-        )?);
+        )?));
     }
 
-    for message in append_only_body {
-        let (role, text) = match message {
-            CompiledSessionMessage::User { text } => (ModelMessageRole::User, text.as_str()),
-            CompiledSessionMessage::Assistant { text } => {
-                (ModelMessageRole::Assistant, text.as_str())
-            }
-        };
-        messages.push(ModelMessage::new(role, ModelContent::text(text)?)?);
+    for item in transcript {
+        messages.push(model_input_from_transcript_snapshot(item)?);
     }
 
-    messages.push(ModelMessage::new(
-        ModelMessageRole::User,
-        ModelContent::text(input.text())?,
-    )?);
+    if let Some(text) = input.user_text_for_request() {
+        messages.push(ModelInputItem::Message(ModelMessage::new(
+            ModelMessageRole::User,
+            ModelContent::text(text)?,
+        )?));
+    }
 
-    let continuations = continuations
-        .iter()
-        .map(model_tool_continuation_from_snapshot)
-        .collect::<Result<Vec<_>, _>>()?;
-
-    ModelRequest::new_with_continuations_and_stable_prefix(
+    ModelRequest::new_with_input_and_stable_prefix(
         model.clone(),
         messages,
         tool_specs,
-        continuations,
         generation_config,
         stable_prefix_message_count,
     )
 }
 
-fn model_tool_continuation_from_snapshot(
-    snapshot: &ResolvedToolContinuationSnapshot,
-) -> Result<ModelToolContinuation, merry_llm::ModelError> {
-    let call = model_tool_call_from_pending(snapshot.call())?;
-    let result = model_tool_result_from_result(snapshot.result(), snapshot.content())?;
-    ModelToolContinuation::new(call, result)
+fn model_input_from_transcript_snapshot(
+    snapshot: &TranscriptItemSnapshot,
+) -> Result<ModelInputItem, merry_llm::ModelError> {
+    match snapshot {
+        TranscriptItemSnapshot::UserMessage { text, .. } => Ok(ModelInputItem::Message(
+            ModelMessage::new(ModelMessageRole::User, ModelContent::text(text)?)?,
+        )),
+        TranscriptItemSnapshot::AssistantText { text } => Ok(ModelInputItem::Message(
+            ModelMessage::new(ModelMessageRole::Assistant, ModelContent::text(text)?)?,
+        )),
+        TranscriptItemSnapshot::ToolCall { call } => Ok(ModelInputItem::ToolCall(
+            model_tool_call_from_pending(call)?,
+        )),
+        TranscriptItemSnapshot::ToolResult {
+            call_id,
+            result,
+            content,
+        } => {
+            debug_assert_eq!(call_id, result.call_id());
+            Ok(ModelInputItem::ToolResult(model_tool_result_from_result(
+                result, content,
+            )?))
+        }
+    }
 }
 
 fn model_tool_call_from_pending(

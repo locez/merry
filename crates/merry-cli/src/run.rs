@@ -520,7 +520,7 @@ fn is_safe_shell_word_byte(byte: u8) -> bool {
 }
 
 fn format_delay_ms(delay_ms: u64) -> String {
-    if delay_ms >= 1000 && delay_ms % 1000 == 0 {
+    if delay_ms >= 1000 && delay_ms.is_multiple_of(1000) {
         format!("{}s", delay_ms / 1000)
     } else {
         format!("{delay_ms}ms")

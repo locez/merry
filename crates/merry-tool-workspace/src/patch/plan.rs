@@ -87,10 +87,10 @@ pub(crate) fn workspace_patch_blocking_checked(
 ) -> Result<ToolExecutionOutcome, ToolExecutionError> {
     match plan_workspace_patch_blocking_checked(state, args, is_cancelled)? {
         WorkspacePatchPlanOutcome::Planned(plan) => {
-            if let Some(approved) = approved_proposal {
-                if match_approved_patch_proposal(approved, &plan).is_err() {
-                    return Ok(proposal_mismatch_outcome(plan.subject()));
-                }
+            if let Some(approved) = approved_proposal
+                && match_approved_patch_proposal(approved, &plan).is_err()
+            {
+                return Ok(proposal_mismatch_outcome(plan.subject()));
             }
             execute_workspace_patch_plan(plan, is_cancelled)
         }

@@ -68,9 +68,12 @@ fn submit_tool_result_stores_exact_content_before_resolved_event() {
 }
 
 #[test]
-fn session_history_ids_increase_across_messages_and_tool_continuations() {
-    let mut session = SessionState::new(SessionId::new("history-order").expect("valid session id"));
-    session.record_user_message_body("first user");
+fn session_transcript_records_messages_and_tool_exchange_in_order() {
+    let mut session =
+        SessionState::new(SessionId::new("transcript-order").expect("valid session id"));
+    session
+        .record_user_message_body("first user")
+        .expect("user records");
     session
         .record_assistant_text_output("first assistant".to_owned())
         .expect("assistant output records");
@@ -85,6 +88,13 @@ fn session_history_ids_increase_across_messages_and_tool_continuations() {
         .submit_tool_result(result, ArtifactContent::text("tool result"))
         .expect("tool result records");
 
-    let ids = session.history_item_ids();
-    assert_eq!(ids, vec![0, 1, 2]);
+    assert_eq!(
+        session.transcript_items_for_tests(),
+        vec![
+            "user:first user",
+            "assistant:first assistant",
+            "tool_call:call-history",
+            "tool_result:call-history:tool result",
+        ]
+    );
 }

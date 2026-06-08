@@ -4,17 +4,16 @@ pub(super) use merry_core::{
     ToolCallResultStatus, ToolName,
 };
 pub(super) use merry_llm::{
-    FinishReason, ModelCapabilities, ModelError, ModelEvent, ModelEventStream, ModelMessageRole,
-    ModelName, ModelOutput, ModelProvider, ModelProviderFuture, ModelRequest, ModelResponse,
+    FinishReason, ModelCapabilities, ModelError, ModelEvent, ModelEventStream, ModelName,
+    ModelOutput, ModelProvider, ModelProviderFuture, ModelRequest, ModelResponse,
     ModelStreamContext, ModelToolCall, ModelToolCallId, ModelToolResultContent, ToolArguments,
     testing::FakeModelProvider,
 };
 pub(super) use merry_runtime::{
-    AcceptedLocalWorkspaceProcessAdmission, AgentLoopConfig, AgentLoopStatus,
-    DEFAULT_AGENT_LOOP_CONTINUATION_INPUT, LedgerFactKind, LedgerProjection, ProcessActionIntent,
-    ProcessExitStatus, ProcessRunner, ProcessRunnerContext, ProcessRunnerError,
-    ProcessRunnerFuture, ProcessRunnerOutput, Runtime, RuntimeProfile, StepContext, StepInput,
-    ToolExecutionContext,
+    AcceptedLocalWorkspaceProcessAdmission, AgentLoopConfig, AgentLoopStatus, LedgerFactKind,
+    LedgerProjection, ProcessActionIntent, ProcessExitStatus, ProcessRunner, ProcessRunnerContext,
+    ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput, Runtime, RuntimeProfile,
+    StepContext, StepInput, ToolExecutionContext,
 };
 pub(super) use merry_tool_workspace::{
     ReadOnlyWorkspaceTools, WORKSPACE_LIST_DIR_TOOL, WORKSPACE_PATCH_TOOL,
@@ -223,29 +222,24 @@ pub(super) async fn collect_step(runtime: &Runtime, text: &str) -> Vec<RuntimeEv
         .await
 }
 
-fn continuation_input_for(original_task: &str) -> String {
-    format!("{DEFAULT_AGENT_LOOP_CONTINUATION_INPUT}\n\nOriginal task:\n{original_task}")
-}
-
 pub(super) fn assert_continuation_request_body(request: &ModelRequest, original_task: &str) {
-    let dynamic = request.dynamic_messages();
+    let dynamic_text = request
+        .dynamic_messages()
+        .iter()
+        .map(|message| message.content().as_text())
+        .collect::<Vec<_>>()
+        .join("\n---\n");
     assert!(
-        dynamic.len() >= 2,
-        "continuation requests should include append-only task body and loop-control input"
-    );
-    assert!(
-        dynamic.iter().any(|message| {
-            message.role() == ModelMessageRole::User && message.content().as_text() == original_task
-        }),
+        dynamic_text.contains(original_task),
         "continuation request should preserve original task user message"
     );
-    assert_eq!(
-        dynamic.last().expect("dynamic message").role(),
-        ModelMessageRole::User
+    assert!(
+        !dynamic_text.contains("Continue after tool result."),
+        "continuation request must not include a synthetic loop-control user prompt"
     );
-    assert_eq!(
-        dynamic.last().expect("dynamic message").content().as_text(),
-        continuation_input_for(original_task)
+    assert!(
+        !dynamic_text.contains("Original task:"),
+        "continuation request must not include the synthetic original task label"
     );
 }
 

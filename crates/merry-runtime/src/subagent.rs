@@ -593,13 +593,12 @@ async fn start_reserved_children_iteratively(
             Ok(()) => {}
             Err(error) => {
                 let mut state_guard = scheduler.state.lock().await;
-                if let Some(agent) = state_guard.agents.get_mut(&start.agent_id) {
-                    if !agent.status.is_terminal() {
-                        agent.status = SubagentStatusLabel::Failed;
-                        agent.summary = "child runtime start failed".to_owned();
-                        agent.diagnostics =
-                            Some(error_info("subagent_start_error", error.to_string()));
-                    }
+                if let Some(agent) = state_guard.agents.get_mut(&start.agent_id)
+                    && !agent.status.is_terminal()
+                {
+                    agent.status = SubagentStatusLabel::Failed;
+                    agent.summary = "child runtime start failed".to_owned();
+                    agent.diagnostics = Some(error_info("subagent_start_error", error.to_string()));
                 }
                 pending.extend(reserve_queued_starts_locked(
                     &mut state_guard,
@@ -868,12 +867,12 @@ async fn update_child_after_error(
     max_threads: usize,
 ) -> Vec<ReservedChildStart> {
     let mut state = state.lock().await;
-    if let Some(agent) = state.agents.get_mut(agent_id) {
-        if !agent.status.is_terminal() {
-            agent.status = SubagentStatusLabel::Failed;
-            agent.summary = summary.to_owned();
-            agent.diagnostics = Some(diagnostics);
-        }
+    if let Some(agent) = state.agents.get_mut(agent_id)
+        && !agent.status.is_terminal()
+    {
+        agent.status = SubagentStatusLabel::Failed;
+        agent.summary = summary.to_owned();
+        agent.diagnostics = Some(diagnostics);
     }
     reserve_queued_starts_locked(&mut state, max_threads)
 }

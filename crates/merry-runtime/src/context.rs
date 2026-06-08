@@ -582,7 +582,7 @@ impl ProjectRules {
 /// Current task objective pinned by a future `/task`-style control command.
 ///
 /// A task anchor is session control-plane context. It is neither durable
-/// project policy nor ordinary append-only user chat, so request compilation
+/// project policy nor ordinary ordered transcript history, so request compilation
 /// renders it outside the stable prefix and before checkpoint/context/body
 /// projection.
 #[derive(Debug, Clone, PartialEq, Eq)]

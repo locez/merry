@@ -133,7 +133,7 @@ mod tests {
             ModelName::new("gpt-4.1-mini").expect("valid model name"),
             vec![
                 message(ModelMessageRole::System, "You are concise."),
-                message(ModelMessageRole::User, "Continue after tool result."),
+                message(ModelMessageRole::User, "Use the weather tool result."),
             ],
             vec![weather_tool()],
             vec![tool_continuation_with_json_result()],
@@ -152,7 +152,7 @@ mod tests {
                     ModelMessageRole::Assistant,
                     "I will check the weather tool.",
                 ),
-                message(ModelMessageRole::User, "Continue after tool result."),
+                message(ModelMessageRole::User, "Use the weather tool result."),
             ],
             vec![weather_tool()],
             vec![tool_continuation_with_json_result()],
@@ -391,7 +391,7 @@ mod tests {
                         "content": [
                             {
                                 "type": "input_text",
-                                "text": "Continue after tool result."
+                                "text": "Use the weather tool result."
                             }
                         ]
                     },
@@ -488,7 +488,7 @@ mod tests {
                     "content": [
                         {
                             "type": "input_text",
-                            "text": "Continue after tool result."
+                            "text": "Use the weather tool result."
                         }
                     ]
                 },

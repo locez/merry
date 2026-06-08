@@ -2,7 +2,7 @@
 
 use crate::{
     ModelError,
-    tool::{ModelToolContinuation, validate_provider_identifier},
+    tool::{ModelToolCall, ModelToolContinuation, ModelToolResult, validate_provider_identifier},
 };
 use merry_core::ToolSpec;
 use schemars::{JsonSchema, Schema, SchemaGenerator};
@@ -230,6 +230,23 @@ impl<'de> Deserialize<'de> for ModelMessage {
     }
 }
 
+/// Provider-neutral ordered model input item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(
+    tag = "kind",
+    content = "item",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum ModelInputItem {
+    /// User, assistant, or system text message.
+    Message(ModelMessage),
+    /// Model-requested tool call replayed into provider-visible history.
+    ToolCall(ModelToolCall),
+    /// Tool result replayed into provider-visible history.
+    ToolResult(ModelToolResult),
+}
+
 /// Provider-neutral generation controls.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -390,6 +407,7 @@ impl<'de> Deserialize<'de> for ModelResponseFormat {
 #[serde(deny_unknown_fields)]
 pub struct ModelRequest {
     model: ModelName,
+    input: Vec<ModelInputItem>,
     messages: Vec<ModelMessage>,
     tools: Vec<ToolSpec>,
     #[serde(default)]
@@ -500,33 +518,88 @@ impl ModelRequest {
                 "ModelRequest stable prefix message count must not exceed messages length",
             ));
         }
-        if messages
-            .iter()
-            .take(stable_prefix_message_count)
-            .any(|message| message.role() != ModelMessageRole::System)
-        {
+
+        let input = input_from_messages_and_continuations(&messages, &continuations);
+        Self::new_with_input_and_stable_prefix_and_response_format(
+            model,
+            input,
+            tools,
+            generation,
+            stable_prefix_message_count,
+            response_format,
+        )
+    }
+
+    /// Creates a validated compiled model request snapshot from ordered input items.
+    pub fn new_with_input_and_stable_prefix(
+        model: ModelName,
+        input: Vec<ModelInputItem>,
+        tools: Vec<ToolSpec>,
+        generation: GenerationConfig,
+        stable_prefix_item_count: usize,
+    ) -> Result<Self, ModelError> {
+        Self::new_with_input_and_stable_prefix_and_response_format(
+            model,
+            input,
+            tools,
+            generation,
+            stable_prefix_item_count,
+            None,
+        )
+    }
+
+    /// Creates a validated compiled model request snapshot from ordered input
+    /// items and an optional response format contract.
+    pub fn new_with_input_and_stable_prefix_and_response_format(
+        model: ModelName,
+        input: Vec<ModelInputItem>,
+        tools: Vec<ToolSpec>,
+        generation: GenerationConfig,
+        stable_prefix_item_count: usize,
+        response_format: Option<ModelResponseFormat>,
+    ) -> Result<Self, ModelError> {
+        if input.is_empty() {
+            return Err(ModelError::invalid_request(
+                "ModelRequest input must not be empty",
+            ));
+        }
+
+        if stable_prefix_item_count > input.len() {
+            return Err(ModelError::invalid_request(
+                "ModelRequest stable prefix item count must not exceed input length",
+            ));
+        }
+        if input.iter().take(stable_prefix_item_count).any(|item| {
+            !matches!(
+                item,
+                ModelInputItem::Message(message)
+                    if message.role() == ModelMessageRole::System
+            )
+        }) {
             return Err(ModelError::invalid_request(
                 "ModelRequest stable prefix messages must use the system role",
             ));
         }
 
+        let messages = messages_from_input(&input);
+        let continuations = continuations_from_input(&input)?;
         let tool_profile_hash = tool_profile_hash(&tools);
-        let stable_prefix_hash = stable_prefix_hash(
-            &messages[..stable_prefix_message_count],
+        let stable_prefix_hash = stable_input_prefix_hash(
+            &input[..stable_prefix_item_count],
             &tools,
             response_format.as_ref(),
         );
-        let dynamic_context_hash =
-            dynamic_context_hash(&messages[stable_prefix_message_count..], &continuations);
+        let dynamic_context_hash = dynamic_input_hash(&input[stable_prefix_item_count..]);
 
         Ok(Self {
             model,
+            input,
             messages,
             tools,
             continuations,
             response_format,
             generation,
-            stable_prefix_message_count,
+            stable_prefix_message_count: stable_prefix_item_count,
             tool_profile_hash,
             stable_prefix_hash,
             dynamic_context_hash,
@@ -543,6 +616,12 @@ impl ModelRequest {
     #[must_use]
     pub fn messages(&self) -> &[ModelMessage] {
         &self.messages
+    }
+
+    /// Ordered provider-neutral input snapshot.
+    #[must_use]
+    pub fn input(&self) -> &[ModelInputItem] {
+        &self.input
     }
 
     /// Provider-neutral tool specifications.
@@ -569,16 +648,34 @@ impl ModelRequest {
         self.stable_prefix_message_count
     }
 
+    /// Number of leading input items included in the stable prefix hash.
+    #[must_use]
+    pub fn stable_prefix_item_count(&self) -> usize {
+        self.stable_prefix_message_count
+    }
+
     /// Leading system/developer messages included in the stable prefix hash.
     #[must_use]
     pub fn stable_prefix_messages(&self) -> &[ModelMessage] {
         &self.messages[..self.stable_prefix_message_count]
     }
 
+    /// Leading input items included in the stable prefix hash.
+    #[must_use]
+    pub fn stable_prefix_input(&self) -> &[ModelInputItem] {
+        &self.input[..self.stable_prefix_message_count]
+    }
+
     /// Dynamic messages outside the stable prefix.
     #[must_use]
     pub fn dynamic_messages(&self) -> &[ModelMessage] {
         &self.messages[self.stable_prefix_message_count..]
+    }
+
+    /// Dynamic input outside the stable prefix.
+    #[must_use]
+    pub fn dynamic_input(&self) -> &[ModelInputItem] {
+        &self.input[self.stable_prefix_message_count..]
     }
 
     /// Generation controls.
@@ -604,13 +701,22 @@ impl ModelRequest {
     pub fn dynamic_context_hash(&self) -> &RequestContentHash {
         &self.dynamic_context_hash
     }
+
+    /// Stable hash of dynamic ordered input outside the cacheable prefix.
+    #[must_use]
+    pub fn dynamic_input_hash(&self) -> &RequestContentHash {
+        &self.dynamic_context_hash
+    }
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ModelRequestWire {
     model: ModelName,
-    messages: Vec<ModelMessage>,
+    #[serde(default)]
+    input: Option<Vec<ModelInputItem>>,
+    #[serde(default)]
+    messages: Option<Vec<ModelMessage>>,
     tools: Vec<ToolSpec>,
     #[serde(default)]
     continuations: Vec<ModelToolContinuation>,
@@ -619,6 +725,8 @@ struct ModelRequestWire {
     generation: GenerationConfig,
     #[serde(default)]
     stable_prefix_message_count: usize,
+    #[serde(default)]
+    stable_prefix_item_count: Option<usize>,
     #[serde(default)]
     tool_profile_hash: Option<ToolProfileHash>,
     #[serde(default)]
@@ -633,15 +741,32 @@ impl<'de> Deserialize<'de> for ModelRequest {
         D: Deserializer<'de>,
     {
         let wire = ModelRequestWire::deserialize(deserializer)?;
-        let request = Self::new_with_continuations_and_stable_prefix_and_response_format(
-            wire.model,
-            wire.messages,
-            wire.tools,
-            wire.continuations,
-            wire.generation,
-            wire.stable_prefix_message_count,
-            wire.response_format,
-        )
+        let stable_prefix_item_count = wire
+            .stable_prefix_item_count
+            .unwrap_or(wire.stable_prefix_message_count);
+        let request = if let Some(input) = wire.input {
+            Self::new_with_input_and_stable_prefix_and_response_format(
+                wire.model,
+                input,
+                wire.tools,
+                wire.generation,
+                stable_prefix_item_count,
+                wire.response_format,
+            )
+        } else {
+            let messages = wire
+                .messages
+                .ok_or_else(|| de::Error::missing_field("messages"))?;
+            Self::new_with_continuations_and_stable_prefix_and_response_format(
+                wire.model,
+                messages,
+                wire.tools,
+                wire.continuations,
+                wire.generation,
+                stable_prefix_item_count,
+                wire.response_format,
+            )
+        }
         .map_err(de::Error::custom)?;
 
         if let Some(expected_hash) = wire.tool_profile_hash
@@ -691,14 +816,14 @@ fn tool_profile_hash(tools: &[ToolSpec]) -> ToolProfileHash {
     ToolProfileHash(format!("fnv1a64:{hash:016x}"))
 }
 
-fn stable_prefix_hash(
-    messages: &[ModelMessage],
+fn stable_input_prefix_hash(
+    input: &[ModelInputItem],
     tools: &[ToolSpec],
     response_format: Option<&ModelResponseFormat>,
 ) -> RequestContentHash {
-    let mut chunks = messages
+    let mut chunks = input
         .iter()
-        .map(|message| stable_chunk("message", message))
+        .map(|item| stable_chunk("input", item))
         .collect::<Vec<_>>();
     let mut tool_chunks = tools
         .iter()
@@ -712,20 +837,64 @@ fn stable_prefix_hash(
     request_content_hash(chunks)
 }
 
-fn dynamic_context_hash(
+fn dynamic_input_hash(input: &[ModelInputItem]) -> RequestContentHash {
+    let chunks = input
+        .iter()
+        .map(|item| stable_chunk("input", item))
+        .collect::<Vec<_>>();
+    request_content_hash(chunks)
+}
+
+fn input_from_messages_and_continuations(
     messages: &[ModelMessage],
     continuations: &[ModelToolContinuation],
-) -> RequestContentHash {
-    let mut chunks = messages
+) -> Vec<ModelInputItem> {
+    let mut input = Vec::with_capacity(messages.len() + continuations.len().saturating_mul(2));
+    input.extend(messages.iter().cloned().map(ModelInputItem::Message));
+    for continuation in continuations {
+        input.push(ModelInputItem::ToolCall(continuation.call().clone()));
+        input.push(ModelInputItem::ToolResult(continuation.result().clone()));
+    }
+    input
+}
+
+fn messages_from_input(input: &[ModelInputItem]) -> Vec<ModelMessage> {
+    input
         .iter()
-        .map(|message| stable_chunk("message", message))
-        .collect::<Vec<_>>();
-    chunks.extend(
-        continuations
-            .iter()
-            .map(|continuation| stable_chunk("continuation", continuation)),
-    );
-    request_content_hash(chunks)
+        .filter_map(|item| match item {
+            ModelInputItem::Message(message) => Some(message.clone()),
+            ModelInputItem::ToolCall(_) | ModelInputItem::ToolResult(_) => None,
+        })
+        .collect()
+}
+
+fn continuations_from_input(
+    input: &[ModelInputItem],
+) -> Result<Vec<ModelToolContinuation>, ModelError> {
+    let mut continuations = Vec::new();
+    let mut index = 0;
+    while index < input.len() {
+        match &input[index] {
+            ModelInputItem::ToolCall(call) => {
+                let Some(ModelInputItem::ToolResult(result)) = input.get(index + 1) else {
+                    return Err(ModelError::invalid_request(
+                        "ModelRequest tool call input items must be followed by matching tool results",
+                    ));
+                };
+                continuations.push(ModelToolContinuation::new(call.clone(), result.clone())?);
+                index += 2;
+            }
+            ModelInputItem::ToolResult(_) => {
+                return Err(ModelError::invalid_request(
+                    "ModelRequest tool result input items must follow matching tool calls",
+                ));
+            }
+            ModelInputItem::Message(_) => {
+                index += 1;
+            }
+        }
+    }
+    Ok(continuations)
 }
 
 fn stable_chunk<T>(kind: &'static str, value: &T) -> String

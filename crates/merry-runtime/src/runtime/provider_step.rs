@@ -15,8 +15,8 @@ use super::model_output::{
     tool_call_commentary_text,
 };
 use super::provider_request::{
-    StepRequestInputs, compile_step_request_from_inputs, request_context_budget,
-    step_request_compile_diagnostic, step_request_inputs_from_session, trace_provider_request,
+    compile_step_request_from_inputs, request_context_budget, step_request_compile_diagnostic,
+    step_request_inputs_from_session, trace_provider_request,
     trace_provider_request_budget_unavailable,
 };
 use super::{DIAGNOSTIC_TOOL_CALL_RESULT_REQUIRED, RuntimeInner, diagnostic_from_text};
@@ -77,47 +77,51 @@ pub(super) async fn run_provider_step(
         }
     };
 
-    let candidates = {
-        let session = inner.session.lock().await;
-        session.memory_store().candidate_snapshot()
-    };
-    tracing::debug!(
-        category = "memory_candidate_count",
-        count = candidates.len(),
-        "runtime memory candidates collected"
-    );
-    if token.is_cancelled() {
-        trace_provider_step_cancelled();
-        let _ = send_cancelled_event(inner, sender).await;
-        return;
-    }
-
-    let activation_context = MemoryActivationContext::new(token.clone());
-    let activation_result = tokio::select! {
-        biased;
-        () = token.cancelled() => {
+    let activated_memories = if let Some(seed) = seed {
+        let candidates = {
+            let session = inner.session.lock().await;
+            session.memory_store().candidate_snapshot()
+        };
+        tracing::debug!(
+            category = "memory_candidate_count",
+            count = candidates.len(),
+            "runtime memory candidates collected"
+        );
+        if token.is_cancelled() {
             trace_provider_step_cancelled();
             let _ = send_cancelled_event(inner, sender).await;
             return;
         }
-        result = inner
-            .memory_activation_source
-            .activate(seed, candidates, activation_context) => result,
-    };
-    if token.is_cancelled() {
-        trace_provider_step_cancelled();
-        let _ = send_cancelled_event(inner, sender).await;
-        return;
-    }
 
-    let activated_memories = match activation_result {
-        Ok(memories) => memories,
-        Err(error) => {
-            let diagnostic = diagnostic_from_text("memory_activation", error.to_string());
-            trace_provider_step_failed(&diagnostic);
-            let _ = send_failed_event(inner, sender, token, diagnostic).await;
+        let activation_context = MemoryActivationContext::new(token.clone());
+        let activation_result = tokio::select! {
+            biased;
+            () = token.cancelled() => {
+                trace_provider_step_cancelled();
+                let _ = send_cancelled_event(inner, sender).await;
+                return;
+            }
+            result = inner
+                .memory_activation_source
+                .activate(seed, candidates, activation_context) => result,
+        };
+        if token.is_cancelled() {
+            trace_provider_step_cancelled();
+            let _ = send_cancelled_event(inner, sender).await;
             return;
         }
+
+        match activation_result {
+            Ok(memories) => memories,
+            Err(error) => {
+                let diagnostic = diagnostic_from_text("memory_activation", error.to_string());
+                trace_provider_step_failed(&diagnostic);
+                let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                return;
+            }
+        }
+    } else {
+        Vec::new()
     };
     tracing::debug!(
         category = "activated_memory_count",
@@ -138,14 +142,14 @@ pub(super) async fn run_provider_step(
             .memory_projection_epoch
             .fetch_add(1, Ordering::AcqRel)
             .wrapping_add(1);
-        let append_only_body = match session.append_only_body_snapshot() {
-            Ok(body) => body,
+        let request_inputs = match step_request_inputs_from_session(&session) {
+            Ok(inputs) => inputs,
             Err(error) => {
                 session.replace_activated_memories(Vec::new());
                 inner.memory_projection_epoch.fetch_add(1, Ordering::AcqRel);
                 let diagnostic = diagnostic_from_text(
-                    "append_only_body_artifact",
-                    format!("append-only body artifact could not be read: {error}"),
+                    "transcript_artifact",
+                    format!("transcript artifact could not be read: {error}"),
                 );
                 drop(session);
                 trace_provider_step_failed(&diagnostic);
@@ -153,25 +157,7 @@ pub(super) async fn run_provider_step(
                 return;
             }
         };
-        let continuations = match session.uncheckpointed_tool_continuation_snapshots() {
-            Ok(continuations) => continuations,
-            Err(error) => {
-                session.replace_activated_memories(Vec::new());
-                inner.memory_projection_epoch.fetch_add(1, Ordering::AcqRel);
-                let diagnostic = diagnostic_from_text(
-                    "tool_continuation_artifact",
-                    format!("tool continuation artifact could not be read: {error}"),
-                );
-                drop(session);
-                trace_provider_step_failed(&diagnostic);
-                let _ = send_failed_event(inner, sender, token, diagnostic).await;
-                return;
-            }
-        };
-        (
-            StepRequestInputs::from_session(&session, append_only_body, continuations),
-            activation_epoch,
-        )
+        (request_inputs, activation_epoch)
     };
     let mut projection_guard =
         ActivationProjectionGuard::new(Arc::clone(inner), token.clone(), activation_epoch);
@@ -180,8 +166,8 @@ pub(super) async fn run_provider_step(
         tool_specs.push(contract.tool_spec().clone());
     }
     tracing::debug!(
-        category = "continuations_and_tools",
-        continuation_count = request_inputs.continuations.len(),
+        category = "transcript_and_tools",
+        transcript_item_count = request_inputs.transcript.len(),
         tool_spec_count = tool_specs.len(),
         "runtime provider request inputs counted"
     );
@@ -285,9 +271,9 @@ pub(super) async fn run_provider_step(
             }
         }
     }
-    let sent_continuation_count = request_inputs.continuations.len();
+    let sent_continuation_count = request.continuations().len();
 
-    if input.should_record_user_history() {
+    if let Some(text) = input.user_text_for_history() {
         let mut session = inner.session.lock().await;
         if token.is_cancelled() {
             drop(session);
@@ -295,7 +281,13 @@ pub(super) async fn run_provider_step(
             let _ = send_cancelled_event(inner, sender).await;
             return;
         }
-        session.record_user_message_body(input.text());
+        if let Err(error) = session.record_user_message_body(text) {
+            drop(session);
+            let diagnostic = diagnostic_from_text("transcript_record", error.to_string());
+            trace_provider_step_failed(&diagnostic);
+            let _ = send_failed_event(inner, sender, token, diagnostic).await;
+            return;
+        }
     }
 
     let stream_context = ModelStreamContext::new(token.clone());

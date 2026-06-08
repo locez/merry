@@ -5,21 +5,20 @@ use merry_core::{
     ToolInputSchema, ToolName, ToolSpec,
 };
 use merry_llm::{
-    FinishReason, ModelCapabilities, ModelError, ModelEvent, ModelEventStream, ModelMessageRole,
-    ModelName, ModelOutput, ModelProvider, ModelProviderFuture, ModelRequest, ModelResponse,
-    ModelStreamContext, ModelToolCall, ModelToolCallId, ToolArguments,
+    FinishReason, ModelCapabilities, ModelError, ModelEvent, ModelEventStream, ModelInputItem,
+    ModelMessageRole, ModelName, ModelOutput, ModelProvider, ModelProviderFuture, ModelRequest,
+    ModelResponse, ModelStreamContext, ModelToolCall, ModelToolCallId, ToolArguments,
 };
 use merry_runtime::{
     ActionExecutionEvidence, ActionProposal, ActionProposalEvidence, AgentLoopBlockedReason,
     AgentLoopConfig, AgentLoopConfigError, AgentLoopStatus, ArtifactError,
-    AutomaticCompactionConfig, CitationCompactionPolicy, ContextSummary,
-    DEFAULT_AGENT_LOOP_CONTINUATION_INPUT, FINAL_OUTPUT_TOOL_NAME, FinalOutputContract,
-    ProcessActionIntent, ProcessEnvPolicy, ProcessExitStatus, ProcessRunner, ProcessRunnerContext,
-    ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput, ProjectRules, Runtime,
-    RuntimeError, RuntimeModelRole, StepContext, StepInput, TaskAnchor, ToolActionKind,
-    ToolActionPreflight, ToolActionProposalFuture, ToolExecutionContext, ToolExecutionError,
-    ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture, WorkspacePatchExecutionEvidence,
-    WorkspacePatchProposal, process_command_tool,
+    AutomaticCompactionConfig, CitationCompactionPolicy, ContextSummary, FINAL_OUTPUT_TOOL_NAME,
+    FinalOutputContract, ProcessActionIntent, ProcessEnvPolicy, ProcessExitStatus, ProcessRunner,
+    ProcessRunnerContext, ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput,
+    ProjectRules, Runtime, RuntimeError, RuntimeModelRole, StepContext, StepInput, TaskAnchor,
+    ToolActionKind, ToolActionPreflight, ToolActionProposalFuture, ToolExecutionContext,
+    ToolExecutionError, ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture,
+    WorkspacePatchExecutionEvidence, WorkspacePatchProposal, process_command_tool,
 };
 use schemars::Schema;
 use serde_json::{Map, Value, json};
@@ -322,6 +321,7 @@ struct ScriptedToolExecutor {
 #[derive(Clone)]
 enum ToolExecutorResponse {
     Outcome(ToolExecutionOutcome),
+    ScriptedOutcomes(Arc<Mutex<Vec<ToolExecutionOutcome>>>),
     InfrastructureError(String),
 }
 
@@ -330,6 +330,19 @@ impl ScriptedToolExecutor {
         Self {
             calls: Arc::new(Mutex::new(Vec::new())),
             response: ToolExecutorResponse::Outcome(ToolExecutionOutcome::succeeded_text(text)),
+        }
+    }
+
+    fn succeeding_texts(texts: Vec<String>) -> Self {
+        Self {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            response: ToolExecutorResponse::ScriptedOutcomes(Arc::new(Mutex::new(
+                texts
+                    .into_iter()
+                    .map(|text| ToolExecutionOutcome::succeeded_text(&text))
+                    .rev()
+                    .collect(),
+            ))),
         }
     }
 
@@ -362,6 +375,11 @@ impl ToolExecutor for ScriptedToolExecutor {
 
             match &self.response {
                 ToolExecutorResponse::Outcome(outcome) => Ok(outcome.clone()),
+                ToolExecutorResponse::ScriptedOutcomes(outcomes) => outcomes
+                    .lock()
+                    .expect("scripted outcomes mutex should not be poisoned")
+                    .pop()
+                    .ok_or_else(|| ToolExecutionError::infrastructure("no scripted outcome")),
                 ToolExecutorResponse::InfrastructureError(message) => {
                     Err(ToolExecutionError::infrastructure(message.clone()))
                 }
@@ -845,6 +863,57 @@ async fn agent_loop_completes_when_model_calls_final_output_tool() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn final_output_tool_call_is_not_replayed_into_next_step_transcript() {
+    let provider = ScriptedModelProvider::new(vec![
+        vec![Ok(completed_tool_call_event(
+            model_tool_call_with_arguments(
+                "call-final",
+                FINAL_OUTPUT_TOOL_NAME,
+                json!({"summary": "Order A123 shipped."}),
+            ),
+        ))],
+        vec![Ok(completed_text_event("next answer"))],
+    ]);
+    let runtime = runtime_with_provider("agent-loop-final-output-then-next-step", provider.clone());
+
+    let result = runtime
+        .run_agent_loop(
+            StepInput::user_text("Return structured order status.").expect("valid step input"),
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default().with_final_output_contract(final_output_contract()),
+        )
+        .await
+        .expect("agent loop should run");
+
+    assert_eq!(result.status(), &AgentLoopStatus::Completed);
+    assert!(runtime.pending_tool_calls().await.is_empty());
+
+    let next_step = runtime
+        .step(
+            StepInput::user_text("Handle the next request.").expect("valid step input"),
+            StepContext::new(CancellationToken::new()),
+        )
+        .expect("next step should start");
+    let next_events = next_step.collect::<Vec<_>>().await;
+
+    assert_eq!(
+        event_kind_names(&next_events),
+        ["StepStarted", "ArtifactRecorded", "StepCompleted"]
+    );
+
+    let requests = provider.recorded_requests();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[1]
+            .input()
+            .iter()
+            .all(|item| matches!(item, ModelInputItem::Message(_))),
+        "runtime final-output tool calls must not be replayed into later provider input"
+    );
+    assert!(requests[1].continuations().is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn agent_loop_executes_runtime_tool_before_final_output_tool() {
     let provider = ScriptedModelProvider::new(vec![
         vec![Ok(completed_tool_call_event(model_tool_call(
@@ -944,23 +1013,22 @@ fn event_kind_names(events: &[RuntimeEvent]) -> Vec<&'static str> {
         .collect()
 }
 
-fn continuation_input_for(original_task: &str) -> String {
-    format!("{DEFAULT_AGENT_LOOP_CONTINUATION_INPUT}\n\nOriginal task:\n{original_task}")
-}
-
 fn assert_continuation_request_body(request: &ModelRequest, original_task: &str) {
-    let dynamic = request.dynamic_messages();
-    assert_eq!(
-        dynamic
-            .iter()
-            .map(|message| message.role())
-            .collect::<Vec<_>>(),
-        [ModelMessageRole::User, ModelMessageRole::User]
+    let dynamic_text = request
+        .dynamic_messages()
+        .iter()
+        .map(|message| message.content().as_text())
+        .collect::<Vec<_>>()
+        .join("\n---\n");
+
+    assert!(dynamic_text.contains(original_task));
+    assert!(
+        !dynamic_text.contains("Continue after tool result."),
+        "agent-loop continuation must not inject a synthetic user prompt"
     );
-    assert_eq!(dynamic[0].content().as_text(), original_task);
-    assert_eq!(
-        dynamic[1].content().as_text(),
-        continuation_input_for(original_task)
+    assert!(
+        !dynamic_text.contains("Original task:"),
+        "agent-loop continuation must not inject the original task label"
     );
 }
 
@@ -1076,7 +1144,7 @@ async fn agent_loop_executes_one_tool_and_continues_to_final_completion() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn agent_loop_preserves_uncheckpointed_tool_continuations_until_compaction() {
+async fn agent_loop_preserves_transcript_tool_exchanges_until_compaction() {
     let provider = ScriptedModelProvider::new(vec![
         vec![Ok(completed_tool_call_event(model_tool_call(
             "call-first",
@@ -1090,7 +1158,7 @@ async fn agent_loop_preserves_uncheckpointed_tool_continuations_until_compaction
     ]);
     let executor = ScriptedToolExecutor::succeeding_text("search result\n");
     let runtime = runtime_with_tool(
-        "agent-loop-uncheckpointed-continuity",
+        "agent-loop-tool-exchange-continuity",
         provider.clone(),
         executor,
     );
@@ -1129,17 +1197,17 @@ async fn agent_loop_preserves_uncheckpointed_tool_continuations_until_compaction
     );
     assert!(
         requests[1].dynamic_context_hash() != requests[2].dynamic_context_hash(),
-        "adding the second uncheckpointed continuation should change only dynamic request context"
+        "adding the second tool exchange should change only dynamic request context"
     );
     assert_eq!(
         requests[1].stable_prefix_hash(),
         requests[2].stable_prefix_hash(),
-        "uncheckpointed continuation growth must not move the cacheable stable prefix"
+        "tool exchange growth must not move the cacheable stable prefix"
     );
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn agent_loop_keeps_uncheckpointed_continuations_after_final_answer() {
+async fn agent_loop_keeps_tool_exchanges_after_final_answer_until_compaction() {
     let provider = ScriptedModelProvider::new(vec![
         vec![Ok(completed_tool_call_event(model_tool_call(
             "call-first",
@@ -1150,7 +1218,7 @@ async fn agent_loop_keeps_uncheckpointed_continuations_after_final_answer() {
     ]);
     let executor = ScriptedToolExecutor::succeeding_text("search result\n");
     let runtime = runtime_with_tool(
-        "agent-loop-uncheckpointed-continuity-final",
+        "agent-loop-tool-exchange-continuity-final",
         provider.clone(),
         executor,
     );
@@ -1167,7 +1235,7 @@ async fn agent_loop_keeps_uncheckpointed_continuations_after_final_answer() {
     assert_eq!(
         requests[2].continuations().len(),
         1,
-        "terminal assistant completion is not compaction; old continuations remain uncheckpointed"
+        "terminal assistant completion is not compaction; old tool exchanges remain raw"
     );
     assert_eq!(
         requests[2].continuations()[0].call().id().as_str(),
@@ -1176,7 +1244,7 @@ async fn agent_loop_keeps_uncheckpointed_continuations_after_final_answer() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn compaction_removes_only_covered_tool_continuations_after_successful_install() {
+async fn compaction_removes_only_covered_tool_exchanges_after_successful_install() {
     let provider = ScriptedModelProvider::new(vec![
         vec![Ok(completed_tool_call_event(model_tool_call(
             "call-old",
@@ -1235,7 +1303,7 @@ async fn compaction_removes_only_covered_tool_continuations_after_successful_ins
     let final_request = requests.last().expect("final request exists");
     assert!(
         final_request.continuations().is_empty(),
-        "covered tool continuations should be removed only after successful compaction"
+        "covered tool exchanges should be removed only after successful compaction"
     );
     let final_text = final_request
         .messages()
@@ -1247,12 +1315,12 @@ async fn compaction_removes_only_covered_tool_continuations_after_successful_ins
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn ordinary_user_and_assistant_messages_remain_append_only_without_task_anchor() {
+async fn ordinary_user_and_assistant_messages_remain_ordered_without_task_anchor() {
     let provider = ScriptedModelProvider::new(vec![
         vec![Ok(completed_text_event("first final answer"))],
         vec![Ok(completed_text_event("second final answer"))],
     ]);
-    let runtime = Runtime::builder(session_id("agent-loop-append-only-body"))
+    let runtime = Runtime::builder(session_id("agent-loop-transcript-body"))
         .model_provider(Arc::new(provider.clone()), model_name())
         .build()
         .expect("runtime should build");
@@ -1269,12 +1337,12 @@ async fn ordinary_user_and_assistant_messages_remain_append_only_without_task_an
     assert_eq!(
         requests[0].stable_prefix_hash(),
         requests[1].stable_prefix_hash(),
-        "append-only body growth must not move the stable prefix"
+        "transcript body growth must not move the stable prefix"
     );
     assert_ne!(
         requests[0].dynamic_context_hash(),
         requests[1].dynamic_context_hash(),
-        "append-only body growth should change only dynamic request context"
+        "transcript growth should change only dynamic request context"
     );
 
     let dynamic = requests[1].dynamic_messages();
@@ -1295,7 +1363,7 @@ async fn ordinary_user_and_assistant_messages_remain_append_only_without_task_an
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn task_anchor_is_dynamic_control_segment_before_append_only_body() {
+async fn task_anchor_is_dynamic_control_segment_before_transcript_body() {
     let provider = ScriptedModelProvider::new(vec![
         vec![Ok(completed_text_event("first final answer"))],
         vec![Ok(completed_text_event("second final answer"))],
@@ -1321,7 +1389,7 @@ async fn task_anchor_is_dynamic_control_segment_before_append_only_body() {
     assert_eq!(
         requests[0].stable_prefix_hash(),
         requests[1].stable_prefix_hash(),
-        "append-only body growth must not move the stable prefix when task anchor is set"
+        "transcript body growth must not move the stable prefix when task anchor is set"
     );
 
     let dynamic = requests[1].dynamic_messages();
@@ -1415,7 +1483,7 @@ async fn continuation_control_prompt_is_not_recorded_as_user_history() {
         .collect::<Vec<_>>()
         .join("\n---\n");
     assert!(
-        !final_request_text.contains(DEFAULT_AGENT_LOOP_CONTINUATION_INPUT),
+        !final_request_text.contains("Continue after tool result."),
         "agent-loop continuation control prompt must not be recorded as user history"
     );
     assert!(final_request_text.contains("Search once."));
@@ -1911,8 +1979,28 @@ async fn auto_compacted_agent_loop_continuation_preserves_original_task_text() {
         continuation_request_text
             .contains("The opening task turn was compacted before tool continuation.")
     );
-    assert!(continuation_request_text.contains(DEFAULT_AGENT_LOOP_CONTINUATION_INPUT));
-    assert!(continuation_request_text.contains(&format!("Original task:\n{original_task}")));
+    assert!(!continuation_request_text.contains("Continue after tool result."));
+    assert!(!continuation_request_text.contains("Original task:"));
+    assert!(
+        !continuation_request_text.contains(&original_task),
+        "covered task text should move behind checkpoint refs instead of remaining raw"
+    );
+
+    let ref_excerpt = runtime
+        .read_checkpoint_ref(
+            &merry_runtime::CheckpointId::new(
+                "checkpoint-agent-loop-auto-compaction-keeps-original-task-3",
+            )
+            .expect("valid checkpoint id"),
+            &merry_runtime::CheckpointRefId::new("r1").expect("valid ref id"),
+        )
+        .await
+        .expect("checkpoint ref resolves");
+    assert!(
+        ref_excerpt
+            .excerpt()
+            .contains("original long task sentinel")
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1982,9 +2070,13 @@ async fn auto_compacted_agent_loop_continuation_keeps_checkpoint_refs_and_stable
         )
         .register_tool(merry_runtime::RegisteredTool::read_only(
             tool_spec("search_notes"),
-            Arc::new(ScriptedToolExecutor::succeeding_text(
-                "covered tool result sentinel\n",
-            )),
+            Arc::new(ScriptedToolExecutor::succeeding_texts(vec![
+                format!(
+                    "covered tool result sentinel {}\n",
+                    "covered-result-evidence ".repeat(90)
+                ),
+                "retained tool result sentinel\n".to_owned(),
+            ])),
         ))
         .model_provider(Arc::new(primary.clone()), model_name())
         .model_provider_for_role(
@@ -2018,7 +2110,7 @@ async fn auto_compacted_agent_loop_continuation_keeps_checkpoint_refs_and_stable
         .join("\n");
     assert!(first_compaction_request_text.contains("long coding loop task sentinel"));
     assert!(!first_compaction_request_text.contains("covered tool result sentinel"));
-    assert!(!first_compaction_request_text.contains(DEFAULT_AGENT_LOOP_CONTINUATION_INPUT));
+    assert!(!first_compaction_request_text.contains("Continue after tool result."));
 
     let second_compaction_request_text = compactor_requests[1]
         .messages()
@@ -2029,7 +2121,7 @@ async fn auto_compacted_agent_loop_continuation_keeps_checkpoint_refs_and_stable
     assert!(second_compaction_request_text.contains("The covered opening task was checkpointed."));
     assert!(second_compaction_request_text.contains("covered tool result sentinel"));
     assert!(!second_compaction_request_text.contains("retained tool result sentinel"));
-    assert!(!second_compaction_request_text.contains(DEFAULT_AGENT_LOOP_CONTINUATION_INPUT));
+    assert!(!second_compaction_request_text.contains("Continue after tool result."));
 
     let primary_requests = primary.recorded_requests();
     assert_eq!(primary_requests.len(), 3);
@@ -2088,14 +2180,18 @@ async fn auto_compacted_agent_loop_continuation_keeps_checkpoint_refs_and_stable
             .contains("The prior checkpoint and first covered tool result were checkpointed.")
     );
     assert!(!dynamic_text.contains("The covered opening task was checkpointed."));
-    assert!(dynamic_text.contains(DEFAULT_AGENT_LOOP_CONTINUATION_INPUT));
-    assert!(dynamic_text.contains(&format!("Original task:\n{original_task}")));
+    assert!(!dynamic_text.contains("Continue after tool result."));
+    assert!(!dynamic_text.contains("Original task:"));
+    assert!(
+        !dynamic_text.contains(&original_task),
+        "covered task text should stay behind checkpoint refs after rolling compaction"
+    );
     assert!(!dynamic_text.contains("covered tool result sentinel"));
 
     let ref_excerpt = runtime
         .read_checkpoint_ref(
             &merry_runtime::CheckpointId::new(
-                "checkpoint-agent-loop-auto-compaction-checkpoint-refs-3",
+                "checkpoint-agent-loop-auto-compaction-checkpoint-refs-5",
             )
             .expect("valid checkpoint id"),
             &merry_runtime::CheckpointRefId::new("r1").expect("valid ref id"),

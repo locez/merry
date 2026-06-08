@@ -57,8 +57,8 @@ mod tool;
 
 pub use agent_loop::{
     AgentLoopBlockedReason, AgentLoopConfig, AgentLoopConfigError, AgentLoopError,
-    AgentLoopEventStream, AgentLoopResult, AgentLoopStatus, DEFAULT_AGENT_LOOP_CONTINUATION_INPUT,
-    DEFAULT_AGENT_LOOP_MAX_MODEL_TURNS, DEFAULT_CODING_AGENT_MAX_MODEL_TURNS,
+    AgentLoopEventStream, AgentLoopResult, AgentLoopStatus, DEFAULT_AGENT_LOOP_MAX_MODEL_TURNS,
+    DEFAULT_CODING_AGENT_MAX_MODEL_TURNS,
 };
 pub use artifact::{
     ArtifactContent, ArtifactContentKind, ArtifactError, ArtifactRecord, ArtifactRegistry,

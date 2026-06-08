@@ -110,15 +110,12 @@ impl SessionState {
             .record_preflighted(result.artifact().clone(), content);
         Self::trace_artifact_record(self.session_id.as_str(), &recorded, content_bytes);
         debug_assert_eq!(&recorded, result.artifact());
+        self.transcript.push_tool_result(
+            result.call_id().clone(),
+            result.clone(),
+            result.artifact().id().clone(),
+        )?;
         self.resolved_tool_calls.insert(result.call_id().clone());
-        let history_id = self.next_history_id();
-        self.uncheckpointed_tool_continuations.push(
-            super::super::history::ResolvedToolContinuation::new(
-                history_id,
-                pending,
-                result.clone(),
-            ),
-        );
 
         events.push(self.record_event(
             RuntimeEventKind::ArtifactRecorded { artifact: recorded },
@@ -188,15 +185,12 @@ impl SessionState {
                 .record_preflighted(result.artifact().clone(), content);
             Self::trace_artifact_record(self.session_id.as_str(), &artifact, content_bytes);
             debug_assert_eq!(artifact, *result.artifact());
+            self.transcript.push_tool_result(
+                result.call_id().clone(),
+                result.clone(),
+                result.artifact().id().clone(),
+            )?;
             self.resolved_tool_calls.insert(result.call_id().clone());
-            let history_id = self.next_history_id();
-            self.uncheckpointed_tool_continuations.push(
-                super::super::history::ResolvedToolContinuation::new(
-                    history_id,
-                    pending,
-                    result.clone(),
-                ),
-            );
             return Ok(vec![
                 started,
                 self.record_event(
@@ -220,15 +214,12 @@ impl SessionState {
             .record_preflighted(result.artifact().clone(), content);
         Self::trace_artifact_record(self.session_id.as_str(), &artifact, content_bytes);
         debug_assert_eq!(artifact, *result.artifact());
+        self.transcript.push_tool_result(
+            result.call_id().clone(),
+            result.clone(),
+            result.artifact().id().clone(),
+        )?;
         self.resolved_tool_calls.insert(result.call_id().clone());
-        let history_id = self.next_history_id();
-        self.uncheckpointed_tool_continuations.push(
-            super::super::history::ResolvedToolContinuation::new(
-                history_id,
-                pending,
-                result.clone(),
-            ),
-        );
         Ok(vec![
             self.record_event(
                 RuntimeEventKind::ArtifactRecorded { artifact },

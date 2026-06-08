@@ -6,10 +6,10 @@ use merry_core::{
 };
 use merry_llm::{
     FinishReason, GenerationConfig, ModelCapabilities, ModelContent, ModelError, ModelEvent,
-    ModelEventStream, ModelMessage, ModelMessageRole, ModelName, ModelOutput, ModelProvider,
-    ModelProviderFuture, ModelRequest, ModelResponse, ModelResponseFormat, ModelStreamContext,
-    ModelStructuredOutputFormat, ModelToolCall, ModelToolCallId, ProviderErrorKind, ToolArguments,
-    testing::FakeModelProvider,
+    ModelEventStream, ModelInputItem, ModelMessage, ModelMessageRole, ModelName, ModelOutput,
+    ModelProvider, ModelProviderFuture, ModelRequest, ModelResponse, ModelResponseFormat,
+    ModelStreamContext, ModelStructuredOutputFormat, ModelToolCall, ModelToolCallId,
+    ProviderErrorKind, ToolArguments, testing::FakeModelProvider,
 };
 use merry_provider_openai::{OpenAiProvider, OpenAiProviderConfig};
 use merry_runtime::{
@@ -479,7 +479,7 @@ fn messy_live_compaction_user_messages() -> Vec<String> {
         .to_owned(),
         concat!(
             "Yet more mixed context: there was confusion about stable prefix versus dynamic control context. Stable prefix is ",
-            "for cacheable instructions and tool descriptions. Task anchor, checkpoint, append-only body, tool continuations, ",
+            "for cacheable instructions and tool descriptions. Task anchor, checkpoint, transcript body, tool exchanges, ",
             "and current user input are dynamic. Working intent is not a new top-level stable segment; it is checkpoint-adjacent ",
             "footer content and must not compete with the current user message. This should survive the summary because it affects ",
             "prompt assembly and prevents duplicated or stale intent."
@@ -1232,7 +1232,7 @@ async fn provider_stop_success_with_single_slot_event_buffer_emits_artifact_and_
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn second_provider_step_continues_sequences_and_replays_append_only_body() {
+async fn second_provider_step_continues_sequences_and_replays_transcript() {
     let provider = FakeModelProvider::new(vec![Ok(completed_event())]);
     let runtime = runtime_with_provider("provider-second-step", provider.clone());
 
@@ -1426,6 +1426,44 @@ async fn registered_tool_specs_are_compiled_into_provider_request() {
             .starts_with("fnv1a64:")
     );
     assert!(requests[0].continuations().is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn provider_request_keeps_tool_exchange_before_later_user_turn() {
+    let provider = ScriptedModelProvider::new(vec![
+        vec![Ok(completed_outputs_event(
+            vec![ModelOutput::tool_call(model_tool_call_with_id("call-read"))],
+            FinishReason::ToolCalls,
+        ))],
+        vec![Ok(completed_text_event("final answer"))],
+    ]);
+    let runtime = runtime_with_scripted_provider("provider-transcript-order", provider.clone());
+
+    let first_events = collect_step(&runtime, "Read the file.").await;
+    let pending = pending_tool_call(&first_events).clone();
+    runtime
+        .submit_tool_result(
+            ToolCallResult::succeeded(
+                pending.id().clone(),
+                ArtifactRef::new(
+                    artifact_id("provider-transcript-result"),
+                    ArtifactKind::Text,
+                ),
+            ),
+            ArtifactContent::text("file contents\n"),
+        )
+        .await
+        .expect("tool result should resolve");
+
+    collect_step(&runtime, "Now answer a new request.").await;
+
+    let requests = provider.recorded_requests();
+    assert_eq!(requests.len(), 2);
+    let dynamic = requests[1].dynamic_input();
+    assert!(matches!(dynamic[0], ModelInputItem::Message(_)));
+    assert!(matches!(dynamic[1], ModelInputItem::ToolCall(_)));
+    assert!(matches!(dynamic[2], ModelInputItem::ToolResult(_)));
+    assert!(matches!(dynamic[3], ModelInputItem::Message(_)));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1737,7 +1775,7 @@ async fn ledger_and_artifact_changes_do_not_change_project_rules_stable_hash() {
         .execute_tool_call(pending.id(), ToolExecutionContext::default())
         .await
         .expect("tool execution should resolve");
-    collect_step(&runtime, "Continue after tool result.").await;
+    collect_step(&runtime, "Use the resolved tool result.").await;
 
     let requests = provider.recorded_requests();
     assert_eq!(requests.len(), 2);
@@ -1747,7 +1785,7 @@ async fn ledger_and_artifact_changes_do_not_change_project_rules_stable_hash() {
     assert_ne!(
         requests[0].dynamic_context_hash(),
         requests[1].dynamic_context_hash(),
-        "tool result continuations and append-only body remain dynamic"
+        "tool exchange and transcript body remain dynamic"
     );
     assert!(
         requests[1]
@@ -2013,10 +2051,7 @@ async fn live_compactor_summarizes_messy_1k_token_window_with_refs() {
         .compile(&runtime.context_snapshot().await)
         .expect("context compiles")
         .to_snapshot();
-    let checkpoint = snapshot
-        .split("append-only-body:")
-        .next()
-        .unwrap_or(snapshot.as_str());
+    let checkpoint = snapshot.as_str();
     let checkpoint_tokens = rough_token_count(checkpoint);
 
     eprintln!("live compactor source_tokens={source_tokens}");
@@ -2342,9 +2377,9 @@ async fn compaction_model_request_excludes_retained_tail_and_tools() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn compacted_checkpoint_renders_after_task_anchor_before_append_only_body() {
+async fn compacted_checkpoint_renders_after_task_anchor_before_transcript_body() {
     let provider = FakeModelProvider::new(vec![
-        Ok(completed_text_event("append-only assistant sentinel")),
+        Ok(completed_text_event("transcript assistant sentinel")),
         Ok(completed_event()),
     ]);
     let runtime = Runtime::builder(session_id("provider-compacted-checkpoint-order"))
@@ -2357,7 +2392,7 @@ async fn compacted_checkpoint_renders_after_task_anchor_before_append_only_body(
         .build()
         .expect("runtime should build");
 
-    collect_step(&runtime, "append-only user sentinel").await;
+    collect_step(&runtime, "transcript user sentinel").await;
     collect_step(&runtime, "current user sentinel").await;
 
     let requests = provider.recorded_requests();
@@ -2378,12 +2413,12 @@ async fn compacted_checkpoint_renders_after_task_anchor_before_append_only_body(
         .expect("compacted checkpoint should render");
     let append_user_index = messages
         .iter()
-        .position(|text| text.contains("append-only user sentinel"))
-        .expect("append-only user body should render");
+        .position(|text| text.contains("transcript user sentinel"))
+        .expect("transcript user body should render");
     let append_assistant_index = messages
         .iter()
-        .position(|text| text.contains("append-only assistant sentinel"))
-        .expect("append-only assistant body should render");
+        .position(|text| text.contains("transcript assistant sentinel"))
+        .expect("transcript assistant body should render");
     let current_user_index = messages
         .iter()
         .position(|text| text.contains("current user sentinel"))
@@ -2464,7 +2499,7 @@ async fn ledger_observations_do_not_enter_prompt_context_by_default() {
         .execute_tool_call(pending.id(), ToolExecutionContext::default())
         .await
         .expect("tool execution should resolve");
-    collect_step(&runtime, "Continue after tool result.").await;
+    collect_step(&runtime, "Use the resolved tool result.").await;
 
     let requests = provider.recorded_requests();
     assert_eq!(requests.len(), 2);
@@ -3921,7 +3956,7 @@ async fn submitted_tool_result_is_compiled_as_provider_neutral_continuation() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn successful_provider_step_keeps_uncheckpointed_tool_continuation_until_compaction() {
+async fn successful_provider_step_keeps_tool_exchange_until_compaction() {
     let provider = ScriptedModelProvider::new(vec![
         vec![Ok(completed_outputs_event(
             vec![ModelOutput::tool_call(model_tool_call())],
@@ -3930,20 +3965,18 @@ async fn successful_provider_step_keeps_uncheckpointed_tool_continuation_until_c
         vec![Ok(completed_text_event("used tool result"))],
         vec![Ok(completed_text_event("fresh request"))],
     ]);
-    let runtime = runtime_with_scripted_provider(
-        "provider-tool-continuation-uncheckpointed-success",
-        provider.clone(),
-    );
+    let runtime =
+        runtime_with_scripted_provider("provider-tool-exchange-success", provider.clone());
     let pending_events = collect_step(&runtime, "Request a tool.").await;
     let call = pending_tool_call(&pending_events).clone();
     let result_artifact = ArtifactRef::new(
-        artifact_id("manual-result-uncheckpointed-on-success"),
+        artifact_id("manual-result-tool-exchange-success"),
         ArtifactKind::Text,
     );
     runtime
         .submit_tool_result(
             ToolCallResult::succeeded(call.id().clone(), result_artifact),
-            ArtifactContent::text("result remains uncheckpointed\n"),
+            ArtifactContent::text("result remains raw before compaction\n"),
         )
         .await
         .expect("tool result should resolve");
@@ -3974,7 +4007,7 @@ async fn successful_provider_step_keeps_uncheckpointed_tool_continuation_until_c
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn new_pending_tool_call_keeps_prior_uncheckpointed_continuation() {
+async fn new_pending_tool_call_keeps_prior_tool_exchange() {
     let provider = ScriptedModelProvider::new(vec![
         vec![Ok(completed_outputs_event(
             vec![ModelOutput::tool_call(model_tool_call_with_id("call-old"))],
@@ -4019,7 +4052,7 @@ async fn new_pending_tool_call_keeps_prior_uncheckpointed_continuation() {
         )
         .await
         .expect("new tool result should resolve");
-    let completed_events = collect_step(&runtime, "Use all uncheckpointed results.").await;
+    let completed_events = collect_step(&runtime, "Use all resolved tool results.").await;
 
     assert_eq!(
         event_kind_names(&new_pending_events),
@@ -4053,7 +4086,7 @@ async fn new_pending_tool_call_keeps_prior_uncheckpointed_continuation() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn duplicate_new_tool_call_id_keeps_uncheckpointed_continuation_for_retry() {
+async fn duplicate_new_tool_call_id_keeps_tool_exchange_for_retry() {
     let provider = ScriptedModelProvider::new(vec![
         vec![Ok(completed_outputs_event(
             vec![ModelOutput::tool_call(model_tool_call_with_id("call-old"))],
@@ -4114,7 +4147,7 @@ async fn duplicate_new_tool_call_id_keeps_uncheckpointed_continuation_for_retry(
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn provider_error_keeps_uncheckpointed_tool_continuation_for_retry() {
+async fn provider_error_keeps_tool_exchange_for_retry() {
     let provider = ScriptedModelProvider::new(vec![
         vec![Ok(completed_outputs_event(
             vec![ModelOutput::tool_call(model_tool_call())],
@@ -4160,7 +4193,7 @@ async fn provider_error_keeps_uncheckpointed_tool_continuation_for_retry() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn provider_setup_error_keeps_uncheckpointed_tool_continuation_for_retry() {
+async fn provider_setup_error_keeps_tool_exchange_for_retry() {
     let provider = ScriptedModelProvider::new_steps(vec![
         ScriptedProviderStep::Stream(vec![Ok(completed_outputs_event(
             vec![ModelOutput::tool_call(model_tool_call())],
@@ -4206,7 +4239,7 @@ async fn provider_setup_error_keeps_uncheckpointed_tool_continuation_for_retry()
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn provider_cancel_keeps_uncheckpointed_tool_continuation_for_retry() {
+async fn provider_cancel_keeps_tool_exchange_for_retry() {
     let provider = ScriptedModelProvider::new(vec![
         vec![Ok(completed_outputs_event(
             vec![ModelOutput::tool_call(model_tool_call())],

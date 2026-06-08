@@ -340,7 +340,7 @@ impl RuntimeBuilder {
     ///
     /// This reserves the runtime context slot for future `/task` commands. It
     /// is rendered as dynamic request context, not as project rules, ledger
-    /// projection, or append-only chat history.
+    /// projection, or ordered transcript history.
     #[must_use]
     pub fn task_anchor(mut self, task_anchor: TaskAnchor) -> Self {
         self.task_anchor = Some(task_anchor);
