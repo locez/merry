@@ -44,7 +44,7 @@ async fn agent_loop_process_command_invalid_arguments_resolve_failed_and_continu
             .diagnostic()
             .expect("invalid argv should include diagnostic")
             .code(),
-        "process_command_invalid_arguments"
+        "tool_input_schema_invalid"
     );
     let content = continuation
         .result()
@@ -52,9 +52,12 @@ async fn agent_loop_process_command_invalid_arguments_resolve_failed_and_continu
         .as_json()
         .expect("invalid argv result should be JSON");
     let value: Value = serde_json::from_str(content).expect("invalid argv JSON should parse");
-    assert_eq!(
-        value["error"]["message"],
-        "argv must be an array of strings"
+    assert_eq!(value["error"]["code"], "tool_input_schema_invalid");
+    assert!(
+        !value["error"]["violations"]
+            .as_array()
+            .expect("schema failure should list violations")
+            .is_empty()
     );
 }
 

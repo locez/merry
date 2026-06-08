@@ -35,6 +35,102 @@ async fn read_only_registered_tool_executes_under_default_policy() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn registered_tool_arguments_are_validated_before_execution() {
+    let executor = SuccessfulToolExecutor::new();
+    let pending = PendingToolCall::new(
+        ToolCallId::new("call-invalid-schema").expect("valid tool call id"),
+        ToolName::new("validated_tool").expect("valid tool name"),
+        ToolCallArguments::new(Default::default()),
+    );
+    let runtime = Runtime::builder(session_id("runtime-tool-input-schema-invalid"))
+        .register_tool(RegisteredTool::read_only(
+            required_query_tool_spec("validated_tool"),
+            Arc::new(executor.clone()),
+        ))
+        .build()
+        .expect("runtime should build");
+    {
+        let mut session = runtime.inner.session.lock().await;
+        session.record_session_started_if_needed();
+        session
+            .record_tool_call_pending(pending.clone())
+            .expect("pending call should record");
+    }
+
+    let events = runtime
+        .execute_tool_call(pending.id(), ToolExecutionContext::default())
+        .await
+        .expect("invalid tool arguments should resolve as a failed tool result");
+
+    assert_eq!(executor.call_count(), 0);
+    assert_eq!(
+        event_kind_names_for_tool_execution(&events),
+        ["ArtifactRecorded", "ToolCallResolved"]
+    );
+    let result = resolved_tool_result(&events);
+    assert_eq!(result.status(), ToolCallResultStatus::Failed);
+    assert_eq!(
+        result
+            .diagnostic()
+            .expect("schema failure should carry diagnostic")
+            .code(),
+        "tool_input_schema_invalid"
+    );
+    let content = runtime
+        .read_artifact_content(result.artifact().id())
+        .await
+        .expect("schema failure artifact should be readable");
+    let payload: serde_json::Value = serde_json::from_str(
+        content
+            .as_text()
+            .expect("schema failure artifact should be textual JSON"),
+    )
+    .expect("schema failure artifact should parse as JSON");
+    assert_eq!(payload["ok"], false);
+    assert_eq!(payload["tool"], "validated_tool");
+    assert_eq!(payload["error"]["code"], "tool_input_schema_invalid");
+    assert!(
+        payload["error"]["violations"]
+            .as_array()
+            .expect("schema failure should list violations")
+            .iter()
+            .any(|violation| violation["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("query")))
+    );
+    assert!(runtime.pending_tool_calls().await.is_empty());
+}
+
+#[test]
+fn runtime_builder_precompiles_registered_tool_input_schema() {
+    let schema = Schema::try_from(json!({ "type": "not-a-json-schema-type" }))
+        .expect("test schema should be a JSON object");
+    let spec = ToolSpec::new(
+        ToolName::new("invalid_schema_tool").expect("valid tool name"),
+        "Invalid schema test tool",
+        ToolInputSchema::new(schema).expect("tool input schema only checks object shape"),
+    )
+    .expect("tool spec should build before runtime schema compilation");
+
+    let result = Runtime::builder(session_id("runtime-tool-input-schema-precompile"))
+        .register_tool(RegisteredTool::read_only(
+            spec,
+            Arc::new(SuccessfulToolExecutor::new()),
+        ))
+        .build();
+    let error = match result {
+        Ok(_) => panic!("runtime should reject invalid registered tool schema"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        RuntimeError::InvalidToolInputSchema { ref name, .. }
+            if name.as_str() == "invalid_schema_tool"
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn runtime_control_tool_resolves_even_if_token_is_cancelled_during_execution() {
     let executor = CancelDuringRuntimeControlExecutor::new();
     let (runtime, pending) = register_policy_pending_tool(

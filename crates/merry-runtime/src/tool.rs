@@ -10,7 +10,10 @@
 //! render tool specs and continuations into provider wire formats outside this
 //! crate.
 
-use crate::{ArtifactContent, ProcessActionError, ProcessActionIntent, ProcessExecutionEvidence};
+use crate::{
+    ArtifactContent, ProcessActionError, ProcessActionIntent, ProcessExecutionEvidence,
+    tool_input_validation::{CompiledToolInputValidator, ToolInputValidationError},
+};
 use merry_core::{
     ErrorInfo, PendingToolCall, ToolCallId, ToolCallResultStatus, ToolName, ToolSpec,
 };
@@ -1160,17 +1163,32 @@ impl std::fmt::Debug for RegisteredTool {
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ToolRegistry {
-    tools: BTreeMap<ToolName, RegisteredTool>,
+    tools: BTreeMap<ToolName, RegisteredToolEntry>,
+}
+
+#[derive(Debug, Clone)]
+struct RegisteredToolEntry {
+    tool: RegisteredTool,
+    input_validator: CompiledToolInputValidator,
 }
 
 impl ToolRegistry {
-    pub(crate) fn from_registered(tools: Vec<RegisteredTool>) -> Result<Self, DuplicateToolName> {
+    pub(crate) fn from_registered(tools: Vec<RegisteredTool>) -> Result<Self, ToolRegistryError> {
         let mut registry = BTreeMap::new();
 
         for tool in tools {
             let name = tool.spec().name().clone();
-            if registry.insert(name.clone(), tool).is_some() {
-                return Err(DuplicateToolName { name });
+            let input_validator = CompiledToolInputValidator::compile(tool.spec().input_schema())
+                .map_err(|source| ToolRegistryError::InvalidToolInputSchema {
+                name: name.clone(),
+                message: source.to_string(),
+            })?;
+            let entry = RegisteredToolEntry {
+                tool,
+                input_validator,
+            };
+            if registry.insert(name.clone(), entry).is_some() {
+                return Err(ToolRegistryError::DuplicateName { name });
             }
         }
 
@@ -1180,24 +1198,34 @@ impl ToolRegistry {
     pub(crate) fn tool_specs(&self) -> Vec<ToolSpec> {
         self.tools
             .values()
-            .map(|tool| tool.spec().clone())
+            .map(|entry| entry.tool.spec().clone())
             .collect()
     }
 
     pub(crate) fn registered_tool(&self, name: &ToolName) -> Option<&RegisteredTool> {
-        self.tools.get(name)
+        self.tools.get(name).map(|entry| &entry.tool)
+    }
+
+    pub(crate) fn validate_tool_input(
+        &self,
+        call: &PendingToolCall,
+    ) -> Option<Result<(), ToolInputValidationError>> {
+        self.tools
+            .get(call.name())
+            .map(|entry| entry.input_validator.validate_call(call))
     }
 
     pub(crate) fn first_bridge_tool_name(&self) -> Option<&ToolName> {
         self.tools
             .iter()
-            .find_map(|(name, tool)| (tool.runner() == ToolRunner::Bridge).then_some(name))
+            .find_map(|(name, entry)| (entry.tool.runner() == ToolRunner::Bridge).then_some(name))
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct DuplicateToolName {
-    pub(crate) name: ToolName,
+pub(crate) enum ToolRegistryError {
+    DuplicateName { name: ToolName },
+    InvalidToolInputSchema { name: ToolName, message: String },
 }
 
 #[cfg(test)]

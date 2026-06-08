@@ -7,6 +7,7 @@ rust-version.workspace = true
 [dependencies]
 futures-core.workspace = true
 futures-util.workspace = true
+jsonschema.workspace = true
 merry-core = { path = "../merry-core" }
 merry-llm = { path = "../merry-llm" }
 schemars.workspace = true

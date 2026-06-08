@@ -54,6 +54,7 @@ mod step;
 mod subagent;
 mod summary_draft_promotion;
 mod tool;
+mod tool_input_validation;
 
 pub use agent_loop::{
     AgentLoopBlockedReason, AgentLoopConfig, AgentLoopConfigError, AgentLoopError,
