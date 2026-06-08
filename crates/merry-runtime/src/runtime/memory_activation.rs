@@ -87,11 +87,16 @@ fn clear_activated_memories_if_epoch_matches(inner: &RuntimeInner, epoch: u64) -
 
 pub(super) fn memory_activation_seed_from_step_input(
     input: &StepInput,
-) -> Result<MemoryActivationSeed, crate::memory::MemoryError> {
+) -> Result<Option<MemoryActivationSeed>, crate::memory::MemoryError> {
+    let Some(query) = input.memory_activation_query() else {
+        return Ok(None);
+    };
+
     MemoryActivationSeed::new(
-        input.text(),
+        query,
         vec![MemoryScope::Session, MemoryScope::Task, MemoryScope::Step],
         MemoryActivationSourceKind::UserQuery,
         "step input",
     )
+    .map(Some)
 }

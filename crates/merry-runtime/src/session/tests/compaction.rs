@@ -5,11 +5,15 @@ fn compaction_input_excludes_retained_raw_tail() {
     let mut session =
         SessionState::new(SessionId::new("compaction-input-tail").expect("valid session id"));
     session.set_task_anchor(TaskAnchor::new("Keep the current task").expect("valid anchor"));
-    session.record_user_message_body("old user message to compact");
+    session
+        .record_user_message_body("old user message to compact")
+        .expect("user records");
     session
         .record_assistant_text_output("old assistant message to compact".to_owned())
         .expect("assistant records");
-    session.record_user_message_body("retained raw tail user sentinel");
+    session
+        .record_user_message_body("retained raw tail user sentinel")
+        .expect("user records");
     session
         .record_assistant_text_output("retained raw tail assistant sentinel".to_owned())
         .expect("assistant records");
@@ -32,15 +36,21 @@ fn compaction_input_excludes_retained_raw_tail() {
 fn compaction_retained_raw_tail_is_policy_driven() {
     let mut session =
         SessionState::new(SessionId::new("retained-tail-policy").expect("valid session id"));
-    session.record_user_message_body("covered user sentinel");
+    session
+        .record_user_message_body("covered user sentinel")
+        .expect("user records");
     session
         .record_assistant_text_output("covered assistant sentinel".to_owned())
         .expect("assistant records");
-    session.record_user_message_body("tail user one sentinel");
+    session
+        .record_user_message_body("tail user one sentinel")
+        .expect("user records");
     session
         .record_assistant_text_output("tail assistant one sentinel".to_owned())
         .expect("assistant records");
-    session.record_user_message_body("tail user two sentinel");
+    session
+        .record_user_message_body("tail user two sentinel")
+        .expect("user records");
     session
         .record_assistant_text_output("tail assistant two sentinel".to_owned())
         .expect("assistant records");
@@ -69,8 +79,12 @@ fn compaction_input_includes_previous_checkpoint_without_old_raw_body() {
         "The prior direction rejected resource timelines.",
     );
     session.set_compacted_checkpoint(checkpoint);
-    session.record_user_message_body("new user message to compact");
-    session.record_user_message_body("retained tail");
+    session
+        .record_user_message_body("new user message to compact")
+        .expect("user records");
+    session
+        .record_user_message_body("retained tail")
+        .expect("user records");
 
     let input = session
         .build_citation_compaction_input(
@@ -95,8 +109,12 @@ fn rolling_compaction_candidate_can_cite_prior_claim_and_new_window_ref() {
         "Runtime cannot validate open semantic truth.",
     );
     session.set_compacted_checkpoint(checkpoint);
-    session.record_user_message_body("new compacted work");
-    session.record_user_message_body("retained tail");
+    session
+        .record_user_message_body("new compacted work")
+        .expect("user records");
+    session
+        .record_user_message_body("retained tail")
+        .expect("user records");
 
     let input = session
         .build_citation_compaction_input(
@@ -149,11 +167,15 @@ fn rolling_compaction_candidate_can_cite_prior_claim_and_new_window_ref() {
 fn installing_valid_checkpoint_removes_only_covered_history() {
     let mut session =
         SessionState::new(SessionId::new("install-checkpoint").expect("valid session id"));
-    session.record_user_message_body("old user");
+    session
+        .record_user_message_body("old user")
+        .expect("user records");
     session
         .record_assistant_text_output("old assistant".to_owned())
         .expect("assistant records");
-    session.record_user_message_body("tail user");
+    session
+        .record_user_message_body("tail user")
+        .expect("user records");
 
     let policy = CitationCompactionPolicy::new(128, None, 4096, 1, 1200, 16).expect("valid policy");
     let input = session
@@ -177,7 +199,7 @@ fn installing_valid_checkpoint_removes_only_covered_history() {
         .expect("install succeeds");
 
     assert_eq!(outcome.covered_history_item_count(), 2);
-    assert_eq!(session.append_only_body_text_for_tests(), vec!["tail user"]);
+    assert_eq!(session.transcript_items_for_tests(), vec!["user:tail user"]);
     assert!(
         session
             .context_snapshot()
@@ -190,8 +212,12 @@ fn installing_valid_checkpoint_removes_only_covered_history() {
 fn failed_checkpoint_install_keeps_history_unchanged() {
     let mut session =
         SessionState::new(SessionId::new("install-checkpoint-rollback").expect("valid session id"));
-    session.record_user_message_body("old user");
-    session.record_user_message_body("tail user");
+    session
+        .record_user_message_body("old user")
+        .expect("user records");
+    session
+        .record_user_message_body("tail user")
+        .expect("user records");
 
     let policy = CitationCompactionPolicy::new(128, None, 4096, 1, 1200, 16).expect("valid policy");
     let input = session
@@ -216,7 +242,7 @@ fn failed_checkpoint_install_keeps_history_unchanged() {
 
     assert!(matches!(error, RuntimeError::Checkpoint { .. }));
     assert_eq!(
-        session.append_only_body_text_for_tests(),
-        vec!["old user", "tail user"]
+        session.transcript_items_for_tests(),
+        vec!["user:old user", "user:tail user"]
     );
 }

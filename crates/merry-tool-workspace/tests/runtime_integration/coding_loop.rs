@@ -96,7 +96,7 @@ async fn coding_loop_harness_inspects_patches_verifies_and_completes() {
         assert_eq!(
             ids,
             expected_continuation_ids[..=index],
-            "request {index} should replay all uncheckpointed tool continuations in order"
+            "request {index} should replay all raw tool exchanges in order"
         );
     }
 

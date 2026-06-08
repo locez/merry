@@ -5,10 +5,10 @@ use merry_core::{
 };
 use merry_llm::{
     FinishReason, GenerationConfig, ModelCapabilities, ModelContent, ModelError, ModelEvent,
-    ModelEventStream, ModelMessage, ModelMessageRole, ModelName, ModelOutput, ModelProvider,
-    ModelProviderFuture, ModelRequest, ModelResponse, ModelResponseFormat, ModelStreamContext,
-    ModelStructuredOutputFormat, ModelToolCall, ModelToolCallId, ModelToolContinuation,
-    ModelToolResult, ModelToolResultContent, ToolArguments, Usage,
+    ModelEventStream, ModelInputItem, ModelMessage, ModelMessageRole, ModelName, ModelOutput,
+    ModelProvider, ModelProviderFuture, ModelRequest, ModelResponse, ModelResponseFormat,
+    ModelStreamContext, ModelStructuredOutputFormat, ModelToolCall, ModelToolCallId,
+    ModelToolContinuation, ModelToolResult, ModelToolResultContent, ToolArguments, Usage,
 };
 use schemars::{JsonSchema, Schema};
 use serde::{Serialize, de::DeserializeOwned};
@@ -331,6 +331,42 @@ fn model_request_stable_prefix_hash_tracks_base_instructions_and_tools() {
     assert_ne!(
         first.stable_prefix_hash(),
         changed_tool_profile.stable_prefix_hash()
+    );
+}
+
+#[test]
+fn model_request_preserves_ordered_input_items_and_hashes_dynamic_tail() {
+    let call = test_tool_call();
+    let result = ModelToolResult::succeeded(
+        call.id().clone(),
+        ModelToolResultContent::text("file contents").expect("valid result content"),
+    );
+
+    let request = ModelRequest::new_with_input_and_stable_prefix(
+        ModelName::new("vendor/model-family:2025-04-14").expect("valid model name"),
+        vec![
+            ModelInputItem::Message(system_message("Base runtime instructions.")),
+            ModelInputItem::Message(user_message("first user")),
+            ModelInputItem::ToolCall(call),
+            ModelInputItem::ToolResult(result),
+            ModelInputItem::Message(user_message("second user")),
+        ],
+        vec![weather_tool()],
+        GenerationConfig::default(),
+        1,
+    )
+    .expect("valid ordered request");
+
+    assert_eq!(request.stable_prefix_item_count(), 1);
+    assert_eq!(request.input().len(), 5);
+    assert!(matches!(request.input()[2], ModelInputItem::ToolCall(_)));
+    assert!(matches!(request.input()[3], ModelInputItem::ToolResult(_)));
+    assert_eq!(request.dynamic_input().len(), 4);
+    assert!(
+        request
+            .dynamic_input_hash()
+            .as_str()
+            .starts_with("fnv1a64:")
     );
 }
 

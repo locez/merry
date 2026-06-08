@@ -23,12 +23,12 @@ mod messages;
 mod recording;
 mod tool_calls;
 mod tool_result;
+mod transcript;
 
-use self::history::{ResolvedToolContinuation, SessionMessage};
 pub(crate) use self::{
     artifacts::is_runtime_reserved_artifact_id,
-    history::ResolvedToolContinuationSnapshot,
     tool_result::{ProposedToolExecutionOutcome, ToolResultLedgerObservation},
+    transcript::{Transcript, TranscriptItemSnapshot, UserInputOrigin},
 };
 
 /// Mutable runtime state for one session.
@@ -37,7 +37,6 @@ pub(crate) struct SessionState {
     session_id: SessionId,
     next_sequence: u64,
     session_started: bool,
-    next_history_id: u64,
     ledger: TaskLedger,
     artifacts: ArtifactRegistry,
     memory_store: MemoryStore,
@@ -51,10 +50,9 @@ pub(crate) struct SessionState {
     judgments: JudgmentRegistry,
     summary_draft_promotions: SummaryDraftPromotionRegistry,
     action_audits: ActionAuditRegistry,
-    append_only_body: Vec<SessionMessage>,
+    transcript: Transcript,
     pending_tool_calls: Vec<PendingToolCall>,
     resolved_tool_calls: BTreeSet<ToolCallId>,
-    uncheckpointed_tool_continuations: Vec<ResolvedToolContinuation>,
 }
 
 impl SessionState {
@@ -63,7 +61,6 @@ impl SessionState {
             session_id,
             next_sequence: 0,
             session_started: false,
-            next_history_id: 0,
             ledger: TaskLedger::default(),
             artifacts: ArtifactRegistry::default(),
             memory_store: MemoryStore::new(),
@@ -76,10 +73,9 @@ impl SessionState {
             judgments: JudgmentRegistry::default(),
             summary_draft_promotions: SummaryDraftPromotionRegistry::default(),
             action_audits: ActionAuditRegistry::default(),
-            append_only_body: Vec::new(),
+            transcript: Transcript::new(),
             pending_tool_calls: Vec::new(),
             resolved_tool_calls: BTreeSet::new(),
-            uncheckpointed_tool_continuations: Vec::new(),
         }
     }
 
@@ -90,6 +86,42 @@ impl SessionState {
     #[cfg(test)]
     pub(crate) fn action_audit_snapshot(&self) -> crate::action_audit::ActionAuditRegistrySnapshot {
         self.action_audits.snapshot()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn transcript_items_for_tests(&self) -> Vec<String> {
+        self.transcript
+            .items()
+            .iter()
+            .map(|item| match item {
+                transcript::TranscriptItem::UserMessage { text, .. } => format!("user:{text}"),
+                transcript::TranscriptItem::AssistantText { artifact_id, .. } => {
+                    let content = self
+                        .read_artifact_content(artifact_id)
+                        .expect("assistant transcript artifact should be readable");
+                    let text = content
+                        .as_text()
+                        .expect("assistant transcript artifact should be text");
+                    format!("assistant:{text}")
+                }
+                transcript::TranscriptItem::ToolCall { call, .. } => {
+                    format!("tool_call:{}", call.id().as_str())
+                }
+                transcript::TranscriptItem::ToolResult {
+                    call_id,
+                    artifact_id,
+                    ..
+                } => {
+                    let content = self
+                        .read_artifact_content(artifact_id)
+                        .expect("tool result transcript artifact should be readable");
+                    let text = content
+                        .as_text()
+                        .expect("tool result transcript artifact should be text");
+                    format!("tool_result:{}:{text}", call_id.as_str())
+                }
+            })
+            .collect()
     }
 }
 

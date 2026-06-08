@@ -44,6 +44,7 @@ impl SessionState {
         Self::trace_artifact_record(self.session_id.as_str(), &recorded, content_bytes);
         self.pending_tool_calls.remove(pending_index);
         self.resolved_tool_calls.insert(call_id.clone());
+        self.transcript.remove_tool_call(&call_id);
 
         let mut events = Vec::with_capacity(if self.session_started { 2 } else { 3 });
         if let Some(started) = self.record_session_started_if_needed() {
@@ -95,17 +96,14 @@ impl SessionState {
         Self::trace_artifact_record(self.session_id.as_str(), &recorded, content_bytes);
         debug_assert_eq!(&recorded, result.artifact());
 
+        self.transcript.push_tool_result(
+            result.call_id().clone(),
+            result.clone(),
+            result.artifact().id().clone(),
+        )?;
         let pending = self.pending_tool_calls.remove(pending_index);
         let pending_for_skill_event = pending.clone();
         self.resolved_tool_calls.insert(result.call_id().clone());
-        let history_id = self.next_history_id();
-        self.uncheckpointed_tool_continuations.push(
-            super::super::history::ResolvedToolContinuation::new(
-                history_id,
-                pending,
-                result.clone(),
-            ),
-        );
 
         let mut events = Vec::with_capacity(if self.session_started { 2 } else { 3 });
         if let Some(started) = self.record_session_started_if_needed() {

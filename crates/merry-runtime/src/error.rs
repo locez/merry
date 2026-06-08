@@ -127,6 +127,10 @@ pub enum RuntimeError {
         content_kind: ArtifactContentKind,
     },
 
+    /// Transcript item ids are exhausted for this session.
+    #[error("transcript item id space is exhausted")]
+    TranscriptItemIdExhausted,
+
     /// A core protocol value could not be constructed.
     #[error("core protocol error while constructing runtime state: {source}")]
     Core {

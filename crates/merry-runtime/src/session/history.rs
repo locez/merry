@@ -7,92 +7,9 @@ use crate::{
     },
     permission::PermissionReviewContextEntry,
 };
-use merry_core::{ArtifactId, PendingToolCall, ToolCallResult};
+use merry_core::{PendingToolCall, ToolCallResult};
 
 const PERMISSION_REVIEW_ENTRY_MAX_BYTES: usize = 2048;
-
-/// Resolved tool call state that has not yet been compiled into a provider request.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ResolvedToolContinuation {
-    pub(super) history_id: u64,
-    pub(super) call: PendingToolCall,
-    pub(super) result: ToolCallResult,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum SessionMessage {
-    User {
-        history_id: u64,
-        text: String,
-    },
-    Assistant {
-        history_id: u64,
-        artifact_id: ArtifactId,
-    },
-}
-
-impl ResolvedToolContinuation {
-    pub(super) fn new(history_id: u64, call: PendingToolCall, result: ToolCallResult) -> Self {
-        Self {
-            history_id,
-            call,
-            result,
-        }
-    }
-}
-
-impl SessionMessage {
-    pub(super) fn user(history_id: u64, text: String) -> Self {
-        Self::User { history_id, text }
-    }
-
-    pub(super) fn assistant(history_id: u64, artifact_id: ArtifactId) -> Self {
-        Self::Assistant {
-            history_id,
-            artifact_id,
-        }
-    }
-
-    pub(super) fn history_id(&self) -> u64 {
-        match self {
-            Self::User { history_id, .. } | Self::Assistant { history_id, .. } => *history_id,
-        }
-    }
-}
-
-/// Tool continuation data read from session state for one request compilation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ResolvedToolContinuationSnapshot {
-    call: PendingToolCall,
-    result: ToolCallResult,
-    content: ArtifactContent,
-}
-
-impl ResolvedToolContinuationSnapshot {
-    pub(super) fn new(
-        call: PendingToolCall,
-        result: ToolCallResult,
-        content: ArtifactContent,
-    ) -> Self {
-        Self {
-            call,
-            result,
-            content,
-        }
-    }
-
-    pub(crate) fn call(&self) -> &PendingToolCall {
-        &self.call
-    }
-
-    pub(crate) fn result(&self) -> &ToolCallResult {
-        &self.result
-    }
-
-    pub(crate) fn content(&self) -> &ArtifactContent {
-        &self.content
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct CompactionHistoryItem {

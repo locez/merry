@@ -1,9 +1,9 @@
 use super::{
     SessionState,
     artifacts::{assistant_output_id, process_input_id},
-    history::SessionMessage,
 };
 use crate::{
+    RuntimeError,
     artifact::{ArtifactContent, ArtifactError},
     ledger::LedgerFactKind,
 };
@@ -52,16 +52,14 @@ impl SessionState {
     pub(crate) fn record_assistant_text_output(
         &mut self,
         text: String,
-    ) -> Result<RuntimeEvent, ArtifactError> {
+    ) -> Result<RuntimeEvent, RuntimeError> {
         let artifact_sequence = self.next_sequence();
         let artifact = ArtifactRef::new(assistant_output_id(artifact_sequence), ArtifactKind::Text);
         let content = ArtifactContent::text(text);
         let content_bytes = content.as_bytes().len();
         let recorded = self.record_artifact_state(artifact, content)?;
         Self::trace_artifact_record(self.session_id.as_str(), &recorded, content_bytes);
-        let history_id = self.next_history_id();
-        self.append_only_body
-            .push(SessionMessage::assistant(history_id, recorded.id().clone()));
+        self.transcript.push_assistant_text(recorded.id().clone())?;
         Ok(self.record_event(
             RuntimeEventKind::ArtifactRecorded { artifact: recorded },
             LedgerFactKind::ArtifactRecorded,

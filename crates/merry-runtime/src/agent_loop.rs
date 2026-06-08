@@ -28,14 +28,6 @@ pub const DEFAULT_AGENT_LOOP_MAX_MODEL_TURNS: usize = 128;
 /// Coding-agent default for one top-level user task.
 pub const DEFAULT_CODING_AGENT_MAX_MODEL_TURNS: usize = 1024;
 
-/// Fixed user input used for provider continuation steps after a tool result.
-///
-/// Tool call and result details are compiled from runtime-owned continuation
-/// state; this text is only a small prompt nudge for the model turn.
-pub const DEFAULT_AGENT_LOOP_CONTINUATION_INPUT: &str = "Continue after tool result.";
-
-const ORIGINAL_TASK_CONTINUATION_LABEL: &str = "Original task:";
-
 /// Configuration for [`Runtime::run_agent_loop`].
 ///
 /// `max_model_turns` bounds the number of model turns started by one loop run.
@@ -341,7 +333,7 @@ impl Runtime {
     /// events. If the step records exactly one pending tool call and more step
     /// budget remains, the loop executes that call through
     /// [`Runtime::execute_tool_call`], appends its events, and starts a
-    /// continuation step using [`DEFAULT_AGENT_LOOP_CONTINUATION_INPUT`].
+    /// continuation step without adding a new user message.
     ///
     /// The MVP loop does not support parallel tool calls and does not introduce
     /// provider conversation state. It owns the runtime active-step permit for
@@ -361,7 +353,6 @@ impl Runtime {
             .map_err(|source| AgentLoopError::new(Vec::new(), source))?;
         let loop_token = context.cancellation_token().clone();
         let generation_config = context.generation_config().clone();
-        let original_task = input.text().to_owned();
         let mut next_input = Some(input);
         let mut events = Vec::new();
         let mut model_turns_run = 0;
@@ -592,13 +583,7 @@ impl Runtime {
                         }
                     }
 
-                    next_input = Some(match continuation_step_input(&original_task) {
-                        Ok(input) => input,
-                        Err(source) => {
-                            trace_loop_error(self.session_id().as_str(), model_turns_run, &source);
-                            return Err(AgentLoopError::new(events, source));
-                        }
-                    });
+                    next_input = Some(continuation_step_input());
                 }
             }
         }
@@ -675,7 +660,6 @@ async fn run_agent_loop_stream_producer(
         sender,
         mut bridge_receiver,
     } = producer;
-    let original_task = input.text().to_owned();
     let mut next_input = Some(input);
     let mut events = Vec::new();
     let mut model_turns_run = 0;
@@ -842,10 +826,7 @@ async fn run_agent_loop_stream_producer(
                         }
                     }
 
-                    let Ok(input) = continuation_step_input(&original_task) else {
-                        return None;
-                    };
-                    next_input = Some(input);
+                    next_input = Some(continuation_step_input());
                 }
             },
         }
@@ -912,10 +893,8 @@ async fn record_final_output_tool_call(
     runtime.record_final_output_tool_call(call).await
 }
 
-fn continuation_step_input(original_task: &str) -> Result<StepInput, RuntimeError> {
-    StepInput::loop_control_text(&format!(
-        "{DEFAULT_AGENT_LOOP_CONTINUATION_INPUT}\n\n{ORIGINAL_TASK_CONTINUATION_LABEL}\n{original_task}"
-    ))
+fn continuation_step_input() -> StepInput {
+    StepInput::no_new_user_input()
 }
 
 fn tool_execution_cancelled_diagnostic(call_id: &merry_core::ToolCallId) -> ErrorInfo {
@@ -957,6 +936,7 @@ fn runtime_error_code(error: &RuntimeError) -> &'static str {
             "mutating_action_commit_lifecycle_required"
         }
         RuntimeError::UnsupportedToolResultContent { .. } => "unsupported_tool_result_content",
+        RuntimeError::TranscriptItemIdExhausted => "transcript_item_id_exhausted",
         RuntimeError::Core { .. } => "core_error",
         RuntimeError::Artifact { .. } => "artifact_error",
         RuntimeError::Context { .. } => "context_error",

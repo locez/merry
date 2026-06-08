@@ -2,8 +2,8 @@ use crate::{
     CheckpointDecision, ContextBudget, ContextBudgetPolicy, ContextCompiler, ProjectRules,
     ResolvedContextWindow, RuntimeError, SessionContextSnapshot, SkillCatalog, TaskAnchor,
     decide_checkpoint, resolve_context_window,
-    session::{ResolvedToolContinuationSnapshot, SessionState},
-    step::{CompiledSessionMessage, StepInput, StepModelRequestParts, compile_step_model_request},
+    session::{SessionState, TranscriptItemSnapshot},
+    step::{StepInput, StepModelRequestParts, compile_step_model_request},
 };
 use merry_core::ErrorInfo;
 use merry_llm::{GenerationConfig, ModelError, ModelName};
@@ -89,23 +89,20 @@ pub(super) struct StepRequestInputs {
     skill_catalog: Option<SkillCatalog>,
     project_rules: Option<ProjectRules>,
     task_anchor: Option<TaskAnchor>,
-    append_only_body: Vec<CompiledSessionMessage>,
-    pub(super) continuations: Vec<ResolvedToolContinuationSnapshot>,
+    pub(super) transcript: Vec<TranscriptItemSnapshot>,
 }
 
 impl StepRequestInputs {
     pub(super) fn from_session(
         session: &SessionState,
-        append_only_body: Vec<CompiledSessionMessage>,
-        continuations: Vec<ResolvedToolContinuationSnapshot>,
+        transcript: Vec<TranscriptItemSnapshot>,
     ) -> Self {
         Self {
             snapshot: session.context_snapshot(),
             skill_catalog: session.skill_catalog(),
             project_rules: session.project_rules(),
             task_anchor: session.task_anchor(),
-            append_only_body,
-            continuations,
+            transcript,
         }
     }
 }
@@ -128,13 +125,8 @@ pub(super) enum StepRequestCompileError {
 pub(super) fn step_request_inputs_from_session(
     session: &SessionState,
 ) -> Result<StepRequestInputs, RuntimeError> {
-    let append_only_body = session.append_only_body_snapshot()?;
-    let continuations = session.uncheckpointed_tool_continuation_snapshots()?;
-    Ok(StepRequestInputs::from_session(
-        session,
-        append_only_body,
-        continuations,
-    ))
+    let transcript = session.transcript_snapshot()?;
+    Ok(StepRequestInputs::from_session(session, transcript))
 }
 
 pub(super) fn compile_step_request_from_inputs(
@@ -153,8 +145,7 @@ pub(super) fn compile_step_request_from_inputs(
         project_rules: inputs.project_rules.as_ref(),
         task_anchor: inputs.task_anchor.as_ref(),
         context: &compiled_context,
-        append_only_body: &inputs.append_only_body,
-        continuations: &inputs.continuations,
+        transcript: &inputs.transcript,
         tool_specs,
         generation_config,
         progress_commentary,
@@ -198,8 +189,7 @@ pub(super) fn request_context_budget(
         .or_else(|| capabilities.max_output_tokens())
         .unwrap_or(DEFAULT_OUTPUT_RESERVE_TOKENS);
     let policy = ContextBudgetPolicy::Balanced;
-    let stable_prefix_estimated_tokens =
-        estimate_model_message_tokens(request.stable_prefix_messages());
+    let stable_prefix_estimated_tokens = estimate_model_input_tokens(request.stable_prefix_input());
     let budget = ContextBudget::from_window(
         window.tokens(),
         DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT,
@@ -207,8 +197,7 @@ pub(super) fn request_context_budget(
         output_reserve_tokens,
         policy,
     )?;
-    let dynamic_body_estimated_tokens = estimate_model_message_tokens(request.dynamic_messages())
-        + estimate_tool_continuation_tokens(request.continuations());
+    let dynamic_body_estimated_tokens = estimate_model_input_tokens(request.dynamic_input());
     let decision = decide_checkpoint(dynamic_body_estimated_tokens, budget);
 
     Ok(RequestContextBudget {
@@ -220,25 +209,26 @@ pub(super) fn request_context_budget(
     })
 }
 
-fn estimate_model_message_tokens(messages: &[merry_llm::ModelMessage]) -> u64 {
-    messages
-        .iter()
-        .map(|message| estimate_text_tokens(message.content().as_text()))
-        .sum()
+fn estimate_model_input_tokens(input: &[merry_llm::ModelInputItem]) -> u64 {
+    input.iter().map(estimate_model_input_item_tokens).sum()
 }
 
-fn estimate_tool_continuation_tokens(continuations: &[merry_llm::ModelToolContinuation]) -> u64 {
-    continuations
-        .iter()
-        .map(|continuation| {
-            estimate_text_tokens(continuation.call().name().as_str())
+fn estimate_model_input_item_tokens(item: &merry_llm::ModelInputItem) -> u64 {
+    match item {
+        merry_llm::ModelInputItem::Message(message) => {
+            estimate_text_tokens(message.content().as_text())
+        }
+        merry_llm::ModelInputItem::ToolCall(call) => {
+            estimate_text_tokens(call.name().as_str())
                 + estimate_text_tokens(
-                    &serde_json::to_string(continuation.call().arguments().as_object())
+                    &serde_json::to_string(call.arguments().as_object())
                         .expect("tool arguments must serialize for budget estimation"),
                 )
-                + estimate_text_tokens(continuation.result().content().as_str())
-        })
-        .sum()
+        }
+        merry_llm::ModelInputItem::ToolResult(result) => {
+            estimate_text_tokens(result.content().as_str())
+        }
+    }
 }
 
 fn estimate_text_tokens(text: &str) -> u64 {

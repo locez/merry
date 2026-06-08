@@ -4,7 +4,9 @@ use super::*;
 fn memory_activation_seed_uses_step_input_as_user_query_source() {
     let input = crate::StepInput::user_text("  Topic\trequest\n").expect("valid step input");
 
-    let seed = memory_activation_seed_from_step_input(&input).expect("seed builds");
+    let seed = memory_activation_seed_from_step_input(&input)
+        .expect("seed builds")
+        .expect("user text should activate memory");
 
     assert_eq!(seed.query(), "topic request");
     assert_eq!(

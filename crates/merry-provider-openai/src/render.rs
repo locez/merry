@@ -7,8 +7,8 @@ use crate::{
     },
 };
 use merry_llm::{
-    ModelMessageRole, ModelRequest, ModelResponseFormat, ModelStructuredOutputFormat,
-    ModelToolContinuation,
+    ModelInputItem, ModelMessageRole, ModelRequest, ModelResponseFormat,
+    ModelStructuredOutputFormat, ModelToolCall,
 };
 use serde_json::{Map, Value};
 
@@ -22,14 +22,7 @@ pub(crate) fn render_responses_request(
         ));
     }
 
-    let mut input = request
-        .messages()
-        .iter()
-        .map(|message| {
-            ResponsesInputItem::message(render_role(message.role()), message.content().as_text())
-        })
-        .collect::<Vec<_>>();
-    append_tool_continuation_input(request, &mut input)?;
+    let input = render_input_items(request.input())?;
 
     let tools = request
         .tools()
@@ -114,28 +107,7 @@ fn render_structured_output_format<'a>(
     })
 }
 
-fn append_tool_continuation_input<'a>(
-    request: &'a ModelRequest,
-    input: &mut Vec<ResponsesInputItem<'a>>,
-) -> Result<(), OpenAiProviderError> {
-    let continuations = request.continuations();
-    input.reserve(continuations.len().saturating_mul(2));
-    for continuation in continuations {
-        let continuation = render_tool_continuation(continuation)?;
-        input.push(ResponsesInputItem::function_call(
-            continuation.id,
-            continuation.name,
-            continuation.arguments,
-        ));
-        input.push(ResponsesInputItem::function_call_output(
-            continuation.id,
-            continuation.result_content,
-        ));
-    }
-
-    Ok(())
-}
-
+#[cfg(test)]
 #[derive(Debug, PartialEq, Eq)]
 struct RenderedToolContinuation<'a> {
     id: &'a str,
@@ -144,17 +116,64 @@ struct RenderedToolContinuation<'a> {
     result_content: &'a str,
 }
 
-fn render_tool_continuation<'a>(
-    continuation: &'a ModelToolContinuation,
-) -> Result<RenderedToolContinuation<'a>, OpenAiProviderError> {
-    let call = continuation.call();
+fn render_input_items<'a>(
+    input: &'a [ModelInputItem],
+) -> Result<Vec<ResponsesInputItem<'a>>, OpenAiProviderError> {
+    input
+        .iter()
+        .map(|item| match item {
+            ModelInputItem::Message(message) => Ok(ResponsesInputItem::message(
+                render_role(message.role()),
+                message.content().as_text(),
+            )),
+            ModelInputItem::ToolCall(call) => {
+                let call = render_tool_call(call)?;
+                Ok(ResponsesInputItem::function_call(
+                    call.id,
+                    call.name,
+                    call.arguments,
+                ))
+            }
+            ModelInputItem::ToolResult(result) => Ok(ResponsesInputItem::function_call_output(
+                result.call_id().as_str(),
+                result.content().as_str(),
+            )),
+        })
+        .collect()
+}
+
+fn render_tool_call<'a>(
+    call: &'a ModelToolCall,
+) -> Result<RenderedToolCall<'a>, OpenAiProviderError> {
     let arguments = stringify_json_object(call.arguments().as_object(), "tool call arguments")?;
 
-    Ok(RenderedToolContinuation {
+    Ok(RenderedToolCall {
         id: call.id().as_str(),
         name: call.name().as_str(),
         arguments,
-        result_content: continuation.result().content().as_str(),
+    })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct RenderedToolCall<'a> {
+    id: &'a str,
+    name: &'a str,
+    arguments: String,
+}
+
+#[cfg(test)]
+fn render_tool_continuation<'a>(
+    continuation: &'a merry_llm::ModelToolContinuation,
+) -> Result<RenderedToolContinuation<'a>, OpenAiProviderError> {
+    let result = continuation.result();
+    let call = continuation.call();
+    let call = render_tool_call(call)?;
+
+    Ok(RenderedToolContinuation {
+        id: call.id,
+        name: call.name,
+        arguments: call.arguments,
+        result_content: result.content().as_str(),
     })
 }
 
@@ -177,10 +196,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::render_tool_continuation;
-    use crate::wire::ResponsesInputItem;
     use merry_core::{ErrorInfo, ToolCallResultStatus, ToolName};
     use merry_llm::{
-        ModelToolCall, ModelToolCallId, ModelToolContinuation, ModelToolResult,
+        GenerationConfig, ModelContent, ModelInputItem, ModelMessage, ModelMessageRole, ModelName,
+        ModelRequest, ModelToolCall, ModelToolCallId, ModelToolContinuation, ModelToolResult,
         ModelToolResultContent, ToolArguments,
     };
     use serde_json::json;
@@ -268,7 +287,6 @@ mod tests {
 
     #[test]
     fn appends_tool_continuations_as_responses_input_items_in_order() {
-        let mut input = vec![ResponsesInputItem::message("user", "Weather in Shanghai?")];
         let request = merry_llm::ModelRequest::new_with_continuations(
             merry_llm::ModelName::new("debug-model").expect("valid model name"),
             vec![
@@ -287,11 +305,10 @@ mod tests {
         )
         .expect("valid request");
 
-        super::append_tool_continuation_input(&request, &mut input)
-            .expect("continuation input should render");
+        let rendered = super::render_responses_request(&request).expect("request should render");
 
         assert_eq!(
-            serde_json::to_value(input).expect("input should serialize"),
+            rendered["input"],
             json!([
                 {
                     "role": "user",
@@ -312,6 +329,84 @@ mod tests {
                     "type": "function_call_output",
                     "call_id": "call_abc123",
                     "output": "{\"temperature_c\":22}"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn renders_ordered_input_items_without_moving_tool_items_to_tail() {
+        let call = ModelToolCall::new(
+            ModelToolCallId::new("call_ordered").expect("valid call id"),
+            ToolName::new("lookup_weather").expect("valid tool name"),
+            ToolArguments::try_from(json!({ "city": "Shanghai" })).expect("valid arguments"),
+        );
+        let result = ModelToolResult::new(
+            call.id().clone(),
+            ToolCallResultStatus::Succeeded,
+            ModelToolResultContent::text("22 C").expect("valid result content"),
+            None,
+        )
+        .expect("valid result");
+        let request = ModelRequest::new_with_input_and_stable_prefix(
+            ModelName::new("debug-model").expect("valid model name"),
+            vec![
+                ModelInputItem::Message(
+                    ModelMessage::new(
+                        ModelMessageRole::User,
+                        ModelContent::text("Weather in Shanghai?").expect("valid content"),
+                    )
+                    .expect("valid message"),
+                ),
+                ModelInputItem::ToolCall(call),
+                ModelInputItem::ToolResult(result),
+                ModelInputItem::Message(
+                    ModelMessage::new(
+                        ModelMessageRole::User,
+                        ModelContent::text("Now summarize.").expect("valid content"),
+                    )
+                    .expect("valid message"),
+                ),
+            ],
+            Vec::new(),
+            GenerationConfig::default(),
+            0,
+        )
+        .expect("valid request");
+
+        let rendered = super::render_responses_request(&request).expect("request renders");
+
+        assert_eq!(
+            rendered["input"],
+            json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Weather in Shanghai?"
+                        }
+                    ]
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_ordered",
+                    "name": "lookup_weather",
+                    "arguments": "{\"city\":\"Shanghai\"}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_ordered",
+                    "output": "22 C"
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Now summarize."
+                        }
+                    ]
                 }
             ])
         );

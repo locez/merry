@@ -1,6 +1,6 @@
 use super::{
-    SessionMessage, SessionState, history::CompactionHistoryItem,
-    history::permission_review_context_entry,
+    SessionState, history::CompactionHistoryItem, history::permission_review_context_entry,
+    transcript::TranscriptItem,
 };
 use crate::{
     RuntimeError,
@@ -78,18 +78,15 @@ impl SessionState {
             checkpoint_from_candidate_json(checkpoint_id.clone(), &input, candidate_json)?;
         let compacted = CompactedCheckpoint::from_citation_backed(citation)?;
 
-        let covered = input.covered_history_ids().clone();
-        let covered_count = covered.len();
-        self.append_only_body
-            .retain(|message| !covered.contains(&message.history_id()));
-        self.uncheckpointed_tool_continuations
-            .retain(|continuation| !covered.contains(&continuation.history_id));
+        let covered_count = input.covered_history_ids().len();
+        self.transcript
+            .remove_compacted_history_prefix(covered_count);
         self.compacted_checkpoint = Some(compacted);
 
         Ok(CompactionOutcome::new(
             checkpoint_id,
             covered_count,
-            self.history_item_count(),
+            self.history_item_count()?,
         ))
     }
 
@@ -107,49 +104,78 @@ impl SessionState {
     }
 
     fn compaction_history_items(&self) -> Result<Vec<CompactionHistoryItem>, RuntimeError> {
-        let mut items = Vec::with_capacity(
-            self.append_only_body.len() + self.uncheckpointed_tool_continuations.len(),
-        );
+        let mut items = Vec::with_capacity(self.transcript.items().len());
+        let transcript_items = self.transcript.items();
+        let mut index = 0usize;
 
-        for message in &self.append_only_body {
-            match message {
-                SessionMessage::User { history_id, text } => {
-                    items.push(CompactionHistoryItem::user(*history_id, text.clone()));
+        while index < transcript_items.len() {
+            match &transcript_items[index] {
+                TranscriptItem::UserMessage { id, text, .. } => {
+                    items.push(CompactionHistoryItem::user(id.as_u64(), text.clone()));
+                    index += 1;
                 }
-                SessionMessage::Assistant {
-                    history_id,
-                    artifact_id,
-                } => {
+                TranscriptItem::AssistantText { id, artifact_id } => {
                     let content = self.read_artifact_content(artifact_id)?;
                     let text =
                         content
                             .as_text()
                             .ok_or_else(|| ArtifactError::InvalidEvidenceLocator {
                                 id: artifact_id.clone(),
-                                reason: "assistant history artifact is not textual",
+                                reason: "assistant transcript artifact is not textual",
                             })?;
                     items.push(CompactionHistoryItem::assistant(
-                        *history_id,
+                        id.as_u64(),
                         text.to_owned(),
                     ));
+                    index += 1;
+                }
+                TranscriptItem::ToolCall { call, .. } => {
+                    let Some(next_item) = transcript_items.get(index + 1) else {
+                        if self
+                            .pending_tool_calls
+                            .iter()
+                            .any(|pending| pending.id() == call.id())
+                        {
+                            index += 1;
+                            continue;
+                        }
+                        return Err(CompactionError::StaleWindow.into());
+                    };
+                    let TranscriptItem::ToolResult {
+                        id,
+                        call_id,
+                        result,
+                        artifact_id,
+                    } = next_item
+                    else {
+                        if self
+                            .pending_tool_calls
+                            .iter()
+                            .any(|pending| pending.id() == call.id())
+                        {
+                            index += 1;
+                            continue;
+                        }
+                        return Err(CompactionError::StaleWindow.into());
+                    };
+                    if call.id() != call_id {
+                        return Err(CompactionError::StaleWindow.into());
+                    }
+                    let content = self.read_artifact_content(artifact_id)?;
+                    items.push(CompactionHistoryItem::tool_exchange(
+                        id.as_u64(),
+                        call.clone(),
+                        result.clone(),
+                        content,
+                    ));
+                    index += 2;
+                }
+                TranscriptItem::ToolResult { .. } => {
+                    return Err(CompactionError::StaleWindow.into());
                 }
             }
         }
 
-        for continuation in &self.uncheckpointed_tool_continuations {
-            let content = self
-                .artifacts
-                .read_content(continuation.result.artifact().id())?
-                .clone();
-            items.push(CompactionHistoryItem::tool_exchange(
-                continuation.history_id,
-                continuation.call.clone(),
-                continuation.result.clone(),
-                content,
-            ));
-        }
-
-        items.sort_by_key(|item| item.history_id);
         Ok(items)
     }
 
@@ -166,7 +192,7 @@ impl SessionState {
         let checkpoint_id = crate::CheckpointId::new(&format!(
             "checkpoint-{}-{}",
             sanitize_checkpoint_component(self.session_id.as_str()),
-            self.next_history_id
+            self.transcript.next_id().as_u64()
         ))?;
         let previous_checkpoint = self.compacted_checkpoint.as_ref().map(|checkpoint| {
             match checkpoint.citation_backed() {
@@ -221,7 +247,7 @@ impl SessionState {
         &self,
         input: &CitationCompactionInput,
     ) -> Result<(), RuntimeError> {
-        let current_ids = self.current_history_id_set();
+        let current_ids = self.current_history_id_set()?;
         let covered = input.covered_history_ids();
         let Some(max_covered_id) = covered.iter().next_back().copied() else {
             return Err(CompactionError::NoCompressibleWindow.into());
@@ -238,20 +264,16 @@ impl SessionState {
         Ok(())
     }
 
-    fn current_history_id_set(&self) -> BTreeSet<u64> {
-        self.append_only_body
-            .iter()
-            .map(SessionMessage::history_id)
-            .chain(
-                self.uncheckpointed_tool_continuations
-                    .iter()
-                    .map(|continuation| continuation.history_id),
-            )
-            .collect()
+    fn current_history_id_set(&self) -> Result<BTreeSet<u64>, RuntimeError> {
+        Ok(self
+            .compaction_history_items()?
+            .into_iter()
+            .map(|item| item.history_id)
+            .collect())
     }
 
-    fn history_item_count(&self) -> usize {
-        self.append_only_body.len() + self.uncheckpointed_tool_continuations.len()
+    fn history_item_count(&self) -> Result<usize, RuntimeError> {
+        Ok(self.compaction_history_items()?.len())
     }
 }
 

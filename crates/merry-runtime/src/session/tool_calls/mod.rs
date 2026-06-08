@@ -1,5 +1,5 @@
-use super::{SessionState, history::ResolvedToolContinuationSnapshot};
-use crate::{artifact::ArtifactError, ledger::LedgerFactKind};
+use super::SessionState;
+use crate::{RuntimeError, ledger::LedgerFactKind};
 use merry_core::{ErrorInfo, PendingToolCall, RuntimeEvent, RuntimeEventKind, ToolCallId};
 
 mod action;
@@ -22,30 +22,6 @@ impl SessionState {
         !self.pending_tool_calls.is_empty()
     }
 
-    /// Returns tool call/result pairs not yet covered by a checkpoint.
-    ///
-    /// These continuations are exact provider-visible protocol history for
-    /// stateless calls. They are not ledger projection; future checkpointing
-    /// owns when older entries can be removed from compiled context.
-    pub(crate) fn uncheckpointed_tool_continuation_snapshots(
-        &self,
-    ) -> Result<Vec<ResolvedToolContinuationSnapshot>, ArtifactError> {
-        self.uncheckpointed_tool_continuations
-            .iter()
-            .map(|continuation| {
-                let content = self
-                    .artifacts
-                    .read_content(continuation.result.artifact().id())?
-                    .clone();
-                Ok(ResolvedToolContinuationSnapshot::new(
-                    continuation.call.clone(),
-                    continuation.result.clone(),
-                    content,
-                ))
-            })
-            .collect()
-    }
-
     pub(crate) fn record_tool_call_pending(
         &mut self,
         call: PendingToolCall,
@@ -65,6 +41,9 @@ impl SessionState {
             ));
         }
 
+        self.transcript
+            .push_tool_call(call.clone())
+            .map_err(transcript_record_diagnostic)?;
         self.pending_tool_calls.push(call.clone());
         Ok(self.record_event(
             RuntimeEventKind::ToolCallPending { call },
@@ -89,4 +68,9 @@ fn duplicate_tool_call_diagnostic(call_id: &ToolCallId, state: &'static str) -> 
         &format!("tool call {call_id} is {state}; duplicate pending admission rejected"),
     )
     .expect("duplicate tool call diagnostic uses static code and validated call id")
+}
+
+fn transcript_record_diagnostic(error: RuntimeError) -> ErrorInfo {
+    ErrorInfo::new("transcript_record", &error.to_string())
+        .expect("transcript diagnostic uses static code")
 }
