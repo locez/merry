@@ -93,7 +93,7 @@ pub(super) fn memory_activation_seed_from_step_input(
     };
 
     MemoryActivationSeed::new(
-        query,
+        &query,
         vec![MemoryScope::Session, MemoryScope::Task, MemoryScope::Step],
         MemoryActivationSourceKind::UserQuery,
         "step input",

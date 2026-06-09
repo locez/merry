@@ -35,7 +35,7 @@ pub(crate) const PROGRESS_COMMENTARY_INSTRUCTIONS: &str = r#"When you are about 
 /// session rather than passed as raw chat history.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StepInput {
-    user_text: Option<String>,
+    user_texts: Vec<String>,
     history: StepInputHistory,
 }
 
@@ -45,9 +45,35 @@ impl StepInput {
     /// Text must be non-blank and may contain newlines and tabs, but not other
     /// control characters.
     pub fn user_text(text: &str) -> Result<Self, RuntimeError> {
-        validate_user_text(text)?;
+        Self::user_texts([text])
+    }
+
+    /// Creates a step input with multiple consecutive user messages.
+    ///
+    /// Each text item must be non-blank and may contain newlines and tabs, but
+    /// not other control characters.
+    pub fn user_texts<I, S>(texts: I) -> Result<Self, RuntimeError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let user_texts = texts
+            .into_iter()
+            .map(|text| {
+                let text = text.as_ref();
+                validate_user_text(text)?;
+                Ok(text.to_owned())
+            })
+            .collect::<Result<Vec<_>, RuntimeError>>()?;
+
+        if user_texts.is_empty() {
+            return Err(RuntimeError::InvalidStepInput {
+                reason: "user text burst must contain at least one message",
+            });
+        }
+
         Ok(Self {
-            user_text: Some(text.to_owned()),
+            user_texts,
             history: StepInputHistory::RecordUser,
         })
     }
@@ -56,14 +82,14 @@ impl StepInput {
     pub(crate) fn loop_control_text(text: &str) -> Result<Self, RuntimeError> {
         validate_user_text(text)?;
         Ok(Self {
-            user_text: Some(text.to_owned()),
+            user_texts: vec![text.to_owned()],
             history: StepInputHistory::ControlOnly,
         })
     }
 
     pub(crate) fn no_new_user_input() -> Self {
         Self {
-            user_text: None,
+            user_texts: Vec::new(),
             history: StepInputHistory::ControlOnly,
         }
     }
@@ -71,25 +97,32 @@ impl StepInput {
     /// Borrows the user text for this step.
     #[must_use]
     pub fn text(&self) -> &str {
-        self.user_text
-            .as_deref()
+        self.user_texts
+            .first()
+            .map(String::as_str)
             .expect("StepInput::text is available only for user text inputs")
     }
 
-    pub(crate) fn user_text_for_request(&self) -> Option<&str> {
-        self.user_text.as_deref()
+    /// Borrows the user texts for this step.
+    #[must_use]
+    pub fn texts(&self) -> &[String] {
+        &self.user_texts
     }
 
-    pub(crate) fn user_text_for_history(&self) -> Option<&str> {
+    pub(crate) fn user_texts_for_request(&self) -> &[String] {
+        &self.user_texts
+    }
+
+    pub(crate) fn user_texts_for_history(&self) -> &[String] {
         if self.history == StepInputHistory::RecordUser {
-            self.user_text.as_deref()
+            &self.user_texts
         } else {
-            None
+            &[]
         }
     }
 
-    pub(crate) fn memory_activation_query(&self) -> Option<&str> {
-        self.user_text.as_deref()
+    pub(crate) fn memory_activation_query(&self) -> Option<String> {
+        (!self.user_texts.is_empty()).then(|| self.user_texts.join("\n\n"))
     }
 }
 
@@ -237,7 +270,7 @@ pub(crate) fn compile_step_model_request(
             + usize::from(task_anchor.is_some())
             + if context_snapshot.is_empty() { 1 } else { 2 }
             + transcript.len()
-            + 1,
+            + input.user_texts_for_request().len(),
     );
 
     // Keep provider prompt projection allowlisted and ordered:
@@ -288,7 +321,7 @@ pub(crate) fn compile_step_model_request(
         messages.push(model_input_from_transcript_snapshot(item)?);
     }
 
-    if let Some(text) = input.user_text_for_request() {
+    for text in input.user_texts_for_request() {
         messages.push(ModelInputItem::Message(ModelMessage::new(
             ModelMessageRole::User,
             ModelContent::text(text)?,
@@ -404,6 +437,37 @@ mod tests {
         let err = StepInput::user_text("hello\u{7}").expect_err("bell should be rejected");
 
         assert!(matches!(err, RuntimeError::InvalidStepInput { .. }));
+    }
+
+    #[test]
+    fn user_texts_preserve_multiple_user_messages() {
+        let input = StepInput::user_texts(["first", "second"]).expect("valid burst");
+
+        assert_eq!(input.texts(), ["first", "second"]);
+        assert_eq!(input.text(), "first");
+    }
+
+    #[test]
+    fn user_texts_reject_empty_burst() {
+        let err = StepInput::user_texts(std::iter::empty::<&str>())
+            .expect_err("empty burst should be rejected");
+
+        assert!(matches!(err, RuntimeError::InvalidStepInput { .. }));
+    }
+
+    #[test]
+    fn user_texts_reject_blank_item() {
+        let err = StepInput::user_texts(["first", " \n\t "])
+            .expect_err("blank burst item should be rejected");
+
+        assert!(matches!(err, RuntimeError::InvalidStepInput { .. }));
+    }
+
+    #[test]
+    fn no_new_user_input_has_no_request_texts() {
+        let input = StepInput::no_new_user_input();
+
+        assert!(input.texts().is_empty());
     }
 
     #[test]
