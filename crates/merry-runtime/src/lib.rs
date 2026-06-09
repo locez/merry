@@ -38,6 +38,7 @@ mod context;
 mod error;
 mod event_stream;
 mod final_output;
+mod interactive;
 mod judgment;
 mod ledger;
 mod memory;
@@ -85,6 +86,11 @@ pub use error::RuntimeError;
 pub use event_stream::RuntimeEventStream;
 pub use final_output::{
     FINAL_OUTPUT_TOOL_NAME, FinalOutput, FinalOutputContract, FinalOutputContractError,
+};
+pub use interactive::{
+    AgentLoopControl, AgentLoopInput, InputReceipt, InteractiveAgentRun, InteractiveError,
+    InteractiveInputId, InteractiveRunEvent, InteractiveRunEventStream, InteractiveRunId,
+    InteractiveRunState, QueueKind, QueueSnapshot, QueuedInputSnapshot,
 };
 pub use ledger::{
     CompactLedgerText, LedgerFactKind, LedgerProjection, LedgerProjectionSnapshot, LedgerScope,
