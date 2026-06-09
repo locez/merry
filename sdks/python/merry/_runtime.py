@@ -163,7 +163,7 @@ class RuntimeConfig:
     provider: OpenAICompatibleProvider
     workspace: WorkspaceConfig | None = None
     tools: list["Tool" | Callable[..., object] | Callable[..., Awaitable[object]]] | None = None
-    session_id: str = "python-sdk"
+    session_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -255,7 +255,7 @@ class Tool:
 class Runtime:
     def __init__(
         self,
-        session_id: str = "python-sdk",
+        session_id: str | None = None,
         *,
         config: RuntimeConfig | None = None,
     ) -> None:
@@ -289,6 +289,7 @@ class Runtime:
             model=config.provider.model,
             base_url=config.provider.base_url,
             retry=config.provider.retry,
+            session_id=config.session_id,
         )
         self._native = runtime._native
         self._tools = {}
@@ -303,6 +304,7 @@ class Runtime:
         model: str,
         base_url: str | None = None,
         retry: ProviderRetryConfig | None = None,
+        session_id: str | None = None,
     ) -> Runtime:
         instance = cls.__new__(cls)
         instance._tools = {}
@@ -312,13 +314,14 @@ class Runtime:
                 model,
                 base_url,
                 None if retry is None else _provider_retry_dict(retry),
+                session_id,
             )
         except NativeMerryError as error:
             raise _decode_native_error(error) from error
         return instance
 
     @classmethod
-    def from_env(cls) -> Runtime:
+    def from_env(cls, *, session_id: str | None = None) -> Runtime:
         api_key = os.environ.get("MERRY_OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY")
         model = os.environ.get("MERRY_OPENAI_MODEL") or os.environ.get("OPENAI_MODEL")
         base_url = os.environ.get("MERRY_OPENAI_BASE_URL")
@@ -338,7 +341,12 @@ class Runtime:
             api_key=api_key,
             model=model,
             base_url=base_url,
+            session_id=session_id,
         )
+
+    @property
+    def session_id(self) -> str:
+        return self._native.session_id()
 
     def run_blocking(
         self,

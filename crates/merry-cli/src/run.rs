@@ -79,8 +79,9 @@ pub(crate) async fn run(
         &root,
         action_process_backend_options(merry_config).map_err(unexpected)?,
     )?;
+    let session_id = default_run_session_id();
     let runtime = build_headless_coding_runtime(HeadlessCodingRuntimeInput {
-        session_id: "run",
+        session_id: session_id.as_str(),
         root: &root,
         admission,
         provider,
@@ -117,6 +118,10 @@ pub(crate) async fn run(
         )
         .await
     }
+}
+
+fn default_run_session_id() -> merry_core::SessionId {
+    crate::session_id::new_ephemeral_session_id()
 }
 
 pub(crate) async fn write_agent_loop_output<W>(
@@ -618,7 +623,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{RunExitStatus, write_agent_loop_jsonl_output, write_agent_loop_output};
+    use super::{
+        RunExitStatus, default_run_session_id, write_agent_loop_jsonl_output,
+        write_agent_loop_output,
+    };
     use crate::coding_runtime::{
         CodingSubagentsConfig, HeadlessCodingRuntimeInput, build_headless_coding_runtime,
     };
@@ -640,6 +648,15 @@ mod tests {
         task::{Context, Poll},
     };
     use tokio::io::AsyncWrite;
+
+    #[test]
+    fn default_run_session_id_is_generated() {
+        let first = default_run_session_id();
+        let second = default_run_session_id();
+
+        assert_ne!(first, second);
+        assert_ne!(first.as_str(), "run");
+    }
 
     #[derive(Default)]
     struct FlushCountingWriter {

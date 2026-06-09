@@ -27,15 +27,36 @@ fn json_schema(value: Value) -> Schema {
     Schema::try_from(value).expect("test schema should be JSON schema")
 }
 
+fn assert_uuid_v4_string(value: &str) {
+    assert_eq!(value.len(), 36);
+    for (index, byte) in value.bytes().enumerate() {
+        match index {
+            8 | 13 | 18 | 23 => assert_eq!(byte, b'-'),
+            14 => assert_eq!(byte, b'4'),
+            19 => assert!(
+                matches!(byte, b'8' | b'9' | b'a' | b'b'),
+                "uuid variant nibble should be RFC 4122"
+            ),
+            _ => assert!(byte.is_ascii_hexdigit()),
+        }
+    }
+}
+
 #[test]
 fn ids_validate_and_round_trip_as_json_strings() {
     let session = SessionId::new("session-1").expect("valid session id");
+    let uuid_session = SessionId::new("550e8400-e29b-41d4-a716-446655440000")
+        .expect("uuid session id should be valid");
     let artifact = ArtifactId::from_str("artifact_1").expect("valid artifact id");
     let skill = SkillId::try_from("skill.alpha").expect("valid skill id");
     let provider =
         ProviderName::try_from(String::from("openai-compatible")).expect("valid provider name");
 
     assert_eq!(session.as_str(), "session-1");
+    assert_eq!(
+        uuid_session.as_str(),
+        "550e8400-e29b-41d4-a716-446655440000"
+    );
     assert_eq!(artifact.to_string(), "artifact_1");
     assert_eq!(skill.as_str(), "skill.alpha");
     assert_eq!(provider.as_str(), "openai-compatible");
@@ -46,6 +67,7 @@ fn ids_validate_and_round_trip_as_json_strings() {
     );
 
     assert_json_round_trip(&session);
+    assert_json_round_trip(&uuid_session);
     assert_json_round_trip(&artifact);
     assert_json_round_trip(&skill);
     assert_json_round_trip(&provider);
@@ -60,9 +82,36 @@ fn ids_validate_and_round_trip_as_json_strings() {
         assert!(serde_json::from_value::<ProviderName>(json!(invalid)).is_err());
     }
 
+    for invalid in [
+        "bad/session",
+        "bad\\session",
+        "bad:session",
+        "bad space",
+        ".",
+        "..",
+    ] {
+        assert!(
+            SessionId::new(invalid).is_err(),
+            "{invalid:?} should reject as a filesystem-safe session id"
+        );
+        assert!(serde_json::from_value::<SessionId>(json!(invalid)).is_err());
+    }
+
     let overlong = "a".repeat(129);
     assert!(ArtifactId::new(&overlong).is_err());
     assert!(serde_json::from_value::<ArtifactId>(json!(overlong)).is_err());
+}
+
+#[test]
+fn session_id_random_generates_distinct_uuid_v4_ids() {
+    let first = SessionId::random();
+    let second = SessionId::random();
+
+    assert_ne!(first, second);
+    assert_uuid_v4_string(first.as_str());
+    assert_uuid_v4_string(second.as_str());
+    assert_json_round_trip(&first);
+    assert_json_round_trip(&second);
 }
 
 #[test]

@@ -185,14 +185,9 @@ impl ToolExecutor for StaticToolExecutor {
 #[pymethods]
 impl PyRuntime {
     #[new]
-    fn new(session_id: String) -> PyResult<Self> {
-        let session_id = SessionId::new(&session_id).map_err(|_error| {
-            error::runtime_message_to_py(
-                "runtime.invalid_session_id",
-                INVALID_SESSION_ID_MESSAGE,
-                Some(INVALID_SESSION_ID_HINT),
-            )
-        })?;
+    #[pyo3(signature = (session_id=None))]
+    fn new(session_id: Option<String>) -> PyResult<Self> {
+        let session_id = resolve_session_id(session_id)?;
         let scenario = RuntimeScenario::Empty;
         let tools = Vec::new();
         let runtime = build_runtime_from(session_id.clone(), &scenario, &tools)
@@ -207,11 +202,13 @@ impl PyRuntime {
     }
 
     #[staticmethod]
+    #[pyo3(signature = (api_key, model, base_url=None, retry=None, session_id=None))]
     fn with_openai_compatible(
         api_key: String,
         model: String,
         base_url: Option<String>,
         retry: Option<Bound<'_, PyDict>>,
+        session_id: Option<String>,
     ) -> PyResult<Self> {
         let mut config = OpenAiProviderConfig::new(&api_key).map_err(|source| {
             error::config_message_to_py(
@@ -236,8 +233,7 @@ impl PyRuntime {
                 Some("Pass a non-empty model name without surrounding whitespace."),
             )
         })?;
-        let session_id =
-            SessionId::new("python-sdk-openai").expect("static session id must be valid");
+        let session_id = resolve_session_id(session_id)?;
         let retry_policy = py_retry_policy(retry.as_ref())?;
         let scenario = RuntimeScenario::OpenAiCompatible {
             config,
@@ -254,6 +250,10 @@ impl PyRuntime {
             tools,
             runtime,
         })
+    }
+
+    fn session_id(&self) -> String {
+        self.session_id.as_str().to_owned()
     }
 
     #[staticmethod]
@@ -620,6 +620,19 @@ impl PyRuntime {
     fn rebuild_runtime(&mut self) -> Result<(), merry_runtime::RuntimeError> {
         self.runtime = build_runtime_from(self.session_id.clone(), &self.scenario, &self.tools)?;
         Ok(())
+    }
+}
+
+fn resolve_session_id(session_id: Option<String>) -> PyResult<SessionId> {
+    match session_id {
+        Some(session_id) => SessionId::new(&session_id).map_err(|_error| {
+            error::runtime_message_to_py(
+                "runtime.invalid_session_id",
+                INVALID_SESSION_ID_MESSAGE,
+                Some(INVALID_SESSION_ID_HINT),
+            )
+        }),
+        None => Ok(SessionId::random()),
     }
 }
 

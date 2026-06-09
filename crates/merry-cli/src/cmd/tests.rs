@@ -44,6 +44,15 @@ impl AsyncWrite for FlushCountingWriter {
 }
 
 #[test]
+fn default_cmd_session_id_is_generated() {
+    let first = default_cmd_session_id();
+    let second = default_cmd_session_id();
+
+    assert_ne!(first, second);
+    assert_ne!(first.as_str(), "cmd");
+}
+
+#[test]
 fn command_plan_final_output_contract_has_described_fields() {
     let contract = command_plan_final_output_contract()
         .expect("command plan final output contract should build");

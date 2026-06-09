@@ -42,6 +42,21 @@ def test_runtime_config_constructs_openai_runtime():
     assert isinstance(runtime, merry.Runtime)
 
 
+def test_runtime_config_session_id_is_honored():
+    config = merry.RuntimeConfig(
+        provider=merry.OpenAICompatibleProvider(
+            api_key="sk-test",
+            model="gpt-test",
+            base_url="https://api.example.test/v1",
+        ),
+        session_id="configured-session_1",
+    )
+
+    runtime = merry.Runtime(config=config)
+
+    assert runtime.session_id == "configured-session_1"
+
+
 def test_runtime_config_rejects_unwired_workspace_config():
     config = merry.RuntimeConfig(
         provider=merry.OpenAICompatibleProvider(
