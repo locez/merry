@@ -1,15 +1,31 @@
 #![allow(dead_code)]
 
-use crate::RuntimeError;
+use crate::{
+    AgentLoopConfig, Runtime, RuntimeError, StepContext, StepInput, event_stream::ActiveStepPermit,
+};
 use futures_core::Stream;
+use futures_util::StreamExt;
 use merry_core::RuntimeEvent;
+use merry_llm::GenerationConfig;
 use std::{
     collections::{HashMap, VecDeque},
     pin::Pin,
+    sync::atomic::{AtomicU64, Ordering},
     task::{Context, Poll},
 };
 use thiserror::Error;
+use tokio::{
+    sync::{mpsc, oneshot},
+    task::JoinHandle,
+};
 use tokio_stream::wrappers::ReceiverStream;
+use tokio_util::sync::CancellationToken;
+
+static NEXT_INTERACTIVE_RUN_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_interactive_run_id() -> InteractiveRunId {
+    InteractiveRunId(NEXT_INTERACTIVE_RUN_ID.fetch_add(1, Ordering::Relaxed))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct InteractiveRunId(u64);
@@ -101,12 +117,22 @@ pub enum InteractiveRunEvent {
 }
 
 pub struct InteractiveRunEventStream {
-    inner: ReceiverStream<InteractiveRunEvent>,
+    inner: Option<ReceiverStream<InteractiveRunEvent>>,
+    cancellation_token: CancellationToken,
+    producer_handle: Option<JoinHandle<()>>,
 }
 
 impl InteractiveRunEventStream {
-    pub(crate) fn new(inner: ReceiverStream<InteractiveRunEvent>) -> Self {
-        Self { inner }
+    pub(crate) fn new(
+        inner: ReceiverStream<InteractiveRunEvent>,
+        cancellation_token: CancellationToken,
+        producer_handle: JoinHandle<()>,
+    ) -> Self {
+        Self {
+            inner: Some(inner),
+            cancellation_token,
+            producer_handle: Some(producer_handle),
+        }
     }
 }
 
@@ -114,7 +140,28 @@ impl Stream for InteractiveRunEventStream {
     type Item = InteractiveRunEvent;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Pin::new(&mut self.inner).poll_next(cx)
+        let Some(inner) = self.inner.as_mut() else {
+            return Poll::Ready(None);
+        };
+
+        match Pin::new(inner).poll_next(cx) {
+            Poll::Ready(None) => {
+                self.producer_handle.take();
+                Poll::Ready(None)
+            }
+            poll => poll,
+        }
+    }
+}
+
+impl Drop for InteractiveRunEventStream {
+    fn drop(&mut self) {
+        self.inner.take();
+        self.cancellation_token.cancel();
+
+        if let Some(handle) = self.producer_handle.take() {
+            handle.abort();
+        }
     }
 }
 
@@ -146,32 +193,329 @@ impl InteractiveAgentRun {
 #[derive(Clone)]
 pub struct AgentLoopInput {
     run_id: InteractiveRunId,
+    command_sender: mpsc::Sender<InteractiveCommand>,
 }
 
 impl AgentLoopInput {
-    pub(crate) fn new(run_id: InteractiveRunId) -> Self {
-        Self { run_id }
+    fn new(run_id: InteractiveRunId, command_sender: mpsc::Sender<InteractiveCommand>) -> Self {
+        Self {
+            run_id,
+            command_sender,
+        }
     }
 
     #[must_use]
     pub fn run_id(&self) -> InteractiveRunId {
         self.run_id
+    }
+
+    pub async fn submit_next(&self, text: &str) -> Result<InputReceipt, InteractiveError> {
+        let (ack_sender, ack_receiver) = oneshot::channel();
+        self.command_sender
+            .send(InteractiveCommand::SubmitNext {
+                text: text.to_owned(),
+                ack_sender,
+            })
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?;
+        ack_receiver
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?
+    }
+
+    pub async fn enqueue(&self, text: &str) -> Result<InputReceipt, InteractiveError> {
+        let (ack_sender, ack_receiver) = oneshot::channel();
+        self.command_sender
+            .send(InteractiveCommand::Enqueue {
+                text: text.to_owned(),
+                ack_sender,
+            })
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?;
+        ack_receiver
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?
+    }
+
+    pub async fn snapshot(&self) -> Result<QueueSnapshot, InteractiveError> {
+        let (ack_sender, ack_receiver) = oneshot::channel();
+        self.command_sender
+            .send(InteractiveCommand::Snapshot { ack_sender })
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?;
+        ack_receiver
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })
     }
 }
 
 #[derive(Clone)]
 pub struct AgentLoopControl {
     run_id: InteractiveRunId,
+    command_sender: mpsc::Sender<InteractiveCommand>,
 }
 
 impl AgentLoopControl {
-    pub(crate) fn new(run_id: InteractiveRunId) -> Self {
-        Self { run_id }
+    fn new(run_id: InteractiveRunId, command_sender: mpsc::Sender<InteractiveCommand>) -> Self {
+        Self {
+            run_id,
+            command_sender,
+        }
     }
 
     #[must_use]
     pub fn run_id(&self) -> InteractiveRunId {
         self.run_id
+    }
+
+    pub async fn resume_backlog(&self) -> Result<(), InteractiveError> {
+        let (ack_sender, ack_receiver) = oneshot::channel();
+        self.command_sender
+            .send(InteractiveCommand::ResumeBacklog { ack_sender })
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?;
+        ack_receiver
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?
+    }
+}
+
+enum InteractiveCommand {
+    SubmitNext {
+        text: String,
+        ack_sender: oneshot::Sender<Result<InputReceipt, InteractiveError>>,
+    },
+    Enqueue {
+        text: String,
+        ack_sender: oneshot::Sender<Result<InputReceipt, InteractiveError>>,
+    },
+    Snapshot {
+        ack_sender: oneshot::Sender<QueueSnapshot>,
+    },
+    ResumeBacklog {
+        ack_sender: oneshot::Sender<Result<(), InteractiveError>>,
+    },
+}
+
+impl Runtime {
+    pub fn start_interactive_agent_run(
+        &self,
+        context: StepContext,
+        config: AgentLoopConfig,
+    ) -> Result<InteractiveAgentRun, RuntimeError> {
+        let loop_permit = self.acquire_active_step_permit()?;
+        let (parent_token, generation_config, _final_output_contract) = context.into_parts();
+        let loop_token = parent_token.child_token();
+        let producer_token = loop_token.clone();
+        let run_id = next_interactive_run_id();
+        let (event_sender, event_receiver) = mpsc::channel(16);
+        let (command_sender, command_receiver) = mpsc::channel(16);
+        let producer = InteractiveProducer {
+            runtime: self.clone(),
+            run_id,
+            queue: InteractiveInputQueue::default(),
+            command_receiver,
+            event_sender,
+            loop_token: producer_token,
+            generation_config,
+            config,
+            loop_permit,
+        };
+        let producer_handle = tokio::spawn(async move {
+            producer.run().await;
+        });
+
+        Ok(InteractiveAgentRun::new(
+            InteractiveRunEventStream::new(
+                ReceiverStream::new(event_receiver),
+                loop_token,
+                producer_handle,
+            ),
+            AgentLoopInput::new(run_id, command_sender.clone()),
+            AgentLoopControl::new(run_id, command_sender),
+        ))
+    }
+}
+
+struct InteractiveProducer {
+    runtime: Runtime,
+    run_id: InteractiveRunId,
+    queue: InteractiveInputQueue,
+    command_receiver: mpsc::Receiver<InteractiveCommand>,
+    event_sender: mpsc::Sender<InteractiveRunEvent>,
+    loop_token: CancellationToken,
+    generation_config: GenerationConfig,
+    config: AgentLoopConfig,
+    loop_permit: ActiveStepPermit,
+}
+
+impl InteractiveProducer {
+    async fn run(mut self) {
+        if !self.send_state(InteractiveRunState::WaitingForInput).await {
+            return;
+        }
+
+        while !self.loop_token.is_cancelled() {
+            let Some(command) = self.command_receiver.recv().await else {
+                break;
+            };
+
+            match command {
+                InteractiveCommand::SubmitNext { text, ack_sender } => {
+                    let receipt = self.queue.submit_next(&text);
+                    let should_run = receipt.is_ok();
+                    let _ = ack_sender.send(receipt);
+                    if !self.send_queue_changed().await {
+                        return;
+                    }
+                    if should_run && !self.run_next_burst().await {
+                        return;
+                    }
+                }
+                InteractiveCommand::Enqueue { text, ack_sender } => {
+                    let receipt = self.queue.enqueue(&text);
+                    let _ = ack_sender.send(receipt);
+                    if !self.send_queue_changed().await {
+                        return;
+                    }
+                }
+                InteractiveCommand::Snapshot { ack_sender } => {
+                    let _ = ack_sender.send(self.queue.snapshot());
+                }
+                InteractiveCommand::ResumeBacklog { ack_sender } => {
+                    let _ = ack_sender.send(Ok(()));
+                    if !self.run_one_backlog().await {
+                        return;
+                    }
+                }
+            }
+        }
+
+        let _ = self
+            .event_sender
+            .send(InteractiveRunEvent::StateChanged {
+                state: InteractiveRunState::Closed,
+            })
+            .await;
+        let _ = self.event_sender.send(InteractiveRunEvent::Closed).await;
+    }
+
+    async fn run_next_burst(&mut self) -> bool {
+        let accepted = self.queue.accept_next_burst();
+        if accepted.is_empty() {
+            return self.send_state(InteractiveRunState::WaitingForInput).await;
+        }
+        self.run_accepted_inputs(accepted, QueueKind::Next).await
+    }
+
+    async fn run_one_backlog(&mut self) -> bool {
+        let accepted = self.queue.accept_one_backlog();
+        if accepted.is_empty() {
+            return self.send_state(InteractiveRunState::WaitingForInput).await;
+        }
+        self.run_accepted_inputs(accepted, QueueKind::Backlog).await
+    }
+
+    async fn run_accepted_inputs(
+        &mut self,
+        accepted: Vec<QueuedInputSnapshot>,
+        queue: QueueKind,
+    ) -> bool {
+        let ids = accepted.iter().map(|item| item.id).collect::<Vec<_>>();
+        let input = match StepInput::user_texts(accepted.iter().map(|item| item.text.as_str())) {
+            Ok(input) => input,
+            Err(error) => {
+                let _ = self
+                    .event_sender
+                    .send(InteractiveRunEvent::StateChanged {
+                        state: InteractiveRunState::Closed,
+                    })
+                    .await;
+                tracing::debug!(
+                    error = %error,
+                    "interactive accepted input failed step conversion"
+                );
+                return false;
+            }
+        };
+
+        if self
+            .event_sender
+            .send(InteractiveRunEvent::InputAccepted { ids, queue })
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        if !self.send_queue_changed().await {
+            return false;
+        }
+        if !self.send_state(InteractiveRunState::RunningModel).await {
+            return false;
+        }
+
+        let mut step_context = StepContext::new(self.loop_token.clone())
+            .with_generation_config(self.generation_config.clone());
+        if let Some(contract) = self.config.final_output_contract().cloned() {
+            step_context = step_context.with_final_output_contract(contract);
+        }
+
+        let stream = match self.runtime.step_with_active_permit(
+            input,
+            step_context,
+            self.loop_permit.clone(),
+        ) {
+            Ok(stream) => stream,
+            Err(error) => {
+                tracing::debug!(error = %error, "interactive step start failed");
+                return false;
+            }
+        };
+        tokio::pin!(stream);
+        while let Some(event) = stream.next().await {
+            if self
+                .event_sender
+                .send(InteractiveRunEvent::Runtime(event))
+                .await
+                .is_err()
+            {
+                return false;
+            }
+        }
+
+        self.send_state(InteractiveRunState::WaitingForInput).await
+    }
+
+    async fn send_queue_changed(&self) -> bool {
+        self.event_sender
+            .send(InteractiveRunEvent::QueueChanged {
+                snapshot: self.queue.snapshot(),
+            })
+            .await
+            .is_ok()
+    }
+
+    async fn send_state(&self, state: InteractiveRunState) -> bool {
+        self.event_sender
+            .send(InteractiveRunEvent::StateChanged { state })
+            .await
+            .is_ok()
     }
 }
 
