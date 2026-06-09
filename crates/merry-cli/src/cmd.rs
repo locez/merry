@@ -75,8 +75,9 @@ pub(crate) async fn run(args: &Args, merry_config: Option<&MerryConfig>) -> Resu
     let RuntimePrimaryProviderConfig { provider, model } = primary;
     let root = env::current_dir().map_err(unexpected)?;
     let environment = CommandGenerationEnvironment::detect(&root);
+    let session_id = default_cmd_session_id();
     let runtime = build_runtime(RuntimeInput {
-        session_id: "cmd",
+        session_id: session_id.as_str(),
         root: &root,
         environment: environment.clone(),
         provider,
@@ -124,6 +125,10 @@ fn command_generation_loop_config() -> Result<AgentLoopConfig, CliError> {
     Ok(AgentLoopConfig::new(128)
         .map_err(unexpected)?
         .with_final_output_contract(command_plan_final_output_contract()?))
+}
+
+fn default_cmd_session_id() -> merry_core::SessionId {
+    crate::session_id::new_ephemeral_session_id()
 }
 
 pub(crate) fn command_generation_prompt(

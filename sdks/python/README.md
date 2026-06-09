@@ -73,6 +73,22 @@ Python SDK retry is opt-in. When enabled, Merry retries transient provider
 setup or stream failures by replaying the whole model turn; partial failed
 attempt output is not exposed as runtime state.
 
+## Session Identity
+
+Python SDK runtimes are in-memory and ephemeral by default. Each `Runtime()`,
+`Runtime.from_env()`, or `Runtime.with_openai_compatible(...)` call creates a
+fresh random session id unless `session_id` is passed explicitly.
+
+Use an explicit session id when you want stable logs or future store/resume
+debugging:
+
+```python
+runtime = merry.Runtime.from_env(session_id="tenant-a.debug_1")
+```
+
+Session ids are filesystem-safe strings. They may contain ASCII letters,
+digits, `.`, `_`, and `-`.
+
 ## Bridge Tool Example
 
 `examples/tool_bridge.py` uses the same OpenAI-compatible provider config,

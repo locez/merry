@@ -135,6 +135,11 @@ The OpenAI provider target is the Responses API only. The provider request path 
 
 ### Recently Completed
 
+- Session identity defaults are now random and filesystem-safe across product
+  entrypoints and the Python SDK. `SessionId` validation rejects path-unsafe
+  values, default CLI/SDK construction uses UUID v4 session ids, explicit ids
+  remain supported for future store/resume, and deterministic debug/test
+  fixtures keep stable ids where useful.
 - Observability-first coding-loop direction is selected and specified in
   `specs/2026-05-23-observability-first-coding-loop.md`. This corrects the
   previous event-first CLI direction: the next value gap is structured

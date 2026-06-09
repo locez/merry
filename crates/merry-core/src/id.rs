@@ -4,6 +4,7 @@ use crate::CoreError;
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, de};
 use std::{fmt, str::FromStr};
+use uuid::Uuid;
 
 const MAX_IDENTIFIER_LEN: usize = 128;
 const MAX_TOOL_NAME_LEN: usize = 64;
@@ -53,6 +54,27 @@ fn validate_common_identifier(
     Ok(())
 }
 
+fn validate_session_id(kind: &'static str, value: &str, max_len: usize) -> Result<(), CoreError> {
+    validate_common_identifier(kind, value, max_len)?;
+
+    if value == "." || value == ".." {
+        return Err(invalid_identifier(kind, value, "must not be '.' or '..'"));
+    }
+
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err(invalid_identifier(
+            kind,
+            value,
+            "must contain only ASCII letters, digits, '.', '_' or '-'",
+        ));
+    }
+
+    Ok(())
+}
+
 fn validate_tool_name(value: &str) -> Result<(), CoreError> {
     validate_common_identifier("ToolName", value, MAX_TOOL_NAME_LEN)?;
 
@@ -92,9 +114,12 @@ fn invalid_identifier(kind: &'static str, value: &str, reason: &'static str) -> 
 
 macro_rules! define_id {
     ($type:ident, $kind:literal) => {
-        define_id!($type, $kind, MAX_IDENTIFIER_LEN);
+        define_id!($type, $kind, MAX_IDENTIFIER_LEN, validate_common_identifier);
     };
     ($type:ident, $kind:literal, $max_len:expr) => {
+        define_id!($type, $kind, $max_len, validate_common_identifier);
+    };
+    ($type:ident, $kind:literal, $max_len:expr, $validator:path) => {
         #[doc = concat!("Validated ", $kind, " newtype.")]
         #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, JsonSchema)]
         #[serde(transparent)]
@@ -103,7 +128,7 @@ macro_rules! define_id {
         impl $type {
             /// Creates a validated identifier from a borrowed string.
             pub fn new(value: &str) -> Result<Self, CoreError> {
-                validate_common_identifier($kind, value, $max_len)?;
+                $validator($kind, value, $max_len)?;
                 Ok(Self(value.to_owned()))
             }
 
@@ -140,7 +165,7 @@ macro_rules! define_id {
             type Error = CoreError;
 
             fn try_from(value: String) -> Result<Self, Self::Error> {
-                validate_common_identifier($kind, &value, $max_len)?;
+                $validator($kind, &value, $max_len)?;
                 Ok(Self(value))
             }
         }
@@ -157,13 +182,26 @@ macro_rules! define_id {
     };
 }
 
-define_id!(SessionId, "SessionId");
+define_id!(
+    SessionId,
+    "SessionId",
+    MAX_IDENTIFIER_LEN,
+    validate_session_id
+);
 define_id!(ArtifactId, "ArtifactId");
 define_id!(SkillId, "SkillId");
 define_id!(SubagentId, "SubagentId");
 define_id!(SubagentTaskId, "SubagentTaskId");
 define_id!(ProviderName, "ProviderName");
 define_id!(ToolCallId, "ToolCallId", MAX_TOOL_CALL_ID_LEN);
+
+impl SessionId {
+    /// Generates a random filesystem-safe session id.
+    #[must_use]
+    pub fn random() -> Self {
+        Self(Uuid::new_v4().to_string())
+    }
+}
 
 /// Provider-portable tool name.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, JsonSchema)]

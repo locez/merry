@@ -14,6 +14,7 @@ mod run;
 mod runtime_config;
 mod runtime_events;
 mod sandbox;
+mod session_id;
 mod testing;
 
 use clap::Parser;

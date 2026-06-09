@@ -42,6 +42,27 @@ def test_native_invalid_session_error_does_not_leak_rejected_value():
     assert "secret-token" not in repr(raised.value.info.context)
 
 
+@pytest.mark.parametrize("session_id", ["bad/session", "bad space"])
+def test_native_invalid_filesystem_session_id_maps_without_leaking_rejected_value(session_id):
+    with pytest.raises(merry.MerryRuntimeError) as raised:
+        merry.Runtime(session_id=session_id)
+
+    assert raised.value.code == "runtime.invalid_session_id"
+    assert raised.value.info.message == "Invalid Merry runtime session id."
+    assert session_id not in str(raised.value)
+    assert session_id not in (raised.value.info.hint or "")
+    assert session_id not in repr(raised.value.info.context)
+
+
+@pytest.mark.parametrize("session_id", [".", ".."])
+def test_native_dot_session_ids_are_rejected(session_id):
+    with pytest.raises(merry.MerryRuntimeError) as raised:
+        merry.Runtime(session_id=session_id)
+
+    assert raised.value.code == "runtime.invalid_session_id"
+    assert raised.value.info.message == "Invalid Merry runtime session id."
+
+
 @pytest.mark.parametrize("domain", ["artifact", "sandbox"])
 def test_native_sdk_domains_map_to_public_runtime_error(domain):
     native_error = merry.NativeMerryError(

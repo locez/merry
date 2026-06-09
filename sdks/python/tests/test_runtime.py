@@ -1,5 +1,6 @@
 import asyncio
 import time
+from uuid import UUID
 
 import pytest
 
@@ -264,6 +265,27 @@ def test_runtime_default_constructor_returns_runtime_object():
     runtime = merry.Runtime()
 
     assert isinstance(runtime, merry.Runtime)
+
+
+def _assert_uuid_v4(value: str) -> None:
+    parsed = UUID(value)
+    assert parsed.version == 4
+    assert str(parsed) == value
+
+
+def test_runtime_default_session_ids_are_random_uuid_v4_values():
+    first = merry.Runtime()
+    second = merry.Runtime()
+
+    assert first.session_id != second.session_id
+    _assert_uuid_v4(first.session_id)
+    _assert_uuid_v4(second.session_id)
+
+
+def test_runtime_accepts_explicit_session_id():
+    runtime = merry.Runtime(session_id="tenant-a.debug_1")
+
+    assert runtime.session_id == "tenant-a.debug_1"
 
 
 def test_runtime_invalid_session_id_maps_without_leaking_rejected_value():
