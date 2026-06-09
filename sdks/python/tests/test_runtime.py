@@ -300,3 +300,62 @@ def test_runtime_invalid_session_id_maps_without_leaking_rejected_value():
     assert "secret-token" not in str(raised.value)
     assert "secret-token" not in (raised.value.info.hint or "")
     assert "secret-token" not in repr(raised.value.info.context)
+
+
+async def _assert_interactive_run_has_split_stream_input_control():
+    runtime = runtime_with_fake_response("done")
+    run = runtime.start_interactive()
+
+    assert run.stream is not None
+    assert run.input is not None
+    assert run.control is not None
+
+    receipt = await run.input.submit_next("hello")
+    assert receipt["queue"] == "next"
+
+    events = []
+    async for event in run.stream:
+        events.append(event)
+        if event.get("type") == "input_accepted":
+            break
+
+    assert any(event.get("type") == "input_accepted" for event in events)
+
+
+def test_interactive_run_has_split_stream_input_control():
+    asyncio.run(_assert_interactive_run_has_split_stream_input_control())
+
+
+async def _assert_interactive_input_queue_is_editable_from_python():
+    runtime = runtime_with_fake_response("done")
+    run = runtime.start_interactive()
+
+    first = await run.input.enqueue("first")
+    second = await run.input.enqueue("second")
+
+    await run.input.update(first["id"], "updated")
+    await run.input.move_after(first["id"], second["id"])
+    await run.input.remove(second["id"])
+
+    snapshot = await run.input.snapshot()
+
+    assert snapshot["backlog"] == [
+        {
+            "id": first["id"],
+            "text": "updated",
+            "queue": "backlog",
+            "position": 0,
+        }
+    ]
+
+    await run.control.close()
+
+
+def test_interactive_input_queue_is_editable_from_python():
+    asyncio.run(_assert_interactive_input_queue_is_editable_from_python())
+
+
+def test_runtime_skills_defaults_to_empty_list():
+    runtime = merry.Runtime()
+
+    assert runtime.skills() == []

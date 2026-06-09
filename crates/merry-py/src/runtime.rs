@@ -14,16 +14,20 @@ use merry_llm::{
 };
 use merry_runtime::{
     AgentLoopConfig, AgentLoopResult, AgentLoopStatus, ArtifactContent, FinalOutputContract,
-    RegisteredTool, Runtime, RuntimeBuilder, StepContext, StepInput, ToolExecutionContext,
-    ToolExecutionError, ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture, ToolRunner,
+    InputReceipt, InteractiveError, InteractiveInputId, InteractiveRunEvent,
+    InteractiveRunEventStream, InteractiveRunState, QueueKind, QueueSnapshot, QueuedInputSnapshot,
+    RegisteredTool, Runtime, RuntimeBuilder, SkillMetadata, StepContext, StepInput,
+    ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome, ToolExecutor,
+    ToolExecutorFuture, ToolRunner,
 };
 use pyo3::{
     prelude::*,
-    types::{PyAny, PyDict},
+    types::{PyAny, PyDict, PyList},
 };
 use schemars::Schema;
 use serde_json::{Map, Value, json};
 use std::{
+    future::Future,
     pin::Pin,
     sync::{Arc, Mutex, mpsc},
     task::{Context, Poll},
@@ -52,12 +56,65 @@ pub(crate) struct NativeRuntimeEventStream {
     command_sender: tokio::sync::mpsc::UnboundedSender<StreamRunnerCommand>,
 }
 
+#[pyclass(name = "InteractiveRun")]
+pub(crate) struct PyInteractiveRun {
+    stream: Py<PyInteractiveRunEventStream>,
+    input: Py<PyAgentLoopInput>,
+    control: Py<PyAgentLoopControl>,
+}
+
+#[pyclass(name = "InteractiveRunEventStream")]
+pub(crate) struct PyInteractiveRunEventStream {
+    state: Arc<Mutex<InteractiveRunStreamState>>,
+}
+
+#[pyclass(name = "AgentLoopInput")]
+pub(crate) struct PyAgentLoopInput {
+    inner: merry_runtime::AgentLoopInput,
+}
+
+#[pyclass(name = "AgentLoopControl")]
+pub(crate) struct PyAgentLoopControl {
+    inner: merry_runtime::AgentLoopControl,
+}
+
 struct NativeRuntimeEventStreamState {
     receiver: mpsc::Receiver<StreamRunnerMessage>,
     events: Vec<merry_core::RuntimeEvent>,
     result: Option<AgentLoopResult>,
     error: Option<StreamRunnerError>,
     finished: bool,
+}
+
+struct InteractiveRunStreamState {
+    stream: Option<InteractiveRunEventStream>,
+    driver_token: CancellationToken,
+    driver_handle: Option<thread::JoinHandle<()>>,
+    finished: bool,
+}
+
+impl InteractiveRunStreamState {
+    fn stop_driver(&mut self) {
+        self.stream.take();
+        self.driver_token.cancel();
+        if let Some(handle) = self.driver_handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl Drop for InteractiveRunStreamState {
+    fn drop(&mut self) {
+        self.stop_driver();
+    }
+}
+
+struct NativeInteractiveRun {
+    stream: InteractiveRunEventStream,
+    input: merry_runtime::AgentLoopInput,
+    control: merry_runtime::AgentLoopControl,
+    driver_token: CancellationToken,
+    driver_handle: thread::JoinHandle<()>,
 }
 
 enum StreamRunnerMessage {
@@ -448,6 +505,28 @@ impl PyRuntime {
         })?;
         runtime_events_to_python(py, &result)
     }
+
+    #[pyo3(signature = (max_model_turns=None))]
+    fn start_interactive_blocking(
+        &self,
+        py: Python<'_>,
+        max_model_turns: Option<usize>,
+    ) -> PyResult<PyInteractiveRun> {
+        let runtime = self.runtime.clone();
+        let native = py.detach(move || {
+            let config = agent_loop_config(None, max_model_turns).map_err(|message| {
+                error::runtime_message_to_py(message.code, &message.message, Some(message.hint))
+            })?;
+            start_interactive_native(runtime, config)
+        })?;
+        PyInteractiveRun::from_native(py, native)
+    }
+
+    fn skills_blocking(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let runtime = self.runtime.clone();
+        let skills = py.detach(move || block_on_interactive_future(runtime.skills()))?;
+        skills_to_python(py, &skills)
+    }
 }
 
 #[pymethods]
@@ -577,6 +656,188 @@ impl NativeRuntimeEventStream {
                 Some("Retry the operation or use Runtime.run(...)."),
             )),
         }
+    }
+}
+
+#[pymethods]
+impl PyInteractiveRun {
+    #[getter]
+    fn stream(&self, py: Python<'_>) -> Py<PyInteractiveRunEventStream> {
+        self.stream.clone_ref(py)
+    }
+
+    #[getter]
+    fn input(&self, py: Python<'_>) -> Py<PyAgentLoopInput> {
+        self.input.clone_ref(py)
+    }
+
+    #[getter]
+    fn control(&self, py: Python<'_>) -> Py<PyAgentLoopControl> {
+        self.control.clone_ref(py)
+    }
+}
+
+#[pymethods]
+impl PyInteractiveRunEventStream {
+    fn next_blocking(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        let state = Arc::clone(&self.state);
+        let event = py.detach(move || -> PyResult<Option<InteractiveRunEvent>> {
+            let mut stream = {
+                let mut state = state.lock().map_err(|_| interactive_stream_poisoned())?;
+                if state.finished {
+                    return Ok(None);
+                }
+                state.stream.take().ok_or_else(interactive_stream_busy)?
+            };
+
+            let event = block_on_interactive_future(async { stream.next().await })?;
+            let mut state = state.lock().map_err(|_| interactive_stream_poisoned())?;
+            if event.is_none() {
+                state.finished = true;
+                drop(stream);
+                state.stop_driver();
+            } else {
+                state.stream = Some(stream);
+            }
+            Ok(event)
+        })?;
+
+        event
+            .as_ref()
+            .map(|event| interactive_event_to_python(py, event))
+            .transpose()
+    }
+}
+
+#[pymethods]
+impl PyAgentLoopInput {
+    fn submit_next_blocking(&self, py: Python<'_>, text: String) -> PyResult<Py<PyAny>> {
+        let input = self.inner.clone();
+        let receipt = py.detach(move || {
+            block_on_interactive_result(async move { input.submit_next(&text).await })
+        })?;
+        input_receipt_to_python(py, &receipt)
+    }
+
+    fn enqueue_blocking(&self, py: Python<'_>, text: String) -> PyResult<Py<PyAny>> {
+        let input = self.inner.clone();
+        let receipt = py.detach(move || {
+            block_on_interactive_result(async move { input.enqueue(&text).await })
+        })?;
+        input_receipt_to_python(py, &receipt)
+    }
+
+    fn update_blocking(&self, py: Python<'_>, id: u64, text: String) -> PyResult<()> {
+        let input = self.inner.clone();
+        py.detach(move || {
+            block_on_interactive_result(async move {
+                input.update(InteractiveInputId::from_u64(id), &text).await
+            })
+        })
+    }
+
+    fn remove_blocking(&self, py: Python<'_>, id: u64) -> PyResult<()> {
+        let input = self.inner.clone();
+        py.detach(move || {
+            block_on_interactive_result(async move {
+                input.remove(InteractiveInputId::from_u64(id)).await
+            })
+        })
+    }
+
+    fn move_before_blocking(&self, py: Python<'_>, id: u64, anchor: u64) -> PyResult<()> {
+        let input = self.inner.clone();
+        py.detach(move || {
+            block_on_interactive_result(async move {
+                input
+                    .move_before(
+                        InteractiveInputId::from_u64(id),
+                        InteractiveInputId::from_u64(anchor),
+                    )
+                    .await
+            })
+        })
+    }
+
+    fn move_after_blocking(&self, py: Python<'_>, id: u64, anchor: u64) -> PyResult<()> {
+        let input = self.inner.clone();
+        py.detach(move || {
+            block_on_interactive_result(async move {
+                input
+                    .move_after(
+                        InteractiveInputId::from_u64(id),
+                        InteractiveInputId::from_u64(anchor),
+                    )
+                    .await
+            })
+        })
+    }
+
+    fn snapshot_blocking(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let input = self.inner.clone();
+        let snapshot =
+            py.detach(move || block_on_interactive_result(async move { input.snapshot().await }))?;
+        queue_snapshot_to_python(py, &snapshot)
+    }
+}
+
+#[pymethods]
+impl PyAgentLoopControl {
+    fn interrupt_blocking(&self, py: Python<'_>) -> PyResult<()> {
+        let control = self.inner.clone();
+        py.detach(move || {
+            block_on_interactive_result(async move {
+                control
+                    .interrupt(merry_runtime::InterruptReason::User)
+                    .await
+            })
+        })
+    }
+
+    fn resume_suspended_blocking(&self, py: Python<'_>) -> PyResult<()> {
+        let control = self.inner.clone();
+        py.detach(move || {
+            block_on_interactive_result(async move { control.resume_suspended().await })
+        })
+    }
+
+    fn discard_suspended_blocking(&self, py: Python<'_>) -> PyResult<()> {
+        let control = self.inner.clone();
+        py.detach(move || {
+            block_on_interactive_result(async move { control.discard_suspended().await })
+        })
+    }
+
+    fn resume_backlog_blocking(&self, py: Python<'_>) -> PyResult<()> {
+        let control = self.inner.clone();
+        py.detach(move || {
+            block_on_interactive_result(async move { control.resume_backlog().await })
+        })
+    }
+
+    fn close_blocking(&self, py: Python<'_>) -> PyResult<()> {
+        let control = self.inner.clone();
+        py.detach(move || block_on_interactive_result(async move { control.close().await }))
+    }
+}
+
+impl PyInteractiveRun {
+    fn from_native(py: Python<'_>, run: NativeInteractiveRun) -> PyResult<Self> {
+        Ok(Self {
+            stream: Py::new(
+                py,
+                PyInteractiveRunEventStream {
+                    state: Arc::new(Mutex::new(InteractiveRunStreamState {
+                        stream: Some(run.stream),
+                        driver_token: run.driver_token,
+                        driver_handle: Some(run.driver_handle),
+                        finished: false,
+                    })),
+                },
+            )?,
+            input: Py::new(py, PyAgentLoopInput { inner: run.input })?,
+            control: Py::new(py, PyAgentLoopControl { inner: run.control })?,
+        })
     }
 }
 
@@ -1172,6 +1433,66 @@ fn run_agent_loop_event_stream_blocking(
     })
 }
 
+fn start_interactive_native(
+    runtime: Runtime,
+    config: AgentLoopConfig,
+) -> PyResult<NativeInteractiveRun> {
+    let driver_token = CancellationToken::new();
+    let thread_token = driver_token.clone();
+    let (sender, receiver) = mpsc::channel();
+    let driver_handle = thread::spawn(move || {
+        let tokio_runtime = match build_python_tokio_runtime() {
+            Ok(tokio_runtime) => tokio_runtime,
+            Err(error) => {
+                let _ = sender.send(Err(error));
+                return;
+            }
+        };
+
+        let run = {
+            let _guard = tokio_runtime.enter();
+            runtime.start_interactive_agent_run(StepContext::new(CancellationToken::new()), config)
+        };
+        let run = match run {
+            Ok(run) => run,
+            Err(error) => {
+                let _ = sender.send(Err(error::runtime_error_to_py(error)));
+                return;
+            }
+        };
+
+        if sender.send(Ok(run.split())).is_err() {
+            thread_token.cancel();
+            return;
+        }
+        tokio_runtime.block_on(thread_token.cancelled());
+    });
+
+    match receiver.recv() {
+        Ok(Ok((stream, input, control))) => Ok(NativeInteractiveRun {
+            stream,
+            input,
+            control,
+            driver_token,
+            driver_handle,
+        }),
+        Ok(Err(error)) => {
+            driver_token.cancel();
+            let _ = driver_handle.join();
+            Err(error)
+        }
+        Err(_) => {
+            driver_token.cancel();
+            let _ = driver_handle.join();
+            Err(error::runtime_message_to_py(
+                "runtime.interactive_start_failed",
+                "Interactive run driver exited before startup completed.",
+                Some("Retry the operation in a fresh Python process."),
+            ))
+        }
+    }
+}
+
 async fn run_agent_loop_event_stream(
     runtime: Runtime,
     task: String,
@@ -1416,6 +1737,161 @@ fn runtime_event_to_python(
 ) -> PyResult<Py<PyAny>> {
     let value = serde_json::to_value(event).expect("RuntimeEvent values must serialize");
     json_to_py(py, &value)
+}
+
+fn interactive_event_to_python(py: Python<'_>, event: &InteractiveRunEvent) -> PyResult<Py<PyAny>> {
+    let dict = PyDict::new(py);
+    match event {
+        InteractiveRunEvent::StateChanged { state } => {
+            dict.set_item("type", "state_changed")?;
+            dict.set_item("state", interactive_state_label(*state))?;
+        }
+        InteractiveRunEvent::InputAccepted { ids, queue } => {
+            dict.set_item("type", "input_accepted")?;
+            dict.set_item(
+                "ids",
+                ids.iter().map(|id| id.as_u64()).collect::<Vec<u64>>(),
+            )?;
+            dict.set_item("queue", queue_kind_label(*queue))?;
+        }
+        InteractiveRunEvent::QueueChanged { snapshot } => {
+            dict.set_item("type", "queue_changed")?;
+            dict.set_item("snapshot", queue_snapshot_to_python(py, snapshot)?)?;
+        }
+        InteractiveRunEvent::Runtime(event) => {
+            dict.set_item("type", "runtime")?;
+            dict.set_item("event", runtime_event_to_python(py, event)?)?;
+        }
+        InteractiveRunEvent::Closed => {
+            dict.set_item("type", "closed")?;
+        }
+    }
+    Ok(dict.unbind().into_any())
+}
+
+fn input_receipt_to_python(py: Python<'_>, receipt: &InputReceipt) -> PyResult<Py<PyAny>> {
+    let dict = PyDict::new(py);
+    dict.set_item("id", receipt.id.as_u64())?;
+    dict.set_item("queue", queue_kind_label(receipt.queue))?;
+    dict.set_item("position", receipt.position)?;
+    Ok(dict.unbind().into_any())
+}
+
+fn queue_snapshot_to_python(py: Python<'_>, snapshot: &QueueSnapshot) -> PyResult<Py<PyAny>> {
+    let dict = PyDict::new(py);
+    dict.set_item(
+        "next",
+        queued_inputs_to_python(py, snapshot.next.as_slice())?,
+    )?;
+    dict.set_item(
+        "suspended",
+        queued_inputs_to_python(py, snapshot.suspended.as_slice())?,
+    )?;
+    dict.set_item(
+        "backlog",
+        queued_inputs_to_python(py, snapshot.backlog.as_slice())?,
+    )?;
+    Ok(dict.unbind().into_any())
+}
+
+fn queued_inputs_to_python(
+    py: Python<'_>,
+    items: &[QueuedInputSnapshot],
+) -> PyResult<Vec<Py<PyAny>>> {
+    items
+        .iter()
+        .map(|item| queued_input_to_python(py, item))
+        .collect()
+}
+
+fn queued_input_to_python(py: Python<'_>, item: &QueuedInputSnapshot) -> PyResult<Py<PyAny>> {
+    let dict = PyDict::new(py);
+    dict.set_item("id", item.id.as_u64())?;
+    dict.set_item("text", item.text.as_str())?;
+    dict.set_item("queue", queue_kind_label(item.queue))?;
+    dict.set_item("position", item.position)?;
+    Ok(dict.unbind().into_any())
+}
+
+fn skills_to_python(py: Python<'_>, skills: &[SkillMetadata]) -> PyResult<Py<PyAny>> {
+    let items = skills
+        .iter()
+        .map(|skill| {
+            let dict = PyDict::new(py);
+            dict.set_item("name", skill.name())?;
+            dict.set_item("description", skill.description())?;
+            dict.set_item("skill_md_path", skill.skill_md_path().display().to_string())?;
+            Ok(dict.unbind().into_any())
+        })
+        .collect::<PyResult<Vec<Py<PyAny>>>>()?;
+    let list = PyList::new(py, items)?;
+    Ok(list.unbind().into_any())
+}
+
+fn queue_kind_label(kind: QueueKind) -> &'static str {
+    match kind {
+        QueueKind::Next => "next",
+        QueueKind::Suspended => "suspended",
+        QueueKind::Backlog => "backlog",
+    }
+}
+
+fn interactive_state_label(state: InteractiveRunState) -> &'static str {
+    match state {
+        InteractiveRunState::WaitingForInput => "waiting_for_input",
+        InteractiveRunState::RunningModel => "running_model",
+        InteractiveRunState::RunningTool => "running_tool",
+        InteractiveRunState::Interrupting => "interrupting",
+        InteractiveRunState::Closed => "closed",
+    }
+}
+
+fn block_on_interactive_result<T>(
+    future: impl Future<Output = Result<T, InteractiveError>>,
+) -> PyResult<T> {
+    block_on_interactive_future(future).and_then(|result| result.map_err(interactive_error_to_py))
+}
+
+fn block_on_interactive_future<T>(future: impl Future<Output = T>) -> PyResult<T> {
+    let tokio_runtime = build_python_tokio_runtime()?;
+    Ok(tokio_runtime.block_on(future))
+}
+
+fn build_python_tokio_runtime() -> PyResult<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|source| {
+            error::runtime_message_to_py(
+                "runtime.tokio_init_failed",
+                &source.to_string(),
+                Some("Retry the operation in a fresh Python thread or process."),
+            )
+        })
+}
+
+fn interactive_error_to_py(error: InteractiveError) -> PyErr {
+    error::runtime_message_to_py(
+        "runtime.interactive_error",
+        &error.to_string(),
+        Some("Inspect the active interactive run and queued input ids."),
+    )
+}
+
+fn interactive_stream_poisoned() -> PyErr {
+    error::runtime_message_to_py(
+        "runtime.interactive_stream_poisoned",
+        "Interactive run event stream receiver was poisoned.",
+        Some("Retry the operation in a fresh Python process."),
+    )
+}
+
+fn interactive_stream_busy() -> PyErr {
+    error::runtime_message_to_py(
+        "runtime.interactive_stream_busy",
+        "Interactive run event stream is already being consumed.",
+        Some("Consume an InteractiveRunStream from only one task."),
+    )
 }
 
 fn status_label(status: &AgentLoopStatus) -> &'static str {

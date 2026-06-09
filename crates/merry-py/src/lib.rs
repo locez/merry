@@ -14,6 +14,10 @@ fn version() -> &'static str {
 #[pyo3(name = "_merry")]
 fn merry_py(module: &Bound<'_, PyModule>) -> PyResult<()> {
     error::register(module)?;
+    module.add_class::<runtime::PyAgentLoopControl>()?;
+    module.add_class::<runtime::PyAgentLoopInput>()?;
+    module.add_class::<runtime::PyInteractiveRun>()?;
+    module.add_class::<runtime::PyInteractiveRunEventStream>()?;
     module.add_class::<runtime::NativeRuntimeEventStream>()?;
     module.add_class::<runtime::PyRuntime>()?;
     module.add_function(wrap_pyfunction!(version, module)?)?;

@@ -28,6 +28,9 @@ fn model_name() -> ModelName {
     ModelName::new("fake/model").expect("valid model name")
 }
 
+type ScriptedModelEvents = Vec<Result<ModelEvent, ModelError>>;
+type ScriptedProviderSteps = Vec<ScriptedModelEvents>;
+
 fn completed_text_event(text: &str) -> ModelEvent {
     ModelEvent::Completed {
         response: ModelResponse::new(vec![ModelOutput::text(text)], FinishReason::Stop, None),
@@ -73,7 +76,7 @@ fn tool_spec(name: &str) -> ToolSpec {
 #[derive(Clone)]
 struct RecordingProvider {
     requests: Arc<Mutex<Vec<ModelRequest>>>,
-    steps: Arc<Mutex<Vec<Vec<Result<ModelEvent, ModelError>>>>>,
+    steps: Arc<Mutex<ScriptedProviderSteps>>,
 }
 
 impl RecordingProvider {
@@ -81,7 +84,7 @@ impl RecordingProvider {
         Self::new_with_steps(vec![vec![Ok(completed_text_event("done"))]])
     }
 
-    fn new_with_steps(steps: Vec<Vec<Result<ModelEvent, ModelError>>>) -> Self {
+    fn new_with_steps(steps: ScriptedProviderSteps) -> Self {
         Self {
             requests: Arc::new(Mutex::new(Vec::new())),
             steps: Arc::new(Mutex::new(steps.into_iter().rev().collect())),
@@ -426,6 +429,44 @@ async fn next_burst_does_not_reorder_backlog() {
 }
 
 #[tokio::test]
+async fn input_handle_updates_removes_and_reorders_pending_items() {
+    let provider = RecordingProvider::new();
+    let runtime = Runtime::builder(session_id("interactive-edit-queue"))
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .build()
+        .expect("runtime builds");
+
+    let run = runtime
+        .start_interactive_agent_run(
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default(),
+        )
+        .expect("interactive run starts");
+    let (mut stream, input, _control) = run.split();
+    let _ = stream.next().await.expect("waiting state");
+
+    let first = input.enqueue("first").await.expect("first queued").id;
+    let second = input.enqueue("second").await.expect("second queued").id;
+
+    input
+        .update(first, "updated")
+        .await
+        .expect("pending input updates");
+    input
+        .move_after(first, second)
+        .await
+        .expect("pending input reorders");
+    input.remove(second).await.expect("pending input removes");
+
+    let snapshot = input.snapshot().await.expect("snapshot");
+    assert_eq!(snapshot.backlog.len(), 1);
+    assert_eq!(snapshot.backlog[0].id, first);
+    assert_eq!(snapshot.backlog[0].text, "updated");
+    assert_eq!(snapshot.backlog[0].position, 0);
+    assert!(provider.recorded_requests().is_empty());
+}
+
+#[tokio::test]
 async fn interrupt_moves_existing_next_to_suspended_and_post_interrupt_next_runs_alone() {
     let (started_tx, started_rx) = oneshot::channel();
     let (release_tx, release_rx) = oneshot::channel();
@@ -479,6 +520,65 @@ async fn interrupt_moves_existing_next_to_suspended_and_post_interrupt_next_runs
         }
     }
     assert!(saw_z);
+}
+
+#[tokio::test]
+async fn resume_suspended_accepts_suspended_burst_when_waiting() {
+    let (started_tx, started_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let provider = BlockingFirstProvider::new(started_tx, release_rx);
+    let runtime = Runtime::builder(session_id("interactive-resume-suspended"))
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .build()
+        .expect("runtime builds");
+
+    let run = runtime
+        .start_interactive_agent_run(
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default(),
+        )
+        .expect("interactive run starts");
+    let (mut stream, input, control) = run.split();
+    let _ = stream.next().await.expect("waiting state");
+
+    input.submit_next("initial").await.expect("initial queued");
+    started_rx.await.expect("initial provider step starts");
+    let suspended = input.submit_next("suspended").await.expect("queued").id;
+    control
+        .interrupt(InterruptReason::User)
+        .await
+        .expect("interrupt accepted");
+    drop(release_tx);
+
+    let mut waiting = false;
+    while let Some(event) = stream.next().await {
+        if matches!(
+            event,
+            InteractiveRunEvent::StateChanged {
+                state: InteractiveRunState::WaitingForInput
+            }
+        ) {
+            waiting = true;
+            break;
+        }
+    }
+    assert!(waiting);
+
+    control.resume_suspended().await.expect("suspended resumes");
+
+    let mut saw_suspended = false;
+    while let Some(event) = stream.next().await {
+        if let InteractiveRunEvent::InputAccepted {
+            ids,
+            queue: QueueKind::Suspended,
+        } = event
+        {
+            assert_eq!(ids, vec![suspended]);
+            saw_suspended = true;
+            break;
+        }
+    }
+    assert!(saw_suspended);
 }
 
 #[tokio::test]

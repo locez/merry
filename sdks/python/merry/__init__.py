@@ -15,6 +15,10 @@ from ._errors import (
     _decode_native_error,
 )
 from ._runtime import (
+    AgentLoopControl,
+    AgentLoopInput,
+    InteractiveRun,
+    InteractiveRunStream,
     OpenAICompatibleProvider,
     ProviderRetryConfig,
     RunResult,
@@ -42,6 +46,10 @@ __all__ = [
     "MerryToolError",
     "MerryTurnError",
     "NativeMerryError",
+    "AgentLoopControl",
+    "AgentLoopInput",
+    "InteractiveRun",
+    "InteractiveRunStream",
     "OpenAICompatibleProvider",
     "ProviderRetryConfig",
     "RunResult",
