@@ -140,6 +140,26 @@ impl Runtime {
         &self.inner.capabilities
     }
 
+    /// Returns the configured skill metadata for UI/SDK discovery.
+    ///
+    /// This exposes only metadata already stored in the session. Skill bodies
+    /// remain on disk and do not enter prompt context through this accessor.
+    pub async fn skills(&self) -> Vec<crate::SkillMetadata> {
+        let session = self.inner.session.lock().await;
+        session
+            .skill_catalog()
+            .map(|catalog| catalog.skills().to_vec())
+            .unwrap_or_default()
+    }
+
+    /// Finds one configured skill by exact metadata name.
+    pub async fn find_skill(&self, name: &str) -> Option<crate::SkillMetadata> {
+        self.skills()
+            .await
+            .into_iter()
+            .find(|skill| skill.name() == name)
+    }
+
     /// Returns whether this runtime asks the model for tool-progress commentary.
     #[must_use]
     pub fn progress_commentary(&self) -> bool {
