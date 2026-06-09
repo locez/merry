@@ -133,6 +133,85 @@ class RuntimeStream:
         return True
 
 
+class InteractiveRun:
+    def __init__(self, native: Any) -> None:
+        self._native = native
+        self.stream = InteractiveRunStream(native.stream)
+        self.input = AgentLoopInput(native.input)
+        self.control = AgentLoopControl(native.control)
+
+
+class InteractiveRunStream:
+    def __init__(self, native: Any) -> None:
+        self._native = native
+
+    def __aiter__(self) -> AsyncIterator[dict[str, Any]]:
+        return self.events()
+
+    async def events(self) -> AsyncIterator[dict[str, Any]]:
+        while True:
+            event = await _run_in_worker(self._native.next_blocking)
+            if event is None:
+                return
+            if not isinstance(event, dict):
+                raise TypeError("native interactive stream events must be dicts")
+            yield event
+
+
+class AgentLoopInput:
+    def __init__(self, native: Any) -> None:
+        self._native = native
+
+    async def submit_next(self, text: str) -> dict[str, Any]:
+        return await _interactive_dict_result(self._native.submit_next_blocking, text)
+
+    async def enqueue(self, text: str) -> dict[str, Any]:
+        return await _interactive_dict_result(self._native.enqueue_blocking, text)
+
+    async def update(self, input_id: int, text: str) -> None:
+        await _run_in_worker(self._native.update_blocking, _validate_input_id(input_id), text)
+
+    async def remove(self, input_id: int) -> None:
+        await _run_in_worker(self._native.remove_blocking, _validate_input_id(input_id))
+
+    async def move_before(self, input_id: int, anchor_id: int) -> None:
+        await _run_in_worker(
+            self._native.move_before_blocking,
+            _validate_input_id(input_id),
+            _validate_input_id(anchor_id),
+        )
+
+    async def move_after(self, input_id: int, anchor_id: int) -> None:
+        await _run_in_worker(
+            self._native.move_after_blocking,
+            _validate_input_id(input_id),
+            _validate_input_id(anchor_id),
+        )
+
+    async def snapshot(self) -> dict[str, Any]:
+        return await _interactive_dict_result(self._native.snapshot_blocking)
+
+
+class AgentLoopControl:
+    def __init__(self, native: Any) -> None:
+        self._native = native
+
+    async def interrupt(self) -> None:
+        await _run_in_worker(self._native.interrupt_blocking)
+
+    async def resume_suspended(self) -> None:
+        await _run_in_worker(self._native.resume_suspended_blocking)
+
+    async def discard_suspended(self) -> None:
+        await _run_in_worker(self._native.discard_suspended_blocking)
+
+    async def resume_backlog(self) -> None:
+        await _run_in_worker(self._native.resume_backlog_blocking)
+
+    async def close(self) -> None:
+        await _run_in_worker(self._native.close_blocking)
+
+
 @dataclass(frozen=True)
 class ProviderRetryConfig:
     enabled: bool = True
@@ -428,6 +507,26 @@ class Runtime:
             max_model_turns=max_model_turns,
         )
 
+    def start_interactive(self, *, max_model_turns: int | None = None) -> InteractiveRun:
+        try:
+            native = self._native.start_interactive_blocking(
+                _validate_max_model_turns(max_model_turns)
+            )
+        except NativeMerryError as error:
+            raise _decode_native_error(error) from error
+        return InteractiveRun(native)
+
+    def skills(self) -> list[dict[str, Any]]:
+        try:
+            skills = self._native.skills_blocking()
+        except NativeMerryError as error:
+            raise _decode_native_error(error) from error
+        if not isinstance(skills, list):
+            raise TypeError("native skills result must be a list")
+        if not all(isinstance(skill, dict) for skill in skills):
+            raise TypeError("native skills result must contain dict items")
+        return list(skills)
+
     def register_tool(
         self,
         tool: Tool | Callable[..., object] | Callable[..., Awaitable[object]],
@@ -566,6 +665,21 @@ def _validate_max_model_turns(max_model_turns: int | None) -> int | None:
     if max_model_turns < 1:
         raise ValueError("max_model_turns must be greater than zero.")
     return max_model_turns
+
+
+def _validate_input_id(input_id: int) -> int:
+    if isinstance(input_id, bool) or not isinstance(input_id, int):
+        raise TypeError("input_id must be a non-negative int.")
+    if input_id < 0:
+        raise ValueError("input_id must be non-negative.")
+    return input_id
+
+
+async def _interactive_dict_result(func: Callable[..., Any], *args: object) -> dict[str, Any]:
+    result = await _run_in_worker(func, *args)
+    if not isinstance(result, dict):
+        raise TypeError("native interactive result must be a dict")
+    return result
 
 
 def _bridge_tool_call(events: list[dict[str, Any]]) -> dict[str, Any] | None:

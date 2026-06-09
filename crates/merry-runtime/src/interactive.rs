@@ -32,8 +32,27 @@ fn next_interactive_run_id() -> InteractiveRunId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct InteractiveRunId(u64);
 
+impl InteractiveRunId {
+    #[must_use]
+    pub fn as_u64(self) -> u64 {
+        self.0
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct InteractiveInputId(u64);
+
+impl InteractiveInputId {
+    #[must_use]
+    pub fn from_u64(value: u64) -> Self {
+        Self(value)
+    }
+
+    #[must_use]
+    pub fn as_u64(self) -> u64 {
+        self.0
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueueKind {
@@ -252,6 +271,86 @@ impl AgentLoopInput {
             })?
     }
 
+    pub async fn update(&self, id: InteractiveInputId, text: &str) -> Result<(), InteractiveError> {
+        let (ack_sender, ack_receiver) = oneshot::channel();
+        self.command_sender
+            .send(InteractiveCommand::Update {
+                id,
+                text: text.to_owned(),
+                ack_sender,
+            })
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?;
+        ack_receiver
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?
+    }
+
+    pub async fn remove(&self, id: InteractiveInputId) -> Result<(), InteractiveError> {
+        let (ack_sender, ack_receiver) = oneshot::channel();
+        self.command_sender
+            .send(InteractiveCommand::Remove { id, ack_sender })
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?;
+        ack_receiver
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?
+    }
+
+    pub async fn move_before(
+        &self,
+        id: InteractiveInputId,
+        anchor: InteractiveInputId,
+    ) -> Result<(), InteractiveError> {
+        let (ack_sender, ack_receiver) = oneshot::channel();
+        self.command_sender
+            .send(InteractiveCommand::MoveBefore {
+                id,
+                anchor,
+                ack_sender,
+            })
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?;
+        ack_receiver
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?
+    }
+
+    pub async fn move_after(
+        &self,
+        id: InteractiveInputId,
+        anchor: InteractiveInputId,
+    ) -> Result<(), InteractiveError> {
+        let (ack_sender, ack_receiver) = oneshot::channel();
+        self.command_sender
+            .send(InteractiveCommand::MoveAfter {
+                id,
+                anchor,
+                ack_sender,
+            })
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?;
+        ack_receiver
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?
+    }
+
     pub async fn snapshot(&self) -> Result<QueueSnapshot, InteractiveError> {
         let (ack_sender, ack_receiver) = oneshot::channel();
         self.command_sender
@@ -287,6 +386,36 @@ impl AgentLoopControl {
         self.run_id
     }
 
+    pub async fn resume_suspended(&self) -> Result<(), InteractiveError> {
+        let (ack_sender, ack_receiver) = oneshot::channel();
+        self.command_sender
+            .send(InteractiveCommand::ResumeSuspended { ack_sender })
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?;
+        ack_receiver
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?
+    }
+
+    pub async fn discard_suspended(&self) -> Result<(), InteractiveError> {
+        let (ack_sender, ack_receiver) = oneshot::channel();
+        self.command_sender
+            .send(InteractiveCommand::DiscardSuspended { ack_sender })
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?;
+        ack_receiver
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?
+    }
+
     pub async fn resume_backlog(&self) -> Result<(), InteractiveError> {
         let (ack_sender, ack_receiver) = oneshot::channel();
         self.command_sender
@@ -316,6 +445,21 @@ impl AgentLoopControl {
                 run_id: self.run_id,
             })?
     }
+
+    pub async fn close(&self) -> Result<(), InteractiveError> {
+        let (ack_sender, ack_receiver) = oneshot::channel();
+        self.command_sender
+            .send(InteractiveCommand::Close { ack_sender })
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?;
+        ack_receiver
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?
+    }
 }
 
 enum InteractiveCommand {
@@ -327,14 +471,42 @@ enum InteractiveCommand {
         text: String,
         ack_sender: oneshot::Sender<Result<InputReceipt, InteractiveError>>,
     },
+    Update {
+        id: InteractiveInputId,
+        text: String,
+        ack_sender: oneshot::Sender<Result<(), InteractiveError>>,
+    },
+    Remove {
+        id: InteractiveInputId,
+        ack_sender: oneshot::Sender<Result<(), InteractiveError>>,
+    },
+    MoveBefore {
+        id: InteractiveInputId,
+        anchor: InteractiveInputId,
+        ack_sender: oneshot::Sender<Result<(), InteractiveError>>,
+    },
+    MoveAfter {
+        id: InteractiveInputId,
+        anchor: InteractiveInputId,
+        ack_sender: oneshot::Sender<Result<(), InteractiveError>>,
+    },
     Snapshot {
         ack_sender: oneshot::Sender<QueueSnapshot>,
+    },
+    ResumeSuspended {
+        ack_sender: oneshot::Sender<Result<(), InteractiveError>>,
+    },
+    DiscardSuspended {
+        ack_sender: oneshot::Sender<Result<(), InteractiveError>>,
     },
     ResumeBacklog {
         ack_sender: oneshot::Sender<Result<(), InteractiveError>>,
     },
     Interrupt {
         reason: InterruptReason,
+        ack_sender: oneshot::Sender<Result<(), InteractiveError>>,
+    },
+    Close {
         ack_sender: oneshot::Sender<Result<(), InteractiveError>>,
     },
 }
@@ -362,6 +534,7 @@ impl Runtime {
             generation_config,
             config,
             loop_permit,
+            suspended_resume_requested: false,
             backlog_resume_requested: false,
             phase_token: None,
             interrupted: false,
@@ -392,6 +565,7 @@ struct InteractiveProducer {
     generation_config: GenerationConfig,
     config: AgentLoopConfig,
     loop_permit: ActiveStepPermit,
+    suspended_resume_requested: bool,
     backlog_resume_requested: bool,
     phase_token: Option<CancellationToken>,
     interrupted: bool,
@@ -421,10 +595,18 @@ impl InteractiveProducer {
                         return;
                     }
                 }
+                CommandDecision::RunSuspended => {
+                    if !self.run_suspended_burst().await {
+                        return;
+                    }
+                }
                 CommandDecision::RunBacklog => {
                     if !self.run_one_backlog().await {
                         return;
                     }
+                }
+                CommandDecision::Close => {
+                    break;
                 }
             }
         }
@@ -444,6 +626,16 @@ impl InteractiveProducer {
             return self.send_state(InteractiveRunState::WaitingForInput).await;
         }
         self.run_accepted_steps(accepted, QueueKind::Next).await
+    }
+
+    async fn run_suspended_burst(&mut self) -> bool {
+        self.suspended_resume_requested = false;
+        let accepted = self.queue.accept_suspended_burst();
+        if accepted.is_empty() {
+            return self.send_state(InteractiveRunState::WaitingForInput).await;
+        }
+        self.run_accepted_steps(accepted, QueueKind::Suspended)
+            .await
     }
 
     async fn run_one_backlog(&mut self) -> bool {
@@ -604,13 +796,9 @@ impl InteractiveProducer {
                         commands_open = false;
                         continue;
                     };
-                    if self
+                    self
                         .handle_command(command, CommandHandlingMode::Running)
-                        .await
-                        .is_none()
-                    {
-                        return None;
-                    }
+                        .await?;
                 }
             }
         }
@@ -736,6 +924,17 @@ impl InteractiveProducer {
             return BoundaryAction::Wait;
         }
 
+        if self.suspended_resume_requested {
+            self.suspended_resume_requested = false;
+            let accepted = self.queue.accept_suspended_burst();
+            if !accepted.is_empty() {
+                return BoundaryAction::UserInput {
+                    accepted,
+                    queue: QueueKind::Suspended,
+                };
+            }
+        }
+
         if self.backlog_resume_requested {
             self.backlog_resume_requested = false;
             let accepted = self.queue.accept_one_backlog();
@@ -782,8 +981,73 @@ impl InteractiveProducer {
                 }
                 Some(CommandDecision::Continue)
             }
+            InteractiveCommand::Update {
+                id,
+                text,
+                ack_sender,
+            } => {
+                let result = self.queue.update(id, &text);
+                let queue_changed = result.is_ok();
+                let _ = ack_sender.send(result);
+                if queue_changed && !self.send_queue_changed().await {
+                    return None;
+                }
+                Some(CommandDecision::Continue)
+            }
+            InteractiveCommand::Remove { id, ack_sender } => {
+                let result = self.queue.remove(id);
+                let queue_changed = result.is_ok();
+                let _ = ack_sender.send(result);
+                if queue_changed && !self.send_queue_changed().await {
+                    return None;
+                }
+                Some(CommandDecision::Continue)
+            }
+            InteractiveCommand::MoveBefore {
+                id,
+                anchor,
+                ack_sender,
+            } => {
+                let result = self.queue.move_before(id, anchor);
+                let queue_changed = result.is_ok();
+                let _ = ack_sender.send(result);
+                if queue_changed && !self.send_queue_changed().await {
+                    return None;
+                }
+                Some(CommandDecision::Continue)
+            }
+            InteractiveCommand::MoveAfter {
+                id,
+                anchor,
+                ack_sender,
+            } => {
+                let result = self.queue.move_after(id, anchor);
+                let queue_changed = result.is_ok();
+                let _ = ack_sender.send(result);
+                if queue_changed && !self.send_queue_changed().await {
+                    return None;
+                }
+                Some(CommandDecision::Continue)
+            }
             InteractiveCommand::Snapshot { ack_sender } => {
                 let _ = ack_sender.send(self.queue.snapshot());
+                Some(CommandDecision::Continue)
+            }
+            InteractiveCommand::ResumeSuspended { ack_sender } => {
+                self.suspended_resume_requested = true;
+                let _ = ack_sender.send(Ok(()));
+                if mode == CommandHandlingMode::Waiting {
+                    return Some(CommandDecision::RunSuspended);
+                }
+                Some(CommandDecision::Continue)
+            }
+            InteractiveCommand::DiscardSuspended { ack_sender } => {
+                self.suspended_resume_requested = false;
+                let discarded = self.queue.discard_suspended();
+                let _ = ack_sender.send(Ok(()));
+                if !discarded.is_empty() && !self.send_queue_changed().await {
+                    return None;
+                }
                 Some(CommandDecision::Continue)
             }
             InteractiveCommand::ResumeBacklog { ack_sender } => {
@@ -802,6 +1066,10 @@ impl InteractiveProducer {
                     Some(CommandDecision::Continue)
                 }
             }
+            InteractiveCommand::Close { ack_sender } => {
+                let _ = ack_sender.send(Ok(()));
+                Some(CommandDecision::Close)
+            }
         }
     }
 
@@ -810,6 +1078,7 @@ impl InteractiveProducer {
         _reason: InterruptReason,
     ) -> Option<CommandDecision> {
         self.interrupted = true;
+        self.suspended_resume_requested = false;
         self.backlog_resume_requested = false;
         self.queue.suspend_next();
         if let Some(token) = self.phase_token.as_ref() {
@@ -851,7 +1120,9 @@ enum CommandHandlingMode {
 enum CommandDecision {
     Continue,
     RunNext,
+    RunSuspended,
     RunBacklog,
+    Close,
 }
 
 enum BoundaryAction {
