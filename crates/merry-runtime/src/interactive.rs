@@ -336,6 +336,7 @@ impl Runtime {
             generation_config,
             config,
             loop_permit,
+            backlog_resume_requested: false,
         };
         let producer_handle = tokio::spawn(async move {
             producer.run().await;
@@ -363,6 +364,7 @@ struct InteractiveProducer {
     generation_config: GenerationConfig,
     config: AgentLoopConfig,
     loop_permit: ActiveStepPermit,
+    backlog_resume_requested: bool,
 }
 
 impl InteractiveProducer {
@@ -376,30 +378,20 @@ impl InteractiveProducer {
                 break;
             };
 
-            match command {
-                InteractiveCommand::SubmitNext { text, ack_sender } => {
-                    let receipt = self.queue.submit_next(&text);
-                    let should_run = receipt.is_ok();
-                    let _ = ack_sender.send(receipt);
-                    if !self.send_queue_changed().await {
-                        return;
-                    }
-                    if should_run && !self.run_next_burst().await {
-                        return;
-                    }
-                }
-                InteractiveCommand::Enqueue { text, ack_sender } => {
-                    let receipt = self.queue.enqueue(&text);
-                    let _ = ack_sender.send(receipt);
-                    if !self.send_queue_changed().await {
+            let Some(decision) = self
+                .handle_command(command, CommandHandlingMode::Waiting)
+                .await
+            else {
+                return;
+            };
+            match decision {
+                CommandDecision::Continue => {}
+                CommandDecision::RunNext => {
+                    if !self.run_next_burst().await {
                         return;
                     }
                 }
-                InteractiveCommand::Snapshot { ack_sender } => {
-                    let _ = ack_sender.send(self.queue.snapshot());
-                }
-                InteractiveCommand::ResumeBacklog { ack_sender } => {
-                    let _ = ack_sender.send(Ok(()));
+                CommandDecision::RunBacklog => {
                     if !self.run_one_backlog().await {
                         return;
                     }
@@ -421,85 +413,196 @@ impl InteractiveProducer {
         if accepted.is_empty() {
             return self.send_state(InteractiveRunState::WaitingForInput).await;
         }
-        self.run_accepted_inputs(accepted, QueueKind::Next).await
+        self.run_accepted_steps(accepted, QueueKind::Next).await
     }
 
     async fn run_one_backlog(&mut self) -> bool {
+        self.backlog_resume_requested = false;
         let accepted = self.queue.accept_one_backlog();
         if accepted.is_empty() {
             return self.send_state(InteractiveRunState::WaitingForInput).await;
         }
-        self.run_accepted_inputs(accepted, QueueKind::Backlog).await
+        self.run_accepted_steps(accepted, QueueKind::Backlog).await
     }
 
-    async fn run_accepted_inputs(
+    async fn run_accepted_steps(
         &mut self,
-        accepted: Vec<QueuedInputSnapshot>,
-        queue: QueueKind,
+        mut accepted: Vec<QueuedInputSnapshot>,
+        mut queue: QueueKind,
     ) -> bool {
-        let ids = accepted.iter().map(|item| item.id).collect::<Vec<_>>();
-        let input = match StepInput::user_texts(accepted.iter().map(|item| item.text.as_str())) {
-            Ok(input) => input,
-            Err(error) => {
-                let _ = self
-                    .event_sender
-                    .send(InteractiveRunEvent::StateChanged {
-                        state: InteractiveRunState::Closed,
-                    })
-                    .await;
-                tracing::debug!(
-                    error = %error,
-                    "interactive accepted input failed step conversion"
-                );
-                return false;
-            }
-        };
+        loop {
+            let ids = accepted.iter().map(|item| item.id).collect::<Vec<_>>();
+            let input = match StepInput::user_texts(accepted.iter().map(|item| item.text.as_str()))
+            {
+                Ok(input) => input,
+                Err(error) => {
+                    let _ = self
+                        .event_sender
+                        .send(InteractiveRunEvent::StateChanged {
+                            state: InteractiveRunState::Closed,
+                        })
+                        .await;
+                    tracing::debug!(
+                        error = %error,
+                        "interactive accepted input failed step conversion"
+                    );
+                    return false;
+                }
+            };
 
-        if self
-            .event_sender
-            .send(InteractiveRunEvent::InputAccepted { ids, queue })
-            .await
-            .is_err()
-        {
-            return false;
-        }
-        if !self.send_queue_changed().await {
-            return false;
-        }
-        if !self.send_state(InteractiveRunState::RunningModel).await {
-            return false;
-        }
-
-        let mut step_context = StepContext::new(self.loop_token.clone())
-            .with_generation_config(self.generation_config.clone());
-        if let Some(contract) = self.config.final_output_contract().cloned() {
-            step_context = step_context.with_final_output_contract(contract);
-        }
-
-        let stream = match self.runtime.step_with_active_permit(
-            input,
-            step_context,
-            self.loop_permit.clone(),
-        ) {
-            Ok(stream) => stream,
-            Err(error) => {
-                tracing::debug!(error = %error, "interactive step start failed");
-                return false;
-            }
-        };
-        tokio::pin!(stream);
-        while let Some(event) = stream.next().await {
             if self
                 .event_sender
-                .send(InteractiveRunEvent::Runtime(event))
+                .send(InteractiveRunEvent::InputAccepted { ids, queue })
                 .await
                 .is_err()
             {
                 return false;
             }
+            if !self.send_queue_changed().await {
+                return false;
+            }
+            if !self.send_state(InteractiveRunState::RunningModel).await {
+                return false;
+            }
+
+            let mut step_context = StepContext::new(self.loop_token.clone())
+                .with_generation_config(self.generation_config.clone());
+            if let Some(contract) = self.config.final_output_contract().cloned() {
+                step_context = step_context.with_final_output_contract(contract);
+            }
+
+            let stream = match self.runtime.step_with_active_permit(
+                input,
+                step_context,
+                self.loop_permit.clone(),
+            ) {
+                Ok(stream) => stream,
+                Err(error) => {
+                    tracing::debug!(error = %error, "interactive step start failed");
+                    return false;
+                }
+            };
+            if !self.forward_step_until_boundary(stream).await {
+                return false;
+            }
+
+            if !self.drain_ready_commands().await {
+                return false;
+            }
+
+            let Some((next_accepted, next_queue)) = self.accept_boundary_inputs() else {
+                return self.send_state(InteractiveRunState::WaitingForInput).await;
+            };
+            accepted = next_accepted;
+            queue = next_queue;
+        }
+    }
+
+    async fn forward_step_until_boundary(&mut self, stream: crate::RuntimeEventStream) -> bool {
+        tokio::pin!(stream);
+        let mut commands_open = true;
+        loop {
+            tokio::select! {
+                event = stream.next() => {
+                    let Some(event) = event else {
+                        return true;
+                    };
+                    if self
+                        .event_sender
+                        .send(InteractiveRunEvent::Runtime(event))
+                        .await
+                        .is_err()
+                    {
+                        return false;
+                    }
+                }
+                command = self.command_receiver.recv(), if commands_open => {
+                    let Some(command) = command else {
+                        commands_open = false;
+                        continue;
+                    };
+                    if self
+                        .handle_command(command, CommandHandlingMode::Running)
+                        .await
+                        .is_none()
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn drain_ready_commands(&mut self) -> bool {
+        while let Ok(command) = self.command_receiver.try_recv() {
+            if self
+                .handle_command(command, CommandHandlingMode::Running)
+                .await
+                .is_none()
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn accept_boundary_inputs(&mut self) -> Option<(Vec<QueuedInputSnapshot>, QueueKind)> {
+        if !self.queue.next.is_empty() {
+            return Some((self.queue.accept_next_burst(), QueueKind::Next));
         }
 
-        self.send_state(InteractiveRunState::WaitingForInput).await
+        if self.backlog_resume_requested {
+            self.backlog_resume_requested = false;
+            let accepted = self.queue.accept_one_backlog();
+            if !accepted.is_empty() {
+                return Some((accepted, QueueKind::Backlog));
+            }
+        }
+
+        None
+    }
+
+    async fn handle_command(
+        &mut self,
+        command: InteractiveCommand,
+        mode: CommandHandlingMode,
+    ) -> Option<CommandDecision> {
+        match command {
+            InteractiveCommand::SubmitNext { text, ack_sender } => {
+                let receipt = self.queue.submit_next(&text);
+                let should_run = mode == CommandHandlingMode::Waiting && receipt.is_ok();
+                let queue_changed = receipt.is_ok();
+                let _ = ack_sender.send(receipt);
+                if queue_changed && !self.send_queue_changed().await {
+                    return None;
+                }
+                if should_run {
+                    return Some(CommandDecision::RunNext);
+                }
+                Some(CommandDecision::Continue)
+            }
+            InteractiveCommand::Enqueue { text, ack_sender } => {
+                let receipt = self.queue.enqueue(&text);
+                let queue_changed = receipt.is_ok();
+                let _ = ack_sender.send(receipt);
+                if queue_changed && !self.send_queue_changed().await {
+                    return None;
+                }
+                Some(CommandDecision::Continue)
+            }
+            InteractiveCommand::Snapshot { ack_sender } => {
+                let _ = ack_sender.send(self.queue.snapshot());
+                Some(CommandDecision::Continue)
+            }
+            InteractiveCommand::ResumeBacklog { ack_sender } => {
+                self.backlog_resume_requested = true;
+                let _ = ack_sender.send(Ok(()));
+                if mode == CommandHandlingMode::Waiting {
+                    return Some(CommandDecision::RunBacklog);
+                }
+                Some(CommandDecision::Continue)
+            }
+        }
     }
 
     async fn send_queue_changed(&self) -> bool {
@@ -517,6 +620,19 @@ impl InteractiveProducer {
             .await
             .is_ok()
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommandHandlingMode {
+    Waiting,
+    Running,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommandDecision {
+    Continue,
+    RunNext,
+    RunBacklog,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
