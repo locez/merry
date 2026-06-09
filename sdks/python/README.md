@@ -58,6 +58,23 @@ async for event in stream:
 result = await stream.result()
 ```
 
+For a long-lived interactive agent run, split event consumption from input and
+control:
+
+```python
+run = runtime.start_interactive()
+
+asyncio.create_task(render(run.stream))
+
+await run.input.submit_next("Inspect the current failure.")
+await run.input.enqueue("After that, summarize the next step.")
+await run.control.interrupt()
+```
+
+Interactive input/control handles do not replace the existing `RuntimeStream`
+bridge-tool path; Python bridge tools continue to be resolved by consuming
+`runtime.stream(...)`.
+
 The same configuration can be passed directly:
 
 ```python
