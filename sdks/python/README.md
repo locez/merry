@@ -36,6 +36,16 @@ export MERRY_OPENAI_BASE_URL=https://api.example.test/v1
 uv run examples/basic_runtime.py
 ```
 
+To inspect concurrent independent multi-turn runtimes, run:
+
+```bash
+uv run examples/multi_runtime.py
+```
+
+The multi-runtime example runs three runtimes concurrently. Each runtime then
+runs three sequential turns and prints the runtime label, round number, runtime
+handle session id, and the session id carried by every event.
+
 `MERRY_OPENAI_BASE_URL` is optional when using the default OpenAI-compatible
 endpoint.
 
