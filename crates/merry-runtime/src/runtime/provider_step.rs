@@ -273,7 +273,7 @@ pub(super) async fn run_provider_step(
     }
     let sent_continuation_count = request.continuations().len();
 
-    if let Some(text) = input.user_text_for_history() {
+    for text in input.user_texts_for_history() {
         let mut session = inner.session.lock().await;
         if token.is_cancelled() {
             drop(session);
