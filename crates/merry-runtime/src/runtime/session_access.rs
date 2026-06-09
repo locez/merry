@@ -5,8 +5,8 @@ use crate::{
     session::is_runtime_reserved_artifact_id, tool_input_validation::ToolInputValidationError,
 };
 use merry_core::{
-    ArtifactId, ArtifactRef, EvidenceLocator, EvidenceRef, PendingToolCall, RuntimeEvent,
-    ToolCallResult, ToolCallResultStatus,
+    ArtifactId, ArtifactRef, ErrorInfo, EvidenceLocator, EvidenceRef, PendingToolCall,
+    RuntimeEvent, ToolCallId, ToolCallResult, ToolCallResultStatus,
 };
 use std::sync::Arc;
 
@@ -112,6 +112,26 @@ impl Runtime {
             call.id(),
             ToolCallResultStatus::Failed,
             content,
+            Some(diagnostic),
+            None,
+        )
+    }
+
+    pub(crate) async fn submit_tool_interrupt_failure_with_active_permit(
+        &self,
+        call_id: &ToolCallId,
+        _active_permit: &ActiveStepPermit,
+    ) -> Result<Vec<RuntimeEvent>, RuntimeError> {
+        let diagnostic = ErrorInfo::new(
+            "tool_cancelled_by_user",
+            &format!("tool call {call_id} was cancelled by user interrupt"),
+        )
+        .expect("static diagnostic code and runtime-owned call id are valid");
+        let mut session = self.inner.session.lock().await;
+        session.submit_tool_execution_outcome(
+            call_id,
+            ToolCallResultStatus::Failed,
+            ArtifactContent::text("Tool execution was cancelled by user interrupt."),
             Some(diagnostic),
             None,
         )

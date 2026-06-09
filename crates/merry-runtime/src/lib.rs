@@ -90,7 +90,7 @@ pub use final_output::{
 pub use interactive::{
     AgentLoopControl, AgentLoopInput, InputReceipt, InteractiveAgentRun, InteractiveError,
     InteractiveInputId, InteractiveRunEvent, InteractiveRunEventStream, InteractiveRunId,
-    InteractiveRunState, QueueKind, QueueSnapshot, QueuedInputSnapshot,
+    InteractiveRunState, InterruptReason, QueueKind, QueueSnapshot, QueuedInputSnapshot,
 };
 pub use ledger::{
     CompactLedgerText, LedgerFactKind, LedgerProjection, LedgerProjectionSnapshot, LedgerScope,
