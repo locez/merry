@@ -1111,7 +1111,7 @@ fn tool_resolution_is_policy_denied(events: &[RuntimeEvent]) -> bool {
     tool_resolution_diagnostic_code(events) == Some("action_policy_denied")
 }
 
-enum StepOutcome {
+pub(crate) enum StepOutcome {
     Completed,
     Failed(ErrorInfo),
     Cancelled(ErrorInfo),
@@ -1120,13 +1120,13 @@ enum StepOutcome {
     Blocked(AgentLoopBlockedReason),
 }
 
-enum PendingLoopToolCall {
+pub(crate) enum PendingLoopToolCall {
     Runtime(PendingToolCall),
     Bridge(PendingToolCall),
     FinalOutput(PendingToolCall),
 }
 
-fn classify_step_events(
+pub(crate) fn classify_step_events(
     events: &[RuntimeEvent],
     final_output_contract: Option<&FinalOutputContract>,
 ) -> StepOutcome {

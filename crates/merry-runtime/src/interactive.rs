@@ -1,7 +1,9 @@
 #![allow(dead_code)]
 
 use crate::{
-    AgentLoopConfig, Runtime, RuntimeError, StepContext, StepInput, event_stream::ActiveStepPermit,
+    AgentLoopConfig, Runtime, RuntimeError, StepContext, StepInput, ToolExecutionContext,
+    agent_loop::{PendingLoopToolCall, StepOutcome, classify_step_events},
+    event_stream::ActiveStepPermit,
 };
 use futures_core::Stream;
 use futures_util::StreamExt;
@@ -47,6 +49,11 @@ pub enum InteractiveRunState {
     RunningTool,
     Interrupting,
     Closed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InterruptReason {
+    User,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -294,6 +301,21 @@ impl AgentLoopControl {
                 run_id: self.run_id,
             })?
     }
+
+    pub async fn interrupt(&self, reason: InterruptReason) -> Result<(), InteractiveError> {
+        let (ack_sender, ack_receiver) = oneshot::channel();
+        self.command_sender
+            .send(InteractiveCommand::Interrupt { reason, ack_sender })
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?;
+        ack_receiver
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?
+    }
 }
 
 enum InteractiveCommand {
@@ -309,6 +331,10 @@ enum InteractiveCommand {
         ack_sender: oneshot::Sender<QueueSnapshot>,
     },
     ResumeBacklog {
+        ack_sender: oneshot::Sender<Result<(), InteractiveError>>,
+    },
+    Interrupt {
+        reason: InterruptReason,
         ack_sender: oneshot::Sender<Result<(), InteractiveError>>,
     },
 }
@@ -337,6 +363,8 @@ impl Runtime {
             config,
             loop_permit,
             backlog_resume_requested: false,
+            phase_token: None,
+            interrupted: false,
         };
         let producer_handle = tokio::spawn(async move {
             producer.run().await;
@@ -365,6 +393,8 @@ struct InteractiveProducer {
     config: AgentLoopConfig,
     loop_permit: ActiveStepPermit,
     backlog_resume_requested: bool,
+    phase_token: Option<CancellationToken>,
+    interrupted: bool,
 }
 
 impl InteractiveProducer {
@@ -431,89 +461,142 @@ impl InteractiveProducer {
         mut queue: QueueKind,
     ) -> bool {
         loop {
-            let ids = accepted.iter().map(|item| item.id).collect::<Vec<_>>();
-            let input = match StepInput::user_texts(accepted.iter().map(|item| item.text.as_str()))
-            {
-                Ok(input) => input,
-                Err(error) => {
-                    let _ = self
-                        .event_sender
-                        .send(InteractiveRunEvent::StateChanged {
-                            state: InteractiveRunState::Closed,
-                        })
-                        .await;
-                    tracing::debug!(
-                        error = %error,
-                        "interactive accepted input failed step conversion"
-                    );
-                    return false;
-                }
+            let Some(input) = step_input_from_accepted(&accepted) else {
+                return false;
+            };
+            let Some(step_events) = self.run_model_phase(input, Some((&accepted, queue))).await
+            else {
+                return false;
             };
 
+            let Some(continuation_required) = self.handle_step_outcome(&step_events).await else {
+                return false;
+            };
+
+            if !self.drain_ready_commands().await {
+                return false;
+            }
+
+            match self.boundary_action(continuation_required) {
+                BoundaryAction::UserInput {
+                    accepted: next_accepted,
+                    queue: next_queue,
+                } => {
+                    accepted = next_accepted;
+                    queue = next_queue;
+                }
+                BoundaryAction::Continuation => {
+                    let Some(boundary) = self.run_continuation_steps().await else {
+                        return false;
+                    };
+                    match boundary {
+                        BoundaryAction::UserInput {
+                            accepted: next_accepted,
+                            queue: next_queue,
+                        } => {
+                            accepted = next_accepted;
+                            queue = next_queue;
+                        }
+                        BoundaryAction::Continuation => continue,
+                        BoundaryAction::Wait => {
+                            return self.send_state(InteractiveRunState::WaitingForInput).await;
+                        }
+                    }
+                }
+                BoundaryAction::Wait => {
+                    return self.send_state(InteractiveRunState::WaitingForInput).await;
+                }
+            }
+        }
+    }
+
+    async fn run_continuation_steps(&mut self) -> Option<BoundaryAction> {
+        loop {
+            let step_events = self
+                .run_model_phase(StepInput::no_new_user_input(), None)
+                .await?;
+            let continuation_required = self.handle_step_outcome(&step_events).await?;
+            if !self.drain_ready_commands().await {
+                return None;
+            }
+            let boundary = self.boundary_action(continuation_required);
+            if matches!(boundary, BoundaryAction::Continuation) {
+                continue;
+            }
+            return Some(boundary);
+        }
+    }
+
+    async fn run_model_phase(
+        &mut self,
+        input: StepInput,
+        accepted: Option<(&[QueuedInputSnapshot], QueueKind)>,
+    ) -> Option<Vec<RuntimeEvent>> {
+        if let Some((accepted, queue)) = accepted {
+            let ids = accepted.iter().map(|item| item.id).collect::<Vec<_>>();
             if self
                 .event_sender
                 .send(InteractiveRunEvent::InputAccepted { ids, queue })
                 .await
                 .is_err()
             {
-                return false;
+                return None;
             }
             if !self.send_queue_changed().await {
-                return false;
+                return None;
             }
-            if !self.send_state(InteractiveRunState::RunningModel).await {
-                return false;
-            }
-
-            let mut step_context = StepContext::new(self.loop_token.clone())
-                .with_generation_config(self.generation_config.clone());
-            if let Some(contract) = self.config.final_output_contract().cloned() {
-                step_context = step_context.with_final_output_contract(contract);
-            }
-
-            let stream = match self.runtime.step_with_active_permit(
-                input,
-                step_context,
-                self.loop_permit.clone(),
-            ) {
-                Ok(stream) => stream,
-                Err(error) => {
-                    tracing::debug!(error = %error, "interactive step start failed");
-                    return false;
-                }
-            };
-            if !self.forward_step_until_boundary(stream).await {
-                return false;
-            }
-
-            if !self.drain_ready_commands().await {
-                return false;
-            }
-
-            let Some((next_accepted, next_queue)) = self.accept_boundary_inputs() else {
-                return self.send_state(InteractiveRunState::WaitingForInput).await;
-            };
-            accepted = next_accepted;
-            queue = next_queue;
         }
+
+        if !self.send_state(InteractiveRunState::RunningModel).await {
+            return None;
+        }
+
+        let phase_token = self.loop_token.child_token();
+        self.phase_token = Some(phase_token.clone());
+        let mut step_context =
+            StepContext::new(phase_token).with_generation_config(self.generation_config.clone());
+        if let Some(contract) = self.config.final_output_contract().cloned() {
+            step_context = step_context.with_final_output_contract(contract);
+        }
+
+        let stream = match self.runtime.step_with_active_permit(
+            input,
+            step_context,
+            self.loop_permit.clone(),
+        ) {
+            Ok(stream) => stream,
+            Err(error) => {
+                self.phase_token = None;
+                tracing::debug!(error = %error, "interactive step start failed");
+                return None;
+            }
+        };
+        let events = self.forward_step_until_boundary(stream).await;
+        self.phase_token = None;
+        events
     }
 
-    async fn forward_step_until_boundary(&mut self, stream: crate::RuntimeEventStream) -> bool {
+    async fn forward_step_until_boundary(
+        &mut self,
+        stream: crate::RuntimeEventStream,
+    ) -> Option<Vec<RuntimeEvent>> {
+        let mut events = Vec::new();
         tokio::pin!(stream);
         let mut commands_open = true;
         loop {
             tokio::select! {
                 event = stream.next() => {
                     let Some(event) = event else {
-                        return true;
+                        return Some(events);
                     };
+                    events.push(event.clone());
                     if self
                         .event_sender
                         .send(InteractiveRunEvent::Runtime(event))
                         .await
                         .is_err()
                     {
-                        return false;
+                        return None;
                     }
                 }
                 command = self.command_receiver.recv(), if commands_open => {
@@ -526,11 +609,105 @@ impl InteractiveProducer {
                         .await
                         .is_none()
                     {
-                        return false;
+                        return None;
                     }
                 }
             }
         }
+    }
+
+    async fn handle_step_outcome(&mut self, step_events: &[RuntimeEvent]) -> Option<bool> {
+        match classify_step_events(step_events, self.config.final_output_contract()) {
+            StepOutcome::Pending(PendingLoopToolCall::Runtime(call)) if !self.interrupted => {
+                self.run_runtime_tool(call).await
+            }
+            StepOutcome::ToolResultRecorded => Some(!self.interrupted),
+            _ => Some(false),
+        }
+    }
+
+    async fn run_runtime_tool(&mut self, call: merry_core::PendingToolCall) -> Option<bool> {
+        if !self.send_state(InteractiveRunState::RunningTool).await {
+            return None;
+        }
+
+        let phase_token = self.loop_token.child_token();
+        self.phase_token = Some(phase_token.clone());
+        let runtime = self.runtime.clone();
+        let loop_permit = self.loop_permit.clone();
+        let call_id = call.id().clone();
+        let execution_call_id = call_id.clone();
+        let execution_permit = loop_permit.clone();
+        let execution = async move {
+            runtime
+                .execute_tool_call_with_active_permit(
+                    &execution_call_id,
+                    ToolExecutionContext::new(phase_token),
+                    &execution_permit,
+                )
+                .await
+        };
+        tokio::pin!(execution);
+        let mut commands_open = true;
+
+        let result = loop {
+            tokio::select! {
+                result = &mut execution => break result,
+                command = self.command_receiver.recv(), if commands_open => {
+                    let Some(command) = command else {
+                        commands_open = false;
+                        continue;
+                    };
+                    self.handle_command(command, CommandHandlingMode::Running).await?;
+                }
+            }
+        };
+        self.phase_token = None;
+
+        match result {
+            Ok(events) => {
+                if !self.send_runtime_events(events).await {
+                    return None;
+                }
+                Some(!self.interrupted)
+            }
+            Err(RuntimeError::ToolExecutionCancelled { call_id, .. }) => {
+                let runtime = self.runtime.clone();
+                let events = match runtime
+                    .submit_tool_interrupt_failure_with_active_permit(&call_id, &loop_permit)
+                    .await
+                {
+                    Ok(events) => events,
+                    Err(error) => {
+                        tracing::debug!(error = %error, "interactive tool interrupt result failed");
+                        return None;
+                    }
+                };
+                self.interrupted = true;
+                if !self.send_runtime_events(events).await {
+                    return None;
+                }
+                Some(false)
+            }
+            Err(error) => {
+                tracing::debug!(error = %error, "interactive runtime tool failed");
+                None
+            }
+        }
+    }
+
+    async fn send_runtime_events(&self, events: Vec<RuntimeEvent>) -> bool {
+        for event in events {
+            if self
+                .event_sender
+                .send(InteractiveRunEvent::Runtime(event))
+                .await
+                .is_err()
+            {
+                return false;
+            }
+        }
+        true
     }
 
     async fn drain_ready_commands(&mut self) -> bool {
@@ -546,20 +723,35 @@ impl InteractiveProducer {
         true
     }
 
-    fn accept_boundary_inputs(&mut self) -> Option<(Vec<QueuedInputSnapshot>, QueueKind)> {
+    fn boundary_action(&mut self, continuation_required: bool) -> BoundaryAction {
         if !self.queue.next.is_empty() {
-            return Some((self.queue.accept_next_burst(), QueueKind::Next));
+            self.interrupted = false;
+            return BoundaryAction::UserInput {
+                accepted: self.queue.accept_next_burst(),
+                queue: QueueKind::Next,
+            };
+        }
+
+        if self.interrupted {
+            return BoundaryAction::Wait;
         }
 
         if self.backlog_resume_requested {
             self.backlog_resume_requested = false;
             let accepted = self.queue.accept_one_backlog();
             if !accepted.is_empty() {
-                return Some((accepted, QueueKind::Backlog));
+                return BoundaryAction::UserInput {
+                    accepted,
+                    queue: QueueKind::Backlog,
+                };
             }
         }
 
-        None
+        if continuation_required {
+            return BoundaryAction::Continuation;
+        }
+
+        BoundaryAction::Wait
     }
 
     async fn handle_command(
@@ -602,7 +794,34 @@ impl InteractiveProducer {
                 }
                 Some(CommandDecision::Continue)
             }
+            InteractiveCommand::Interrupt { reason, ack_sender } => {
+                let _ = ack_sender.send(Ok(()));
+                if mode == CommandHandlingMode::Running {
+                    self.interrupt_running_phase(reason).await
+                } else {
+                    Some(CommandDecision::Continue)
+                }
+            }
         }
+    }
+
+    async fn interrupt_running_phase(
+        &mut self,
+        _reason: InterruptReason,
+    ) -> Option<CommandDecision> {
+        self.interrupted = true;
+        self.backlog_resume_requested = false;
+        self.queue.suspend_next();
+        if let Some(token) = self.phase_token.as_ref() {
+            token.cancel();
+        }
+        if !self.send_queue_changed().await {
+            return None;
+        }
+        if !self.send_state(InteractiveRunState::Interrupting).await {
+            return None;
+        }
+        Some(CommandDecision::Continue)
     }
 
     async fn send_queue_changed(&self) -> bool {
@@ -633,6 +852,15 @@ enum CommandDecision {
     Continue,
     RunNext,
     RunBacklog,
+}
+
+enum BoundaryAction {
+    UserInput {
+        accepted: Vec<QueuedInputSnapshot>,
+        queue: QueueKind,
+    },
+    Continuation,
+    Wait,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -928,6 +1156,10 @@ fn validate_interactive_text(text: &str) -> Result<(), InteractiveError> {
     }
 
     Ok(())
+}
+
+fn step_input_from_accepted(accepted: &[QueuedInputSnapshot]) -> Option<StepInput> {
+    StepInput::user_texts(accepted.iter().map(|item| item.text.as_str())).ok()
 }
 
 #[cfg(test)]

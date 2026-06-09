@@ -1,13 +1,18 @@
 use futures_util::{StreamExt, stream};
-use merry_core::{ProviderName, SessionId};
+use merry_core::{
+    PendingToolCall, ProviderName, RuntimeEventKind, SessionId, ToolInputSchema, ToolName, ToolSpec,
+};
 use merry_llm::{
     FinishReason, ModelCapabilities, ModelError, ModelEvent, ModelEventStream, ModelMessageRole,
     ModelName, ModelOutput, ModelProvider, ModelProviderFuture, ModelRequest, ModelResponse,
-    ModelStreamContext,
+    ModelStreamContext, ModelToolCall, ModelToolCallId, ToolArguments,
 };
 use merry_runtime::{
-    AgentLoopConfig, InteractiveRunEvent, InteractiveRunState, QueueKind, Runtime, StepContext,
+    AgentLoopConfig, InteractiveRunEvent, InteractiveRunState, InterruptReason, QueueKind, Runtime,
+    StepContext, ToolExecutionContext, ToolExecutionError, ToolExecutor, ToolExecutorFuture,
 };
+use schemars::Schema;
+use serde_json::json;
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio::{
     sync::{Mutex as AsyncMutex, oneshot},
@@ -27,6 +32,42 @@ fn completed_text_event(text: &str) -> ModelEvent {
     ModelEvent::Completed {
         response: ModelResponse::new(vec![ModelOutput::text(text)], FinishReason::Stop, None),
     }
+}
+
+fn model_tool_call(id: &str, name: &str) -> ModelToolCall {
+    ModelToolCall::new(
+        ModelToolCallId::new(id).expect("valid model tool call id"),
+        ToolName::new(name).expect("valid tool name"),
+        ToolArguments::try_from(json!({"query": "test query"})).expect("valid model arguments"),
+    )
+}
+
+fn completed_tool_call_event(call: ModelToolCall) -> ModelEvent {
+    ModelEvent::Completed {
+        response: ModelResponse::new(
+            vec![ModelOutput::tool_call(call)],
+            FinishReason::ToolCalls,
+            None,
+        ),
+    }
+}
+
+fn tool_spec(name: &str) -> ToolSpec {
+    let schema = Schema::try_from(json!({
+        "type": "object",
+        "properties": {
+            "query": { "type": "string" }
+        },
+        "required": ["query"]
+    }))
+    .expect("test schema should be valid JSON schema");
+
+    ToolSpec::new(
+        ToolName::new(name).expect("valid tool name"),
+        "Search test notes",
+        ToolInputSchema::new(schema).expect("valid tool schema"),
+    )
+    .expect("valid tool spec")
 }
 
 #[derive(Clone)]
@@ -156,6 +197,27 @@ impl ModelProvider for BlockingFirstProvider {
             let event_stream: ModelEventStream =
                 Box::pin(stream::iter([Ok(completed_text_event("done"))]));
             Ok(event_stream)
+        })
+    }
+}
+
+#[derive(Clone)]
+struct BlockingToolExecutor {
+    started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+}
+
+impl ToolExecutor for BlockingToolExecutor {
+    fn execute<'a>(
+        &'a self,
+        _call: PendingToolCall,
+        context: ToolExecutionContext,
+    ) -> ToolExecutorFuture<'a> {
+        Box::pin(async move {
+            if let Some(started) = self.started.lock().expect("started lock").take() {
+                let _ = started.send(());
+            }
+            context.cancellation_token().cancelled().await;
+            Err(ToolExecutionError::Cancelled)
         })
     }
 }
@@ -361,4 +423,114 @@ async fn next_burst_does_not_reorder_backlog() {
             break;
         }
     }
+}
+
+#[tokio::test]
+async fn interrupt_moves_existing_next_to_suspended_and_post_interrupt_next_runs_alone() {
+    let (started_tx, started_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let provider = BlockingFirstProvider::new(started_tx, release_rx);
+    let runtime = Runtime::builder(session_id("interactive-esc-suspended"))
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .build()
+        .expect("runtime builds");
+
+    let run = runtime
+        .start_interactive_agent_run(
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default(),
+        )
+        .expect("interactive run starts");
+    let (mut stream, input, control) = run.split();
+    let _ = stream.next().await.expect("waiting state");
+
+    input.submit_next("initial").await.expect("initial queued");
+    started_rx.await.expect("initial provider step starts");
+    input.submit_next("x").await.expect("x queued");
+    input.submit_next("y").await.expect("y queued");
+    control
+        .interrupt(InterruptReason::User)
+        .await
+        .expect("interrupt accepted");
+
+    let snapshot = input.snapshot().await.expect("snapshot");
+    assert_eq!(
+        snapshot
+            .suspended
+            .iter()
+            .map(|item| item.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["x", "y"]
+    );
+
+    input.submit_next("z").await.expect("z queued");
+    drop(release_tx);
+
+    let mut saw_z = false;
+    while let Some(event) = stream.next().await {
+        if let InteractiveRunEvent::InputAccepted {
+            ids,
+            queue: QueueKind::Next,
+        } = event
+        {
+            assert_eq!(ids.len(), 1);
+            saw_z = true;
+            break;
+        }
+    }
+    assert!(saw_z);
+}
+
+#[tokio::test]
+async fn interrupt_during_tool_execution_closes_pending_tool_call() {
+    let (started_tx, started_rx) = oneshot::channel();
+    let provider = RecordingProvider::new_with_steps(vec![
+        vec![Ok(completed_tool_call_event(model_tool_call(
+            "call-blocking",
+            "search_notes",
+        )))],
+        vec![Ok(completed_text_event("after cancel"))],
+    ]);
+    let tool = BlockingToolExecutor {
+        started: Arc::new(Mutex::new(Some(started_tx))),
+    };
+    let runtime = Runtime::builder(session_id("interactive-tool-interrupt"))
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .register_tool(merry_runtime::RegisteredTool::read_only(
+            tool_spec("search_notes"),
+            Arc::new(tool),
+        ))
+        .build()
+        .expect("runtime builds");
+
+    let run = runtime
+        .start_interactive_agent_run(
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default(),
+        )
+        .expect("interactive run starts");
+    let (mut stream, input, control) = run.split();
+    let _ = stream.next().await.expect("waiting state");
+
+    input.submit_next("start").await.expect("start queued");
+    started_rx.await.expect("tool starts");
+    control
+        .interrupt(InterruptReason::User)
+        .await
+        .expect("interrupt accepted");
+
+    let mut saw_resolved = false;
+    while let Some(event) = stream.next().await {
+        if let InteractiveRunEvent::Runtime(runtime_event) = event
+            && matches!(
+                runtime_event.kind,
+                RuntimeEventKind::ToolCallResolved { .. }
+            )
+        {
+            saw_resolved = true;
+            break;
+        }
+    }
+    assert!(saw_resolved);
+    assert!(runtime.pending_tool_calls().await.is_empty());
 }
