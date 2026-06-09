@@ -58,6 +58,13 @@ async for event in stream:
 result = await stream.result()
 ```
 
+To inspect a long-lived interactive run with separate event, input, and control
+handles, run:
+
+```bash
+uv run examples/interactive_agent.py
+```
+
 For a long-lived interactive agent run, split event consumption from input and
 control:
 
