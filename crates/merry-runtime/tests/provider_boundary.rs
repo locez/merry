@@ -1718,6 +1718,35 @@ async fn compiled_provider_request_skill_metadata_enters_stable_prefix_before_pr
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn runtime_exposes_skill_metadata_for_completion() {
+    let catalog = SkillCatalog::from_metadata(vec![
+        SkillMetadata::new(
+            "brainstorming",
+            "Use for design discussion.",
+            PathBuf::from("skills/brainstorming/SKILL.md"),
+            PathBuf::from("skills"),
+        )
+        .expect("valid skill"),
+    ])
+    .expect("valid catalog");
+
+    let runtime = Runtime::builder(session_id("runtime-skill-list"))
+        .skill_catalog(catalog)
+        .build()
+        .expect("runtime builds");
+
+    let skills = runtime.skills().await;
+    assert_eq!(skills.len(), 1);
+    assert_eq!(skills[0].name(), "brainstorming");
+
+    let found = runtime
+        .find_skill("brainstorming")
+        .await
+        .expect("skill found");
+    assert_eq!(found.description(), "Use for design discussion.");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn skill_metadata_changes_stable_prefix_but_not_dynamic_context() {
     let first_provider = FakeModelProvider::new(vec![Ok(completed_event())]);
     let first_catalog = SkillCatalog::from_metadata(vec![
