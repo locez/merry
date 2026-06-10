@@ -13,7 +13,8 @@ use futures_core::Stream;
 use futures_util::StreamExt;
 use merry_core::{
     ArtifactKind, ErrorInfo, PendingToolCall, RuntimeEvent, RuntimeJournalEvent,
-    RuntimeJournalPayload, SessionId, ToolCallId, ToolCallResult, ToolCallResultStatus, ToolName,
+    RuntimeJournalPayload, SessionId, SessionUsage, ToolCallId, ToolCallResult,
+    ToolCallResultStatus, ToolName,
 };
 use std::{
     collections::BTreeSet,
@@ -101,6 +102,7 @@ pub struct AgentLoopResult {
     model_turns_run: usize,
     final_output: Option<String>,
     final_output_json: Option<FinalOutput>,
+    session_usage: Option<SessionUsage>,
 }
 
 impl AgentLoopResult {
@@ -109,8 +111,16 @@ impl AgentLoopResult {
         events: Vec<RuntimeJournalEvent>,
         model_turns_run: usize,
         final_output: Option<String>,
+        session_usage: Option<SessionUsage>,
     ) -> Self {
-        Self::new_with_final_output_json(status, events, model_turns_run, final_output, None)
+        Self::new_with_final_output_json(
+            status,
+            events,
+            model_turns_run,
+            final_output,
+            None,
+            session_usage,
+        )
     }
 
     fn new_with_final_output_json(
@@ -119,6 +129,7 @@ impl AgentLoopResult {
         model_turns_run: usize,
         final_output: Option<String>,
         final_output_json: Option<FinalOutput>,
+        session_usage: Option<SessionUsage>,
     ) -> Self {
         Self {
             status,
@@ -126,6 +137,7 @@ impl AgentLoopResult {
             model_turns_run,
             final_output,
             final_output_json,
+            session_usage,
         }
     }
 
@@ -157,6 +169,12 @@ impl AgentLoopResult {
     #[must_use]
     pub fn final_output_json(&self) -> Option<&FinalOutput> {
         self.final_output_json.as_ref()
+    }
+
+    /// Latest session usage snapshot when this loop result was produced.
+    #[must_use]
+    pub fn session_usage(&self) -> Option<&SessionUsage> {
+        self.session_usage.as_ref()
     }
 
     /// Consumes the result and returns the collected events.
@@ -471,11 +489,13 @@ impl Runtime {
                         model_turns_run,
                         None,
                     );
+                    let session_usage = self.usage().await;
                     return Ok(AgentLoopResult::new(
                         AgentLoopStatus::Completed,
                         events,
                         model_turns_run,
                         step_final_output,
+                        session_usage,
                     ));
                 }
                 StepOutcome::Failed(diagnostic) => {
@@ -485,11 +505,13 @@ impl Runtime {
                         model_turns_run,
                         Some(diagnostic.code()),
                     );
+                    let session_usage = self.usage().await;
                     return Ok(AgentLoopResult::new(
                         AgentLoopStatus::Failed { diagnostic },
                         events,
                         model_turns_run,
                         None,
+                        session_usage,
                     ));
                 }
                 StepOutcome::Cancelled(diagnostic) => {
@@ -499,11 +521,13 @@ impl Runtime {
                         model_turns_run,
                         Some(diagnostic.code()),
                     );
+                    let session_usage = self.usage().await;
                     return Ok(AgentLoopResult::new(
                         AgentLoopStatus::Cancelled { diagnostic },
                         events,
                         model_turns_run,
                         None,
+                        session_usage,
                     ));
                 }
                 StepOutcome::Blocked(reason) => {
@@ -513,11 +537,13 @@ impl Runtime {
                         model_turns_run,
                         Some(blocked_reason_code(&reason)),
                     );
+                    let session_usage = self.usage().await;
                     return Ok(AgentLoopResult::new(
                         AgentLoopStatus::Blocked { reason },
                         events,
                         model_turns_run,
                         None,
+                        session_usage,
                     ));
                 }
                 StepOutcome::Pending(PendingLoopToolCall::Bridge(call)) => {
@@ -527,6 +553,7 @@ impl Runtime {
                         model_turns_run,
                         Some("bridge_tool_call_requested"),
                     );
+                    let session_usage = self.usage().await;
                     return Ok(AgentLoopResult::new(
                         AgentLoopStatus::Blocked {
                             reason: AgentLoopBlockedReason::BridgeToolCallRequested {
@@ -537,6 +564,7 @@ impl Runtime {
                         events,
                         model_turns_run,
                         None,
+                        session_usage,
                     ));
                 }
                 StepOutcome::ToolResultRecorded => {
@@ -547,6 +575,7 @@ impl Runtime {
                             model_turns_run,
                             Some("max_model_turns_reached"),
                         );
+                        let session_usage = self.usage().await;
                         return Ok(AgentLoopResult::new(
                             AgentLoopStatus::Blocked {
                                 reason: AgentLoopBlockedReason::MaxModelTurnsReached {
@@ -556,6 +585,7 @@ impl Runtime {
                             events,
                             model_turns_run,
                             None,
+                            session_usage,
                         ));
                     }
 
@@ -593,6 +623,7 @@ impl Runtime {
                                 model_turns_run,
                                 Some("max_model_turns_reached"),
                             );
+                            let session_usage = self.usage().await;
                             return Ok(AgentLoopResult::new(
                                 AgentLoopStatus::Blocked {
                                     reason: AgentLoopBlockedReason::MaxModelTurnsReached {
@@ -602,6 +633,7 @@ impl Runtime {
                                 events,
                                 model_turns_run,
                                 None,
+                                session_usage,
                             ));
                         }
 
@@ -628,12 +660,14 @@ impl Runtime {
                         model_turns_run,
                         None,
                     );
+                    let session_usage = self.usage().await;
                     return Ok(AgentLoopResult::new_with_final_output_json(
                         AgentLoopStatus::Completed,
                         events,
                         model_turns_run,
                         None,
                         Some(final_output),
+                        session_usage,
                     ));
                 }
                 StepOutcome::Pending(PendingLoopToolCall::Runtime(call)) => {
@@ -644,6 +678,7 @@ impl Runtime {
                             model_turns_run,
                             Some("max_model_turns_reached"),
                         );
+                        let session_usage = self.usage().await;
                         return Ok(AgentLoopResult::new(
                             AgentLoopStatus::Blocked {
                                 reason: AgentLoopBlockedReason::MaxModelTurnsReached {
@@ -653,6 +688,7 @@ impl Runtime {
                             events,
                             model_turns_run,
                             None,
+                            session_usage,
                         ));
                     }
 
@@ -705,6 +741,7 @@ impl Runtime {
                                 model_turns_run,
                                 Some("tool_execution_cancelled"),
                             );
+                            let session_usage = self.usage().await;
                             return Ok(AgentLoopResult::new(
                                 AgentLoopStatus::Cancelled {
                                     diagnostic: tool_execution_cancelled_diagnostic(&call_id),
@@ -712,6 +749,7 @@ impl Runtime {
                                 events,
                                 model_turns_run,
                                 None,
+                                session_usage,
                             ));
                         }
                         Err(source) => {
@@ -830,39 +868,48 @@ async fn run_agent_loop_stream_producer(
         let step_final_output = final_assistant_output_from_step(&runtime, &step_events).await;
         match classify_step_events(&step_events, config.final_output_contract()) {
             StepOutcome::Completed => {
+                let session_usage = runtime.usage().await;
                 return Some(AgentLoopResult::new(
                     AgentLoopStatus::Completed,
                     events,
                     model_turns_run,
                     step_final_output,
+                    session_usage,
                 ));
             }
             StepOutcome::Failed(diagnostic) => {
+                let session_usage = runtime.usage().await;
                 return Some(AgentLoopResult::new(
                     AgentLoopStatus::Failed { diagnostic },
                     events,
                     model_turns_run,
                     None,
+                    session_usage,
                 ));
             }
             StepOutcome::Cancelled(diagnostic) => {
+                let session_usage = runtime.usage().await;
                 return Some(AgentLoopResult::new(
                     AgentLoopStatus::Cancelled { diagnostic },
                     events,
                     model_turns_run,
                     None,
+                    session_usage,
                 ));
             }
             StepOutcome::Blocked(reason) => {
+                let session_usage = runtime.usage().await;
                 return Some(AgentLoopResult::new(
                     AgentLoopStatus::Blocked { reason },
                     events,
                     model_turns_run,
                     None,
+                    session_usage,
                 ));
             }
             StepOutcome::ToolResultRecorded => {
                 if model_turns_run >= config.max_model_turns() {
+                    let session_usage = runtime.usage().await;
                     return Some(AgentLoopResult::new(
                         AgentLoopStatus::Blocked {
                             reason: AgentLoopBlockedReason::MaxModelTurnsReached {
@@ -872,6 +919,7 @@ async fn run_agent_loop_stream_producer(
                         events,
                         model_turns_run,
                         None,
+                        session_usage,
                     ));
                 }
 
@@ -907,6 +955,7 @@ async fn run_agent_loop_stream_producer(
                         }
 
                         if model_turns_run >= config.max_model_turns() {
+                            let session_usage = runtime.usage().await;
                             return Some(AgentLoopResult::new(
                                 AgentLoopStatus::Blocked {
                                     reason: AgentLoopBlockedReason::MaxModelTurnsReached {
@@ -916,6 +965,7 @@ async fn run_agent_loop_stream_producer(
                                 events,
                                 model_turns_run,
                                 None,
+                                session_usage,
                             ));
                         }
 
@@ -938,16 +988,19 @@ async fn run_agent_loop_stream_producer(
                             return None;
                         }
                     }
+                    let session_usage = runtime.usage().await;
                     return Some(AgentLoopResult::new_with_final_output_json(
                         AgentLoopStatus::Completed,
                         events,
                         model_turns_run,
                         None,
                         Some(final_output),
+                        session_usage,
                     ));
                 }
                 call => {
                     if model_turns_run >= config.max_model_turns() {
+                        let session_usage = runtime.usage().await;
                         return Some(AgentLoopResult::new(
                             AgentLoopStatus::Blocked {
                                 reason: AgentLoopBlockedReason::MaxModelTurnsReached {
@@ -957,6 +1010,7 @@ async fn run_agent_loop_stream_producer(
                             events,
                             model_turns_run,
                             None,
+                            session_usage,
                         ));
                     }
 
@@ -972,6 +1026,7 @@ async fn run_agent_loop_stream_producer(
                             {
                                 Ok(events) => events,
                                 Err(RuntimeError::ToolExecutionCancelled { call_id, .. }) => {
+                                    let session_usage = runtime.usage().await;
                                     return Some(AgentLoopResult::new(
                                         AgentLoopStatus::Cancelled {
                                             diagnostic: tool_execution_cancelled_diagnostic(
@@ -981,6 +1036,7 @@ async fn run_agent_loop_stream_producer(
                                         events,
                                         model_turns_run,
                                         None,
+                                        session_usage,
                                     ));
                                 }
                                 Err(_) => return None,

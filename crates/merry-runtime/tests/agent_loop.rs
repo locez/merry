@@ -1,7 +1,7 @@
 use futures_util::{StreamExt, stream};
 use merry_core::{
-    ArtifactId, ArtifactKind, ArtifactRef, EvidenceLocator, PendingToolCall, ProviderName,
-    RuntimeEvent, RuntimeJournalEvent, RuntimeJournalPayload, SessionId, ToolCallId,
+    ArtifactId, ArtifactKind, ArtifactRef, EvidenceLocator, ModelUsage, PendingToolCall,
+    ProviderName, RuntimeEvent, RuntimeJournalEvent, RuntimeJournalPayload, SessionId, ToolCallId,
     ToolCallResult, ToolCallResultStatus, ToolInputSchema, ToolName, ToolSpec,
 };
 use merry_llm::{
@@ -160,6 +160,16 @@ fn model_tool_call_with_arguments(id: &str, name: &str, arguments: Value) -> Mod
 fn completed_text_event(text: &str) -> ModelEvent {
     ModelEvent::Completed {
         response: ModelResponse::new(vec![ModelOutput::text(text)], FinishReason::Stop, None),
+    }
+}
+
+fn completed_text_event_with_usage(text: &str, usage: ModelUsage) -> ModelEvent {
+    ModelEvent::Completed {
+        response: ModelResponse::new(
+            vec![ModelOutput::text(text)],
+            FinishReason::Stop,
+            Some(usage),
+        ),
     }
 }
 
@@ -662,6 +672,59 @@ async fn run_default_loop(runtime: &Runtime, text: &str) -> merry_runtime::Agent
         )
         .await
         .expect("agent loop should run")
+}
+
+#[tokio::test]
+async fn run_agent_loop_result_includes_session_usage_snapshot() {
+    let usage = ModelUsage::with_details(21, Some(13), 8, Some(2), 29);
+    let provider = ScriptedModelProvider::new(vec![vec![Ok(completed_text_event_with_usage(
+        "usage final",
+        usage,
+    ))]]);
+    let runtime = Runtime::builder(session_id("agent-loop-result-usage"))
+        .model_provider(Arc::new(provider), model_name())
+        .build()
+        .expect("runtime should build");
+
+    let result = run_default_loop(&runtime, "Report usage.").await;
+
+    let result_usage = result
+        .session_usage()
+        .cloned()
+        .expect("agent loop result should include usage");
+    assert_eq!(result_usage.last, usage);
+    assert_eq!(result_usage.total, usage);
+    assert_eq!(runtime.usage().await, Some(result_usage));
+}
+
+#[tokio::test]
+async fn run_agent_loop_stream_result_includes_session_usage_snapshot() {
+    let usage = ModelUsage::with_details(31, Some(19), 11, None, 42);
+    let provider = ScriptedModelProvider::new(vec![vec![Ok(completed_text_event_with_usage(
+        "stream usage final",
+        usage,
+    ))]]);
+    let runtime = Runtime::builder(session_id("agent-loop-stream-result-usage"))
+        .model_provider(Arc::new(provider), model_name())
+        .build()
+        .expect("runtime should build");
+    let mut stream = runtime
+        .run_agent_loop_stream(
+            StepInput::user_text("Report stream usage.").expect("valid step input"),
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default(),
+        )
+        .expect("agent loop stream should start");
+
+    let result = stream.result().await.expect("stream should produce result");
+
+    let result_usage = result
+        .session_usage()
+        .cloned()
+        .expect("stream result should include usage");
+    assert_eq!(result_usage.last, usage);
+    assert_eq!(result_usage.total, usage);
+    assert_eq!(runtime.usage().await, Some(result_usage));
 }
 
 #[tokio::test]

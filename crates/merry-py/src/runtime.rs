@@ -533,6 +533,13 @@ impl PyRuntime {
         let skills = py.detach(move || block_on_interactive_future(runtime.skills()))?;
         skills_to_python(py, &skills)
     }
+
+    fn usage_blocking(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let runtime = self.runtime.clone();
+        let usage = py.detach(move || block_on_interactive_future(runtime.usage()))?;
+        let value = serde_json::to_value(usage).expect("SessionUsage values must serialize");
+        json_to_py(py, &value)
+    }
 }
 
 #[pymethods]
@@ -1789,6 +1796,9 @@ fn agent_loop_result_with_public_events_to_python(
             .final_output_json()
             .map(merry_runtime::FinalOutput::json),
     )?;
+    let session_usage =
+        serde_json::to_value(result.session_usage()).expect("SessionUsage values must serialize");
+    dict.set_item("session_usage", json_to_py(py, &session_usage)?)?;
 
     let events = serde_json::to_value(events).expect("RuntimeEvent values must serialize");
     dict.set_item("events", json_to_py(py, &events)?)?;

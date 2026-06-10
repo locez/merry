@@ -31,6 +31,20 @@ def test_runtime_run_returns_final_output_and_events():
     asyncio.run(_assert_runtime_run_returns_final_output_and_events())
 
 
+def test_runtime_usage_is_none_before_model_usage() -> None:
+    runtime = runtime_with_fake_response("done")
+
+    assert asyncio.run(runtime.usage()) is None
+
+
+def test_run_result_exposes_session_usage_snapshot() -> None:
+    runtime = runtime_with_fake_response("done")
+
+    result = asyncio.run(runtime.run("hello"))
+
+    assert result.session_usage is None
+
+
 async def _assert_runtime_run_stream_yields_event_dicts_in_order():
     runtime = runtime_with_fake_response("streamed")
 
