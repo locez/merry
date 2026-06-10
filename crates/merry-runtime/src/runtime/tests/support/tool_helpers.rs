@@ -253,6 +253,7 @@
                 RuntimeJournalPayload::ArtifactRecorded { .. } => "ArtifactRecorded",
                 RuntimeJournalPayload::AssistantOutputRecorded { .. } => "AssistantOutputRecorded",
                 RuntimeJournalPayload::ToolCallResolved { .. } => "ToolCallResolved",
+                RuntimeJournalPayload::SessionUsageUpdated { .. } => "SessionUsageUpdated",
                 RuntimeJournalPayload::SessionStarted => "SessionStarted",
                 RuntimeJournalPayload::StepStarted => "StepStarted",
                 RuntimeJournalPayload::StepCompleted => "StepCompleted",

@@ -1,6 +1,6 @@
 use futures_util::StreamExt;
 use merry_core::{
-    ArtifactKind, RuntimeEvent, RuntimeJournalEvent, RuntimeJournalPayload, SessionId,
+    ArtifactKind, ModelUsage, RuntimeEvent, RuntimeJournalEvent, RuntimeJournalPayload, SessionId,
     ToolInputSchema, ToolName, ToolSpec,
 };
 use merry_llm::{
@@ -24,6 +24,16 @@ fn model_name() -> merry_llm::ModelName {
 fn completed_text_event(text: &str) -> ModelEvent {
     ModelEvent::Completed {
         response: ModelResponse::new(vec![ModelOutput::text(text)], FinishReason::Stop, None),
+    }
+}
+
+fn completed_text_event_with_usage(text: &str, usage: ModelUsage) -> ModelEvent {
+    ModelEvent::Completed {
+        response: ModelResponse::new(
+            vec![ModelOutput::text(text)],
+            FinishReason::Stop,
+            Some(usage),
+        ),
     }
 }
 
@@ -102,6 +112,56 @@ async fn assistant_output_projects_to_public_assistant_message() {
     assert_eq!(artifact.kind(), &ArtifactKind::Text);
     assert_eq!(source.sequence, 2);
     assert!(matches!(events[3], RuntimeEvent::StepCompleted { .. }));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn usage_update_projects_to_public_stream_and_getter() {
+    let provider = FakeModelProvider::new(vec![Ok(completed_text_event_with_usage(
+        "hello with usage",
+        ModelUsage::with_details(12, Some(8), 5, None, 17),
+    ))]);
+    let runtime = Runtime::builder(session_id("public-usage-updated"))
+        .model_provider(Arc::new(provider), model_name())
+        .build()
+        .expect("runtime should build");
+
+    assert_eq!(runtime.usage().await, None);
+    let events = collect_public_stream(&runtime, "Say hello.").await;
+
+    assert!(matches!(events[0], RuntimeEvent::SessionStarted { .. }));
+    assert!(matches!(events[1], RuntimeEvent::StepStarted { .. }));
+    let RuntimeEvent::UsageUpdated { usage, source } = &events[2] else {
+        panic!("expected usage update, got {:?}", events[2]);
+    };
+    assert_eq!(source.sequence, 2);
+    assert_eq!(
+        usage.last,
+        ModelUsage::with_details(12, Some(8), 5, None, 17)
+    );
+    assert_eq!(usage.total, usage.last);
+    assert!(usage.context.is_some());
+    assert!(usage.compaction.is_some());
+    assert!(matches!(events[3], RuntimeEvent::AssistantMessage { .. }));
+    assert!(matches!(events[4], RuntimeEvent::StepCompleted { .. }));
+    assert_eq!(runtime.usage().await, Some(usage.clone()));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn usage_none_does_not_emit_usage_update() {
+    let provider = FakeModelProvider::new(vec![Ok(completed_text_event("hello without usage"))]);
+    let runtime = Runtime::builder(session_id("public-no-usage"))
+        .model_provider(Arc::new(provider), model_name())
+        .build()
+        .expect("runtime should build");
+
+    let events = collect_public_stream(&runtime, "Say hello.").await;
+
+    assert!(
+        events
+            .iter()
+            .all(|event| !matches!(event, RuntimeEvent::UsageUpdated { .. }))
+    );
+    assert_eq!(runtime.usage().await, None);
 }
 
 #[tokio::test(flavor = "current_thread")]
