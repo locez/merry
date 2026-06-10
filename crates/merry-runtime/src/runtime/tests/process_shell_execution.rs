@@ -88,9 +88,9 @@ async fn read_only_shell_process_executes_under_shell_profile_when_opted_in() {
         event_kind_names_for_tool_execution(&events),
         ["ArtifactRecorded", "ArtifactRecorded", "ToolCallResolved"]
     );
-    let RuntimeEventKind::ArtifactRecorded {
+    let RuntimeJournalPayload::ArtifactRecorded {
         artifact: input_artifact,
-    } = &events[0].kind
+    } = &events[0].payload
     else {
         panic!("shell process input artifact should be recorded first");
     };

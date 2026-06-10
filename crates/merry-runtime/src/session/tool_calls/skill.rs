@@ -1,7 +1,8 @@
 use super::SessionState;
 use crate::ledger::LedgerFactKind;
 use merry_core::{
-    PendingToolCall, RuntimeEvent, RuntimeEventKind, ToolCallResult, ToolCallResultStatus,
+    PendingToolCall, RuntimeJournalEvent, RuntimeJournalPayload, ToolCallResult,
+    ToolCallResultStatus,
 };
 
 const WORKSPACE_READ_FILE_TOOL_NAME: &str = "workspace_read_file";
@@ -11,7 +12,7 @@ impl SessionState {
         &mut self,
         pending: &PendingToolCall,
         result: &ToolCallResult,
-    ) -> Option<RuntimeEvent> {
+    ) -> Option<RuntimeJournalEvent> {
         if result.status() != ToolCallResultStatus::Succeeded {
             return None;
         }
@@ -32,7 +33,7 @@ impl SessionState {
         };
 
         Some(self.record_event(
-            RuntimeEventKind::SkillUsed {
+            RuntimeJournalPayload::SkillUsed {
                 skill_name,
                 skill_md_path,
                 tool_call_id: pending.id().clone(),

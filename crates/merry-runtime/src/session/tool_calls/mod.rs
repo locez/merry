@@ -1,6 +1,8 @@
 use super::SessionState;
 use crate::{RuntimeError, ledger::LedgerFactKind};
-use merry_core::{ErrorInfo, PendingToolCall, RuntimeEvent, RuntimeEventKind, ToolCallId};
+use merry_core::{
+    ErrorInfo, PendingToolCall, RuntimeJournalEvent, RuntimeJournalPayload, ToolCallId,
+};
 
 mod action;
 mod result;
@@ -25,7 +27,7 @@ impl SessionState {
     pub(crate) fn record_tool_call_pending(
         &mut self,
         call: PendingToolCall,
-    ) -> Result<RuntimeEvent, ErrorInfo> {
+    ) -> Result<RuntimeJournalEvent, ErrorInfo> {
         if self
             .pending_tool_calls
             .iter()
@@ -46,7 +48,7 @@ impl SessionState {
             .map_err(transcript_record_diagnostic)?;
         self.pending_tool_calls.push(call.clone());
         Ok(self.record_event(
-            RuntimeEventKind::ToolCallPending { call },
+            RuntimeJournalPayload::ToolCallPending { call },
             LedgerFactKind::ToolCallPending,
         ))
     }
@@ -54,9 +56,9 @@ impl SessionState {
     pub(crate) fn record_bridge_tool_call_requested(
         &mut self,
         call: PendingToolCall,
-    ) -> RuntimeEvent {
+    ) -> RuntimeJournalEvent {
         self.record_event(
-            RuntimeEventKind::BridgeToolCallRequested { call },
+            RuntimeJournalPayload::BridgeToolCallRequested { call },
             LedgerFactKind::BridgeToolCallRequested,
         )
     }

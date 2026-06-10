@@ -164,15 +164,15 @@ async fn unregistered_tool_resolves_failed_and_continues_once() {
             "ArtifactRecorded",
             "ToolCallResolved",
             "StepStarted",
-            "ArtifactRecorded",
+            "AssistantOutputRecorded",
             "StepCompleted",
         ]
     );
     let resolved = result
         .events()
         .iter()
-        .find_map(|event| match &event.kind {
-            RuntimeEventKind::ToolCallResolved { result } => Some(result),
+        .find_map(|event| match &event.payload {
+            RuntimeJournalPayload::ToolCallResolved { result } => Some(result),
             _ => None,
         })
         .expect("tool call should resolve");
@@ -226,7 +226,7 @@ async fn denied_registered_tool_resolves_failed_and_agent_loop_continues_once() 
             "ArtifactRecorded",
             "ToolCallResolved",
             "StepStarted",
-            "ArtifactRecorded",
+            "AssistantOutputRecorded",
             "StepCompleted",
         ]
     );
@@ -234,8 +234,8 @@ async fn denied_registered_tool_resolves_failed_and_agent_loop_continues_once() 
     let resolved = result
         .events()
         .iter()
-        .find_map(|event| match &event.kind {
-            RuntimeEventKind::ToolCallResolved { result } => Some(result),
+        .find_map(|event| match &event.payload {
+            RuntimeJournalPayload::ToolCallResolved { result } => Some(result),
             _ => None,
         })
         .expect("tool call should resolve");
@@ -376,12 +376,10 @@ async fn agent_loop_tool_execution_cancellation_returns_cancelled_and_keeps_pend
             source: ArtifactError::MissingArtifact { id }
         } if id == artifact_id("tool-result-3")
     ));
-    assert!(
-        result
-            .events()
-            .iter()
-            .all(|event| !matches!(event.kind, RuntimeEventKind::ToolCallResolved { .. }))
-    );
+    assert!(result.events().iter().all(|event| !matches!(
+        event.payload,
+        RuntimeJournalPayload::ToolCallResolved { .. }
+    )));
 
     let artifact_events = runtime
         .record_artifact(

@@ -487,7 +487,7 @@ fn model_judgment_output_rejects_bad_schema_purpose_kind_and_risk() {
         parse_tool_risk_review_model_judgment_output(&wrong_kind, &request, "test llm source",)
             .expect_err("wrong recommendation kind rejects"),
         JudgmentError::InvalidModelJudgmentLiteral {
-            field: "recommendation.kind",
+            field: "recommendation.payload",
             expected: "tool_risk_review",
             actual: "summary_draft".to_owned(),
         }
@@ -719,12 +719,12 @@ fn registry_payloads_include_schema_version_and_core_fields() {
     assert!(outcome_payload.contains("schema_version=merry.judgment.audit.v1\n"));
     assert!(outcome_payload.contains("artifact=outcome\n"));
     assert!(outcome_payload.contains("purpose=summary_draft\n"));
-    assert!(outcome_payload.contains("recommendation.kind=summary_draft\n"));
+    assert!(outcome_payload.contains("recommendation.payload=summary_draft\n"));
     assert!(outcome_payload.contains("recommendation.draft=Summary draft from exact evidence.\n"));
     assert!(outcome_payload.contains("confidence=0.750000\n"));
     assert!(outcome_payload.contains("rationale=The draft uses the supplied artifact evidence.\n"));
     assert!(outcome_payload.contains("uncertainty=Coverage is partial.\n"));
-    assert!(outcome_payload.contains("provenance.kind=test\n"));
+    assert!(outcome_payload.contains("provenance.payload=test\n"));
     assert!(outcome_payload.contains("provenance.label=test source\n"));
 }
 

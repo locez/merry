@@ -12,12 +12,9 @@ use crate::provider_config::{
 use crate::runtime_config::{
     action_process_backend_options, automatic_compaction_config, subagents_config,
 };
-use crate::runtime_events::write_runtime_event;
 use crate::sandbox::ChildHandoff as SandboxChildHandoff;
 use futures_util::StreamExt;
-use merry_core::{
-    ArtifactId, ErrorInfo, PendingToolCall, RuntimeEvent, RuntimeEventKind, ToolCallResultStatus,
-};
+use merry_core::{ErrorInfo, PendingToolCall, RuntimeEvent, ToolCallResultStatus};
 use merry_runtime::{
     AgentLoopBlockedReason, AgentLoopConfig, AgentLoopResult, AgentLoopStatus, Runtime,
     StepContext, StepInput,
@@ -25,8 +22,6 @@ use merry_runtime::{
 use serde_json::{Map, Value};
 use std::env;
 use tokio::io::{AsyncWrite, AsyncWriteExt, BufWriter};
-
-const ASSISTANT_OUTPUT_ARTIFACT_PREFIX: &str = "assistant-output-";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RunExitStatus {
@@ -139,7 +134,7 @@ where
         .map_err(unexpected)?;
     let mut pending_commentary = None;
     while let Some(event) = stream.next().await {
-        write_human_progress_event(runtime, &event, &mut pending_commentary, &mut writer).await?;
+        write_human_progress_event(&event, &mut pending_commentary, &mut writer).await?;
     }
     let result = stream.result().await.ok_or_else(|| {
         CliError::Unexpected("agent loop stream closed before producing a result".to_owned())
@@ -164,7 +159,7 @@ where
         .map_err(unexpected)?;
 
     while let Some(event) = stream.next().await {
-        write_runtime_event(&event, &mut writer).await?;
+        write_public_runtime_event(&event, &mut writer).await?;
         writer.flush().await.map_err(stdout_error)?;
     }
 
@@ -268,37 +263,24 @@ fn format_blocked_reason(reason: &AgentLoopBlockedReason) -> String {
 }
 
 async fn write_human_progress_event<W>(
-    runtime: &Runtime,
     event: &RuntimeEvent,
-    pending_commentary: &mut Option<ArtifactId>,
+    pending_commentary: &mut Option<String>,
     writer: &mut W,
 ) -> Result<(), CliError>
 where
     W: AsyncWrite + Unpin,
 {
-    match &event.kind {
-        RuntimeEventKind::ArtifactRecorded { artifact }
-            if artifact
-                .id()
-                .as_str()
-                .starts_with(ASSISTANT_OUTPUT_ARTIFACT_PREFIX) =>
-        {
-            *pending_commentary = Some(artifact.id().clone());
+    match event {
+        RuntimeEvent::AssistantMessage { text, .. } => {
+            *pending_commentary = Some(text.clone());
         }
-        RuntimeEventKind::ToolCallPending { call } => {
-            if let Some(artifact_id) = pending_commentary.take() {
-                write_progress_commentary_artifact(runtime, &artifact_id, writer).await?;
+        RuntimeEvent::ToolCallStarted { call, .. } => {
+            if let Some(commentary) = pending_commentary.take() {
+                write_progress_commentary(&commentary, writer).await?;
             }
             write_human_progress_line(writer, format_tool_call_progress("tool", call)).await?;
         }
-        RuntimeEventKind::BridgeToolCallRequested { call } => {
-            if let Some(artifact_id) = pending_commentary.take() {
-                write_progress_commentary_artifact(runtime, &artifact_id, writer).await?;
-            }
-            write_human_progress_line(writer, format_tool_call_progress("bridge tool", call))
-                .await?;
-        }
-        RuntimeEventKind::ToolCallResolved { result }
+        RuntimeEvent::ToolCallFinished { result, .. }
             if result.status() == ToolCallResultStatus::Failed =>
         {
             let line = result.diagnostic().map_or_else(
@@ -313,12 +295,13 @@ where
             );
             write_human_progress_line(writer, line).await?;
         }
-        RuntimeEventKind::ModelRetryScheduled {
+        RuntimeEvent::ModelRetryScheduled {
             attempt,
             next_attempt,
             max_attempts,
             delay_ms,
             error_kind,
+            ..
         } => {
             let line = format!(
                 "model retry: attempt {attempt}/{max_attempts} failed with {error_kind}; retrying attempt {next_attempt}/{max_attempts} in {}",
@@ -326,26 +309,44 @@ where
             );
             write_human_progress_line(writer, line).await?;
         }
-        RuntimeEventKind::ModelRetryExhausted {
+        RuntimeEvent::ModelRetryExhausted {
             attempts_run,
             max_attempts,
             error_kind,
+            ..
         } => {
             let line = format!(
                 "model retry exhausted: {attempts_run}/{max_attempts} attempts failed with {error_kind}"
             );
             write_human_progress_line(writer, line).await?;
         }
-        RuntimeEventKind::ArtifactRecorded { .. }
-        | RuntimeEventKind::StepCompleted
-        | RuntimeEventKind::Failed { .. }
-        | RuntimeEventKind::Cancelled { .. } => {
+        RuntimeEvent::StepCompleted { .. }
+        | RuntimeEvent::RunFailed { .. }
+        | RuntimeEvent::RunCancelled { .. }
+        | RuntimeEvent::FinalOutputRecorded { .. } => {
             *pending_commentary = None;
         }
         _ => {}
     }
 
     Ok(())
+}
+
+async fn write_progress_commentary<W>(commentary: &str, writer: &mut W) -> Result<(), CliError>
+where
+    W: AsyncWrite + Unpin,
+{
+    let commentary = commentary.trim();
+    if commentary.is_empty() {
+        return Ok(());
+    }
+
+    writer
+        .write_all(commentary.as_bytes())
+        .await
+        .map_err(stdout_error)?;
+    writer.write_all(b"\n\n").await.map_err(stdout_error)?;
+    writer.flush().await.map_err(stdout_error)
 }
 
 async fn write_human_progress_line<W>(writer: &mut W, line: String) -> Result<(), CliError>
@@ -532,32 +533,16 @@ fn format_delay_ms(delay_ms: u64) -> String {
     }
 }
 
-async fn write_progress_commentary_artifact<W>(
-    runtime: &Runtime,
-    artifact_id: &ArtifactId,
-    writer: &mut W,
-) -> Result<(), CliError>
+async fn write_public_runtime_event<W>(event: &RuntimeEvent, writer: &mut W) -> Result<(), CliError>
 where
     W: AsyncWrite + Unpin,
 {
-    let content = runtime
-        .read_artifact_content(artifact_id)
-        .await
-        .map_err(unexpected)?;
-    let Some(text) = content.as_text() else {
-        return Ok(());
-    };
-    let text = text.trim();
-    if text.is_empty() {
-        return Ok(());
-    }
-
+    let line = serde_json::to_string(event).map_err(unexpected)?;
     writer
-        .write_all(text.as_bytes())
+        .write_all(line.as_bytes())
         .await
         .map_err(stdout_error)?;
-    writer.write_all(b"\n\n").await.map_err(stdout_error)?;
-    writer.flush().await.map_err(stdout_error)
+    writer.write_all(b"\n").await.map_err(stdout_error)
 }
 
 async fn write_agent_loop_result<W>(

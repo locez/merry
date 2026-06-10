@@ -26,12 +26,12 @@ fn denied_tool_action_records_audit_lifecycle_before_artifact_and_resolution() {
 
     assert_eq!(events.len(), 2);
     assert!(matches!(
-        events[0].kind,
-        RuntimeEventKind::ArtifactRecorded { .. }
+        events[0].payload,
+        RuntimeJournalPayload::ArtifactRecorded { .. }
     ));
     assert!(matches!(
-        events[1].kind,
-        RuntimeEventKind::ToolCallResolved { .. }
+        events[1].payload,
+        RuntimeJournalPayload::ToolCallResolved { .. }
     ));
 
     let audit_snapshot = session.action_audit_snapshot();
@@ -137,12 +137,12 @@ fn proposed_tool_execution_records_executed_audit_before_artifact_and_resolution
 
     assert_eq!(events.len(), 2);
     assert!(matches!(
-        events[0].kind,
-        RuntimeEventKind::ArtifactRecorded { .. }
+        events[0].payload,
+        RuntimeJournalPayload::ArtifactRecorded { .. }
     ));
     assert!(matches!(
-        events[1].kind,
-        RuntimeEventKind::ToolCallResolved { .. }
+        events[1].payload,
+        RuntimeJournalPayload::ToolCallResolved { .. }
     ));
 
     let audit_snapshot = session.action_audit_snapshot();
@@ -263,8 +263,8 @@ fn proposed_tool_execution_can_record_observation_after_artifact_before_resoluti
         .expect("observed proposed execution should resolve");
     let result = events
         .iter()
-        .find_map(|event| match &event.kind {
-            RuntimeEventKind::ToolCallResolved { result } => Some(result),
+        .find_map(|event| match &event.payload {
+            RuntimeJournalPayload::ToolCallResolved { result } => Some(result),
             _ => None,
         })
         .expect("tool result should resolve");
@@ -406,14 +406,17 @@ fn submit_tool_result_starts_session_before_artifact_and_resolution_when_needed(
             .collect::<Vec<_>>(),
         vec![0, 1, 2]
     );
-    assert!(matches!(events[0].kind, RuntimeEventKind::SessionStarted));
     assert!(matches!(
-        &events[1].kind,
-        RuntimeEventKind::ArtifactRecorded { artifact: recorded } if recorded == &artifact
+        events[0].payload,
+        RuntimeJournalPayload::SessionStarted
     ));
     assert!(matches!(
-        &events[2].kind,
-        RuntimeEventKind::ToolCallResolved { result: resolved } if resolved == &result
+        &events[1].payload,
+        RuntimeJournalPayload::ArtifactRecorded { artifact: recorded } if recorded == &artifact
+    ));
+    assert!(matches!(
+        &events[2].payload,
+        RuntimeJournalPayload::ToolCallResolved { result: resolved } if resolved == &result
     ));
 }
 

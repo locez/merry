@@ -54,7 +54,7 @@ impl TaskLedger {
 
     /// Records an event lifecycle fact that was durably written before event emission.
     ///
-    /// Runtime session code calls this before the matching [`merry_core::RuntimeEvent`]
+    /// Runtime session code calls this before the matching [`merry_core::RuntimeJournalEvent`]
     /// is emitted or returned to a caller.
     pub fn record_lifecycle(&mut self, sequence: u64, kind: LedgerFactKind) -> &LifecycleFact {
         let fact = LifecycleFact {

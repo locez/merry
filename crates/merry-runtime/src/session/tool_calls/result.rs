@@ -5,8 +5,8 @@ use crate::{
     ledger::{LedgerFactKind, LedgerUpdateKind},
 };
 use merry_core::{
-    ArtifactId, ArtifactKind, ArtifactRef, ErrorInfo, RuntimeEvent, RuntimeEventKind, ToolCallId,
-    ToolCallResult, ToolCallResultStatus,
+    ArtifactId, ArtifactKind, ArtifactRef, ErrorInfo, RuntimeJournalEvent, RuntimeJournalPayload,
+    ToolCallId, ToolCallResult, ToolCallResultStatus,
 };
 
 impl SessionState {
@@ -14,7 +14,7 @@ impl SessionState {
         &mut self,
         call_id: ToolCallId,
         json: String,
-    ) -> Result<(crate::FinalOutput, Vec<RuntimeEvent>), RuntimeError> {
+    ) -> Result<(crate::FinalOutput, Vec<RuntimeJournalEvent>), RuntimeError> {
         let Some(pending_index) = self
             .pending_tool_calls
             .iter()
@@ -51,13 +51,13 @@ impl SessionState {
             events.push(started);
         }
         events.push(self.record_event(
-            RuntimeEventKind::ArtifactRecorded {
+            RuntimeJournalPayload::ArtifactRecorded {
                 artifact: recorded.clone(),
             },
             LedgerFactKind::ArtifactRecorded,
         ));
         events.push(self.record_event(
-            RuntimeEventKind::FinalOutputRecorded {
+            RuntimeJournalPayload::FinalOutputRecorded {
                 call_id: call_id.clone(),
                 artifact: recorded.clone(),
             },
@@ -71,7 +71,7 @@ impl SessionState {
         &mut self,
         result: ToolCallResult,
         content: ArtifactContent,
-    ) -> Result<Vec<RuntimeEvent>, RuntimeError> {
+    ) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
         let Some(pending_index) = self
             .pending_tool_calls
             .iter()
@@ -111,11 +111,11 @@ impl SessionState {
         }
 
         events.push(self.record_event(
-            RuntimeEventKind::ArtifactRecorded { artifact: recorded },
+            RuntimeJournalPayload::ArtifactRecorded { artifact: recorded },
             LedgerFactKind::ArtifactRecorded,
         ));
         events.push(self.record_event(
-            RuntimeEventKind::ToolCallResolved {
+            RuntimeJournalPayload::ToolCallResolved {
                 result: result.clone(),
             },
             LedgerFactKind::ToolCallResolved,
@@ -134,7 +134,7 @@ impl SessionState {
         content: ArtifactContent,
         diagnostic: Option<ErrorInfo>,
         execution_evidence: Option<ActionExecutionEvidence>,
-    ) -> Result<Vec<RuntimeEvent>, RuntimeError> {
+    ) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
         debug_assert!(execution_evidence.is_none());
         let artifact_kind = self.tool_result_artifact_kind(&content)?;
         let artifact = ArtifactRef::new(self.next_tool_result_artifact_id(), artifact_kind);

@@ -71,7 +71,7 @@ pub fn assert_debug_output(stdout: &[u8], expected_session_id: &str) {
     for (index, event) in events.iter().enumerate() {
         assert_eq!(event["session_id"], expected_session_id);
         assert_eq!(event["sequence"], index as u64);
-        assert_eq!(event["kind"]["type"], expected_kinds[index]);
+        assert_eq!(event["payload"]["type"], expected_kinds[index]);
     }
 }
 
@@ -87,7 +87,7 @@ pub fn event_kinds(events: &[Value]) -> Vec<&str> {
     events
         .iter()
         .map(|event| {
-            event["kind"]["type"]
+            event["payload"]["type"]
                 .as_str()
                 .expect("event kind type should be a string")
         })

@@ -159,7 +159,7 @@ async fn step_uses_primary_model_and_does_not_call_any_non_primary_role_provider
         [
             "SessionStarted",
             "StepStarted",
-            "ArtifactRecorded",
+            "AssistantOutputRecorded",
             "StepCompleted"
         ]
     );
@@ -191,7 +191,7 @@ async fn seed_two_history_items_for_compaction(runtime: &Runtime) {
     assert!(
         events
             .iter()
-            .any(|event| matches!(event.kind, RuntimeEventKind::StepCompleted)),
+            .any(|event| matches!(event.payload, RuntimeJournalPayload::StepCompleted)),
         "seed step should complete"
     );
     let events = collect_step(
@@ -203,7 +203,7 @@ async fn seed_two_history_items_for_compaction(runtime: &Runtime) {
     assert!(
         events
             .iter()
-            .any(|event| matches!(event.kind, RuntimeEventKind::StepCompleted)),
+            .any(|event| matches!(event.payload, RuntimeJournalPayload::StepCompleted)),
         "tail seed step should complete"
     );
 }

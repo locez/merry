@@ -1,5 +1,5 @@
 use crate::cli_error::{CliError, unexpected};
-use merry_core::{RuntimeEvent, RuntimeEventKind, ToolCallResultStatus, ToolName};
+use merry_core::{RuntimeJournalEvent, RuntimeJournalPayload, ToolCallResultStatus, ToolName};
 use merry_runtime::{AgentLoopStatus, Runtime};
 use std::{collections::BTreeMap, fs, path::Path};
 
@@ -59,11 +59,11 @@ pub(crate) async fn assert_permission_network_smoke_result(
     let mut saw_initial_failed_network_attempt = false;
     let mut saw_approved_successful_network_attempt = false;
     for event in result.events() {
-        match &event.kind {
-            RuntimeEventKind::ToolCallPending { call } => {
+        match &event.payload {
+            RuntimeJournalPayload::ToolCallPending { call } => {
                 pending_by_call_id.insert(call.id().clone(), call.clone());
             }
-            RuntimeEventKind::ToolCallResolved { result } => {
+            RuntimeJournalPayload::ToolCallResolved { result } => {
                 let call = pending_by_call_id.get(result.call_id()).ok_or_else(|| {
                     CliError::Unexpected(format!(
                         "permission-network-smoke resolved unknown tool call {}",
@@ -135,8 +135,8 @@ pub(crate) async fn assert_coding_loop_task_smoke_result(
     let statuses = result
         .events()
         .iter()
-        .filter_map(|event| match &event.kind {
-            RuntimeEventKind::ToolCallResolved { result } => Some(result.status()),
+        .filter_map(|event| match &event.payload {
+            RuntimeJournalPayload::ToolCallResolved { result } => Some(result.status()),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -228,12 +228,12 @@ pub(crate) async fn assert_coding_loop_subagent_live_smoke_result(
 }
 
 pub(crate) fn assert_coding_loop_task_smoke_uses_small_patch(
-    events: &[RuntimeEvent],
+    events: &[RuntimeJournalEvent],
     fixture: CodingLoopTaskSmokeFixture,
 ) -> Result<(), CliError> {
     let mut pending_patch_args = BTreeMap::new();
     for event in events {
-        if let RuntimeEventKind::ToolCallPending { call } = &event.kind
+        if let RuntimeJournalPayload::ToolCallPending { call } = &event.payload
             && call.name().as_str() == WORKSPACE_PATCH_TOOL
         {
             let arguments = call.arguments().as_object();
@@ -245,7 +245,7 @@ pub(crate) fn assert_coding_loop_task_smoke_uses_small_patch(
     }
 
     let Some(patch) = events.iter().find_map(|event| {
-        let RuntimeEventKind::ToolCallResolved { result } = &event.kind else {
+        let RuntimeJournalPayload::ToolCallResolved { result } = &event.payload else {
             return None;
         };
         if result.status() != ToolCallResultStatus::Succeeded {
@@ -292,7 +292,7 @@ fn workspace_patch_envelope_is_accepted(patch: &str) -> bool {
 
 pub(crate) async fn assert_coding_loop_subagent_live_smoke_tool_sequence(
     runtime: &Runtime,
-    events: &[RuntimeEvent],
+    events: &[RuntimeJournalEvent],
 ) -> Result<(), CliError> {
     let mut pending_by_call_id = BTreeMap::new();
     let mut resolved_tool_names = Vec::new();
@@ -301,8 +301,8 @@ pub(crate) async fn assert_coding_loop_subagent_live_smoke_tool_sequence(
     let mut wait_call_id = None;
     let mut parent_patch_call_seen = false;
     for event in events {
-        match &event.kind {
-            RuntimeEventKind::ToolCallPending { call } => {
+        match &event.payload {
+            RuntimeJournalPayload::ToolCallPending { call } => {
                 pending_by_call_id.insert(call.id().clone(), call.clone());
                 match call.name().as_str() {
                     "spawn_subagents" => spawn_call_id = Some(call.id().clone()),
@@ -311,7 +311,7 @@ pub(crate) async fn assert_coding_loop_subagent_live_smoke_tool_sequence(
                     _ => {}
                 }
             }
-            RuntimeEventKind::ToolCallResolved { result } => {
+            RuntimeJournalPayload::ToolCallResolved { result } => {
                 if result.status() != ToolCallResultStatus::Succeeded {
                     return Err(CliError::Unexpected(format!(
                         "coding-loop-subagent-live-smoke tool call {} did not succeed",
@@ -488,11 +488,11 @@ pub(crate) async fn assert_coding_loop_subagent_live_smoke_tool_sequence(
     Ok(())
 }
 
-fn assert_coding_loop_smoke_tool_results(events: &[RuntimeEvent]) -> Result<(), CliError> {
+fn assert_coding_loop_smoke_tool_results(events: &[RuntimeJournalEvent]) -> Result<(), CliError> {
     let statuses = events
         .iter()
-        .filter_map(|event| match &event.kind {
-            RuntimeEventKind::ToolCallResolved { result } => Some(result.status()),
+        .filter_map(|event| match &event.payload {
+            RuntimeJournalPayload::ToolCallResolved { result } => Some(result.status()),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -516,16 +516,16 @@ fn assert_coding_loop_smoke_tool_results(events: &[RuntimeEvent]) -> Result<(), 
     Ok(())
 }
 
-fn failed_tool_result_summary(events: &[RuntimeEvent]) -> Option<String> {
+fn failed_tool_result_summary(events: &[RuntimeJournalEvent]) -> Option<String> {
     let mut pending_by_call_id = BTreeMap::new();
     for event in events {
-        if let RuntimeEventKind::ToolCallPending { call } = &event.kind {
+        if let RuntimeJournalPayload::ToolCallPending { call } = &event.payload {
             pending_by_call_id.insert(call.id().clone(), call.name().clone());
         }
     }
 
     events.iter().find_map(|event| {
-        let RuntimeEventKind::ToolCallResolved { result } = &event.kind else {
+        let RuntimeJournalPayload::ToolCallResolved { result } = &event.payload else {
             return None;
         };
         if result.status() != ToolCallResultStatus::Failed {
@@ -553,17 +553,17 @@ fn failed_tool_result_summary(events: &[RuntimeEvent]) -> Option<String> {
 
 pub(crate) async fn assert_coding_loop_live_smoke_tool_sequence(
     runtime: &Runtime,
-    events: &[RuntimeEvent],
+    events: &[RuntimeJournalEvent],
 ) -> Result<(), CliError> {
     let mut pending_by_call_id = BTreeMap::new();
     let mut resolved_tool_names = Vec::new();
     let mut resolved_artifacts = Vec::new();
     for event in events {
-        match &event.kind {
-            RuntimeEventKind::ToolCallPending { call } => {
+        match &event.payload {
+            RuntimeJournalPayload::ToolCallPending { call } => {
                 pending_by_call_id.insert(call.id().clone(), call.clone());
             }
-            RuntimeEventKind::ToolCallResolved { result } => {
+            RuntimeJournalPayload::ToolCallResolved { result } => {
                 if result.status() != ToolCallResultStatus::Succeeded {
                     return Err(CliError::Unexpected(format!(
                         "live smoke tool call {} did not succeed",
@@ -622,7 +622,7 @@ pub(crate) async fn assert_coding_loop_live_smoke_tool_sequence(
 
 pub(crate) async fn assert_coding_loop_task_live_smoke_tool_sequence(
     runtime: &Runtime,
-    events: &[RuntimeEvent],
+    events: &[RuntimeJournalEvent],
     fixture: CodingLoopTaskSmokeFixture,
 ) -> Result<(), CliError> {
     let mut pending_by_call_id = BTreeMap::new();
@@ -630,11 +630,11 @@ pub(crate) async fn assert_coding_loop_task_live_smoke_tool_sequence(
     let mut resolved_artifacts = Vec::new();
     let mut resolved_read_paths = Vec::new();
     for event in events {
-        match &event.kind {
-            RuntimeEventKind::ToolCallPending { call } => {
+        match &event.payload {
+            RuntimeJournalPayload::ToolCallPending { call } => {
                 pending_by_call_id.insert(call.id().clone(), call.clone());
             }
-            RuntimeEventKind::ToolCallResolved { result } => {
+            RuntimeJournalPayload::ToolCallResolved { result } => {
                 let call = pending_by_call_id.get(result.call_id()).ok_or_else(|| {
                     CliError::Unexpected(format!(
                         "task live smoke resolved unknown tool call {}",

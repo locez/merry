@@ -1,7 +1,7 @@
 use futures_util::StreamExt;
 use merry_core::{
-    ArtifactId, EvidenceLocator, PendingToolCall, RuntimeEvent, RuntimeEventKind, SessionId,
-    ToolCallId, ToolInputSchema, ToolName, ToolSpec,
+    ArtifactId, EvidenceLocator, PendingToolCall, RuntimeJournalEvent, RuntimeJournalPayload,
+    SessionId, ToolCallId, ToolInputSchema, ToolName, ToolSpec,
 };
 use merry_llm::{
     FinishReason, ModelEvent, ModelName, ModelOutput, ModelResponse, ModelToolCall,
@@ -68,7 +68,7 @@ fn pending_tool_response(call_id: &str) -> ModelEvent {
     }
 }
 
-async fn collect_pending_step(runtime: &Runtime, text: &str) -> Vec<RuntimeEvent> {
+async fn collect_pending_step(runtime: &Runtime, text: &str) -> Vec<RuntimeJournalEvent> {
     runtime
         .step(
             StepInput::user_text(text).expect("valid step input"),
@@ -79,20 +79,21 @@ async fn collect_pending_step(runtime: &Runtime, text: &str) -> Vec<RuntimeEvent
         .await
 }
 
-fn event_kind_names(events: &[RuntimeEvent]) -> Vec<&'static str> {
+fn event_kind_names(events: &[RuntimeJournalEvent]) -> Vec<&'static str> {
     events
         .iter()
-        .map(|event| match event.kind {
-            RuntimeEventKind::SessionStarted => "SessionStarted",
-            RuntimeEventKind::StepStarted => "StepStarted",
-            RuntimeEventKind::StepCompleted => "StepCompleted",
-            RuntimeEventKind::Cancelled { .. } => "Cancelled",
-            RuntimeEventKind::Failed { .. } => "Failed",
-            RuntimeEventKind::ArtifactRecorded { .. } => "ArtifactRecorded",
-            RuntimeEventKind::EvidenceReferenced { .. } => "EvidenceReferenced",
-            RuntimeEventKind::ToolCallPending { .. } => "ToolCallPending",
-            RuntimeEventKind::ToolCallResolved { .. } => "ToolCallResolved",
-            RuntimeEventKind::SkillUsed { .. } => "SkillUsed",
+        .map(|event| match event.payload {
+            RuntimeJournalPayload::SessionStarted => "SessionStarted",
+            RuntimeJournalPayload::StepStarted => "StepStarted",
+            RuntimeJournalPayload::StepCompleted => "StepCompleted",
+            RuntimeJournalPayload::Cancelled { .. } => "Cancelled",
+            RuntimeJournalPayload::Failed { .. } => "Failed",
+            RuntimeJournalPayload::ArtifactRecorded { .. } => "ArtifactRecorded",
+            RuntimeJournalPayload::AssistantOutputRecorded { .. } => "AssistantOutputRecorded",
+            RuntimeJournalPayload::EvidenceReferenced { .. } => "EvidenceReferenced",
+            RuntimeJournalPayload::ToolCallPending { .. } => "ToolCallPending",
+            RuntimeJournalPayload::ToolCallResolved { .. } => "ToolCallResolved",
+            RuntimeJournalPayload::SkillUsed { .. } => "SkillUsed",
             _ => "Unknown",
         })
         .collect()
@@ -229,8 +230,8 @@ async fn pre_cancelled_step_emits_only_cancelled() {
 
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].sequence, 0);
-    match &events[0].kind {
-        RuntimeEventKind::Cancelled { diagnostic } => {
+    match &events[0].payload {
+        RuntimeJournalPayload::Cancelled { diagnostic } => {
             assert_eq!(diagnostic.code(), "cancelled");
         }
         other => panic!("expected Cancelled event, got {other:?}"),
@@ -352,7 +353,7 @@ async fn pre_cancelled_tool_execution_keeps_pending_and_releases_active_permit()
     assert!(
         follow_up_events
             .iter()
-            .any(|event| matches!(event.kind, RuntimeEventKind::Failed { .. }))
+            .any(|event| matches!(event.payload, RuntimeJournalPayload::Failed { .. }))
     );
 }
 
@@ -462,7 +463,7 @@ async fn cancelling_during_tool_execution_keeps_pending_and_releases_active_perm
     assert!(
         follow_up_events
             .iter()
-            .any(|event| matches!(event.kind, RuntimeEventKind::Failed { .. }))
+            .any(|event| matches!(event.payload, RuntimeJournalPayload::Failed { .. }))
     );
 }
 
@@ -527,7 +528,7 @@ async fn cancelling_after_successful_tool_execution_keeps_pending_and_releases_a
     assert!(
         follow_up_events
             .iter()
-            .any(|event| matches!(event.kind, RuntimeEventKind::Failed { .. }))
+            .any(|event| matches!(event.payload, RuntimeJournalPayload::Failed { .. }))
     );
 }
 
@@ -560,12 +561,12 @@ async fn cancelling_full_stream_releases_active_step_after_producer_stops() {
     let old_events = first_stream.by_ref().collect::<Vec<_>>().await;
     assert_eq!(old_events.len(), 2);
     assert!(matches!(
-        old_events[0].kind,
-        RuntimeEventKind::SessionStarted
+        old_events[0].payload,
+        RuntimeJournalPayload::SessionStarted
     ));
     assert!(matches!(
-        old_events[1].kind,
-        RuntimeEventKind::Cancelled { .. }
+        old_events[1].payload,
+        RuntimeJournalPayload::Cancelled { .. }
     ));
 
     let second_events = runtime
@@ -585,12 +586,12 @@ async fn cancelling_full_stream_releases_active_step_after_producer_stops() {
         vec![2, 3]
     );
     assert!(matches!(
-        second_events[0].kind,
-        RuntimeEventKind::StepStarted
+        second_events[0].payload,
+        RuntimeJournalPayload::StepStarted
     ));
     assert!(matches!(
-        second_events[1].kind,
-        RuntimeEventKind::StepCompleted
+        second_events[1].payload,
+        RuntimeJournalPayload::StepCompleted
     ));
 }
 
@@ -621,11 +622,20 @@ async fn cancelling_full_stream_eventually_emits_cancelled() {
             .collect::<Vec<_>>(),
         vec![0, 1]
     );
-    assert!(matches!(events[0].kind, RuntimeEventKind::SessionStarted));
-    assert!(matches!(events[1].kind, RuntimeEventKind::Cancelled { .. }));
+    assert!(matches!(
+        events[0].payload,
+        RuntimeJournalPayload::SessionStarted
+    ));
+    assert!(matches!(
+        events[1].payload,
+        RuntimeJournalPayload::Cancelled { .. }
+    ));
 }
 
-async fn start_step_after_cleanup(runtime: &Runtime, text: &str) -> Vec<merry_core::RuntimeEvent> {
+async fn start_step_after_cleanup(
+    runtime: &Runtime,
+    text: &str,
+) -> Vec<merry_core::RuntimeJournalEvent> {
     for _ in 0..8 {
         tokio::task::yield_now().await;
 
@@ -677,11 +687,11 @@ async fn dropping_full_stream_keeps_step_active_until_producer_stops() {
         vec![1, 2]
     );
     assert!(matches!(
-        second_events[0].kind,
-        RuntimeEventKind::StepStarted
+        second_events[0].payload,
+        RuntimeJournalPayload::StepStarted
     ));
     assert!(matches!(
-        second_events[1].kind,
-        RuntimeEventKind::StepCompleted
+        second_events[1].payload,
+        RuntimeJournalPayload::StepCompleted
     ));
 }

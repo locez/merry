@@ -43,34 +43,41 @@ async def render_events(
     async for event in stream:
         event_type = event.get("type")
 
-        if event_type == "runtime":
-            runtime_event = event["event"]
-            if not isinstance(runtime_event, dict):
-                raise TypeError("interactive runtime event must be a dict")
-            kind = runtime_event["kind"]
-            if not isinstance(kind, dict):
-                raise TypeError("interactive runtime event kind must be a dict")
-            kind_type = kind["type"]
-            event_session = runtime_event.get("session_id")
-            print(f"[{label}] runtime_event kind={kind_type} event_session={event_session}")
-            if kind_type == "step_completed":
-                seen_completed_turns += 1
-                if seen_completed_turns >= completed_turns:
-                    completed.set()
-        elif event_type == "state_changed":
+        if event_type == "interactive_run_state_changed":
             print(f"[{label}] state={event['state']}")
-        elif event_type == "input_accepted":
-            print(f"[{label}] input_accepted queue={event['queue']} ids={event['ids']}")
-        elif event_type == "queue_changed":
-            snapshot = event["snapshot"]
-            if not isinstance(snapshot, dict):
-                raise TypeError("interactive queue snapshot must be a dict")
+        elif event_type == "queued_input_accepted":
+            print(
+                f"[{label}] input_accepted "
+                f"lane={event['lane']} texts={_event_texts(event)}"
+            )
+        elif event_type == "queued_inputs_changed":
+            inputs = event["inputs"]
+            if not isinstance(inputs, dict):
+                raise TypeError("interactive queued inputs must be a dict")
             print(
                 f"[{label}] queue "
-                f"next={_texts(snapshot, 'next')} "
-                f"suspended={_texts(snapshot, 'suspended')} "
-                f"backlog={_texts(snapshot, 'backlog')}"
+                f"next={_texts(inputs, 'next')} "
+                f"suspended={_texts(inputs, 'suspended')} "
+                f"backlog={_texts(inputs, 'backlog')}"
             )
+        elif event_type == "assistant_message":
+            print(f"[{label}] assistant={event['text']}")
+        elif event_type == "tool_call_started":
+            call = event["call"]
+            if not isinstance(call, dict):
+                raise TypeError("tool call must be a dict")
+            print(f"[{label}] tool_call_started name={call.get('name')} id={call.get('id')}")
+        elif event_type == "tool_call_finished":
+            result = event["result"]
+            if not isinstance(result, dict):
+                raise TypeError("tool result must be a dict")
+            print(f"[{label}] tool_call_finished status={result.get('status')}")
+        elif event_type == "step_completed":
+            source = event.get("source")
+            print(f"[{label}] runtime_event type=step_completed source={source}")
+            seen_completed_turns += 1
+            if seen_completed_turns >= completed_turns:
+                completed.set()
         else:
             print(f"[{label}] event type={event_type}")
 
@@ -90,6 +97,21 @@ def _texts(snapshot: dict[str, object], queue: str) -> list[str]:
     return texts
 
 
+def _event_texts(event: dict[str, object]) -> list[str]:
+    items = event.get("inputs", [])
+    if not isinstance(items, list):
+        raise TypeError("queued input accepted event inputs must be a list")
+    texts: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            raise TypeError("queued input accepted event items must be dicts")
+        text = item.get("text")
+        if not isinstance(text, str):
+            raise TypeError("queued input accepted event item text must be a str")
+        texts.append(text)
+    return texts
+
+
 async def main() -> None:
     label = "interactive"
     runtime = runtime_from_env_config()
@@ -104,21 +126,34 @@ async def main() -> None:
     first = await run.input.submit_next(
         "Reply in one short sentence that says this is the first interactive turn."
     )
-    print(f"[{label}] submitted_next id={first['id']} handle_session={runtime.session_id}")
+    print(
+        f"[{label}] submitted_next lane={first.lane} text={first.text!r} "
+        f"handle_session={runtime.session_id}"
+    )
 
     second = await run.input.enqueue(
-        "Reply in one short sentence that says this is the queued backlog turn."
+        "Reply in one short sentence that says this backlog turn will be edited."
     )
-    print(f"[{label}] enqueued_backlog id={second['id']} handle_session={runtime.session_id}")
-
-    await run.input.update(
-        second["id"],
-        "Reply in one short sentence that says this is the edited backlog turn.",
+    print(
+        f"[{label}] enqueued_backlog lane={second.lane} text={second.text!r} "
+        f"handle_session={runtime.session_id}"
     )
-    print(f"[{label}] updated_backlog id={second['id']} handle_session={runtime.session_id}")
-
-    await run.control.resume_backlog()
-    print(f"[{label}] resumed_backlog handle_session={runtime.session_id}")
+    try:
+        await second.update(
+            second.text.replace(
+                "will be edited",
+                "is the edited automatic backlog turn",
+            )
+        )
+        print(
+            f"[{label}] updated_backlog text={second.text!r} "
+            f"handle_session={runtime.session_id}"
+        )
+    except merry.MerryError:
+        print(
+            f"[{label}] backlog_already_accepted text={second.text!r} "
+            f"handle_session={runtime.session_id}"
+        )
 
     await asyncio.wait_for(completed.wait(), timeout=180)
     await run.control.close()

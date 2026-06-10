@@ -11,7 +11,7 @@ use crate::{
     tool::{ActionProposalEvidence, ToolActionPreflight, ToolExecutionContext, ToolExecutionError},
 };
 use merry_core::{
-    CoreError, PendingToolCall, RuntimeEvent, RuntimeEventKind, SessionId, ToolCallId,
+    CoreError, PendingToolCall, RuntimeJournalEvent, RuntimeJournalPayload, SessionId, ToolCallId,
     ToolCallResultStatus,
 };
 use std::sync::Arc;
@@ -27,7 +27,7 @@ pub(super) async fn execute_tool_call_with_active_permit(
     inner: &Arc<RuntimeInner>,
     call_id: &ToolCallId,
     context: ToolExecutionContext,
-) -> Result<Vec<RuntimeEvent>, RuntimeError> {
+) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
     if context.cancellation_token().is_cancelled() {
         return Err(RuntimeError::ToolExecutionCancelled {
             session_id: inner.session_id.clone(),
@@ -471,7 +471,7 @@ pub(super) fn denied_tool_action_outcome(pending: &PendingToolCall) -> crate::To
 pub(super) fn trace_denied_tool_execution(
     session_id: &str,
     pending: &PendingToolCall,
-    events: &[RuntimeEvent],
+    events: &[RuntimeJournalEvent],
 ) {
     tracing::info!(
         event = "runtime.tool.execute.finish",
@@ -485,11 +485,11 @@ pub(super) fn trace_denied_tool_execution(
     );
 }
 
-fn tool_resolution_artifact_id(events: &[RuntimeEvent]) -> String {
+fn tool_resolution_artifact_id(events: &[RuntimeJournalEvent]) -> String {
     events
         .iter()
-        .find_map(|event| match &event.kind {
-            RuntimeEventKind::ToolCallResolved { result } => {
+        .find_map(|event| match &event.payload {
+            RuntimeJournalPayload::ToolCallResolved { result } => {
                 Some(result.artifact().id().as_str().to_owned())
             }
             _ => None,

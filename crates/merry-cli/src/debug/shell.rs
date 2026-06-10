@@ -13,7 +13,7 @@ use crate::sandbox::{
     runtime_profile_from_evidence as sandbox_runtime_profile_from_evidence,
 };
 use futures_util::stream;
-use merry_core::{ProviderName, RuntimeEvent, RuntimeEventKind, SessionId, ToolName};
+use merry_core::{ProviderName, RuntimeJournalEvent, RuntimeJournalPayload, SessionId, ToolName};
 use merry_llm::{
     FinishReason, ModelCapabilities, ModelError, ModelEvent, ModelEventStream, ModelName,
     ModelOutput, ModelProvider, ModelProviderFuture, ModelRequest, ModelResponse,
@@ -186,7 +186,7 @@ pub(crate) fn process_action_intent(argv: Vec<String>) -> Result<ProcessActionIn
 
 async fn write_process_output<W>(
     runtime: &Runtime,
-    events: &[RuntimeEvent],
+    events: &[RuntimeJournalEvent],
     writer: &mut W,
 ) -> Result<(), CliError>
 where
@@ -194,8 +194,8 @@ where
 {
     let result = events
         .iter()
-        .find_map(|event| match &event.kind {
-            RuntimeEventKind::ToolCallResolved { result } => Some(result),
+        .find_map(|event| match &event.payload {
+            RuntimeJournalPayload::ToolCallResolved { result } => Some(result),
             _ => None,
         })
         .ok_or_else(|| {

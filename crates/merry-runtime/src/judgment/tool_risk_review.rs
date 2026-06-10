@@ -73,7 +73,7 @@ impl ModelJudgmentOutput {
             JudgmentPurpose::ToolRiskReview.as_str(),
         )?;
         validate_model_judgment_literal(
-            "recommendation.kind",
+            "recommendation.payload",
             &self.recommendation.kind,
             MODEL_JUDGMENT_TOOL_RISK_RECOMMENDATION_KIND,
         )?;

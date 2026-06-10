@@ -6,8 +6,8 @@ use crate::{
     session::tool_result::ProposedToolExecutionOutcome,
 };
 use merry_core::{
-    ArtifactRef, ErrorInfo, PendingToolCall, RuntimeEvent, RuntimeEventKind, ToolCallResult,
-    ToolCallResultStatus,
+    ArtifactRef, ErrorInfo, PendingToolCall, RuntimeJournalEvent, RuntimeJournalPayload,
+    ToolCallResult, ToolCallResultStatus,
 };
 
 impl SessionState {
@@ -19,7 +19,7 @@ impl SessionState {
         diagnostic: Option<ErrorInfo>,
         execution_evidence: Option<ActionExecutionEvidence>,
         policy: ActionAuditPolicy,
-    ) -> Result<Vec<RuntimeEvent>, RuntimeError> {
+    ) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
         self.submit_proposed_tool_execution_outcome_record(ProposedToolExecutionOutcome::new(
             proposal,
             status,
@@ -33,7 +33,7 @@ impl SessionState {
     pub(crate) fn submit_proposed_tool_execution_outcome_record(
         &mut self,
         outcome: ProposedToolExecutionOutcome,
-    ) -> Result<Vec<RuntimeEvent>, RuntimeError> {
+    ) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
         let ProposedToolExecutionOutcome {
             proposal,
             status,
@@ -118,14 +118,14 @@ impl SessionState {
         self.resolved_tool_calls.insert(result.call_id().clone());
 
         events.push(self.record_event(
-            RuntimeEventKind::ArtifactRecorded { artifact: recorded },
+            RuntimeJournalPayload::ArtifactRecorded { artifact: recorded },
             LedgerFactKind::ArtifactRecorded,
         ));
         if let Some(observation) = observation {
             self.record_tool_result_observation(observation);
         }
         events.push(self.record_event(
-            RuntimeEventKind::ToolCallResolved {
+            RuntimeJournalPayload::ToolCallResolved {
                 result: result.clone(),
             },
             LedgerFactKind::ToolCallResolved,
@@ -144,7 +144,7 @@ impl SessionState {
         proposal: Option<ActionProposal>,
         content: ArtifactContent,
         diagnostic: ErrorInfo,
-    ) -> Result<Vec<RuntimeEvent>, RuntimeError> {
+    ) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
         debug_assert!(!decision.is_allowed());
 
         let Some(pending_index) = self
@@ -194,11 +194,11 @@ impl SessionState {
             return Ok(vec![
                 started,
                 self.record_event(
-                    RuntimeEventKind::ArtifactRecorded { artifact },
+                    RuntimeJournalPayload::ArtifactRecorded { artifact },
                     LedgerFactKind::ArtifactRecorded,
                 ),
                 self.record_event(
-                    RuntimeEventKind::ToolCallResolved { result },
+                    RuntimeJournalPayload::ToolCallResolved { result },
                     LedgerFactKind::ToolCallResolved,
                 ),
             ]);
@@ -222,11 +222,11 @@ impl SessionState {
         self.resolved_tool_calls.insert(result.call_id().clone());
         Ok(vec![
             self.record_event(
-                RuntimeEventKind::ArtifactRecorded { artifact },
+                RuntimeJournalPayload::ArtifactRecorded { artifact },
                 LedgerFactKind::ArtifactRecorded,
             ),
             self.record_event(
-                RuntimeEventKind::ToolCallResolved { result },
+                RuntimeJournalPayload::ToolCallResolved { result },
                 LedgerFactKind::ToolCallResolved,
             ),
         ])

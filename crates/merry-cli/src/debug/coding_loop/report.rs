@@ -3,7 +3,7 @@ use crate::debug::coding_loop::{
     CODING_LOOP_SUBAGENT_LIVE_SMOKE_FILE, CODING_LOOP_SUBAGENT_LIVE_SMOKE_TARGET,
 };
 use crate::runtime_events::write_runtime_event_slice;
-use merry_core::{RuntimeEvent, RuntimeEventKind};
+use merry_core::{RuntimeJournalEvent, RuntimeJournalPayload};
 use merry_runtime::{ArtifactContent, AutomaticCompactionConfig, Runtime};
 use std::{fs, path::Path};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
@@ -114,14 +114,14 @@ where
 
 async fn write_process_artifact_previews<W>(
     runtime: &Runtime,
-    events: &[RuntimeEvent],
+    events: &[RuntimeJournalEvent],
     writer: &mut W,
 ) -> Result<(), CliError>
 where
     W: AsyncWrite + Unpin,
 {
     for event in events {
-        let RuntimeEventKind::ToolCallResolved { result } = &event.kind else {
+        let RuntimeJournalPayload::ToolCallResolved { result } = &event.payload else {
             continue;
         };
         let content = runtime
@@ -159,7 +159,7 @@ pub(crate) async fn write_coding_loop_task_live_smoke_report<W>(
     runtime: &Runtime,
     automatic_compaction: AutomaticCompactionConfig,
     passed: bool,
-    events: &[RuntimeEvent],
+    events: &[RuntimeJournalEvent],
     writer: &mut W,
 ) -> Result<(), CliError>
 where
@@ -179,7 +179,7 @@ where
 
 pub(crate) async fn write_permission_network_smoke_report<W>(
     runtime: &Runtime,
-    events: &[RuntimeEvent],
+    events: &[RuntimeJournalEvent],
     writer: &mut W,
 ) -> Result<(), CliError>
 where
@@ -196,7 +196,7 @@ where
 pub(crate) async fn write_coding_loop_subagent_live_smoke_report<W>(
     runtime: &Runtime,
     passed: bool,
-    events: &[RuntimeEvent],
+    events: &[RuntimeJournalEvent],
     smoke_root: &Path,
     writer: &mut W,
 ) -> Result<(), CliError>

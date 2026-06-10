@@ -3,8 +3,8 @@ use futures_core::Stream;
 use futures_util::StreamExt;
 use merry::providers::{OpenAiProviderConfig, RuntimeBuilderProviderExt, openai_compatible};
 use merry_core::{
-    ArtifactId, ArtifactKind, ArtifactRef, ErrorInfo, ProviderName, SessionId, ToolCallId,
-    ToolInputSchema, ToolName, ToolSpec,
+    ArtifactId, ArtifactKind, ArtifactRef, ErrorInfo, PendingToolCall, ProviderName,
+    QueuedInputLane, RuntimeEvent, SessionId, ToolCallId, ToolInputSchema, ToolName, ToolSpec,
 };
 use merry_llm::{
     FinishReason, ModelCapabilities, ModelError, ModelEvent, ModelEventStream, ModelName,
@@ -14,8 +14,7 @@ use merry_llm::{
 };
 use merry_runtime::{
     AgentLoopConfig, AgentLoopResult, AgentLoopStatus, ArtifactContent, FinalOutputContract,
-    InputReceipt, InteractiveError, InteractiveInputId, InteractiveRunEvent,
-    InteractiveRunEventStream, InteractiveRunState, QueueKind, QueueSnapshot, QueuedInputSnapshot,
+    InteractiveError, InteractiveInputItem, InteractiveInputSnapshot, InteractiveRunEventStream,
     RegisteredTool, Runtime, RuntimeBuilder, SkillMetadata, StepContext, StepInput,
     ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome, ToolExecutor,
     ToolExecutorFuture, ToolRunner,
@@ -50,9 +49,9 @@ pub(crate) struct PyRuntime {
     runtime: Runtime,
 }
 
-#[pyclass(name = "RuntimeEventStream")]
-pub(crate) struct NativeRuntimeEventStream {
-    state: Arc<Mutex<NativeRuntimeEventStreamState>>,
+#[pyclass(name = "RuntimeJournalEventStream")]
+pub(crate) struct NativeRuntimeJournalEventStream {
+    state: Arc<Mutex<NativeRuntimeJournalEventStreamState>>,
     command_sender: tokio::sync::mpsc::UnboundedSender<StreamRunnerCommand>,
 }
 
@@ -73,14 +72,19 @@ pub(crate) struct PyAgentLoopInput {
     inner: merry_runtime::AgentLoopInput,
 }
 
+#[pyclass(name = "InteractiveInputItem")]
+pub(crate) struct PyInteractiveInputItem {
+    inner: Arc<Mutex<Option<InteractiveInputItem>>>,
+}
+
 #[pyclass(name = "AgentLoopControl")]
 pub(crate) struct PyAgentLoopControl {
     inner: merry_runtime::AgentLoopControl,
 }
 
-struct NativeRuntimeEventStreamState {
+struct NativeRuntimeJournalEventStreamState {
     receiver: mpsc::Receiver<StreamRunnerMessage>,
-    events: Vec<merry_core::RuntimeEvent>,
+    events: Vec<RuntimeEvent>,
     result: Option<AgentLoopResult>,
     error: Option<StreamRunnerError>,
     finished: bool,
@@ -118,7 +122,8 @@ struct NativeInteractiveRun {
 }
 
 enum StreamRunnerMessage {
-    Event(merry_core::RuntimeEvent),
+    Event(RuntimeEvent),
+    BridgeToolRequest(PendingToolCall),
     Finished {
         result: Option<AgentLoopResult>,
     },
@@ -434,10 +439,11 @@ impl PyRuntime {
         max_model_turns: Option<usize>,
     ) -> PyResult<Py<PyAny>> {
         let runtime = self.runtime.clone();
+        let result_runtime = runtime.clone();
         let result = py.detach(move || {
             run_agent_loop_blocking(runtime, task, final_output_schema_json, max_model_turns)
         })?;
-        agent_loop_result_to_python(py, result)
+        agent_loop_result_to_python(py, &result_runtime, result)
     }
 
     #[pyo3(signature = (task, final_output_schema_json=None, max_model_turns=None))]
@@ -446,7 +452,7 @@ impl PyRuntime {
         task: String,
         final_output_schema_json: Option<String>,
         max_model_turns: Option<usize>,
-    ) -> NativeRuntimeEventStream {
+    ) -> NativeRuntimeJournalEventStream {
         let runtime = self.runtime.clone();
         let (sender, receiver) = mpsc::channel();
         let (command_sender, command_receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -467,9 +473,9 @@ impl PyRuntime {
             }
         });
 
-        NativeRuntimeEventStream {
+        NativeRuntimeJournalEventStream {
             command_sender,
-            state: Arc::new(Mutex::new(NativeRuntimeEventStreamState {
+            state: Arc::new(Mutex::new(NativeRuntimeJournalEventStreamState {
                 receiver,
                 events: Vec::new(),
                 result: None,
@@ -530,7 +536,7 @@ impl PyRuntime {
 }
 
 #[pymethods]
-impl NativeRuntimeEventStream {
+impl NativeRuntimeJournalEventStream {
     fn next_blocking(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         let state = Arc::clone(&self.state);
         let message = py.detach(move || {
@@ -539,7 +545,12 @@ impl NativeRuntimeEventStream {
         });
 
         match message {
-            Ok(StreamRunnerMessage::Event(event)) => Ok(Some(runtime_event_to_python(py, &event)?)),
+            Ok(StreamRunnerMessage::Event(event)) => {
+                Ok(Some(public_runtime_event_to_python(py, &event)?))
+            }
+            Ok(StreamRunnerMessage::BridgeToolRequest(call)) => {
+                Ok(Some(bridge_tool_request_to_python(py, &call)?))
+            }
             Ok(StreamRunnerMessage::Finished { .. }) | Err(StreamReceiveError::Closed) => Ok(None),
             Ok(StreamRunnerMessage::Error {
                 code,
@@ -575,7 +586,7 @@ impl NativeRuntimeEventStream {
                     error::runtime_message_to_py(
                         "runtime.stream_closed",
                         "Runtime event stream closed before accepting the bridge tool result.",
-                        Some("Consume bridge tool events from the active RuntimeStream."),
+                        Some("Keep the active RuntimeStream open while the SDK bridge driver resolves bridge tools."),
                     )
                 })?;
             match ack_receiver.recv() {
@@ -588,7 +599,7 @@ impl NativeRuntimeEventStream {
                 Err(_) => Err(error::runtime_message_to_py(
                     "runtime.stream_closed",
                     "Runtime event stream closed before recording the bridge tool result.",
-                    Some("Consume bridge tool events from the active RuntimeStream."),
+                    Some("Keep the active RuntimeStream open while the SDK bridge driver resolves bridge tools."),
                 )),
             }
         })
@@ -596,13 +607,14 @@ impl NativeRuntimeEventStream {
 
     fn result_blocking(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let state = Arc::clone(&self.state);
+        let result_state = Arc::clone(&state);
         let result = py.detach(move || {
-            let mut state = state
+            let mut state = result_state
                 .lock()
                 .map_err(|_| StreamResultError::Receive(StreamReceiveError::Poisoned))?;
             while !state.finished {
                 match receive_stream_message(&mut state)? {
-                    StreamRunnerMessage::Event(_) => {}
+                    StreamRunnerMessage::Event(_) | StreamRunnerMessage::BridgeToolRequest(_) => {}
                     StreamRunnerMessage::Finished { .. } => {}
                     StreamRunnerMessage::Error {
                         code,
@@ -630,7 +642,20 @@ impl NativeRuntimeEventStream {
         });
 
         match result {
-            Ok(result) => agent_loop_result_to_python(py, result),
+            Ok(result) => {
+                let events = state
+                    .lock()
+                    .map_err(|_| {
+                        error::runtime_message_to_py(
+                            "runtime.stream_poisoned",
+                            "Runtime event stream receiver was poisoned.",
+                            Some("Retry the operation in a fresh Python process."),
+                        )
+                    })?
+                    .events
+                    .clone();
+                agent_loop_result_with_public_events_to_python(py, result, events)
+            }
             Err(StreamResultError::Receive(StreamReceiveError::Poisoned)) => {
                 Err(error::runtime_message_to_py(
                     "runtime.stream_poisoned",
@@ -681,7 +706,7 @@ impl PyInteractiveRun {
 impl PyInteractiveRunEventStream {
     fn next_blocking(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         let state = Arc::clone(&self.state);
-        let event = py.detach(move || -> PyResult<Option<InteractiveRunEvent>> {
+        let event = py.detach(move || -> PyResult<Option<RuntimeEvent>> {
             let mut stream = {
                 let mut state = state.lock().map_err(|_| interactive_stream_poisoned())?;
                 if state.finished {
@@ -704,72 +729,34 @@ impl PyInteractiveRunEventStream {
 
         event
             .as_ref()
-            .map(|event| interactive_event_to_python(py, event))
+            .map(|event| public_runtime_event_to_python(py, event))
             .transpose()
     }
 }
 
 #[pymethods]
 impl PyAgentLoopInput {
-    fn submit_next_blocking(&self, py: Python<'_>, text: String) -> PyResult<Py<PyAny>> {
+    fn submit_next_blocking(
+        &self,
+        py: Python<'_>,
+        text: String,
+    ) -> PyResult<PyInteractiveInputItem> {
         let input = self.inner.clone();
-        let receipt = py.detach(move || {
+        let item = py.detach(move || {
             block_on_interactive_result(async move { input.submit_next(&text).await })
         })?;
-        input_receipt_to_python(py, &receipt)
+        Ok(PyInteractiveInputItem {
+            inner: Arc::new(Mutex::new(Some(item))),
+        })
     }
 
-    fn enqueue_blocking(&self, py: Python<'_>, text: String) -> PyResult<Py<PyAny>> {
+    fn enqueue_blocking(&self, py: Python<'_>, text: String) -> PyResult<PyInteractiveInputItem> {
         let input = self.inner.clone();
-        let receipt = py.detach(move || {
+        let item = py.detach(move || {
             block_on_interactive_result(async move { input.enqueue(&text).await })
         })?;
-        input_receipt_to_python(py, &receipt)
-    }
-
-    fn update_blocking(&self, py: Python<'_>, id: u64, text: String) -> PyResult<()> {
-        let input = self.inner.clone();
-        py.detach(move || {
-            block_on_interactive_result(async move {
-                input.update(InteractiveInputId::from_u64(id), &text).await
-            })
-        })
-    }
-
-    fn remove_blocking(&self, py: Python<'_>, id: u64) -> PyResult<()> {
-        let input = self.inner.clone();
-        py.detach(move || {
-            block_on_interactive_result(async move {
-                input.remove(InteractiveInputId::from_u64(id)).await
-            })
-        })
-    }
-
-    fn move_before_blocking(&self, py: Python<'_>, id: u64, anchor: u64) -> PyResult<()> {
-        let input = self.inner.clone();
-        py.detach(move || {
-            block_on_interactive_result(async move {
-                input
-                    .move_before(
-                        InteractiveInputId::from_u64(id),
-                        InteractiveInputId::from_u64(anchor),
-                    )
-                    .await
-            })
-        })
-    }
-
-    fn move_after_blocking(&self, py: Python<'_>, id: u64, anchor: u64) -> PyResult<()> {
-        let input = self.inner.clone();
-        py.detach(move || {
-            block_on_interactive_result(async move {
-                input
-                    .move_after(
-                        InteractiveInputId::from_u64(id),
-                        InteractiveInputId::from_u64(anchor),
-                    )
-                    .await
-            })
+        Ok(PyInteractiveInputItem {
+            inner: Arc::new(Mutex::new(Some(item))),
         })
     }
 
@@ -777,7 +764,77 @@ impl PyAgentLoopInput {
         let input = self.inner.clone();
         let snapshot =
             py.detach(move || block_on_interactive_result(async move { input.snapshot().await }))?;
-        queue_snapshot_to_python(py, &snapshot)
+        interactive_input_snapshot_to_python(py, snapshot)
+    }
+
+    fn replace_pending_order_blocking(
+        &self,
+        py: Python<'_>,
+        lane: String,
+        items: &Bound<'_, PyList>,
+    ) -> PyResult<()> {
+        let lane = queue_kind_from_label(&lane)?;
+        let items = items
+            .iter()
+            .map(|item| {
+                let item = item.extract::<PyRef<'_, PyInteractiveInputItem>>()?;
+                clone_interactive_input_item(&item.inner)
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        let input = self.inner.clone();
+        py.detach(move || {
+            block_on_interactive_result(
+                async move { input.replace_pending_order(lane, &items).await },
+            )
+        })
+    }
+}
+
+#[pymethods]
+impl PyInteractiveInputItem {
+    #[getter]
+    fn lane(&self) -> PyResult<&'static str> {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|_| interactive_handle_poisoned())?;
+        let handle = guard.as_ref().ok_or_else(interactive_handle_consumed)?;
+        Ok(queue_kind_label(handle.lane()))
+    }
+
+    #[getter]
+    fn text(&self) -> PyResult<String> {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|_| interactive_handle_poisoned())?;
+        let handle = guard.as_ref().ok_or_else(interactive_handle_consumed)?;
+        Ok(handle.text().to_owned())
+    }
+
+    fn update_blocking(&self, py: Python<'_>, text: String) -> PyResult<()> {
+        let inner = Arc::clone(&self.inner);
+        py.detach(move || {
+            let mut handle = {
+                let mut guard = inner.lock().map_err(|_| interactive_handle_poisoned())?;
+                guard.take().ok_or_else(interactive_handle_consumed)?
+            };
+            let result = block_on_interactive_result(async { handle.update(text).await });
+            let mut guard = inner.lock().map_err(|_| interactive_handle_poisoned())?;
+            *guard = Some(handle);
+            result
+        })
+    }
+
+    fn remove_blocking(&self, py: Python<'_>) -> PyResult<()> {
+        let inner = Arc::clone(&self.inner);
+        py.detach(move || {
+            let handle = {
+                let mut guard = inner.lock().map_err(|_| interactive_handle_poisoned())?;
+                guard.take().ok_or_else(interactive_handle_consumed)?
+            };
+            block_on_interactive_result(async { handle.remove().await })
+        })
     }
 }
 
@@ -808,13 +865,6 @@ impl PyAgentLoopControl {
         })
     }
 
-    fn resume_backlog_blocking(&self, py: Python<'_>) -> PyResult<()> {
-        let control = self.inner.clone();
-        py.detach(move || {
-            block_on_interactive_result(async move { control.resume_backlog().await })
-        })
-    }
-
     fn close_blocking(&self, py: Python<'_>) -> PyResult<()> {
         let control = self.inner.clone();
         py.detach(move || block_on_interactive_result(async move { control.close().await }))
@@ -842,7 +892,7 @@ impl PyInteractiveRun {
 }
 
 fn receive_stream_message(
-    state: &mut NativeRuntimeEventStreamState,
+    state: &mut NativeRuntimeJournalEventStreamState,
 ) -> Result<StreamRunnerMessage, StreamReceiveError> {
     if state.finished {
         return Err(StreamReceiveError::Closed);
@@ -854,6 +904,7 @@ fn receive_stream_message(
         .map_err(|_| StreamReceiveError::Closed)?;
     match &message {
         StreamRunnerMessage::Event(event) => state.events.push(event.clone()),
+        StreamRunnerMessage::BridgeToolRequest(_) => {}
         StreamRunnerMessage::Finished { result } => {
             state.result = result.clone();
             state.finished = true;
@@ -1508,11 +1559,20 @@ async fn run_agent_loop_event_stream(
 
     loop {
         tokio::select! {
-            event = stream.next() => {
-                let Some(event) = event else {
+            message = stream.next_driver_message() => {
+                let Some(message) = message else {
                     break;
                 };
-                if sender.send(StreamRunnerMessage::Event(event)).is_err() {
+                let message = match message {
+                    merry_runtime::AgentLoopStreamMessage::Event(event) => {
+                        StreamRunnerMessage::Event(event)
+                    }
+                    merry_runtime::AgentLoopStreamMessage::BridgeToolRequest { call } => {
+                        StreamRunnerMessage::BridgeToolRequest(call)
+                    }
+                    _ => continue,
+                };
+                if sender.send(message).is_err() {
                     return Ok(());
                 }
             }
@@ -1667,7 +1727,7 @@ fn submit_tool_success_json_blocking(
     call_id: String,
     artifact_id: String,
     content_json: String,
-) -> PyResult<Vec<merry_core::RuntimeEvent>> {
+) -> PyResult<Vec<merry_core::RuntimeJournalEvent>> {
     let tokio_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -1705,7 +1765,20 @@ fn submit_tool_success_json_blocking(
     })
 }
 
-fn agent_loop_result_to_python(py: Python<'_>, result: AgentLoopResult) -> PyResult<Py<PyAny>> {
+fn agent_loop_result_to_python(
+    py: Python<'_>,
+    runtime: &Runtime,
+    result: AgentLoopResult,
+) -> PyResult<Py<PyAny>> {
+    let events = project_public_events_blocking(runtime.clone(), result.events())?;
+    agent_loop_result_with_public_events_to_python(py, result, events)
+}
+
+fn agent_loop_result_with_public_events_to_python(
+    py: Python<'_>,
+    result: AgentLoopResult,
+    events: Vec<RuntimeEvent>,
+) -> PyResult<Py<PyAny>> {
     let dict = PyDict::new(py);
     dict.set_item("status", status_label(result.status()))?;
     dict.set_item("model_turns_run", result.model_turns_run())?;
@@ -1717,100 +1790,100 @@ fn agent_loop_result_to_python(py: Python<'_>, result: AgentLoopResult) -> PyRes
             .map(merry_runtime::FinalOutput::json),
     )?;
 
-    let events = serde_json::to_value(result.events()).expect("RuntimeEvent values must serialize");
+    let events = serde_json::to_value(events).expect("RuntimeEvent values must serialize");
     dict.set_item("events", json_to_py(py, &events)?)?;
 
     Ok(dict.unbind().into_any())
 }
 
+fn project_public_events_blocking(
+    runtime: Runtime,
+    events: &[merry_core::RuntimeJournalEvent],
+) -> PyResult<Vec<RuntimeEvent>> {
+    let events = events.to_vec();
+    let tokio_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|source| {
+            error::runtime_message_to_py(
+                "runtime.tokio_init_failed",
+                &source.to_string(),
+                Some("Retry the operation in a fresh Python thread or process."),
+            )
+        })?;
+
+    tokio_runtime
+        .block_on(async move { runtime.project_journal_events(&events).await })
+        .map_err(error::runtime_error_to_py)
+}
+
 fn runtime_events_to_python(
     py: Python<'_>,
-    events: &[merry_core::RuntimeEvent],
+    events: &[merry_core::RuntimeJournalEvent],
 ) -> PyResult<Py<PyAny>> {
-    let value = serde_json::to_value(events).expect("RuntimeEvent values must serialize");
+    let value = serde_json::to_value(events).expect("RuntimeJournalEvent values must serialize");
     json_to_py(py, &value)
 }
 
-fn runtime_event_to_python(
-    py: Python<'_>,
-    event: &merry_core::RuntimeEvent,
-) -> PyResult<Py<PyAny>> {
+fn public_runtime_event_to_python(py: Python<'_>, event: &RuntimeEvent) -> PyResult<Py<PyAny>> {
     let value = serde_json::to_value(event).expect("RuntimeEvent values must serialize");
     json_to_py(py, &value)
 }
 
-fn interactive_event_to_python(py: Python<'_>, event: &InteractiveRunEvent) -> PyResult<Py<PyAny>> {
+fn bridge_tool_request_to_python(py: Python<'_>, call: &PendingToolCall) -> PyResult<Py<PyAny>> {
     let dict = PyDict::new(py);
-    match event {
-        InteractiveRunEvent::StateChanged { state } => {
-            dict.set_item("type", "state_changed")?;
-            dict.set_item("state", interactive_state_label(*state))?;
-        }
-        InteractiveRunEvent::InputAccepted { ids, queue } => {
-            dict.set_item("type", "input_accepted")?;
-            dict.set_item(
-                "ids",
-                ids.iter().map(|id| id.as_u64()).collect::<Vec<u64>>(),
-            )?;
-            dict.set_item("queue", queue_kind_label(*queue))?;
-        }
-        InteractiveRunEvent::QueueChanged { snapshot } => {
-            dict.set_item("type", "queue_changed")?;
-            dict.set_item("snapshot", queue_snapshot_to_python(py, snapshot)?)?;
-        }
-        InteractiveRunEvent::Runtime(event) => {
-            dict.set_item("type", "runtime")?;
-            dict.set_item("event", runtime_event_to_python(py, event)?)?;
-        }
-        InteractiveRunEvent::Closed => {
-            dict.set_item("type", "closed")?;
-        }
-    }
+    let call = serde_json::to_value(call).expect("PendingToolCall values must serialize");
+    dict.set_item("type", "bridge_tool_request")?;
+    dict.set_item("call", json_to_py(py, &call)?)?;
     Ok(dict.unbind().into_any())
 }
 
-fn input_receipt_to_python(py: Python<'_>, receipt: &InputReceipt) -> PyResult<Py<PyAny>> {
-    let dict = PyDict::new(py);
-    dict.set_item("id", receipt.id.as_u64())?;
-    dict.set_item("queue", queue_kind_label(receipt.queue))?;
-    dict.set_item("position", receipt.position)?;
-    Ok(dict.unbind().into_any())
-}
-
-fn queue_snapshot_to_python(py: Python<'_>, snapshot: &QueueSnapshot) -> PyResult<Py<PyAny>> {
+fn interactive_input_snapshot_to_python(
+    py: Python<'_>,
+    snapshot: InteractiveInputSnapshot,
+) -> PyResult<Py<PyAny>> {
     let dict = PyDict::new(py);
     dict.set_item(
         "next",
-        queued_inputs_to_python(py, snapshot.next.as_slice())?,
+        interactive_input_items_to_python(py, snapshot.next)?,
     )?;
     dict.set_item(
         "suspended",
-        queued_inputs_to_python(py, snapshot.suspended.as_slice())?,
+        interactive_input_items_to_python(py, snapshot.suspended)?,
     )?;
     dict.set_item(
         "backlog",
-        queued_inputs_to_python(py, snapshot.backlog.as_slice())?,
+        interactive_input_items_to_python(py, snapshot.backlog)?,
     )?;
     Ok(dict.unbind().into_any())
 }
 
-fn queued_inputs_to_python(
+fn interactive_input_items_to_python(
     py: Python<'_>,
-    items: &[QueuedInputSnapshot],
+    items: Vec<InteractiveInputItem>,
 ) -> PyResult<Vec<Py<PyAny>>> {
     items
-        .iter()
-        .map(|item| queued_input_to_python(py, item))
+        .into_iter()
+        .map(|item| {
+            Ok(Py::new(
+                py,
+                PyInteractiveInputItem {
+                    inner: Arc::new(Mutex::new(Some(item))),
+                },
+            )?
+            .into_any())
+        })
         .collect()
 }
 
-fn queued_input_to_python(py: Python<'_>, item: &QueuedInputSnapshot) -> PyResult<Py<PyAny>> {
-    let dict = PyDict::new(py);
-    dict.set_item("id", item.id.as_u64())?;
-    dict.set_item("text", item.text.as_str())?;
-    dict.set_item("queue", queue_kind_label(item.queue))?;
-    dict.set_item("position", item.position)?;
-    Ok(dict.unbind().into_any())
+fn clone_interactive_input_item(
+    inner: &Arc<Mutex<Option<InteractiveInputItem>>>,
+) -> PyResult<InteractiveInputItem> {
+    let guard = inner.lock().map_err(|_| interactive_handle_poisoned())?;
+    guard
+        .as_ref()
+        .cloned()
+        .ok_or_else(interactive_handle_consumed)
 }
 
 fn skills_to_python(py: Python<'_>, skills: &[SkillMetadata]) -> PyResult<Py<PyAny>> {
@@ -1828,21 +1901,24 @@ fn skills_to_python(py: Python<'_>, skills: &[SkillMetadata]) -> PyResult<Py<PyA
     Ok(list.unbind().into_any())
 }
 
-fn queue_kind_label(kind: QueueKind) -> &'static str {
+fn queue_kind_label(kind: QueuedInputLane) -> &'static str {
     match kind {
-        QueueKind::Next => "next",
-        QueueKind::Suspended => "suspended",
-        QueueKind::Backlog => "backlog",
+        QueuedInputLane::Next => "next",
+        QueuedInputLane::Suspended => "suspended",
+        QueuedInputLane::Backlog => "backlog",
     }
 }
 
-fn interactive_state_label(state: InteractiveRunState) -> &'static str {
-    match state {
-        InteractiveRunState::WaitingForInput => "waiting_for_input",
-        InteractiveRunState::RunningModel => "running_model",
-        InteractiveRunState::RunningTool => "running_tool",
-        InteractiveRunState::Interrupting => "interrupting",
-        InteractiveRunState::Closed => "closed",
+fn queue_kind_from_label(label: &str) -> PyResult<QueuedInputLane> {
+    match label {
+        "next" => Ok(QueuedInputLane::Next),
+        "suspended" => Ok(QueuedInputLane::Suspended),
+        "backlog" => Ok(QueuedInputLane::Backlog),
+        _ => Err(error::runtime_message_to_py(
+            "runtime.invalid_interactive_input_lane",
+            "Invalid interactive input lane.",
+            Some("Use one of: next, suspended, backlog."),
+        )),
     }
 }
 
@@ -1874,7 +1950,7 @@ fn interactive_error_to_py(error: InteractiveError) -> PyErr {
     error::runtime_message_to_py(
         "runtime.interactive_error",
         &error.to_string(),
-        Some("Inspect the active interactive run and queued input ids."),
+        Some("Inspect the active interactive run and pending input handles."),
     )
 }
 
@@ -1891,6 +1967,22 @@ fn interactive_stream_busy() -> PyErr {
         "runtime.interactive_stream_busy",
         "Interactive run event stream is already being consumed.",
         Some("Consume an InteractiveRunStream from only one task."),
+    )
+}
+
+fn interactive_handle_poisoned() -> PyErr {
+    error::runtime_message_to_py(
+        "runtime.interactive_input_handle_poisoned",
+        "Interactive input handle state was poisoned.",
+        Some("Retry the operation in a fresh Python process."),
+    )
+}
+
+fn interactive_handle_consumed() -> PyErr {
+    error::runtime_message_to_py(
+        "runtime.interactive_input_handle_consumed",
+        "Interactive input handle has already been consumed.",
+        Some("Create a new input handle with submit_next() or enqueue()."),
     )
 }
 

@@ -350,7 +350,7 @@ impl ToolActionKind {
 ///
 /// This type is public only so tool crates can supply deterministic proposal
 /// evidence to `merry-runtime`. It is unstable implementation-facing API: it is
-/// not part of `merry_core::RuntimeEvent`, is not provider wire format, and must
+/// not part of `merry_core::RuntimeJournalEvent`, is not provider wire format, and must
 /// not be rendered into provider-visible tool specs or continuations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActionProposal {

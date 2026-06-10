@@ -7,7 +7,7 @@ use crate::debug::coding_loop::{
 use crate::runtime_config::automatic_compaction_config;
 use crate::runtime_events::{collect_runtime_step_events, first_pending_tool_call};
 use crate::testing::{FakeProcessRunner, FakeProcessRunnerStep, ScriptedProvider};
-use merry_core::RuntimeEvent;
+use merry_core::RuntimeJournalEvent;
 use merry_llm::ModelName;
 use merry_runtime::{
     AcceptedLocalWorkspaceProcessAdmission, AgentLoopConfig, CheckpointId, CheckpointRef,
@@ -27,10 +27,10 @@ async fn task_live_smoke_report_preserves_runtime_events_on_failure() {
         Runtime::builder(merry_core::SessionId::new("coding-loop-task-live-smoke").unwrap())
             .build()
             .expect("runtime should build");
-    let event = RuntimeEvent::new(
+    let event = RuntimeJournalEvent::new(
         merry_core::SessionId::new("coding-loop-task-live-smoke").unwrap(),
         1,
-        merry_core::RuntimeEventKind::StepStarted,
+        merry_core::RuntimeJournalPayload::StepStarted,
     );
     let mut output = Vec::new();
 
@@ -49,11 +49,11 @@ async fn task_live_smoke_report_preserves_runtime_events_on_failure() {
     assert_eq!(lines.next(), Some("coding-loop-task-live-smoke: failed"));
     let event = lines
         .next()
-        .map(|line| serde_json::from_str::<RuntimeEvent>(line).expect("event should parse"))
+        .map(|line| serde_json::from_str::<RuntimeJournalEvent>(line).expect("event should parse"))
         .expect("failure report should include runtime event JSONL");
     assert!(matches!(
-        event.kind,
-        merry_core::RuntimeEventKind::StepStarted
+        event.payload,
+        merry_core::RuntimeJournalPayload::StepStarted
     ));
     let config_summary = lines
         .next()

@@ -39,12 +39,12 @@ async fn opt_in_process_action_uses_runner_and_records_execution_audit() {
     assert_eq!(result.status(), merry_core::ToolCallResultStatus::Succeeded);
     assert!(result.diagnostic().is_none());
     assert!(matches!(
-        &events[0].kind,
-        RuntimeEventKind::ArtifactRecorded { artifact } if artifact == result.artifact()
+        &events[0].payload,
+        RuntimeJournalPayload::ArtifactRecorded { artifact } if artifact == result.artifact()
     ));
     assert!(matches!(
-        &events[1].kind,
-        RuntimeEventKind::ToolCallResolved { result: resolved } if resolved == result
+        &events[1].payload,
+        RuntimeJournalPayload::ToolCallResolved { result: resolved } if resolved == result
     ));
     assert!(runtime.pending_tool_calls().await.is_empty());
 

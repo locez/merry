@@ -44,7 +44,7 @@
     use futures_util::StreamExt;
     use merry_core::{
         ArtifactId, ArtifactKind, ArtifactRef, EvidenceLocator, EvidenceRef, PendingToolCall,
-        RuntimeEvent, RuntimeEventKind, SessionId, ToolCallArguments, ToolCallId,
+        RuntimeJournalEvent, RuntimeJournalPayload, SessionId, ToolCallArguments, ToolCallId,
         ToolCallResultStatus, ToolInputSchema, ToolName, ToolSpec,
     };
     use merry_llm::{

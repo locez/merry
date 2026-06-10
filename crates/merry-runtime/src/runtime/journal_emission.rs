@@ -2,7 +2,7 @@ use super::{RuntimeInner, diagnostic_from_text};
 use crate::{session::SessionState, tool_input_validation::ToolInputValidationError};
 use futures_util::StreamExt;
 use merry_core::{
-    ErrorInfo, PendingToolCall, RuntimeEvent, RuntimeEventKind, ToolCallResultStatus,
+    ErrorInfo, PendingToolCall, RuntimeJournalEvent, RuntimeJournalPayload, ToolCallResultStatus,
 };
 use merry_llm::{
     ModelError, ModelEvent, ModelEventStream, ModelProvider, ModelRequest, ModelRetryEvent,
@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 pub(super) async fn send_assistant_text_output_completed_events(
     inner: &RuntimeInner,
-    sender: &mpsc::Sender<RuntimeEvent>,
+    sender: &mpsc::Sender<RuntimeJournalEvent>,
     token: &CancellationToken,
     text: String,
 ) -> bool {
@@ -48,7 +48,7 @@ pub(super) async fn send_assistant_text_output_completed_events(
 
 pub(super) async fn send_assistant_text_output_recorded_event(
     inner: &RuntimeInner,
-    sender: &mpsc::Sender<RuntimeEvent>,
+    sender: &mpsc::Sender<RuntimeJournalEvent>,
     token: &CancellationToken,
     text: String,
 ) -> bool {
@@ -84,7 +84,7 @@ pub(super) async fn send_assistant_text_output_recorded_event(
 
 pub(super) async fn send_tool_call_pending_event(
     inner: &RuntimeInner,
-    sender: &mpsc::Sender<RuntimeEvent>,
+    sender: &mpsc::Sender<RuntimeJournalEvent>,
     token: &CancellationToken,
     call: PendingToolCall,
 ) -> bool {
@@ -106,8 +106,8 @@ pub(super) async fn send_tool_call_pending_event(
 
     match event {
         Ok(event) => {
-            let bridge_call = match &event.kind {
-                RuntimeEventKind::ToolCallPending { call } => inner
+            let bridge_call = match &event.payload {
+                RuntimeJournalPayload::ToolCallPending { call } => inner
                     .tool_registry
                     .registered_tool(call.name())
                     .is_some_and(|tool| tool.runner() == crate::ToolRunner::Bridge)
@@ -138,7 +138,7 @@ pub(super) async fn send_tool_call_pending_event(
 
 async fn send_bridge_tool_call_requested_event(
     inner: &RuntimeInner,
-    sender: &mpsc::Sender<RuntimeEvent>,
+    sender: &mpsc::Sender<RuntimeJournalEvent>,
     token: &CancellationToken,
     call: PendingToolCall,
 ) -> bool {
@@ -164,7 +164,7 @@ async fn send_bridge_tool_call_requested_event(
 
 async fn send_bridge_tool_input_validation_failure_events(
     inner: &RuntimeInner,
-    sender: &mpsc::Sender<RuntimeEvent>,
+    sender: &mpsc::Sender<RuntimeJournalEvent>,
     token: &CancellationToken,
     call: &PendingToolCall,
     error: ToolInputValidationError,
@@ -219,7 +219,7 @@ async fn send_bridge_tool_input_validation_failure_events(
 
 pub(super) async fn wait_for_retrying_stream_setup<F>(
     inner: &RuntimeInner,
-    sender: &mpsc::Sender<RuntimeEvent>,
+    sender: &mpsc::Sender<RuntimeJournalEvent>,
     token: &CancellationToken,
     setup: F,
     retry_events: &mut mpsc::Receiver<ModelRetryEvent>,
@@ -265,7 +265,7 @@ pub(super) async fn stream_model_with_retry_policy(
 
 pub(super) async fn wait_for_model_stream_item(
     inner: &RuntimeInner,
-    sender: &mpsc::Sender<RuntimeEvent>,
+    sender: &mpsc::Sender<RuntimeJournalEvent>,
     token: &CancellationToken,
     stream: &mut Pin<Box<dyn futures_core::Stream<Item = Result<ModelEvent, ModelError>> + Send>>,
     retry_events: &mut mpsc::Receiver<ModelRetryEvent>,
@@ -286,7 +286,7 @@ pub(super) async fn wait_for_model_stream_item(
 
 async fn send_model_retry_event(
     inner: &RuntimeInner,
-    sender: &mpsc::Sender<RuntimeEvent>,
+    sender: &mpsc::Sender<RuntimeJournalEvent>,
     token: &CancellationToken,
     event: ModelRetryEvent,
 ) -> bool {
@@ -311,7 +311,7 @@ async fn send_model_retry_event(
 
 pub(super) async fn send_failed_event(
     inner: &RuntimeInner,
-    sender: &mpsc::Sender<RuntimeEvent>,
+    sender: &mpsc::Sender<RuntimeJournalEvent>,
     token: &CancellationToken,
     diagnostic: ErrorInfo,
 ) -> bool {
@@ -325,12 +325,12 @@ pub(super) async fn send_failed_event(
     .await
 }
 
-fn runtime_event_kind_from_model_retry_event(event: ModelRetryEvent) -> RuntimeEventKind {
+fn runtime_event_kind_from_model_retry_event(event: ModelRetryEvent) -> RuntimeJournalPayload {
     match event {
         ModelRetryEvent::AttemptStarted {
             attempt,
             max_attempts,
-        } => RuntimeEventKind::ModelRetryAttemptStarted {
+        } => RuntimeJournalPayload::ModelRetryAttemptStarted {
             attempt,
             max_attempts,
         },
@@ -340,7 +340,7 @@ fn runtime_event_kind_from_model_retry_event(event: ModelRetryEvent) -> RuntimeE
             max_attempts,
             delay,
             error_kind,
-        } => RuntimeEventKind::ModelRetryScheduled {
+        } => RuntimeJournalPayload::ModelRetryScheduled {
             attempt,
             next_attempt,
             max_attempts,
@@ -351,7 +351,7 @@ fn runtime_event_kind_from_model_retry_event(event: ModelRetryEvent) -> RuntimeE
             attempts_run,
             max_attempts,
             error_kind,
-        } => RuntimeEventKind::ModelRetryExhausted {
+        } => RuntimeJournalPayload::ModelRetryExhausted {
             attempts_run,
             max_attempts,
             error_kind: provider_error_kind_label(error_kind).to_owned(),
@@ -393,9 +393,9 @@ pub(super) fn trace_provider_step_cancelled() {
 
 pub(super) async fn send_normal_event(
     inner: &RuntimeInner,
-    sender: &mpsc::Sender<RuntimeEvent>,
+    sender: &mpsc::Sender<RuntimeJournalEvent>,
     token: &CancellationToken,
-    make_event: impl FnOnce(&mut SessionState) -> Option<RuntimeEvent>,
+    make_event: impl FnOnce(&mut SessionState) -> Option<RuntimeJournalEvent>,
 ) -> bool {
     if token.is_cancelled() {
         return false;
@@ -421,9 +421,9 @@ pub(super) async fn send_normal_event(
 }
 
 async fn reserve_normal_event_slot<'a>(
-    sender: &'a mpsc::Sender<RuntimeEvent>,
+    sender: &'a mpsc::Sender<RuntimeJournalEvent>,
     token: &CancellationToken,
-) -> Option<Permit<'a, RuntimeEvent>> {
+) -> Option<Permit<'a, RuntimeJournalEvent>> {
     if token.is_cancelled() || sender.is_closed() {
         return None;
     }
@@ -438,7 +438,7 @@ async fn reserve_normal_event_slot<'a>(
 
 pub(super) async fn send_cancelled_if_requested(
     inner: &RuntimeInner,
-    sender: &mpsc::Sender<RuntimeEvent>,
+    sender: &mpsc::Sender<RuntimeJournalEvent>,
     token: &CancellationToken,
 ) -> bool {
     if !token.is_cancelled() {
@@ -450,7 +450,7 @@ pub(super) async fn send_cancelled_if_requested(
 
 pub(super) async fn send_cancelled_event(
     inner: &RuntimeInner,
-    sender: &mpsc::Sender<RuntimeEvent>,
+    sender: &mpsc::Sender<RuntimeJournalEvent>,
 ) -> bool {
     let Some(permit) = reserve_cancelled_event_slot(sender).await else {
         return false;
@@ -471,8 +471,8 @@ pub(super) async fn send_cancelled_event(
 }
 
 async fn reserve_cancelled_event_slot<'a>(
-    sender: &'a mpsc::Sender<RuntimeEvent>,
-) -> Option<Permit<'a, RuntimeEvent>> {
+    sender: &'a mpsc::Sender<RuntimeJournalEvent>,
+) -> Option<Permit<'a, RuntimeJournalEvent>> {
     if sender.is_closed() {
         return None;
     }

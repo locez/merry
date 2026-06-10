@@ -1,6 +1,7 @@
 use futures_util::{StreamExt, stream};
 use merry_core::{
-    PendingToolCall, ProviderName, RuntimeEventKind, SessionId, ToolInputSchema, ToolName, ToolSpec,
+    InteractiveRunState, PendingToolCall, ProviderName, QueuedInputLane, RuntimeEvent, SessionId,
+    ToolInputSchema, ToolName, ToolSpec,
 };
 use merry_llm::{
     FinishReason, ModelCapabilities, ModelError, ModelEvent, ModelEventStream, ModelMessageRole,
@@ -8,8 +9,8 @@ use merry_llm::{
     ModelStreamContext, ModelToolCall, ModelToolCallId, ToolArguments,
 };
 use merry_runtime::{
-    AgentLoopConfig, InteractiveRunEvent, InteractiveRunState, InterruptReason, QueueKind, Runtime,
-    StepContext, ToolExecutionContext, ToolExecutionError, ToolExecutor, ToolExecutorFuture,
+    AgentLoopConfig, InterruptReason, Runtime, StepContext, ToolExecutionContext,
+    ToolExecutionError, ToolExecutor, ToolExecutorFuture,
 };
 use schemars::Schema;
 use serde_json::json;
@@ -244,7 +245,7 @@ async fn interactive_run_starts_waiting_for_input() {
     let event = stream.next().await.expect("state event");
     assert!(matches!(
         event,
-        InteractiveRunEvent::StateChanged {
+        RuntimeEvent::InteractiveRunStateChanged {
             state: InteractiveRunState::WaitingForInput
         }
     ));
@@ -268,17 +269,18 @@ async fn submit_next_while_waiting_starts_model_turn() {
     let (mut stream, input, _control) = run.split();
     assert!(matches!(
         stream.next().await.expect("state event"),
-        InteractiveRunEvent::StateChanged {
+        RuntimeEvent::InteractiveRunStateChanged {
             state: InteractiveRunState::WaitingForInput
         }
     ));
 
-    let receipt = input.submit_next("hello").await.expect("input queued");
-    assert_eq!(receipt.queue, QueueKind::Next);
+    let item = input.submit_next("hello").await.expect("input queued");
+    assert_eq!(item.lane(), QueuedInputLane::Next);
+    assert_eq!(item.text(), "hello");
 
     let mut saw_accepted = false;
     while let Some(event) = stream.next().await {
-        if matches!(event, InteractiveRunEvent::InputAccepted { .. }) {
+        if matches!(event, RuntimeEvent::QueuedInputAccepted { .. }) {
             saw_accepted = true;
             break;
         }
@@ -288,7 +290,7 @@ async fn submit_next_while_waiting_starts_model_turn() {
 }
 
 #[tokio::test]
-async fn enqueue_while_waiting_does_not_start_until_resume_backlog() {
+async fn enqueue_while_waiting_starts_backlog_turn() {
     let provider = RecordingProvider::new();
     let runtime = Runtime::builder(session_id("interactive-backlog-waiting"))
         .model_provider(Arc::new(provider.clone()), model_name())
@@ -301,19 +303,19 @@ async fn enqueue_while_waiting_does_not_start_until_resume_backlog() {
             AgentLoopConfig::default(),
         )
         .expect("interactive run starts");
-    let (mut stream, input, control) = run.split();
+    let (mut stream, input, _control) = run.split();
     let _ = stream.next().await.expect("waiting state");
 
-    input.enqueue("later").await.expect("backlog queued");
-    assert!(provider.recorded_requests().is_empty());
+    let item = input.enqueue("later").await.expect("backlog queued");
+    assert_eq!(item.lane(), QueuedInputLane::Backlog);
+    assert_eq!(item.text(), "later");
 
-    control.resume_backlog().await.expect("backlog resumes");
     let mut saw_accepted = false;
     while let Some(event) = stream.next().await {
         if matches!(
             event,
-            InteractiveRunEvent::InputAccepted {
-                queue: QueueKind::Backlog,
+            RuntimeEvent::QueuedInputAccepted {
+                lane: QueuedInputLane::Backlog,
                 ..
             }
         ) {
@@ -354,18 +356,22 @@ async fn next_burst_before_boundary_becomes_two_user_messages_in_one_request() {
     })
     .await
     .expect("running step should keep accepting queued next input");
-    let first = first.expect("first queued").id;
-    let second = second.expect("second queued").id;
+    let first = first.expect("first queued");
+    let second = second.expect("second queued");
 
     release_tx.send(()).expect("first provider step released");
 
     let mut saw_two = false;
     while let Some(event) = stream.next().await {
-        if let InteractiveRunEvent::InputAccepted {
-            ids,
-            queue: QueueKind::Next,
+        if let RuntimeEvent::QueuedInputAccepted {
+            inputs,
+            lane: QueuedInputLane::Next,
         } = event
-            && ids == vec![first, second]
+            && inputs
+                .iter()
+                .map(|item| item.text.as_str())
+                .collect::<Vec<_>>()
+                == vec![first.text(), second.text()]
         {
             saw_two = true;
             break;
@@ -386,7 +392,9 @@ async fn next_burst_before_boundary_becomes_two_user_messages_in_one_request() {
 
 #[tokio::test]
 async fn next_burst_does_not_reorder_backlog() {
-    let provider = RecordingProvider::new();
+    let (started_tx, started_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let provider = BlockingFirstProvider::new(started_tx, release_rx);
     let runtime = Runtime::builder(session_id("interactive-backlog-order"))
         .model_provider(Arc::new(provider.clone()), model_name())
         .build()
@@ -398,31 +406,46 @@ async fn next_burst_does_not_reorder_backlog() {
             AgentLoopConfig::default(),
         )
         .expect("interactive run starts");
-    let (mut stream, input, control) = run.split();
+    let (mut stream, input, _control) = run.split();
     let _ = stream.next().await.expect("waiting state");
 
-    let backlog = input.enqueue("backlog").await.expect("backlog queued").id;
-    let next = input.submit_next("next").await.expect("next queued").id;
+    input.submit_next("initial").await.expect("initial queued");
+    started_rx.await.expect("first provider step starts");
+
+    input.enqueue("backlog").await.expect("backlog queued");
+    input.submit_next("next").await.expect("next queued");
+
+    release_tx.send(()).expect("first provider step released");
 
     let mut accepted = Vec::new();
     while let Some(event) = stream.next().await {
-        if let InteractiveRunEvent::InputAccepted { ids, .. } = event {
-            accepted.extend(ids);
-            if accepted.contains(&next) {
+        if let RuntimeEvent::QueuedInputAccepted { inputs, .. } = event {
+            accepted.extend(
+                inputs
+                    .into_iter()
+                    .map(|item| item.text)
+                    .filter(|text| text == "next" || text == "backlog"),
+            );
+            if accepted.contains(&"next".to_owned()) {
                 break;
             }
         }
     }
-    assert_eq!(accepted, vec![next]);
+    assert_eq!(accepted, vec!["next".to_owned()]);
 
-    control.resume_backlog().await.expect("backlog resumes");
     while let Some(event) = stream.next().await {
-        if let InteractiveRunEvent::InputAccepted {
-            ids,
-            queue: QueueKind::Backlog,
+        if let RuntimeEvent::QueuedInputAccepted {
+            inputs,
+            lane: QueuedInputLane::Backlog,
         } = event
         {
-            assert_eq!(ids, vec![backlog]);
+            assert_eq!(
+                inputs
+                    .iter()
+                    .map(|item| item.text.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["backlog"]
+            );
             break;
         }
     }
@@ -430,7 +453,9 @@ async fn next_burst_does_not_reorder_backlog() {
 
 #[tokio::test]
 async fn input_handle_updates_removes_and_reorders_pending_items() {
-    let provider = RecordingProvider::new();
+    let (started_tx, started_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let provider = BlockingFirstProvider::new(started_tx, release_rx);
     let runtime = Runtime::builder(session_id("interactive-edit-queue"))
         .model_provider(Arc::new(provider.clone()), model_name())
         .build()
@@ -445,25 +470,46 @@ async fn input_handle_updates_removes_and_reorders_pending_items() {
     let (mut stream, input, _control) = run.split();
     let _ = stream.next().await.expect("waiting state");
 
-    let first = input.enqueue("first").await.expect("first queued").id;
-    let second = input.enqueue("second").await.expect("second queued").id;
+    input.submit_next("initial").await.expect("initial queued");
+    started_rx.await.expect("first provider step starts");
 
-    input
-        .update(first, "updated")
+    let mut first = input.enqueue("first").await.expect("first queued");
+    let second = input.enqueue("second").await.expect("second queued");
+
+    first
+        .update("updated")
         .await
         .expect("pending input updates");
+    let mut snapshot = input.snapshot().await.expect("snapshot");
+    snapshot.backlog.swap(0, 1);
     input
-        .move_after(first, second)
+        .replace_pending_order(QueuedInputLane::Backlog, &snapshot.backlog)
         .await
         .expect("pending input reorders");
-    input.remove(second).await.expect("pending input removes");
+    second.remove().await.expect("pending input removes");
 
     let snapshot = input.snapshot().await.expect("snapshot");
     assert_eq!(snapshot.backlog.len(), 1);
-    assert_eq!(snapshot.backlog[0].id, first);
-    assert_eq!(snapshot.backlog[0].text, "updated");
-    assert_eq!(snapshot.backlog[0].position, 0);
-    assert!(provider.recorded_requests().is_empty());
+    assert_eq!(snapshot.backlog[0].text(), "updated");
+
+    release_tx.send(()).expect("first provider step released");
+
+    while let Some(event) = stream.next().await {
+        if let RuntimeEvent::QueuedInputAccepted {
+            inputs,
+            lane: QueuedInputLane::Backlog,
+        } = event
+        {
+            assert_eq!(
+                inputs
+                    .iter()
+                    .map(|item| item.text.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["updated"]
+            );
+            break;
+        }
+    }
 }
 
 #[tokio::test]
@@ -499,7 +545,7 @@ async fn interrupt_moves_existing_next_to_suspended_and_post_interrupt_next_runs
         snapshot
             .suspended
             .iter()
-            .map(|item| item.text.as_str())
+            .map(|item| item.text())
             .collect::<Vec<_>>(),
         vec!["x", "y"]
     );
@@ -509,12 +555,14 @@ async fn interrupt_moves_existing_next_to_suspended_and_post_interrupt_next_runs
 
     let mut saw_z = false;
     while let Some(event) = stream.next().await {
-        if let InteractiveRunEvent::InputAccepted {
-            ids,
-            queue: QueueKind::Next,
+        if let RuntimeEvent::QueuedInputAccepted {
+            inputs,
+            lane: QueuedInputLane::Next,
         } = event
+            && inputs.iter().any(|item| item.text == "z")
         {
-            assert_eq!(ids.len(), 1);
+            assert_eq!(inputs.len(), 1);
+            assert_eq!(inputs[0].text, "z");
             saw_z = true;
             break;
         }
@@ -543,7 +591,7 @@ async fn resume_suspended_accepts_suspended_burst_when_waiting() {
 
     input.submit_next("initial").await.expect("initial queued");
     started_rx.await.expect("initial provider step starts");
-    let suspended = input.submit_next("suspended").await.expect("queued").id;
+    input.submit_next("suspended").await.expect("queued");
     control
         .interrupt(InterruptReason::User)
         .await
@@ -554,7 +602,7 @@ async fn resume_suspended_accepts_suspended_burst_when_waiting() {
     while let Some(event) = stream.next().await {
         if matches!(
             event,
-            InteractiveRunEvent::StateChanged {
+            RuntimeEvent::InteractiveRunStateChanged {
                 state: InteractiveRunState::WaitingForInput
             }
         ) {
@@ -568,12 +616,18 @@ async fn resume_suspended_accepts_suspended_burst_when_waiting() {
 
     let mut saw_suspended = false;
     while let Some(event) = stream.next().await {
-        if let InteractiveRunEvent::InputAccepted {
-            ids,
-            queue: QueueKind::Suspended,
+        if let RuntimeEvent::QueuedInputAccepted {
+            inputs,
+            lane: QueuedInputLane::Suspended,
         } = event
         {
-            assert_eq!(ids, vec![suspended]);
+            assert_eq!(
+                inputs
+                    .iter()
+                    .map(|item| item.text.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["suspended"]
+            );
             saw_suspended = true;
             break;
         }
@@ -621,12 +675,7 @@ async fn interrupt_during_tool_execution_closes_pending_tool_call() {
 
     let mut saw_resolved = false;
     while let Some(event) = stream.next().await {
-        if let InteractiveRunEvent::Runtime(runtime_event) = event
-            && matches!(
-                runtime_event.kind,
-                RuntimeEventKind::ToolCallResolved { .. }
-            )
-        {
+        if matches!(event, RuntimeEvent::ToolCallFinished { .. }) {
             saw_resolved = true;
             break;
         }

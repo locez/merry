@@ -6,7 +6,7 @@ import json
 import os
 import queue
 import threading
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, get_args, get_type_hints
@@ -65,20 +65,23 @@ class RuntimeStream:
         )
 
         while True:
-            event = await _run_in_worker(native_stream.next_blocking)
-            if event is None:
+            message = await _run_in_worker(native_stream.next_blocking)
+            if message is None:
                 await self._finish_from_native_result(native_stream)
                 return
-            if not isinstance(event, dict):
+            if not isinstance(message, dict):
                 raise TypeError("native stream events must be dicts")
-            self._events.append(event)
-            yield event
 
-            pending = _bridge_tool_call([event])
+            pending = _bridge_tool_request(message)
             if pending is not None:
                 submitted = await self._resolve_bridge_tool_call(native_stream, pending)
                 if not submitted:
                     continue
+                continue
+
+            event = message
+            self._events.append(event)
+            yield event
 
     async def result(self) -> RunResult:
         if not self._finished:
@@ -162,34 +165,60 @@ class AgentLoopInput:
     def __init__(self, native: Any) -> None:
         self._native = native
 
-    async def submit_next(self, text: str) -> dict[str, Any]:
-        return await _interactive_dict_result(self._native.submit_next_blocking, text)
+    async def submit_next(self, text: str) -> InteractiveInputItem:
+        native = await _run_in_worker(self._native.submit_next_blocking, text)
+        return InteractiveInputItem(native=native)
 
-    async def enqueue(self, text: str) -> dict[str, Any]:
-        return await _interactive_dict_result(self._native.enqueue_blocking, text)
+    async def enqueue(self, text: str) -> InteractiveInputItem:
+        native = await _run_in_worker(self._native.enqueue_blocking, text)
+        return InteractiveInputItem(native=native)
 
-    async def update(self, input_id: int, text: str) -> None:
-        await _run_in_worker(self._native.update_blocking, _validate_input_id(input_id), text)
+    async def snapshot(self) -> InteractiveInputSnapshot:
+        native = await _interactive_dict_result(self._native.snapshot_blocking)
+        return InteractiveInputSnapshot(native)
 
-    async def remove(self, input_id: int) -> None:
-        await _run_in_worker(self._native.remove_blocking, _validate_input_id(input_id))
-
-    async def move_before(self, input_id: int, anchor_id: int) -> None:
+    async def replace_pending_order(
+        self,
+        lane: str,
+        items: Sequence[InteractiveInputItem],
+    ) -> None:
         await _run_in_worker(
-            self._native.move_before_blocking,
-            _validate_input_id(input_id),
-            _validate_input_id(anchor_id),
+            self._native.replace_pending_order_blocking,
+            lane,
+            [item._native for item in items],
         )
 
-    async def move_after(self, input_id: int, anchor_id: int) -> None:
-        await _run_in_worker(
-            self._native.move_after_blocking,
-            _validate_input_id(input_id),
-            _validate_input_id(anchor_id),
-        )
 
-    async def snapshot(self) -> dict[str, Any]:
-        return await _interactive_dict_result(self._native.snapshot_blocking)
+class InteractiveInputItem:
+    def __init__(self, native: Any) -> None:
+        self._native = native
+
+    @property
+    def lane(self) -> str:
+        lane = self._native.lane
+        if not isinstance(lane, str):
+            raise TypeError("native interactive input lane must be a str")
+        return lane
+
+    @property
+    def text(self) -> str:
+        text = self._native.text
+        if not isinstance(text, str):
+            raise TypeError("native interactive input text must be a str")
+        return text
+
+    async def update(self, text: str) -> None:
+        await _run_in_worker(self._native.update_blocking, text)
+
+    async def remove(self) -> None:
+        await _run_in_worker(self._native.remove_blocking)
+
+
+class InteractiveInputSnapshot:
+    def __init__(self, native: dict[str, Any]) -> None:
+        self.next = _interactive_input_items(native, "next")
+        self.suspended = _interactive_input_items(native, "suspended")
+        self.backlog = _interactive_input_items(native, "backlog")
 
 
 class AgentLoopControl:
@@ -204,9 +233,6 @@ class AgentLoopControl:
 
     async def discard_suspended(self) -> None:
         await _run_in_worker(self._native.discard_suspended_blocking)
-
-    async def resume_backlog(self) -> None:
-        await _run_in_worker(self._native.resume_backlog_blocking)
 
     async def close(self) -> None:
         await _run_in_worker(self._native.close_blocking)
@@ -667,14 +693,6 @@ def _validate_max_model_turns(max_model_turns: int | None) -> int | None:
     return max_model_turns
 
 
-def _validate_input_id(input_id: int) -> int:
-    if isinstance(input_id, bool) or not isinstance(input_id, int):
-        raise TypeError("input_id must be a non-negative int.")
-    if input_id < 0:
-        raise ValueError("input_id must be non-negative.")
-    return input_id
-
-
 async def _interactive_dict_result(func: Callable[..., Any], *args: object) -> dict[str, Any]:
     result = await _run_in_worker(func, *args)
     if not isinstance(result, dict):
@@ -682,24 +700,29 @@ async def _interactive_dict_result(func: Callable[..., Any], *args: object) -> d
     return result
 
 
-def _bridge_tool_call(events: list[dict[str, Any]]) -> dict[str, Any] | None:
-    pending = [
-        event["kind"]["call"]
-        for event in events
-        if event.get("kind", {}).get("type") == "bridge_tool_call_requested"
-    ]
-    if not pending:
+def _interactive_input_items(
+    snapshot: dict[str, Any],
+    lane: str,
+) -> list[InteractiveInputItem]:
+    items = snapshot.get(lane, [])
+    if not isinstance(items, list):
+        raise TypeError(f"native interactive snapshot {lane} must be a list")
+    return [InteractiveInputItem(native=item) for item in items]
+
+
+def _bridge_tool_request(message: dict[str, Any]) -> dict[str, Any] | None:
+    if message.get("type") != "bridge_tool_request":
         return None
-    call = pending[-1]
+    call = message.get("call")
     if not isinstance(call, dict):
-        raise TypeError("bridge_tool_call_requested call must be a dict")
+        raise TypeError("bridge_tool_request call must be a dict")
     arguments = call.get("arguments")
     if not isinstance(arguments, dict):
-        raise TypeError("bridge_tool_call_requested arguments must be a dict")
+        raise TypeError("bridge_tool_request arguments must be a dict")
     name = call.get("name")
     call_id = call.get("id")
     if not isinstance(name, str) or not isinstance(call_id, str):
-        raise TypeError("bridge_tool_call_requested id and name must be str")
+        raise TypeError("bridge_tool_request id and name must be str")
     return {"id": call_id, "name": name, "arguments": arguments}
 
 

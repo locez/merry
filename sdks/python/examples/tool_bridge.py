@@ -60,7 +60,7 @@ async def main() -> None:
 
     print("events:")
     async for event in stream:
-        print(f"- {event['kind']['type']}")
+        print(f"- {event['type']}")
 
     result = await stream.result()
 

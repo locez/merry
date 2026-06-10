@@ -1,8 +1,8 @@
 use futures_util::{StreamExt, stream};
 use merry_core::{
     ArtifactId, ArtifactKind, ArtifactRef, EvidenceLocator, PendingToolCall, ProviderName,
-    RuntimeEvent, RuntimeEventKind, SessionId, ToolCallId, ToolCallResult, ToolCallResultStatus,
-    ToolInputSchema, ToolName, ToolSpec,
+    RuntimeEvent, RuntimeJournalEvent, RuntimeJournalPayload, SessionId, ToolCallId,
+    ToolCallResult, ToolCallResultStatus, ToolInputSchema, ToolName, ToolSpec,
 };
 use merry_llm::{
     FinishReason, ModelCapabilities, ModelError, ModelEvent, ModelEventStream, ModelInputItem,
@@ -11,7 +11,7 @@ use merry_llm::{
 };
 use merry_runtime::{
     ActionExecutionEvidence, ActionProposal, ActionProposalEvidence, AgentLoopBlockedReason,
-    AgentLoopConfig, AgentLoopConfigError, AgentLoopStatus, ArtifactError,
+    AgentLoopConfig, AgentLoopConfigError, AgentLoopStatus, AgentLoopStreamMessage, ArtifactError,
     AutomaticCompactionConfig, CitationCompactionPolicy, ContextSummary, FINAL_OUTPUT_TOOL_NAME,
     FinalOutputContract, ProcessActionIntent, ProcessEnvPolicy, ProcessExitStatus, ProcessRunner,
     ProcessRunnerContext, ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput,
@@ -697,7 +697,7 @@ async fn run_agent_loop_stream_yields_step_events_before_provider_finishes() {
         .expect("step-start event should be present");
 
     assert_eq!(
-        event_kind_names(&[first, second]),
+        public_event_kind_names(&[first, second]),
         ["SessionStarted", "StepStarted"]
     );
 
@@ -706,8 +706,8 @@ async fn run_agent_loop_stream_yields_step_events_before_provider_finishes() {
         .expect("provider release receiver should still be waiting");
     let remaining = events.collect::<Vec<_>>().await;
     assert_eq!(
-        event_kind_names(&remaining),
-        ["ArtifactRecorded", "StepCompleted"]
+        public_event_kind_names(&remaining),
+        ["AssistantMessage", "StepCompleted"]
     );
 }
 
@@ -730,22 +730,24 @@ async fn run_agent_loop_stream_resumes_same_loop_after_bridge_tool_result() {
         .expect("agent loop stream should start");
 
     let mut events = Vec::new();
-    while let Some(event) = stream.next().await {
-        let is_bridge_request =
-            matches!(event.kind, RuntimeEventKind::BridgeToolCallRequested { .. });
-        events.push(event.clone());
-        if is_bridge_request {
-            let artifact = ArtifactRef::new(
-                ArtifactId::new("sdk-bridge-result").expect("valid artifact id"),
-                ArtifactKind::Json,
-            );
-            stream
-                .submit_bridge_tool_result(
-                    ToolCallResult::succeeded(tool_call_id("call-bridge"), artifact),
-                    merry_runtime::ArtifactContent::json(r#"{"ok":true}"#),
-                )
-                .await
-                .expect("bridge result should submit to the active loop");
+    while let Some(message) = stream.next_driver_message().await {
+        match message {
+            AgentLoopStreamMessage::Event(event) => events.push(event),
+            AgentLoopStreamMessage::BridgeToolRequest { call } => {
+                assert_eq!(call.id().as_str(), "call-bridge");
+                let artifact = ArtifactRef::new(
+                    ArtifactId::new("sdk-bridge-result").expect("valid artifact id"),
+                    ArtifactKind::Json,
+                );
+                stream
+                    .submit_bridge_tool_result(
+                        ToolCallResult::succeeded(tool_call_id("call-bridge"), artifact),
+                        merry_runtime::ArtifactContent::json(r#"{"ok":true}"#),
+                    )
+                    .await
+                    .expect("bridge result should submit to the active loop");
+            }
+            _ => {}
         }
     }
 
@@ -754,7 +756,19 @@ async fn run_agent_loop_stream_resumes_same_loop_after_bridge_tool_result() {
     assert_eq!(result.status(), &AgentLoopStatus::Completed);
     assert_eq!(result.model_turns_run(), 2);
     assert_eq!(
-        event_kind_names(&events),
+        public_event_kind_names(&events),
+        [
+            "SessionStarted",
+            "StepStarted",
+            "ToolCallStarted",
+            "ToolCallFinished",
+            "StepStarted",
+            "AssistantMessage",
+            "StepCompleted",
+        ]
+    );
+    assert_eq!(
+        event_kind_names(result.events()),
         [
             "SessionStarted",
             "StepStarted",
@@ -763,7 +777,7 @@ async fn run_agent_loop_stream_resumes_same_loop_after_bridge_tool_result() {
             "ArtifactRecorded",
             "ToolCallResolved",
             "StepStarted",
-            "ArtifactRecorded",
+            "AssistantOutputRecorded",
             "StepCompleted",
         ]
     );
@@ -805,12 +819,11 @@ async fn run_agent_loop_stream_completes_final_output_without_continuation_budge
         r#"{"summary":"Order A123 shipped."}"#
     );
     assert_eq!(
-        event_kind_names(&events),
+        public_event_kind_names(&events),
         [
             "SessionStarted",
             "StepStarted",
-            "ToolCallPending",
-            "ArtifactRecorded",
+            "ToolCallStarted",
             "FinalOutputRecorded",
         ]
     );
@@ -894,7 +907,7 @@ async fn final_output_tool_call_is_not_replayed_into_next_step_transcript() {
 
     assert_eq!(
         event_kind_names(&next_events),
-        ["StepStarted", "ArtifactRecorded", "StepCompleted"]
+        ["StepStarted", "AssistantOutputRecorded", "StepCompleted"]
     );
 
     let requests = provider.recorded_requests();
@@ -1061,22 +1074,56 @@ async fn agent_loop_blocks_text_completion_when_final_output_contract_is_active(
     assert!(result.final_output_json().is_none());
 }
 
-fn event_kind_names(events: &[RuntimeEvent]) -> Vec<&'static str> {
+fn event_kind_names(events: &[RuntimeJournalEvent]) -> Vec<&'static str> {
     events
         .iter()
-        .map(|event| match event.kind {
-            RuntimeEventKind::SessionStarted => "SessionStarted",
-            RuntimeEventKind::StepStarted => "StepStarted",
-            RuntimeEventKind::StepCompleted => "StepCompleted",
-            RuntimeEventKind::Cancelled { .. } => "Cancelled",
-            RuntimeEventKind::Failed { .. } => "Failed",
-            RuntimeEventKind::ArtifactRecorded { .. } => "ArtifactRecorded",
-            RuntimeEventKind::EvidenceReferenced { .. } => "EvidenceReferenced",
-            RuntimeEventKind::ToolCallPending { .. } => "ToolCallPending",
-            RuntimeEventKind::BridgeToolCallRequested { .. } => "BridgeToolCallRequested",
-            RuntimeEventKind::ToolCallResolved { .. } => "ToolCallResolved",
-            RuntimeEventKind::FinalOutputRecorded { .. } => "FinalOutputRecorded",
-            RuntimeEventKind::SkillUsed { .. } => "SkillUsed",
+        .map(|event| match event.payload {
+            RuntimeJournalPayload::SessionStarted => "SessionStarted",
+            RuntimeJournalPayload::StepStarted => "StepStarted",
+            RuntimeJournalPayload::StepCompleted => "StepCompleted",
+            RuntimeJournalPayload::Cancelled { .. } => "Cancelled",
+            RuntimeJournalPayload::Failed { .. } => "Failed",
+            RuntimeJournalPayload::ArtifactRecorded { .. } => "ArtifactRecorded",
+            RuntimeJournalPayload::AssistantOutputRecorded { .. } => "AssistantOutputRecorded",
+            RuntimeJournalPayload::EvidenceReferenced { .. } => "EvidenceReferenced",
+            RuntimeJournalPayload::ToolCallPending { .. } => "ToolCallPending",
+            RuntimeJournalPayload::BridgeToolCallRequested { .. } => "BridgeToolCallRequested",
+            RuntimeJournalPayload::ToolCallResolved { .. } => "ToolCallResolved",
+            RuntimeJournalPayload::FinalOutputRecorded { .. } => "FinalOutputRecorded",
+            RuntimeJournalPayload::SkillUsed { .. } => "SkillUsed",
+            _ => "Unknown",
+        })
+        .collect()
+}
+
+fn public_event_kind_names(events: &[RuntimeEvent]) -> Vec<&'static str> {
+    events
+        .iter()
+        .map(|event| match event {
+            RuntimeEvent::SessionStarted { .. } => "SessionStarted",
+            RuntimeEvent::StepStarted { .. } => "StepStarted",
+            RuntimeEvent::StepCompleted { .. } => "StepCompleted",
+            RuntimeEvent::AssistantMessage { .. } => "AssistantMessage",
+            RuntimeEvent::ToolCallStarted { .. } => "ToolCallStarted",
+            RuntimeEvent::ToolCallFinished { .. } => "ToolCallFinished",
+            RuntimeEvent::FinalOutputRecorded { .. } => "FinalOutputRecorded",
+            RuntimeEvent::ModelRetryAttemptStarted { .. } => "ModelRetryAttemptStarted",
+            RuntimeEvent::ModelRetryScheduled { .. } => "ModelRetryScheduled",
+            RuntimeEvent::ModelRetryExhausted { .. } => "ModelRetryExhausted",
+            RuntimeEvent::EvidenceReferenced { .. } => "EvidenceReferenced",
+            RuntimeEvent::SkillUsed { .. } => "SkillUsed",
+            RuntimeEvent::SubagentSpawned { .. } => "SubagentSpawned",
+            RuntimeEvent::SubagentStarted { .. } => "SubagentStarted",
+            RuntimeEvent::SubagentStatusChanged { .. } => "SubagentStatusChanged",
+            RuntimeEvent::SubagentCompleted { .. } => "SubagentCompleted",
+            RuntimeEvent::SubagentFailed { .. } => "SubagentFailed",
+            RuntimeEvent::SubagentCancelled { .. } => "SubagentCancelled",
+            RuntimeEvent::RunFailed { .. } => "RunFailed",
+            RuntimeEvent::RunCancelled { .. } => "RunCancelled",
+            RuntimeEvent::InteractiveRunStateChanged { .. } => "InteractiveRunStateChanged",
+            RuntimeEvent::QueuedInputAccepted { .. } => "QueuedInputAccepted",
+            RuntimeEvent::QueuedInputsChanged { .. } => "QueuedInputsChanged",
+            RuntimeEvent::Closed => "Closed",
             _ => "Unknown",
         })
         .collect()
@@ -1101,11 +1148,11 @@ fn assert_continuation_request_body(request: &ModelRequest, original_task: &str)
     );
 }
 
-fn pending_tool_call(events: &[RuntimeEvent]) -> &PendingToolCall {
+fn pending_tool_call(events: &[RuntimeJournalEvent]) -> &PendingToolCall {
     events
         .iter()
-        .find_map(|event| match &event.kind {
-            RuntimeEventKind::ToolCallPending { call } => Some(call),
+        .find_map(|event| match &event.payload {
+            RuntimeJournalPayload::ToolCallPending { call } => Some(call),
             _ => None,
         })
         .expect("pending tool call should be emitted")
@@ -1168,7 +1215,7 @@ async fn agent_loop_continues_after_invalid_bridge_tool_arguments_are_resolved()
             "ArtifactRecorded",
             "ToolCallResolved",
             "StepStarted",
-            "ArtifactRecorded",
+            "AssistantOutputRecorded",
             "StepCompleted",
         ]
     );
@@ -1219,15 +1266,14 @@ async fn agent_loop_stream_continues_after_invalid_bridge_tool_arguments_are_res
     assert_eq!(result.status(), &AgentLoopStatus::Completed);
     assert_eq!(result.model_turns_run(), 2);
     assert_eq!(
-        event_kind_names(&events),
+        public_event_kind_names(&events),
         [
             "SessionStarted",
             "StepStarted",
-            "ToolCallPending",
-            "ArtifactRecorded",
-            "ToolCallResolved",
+            "ToolCallStarted",
+            "ToolCallFinished",
             "StepStarted",
-            "ArtifactRecorded",
+            "AssistantMessage",
             "StepCompleted",
         ]
     );
@@ -1266,7 +1312,7 @@ async fn agent_loop_executes_one_tool_and_continues_to_final_completion() {
             "ArtifactRecorded",
             "ToolCallResolved",
             "StepStarted",
-            "ArtifactRecorded",
+            "AssistantOutputRecorded",
             "StepCompleted",
         ]
     );
@@ -1462,7 +1508,7 @@ async fn compaction_removes_only_covered_tool_exchanges_after_successful_install
             StepContext::default(),
         )
         .expect("step starts");
-    let _events: Vec<RuntimeEvent> = stream.collect().await;
+    let _events: Vec<RuntimeJournalEvent> = stream.collect().await;
 
     let requests = provider.recorded_requests();
     let final_request = requests.last().expect("final request exists");
@@ -1693,7 +1739,7 @@ async fn agent_loop_executes_opt_in_workspace_patch_and_continues_to_final_compl
             "ArtifactRecorded",
             "ToolCallResolved",
             "StepStarted",
-            "ArtifactRecorded",
+            "AssistantOutputRecorded",
             "StepCompleted",
         ]
     );
@@ -1704,8 +1750,8 @@ async fn agent_loop_executes_opt_in_workspace_patch_and_continues_to_final_compl
     let resolved = result
         .events()
         .iter()
-        .find_map(|event| match &event.kind {
-            RuntimeEventKind::ToolCallResolved { result } => Some(result),
+        .find_map(|event| match &event.payload {
+            RuntimeJournalPayload::ToolCallResolved { result } => Some(result),
             _ => None,
         })
         .expect("patch tool call should resolve");
@@ -1792,7 +1838,7 @@ async fn agent_loop_process_command_tool_executes_and_continues() {
             "ArtifactRecorded",
             "ToolCallResolved",
             "StepStarted",
-            "ArtifactRecorded",
+            "AssistantOutputRecorded",
             "StepCompleted",
         ]
     );

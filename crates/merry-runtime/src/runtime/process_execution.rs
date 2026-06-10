@@ -8,7 +8,8 @@ use crate::{
     tool::ActionProposalEvidence, tool::ToolExecutionContext,
 };
 use merry_core::{
-    ArtifactKind, ArtifactRef, PendingToolCall, RuntimeEvent, SessionId, ToolCallResultStatus,
+    ArtifactKind, ArtifactRef, PendingToolCall, RuntimeJournalEvent, SessionId,
+    ToolCallResultStatus,
 };
 use std::sync::Arc;
 
@@ -20,7 +21,7 @@ pub(super) async fn execute_admitted_process_action(
     permission_profile_id: ProcessPermissionProfileId,
     runner: Arc<dyn ProcessRunner>,
     context: ToolExecutionContext,
-) -> Result<Vec<RuntimeEvent>, RuntimeError> {
+) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
     let ActionProposalEvidence::ProcessAction(intent) = proposal.evidence().clone() else {
         return Err(RuntimeError::ToolExecutionFailed {
             session_id: inner.session_id.clone(),
@@ -399,9 +400,9 @@ fn artifact_kind_label(kind: &ArtifactKind) -> &'static str {
 }
 
 fn merge_process_input_and_result_events(
-    input_events: Option<Vec<RuntimeEvent>>,
-    result_events: Vec<RuntimeEvent>,
-) -> Vec<RuntimeEvent> {
+    input_events: Option<Vec<RuntimeJournalEvent>>,
+    result_events: Vec<RuntimeJournalEvent>,
+) -> Vec<RuntimeJournalEvent> {
     let Some(mut input_events) = input_events else {
         return result_events;
     };

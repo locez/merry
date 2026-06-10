@@ -123,6 +123,22 @@ impl SessionState {
             })
             .collect()
     }
+
+    #[cfg(test)]
+    pub(crate) fn assistant_transcript_artifact_ids_for_tests(
+        &self,
+    ) -> Vec<merry_core::ArtifactId> {
+        self.transcript
+            .items()
+            .iter()
+            .filter_map(|item| match item {
+                transcript::TranscriptItem::AssistantText { artifact_id, .. } => {
+                    Some(artifact_id.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]

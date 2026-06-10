@@ -1,58 +1,64 @@
 use super::SessionState;
 use crate::ledger::LedgerFactKind;
-use merry_core::{ErrorInfo, RuntimeEvent, RuntimeEventKind};
+use merry_core::{ErrorInfo, RuntimeJournalEvent, RuntimeJournalPayload};
 
 impl SessionState {
-    pub(crate) fn record_session_started_if_needed(&mut self) -> Option<RuntimeEvent> {
+    pub(crate) fn record_session_started_if_needed(&mut self) -> Option<RuntimeJournalEvent> {
         if self.session_started {
             return None;
         }
 
         self.session_started = true;
         Some(self.record_event(
-            RuntimeEventKind::SessionStarted,
+            RuntimeJournalPayload::SessionStarted,
             LedgerFactKind::SessionStarted,
         ))
     }
 
-    pub(crate) fn record_step_started(&mut self) -> RuntimeEvent {
-        self.record_event(RuntimeEventKind::StepStarted, LedgerFactKind::StepStarted)
-    }
-
-    pub(crate) fn record_model_retry_event(&mut self, kind: RuntimeEventKind) -> RuntimeEvent {
-        self.record_event(kind, LedgerFactKind::ModelRetry)
-    }
-
-    pub(crate) fn record_step_completed(&mut self) -> RuntimeEvent {
+    pub(crate) fn record_step_started(&mut self) -> RuntimeJournalEvent {
         self.record_event(
-            RuntimeEventKind::StepCompleted,
+            RuntimeJournalPayload::StepStarted,
+            LedgerFactKind::StepStarted,
+        )
+    }
+
+    pub(crate) fn record_model_retry_event(
+        &mut self,
+        payload: RuntimeJournalPayload,
+    ) -> RuntimeJournalEvent {
+        self.record_event(payload, LedgerFactKind::ModelRetry)
+    }
+
+    pub(crate) fn record_step_completed(&mut self) -> RuntimeJournalEvent {
+        self.record_event(
+            RuntimeJournalPayload::StepCompleted,
             LedgerFactKind::StepCompleted,
         )
     }
 
-    pub(crate) fn record_cancelled(&mut self, diagnostic: ErrorInfo) -> RuntimeEvent {
+    pub(crate) fn record_cancelled(&mut self, diagnostic: ErrorInfo) -> RuntimeJournalEvent {
         self.record_event(
-            RuntimeEventKind::Cancelled { diagnostic },
+            RuntimeJournalPayload::Cancelled { diagnostic },
             LedgerFactKind::Cancelled,
         )
     }
 
-    pub(crate) fn record_failed(&mut self, diagnostic: ErrorInfo) -> RuntimeEvent {
+    pub(crate) fn record_failed(&mut self, diagnostic: ErrorInfo) -> RuntimeJournalEvent {
         self.record_event(
-            RuntimeEventKind::Failed { diagnostic },
+            RuntimeJournalPayload::Failed { diagnostic },
             LedgerFactKind::Failed,
         )
     }
 
     pub(super) fn record_event(
         &mut self,
-        kind: RuntimeEventKind,
+        payload: RuntimeJournalPayload,
         fact_kind: LedgerFactKind,
-    ) -> RuntimeEvent {
+    ) -> RuntimeJournalEvent {
         let sequence = self.next_sequence;
         self.ledger.record(sequence, fact_kind);
         self.next_sequence += 1;
-        RuntimeEvent::new(self.session_id.clone(), sequence, kind)
+        RuntimeJournalEvent::new(self.session_id.clone(), sequence, payload)
     }
 
     pub(super) fn next_sequence(&self) -> u64 {
