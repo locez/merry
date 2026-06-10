@@ -1,8 +1,8 @@
 //! Public runtime event contract for SDK/UI consumers.
 
 use crate::{
-    ArtifactRef, ErrorInfo, EvidenceRef, PendingToolCall, SessionId, SubagentId, SubagentTaskId,
-    SessionUsage, ToolCallId, ToolCallResult,
+    ArtifactRef, ErrorInfo, EvidenceRef, PendingToolCall, SessionId, SessionUsage, SubagentId,
+    SubagentTaskId, ToolCallId, ToolCallResult,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
