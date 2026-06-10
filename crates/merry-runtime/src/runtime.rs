@@ -165,6 +165,12 @@ impl Runtime {
         Ok(projected)
     }
 
+    /// Returns the latest authoritative session usage snapshot.
+    pub async fn usage(&self) -> Option<merry_core::SessionUsage> {
+        let session = self.inner.session.lock().await;
+        session.usage()
+    }
+
     pub(crate) fn acquire_active_step_permit(&self) -> Result<ActiveStepPermit, RuntimeError> {
         ActiveStepPermit::acquire(Arc::clone(&self.inner.active_step)).ok_or_else(|| {
             RuntimeError::StepAlreadyActive {

@@ -78,9 +78,8 @@ pub use compaction::{
 pub use context::{
     CheckpointDecision, CompactedCheckpoint, CompactedCheckpointSummary, CompiledContext,
     CompiledContextSection, ContextBudget, ContextBudgetPolicy, ContextCompiler, ContextEntry,
-    ContextError, ContextEvidence, ContextSummary, ContextWindowSource, ProjectRules,
-    ResolvedContextWindow, SessionContextSnapshot, TaskAnchor, decide_checkpoint,
-    resolve_context_window,
+    ContextError, ContextEvidence, ContextSummary, ProjectRules, ResolvedContextWindow,
+    SessionContextSnapshot, TaskAnchor, decide_checkpoint, resolve_context_window,
 };
 pub use error::RuntimeError;
 pub use events::{RuntimeEventStream, RuntimeJournalEventStream};
@@ -95,6 +94,7 @@ pub use ledger::{
     CompactLedgerText, LedgerFactKind, LedgerProjection, LedgerProjectionSnapshot, LedgerScope,
     LedgerUpdate, LedgerUpdateKind, LedgerValidationError, LifecycleFact, TaskLedger,
 };
+pub use merry_core::ContextWindowSource;
 pub use model_config::RuntimeModelRole;
 pub use permission::{
     PermissionAdmissionContext, PermissionAdmissionDecision, PermissionAdmissionError,

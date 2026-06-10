@@ -289,6 +289,8 @@ pub enum LedgerFactKind {
     StepStarted,
     /// Provider-neutral model retry status has been recorded.
     ModelRetry,
+    /// Session usage has been updated from provider-reported model usage.
+    SessionUsageUpdated,
     /// Step completion has been recorded.
     StepCompleted,
     /// A model-requested tool call has been recorded as pending.
