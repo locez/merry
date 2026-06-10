@@ -38,6 +38,7 @@ mod judgments;
 mod lifecycle;
 mod tool_calls;
 mod transcript;
+mod usage;
 
 fn session_id() -> SessionId {
     SessionId::new("session-state-test").expect("valid session id")

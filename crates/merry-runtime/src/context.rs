@@ -25,7 +25,7 @@ use crate::{
         CitationBackedCheckpoint,
     },
 };
-use merry_core::{ArtifactId, EvidenceLocator, EvidenceRef};
+use merry_core::{ArtifactId, ContextWindowSource, EvidenceLocator, EvidenceRef};
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, btree_map::Entry},
@@ -187,19 +187,6 @@ impl ContextBudgetPolicy {
     }
 }
 
-/// Source used to resolve a model context window.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ContextWindowSource {
-    /// Explicit runtime or caller override.
-    ExplicitConfig,
-    /// Provider-neutral model capabilities.
-    ProviderCapabilities,
-    /// Bundled model catalog metadata.
-    BundledCatalog,
-    /// Conservative fallback when no metadata is available.
-    Fallback,
-}
-
 /// Resolved model context window and the metadata source that supplied it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResolvedContextWindow {
@@ -218,17 +205,6 @@ impl ResolvedContextWindow {
     #[must_use]
     pub fn source(&self) -> ContextWindowSource {
         self.source
-    }
-}
-
-impl ContextWindowSource {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::ExplicitConfig => "explicit_config",
-            Self::ProviderCapabilities => "provider_capabilities",
-            Self::BundledCatalog => "bundled_catalog",
-            Self::Fallback => "fallback",
-        }
     }
 }
 

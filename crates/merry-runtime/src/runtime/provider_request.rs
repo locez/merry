@@ -5,7 +5,7 @@ use crate::{
     session::{SessionState, TranscriptItemSnapshot},
     step::{StepInput, StepModelRequestParts, compile_step_model_request},
 };
-use merry_core::ErrorInfo;
+use merry_core::{CompactionUsageWindow, ErrorInfo, UsageContextWindow};
 use merry_llm::{GenerationConfig, ModelError, ModelName};
 
 use super::diagnostic_from_text;
@@ -171,6 +171,44 @@ pub(super) struct RequestContextBudget {
     pub(super) budget: ContextBudget,
     pub(super) dynamic_body_estimated_tokens: u64,
     pub(super) decision: CheckpointDecision,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct StepUsageContextSnapshot {
+    pub(super) context: Option<UsageContextWindow>,
+    pub(super) compaction: Option<CompactionUsageWindow>,
+}
+
+impl StepUsageContextSnapshot {
+    pub(super) const fn unavailable() -> Self {
+        Self {
+            context: None,
+            compaction: None,
+        }
+    }
+}
+
+pub(super) fn step_usage_context_snapshot(
+    request_budget: Option<&RequestContextBudget>,
+    auto_compaction_enabled: bool,
+) -> StepUsageContextSnapshot {
+    let Some(request_budget) = request_budget else {
+        return StepUsageContextSnapshot::unavailable();
+    };
+
+    StepUsageContextSnapshot {
+        context: Some(UsageContextWindow {
+            resolved_model_window_tokens: request_budget.window.tokens(),
+            effective_window_tokens: request_budget.budget.effective_window_tokens(),
+            source: request_budget.window.source(),
+        }),
+        compaction: Some(CompactionUsageWindow {
+            auto_compaction_enabled,
+            body_budget_tokens: request_budget.budget.body_budget_tokens(),
+            soft_water_tokens: request_budget.budget.soft_water_tokens(),
+            hard_water_tokens: request_budget.budget.hard_water_tokens(),
+        }),
+    }
 }
 
 pub(super) fn request_context_budget(

@@ -24,6 +24,7 @@ mod recording;
 mod tool_calls;
 mod tool_result;
 mod transcript;
+mod usage;
 
 pub(crate) use self::{
     artifacts::is_runtime_reserved_artifact_id,
@@ -53,6 +54,7 @@ pub(crate) struct SessionState {
     transcript: Transcript,
     pending_tool_calls: Vec<PendingToolCall>,
     resolved_tool_calls: BTreeSet<ToolCallId>,
+    usage: Option<merry_core::SessionUsage>,
 }
 
 impl SessionState {
@@ -76,6 +78,7 @@ impl SessionState {
             transcript: Transcript::new(),
             pending_tool_calls: Vec::new(),
             resolved_tool_calls: BTreeSet::new(),
+            usage: None,
         }
     }
 
