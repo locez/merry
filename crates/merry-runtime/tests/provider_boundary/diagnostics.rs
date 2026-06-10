@@ -40,7 +40,7 @@ async fn failed_tool_result_status_diagnostic_and_content_are_compiled_without_r
             .iter()
             .chain(resolved_events.iter())
             .chain(continuation_events.iter())
-            .all(|event| !matches!(event.kind, RuntimeEventKind::Failed { .. })),
+            .all(|event| !matches!(event.payload, RuntimeJournalPayload::Failed { .. })),
         "tool execution failure should be model-visible data, not runtime failure"
     );
     let requests = provider.recorded_requests();
@@ -98,12 +98,12 @@ async fn submit_failed_tool_result_preserves_diagnostic_and_failure_artifact_wit
         vec![3, 4]
     );
     assert!(matches!(
-        &events[0].kind,
-        RuntimeEventKind::ArtifactRecorded { artifact } if artifact == &result_artifact
+        &events[0].payload,
+        RuntimeJournalPayload::ArtifactRecorded { artifact } if artifact == &result_artifact
     ));
     assert!(matches!(
-        &events[1].kind,
-        RuntimeEventKind::ToolCallResolved { result: resolved }
+        &events[1].payload,
+        RuntimeJournalPayload::ToolCallResolved { result: resolved }
             if resolved.status() == ToolCallResultStatus::Failed
                 && resolved.diagnostic().map(merry_core::ErrorInfo::code) == Some("tool_failed")
                 && resolved == &result
@@ -112,8 +112,8 @@ async fn submit_failed_tool_result_preserves_diagnostic_and_failure_artifact_wit
         pending_events
             .iter()
             .chain(events.iter())
-            .all(|event| !matches!(event.kind, RuntimeEventKind::Failed { .. })),
-        "tool execution failure must be represented as ToolCallResolved, not RuntimeEventKind::Failed"
+            .all(|event| !matches!(event.payload, RuntimeJournalPayload::Failed { .. })),
+        "tool execution failure must be represented as ToolCallResolved, not RuntimeJournalPayload::Failed"
     );
     let evidence = runtime
         .evidence_ref(result_artifact.id(), EvidenceLocator::whole_artifact())

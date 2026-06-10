@@ -5,8 +5,8 @@ use crate::{
     StepContext, StepInput, TaskAnchor,
 };
 use merry_core::{
-    ErrorInfo, RuntimeEvent, RuntimeEventKind, SubagentId, SubagentTaskId, ToolCallResultStatus,
-    ToolName,
+    ErrorInfo, RuntimeJournalEvent, RuntimeJournalPayload, SubagentId, SubagentTaskId,
+    ToolCallResultStatus, ToolName,
 };
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -802,17 +802,17 @@ fn apply_loop_result(
 
 async fn changed_paths_from_child_events(
     runtime: &Runtime,
-    events: &[RuntimeEvent],
+    events: &[RuntimeJournalEvent],
 ) -> Vec<String> {
     let mut pending_tool_names = BTreeMap::new();
     let mut paths = BTreeSet::new();
 
     for event in events {
-        match &event.kind {
-            RuntimeEventKind::ToolCallPending { call } => {
+        match &event.payload {
+            RuntimeJournalPayload::ToolCallPending { call } => {
                 pending_tool_names.insert(call.id().clone(), call.name().clone());
             }
-            RuntimeEventKind::ToolCallResolved { result }
+            RuntimeJournalPayload::ToolCallResolved { result }
                 if result.status() == ToolCallResultStatus::Succeeded
                     && pending_tool_names
                         .get(result.call_id())

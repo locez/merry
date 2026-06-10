@@ -1,7 +1,8 @@
 use futures_util::StreamExt;
 use merry_core::{
-    ArtifactId, ArtifactKind, ArtifactRef, EvidenceLocator, RuntimeEvent, RuntimeEventKind,
-    SessionId, ToolCallId, ToolCallResult, ToolInputSchema, ToolName, ToolSpec,
+    ArtifactId, ArtifactKind, ArtifactRef, EvidenceLocator, RuntimeJournalEvent,
+    RuntimeJournalPayload, SessionId, ToolCallId, ToolCallResult, ToolInputSchema, ToolName,
+    ToolSpec,
 };
 use merry_runtime::{
     ArtifactContent, ArtifactContentKind, ArtifactError, ContextCompiler, ContextSummary,
@@ -55,7 +56,7 @@ impl ToolExecutor for StaticToolExecutor {
     }
 }
 
-async fn collect_step(runtime: &Runtime, text: &str) -> Vec<RuntimeEvent> {
+async fn collect_step(runtime: &Runtime, text: &str) -> Vec<RuntimeJournalEvent> {
     runtime
         .step(
             StepInput::user_text(text).expect("valid step input"),
@@ -357,7 +358,7 @@ async fn submit_tool_result_reserved_id_keeps_step_already_active_priority() {
 }
 
 #[track_caller]
-fn assert_sequences(events: &[RuntimeEvent], expected: &[u64]) {
+fn assert_sequences(events: &[RuntimeJournalEvent], expected: &[u64]) {
     assert_eq!(
         events
             .iter()
@@ -381,10 +382,13 @@ async fn record_artifact_returns_session_started_then_artifact_recorded() {
 
     assert_eq!(events.len(), 2);
     assert_sequences(&events, &[0, 1]);
-    assert!(matches!(events[0].kind, RuntimeEventKind::SessionStarted));
     assert!(matches!(
-        &events[1].kind,
-        RuntimeEventKind::ArtifactRecorded { artifact: recorded } if recorded == &artifact
+        events[0].payload,
+        RuntimeJournalPayload::SessionStarted
+    ));
+    assert!(matches!(
+        &events[1].payload,
+        RuntimeJournalPayload::ArtifactRecorded { artifact: recorded } if recorded == &artifact
     ));
 }
 
@@ -408,8 +412,8 @@ async fn record_artifact_after_step_completion_continues_global_sequence() {
     assert_eq!(events.len(), 1);
     assert_sequences(&events, &[3]);
     assert!(matches!(
-        &events[0].kind,
-        RuntimeEventKind::ArtifactRecorded { artifact: recorded } if recorded == &artifact
+        &events[0].payload,
+        RuntimeJournalPayload::ArtifactRecorded { artifact: recorded } if recorded == &artifact
     ));
 }
 
@@ -553,8 +557,8 @@ async fn artifact_event_is_returned_after_recorded_artifact_supports_evidence_re
 
     assert_eq!(evidence.artifact_id, *artifact.id());
     assert!(matches!(
-        events.last().map(|event| &event.kind),
-        Some(RuntimeEventKind::ArtifactRecorded { artifact: recorded }) if recorded == &artifact
+        events.last().map(|event| &event.payload),
+        Some(RuntimeJournalPayload::ArtifactRecorded { artifact: recorded }) if recorded == &artifact
     ));
 }
 
@@ -662,9 +666,18 @@ async fn first_step_emits_session_started_then_step_lifecycle() {
 
     assert_eq!(events.len(), 3);
     assert_sequences(&events, &[0, 1, 2]);
-    assert!(matches!(events[0].kind, RuntimeEventKind::SessionStarted));
-    assert!(matches!(events[1].kind, RuntimeEventKind::StepStarted));
-    assert!(matches!(events[2].kind, RuntimeEventKind::StepCompleted));
+    assert!(matches!(
+        events[0].payload,
+        RuntimeJournalPayload::SessionStarted
+    ));
+    assert!(matches!(
+        events[1].payload,
+        RuntimeJournalPayload::StepStarted
+    ));
+    assert!(matches!(
+        events[2].payload,
+        RuntimeJournalPayload::StepCompleted
+    ));
     assert!(events.iter().all(|event| event.session_id == session_id()));
 }
 
@@ -681,11 +694,11 @@ async fn second_step_continues_sequence_without_restarting_session() {
     assert_eq!(second_events.len(), 2);
     assert_sequences(&second_events, &[3, 4]);
     assert!(matches!(
-        second_events[0].kind,
-        RuntimeEventKind::StepStarted
+        second_events[0].payload,
+        RuntimeJournalPayload::StepStarted
     ));
     assert!(matches!(
-        second_events[1].kind,
-        RuntimeEventKind::StepCompleted
+        second_events[1].payload,
+        RuntimeJournalPayload::StepCompleted
     ));
 }

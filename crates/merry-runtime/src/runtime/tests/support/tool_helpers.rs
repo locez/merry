@@ -78,11 +78,11 @@
         )
     }
 
-    fn resolved_tool_result(events: &[RuntimeEvent]) -> &merry_core::ToolCallResult {
+    fn resolved_tool_result(events: &[RuntimeJournalEvent]) -> &merry_core::ToolCallResult {
         events
             .iter()
-            .find_map(|event| match &event.kind {
-                RuntimeEventKind::ToolCallResolved { result } => Some(result),
+            .find_map(|event| match &event.payload {
+                RuntimeJournalPayload::ToolCallResolved { result } => Some(result),
                 _ => None,
             })
             .expect("tool call should resolve")
@@ -172,7 +172,7 @@
 
     async fn denied_action_content(
         runtime: &Runtime,
-        events: &[RuntimeEvent],
+        events: &[RuntimeJournalEvent],
     ) -> serde_json::Value {
         let result = resolved_tool_result(events);
         let content = runtime
@@ -246,20 +246,21 @@
         assert!(content.get("previous_response_id").is_none());
     }
 
-    fn event_kind_names_for_tool_execution(events: &[RuntimeEvent]) -> Vec<&'static str> {
+    fn event_kind_names_for_tool_execution(events: &[RuntimeJournalEvent]) -> Vec<&'static str> {
         events
             .iter()
-            .map(|event| match event.kind {
-                RuntimeEventKind::ArtifactRecorded { .. } => "ArtifactRecorded",
-                RuntimeEventKind::ToolCallResolved { .. } => "ToolCallResolved",
-                RuntimeEventKind::SessionStarted => "SessionStarted",
-                RuntimeEventKind::StepStarted => "StepStarted",
-                RuntimeEventKind::StepCompleted => "StepCompleted",
-                RuntimeEventKind::Cancelled { .. } => "Cancelled",
-                RuntimeEventKind::Failed { .. } => "Failed",
-                RuntimeEventKind::ToolCallPending { .. } => "ToolCallPending",
-                RuntimeEventKind::EvidenceReferenced { .. } => "EvidenceReferenced",
-                RuntimeEventKind::SkillUsed { .. } => "SkillUsed",
+            .map(|event| match event.payload {
+                RuntimeJournalPayload::ArtifactRecorded { .. } => "ArtifactRecorded",
+                RuntimeJournalPayload::AssistantOutputRecorded { .. } => "AssistantOutputRecorded",
+                RuntimeJournalPayload::ToolCallResolved { .. } => "ToolCallResolved",
+                RuntimeJournalPayload::SessionStarted => "SessionStarted",
+                RuntimeJournalPayload::StepStarted => "StepStarted",
+                RuntimeJournalPayload::StepCompleted => "StepCompleted",
+                RuntimeJournalPayload::Cancelled { .. } => "Cancelled",
+                RuntimeJournalPayload::Failed { .. } => "Failed",
+                RuntimeJournalPayload::ToolCallPending { .. } => "ToolCallPending",
+                RuntimeJournalPayload::EvidenceReferenced { .. } => "EvidenceReferenced",
+                RuntimeJournalPayload::SkillUsed { .. } => "SkillUsed",
                 _ => "Other",
             })
             .collect()

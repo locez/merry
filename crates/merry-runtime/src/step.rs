@@ -157,7 +157,7 @@ impl StepContext {
     /// Returns the cancellation token for this step.
     ///
     /// Runtime producers check this token at cancellation checkpoints. Dropping
-    /// the returned [`crate::RuntimeEventStream`] also cancels the step token.
+    /// the returned [`crate::RuntimeJournalEventStream`] also cancels the step token.
     #[must_use]
     pub fn cancellation_token(&self) -> &CancellationToken {
         &self.cancellation_token

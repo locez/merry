@@ -53,7 +53,7 @@ endpoint.
 stream = runtime.stream("...")
 
 async for event in stream:
-    print(event["kind"]["type"])
+    print(event["type"])
 
 result = await stream.result()
 ```
@@ -74,9 +74,17 @@ run = runtime.start_interactive()
 asyncio.create_task(render(run.stream))
 
 await run.input.submit_next("Inspect the current failure.")
-await run.input.enqueue("After that, summarize the next step.")
+backlog = await run.input.enqueue("After that, summarize the next step.")
+await backlog.update(backlog.text + " Keep it brief.")
 await run.control.interrupt()
 ```
+
+`submit_next()` preempts backlog at the next boundary. `enqueue()` adds normal
+backlog input that the run consumes automatically and returns a pending input
+handle with `lane`, `text`, and `update()`/`remove()` methods. Only
+suspended input created by an interrupt requires explicit resume or discard.
+To reorder pending input, mutate a snapshot list and submit the whole order with
+`replace_pending_order(lane, items)`.
 
 Interactive input/control handles do not replace the existing `RuntimeStream`
 bridge-tool path; Python bridge tools continue to be resolved by consuming
@@ -171,10 +179,11 @@ async def lookup_order(args: LookupOrderInput) -> LookupOrderOutput:
     return LookupOrderOutput(order_id=args.order_id, status="shipped")
 ```
 
-The Rust runtime emits `bridge_tool_call_requested`, Python executes the
-registered handler, then Python submits the result back to the same Rust runtime
-session. Bridge handlers run in the host Python process; Merry profiles do not
-sandbox arbitrary host code.
+The native stream driver sends an internal bridge tool request to the Python
+wrapper, Python executes the registered handler, then Python submits the result
+back to the same Rust runtime session. Public events still show ordinary
+`tool_call_started` and `tool_call_finished` records. Bridge handlers run in the
+host Python process; Merry profiles do not sandbox arbitrary host code.
 
 ## Structured Final Output
 
@@ -197,7 +206,7 @@ stream = runtime.stream(
 )
 
 async for event in stream:
-    print(event["kind"]["type"])
+    print(event["type"])
 
 result = await stream.result()
 print(result.final_output.status)

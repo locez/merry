@@ -21,9 +21,10 @@ async fn read_only_registered_tool_executes_under_default_policy() {
     assert_eq!(
         events
             .iter()
-            .map(|event| match event.kind {
-                RuntimeEventKind::ArtifactRecorded { .. } => "ArtifactRecorded",
-                RuntimeEventKind::ToolCallResolved { .. } => "ToolCallResolved",
+            .map(|event| match event.payload {
+                RuntimeJournalPayload::ArtifactRecorded { .. } => "ArtifactRecorded",
+                RuntimeJournalPayload::AssistantOutputRecorded { .. } => "AssistantOutputRecorded",
+                RuntimeJournalPayload::ToolCallResolved { .. } => "ToolCallResolved",
                 _ => "Other",
             })
             .collect::<Vec<_>>(),
@@ -303,9 +304,10 @@ async fn workspace_write_tool_is_denied_before_executor_and_records_sanitized_fa
     assert_eq!(
         events
             .iter()
-            .map(|event| match event.kind {
-                RuntimeEventKind::ArtifactRecorded { .. } => "ArtifactRecorded",
-                RuntimeEventKind::ToolCallResolved { .. } => "ToolCallResolved",
+            .map(|event| match event.payload {
+                RuntimeJournalPayload::ArtifactRecorded { .. } => "ArtifactRecorded",
+                RuntimeJournalPayload::AssistantOutputRecorded { .. } => "AssistantOutputRecorded",
+                RuntimeJournalPayload::ToolCallResolved { .. } => "ToolCallResolved",
                 _ => "Other",
             })
             .collect::<Vec<_>>(),
@@ -313,12 +315,12 @@ async fn workspace_write_tool_is_denied_before_executor_and_records_sanitized_fa
     );
     let result = resolved_tool_result(&events);
     assert!(matches!(
-        &events[0].kind,
-        RuntimeEventKind::ArtifactRecorded { artifact } if artifact == result.artifact()
+        &events[0].payload,
+        RuntimeJournalPayload::ArtifactRecorded { artifact } if artifact == result.artifact()
     ));
     assert!(matches!(
-        &events[1].kind,
-        RuntimeEventKind::ToolCallResolved { result: resolved } if resolved == result
+        &events[1].payload,
+        RuntimeJournalPayload::ToolCallResolved { result: resolved } if resolved == result
     ));
     assert_eq!(result.status(), merry_core::ToolCallResultStatus::Failed);
     assert_eq!(

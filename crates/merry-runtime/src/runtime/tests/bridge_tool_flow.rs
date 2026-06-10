@@ -98,8 +98,8 @@ async fn bridge_tool_call_emits_bridge_request_event() {
         ]
     );
     assert!(events.iter().any(|event| matches!(
-        &event.kind,
-        RuntimeEventKind::BridgeToolCallRequested { call }
+        &event.payload,
+        RuntimeJournalPayload::BridgeToolCallRequested { call }
             if call.id().as_str() == "call-bridge-tool"
                 && call.name().as_str() == "lookup"
     )));
@@ -141,16 +141,15 @@ async fn invalid_bridge_tool_arguments_resolve_failed_without_bridge_request() {
             "ToolCallResolved",
         ]
     );
-    assert!(
-        !events
-            .iter()
-            .any(|event| matches!(event.kind, RuntimeEventKind::BridgeToolCallRequested { .. }))
-    );
+    assert!(!events.iter().any(|event| matches!(
+        event.payload,
+        RuntimeJournalPayload::BridgeToolCallRequested { .. }
+    )));
     assert_eq!(runtime.pending_tool_calls().await, Vec::new());
     let result = events
         .iter()
-        .find_map(|event| match &event.kind {
-            RuntimeEventKind::ToolCallResolved { result } => Some(result),
+        .find_map(|event| match &event.payload {
+            RuntimeJournalPayload::ToolCallResolved { result } => Some(result),
             _ => None,
         })
         .expect("invalid bridge call should resolve");

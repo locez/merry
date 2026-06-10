@@ -5,7 +5,7 @@ use super::{
 use crate::debug::coding_loop::coding_loop_workspace_call;
 use crate::runtime_events::{collect_runtime_step_events, first_pending_tool_call};
 use crate::testing::{FakeProcessRunner, ScriptedProvider, model_name};
-use merry_core::{RuntimeEvent, ToolCallResult, ToolCallResultStatus, ToolName};
+use merry_core::{RuntimeJournalEvent, ToolCallResult, ToolCallResultStatus, ToolName};
 use merry_llm::{
     FinishReason, ModelEvent, ModelOutput, ModelResponse, ModelToolCall, ModelToolCallId,
     ToolArguments,
@@ -461,11 +461,11 @@ async fn subagent_with_narrow_tools_keeps_read_only_profile() {
     assert!(!child_tool_names.contains(&"cancel_subagents"));
 }
 
-fn resolved_tool_result(events: &[RuntimeEvent]) -> &ToolCallResult {
+fn resolved_tool_result(events: &[RuntimeJournalEvent]) -> &ToolCallResult {
     events
         .iter()
-        .find_map(|event| match &event.kind {
-            merry_core::RuntimeEventKind::ToolCallResolved { result } => Some(result),
+        .find_map(|event| match &event.payload {
+            merry_core::RuntimeJournalPayload::ToolCallResolved { result } => Some(result),
             _ => None,
         })
         .expect("events should include a resolved tool result")

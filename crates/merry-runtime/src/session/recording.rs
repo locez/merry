@@ -7,7 +7,9 @@ use crate::{
     artifact::{ArtifactContent, ArtifactError},
     ledger::LedgerFactKind,
 };
-use merry_core::{ArtifactId, ArtifactKind, ArtifactRef, RuntimeEvent, RuntimeEventKind};
+use merry_core::{
+    ArtifactId, ArtifactKind, ArtifactRef, RuntimeJournalEvent, RuntimeJournalPayload,
+};
 
 impl SessionState {
     pub(crate) fn record_artifact_state(
@@ -22,7 +24,7 @@ impl SessionState {
         &mut self,
         artifact: ArtifactRef,
         content: ArtifactContent,
-    ) -> Result<Vec<RuntimeEvent>, ArtifactError> {
+    ) -> Result<Vec<RuntimeJournalEvent>, ArtifactError> {
         let content_bytes = content.as_bytes().len();
         let recorded = self.record_artifact_state(artifact, content)?;
         Self::trace_artifact_record(self.session_id.as_str(), &recorded, content_bytes);
@@ -33,7 +35,7 @@ impl SessionState {
         }
 
         events.push(self.record_event(
-            RuntimeEventKind::ArtifactRecorded { artifact: recorded },
+            RuntimeJournalPayload::ArtifactRecorded { artifact: recorded },
             LedgerFactKind::ArtifactRecorded,
         ));
 
@@ -43,7 +45,7 @@ impl SessionState {
     pub(crate) fn record_process_input_artifact(
         &mut self,
         content: ArtifactContent,
-    ) -> Result<(ArtifactRef, Vec<RuntimeEvent>), ArtifactError> {
+    ) -> Result<(ArtifactRef, Vec<RuntimeJournalEvent>), ArtifactError> {
         let artifact = ArtifactRef::new(process_input_id(self.next_sequence()), ArtifactKind::Json);
         let events = self.record_artifact_events(artifact.clone(), content)?;
         Ok((artifact, events))
@@ -52,7 +54,7 @@ impl SessionState {
     pub(crate) fn record_assistant_text_output(
         &mut self,
         text: String,
-    ) -> Result<RuntimeEvent, RuntimeError> {
+    ) -> Result<RuntimeJournalEvent, RuntimeError> {
         let artifact_sequence = self.next_sequence();
         let artifact = ArtifactRef::new(assistant_output_id(artifact_sequence), ArtifactKind::Text);
         let content = ArtifactContent::text(text);
@@ -61,7 +63,7 @@ impl SessionState {
         Self::trace_artifact_record(self.session_id.as_str(), &recorded, content_bytes);
         self.transcript.push_assistant_text(recorded.id().clone())?;
         Ok(self.record_event(
-            RuntimeEventKind::ArtifactRecorded { artifact: recorded },
+            RuntimeJournalPayload::AssistantOutputRecorded { artifact: recorded },
             LedgerFactKind::ArtifactRecorded,
         ))
     }

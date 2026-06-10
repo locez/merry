@@ -1,5 +1,5 @@
 use super::auto_compaction::compact_context_for_hard_watermark;
-use super::events::{
+use super::journal_emission::{
     send_assistant_text_output_completed_events, send_assistant_text_output_recorded_event,
     send_cancelled_event, send_cancelled_if_requested, send_failed_event,
     send_tool_call_pending_event, stream_model_with_retry_policy, trace_provider_step_cancelled,
@@ -24,7 +24,7 @@ use crate::{
     CheckpointDecision, memory::MemoryActivationContext, model_config::ModelProviderConfig,
     step::StepInput,
 };
-use merry_core::{PendingToolCall, RuntimeEvent};
+use merry_core::{PendingToolCall, RuntimeJournalEvent};
 use merry_llm::{FinishReason, GenerationConfig, ModelEvent, ModelOutput, ModelStreamContext};
 use std::sync::{Arc, atomic::Ordering};
 use tokio::sync::mpsc;
@@ -37,7 +37,7 @@ async fn has_unresolved_pending_tool_calls(inner: &RuntimeInner) -> bool {
 
 pub(super) async fn run_provider_step(
     inner: &Arc<RuntimeInner>,
-    sender: &mpsc::Sender<RuntimeEvent>,
+    sender: &mpsc::Sender<RuntimeJournalEvent>,
     token: &CancellationToken,
     input: StepInput,
     generation_config: GenerationConfig,

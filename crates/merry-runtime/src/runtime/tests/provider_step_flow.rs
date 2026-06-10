@@ -56,14 +56,16 @@ async fn model_retry_events_are_emitted_and_failed_attempt_output_is_not_recorde
             "ModelRetryAttemptStarted",
             "ModelRetryScheduled",
             "ModelRetryAttemptStarted",
-            "ArtifactRecorded",
+            "AssistantOutputRecorded",
             "StepCompleted",
         ]
     );
     let artifact_id = events
         .iter()
-        .find_map(|event| match &event.kind {
-            RuntimeEventKind::ArtifactRecorded { artifact } => Some(artifact.id().clone()),
+        .find_map(|event| match &event.payload {
+            RuntimeJournalPayload::AssistantOutputRecorded { artifact } => {
+                Some(artifact.id().clone())
+            }
             _ => None,
         })
         .expect("assistant output artifact should be recorded");
@@ -475,7 +477,7 @@ async fn provider_stop_completion_retains_activated_memory_projection() {
         [
             "SessionStarted",
             "StepStarted",
-            "ArtifactRecorded",
+            "AssistantOutputRecorded",
             "StepCompleted"
         ]
     );

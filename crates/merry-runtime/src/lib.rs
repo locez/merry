@@ -3,7 +3,7 @@
 //! This crate owns the MVP runtime facade for session execution:
 //!
 //! - [`Runtime`] and [`RuntimeBuilder`] construct a session-scoped runtime.
-//! - [`StepInput`], [`StepContext`], and [`RuntimeEventStream`] drive one
+//! - [`StepInput`], [`StepContext`], and [`RuntimeJournalEventStream`] drive one
 //!   provider-neutral runtime step at a time.
 //! - [`RegisteredTool`] and [`ToolExecutor`] define the runtime-owned tool
 //!   executor path.
@@ -36,7 +36,7 @@ mod checkpoint;
 mod compaction;
 mod context;
 mod error;
-mod event_stream;
+mod events;
 mod final_output;
 mod interactive;
 mod judgment;
@@ -59,8 +59,8 @@ mod tool_input_validation;
 
 pub use agent_loop::{
     AgentLoopBlockedReason, AgentLoopConfig, AgentLoopConfigError, AgentLoopError,
-    AgentLoopEventStream, AgentLoopResult, AgentLoopStatus, DEFAULT_AGENT_LOOP_MAX_MODEL_TURNS,
-    DEFAULT_CODING_AGENT_MAX_MODEL_TURNS,
+    AgentLoopEventStream, AgentLoopResult, AgentLoopStatus, AgentLoopStreamMessage,
+    DEFAULT_AGENT_LOOP_MAX_MODEL_TURNS, DEFAULT_CODING_AGENT_MAX_MODEL_TURNS,
 };
 pub use artifact::{
     ArtifactContent, ArtifactContentKind, ArtifactError, ArtifactRecord, ArtifactRegistry,
@@ -83,14 +83,13 @@ pub use context::{
     resolve_context_window,
 };
 pub use error::RuntimeError;
-pub use event_stream::RuntimeEventStream;
+pub use events::{RuntimeEventStream, RuntimeJournalEventStream};
 pub use final_output::{
     FINAL_OUTPUT_TOOL_NAME, FinalOutput, FinalOutputContract, FinalOutputContractError,
 };
 pub use interactive::{
-    AgentLoopControl, AgentLoopInput, InputReceipt, InteractiveAgentRun, InteractiveError,
-    InteractiveInputId, InteractiveRunEvent, InteractiveRunEventStream, InteractiveRunId,
-    InteractiveRunState, InterruptReason, QueueKind, QueueSnapshot, QueuedInputSnapshot,
+    AgentLoopControl, AgentLoopInput, InteractiveAgentRun, InteractiveError, InteractiveInputItem,
+    InteractiveInputSnapshot, InteractiveRunEventStream, InteractiveRunId, InterruptReason,
 };
 pub use ledger::{
     CompactLedgerText, LedgerFactKind, LedgerProjection, LedgerProjectionSnapshot, LedgerScope,

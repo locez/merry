@@ -160,7 +160,7 @@ async fn workspace_coding_loop_profile_seeds_project_capability_context() {
             "SessionStarted",
             "StepStarted",
             "ModelRetryAttemptStarted",
-            "ArtifactRecorded",
+            "AssistantOutputRecorded",
             "StepCompleted"
         ],
         "seeded project context should not emit startup artifact events"

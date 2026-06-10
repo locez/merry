@@ -134,32 +134,33 @@
         completed_event_with(vec![ModelOutput::text(&output)], FinishReason::Stop)
     }
 
-    fn event_kind_names(events: &[RuntimeEvent]) -> Vec<&'static str> {
+    fn event_kind_names(events: &[RuntimeJournalEvent]) -> Vec<&'static str> {
         events
             .iter()
-            .map(|event| match event.kind {
-                RuntimeEventKind::SessionStarted => "SessionStarted",
-                RuntimeEventKind::StepStarted => "StepStarted",
-                RuntimeEventKind::ModelRetryAttemptStarted { .. } => "ModelRetryAttemptStarted",
-                RuntimeEventKind::ModelRetryScheduled { .. } => "ModelRetryScheduled",
-                RuntimeEventKind::ModelRetryExhausted { .. } => "ModelRetryExhausted",
-                RuntimeEventKind::StepCompleted => "StepCompleted",
-                RuntimeEventKind::Cancelled { .. } => "Cancelled",
-                RuntimeEventKind::Failed { .. } => "Failed",
-                RuntimeEventKind::ArtifactRecorded { .. } => "ArtifactRecorded",
-                RuntimeEventKind::EvidenceReferenced { .. } => "EvidenceReferenced",
-                RuntimeEventKind::ToolCallPending { .. } => "ToolCallPending",
-                RuntimeEventKind::BridgeToolCallRequested { .. } => "BridgeToolCallRequested",
-                RuntimeEventKind::ToolCallResolved { .. } => "ToolCallResolved",
-                RuntimeEventKind::SkillUsed { .. } => "SkillUsed",
+            .map(|event| match event.payload {
+                RuntimeJournalPayload::SessionStarted => "SessionStarted",
+                RuntimeJournalPayload::StepStarted => "StepStarted",
+                RuntimeJournalPayload::ModelRetryAttemptStarted { .. } => "ModelRetryAttemptStarted",
+                RuntimeJournalPayload::ModelRetryScheduled { .. } => "ModelRetryScheduled",
+                RuntimeJournalPayload::ModelRetryExhausted { .. } => "ModelRetryExhausted",
+                RuntimeJournalPayload::StepCompleted => "StepCompleted",
+                RuntimeJournalPayload::Cancelled { .. } => "Cancelled",
+                RuntimeJournalPayload::Failed { .. } => "Failed",
+                RuntimeJournalPayload::ArtifactRecorded { .. } => "ArtifactRecorded",
+                RuntimeJournalPayload::AssistantOutputRecorded { .. } => "AssistantOutputRecorded",
+                RuntimeJournalPayload::EvidenceReferenced { .. } => "EvidenceReferenced",
+                RuntimeJournalPayload::ToolCallPending { .. } => "ToolCallPending",
+                RuntimeJournalPayload::BridgeToolCallRequested { .. } => "BridgeToolCallRequested",
+                RuntimeJournalPayload::ToolCallResolved { .. } => "ToolCallResolved",
+                RuntimeJournalPayload::SkillUsed { .. } => "SkillUsed",
                 _ => "Unknown",
             })
             .collect()
     }
 
-    fn failed_code(events: &[RuntimeEvent]) -> Option<&str> {
-        events.iter().find_map(|event| match &event.kind {
-            RuntimeEventKind::Failed { diagnostic } => Some(diagnostic.code()),
+    fn failed_code(events: &[RuntimeJournalEvent]) -> Option<&str> {
+        events.iter().find_map(|event| match &event.payload {
+            RuntimeJournalPayload::Failed { diagnostic } => Some(diagnostic.code()),
             _ => None,
         })
     }
@@ -168,7 +169,7 @@
         runtime: &Runtime,
         text: &str,
         context: crate::StepContext,
-    ) -> Vec<RuntimeEvent> {
+    ) -> Vec<RuntimeJournalEvent> {
         runtime
             .step(
                 crate::StepInput::user_text(text).expect("valid step input"),

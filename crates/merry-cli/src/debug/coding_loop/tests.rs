@@ -12,8 +12,8 @@ use crate::debug::CodingLoopTaskSmokeTask;
 use crate::runtime_config::effective_log_settings;
 use crate::testing::{FakeProcessRunner, FakeProcessRunnerStep};
 use merry_core::{
-    ArtifactKind, ArtifactRef, PendingToolCall, RuntimeEvent, RuntimeEventKind, ToolCallId,
-    ToolCallResult, ToolName,
+    ArtifactKind, ArtifactRef, PendingToolCall, RuntimeJournalEvent, RuntimeJournalPayload,
+    ToolCallId, ToolCallResult, ToolName,
 };
 use merry_runtime::{
     AcceptedLocalWorkspaceProcessAdmission, AgentLoopConfig, StepContext, StepInput,
@@ -207,10 +207,10 @@ fn coding_loop_task_patch_assertion_accepts_standard_patch_envelope_alias() {
 -    Entry { key: \"status\", value: \"todo\" },
 +    Entry { key: \"status\", value: \"done\" },
 *** End Patch";
-    let pending = RuntimeEvent::new(
+    let pending = RuntimeJournalEvent::new(
         merry_core::SessionId::new("coding-loop-task-live-smoke").unwrap(),
         1,
-        RuntimeEventKind::ToolCallPending {
+        RuntimeJournalPayload::ToolCallPending {
             call: PendingToolCall::new(
                 call_id.clone(),
                 ToolName::new(WORKSPACE_PATCH_TOOL).expect("valid tool name"),
@@ -221,10 +221,10 @@ fn coding_loop_task_patch_assertion_accepts_standard_patch_envelope_alias() {
             ),
         },
     );
-    let resolved = RuntimeEvent::new(
+    let resolved = RuntimeJournalEvent::new(
         merry_core::SessionId::new("coding-loop-task-live-smoke").unwrap(),
         2,
-        RuntimeEventKind::ToolCallResolved {
+        RuntimeJournalPayload::ToolCallResolved {
             result: ToolCallResult::succeeded(
                 call_id,
                 ArtifactRef::new(

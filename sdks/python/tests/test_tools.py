@@ -32,10 +32,10 @@ async def _assert_scripted_tool_domain_failure_resolves_tool_and_continues():
     resolved = [
         event
         for event in result.events
-        if event["kind"]["type"] == "tool_call_resolved"
+        if event["type"] == "tool_call_finished"
     ]
-    assert resolved[0]["kind"]["result"]["status"] == "failed"
-    assert resolved[0]["kind"]["result"]["diagnostic"]["code"] == "tool.domain_failed"
+    assert resolved[0]["result"]["status"] == "failed"
+    assert resolved[0]["result"]["diagnostic"]["code"] == "tool.domain_failed"
 
 
 def test_scripted_tool_domain_failure_resolves_tool_and_continues():

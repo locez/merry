@@ -5,17 +5,22 @@ pub mod error;
 pub mod event;
 pub mod evidence;
 pub mod id;
+pub mod journal;
+pub mod runtime_event;
 pub mod schema;
 pub mod tool;
 
 pub use artifact::{ArtifactKind, ArtifactRef};
 pub use error::CoreError;
-pub use event::{
-    ErrorInfo, MerryErrorDomain, MerryErrorInfo, MerryRetryability, RuntimeEvent, RuntimeEventKind,
-};
+pub use event::{ErrorInfo, MerryErrorDomain, MerryErrorInfo, MerryRetryability};
 pub use evidence::{EvidenceLocator, EvidenceRef};
 pub use id::{
     ArtifactId, ProviderName, SessionId, SkillId, SubagentId, SubagentTaskId, ToolCallId, ToolName,
+};
+pub use journal::{RuntimeJournalEvent, RuntimeJournalPayload};
+pub use runtime_event::{
+    InteractiveRunState, QueuedInputLane, QueuedInputView, QueuedInputsView, RuntimeEvent,
+    RuntimeEventSource, SubagentStatus, ToolOutput,
 };
 pub use schema::ToolInputSchema;
 pub use tool::{

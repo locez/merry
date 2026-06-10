@@ -8,9 +8,10 @@
 use crate::{
     AcceptedLocalWorkspaceProcessAdmission, CheckpointId, CheckpointRefExcerpt, CheckpointRefId,
     CitationCompactionInput, CitationCompactionPolicy, CompactedCheckpointSummary, CompactionError,
-    CompactionOutcome, ProcessRunner, RuntimeCapabilities, RuntimeError, RuntimeEventStream,
-    RuntimeModelRole,
-    event_stream::ActiveStepPermit,
+    CompactionOutcome, ProcessRunner, RuntimeCapabilities, RuntimeError, RuntimeModelRole,
+    events::{
+        ActiveStepPermit, RuntimeEventProjector, RuntimeEventStream, RuntimeJournalEventStream,
+    },
     judgment::{JudgmentContext, JudgmentError, JudgmentRecord, JudgmentRequest, JudgmentSource},
     memory::MemoryActivationSource,
     model_config::RuntimeModelConfigs,
@@ -21,7 +22,7 @@ use crate::{
     subagent::SubagentManager,
     tool::{ToolExecutionContext, ToolRegistry},
 };
-use merry_core::{RuntimeEvent, SessionId, ToolCallId};
+use merry_core::{RuntimeEvent, RuntimeJournalEvent, SessionId, ToolCallId};
 use merry_llm::GenerationConfig;
 use std::{
     num::NonZeroUsize,
@@ -38,7 +39,7 @@ use tracing::Instrument;
 mod auto_compaction;
 mod builder;
 mod diagnostics;
-mod events;
+mod journal_emission;
 mod memory_activation;
 mod model_output;
 mod permission_execution;
@@ -55,7 +56,7 @@ use self::diagnostics::{
     DIAGNOSTIC_TOOL_NOT_REGISTERED, TOOL_ACTION_POLICY_DENIED_MESSAGE, WORKSPACE_PATCH_TOOL_NAME,
     diagnostic_from_text,
 };
-use self::events::{
+use self::journal_emission::{
     send_cancelled_event, send_cancelled_if_requested, send_normal_event,
     stream_model_with_retry_policy,
 };
@@ -91,10 +92,10 @@ impl Runtime {
     ///
     /// Only one step or direct mutation may own the runtime at a time. The
     /// step producer owns the active-step permit. Dropping the
-    /// returned [`RuntimeEventStream`] cancels and aborts the producer; the
+    /// returned [`RuntimeJournalEventStream`] cancels and aborts the producer; the
     /// permit is released when that producer future stops and drops its state.
     ///
-    /// All events emitted by the step are provider-neutral [`RuntimeEvent`]
+    /// All events emitted by the step are provider-neutral [`RuntimeJournalEvent`]
     /// values. The runtime records session, ledger, artifact, and pending-tool
     /// state before the corresponding event becomes observable.
     ///
@@ -105,13 +106,63 @@ impl Runtime {
         &self,
         input: StepInput,
         context: StepContext,
-    ) -> Result<RuntimeEventStream, RuntimeError> {
+    ) -> Result<RuntimeJournalEventStream, RuntimeError> {
         let active_permit = ActiveStepPermit::acquire(Arc::clone(&self.inner.active_step))
             .ok_or_else(|| RuntimeError::StepAlreadyActive {
                 session_id: self.inner.session_id.clone(),
             })?;
 
         self.step_with_active_permit(input, context, active_permit)
+    }
+
+    /// Starts a runtime step and returns the raw ordered journal stream.
+    ///
+    /// This is the explicit low-level alias for [`Runtime::step`]. Runtime
+    /// internals, debugging tools, and replay inspection should use this API
+    /// when they need exact journal payloads rather than SDK-facing projection.
+    pub fn journal_stream(
+        &self,
+        input: StepInput,
+        context: StepContext,
+    ) -> Result<RuntimeJournalEventStream, RuntimeError> {
+        self.step(input, context)
+    }
+
+    /// Starts a runtime step and returns SDK-facing public events.
+    ///
+    /// Public events are projected from the internal journal after the
+    /// corresponding session state is recorded. They expose assistant text and
+    /// tool activity directly while omitting internal bridge handoff details.
+    pub fn stream(
+        &self,
+        input: StepInput,
+        context: StepContext,
+    ) -> Result<RuntimeEventStream, RuntimeError> {
+        let journal_stream = self.step(input, context)?;
+        Ok(RuntimeEventStream::new(
+            journal_stream,
+            self.clone(),
+            self.inner.event_buffer_size.get(),
+        ))
+    }
+
+    /// Projects raw ordered journal events into SDK-facing public events.
+    ///
+    /// This helper is read-only and is intended for SDK bindings that need to
+    /// return public events for a completed run while preserving raw journal
+    /// evidence inside Rust runtime results.
+    pub async fn project_journal_events(
+        &self,
+        events: &[RuntimeJournalEvent],
+    ) -> Result<Vec<RuntimeEvent>, RuntimeError> {
+        let mut projector = RuntimeEventProjector::new();
+        let mut projected = Vec::new();
+        for event in events {
+            if let Some(event) = projector.project(event.clone(), self).await? {
+                projected.push(event);
+            }
+        }
+        Ok(projected)
     }
 
     pub(crate) fn acquire_active_step_permit(&self) -> Result<ActiveStepPermit, RuntimeError> {
@@ -171,7 +222,7 @@ impl Runtime {
         input: StepInput,
         context: StepContext,
         active_permit: ActiveStepPermit,
-    ) -> Result<RuntimeEventStream, RuntimeError> {
+    ) -> Result<RuntimeJournalEventStream, RuntimeError> {
         let (parent_token, generation_config, final_output_contract) = context.into_parts();
         let step_token = parent_token.child_token();
         let producer_token = step_token.clone();
@@ -205,7 +256,7 @@ impl Runtime {
             .instrument(producer_span),
         );
 
-        Ok(RuntimeEventStream::new(
+        Ok(RuntimeJournalEventStream::new(
             ReceiverStream::new(receiver),
             step_token,
             producer_handle,
@@ -227,7 +278,7 @@ impl Runtime {
         &self,
         call_id: &ToolCallId,
         context: ToolExecutionContext,
-    ) -> Result<Vec<RuntimeEvent>, RuntimeError> {
+    ) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
         let _active_permit = ActiveStepPermit::acquire(Arc::clone(&self.inner.active_step))
             .ok_or_else(|| RuntimeError::StepAlreadyActive {
                 session_id: self.inner.session_id.clone(),
@@ -242,7 +293,7 @@ impl Runtime {
         call_id: &ToolCallId,
         context: ToolExecutionContext,
         _active_permit: &ActiveStepPermit,
-    ) -> Result<Vec<RuntimeEvent>, RuntimeError> {
+    ) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
         tool_execution::execute_tool_call_with_active_permit(&self.inner, call_id, context).await
     }
 
@@ -389,7 +440,7 @@ struct AcceptedLocalWorkspaceProcessRunner {
 
 async fn run_step(
     inner: Arc<RuntimeInner>,
-    sender: mpsc::Sender<RuntimeEvent>,
+    sender: mpsc::Sender<RuntimeJournalEvent>,
     token: CancellationToken,
     input: StepInput,
     generation_config: GenerationConfig,

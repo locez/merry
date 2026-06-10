@@ -1,9 +1,10 @@
 use merry_core::{
     ArtifactId, ArtifactKind, ArtifactRef, CoreError, ErrorInfo, EvidenceLocator, EvidenceRef,
     MerryErrorDomain, MerryErrorInfo, MerryRetryability, PendingToolCall, ProviderName,
-    RuntimeEvent, RuntimeEventKind, SessionId, SkillId, SubagentId, SubagentTaskId,
-    ToolCallArguments, ToolCallId, ToolCallResult, ToolCallResultStatus, ToolInputSchema, ToolName,
-    ToolSpec,
+    QueuedInputLane, QueuedInputView, QueuedInputsView, RuntimeEvent, RuntimeEventSource,
+    RuntimeJournalEvent, RuntimeJournalPayload, SessionId, SkillId, SubagentId, SubagentStatus,
+    SubagentTaskId, ToolCallArguments, ToolCallId, ToolCallResult, ToolCallResultStatus,
+    ToolInputSchema, ToolName, ToolOutput, ToolSpec,
 };
 use schemars::{JsonSchema, Schema};
 use serde::{Serialize, de::DeserializeOwned};
@@ -396,10 +397,10 @@ fn pending_tool_call_event_uses_provider_neutral_payload_shape() {
         }))
     );
 
-    let event = RuntimeEvent::new(
+    let event = RuntimeJournalEvent::new(
         SessionId::new("session-1").expect("valid session id"),
         9,
-        RuntimeEventKind::ToolCallPending { call },
+        RuntimeJournalPayload::ToolCallPending { call },
     );
 
     assert_eq!(
@@ -407,7 +408,7 @@ fn pending_tool_call_event_uses_provider_neutral_payload_shape() {
         json!({
             "session_id": "session-1",
             "sequence": 9,
-            "kind": {
+            "payload": {
                 "type": "tool_call_pending",
                 "call": {
                     "id": "call.provider/opaque.id:42",
@@ -619,10 +620,10 @@ fn tool_call_resolved_event_uses_snake_case_and_no_inline_payload() {
             ArtifactKind::Text,
         ),
     );
-    let event = RuntimeEvent::new(
+    let event = RuntimeJournalEvent::new(
         SessionId::new("session-1").expect("valid session id"),
         10,
-        RuntimeEventKind::ToolCallResolved { result },
+        RuntimeJournalPayload::ToolCallResolved { result },
     );
 
     assert_eq!(
@@ -630,7 +631,7 @@ fn tool_call_resolved_event_uses_snake_case_and_no_inline_payload() {
         json!({
             "session_id": "session-1",
             "sequence": 10,
-            "kind": {
+            "payload": {
                 "type": "tool_call_resolved",
                 "result": {
                     "call_id": "call-1",
@@ -649,11 +650,166 @@ fn tool_call_resolved_event_uses_snake_case_and_no_inline_payload() {
 }
 
 #[test]
+fn public_runtime_event_assistant_message_uses_top_level_type() {
+    let source = RuntimeEventSource::new(SessionId::new("session-1").expect("valid session id"), 4);
+    let event = RuntimeEvent::AssistantMessage {
+        text: "hello from the model".to_owned(),
+        artifact: ArtifactRef::new(
+            ArtifactId::new("assistant-output-4").expect("valid artifact id"),
+            ArtifactKind::Text,
+        ),
+        source,
+    };
+
+    assert_eq!(
+        serde_json::to_value(&event).expect("event serializes"),
+        json!({
+            "type": "assistant_message",
+            "text": "hello from the model",
+            "artifact": {
+                "id": "assistant-output-4",
+                "kind": "text",
+                "label": null
+            },
+            "source": {
+                "session_id": "session-1",
+                "sequence": 4
+            }
+        })
+    );
+    assert_json_round_trip(&event);
+}
+
+#[test]
+fn public_tool_call_started_does_not_expose_bridge_runner() {
+    let call = PendingToolCall::new(
+        ToolCallId::new("call-bridge").expect("valid call id"),
+        ToolName::new("python_tool").expect("valid tool name"),
+        ToolCallArguments::try_from(json!({ "value": 1 })).expect("valid arguments"),
+    );
+    let event = RuntimeEvent::ToolCallStarted {
+        call,
+        source: RuntimeEventSource::new(SessionId::new("session-1").expect("valid session id"), 5),
+    };
+    let value = serde_json::to_value(&event).expect("event serializes");
+
+    assert_eq!(value["type"], json!("tool_call_started"));
+    assert_eq!(value["call"]["id"], json!("call-bridge"));
+    assert!(value.get("runner").is_none());
+    assert!(value.get("bridge").is_none());
+    assert_json_round_trip(&event);
+}
+
+#[test]
+fn public_tool_call_finished_carries_complete_text_output() {
+    let result = ToolCallResult::succeeded(
+        ToolCallId::new("call-1").expect("valid call id"),
+        ArtifactRef::new(
+            ArtifactId::new("tool-result-1").expect("valid artifact id"),
+            ArtifactKind::Text,
+        ),
+    );
+    let event = RuntimeEvent::ToolCallFinished {
+        result,
+        output: Some(ToolOutput::Text {
+            text: "complete tool output".to_owned(),
+        }),
+        source: RuntimeEventSource::new(SessionId::new("session-1").expect("valid session id"), 6),
+    };
+    let value = serde_json::to_value(&event).expect("event serializes");
+
+    assert_eq!(value["type"], json!("tool_call_finished"));
+    assert_eq!(value["output"]["kind"], json!("text"));
+    assert_eq!(value["output"]["text"], json!("complete tool output"));
+    assert!(value.get("output_preview").is_none());
+    assert!(value["output"].get("truncated").is_none());
+    assert_json_round_trip(&event);
+}
+
+#[test]
+fn public_subagent_status_changed_uses_typed_status() {
+    let event = RuntimeEvent::SubagentStatusChanged {
+        agent_id: SubagentId::new("agent-1").expect("valid subagent id"),
+        task_id: SubagentTaskId::new("task-1").expect("valid task id"),
+        status: SubagentStatus::Running,
+        source: RuntimeEventSource::new(SessionId::new("session-1").expect("valid session id"), 6),
+    };
+
+    assert_eq!(
+        serde_json::to_value(&event).expect("event serializes"),
+        json!({
+            "type": "subagent_status_changed",
+            "agent_id": "agent-1",
+            "task_id": "task-1",
+            "status": "running",
+            "source": {
+                "session_id": "session-1",
+                "sequence": 6
+            }
+        })
+    );
+    assert!(
+        serde_json::from_value::<RuntimeEvent>(json!({
+            "type": "subagent_status_changed",
+            "agent_id": "agent-1",
+            "task_id": "task-1",
+            "status": "not_a_status",
+            "source": {
+                "session_id": "session-1",
+                "sequence": 6
+            }
+        }))
+        .is_err()
+    );
+    assert_json_round_trip(&event);
+}
+
+#[test]
+fn public_queued_inputs_changed_uses_inputs_view() {
+    let event = RuntimeEvent::QueuedInputsChanged {
+        inputs: QueuedInputsView {
+            next: vec![QueuedInputView {
+                text: "use the other approach".to_owned(),
+                lane: QueuedInputLane::Next,
+                position: 0,
+            }],
+            suspended: Vec::new(),
+            backlog: vec![QueuedInputView {
+                text: "run tests after that".to_owned(),
+                lane: QueuedInputLane::Backlog,
+                position: 0,
+            }],
+        },
+    };
+
+    assert_eq!(
+        serde_json::to_value(&event).expect("event serializes"),
+        json!({
+            "type": "queued_inputs_changed",
+            "inputs": {
+                "next": [{
+                    "text": "use the other approach",
+                    "lane": "next",
+                    "position": 0
+                }],
+                "suspended": [],
+                "backlog": [{
+                    "text": "run tests after that",
+                    "lane": "backlog",
+                    "position": 0
+                }]
+            }
+        })
+    );
+    assert_json_round_trip(&event);
+}
+
+#[test]
 fn final_output_recorded_event_uses_artifact_ref_without_payload() {
-    let event = RuntimeEvent::new(
+    let event = RuntimeJournalEvent::new(
         SessionId::new("final-output-session").expect("valid session id"),
         3,
-        RuntimeEventKind::FinalOutputRecorded {
+        RuntimeJournalPayload::FinalOutputRecorded {
             call_id: ToolCallId::new("call-final").expect("valid call id"),
             artifact: ArtifactRef::new(
                 ArtifactId::new("final-output-3").expect("valid artifact id"),
@@ -664,20 +820,20 @@ fn final_output_recorded_event_uses_artifact_ref_without_payload() {
 
     let value = serde_json::to_value(&event).expect("event serializes");
 
-    assert_eq!(value["kind"]["type"], json!("final_output_recorded"));
-    assert_eq!(value["kind"]["call_id"], json!("call-final"));
-    assert_eq!(value["kind"]["artifact"]["id"], json!("final-output-3"));
-    assert_eq!(value["kind"]["artifact"]["kind"], json!("json"));
-    assert!(value["kind"].get("content").is_none());
+    assert_eq!(value["payload"]["type"], json!("final_output_recorded"));
+    assert_eq!(value["payload"]["call_id"], json!("call-final"));
+    assert_eq!(value["payload"]["artifact"]["id"], json!("final-output-3"));
+    assert_eq!(value["payload"]["artifact"]["kind"], json!("json"));
+    assert!(value["payload"].get("content").is_none());
     assert_json_round_trip(&event);
 }
 
 #[test]
 fn skill_used_event_records_catalog_skill_read() {
-    let event = RuntimeEvent::new(
+    let event = RuntimeJournalEvent::new(
         SessionId::new("session-1").expect("valid session id"),
         11,
-        RuntimeEventKind::SkillUsed {
+        RuntimeJournalPayload::SkillUsed {
             skill_name: "demo-skill".to_owned(),
             skill_md_path: "demo/SKILL.md".to_owned(),
             tool_call_id: ToolCallId::new("call-read-skill").expect("valid call id"),
@@ -693,7 +849,7 @@ fn skill_used_event_records_catalog_skill_read() {
         json!({
             "session_id": "session-1",
             "sequence": 11,
-            "kind": {
+            "payload": {
                 "type": "skill_used",
                 "skill_name": "demo-skill",
                 "skill_md_path": "demo/SKILL.md",
@@ -711,10 +867,10 @@ fn skill_used_event_records_catalog_skill_read() {
 
 #[test]
 fn subagent_spawned_event_uses_snake_case_and_round_trips() {
-    let event = RuntimeEvent::new(
+    let event = RuntimeJournalEvent::new(
         SessionId::new("session-1").expect("valid session id"),
         12,
-        RuntimeEventKind::SubagentSpawned {
+        RuntimeJournalPayload::SubagentSpawned {
             agent_id: SubagentId::new("agent-1").expect("valid subagent id"),
             task_id: SubagentTaskId::new("task-1").expect("valid subagent task id"),
             task_anchor: "crates/merry-runtime/src/subagent.rs".to_owned(),
@@ -726,7 +882,7 @@ fn subagent_spawned_event_uses_snake_case_and_round_trips() {
         json!({
             "session_id": "session-1",
             "sequence": 12,
-            "kind": {
+            "payload": {
                 "type": "subagent_spawned",
                 "agent_id": "agent-1",
                 "task_id": "task-1",
@@ -739,10 +895,10 @@ fn subagent_spawned_event_uses_snake_case_and_round_trips() {
 
 #[test]
 fn subagent_nonterminal_events_use_snake_case_and_round_trip() {
-    let started = RuntimeEvent::new(
+    let started = RuntimeJournalEvent::new(
         SessionId::new("session-1").expect("valid session id"),
         13,
-        RuntimeEventKind::SubagentStarted {
+        RuntimeJournalPayload::SubagentStarted {
             agent_id: SubagentId::new("agent-1").expect("valid subagent id"),
             task_id: SubagentTaskId::new("task-1").expect("valid subagent task id"),
         },
@@ -752,7 +908,7 @@ fn subagent_nonterminal_events_use_snake_case_and_round_trip() {
         json!({
             "session_id": "session-1",
             "sequence": 13,
-            "kind": {
+            "payload": {
                 "type": "subagent_started",
                 "agent_id": "agent-1",
                 "task_id": "task-1"
@@ -761,13 +917,13 @@ fn subagent_nonterminal_events_use_snake_case_and_round_trip() {
     );
     assert_json_round_trip(&started);
 
-    let status_changed = RuntimeEvent::new(
+    let status_changed = RuntimeJournalEvent::new(
         SessionId::new("session-1").expect("valid session id"),
         14,
-        RuntimeEventKind::SubagentStatusChanged {
+        RuntimeJournalPayload::SubagentStatusChanged {
             agent_id: SubagentId::new("agent-1").expect("valid subagent id"),
             task_id: SubagentTaskId::new("task-1").expect("valid subagent task id"),
-            status: "running".to_owned(),
+            status: SubagentStatus::Running,
         },
     );
     assert_eq!(
@@ -775,7 +931,7 @@ fn subagent_nonterminal_events_use_snake_case_and_round_trip() {
         json!({
             "session_id": "session-1",
             "sequence": 14,
-            "kind": {
+            "payload": {
                 "type": "subagent_status_changed",
                 "agent_id": "agent-1",
                 "task_id": "task-1",
@@ -788,10 +944,10 @@ fn subagent_nonterminal_events_use_snake_case_and_round_trip() {
 
 #[test]
 fn subagent_terminal_events_do_not_embed_large_payloads() {
-    let completed = RuntimeEvent::new(
+    let completed = RuntimeJournalEvent::new(
         SessionId::new("session-1").expect("valid session id"),
         13,
-        RuntimeEventKind::SubagentCompleted {
+        RuntimeJournalPayload::SubagentCompleted {
             agent_id: SubagentId::new("agent-1").expect("valid subagent id"),
             task_id: SubagentTaskId::new("task-1").expect("valid subagent task id"),
             summary: "Updated protocol tests and core event vocabulary.".to_owned(),
@@ -805,7 +961,7 @@ fn subagent_terminal_events_do_not_embed_large_payloads() {
         json!({
             "session_id": "session-1",
             "sequence": 13,
-            "kind": {
+            "payload": {
                 "type": "subagent_completed",
                 "agent_id": "agent-1",
                 "task_id": "task-1",
@@ -816,7 +972,7 @@ fn subagent_terminal_events_do_not_embed_large_payloads() {
         })
     );
     let completed_kind = completed_json
-        .get("kind")
+        .get("payload")
         .and_then(Value::as_object)
         .expect("kind should be an object");
     assert!(completed_kind.get("output").is_none());
@@ -824,10 +980,10 @@ fn subagent_terminal_events_do_not_embed_large_payloads() {
     assert!(completed_kind.get("artifact").is_none());
     assert_json_round_trip(&completed);
 
-    let failed = RuntimeEvent::new(
+    let failed = RuntimeJournalEvent::new(
         SessionId::new("session-1").expect("valid session id"),
         14,
-        RuntimeEventKind::SubagentFailed {
+        RuntimeJournalPayload::SubagentFailed {
             agent_id: SubagentId::new("agent-1").expect("valid subagent id"),
             task_id: SubagentTaskId::new("task-1").expect("valid subagent task id"),
             diagnostic: ErrorInfo::new("subagent_failed", "Subagent exited with status 1")
@@ -840,7 +996,7 @@ fn subagent_terminal_events_do_not_embed_large_payloads() {
         json!({
             "session_id": "session-1",
             "sequence": 14,
-            "kind": {
+            "payload": {
                 "type": "subagent_failed",
                 "agent_id": "agent-1",
                 "task_id": "task-1",
@@ -852,7 +1008,7 @@ fn subagent_terminal_events_do_not_embed_large_payloads() {
         })
     );
     let failed_kind = failed_json
-        .get("kind")
+        .get("payload")
         .and_then(Value::as_object)
         .expect("kind should be an object");
     assert!(failed_kind.get("output").is_none());
@@ -860,10 +1016,10 @@ fn subagent_terminal_events_do_not_embed_large_payloads() {
     assert!(failed_kind.get("artifact").is_none());
     assert_json_round_trip(&failed);
 
-    let cancelled = RuntimeEvent::new(
+    let cancelled = RuntimeJournalEvent::new(
         SessionId::new("session-1").expect("valid session id"),
         15,
-        RuntimeEventKind::SubagentCancelled {
+        RuntimeJournalPayload::SubagentCancelled {
             agent_id: SubagentId::new("agent-1").expect("valid subagent id"),
             task_id: SubagentTaskId::new("task-1").expect("valid subagent task id"),
             diagnostic: ErrorInfo::new("subagent_cancelled", "Cancellation token was dropped")
@@ -876,7 +1032,7 @@ fn subagent_terminal_events_do_not_embed_large_payloads() {
         json!({
             "session_id": "session-1",
             "sequence": 15,
-            "kind": {
+            "payload": {
                 "type": "subagent_cancelled",
                 "agent_id": "agent-1",
                 "task_id": "task-1",
@@ -888,7 +1044,7 @@ fn subagent_terminal_events_do_not_embed_large_payloads() {
         })
     );
     let cancelled_kind = cancelled_json
-        .get("kind")
+        .get("payload")
         .and_then(Value::as_object)
         .expect("kind should be an object");
     assert!(cancelled_kind.get("output").is_none());
@@ -899,10 +1055,10 @@ fn subagent_terminal_events_do_not_embed_large_payloads() {
 
 #[test]
 fn runtime_event_uses_stable_snake_case_tags_and_round_trips() {
-    let event = RuntimeEvent::new(
+    let event = RuntimeJournalEvent::new(
         SessionId::new("session-1").expect("valid session id"),
         7,
-        RuntimeEventKind::ArtifactRecorded {
+        RuntimeJournalPayload::ArtifactRecorded {
             artifact: ArtifactRef::new(
                 ArtifactId::new("artifact-1").expect("valid artifact id"),
                 ArtifactKind::Text,
@@ -915,7 +1071,7 @@ fn runtime_event_uses_stable_snake_case_tags_and_round_trips() {
         json!({
             "session_id": "session-1",
             "sequence": 7,
-            "kind": {
+            "payload": {
                 "type": "artifact_recorded",
                 "artifact": {
                     "id": "artifact-1",
@@ -927,10 +1083,10 @@ fn runtime_event_uses_stable_snake_case_tags_and_round_trips() {
     );
     assert_json_round_trip(&event);
 
-    let failed = RuntimeEvent::new(
+    let failed = RuntimeJournalEvent::new(
         SessionId::new("session-1").expect("valid session id"),
         8,
-        RuntimeEventKind::Failed {
+        RuntimeJournalPayload::Failed {
             diagnostic: ErrorInfo::new("validation", "Tool spec was invalid")
                 .expect("valid diagnostic"),
         },
@@ -1019,6 +1175,6 @@ fn schemars_generation_compiles_for_public_protocol_types() {
     assert_schema_compiles::<ToolInputSchema>();
     assert_schema_compiles::<ToolSpec>();
     assert_schema_compiles::<ErrorInfo>();
-    assert_schema_compiles::<RuntimeEvent>();
-    assert_schema_compiles::<RuntimeEventKind>();
+    assert_schema_compiles::<RuntimeJournalEvent>();
+    assert_schema_compiles::<RuntimeJournalPayload>();
 }

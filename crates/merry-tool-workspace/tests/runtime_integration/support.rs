@@ -1,7 +1,7 @@
 pub(super) use futures_util::StreamExt;
 pub(super) use merry_core::{
-    ArtifactKind, ProviderName, RuntimeEvent, RuntimeEventKind, SessionId, ToolCallResult,
-    ToolCallResultStatus, ToolName,
+    ArtifactKind, ProviderName, RuntimeJournalEvent, RuntimeJournalPayload, SessionId,
+    ToolCallResult, ToolCallResultStatus, ToolName,
 };
 pub(super) use merry_llm::{
     FinishReason, ModelCapabilities, ModelError, ModelEvent, ModelEventStream, ModelName,
@@ -211,7 +211,7 @@ impl ModelProvider for ScriptedModelProvider {
     }
 }
 
-pub(super) async fn collect_step(runtime: &Runtime, text: &str) -> Vec<RuntimeEvent> {
+pub(super) async fn collect_step(runtime: &Runtime, text: &str) -> Vec<RuntimeJournalEvent> {
     runtime
         .step(
             StepInput::user_text(text).expect("valid step input"),
@@ -418,7 +418,7 @@ impl ProcessRunner for ScriptedProcessRunner {
 pub(super) async fn execute_first_pending_call(
     runtime: &Runtime,
     user_text: &str,
-) -> Vec<RuntimeEvent> {
+) -> Vec<RuntimeJournalEvent> {
     let pending_events = collect_step(runtime, user_text).await;
     assert_pending_tool_call_events(&pending_events);
     let pending_calls = runtime.pending_tool_calls().await;
@@ -437,7 +437,7 @@ pub(super) async fn execute_first_pending_call(
     execution_events
 }
 
-fn assert_pending_tool_call_events(events: &[RuntimeEvent]) {
+fn assert_pending_tool_call_events(events: &[RuntimeJournalEvent]) {
     let kinds = event_kind_names(events);
     assert!(
         kinds == ["SessionStarted", "StepStarted", "ToolCallPending"]
@@ -452,39 +452,40 @@ fn assert_pending_tool_call_events(events: &[RuntimeEvent]) {
     );
 }
 
-pub(super) fn event_kind_names(events: &[RuntimeEvent]) -> Vec<&'static str> {
+pub(super) fn event_kind_names(events: &[RuntimeJournalEvent]) -> Vec<&'static str> {
     events
         .iter()
-        .map(|event| match event.kind {
-            RuntimeEventKind::SessionStarted => "SessionStarted",
-            RuntimeEventKind::StepStarted => "StepStarted",
-            RuntimeEventKind::ModelRetryAttemptStarted { .. } => "ModelRetryAttemptStarted",
-            RuntimeEventKind::ModelRetryScheduled { .. } => "ModelRetryScheduled",
-            RuntimeEventKind::ModelRetryExhausted { .. } => "ModelRetryExhausted",
-            RuntimeEventKind::StepCompleted => "StepCompleted",
-            RuntimeEventKind::ArtifactRecorded { .. } => "ArtifactRecorded",
-            RuntimeEventKind::EvidenceReferenced { .. } => "EvidenceReferenced",
-            RuntimeEventKind::ToolCallPending { .. } => "ToolCallPending",
-            RuntimeEventKind::ToolCallResolved { .. } => "ToolCallResolved",
-            RuntimeEventKind::Cancelled { .. } => "Cancelled",
-            RuntimeEventKind::Failed { .. } => "Failed",
+        .map(|event| match event.payload {
+            RuntimeJournalPayload::SessionStarted => "SessionStarted",
+            RuntimeJournalPayload::StepStarted => "StepStarted",
+            RuntimeJournalPayload::ModelRetryAttemptStarted { .. } => "ModelRetryAttemptStarted",
+            RuntimeJournalPayload::ModelRetryScheduled { .. } => "ModelRetryScheduled",
+            RuntimeJournalPayload::ModelRetryExhausted { .. } => "ModelRetryExhausted",
+            RuntimeJournalPayload::StepCompleted => "StepCompleted",
+            RuntimeJournalPayload::ArtifactRecorded { .. } => "ArtifactRecorded",
+            RuntimeJournalPayload::AssistantOutputRecorded { .. } => "AssistantOutputRecorded",
+            RuntimeJournalPayload::EvidenceReferenced { .. } => "EvidenceReferenced",
+            RuntimeJournalPayload::ToolCallPending { .. } => "ToolCallPending",
+            RuntimeJournalPayload::ToolCallResolved { .. } => "ToolCallResolved",
+            RuntimeJournalPayload::Cancelled { .. } => "Cancelled",
+            RuntimeJournalPayload::Failed { .. } => "Failed",
             _ => "Other",
         })
         .collect()
 }
 
-pub(super) fn resolved_tool_result(events: &[RuntimeEvent]) -> &ToolCallResult {
+pub(super) fn resolved_tool_result(events: &[RuntimeJournalEvent]) -> &ToolCallResult {
     events
         .iter()
-        .find_map(|event| match &event.kind {
-            RuntimeEventKind::ToolCallResolved { result } => Some(result),
+        .find_map(|event| match &event.payload {
+            RuntimeJournalPayload::ToolCallResolved { result } => Some(result),
             _ => None,
         })
         .expect("tool resolution event should be present")
 }
 
 fn assert_artifact_recorded_before_tool_resolution(
-    events: &[RuntimeEvent],
+    events: &[RuntimeJournalEvent],
     result: &ToolCallResult,
 ) {
     assert_eq!(
@@ -494,20 +495,20 @@ fn assert_artifact_recorded_before_tool_resolution(
     assert!(
         events
             .iter()
-            .all(|event| !matches!(event.kind, RuntimeEventKind::Failed { .. })),
-        "tool execution should not emit RuntimeEventKind::Failed: {events:?}"
+            .all(|event| !matches!(event.payload, RuntimeJournalPayload::Failed { .. })),
+        "tool execution should not emit RuntimeJournalPayload::Failed: {events:?}"
     );
     assert!(matches!(
-        &events[0].kind,
-        RuntimeEventKind::ArtifactRecorded { artifact } if artifact == result.artifact()
+        &events[0].payload,
+        RuntimeJournalPayload::ArtifactRecorded { artifact } if artifact == result.artifact()
     ));
     assert!(matches!(
-        &events[1].kind,
-        RuntimeEventKind::ToolCallResolved { result: resolved } if resolved == result
+        &events[1].payload,
+        RuntimeJournalPayload::ToolCallResolved { result: resolved } if resolved == result
     ));
 }
 
-pub(super) fn assert_succeeded_json_result(events: &[RuntimeEvent]) {
+pub(super) fn assert_succeeded_json_result(events: &[RuntimeJournalEvent]) {
     let result = resolved_tool_result(events);
     assert_artifact_recorded_before_tool_resolution(events, result);
     assert_eq!(result.status(), ToolCallResultStatus::Succeeded);
@@ -561,7 +562,7 @@ pub(super) fn assert_successful_patch_content_does_not_leak_internal_metadata(js
     }
 }
 
-pub(super) fn assert_failed_json_result(events: &[RuntimeEvent], diagnostic_code: &str) {
+pub(super) fn assert_failed_json_result(events: &[RuntimeJournalEvent], diagnostic_code: &str) {
     let result = resolved_tool_result(events);
     assert_artifact_recorded_before_tool_resolution(events, result);
     assert_eq!(result.status(), ToolCallResultStatus::Failed);

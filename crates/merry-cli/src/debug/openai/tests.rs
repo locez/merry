@@ -1,6 +1,6 @@
 use super::*;
 use crate::testing::ScriptedProvider;
-use merry_core::{RuntimeEvent, ToolCallResultStatus, ToolName};
+use merry_core::{RuntimeJournalEvent, ToolCallResultStatus, ToolName};
 use merry_llm::{
     FinishReason, GenerationConfig, ModelEvent, ModelOutput, ModelResponse, ModelToolCall,
     ModelToolCallId, ToolArguments,
@@ -53,13 +53,13 @@ async fn tool_helper_executes_one_pending_call_and_continues() {
     let text = String::from_utf8(output).expect("output should be utf-8");
     let events = text
         .lines()
-        .map(|line| serde_json::from_str::<RuntimeEvent>(line).expect("line should be JSON"))
+        .map(|line| serde_json::from_str::<RuntimeJournalEvent>(line).expect("line should be JSON"))
         .collect::<Vec<_>>();
     let event_types = events
         .iter()
         .map(|event| {
             let value = serde_json::to_value(event).expect("event should serialize");
-            value["kind"]["type"].as_str().unwrap().to_owned()
+            value["payload"]["type"].as_str().unwrap().to_owned()
         })
         .collect::<Vec<_>>();
 
@@ -72,15 +72,15 @@ async fn tool_helper_executes_one_pending_call_and_continues() {
             "artifact_recorded",
             "tool_call_resolved",
             "step_started",
-            "artifact_recorded",
+            "assistant_output_recorded",
             "step_completed",
         ]
     );
 
     let resolved = events
         .iter()
-        .find_map(|event| match &event.kind {
-            merry_core::RuntimeEventKind::ToolCallResolved { result } => Some(result),
+        .find_map(|event| match &event.payload {
+            merry_core::RuntimeJournalPayload::ToolCallResolved { result } => Some(result),
             _ => None,
         })
         .expect("tool should be resolved");
@@ -167,7 +167,7 @@ async fn tool_helper_errors_when_first_step_calls_wrong_tool() {
     let text = String::from_utf8(output).expect("output should be utf-8");
     let events = text
         .lines()
-        .map(|line| serde_json::from_str::<RuntimeEvent>(line).expect("line should be JSON"))
+        .map(|line| serde_json::from_str::<RuntimeJournalEvent>(line).expect("line should be JSON"))
         .collect::<Vec<_>>();
     assert!(
         !events.is_empty(),
@@ -177,7 +177,7 @@ async fn tool_helper_errors_when_first_step_calls_wrong_tool() {
         .iter()
         .map(|event| {
             let value = serde_json::to_value(event).expect("event should serialize");
-            value["kind"]["type"].as_str().unwrap().to_owned()
+            value["payload"]["type"].as_str().unwrap().to_owned()
         })
         .collect::<Vec<_>>();
 
@@ -185,8 +185,8 @@ async fn tool_helper_errors_when_first_step_calls_wrong_tool() {
     assert!(!event_types.iter().any(|kind| kind == "tool_call_resolved"));
     let pending = events
         .iter()
-        .find_map(|event| match &event.kind {
-            merry_core::RuntimeEventKind::ToolCallPending { call } => Some(call),
+        .find_map(|event| match &event.payload {
+            merry_core::RuntimeJournalPayload::ToolCallPending { call } => Some(call),
             _ => None,
         })
         .expect("wrong tool call should remain pending in first-step events");
@@ -232,7 +232,7 @@ async fn tool_helper_errors_when_first_step_does_not_call_debug_echo() {
     let text = String::from_utf8(output).expect("output should be utf-8");
     let events = text
         .lines()
-        .map(|line| serde_json::from_str::<RuntimeEvent>(line).expect("line should be JSON"))
+        .map(|line| serde_json::from_str::<RuntimeJournalEvent>(line).expect("line should be JSON"))
         .collect::<Vec<_>>();
     assert!(
         !events.is_empty(),
@@ -242,7 +242,7 @@ async fn tool_helper_errors_when_first_step_does_not_call_debug_echo() {
         .iter()
         .map(|event| {
             let value = serde_json::to_value(event).expect("event should serialize");
-            value["kind"]["type"].as_str().unwrap().to_owned()
+            value["payload"]["type"].as_str().unwrap().to_owned()
         })
         .collect::<Vec<_>>();
 
@@ -251,7 +251,7 @@ async fn tool_helper_errors_when_first_step_does_not_call_debug_echo() {
         [
             "session_started",
             "step_started",
-            "artifact_recorded",
+            "assistant_output_recorded",
             "step_completed",
         ]
     );

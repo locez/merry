@@ -1,6 +1,6 @@
 use crate::cli_error::{CliError, stdout_error, unexpected};
 use futures_util::StreamExt;
-use merry_core::{PendingToolCall, RuntimeEvent, RuntimeEventKind};
+use merry_core::{PendingToolCall, RuntimeJournalEvent, RuntimeJournalPayload};
 use merry_runtime::{Runtime, StepContext, StepInput};
 use tokio::io::{AsyncWrite, AsyncWriteExt, BufWriter};
 
@@ -23,7 +23,7 @@ pub(crate) async fn write_runtime_step_events_to<W>(
     input: StepInput,
     context: StepContext,
     writer: &mut W,
-) -> Result<Vec<RuntimeEvent>, CliError>
+) -> Result<Vec<RuntimeJournalEvent>, CliError>
 where
     W: AsyncWrite + Unpin,
 {
@@ -36,7 +36,7 @@ pub(crate) async fn collect_runtime_step_events(
     runtime: &Runtime,
     input: StepInput,
     context: StepContext,
-) -> Result<Vec<RuntimeEvent>, CliError> {
+) -> Result<Vec<RuntimeJournalEvent>, CliError> {
     let mut events = runtime.step(input, context).map_err(unexpected)?;
     let mut collected = Vec::new();
     while let Some(event) = events.next().await {
@@ -47,7 +47,7 @@ pub(crate) async fn collect_runtime_step_events(
 }
 
 pub(crate) async fn write_runtime_events<W>(
-    events: Vec<RuntimeEvent>,
+    events: Vec<RuntimeJournalEvent>,
     writer: &mut W,
 ) -> Result<(), CliError>
 where
@@ -57,7 +57,7 @@ where
 }
 
 pub(crate) async fn write_runtime_event_slice<W>(
-    events: &[RuntimeEvent],
+    events: &[RuntimeJournalEvent],
     writer: &mut W,
 ) -> Result<(), CliError>
 where
@@ -70,7 +70,7 @@ where
 }
 
 pub(crate) async fn write_runtime_event<W>(
-    event: &RuntimeEvent,
+    event: &RuntimeJournalEvent,
     writer: &mut W,
 ) -> Result<(), CliError>
 where
@@ -84,9 +84,9 @@ where
     writer.write_all(b"\n").await.map_err(stdout_error)
 }
 
-pub(crate) fn first_pending_tool_call(events: &[RuntimeEvent]) -> Option<PendingToolCall> {
-    events.iter().find_map(|event| match &event.kind {
-        RuntimeEventKind::ToolCallPending { call } => Some(call.clone()),
+pub(crate) fn first_pending_tool_call(events: &[RuntimeJournalEvent]) -> Option<PendingToolCall> {
+    events.iter().find_map(|event| match &event.payload {
+        RuntimeJournalPayload::ToolCallPending { call } => Some(call.clone()),
         _ => None,
     })
 }
@@ -123,7 +123,7 @@ mod tests {
             .iter()
             .map(|line| {
                 let value = serde_json::from_str::<Value>(line).expect("line should be JSON");
-                value["kind"]["type"].as_str().unwrap().to_owned()
+                value["payload"]["type"].as_str().unwrap().to_owned()
             })
             .collect::<Vec<_>>();
 
@@ -132,7 +132,7 @@ mod tests {
             [
                 "session_started",
                 "step_started",
-                "artifact_recorded",
+                "assistant_output_recorded",
                 "step_completed"
             ]
         );

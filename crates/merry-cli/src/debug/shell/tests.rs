@@ -205,21 +205,21 @@ async fn helper_simulated_sandbox_marker_still_denies_forbidden_command() {
     );
 }
 
-fn parse_runtime_events(text: &str) -> Vec<RuntimeEvent> {
+fn parse_runtime_events(text: &str) -> Vec<RuntimeJournalEvent> {
     assert!(
         text.ends_with('\n'),
         "runtime JSONL should end with newline"
     );
     text.lines()
-        .map(|line| serde_json::from_str::<RuntimeEvent>(line).expect("line should be JSON"))
+        .map(|line| serde_json::from_str::<RuntimeJournalEvent>(line).expect("line should be JSON"))
         .collect()
 }
 
-fn resolved_tool_result(events: &[RuntimeEvent]) -> &merry_core::ToolCallResult {
+fn resolved_tool_result(events: &[RuntimeJournalEvent]) -> &merry_core::ToolCallResult {
     events
         .iter()
-        .find_map(|event| match &event.kind {
-            RuntimeEventKind::ToolCallResolved { result } => Some(result),
+        .find_map(|event| match &event.payload {
+            RuntimeJournalPayload::ToolCallResolved { result } => Some(result),
             _ => None,
         })
         .expect("shell command should resolve a tool call")

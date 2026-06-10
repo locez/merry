@@ -2,7 +2,7 @@ use super::*;
 use crate::debug::coding_loop::{coding_loop_tool_call, coding_loop_workspace_call};
 use crate::runtime_events::{collect_runtime_step_events, first_pending_tool_call};
 use crate::testing::ScriptedProvider;
-use merry_core::RuntimeEventKind;
+use merry_core::RuntimeJournalPayload;
 use merry_llm::{FinishReason, ModelEvent, ModelName, ModelOutput, ModelResponse};
 use merry_runtime::{ArtifactContent, StepContext, StepInput, ToolExecutionContext};
 use merry_tool_workspace::{
@@ -251,8 +251,10 @@ async fn cmd_check_command_tool_reports_path_availability() {
         .expect("tool should execute");
     let artifact_id = resolved
         .iter()
-        .find_map(|event| match &event.kind {
-            RuntimeEventKind::ToolCallResolved { result } => Some(result.artifact().id().clone()),
+        .find_map(|event| match &event.payload {
+            RuntimeJournalPayload::ToolCallResolved { result } => {
+                Some(result.artifact().id().clone())
+            }
             _ => None,
         })
         .expect("tool result artifact should be recorded");

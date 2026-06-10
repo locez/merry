@@ -5,14 +5,15 @@
 //! [`Runtime::step`]. It is intentionally serial, provider-neutral, and bounded.
 
 use crate::{
-    FinalOutput, FinalOutputContract, Runtime, RuntimeError, RuntimeEventStream, StepContext,
-    StepInput, ToolExecutionContext, event_stream::ActiveStepPermit,
+    FinalOutput, FinalOutputContract, Runtime, RuntimeError, RuntimeJournalEventStream,
+    StepContext, StepInput, ToolExecutionContext,
+    events::{ActiveStepPermit, RuntimeEventProjector},
 };
 use futures_core::Stream;
 use futures_util::StreamExt;
 use merry_core::{
-    ArtifactKind, ErrorInfo, PendingToolCall, RuntimeEvent, RuntimeEventKind, SessionId,
-    ToolCallId, ToolCallResult, ToolCallResultStatus, ToolName,
+    ArtifactKind, ErrorInfo, PendingToolCall, RuntimeEvent, RuntimeJournalEvent,
+    RuntimeJournalPayload, SessionId, ToolCallId, ToolCallResult, ToolCallResultStatus, ToolName,
 };
 use std::{
     collections::BTreeSet,
@@ -96,7 +97,7 @@ pub enum AgentLoopConfigError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentLoopResult {
     status: AgentLoopStatus,
-    events: Vec<RuntimeEvent>,
+    events: Vec<RuntimeJournalEvent>,
     model_turns_run: usize,
     final_output: Option<String>,
     final_output_json: Option<FinalOutput>,
@@ -105,7 +106,7 @@ pub struct AgentLoopResult {
 impl AgentLoopResult {
     fn new(
         status: AgentLoopStatus,
-        events: Vec<RuntimeEvent>,
+        events: Vec<RuntimeJournalEvent>,
         model_turns_run: usize,
         final_output: Option<String>,
     ) -> Self {
@@ -114,7 +115,7 @@ impl AgentLoopResult {
 
     fn new_with_final_output_json(
         status: AgentLoopStatus,
-        events: Vec<RuntimeEvent>,
+        events: Vec<RuntimeJournalEvent>,
         model_turns_run: usize,
         final_output: Option<String>,
         final_output_json: Option<FinalOutput>,
@@ -136,7 +137,7 @@ impl AgentLoopResult {
 
     /// Runtime events collected in emission order.
     #[must_use]
-    pub fn events(&self) -> &[RuntimeEvent] {
+    pub fn events(&self) -> &[RuntimeJournalEvent] {
         &self.events
     }
 
@@ -160,7 +161,7 @@ impl AgentLoopResult {
 
     /// Consumes the result and returns the collected events.
     #[must_use]
-    pub fn into_events(self) -> Vec<RuntimeEvent> {
+    pub fn into_events(self) -> Vec<RuntimeJournalEvent> {
         self.events
     }
 }
@@ -171,7 +172,9 @@ impl AgentLoopResult {
 /// drains any unconsumed events before returning the collected loop result.
 pub struct AgentLoopEventStream {
     session_id: SessionId,
-    events: RuntimeEventStream,
+    events: ReceiverStream<AgentLoopStreamMessage>,
+    loop_token: tokio_util::sync::CancellationToken,
+    producer_handle: Option<tokio::task::JoinHandle<()>>,
     result_receiver: Option<oneshot::Receiver<Option<AgentLoopResult>>>,
     bridge_sender: mpsc::Sender<BridgeToolResultCommand>,
 }
@@ -179,13 +182,17 @@ pub struct AgentLoopEventStream {
 impl AgentLoopEventStream {
     fn new(
         session_id: SessionId,
-        events: RuntimeEventStream,
+        events: ReceiverStream<AgentLoopStreamMessage>,
+        loop_token: tokio_util::sync::CancellationToken,
+        producer_handle: tokio::task::JoinHandle<()>,
         result_receiver: oneshot::Receiver<Option<AgentLoopResult>>,
         bridge_sender: mpsc::Sender<BridgeToolResultCommand>,
     ) -> Self {
         Self {
             session_id,
             events,
+            loop_token,
+            producer_handle: Some(producer_handle),
             result_receiver: Some(result_receiver),
             bridge_sender,
         }
@@ -231,6 +238,14 @@ impl AgentLoopEventStream {
 
         self.result_receiver.take()?.await.ok().flatten()
     }
+
+    /// Returns the next internal driver message.
+    ///
+    /// SDK bridge drivers use this to execute bridge tool calls without
+    /// exposing bridge handoff as a public [`RuntimeEvent`].
+    pub async fn next_driver_message(&mut self) -> Option<AgentLoopStreamMessage> {
+        self.events.next().await
+    }
 }
 
 struct BridgeToolResultCommand {
@@ -243,7 +258,59 @@ impl Stream for AgentLoopEventStream {
     type Item = RuntimeEvent;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
-        Pin::new(&mut self.events).poll_next(cx)
+        loop {
+            match Pin::new(&mut self.events).poll_next(cx) {
+                Poll::Ready(Some(AgentLoopStreamMessage::Event(event))) => {
+                    return Poll::Ready(Some(event));
+                }
+                Poll::Ready(Some(AgentLoopStreamMessage::BridgeToolRequest { .. })) => continue,
+                Poll::Ready(None) => {
+                    self.producer_handle.take();
+                    return Poll::Ready(None);
+                }
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+    }
+}
+
+impl Drop for AgentLoopEventStream {
+    fn drop(&mut self) {
+        self.loop_token.cancel();
+        if let Some(handle) = self.producer_handle.take() {
+            handle.abort();
+        }
+    }
+}
+
+/// Internal agent-loop stream driver message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AgentLoopStreamMessage {
+    /// Public SDK/UI event.
+    Event(RuntimeEvent),
+    /// Bridge tool request for SDK-internal execution.
+    BridgeToolRequest {
+        /// Tool call that must be executed by the bridge host.
+        call: PendingToolCall,
+    },
+}
+
+impl AgentLoopStreamMessage {
+    #[must_use]
+    pub fn as_event(&self) -> Option<&RuntimeEvent> {
+        match self {
+            Self::Event(event) => Some(event),
+            Self::BridgeToolRequest { .. } => None,
+        }
+    }
+
+    #[must_use]
+    pub fn as_bridge_tool_request(&self) -> Option<&PendingToolCall> {
+        match self {
+            Self::BridgeToolRequest { call } => Some(call),
+            Self::Event(_) => None,
+        }
     }
 }
 
@@ -297,19 +364,19 @@ pub enum AgentLoopBlockedReason {
 #[derive(Debug, Error)]
 #[error("agent loop stopped on runtime method error: {source}")]
 pub struct AgentLoopError {
-    events: Vec<RuntimeEvent>,
+    events: Vec<RuntimeJournalEvent>,
     #[source]
     source: RuntimeError,
 }
 
 impl AgentLoopError {
-    fn new(events: Vec<RuntimeEvent>, source: RuntimeError) -> Self {
+    fn new(events: Vec<RuntimeJournalEvent>, source: RuntimeError) -> Self {
         Self { events, source }
     }
 
     /// Runtime events collected before the method error.
     #[must_use]
-    pub fn events(&self) -> &[RuntimeEvent] {
+    pub fn events(&self) -> &[RuntimeJournalEvent] {
         &self.events
     }
 
@@ -321,7 +388,7 @@ impl AgentLoopError {
 
     /// Consumes the error into its preserved events and runtime error.
     #[must_use]
-    pub fn into_parts(self) -> (Vec<RuntimeEvent>, RuntimeError) {
+    pub fn into_parts(self) -> (Vec<RuntimeJournalEvent>, RuntimeError) {
         (self.events, self.source)
     }
 }
@@ -662,7 +729,7 @@ impl Runtime {
     /// Starts a bounded, serial runtime-owned agent loop and returns live events.
     ///
     /// This has the same loop semantics as [`Runtime::run_agent_loop`], but it
-    /// yields each observed [`RuntimeEvent`] as soon as the underlying step or
+    /// yields each observed [`RuntimeJournalEvent`] as soon as the underlying step or
     /// tool execution produces it. Dropping the returned stream cancels the loop
     /// token and aborts the loop producer.
     pub fn run_agent_loop_stream(
@@ -695,11 +762,11 @@ impl Runtime {
             let _ = result_sender.send(result);
         });
 
-        let events =
-            RuntimeEventStream::new(ReceiverStream::new(receiver), loop_token, producer_handle);
         Ok(AgentLoopEventStream::new(
             session_id,
-            events,
+            ReceiverStream::new(receiver),
+            loop_token,
+            producer_handle,
             result_receiver,
             bridge_sender,
         ))
@@ -713,7 +780,7 @@ struct AgentLoopStreamProducer {
     generation_config: merry_llm::GenerationConfig,
     config: AgentLoopConfig,
     loop_permit: ActiveStepPermit,
-    sender: mpsc::Sender<RuntimeEvent>,
+    sender: mpsc::Sender<AgentLoopStreamMessage>,
     bridge_receiver: mpsc::Receiver<BridgeToolResultCommand>,
 }
 
@@ -732,6 +799,7 @@ async fn run_agent_loop_stream_producer(
     } = producer;
     let mut next_input = Some(input);
     let mut events = Vec::new();
+    let mut projector = RuntimeEventProjector::new();
     let mut model_turns_run = 0;
 
     while let Some(input) = next_input.take() {
@@ -754,8 +822,7 @@ async fn run_agent_loop_stream_producer(
         tokio::pin!(stream);
         while let Some(event) = stream.next().await {
             step_events.push(event.clone());
-            events.push(event.clone());
-            if sender.send(event).await.is_err() {
+            if !publish_journal_event(&runtime, &mut projector, &sender, &mut events, event).await {
                 return None;
             }
         }
@@ -826,8 +893,15 @@ async fn run_agent_loop_stream_producer(
                             .ok()?;
 
                         for event in failure_events {
-                            events.push(event.clone());
-                            if sender.send(event).await.is_err() {
+                            if !publish_journal_event(
+                                &runtime,
+                                &mut projector,
+                                &sender,
+                                &mut events,
+                                event,
+                            )
+                            .await
+                            {
                                 return None;
                             }
                         }
@@ -852,8 +926,15 @@ async fn run_agent_loop_stream_producer(
                     let (final_output, events_for_final_output) =
                         record_final_output_tool_call(&runtime, call).await.ok()?;
                     for event in events_for_final_output {
-                        events.push(event.clone());
-                        if sender.send(event).await.is_err() {
+                        if !publish_journal_event(
+                            &runtime,
+                            &mut projector,
+                            &sender,
+                            &mut events,
+                            event,
+                        )
+                        .await
+                        {
                             return None;
                         }
                     }
@@ -943,8 +1024,15 @@ async fn run_agent_loop_stream_producer(
                     };
 
                     for event in execution_events {
-                        events.push(event.clone());
-                        if sender.send(event).await.is_err() {
+                        if !publish_journal_event(
+                            &runtime,
+                            &mut projector,
+                            &sender,
+                            &mut events,
+                            event,
+                        )
+                        .await
+                        {
                             return None;
                         }
                     }
@@ -983,16 +1071,16 @@ fn trace_loop_error(session_id: &str, model_turns_run: usize, source: &RuntimeEr
     );
 }
 
-async fn collect_step_events(stream: RuntimeEventStream) -> Vec<RuntimeEvent> {
+async fn collect_step_events(stream: RuntimeJournalEventStream) -> Vec<RuntimeJournalEvent> {
     stream.collect().await
 }
 
 async fn final_assistant_output_from_step(
     runtime: &Runtime,
-    events: &[RuntimeEvent],
+    events: &[RuntimeJournalEvent],
 ) -> Option<String> {
     for event in events.iter().rev() {
-        let RuntimeEventKind::ArtifactRecorded { artifact } = &event.kind else {
+        let RuntimeJournalPayload::AssistantOutputRecorded { artifact } = &event.payload else {
             continue;
         };
         if artifact.kind() != &ArtifactKind::Text {
@@ -1012,8 +1100,48 @@ async fn final_assistant_output_from_step(
 async fn record_final_output_tool_call(
     runtime: &Runtime,
     call: PendingToolCall,
-) -> Result<(FinalOutput, Vec<RuntimeEvent>), RuntimeError> {
+) -> Result<(FinalOutput, Vec<RuntimeJournalEvent>), RuntimeError> {
     runtime.record_final_output_tool_call(call).await
+}
+
+async fn publish_journal_event(
+    runtime: &Runtime,
+    projector: &mut RuntimeEventProjector,
+    sender: &mpsc::Sender<AgentLoopStreamMessage>,
+    events: &mut Vec<RuntimeJournalEvent>,
+    event: RuntimeJournalEvent,
+) -> bool {
+    let bridge_call = match &event.payload {
+        RuntimeJournalPayload::BridgeToolCallRequested { call } => Some(call.clone()),
+        _ => None,
+    };
+    let projected = projector
+        .project(event.clone(), runtime)
+        .await
+        .ok()
+        .flatten();
+
+    events.push(event);
+
+    if let Some(projected) = projected
+        && sender
+            .send(AgentLoopStreamMessage::Event(projected))
+            .await
+            .is_err()
+    {
+        return false;
+    }
+
+    if let Some(call) = bridge_call
+        && sender
+            .send(AgentLoopStreamMessage::BridgeToolRequest { call })
+            .await
+            .is_err()
+    {
+        return false;
+    }
+
+    true
 }
 
 fn continuation_step_input() -> StepInput {
@@ -1073,11 +1201,11 @@ fn runtime_error_code(error: &RuntimeError) -> &'static str {
     }
 }
 
-fn tool_resolution_status(events: &[RuntimeEvent]) -> &'static str {
+fn tool_resolution_status(events: &[RuntimeJournalEvent]) -> &'static str {
     events
         .iter()
-        .find_map(|event| match &event.kind {
-            RuntimeEventKind::ToolCallResolved { result } => Some(match result.status() {
+        .find_map(|event| match &event.payload {
+            RuntimeJournalPayload::ToolCallResolved { result } => Some(match result.status() {
                 ToolCallResultStatus::Succeeded => "succeeded",
                 ToolCallResultStatus::Failed => "failed",
             }),
@@ -1086,11 +1214,11 @@ fn tool_resolution_status(events: &[RuntimeEvent]) -> &'static str {
         .unwrap_or("unresolved")
 }
 
-fn tool_resolution_artifact_id(events: &[RuntimeEvent]) -> String {
+fn tool_resolution_artifact_id(events: &[RuntimeJournalEvent]) -> String {
     events
         .iter()
-        .find_map(|event| match &event.kind {
-            RuntimeEventKind::ToolCallResolved { result } => {
+        .find_map(|event| match &event.payload {
+            RuntimeJournalPayload::ToolCallResolved { result } => {
                 Some(result.artifact().id().as_str().to_owned())
             }
             _ => None,
@@ -1098,16 +1226,16 @@ fn tool_resolution_artifact_id(events: &[RuntimeEvent]) -> String {
         .unwrap_or_default()
 }
 
-fn tool_resolution_diagnostic_code(events: &[RuntimeEvent]) -> Option<&str> {
-    events.iter().find_map(|event| match &event.kind {
-        RuntimeEventKind::ToolCallResolved { result } => {
+fn tool_resolution_diagnostic_code(events: &[RuntimeJournalEvent]) -> Option<&str> {
+    events.iter().find_map(|event| match &event.payload {
+        RuntimeJournalPayload::ToolCallResolved { result } => {
             result.diagnostic().map(merry_core::ErrorInfo::code)
         }
         _ => None,
     })
 }
 
-fn tool_resolution_is_policy_denied(events: &[RuntimeEvent]) -> bool {
+fn tool_resolution_is_policy_denied(events: &[RuntimeJournalEvent]) -> bool {
     tool_resolution_diagnostic_code(events) == Some("action_policy_denied")
 }
 
@@ -1127,11 +1255,11 @@ pub(crate) enum PendingLoopToolCall {
 }
 
 pub(crate) fn classify_step_events(
-    events: &[RuntimeEvent],
+    events: &[RuntimeJournalEvent],
     final_output_contract: Option<&FinalOutputContract>,
 ) -> StepOutcome {
-    if let Some(call) = events.iter().rev().find_map(|event| match &event.kind {
-        RuntimeEventKind::BridgeToolCallRequested { call } => Some(call.clone()),
+    if let Some(call) = events.iter().rev().find_map(|event| match &event.payload {
+        RuntimeJournalPayload::BridgeToolCallRequested { call } => Some(call.clone()),
         _ => None,
     }) {
         return StepOutcome::Pending(PendingLoopToolCall::Bridge(call));
@@ -1139,8 +1267,8 @@ pub(crate) fn classify_step_events(
 
     let resolved_call_ids = events
         .iter()
-        .filter_map(|event| match &event.kind {
-            RuntimeEventKind::ToolCallResolved { result } => Some(result.call_id().clone()),
+        .filter_map(|event| match &event.payload {
+            RuntimeJournalPayload::ToolCallResolved { result } => Some(result.call_id().clone()),
             _ => None,
         })
         .collect::<BTreeSet<_>>();
@@ -1148,8 +1276,8 @@ pub(crate) fn classify_step_events(
 
     let mut pending = events
         .iter()
-        .filter_map(|event| match &event.kind {
-            RuntimeEventKind::ToolCallPending { call }
+        .filter_map(|event| match &event.payload {
+            RuntimeJournalPayload::ToolCallPending { call }
                 if !resolved_call_ids.contains(call.id()) =>
             {
                 Some(call.clone())
@@ -1158,15 +1286,15 @@ pub(crate) fn classify_step_events(
         })
         .collect::<Vec<_>>();
 
-    if let Some(diagnostic) = events.iter().rev().find_map(|event| match &event.kind {
-        RuntimeEventKind::Failed { diagnostic } => Some(diagnostic.clone()),
+    if let Some(diagnostic) = events.iter().rev().find_map(|event| match &event.payload {
+        RuntimeJournalPayload::Failed { diagnostic } => Some(diagnostic.clone()),
         _ => None,
     }) {
         return StepOutcome::Failed(diagnostic);
     }
 
-    if let Some(diagnostic) = events.iter().rev().find_map(|event| match &event.kind {
-        RuntimeEventKind::Cancelled { diagnostic } => Some(diagnostic.clone()),
+    if let Some(diagnostic) = events.iter().rev().find_map(|event| match &event.payload {
+        RuntimeJournalPayload::Cancelled { diagnostic } => Some(diagnostic.clone()),
         _ => None,
     }) {
         return StepOutcome::Cancelled(diagnostic);
@@ -1174,7 +1302,7 @@ pub(crate) fn classify_step_events(
 
     let completed = events
         .iter()
-        .any(|event| matches!(event.kind, RuntimeEventKind::StepCompleted));
+        .any(|event| matches!(event.payload, RuntimeJournalPayload::StepCompleted));
 
     if completed {
         if pending.is_empty() {

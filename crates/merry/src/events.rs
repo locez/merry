@@ -1,7 +1,8 @@
 //! Runtime event protocol types.
 
 pub use merry_core::{
-    ArtifactId, ArtifactKind, ArtifactRef, PendingToolCall, RuntimeEvent, RuntimeEventKind,
-    ToolCallId, ToolCallResultStatus,
+    ArtifactId, ArtifactKind, ArtifactRef, PendingToolCall, RuntimeEvent, RuntimeEventSource,
+    RuntimeJournalEvent, RuntimeJournalPayload, SubagentStatus, ToolCallId, ToolCallResultStatus,
+    ToolOutput,
 };
-pub use merry_runtime::{ArtifactContent, RuntimeEventStream};
+pub use merry_runtime::{ArtifactContent, RuntimeEventStream, RuntimeJournalEventStream};

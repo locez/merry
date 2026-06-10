@@ -105,25 +105,23 @@ async def _assert_python_tool_executes_through_runtime_loop():
     resolved = [
         event
         for event in result.events
-        if event["kind"]["type"] == "tool_call_resolved"
+        if event["type"] == "tool_call_finished"
     ]
     bridge_requests = [
         event
         for event in result.events
-        if event["kind"]["type"] == "bridge_tool_call_requested"
+        if event["type"] == "bridge_tool_call_requested"
     ]
-    assert len(bridge_requests) == 1
-    assert resolved[0]["kind"]["result"]["status"] == "succeeded"
-    event_types = [event["kind"]["type"] for event in result.events]
+    assert bridge_requests == []
+    assert resolved[0]["result"]["status"] == "succeeded"
+    event_types = [event["type"] for event in result.events]
     assert event_types == [
         "session_started",
         "step_started",
-        "tool_call_pending",
-        "bridge_tool_call_requested",
-        "artifact_recorded",
-        "tool_call_resolved",
+        "tool_call_started",
+        "tool_call_finished",
         "step_started",
-        "artifact_recorded",
+        "assistant_message",
         "step_completed",
     ]
 
@@ -150,7 +148,7 @@ async def _assert_runtime_stream_executes_python_tool_and_returns_final_result()
     stream = runtime.stream("Check order A123.")
     event_types = []
     async for event in stream:
-        event_types.append(event["kind"]["type"])
+        event_types.append(event["type"])
 
     result = await stream.result()
 
@@ -158,8 +156,9 @@ async def _assert_runtime_stream_executes_python_tool_and_returns_final_result()
     assert result.model_turns_run == 2
     assert result.final_output == "Order A123 shipped."
     assert calls == ["A123"]
-    assert "bridge_tool_call_requested" in event_types
-    assert "tool_call_resolved" in event_types
+    assert "bridge_tool_call_requested" not in event_types
+    assert "tool_call_started" in event_types
+    assert "tool_call_finished" in event_types
     assert event_types[-1] == "step_completed"
 
 
@@ -183,11 +182,10 @@ async def _assert_runtime_run_returns_pydantic_final_output_model():
     assert result.model_turns_run == 1
     assert result.final_output == OrderStatusFinalOutput(order_id="A123", status="shipped")
     assert result.final_output_json == '{"order_id":"A123","status":"shipped"}'
-    assert [event["kind"]["type"] for event in result.events] == [
+    assert [event["type"] for event in result.events] == [
         "session_started",
         "step_started",
-        "tool_call_pending",
-        "artifact_recorded",
+        "tool_call_started",
         "final_output_recorded",
     ]
 
@@ -222,7 +220,7 @@ async def _assert_runtime_stream_executes_python_tool_before_final_output_model(
     )
     event_types = []
     async for event in stream:
-        event_types.append(event["kind"]["type"])
+        event_types.append(event["type"])
 
     result = await stream.result()
 
@@ -234,16 +232,13 @@ async def _assert_runtime_stream_executes_python_tool_before_final_output_model(
     assert event_types == [
         "session_started",
         "step_started",
-        "tool_call_pending",
-        "bridge_tool_call_requested",
-        "artifact_recorded",
-        "tool_call_resolved",
+        "tool_call_started",
+        "tool_call_finished",
         "step_started",
-        "tool_call_pending",
-        "artifact_recorded",
+        "tool_call_started",
         "final_output_recorded",
     ]
-    assert [event["kind"]["type"] for event in result.events] == event_types
+    assert [event["type"] for event in result.events] == event_types
 
 
 def test_runtime_stream_executes_python_tool_before_final_output_model():

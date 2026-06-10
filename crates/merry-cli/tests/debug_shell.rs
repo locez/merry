@@ -90,21 +90,24 @@ fn shell_events_jsonl_records_exact_argv_and_resolves_success() {
 
     let pending = events
         .iter()
-        .find(|event| event["kind"]["type"] == "tool_call_pending")
+        .find(|event| event["payload"]["type"] == "tool_call_pending")
         .expect("shell tool call should be pending before execution");
     assert_eq!(
-        pending["kind"]["call"]["arguments"]["argv"],
+        pending["payload"]["call"]["arguments"]["argv"],
         serde_json::json!(["rg", "--files"])
     );
-    assert_eq!(pending["kind"]["call"]["arguments"]["cwd"], ".");
+    assert_eq!(pending["payload"]["call"]["arguments"]["cwd"], ".");
 
     let resolved = events
         .iter()
-        .find(|event| event["kind"]["type"] == "tool_call_resolved")
+        .find(|event| event["payload"]["type"] == "tool_call_resolved")
         .expect("shell tool call should resolve");
-    assert_eq!(resolved["kind"]["result"]["call_id"], "call-shell-command");
-    assert_eq!(resolved["kind"]["result"]["status"], "succeeded");
-    assert!(resolved["kind"]["result"]["diagnostic"].is_null());
+    assert_eq!(
+        resolved["payload"]["result"]["call_id"],
+        "call-shell-command"
+    );
+    assert_eq!(resolved["payload"]["result"]["status"], "succeeded");
+    assert!(resolved["payload"]["result"]["diagnostic"].is_null());
 }
 
 #[test]
@@ -151,12 +154,15 @@ fn shell_forbidden_command_denies_without_running_raw_command() {
 
     let resolved = events
         .iter()
-        .find(|event| event["kind"]["type"] == "tool_call_resolved")
+        .find(|event| event["payload"]["type"] == "tool_call_resolved")
         .expect("shell tool call should resolve");
-    assert_eq!(resolved["kind"]["result"]["call_id"], "call-shell-command");
-    assert_eq!(resolved["kind"]["result"]["status"], "failed");
     assert_eq!(
-        resolved["kind"]["result"]["diagnostic"]["code"],
+        resolved["payload"]["result"]["call_id"],
+        "call-shell-command"
+    );
+    assert_eq!(resolved["payload"]["result"]["status"], "failed");
+    assert_eq!(
+        resolved["payload"]["result"]["diagnostic"]["code"],
         "action_policy_denied"
     );
 }
@@ -203,12 +209,15 @@ fn shell_local_workspace_effect_denies_without_sandbox_admission_or_raw_cargo_ou
 
     let resolved = events
         .iter()
-        .find(|event| event["kind"]["type"] == "tool_call_resolved")
+        .find(|event| event["payload"]["type"] == "tool_call_resolved")
         .expect("shell tool call should resolve");
-    assert_eq!(resolved["kind"]["result"]["call_id"], "call-shell-command");
-    assert_eq!(resolved["kind"]["result"]["status"], "failed");
     assert_eq!(
-        resolved["kind"]["result"]["diagnostic"]["code"],
+        resolved["payload"]["result"]["call_id"],
+        "call-shell-command"
+    );
+    assert_eq!(resolved["payload"]["result"]["status"], "failed");
+    assert_eq!(
+        resolved["payload"]["result"]["diagnostic"]["code"],
         "action_policy_denied"
     );
 }
@@ -250,12 +259,15 @@ fn shell_spoofed_sandbox_markers_do_not_enable_local_workspace_effect() {
     let events = parse_jsonl(&output.stdout);
     let resolved = events
         .iter()
-        .find(|event| event["kind"]["type"] == "tool_call_resolved")
+        .find(|event| event["payload"]["type"] == "tool_call_resolved")
         .expect("shell tool call should resolve");
-    assert_eq!(resolved["kind"]["result"]["call_id"], "call-shell-command");
-    assert_eq!(resolved["kind"]["result"]["status"], "failed");
     assert_eq!(
-        resolved["kind"]["result"]["diagnostic"]["code"],
+        resolved["payload"]["result"]["call_id"],
+        "call-shell-command"
+    );
+    assert_eq!(resolved["payload"]["result"]["status"], "failed");
+    assert_eq!(
+        resolved["payload"]["result"]["diagnostic"]["code"],
         "action_policy_denied"
     );
 }
@@ -298,12 +310,15 @@ fn shell_spoofed_sandbox_markers_with_explicit_accept_do_not_enable_local_worksp
     let events = parse_jsonl(&output.stdout);
     let resolved = events
         .iter()
-        .find(|event| event["kind"]["type"] == "tool_call_resolved")
+        .find(|event| event["payload"]["type"] == "tool_call_resolved")
         .expect("shell tool call should resolve");
-    assert_eq!(resolved["kind"]["result"]["call_id"], "call-shell-command");
-    assert_eq!(resolved["kind"]["result"]["status"], "failed");
     assert_eq!(
-        resolved["kind"]["result"]["diagnostic"]["code"],
+        resolved["payload"]["result"]["call_id"],
+        "call-shell-command"
+    );
+    assert_eq!(resolved["payload"]["result"]["status"], "failed");
+    assert_eq!(
+        resolved["payload"]["result"]["diagnostic"]["code"],
         "action_policy_denied"
     );
 }
@@ -350,12 +365,15 @@ fn shell_forged_hidden_handoff_markers_and_accept_do_not_enable_local_workspace_
     let events = parse_jsonl(&output.stdout);
     let resolved = events
         .iter()
-        .find(|event| event["kind"]["type"] == "tool_call_resolved")
+        .find(|event| event["payload"]["type"] == "tool_call_resolved")
         .expect("shell tool call should resolve");
-    assert_eq!(resolved["kind"]["result"]["call_id"], "call-shell-command");
-    assert_eq!(resolved["kind"]["result"]["status"], "failed");
     assert_eq!(
-        resolved["kind"]["result"]["diagnostic"]["code"],
+        resolved["payload"]["result"]["call_id"],
+        "call-shell-command"
+    );
+    assert_eq!(resolved["payload"]["result"]["status"], "failed");
+    assert_eq!(
+        resolved["payload"]["result"]["diagnostic"]["code"],
         "action_policy_denied"
     );
 }

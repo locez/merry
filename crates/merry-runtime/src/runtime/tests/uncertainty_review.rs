@@ -130,7 +130,7 @@ async fn uncertainty_review_records_one_internal_payload_and_no_public_state() {
             .artifacts()
             .outcome()
             .content()
-            .contains("provenance.kind=test\n")
+            .contains("provenance.payload=test\n")
     );
 
     let after = judgment_harness_state(&runtime).await;
@@ -287,7 +287,7 @@ async fn uncertainty_review_model_backed_source_records_llm_judgment_and_no_publ
             .artifacts()
             .outcome()
             .content()
-            .contains("provenance.kind=llm\n")
+            .contains("provenance.payload=llm\n")
     );
     assert!(
         record

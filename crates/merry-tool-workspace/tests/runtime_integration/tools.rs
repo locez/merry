@@ -27,8 +27,8 @@ async fn registered_read_file_tool_records_artifact_before_resolving_pending_cal
         event_kind_names(&execution_events),
         ["ArtifactRecorded", "ToolCallResolved"]
     );
-    let result = match &execution_events[1].kind {
-        RuntimeEventKind::ToolCallResolved { result } => result,
+    let result = match &execution_events[1].payload {
+        RuntimeJournalPayload::ToolCallResolved { result } => result,
         other => panic!("expected tool resolution, got {other:?}"),
     };
     assert_eq!(result.status(), ToolCallResultStatus::Succeeded);
@@ -62,13 +62,13 @@ async fn registered_read_file_domain_failure_records_failed_json_before_resolvin
         event_kind_names(&execution_events),
         ["ArtifactRecorded", "ToolCallResolved"]
     );
-    let result = match &execution_events[1].kind {
-        RuntimeEventKind::ToolCallResolved { result } => result,
+    let result = match &execution_events[1].payload {
+        RuntimeJournalPayload::ToolCallResolved { result } => result,
         other => panic!("expected tool resolution, got {other:?}"),
     };
     assert!(matches!(
-        &execution_events[0].kind,
-        RuntimeEventKind::ArtifactRecorded { artifact } if artifact == result.artifact()
+        &execution_events[0].payload,
+        RuntimeJournalPayload::ArtifactRecorded { artifact } if artifact == result.artifact()
     ));
     assert_eq!(result.status(), ToolCallResultStatus::Failed);
     assert_eq!(result.artifact().kind(), &ArtifactKind::Json);

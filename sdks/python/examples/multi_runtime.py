@@ -38,8 +38,9 @@ async def run_named_runtime(label: str) -> None:
 
         stream = runtime.stream(task)
         async for event in stream:
-            kind = event["kind"]["type"]
-            event_session = event.get("session_id")
+            kind = event["type"]
+            source = event.get("source")
+            event_session = source.get("session_id") if isinstance(source, dict) else None
             print(
                 f"[{label}] round={round_index} event kind={kind} "
                 f"handle_session={runtime.session_id} event_session={event_session}"

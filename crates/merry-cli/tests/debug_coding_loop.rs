@@ -205,11 +205,11 @@ fn debug_permission_network_smoke_runs_inside_real_bwrap_when_opted_in() {
         .collect::<Vec<_>>();
     assert!(
         events.iter().any(|event| {
-            event.pointer("/kind/type").and_then(Value::as_str) == Some("tool_call_pending")
-                && event.pointer("/kind/call/name").and_then(Value::as_str)
+            event.pointer("/payload/type").and_then(Value::as_str) == Some("tool_call_pending")
+                && event.pointer("/payload/call/name").and_then(Value::as_str)
                     == Some("request_permissions")
                 && event
-                    .pointer("/kind/call/arguments/requested/network")
+                    .pointer("/payload/call/arguments/requested/network")
                     .and_then(Value::as_bool)
                     == Some(true)
         }),
@@ -281,11 +281,11 @@ fn debug_coding_loop_task_live_smoke_runs_inside_real_bwrap_when_opted_in() {
         .collect::<Vec<_>>();
     assert!(
         events.iter().any(|event| {
-            event.pointer("/kind/type").and_then(Value::as_str) == Some("tool_call_pending")
-                && event.pointer("/kind/call/name").and_then(Value::as_str)
+            event.pointer("/payload/type").and_then(Value::as_str) == Some("tool_call_pending")
+                && event.pointer("/payload/call/name").and_then(Value::as_str)
                     == Some("workspace_patch")
                 && event
-                    .pointer("/kind/call/arguments/patch")
+                    .pointer("/payload/call/arguments/patch")
                     .and_then(Value::as_str)
                     .is_some_and(|patch| patch.contains("*** Begin Workspace Patch"))
         }),
@@ -320,16 +320,16 @@ fn debug_coding_loop_subagent_live_smoke_runs_inside_real_bwrap_when_opted_in() 
         .collect::<Vec<_>>();
     assert!(
         events.iter().any(|event| {
-            event.pointer("/kind/type").and_then(Value::as_str) == Some("tool_call_pending")
-                && event.pointer("/kind/call/name").and_then(Value::as_str)
+            event.pointer("/payload/type").and_then(Value::as_str) == Some("tool_call_pending")
+                && event.pointer("/payload/call/name").and_then(Value::as_str)
                     == Some("spawn_subagents")
         }),
         "stdout should include the parent spawn_subagents tool call"
     );
     assert!(
         events.iter().any(|event| {
-            event.pointer("/kind/type").and_then(Value::as_str) == Some("tool_call_pending")
-                && event.pointer("/kind/call/name").and_then(Value::as_str)
+            event.pointer("/payload/type").and_then(Value::as_str) == Some("tool_call_pending")
+                && event.pointer("/payload/call/name").and_then(Value::as_str)
                     == Some("wait_subagents")
         }),
         "stdout should include the parent wait_subagents tool call"

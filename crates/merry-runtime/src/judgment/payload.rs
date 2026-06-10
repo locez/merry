@@ -107,7 +107,7 @@ pub(super) fn render_outcome_payload(
     push_field(&mut payload, "uncertainty", outcome.uncertainty());
     push_field(
         &mut payload,
-        "provenance.kind",
+        "provenance.payload",
         outcome.provenance().source_kind().as_str(),
     );
     push_field(
@@ -119,7 +119,7 @@ pub(super) fn render_outcome_payload(
 }
 
 fn push_recommendation(payload: &mut String, recommendation: &JudgmentRecommendation) {
-    push_field(payload, "recommendation.kind", recommendation.as_str());
+    push_field(payload, "recommendation.payload", recommendation.as_str());
 
     match recommendation {
         JudgmentRecommendation::SummaryDraft { draft } => {

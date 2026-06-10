@@ -1,12 +1,12 @@
 use super::{Runtime, RuntimeError};
 use crate::{
     ArtifactContent, ContextEntry, ContextSummary, LedgerProjectionSnapshot,
-    SessionContextSnapshot, event_stream::ActiveStepPermit,
-    session::is_runtime_reserved_artifact_id, tool_input_validation::ToolInputValidationError,
+    SessionContextSnapshot, events::ActiveStepPermit, session::is_runtime_reserved_artifact_id,
+    tool_input_validation::ToolInputValidationError,
 };
 use merry_core::{
     ArtifactId, ArtifactRef, ErrorInfo, EvidenceLocator, EvidenceRef, PendingToolCall,
-    RuntimeEvent, ToolCallId, ToolCallResult, ToolCallResultStatus,
+    RuntimeJournalEvent, ToolCallId, ToolCallResult, ToolCallResultStatus,
 };
 use std::sync::Arc;
 
@@ -28,7 +28,7 @@ impl Runtime {
         &self,
         artifact: ArtifactRef,
         content: ArtifactContent,
-    ) -> Result<Vec<RuntimeEvent>, RuntimeError> {
+    ) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
         let _active_permit = ActiveStepPermit::acquire(Arc::clone(&self.inner.active_step))
             .ok_or_else(|| RuntimeError::StepAlreadyActive {
                 session_id: self.inner.session_id.clone(),
@@ -63,7 +63,7 @@ impl Runtime {
         &self,
         result: ToolCallResult,
         content: ArtifactContent,
-    ) -> Result<Vec<RuntimeEvent>, RuntimeError> {
+    ) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
         let _active_permit = ActiveStepPermit::acquire(Arc::clone(&self.inner.active_step))
             .ok_or_else(|| RuntimeError::StepAlreadyActive {
                 session_id: self.inner.session_id.clone(),
@@ -78,7 +78,7 @@ impl Runtime {
         result: ToolCallResult,
         content: ArtifactContent,
         _active_permit: &ActiveStepPermit,
-    ) -> Result<Vec<RuntimeEvent>, RuntimeError> {
+    ) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
         if is_runtime_reserved_artifact_id(result.artifact().id()) {
             return Err(RuntimeError::ReservedArtifactId {
                 artifact_id: result.artifact().id().clone(),
@@ -92,7 +92,7 @@ impl Runtime {
     pub(crate) async fn record_final_output_tool_call(
         &self,
         call: PendingToolCall,
-    ) -> Result<(crate::FinalOutput, Vec<RuntimeEvent>), RuntimeError> {
+    ) -> Result<(crate::FinalOutput, Vec<RuntimeJournalEvent>), RuntimeError> {
         let json = serde_json::to_string(call.arguments().as_object())
             .expect("tool call arguments are JSON object values and must serialize");
         let mut session = self.inner.session.lock().await;
@@ -104,7 +104,7 @@ impl Runtime {
         call: &PendingToolCall,
         error: ToolInputValidationError,
         _active_permit: &ActiveStepPermit,
-    ) -> Result<Vec<RuntimeEvent>, RuntimeError> {
+    ) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
         let content = error.content_for_call(call);
         let diagnostic = error.diagnostic();
         let mut session = self.inner.session.lock().await;
@@ -121,7 +121,7 @@ impl Runtime {
         &self,
         call_id: &ToolCallId,
         _active_permit: &ActiveStepPermit,
-    ) -> Result<Vec<RuntimeEvent>, RuntimeError> {
+    ) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
         let diagnostic = ErrorInfo::new(
             "tool_cancelled_by_user",
             &format!("tool call {call_id} was cancelled by user interrupt"),

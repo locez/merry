@@ -12,14 +12,14 @@ use crate::{
     },
     tool::{ActionProposalEvidence, ToolExecutionContext},
 };
-use merry_core::{PendingToolCall, RuntimeEvent};
+use merry_core::{PendingToolCall, RuntimeJournalEvent};
 use std::sync::Arc;
 
 pub(super) async fn execute_permission_request_tool_call(
     inner: &Arc<RuntimeInner>,
     pending: &PendingToolCall,
     context: ToolExecutionContext,
-) -> Result<Vec<RuntimeEvent>, RuntimeError> {
+) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
     if context.cancellation_token().is_cancelled() {
         return Err(RuntimeError::ToolExecutionCancelled {
             session_id: inner.session_id.clone(),

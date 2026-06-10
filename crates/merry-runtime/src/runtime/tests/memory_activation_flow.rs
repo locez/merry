@@ -49,7 +49,7 @@ async fn default_stored_source_projects_session_memory_before_user_message() {
         [
             "SessionStarted",
             "StepStarted",
-            "ArtifactRecorded",
+            "AssistantOutputRecorded",
             "StepCompleted"
         ]
     );
@@ -114,7 +114,7 @@ async fn unmatched_stored_memory_does_not_add_system_message() {
         [
             "SessionStarted",
             "StepStarted",
-            "ArtifactRecorded",
+            "AssistantOutputRecorded",
             "StepCompleted"
         ]
     );
@@ -209,13 +209,13 @@ async fn provider_step_replaces_activated_memories_between_requests() {
         [
             "SessionStarted",
             "StepStarted",
-            "ArtifactRecorded",
+            "AssistantOutputRecorded",
             "StepCompleted"
         ]
     );
     assert_eq!(
         event_kind_names(&second_events),
-        ["StepStarted", "ArtifactRecorded", "StepCompleted"]
+        ["StepStarted", "AssistantOutputRecorded", "StepCompleted"]
     );
     assert_eq!(source.call_count(), 2);
 
@@ -307,7 +307,7 @@ async fn activation_source_error_clears_previous_successful_projection() {
         [
             "SessionStarted",
             "StepStarted",
-            "ArtifactRecorded",
+            "AssistantOutputRecorded",
             "StepCompleted"
         ]
     );
@@ -472,15 +472,15 @@ async fn cancelling_pending_memory_activation_emits_cancelled_without_provider_c
 
     assert!(matches!(
         stream.next().await.expect("session started event"),
-        RuntimeEvent {
-            kind: RuntimeEventKind::SessionStarted,
+        RuntimeJournalEvent {
+            payload: RuntimeJournalPayload::SessionStarted,
             ..
         }
     ));
     assert!(matches!(
         stream.next().await.expect("step started event"),
-        RuntimeEvent {
-            kind: RuntimeEventKind::StepStarted,
+        RuntimeJournalEvent {
+            payload: RuntimeJournalPayload::StepStarted,
             ..
         }
     ));
@@ -518,15 +518,15 @@ async fn dropping_stream_while_memory_activation_pending_drops_activation_withou
 
     assert!(matches!(
         stream.next().await.expect("session started event"),
-        RuntimeEvent {
-            kind: RuntimeEventKind::SessionStarted,
+        RuntimeJournalEvent {
+            payload: RuntimeJournalPayload::SessionStarted,
             ..
         }
     ));
     assert!(matches!(
         stream.next().await.expect("step started event"),
-        RuntimeEvent {
-            kind: RuntimeEventKind::StepStarted,
+        RuntimeJournalEvent {
+            payload: RuntimeJournalPayload::StepStarted,
             ..
         }
     ));

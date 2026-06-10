@@ -1,8 +1,8 @@
 use futures_util::{StreamExt, stream};
 use merry_core::{
     ArtifactId, ArtifactKind, ArtifactRef, ErrorInfo, EvidenceLocator, PendingToolCall,
-    ProviderName, RuntimeEvent, RuntimeEventKind, SessionId, ToolCallId, ToolCallResult,
-    ToolCallResultStatus, ToolInputSchema, ToolName, ToolSpec,
+    ProviderName, RuntimeJournalEvent, RuntimeJournalPayload, SessionId, ToolCallId,
+    ToolCallResult, ToolCallResultStatus, ToolInputSchema, ToolName, ToolSpec,
 };
 use merry_llm::{
     FinishReason, GenerationConfig, ModelCapabilities, ModelContent, ModelError, ModelEvent,
@@ -318,7 +318,7 @@ impl ModelProvider for ScriptedModelProvider {
     }
 }
 
-async fn collect_step(runtime: &Runtime, text: &str) -> Vec<RuntimeEvent> {
+async fn collect_step(runtime: &Runtime, text: &str) -> Vec<RuntimeJournalEvent> {
     collect_step_with_context(runtime, text, StepContext::new(CancellationToken::new())).await
 }
 
@@ -326,7 +326,7 @@ async fn collect_step_with_context(
     runtime: &Runtime,
     text: &str,
     context: StepContext,
-) -> Vec<RuntimeEvent> {
+) -> Vec<RuntimeJournalEvent> {
     runtime
         .step(
             StepInput::user_text(text).expect("valid step input"),
@@ -342,14 +342,14 @@ async fn seed_history_text_for_compaction(runtime: &Runtime, old_user: &str, ret
     assert!(
         first_events
             .iter()
-            .any(|event| matches!(event.kind, RuntimeEventKind::StepCompleted)),
+            .any(|event| matches!(event.payload, RuntimeJournalPayload::StepCompleted)),
         "first seed step should complete"
     );
     let second_events = collect_step(runtime, retained_tail).await;
     assert!(
         second_events
             .iter()
-            .any(|event| matches!(event.kind, RuntimeEventKind::StepCompleted)),
+            .any(|event| matches!(event.payload, RuntimeJournalPayload::StepCompleted)),
         "tail seed step should complete"
     );
 }
@@ -389,7 +389,7 @@ async fn seed_fixture_messages(runtime: &Runtime, messages: &[FixtureMessage]) {
                 assert!(
                     events
                         .iter()
-                        .any(|event| matches!(event.kind, RuntimeEventKind::StepCompleted)),
+                        .any(|event| matches!(event.payload, RuntimeJournalPayload::StepCompleted)),
                     "fixture user message should complete"
                 );
             }
@@ -584,74 +584,76 @@ fn command_is_available(program: &str) -> bool {
     env::split_paths(&path).any(|directory| directory.join(program).is_file())
 }
 
-fn event_kind_names(events: &[RuntimeEvent]) -> Vec<&'static str> {
+fn event_kind_names(events: &[RuntimeJournalEvent]) -> Vec<&'static str> {
     events
         .iter()
-        .map(|event| match event.kind {
-            RuntimeEventKind::SessionStarted => "SessionStarted",
-            RuntimeEventKind::StepStarted => "StepStarted",
-            RuntimeEventKind::StepCompleted => "StepCompleted",
-            RuntimeEventKind::Cancelled { .. } => "Cancelled",
-            RuntimeEventKind::Failed { .. } => "Failed",
-            RuntimeEventKind::ArtifactRecorded { .. } => "ArtifactRecorded",
-            RuntimeEventKind::EvidenceReferenced { .. } => "EvidenceReferenced",
-            RuntimeEventKind::ToolCallPending { .. } => "ToolCallPending",
-            RuntimeEventKind::ToolCallResolved { .. } => "ToolCallResolved",
-            RuntimeEventKind::SkillUsed { .. } => "SkillUsed",
+        .map(|event| match event.payload {
+            RuntimeJournalPayload::SessionStarted => "SessionStarted",
+            RuntimeJournalPayload::StepStarted => "StepStarted",
+            RuntimeJournalPayload::StepCompleted => "StepCompleted",
+            RuntimeJournalPayload::Cancelled { .. } => "Cancelled",
+            RuntimeJournalPayload::Failed { .. } => "Failed",
+            RuntimeJournalPayload::ArtifactRecorded { .. } => "ArtifactRecorded",
+            RuntimeJournalPayload::AssistantOutputRecorded { .. } => "AssistantOutputRecorded",
+            RuntimeJournalPayload::EvidenceReferenced { .. } => "EvidenceReferenced",
+            RuntimeJournalPayload::ToolCallPending { .. } => "ToolCallPending",
+            RuntimeJournalPayload::ToolCallResolved { .. } => "ToolCallResolved",
+            RuntimeJournalPayload::SkillUsed { .. } => "SkillUsed",
             _ => "Unknown",
         })
         .collect()
 }
 
-fn failed_code(events: &[RuntimeEvent]) -> Option<&str> {
-    events.iter().find_map(|event| match &event.kind {
-        RuntimeEventKind::Failed { diagnostic } => Some(diagnostic.code()),
+fn failed_code(events: &[RuntimeJournalEvent]) -> Option<&str> {
+    events.iter().find_map(|event| match &event.payload {
+        RuntimeJournalPayload::Failed { diagnostic } => Some(diagnostic.code()),
         _ => None,
     })
 }
 
-fn failed_sequence(events: &[RuntimeEvent]) -> u64 {
+fn failed_sequence(events: &[RuntimeJournalEvent]) -> u64 {
     events
         .iter()
-        .find_map(|event| match event.kind {
-            RuntimeEventKind::Failed { .. } => Some(event.sequence),
+        .find_map(|event| match event.payload {
+            RuntimeJournalPayload::Failed { .. } => Some(event.sequence),
             _ => None,
         })
         .expect("failed event should be present")
 }
 
-fn assert_no_completion(events: &[RuntimeEvent]) {
+fn assert_no_completion(events: &[RuntimeJournalEvent]) {
     assert!(
         events
             .iter()
-            .all(|event| !matches!(event.kind, RuntimeEventKind::StepCompleted)),
+            .all(|event| !matches!(event.payload, RuntimeJournalPayload::StepCompleted)),
         "terminal failure/cancellation must not be followed by StepCompleted: {events:?}"
     );
 }
 
-fn assert_no_artifact_recorded(events: &[RuntimeEvent]) {
+fn assert_no_artifact_recorded(events: &[RuntimeJournalEvent]) {
     assert!(
-        events
-            .iter()
-            .all(|event| !matches!(event.kind, RuntimeEventKind::ArtifactRecorded { .. })),
+        events.iter().all(|event| !matches!(
+            event.payload,
+            RuntimeJournalPayload::ArtifactRecorded { .. }
+        )),
         "terminal failure/cancellation must not record artifacts: {events:?}"
     );
 }
 
-fn assert_no_tool_call_pending(events: &[RuntimeEvent]) {
+fn assert_no_tool_call_pending(events: &[RuntimeJournalEvent]) {
     assert!(
         events
             .iter()
-            .all(|event| !matches!(event.kind, RuntimeEventKind::ToolCallPending { .. })),
+            .all(|event| !matches!(event.payload, RuntimeJournalPayload::ToolCallPending { .. })),
         "terminal failure/cancellation must not record pending tool calls: {events:?}"
     );
 }
 
-fn assert_no_failed(events: &[RuntimeEvent]) {
+fn assert_no_failed(events: &[RuntimeJournalEvent]) {
     assert!(
         events
             .iter()
-            .all(|event| !matches!(event.kind, RuntimeEventKind::Failed { .. })),
+            .all(|event| !matches!(event.payload, RuntimeJournalPayload::Failed { .. })),
         "terminal cancellation must not emit Failed: {events:?}"
     );
 }
@@ -697,21 +699,21 @@ async fn record_valid_context(runtime: &Runtime) -> String {
         .to_snapshot()
 }
 
-fn assistant_output_artifact(events: &[RuntimeEvent]) -> &ArtifactRef {
+fn assistant_output_artifact(events: &[RuntimeJournalEvent]) -> &ArtifactRef {
     events
         .iter()
-        .find_map(|event| match &event.kind {
-            RuntimeEventKind::ArtifactRecorded { artifact } => Some(artifact),
+        .find_map(|event| match &event.payload {
+            RuntimeJournalPayload::AssistantOutputRecorded { artifact } => Some(artifact),
             _ => None,
         })
         .expect("assistant output artifact should be recorded")
 }
 
-fn pending_tool_call(events: &[RuntimeEvent]) -> &PendingToolCall {
+fn pending_tool_call(events: &[RuntimeJournalEvent]) -> &PendingToolCall {
     events
         .iter()
-        .find_map(|event| match &event.kind {
-            RuntimeEventKind::ToolCallPending { call } => Some(call),
+        .find_map(|event| match &event.payload {
+            RuntimeJournalPayload::ToolCallPending { call } => Some(call),
             _ => None,
         })
         .expect("pending tool call should be emitted")
@@ -968,11 +970,11 @@ fn runtime_with_registered_tool_action(
         .expect("runtime should build")
 }
 
-fn resolved_tool_result(events: &[RuntimeEvent]) -> &ToolCallResult {
+fn resolved_tool_result(events: &[RuntimeJournalEvent]) -> &ToolCallResult {
     events
         .iter()
-        .find_map(|event| match &event.kind {
-            RuntimeEventKind::ToolCallResolved { result } => Some(result),
+        .find_map(|event| match &event.payload {
+            RuntimeJournalPayload::ToolCallResolved { result } => Some(result),
             _ => None,
         })
         .expect("resolved tool call should be emitted")
@@ -1019,7 +1021,7 @@ async fn runtime_step_with_provider_compiles_user_text_request_and_records_assis
         [
             "SessionStarted",
             "StepStarted",
-            "ArtifactRecorded",
+            "AssistantOutputRecorded",
             "StepCompleted"
         ]
     );
@@ -1134,7 +1136,7 @@ async fn reserved_assistant_output_external_recording_does_not_block_runtime_own
         [
             "SessionStarted",
             "StepStarted",
-            "ArtifactRecorded",
+            "AssistantOutputRecorded",
             "StepCompleted"
         ]
     );
@@ -1162,7 +1164,7 @@ async fn runtime_step_with_provider_uses_step_generation_config() {
         [
             "SessionStarted",
             "StepStarted",
-            "ArtifactRecorded",
+            "AssistantOutputRecorded",
             "StepCompleted"
         ]
     );
@@ -1182,7 +1184,7 @@ async fn runtime_step_with_provider_includes_compiled_context_as_system_message(
 
     assert_eq!(
         event_kind_names(&events),
-        ["StepStarted", "ArtifactRecorded", "StepCompleted"]
+        ["StepStarted", "AssistantOutputRecorded", "StepCompleted"]
     );
     let requests = provider.recorded_requests();
     assert_eq!(requests.len(), 1);
@@ -1221,7 +1223,7 @@ async fn provider_stop_multiline_text_artifact_supports_line_evidence() {
         [
             "SessionStarted",
             "StepStarted",
-            "ArtifactRecorded",
+            "AssistantOutputRecorded",
             "StepCompleted"
         ]
     );
@@ -1248,7 +1250,7 @@ async fn provider_stop_success_with_single_slot_event_buffer_emits_artifact_and_
         [
             "SessionStarted",
             "StepStarted",
-            "ArtifactRecorded",
+            "AssistantOutputRecorded",
             "StepCompleted"
         ]
     );
@@ -1278,7 +1280,7 @@ async fn second_provider_step_continues_sequences_and_replays_transcript() {
     );
     assert_eq!(
         event_kind_names(&second_events),
-        ["StepStarted", "ArtifactRecorded", "StepCompleted"]
+        ["StepStarted", "AssistantOutputRecorded", "StepCompleted"]
     );
     assert_eq!(
         assistant_output_artifact(&first_events).id().as_str(),
@@ -1435,7 +1437,7 @@ async fn registered_tool_specs_are_compiled_into_provider_request() {
         [
             "SessionStarted",
             "StepStarted",
-            "ArtifactRecorded",
+            "AssistantOutputRecorded",
             "StepCompleted"
         ]
     );
@@ -2041,7 +2043,7 @@ async fn live_compactor_summarizes_messy_1k_token_window_with_refs() {
         assert!(
             events
                 .iter()
-                .any(|event| matches!(event.kind, RuntimeEventKind::StepCompleted)),
+                .any(|event| matches!(event.payload, RuntimeJournalPayload::StepCompleted)),
             "seed message should complete"
         );
     }
@@ -2630,8 +2632,8 @@ async fn tokio_process_runner_executes_read_only_shell_wrapper_with_input_artifa
     );
     let input_artifact = execution_events
         .iter()
-        .find_map(|event| match &event.kind {
-            RuntimeEventKind::ArtifactRecorded { artifact }
+        .find_map(|event| match &event.payload {
+            RuntimeJournalPayload::ArtifactRecorded { artifact }
                 if artifact.id().as_str().starts_with("process-input-") =>
             {
                 Some(artifact)
@@ -2766,12 +2768,12 @@ async fn execute_registered_tool_success_records_artifact_resolves_and_compiles_
     );
     let result = resolved_tool_result(&execution_events);
     assert!(matches!(
-        &execution_events[0].kind,
-        RuntimeEventKind::ArtifactRecorded { artifact } if artifact == result.artifact()
+        &execution_events[0].payload,
+        RuntimeJournalPayload::ArtifactRecorded { artifact } if artifact == result.artifact()
     ));
     assert!(matches!(
-        &execution_events[1].kind,
-        RuntimeEventKind::ToolCallResolved { result: resolved } if resolved == result
+        &execution_events[1].payload,
+        RuntimeJournalPayload::ToolCallResolved { result: resolved } if resolved == result
     ));
     assert_eq!(result.status(), ToolCallResultStatus::Succeeded);
     assert_eq!(result.artifact().id().as_str(), "tool-result-3");
@@ -2818,7 +2820,7 @@ async fn execute_registered_tool_success_records_artifact_resolves_and_compiles_
     let continuation_events = collect_step(&runtime, "Continue with result.").await;
     assert_eq!(
         event_kind_names(&continuation_events),
-        ["StepStarted", "ArtifactRecorded", "StepCompleted"]
+        ["StepStarted", "AssistantOutputRecorded", "StepCompleted"]
     );
     assert_eq!(
         continuation_events
@@ -2899,8 +2901,8 @@ async fn reading_catalog_skill_file_emits_skill_used_event() {
     );
     let result = resolved_tool_result(&execution_events);
     assert!(matches!(
-        &execution_events[2].kind,
-        RuntimeEventKind::SkillUsed {
+        &execution_events[2].payload,
+        RuntimeJournalPayload::SkillUsed {
             skill_name,
             skill_md_path,
             tool_call_id,
@@ -2954,17 +2956,17 @@ async fn execute_tool_domain_failure_resolves_failed_without_runtime_failed() {
     assert!(
         execution_events
             .iter()
-            .all(|event| !matches!(event.kind, RuntimeEventKind::Failed { .. })),
-        "tool domain failure must not emit RuntimeEventKind::Failed: {execution_events:?}"
+            .all(|event| !matches!(event.payload, RuntimeJournalPayload::Failed { .. })),
+        "tool domain failure must not emit RuntimeJournalPayload::Failed: {execution_events:?}"
     );
     let result = resolved_tool_result(&execution_events);
     assert!(matches!(
-        &execution_events[0].kind,
-        RuntimeEventKind::ArtifactRecorded { artifact } if artifact == result.artifact()
+        &execution_events[0].payload,
+        RuntimeJournalPayload::ArtifactRecorded { artifact } if artifact == result.artifact()
     ));
     assert!(matches!(
-        &execution_events[1].kind,
-        RuntimeEventKind::ToolCallResolved { result: resolved } if resolved == result
+        &execution_events[1].payload,
+        RuntimeJournalPayload::ToolCallResolved { result: resolved } if resolved == result
     ));
     assert_eq!(result.status(), ToolCallResultStatus::Failed);
     assert_eq!(result.artifact().id().as_str(), "tool-result-3");
@@ -3291,12 +3293,12 @@ async fn unregistered_pending_tool_name_resolves_failed_with_tool_not_registered
     );
     let result = resolved_tool_result(&execution_events);
     assert!(matches!(
-        &execution_events[0].kind,
-        RuntimeEventKind::ArtifactRecorded { artifact } if artifact == result.artifact()
+        &execution_events[0].payload,
+        RuntimeJournalPayload::ArtifactRecorded { artifact } if artifact == result.artifact()
     ));
     assert!(matches!(
-        &execution_events[1].kind,
-        RuntimeEventKind::ToolCallResolved { result: resolved } if resolved == result
+        &execution_events[1].payload,
+        RuntimeJournalPayload::ToolCallResolved { result: resolved } if resolved == result
     ));
     assert_eq!(result.status(), ToolCallResultStatus::Failed);
     assert_eq!(
@@ -3351,7 +3353,7 @@ async fn unregistered_pending_tool_name_resolves_failed_with_tool_not_registered
     let continuation_events = collect_step(&runtime, "Continue after missing tool.").await;
     assert_eq!(
         event_kind_names(&continuation_events),
-        ["StepStarted", "ArtifactRecorded", "StepCompleted"]
+        ["StepStarted", "AssistantOutputRecorded", "StepCompleted"]
     );
     assert_eq!(
         continuation_events
@@ -3396,7 +3398,7 @@ async fn denied_registered_tool_result_is_compiled_as_failed_provider_neutral_co
     );
     assert_eq!(
         event_kind_names(&continuation_events),
-        ["StepStarted", "ArtifactRecorded", "StepCompleted"]
+        ["StepStarted", "AssistantOutputRecorded", "StepCompleted"]
     );
     assert!(runtime.pending_tool_calls().await.is_empty());
     let result = resolved_tool_result(&execution_events);
@@ -3573,7 +3575,7 @@ async fn provider_cancelled_stream_emits_cancelled_without_completion() {
     assert!(
         events
             .iter()
-            .any(|event| matches!(event.kind, RuntimeEventKind::Cancelled { .. }))
+            .any(|event| matches!(event.payload, RuntimeJournalPayload::Cancelled { .. }))
     );
     assert_no_artifact_recorded(&events);
     assert_no_failed(&events);
@@ -3832,12 +3834,12 @@ async fn submit_tool_result_records_success_artifact_resolves_pending_and_update
         vec![3, 4]
     );
     assert!(matches!(
-        &events[0].kind,
-        RuntimeEventKind::ArtifactRecorded { artifact } if artifact == &result_artifact
+        &events[0].payload,
+        RuntimeJournalPayload::ArtifactRecorded { artifact } if artifact == &result_artifact
     ));
     assert!(matches!(
-        &events[1].kind,
-        RuntimeEventKind::ToolCallResolved { result: resolved } if resolved == &result
+        &events[1].payload,
+        RuntimeJournalPayload::ToolCallResolved { result: resolved } if resolved == &result
     ));
     assert!(runtime.pending_tool_calls().await.is_empty());
     let evidence = runtime
@@ -3881,7 +3883,7 @@ async fn submit_tool_result_records_success_artifact_resolves_pending_and_update
     let next_events = collect_step(&runtime, "after tool result").await;
     assert_eq!(
         event_kind_names(&next_events),
-        ["StepStarted", "ArtifactRecorded", "StepCompleted"]
+        ["StepStarted", "AssistantOutputRecorded", "StepCompleted"]
     );
     assert_eq!(provider.recorded_requests().len(), 2);
     assert_eq!(
@@ -3967,7 +3969,7 @@ async fn submitted_tool_result_is_compiled_as_provider_neutral_continuation() {
 
     assert_eq!(
         event_kind_names(&events),
-        ["StepStarted", "ArtifactRecorded", "StepCompleted"]
+        ["StepStarted", "AssistantOutputRecorded", "StepCompleted"]
     );
     let requests = provider.recorded_requests();
     assert_eq!(requests.len(), 2);
@@ -4045,11 +4047,11 @@ async fn successful_provider_step_keeps_tool_exchange_until_compaction() {
 
     assert_eq!(
         event_kind_names(&continuation_events),
-        ["StepStarted", "ArtifactRecorded", "StepCompleted"]
+        ["StepStarted", "AssistantOutputRecorded", "StepCompleted"]
     );
     assert_eq!(
         event_kind_names(&next_events),
-        ["StepStarted", "ArtifactRecorded", "StepCompleted"]
+        ["StepStarted", "AssistantOutputRecorded", "StepCompleted"]
     );
     let requests = provider.recorded_requests();
     assert_eq!(requests.len(), 3);
@@ -4123,7 +4125,7 @@ async fn new_pending_tool_call_keeps_prior_tool_exchange() {
     );
     assert_eq!(
         event_kind_names(&completed_events),
-        ["StepStarted", "ArtifactRecorded", "StepCompleted"]
+        ["StepStarted", "AssistantOutputRecorded", "StepCompleted"]
     );
     assert!(runtime.pending_tool_calls().await.is_empty());
 
@@ -4187,7 +4189,7 @@ async fn duplicate_new_tool_call_id_keeps_tool_exchange_for_retry() {
     assert_eq!(failed_code(&duplicate_events), Some("tool_call_duplicate"));
     assert_eq!(
         event_kind_names(&retry_events),
-        ["StepStarted", "ArtifactRecorded", "StepCompleted"]
+        ["StepStarted", "AssistantOutputRecorded", "StepCompleted"]
     );
     assert!(runtime.pending_tool_calls().await.is_empty());
 
@@ -4243,7 +4245,7 @@ async fn provider_error_keeps_tool_exchange_for_retry() {
     assert_eq!(failed_code(&error_events), Some("model_protocol"));
     assert_eq!(
         event_kind_names(&retry_events),
-        ["StepStarted", "ArtifactRecorded", "StepCompleted"]
+        ["StepStarted", "AssistantOutputRecorded", "StepCompleted"]
     );
     let requests = provider.recorded_requests();
     assert_eq!(requests.len(), 3);
@@ -4289,7 +4291,7 @@ async fn provider_setup_error_keeps_tool_exchange_for_retry() {
     assert_eq!(failed_code(&error_events), Some("model_unavailable"));
     assert_eq!(
         event_kind_names(&retry_events),
-        ["StepStarted", "ArtifactRecorded", "StepCompleted"]
+        ["StepStarted", "AssistantOutputRecorded", "StepCompleted"]
     );
     let requests = provider.recorded_requests();
     assert_eq!(requests.len(), 3);
@@ -4335,7 +4337,7 @@ async fn provider_cancel_keeps_tool_exchange_for_retry() {
     assert_no_failed(&cancel_events);
     assert_eq!(
         event_kind_names(&retry_events),
-        ["StepStarted", "ArtifactRecorded", "StepCompleted"]
+        ["StepStarted", "AssistantOutputRecorded", "StepCompleted"]
     );
     let requests = provider.recorded_requests();
     assert_eq!(requests.len(), 3);
@@ -4713,7 +4715,7 @@ async fn runtime_profile_progress_commentary_adds_stable_prefix_guidance() {
         [
             "SessionStarted",
             "StepStarted",
-            "ArtifactRecorded",
+            "AssistantOutputRecorded",
             "StepCompleted"
         ]
     );
@@ -4755,7 +4757,7 @@ async fn provider_completed_with_mixed_text_and_tool_call_records_commentary_and
         [
             "SessionStarted",
             "StepStarted",
-            "ArtifactRecorded",
+            "AssistantOutputRecorded",
             "ToolCallPending"
         ]
     );
@@ -4796,7 +4798,7 @@ async fn provider_tool_call_after_non_empty_text_delta_records_commentary_and_pe
         [
             "SessionStarted",
             "StepStarted",
-            "ArtifactRecorded",
+            "AssistantOutputRecorded",
             "ToolCallPending"
         ]
     );
@@ -4846,7 +4848,7 @@ async fn tool_progress_commentary_is_replayed_to_next_provider_step() {
 
     assert_eq!(
         event_kind_names(&final_events),
-        ["StepStarted", "ArtifactRecorded", "StepCompleted"]
+        ["StepStarted", "AssistantOutputRecorded", "StepCompleted"]
     );
     let requests = provider.recorded_requests();
     assert_eq!(requests.len(), 2);
