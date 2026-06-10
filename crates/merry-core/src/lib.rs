@@ -9,6 +9,7 @@ pub mod journal;
 pub mod runtime_event;
 pub mod schema;
 pub mod tool;
+pub mod usage;
 
 pub use artifact::{ArtifactKind, ArtifactRef};
 pub use error::CoreError;
@@ -25,4 +26,7 @@ pub use runtime_event::{
 pub use schema::ToolInputSchema;
 pub use tool::{
     PendingToolCall, ToolCallArguments, ToolCallResult, ToolCallResultStatus, ToolSpec,
+};
+pub use usage::{
+    CompactionUsageWindow, ContextWindowSource, ModelUsage, SessionUsage, UsageContextWindow,
 };
