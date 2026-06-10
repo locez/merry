@@ -525,7 +525,10 @@ mod tests {
             crate::parse::parse_responses_response(fixture).expect("fixture should parse");
 
         assert_eq!(response.finish_reason(), FinishReason::Stop);
-        assert_eq!(response.usage(), Some(Usage::new(12, 5)));
+        assert_eq!(
+            response.usage(),
+            Some(Usage::with_details(12, None, 5, None, 17))
+        );
         assert_eq!(
             response.outputs(),
             &[ModelOutput::text("Hello from the assistant.")]
@@ -539,7 +542,10 @@ mod tests {
             crate::parse::parse_responses_response(fixture).expect("fixture should parse");
 
         assert_eq!(response.finish_reason(), FinishReason::ToolCalls);
-        assert_eq!(response.usage(), Some(Usage::new(20, 8)));
+        assert_eq!(
+            response.usage(),
+            Some(Usage::with_details(20, None, 8, None, 28))
+        );
         assert_eq!(response.outputs().len(), 1);
 
         match &response.outputs()[0] {
@@ -553,6 +559,36 @@ mod tests {
             }
             output => panic!("expected tool call output, got {output:?}"),
         }
+    }
+
+    #[test]
+    fn responses_usage_preserves_cached_reasoning_and_total_counts() {
+        let response = crate::parse::parse_responses_response(
+            r#"{
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [
+                            { "type": "output_text", "text": "Done" }
+                        ]
+                    }
+                ],
+                "usage": {
+                    "input_tokens": 20,
+                    "input_tokens_details": { "cached_tokens": 12 },
+                    "output_tokens": 8,
+                    "output_tokens_details": { "reasoning_tokens": 3 },
+                    "total_tokens": 28
+                }
+            }"#,
+        )
+        .expect("response should parse");
+
+        assert_eq!(
+            response.usage(),
+            Some(Usage::with_details(20, Some(12), 8, Some(3), 28))
+        );
     }
 
     #[test]
@@ -590,7 +626,7 @@ mod tests {
                 response: merry_llm::ModelResponse::new(
                     vec![ModelOutput::text("Hello world")],
                     FinishReason::Stop,
-                    Some(Usage::new(9, 3)),
+                    Some(Usage::with_details(9, None, 3, None, 12)),
                 )
             }
         );
@@ -624,7 +660,7 @@ mod tests {
                 response: merry_llm::ModelResponse::new(
                     vec![ModelOutput::tool_call(expected_call)],
                     FinishReason::ToolCalls,
-                    Some(Usage::new(14, 6)),
+                    Some(Usage::with_details(14, None, 6, None, 20)),
                 )
             }
         );
