@@ -1,10 +1,11 @@
 use merry_core::{
-    ArtifactId, ArtifactKind, ArtifactRef, CoreError, ErrorInfo, EvidenceLocator, EvidenceRef,
-    MerryErrorDomain, MerryErrorInfo, MerryRetryability, PendingToolCall, ProviderName,
-    QueuedInputLane, QueuedInputView, QueuedInputsView, RuntimeEvent, RuntimeEventSource,
-    RuntimeJournalEvent, RuntimeJournalPayload, SessionId, SkillId, SubagentId, SubagentStatus,
+    ArtifactId, ArtifactKind, ArtifactRef, CompactionUsageWindow, ContextWindowSource, CoreError,
+    ErrorInfo, EvidenceLocator, EvidenceRef, MerryErrorDomain, MerryErrorInfo, MerryRetryability,
+    ModelUsage, PendingToolCall, ProviderName, QueuedInputLane, QueuedInputView,
+    QueuedInputsView, RuntimeEvent, RuntimeEventSource, RuntimeJournalEvent,
+    RuntimeJournalPayload, SessionId, SessionUsage, SkillId, SubagentId, SubagentStatus,
     SubagentTaskId, ToolCallArguments, ToolCallId, ToolCallResult, ToolCallResultStatus,
-    ToolInputSchema, ToolName, ToolOutput, ToolSpec,
+    ToolInputSchema, ToolName, ToolOutput, ToolSpec, UsageContextWindow,
 };
 use schemars::{JsonSchema, Schema};
 use serde::{Serialize, de::DeserializeOwned};
@@ -681,6 +682,85 @@ fn public_runtime_event_assistant_message_uses_top_level_type() {
 }
 
 #[test]
+fn usage_protocol_round_trips_and_preserves_unknown_subcounts() {
+    let last = ModelUsage::with_details(2400, Some(2200), 260, None, 2660);
+    let total = ModelUsage::with_details(12000, Some(8000), 1400, None, 13400);
+    let usage = SessionUsage {
+        total,
+        last,
+        context: Some(UsageContextWindow {
+            resolved_model_window_tokens: 128000,
+            effective_window_tokens: 121600,
+            source: ContextWindowSource::ProviderCapabilities,
+        }),
+        compaction: Some(CompactionUsageWindow {
+            auto_compaction_enabled: true,
+            body_budget_tokens: 90000,
+            soft_water_tokens: 70000,
+            hard_water_tokens: 82000,
+        }),
+    };
+
+    assert_json_round_trip(&last);
+    assert_json_round_trip(&usage);
+    assert_eq!(last.cached_input_tokens, Some(2200));
+    assert_eq!(last.reasoning_output_tokens, None);
+
+    assert_eq!(
+        serde_json::to_value(&usage).expect("usage serializes"),
+        json!({
+            "total": {
+                "input_tokens": 12000,
+                "cached_input_tokens": 8000,
+                "output_tokens": 1400,
+                "reasoning_output_tokens": null,
+                "total_tokens": 13400
+            },
+            "last": {
+                "input_tokens": 2400,
+                "cached_input_tokens": 2200,
+                "output_tokens": 260,
+                "reasoning_output_tokens": null,
+                "total_tokens": 2660
+            },
+            "context": {
+                "resolved_model_window_tokens": 128000,
+                "effective_window_tokens": 121600,
+                "source": "provider_capabilities"
+            },
+            "compaction": {
+                "auto_compaction_enabled": true,
+                "body_budget_tokens": 90000,
+                "soft_water_tokens": 70000,
+                "hard_water_tokens": 82000
+            }
+        })
+    );
+}
+
+#[test]
+fn usage_updated_events_round_trip_as_full_snapshots() {
+    let usage = SessionUsage {
+        total: ModelUsage::new(10, 4),
+        last: ModelUsage::new(10, 4),
+        context: None,
+        compaction: None,
+    };
+    let source = RuntimeEventSource::new(
+        SessionId::new("usage-event-session").expect("valid session id"),
+        7,
+    );
+
+    assert_json_round_trip(&RuntimeJournalPayload::SessionUsageUpdated {
+        usage: usage.clone(),
+    });
+    assert_json_round_trip(&RuntimeEvent::UsageUpdated {
+        usage: usage.clone(),
+        source,
+    });
+}
+
+#[test]
 fn public_tool_call_started_does_not_expose_bridge_runner() {
     let call = PendingToolCall::new(
         ToolCallId::new("call-bridge").expect("valid call id"),
@@ -1177,4 +1257,10 @@ fn schemars_generation_compiles_for_public_protocol_types() {
     assert_schema_compiles::<ErrorInfo>();
     assert_schema_compiles::<RuntimeJournalEvent>();
     assert_schema_compiles::<RuntimeJournalPayload>();
+    assert_schema_compiles::<RuntimeEvent>();
+    assert_schema_compiles::<ModelUsage>();
+    assert_schema_compiles::<SessionUsage>();
+    assert_schema_compiles::<UsageContextWindow>();
+    assert_schema_compiles::<CompactionUsageWindow>();
+    assert_schema_compiles::<ContextWindowSource>();
 }

@@ -2,7 +2,7 @@
 
 use crate::{
     ArtifactRef, ErrorInfo, EvidenceRef, PendingToolCall, SessionId, SubagentId, SubagentTaskId,
-    ToolCallId, ToolCallResult,
+    SessionUsage, ToolCallId, ToolCallResult,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -18,6 +18,11 @@ pub enum RuntimeEvent {
     StepStarted { source: RuntimeEventSource },
     /// A runtime step completed.
     StepCompleted { source: RuntimeEventSource },
+    /// Session usage was updated from a provider-reported model response.
+    UsageUpdated {
+        usage: SessionUsage,
+        source: RuntimeEventSource,
+    },
     /// The assistant produced user-facing text.
     AssistantMessage {
         text: String,

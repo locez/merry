@@ -2,7 +2,7 @@
 
 use crate::{
     ArtifactRef, ErrorInfo, EvidenceRef, PendingToolCall, SessionId, SubagentId, SubagentTaskId,
-    ToolCallId, ToolCallResult,
+    SessionUsage, ToolCallId, ToolCallResult,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -75,6 +75,8 @@ pub enum RuntimeJournalPayload {
     },
     /// A runtime step completed.
     StepCompleted,
+    /// Session usage was updated from a provider-reported model response.
+    SessionUsageUpdated { usage: SessionUsage },
     /// An artifact reference was recorded.
     ArtifactRecorded { artifact: ArtifactRef },
     /// An assistant text output artifact was recorded.
