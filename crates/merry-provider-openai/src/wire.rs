@@ -188,7 +188,25 @@ pub(crate) enum ResponsesOutputContent {
 #[derive(Debug, Clone, Copy, Deserialize)]
 pub(crate) struct ResponsesUsage {
     pub(crate) input_tokens: u64,
+    #[serde(default)]
+    pub(crate) input_tokens_details: Option<ResponsesInputTokensDetails>,
     pub(crate) output_tokens: u64,
+    #[serde(default)]
+    pub(crate) output_tokens_details: Option<ResponsesOutputTokensDetails>,
+    #[serde(default)]
+    pub(crate) total_tokens: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub(crate) struct ResponsesInputTokensDetails {
+    #[serde(default)]
+    pub(crate) cached_tokens: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub(crate) struct ResponsesOutputTokensDetails {
+    #[serde(default)]
+    pub(crate) reasoning_tokens: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]

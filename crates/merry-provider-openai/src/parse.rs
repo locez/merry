@@ -217,7 +217,7 @@ impl ResponsesStreamParser {
         &self,
         response: ResponsesResponse,
     ) -> Result<ModelResponse, OpenAiProviderError> {
-        let usage = response.usage.map(usage_from_wire);
+        let usage = response.usage.map(usage_from_wire).transpose()?;
         if !self.tool_call_buffers.is_empty() {
             return Err(OpenAiProviderError::protocol(
                 "Responses stream completed with unfinished function call",
@@ -268,7 +268,7 @@ fn parse_response(response: ResponsesResponse) -> Result<ModelResponse, OpenAiPr
         } else {
             parse_response_status(response.status.as_deref())?
         },
-        response.usage.map(usage_from_wire),
+        response.usage.map(usage_from_wire).transpose()?,
     ))
 }
 
@@ -292,8 +292,26 @@ fn stream_finish_reason(tool_calls: &[ModelToolCall]) -> FinishReason {
     }
 }
 
-fn usage_from_wire(usage: ResponsesUsage) -> Usage {
-    Usage::new(usage.input_tokens, usage.output_tokens)
+fn usage_from_wire(usage: ResponsesUsage) -> Result<Usage, OpenAiProviderError> {
+    let total_tokens = match usage.total_tokens {
+        Some(total_tokens) => total_tokens,
+        None => usage
+            .input_tokens
+            .checked_add(usage.output_tokens)
+            .ok_or_else(|| OpenAiProviderError::protocol("usage total token count overflowed"))?,
+    };
+
+    Ok(Usage::with_details(
+        usage.input_tokens,
+        usage
+            .input_tokens_details
+            .and_then(|details| details.cached_tokens),
+        usage.output_tokens,
+        usage
+            .output_tokens_details
+            .and_then(|details| details.reasoning_tokens),
+        total_tokens,
+    ))
 }
 
 fn stream_outputs(aggregate_text: &str, tool_calls: &[ModelToolCall]) -> Vec<ModelOutput> {

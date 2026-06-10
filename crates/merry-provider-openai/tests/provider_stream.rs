@@ -113,6 +113,40 @@ async fn stream_model_posts_responses_request_and_streams_events() {
 
 #[ignore = "requires loopback TCP permission; default tests cover this behavior without network"]
 #[tokio::test]
+async fn stream_model_preserves_detailed_usage_counts() {
+    let body = concat!(
+        "data: {\"type\":\"response.created\"}\n\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"Done\"}]}],\"usage\":{\"input_tokens\":20,\"input_tokens_details\":{\"cached_tokens\":12},\"output_tokens\":8,\"output_tokens_details\":{\"reasoning_tokens\":3},\"total_tokens\":28}}}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let server = TestServer::spawn(TestResponse::ok_sse(body));
+    let stream = provider(server.base_url())
+        .stream_model(request(), ModelStreamContext::default())
+        .await
+        .expect("stream setup should succeed");
+
+    let events = stream
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("stream succeeds");
+
+    assert_eq!(
+        events,
+        vec![
+            ModelEvent::Started,
+            ModelEvent::Completed {
+                response: ModelResponse::new(
+                    vec![ModelOutput::text("Done")],
+                    FinishReason::Stop,
+                    Some(Usage::with_details(20, Some(12), 8, Some(3), 28)),
+                )
+            },
+        ]
+    );
+}
+
+#[ignore = "requires loopback TCP permission; default tests cover this behavior without network"]
+#[tokio::test]
 async fn stream_model_maps_authentication_status_to_model_error() {
     let server = TestServer::spawn(TestResponse::plain(401, "bad api key"));
     let error = expect_setup_error(
