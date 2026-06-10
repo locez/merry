@@ -26,6 +26,7 @@ class RunResult:
     model_turns_run: int
     final_output: str | BaseModel | None
     final_output_json: str | None
+    session_usage: dict[str, Any] | None
     events: list[dict[str, Any]]
 
 
@@ -105,6 +106,7 @@ class RuntimeStream:
             model_turns_run=result.model_turns_run,
             final_output=result.final_output,
             final_output_json=result.final_output_json,
+            session_usage=result.session_usage,
             events=list(self._events),
         )
         self._finished = True
@@ -453,6 +455,17 @@ class Runtime:
     def session_id(self) -> str:
         return self._native.session_id()
 
+    async def usage(self) -> dict[str, Any] | None:
+        try:
+            usage = await _run_in_worker(self._native.usage_blocking)
+        except NativeMerryError as error:
+            raise _decode_native_error(error) from error
+        if usage is None:
+            return None
+        if not isinstance(usage, dict):
+            raise TypeError("native runtime usage must be a dict or None")
+        return dict(usage)
+
     def run_blocking(
         self,
         task: str,
@@ -634,6 +647,9 @@ def _run_result_from_native(
     final_output_json = raw.get("final_output_json")
     if final_output_json is not None and not isinstance(final_output_json, str):
         raise TypeError("native run result final_output_json must be a str or None")
+    session_usage = raw.get("session_usage")
+    if session_usage is not None and not isinstance(session_usage, dict):
+        raise TypeError("native run result session_usage must be a dict or None")
     events = raw["events"]
     if not isinstance(events, list):
         raise TypeError("native run result events must be a list")
@@ -650,6 +666,7 @@ def _run_result_from_native(
         model_turns_run=model_turns_run,
         final_output=structured_final_output if final_output_model is not None else final_output,
         final_output_json=final_output_json,
+        session_usage=None if session_usage is None else dict(session_usage),
         events=list(events),
     )
 
