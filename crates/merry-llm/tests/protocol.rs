@@ -782,9 +782,18 @@ fn broad_provider_identifiers_are_allowed_without_tool_name_rules() {
 }
 
 #[test]
-fn usage_total_is_overflow_safe() {
-    assert_eq!(Usage::new(7, 9).total_tokens(), Some(16));
-    assert_eq!(Usage::new(u64::MAX, 1).total_tokens(), None);
+fn usage_total_and_optional_subcounts_are_provider_neutral() {
+    let basic = Usage::new(7, 9);
+    assert_eq!(basic.input_tokens(), 7);
+    assert_eq!(basic.cached_input_tokens(), None);
+    assert_eq!(basic.output_tokens(), 9);
+    assert_eq!(basic.reasoning_output_tokens(), None);
+    assert_eq!(basic.total_tokens(), 16);
+
+    let detailed = Usage::with_details(11, Some(8), 5, Some(2), 16);
+    assert_eq!(detailed.cached_input_tokens(), Some(8));
+    assert_eq!(detailed.reasoning_output_tokens(), Some(2));
+    assert_eq!(detailed.total_tokens(), 16);
 }
 
 #[test]
