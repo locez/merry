@@ -143,6 +143,7 @@
                 RuntimeJournalPayload::ModelRetryAttemptStarted { .. } => "ModelRetryAttemptStarted",
                 RuntimeJournalPayload::ModelRetryScheduled { .. } => "ModelRetryScheduled",
                 RuntimeJournalPayload::ModelRetryExhausted { .. } => "ModelRetryExhausted",
+                RuntimeJournalPayload::SessionUsageUpdated { .. } => "SessionUsageUpdated",
                 RuntimeJournalPayload::StepCompleted => "StepCompleted",
                 RuntimeJournalPayload::Cancelled { .. } => "Cancelled",
                 RuntimeJournalPayload::Failed { .. } => "Failed",

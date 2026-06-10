@@ -2,8 +2,9 @@ use super::auto_compaction::compact_context_for_hard_watermark;
 use super::journal_emission::{
     send_assistant_text_output_completed_events, send_assistant_text_output_recorded_event,
     send_cancelled_event, send_cancelled_if_requested, send_failed_event,
-    send_tool_call_pending_event, stream_model_with_retry_policy, trace_provider_step_cancelled,
-    trace_provider_step_failed, wait_for_model_stream_item, wait_for_retrying_stream_setup,
+    send_model_usage_updated_event, send_tool_call_pending_event, stream_model_with_retry_policy,
+    trace_provider_step_cancelled, trace_provider_step_failed, wait_for_model_stream_item,
+    wait_for_retrying_stream_setup,
 };
 use super::memory_activation::{
     ActivationProjectionGuard, clear_current_activated_memories,
@@ -16,7 +17,7 @@ use super::model_output::{
 };
 use super::provider_request::{
     compile_step_request_from_inputs, request_context_budget, step_request_compile_diagnostic,
-    step_request_inputs_from_session, trace_provider_request,
+    step_request_inputs_from_session, step_usage_context_snapshot, trace_provider_request,
     trace_provider_request_budget_unavailable,
 };
 use super::{DIAGNOSTIC_TOOL_CALL_RESULT_REQUIRED, RuntimeInner, diagnostic_from_text};
@@ -271,6 +272,10 @@ pub(super) async fn run_provider_step(
             }
         }
     }
+    let usage_context_snapshot = step_usage_context_snapshot(
+        request_budget.as_ref().ok(),
+        inner.automatic_compaction.is_enabled(),
+    );
     let sent_continuation_count = request.continuations().len();
 
     for text in input.user_texts_for_history() {
@@ -399,6 +404,29 @@ pub(super) async fn run_provider_step(
                     finish_reason = ?response.finish_reason(),
                     "runtime model stream event received"
                 );
+                if let Some(model_usage) = response.usage() {
+                    match send_model_usage_updated_event(
+                        inner,
+                        sender,
+                        token,
+                        model_usage,
+                        usage_context_snapshot.context,
+                        usage_context_snapshot.compaction,
+                    )
+                    .await
+                    {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            let _ = send_cancelled_if_requested(inner, sender, token).await;
+                            return;
+                        }
+                        Err(diagnostic) => {
+                            trace_provider_step_failed(&diagnostic);
+                            let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                            return;
+                        }
+                    }
+                }
                 match response.finish_reason() {
                     FinishReason::Stop => {
                         if streamed_tool_call.is_some() {

@@ -2,7 +2,8 @@ use super::{RuntimeInner, diagnostic_from_text};
 use crate::{session::SessionState, tool_input_validation::ToolInputValidationError};
 use futures_util::StreamExt;
 use merry_core::{
-    ErrorInfo, PendingToolCall, RuntimeJournalEvent, RuntimeJournalPayload, ToolCallResultStatus,
+    CompactionUsageWindow, ErrorInfo, ModelUsage, PendingToolCall, RuntimeJournalEvent,
+    RuntimeJournalPayload, ToolCallResultStatus, UsageContextWindow,
 };
 use merry_llm::{
     ModelError, ModelEvent, ModelEventStream, ModelProvider, ModelRequest, ModelRetryEvent,
@@ -134,6 +135,34 @@ pub(super) async fn send_tool_call_pending_event(
             send_failed_event(inner, sender, token, diagnostic).await
         }
     }
+}
+
+pub(super) async fn send_model_usage_updated_event(
+    inner: &RuntimeInner,
+    sender: &mpsc::Sender<RuntimeJournalEvent>,
+    token: &CancellationToken,
+    model_usage: ModelUsage,
+    context: Option<UsageContextWindow>,
+    compaction: Option<CompactionUsageWindow>,
+) -> Result<bool, ErrorInfo> {
+    if token.is_cancelled() {
+        return Ok(false);
+    }
+
+    let Some(permit) = reserve_normal_event_slot(sender, token).await else {
+        return Ok(false);
+    };
+
+    let event = {
+        let mut session = inner.session.lock().await;
+        if token.is_cancelled() {
+            return Ok(false);
+        }
+        session.record_model_usage(model_usage, context, compaction)?
+    };
+
+    permit.send(event);
+    Ok(true)
 }
 
 async fn send_bridge_tool_call_requested_event(

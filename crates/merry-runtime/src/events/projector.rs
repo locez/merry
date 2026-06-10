@@ -38,6 +38,9 @@ impl RuntimeEventProjector {
             RuntimeJournalPayload::StepCompleted => {
                 Ok(Some(RuntimeEvent::StepCompleted { source }))
             }
+            RuntimeJournalPayload::SessionUsageUpdated { usage } => {
+                Ok(Some(RuntimeEvent::UsageUpdated { usage, source }))
+            }
             RuntimeJournalPayload::ModelRetryAttemptStarted {
                 attempt,
                 max_attempts,

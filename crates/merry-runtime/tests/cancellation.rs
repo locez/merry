@@ -85,6 +85,7 @@ fn event_kind_names(events: &[RuntimeJournalEvent]) -> Vec<&'static str> {
         .map(|event| match event.payload {
             RuntimeJournalPayload::SessionStarted => "SessionStarted",
             RuntimeJournalPayload::StepStarted => "StepStarted",
+            RuntimeJournalPayload::SessionUsageUpdated { .. } => "SessionUsageUpdated",
             RuntimeJournalPayload::StepCompleted => "StepCompleted",
             RuntimeJournalPayload::Cancelled { .. } => "Cancelled",
             RuntimeJournalPayload::Failed { .. } => "Failed",
