@@ -110,7 +110,6 @@ pub trait ChildRuntimeFactory: Send + Sync {
 /// Runtime-owned manager for bounded child agent execution.
 #[derive(Clone)]
 pub struct SubagentManager {
-    parent_session_id: merry_core::SessionId,
     config: SubagentConfig,
     factory: Arc<dyn ChildRuntimeFactory>,
     state: Arc<Mutex<SubagentManagerState>>,
@@ -140,7 +139,6 @@ struct ReservedChildStart {
 
 #[derive(Clone)]
 struct ChildScheduler {
-    parent_session_id: merry_core::SessionId,
     factory: Arc<dyn ChildRuntimeFactory>,
     state: Arc<Mutex<SubagentManagerState>>,
     notify: Arc<Notify>,
@@ -174,12 +172,11 @@ impl SubagentManager {
     /// Creates a subagent manager for one parent session.
     #[must_use]
     pub fn new(
-        parent_session_id: merry_core::SessionId,
+        _parent_session_id: merry_core::SessionId,
         config: SubagentConfig,
         factory: Arc<dyn ChildRuntimeFactory>,
     ) -> Self {
         Self {
-            parent_session_id,
             config,
             factory,
             state: Arc::new(Mutex::new(SubagentManagerState::default())),
@@ -373,18 +370,7 @@ impl SubagentManager {
         task_anchor: TaskAnchor,
         token: CancellationToken,
     ) {
-        let child_session_id = match child_session_id(&self.parent_session_id, agent_id.as_str()) {
-            Ok(session_id) => session_id,
-            Err(error) => {
-                self.mark_failed_and_schedule(
-                    &agent_id,
-                    "child runtime session id was rejected",
-                    error_info("subagent_start_error", error.to_string()),
-                )
-                .await;
-                return;
-            }
-        };
+        let child_session_id = child_session_id();
         let runtime = match self.factory.build_child(ChildRuntimeInput {
             session_id: child_session_id,
             task_anchor,
@@ -446,7 +432,6 @@ impl SubagentManager {
 
     fn child_scheduler(&self) -> ChildScheduler {
         ChildScheduler {
-            parent_session_id: self.parent_session_id.clone(),
             factory: Arc::clone(&self.factory),
             state: Arc::clone(&self.state),
             notify: Arc::clone(&self.notify),
@@ -615,7 +600,7 @@ fn spawn_reserved_child(
     scheduler: ChildScheduler,
     start: &ReservedChildStart,
 ) -> Result<(), RuntimeError> {
-    let child_session_id = child_session_id(&scheduler.parent_session_id, start.agent_id.as_str())?;
+    let child_session_id = child_session_id();
     let runtime = scheduler.factory.build_child(ChildRuntimeInput {
         session_id: child_session_id,
         task_anchor: start.task_anchor.clone(),
@@ -717,14 +702,8 @@ fn paths_to_strings(paths: &[PathBuf]) -> Vec<String> {
         .collect()
 }
 
-fn child_session_id(
-    parent_session_id: &merry_core::SessionId,
-    agent_id: &str,
-) -> Result<merry_core::SessionId, RuntimeError> {
-    Ok(merry_core::SessionId::new(&format!(
-        "{}-{agent_id}",
-        parent_session_id.as_str()
-    ))?)
+fn child_session_id() -> merry_core::SessionId {
+    merry_core::SessionId::random()
 }
 
 fn initial_summary(status: SubagentStatusLabel) -> String {
@@ -1677,7 +1656,7 @@ mod manager_tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn child_session_id_failure_marks_failed_and_promotes_queue() {
+    async fn max_length_parent_session_still_starts_random_child_session() {
         let factory = Arc::new(FakeChildFactory::new());
         let manager = SubagentManager::new(
             SessionId::new(&"p".repeat(128)).expect("max length parent id is valid"),
@@ -1696,29 +1675,14 @@ mod manager_tests {
             )
             .await
             .expect("spawn should return structured statuses");
-        let first_id = output.spawned[0].agent_id.clone();
-        let second_id = output.spawned[1].agent_id.clone();
 
-        let first = manager
-            .wait(
-                std::slice::from_ref(&first_id),
-                WaitMode::All,
-                Some(Duration::from_millis(100)),
-            )
-            .await
-            .expect("wait should return failed child");
-        let second = manager
-            .wait(
-                std::slice::from_ref(&second_id),
-                WaitMode::All,
-                Some(Duration::from_millis(100)),
-            )
-            .await
-            .expect("wait should return promoted child");
-
-        assert_eq!(first.agents[0].status, SubagentStatusLabel::Failed);
-        assert_ne!(second.agents[0].status, SubagentStatusLabel::Queued);
-        assert_eq!(factory.started.load(Ordering::SeqCst), 0);
+        assert_eq!(output.spawned.len(), 2);
+        assert_eq!(
+            output.spawned[0].status,
+            SpawnedSubagentStatusLabel::Running
+        );
+        assert_eq!(output.spawned[1].status, SpawnedSubagentStatusLabel::Queued);
+        assert_eq!(factory.started.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test(flavor = "current_thread")]

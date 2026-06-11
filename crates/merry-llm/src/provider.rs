@@ -2,7 +2,7 @@
 
 use crate::{ModelCapabilities, ModelError, ModelEvent, ModelRequest};
 use futures_core::Stream;
-use merry_core::ProviderName;
+use merry_core::{ProviderName, SessionId};
 use std::{future::Future, pin::Pin};
 use tokio_util::sync::CancellationToken;
 
@@ -22,13 +22,17 @@ pub type ModelEventStream =
 #[derive(Debug, Clone)]
 pub struct ModelStreamContext {
     cancellation_token: CancellationToken,
+    prompt_cache_key: Option<SessionId>,
 }
 
 impl ModelStreamContext {
     /// Creates a context with the provided cancellation token.
     #[must_use]
     pub fn new(cancellation_token: CancellationToken) -> Self {
-        Self { cancellation_token }
+        Self {
+            cancellation_token,
+            prompt_cache_key: None,
+        }
     }
 
     /// Returns the cancellation token.
@@ -36,12 +40,26 @@ impl ModelStreamContext {
     pub fn cancellation_token(&self) -> &CancellationToken {
         &self.cancellation_token
     }
+
+    /// Sets the provider prompt cache key hint.
+    #[must_use]
+    pub fn with_prompt_cache_key(mut self, prompt_cache_key: SessionId) -> Self {
+        self.prompt_cache_key = Some(prompt_cache_key);
+        self
+    }
+
+    /// Returns the provider prompt cache key hint.
+    #[must_use]
+    pub fn prompt_cache_key(&self) -> Option<&SessionId> {
+        self.prompt_cache_key.as_ref()
+    }
 }
 
 impl Default for ModelStreamContext {
     fn default() -> Self {
         Self {
             cancellation_token: CancellationToken::new(),
+            prompt_cache_key: None,
         }
     }
 }

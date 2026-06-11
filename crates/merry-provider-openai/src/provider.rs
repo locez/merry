@@ -82,6 +82,7 @@ impl ModelProvider for OpenAiProvider {
                 let http_request = build_and_trace_responses_http_request(
                     &self.config,
                     &request,
+                    &context,
                     &event_stream_span,
                 )?;
                 tracing::trace!(event = "runtime.provider.request.rendered");
@@ -314,6 +315,7 @@ struct ResponsesHttpHeader {
 fn build_responses_http_request(
     config: &OpenAiProviderConfig,
     request: &ModelRequest,
+    context: &ModelStreamContext,
 ) -> Result<ResponsesHttpRequest, ModelError> {
     let mut headers = vec![
         ResponsesHttpHeader {
@@ -345,16 +347,22 @@ fn build_responses_http_request(
     Ok(ResponsesHttpRequest {
         endpoint: responses_endpoint(config.base_url())?,
         headers,
-        body: crate::render::render_responses_request(request)?,
+        body: crate::render::render_responses_request_with_prompt_cache_key(
+            request,
+            context
+                .prompt_cache_key()
+                .map(merry_core::SessionId::as_str),
+        )?,
     })
 }
 
 fn build_and_trace_responses_http_request(
     config: &OpenAiProviderConfig,
     request: &ModelRequest,
+    context: &ModelStreamContext,
     span: &tracing::Span,
 ) -> Result<ResponsesHttpRequest, ModelError> {
-    let http_request = build_responses_http_request(config, request)?;
+    let http_request = build_responses_http_request(config, request, context)?;
     span.record("endpoint_path", http_request.endpoint.path());
     trace_openai_request_metadata(config, request, http_request.endpoint.path());
     Ok(http_request)
@@ -467,6 +475,7 @@ mod tests {
     };
     use crate::OpenAiProviderConfig;
     use crate::parse::ResponsesStreamParser;
+    use merry_core::SessionId;
     use merry_llm::{
         FinishReason, GenerationConfig, ModelContent, ModelEvent, ModelMessage, ModelMessageRole,
         ModelName, ModelOutput, ModelProvider, ModelRequest, ModelResponse, ModelStreamContext,
@@ -617,12 +626,14 @@ mod tests {
         request: &ModelRequest,
     ) -> String {
         capture_trace_fields(|| {
+            let context = ModelStreamContext::default();
             let span = tracing::debug_span!(
                 "test.provider.request",
                 endpoint_path = tracing::field::Empty
             );
-            let http_request = build_and_trace_responses_http_request(config, request, &span)
-                .expect("request should build and trace");
+            let http_request =
+                build_and_trace_responses_http_request(config, request, &context, &span)
+                    .expect("request should build and trace");
             drop(http_request);
         })
     }
@@ -638,8 +649,9 @@ mod tests {
             .with_project("proj-test")
             .expect("valid project");
 
-        let request =
-            build_responses_http_request(&config, &request()).expect("request should build");
+        let context = ModelStreamContext::default();
+        let request = build_responses_http_request(&config, &request(), &context)
+            .expect("request should build");
 
         assert_eq!(
             request.endpoint.as_str(),
@@ -654,6 +666,18 @@ mod tests {
         assert_eq!(request.body["stream"], true);
         assert_eq!(request.body["store"], false);
         assert_eq!(request.body["parallel_tool_calls"], false);
+    }
+
+    #[test]
+    fn builds_responses_http_request_with_prompt_cache_key_from_stream_context() {
+        let config = OpenAiProviderConfig::new("sk-test").expect("valid config");
+        let context = ModelStreamContext::default()
+            .with_prompt_cache_key(SessionId::new("cache-session").expect("valid session id"));
+
+        let request = build_responses_http_request(&config, &request(), &context)
+            .expect("request should build");
+
+        assert_eq!(request.body["prompt_cache_key"], "cache-session");
     }
 
     #[test]

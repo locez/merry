@@ -44,7 +44,24 @@ uv run examples/multi_runtime.py
 
 The multi-runtime example runs three runtimes concurrently. Each runtime then
 runs three sequential turns and prints the runtime label, round number, runtime
-handle session id, and the session id carried by every event.
+handle session id, the prompt-cache-key hint derived from that session id, the
+session id carried by every event, and provider-reported usage. Use it to check
+runtime isolation and event/session plumbing. Treat `cached_input_tokens` as a
+best-effort provider diagnostic; a zero value for one concurrent runtime is not
+by itself a wiring failure.
+
+To inspect one stable session with a deliberately long repeated prefix, run:
+
+```bash
+uv run examples/single_runtime_cache_probe.py
+```
+
+The cache probe runs one runtime for several sequential turns and prints the
+session id Merry uses as the OpenAI `prompt_cache_key` hint, the last-turn
+`cached_input_tokens` value when the provider reports it, and the full usage
+snapshot. It is a live observation probe, not a deterministic test: OpenAI
+prompt caching requires eligible long prompts, exact matching prefixes, and
+provider-side cache routing, so cache hits remain best-effort.
 
 `MERRY_OPENAI_BASE_URL` is optional when using the default OpenAI-compatible
 endpoint.

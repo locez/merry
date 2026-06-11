@@ -1,6 +1,41 @@
 use super::*;
 
 #[tokio::test(flavor = "current_thread")]
+async fn provider_stream_context_uses_runtime_session_as_prompt_cache_key() {
+    let provider = RecordingModelProvider::new();
+    let runtime = Runtime::builder(session_id("runtime-cache-key"))
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .build()
+        .expect("runtime should build");
+
+    let events = collect_step(
+        &runtime,
+        "Use the runtime session as the cache key.",
+        crate::StepContext::default(),
+    )
+    .await;
+
+    assert_eq!(
+        event_kind_names(&events),
+        [
+            "SessionStarted",
+            "StepStarted",
+            "AssistantOutputRecorded",
+            "StepCompleted",
+        ]
+    );
+    let contexts = provider.recorded_contexts();
+    assert_eq!(contexts.len(), 1);
+    assert_eq!(
+        contexts[0]
+            .prompt_cache_key()
+            .expect("prompt cache key should be set")
+            .as_str(),
+        "runtime-cache-key"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn model_retry_events_are_emitted_and_failed_attempt_output_is_not_recorded() {
     let provider = RecordingModelProvider::with_script(vec![
         ScriptedModelProviderResponse::Stream(vec![

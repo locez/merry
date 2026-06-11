@@ -72,7 +72,8 @@ pub(super) async fn compact_context_once_inner(
         .map_err(|error| RuntimeError::CompactionModelRequest {
             message: error.to_string(),
         })?;
-    let stream_context = ModelStreamContext::new(token.clone());
+    let stream_context =
+        ModelStreamContext::new(token.clone()).with_prompt_cache_key(inner.session_id.clone());
     let provider = provider_config.provider();
     let stream = stream_model_with_retry_policy(
         provider,
