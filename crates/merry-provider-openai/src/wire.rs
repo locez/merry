@@ -11,6 +11,8 @@ pub(crate) struct ResponsesRequest<'a> {
     pub(crate) store: bool,
     pub(crate) parallel_tool_calls: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) prompt_cache_key: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) max_output_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) text: Option<ResponsesText<'a>>,

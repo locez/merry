@@ -493,6 +493,37 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn spawn_tool_uses_random_child_session_ids() {
+        let factory = Arc::new(CapturingChildFactory::default());
+        let executor = SpawnSubagentsExecutor::new(manager(factory.clone()));
+        let call = pending_call(
+            SPAWN_SUBAGENTS_TOOL_NAME,
+            json!({
+                "max_concurrency": 2,
+                "tasks": [
+                    { "task": "Inspect one file." },
+                    { "task": "Inspect another file." }
+                ]
+            }),
+        );
+
+        executor
+            .execute(call, ToolExecutionContext::default())
+            .await
+            .expect("spawn execution should succeed");
+        let captured = factory.inputs();
+
+        assert_eq!(captured.len(), 2);
+        let first = captured[0].session_id.as_str();
+        let second = captured[1].session_id.as_str();
+        assert_ne!(first, second);
+        assert_eq!(first.len(), 36);
+        assert_eq!(second.len(), 36);
+        assert!(!first.starts_with("parent-agent-"));
+        assert!(!second.starts_with("parent-agent-"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn wait_tool_returns_status_output() {
         let manager = manager(Arc::new(CapturingChildFactory::default()));
         let spawn = manager

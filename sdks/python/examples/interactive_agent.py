@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from collections.abc import AsyncIterator
 
@@ -30,6 +31,12 @@ def runtime_from_env_config() -> merry.Runtime:
             )
         )
     )
+
+
+def usage_text(usage: dict[str, object] | None) -> str:
+    if usage is None:
+        return "None"
+    return json.dumps(usage, sort_keys=True)
 
 
 async def render_events(
@@ -62,6 +69,11 @@ async def render_events(
             )
         elif event_type == "assistant_message":
             print(f"[{label}] assistant={event['text']}")
+        elif event_type == "usage_updated":
+            usage = event["usage"]
+            if not isinstance(usage, dict):
+                raise TypeError("usage updated event usage must be a dict")
+            print(f"[{label}] usage_updated session_usage={usage_text(usage)}")
         elif event_type == "tool_call_started":
             call = event["call"]
             if not isinstance(call, dict):
@@ -158,6 +170,7 @@ async def main() -> None:
     await asyncio.wait_for(completed.wait(), timeout=180)
     await run.control.close()
     await render_task
+    print(f"[{label}] runtime_usage={usage_text(await runtime.usage())}")
     print(f"[{label}] closed handle_session={runtime.session_id}")
 
 

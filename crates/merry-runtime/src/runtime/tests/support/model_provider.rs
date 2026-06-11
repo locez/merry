@@ -27,6 +27,7 @@
     #[derive(Debug, Clone)]
     struct RecordingModelProvider {
         requests: Arc<StdMutex<Vec<ModelRequest>>>,
+        contexts: Arc<StdMutex<Vec<ModelStreamContext>>>,
         calls: Arc<AtomicUsize>,
         responses: Arc<StdMutex<Vec<ScriptedModelProviderResponse>>>,
     }
@@ -39,6 +40,7 @@
         fn with_script(responses: Vec<ScriptedModelProviderResponse>) -> Self {
             Self {
                 requests: Arc::new(StdMutex::new(Vec::new())),
+                contexts: Arc::new(StdMutex::new(Vec::new())),
                 calls: Arc::new(AtomicUsize::new(0)),
                 responses: Arc::new(StdMutex::new(responses.into_iter().rev().collect())),
             }
@@ -48,6 +50,13 @@
             self.requests
                 .lock()
                 .expect("recorded requests mutex should not be poisoned")
+                .clone()
+        }
+
+        fn recorded_contexts(&self) -> Vec<ModelStreamContext> {
+            self.contexts
+                .lock()
+                .expect("recorded contexts mutex should not be poisoned")
                 .clone()
         }
 
@@ -95,6 +104,10 @@
                     .lock()
                     .expect("recorded requests mutex should not be poisoned")
                     .push(request);
+                self.contexts
+                    .lock()
+                    .expect("recorded contexts mutex should not be poisoned")
+                    .push(context.clone());
                 match self.next_response() {
                     ScriptedModelProviderResponse::SetupError(error) => Err(error),
                     ScriptedModelProviderResponse::PendingSetup(started) => {

@@ -16,6 +16,14 @@ use serde_json::{Map, Value};
 pub(crate) fn render_responses_request(
     request: &ModelRequest,
 ) -> Result<Value, OpenAiProviderError> {
+    render_responses_request_with_prompt_cache_key(request, None)
+}
+
+#[allow(dead_code)]
+pub(crate) fn render_responses_request_with_prompt_cache_key(
+    request: &ModelRequest,
+    prompt_cache_key: Option<&str>,
+) -> Result<Value, OpenAiProviderError> {
     if request.generation().allow_parallel_tool_calls() {
         return Err(OpenAiProviderError::invalid_request(
             "parallel tool calls are not supported by the OpenAI provider adapter yet",
@@ -43,6 +51,7 @@ pub(crate) fn render_responses_request(
         stream: true,
         store: false,
         parallel_tool_calls: false,
+        prompt_cache_key,
         max_output_tokens: request.generation().max_output_tokens(),
         text: render_response_format(request.response_format())?,
         tool_choice: if tools.is_empty() { None } else { Some("auto") },
