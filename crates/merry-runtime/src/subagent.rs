@@ -1187,7 +1187,7 @@ mod manager_tests {
                 name: merry_core::ProviderName::new("pending-model-provider")
                     .expect("valid provider name"),
                 capabilities: merry_llm::ModelCapabilities::new(
-                    true, false, false, false, None, None,
+                    true, true, false, false, None, None,
                 )
                 .expect("valid capabilities"),
             }
