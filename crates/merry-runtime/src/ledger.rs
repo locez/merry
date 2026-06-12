@@ -289,6 +289,10 @@ pub enum LedgerFactKind {
     StepStarted,
     /// Provider-neutral model retry status has been recorded.
     ModelRetry,
+    /// Automatic context compaction has started.
+    CompactionStarted,
+    /// Automatic context compaction installed a compacted checkpoint.
+    CompactionCompleted,
     /// Session usage has been updated from provider-reported model usage.
     SessionUsageUpdated,
     /// Step completion has been recorded.

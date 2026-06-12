@@ -1,7 +1,7 @@
 use super::{RuntimeInner, stream_model_with_retry_policy};
 use crate::{
-    CitationCompactionPolicy, CompactionError, CompactionOutcome, RuntimeError, RuntimeModelRole,
-    compaction::compile_citation_compaction_model_request,
+    CitationCompactionInput, CitationCompactionPolicy, CompactionError, CompactionOutcome,
+    RuntimeError, RuntimeModelRole, compaction::compile_citation_compaction_model_request,
 };
 use futures_util::StreamExt;
 use merry_llm::{FinishReason, ModelEvent, ModelOutput, ModelStreamContext};
@@ -28,16 +28,32 @@ pub(super) fn default_automatic_compaction_policy() -> CitationCompactionPolicy 
     .expect("static automatic compaction policy must be valid")
 }
 
-pub(super) async fn compact_context_for_hard_watermark(
+pub(super) async fn compaction_input_for_hard_watermark(
     inner: &RuntimeInner,
-    token: &CancellationToken,
-) -> Result<Option<CompactionOutcome>, RuntimeError> {
+) -> Result<Option<CitationCompactionInput>, RuntimeError> {
     let config = inner.automatic_compaction;
     if !config.is_enabled() {
         return Ok(None);
     }
 
-    compact_context_once_inner(inner, config.policy(), token.clone()).await
+    let session = inner.session.lock().await;
+    session.build_citation_compaction_input(config.policy())
+}
+
+pub(super) async fn compact_prepared_context(
+    inner: &RuntimeInner,
+    input: CitationCompactionInput,
+    token: CancellationToken,
+) -> Result<CompactionOutcome, RuntimeError> {
+    if token.is_cancelled() {
+        return Err(RuntimeError::Compaction {
+            source: CompactionError::InvalidModelResponseShape {
+                reason: "compaction cancelled before input build",
+            },
+        });
+    }
+
+    compact_prepared_context_inner(inner, input, token).await
 }
 
 pub(super) async fn compact_context_once_inner(
@@ -53,13 +69,6 @@ pub(super) async fn compact_context_once_inner(
         });
     }
 
-    let provider_config = inner
-        .model_configs
-        .get_with_primary_fallback(RuntimeModelRole::ContextCompaction)
-        .ok_or(RuntimeError::MissingModelProvider {
-            role: RuntimeModelRole::ContextCompaction.as_str(),
-        })?;
-
     let input = {
         let session = inner.session.lock().await;
         session.build_citation_compaction_input(policy)?
@@ -67,6 +76,23 @@ pub(super) async fn compact_context_once_inner(
     let Some(input) = input else {
         return Ok(None);
     };
+
+    compact_prepared_context_inner(inner, input, token)
+        .await
+        .map(Some)
+}
+
+async fn compact_prepared_context_inner(
+    inner: &RuntimeInner,
+    input: CitationCompactionInput,
+    token: CancellationToken,
+) -> Result<CompactionOutcome, RuntimeError> {
+    let provider_config = inner
+        .model_configs
+        .get_with_primary_fallback(RuntimeModelRole::ContextCompaction)
+        .ok_or(RuntimeError::MissingModelProvider {
+            role: RuntimeModelRole::ContextCompaction.as_str(),
+        })?;
 
     let request = compile_citation_compaction_model_request(&input, provider_config.model())
         .map_err(|error| RuntimeError::CompactionModelRequest {
@@ -89,9 +115,7 @@ pub(super) async fn compact_context_once_inner(
     let candidate_json = collect_compaction_candidate_json(stream, token).await?;
 
     let mut session = inner.session.lock().await;
-    session
-        .install_citation_compaction_candidate(input, &candidate_json)
-        .map(Some)
+    session.install_citation_compaction_candidate(input, &candidate_json)
 }
 
 async fn collect_compaction_candidate_json(

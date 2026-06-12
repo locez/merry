@@ -316,6 +316,126 @@ async fn compaction_accepts_streamed_text_delta_before_completed_response() {
     assert_eq!(outcome.covered_history_item_count(), 2);
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn hard_watermark_auto_compaction_emits_lifecycle_events() {
+    let primary = RecordingModelProvider::with_script_and_capabilities(
+        vec![
+            ScriptedModelProviderResponse::Stream(vec![Ok(completed_event())]),
+            ScriptedModelProviderResponse::Stream(vec![Ok(completed_event())]),
+            ScriptedModelProviderResponse::Stream(vec![Ok(completed_event())]),
+        ],
+        ModelCapabilities::new(true, true, false, true, Some(4_000), None)
+            .expect("valid capabilities"),
+    );
+    let compactor =
+        RecordingModelProvider::with_script(vec![ScriptedModelProviderResponse::Stream(vec![Ok(
+            completed_event_with(
+                vec![ModelOutput::text(
+                    r#"{
+                      "claims": [
+                        {
+                          "id": "c1",
+                          "kind": "completed_action",
+                          "text": "Old history was compacted for UI lifecycle visibility.",
+                          "refs": ["r1", "r2"]
+                        }
+                      ],
+                      "working_intent": null
+                    }"#,
+                )],
+                FinishReason::Stop,
+            ),
+        )])]);
+    let runtime = Runtime::builder(session_id("auto-compaction-events"))
+        .model_provider(Arc::new(primary), model_name())
+        .model_provider_for_role(
+            RuntimeModelRole::ContextCompaction,
+            Arc::new(compactor),
+            ModelName::new("compaction-model").expect("valid model"),
+        )
+        .build()
+        .expect("runtime builds");
+
+    seed_two_history_items_for_compaction(&runtime).await;
+
+    let events = collect_step(
+        &runtime,
+        &format!(
+            "Trigger auto compaction with enough current input.\n{}",
+            "ballast ".repeat(1_200)
+        ),
+        StepContext::default(),
+    )
+    .await;
+
+    assert_eq!(
+        event_kind_names(&events),
+        [
+            "StepStarted",
+            "CompactionStarted",
+            "CompactionCompleted",
+            "AssistantOutputRecorded",
+            "StepCompleted"
+        ]
+    );
+    assert!(matches!(
+        events[2].payload,
+        RuntimeJournalPayload::CompactionCompleted {
+            ref checkpoint_id,
+            covered_history_item_count: 2
+        } if checkpoint_id.starts_with("checkpoint-auto-compaction-events-")
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn hard_watermark_without_compressible_history_skips_compaction_lifecycle_events() {
+    let primary = RecordingModelProvider::with_script_and_capabilities(
+        vec![ScriptedModelProviderResponse::Stream(vec![Ok(
+            completed_event(),
+        )])],
+        ModelCapabilities::new(true, true, false, true, Some(4_000), None)
+            .expect("valid capabilities"),
+    );
+    let compactor =
+        RecordingModelProvider::with_script(vec![ScriptedModelProviderResponse::Stream(vec![Ok(
+            completed_event(),
+        )])]);
+    let runtime = Runtime::builder(session_id("auto-compaction-skip-events"))
+        .model_provider(Arc::new(primary), model_name())
+        .model_provider_for_role(
+            RuntimeModelRole::ContextCompaction,
+            Arc::new(compactor.clone()),
+            ModelName::new("compaction-model").expect("valid model"),
+        )
+        .build()
+        .expect("runtime builds");
+
+    let events = collect_step(
+        &runtime,
+        &format!(
+            "Oversized current input with no compressible history.\n{}",
+            "ballast ".repeat(1_200)
+        ),
+        StepContext::default(),
+    )
+    .await;
+
+    assert_eq!(
+        event_kind_names(&events),
+        [
+            "SessionStarted",
+            "StepStarted",
+            "AssistantOutputRecorded",
+            "StepCompleted"
+        ]
+    );
+    assert_eq!(
+        compactor.recorded_requests().len(),
+        0,
+        "skip should not call the compaction model"
+    );
+}
+
 #[test]
 fn request_context_budget_uses_dynamic_estimate_watermarks() {
     let capabilities = ModelCapabilities::new(true, true, false, true, Some(100_000), Some(10_000))
@@ -330,7 +450,7 @@ fn request_context_budget_uses_dynamic_estimate_watermarks() {
             .expect("valid message"),
             ModelMessage::new(
                 ModelMessageRole::User,
-                ModelContent::text(&"a".repeat(260_000)).expect("valid content"),
+                ModelContent::text(&"a".repeat(320_000)).expect("valid content"),
             )
             .expect("valid message"),
         ],

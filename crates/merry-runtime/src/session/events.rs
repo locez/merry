@@ -36,6 +36,27 @@ impl SessionState {
         )
     }
 
+    pub(crate) fn record_compaction_started(&mut self) -> RuntimeJournalEvent {
+        self.record_event(
+            RuntimeJournalPayload::CompactionStarted,
+            LedgerFactKind::CompactionStarted,
+        )
+    }
+
+    pub(crate) fn record_compaction_completed(
+        &mut self,
+        checkpoint_id: String,
+        covered_history_item_count: usize,
+    ) -> RuntimeJournalEvent {
+        self.record_event(
+            RuntimeJournalPayload::CompactionCompleted {
+                checkpoint_id,
+                covered_history_item_count,
+            },
+            LedgerFactKind::CompactionCompleted,
+        )
+    }
+
     pub(crate) fn record_cancelled(&mut self, diagnostic: ErrorInfo) -> RuntimeJournalEvent {
         self.record_event(
             RuntimeJournalPayload::Cancelled { diagnostic },

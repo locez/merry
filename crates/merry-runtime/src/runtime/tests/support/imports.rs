@@ -3,7 +3,7 @@
         DIAGNOSTIC_TOOL_CALL_RESULT_REQUIRED, Runtime, RuntimeBuilder, RuntimeInner,
         TOOL_ACTION_POLICY_DENIED_MESSAGE, WORKSPACE_PATCH_TOOL_NAME,
         admit_action_to_generic_executor, memory_activation_seed_from_step_input,
-        request_context_budget, send_cancelled_event,
+        merry_read_checkpoint_ref_tool_name, request_context_budget, send_cancelled_event,
     };
     use crate::action_audit::ActionAuditStatus;
     use crate::action_policy::{
@@ -37,9 +37,11 @@
         WorkspacePatchExecutionEvidence, WorkspacePatchProposal,
     };
     use crate::{
-        ArtifactError, CheckpointDecision, CitationCompactionPolicy, ContextBudgetPolicy,
-        PermissionReviewMode, RuntimeError, RuntimeModelRole, RuntimeTrustLevel, StepContext,
-        request_permissions_tool,
+        ArtifactError, CheckpointDecision, CheckpointId, CheckpointRef, CheckpointRefId,
+        CheckpointRefManifest, CheckpointSequenceRange, CheckpointSourceKind,
+        CitationBackedCheckpoint, CitationCompactionPolicy, CompactedCheckpoint,
+        CompactedCheckpointCandidate, ContextBudgetPolicy, PermissionReviewMode, RuntimeError,
+        RuntimeModelRole, RuntimeTrustLevel, StepContext, request_permissions_tool,
     };
     use futures_util::StreamExt;
     use merry_core::{

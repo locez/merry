@@ -4,10 +4,10 @@ use merry_core::{
     ToolInputSchema, ToolName, ToolSpec,
 };
 use merry_llm::{
-    FinishReason, ModelEvent, ModelOutput, ModelResponse, ModelToolCall, ModelToolCallId,
-    ToolArguments, testing::FakeModelProvider,
+    FinishReason, ModelCapabilities, ModelEvent, ModelOutput, ModelResponse, ModelToolCall,
+    ModelToolCallId, ToolArguments, testing::FakeModelProvider,
 };
-use merry_runtime::{RegisteredTool, Runtime, StepContext, StepInput};
+use merry_runtime::{RegisteredTool, Runtime, RuntimeModelRole, StepContext, StepInput};
 use schemars::Schema;
 use serde_json::{Map, json};
 use std::sync::Arc;
@@ -162,6 +162,67 @@ async fn usage_none_does_not_emit_usage_update() {
             .all(|event| !matches!(event, RuntimeEvent::UsageUpdated { .. }))
     );
     assert_eq!(runtime.usage().await, None);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn auto_compaction_lifecycle_projects_to_public_stream() {
+    let primary = FakeModelProvider::with_capabilities(
+        vec![
+            Ok(completed_text_event("seed one")),
+            Ok(completed_text_event("seed two")),
+            Ok(completed_text_event("primary answer")),
+        ],
+        ModelCapabilities::new(true, true, false, true, Some(4_000), None)
+            .expect("valid capabilities"),
+    );
+    let compactor = FakeModelProvider::new(vec![Ok(completed_text_event(
+        r#"{
+          "claims": [
+            {
+              "id": "c1",
+              "kind": "completed_action",
+              "text": "Old history was compacted for the public event stream.",
+              "refs": ["r1", "r2"]
+            }
+          ],
+          "working_intent": null
+        }"#,
+    ))]);
+    let runtime = Runtime::builder(session_id("public-auto-compaction"))
+        .model_provider(Arc::new(primary), model_name())
+        .model_provider_for_role(
+            RuntimeModelRole::ContextCompaction,
+            Arc::new(compactor),
+            merry_llm::ModelName::new("fake/compactor").expect("valid model"),
+        )
+        .build()
+        .expect("runtime should build");
+
+    let _ = collect_public_stream(&runtime, "old user message for public compaction").await;
+    let _ = collect_public_stream(&runtime, "retained tail for public compaction").await;
+
+    let events = collect_public_stream(
+        &runtime,
+        &format!(
+            "Trigger auto compaction for public stream.\n{}",
+            "ballast ".repeat(1_200)
+        ),
+    )
+    .await;
+
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, RuntimeEvent::CompactionStarted { .. }))
+    );
+    assert!(matches!(
+        events.iter().find(|event| matches!(event, RuntimeEvent::CompactionCompleted { .. })),
+        Some(RuntimeEvent::CompactionCompleted {
+            checkpoint_id,
+            covered_history_item_count: 2,
+            ..
+        }) if checkpoint_id.starts_with("checkpoint-public-auto-compaction-")
+    ));
 }
 
 #[tokio::test(flavor = "current_thread")]

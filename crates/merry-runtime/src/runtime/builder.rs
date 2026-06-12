@@ -1,4 +1,5 @@
 use super::auto_compaction::default_automatic_compaction_policy;
+use super::checkpoint_ref_tool::merry_read_checkpoint_ref_tool;
 use super::{AcceptedLocalWorkspaceProcessRunner, Runtime, RuntimeInner};
 use crate::{
     AcceptedLocalWorkspaceProcessAdmission, CitationCompactionPolicy, CompactedCheckpoint,
@@ -479,8 +480,12 @@ impl RuntimeBuilder {
     ///
     /// Duplicate tool names are rejected before the runtime is constructed.
     pub fn build(self) -> Result<Runtime, RuntimeError> {
+        let mut registered_tools = self.registered_tools;
+        if self.automatic_compaction.is_enabled() {
+            registered_tools.push(merry_read_checkpoint_ref_tool().map_err(RuntimeError::from)?);
+        }
         let tool_registry =
-            ToolRegistry::from_registered(self.registered_tools).map_err(|error| match error {
+            ToolRegistry::from_registered(registered_tools).map_err(|error| match error {
                 ToolRegistryError::DuplicateName { name } => {
                     RuntimeError::DuplicateToolRegistration { name }
                 }

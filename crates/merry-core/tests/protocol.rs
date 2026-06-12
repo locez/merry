@@ -761,6 +761,51 @@ fn usage_updated_events_round_trip_as_full_snapshots() {
 }
 
 #[test]
+fn compaction_lifecycle_events_round_trip_as_low_noise_public_events() {
+    let source = RuntimeEventSource::new(
+        SessionId::new("compaction-event-session").expect("valid session id"),
+        8,
+    );
+
+    assert_json_round_trip(&RuntimeJournalPayload::CompactionStarted);
+    assert_json_round_trip(&RuntimeJournalPayload::CompactionCompleted {
+        checkpoint_id: "checkpoint-session-8".to_owned(),
+        covered_history_item_count: 6,
+    });
+
+    assert_eq!(
+        serde_json::to_value(&RuntimeEvent::CompactionStarted {
+            source: source.clone(),
+        })
+        .expect("event serializes"),
+        json!({
+            "type": "compaction_started",
+            "source": {
+                "session_id": "compaction-event-session",
+                "sequence": 8
+            }
+        })
+    );
+    assert_eq!(
+        serde_json::to_value(&RuntimeEvent::CompactionCompleted {
+            checkpoint_id: "checkpoint-session-8".to_owned(),
+            covered_history_item_count: 6,
+            source,
+        })
+        .expect("event serializes"),
+        json!({
+            "type": "compaction_completed",
+            "checkpoint_id": "checkpoint-session-8",
+            "covered_history_item_count": 6,
+            "source": {
+                "session_id": "compaction-event-session",
+                "sequence": 8
+            }
+        })
+    );
+}
+
+#[test]
 fn public_tool_call_started_does_not_expose_bridge_runner() {
     let call = PendingToolCall::new(
         ToolCallId::new("call-bridge").expect("valid call id"),

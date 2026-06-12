@@ -1,10 +1,10 @@
-use super::auto_compaction::compact_context_for_hard_watermark;
+use super::auto_compaction::{compact_prepared_context, compaction_input_for_hard_watermark};
 use super::journal_emission::{
     send_assistant_text_output_completed_events, send_assistant_text_output_recorded_event,
-    send_cancelled_event, send_cancelled_if_requested, send_failed_event,
-    send_model_usage_updated_event, send_tool_call_pending_event, stream_model_with_retry_policy,
-    trace_provider_step_cancelled, trace_provider_step_failed, wait_for_model_stream_item,
-    wait_for_retrying_stream_setup,
+    send_cancelled_event, send_cancelled_if_requested, send_compaction_completed_event,
+    send_compaction_started_event, send_failed_event, send_model_usage_updated_event,
+    send_tool_call_pending_event, stream_model_with_retry_policy, trace_provider_step_cancelled,
+    trace_provider_step_failed, wait_for_model_stream_item, wait_for_retrying_stream_setup,
 };
 use super::memory_activation::{
     ActivationProjectionGuard, clear_current_activated_memories,
@@ -162,9 +162,23 @@ pub(super) async fn run_provider_step(
     };
     let mut projection_guard =
         ActivationProjectionGuard::new(Arc::clone(inner), token.clone(), activation_epoch);
+    let provider = provider_config.provider();
     let mut tool_specs = inner.tool_registry.tool_specs();
     if let Some(contract) = &final_output_contract {
         tool_specs.push(contract.tool_spec().clone());
+    }
+    if !tool_specs.is_empty() && !provider.capabilities().supports_tool_calls() {
+        clear_current_activated_memories(inner).await;
+        let diagnostic = diagnostic_from_text(
+            "provider_tool_calls_unsupported",
+            format!(
+                "provider {} does not support tool calls required by runtime tools",
+                provider.name()
+            ),
+        );
+        trace_provider_step_failed(&diagnostic);
+        let _ = send_failed_event(inner, sender, token, diagnostic).await;
+        return;
     }
     tracing::debug!(
         category = "transcript_and_tools",
@@ -197,7 +211,6 @@ pub(super) async fn run_provider_step(
         }
     };
 
-    let provider = provider_config.provider();
     let mut request_budget = request_context_budget(provider.capabilities(), &request);
     if let Err(error) = &request_budget {
         trace_provider_request_budget_unavailable(
@@ -211,8 +224,39 @@ pub(super) async fn run_provider_step(
         request_budget.as_ref().map(|budget| budget.decision),
         Ok(CheckpointDecision::RequireCheckpoint)
     ) {
-        match compact_context_for_hard_watermark(inner, token).await {
-            Ok(Some(_outcome)) => {
+        match compaction_input_for_hard_watermark(inner).await {
+            Ok(Some(compaction_input)) => {
+                if !send_compaction_started_event(inner, sender, token).await {
+                    return;
+                }
+                let outcome = match compact_prepared_context(inner, compaction_input, token.clone())
+                    .await
+                {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        clear_current_activated_memories(inner).await;
+                        if token.is_cancelled() {
+                            trace_provider_step_cancelled();
+                            let _ = send_cancelled_event(inner, sender).await;
+                            return;
+                        }
+                        let diagnostic = diagnostic_from_text("auto_compaction", error.to_string());
+                        trace_provider_step_failed(&diagnostic);
+                        let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                        return;
+                    }
+                };
+                if !send_compaction_completed_event(
+                    inner,
+                    sender,
+                    token,
+                    outcome.checkpoint_id().as_str().to_owned(),
+                    outcome.covered_history_item_count(),
+                )
+                .await
+                {
+                    return;
+                }
                 let refreshed = {
                     let session = inner.session.lock().await;
                     match step_request_inputs_from_session(&session) {

@@ -24,10 +24,21 @@ pub struct FakeModelProvider {
 impl FakeModelProvider {
     /// Creates a fake provider from scripted stream items.
     pub fn new(script: Vec<Result<ModelEvent, ModelError>>) -> Self {
+        Self::with_capabilities(
+            script,
+            ModelCapabilities::new(true, true, false, true, None, None)
+                .expect("static capabilities are valid"),
+        )
+    }
+
+    /// Creates a fake provider from scripted stream items and explicit capabilities.
+    pub fn with_capabilities(
+        script: Vec<Result<ModelEvent, ModelError>>,
+        capabilities: ModelCapabilities,
+    ) -> Self {
         Self {
             name: ProviderName::new("fake-model-provider").expect("static provider name is valid"),
-            capabilities: ModelCapabilities::new(true, true, false, true, None, None)
-                .expect("static capabilities are valid"),
+            capabilities,
             script: Arc::new(script.into_iter().map(FakeStreamItem::from).collect()),
             recorded_requests: Arc::new(Mutex::new(Vec::new())),
         }

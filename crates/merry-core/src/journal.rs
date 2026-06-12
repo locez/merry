@@ -75,6 +75,15 @@ pub enum RuntimeJournalPayload {
     },
     /// A runtime step completed.
     StepCompleted,
+    /// Automatic context compaction started.
+    CompactionStarted,
+    /// Automatic context compaction installed a compacted checkpoint.
+    CompactionCompleted {
+        /// Installed checkpoint id.
+        checkpoint_id: String,
+        /// Number of history items covered by the new checkpoint.
+        covered_history_item_count: usize,
+    },
     /// Session usage was updated from a provider-reported model response.
     SessionUsageUpdated { usage: SessionUsage },
     /// An artifact reference was recorded.

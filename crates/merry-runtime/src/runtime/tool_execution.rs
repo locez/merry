@@ -16,6 +16,9 @@ use merry_core::{
 };
 use std::sync::Arc;
 
+use super::checkpoint_ref_tool::{
+    execute_merry_read_checkpoint_ref_tool_call, is_merry_read_checkpoint_ref_tool,
+};
 use super::permission_execution::execute_permission_request_tool_call;
 use super::process_execution::execute_admitted_process_action;
 use super::{
@@ -101,6 +104,10 @@ pub(super) async fn execute_tool_call_with_active_permit(
             Some(diagnostic),
             None,
         );
+    }
+
+    if is_merry_read_checkpoint_ref_tool(pending.name()) {
+        return execute_merry_read_checkpoint_ref_tool_call(inner, &pending, context).await;
     }
 
     if is_request_permissions_tool(pending.name())

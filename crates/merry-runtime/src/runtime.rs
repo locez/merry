@@ -38,6 +38,7 @@ use tracing::Instrument;
 
 mod auto_compaction;
 mod builder;
+mod checkpoint_ref_tool;
 mod diagnostics;
 mod journal_emission;
 mod memory_activation;
@@ -51,6 +52,8 @@ mod tool_execution;
 
 use self::auto_compaction::compact_context_once_inner;
 pub use self::builder::{AutomaticCompactionConfig, RuntimeBuilder};
+#[cfg(test)]
+use self::checkpoint_ref_tool::merry_read_checkpoint_ref_tool_name;
 use self::diagnostics::{
     DIAGNOSTIC_TOOL_ACTION_POLICY_DENIED, DIAGNOSTIC_TOOL_CALL_RESULT_REQUIRED,
     DIAGNOSTIC_TOOL_NOT_REGISTERED, TOOL_ACTION_POLICY_DENIED_MESSAGE, WORKSPACE_PATCH_TOOL_NAME,
@@ -527,6 +530,7 @@ async fn run_step(
 #[cfg(test)]
 mod tests {
     mod bridge_tool_flow;
+    mod checkpoint_ref_tool;
     mod event_cancellation;
     mod memory_activation_flow;
     mod model_role_flow;

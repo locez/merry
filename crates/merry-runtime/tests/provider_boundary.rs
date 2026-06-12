@@ -751,6 +751,20 @@ fn test_tool_spec(name: &str) -> ToolSpec {
     .expect("valid tool spec")
 }
 
+fn assert_default_checkpoint_ref_tool(tools: &[ToolSpec]) {
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0].name().as_str(), "merry_read_checkpoint_ref");
+}
+
+fn assert_tools_are_default_checkpoint_ref_plus(
+    tools: &[ToolSpec],
+    expected_user_tools: &[ToolSpec],
+) {
+    assert_eq!(tools.len(), expected_user_tools.len() + 1);
+    assert_eq!(tools[0].name().as_str(), "merry_read_checkpoint_ref");
+    assert_eq!(&tools[1..], expected_user_tools);
+}
+
 fn path_tool_spec(name: &str) -> ToolSpec {
     let schema = Schema::try_from(json!({
         "type": "object",
@@ -1094,7 +1108,7 @@ async fn runtime_step_with_provider_compiles_user_text_request_and_records_assis
         request.messages()[1].content().as_text(),
         "Explain the runtime boundary."
     );
-    assert!(request.tools().is_empty());
+    assert_default_checkpoint_ref_tool(request.tools());
     assert_eq!(request.generation(), &GenerationConfig::default());
     assert!(!request.generation().allow_parallel_tool_calls());
 }
@@ -1206,7 +1220,7 @@ async fn runtime_step_with_provider_includes_compiled_context_as_system_message(
         request.messages()[2].content().as_text(),
         "Use the stored context."
     );
-    assert!(request.tools().is_empty());
+    assert_default_checkpoint_ref_tool(request.tools());
     assert!(!request.generation().allow_parallel_tool_calls());
 }
 
@@ -1444,7 +1458,7 @@ async fn registered_tool_specs_are_compiled_into_provider_request() {
     );
     let requests = provider.recorded_requests();
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].tools(), &[tool]);
+    assert_tools_are_default_checkpoint_ref_plus(requests[0].tools(), &[tool]);
     assert!(
         requests[0]
             .tool_profile_hash()
@@ -2833,9 +2847,15 @@ async fn execute_registered_tool_success_records_artifact_resolves_and_compiles_
 
     let requests = provider.recorded_requests();
     assert_eq!(requests.len(), 2);
-    assert_eq!(requests[0].tools(), &[test_tool_spec("search_notes")]);
+    assert_tools_are_default_checkpoint_ref_plus(
+        requests[0].tools(),
+        &[test_tool_spec("search_notes")],
+    );
     assert!(requests[0].continuations().is_empty());
-    assert_eq!(requests[1].tools(), &[test_tool_spec("search_notes")]);
+    assert_tools_are_default_checkpoint_ref_plus(
+        requests[1].tools(),
+        &[test_tool_spec("search_notes")],
+    );
     let continuation = requests[1]
         .continuations()
         .first()

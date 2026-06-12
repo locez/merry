@@ -18,6 +18,14 @@ pub enum RuntimeEvent {
     StepStarted { source: RuntimeEventSource },
     /// A runtime step completed.
     StepCompleted { source: RuntimeEventSource },
+    /// Automatic context compaction started.
+    CompactionStarted { source: RuntimeEventSource },
+    /// Automatic context compaction installed a compacted checkpoint.
+    CompactionCompleted {
+        checkpoint_id: String,
+        covered_history_item_count: usize,
+        source: RuntimeEventSource,
+    },
     /// Session usage was updated from a provider-reported model response.
     UsageUpdated {
         usage: SessionUsage,
