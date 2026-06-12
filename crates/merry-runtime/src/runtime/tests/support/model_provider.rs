@@ -30,6 +30,7 @@
         contexts: Arc<StdMutex<Vec<ModelStreamContext>>>,
         calls: Arc<AtomicUsize>,
         responses: Arc<StdMutex<Vec<ScriptedModelProviderResponse>>>,
+        capabilities: ModelCapabilities,
     }
 
     impl RecordingModelProvider {
@@ -38,11 +39,23 @@
         }
 
         fn with_script(responses: Vec<ScriptedModelProviderResponse>) -> Self {
+            Self::with_script_and_capabilities(
+                responses,
+                ModelCapabilities::new(true, true, false, true, None, None)
+                    .expect("valid capabilities"),
+            )
+        }
+
+        fn with_script_and_capabilities(
+            responses: Vec<ScriptedModelProviderResponse>,
+            capabilities: ModelCapabilities,
+        ) -> Self {
             Self {
                 requests: Arc::new(StdMutex::new(Vec::new())),
                 contexts: Arc::new(StdMutex::new(Vec::new())),
                 calls: Arc::new(AtomicUsize::new(0)),
                 responses: Arc::new(StdMutex::new(responses.into_iter().rev().collect())),
+                capabilities,
             }
         }
 
@@ -81,12 +94,7 @@
         }
 
         fn capabilities(&self) -> &ModelCapabilities {
-            static CAPABILITIES: std::sync::OnceLock<ModelCapabilities> =
-                std::sync::OnceLock::new();
-            CAPABILITIES.get_or_init(|| {
-                ModelCapabilities::new(true, true, false, true, None, None)
-                    .expect("valid capabilities")
-            })
+            &self.capabilities
         }
 
         fn stream_model<'a>(

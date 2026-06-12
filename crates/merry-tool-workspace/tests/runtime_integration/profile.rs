@@ -31,7 +31,12 @@ async fn workspace_coding_loop_profile_registers_expected_tools_and_process_lane
     let requests = provider_handle.recorded_requests();
     assert_eq!(requests.len(), 1);
     let tool_names = requests[0].tools();
-    assert_eq!(tool_names.len(), 5);
+    assert_eq!(tool_names.len(), 6);
+    assert!(
+        tool_names
+            .iter()
+            .any(|tool| tool.name().as_str() == "merry_read_checkpoint_ref")
+    );
     assert!(
         tool_names
             .iter()
@@ -221,7 +226,12 @@ async fn workspace_coding_loop_profile_can_enable_patch_tool() {
     let requests = provider_handle.recorded_requests();
     assert_eq!(requests.len(), 1);
     let tool_names = requests[0].tools();
-    assert_eq!(tool_names.len(), 6);
+    assert_eq!(tool_names.len(), 7);
+    assert!(
+        tool_names
+            .iter()
+            .any(|tool| tool.name().as_str() == "merry_read_checkpoint_ref")
+    );
     assert!(
         tool_names
             .iter()

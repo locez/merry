@@ -1143,6 +1143,8 @@ fn event_kind_names(events: &[RuntimeJournalEvent]) -> Vec<&'static str> {
         .map(|event| match event.payload {
             RuntimeJournalPayload::SessionStarted => "SessionStarted",
             RuntimeJournalPayload::StepStarted => "StepStarted",
+            RuntimeJournalPayload::CompactionStarted => "CompactionStarted",
+            RuntimeJournalPayload::CompactionCompleted { .. } => "CompactionCompleted",
             RuntimeJournalPayload::SessionUsageUpdated { .. } => "SessionUsageUpdated",
             RuntimeJournalPayload::StepCompleted => "StepCompleted",
             RuntimeJournalPayload::Cancelled { .. } => "Cancelled",
@@ -1167,6 +1169,8 @@ fn public_event_kind_names(events: &[RuntimeEvent]) -> Vec<&'static str> {
             RuntimeEvent::SessionStarted { .. } => "SessionStarted",
             RuntimeEvent::StepStarted { .. } => "StepStarted",
             RuntimeEvent::StepCompleted { .. } => "StepCompleted",
+            RuntimeEvent::CompactionStarted { .. } => "CompactionStarted",
+            RuntimeEvent::CompactionCompleted { .. } => "CompactionCompleted",
             RuntimeEvent::AssistantMessage { .. } => "AssistantMessage",
             RuntimeEvent::ToolCallStarted { .. } => "ToolCallStarted",
             RuntimeEvent::ToolCallFinished { .. } => "ToolCallFinished",

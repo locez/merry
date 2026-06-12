@@ -37,12 +37,22 @@ const FNV_PRIME: u64 = 0x100000001b3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContextBudgetPolicy {
-    /// Earlier checkpoint planning to reduce prompt cost.
+    /// Earlier checkpoint planning for conservative prompt growth control.
     CostAware,
-    /// Default compromise between preserving context and avoiding late compaction.
+    /// Default compromise that uses most of the safe body budget.
     Balanced,
-    /// Use more of the available body budget before checkpoint planning.
+    /// Use nearly all of the safe body budget before checkpoint planning.
     Capacity,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WatermarkRule {
+    hard_headroom_basis_points: u64,
+    hard_headroom_min_tokens: u64,
+    hard_headroom_max_tokens: u64,
+    soft_band_basis_points: u64,
+    soft_band_min_tokens: u64,
+    soft_band_max_tokens: u64,
 }
 
 /// Derived context body budget and checkpoint watermarks.
@@ -97,19 +107,8 @@ impl ContextBudget {
             });
         }
 
-        let (soft_percent, hard_percent) = policy.watermark_percents();
-        let soft_water_tokens = body_budget_tokens
-            .checked_mul(soft_percent)
-            .and_then(|value| value.checked_div(100))
-            .ok_or(ContextError::InvalidBudget {
-                reason: "soft watermark calculation overflowed",
-            })?;
-        let hard_water_tokens = body_budget_tokens
-            .checked_mul(hard_percent)
-            .and_then(|value| value.checked_div(100))
-            .ok_or(ContextError::InvalidBudget {
-                reason: "hard watermark calculation overflowed",
-            })?;
+        let (soft_water_tokens, hard_water_tokens) =
+            policy.watermarks(resolved_context_window_tokens, body_budget_tokens)?;
 
         if soft_water_tokens >= hard_water_tokens {
             return Err(ContextError::InvalidBudget {
@@ -170,11 +169,82 @@ impl ContextBudget {
 }
 
 impl ContextBudgetPolicy {
-    fn watermark_percents(self) -> (u64, u64) {
+    fn watermarks(
+        self,
+        resolved_context_window_tokens: u64,
+        body_budget_tokens: u64,
+    ) -> Result<(u64, u64), ContextError> {
         match self {
-            Self::CostAware => (60, 80),
-            Self::Balanced => (70, 90),
-            Self::Capacity => (85, 95),
+            Self::CostAware => self.ratio_watermarks(body_budget_tokens, 60, 80),
+            Self::Balanced | Self::Capacity => {
+                let rule = self.watermark_rule();
+                let nominal_hard_headroom = basis_points_of_window(
+                    resolved_context_window_tokens,
+                    rule.hard_headroom_basis_points,
+                )?
+                .clamp(rule.hard_headroom_min_tokens, rule.hard_headroom_max_tokens);
+                let hard_headroom = nominal_hard_headroom.min(body_budget_tokens / 2);
+                let nominal_soft_band = basis_points_of_window(
+                    resolved_context_window_tokens,
+                    rule.soft_band_basis_points,
+                )?
+                .clamp(rule.soft_band_min_tokens, rule.soft_band_max_tokens);
+                let hard_water_tokens = body_budget_tokens.checked_sub(hard_headroom).ok_or(
+                    ContextError::InvalidBudget {
+                        reason: "body budget must exceed hard watermark headroom",
+                    },
+                )?;
+                let soft_band = nominal_soft_band.min(hard_water_tokens / 2);
+                let soft_water_tokens = hard_water_tokens.checked_sub(soft_band).ok_or(
+                    ContextError::InvalidBudget {
+                        reason: "hard watermark must exceed soft watermark band",
+                    },
+                )?;
+                Ok((soft_water_tokens, hard_water_tokens))
+            }
+        }
+    }
+
+    fn ratio_watermarks(
+        self,
+        body_budget_tokens: u64,
+        soft_percent: u64,
+        hard_percent: u64,
+    ) -> Result<(u64, u64), ContextError> {
+        let soft_water_tokens = body_budget_tokens
+            .checked_mul(soft_percent)
+            .and_then(|value| value.checked_div(100))
+            .ok_or(ContextError::InvalidBudget {
+                reason: "soft watermark calculation overflowed",
+            })?;
+        let hard_water_tokens = body_budget_tokens
+            .checked_mul(hard_percent)
+            .and_then(|value| value.checked_div(100))
+            .ok_or(ContextError::InvalidBudget {
+                reason: "hard watermark calculation overflowed",
+            })?;
+        Ok((soft_water_tokens, hard_water_tokens))
+    }
+
+    fn watermark_rule(self) -> WatermarkRule {
+        match self {
+            Self::CostAware => unreachable!("cost-aware uses ratio watermarks"),
+            Self::Balanced => WatermarkRule {
+                hard_headroom_basis_points: 100,
+                hard_headroom_min_tokens: 2_000,
+                hard_headroom_max_tokens: 16_000,
+                soft_band_basis_points: 300,
+                soft_band_min_tokens: 8_000,
+                soft_band_max_tokens: 48_000,
+            },
+            Self::Capacity => WatermarkRule {
+                hard_headroom_basis_points: 50,
+                hard_headroom_min_tokens: 1_000,
+                hard_headroom_max_tokens: 8_000,
+                soft_band_basis_points: 200,
+                soft_band_min_tokens: 4_000,
+                soft_band_max_tokens: 24_000,
+            },
         }
     }
 
@@ -185,6 +255,15 @@ impl ContextBudgetPolicy {
             Self::Capacity => "capacity",
         }
     }
+}
+
+fn basis_points_of_window(window_tokens: u64, basis_points: u64) -> Result<u64, ContextError> {
+    window_tokens
+        .checked_mul(basis_points)
+        .and_then(|value| value.checked_div(10_000))
+        .ok_or(ContextError::InvalidBudget {
+            reason: "window percentage calculation overflowed",
+        })
 }
 
 /// Resolved model context window and the metadata source that supplied it.
@@ -1503,29 +1582,78 @@ mod tests {
         assert_eq!(budget.stable_prefix_tokens(), 120_000);
         assert_eq!(budget.output_reserve_tokens(), 32_000);
         assert_eq!(budget.body_budget_tokens(), 798_000);
-        assert_eq!(budget.soft_water_tokens(), 558_600);
-        assert_eq!(budget.hard_water_tokens(), 718_200);
+        assert_eq!(budget.soft_water_tokens(), 758_000);
+        assert_eq!(budget.hard_water_tokens(), 788_000);
     }
 
     #[test]
-    fn context_budget_policy_ratios_use_body_budget() {
+    fn context_budget_policy_watermarks_use_policy_rules() {
         let cost_aware =
-            ContextBudget::from_window(10_000, 100, 1_000, 1_000, ContextBudgetPolicy::CostAware)
+            ContextBudget::from_window(100_000, 100, 1_000, 1_000, ContextBudgetPolicy::CostAware)
                 .expect("cost-aware budget should calculate");
         let balanced =
-            ContextBudget::from_window(10_000, 100, 1_000, 1_000, ContextBudgetPolicy::Balanced)
+            ContextBudget::from_window(100_000, 100, 1_000, 1_000, ContextBudgetPolicy::Balanced)
                 .expect("balanced budget should calculate");
         let capacity =
-            ContextBudget::from_window(10_000, 100, 1_000, 1_000, ContextBudgetPolicy::Capacity)
+            ContextBudget::from_window(100_000, 100, 1_000, 1_000, ContextBudgetPolicy::Capacity)
                 .expect("capacity budget should calculate");
 
-        assert_eq!(cost_aware.body_budget_tokens(), 8_000);
-        assert_eq!(cost_aware.soft_water_tokens(), 4_800);
-        assert_eq!(cost_aware.hard_water_tokens(), 6_400);
-        assert_eq!(balanced.soft_water_tokens(), 5_600);
-        assert_eq!(balanced.hard_water_tokens(), 7_200);
-        assert_eq!(capacity.soft_water_tokens(), 6_800);
-        assert_eq!(capacity.hard_water_tokens(), 7_600);
+        assert_eq!(cost_aware.body_budget_tokens(), 98_000);
+        assert_eq!(cost_aware.soft_water_tokens(), 58_800);
+        assert_eq!(cost_aware.hard_water_tokens(), 78_400);
+        assert_eq!(balanced.soft_water_tokens(), 88_000);
+        assert_eq!(balanced.hard_water_tokens(), 96_000);
+        assert_eq!(capacity.soft_water_tokens(), 93_000);
+        assert_eq!(capacity.hard_water_tokens(), 97_000);
+    }
+
+    #[test]
+    fn context_budget_balanced_and_capacity_use_capped_window_headroom() {
+        for (window, output_reserve, balanced_soft, balanced_hard, capacity_soft, capacity_hard) in [
+            (64_000, 3_200, 47_600, 55_600, 52_600, 56_600),
+            (128_000, 6_400, 105_200, 113_200, 110_200, 114_200),
+            (256_000, 8_192, 224_448, 232_448, 228_608, 233_728),
+            (512_000, 8_192, 457_728, 473_088, 465_408, 475_648),
+            (1_000_000, 8_192, 901_808, 931_808, 916_808, 936_808),
+        ] {
+            let balanced = ContextBudget::from_window(
+                window,
+                95,
+                0,
+                output_reserve,
+                ContextBudgetPolicy::Balanced,
+            )
+            .expect("balanced budget should calculate");
+            let capacity = ContextBudget::from_window(
+                window,
+                95,
+                0,
+                output_reserve,
+                ContextBudgetPolicy::Capacity,
+            )
+            .expect("capacity budget should calculate");
+
+            assert_eq!(balanced.soft_water_tokens(), balanced_soft);
+            assert_eq!(balanced.hard_water_tokens(), balanced_hard);
+            assert_eq!(capacity.soft_water_tokens(), capacity_soft);
+            assert_eq!(capacity.hard_water_tokens(), capacity_hard);
+        }
+    }
+
+    #[test]
+    fn context_budget_caps_window_headroom_when_stable_prefix_leaves_tiny_body() {
+        let balanced =
+            ContextBudget::from_window(64_000, 95, 54_000, 3_200, ContextBudgetPolicy::Balanced)
+                .expect("balanced budget should calculate");
+        let capacity =
+            ContextBudget::from_window(64_000, 95, 54_000, 3_200, ContextBudgetPolicy::Capacity)
+                .expect("capacity budget should calculate");
+
+        assert_eq!(balanced.body_budget_tokens(), 3_600);
+        assert_eq!(balanced.soft_water_tokens(), 900);
+        assert_eq!(balanced.hard_water_tokens(), 1_800);
+        assert_eq!(capacity.soft_water_tokens(), 1_300);
+        assert_eq!(capacity.hard_water_tokens(), 2_600);
     }
 
     #[test]

@@ -165,6 +165,58 @@ pub(super) async fn send_model_usage_updated_event(
     Ok(true)
 }
 
+pub(super) async fn send_compaction_started_event(
+    inner: &RuntimeInner,
+    sender: &mpsc::Sender<RuntimeJournalEvent>,
+    token: &CancellationToken,
+) -> bool {
+    if token.is_cancelled() {
+        return false;
+    }
+
+    let Some(permit) = reserve_normal_event_slot(sender, token).await else {
+        return false;
+    };
+
+    let event = {
+        let mut session = inner.session.lock().await;
+        if token.is_cancelled() {
+            return false;
+        }
+        session.record_compaction_started()
+    };
+
+    permit.send(event);
+    true
+}
+
+pub(super) async fn send_compaction_completed_event(
+    inner: &RuntimeInner,
+    sender: &mpsc::Sender<RuntimeJournalEvent>,
+    token: &CancellationToken,
+    checkpoint_id: String,
+    covered_history_item_count: usize,
+) -> bool {
+    if token.is_cancelled() {
+        return false;
+    }
+
+    let Some(permit) = reserve_normal_event_slot(sender, token).await else {
+        return false;
+    };
+
+    let event = {
+        let mut session = inner.session.lock().await;
+        if token.is_cancelled() {
+            return false;
+        }
+        session.record_compaction_completed(checkpoint_id, covered_history_item_count)
+    };
+
+    permit.send(event);
+    true
+}
+
 async fn send_bridge_tool_call_requested_event(
     inner: &RuntimeInner,
     sender: &mpsc::Sender<RuntimeJournalEvent>,

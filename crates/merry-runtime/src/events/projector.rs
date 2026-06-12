@@ -38,6 +38,17 @@ impl RuntimeEventProjector {
             RuntimeJournalPayload::StepCompleted => {
                 Ok(Some(RuntimeEvent::StepCompleted { source }))
             }
+            RuntimeJournalPayload::CompactionStarted => {
+                Ok(Some(RuntimeEvent::CompactionStarted { source }))
+            }
+            RuntimeJournalPayload::CompactionCompleted {
+                checkpoint_id,
+                covered_history_item_count,
+            } => Ok(Some(RuntimeEvent::CompactionCompleted {
+                checkpoint_id,
+                covered_history_item_count,
+                source,
+            })),
             RuntimeJournalPayload::SessionUsageUpdated { usage } => {
                 Ok(Some(RuntimeEvent::UsageUpdated { usage, source }))
             }
@@ -285,6 +296,42 @@ mod tests {
         assert!(matches!(
             projected,
             RuntimeEvent::ToolCallStarted { call: projected, .. } if projected == call
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn compaction_journal_events_project_to_public_lifecycle_events() {
+        let runtime = runtime();
+        let mut projector = RuntimeEventProjector::new();
+        let started = source_event(2, RuntimeJournalPayload::CompactionStarted);
+        let completed = source_event(
+            3,
+            RuntimeJournalPayload::CompactionCompleted {
+                checkpoint_id: "checkpoint-projector".to_owned(),
+                covered_history_item_count: 4,
+            },
+        );
+
+        let started = projector
+            .project(started, &runtime)
+            .await
+            .expect("projection should not fail");
+        let completed = projector
+            .project(completed, &runtime)
+            .await
+            .expect("projection should not fail");
+
+        assert!(matches!(
+            started,
+            Some(RuntimeEvent::CompactionStarted { .. })
+        ));
+        assert!(matches!(
+            completed,
+            Some(RuntimeEvent::CompactionCompleted {
+                checkpoint_id,
+                covered_history_item_count: 4,
+                ..
+            }) if checkpoint_id == "checkpoint-projector"
         ));
     }
 
