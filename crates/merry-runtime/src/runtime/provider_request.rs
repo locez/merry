@@ -12,7 +12,9 @@ use super::diagnostic_from_text;
 
 const DEFAULT_CONTEXT_WINDOW_FALLBACK_TOKENS: u64 = 64_000;
 const DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT: u8 = 95;
-const DEFAULT_OUTPUT_RESERVE_TOKENS: u64 = 32_000;
+const DEFAULT_OUTPUT_RESERVE_WINDOW_DIVISOR: u64 = 20;
+const DEFAULT_OUTPUT_RESERVE_MIN_TOKENS: u64 = 3_200;
+const DEFAULT_OUTPUT_RESERVE_MAX_TOKENS: u64 = 8_192;
 
 pub(super) fn trace_provider_request(
     session_id: &str,
@@ -225,7 +227,7 @@ pub(super) fn request_context_budget(
         .generation()
         .max_output_tokens()
         .or_else(|| capabilities.max_output_tokens())
-        .unwrap_or(DEFAULT_OUTPUT_RESERVE_TOKENS);
+        .unwrap_or_else(|| default_output_reserve_tokens(window.tokens()));
     let policy = ContextBudgetPolicy::Balanced;
     let stable_prefix_estimated_tokens = estimate_model_input_tokens(request.stable_prefix_input());
     let budget = ContextBudget::from_window(
@@ -245,6 +247,13 @@ pub(super) fn request_context_budget(
         dynamic_body_estimated_tokens,
         decision,
     })
+}
+
+fn default_output_reserve_tokens(window_tokens: u64) -> u64 {
+    (window_tokens / DEFAULT_OUTPUT_RESERVE_WINDOW_DIVISOR).clamp(
+        DEFAULT_OUTPUT_RESERVE_MIN_TOKENS,
+        DEFAULT_OUTPUT_RESERVE_MAX_TOKENS,
+    )
 }
 
 fn estimate_model_input_tokens(input: &[merry_llm::ModelInputItem]) -> u64 {
