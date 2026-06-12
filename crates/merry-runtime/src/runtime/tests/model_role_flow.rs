@@ -352,3 +352,42 @@ fn request_context_budget_uses_dynamic_estimate_watermarks() {
     assert!(budget.dynamic_body_estimated_tokens >= budget.budget.soft_water_tokens());
     assert!(budget.dynamic_body_estimated_tokens < budget.budget.hard_water_tokens());
 }
+
+#[test]
+fn request_context_budget_derives_default_output_reserve_from_window() {
+    let request = ModelRequest::new_with_continuations_and_stable_prefix(
+        named_model("fake/default-output-reserve"),
+        vec![
+            ModelMessage::new(
+                ModelMessageRole::User,
+                ModelContent::text("Need budget.").expect("valid content"),
+            )
+            .expect("valid message"),
+        ],
+        Vec::new(),
+        Vec::new(),
+        GenerationConfig::default(),
+        0,
+    )
+    .expect("valid request");
+
+    for (window, expected_output_reserve) in [
+        (32_000, 3_200),
+        (64_000, 3_200),
+        (128_000, 6_400),
+        (256_000, 8_192),
+        (512_000, 8_192),
+        (1_000_000, 8_192),
+        (2_000_000, 8_192),
+    ] {
+        let capabilities = ModelCapabilities::new(true, true, false, true, Some(window), None)
+            .expect("valid capabilities");
+        let budget =
+            request_context_budget(&capabilities, &request).expect("budget should calculate");
+
+        assert_eq!(
+            budget.budget.output_reserve_tokens(),
+            expected_output_reserve
+        );
+    }
+}
