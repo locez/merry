@@ -1,10 +1,11 @@
+use super::controller::{ControllerEffect, handle_key_action};
 use super::input::TextInput;
 use super::keymap::{KeyAction, KeyBinding, Keymap};
 use super::projector::TuiProjector;
 use super::render::render_to_text;
 use super::state::{QueuePreview, TimelineItem, TuiState};
 use super::theme::{SemanticColor, TuiTheme};
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use merry_core::{
     ArtifactId, ArtifactKind, ArtifactRef, ContextWindowSource, ModelUsage, PendingToolCall,
     QueuedInputLane, QueuedInputView, RuntimeEvent, RuntimeEventSource, SessionId, SessionUsage,
@@ -41,6 +42,50 @@ fn text_input_inserts_deletes_and_takes_trimmed_text() {
     assert_eq!(input.take_trimmed(), Some("h!".to_owned()));
     assert_eq!(input.text(), "");
     assert_eq!(input.take_trimmed(), None);
+}
+
+#[test]
+fn text_input_handles_plain_chars_and_backspace_key_events() {
+    let mut input = TextInput::default();
+
+    input.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+    input.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::SHIFT));
+    input.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+    input.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+
+    assert_eq!(input.text(), "a");
+}
+
+#[test]
+fn controller_submit_next_takes_input_text() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.input_mut().insert_char('n');
+    state.input_mut().insert_char('o');
+    state.input_mut().insert_char('w');
+
+    let effect = handle_key_action(KeyAction::SubmitNext, &mut state);
+
+    assert_eq!(effect, ControllerEffect::SubmitNext("now".to_owned()));
+    assert_eq!(state.input_text(), "");
+}
+
+#[test]
+fn controller_empty_submit_does_nothing() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+
+    let effect = handle_key_action(KeyAction::SubmitNext, &mut state);
+
+    assert_eq!(effect, ControllerEffect::None);
 }
 
 #[test]

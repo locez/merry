@@ -1,3 +1,5 @@
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
 pub(crate) struct TextInput {
@@ -42,5 +44,15 @@ impl TextInput {
         let value = trimmed.to_owned();
         self.clear();
         Some(value)
+    }
+
+    pub(crate) fn handle_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char(value) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.insert_char(value);
+            }
+            KeyCode::Backspace => self.backspace(),
+            _ => {}
+        }
     }
 }

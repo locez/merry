@@ -2,12 +2,14 @@ use crate::cli_error::CliError;
 use crate::config::MerryConfig;
 use crate::sandbox::ChildHandoff as SandboxChildHandoff;
 
+mod controller;
 mod input;
 pub(crate) mod keymap;
 mod projector;
 mod render;
 mod runtime;
 mod state;
+mod terminal;
 pub(crate) mod theme;
 
 #[cfg(test)]
