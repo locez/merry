@@ -1,9 +1,22 @@
 use super::input::TextInput;
 use super::keymap::{KeyAction, KeyBinding, Keymap};
-use super::state::{QueuePreview, TuiState};
+use super::projector::TuiProjector;
+use super::state::{QueuePreview, TimelineItem, TuiState};
 use super::theme::{SemanticColor, TuiTheme};
 use crossterm::event::{KeyCode, KeyModifiers};
-use merry_core::{QueuedInputLane, QueuedInputView};
+use merry_core::{
+    ArtifactId, ArtifactKind, ArtifactRef, ContextWindowSource, ModelUsage, QueuedInputLane,
+    QueuedInputView, RuntimeEvent, RuntimeEventSource, SessionId, SessionUsage, ToolCallId,
+    ToolCallResult, ToolOutput, UsageContextWindow,
+};
+
+fn source() -> RuntimeEventSource {
+    RuntimeEventSource::new(SessionId::new("tui-test").unwrap(), 1)
+}
+
+fn text_artifact(id: &str) -> ArtifactRef {
+    ArtifactRef::new(ArtifactId::new(id).unwrap(), ArtifactKind::Text)
+}
 
 #[test]
 fn text_input_inserts_deletes_and_takes_trimmed_text() {
@@ -82,4 +95,118 @@ fn theme_has_required_semantic_color_slots() {
     ] {
         assert!(theme.color(slot).is_some());
     }
+}
+
+#[test]
+fn projector_renders_assistant_text_as_primary_timeline_item() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    let mut projector = TuiProjector::default();
+
+    projector.apply(
+        RuntimeEvent::AssistantMessage {
+            text: "hello from assistant".to_owned(),
+            artifact: text_artifact("assistant-1"),
+            source: source(),
+        },
+        &mut state,
+    );
+
+    assert_eq!(
+        state.timeline(),
+        &[TimelineItem::Assistant {
+            text: "hello from assistant".to_owned()
+        }]
+    );
+}
+
+#[test]
+fn projector_collapses_read_tool_and_expands_patch_tool() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    let mut projector = TuiProjector::default();
+
+    projector.apply(
+        RuntimeEvent::ToolCallFinished {
+            result: ToolCallResult::succeeded(
+                ToolCallId::new("call-read").unwrap(),
+                text_artifact("read-output"),
+            ),
+            output: Some(ToolOutput::Text {
+                text: "file contents".to_owned(),
+            }),
+            source: source(),
+        },
+        &mut state,
+    );
+    projector.apply(
+        RuntimeEvent::ToolCallFinished {
+            result: ToolCallResult::succeeded(
+                ToolCallId::new("call-patch").unwrap(),
+                text_artifact("patch-output"),
+            ),
+            output: Some(ToolOutput::Text {
+                text: "--- a/src/lib.rs\n+++ b/src/lib.rs\n+new line".to_owned(),
+            }),
+            source: source(),
+        },
+        &mut state,
+    );
+
+    assert!(matches!(state.timeline()[0], TimelineItem::Muted { .. }));
+    assert!(matches!(state.timeline()[1], TimelineItem::Expanded { .. }));
+}
+
+#[test]
+fn projector_updates_queue_preview_and_usage_without_timeline_noise() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    let mut projector = TuiProjector::default();
+
+    projector.apply(
+        RuntimeEvent::QueuedInputsChanged {
+            inputs: merry_core::QueuedInputsView {
+                next: vec![merry_core::QueuedInputView {
+                    text: "urgent".to_owned(),
+                    lane: merry_core::QueuedInputLane::Next,
+                    position: 0,
+                }],
+                suspended: vec![],
+                backlog: vec![],
+            },
+        },
+        &mut state,
+    );
+    projector.apply(
+        RuntimeEvent::UsageUpdated {
+            usage: SessionUsage {
+                total: ModelUsage::new(10, 3),
+                last: ModelUsage::new(10, 3),
+                context: Some(UsageContextWindow {
+                    resolved_model_window_tokens: 128000,
+                    effective_window_tokens: 128000,
+                    source: ContextWindowSource::ProviderCapabilities,
+                }),
+                compaction: None,
+            },
+            source: source(),
+        },
+        &mut state,
+    );
+
+    assert_eq!(state.queue_preview().next[0].text, "urgent");
+    assert!(state.timeline().is_empty());
+    assert!(state.status_text().contains("13 tok"));
 }
