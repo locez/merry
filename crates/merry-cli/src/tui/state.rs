@@ -130,6 +130,10 @@ impl TuiState {
         &mut self.timeline
     }
 
+    pub(crate) fn push_timeline_item(&mut self, item: TimelineItem) {
+        self.timeline.push(item);
+    }
+
     pub(crate) fn queue_preview(&self) -> &QueuePreviewState {
         &self.queue_preview
     }
