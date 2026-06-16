@@ -5,10 +5,11 @@ use super::state::{QueuePreview, TimelineItem, TuiState};
 use super::theme::{SemanticColor, TuiTheme};
 use crossterm::event::{KeyCode, KeyModifiers};
 use merry_core::{
-    ArtifactId, ArtifactKind, ArtifactRef, ContextWindowSource, ModelUsage, QueuedInputLane,
-    QueuedInputView, RuntimeEvent, RuntimeEventSource, SessionId, SessionUsage, ToolCallId,
-    ToolCallResult, ToolOutput, UsageContextWindow,
+    ArtifactId, ArtifactKind, ArtifactRef, ContextWindowSource, ModelUsage, PendingToolCall,
+    QueuedInputLane, QueuedInputView, RuntimeEvent, RuntimeEventSource, SessionId, SessionUsage,
+    ToolCallArguments, ToolCallId, ToolCallResult, ToolName, ToolOutput, UsageContextWindow,
 };
+use merry_tool_workspace::WORKSPACE_PATCH_TOOL;
 
 fn source() -> RuntimeEventSource {
     RuntimeEventSource::new(SessionId::new("tui-test").unwrap(), 1)
@@ -16,6 +17,14 @@ fn source() -> RuntimeEventSource {
 
 fn text_artifact(id: &str) -> ArtifactRef {
     ArtifactRef::new(ArtifactId::new(id).unwrap(), ArtifactKind::Text)
+}
+
+fn pending_call(id: &str, tool_name: &str) -> PendingToolCall {
+    PendingToolCall::new(
+        ToolCallId::new(id).unwrap(),
+        ToolName::new(tool_name).unwrap(),
+        ToolCallArguments::new(Default::default()),
+    )
 }
 
 #[test]
@@ -135,6 +144,13 @@ fn projector_collapses_read_tool_and_expands_patch_tool() {
     let mut projector = TuiProjector::default();
 
     projector.apply(
+        RuntimeEvent::ToolCallStarted {
+            call: pending_call("call-read", "workspace_read_file"),
+            source: source(),
+        },
+        &mut state,
+    );
+    projector.apply(
         RuntimeEvent::ToolCallFinished {
             result: ToolCallResult::succeeded(
                 ToolCallId::new("call-read").unwrap(),
@@ -143,6 +159,13 @@ fn projector_collapses_read_tool_and_expands_patch_tool() {
             output: Some(ToolOutput::Text {
                 text: "file contents".to_owned(),
             }),
+            source: source(),
+        },
+        &mut state,
+    );
+    projector.apply(
+        RuntimeEvent::ToolCallStarted {
+            call: pending_call("call-patch", WORKSPACE_PATCH_TOOL),
             source: source(),
         },
         &mut state,
@@ -162,7 +185,77 @@ fn projector_collapses_read_tool_and_expands_patch_tool() {
     );
 
     assert!(matches!(state.timeline()[0], TimelineItem::Muted { .. }));
+    assert!(matches!(state.timeline()[1], TimelineItem::Muted { .. }));
+    assert!(matches!(state.timeline()[2], TimelineItem::Muted { .. }));
+    assert!(matches!(state.timeline()[3], TimelineItem::Expanded { .. }));
+}
+
+#[test]
+fn projector_expands_workspace_patch_by_tool_name() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    let mut projector = TuiProjector::default();
+
+    projector.apply(
+        RuntimeEvent::ToolCallStarted {
+            call: pending_call("call-patch", WORKSPACE_PATCH_TOOL),
+            source: source(),
+        },
+        &mut state,
+    );
+    projector.apply(
+        RuntimeEvent::ToolCallFinished {
+            result: ToolCallResult::succeeded(
+                ToolCallId::new("call-patch").unwrap(),
+                text_artifact("patch-output"),
+            ),
+            output: Some(ToolOutput::Json {
+                json: r#"{"tool":"workspace_patch","status":"applied"}"#.to_owned(),
+            }),
+            source: source(),
+        },
+        &mut state,
+    );
+
     assert!(matches!(state.timeline()[1], TimelineItem::Expanded { .. }));
+}
+
+#[test]
+fn projector_keeps_diff_like_non_patch_output_muted() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    let mut projector = TuiProjector::default();
+
+    projector.apply(
+        RuntimeEvent::ToolCallStarted {
+            call: pending_call("call-read", "workspace_read_file"),
+            source: source(),
+        },
+        &mut state,
+    );
+    projector.apply(
+        RuntimeEvent::ToolCallFinished {
+            result: ToolCallResult::succeeded(
+                ToolCallId::new("call-read").unwrap(),
+                text_artifact("read-output"),
+            ),
+            output: Some(ToolOutput::Text {
+                text: "--- a/src/lib.rs\n+++ b/src/lib.rs\n+not a patch result".to_owned(),
+            }),
+            source: source(),
+        },
+        &mut state,
+    );
+
+    assert!(matches!(state.timeline()[1], TimelineItem::Muted { .. }));
 }
 
 #[test]

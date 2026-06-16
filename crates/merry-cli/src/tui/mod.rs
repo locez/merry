@@ -4,7 +4,6 @@ use crate::sandbox::ChildHandoff as SandboxChildHandoff;
 
 mod input;
 pub(crate) mod keymap;
-#[allow(dead_code)]
 mod projector;
 mod runtime;
 mod state;
