@@ -2,7 +2,14 @@ use crate::cli_error::CliError;
 use crate::config::MerryConfig;
 use crate::sandbox::ChildHandoff as SandboxChildHandoff;
 
+mod input;
+pub(crate) mod keymap;
 mod runtime;
+mod state;
+pub(crate) mod theme;
+
+#[cfg(test)]
+mod tests;
 
 pub(crate) async fn run(
     _sandbox_child_handoff: Option<SandboxChildHandoff>,
