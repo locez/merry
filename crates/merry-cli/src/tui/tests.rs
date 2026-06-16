@@ -90,6 +90,30 @@ fn controller_empty_submit_does_nothing() {
 }
 
 #[test]
+fn controller_scroll_actions_move_timeline_viewport() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+
+    let initial = state.timeline_scroll_offset();
+
+    assert_eq!(
+        handle_key_action(KeyAction::ScrollUp, &mut state),
+        ControllerEffect::None
+    );
+    assert_eq!(state.timeline_scroll_offset(), initial.saturating_add(1));
+
+    assert_eq!(
+        handle_key_action(KeyAction::ScrollDown, &mut state),
+        ControllerEffect::None
+    );
+    assert_eq!(state.timeline_scroll_offset(), initial);
+}
+
+#[test]
 fn default_keymap_maps_enter_to_submit_next_and_ctrl_b_to_backlog() {
     let keymap = Keymap::default();
 
@@ -235,6 +259,46 @@ fn projector_collapses_read_tool_and_expands_patch_tool() {
     assert!(matches!(state.timeline()[1], TimelineItem::Muted { .. }));
     assert!(matches!(state.timeline()[2], TimelineItem::Muted { .. }));
     assert!(matches!(state.timeline()[3], TimelineItem::Expanded { .. }));
+}
+
+#[test]
+fn projector_keeps_non_patch_tool_results_compact_without_raw_json() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    let mut projector = TuiProjector::default();
+
+    projector.apply(
+        RuntimeEvent::ToolCallStarted {
+            call: pending_call("call-read", "workspace_read_file"),
+            source: source(),
+        },
+        &mut state,
+    );
+    projector.apply(
+        RuntimeEvent::ToolCallFinished {
+            result: ToolCallResult::succeeded(
+                ToolCallId::new("call-read").unwrap(),
+                text_artifact("read-output"),
+            ),
+            output: Some(ToolOutput::Json {
+                json: r#"{"ok":true,"tool":"workspace_read_file","path":"AGENTS.md","bytes":19704,"content":"large raw content"}"#.to_owned(),
+            }),
+            source: source(),
+        },
+        &mut state,
+    );
+
+    assert_eq!(state.timeline().len(), 2);
+    assert!(matches!(state.timeline()[0], TimelineItem::Muted { .. }));
+    let TimelineItem::Muted { title, detail } = &state.timeline()[1] else {
+        panic!("non-patch tool result should stay muted");
+    };
+    assert_eq!(title, "workspace_read_file");
+    assert_eq!(detail, "completed");
 }
 
 #[test]
@@ -390,6 +454,49 @@ fn renderer_shows_status_timeline_queue_and_input() {
 }
 
 #[test]
+fn renderer_shows_empty_queue_lanes() {
+    let state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+
+    let text = render_to_text(&state, 80, 16);
+
+    assert!(text.contains("Next"));
+    assert!(text.contains("Suspended"));
+    assert!(text.contains("Backlog"));
+    assert!(text.contains("--"));
+}
+
+#[test]
+fn renderer_scrolls_timeline_viewport() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    for index in 0..12 {
+        state.push_timeline_item(TimelineItem::Assistant {
+            text: format!("line {index}"),
+        });
+    }
+
+    let bottom = render_to_text(&state, 48, 12);
+    assert!(bottom.contains("line 11"));
+    assert!(!bottom.contains("line 0"));
+
+    state.scroll_timeline_up();
+    state.scroll_timeline_up();
+    state.scroll_timeline_up();
+    let scrolled = render_to_text(&state, 48, 12);
+    assert!(scrolled.contains("line 8"));
+    assert!(!scrolled.contains("line 11"));
+}
+
+#[test]
 fn renderer_applies_configured_semantic_theme_colors() {
     let theme = TuiTheme::from_config(&crate::config::TuiThemeToml {
         status: Some("red".to_owned()),
@@ -426,7 +533,7 @@ fn renderer_applies_configured_semantic_theme_colors() {
 
     let buffer = render_to_buffer(&state, 80, 18);
 
-    assert_eq!(buffer[(0, 0)].fg, Color::Red);
+    assert_eq!(find_cell_color(&buffer, "gpt-test"), Some(Color::Red));
     assert_eq!(find_cell_color(&buffer, "tool"), Some(Color::Blue));
     assert_eq!(find_cell_color(&buffer, "patch"), Some(Color::Magenta));
     assert_eq!(find_cell_color(&buffer, "+added"), Some(Color::Green));

@@ -33,6 +33,14 @@ pub(crate) fn handle_key_action(action: KeyAction, state: &mut TuiState) -> Cont
             .map_or(ControllerEffect::None, ControllerEffect::SubmitBacklog),
         KeyAction::Interrupt => ControllerEffect::Interrupt,
         KeyAction::Quit => ControllerEffect::Quit,
+        KeyAction::ScrollUp => {
+            state.scroll_timeline_up();
+            ControllerEffect::None
+        }
+        KeyAction::ScrollDown => {
+            state.scroll_timeline_down();
+            ControllerEffect::None
+        }
         _ => ControllerEffect::None,
     }
 }

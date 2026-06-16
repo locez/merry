@@ -5,51 +5,60 @@ use super::{
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
-    style::Style,
+    style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Paragraph, Wrap},
 };
 
-const QUEUE_PREVIEW_HEIGHT: u16 = 6;
+const QUEUE_PREVIEW_HEIGHT: u16 = 5;
 
 #[allow(dead_code)]
 pub(crate) fn render(frame: &mut Frame<'_>, state: &TuiState) {
     let root = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),
             Constraint::Min(3),
             Constraint::Length(QUEUE_PREVIEW_HEIGHT),
             Constraint::Length(3),
+            Constraint::Length(1),
         ])
         .split(frame.area());
 
     frame.render_widget(
-        Paragraph::new(state.status_text()).style(semantic_style(state, SemanticColor::Status)),
+        Paragraph::new(timeline_lines(state, root[0].height))
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::default()
+                    .borders(Borders::BOTTOM)
+                    .border_type(BorderType::Plain)
+                    .border_style(semantic_style(state, SemanticColor::Muted))
+                    .title_style(semantic_style(state, SemanticColor::Muted)),
+            ),
         root[0],
     );
     frame.render_widget(
-        Paragraph::new(timeline_lines(state)).wrap(Wrap { trim: false }),
-        root[1],
-    );
-    frame.render_widget(
-        Paragraph::new(queue_lines(state, root[2])).block(
+        Paragraph::new(queue_lines(state, root[1])).block(
             Block::default()
-                .borders(Borders::TOP)
+                .title("queue")
                 .border_style(semantic_style(state, SemanticColor::Muted)),
         ),
-        root[2],
+        root[1],
     );
     frame.render_widget(
         Paragraph::new(state.input_text())
             .style(semantic_style(state, SemanticColor::Focus))
             .block(
                 Block::default()
-                    .borders(Borders::TOP)
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Plain)
                     .title("input")
                     .border_style(semantic_style(state, SemanticColor::Focus))
                     .title_style(semantic_style(state, SemanticColor::Focus)),
             ),
+        root[2],
+    );
+    frame.render_widget(
+        Paragraph::new(state.status_text()).style(semantic_style(state, SemanticColor::Status)),
         root[3],
     );
 }
@@ -83,8 +92,8 @@ pub(crate) fn render_to_buffer(
     terminal.backend().buffer().clone()
 }
 
-fn timeline_lines(state: &TuiState) -> Vec<Line<'static>> {
-    state
+fn timeline_lines(state: &TuiState, region_height: u16) -> Vec<Line<'static>> {
+    let lines = state
         .timeline()
         .iter()
         .flat_map(|item| match item {
@@ -112,67 +121,64 @@ fn timeline_lines(state: &TuiState) -> Vec<Line<'static>> {
                 lines
             }
         })
-        .collect()
+        .collect::<Vec<_>>();
+    let visible_height = usize::from(region_height).saturating_sub(1).max(1);
+    let end = lines
+        .len()
+        .saturating_sub(state.timeline_scroll_offset())
+        .max(visible_height)
+        .min(lines.len());
+    let start = end.saturating_sub(visible_height);
+    lines.into_iter().skip(start).take(end - start).collect()
 }
 
 fn queue_lines(state: &TuiState, region: Rect) -> Vec<Line<'static>> {
     let queue = state.queue_preview();
-    let mut lines = Vec::new();
-    if !queue.next.is_empty() {
-        lines.push(queue_heading(state, "Next"));
-        lines.extend(queue.next.iter().enumerate().map(|(index, item)| {
-            let prefix = format!("  {}. ", index + 1);
-            queue_item(
-                state,
-                &prefix,
-                &item.display_text(queue_item_width(region.width, prefix.len())),
-            )
-        }));
-    }
-    if !queue.suspended.is_empty() {
-        lines.push(queue_heading(state, "Suspended"));
-        lines.extend(queue.suspended.iter().enumerate().map(|(index, item)| {
-            let prefix = format!("  {}. ", index + 1);
-            queue_item(
-                state,
-                &prefix,
-                &item.display_text(queue_item_width(region.width, prefix.len())),
-            )
-        }));
-    }
-    if !queue.backlog.is_empty() {
-        lines.push(queue_heading(state, "Backlog"));
-        lines.extend(queue.backlog.iter().enumerate().map(|(index, item)| {
-            let prefix = format!("  {}. ", index + 1);
-            queue_item(
-                state,
-                &prefix,
-                &item.display_text(queue_item_width(region.width, prefix.len())),
-            )
-        }));
-    }
-    lines
+    vec![
+        queue_lane(state, "Next", &queue.next, region.width),
+        queue_lane(state, "Suspended", &queue.suspended, region.width),
+        queue_lane(state, "Backlog", &queue.backlog, region.width),
+    ]
 }
 
-fn queue_item_width(region_width: u16, prefix_width: usize) -> usize {
-    usize::from(region_width).saturating_sub(prefix_width)
-}
-
-fn queue_heading(state: &TuiState, label: &'static str) -> Line<'static> {
-    Line::from(Span::styled(
-        label,
-        semantic_style(state, SemanticColor::Focus),
-    ))
-}
-
-fn queue_item(state: &TuiState, prefix: &str, text: &str) -> Line<'static> {
+fn queue_lane(
+    state: &TuiState,
+    label: &'static str,
+    items: &[super::state::QueuePreviewItem],
+    region_width: u16,
+) -> Line<'static> {
+    let label_text = format!("{label:<10} ");
+    let content_width = usize::from(region_width).saturating_sub(label_text.chars().count());
+    let content = if items.is_empty() {
+        "--".to_owned()
+    } else {
+        items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| format!("{}. {}", index + 1, item.text))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
     Line::from(vec![
         Span::styled(
-            prefix.to_owned(),
+            label_text,
+            semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            truncate_chars(&content, content_width),
             semantic_style(state, SemanticColor::Muted),
         ),
-        Span::styled(text.to_owned(), semantic_style(state, SemanticColor::Muted)),
     ])
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    if max_chars <= 3 {
+        return ".".repeat(max_chars);
+    }
+    if text.chars().count() <= max_chars {
+        return text.to_owned();
+    }
+    text.chars().take(max_chars - 3).collect::<String>() + "..."
 }
 
 fn timeline_body_style(state: &TuiState, item: &TimelineItem, line: &str) -> Style {
