@@ -4,6 +4,7 @@ use crate::{
     artifact::{ArtifactContent, ArtifactError},
 };
 use merry_core::{ArtifactId, PendingToolCall, ToolCallId, ToolCallResult};
+use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use std::collections::BTreeSet;
 
@@ -57,6 +58,44 @@ pub(crate) enum TranscriptItem {
         result: ToolCallResult,
         artifact_id: ArtifactId,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PersistedTranscript {
+    pub(crate) items: Vec<PersistedTranscriptItem>,
+    pub(crate) next_id: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum PersistedTranscriptItem {
+    UserMessage {
+        id: u64,
+        text: String,
+        origin: PersistedUserInputOrigin,
+    },
+    AssistantText {
+        id: u64,
+        artifact_id: ArtifactId,
+    },
+    ToolCall {
+        id: u64,
+        call: PendingToolCall,
+    },
+    ToolResult {
+        id: u64,
+        call_id: ToolCallId,
+        result: ToolCallResult,
+        artifact_id: ArtifactId,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PersistedUserInputOrigin {
+    ExternalUser,
+    RuntimeControl,
 }
 
 impl TranscriptItem {
@@ -225,11 +264,115 @@ impl Transcript {
         self.next_id = self.next_id.checked_next()?;
         Ok(id)
     }
+
+    pub(crate) fn persisted(&self) -> PersistedTranscript {
+        PersistedTranscript {
+            items: self
+                .items
+                .iter()
+                .map(PersistedTranscriptItem::from)
+                .collect(),
+            next_id: self.next_id.as_u64(),
+        }
+    }
+
+    pub(crate) fn from_persisted(persisted: PersistedTranscript) -> Result<Self, RuntimeError> {
+        Ok(Self {
+            items: persisted
+                .items
+                .into_iter()
+                .map(TranscriptItem::try_from)
+                .collect::<Result<Vec<_>, _>>()?,
+            next_id: TranscriptItemId::new(persisted.next_id),
+        })
+    }
 }
 
 impl Default for Transcript {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl From<UserInputOrigin> for PersistedUserInputOrigin {
+    fn from(value: UserInputOrigin) -> Self {
+        match value {
+            UserInputOrigin::ExternalUser => Self::ExternalUser,
+            UserInputOrigin::RuntimeControl => Self::RuntimeControl,
+        }
+    }
+}
+
+impl From<PersistedUserInputOrigin> for UserInputOrigin {
+    fn from(value: PersistedUserInputOrigin) -> Self {
+        match value {
+            PersistedUserInputOrigin::ExternalUser => Self::ExternalUser,
+            PersistedUserInputOrigin::RuntimeControl => Self::RuntimeControl,
+        }
+    }
+}
+
+impl From<&TranscriptItem> for PersistedTranscriptItem {
+    fn from(value: &TranscriptItem) -> Self {
+        match value {
+            TranscriptItem::UserMessage { id, text, origin } => Self::UserMessage {
+                id: id.as_u64(),
+                text: text.clone(),
+                origin: (*origin).into(),
+            },
+            TranscriptItem::AssistantText { id, artifact_id } => Self::AssistantText {
+                id: id.as_u64(),
+                artifact_id: artifact_id.clone(),
+            },
+            TranscriptItem::ToolCall { id, call } => Self::ToolCall {
+                id: id.as_u64(),
+                call: call.clone(),
+            },
+            TranscriptItem::ToolResult {
+                id,
+                call_id,
+                result,
+                artifact_id,
+            } => Self::ToolResult {
+                id: id.as_u64(),
+                call_id: call_id.clone(),
+                result: result.clone(),
+                artifact_id: artifact_id.clone(),
+            },
+        }
+    }
+}
+
+impl TryFrom<PersistedTranscriptItem> for TranscriptItem {
+    type Error = RuntimeError;
+
+    fn try_from(value: PersistedTranscriptItem) -> Result<Self, Self::Error> {
+        Ok(match value {
+            PersistedTranscriptItem::UserMessage { id, text, origin } => Self::UserMessage {
+                id: TranscriptItemId::new(id),
+                text,
+                origin: origin.into(),
+            },
+            PersistedTranscriptItem::AssistantText { id, artifact_id } => Self::AssistantText {
+                id: TranscriptItemId::new(id),
+                artifact_id,
+            },
+            PersistedTranscriptItem::ToolCall { id, call } => Self::ToolCall {
+                id: TranscriptItemId::new(id),
+                call,
+            },
+            PersistedTranscriptItem::ToolResult {
+                id,
+                call_id,
+                result,
+                artifact_id,
+            } => Self::ToolResult {
+                id: TranscriptItemId::new(id),
+                call_id,
+                result,
+                artifact_id,
+            },
+        })
     }
 }
 

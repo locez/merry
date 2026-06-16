@@ -73,8 +73,12 @@ Initial layout:
 ```text
 <state_home>/merry/sessions/<session_id>/
   state.json
-  artifacts/
 ```
+
+`state.json` is the latest complete session document. The filesystem store may
+use same-directory temporary files while saving, but it must not keep
+per-artifact payload files, snapshot histories, or pack files in the first
+slice.
 
 The first slice does not need SQLite, an abstract `SessionStore` trait, remote
 storage, listing/search indexes, archives, or a global session catalog. Add
@@ -91,7 +95,7 @@ Persist:
 - `next_sequence`
 - `session_started`
 - task ledger state
-- artifact registry metadata and exact artifact payloads
+- artifact registry metadata and exact artifact content
 - compacted checkpoint state
 - context entries
 - judgment registry
@@ -134,27 +138,40 @@ designed.
 
 Save only resume-safe session states.
 
-The main savepoint is the complete tool exchange boundary: after a tool result
-has been durably incorporated into session memory state, including its artifact
-payload, transcript item, ledger/audit facts, resolved tool-call id, and emitted
-result event state.
+Complete boundaries are:
+
+- a text-output model step after assistant output and `StepCompleted` have been
+  durably incorporated and no tool call is pending
+- a complete tool exchange after a tool result has been durably incorporated
+  into session memory state, including its artifact content, transcript item,
+  ledger/audit facts, resolved tool-call id, and emitted result event state
+- a final-output tool call after the structured output artifact and
+  `FinalOutputRecorded` state have been durably incorporated
 
 Do not save a state where an LLM-returned tool call is pending or a tool/process
 is executing. If the process crashes or the host restarts during that interval,
 the resumed runtime returns to the previous saved state and loses the
 incomplete work.
 
-Saving after ordinary assistant output or final output is also allowed when the
-state is resume-safe. This is not a broader turn-level replay contract; it only
-records stable session state that can be used by the next provider step.
+A model tool-call step is not complete at `ToolCallPending`; it becomes
+resume-safe only when the matching tool result has been recorded. This is not a
+broader turn-level replay contract; it only records stable session state that
+can be used by the next provider step.
 
 The resume-safe predicate is:
 
 - no active step is being persisted
 - no pending tool calls are persisted
-- every artifact referenced by persisted state has exact payload available
+- every artifact referenced by persisted state has exact content available
 - transcript, ledger, checkpoint/context, audits, resolved ids, and counters
   are internally consistent
+
+Automatic savepoints are best-effort side effects after the runtime has already
+committed a complete boundary to `SessionState`. A failed automatic savepoint
+must not turn an otherwise successful tool result, final-output record, or model
+step completion into a failed runtime operation, and it must not hide already
+committed journal events from the caller. Explicit `Runtime::save_session`
+remains strict: save failure is the primary result of that API.
 
 ## Write Ordering
 
@@ -163,20 +180,19 @@ latest resumable state.
 
 Required ordering:
 
-1. Write artifact payload files needed by the new state.
-2. Flush those writes enough that the next `state.json` does not reference
-   missing artifact payloads under normal process restart.
-3. Write the complete session document to a temporary file.
-4. Atomically replace `state.json` with the new document.
+1. Serialize the complete session document, including artifact content.
+2. Write the document bytes to a same-directory temporary file.
+3. Flush the temporary file enough that the next `state.json` is not a partial
+   document under normal process restart.
+4. Atomically replace `state.json` with the temporary file.
 
 If a write fails, the previous `state.json` remains the latest resumable state.
-It is acceptable to leave unreferenced temporary files or orphan artifacts; a
-future cleanup pass can remove them.
+It is acceptable to leave an unreferenced temporary file; a future cleanup pass
+can remove it.
 
 ## Resume Semantics
 
-Loading a session reconstructs a `SessionState` from `state.json` and artifact
-payloads.
+Loading a session reconstructs a `SessionState` from `state.json`.
 
 After loading:
 
@@ -200,13 +216,12 @@ Loading should fail clearly when:
 - `state.json` is absent
 - the persisted document has an unsupported format version
 - the session id inside the document does not match the requested `SessionId`
-- a referenced artifact payload is missing
+- persisted context evidence cannot be resolved from persisted artifacts
 - persisted data cannot be validated into `SessionState`
 
 Saving should fail clearly when:
 
 - the store root cannot be created
-- an artifact payload cannot be written
 - the state document cannot be serialized or atomically replaced
 
 Do not silently fall back to an ephemeral empty session on resume failure.
@@ -245,7 +260,8 @@ Deterministic runtime coverage should prove:
   are supplied by resumed runtime construction.
 - `activated_memories` are empty after load and can be recomputed on the next
   provider step.
-- Missing artifact payloads make resume fail with an actionable error.
+- Artifact records without restorable inline content make resume fail with an
+  actionable error.
 - `state.json` replacement is atomic enough that a failed save leaves the
   previous saved state loadable.
 

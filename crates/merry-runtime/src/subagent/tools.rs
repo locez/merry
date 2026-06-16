@@ -379,7 +379,7 @@ mod tests {
     }
 
     fn outcome_json(outcome: &crate::ToolExecutionOutcome) -> Value {
-        let ArtifactContent::Json(content) = outcome.content() else {
+        let ArtifactContent::Json { content } = outcome.content() else {
             panic!("expected JSON tool outcome");
         };
         serde_json::from_str(content).expect("outcome contains valid JSON")

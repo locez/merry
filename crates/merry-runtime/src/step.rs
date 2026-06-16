@@ -400,13 +400,13 @@ fn model_tool_result_content(
     content: &ArtifactContent,
 ) -> Result<ModelToolResultContent, merry_llm::ModelError> {
     match content {
-        ArtifactContent::Text(text) => ModelToolResultContent::text(text),
-        ArtifactContent::Json(json) => ModelToolResultContent::json(json),
-        ArtifactContent::Binary(_) | ArtifactContent::Image(_) | ArtifactContent::Other(_) => {
-            Err(merry_llm::ModelError::invalid_request(
-                "tool result continuation content must be text or json",
-            ))
-        }
+        ArtifactContent::Text { content: text } => ModelToolResultContent::text(text),
+        ArtifactContent::Json { content: json } => ModelToolResultContent::json(json),
+        ArtifactContent::Binary { .. }
+        | ArtifactContent::Image { .. }
+        | ArtifactContent::Other { .. } => Err(merry_llm::ModelError::invalid_request(
+            "tool result continuation content must be text or json",
+        )),
     }
 }
 

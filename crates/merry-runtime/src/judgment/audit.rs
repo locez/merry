@@ -5,13 +5,15 @@ use super::{
     error::JudgmentError,
     payload::{render_outcome_payload, render_request_payload, validate_record_id},
 };
+use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fmt};
 
 const JUDGMENT_RECORD_ID_PREFIX: &str = "judgment-record-";
 const JUDGMENT_RECORD_ID_ORDER_DIGITS: usize = 20;
 
 /// Validated internal identifier for completed judgment audit records.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub(crate) struct JudgmentRecordId(String);
 
 impl JudgmentRecordId {
@@ -39,7 +41,8 @@ impl fmt::Display for JudgmentRecordId {
 }
 
 /// Internal artifact identifier for judgment audit payloads.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub(crate) struct JudgmentInternalArtifactId(String);
 
 impl JudgmentInternalArtifactId {
@@ -75,7 +78,8 @@ impl JudgmentInternalArtifactKind {
 }
 
 /// Internal exact payload artifact for judgment audit records.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct JudgmentInternalArtifact {
     id: JudgmentInternalArtifactId,
     content: String,
@@ -98,7 +102,8 @@ impl JudgmentInternalArtifact {
 }
 
 /// Internal request/outcome artifact pair for a completed judgment record.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct JudgmentRecordArtifacts {
     request: JudgmentInternalArtifact,
     outcome: JudgmentInternalArtifact,
@@ -141,7 +146,8 @@ impl JudgmentRecordArtifacts {
 }
 
 /// Completed internal advisory judgment audit record.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct JudgmentRecord {
     id: JudgmentRecordId,
     request: JudgmentRequest,
@@ -197,6 +203,12 @@ pub(crate) struct JudgmentRegistry {
     next_order: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PersistedJudgmentRegistry {
+    records: Vec<JudgmentRecord>,
+}
+
 impl JudgmentRegistry {
     #[must_use]
     pub(crate) fn is_empty(&self) -> bool {
@@ -249,6 +261,34 @@ impl JudgmentRegistry {
         });
 
         JudgmentRegistrySnapshot { records }
+    }
+
+    #[must_use]
+    pub(crate) fn persisted(&self) -> PersistedJudgmentRegistry {
+        PersistedJudgmentRegistry {
+            records: self.snapshot().records,
+        }
+    }
+
+    pub(crate) fn from_persisted(
+        persisted: PersistedJudgmentRegistry,
+    ) -> Result<Self, JudgmentError> {
+        let mut records = BTreeMap::new();
+        let mut next_order = 0;
+        for record in persisted.records {
+            validate_record_purpose(record.request(), record.outcome())?;
+            if records.contains_key(record.id()) {
+                return Err(JudgmentError::DuplicateRecordId {
+                    id: record.id().clone(),
+                });
+            }
+            next_order = next_order.max(record.commit_order().saturating_add(1));
+            records.insert(record.id().clone(), record);
+        }
+        Ok(Self {
+            records,
+            next_order,
+        })
     }
 
     fn next_generated_id(&self) -> JudgmentRecordId {

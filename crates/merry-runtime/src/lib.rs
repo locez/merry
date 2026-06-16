@@ -50,6 +50,7 @@ mod process_tool;
 mod profile;
 mod runtime;
 mod session;
+mod session_store;
 mod skill;
 mod step;
 mod subagent;
@@ -121,6 +122,7 @@ pub use profile::{
     RuntimeCapabilities, RuntimeProfile, RuntimeProfileBuilder, RuntimeProfileError,
 };
 pub use runtime::{AutomaticCompactionConfig, Runtime, RuntimeBuilder};
+pub use session_store::{FileSessionStore, SessionStoreError};
 pub use skill::{SkillCatalog, SkillError, SkillLoadWarning, SkillMetadata};
 pub use step::{StepContext, StepInput};
 pub use subagent::{

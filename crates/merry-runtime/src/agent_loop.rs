@@ -1250,6 +1250,7 @@ fn runtime_error_code(error: &RuntimeError) -> &'static str {
         RuntimeError::Context { .. } => "context_error",
         RuntimeError::Checkpoint { .. } => "checkpoint_error",
         RuntimeError::Compaction { .. } => "compaction_error",
+        RuntimeError::SessionStore { .. } => "session_store",
         RuntimeError::MissingModelProvider { .. } => "missing_model_provider",
         RuntimeError::CompactionModelRequest { .. } => "compaction_model_request",
         RuntimeError::CompactionModelSetup { .. } => "compaction_model_setup",

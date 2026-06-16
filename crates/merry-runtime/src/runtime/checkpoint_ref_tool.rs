@@ -9,7 +9,7 @@ use schemars::Schema;
 use serde_json::json;
 use std::sync::Arc;
 
-use super::RuntimeInner;
+use super::{RuntimeInner, persist_resume_safe_savepoint_if_configured};
 
 pub(super) const MERRY_READ_CHECKPOINT_REF_TOOL_NAME: &str = "merry_read_checkpoint_ref";
 const CHECKPOINT_REF_NOT_FOUND: &str = "checkpoint_ref_not_found";
@@ -121,14 +121,18 @@ pub(super) async fn execute_merry_read_checkpoint_ref_tool_call(
 
     let (status, content, diagnostic, execution_evidence) = outcome.into_parts();
     debug_assert!(execution_evidence.is_none());
-    let mut session = inner.session.lock().await;
-    if context.cancellation_token().is_cancelled() {
-        return Err(RuntimeError::ToolExecutionCancelled {
-            session_id: inner.session_id.clone(),
-            call_id: pending.id().clone(),
-        });
-    }
-    session.submit_tool_execution_outcome(pending.id(), status, content, diagnostic, None)
+    let events = {
+        let mut session = inner.session.lock().await;
+        if context.cancellation_token().is_cancelled() {
+            return Err(RuntimeError::ToolExecutionCancelled {
+                session_id: inner.session_id.clone(),
+                call_id: pending.id().clone(),
+            });
+        }
+        session.submit_tool_execution_outcome(pending.id(), status, content, diagnostic, None)?
+    };
+    persist_resume_safe_savepoint_if_configured(inner).await;
+    Ok(events)
 }
 
 fn checkpoint_ref_argument(pending: &PendingToolCall) -> String {

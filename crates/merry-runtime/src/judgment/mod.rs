@@ -23,7 +23,7 @@ mod summary_draft;
 mod tool_risk_review;
 
 pub(crate) use self::{
-    audit::{JudgmentRecord, JudgmentRecordId, JudgmentRegistry},
+    audit::{JudgmentRecord, JudgmentRecordId, JudgmentRegistry, PersistedJudgmentRegistry},
     core::{JudgmentEvidence, JudgmentOutcome, JudgmentRequest},
     error::JudgmentError,
     source::{JudgmentContext, JudgmentSource},

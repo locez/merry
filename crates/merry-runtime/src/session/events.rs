@@ -82,7 +82,7 @@ impl SessionState {
         RuntimeJournalEvent::new(self.session_id.clone(), sequence, payload)
     }
 
-    pub(super) fn next_sequence(&self) -> u64 {
+    pub(crate) fn next_sequence(&self) -> u64 {
         self.next_sequence
     }
 }

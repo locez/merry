@@ -209,12 +209,14 @@ async fn read_text_artifact(
 ) -> Result<String, RuntimeError> {
     let content = runtime.read_artifact_content(artifact_id).await?;
     match content {
-        ArtifactContent::Text(text) | ArtifactContent::Json(text) => Ok(text),
-        ArtifactContent::Binary(_) | ArtifactContent::Image(_) | ArtifactContent::Other(_) => {
-            Err(RuntimeError::InvalidStepInput {
-                reason: "assistant output artifact content is not text",
-            })
+        ArtifactContent::Text { content: text } | ArtifactContent::Json { content: text } => {
+            Ok(text)
         }
+        ArtifactContent::Binary { .. }
+        | ArtifactContent::Image { .. }
+        | ArtifactContent::Other { .. } => Err(RuntimeError::InvalidStepInput {
+            reason: "assistant output artifact content is not text",
+        }),
     }
 }
 

@@ -171,14 +171,14 @@ impl SessionState {
         content: &ArtifactContent,
     ) -> Result<ArtifactKind, RuntimeError> {
         match content {
-            ArtifactContent::Text(_) => Ok(ArtifactKind::Text),
-            ArtifactContent::Json(_) => Ok(ArtifactKind::Json),
-            ArtifactContent::Binary(_) | ArtifactContent::Image(_) | ArtifactContent::Other(_) => {
-                Err(RuntimeError::UnsupportedToolResultContent {
-                    artifact_id: self.next_tool_result_artifact_id(),
-                    content_kind: content.kind(),
-                })
-            }
+            ArtifactContent::Text { .. } => Ok(ArtifactKind::Text),
+            ArtifactContent::Json { .. } => Ok(ArtifactKind::Json),
+            ArtifactContent::Binary { .. }
+            | ArtifactContent::Image { .. }
+            | ArtifactContent::Other { .. } => Err(RuntimeError::UnsupportedToolResultContent {
+                artifact_id: self.next_tool_result_artifact_id(),
+                content_kind: content.kind(),
+            }),
         }
     }
 
@@ -187,11 +187,14 @@ impl SessionState {
         result: &ToolCallResult,
         content: &ArtifactContent,
     ) -> Result<(), RuntimeError> {
-        let supported = matches!(content, ArtifactContent::Text(_) | ArtifactContent::Json(_));
+        let supported = matches!(
+            content,
+            ArtifactContent::Text { .. } | ArtifactContent::Json { .. }
+        );
         let compatible = matches!(
             (result.artifact().kind(), content),
-            (ArtifactKind::Text, ArtifactContent::Text(_))
-                | (ArtifactKind::Json, ArtifactContent::Json(_))
+            (ArtifactKind::Text, ArtifactContent::Text { .. })
+                | (ArtifactKind::Json, ArtifactContent::Json { .. })
         );
 
         if !supported {
@@ -211,14 +214,18 @@ impl SessionState {
         }
 
         match content {
-            ArtifactContent::Text(text) | ArtifactContent::Json(text) if text.trim().is_empty() => {
+            ArtifactContent::Text { content: text } | ArtifactContent::Json { content: text }
+                if text.trim().is_empty() =>
+            {
                 Err(RuntimeError::UnsupportedToolResultContent {
                     artifact_id: result.artifact().id().clone(),
                     content_kind: content.kind(),
                 })
             }
-            ArtifactContent::Text(_) | ArtifactContent::Json(_) => Ok(()),
-            ArtifactContent::Binary(_) | ArtifactContent::Image(_) | ArtifactContent::Other(_) => {
+            ArtifactContent::Text { .. } | ArtifactContent::Json { .. } => Ok(()),
+            ArtifactContent::Binary { .. }
+            | ArtifactContent::Image { .. }
+            | ArtifactContent::Other { .. } => {
                 unreachable!("unsupported tool result content is rejected before blank validation")
             }
         }

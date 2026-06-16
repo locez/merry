@@ -20,6 +20,7 @@ mod events;
 mod history;
 mod judgments;
 mod messages;
+mod persistence;
 mod recording;
 mod tool_calls;
 mod tool_result;

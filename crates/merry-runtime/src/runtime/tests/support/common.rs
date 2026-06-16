@@ -88,6 +88,7 @@
             permission_admission_source: None,
             permissioned_process_runner_factory: None,
             subagent_manager: None,
+            session_store: None,
         }
     }
 

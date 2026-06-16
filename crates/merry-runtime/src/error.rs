@@ -9,6 +9,7 @@ use crate::artifact::{ArtifactContentKind, ArtifactError};
 use crate::checkpoint::CheckpointError;
 use crate::compaction::CompactionError;
 use crate::context::ContextError;
+use crate::session_store::SessionStoreError;
 use merry_core::{ArtifactId, CoreError, SessionId, ToolCallId, ToolName};
 use thiserror::Error;
 
@@ -178,6 +179,14 @@ pub enum RuntimeError {
         /// Source compaction error.
         #[from]
         source: CompactionError,
+    },
+
+    /// Session persistence failed.
+    #[error("session store error: {source}")]
+    SessionStore {
+        /// Source session store error.
+        #[from]
+        source: SessionStoreError,
     },
 
     /// A runtime operation needed a model provider for a role that is not configured.

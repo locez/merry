@@ -24,6 +24,7 @@ use super::process_execution::execute_admitted_process_action;
 use super::{
     DIAGNOSTIC_TOOL_ACTION_POLICY_DENIED, DIAGNOSTIC_TOOL_NOT_REGISTERED, RuntimeInner,
     TOOL_ACTION_POLICY_DENIED_MESSAGE, WORKSPACE_PATCH_TOOL_NAME, diagnostic_from_text,
+    persist_resume_safe_savepoint_if_configured,
 };
 
 pub(super) async fn execute_tool_call_with_active_permit(
@@ -64,20 +65,23 @@ pub(super) async fn execute_tool_call_with_active_permit(
             r#"{{"error":"tool_not_registered","tool":"{}"}}"#,
             pending.name()
         ));
-        let mut session = inner.session.lock().await;
-        if context.cancellation_token().is_cancelled() {
-            return Err(RuntimeError::ToolExecutionCancelled {
-                session_id: inner.session_id.clone(),
-                call_id: call_id.clone(),
-            });
-        }
-        return session.submit_tool_execution_outcome(
-            call_id,
-            ToolCallResultStatus::Failed,
-            content,
-            Some(diagnostic),
-            None,
-        );
+        let events = {
+            let mut session = inner.session.lock().await;
+            if context.cancellation_token().is_cancelled() {
+                return Err(RuntimeError::ToolExecutionCancelled {
+                    session_id: inner.session_id.clone(),
+                    call_id: call_id.clone(),
+                });
+            }
+            session.submit_tool_execution_outcome(
+                call_id,
+                ToolCallResultStatus::Failed,
+                content,
+                Some(diagnostic),
+                None,
+            )?
+        };
+        return persist_tool_events(inner, events).await;
     };
 
     if let Some(Err(error)) = inner.tool_registry.validate_tool_input(&pending) {
@@ -90,20 +94,23 @@ pub(super) async fn execute_tool_call_with_active_permit(
 
         let content = error.content_for_call(&pending);
         let diagnostic = error.diagnostic();
-        let mut session = inner.session.lock().await;
-        if context.cancellation_token().is_cancelled() {
-            return Err(RuntimeError::ToolExecutionCancelled {
-                session_id: inner.session_id.clone(),
-                call_id: call_id.clone(),
-            });
-        }
-        return session.submit_tool_execution_outcome(
-            call_id,
-            ToolCallResultStatus::Failed,
-            content,
-            Some(diagnostic),
-            None,
-        );
+        let events = {
+            let mut session = inner.session.lock().await;
+            if context.cancellation_token().is_cancelled() {
+                return Err(RuntimeError::ToolExecutionCancelled {
+                    session_id: inner.session_id.clone(),
+                    call_id: call_id.clone(),
+                });
+            }
+            session.submit_tool_execution_outcome(
+                call_id,
+                ToolCallResultStatus::Failed,
+                content,
+                Some(diagnostic),
+                None,
+            )?
+        };
+        return persist_tool_events(inner, events).await;
     }
 
     if is_merry_read_checkpoint_ref_tool(pending.name()) {
@@ -169,15 +176,19 @@ pub(super) async fn execute_tool_call_with_active_permit(
                         });
                     }
                     debug_assert!(execution_evidence.is_none());
-                    let mut session = inner.session.lock().await;
-                    if context.cancellation_token().is_cancelled() {
-                        return Err(RuntimeError::ToolExecutionCancelled {
-                            session_id: inner.session_id.clone(),
-                            call_id: call_id.clone(),
-                        });
-                    }
-                    return session
-                        .submit_tool_execution_outcome(call_id, status, content, diagnostic, None);
+                    let events = {
+                        let mut session = inner.session.lock().await;
+                        if context.cancellation_token().is_cancelled() {
+                            return Err(RuntimeError::ToolExecutionCancelled {
+                                session_id: inner.session_id.clone(),
+                                call_id: call_id.clone(),
+                            });
+                        }
+                        session.submit_tool_execution_outcome(
+                            call_id, status, content, diagnostic, None,
+                        )?
+                    };
+                    return persist_tool_events(inner, events).await;
                 }
                 Err(ToolExecutionError::Cancelled) => {
                     return Err(RuntimeError::ToolExecutionCancelled {
@@ -271,25 +282,27 @@ pub(super) async fn execute_tool_call_with_active_permit(
                         reason: "denied tool action outcome must include a diagnostic",
                     },
                 })?;
-                let mut session = inner.session.lock().await;
-                if context.cancellation_token().is_cancelled() {
-                    return Err(RuntimeError::ToolExecutionCancelled {
-                        session_id: inner.session_id.clone(),
-                        call_id: call_id.clone(),
-                    });
-                }
                 let denied_policy_decision = policy_decision.with_risk_tier(
                     classify_tool_action_risk(registered_tool.action_kind(), Some(&proposal)),
                 );
-                let events = session.submit_denied_tool_action(
-                    &pending,
-                    &denied_policy_decision,
-                    Some(proposal),
-                    content,
-                    diagnostic,
-                )?;
+                let events = {
+                    let mut session = inner.session.lock().await;
+                    if context.cancellation_token().is_cancelled() {
+                        return Err(RuntimeError::ToolExecutionCancelled {
+                            session_id: inner.session_id.clone(),
+                            call_id: call_id.clone(),
+                        });
+                    }
+                    session.submit_denied_tool_action(
+                        &pending,
+                        &denied_policy_decision,
+                        Some(proposal),
+                        content,
+                        diagnostic,
+                    )?
+                };
                 trace_denied_tool_execution(inner.session_id.as_str(), &pending, &events);
-                return Ok(events);
+                return persist_tool_events(inner, events).await;
             }
         } else {
             let outcome = denied_tool_action_outcome(&pending);
@@ -301,26 +314,28 @@ pub(super) async fn execute_tool_call_with_active_permit(
                     reason: "denied tool action outcome must include a diagnostic",
                 },
             })?;
-            let mut session = inner.session.lock().await;
-            if context.cancellation_token().is_cancelled() {
-                return Err(RuntimeError::ToolExecutionCancelled {
-                    session_id: inner.session_id.clone(),
-                    call_id: call_id.clone(),
-                });
-            }
             let denied_policy_decision = policy_decision.with_risk_tier(classify_tool_action_risk(
                 registered_tool.action_kind(),
                 None,
             ));
-            let events = session.submit_denied_tool_action(
-                &pending,
-                &denied_policy_decision,
-                None,
-                content,
-                diagnostic,
-            )?;
+            let events = {
+                let mut session = inner.session.lock().await;
+                if context.cancellation_token().is_cancelled() {
+                    return Err(RuntimeError::ToolExecutionCancelled {
+                        session_id: inner.session_id.clone(),
+                        call_id: call_id.clone(),
+                    });
+                }
+                session.submit_denied_tool_action(
+                    &pending,
+                    &denied_policy_decision,
+                    None,
+                    content,
+                    diagnostic,
+                )?
+            };
             trace_denied_tool_execution(inner.session_id.as_str(), &pending, &events);
-            return Ok(events);
+            return persist_tool_events(inner, events).await;
         }
     }
 
@@ -407,17 +422,7 @@ pub(super) async fn execute_tool_call_with_active_permit(
     };
 
     let (status, content, diagnostic, execution_evidence) = outcome.into_parts();
-    let mut session = inner.session.lock().await;
-    if context.cancellation_token().is_cancelled()
-        && allowed_proposal.is_none()
-        && !preserves_control_state
-    {
-        return Err(RuntimeError::ToolExecutionCancelled {
-            session_id: inner.session_id.clone(),
-            call_id: call_id.clone(),
-        });
-    }
-    if let Some(proposal) = allowed_proposal {
+    let events = if let Some(proposal) = allowed_proposal {
         if status == ToolCallResultStatus::Succeeded && execution_evidence.is_none() {
             return Err(RuntimeError::MissingActionExecutionEvidence {
                 session_id: inner.session_id.clone(),
@@ -446,16 +451,40 @@ pub(super) async fn execute_tool_call_with_active_permit(
                 });
             }
         }
-        return session.submit_proposed_tool_execution_outcome(
+        let mut session = inner.session.lock().await;
+        session.submit_proposed_tool_execution_outcome(
             proposal,
             status,
             content,
             diagnostic,
             execution_evidence,
             ActionAuditPolicy::from_decision(&policy_decision),
-        );
-    }
-    session.submit_tool_execution_outcome(call_id, status, content, diagnostic, execution_evidence)
+        )?
+    } else {
+        let mut session = inner.session.lock().await;
+        if context.cancellation_token().is_cancelled() && !preserves_control_state {
+            return Err(RuntimeError::ToolExecutionCancelled {
+                session_id: inner.session_id.clone(),
+                call_id: call_id.clone(),
+            });
+        }
+        session.submit_tool_execution_outcome(
+            call_id,
+            status,
+            content,
+            diagnostic,
+            execution_evidence,
+        )?
+    };
+    persist_tool_events(inner, events).await
+}
+
+async fn persist_tool_events(
+    inner: &RuntimeInner,
+    events: Vec<RuntimeJournalEvent>,
+) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
+    persist_resume_safe_savepoint_if_configured(inner).await;
+    Ok(events)
 }
 
 pub(super) fn denied_tool_action_outcome(pending: &PendingToolCall) -> crate::ToolExecutionOutcome {

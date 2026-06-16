@@ -6,6 +6,7 @@
 //! classifiers are not a shell interpreter.
 
 use crate::PermissionRequest;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::{
     fmt,
     future::Future,
@@ -34,7 +35,8 @@ pub const MAX_PROCESS_OUTPUT_LIMIT_BYTES: usize = 1024 * 1024;
 /// environment; that is part of the runner/sandbox boundary chosen by the
 /// runtime builder.
 #[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ProcessEnvPolicy {
     /// No tool-requested environment overrides.
     #[default]
@@ -138,6 +140,33 @@ impl ProcessPermissionProfileId {
     }
 }
 
+impl Serialize for ProcessPermissionProfileId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str((*self).as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ProcessPermissionProfileId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        match value.as_str() {
+            "process.read_only.v1" => Ok(Self::READ_ONLY_V1),
+            "process.local_workspace.bwrap.v1" => Ok(Self::LOCAL_WORKSPACE_BWRAP_V1),
+            "process.shell.read_only.v1" => Ok(Self::SHELL_READ_ONLY_V1),
+            "process.permission_request.approved.v1" => Ok(Self::APPROVED_PERMISSION_REQUEST_V1),
+            _ => Err(serde::de::Error::custom(format!(
+                "unsupported process permission profile id `{value}`"
+            ))),
+        }
+    }
+}
+
 impl fmt::Display for ProcessPermissionProfileId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.as_str())
@@ -222,7 +251,8 @@ impl PermissionedProcessRunnerFactory for StaticPermissionedProcessRunnerFactory
 /// The argv vector is intentionally open and does not enumerate allowed
 /// commands. This value is proposal evidence only in SP1; it is not an
 /// executor and must not be treated as authorization to spawn a process.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProcessActionIntent {
     summary: String,
     argv: Vec<String>,
@@ -438,7 +468,8 @@ impl ProcessRunnerOutput {
 }
 
 /// Provider-neutral process completion status.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ProcessExitStatus {
     /// The process exited with an integer code.
     Exited(i32),
@@ -491,7 +522,8 @@ impl ProcessRunnerError {
 /// This stores bounded metadata only: the validated intent identity, completion
 /// status, captured byte counts, and truncation flags. It contains no provider
 /// wire data and no stdout/stderr payload.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProcessExecutionEvidence {
     intent_summary: String,
     argv: Vec<String>,

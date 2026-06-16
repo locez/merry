@@ -9,6 +9,7 @@
 //! observable. Projections preserve that recorded ordering for deterministic
 //! context and debugging use.
 
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use thiserror::Error;
 
@@ -147,6 +148,57 @@ pub enum LedgerScope {
     Step,
     /// A fact that applies to a runtime-owned tool result.
     Tool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PersistedLedgerEntry {
+    sequence: u64,
+    order: u64,
+    kind: PersistedLedgerEntryKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+enum PersistedLedgerEntryKind {
+    Observation {
+        scope: PersistedLedgerScope,
+        summary: String,
+    },
+    Lifecycle {
+        kind: PersistedLedgerFactKind,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PersistedLedgerScope {
+    Session,
+    Task,
+    Step,
+    Tool,
+}
+
+impl From<LedgerScope> for PersistedLedgerScope {
+    fn from(value: LedgerScope) -> Self {
+        match value {
+            LedgerScope::Session => Self::Session,
+            LedgerScope::Task => Self::Task,
+            LedgerScope::Step => Self::Step,
+            LedgerScope::Tool => Self::Tool,
+        }
+    }
+}
+
+impl From<PersistedLedgerScope> for LedgerScope {
+    fn from(value: PersistedLedgerScope) -> Self {
+        match value {
+            PersistedLedgerScope::Session => Self::Session,
+            PersistedLedgerScope::Task => Self::Task,
+            PersistedLedgerScope::Step => Self::Step,
+            PersistedLedgerScope::Tool => Self::Tool,
+        }
+    }
 }
 
 /// Compact, validated text for ledger facts.
@@ -315,6 +367,73 @@ pub enum LedgerFactKind {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PersistedLedgerFactKind {
+    SessionStarted,
+    ArtifactRecorded,
+    StepStarted,
+    ModelRetry,
+    CompactionStarted,
+    CompactionCompleted,
+    SessionUsageUpdated,
+    StepCompleted,
+    ToolCallPending,
+    BridgeToolCallRequested,
+    ActionAuditRecorded,
+    ToolCallResolved,
+    FinalOutputRecorded,
+    SkillUsed,
+    Cancelled,
+    Failed,
+}
+
+impl From<LedgerFactKind> for PersistedLedgerFactKind {
+    fn from(value: LedgerFactKind) -> Self {
+        match value {
+            LedgerFactKind::SessionStarted => Self::SessionStarted,
+            LedgerFactKind::ArtifactRecorded => Self::ArtifactRecorded,
+            LedgerFactKind::StepStarted => Self::StepStarted,
+            LedgerFactKind::ModelRetry => Self::ModelRetry,
+            LedgerFactKind::CompactionStarted => Self::CompactionStarted,
+            LedgerFactKind::CompactionCompleted => Self::CompactionCompleted,
+            LedgerFactKind::SessionUsageUpdated => Self::SessionUsageUpdated,
+            LedgerFactKind::StepCompleted => Self::StepCompleted,
+            LedgerFactKind::ToolCallPending => Self::ToolCallPending,
+            LedgerFactKind::BridgeToolCallRequested => Self::BridgeToolCallRequested,
+            LedgerFactKind::ActionAuditRecorded => Self::ActionAuditRecorded,
+            LedgerFactKind::ToolCallResolved => Self::ToolCallResolved,
+            LedgerFactKind::FinalOutputRecorded => Self::FinalOutputRecorded,
+            LedgerFactKind::SkillUsed => Self::SkillUsed,
+            LedgerFactKind::Cancelled => Self::Cancelled,
+            LedgerFactKind::Failed => Self::Failed,
+        }
+    }
+}
+
+impl From<PersistedLedgerFactKind> for LedgerFactKind {
+    fn from(value: PersistedLedgerFactKind) -> Self {
+        match value {
+            PersistedLedgerFactKind::SessionStarted => Self::SessionStarted,
+            PersistedLedgerFactKind::ArtifactRecorded => Self::ArtifactRecorded,
+            PersistedLedgerFactKind::StepStarted => Self::StepStarted,
+            PersistedLedgerFactKind::ModelRetry => Self::ModelRetry,
+            PersistedLedgerFactKind::CompactionStarted => Self::CompactionStarted,
+            PersistedLedgerFactKind::CompactionCompleted => Self::CompactionCompleted,
+            PersistedLedgerFactKind::SessionUsageUpdated => Self::SessionUsageUpdated,
+            PersistedLedgerFactKind::StepCompleted => Self::StepCompleted,
+            PersistedLedgerFactKind::ToolCallPending => Self::ToolCallPending,
+            PersistedLedgerFactKind::BridgeToolCallRequested => Self::BridgeToolCallRequested,
+            PersistedLedgerFactKind::ActionAuditRecorded => Self::ActionAuditRecorded,
+            PersistedLedgerFactKind::ToolCallResolved => Self::ToolCallResolved,
+            PersistedLedgerFactKind::FinalOutputRecorded => Self::FinalOutputRecorded,
+            PersistedLedgerFactKind::SkillUsed => Self::SkillUsed,
+            PersistedLedgerFactKind::Cancelled => Self::Cancelled,
+            PersistedLedgerFactKind::Failed => Self::Failed,
+        }
+    }
+}
+
 /// Owned deterministic view of the ledger for context compilation.
 ///
 /// This is the preferred shape returned by [`crate::Runtime::ledger_projection`].
@@ -365,4 +484,79 @@ pub enum LedgerProjection {
 enum LedgerEntryRef {
     Update(usize),
     Lifecycle(usize),
+}
+
+impl TaskLedger {
+    pub(crate) fn persisted_entries(&self) -> Vec<PersistedLedgerEntry> {
+        self.entries
+            .iter()
+            .map(|entry| match entry {
+                LedgerEntryRef::Update(index) => {
+                    let update = &self.updates[*index];
+                    match update.kind() {
+                        LedgerUpdateKind::Observation { scope, summary } => PersistedLedgerEntry {
+                            sequence: update.sequence(),
+                            order: update.order(),
+                            kind: PersistedLedgerEntryKind::Observation {
+                                scope: (*scope).into(),
+                                summary: summary.as_str().to_owned(),
+                            },
+                        },
+                    }
+                }
+                LedgerEntryRef::Lifecycle(index) => {
+                    let fact = &self.lifecycle_facts[*index];
+                    PersistedLedgerEntry {
+                        sequence: fact.sequence(),
+                        order: fact.order(),
+                        kind: PersistedLedgerEntryKind::Lifecycle {
+                            kind: fact.kind().into(),
+                        },
+                    }
+                }
+            })
+            .collect()
+    }
+
+    pub(crate) fn from_persisted_entries(
+        entries: Vec<PersistedLedgerEntry>,
+    ) -> Result<Self, LedgerValidationError> {
+        let mut ledger = Self::default();
+        for entry in entries {
+            match entry.kind {
+                PersistedLedgerEntryKind::Observation { scope, summary } => {
+                    let update = LedgerUpdate {
+                        sequence: entry.sequence,
+                        order: entry.order,
+                        kind: LedgerUpdateKind::Observation {
+                            scope: scope.into(),
+                            summary: CompactLedgerText::try_from(summary)?,
+                        },
+                    };
+                    ledger.next_sequence =
+                        ledger.next_sequence.max(entry.sequence.saturating_add(1));
+                    ledger.next_order = ledger.next_order.max(entry.order.saturating_add(1));
+                    ledger.updates.push(update);
+                    ledger
+                        .entries
+                        .push(LedgerEntryRef::Update(ledger.updates.len() - 1));
+                }
+                PersistedLedgerEntryKind::Lifecycle { kind } => {
+                    let fact = LifecycleFact {
+                        sequence: entry.sequence,
+                        order: entry.order,
+                        kind: kind.into(),
+                    };
+                    ledger.next_sequence =
+                        ledger.next_sequence.max(entry.sequence.saturating_add(1));
+                    ledger.next_order = ledger.next_order.max(entry.order.saturating_add(1));
+                    ledger.lifecycle_facts.push(fact);
+                    ledger
+                        .entries
+                        .push(LedgerEntryRef::Lifecycle(ledger.lifecycle_facts.len() - 1));
+                }
+            }
+        }
+        Ok(ledger)
+    }
 }

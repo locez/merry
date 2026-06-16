@@ -1,4 +1,4 @@
-use super::{Runtime, RuntimeError};
+use super::{Runtime, RuntimeError, persist_resume_safe_savepoint_if_configured};
 use crate::{
     ArtifactContent, ContextEntry, ContextSummary, LedgerProjectionSnapshot,
     SessionContextSnapshot, events::ActiveStepPermit, session::is_runtime_reserved_artifact_id,
@@ -85,8 +85,12 @@ impl Runtime {
             });
         }
 
-        let mut session = self.inner.session.lock().await;
-        session.submit_tool_result(result, content)
+        let events = {
+            let mut session = self.inner.session.lock().await;
+            session.submit_tool_result(result, content)?
+        };
+        persist_resume_safe_savepoint_if_configured(&self.inner).await;
+        Ok(events)
     }
 
     pub(crate) async fn record_final_output_tool_call(
@@ -95,8 +99,12 @@ impl Runtime {
     ) -> Result<(crate::FinalOutput, Vec<RuntimeJournalEvent>), RuntimeError> {
         let json = serde_json::to_string(call.arguments().as_object())
             .expect("tool call arguments are JSON object values and must serialize");
-        let mut session = self.inner.session.lock().await;
-        session.record_final_output(call.id().clone(), json)
+        let output = {
+            let mut session = self.inner.session.lock().await;
+            session.record_final_output(call.id().clone(), json)?
+        };
+        persist_resume_safe_savepoint_if_configured(&self.inner).await;
+        Ok(output)
     }
 
     pub(crate) async fn submit_tool_input_validation_failure_with_active_permit(
@@ -107,14 +115,18 @@ impl Runtime {
     ) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
         let content = error.content_for_call(call);
         let diagnostic = error.diagnostic();
-        let mut session = self.inner.session.lock().await;
-        session.submit_tool_execution_outcome(
-            call.id(),
-            ToolCallResultStatus::Failed,
-            content,
-            Some(diagnostic),
-            None,
-        )
+        let events = {
+            let mut session = self.inner.session.lock().await;
+            session.submit_tool_execution_outcome(
+                call.id(),
+                ToolCallResultStatus::Failed,
+                content,
+                Some(diagnostic),
+                None,
+            )?
+        };
+        persist_resume_safe_savepoint_if_configured(&self.inner).await;
+        Ok(events)
     }
 
     pub(crate) async fn submit_tool_interrupt_failure_with_active_permit(
@@ -127,14 +139,18 @@ impl Runtime {
             &format!("tool call {call_id} was cancelled by user interrupt"),
         )
         .expect("static diagnostic code and runtime-owned call id are valid");
-        let mut session = self.inner.session.lock().await;
-        session.submit_tool_execution_outcome(
-            call_id,
-            ToolCallResultStatus::Failed,
-            ArtifactContent::text("Tool execution was cancelled by user interrupt."),
-            Some(diagnostic),
-            None,
-        )
+        let events = {
+            let mut session = self.inner.session.lock().await;
+            session.submit_tool_execution_outcome(
+                call_id,
+                ToolCallResultStatus::Failed,
+                ArtifactContent::text("Tool execution was cancelled by user interrupt."),
+                Some(diagnostic),
+                None,
+            )?
+        };
+        persist_resume_safe_savepoint_if_configured(&self.inner).await;
+        Ok(events)
     }
 
     /// Creates an exact evidence reference from artifact state owned by this session.
@@ -172,13 +188,12 @@ impl Runtime {
     ///
     /// This is the raw/manual MVP direct context mutation surface. It appends
     /// summary-only context entries today after acquiring the active-step
-    /// permit. It does not validate evidence readability, reject duplicate
-    /// summary ids, emit runtime events, or write ledger facts.
+    /// permit. It validates evidence readability and duplicate summary ids, but
+    /// does not emit runtime events or write ledger facts.
     ///
-    /// Direct writes are validated later when a session snapshot is compiled by
-    /// [`crate::ContextCompiler`]. They are not summary-draft promotion, do not
-    /// record promotion lifecycle state, and are not governed by the internal
-    /// summary-draft promotion acceptance/replay rules.
+    /// Direct writes are not summary-draft promotion, do not record promotion
+    /// lifecycle state, and are not governed by the internal summary-draft
+    /// promotion acceptance/replay rules.
     pub async fn record_context_entry(&self, entry: ContextEntry) -> Result<(), RuntimeError> {
         let _active_permit = ActiveStepPermit::acquire(Arc::clone(&self.inner.active_step))
             .ok_or_else(|| RuntimeError::StepAlreadyActive {
@@ -186,7 +201,7 @@ impl Runtime {
             })?;
 
         let mut session = self.inner.session.lock().await;
-        session.record_context_entry(entry);
+        session.record_context_entry(entry)?;
         Ok(())
     }
 
@@ -196,9 +211,9 @@ impl Runtime {
     /// readable through session-owned artifacts before the summary can enter
     /// compiled context. This helper is the raw/manual MVP direct write path:
     /// it delegates to [`Runtime::record_context_entry`], so it records with
-    /// the same active-step admission guard and without immediate evidence
-    /// readability validation, duplicate-id rejection, runtime events, or
-    /// ledger facts.
+    /// the same active-step admission guard, immediate evidence readability
+    /// validation, duplicate-id rejection, and without runtime events or ledger
+    /// facts.
     ///
     /// This API is independent of the internal summary-draft promotion
     /// lifecycle. Calling it does not create promotion records, perform
