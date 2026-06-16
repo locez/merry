@@ -37,7 +37,6 @@ pub(crate) fn handle_key_action(action: KeyAction, state: &mut TuiState) -> Cont
     }
 }
 
-#[allow(dead_code)]
 pub(crate) async fn run_controller(
     mut terminal: TerminalSession,
     mut session: TuiRuntimeSession,
