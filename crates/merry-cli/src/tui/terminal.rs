@@ -13,14 +13,12 @@ pub(crate) enum TerminalEvent {
     Resize,
 }
 
-#[allow(dead_code)]
 pub(crate) struct TerminalSession {
     terminal: Terminal<CrosstermBackend<Stdout>>,
     events: EventStream,
 }
 
 impl TerminalSession {
-    #[allow(dead_code)]
     pub(crate) fn enter() -> io::Result<Self> {
         enable_raw_mode()?;
 
