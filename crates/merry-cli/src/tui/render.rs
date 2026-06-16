@@ -1,10 +1,12 @@
 use super::state::{TimelineItem, TuiState};
 use ratatui::{
     Frame,
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Wrap},
 };
+
+const QUEUE_PREVIEW_HEIGHT: u16 = 6;
 
 #[allow(dead_code)]
 pub(crate) fn render(frame: &mut Frame<'_>, state: &TuiState) {
@@ -13,7 +15,7 @@ pub(crate) fn render(frame: &mut Frame<'_>, state: &TuiState) {
         .constraints([
             Constraint::Length(1),
             Constraint::Min(3),
-            Constraint::Length(queue_height(state)),
+            Constraint::Length(QUEUE_PREVIEW_HEIGHT),
             Constraint::Length(3),
         ])
         .split(frame.area());
@@ -24,7 +26,7 @@ pub(crate) fn render(frame: &mut Frame<'_>, state: &TuiState) {
         root[1],
     );
     frame.render_widget(
-        Paragraph::new(queue_lines(state)).block(Block::default().borders(Borders::TOP)),
+        Paragraph::new(queue_lines(state, root[2])).block(Block::default().borders(Borders::TOP)),
         root[2],
     );
     frame.render_widget(
@@ -74,36 +76,42 @@ fn timeline_lines(state: &TuiState) -> Vec<Line<'static>> {
         .collect()
 }
 
-fn queue_lines(state: &TuiState) -> Vec<Line<'static>> {
+fn queue_lines(state: &TuiState, region: Rect) -> Vec<Line<'static>> {
     let queue = state.queue_preview();
     let mut lines = Vec::new();
     if !queue.next.is_empty() {
         lines.push(Line::from("Next"));
         lines.extend(queue.next.iter().enumerate().map(|(index, item)| {
-            Line::from(format!("  {}. {}", index + 1, item.display_text(72)))
+            let prefix = format!("  {}. ", index + 1);
+            Line::from(format!(
+                "{prefix}{}",
+                item.display_text(queue_item_width(region.width, prefix.len()))
+            ))
         }));
     }
     if !queue.suspended.is_empty() {
         lines.push(Line::from("Suspended"));
         lines.extend(queue.suspended.iter().enumerate().map(|(index, item)| {
-            Line::from(format!("  {}. {}", index + 1, item.display_text(72)))
+            let prefix = format!("  {}. ", index + 1);
+            Line::from(format!(
+                "{prefix}{}",
+                item.display_text(queue_item_width(region.width, prefix.len()))
+            ))
         }));
     }
     if !queue.backlog.is_empty() {
         lines.push(Line::from("Backlog"));
         lines.extend(queue.backlog.iter().enumerate().map(|(index, item)| {
-            Line::from(format!("  {}. {}", index + 1, item.display_text(72)))
+            let prefix = format!("  {}. ", index + 1);
+            Line::from(format!(
+                "{prefix}{}",
+                item.display_text(queue_item_width(region.width, prefix.len()))
+            ))
         }));
     }
     lines
 }
 
-fn queue_height(state: &TuiState) -> u16 {
-    let queue = state.queue_preview();
-    let count = queue.next.len() + queue.suspended.len() + queue.backlog.len();
-    if count == 0 {
-        1
-    } else {
-        (count + 4).min(8) as u16
-    }
+fn queue_item_width(region_width: u16, prefix_width: usize) -> usize {
+    usize::from(region_width).saturating_sub(prefix_width)
 }
