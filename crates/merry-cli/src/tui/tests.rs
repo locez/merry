@@ -2,7 +2,7 @@ use super::controller::{ControllerEffect, handle_key_action};
 use super::input::TextInput;
 use super::keymap::{KeyAction, KeyBinding, Keymap};
 use super::projector::TuiProjector;
-use super::render::render_to_text;
+use super::render::{render_to_buffer, render_to_text};
 use super::state::{QueuePreview, TimelineItem, TuiState};
 use super::theme::{SemanticColor, TuiTheme};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -12,6 +12,7 @@ use merry_core::{
     ToolCallArguments, ToolCallId, ToolCallResult, ToolName, ToolOutput, UsageContextWindow,
 };
 use merry_tool_workspace::WORKSPACE_PATCH_TOOL;
+use ratatui::style::Color;
 
 fn source() -> RuntimeEventSource {
     RuntimeEventSource::new(SessionId::new("tui-test").unwrap(), 1)
@@ -389,6 +390,52 @@ fn renderer_shows_status_timeline_queue_and_input() {
 }
 
 #[test]
+fn renderer_applies_configured_semantic_theme_colors() {
+    let theme = TuiTheme::from_config(&crate::config::TuiThemeToml {
+        status: Some("red".to_owned()),
+        muted: Some("blue".to_owned()),
+        focus: Some("magenta".to_owned()),
+        diff_add: Some("green".to_owned()),
+        diff_delete: Some("yellow".to_owned()),
+        ..crate::config::TuiThemeToml::default()
+    })
+    .expect("theme config should validate");
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        theme,
+    );
+    state.push_timeline_item(TimelineItem::Muted {
+        title: "tool".to_owned(),
+        detail: "read".to_owned(),
+    });
+    state.push_timeline_item(TimelineItem::Expanded {
+        title: "patch".to_owned(),
+        body: "+added\n-removed".to_owned(),
+    });
+    state.update_queue_preview(QueuePreview {
+        next: vec![QueuedInputView {
+            text: "queued".to_owned(),
+            lane: QueuedInputLane::Next,
+            position: 0,
+        }],
+        suspended: vec![],
+        backlog: vec![],
+    });
+
+    let buffer = render_to_buffer(&state, 80, 18);
+
+    assert_eq!(buffer[(0, 0)].fg, Color::Red);
+    assert_eq!(find_cell_color(&buffer, "tool"), Some(Color::Blue));
+    assert_eq!(find_cell_color(&buffer, "patch"), Some(Color::Magenta));
+    assert_eq!(find_cell_color(&buffer, "+added"), Some(Color::Green));
+    assert_eq!(find_cell_color(&buffer, "-removed"), Some(Color::Yellow));
+    assert_eq!(find_cell_color(&buffer, "Next"), Some(Color::Magenta));
+    assert_eq!(find_cell_color(&buffer, "queued"), Some(Color::Blue));
+}
+
+#[test]
 fn renderer_ellipsizes_queue_items_to_region_width() {
     let mut state = TuiState::new(
         "/repo".into(),
@@ -459,4 +506,24 @@ fn renderer_keeps_input_region_stable_when_queue_count_changes() {
         .expect("populated queue render should show input");
 
     assert_eq!(empty_input_row, queued_input_row);
+}
+
+fn find_cell_color(buffer: &ratatui::buffer::Buffer, text: &str) -> Option<Color> {
+    let area = buffer.area;
+    let first = text.chars().next()?.to_string();
+    for y in area.y..area.y + area.height {
+        let mut row = String::new();
+        for x in area.x..area.x + area.width {
+            row.push_str(buffer[(x, y)].symbol());
+        }
+        let Some(start) = row.find(text) else {
+            continue;
+        };
+        for x in area.x + start as u16..area.x + area.width {
+            if buffer[(x, y)].symbol() == first {
+                return Some(buffer[(x, y)].fg);
+            }
+        }
+    }
+    None
 }
