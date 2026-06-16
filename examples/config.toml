@@ -69,6 +69,26 @@ enabled = false
 max_threads = 6
 max_depth = 1
 
+[tui.theme]
+# Semantic color names keep component styling configurable without changing
+# rendering code.
+status = "cyan"
+muted = "dark_gray"
+focus = "yellow"
+selection = "blue"
+diff_add = "green"
+diff_delete = "red"
+warning = "yellow"
+error = "red"
+risk = "magenta"
+success = "green"
+
+[tui.keymap]
+submit_next = "enter"
+submit_backlog = "ctrl+b"
+interrupt = "ctrl+c"
+quit = "ctrl+q"
+
 [observability.log]
 # Enable this for smoke/debug runs that should write structured JSON logs.
 enabled = true

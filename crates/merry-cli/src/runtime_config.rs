@@ -19,6 +19,8 @@ pub(crate) fn validate_loaded_config(
     let _ = config.skill_roots()?;
     let _ = config.runtime_models()?;
     let _ = config.profile();
+    let tui_config = config.tui_config()?;
+    crate::config::validate_tui_config(&tui_config)?;
     config.validate_provider_settings_if_present()?;
     Ok(())
 }
