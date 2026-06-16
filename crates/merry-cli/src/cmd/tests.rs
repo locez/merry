@@ -263,7 +263,7 @@ async fn cmd_check_command_tool_reports_path_availability() {
         .await
         .expect("tool result artifact should be readable");
     let payload = match content {
-        ArtifactContent::Json(content) => {
+        ArtifactContent::Json { content } => {
             serde_json::from_str::<serde_json::Value>(&content).expect("json payload")
         }
         other => panic!("expected json content, got {other:?}"),

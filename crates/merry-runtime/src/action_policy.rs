@@ -11,10 +11,12 @@ use crate::{
         ProcessIntentClass, classify_process_intent, required_process_permission_profile_id,
     },
 };
+use serde::{Deserialize, Serialize};
 
 /// Runtime-owned risk tier for a registered tool action.
 #[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum ActionRiskTier {
     /// Reads runtime or workspace state without changing it.
     ReadOnly,
@@ -42,7 +44,8 @@ pub(crate) enum ActionRiskTier {
 
 /// Runtime-owned disposition for an action policy decision.
 #[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum ActionPolicyDisposition {
     /// The action may execute without additional gates.
     Allow,

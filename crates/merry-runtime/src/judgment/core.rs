@@ -5,10 +5,12 @@ use super::{
     payload::{canonicalize_label_text, validate_non_blank},
 };
 use merry_core::EvidenceRef;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Semantic purpose for an internal advisory judgment request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum JudgmentPurpose {
     /// Assess whether memory is relevant to a step or runtime state.
     MemoryRelevance,
@@ -43,7 +45,8 @@ impl fmt::Display for JudgmentPurpose {
 }
 
 /// Provenance category for an internal advisory judgment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum JudgmentSourceKind {
     /// Produced by deterministic runtime code.
     Deterministic,
@@ -67,7 +70,8 @@ impl JudgmentSourceKind {
 }
 
 /// Validated confidence in the inclusive finite 0.0..=1.0 range.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
 pub(crate) struct JudgmentConfidence(f32);
 
 impl JudgmentConfidence {
@@ -87,7 +91,8 @@ impl JudgmentConfidence {
 }
 
 /// Exact evidence supplied to or produced by an advisory judgment.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct JudgmentEvidence {
     label: String,
     reference: EvidenceRef,
@@ -119,7 +124,8 @@ impl JudgmentEvidence {
 }
 
 /// Source metadata for an advisory judgment outcome.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct JudgmentProvenance {
     source_kind: JudgmentSourceKind,
     source_label: String,
@@ -156,7 +162,8 @@ impl JudgmentProvenance {
 /// runtime-owned boundary for the semantic judgment; hard policy remains
 /// outside this request. `SummaryDraft` requests require exact evidence because
 /// summaries must stay grounded in retrievable artifacts.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct JudgmentRequest {
     purpose: JudgmentPurpose,
     subject: String,
@@ -244,7 +251,8 @@ impl JudgmentRequest {
 }
 
 /// Advisory risk level for [`JudgmentRecommendation::ToolRiskReview`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum JudgmentRiskLevel {
     /// The source found no material semantic risk signal.
     Low,
@@ -271,7 +279,8 @@ impl JudgmentRiskLevel {
 ///
 /// These variants deliberately describe semantic recommendations only. They do
 /// not grant permission to execute tools, mutate context, or perform actions.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum JudgmentRecommendation {
     /// Memory appears semantically relevant.
     MemoryRelevant,
@@ -356,7 +365,8 @@ fn validate_recommendation(
 /// An outcome is evidence, confidence, rationale, uncertainty, and provenance
 /// for runtime policy to inspect. It cannot encode direct permission for a
 /// tool/action/context mutation.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct JudgmentOutcome {
     purpose: JudgmentPurpose,
     recommendation: JudgmentRecommendation,

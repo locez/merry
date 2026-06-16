@@ -334,7 +334,7 @@ fn guarded_tool_action_records_internal_audit_without_events_or_resolution() {
     );
 
     session
-        .record_guarded_tool_action(&call, crate::ToolActionKind::WorkspaceWrite, policy)
+        .record_guarded_tool_action(&call, crate::ToolActionKind::WorkspaceWrite, policy.clone())
         .expect("guarded audit should record for pending call");
 
     assert_eq!(session.next_sequence(), next_sequence_before);

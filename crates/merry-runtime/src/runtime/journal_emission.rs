@@ -1,4 +1,4 @@
-use super::{RuntimeInner, diagnostic_from_text};
+use super::{RuntimeInner, diagnostic_from_text, persist_resume_safe_savepoint_if_configured};
 use crate::{session::SessionState, tool_input_validation::ToolInputValidationError};
 use futures_util::StreamExt;
 use merry_core::{
@@ -43,6 +43,7 @@ pub(super) async fn send_assistant_text_output_completed_events(
         session.record_step_completed()
     };
 
+    persist_resume_safe_savepoint_if_configured(inner).await;
     completed_permit.send(completed_event);
     true
 }
@@ -278,6 +279,8 @@ async fn send_bridge_tool_input_validation_failure_events(
                 return false;
             };
             debug_assert!(events.next().is_none());
+
+            persist_resume_safe_savepoint_if_configured(inner).await;
 
             let Some(artifact_permit) = reserve_normal_event_slot(sender, token).await else {
                 return false;

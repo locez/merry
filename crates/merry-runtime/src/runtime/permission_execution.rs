@@ -1,5 +1,5 @@
-use super::RuntimeInner;
 use super::process_execution::execute_admitted_process_action;
+use super::{RuntimeInner, persist_resume_safe_savepoint_if_configured};
 use crate::{
     ActionProposal, ProcessPermissionProfileId, RuntimeError, RuntimeModelRole,
     action_policy::ActionPolicyDecision,
@@ -37,14 +37,17 @@ pub(super) async fn execute_permission_request_tool_call(
             let outcome = permission_invalid_arguments_outcome(pending.name().as_str(), error);
             let (status, content, diagnostic, execution_evidence) = outcome.into_parts();
             debug_assert!(execution_evidence.is_none());
-            let mut session = inner.session.lock().await;
-            return session.submit_tool_execution_outcome(
-                pending.id(),
-                status,
-                content,
-                diagnostic,
-                None,
-            );
+            let events = {
+                let mut session = inner.session.lock().await;
+                session.submit_tool_execution_outcome(
+                    pending.id(),
+                    status,
+                    content,
+                    diagnostic,
+                    None,
+                )?
+            };
+            return persist_tool_events(inner, events).await;
         }
     };
 
@@ -55,14 +58,17 @@ pub(super) async fn execute_permission_request_tool_call(
         );
         let (status, content, diagnostic, execution_evidence) = outcome.into_parts();
         debug_assert!(execution_evidence.is_none());
-        let mut session = inner.session.lock().await;
-        return session.submit_tool_execution_outcome(
-            pending.id(),
-            status,
-            content,
-            diagnostic,
-            None,
-        );
+        let events = {
+            let mut session = inner.session.lock().await;
+            session.submit_tool_execution_outcome(
+                pending.id(),
+                status,
+                content,
+                diagnostic,
+                None,
+            )?
+        };
+        return persist_tool_events(inner, events).await;
     };
 
     let admission = review_permission_request(inner, request.clone(), &context).await;
@@ -80,14 +86,17 @@ pub(super) async fn execute_permission_request_tool_call(
             let outcome = permission_review_error_outcome(pending, &error);
             let (status, content, diagnostic, execution_evidence) = outcome.into_parts();
             debug_assert!(execution_evidence.is_none());
-            let mut session = inner.session.lock().await;
-            return session.submit_tool_execution_outcome(
-                pending.id(),
-                status,
-                content,
-                diagnostic,
-                None,
-            );
+            let events = {
+                let mut session = inner.session.lock().await;
+                session.submit_tool_execution_outcome(
+                    pending.id(),
+                    status,
+                    content,
+                    diagnostic,
+                    None,
+                )?
+            };
+            return persist_tool_events(inner, events).await;
         }
     };
 
@@ -95,14 +104,17 @@ pub(super) async fn execute_permission_request_tool_call(
         let outcome = permission_denied_outcome(pending, Some(decision.review()));
         let (status, content, diagnostic, execution_evidence) = outcome.into_parts();
         debug_assert!(execution_evidence.is_none());
-        let mut session = inner.session.lock().await;
-        return session.submit_tool_execution_outcome(
-            pending.id(),
-            status,
-            content,
-            diagnostic,
-            None,
-        );
+        let events = {
+            let mut session = inner.session.lock().await;
+            session.submit_tool_execution_outcome(
+                pending.id(),
+                status,
+                content,
+                diagnostic,
+                None,
+            )?
+        };
+        return persist_tool_events(inner, events).await;
     }
 
     let runner = runner_factory.runner_for(&request);
@@ -133,6 +145,14 @@ pub(super) async fn execute_permission_request_tool_call(
         context,
     )
     .await
+}
+
+async fn persist_tool_events(
+    inner: &RuntimeInner,
+    events: Vec<RuntimeJournalEvent>,
+) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
+    persist_resume_safe_savepoint_if_configured(inner).await;
+    Ok(events)
 }
 
 async fn review_permission_request(

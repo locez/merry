@@ -128,7 +128,7 @@ where
             .read_artifact_content(result.artifact().id())
             .await
             .map_err(unexpected)?;
-        let ArtifactContent::Json(content) = content else {
+        let ArtifactContent::Json { content } = content else {
             continue;
         };
         let value = serde_json::from_str::<serde_json::Value>(&content).map_err(unexpected)?;

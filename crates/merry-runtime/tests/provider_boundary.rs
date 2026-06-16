@@ -1337,10 +1337,10 @@ async fn second_provider_step_continues_sequences_and_replays_transcript() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn runtime_step_with_provider_emits_failed_when_context_compile_fails() {
+async fn runtime_rejects_invalid_context_summary_before_provider_step() {
     let provider = FakeModelProvider::new(vec![Ok(completed_event())]);
     let runtime = runtime_with_provider("provider-context-failure", provider.clone());
-    runtime
+    let error = runtime
         .record_context_summary(
             ContextSummary::new(
                 "invalid-summary",
@@ -1350,18 +1350,13 @@ async fn runtime_step_with_provider_emits_failed_when_context_compile_fails() {
             .expect("summary construction allows compiler validation"),
         )
         .await
-        .expect("raw context summary should record");
-
-    let events = collect_step(&runtime, "Compile context.").await;
+        .expect_err("invalid context summary is rejected before provider step");
 
     assert_eq!(provider.recorded_requests().len(), 0);
     assert_eq!(
-        event_kind_names(&events),
-        ["SessionStarted", "StepStarted", "Failed"]
+        error.to_string(),
+        "context state error: context summary invalid-summary has no exact evidence references"
     );
-    assert_eq!(failed_code(&events), Some("context_compile"));
-    assert_no_artifact_recorded(&events);
-    assert_no_completion(&events);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -4997,21 +4992,10 @@ async fn provider_stop_with_tool_output_emits_model_output_unsupported_failed() 
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn provider_absent_step_does_not_compile_context_and_preserves_skeleton_behavior() {
+async fn provider_absent_step_preserves_skeleton_behavior() {
     let runtime = Runtime::builder(session_id("provider-absent"))
         .build()
         .expect("runtime should build");
-    runtime
-        .record_context_summary(
-            ContextSummary::new(
-                "invalid-summary-without-provider",
-                "This would fail if the provider path compiled context.",
-                Vec::new(),
-            )
-            .expect("summary construction allows compiler validation"),
-        )
-        .await
-        .expect("raw context summary should record");
 
     let events = collect_step(&runtime, "Run without provider.").await;
 

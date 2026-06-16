@@ -10,10 +10,12 @@ use super::{
 };
 use crate::context::{ContextError, ContextEvidence, ContextSummary};
 use merry_core::{ArtifactId, EvidenceLocator};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Authority allowed to explicitly accept a summary draft for context promotion.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum SummaryDraftAcceptanceAuthority {
     /// Runtime hard policy accepted the promotion.
     HardPolicy,
@@ -24,7 +26,8 @@ pub(crate) enum SummaryDraftAcceptanceAuthority {
 }
 
 /// Explicit acceptance required before a summary draft can become context.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SummaryDraftAcceptance {
     authority: SummaryDraftAcceptanceAuthority,
     source_label: String,
@@ -67,7 +70,8 @@ impl SummaryDraftAcceptance {
 }
 
 /// Explicit input for turning an accepted summary draft into context.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SummaryDraftPromotionInput {
     summary_id: String,
     draft_text: String,

@@ -9,12 +9,14 @@ use crate::{
     action_policy::{ActionPolicyDecision, ActionPolicyDisposition, ActionRiskTier},
 };
 use merry_core::{PendingToolCall, ToolCallId, ToolName};
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 const ACTION_AUDIT_ID_PREFIX: &str = "action-audit-";
 
 /// Deterministic identifier for an internal action audit record.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub(crate) struct ActionAuditId(String);
 
 impl ActionAuditId {
@@ -35,7 +37,8 @@ impl fmt::Display for ActionAuditId {
 }
 
 /// Runtime-owned lifecycle status for an audited action.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum ActionAuditStatus {
     /// The action was proposed with deterministic runtime-owned evidence.
     Proposed,
@@ -48,11 +51,12 @@ pub(crate) enum ActionAuditStatus {
 }
 
 /// Compact runtime-owned policy decision recorded with an action audit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ActionAuditPolicy {
     risk_tier: ActionRiskTier,
     disposition: ActionPolicyDisposition,
-    reason: &'static str,
+    reason: String,
 }
 
 impl ActionAuditPolicy {
@@ -60,20 +64,20 @@ impl ActionAuditPolicy {
         Self {
             risk_tier: decision.risk_tier(),
             disposition: decision.disposition(),
-            reason: decision.reason(),
+            reason: decision.reason().to_owned(),
         }
     }
 
     #[cfg(test)]
-    pub(crate) const fn new(
+    pub(crate) fn new(
         risk_tier: ActionRiskTier,
         disposition: ActionPolicyDisposition,
-        reason: &'static str,
+        reason: impl Into<String>,
     ) -> Self {
         Self {
             risk_tier,
             disposition,
-            reason,
+            reason: reason.into(),
         }
     }
 
@@ -88,13 +92,14 @@ impl ActionAuditPolicy {
     }
 
     #[cfg(test)]
-    pub(crate) const fn reason(&self) -> &'static str {
-        self.reason
+    pub(crate) fn reason(&self) -> &str {
+        &self.reason
     }
 }
 
 /// Runtime-owned audit record for an action proposal or policy decision.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ActionAuditRecord {
     id: ActionAuditId,
     order: u64,
@@ -208,8 +213,8 @@ impl ActionAuditRecord {
     }
 
     #[cfg(test)]
-    pub(crate) const fn policy(&self) -> Option<ActionAuditPolicy> {
-        self.policy
+    pub(crate) fn policy(&self) -> Option<ActionAuditPolicy> {
+        self.policy.clone()
     }
 
     #[cfg(test)]
@@ -233,6 +238,12 @@ impl ActionAuditRecord {
 pub(crate) struct ActionAuditRegistry {
     records: Vec<ActionAuditRecord>,
     next_order: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PersistedActionAuditRegistry {
+    records: Vec<ActionAuditRecord>,
 }
 
 impl ActionAuditRegistry {
@@ -289,6 +300,26 @@ impl ActionAuditRegistry {
     pub(crate) fn snapshot(&self) -> ActionAuditRegistrySnapshot {
         ActionAuditRegistrySnapshot {
             records: self.records.clone(),
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn persisted(&self) -> PersistedActionAuditRegistry {
+        PersistedActionAuditRegistry {
+            records: self.records.clone(),
+        }
+    }
+
+    pub(crate) fn from_persisted(persisted: PersistedActionAuditRegistry) -> Self {
+        let next_order = persisted
+            .records
+            .iter()
+            .map(|record| record.order.saturating_add(1))
+            .max()
+            .unwrap_or(0);
+        Self {
+            records: persisted.records,
+            next_order,
         }
     }
 }

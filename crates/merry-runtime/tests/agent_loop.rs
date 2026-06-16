@@ -1,8 +1,9 @@
 use futures_util::{StreamExt, stream};
 use merry_core::{
-    ArtifactId, ArtifactKind, ArtifactRef, EvidenceLocator, ModelUsage, PendingToolCall,
-    ProviderName, RuntimeEvent, RuntimeJournalEvent, RuntimeJournalPayload, SessionId, ToolCallId,
-    ToolCallResult, ToolCallResultStatus, ToolInputSchema, ToolName, ToolSpec,
+    ArtifactId, ArtifactKind, ArtifactRef, EvidenceLocator, EvidenceRef, ModelUsage,
+    PendingToolCall, ProviderName, RuntimeEvent, RuntimeJournalEvent, RuntimeJournalPayload,
+    SessionId, ToolCallId, ToolCallResult, ToolCallResultStatus, ToolInputSchema, ToolName,
+    ToolSpec,
 };
 use merry_llm::{
     FinishReason, ModelCapabilities, ModelError, ModelEvent, ModelEventStream, ModelInputItem,
@@ -12,13 +13,14 @@ use merry_llm::{
 use merry_runtime::{
     ActionExecutionEvidence, ActionProposal, ActionProposalEvidence, AgentLoopBlockedReason,
     AgentLoopConfig, AgentLoopConfigError, AgentLoopStatus, AgentLoopStreamMessage, ArtifactError,
-    AutomaticCompactionConfig, CitationCompactionPolicy, ContextSummary, FINAL_OUTPUT_TOOL_NAME,
-    FinalOutputContract, ProcessActionIntent, ProcessEnvPolicy, ProcessExitStatus, ProcessRunner,
-    ProcessRunnerContext, ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput,
-    ProjectRules, Runtime, RuntimeError, RuntimeModelRole, StepContext, StepInput, TaskAnchor,
-    ToolActionKind, ToolActionPreflight, ToolActionProposalFuture, ToolExecutionContext,
-    ToolExecutionError, ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture,
-    WorkspacePatchExecutionEvidence, WorkspacePatchProposal, process_command_tool,
+    AutomaticCompactionConfig, CitationCompactionPolicy, ContextEvidence, ContextSummary,
+    FINAL_OUTPUT_TOOL_NAME, FinalOutputContract, ProcessActionIntent, ProcessEnvPolicy,
+    ProcessExitStatus, ProcessRunner, ProcessRunnerContext, ProcessRunnerError,
+    ProcessRunnerFuture, ProcessRunnerOutput, ProjectRules, Runtime, RuntimeError,
+    RuntimeModelRole, StepContext, StepInput, TaskAnchor, ToolActionKind, ToolActionPreflight,
+    ToolActionProposalFuture, ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome,
+    ToolExecutor, ToolExecutorFuture, WorkspacePatchExecutionEvidence, WorkspacePatchProposal,
+    process_command_tool,
 };
 use schemars::Schema;
 use serde_json::{Value, json};
@@ -2744,12 +2746,24 @@ async fn agent_loop_running_step_rejects_concurrent_context_summary_write() {
         .expect("agent loop task should not panic after release");
     assert_eq!(result.status(), &AgentLoopStatus::Completed);
 
+    let artifact = ArtifactRef::new(artifact_id("post-run-context-source"), ArtifactKind::Text);
+    runtime
+        .record_artifact(
+            artifact.clone(),
+            merry_runtime::ArtifactContent::text("post-run exact evidence\n"),
+        )
+        .await
+        .expect("runtime should accept artifact after the loop completes");
+    let evidence = EvidenceRef::new(artifact.id().clone(), EvidenceLocator::whole_artifact());
     runtime
         .record_context_summary(
             ContextSummary::new(
                 "post-run-summary",
                 "Raw context write may resume.",
-                Vec::new(),
+                vec![
+                    ContextEvidence::new("post-run source", evidence)
+                        .expect("context evidence builds"),
+                ],
             )
             .expect("summary construction allows compiler validation"),
         )

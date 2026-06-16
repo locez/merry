@@ -3,8 +3,8 @@ use super::checkpoint_ref_tool::merry_read_checkpoint_ref_tool;
 use super::{AcceptedLocalWorkspaceProcessRunner, Runtime, RuntimeInner};
 use crate::{
     AcceptedLocalWorkspaceProcessAdmission, CitationCompactionPolicy, CompactedCheckpoint,
-    ProcessRunner, ProjectRules, RuntimeCapabilities, RuntimeError, RuntimeModelRole,
-    RuntimeProfile, SkillCatalog, TaskAnchor,
+    FileSessionStore, ProcessRunner, ProjectRules, RuntimeCapabilities, RuntimeError,
+    RuntimeModelRole, RuntimeProfile, SkillCatalog, TaskAnchor,
     memory::{MemoryActivationSource, StoredMemoryActivationSource},
     model_config::RuntimeModelConfigs,
     permission::{PermissionAdmissionSource, PermissionReviewMode, RuntimeTrustLevel},
@@ -108,6 +108,8 @@ pub struct RuntimeBuilder {
     permission_admission_source: Option<Arc<dyn PermissionAdmissionSource>>,
     permissioned_process_runner_factory: Option<Arc<dyn PermissionedProcessRunnerFactory>>,
     subagent_manager: Option<SubagentManager>,
+    session_store: Option<FileSessionStore>,
+    loaded_session: Option<SessionState>,
 }
 
 impl RuntimeBuilder {
@@ -138,6 +140,8 @@ impl RuntimeBuilder {
             permission_admission_source: None,
             permissioned_process_runner_factory: None,
             subagent_manager: None,
+            session_store: None,
+            loaded_session: None,
         }
     }
 
@@ -476,6 +480,24 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Installs the filesystem store used by explicit and automatic session savepoints.
+    #[must_use]
+    pub fn session_store(mut self, store: FileSessionStore) -> Self {
+        self.session_store = Some(store);
+        self
+    }
+
+    /// Loads persisted session state from an injected filesystem store, then builds a runtime.
+    pub async fn resume_from_store(
+        mut self,
+        store: FileSessionStore,
+    ) -> Result<Runtime, RuntimeError> {
+        let session = SessionState::load_from(&store, &self.session_id).await?;
+        self.session_store = Some(store);
+        self.loaded_session = Some(session);
+        self.build()
+    }
+
     /// Builds the runtime.
     ///
     /// Duplicate tool names are rejected before the runtime is constructed.
@@ -499,9 +521,26 @@ impl RuntimeBuilder {
             return Err(RuntimeError::BridgeToolsNotAllowed { name: name.clone() });
         }
 
-        let mut session = SessionState::new(self.session_id.clone());
-        for (id, text) in self.initial_context_summaries {
-            session.seed_context_summary(&id, &text)?;
+        let mut session = match self.loaded_session {
+            Some(session) => session,
+            None => {
+                let mut session = SessionState::new(self.session_id.clone());
+                for (id, text) in self.initial_context_summaries {
+                    session.seed_context_summary(&id, &text)?;
+                }
+                if let Some(checkpoint) = self.compacted_checkpoint {
+                    session.set_compacted_checkpoint(checkpoint);
+                }
+                session
+            }
+        };
+        if session.session_id() != &self.session_id {
+            return Err(RuntimeError::SessionStore {
+                source: crate::SessionStoreError::SessionIdMismatch {
+                    requested: self.session_id.clone(),
+                    actual: session.session_id().clone(),
+                },
+            });
         }
         if let Some(project_rules) = self.project_rules {
             session.set_project_rules(project_rules);
@@ -511,9 +550,6 @@ impl RuntimeBuilder {
         }
         if let Some(task_anchor) = self.task_anchor {
             session.set_task_anchor(task_anchor);
-        }
-        if let Some(checkpoint) = self.compacted_checkpoint {
-            session.set_compacted_checkpoint(checkpoint);
         }
 
         Ok(Runtime {
@@ -539,6 +575,7 @@ impl RuntimeBuilder {
                 permission_admission_source: self.permission_admission_source,
                 permissioned_process_runner_factory: self.permissioned_process_runner_factory,
                 subagent_manager: self.subagent_manager,
+                session_store: self.session_store,
             }),
         })
     }

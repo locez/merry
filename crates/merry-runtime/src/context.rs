@@ -22,7 +22,7 @@ use crate::{
     artifact::{ArtifactError, ArtifactRegistry},
     checkpoint::{
         CheckpointError, CheckpointId, CheckpointRefExcerpt, CheckpointRefId,
-        CitationBackedCheckpoint,
+        CitationBackedCheckpoint, PersistedCitationBackedCheckpoint,
     },
 };
 use merry_core::{ArtifactId, ContextWindowSource, EvidenceLocator, EvidenceRef};
@@ -524,6 +524,12 @@ impl ContextEntry {
     pub fn summary(summary: ContextSummary) -> Self {
         Self::Summary(summary)
     }
+
+    pub(crate) fn as_summary(&self) -> &ContextSummary {
+        match self {
+            Self::Summary(summary) => summary,
+        }
+    }
 }
 
 /// Navigation text that must remain tied to exact retrievable evidence.
@@ -677,6 +683,13 @@ pub struct CompactedCheckpoint {
     citation_backed: Option<CitationBackedCheckpoint>,
 }
 
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PersistedCompactedCheckpoint {
+    text: String,
+    citation_backed: Option<PersistedCitationBackedCheckpoint>,
+}
+
 /// Payload-free checkpoint status for diagnostics and smoke reports.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompactedCheckpointSummary {
@@ -784,6 +797,27 @@ impl CompactedCheckpoint {
         };
 
         checkpoint.read_ref_for_checkpoint(checkpoint_id, ref_id)
+    }
+
+    pub(crate) fn persisted(&self) -> PersistedCompactedCheckpoint {
+        PersistedCompactedCheckpoint {
+            text: self.text.clone(),
+            citation_backed: self
+                .citation_backed
+                .as_ref()
+                .map(CitationBackedCheckpoint::persisted),
+        }
+    }
+
+    pub(crate) fn from_persisted(
+        persisted: PersistedCompactedCheckpoint,
+    ) -> Result<Self, ContextError> {
+        match persisted.citation_backed {
+            Some(checkpoint) => {
+                Self::from_citation_backed(CitationBackedCheckpoint::from_persisted(checkpoint)?)
+            }
+            None => Self::new(persisted.text),
+        }
     }
 }
 

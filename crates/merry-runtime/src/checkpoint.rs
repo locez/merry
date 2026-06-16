@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
@@ -120,7 +120,7 @@ impl CheckpointSequenceRange {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CheckpointClaimKind {
     CurrentState,
@@ -149,7 +149,8 @@ impl CheckpointClaimKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CheckpointSourceKind {
     UserMessage,
     AssistantMessage,
@@ -157,6 +158,44 @@ pub enum CheckpointSourceKind {
     ToolResult,
     ArtifactRange,
     PriorCheckpointClaim,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PersistedCitationBackedCheckpoint {
+    id: String,
+    claims: Vec<PersistedCheckpointClaim>,
+    refs: Vec<PersistedCheckpointRef>,
+    working_intent: Option<PersistedCheckpointWorkingIntent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedCheckpointClaim {
+    id: String,
+    kind: CheckpointClaimKind,
+    text: String,
+    refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedCheckpointRef {
+    id: String,
+    source_kind: CheckpointSourceKind,
+    source_id: String,
+    sequence_start: u64,
+    sequence_end: u64,
+    locator: String,
+    excerpt: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedCheckpointWorkingIntent {
+    text: String,
+    refs: Vec<String>,
+    confidence: f32,
 }
 
 impl CheckpointSourceKind {
@@ -546,6 +585,132 @@ impl CitationBackedCheckpoint {
         }
 
         self.read_ref(ref_id)
+    }
+
+    pub(crate) fn persisted(&self) -> PersistedCitationBackedCheckpoint {
+        PersistedCitationBackedCheckpoint {
+            id: self.id().as_str().to_owned(),
+            claims: self
+                .claims()
+                .iter()
+                .map(|claim| PersistedCheckpointClaim {
+                    id: claim.id().as_str().to_owned(),
+                    kind: claim.kind(),
+                    text: claim.text().to_owned(),
+                    refs: claim
+                        .refs()
+                        .iter()
+                        .map(|ref_id| ref_id.as_str().to_owned())
+                        .collect(),
+                })
+                .collect(),
+            refs: self
+                .manifest()
+                .refs()
+                .iter()
+                .map(|item| PersistedCheckpointRef {
+                    id: item.id().as_str().to_owned(),
+                    source_kind: item.source_kind(),
+                    source_id: item.source_id().to_owned(),
+                    sequence_start: item.sequence_range().start(),
+                    sequence_end: item.sequence_range().end(),
+                    locator: item.locator().to_owned(),
+                    excerpt: item.excerpt().to_owned(),
+                })
+                .collect(),
+            working_intent: self
+                .working_intent()
+                .map(|intent| PersistedCheckpointWorkingIntent {
+                    text: intent.text().to_owned(),
+                    refs: intent
+                        .refs()
+                        .iter()
+                        .map(|ref_id| ref_id.as_str().to_owned())
+                        .collect(),
+                    confidence: intent.confidence(),
+                }),
+        }
+    }
+
+    pub(crate) fn from_persisted(
+        persisted: PersistedCitationBackedCheckpoint,
+    ) -> Result<Self, CheckpointError> {
+        let id = CheckpointId::new(&persisted.id)?;
+        let refs = persisted
+            .refs
+            .into_iter()
+            .map(CheckpointRef::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+        let manifest = CheckpointRefManifest::new(id.clone(), refs)?;
+        let candidate = CompactedCheckpointCandidate {
+            claims: persisted
+                .claims
+                .into_iter()
+                .map(CheckpointClaim::try_from)
+                .collect::<Result<Vec<_>, _>>()?,
+            working_intent: persisted
+                .working_intent
+                .map(CheckpointWorkingIntent::try_from)
+                .transpose()?,
+        };
+        Self::from_candidate(
+            id,
+            candidate,
+            manifest,
+            CheckpointValidationPolicy::default(),
+        )
+    }
+}
+
+impl TryFrom<PersistedCheckpointClaim> for CheckpointClaim {
+    type Error = CheckpointError;
+
+    fn try_from(value: PersistedCheckpointClaim) -> Result<Self, Self::Error> {
+        validate_text_field("checkpoint claim text", &value.text)?;
+        let refs = value
+            .refs
+            .iter()
+            .map(|item| CheckpointRefId::new(item))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            id: CheckpointClaimId::new(&value.id)?,
+            kind: value.kind,
+            text: value.text,
+            refs,
+        })
+    }
+}
+
+impl TryFrom<PersistedCheckpointRef> for CheckpointRef {
+    type Error = CheckpointError;
+
+    fn try_from(value: PersistedCheckpointRef) -> Result<Self, Self::Error> {
+        Self::new(
+            CheckpointRefId::new(&value.id)?,
+            value.source_kind,
+            value.source_id,
+            CheckpointSequenceRange::new(value.sequence_start, value.sequence_end)?,
+            value.locator,
+            value.excerpt,
+        )
+    }
+}
+
+impl TryFrom<PersistedCheckpointWorkingIntent> for CheckpointWorkingIntent {
+    type Error = CheckpointError;
+
+    fn try_from(value: PersistedCheckpointWorkingIntent) -> Result<Self, Self::Error> {
+        validate_text_field("checkpoint working_intent text", &value.text)?;
+        let refs = value
+            .refs
+            .iter()
+            .map(|item| CheckpointRefId::new(item))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            text: value.text,
+            refs,
+            confidence_millis: confidence_to_millis(value.confidence)?,
+        })
     }
 }
 

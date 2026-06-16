@@ -11,13 +11,15 @@ use crate::judgment::{
     SummaryDraftPromotionError, SummaryDraftPromotionInput,
 };
 use merry_core::EvidenceRef;
+use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fmt};
 
 const SUMMARY_DRAFT_PROMOTION_RECORD_ID_PREFIX: &str = "summary-draft-promotion-";
 const SUMMARY_DRAFT_PROMOTION_RECORD_ID_ORDER_DIGITS: usize = 20;
 
 /// Validated internal identifier for one promotion lifecycle record.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub(crate) struct SummaryDraftPromotionRecordId(String);
 
 impl SummaryDraftPromotionRecordId {
@@ -40,7 +42,8 @@ impl fmt::Display for SummaryDraftPromotionRecordId {
 }
 
 /// Lifecycle state for a summary draft promotion record.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum SummaryDraftPromotionState {
     /// The exact promotion input has been accepted by runtime policy but not yet
     /// written into context.
@@ -52,7 +55,8 @@ pub(crate) enum SummaryDraftPromotionState {
 }
 
 /// Recorded internal lifecycle entry for one summary id.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SummaryDraftPromotionRecord {
     id: SummaryDraftPromotionRecordId,
     key: SummaryDraftPromotionKey,
@@ -88,7 +92,8 @@ impl SummaryDraftPromotionRecord {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SummaryDraftPromotionKey {
     summary_id: String,
 }
@@ -105,7 +110,8 @@ impl SummaryDraftPromotionKey {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SummaryDraftPromotionPayload {
     draft_text: String,
     selected_evidence: Vec<SummaryDraftPromotionEvidence>,
@@ -132,7 +138,8 @@ impl SummaryDraftPromotionPayload {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SummaryDraftPromotionEvidence {
     label: String,
     reference: EvidenceRef,
@@ -147,7 +154,8 @@ impl SummaryDraftPromotionEvidence {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SummaryDraftPromotionAcceptance {
     authority: SummaryDraftAcceptanceAuthority,
     source_label: String,
@@ -202,6 +210,12 @@ pub(crate) enum SummaryDraftPromotionAcceptanceStatus {
 pub(crate) struct SummaryDraftPromotionRegistry {
     records: BTreeMap<SummaryDraftPromotionKey, SummaryDraftPromotionRecord>,
     next_order: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PersistedSummaryDraftPromotionRegistry {
+    records: Vec<SummaryDraftPromotionRecord>,
 }
 
 impl SummaryDraftPromotionRegistry {
@@ -311,6 +325,33 @@ impl SummaryDraftPromotionRegistry {
         });
 
         SummaryDraftPromotionRegistrySnapshot { records }
+    }
+
+    #[must_use]
+    pub(crate) fn persisted(&self) -> PersistedSummaryDraftPromotionRegistry {
+        PersistedSummaryDraftPromotionRegistry {
+            records: self.snapshot().records,
+        }
+    }
+
+    pub(crate) fn from_persisted(
+        persisted: PersistedSummaryDraftPromotionRegistry,
+    ) -> Result<Self, SummaryDraftPromotionError> {
+        let mut records = BTreeMap::new();
+        let mut next_order = 0;
+        for record in persisted.records {
+            if records.contains_key(&record.key) {
+                return Err(SummaryDraftPromotionError::PromotionPayloadConflict {
+                    summary_id: record.key.summary_id().to_owned(),
+                });
+            }
+            next_order = next_order.max(record.commit_order().saturating_add(1));
+            records.insert(record.key.clone(), record);
+        }
+        Ok(Self {
+            records,
+            next_order,
+        })
     }
 
     fn next_generated_id(&self) -> SummaryDraftPromotionRecordId {

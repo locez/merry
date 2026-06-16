@@ -65,8 +65,8 @@ impl SessionState {
         self.artifacts.evidence_ref(artifact_id, locator)
     }
 
-    pub(crate) fn record_context_entry(&mut self, entry: ContextEntry) {
-        self.context_entries.push(entry);
+    pub(crate) fn record_context_entry(&mut self, entry: ContextEntry) -> Result<(), ContextError> {
+        self.record_checked_context_entry(entry)
     }
 
     pub(super) fn record_checked_context_entry(

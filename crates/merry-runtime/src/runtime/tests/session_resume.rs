@@ -1,0 +1,379 @@
+use super::*;
+use crate::{
+    ContextEvidence, ContextSummary, FINAL_OUTPUT_TOOL_NAME, FileSessionStore, ProjectRules,
+    StepInput, TaskAnchor,
+};
+use merry_core::ToolCallResult;
+
+#[tokio::test(flavor = "current_thread")]
+async fn builder_resumes_session_from_store_and_reinjects_construction_context() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = FileSessionStore::new(temp.path());
+    let session_id = session_id("runtime-resume");
+    let runtime = Runtime::builder(session_id.clone())
+        .session_store(store.clone())
+        .build()
+        .expect("runtime builds");
+
+    runtime.save_session().await.expect("session saves");
+
+    let resumed = Runtime::builder(session_id.clone())
+        .project_rules(ProjectRules::new("AGENTS.md", "Runtime rules").expect("project rules"))
+        .task_anchor(TaskAnchor::new("continue from restored state").expect("task anchor"))
+        .resume_from_store(store)
+        .await
+        .expect("runtime resumes");
+
+    assert_eq!(resumed.session_id(), &session_id);
+    assert!(resumed.pending_tool_calls().await.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_resume_uses_default_store_constructor_shape() {
+    let session_id = session_id("runtime-resume-default-shape");
+    let _resume_fn = Runtime::resume;
+    let _builder = Runtime::builder(session_id);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn save_session_rejects_while_step_is_active() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = FileSessionStore::new(temp.path());
+    let session_id = session_id("runtime-save-active");
+    let (started_tx, started_rx) = oneshot::channel();
+    let (dropped_tx, dropped_rx) = oneshot::channel();
+    let provider = RecordingModelProvider::with_script(vec![
+        ScriptedModelProviderResponse::PendingSetupWithDrop {
+            started: started_tx,
+            dropped: dropped_tx,
+        },
+    ]);
+    let runtime = Runtime::builder(session_id)
+        .session_store(store)
+        .model_provider(Arc::new(provider), model_name())
+        .build()
+        .expect("runtime builds");
+    let stream = runtime
+        .step(
+            StepInput::user_text("hold").expect("valid input"),
+            StepContext::default(),
+        )
+        .expect("step starts");
+    started_rx.await.expect("provider setup starts");
+
+    let error = runtime
+        .save_session()
+        .await
+        .expect_err("active step save is rejected");
+    assert!(matches!(error, RuntimeError::StepAlreadyActive { .. }));
+
+    drop(stream);
+    dropped_rx.await.expect("provider setup future drops");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn complete_boundary_savepoint_text_output_step_completed_persists_resume_state() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = FileSessionStore::new(temp.path());
+    let session_id = session_id("runtime-savepoint-text");
+    let provider =
+        RecordingModelProvider::with_script(vec![ScriptedModelProviderResponse::Stream(vec![Ok(
+            completed_event_with(vec![ModelOutput::text("persist me")], FinishReason::Stop),
+        )])]);
+    let runtime = Runtime::builder(session_id.clone())
+        .session_store(store.clone())
+        .model_provider(Arc::new(provider), model_name())
+        .build()
+        .expect("runtime builds");
+
+    let events = runtime
+        .step(
+            StepInput::user_text("write text").expect("valid input"),
+            StepContext::default(),
+        )
+        .expect("step starts")
+        .collect::<Vec<_>>()
+        .await;
+
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.payload, RuntimeJournalPayload::StepCompleted))
+    );
+    let resumed = Runtime::builder(session_id.clone())
+        .resume_from_store(store)
+        .await
+        .expect("runtime resumes after text step");
+    let artifact_id = events
+        .iter()
+        .find_map(|event| match &event.payload {
+            RuntimeJournalPayload::AssistantOutputRecorded { artifact, .. } => Some(artifact.id()),
+            _ => None,
+        })
+        .expect("assistant output artifact is emitted");
+    assert_eq!(
+        resumed
+            .read_artifact_content(artifact_id)
+            .await
+            .expect("assistant output artifact resumes")
+            .as_text(),
+        Some("persist me")
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn complete_boundary_savepoint_tool_call_pending_does_not_overwrite_last_complete_savepoint()
+{
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = FileSessionStore::new(temp.path());
+    let session_id = session_id("runtime-savepoint-pending");
+    let runtime = Runtime::builder(session_id.clone())
+        .session_store(store.clone())
+        .build()
+        .expect("runtime builds");
+    runtime.save_session().await.expect("initial savepoint");
+
+    let provider =
+        RecordingModelProvider::with_script(vec![ScriptedModelProviderResponse::Stream(vec![Ok(
+            completed_event_with(
+                vec![ModelOutput::tool_call(model_tool_call(
+                    "pending-call",
+                    "lookup",
+                    json!({"query":"pending"}),
+                ))],
+                FinishReason::ToolCalls,
+            ),
+        )])]);
+    let runtime = Runtime::builder(session_id.clone())
+        .session_store(store.clone())
+        .model_provider(Arc::new(provider), model_name())
+        .build()
+        .expect("runtime builds with provider");
+
+    let events = runtime
+        .step(
+            StepInput::user_text("call tool").expect("valid input"),
+            StepContext::default(),
+        )
+        .expect("step starts")
+        .collect::<Vec<_>>()
+        .await;
+
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.payload, RuntimeJournalPayload::ToolCallPending { .. }))
+    );
+    let resumed = Runtime::builder(session_id.clone())
+        .resume_from_store(store)
+        .await
+        .expect("runtime resumes from previous complete savepoint");
+    assert!(resumed.pending_tool_calls().await.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn complete_boundary_savepoint_submit_tool_result_persists_complete_exchange_before_returning_events()
+ {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = FileSessionStore::new(temp.path());
+    let session_id = session_id("runtime-savepoint-tool-result");
+    let runtime = Runtime::builder(session_id.clone())
+        .session_store(store.clone())
+        .build()
+        .expect("runtime builds");
+    let pending = pending_tool_call("manual-call");
+    {
+        let mut session = runtime.inner.session.lock().await;
+        session.record_session_started_if_needed();
+        session
+            .record_tool_call_pending(pending.clone())
+            .expect("pending call records");
+    }
+    let artifact = ArtifactRef::new(
+        ArtifactId::new("manual-result-artifact").expect("valid artifact id"),
+        ArtifactKind::Json,
+    );
+    let result = ToolCallResult::succeeded(pending.id().clone(), artifact);
+
+    let events = runtime
+        .submit_tool_result(result, ArtifactContent::json(r#"{"ok":true}"#))
+        .await
+        .expect("tool result submits");
+
+    assert!(events.iter().any(|event| matches!(
+        event.payload,
+        RuntimeJournalPayload::ToolCallResolved { .. }
+    )));
+    let resumed = Runtime::builder(session_id.clone())
+        .resume_from_store(store)
+        .await
+        .expect("runtime resumes after tool result");
+    assert!(resumed.pending_tool_calls().await.is_empty());
+    assert_eq!(
+        resumed
+            .read_artifact_content(&ArtifactId::new("manual-result-artifact").expect("valid id"))
+            .await
+            .expect("manual result artifact resumes")
+            .as_text(),
+        Some(r#"{"ok":true}"#)
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn automatic_savepoint_failure_does_not_fail_submitted_tool_result() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let broken_store_root = temp.path().join("sessions-file");
+    std::fs::write(&broken_store_root, b"not a directory").expect("broken store marker writes");
+    let store = FileSessionStore::new(&broken_store_root);
+    let session_id = session_id("runtime-savepoint-tool-result-store-fails");
+    let runtime = Runtime::builder(session_id)
+        .session_store(store)
+        .build()
+        .expect("runtime builds");
+    let pending = pending_tool_call("manual-call-save-fails");
+    {
+        let mut session = runtime.inner.session.lock().await;
+        session.record_session_started_if_needed();
+        session
+            .record_tool_call_pending(pending.clone())
+            .expect("pending call records");
+    }
+    let artifact = ArtifactRef::new(
+        ArtifactId::new("manual-result-store-fails").expect("valid artifact id"),
+        ArtifactKind::Json,
+    );
+    let result = ToolCallResult::succeeded(pending.id().clone(), artifact.clone());
+
+    let events = runtime
+        .submit_tool_result(result, ArtifactContent::json(r#"{"ok":true}"#))
+        .await
+        .expect("tool result succeeds even when automatic savepoint fails");
+
+    assert!(events.iter().any(|event| matches!(
+        event.payload,
+        RuntimeJournalPayload::ToolCallResolved { .. }
+    )));
+    assert!(runtime.pending_tool_calls().await.is_empty());
+    assert_eq!(
+        runtime
+            .read_artifact_content(artifact.id())
+            .await
+            .expect("committed result artifact remains readable")
+            .as_text(),
+        Some(r#"{"ok":true}"#)
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn automatic_savepoint_failure_does_not_fail_text_step_completion() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let broken_store_root = temp.path().join("sessions-file");
+    std::fs::write(&broken_store_root, b"not a directory").expect("broken store marker writes");
+    let store = FileSessionStore::new(&broken_store_root);
+    let session_id = session_id("runtime-savepoint-text-store-fails");
+    let provider =
+        RecordingModelProvider::with_script(vec![ScriptedModelProviderResponse::Stream(vec![Ok(
+            completed_event_with(vec![ModelOutput::text("persist maybe")], FinishReason::Stop),
+        )])]);
+    let runtime = Runtime::builder(session_id)
+        .session_store(store)
+        .model_provider(Arc::new(provider), model_name())
+        .build()
+        .expect("runtime builds");
+
+    let events = runtime
+        .step(
+            StepInput::user_text("write text").expect("valid input"),
+            StepContext::default(),
+        )
+        .expect("step starts")
+        .collect::<Vec<_>>()
+        .await;
+
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.payload, RuntimeJournalPayload::StepCompleted))
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.payload, RuntimeJournalPayload::Failed { .. }))
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn record_context_summary_rejects_missing_evidence_before_savepoint() {
+    let runtime = Runtime::builder(session_id("runtime-context-missing-evidence"))
+        .build()
+        .expect("runtime builds");
+    let missing_ref = EvidenceRef::new(
+        ArtifactId::new("missing-context-evidence").expect("valid artifact id"),
+        EvidenceLocator::whole_artifact(),
+    );
+    let summary = ContextSummary::new(
+        "missing-evidence-summary",
+        "This summary points at missing exact evidence.",
+        vec![
+            ContextEvidence::new("missing exact evidence", missing_ref)
+                .expect("context evidence builds"),
+        ],
+    )
+    .expect("context summary builds");
+
+    let error = runtime
+        .record_context_summary(summary)
+        .await
+        .expect_err("missing evidence is rejected at record time");
+
+    assert!(error.to_string().contains("unreadable evidence"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn complete_boundary_savepoint_final_output_tool_call_persists_complete_boundary() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = FileSessionStore::new(temp.path());
+    let session_id = session_id("runtime-savepoint-final-output");
+    let pending = PendingToolCall::new(
+        ToolCallId::new("final-output-call").expect("valid call id"),
+        ToolName::new(FINAL_OUTPUT_TOOL_NAME).expect("valid tool name"),
+        ToolCallArguments::try_from(json!({
+            "answer": "done"
+        }))
+        .expect("valid tool call arguments"),
+    );
+    let runtime = Runtime::builder(session_id.clone())
+        .session_store(store.clone())
+        .build()
+        .expect("runtime builds");
+    {
+        let mut session = runtime.inner.session.lock().await;
+        session.record_session_started_if_needed();
+        session
+            .record_tool_call_pending(pending.clone())
+            .expect("pending final output records");
+    }
+
+    let (_output, events) = runtime
+        .record_final_output_tool_call(pending)
+        .await
+        .expect("final output records");
+
+    assert!(events.iter().any(|event| matches!(
+        event.payload,
+        RuntimeJournalPayload::FinalOutputRecorded { .. }
+    )));
+    let resumed = Runtime::builder(session_id)
+        .resume_from_store(store)
+        .await
+        .expect("runtime resumes after final output");
+    assert!(resumed.pending_tool_calls().await.is_empty());
+}
+
+fn model_tool_call(id: &str, name: &str, arguments: serde_json::Value) -> ModelToolCall {
+    ModelToolCall::new(
+        ModelToolCallId::new(id).expect("valid model call id"),
+        ToolName::new(name).expect("valid tool name"),
+        ToolArguments::try_from(arguments).expect("valid tool arguments"),
+    )
+}

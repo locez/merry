@@ -8,7 +8,8 @@
 use crate::{
     AcceptedLocalWorkspaceProcessAdmission, CheckpointId, CheckpointRefExcerpt, CheckpointRefId,
     CitationCompactionInput, CitationCompactionPolicy, CompactedCheckpointSummary, CompactionError,
-    CompactionOutcome, ProcessRunner, RuntimeCapabilities, RuntimeError, RuntimeModelRole,
+    CompactionOutcome, FileSessionStore, ProcessRunner, RuntimeCapabilities, RuntimeError,
+    RuntimeModelRole,
     events::{
         ActiveStepPermit, RuntimeEventProjector, RuntimeEventStream, RuntimeJournalEventStream,
     },
@@ -89,6 +90,12 @@ impl Runtime {
     #[must_use]
     pub fn builder(session_id: SessionId) -> RuntimeBuilder {
         RuntimeBuilder::new(session_id)
+    }
+
+    /// Resumes a session from the default XDG state store.
+    pub async fn resume(session_id: SessionId) -> Result<Self, RuntimeError> {
+        let store = FileSessionStore::default_store()?;
+        Self::builder(session_id).resume_from_store(store).await
     }
 
     /// Starts a runtime step and returns its event stream.
@@ -184,6 +191,22 @@ impl Runtime {
 
     pub(crate) fn session_id(&self) -> &SessionId {
         &self.inner.session_id
+    }
+
+    /// Saves the current resume-safe session state to the configured store.
+    pub async fn save_session(&self) -> Result<(), RuntimeError> {
+        let _active_permit = self.acquire_active_step_permit()?;
+        let store = self
+            .inner
+            .session_store
+            .clone()
+            .unwrap_or(FileSessionStore::default_store()?);
+        let bundle = {
+            let session = self.inner.session.lock().await;
+            session.persistable_bundle()?
+        };
+        store.write_bundle(bundle).await?;
+        Ok(())
     }
 
     /// Returns a compact snapshot of managed subagent statuses when configured.
@@ -418,6 +441,35 @@ impl Runtime {
     }
 }
 
+async fn persist_resume_safe_savepoint_if_configured(inner: &RuntimeInner) {
+    let Some(store) = inner.session_store.clone() else {
+        return;
+    };
+    let bundle = {
+        let session = inner.session.lock().await;
+        session.persistable_bundle_if_resume_safe()
+    };
+    let bundle = match bundle {
+        Ok(Some(bundle)) => bundle,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::warn!(
+                session_id = %inner.session_id,
+                error = %error,
+                "automatic session resume savepoint skipped"
+            );
+            return;
+        }
+    };
+    if let Err(error) = store.write_bundle(bundle).await {
+        tracing::warn!(
+            session_id = %inner.session_id,
+            error = %error,
+            "automatic session resume savepoint failed"
+        );
+    }
+}
+
 struct RuntimeInner {
     session_id: SessionId,
     session: Mutex<SessionState>,
@@ -439,6 +491,7 @@ struct RuntimeInner {
     permission_admission_source: Option<Arc<dyn PermissionAdmissionSource>>,
     permissioned_process_runner_factory: Option<Arc<dyn PermissionedProcessRunnerFactory>>,
     subagent_manager: Option<SubagentManager>,
+    session_store: Option<FileSessionStore>,
 }
 
 #[derive(Clone)]
@@ -539,6 +592,7 @@ mod tests {
     mod process_execution;
     mod process_shell_execution;
     mod provider_step_flow;
+    mod session_resume;
     mod tool_execution;
     mod tool_submit_cancellation;
     mod uncertainty_review;

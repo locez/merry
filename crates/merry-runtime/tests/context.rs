@@ -1,10 +1,10 @@
 use merry_core::{ArtifactId, ArtifactKind, ArtifactRef, EvidenceLocator, EvidenceRef, SessionId};
 use merry_runtime::{
-    ArtifactContent, ArtifactError, CheckpointId, CheckpointRef, CheckpointRefId,
-    CheckpointRefManifest, CheckpointSequenceRange, CheckpointSourceKind,
-    CheckpointValidationPolicy, CitationBackedCheckpoint, CompactedCheckpoint,
-    CompactedCheckpointCandidate, CompiledContextSection, ContextCompiler, ContextEntry,
-    ContextError, ContextEvidence, ContextSummary, Runtime,
+    ArtifactContent, CheckpointId, CheckpointRef, CheckpointRefId, CheckpointRefManifest,
+    CheckpointSequenceRange, CheckpointSourceKind, CheckpointValidationPolicy,
+    CitationBackedCheckpoint, CompactedCheckpoint, CompactedCheckpointCandidate,
+    CompiledContextSection, ContextCompiler, ContextEntry, ContextEvidence, ContextSummary,
+    Runtime,
 };
 
 fn session_id(value: &str) -> SessionId {
@@ -214,10 +214,9 @@ async fn registry_mismatch_is_not_expressible_through_public_context_compiler_ap
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn direct_record_context_summary_accepts_missing_evidence_until_compile() {
-    let compiler = ContextCompiler::new();
+async fn direct_record_context_summary_rejects_missing_evidence_at_record_time() {
     let runtime = runtime("context-missing-evidence");
-    runtime
+    let error = runtime
         .record_context_summary(
             ContextSummary::new(
                 "summary-with-missing-artifact",
@@ -230,30 +229,11 @@ async fn direct_record_context_summary_accepts_missing_evidence_until_compile() 
             .expect("valid summary"),
         )
         .await
-        .expect("raw context summary should record");
-
-    let error = compiler
-        .compile(&runtime.context_snapshot().await)
         .expect_err("missing evidence artifact must be rejected");
 
     assert_eq!(
         error.to_string(),
-        "context summary summary-with-missing-artifact references unreadable evidence artifact-missing: artifact id artifact-missing is not recorded"
-    );
-
-    record_text_artifact(&runtime, "artifact-missing", "available after raw write\n").await;
-
-    let current = compiler
-        .compile(&runtime.context_snapshot().await)
-        .expect("direct raw write remains in session once evidence is readable");
-    assert_eq!(
-        current.to_snapshot(),
-        [
-            "summary:summary-with-missing-artifact",
-            "text:Navigation must not outrun exact evidence.",
-            "evidence:missing build output:artifact-missing:line:1-1",
-        ]
-        .join("\n")
+        "context state error: context summary summary-with-missing-artifact references unreadable evidence artifact-missing: artifact id artifact-missing is not recorded"
     );
 }
 
@@ -291,14 +271,15 @@ async fn citation_backed_checkpoint_renders_before_summary_and_memory() {
 async fn session_context_snapshot_is_independent_from_later_session_mutation() {
     let compiler = ContextCompiler::new();
     let runtime = runtime("context-snapshot-isolation");
+    record_text_artifact(&runtime, "artifact-before-snapshot", "available before\n").await;
     record_summary(
         &runtime,
         summary(
-            "summary-before-artifact",
+            "summary-before-snapshot",
             "Snapshot evidence must come from the captured artifact state.",
             vec![evidence(
-                "future artifact",
-                line_evidence("artifact-recorded-later", 1, 1),
+                "captured artifact",
+                line_evidence("artifact-before-snapshot", 1, 1),
             )],
         ),
     )
@@ -307,61 +288,69 @@ async fn session_context_snapshot_is_independent_from_later_session_mutation() {
     let snapshot = runtime.context_snapshot().await;
 
     record_text_artifact(&runtime, "artifact-recorded-later", "available later\n").await;
+    record_summary(
+        &runtime,
+        summary(
+            "summary-after-snapshot",
+            "Later summary must not enter the captured snapshot.",
+            vec![evidence(
+                "later artifact",
+                line_evidence("artifact-recorded-later", 1, 1),
+            )],
+        ),
+    )
+    .await;
 
-    let stale_error = compiler
+    let stale = compiler
         .compile(&snapshot)
-        .expect_err("snapshot must not observe artifacts recorded later");
+        .expect("captured snapshot remains compilable");
     assert_eq!(
-        stale_error,
-        ContextError::UnreadableEvidence {
-            summary_id: "summary-before-artifact".to_owned(),
-            artifact_id: artifact_id("artifact-recorded-later"),
-            source: ArtifactError::MissingArtifact {
-                id: artifact_id("artifact-recorded-later"),
-            },
-        }
+        stale.to_snapshot(),
+        [
+            "summary:summary-before-snapshot",
+            "text:Snapshot evidence must come from the captured artifact state.",
+            "evidence:captured artifact:artifact-before-snapshot:line:1-1",
+        ]
+        .join("\n")
     );
 
     let current = compiler
         .compile(&runtime.context_snapshot().await)
         .expect("current snapshot sees the later artifact");
-    assert_eq!(
-        current.to_snapshot(),
-        [
-            "summary:summary-before-artifact",
-            "text:Snapshot evidence must come from the captured artifact state.",
-            "evidence:future artifact:artifact-recorded-later:line:1-1",
-        ]
-        .join("\n")
+    assert!(
+        current
+            .to_snapshot()
+            .contains("summary:summary-before-snapshot")
+    );
+    assert!(
+        current
+            .to_snapshot()
+            .contains("summary:summary-after-snapshot")
     );
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn summary_text_requires_linked_exact_evidence_metadata() {
-    let compiler = ContextCompiler::new();
     let runtime = runtime("context-summary-without-evidence");
-    record_summary(
-        &runtime,
-        summary("summary-without-evidence", "Navigation only.", vec![]),
-    )
-    .await;
-
-    let error = compiler
-        .compile(&runtime.context_snapshot().await)
+    let error = runtime
+        .record_context_summary(
+            ContextSummary::new("summary-without-evidence", "Navigation only.", vec![])
+                .expect("valid summary"),
+        )
+        .await
         .expect_err("summary without evidence must be rejected");
 
     assert_eq!(
         error.to_string(),
-        "context summary summary-without-evidence has no exact evidence references"
+        "context state error: context summary summary-without-evidence has no exact evidence references"
     );
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn session_snapshot_compilation_rejects_unreadable_evidence_locators() {
-    let compiler = ContextCompiler::new();
     let runtime = runtime("context-unreadable-evidence");
     record_text_artifact(&runtime, "artifact-short-log", "01\n02\n").await;
-    runtime
+    let error = runtime
         .record_context_summary(
             ContextSummary::new(
                 "summary-with-unreadable-evidence",
@@ -374,15 +363,11 @@ async fn session_snapshot_compilation_rejects_unreadable_evidence_locators() {
             .expect("valid summary"),
         )
         .await
-        .expect("raw context summary should record");
-
-    let error = compiler
-        .compile(&runtime.context_snapshot().await)
         .expect_err("unreadable evidence locator must be rejected");
 
     assert_eq!(
         error.to_string(),
-        "context summary summary-with-unreadable-evidence references unreadable evidence artifact-short-log: artifact id artifact-short-log has invalid evidence locator: line range is outside artifact content"
+        "context state error: context summary summary-with-unreadable-evidence references unreadable evidence artifact-short-log: artifact id artifact-short-log has invalid evidence locator: line range is outside artifact content"
     );
 }
 
@@ -412,7 +397,7 @@ async fn direct_duplicate_summary_ids_compile_as_duplicate_sections_when_evidenc
             .expect("valid summary"),
         )
         .await
-        .expect("raw context summary should record");
+        .expect("direct context summary should record");
     runtime
         .record_context_summary(
             ContextSummary::new(
@@ -426,7 +411,7 @@ async fn direct_duplicate_summary_ids_compile_as_duplicate_sections_when_evidenc
             .expect("valid summary"),
         )
         .await
-        .expect("raw context summary should record");
+        .expect("direct context summary should record");
 
     let compiled = compiler
         .compile(&runtime.context_snapshot().await)

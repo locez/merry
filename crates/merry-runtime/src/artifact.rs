@@ -10,6 +10,7 @@
 //! before observable events.
 
 use merry_core::{ArtifactId, ArtifactKind, ArtifactRef, EvidenceLocator, EvidenceRef};
+use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::Arc};
 use thiserror::Error;
 
@@ -18,24 +19,27 @@ use thiserror::Error;
 /// This enum is the MVP payload boundary for runtime-owned artifacts. Variants
 /// are provider-neutral and intentionally mirror Merry artifact kinds rather
 /// than provider wire content blocks.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ArtifactContent {
     /// UTF-8 text.
-    Text(String),
+    Text { content: String },
     /// Serialized JSON text.
-    Json(String),
+    Json { content: String },
     /// Opaque binary bytes.
-    Binary(Vec<u8>),
+    Binary { bytes: Vec<u8> },
     /// Image bytes.
-    Image(Vec<u8>),
+    Image { bytes: Vec<u8> },
     /// Provider-neutral bytes for artifact kinds not covered by stable variants.
-    Other(Vec<u8>),
+    Other { bytes: Vec<u8> },
 }
 
 impl ArtifactContent {
     /// Creates UTF-8 text artifact content.
     pub fn text(content: impl Into<String>) -> Self {
-        Self::Text(content.into())
+        Self::Text {
+            content: content.into(),
+        }
     }
 
     /// Creates serialized JSON artifact content.
@@ -43,33 +47,41 @@ impl ArtifactContent {
     /// The runtime stores JSON as exact text in the MVP; it does not parse or
     /// rewrite the payload.
     pub fn json(content: impl Into<String>) -> Self {
-        Self::Json(content.into())
+        Self::Json {
+            content: content.into(),
+        }
     }
 
     /// Creates opaque binary artifact content.
     pub fn binary(bytes: impl Into<Vec<u8>>) -> Self {
-        Self::Binary(bytes.into())
+        Self::Binary {
+            bytes: bytes.into(),
+        }
     }
 
     /// Creates image artifact content.
     pub fn image(bytes: impl Into<Vec<u8>>) -> Self {
-        Self::Image(bytes.into())
+        Self::Image {
+            bytes: bytes.into(),
+        }
     }
 
     /// Creates content for provider-neutral artifact kinds not covered by stable variants.
     pub fn other(bytes: impl Into<Vec<u8>>) -> Self {
-        Self::Other(bytes.into())
+        Self::Other {
+            bytes: bytes.into(),
+        }
     }
 
     /// Returns the content kind.
     #[must_use]
     pub fn kind(&self) -> ArtifactContentKind {
         match self {
-            Self::Text(_) => ArtifactContentKind::Text,
-            Self::Json(_) => ArtifactContentKind::Json,
-            Self::Binary(_) => ArtifactContentKind::Binary,
-            Self::Image(_) => ArtifactContentKind::Image,
-            Self::Other(_) => ArtifactContentKind::Other,
+            Self::Text { .. } => ArtifactContentKind::Text,
+            Self::Json { .. } => ArtifactContentKind::Json,
+            Self::Binary { .. } => ArtifactContentKind::Binary,
+            Self::Image { .. } => ArtifactContentKind::Image,
+            Self::Other { .. } => ArtifactContentKind::Other,
         }
     }
 
@@ -80,8 +92,8 @@ impl ArtifactContent {
     #[must_use]
     pub fn as_text(&self) -> Option<&str> {
         match self {
-            Self::Text(content) | Self::Json(content) => Some(content),
-            Self::Binary(_) | Self::Image(_) | Self::Other(_) => None,
+            Self::Text { content } | Self::Json { content } => Some(content),
+            Self::Binary { .. } | Self::Image { .. } | Self::Other { .. } => None,
         }
     }
 
@@ -89,8 +101,8 @@ impl ArtifactContent {
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         match self {
-            Self::Text(content) | Self::Json(content) => content.as_bytes(),
-            Self::Binary(bytes) | Self::Image(bytes) | Self::Other(bytes) => bytes,
+            Self::Text { content } | Self::Json { content } => content.as_bytes(),
+            Self::Binary { bytes } | Self::Image { bytes } | Self::Other { bytes } => bytes,
         }
     }
 }
@@ -121,6 +133,13 @@ pub enum ArtifactContentKind {
 pub struct ArtifactRecord {
     artifact: ArtifactRef,
     content: Arc<ArtifactContent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PersistedArtifactRecord {
+    pub(crate) artifact: ArtifactRef,
+    pub(crate) content: ArtifactContent,
 }
 
 impl ArtifactRecord {
@@ -301,6 +320,26 @@ impl ArtifactRegistry {
         let record = self.read_record(&evidence.artifact_id)?;
         read_located_content(record.artifact.id(), record.content(), &evidence.locator)
     }
+
+    pub(crate) fn persisted_records(&self) -> Vec<PersistedArtifactRecord> {
+        self.records
+            .values()
+            .map(|record| PersistedArtifactRecord {
+                artifact: record.artifact().clone(),
+                content: record.content().clone(),
+            })
+            .collect()
+    }
+
+    pub(crate) fn from_persisted_records(
+        records: Vec<PersistedArtifactRecord>,
+    ) -> Result<Self, ArtifactError> {
+        let mut registry = Self::default();
+        for record in records {
+            registry.record(record.artifact, record.content)?;
+        }
+        Ok(registry)
+    }
 }
 
 fn validate_content_kind(
@@ -391,7 +430,7 @@ fn validate_byte_range(
     }
 
     match content {
-        ArtifactContent::Text(text) | ArtifactContent::Json(text) => {
+        ArtifactContent::Text { content: text } | ArtifactContent::Json { content: text } => {
             text.get(start..end).map(|_| ()).ok_or_else(|| {
                 invalid_locator(
                     artifact_id,
@@ -399,9 +438,9 @@ fn validate_byte_range(
                 )
             })
         }
-        ArtifactContent::Binary(_) | ArtifactContent::Image(_) | ArtifactContent::Other(_) => {
-            Ok(())
-        }
+        ArtifactContent::Binary { .. }
+        | ArtifactContent::Image { .. }
+        | ArtifactContent::Other { .. } => Ok(()),
     }
 }
 
@@ -424,7 +463,9 @@ fn read_located_content(
                 "line range is outside artifact content",
             ));
         };
-        Ok(ArtifactContent::Text(text[start..end].to_owned()))
+        Ok(ArtifactContent::Text {
+            content: text[start..end].to_owned(),
+        })
     } else if let Some((start, end)) = locator.as_byte_range() {
         read_byte_range(artifact_id, content, start, end)
     } else if locator.as_json_pointer().is_some() {
@@ -453,12 +494,20 @@ fn read_byte_range(
     let end = usize::try_from(end).expect("validated byte range end fits usize");
 
     match content {
-        ArtifactContent::Text(text) | ArtifactContent::Json(text) => {
-            Ok(ArtifactContent::Text(text[start..end].to_owned()))
+        ArtifactContent::Text { content: text } | ArtifactContent::Json { content: text } => {
+            Ok(ArtifactContent::Text {
+                content: text[start..end].to_owned(),
+            })
         }
-        ArtifactContent::Binary(bytes) => Ok(ArtifactContent::Binary(bytes[start..end].to_vec())),
-        ArtifactContent::Image(bytes) => Ok(ArtifactContent::Image(bytes[start..end].to_vec())),
-        ArtifactContent::Other(bytes) => Ok(ArtifactContent::Other(bytes[start..end].to_vec())),
+        ArtifactContent::Binary { bytes } => Ok(ArtifactContent::Binary {
+            bytes: bytes[start..end].to_vec(),
+        }),
+        ArtifactContent::Image { bytes } => Ok(ArtifactContent::Image {
+            bytes: bytes[start..end].to_vec(),
+        }),
+        ArtifactContent::Other { bytes } => Ok(ArtifactContent::Other {
+            bytes: bytes[start..end].to_vec(),
+        }),
     }
 }
 

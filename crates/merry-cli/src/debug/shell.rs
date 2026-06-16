@@ -205,7 +205,7 @@ where
         .read_artifact_content(result.artifact().id())
         .await
         .map_err(unexpected)?;
-    let ArtifactContent::Json(content) = content else {
+    let ArtifactContent::Json { content } = content else {
         return Err(CliError::Unexpected(
             "shell command result artifact was not JSON".to_owned(),
         ));

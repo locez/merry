@@ -17,6 +17,7 @@ use crate::{
 use merry_core::{
     ErrorInfo, PendingToolCall, ToolCallId, ToolCallResultStatus, ToolName, ToolSpec,
 };
+use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     future::Future,
@@ -320,7 +321,8 @@ impl ToolExecutionError {
 ///
 /// This metadata is intentionally not part of provider-visible [`ToolSpec`].
 /// Runtime policy uses it before invoking an executor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ToolActionKind {
     /// Reads runtime or workspace state without changing it.
     ReadOnly,
@@ -352,7 +354,8 @@ impl ToolActionKind {
 /// evidence to `merry-runtime`. It is unstable implementation-facing API: it is
 /// not part of `merry_core::RuntimeJournalEvent`, is not provider wire format, and must
 /// not be rendered into provider-visible tool specs or continuations.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ActionProposal {
     tool_call_id: ToolCallId,
     tool_name: ToolName,
@@ -479,7 +482,8 @@ impl ActionProposal {
 }
 
 /// Provider-neutral deterministic evidence attached to an action proposal.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ActionProposalEvidence {
     /// A constrained workspace patch proposal.
     WorkspacePatch(WorkspacePatchProposal),
@@ -502,7 +506,8 @@ impl ActionProposalEvidence {
 /// This evidence is runtime-owned audit state. It intentionally carries no
 /// provider wire data and must not be exposed through artifacts or tool result
 /// continuations.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ActionExecutionEvidence {
     /// A constrained workspace patch that was actually applied.
     WorkspacePatch(WorkspacePatchExecutionEvidence),
@@ -524,7 +529,8 @@ impl ActionExecutionEvidence {
 ///
 /// This stores only relative workspace identity, byte counts, and stable
 /// non-cryptographic content fingerprints. It does not store old or new text.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkspacePatchChangeEvidence {
     relative_path: String,
     preimage_bytes: usize,
@@ -620,7 +626,8 @@ impl WorkspacePatchChangeEvidence {
 ///
 /// This stores one or more file changes. It intentionally does not store old or
 /// new text.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkspacePatchExecutionEvidence {
     changes: Vec<WorkspacePatchChangeEvidence>,
 }
@@ -714,7 +721,8 @@ impl WorkspacePatchExecutionEvidence {
 ///
 /// This stores one or more file changes needed for a future edit decision. It
 /// does not store old text, new text, host absolute paths, or provider wire data.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkspacePatchProposal {
     changes: Vec<WorkspacePatchChangeEvidence>,
 }

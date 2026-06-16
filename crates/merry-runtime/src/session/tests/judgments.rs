@@ -317,23 +317,25 @@ fn checked_context_entry_rejects_invalid_candidate_without_context_mutation() {
             ArtifactContent::text("one line\n"),
         )
         .expect("short artifact records");
-    session.record_context_entry(ContextEntry::summary(
-        ContextSummary::new(
-            "checked-existing-summary",
-            "Existing checked summary.",
-            vec![
-                ContextEvidence::new(
-                    "existing source",
-                    EvidenceRef::new(
-                        artifact_id("checked-existing-source"),
-                        EvidenceLocator::whole_artifact(),
-                    ),
-                )
-                .expect("valid context evidence"),
-            ],
-        )
-        .expect("valid context summary"),
-    ));
+    session
+        .record_context_entry(ContextEntry::summary(
+            ContextSummary::new(
+                "checked-existing-summary",
+                "Existing checked summary.",
+                vec![
+                    ContextEvidence::new(
+                        "existing source",
+                        EvidenceRef::new(
+                            artifact_id("checked-existing-source"),
+                            EvidenceLocator::whole_artifact(),
+                        ),
+                    )
+                    .expect("valid context evidence"),
+                ],
+            )
+            .expect("valid context summary"),
+        ))
+        .expect("existing context records");
     let context_before = ContextCompiler::new()
         .compile(&session.context_snapshot())
         .expect("existing context compiles")
@@ -517,23 +519,25 @@ fn summary_draft_promotion_pre_existing_context_duplicate_does_not_write_registr
         "pre-existing-summary-source",
         EvidenceLocator::whole_artifact(),
     );
-    session.record_context_entry(crate::context::ContextEntry::summary(
-        crate::context::ContextSummary::new(
-            "pre-existing-summary",
-            "Already recorded summary.",
-            vec![
-                crate::context::ContextEvidence::new(
-                    "pre-existing source",
-                    EvidenceRef::new(
-                        artifact_id("pre-existing-summary-source"),
-                        EvidenceLocator::whole_artifact(),
-                    ),
-                )
-                .expect("valid context evidence"),
-            ],
-        )
-        .expect("valid context summary"),
-    ));
+    session
+        .record_context_entry(crate::context::ContextEntry::summary(
+            crate::context::ContextSummary::new(
+                "pre-existing-summary",
+                "Already recorded summary.",
+                vec![
+                    crate::context::ContextEvidence::new(
+                        "pre-existing source",
+                        EvidenceRef::new(
+                            artifact_id("pre-existing-summary-source"),
+                            EvidenceLocator::whole_artifact(),
+                        ),
+                    )
+                    .expect("valid context evidence"),
+                ],
+            )
+            .expect("valid context summary"),
+        ))
+        .expect("pre-existing context records");
     let context_before = ContextCompiler::new()
         .compile(&session.context_snapshot())
         .expect("pre-existing context compiles");
