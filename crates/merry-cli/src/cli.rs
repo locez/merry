@@ -37,7 +37,7 @@ pub(crate) struct Cli {
     pub(crate) sandbox_child_handoff: Option<SandboxChildHandoff>,
 
     #[command(subcommand)]
-    pub(crate) command: CliCommand,
+    pub(crate) command: Option<CliCommand>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -60,6 +60,11 @@ pub(crate) fn parse_max_output_tokens(value: &str) -> Result<u64, String> {
     }
 
     Ok(tokens)
+}
+
+pub(crate) fn root_usage() -> String {
+    let mut command = Cli::command();
+    command_usage(&mut command)
 }
 
 pub(crate) fn debug_usage() -> String {
@@ -168,11 +173,30 @@ mod tests {
     use clap::Parser;
 
     #[test]
+    fn parses_no_subcommand_as_tui_entrypoint() {
+        let cli = Cli::try_parse_from(["merry"]).expect("root args should parse");
+
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn existing_subcommands_still_parse_after_tui_entrypoint() {
+        let run = Cli::try_parse_from(["merry", "run", "fix the test"]).expect("run parses");
+        assert!(matches!(run.command, Some(CliCommand::Run(_))));
+
+        let cmd = Cli::try_parse_from(["merry", "cmd", "list files"]).expect("cmd parses");
+        assert!(matches!(cmd.command, Some(CliCommand::Cmd(_))));
+
+        let debug = Cli::try_parse_from(["merry", "debug"]).expect("debug parses");
+        assert!(matches!(debug.command, Some(CliCommand::Debug(_))));
+    }
+
+    #[test]
     fn parses_run_task() {
         let cli = Cli::try_parse_from(["merry", "run", "fix the failing test"])
             .expect("run args should parse");
 
-        match cli.command {
+        match cli.command.expect("command should be present") {
             CliCommand::Run(args) => {
                 assert_eq!(args.task, "fix the failing test");
                 assert!(!args.events_jsonl);
@@ -186,7 +210,7 @@ mod tests {
         let cli = Cli::try_parse_from(["merry", "run", "--events-jsonl", "fix the failing test"])
             .expect("run args should parse");
 
-        match cli.command {
+        match cli.command.expect("command should be present") {
             CliCommand::Run(args) => {
                 assert_eq!(args.task, "fix the failing test");
                 assert!(args.events_jsonl);
@@ -200,7 +224,7 @@ mod tests {
         let cli = Cli::try_parse_from(["merry", "cmd", "find all TypeScript tests"])
             .expect("cmd args should parse");
 
-        match cli.command {
+        match cli.command.expect("command should be present") {
             CliCommand::Cmd(args) => {
                 assert_eq!(args.request, "find all TypeScript tests");
                 assert!(!args.json);
@@ -221,7 +245,7 @@ mod tests {
         ])
         .expect("cmd args should parse");
 
-        match cli.command {
+        match cli.command.expect("command should be present") {
             CliCommand::Cmd(args) => {
                 assert_eq!(args.request, "find all TypeScript tests");
                 assert!(args.json);
@@ -244,7 +268,7 @@ mod tests {
     fn parses_debug_defaults() {
         let cli = Cli::try_parse_from(["merry", "debug"]).expect("debug args should parse");
 
-        match cli.command {
+        match cli.command.expect("command should be present") {
             CliCommand::Debug(debug) => {
                 assert!(!cli.with_sandbox);
                 assert_eq!(debug.session_id, DEFAULT_SESSION_ID);
@@ -272,7 +296,7 @@ mod tests {
         ])
         .expect("debug openai args should parse");
 
-        match cli.command {
+        match cli.command.expect("command should be present") {
             CliCommand::Debug(debug) => match debug.command {
                 Some(DebugCommand::OpenAi(openai)) => {
                     assert_eq!(openai.input, "hello");
@@ -300,7 +324,7 @@ mod tests {
         let cli = Cli::try_parse_from(["merry", "debug", "coding-loop-smoke"])
             .expect("debug coding-loop-smoke args should parse");
 
-        match cli.command {
+        match cli.command.expect("command should be present") {
             CliCommand::Debug(debug) => match debug.command {
                 Some(DebugCommand::CodingLoopSmoke) => {}
                 Some(
@@ -331,7 +355,7 @@ mod tests {
         ])
         .expect("debug permission-network-smoke args should parse");
 
-        match cli.command {
+        match cli.command.expect("command should be present") {
             CliCommand::Debug(debug) => match debug.command {
                 Some(DebugCommand::PermissionNetworkSmoke(smoke)) => {
                     assert_eq!(smoke.model.as_deref(), Some("gpt-test"));
@@ -365,7 +389,7 @@ mod tests {
         ])
         .expect("debug coding-loop-live-smoke args should parse");
 
-        match cli.command {
+        match cli.command.expect("command should be present") {
             CliCommand::Debug(debug) => match debug.command {
                 Some(DebugCommand::CodingLoopLiveSmoke(live)) => {
                     assert_eq!(live.model.as_deref(), Some("gpt-test"));
@@ -391,7 +415,7 @@ mod tests {
         let cli = Cli::try_parse_from(["merry", "debug", "coding-loop-task-smoke"])
             .expect("debug coding-loop-task-smoke args should parse");
 
-        match cli.command {
+        match cli.command.expect("command should be present") {
             CliCommand::Debug(debug) => match debug.command {
                 Some(DebugCommand::CodingLoopTaskSmoke(task)) => {
                     assert_eq!(task.task, CodingLoopTaskSmokeTask::StatusText);
@@ -426,7 +450,7 @@ mod tests {
         ])
         .expect("debug coding-loop-task-live-smoke args should parse");
 
-        match cli.command {
+        match cli.command.expect("command should be present") {
             CliCommand::Debug(debug) => match debug.command {
                 Some(DebugCommand::CodingLoopTaskLiveSmoke(live)) => {
                     assert_eq!(live.task, CodingLoopTaskSmokeTask::StatusText);
@@ -461,7 +485,7 @@ mod tests {
         ])
         .expect("debug coding-loop-subagent-live-smoke args should parse");
 
-        match cli.command {
+        match cli.command.expect("command should be present") {
             CliCommand::Debug(debug) => match debug.command {
                 Some(DebugCommand::CodingLoopSubagentLiveSmoke(live)) => {
                     assert_eq!(live.model.as_deref(), Some("gpt-test"));
@@ -487,7 +511,7 @@ mod tests {
         let cli = Cli::try_parse_from(["merry", "debug", "shell", "--", "rustc", "--version"])
             .expect("shell args should parse");
 
-        match cli.command {
+        match cli.command.expect("command should be present") {
             CliCommand::Debug(debug) => match debug.command {
                 Some(DebugCommand::Shell(shell)) => {
                     assert!(!shell.accept_local_workspace_process_risk);
@@ -514,7 +538,7 @@ mod tests {
         ])
         .expect("shell args should parse");
 
-        match cli.command {
+        match cli.command.expect("command should be present") {
             CliCommand::Debug(debug) => match debug.command {
                 Some(DebugCommand::Shell(shell)) => {
                     assert!(shell.accept_local_workspace_process_risk);
