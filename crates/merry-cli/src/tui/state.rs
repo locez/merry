@@ -85,6 +85,7 @@ pub(crate) struct TuiState {
     input: TextInput,
     queue_preview: QueuePreviewState,
     timeline: Vec<TimelineItem>,
+    timeline_scroll_offset: usize,
     run_state: InteractiveRunState,
     usage: Option<SessionUsage>,
 }
@@ -105,6 +106,7 @@ impl TuiState {
             input: TextInput::default(),
             queue_preview: QueuePreviewState::from_preview(QueuePreview::empty()),
             timeline: Vec::new(),
+            timeline_scroll_offset: 0,
             run_state: InteractiveRunState::WaitingForInput,
             usage: None,
         }
@@ -132,6 +134,19 @@ impl TuiState {
 
     pub(crate) fn push_timeline_item(&mut self, item: TimelineItem) {
         self.timeline.push(item);
+        self.timeline_scroll_offset = 0;
+    }
+
+    pub(crate) fn timeline_scroll_offset(&self) -> usize {
+        self.timeline_scroll_offset
+    }
+
+    pub(crate) fn scroll_timeline_up(&mut self) {
+        self.timeline_scroll_offset = self.timeline_scroll_offset.saturating_add(1);
+    }
+
+    pub(crate) fn scroll_timeline_down(&mut self) {
+        self.timeline_scroll_offset = self.timeline_scroll_offset.saturating_sub(1);
     }
 
     pub(crate) fn queue_preview(&self) -> &QueuePreviewState {

@@ -33,13 +33,14 @@ impl TuiProjector {
                 let call_id = call.id().clone();
                 let tool_name = call.name().clone();
                 state.push_timeline_item(TimelineItem::Muted {
-                    title: format!("tool {}", tool_name.as_str()),
-                    detail: format!("call {}", call_id.as_str()),
+                    title: tool_name.as_str().to_owned(),
+                    detail: "started".to_owned(),
                 });
                 self.started_tools.insert(call_id, tool_name);
             }
             RuntimeEvent::ToolCallFinished { result, output, .. } => {
                 let text = tool_output_text(output);
+                let tool_name = self.started_tools.get(result.call_id()).cloned();
                 if result.status() == ToolCallResultStatus::Failed {
                     let body = result
                         .diagnostic()
@@ -58,8 +59,11 @@ impl TuiProjector {
                     });
                 } else {
                     state.push_timeline_item(TimelineItem::Muted {
-                        title: "tool result".to_owned(),
-                        detail: summarize(&text, 96),
+                        title: tool_name
+                            .as_ref()
+                            .map(|name| name.as_str().to_owned())
+                            .unwrap_or_else(|| "tool result".to_owned()),
+                        detail: "completed".to_owned(),
                     });
                 }
             }
@@ -110,24 +114,4 @@ fn tool_output_text(output: Option<ToolOutput>) -> String {
         Some(ToolOutput::Json { json }) => json,
         None => String::new(),
     }
-}
-
-fn summarize(text: &str, max_chars: usize) -> String {
-    let mut compact = String::new();
-    for word in text.split_whitespace() {
-        if !compact.is_empty() {
-            compact.push(' ');
-        }
-        compact.push_str(word);
-    }
-
-    if compact.chars().count() <= max_chars {
-        return compact;
-    }
-
-    compact
-        .chars()
-        .take(max_chars.saturating_sub(3))
-        .collect::<String>()
-        + "..."
 }
