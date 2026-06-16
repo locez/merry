@@ -359,6 +359,7 @@ struct MerryConfigToml {
     models: Option<ModelsToml>,
     observability: Option<ObservabilityToml>,
     providers: Option<ProvidersToml>,
+    tui: Option<TuiToml>,
 }
 
 #[derive(Debug, Deserialize, Default, Clone, PartialEq, Eq)]
@@ -429,6 +430,63 @@ struct ModelsToml {
 struct RuntimeModelToml {
     provider: Option<String>,
     model: String,
+}
+
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct TuiToml {
+    theme: Option<TuiThemeToml>,
+    keymap: Option<TuiKeymapToml>,
+}
+
+#[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TuiThemeToml {
+    pub(crate) status: Option<String>,
+    pub(crate) muted: Option<String>,
+    pub(crate) focus: Option<String>,
+    pub(crate) selection: Option<String>,
+    pub(crate) diff_add: Option<String>,
+    pub(crate) diff_delete: Option<String>,
+    pub(crate) warning: Option<String>,
+    pub(crate) error: Option<String>,
+    pub(crate) risk: Option<String>,
+    pub(crate) success: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TuiKeymapToml {
+    pub(crate) submit_next: Option<String>,
+    pub(crate) submit_backlog: Option<String>,
+    pub(crate) interrupt: Option<String>,
+    pub(crate) quit: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct TuiConfig {
+    pub(crate) theme: TuiThemeToml,
+    pub(crate) keymap: TuiKeymapToml,
+}
+
+impl MerryConfig {
+    pub(crate) fn tui_config(&self) -> Result<TuiConfig, ConfigError> {
+        let Some(tui) = self.raw.tui.as_ref() else {
+            return Ok(TuiConfig::default());
+        };
+        let config = TuiConfig {
+            theme: tui.theme.clone().unwrap_or_default(),
+            keymap: tui.keymap.clone().unwrap_or_default(),
+        };
+        validate_tui_config(&config)?;
+        Ok(config)
+    }
+}
+
+pub(crate) fn validate_tui_config(config: &TuiConfig) -> Result<(), ConfigError> {
+    let _ = crate::tui::theme::TuiTheme::from_config(&config.theme)?;
+    let _ = crate::tui::keymap::Keymap::from_config(&config.keymap)?;
+    Ok(())
 }
 
 fn default_true() -> bool {
@@ -551,6 +609,41 @@ format = "json"
         assert_eq!(log.level, LogLevel::Debug);
         assert_eq!(log.format, LogFormat::Json);
         assert_eq!(log.path, paths.default_log_file());
+    }
+
+    #[test]
+    fn parses_tui_theme_and_keymap_config() {
+        let paths = XdgPaths::from_parts(home(), None, None);
+        let config = MerryConfig::load_optional_from_text(
+            Some(
+                r##"
+[tui.theme]
+status = "cyan"
+muted = "dark_gray"
+focus = "yellow"
+selection = "blue"
+diff_add = "green"
+diff_delete = "red"
+warning = "yellow"
+error = "red"
+risk = "magenta"
+success = "green"
+
+[tui.keymap]
+submit_next = "enter"
+submit_backlog = "ctrl+b"
+interrupt = "ctrl+c"
+quit = "ctrl+q"
+"##,
+            ),
+            &paths,
+        )
+        .expect("config should parse")
+        .expect("config should be present");
+
+        let tui = config.tui_config().expect("tui config should validate");
+        assert_eq!(tui.theme.status.as_deref(), Some("cyan"));
+        assert_eq!(tui.keymap.submit_next.as_deref(), Some("enter"));
     }
 
     #[test]
@@ -703,6 +796,12 @@ roots = ["skills", "~/shared-skills", "/opt/company/skills"]
         assert_eq!(log.level, LogLevel::Debug);
         assert_eq!(log.format, LogFormat::Json);
         assert_eq!(log.path, paths.default_log_file());
+
+        let tui = config
+            .tui_config()
+            .expect("example TUI config should validate");
+        assert_eq!(tui.theme.status.as_deref(), Some("cyan"));
+        assert_eq!(tui.keymap.submit_next.as_deref(), Some("enter"));
 
         let provider = config
             .openai_compatible_provider()

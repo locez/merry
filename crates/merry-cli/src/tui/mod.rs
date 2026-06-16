@@ -23,12 +23,19 @@ pub(crate) async fn run(
     sandbox_child_handoff: Option<SandboxChildHandoff>,
     merry_config: Option<&MerryConfig>,
 ) -> Result<(), CliError> {
+    let tui_config = merry_config
+        .map(MerryConfig::tui_config)
+        .transpose()
+        .map_err(crate::cli_error::unexpected)?
+        .unwrap_or_default();
+    let keymap = Keymap::from_config(&tui_config.keymap).map_err(crate::cli_error::unexpected)?;
+    let theme = TuiTheme::from_config(&tui_config.theme).map_err(crate::cli_error::unexpected)?;
     let session = runtime::start_tui_runtime_session(sandbox_child_handoff, merry_config).await?;
     let state = TuiState::new(
         session.workspace_root.clone(),
         session.model_label.clone(),
-        Keymap::default(),
-        TuiTheme::default(),
+        keymap,
+        theme,
     );
     let terminal = TerminalSession::enter().map_err(crate::cli_error::unexpected)?;
     controller::run_controller(terminal, session, state).await
