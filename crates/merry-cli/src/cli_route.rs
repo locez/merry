@@ -10,29 +10,35 @@ use crate::debug::{
     OpenAiArgs as DebugOpenAiArgs, PermissionNetworkSmokeArgs as DebugPermissionNetworkSmokeArgs,
 };
 use crate::run as run_command;
+use crate::tui;
 
 pub(crate) async fn run(cli: Cli, merry_config: Option<MerryConfig>) -> CliExit {
     let sandbox_child_handoff = cli.sandbox_child_handoff;
 
     match cli.command {
-        CliCommand::Run(args) => map_run_result(
+        None => map_result(
+            tui::run(sandbox_child_handoff, merry_config.as_ref()).await,
+            cli::root_usage,
+            cli::debug_openai_usage,
+        ),
+        Some(CliCommand::Run(args)) => map_run_result(
             run_command::run(&args, sandbox_child_handoff, merry_config.as_ref()).await,
         ),
-        CliCommand::Cmd(args) => map_result(
+        Some(CliCommand::Cmd(args)) => map_result(
             cmd::run(&args, merry_config.as_ref()).await,
             cli::cmd_usage,
             cli::cmd_usage,
         ),
-        CliCommand::Debug(DebugArgs {
+        Some(CliCommand::Debug(DebugArgs {
             session_id,
             input,
             command: None,
-        }) => map_result(
+        })) => map_result(
             debug::basic::run(&session_id, &input, merry_config.as_ref()).await,
             cli::debug_usage,
             cli::debug_openai_usage,
         ),
-        CliCommand::Debug(DebugArgs {
+        Some(CliCommand::Debug(DebugArgs {
             command:
                 Some(DebugCommand::OpenAi(DebugOpenAiArgs {
                     input,
@@ -41,7 +47,7 @@ pub(crate) async fn run(cli: Cli, merry_config: Option<MerryConfig>) -> CliExit 
                     debug_tool_result,
                 })),
             ..
-        }) => map_debug_openai_result(
+        })) => map_debug_openai_result(
             debug::openai::run(
                 &input,
                 model.as_deref(),
@@ -51,28 +57,28 @@ pub(crate) async fn run(cli: Cli, merry_config: Option<MerryConfig>) -> CliExit 
             )
             .await,
         ),
-        CliCommand::Debug(DebugArgs {
+        Some(CliCommand::Debug(DebugArgs {
             command: Some(DebugCommand::Shell(args)),
             ..
-        }) => map_shell_result(
+        })) => map_shell_result(
             debug::shell::run(args, sandbox_child_handoff, merry_config.as_ref()).await,
         ),
-        CliCommand::Debug(DebugArgs {
+        Some(CliCommand::Debug(DebugArgs {
             command: Some(DebugCommand::CodingLoopSmoke),
             ..
-        }) => map_result(
+        })) => map_result(
             debug::coding_loop::run_smoke(sandbox_child_handoff, merry_config.as_ref()).await,
             cli::debug_usage,
             cli::debug_openai_usage,
         ),
-        CliCommand::Debug(DebugArgs {
+        Some(CliCommand::Debug(DebugArgs {
             command:
                 Some(DebugCommand::PermissionNetworkSmoke(DebugPermissionNetworkSmokeArgs {
                     model,
                     max_output_tokens,
                 })),
             ..
-        }) => map_result(
+        })) => map_result(
             debug::coding_loop::run_permission_network_smoke(
                 sandbox_child_handoff,
                 model.as_deref(),
@@ -83,10 +89,10 @@ pub(crate) async fn run(cli: Cli, merry_config: Option<MerryConfig>) -> CliExit 
             cli::debug_usage,
             cli::debug_openai_usage,
         ),
-        CliCommand::Debug(DebugArgs {
+        Some(CliCommand::Debug(DebugArgs {
             command: Some(DebugCommand::CodingLoopTaskSmoke(args)),
             ..
-        }) => map_result(
+        })) => map_result(
             debug::coding_loop::run_task_smoke(
                 sandbox_child_handoff,
                 args.task,
@@ -96,14 +102,14 @@ pub(crate) async fn run(cli: Cli, merry_config: Option<MerryConfig>) -> CliExit 
             cli::debug_usage,
             cli::debug_openai_usage,
         ),
-        CliCommand::Debug(DebugArgs {
+        Some(CliCommand::Debug(DebugArgs {
             command:
                 Some(DebugCommand::CodingLoopLiveSmoke(DebugCodingLoopLiveSmokeArgs {
                     model,
                     max_output_tokens,
                 })),
             ..
-        }) => map_result(
+        })) => map_result(
             debug::coding_loop::run_live_smoke(
                 sandbox_child_handoff,
                 model.as_deref(),
@@ -114,7 +120,7 @@ pub(crate) async fn run(cli: Cli, merry_config: Option<MerryConfig>) -> CliExit 
             cli::debug_usage,
             cli::debug_coding_loop_live_smoke_usage,
         ),
-        CliCommand::Debug(DebugArgs {
+        Some(CliCommand::Debug(DebugArgs {
             command:
                 Some(DebugCommand::CodingLoopTaskLiveSmoke(DebugCodingLoopTaskLiveSmokeArgs {
                     task,
@@ -122,7 +128,7 @@ pub(crate) async fn run(cli: Cli, merry_config: Option<MerryConfig>) -> CliExit 
                     max_output_tokens,
                 })),
             ..
-        }) => map_result(
+        })) => map_result(
             debug::coding_loop::run_task_live_smoke(
                 sandbox_child_handoff,
                 task,
@@ -134,14 +140,14 @@ pub(crate) async fn run(cli: Cli, merry_config: Option<MerryConfig>) -> CliExit 
             cli::debug_usage,
             cli::debug_coding_loop_task_live_smoke_usage,
         ),
-        CliCommand::Debug(DebugArgs {
+        Some(CliCommand::Debug(DebugArgs {
             command:
                 Some(DebugCommand::CodingLoopSubagentLiveSmoke(DebugCodingLoopSubagentLiveSmokeArgs {
                     model,
                     max_output_tokens,
                 })),
             ..
-        }) => map_result(
+        })) => map_result(
             debug::coding_loop::run_subagent_live_smoke(
                 sandbox_child_handoff,
                 model.as_deref(),

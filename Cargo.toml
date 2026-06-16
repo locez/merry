@@ -28,12 +28,14 @@ rust-version = "1.93"
 
 [workspace.dependencies]
 clap = { version = "4.5", features = ["derive"] }
+crossterm = { version = "0.29", features = ["event-stream"] }
 futures-core = "0.3"
 futures-executor = "0.3"
 futures-util = "0.3"
 jsonschema = { version = "0.30", default-features = false }
 libc = "0.2"
 pyo3 = { version = "0.28.3", features = ["extension-module"] }
+ratatui = "0.30"
 schemars = { version = "1.0", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

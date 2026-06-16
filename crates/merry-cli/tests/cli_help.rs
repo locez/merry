@@ -87,9 +87,11 @@ fn root_help_writes_usage_to_stdout() {
     assert!(output.status.success(), "help should exit successfully");
     assert!(output.stderr.is_empty(), "help should not write stderr");
     let stdout = std::str::from_utf8(&output.stdout).expect("stdout should be utf-8");
-    assert!(stdout.contains("Usage: merry [OPTIONS] <COMMAND>"));
-    assert!(stdout.contains("--with-sandbox"));
+    assert!(stdout.contains("Usage: merry [OPTIONS] [COMMAND]"));
+    assert!(stdout.contains("run"));
+    assert!(stdout.contains("cmd"));
     assert!(stdout.contains("debug"));
+    assert!(!stdout.contains("tui"));
 }
 
 #[test]
@@ -103,9 +105,11 @@ fn root_with_sandbox_help_writes_usage_to_stdout_without_reexec() {
     assert!(output.status.success(), "help should exit successfully");
     assert!(output.stderr.is_empty(), "help should not write stderr");
     let stdout = std::str::from_utf8(&output.stdout).expect("stdout should be utf-8");
-    assert!(stdout.contains("Usage: merry [OPTIONS] <COMMAND>"));
-    assert!(stdout.contains("--with-sandbox"));
+    assert!(stdout.contains("Usage: merry [OPTIONS] [COMMAND]"));
+    assert!(stdout.contains("run"));
+    assert!(stdout.contains("cmd"));
     assert!(stdout.contains("debug"));
+    assert!(!stdout.contains("tui"));
 }
 
 #[test]
