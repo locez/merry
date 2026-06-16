@@ -1,6 +1,7 @@
 use super::input::TextInput;
 use super::keymap::{KeyAction, KeyBinding, Keymap};
 use super::projector::TuiProjector;
+use super::render::render_to_text;
 use super::state::{QueuePreview, TimelineItem, TuiState};
 use super::theme::{SemanticColor, TuiTheme};
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -302,4 +303,42 @@ fn projector_updates_queue_preview_and_usage_without_timeline_noise() {
     assert_eq!(state.queue_preview().next[0].text, "urgent");
     assert!(state.timeline().is_empty());
     assert!(state.status_text().contains("13 tok"));
+}
+
+#[test]
+fn renderer_shows_status_timeline_queue_and_input() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.push_timeline_item(TimelineItem::Assistant {
+        text: "assistant says hello".to_owned(),
+    });
+    state.update_queue_preview(QueuePreview {
+        next: vec![QueuedInputView {
+            text: "next item".to_owned(),
+            lane: QueuedInputLane::Next,
+            position: 0,
+        }],
+        suspended: vec![],
+        backlog: vec![QueuedInputView {
+            text: "backlog item".to_owned(),
+            lane: QueuedInputLane::Backlog,
+            position: 0,
+        }],
+    });
+    state.input_mut().insert_char('h');
+    state.input_mut().insert_char('i');
+
+    let text = render_to_text(&state, 80, 24);
+
+    assert!(text.contains("gpt-test"));
+    assert!(text.contains("assistant says hello"));
+    assert!(text.contains("Next"));
+    assert!(text.contains("next item"));
+    assert!(text.contains("Backlog"));
+    assert!(text.contains("backlog item"));
+    assert!(text.contains("hi"));
 }

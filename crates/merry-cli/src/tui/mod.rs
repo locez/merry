@@ -5,6 +5,7 @@ use crate::sandbox::ChildHandoff as SandboxChildHandoff;
 mod input;
 pub(crate) mod keymap;
 mod projector;
+mod render;
 mod runtime;
 mod state;
 pub(crate) mod theme;

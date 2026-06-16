@@ -114,6 +114,10 @@ impl TuiState {
         &mut self.input
     }
 
+    pub(crate) fn input_text(&self) -> &str {
+        self.input.text()
+    }
+
     pub(crate) fn keymap(&self) -> &Keymap {
         &self.keymap
     }
