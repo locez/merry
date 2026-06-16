@@ -1,11 +1,15 @@
 use super::state::{QueuePreview, TimelineItem, TuiState};
-use merry_core::{RuntimeEvent, ToolCallResultStatus, ToolOutput};
+use merry_core::{RuntimeEvent, ToolCallId, ToolCallResultStatus, ToolName, ToolOutput};
+use merry_tool_workspace::WORKSPACE_PATCH_TOOL;
+use std::collections::HashMap;
 
 #[derive(Debug, Default)]
+#[allow(dead_code)]
 pub(crate) struct TuiProjector {
-    _private: (),
+    started_tools: HashMap<ToolCallId, ToolName>,
 }
 
+#[allow(dead_code)]
 impl TuiProjector {
     pub(crate) fn apply(&mut self, event: RuntimeEvent, state: &mut TuiState) {
         match event {
@@ -26,10 +30,13 @@ impl TuiProjector {
                 state.set_usage(usage);
             }
             RuntimeEvent::ToolCallStarted { call, .. } => {
+                let call_id = call.id().clone();
+                let tool_name = call.name().clone();
                 state.push_timeline_item(TimelineItem::Muted {
-                    title: format!("tool {}", call.name().as_str()),
-                    detail: format!("call {}", call.id().as_str()),
+                    title: format!("tool {}", tool_name.as_str()),
+                    detail: format!("call {}", call_id.as_str()),
                 });
+                self.started_tools.insert(call_id, tool_name);
             }
             RuntimeEvent::ToolCallFinished { result, output, .. } => {
                 let text = tool_output_text(output);
@@ -44,7 +51,7 @@ impl TuiProjector {
                         title: "tool failed".to_owned(),
                         body,
                     });
-                } else if looks_like_patch(&text) {
+                } else if self.is_workspace_patch_result(result.call_id()) {
                     state.push_timeline_item(TimelineItem::Expanded {
                         title: "patch".to_owned(),
                         body: text,
@@ -89,6 +96,12 @@ impl TuiProjector {
             _ => {}
         }
     }
+
+    fn is_workspace_patch_result(&self, call_id: &ToolCallId) -> bool {
+        self.started_tools
+            .get(call_id)
+            .is_some_and(|name| name.as_str() == WORKSPACE_PATCH_TOOL)
+    }
 }
 
 fn tool_output_text(output: Option<ToolOutput>) -> String {
@@ -97,10 +110,6 @@ fn tool_output_text(output: Option<ToolOutput>) -> String {
         Some(ToolOutput::Json { json }) => json,
         None => String::new(),
     }
-}
-
-fn looks_like_patch(text: &str) -> bool {
-    text.contains("\n+++") || text.contains("\n---") || text.contains("*** Begin Patch")
 }
 
 fn summarize(text: &str, max_chars: usize) -> String {

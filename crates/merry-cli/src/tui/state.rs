@@ -126,10 +126,6 @@ impl TuiState {
         &self.timeline
     }
 
-    pub(crate) fn timeline_mut(&mut self) -> &mut Vec<TimelineItem> {
-        &mut self.timeline
-    }
-
     pub(crate) fn push_timeline_item(&mut self, item: TimelineItem) {
         self.timeline.push(item);
     }
