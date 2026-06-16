@@ -342,3 +342,76 @@ fn renderer_shows_status_timeline_queue_and_input() {
     assert!(text.contains("backlog item"));
     assert!(text.contains("hi"));
 }
+
+#[test]
+fn renderer_ellipsizes_queue_items_to_region_width() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.update_queue_preview(QueuePreview {
+        next: vec![QueuedInputView {
+            text: "abcdefghijklmnopqrstuvwxyz".to_owned(),
+            lane: QueuedInputLane::Next,
+            position: 0,
+        }],
+        suspended: vec![],
+        backlog: vec![],
+    });
+
+    let text = render_to_text(&state, 18, 12);
+
+    assert!(
+        text.lines()
+            .any(|line| line.contains("  1. ") && line.contains("..."))
+    );
+    assert!(!text.contains("abcdefghijklmnopqrstuvwxyz"));
+}
+
+#[test]
+fn renderer_keeps_input_region_stable_when_queue_count_changes() {
+    let empty_state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    let mut queued_state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    queued_state.update_queue_preview(QueuePreview {
+        next: vec![QueuedInputView {
+            text: "next item".to_owned(),
+            lane: QueuedInputLane::Next,
+            position: 0,
+        }],
+        suspended: vec![QueuedInputView {
+            text: "suspended item".to_owned(),
+            lane: QueuedInputLane::Suspended,
+            position: 0,
+        }],
+        backlog: vec![QueuedInputView {
+            text: "backlog item".to_owned(),
+            lane: QueuedInputLane::Backlog,
+            position: 0,
+        }],
+    });
+
+    let empty_text = render_to_text(&empty_state, 80, 18);
+    let queued_text = render_to_text(&queued_state, 80, 18);
+    let empty_input_row = empty_text
+        .lines()
+        .position(|line| line.contains("input"))
+        .expect("empty queue render should show input");
+    let queued_input_row = queued_text
+        .lines()
+        .position(|line| line.contains("input"))
+        .expect("populated queue render should show input");
+
+    assert_eq!(empty_input_row, queued_input_row);
+}
