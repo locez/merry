@@ -15,7 +15,6 @@ use crate::sandbox::ChildHandoff as SandboxChildHandoff;
 use merry_runtime::{AgentLoopControl, AgentLoopInput, InteractiveRunEventStream, StepContext};
 use std::{env, path::PathBuf};
 
-#[allow(dead_code)]
 pub(crate) struct TuiRuntimeSession {
     pub(crate) workspace_root: PathBuf,
     pub(crate) model_label: String,
@@ -24,7 +23,6 @@ pub(crate) struct TuiRuntimeSession {
     pub(crate) control: AgentLoopControl,
 }
 
-#[allow(dead_code)]
 pub(crate) async fn start_tui_runtime_session(
     sandbox_child_handoff: Option<SandboxChildHandoff>,
     merry_config: Option<&MerryConfig>,
@@ -87,7 +85,6 @@ pub(crate) async fn start_tui_runtime_session(
     })
 }
 
-#[allow(dead_code)]
 pub(crate) fn default_tui_session_id() -> merry_core::SessionId {
     crate::session_id::new_ephemeral_session_id()
 }
