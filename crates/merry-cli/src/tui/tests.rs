@@ -1504,6 +1504,62 @@ fn renderer_preserves_assistant_message_newlines() {
 }
 
 #[test]
+fn renderer_renders_assistant_fenced_code_blocks_without_fence_markers() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.push_timeline_item(TimelineItem::Assistant {
+        text: "Output:\n```text\nhello world\n```\nDone".to_owned(),
+    });
+
+    let text = render_to_text(&state, 80, 18);
+    eprintln!("{text}");
+    assert!(text.contains("Output:"));
+    assert!(text.contains("  hello world"));
+    assert!(text.contains("Done"));
+    assert!(!text.contains("```"));
+}
+
+#[test]
+fn renderer_keeps_inline_code_atomic_when_wrapping_assistant_text() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.push_timeline_item(TimelineItem::Assistant {
+        text: "prefix text `hello world` suffix".to_owned(),
+    });
+
+    let text = render_to_text(&state, 24, 18);
+    assert!(text.contains(" hello world "));
+    assert!(!text.contains("hello \nworld"));
+}
+
+#[test]
+fn renderer_wraps_assistant_text_on_word_boundaries() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.push_timeline_item(TimelineItem::Assistant {
+        text: "alpha beta gamma delta".to_owned(),
+    });
+
+    let text = render_to_text(&state, 18, 18);
+    assert!(text.contains("alpha beta"));
+    assert!(!text.contains("bet\na"));
+    assert!(!text.contains("gamm\na"));
+    assert!(!text.contains("delt\na"));
+}
+
+#[test]
 fn renderer_draws_assistant_separator_across_timeline_width() {
     let mut state = TuiState::new(
         "/repo".into(),

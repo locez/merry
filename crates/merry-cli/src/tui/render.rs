@@ -10,6 +10,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph, Wrap},
 };
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const QUEUE_PREVIEW_HEIGHT: u16 = 5;
 
@@ -194,12 +195,44 @@ fn spaced_timeline_item(mut lines: Vec<Line<'static>>, has_next_item: bool) -> V
 }
 
 fn assistant_lines(state: &TuiState, text: &str, region_width: u16) -> Vec<Line<'static>> {
-    let mut lines = text
-        .split('\n')
-        .map(|line| inline_code_line(state, line, semantic_style(state, SemanticColor::Assistant)))
-        .collect::<Vec<_>>();
+    let mut lines = Vec::new();
+    let mut in_code_fence = false;
+    for line in text.split('\n') {
+        if is_code_fence_line(line) {
+            in_code_fence = !in_code_fence;
+            continue;
+        }
+
+        if in_code_fence {
+            lines.extend(code_block_lines(state, line, region_width));
+        } else {
+            lines.extend(inline_code_wrapped_lines(
+                state,
+                line,
+                semantic_style(state, SemanticColor::Assistant),
+                region_width,
+            ));
+        }
+    }
     lines.push(assistant_separator_line(state, region_width));
     lines
+}
+
+fn is_code_fence_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with("```") || trimmed.starts_with("~~~")
+}
+
+fn code_block_lines(state: &TuiState, text: &str, region_width: u16) -> Vec<Line<'static>> {
+    let style = inline_code_style(state, semantic_style(state, SemanticColor::Assistant));
+    wrap_styled_parts_preserving_leading_whitespace(
+        vec![StyledTextPart {
+            text: format!("  {text}"),
+            style,
+            atomic: false,
+        }],
+        region_width,
+    )
 }
 
 fn assistant_separator_line(state: &TuiState, region_width: u16) -> Line<'static> {
@@ -490,31 +523,263 @@ fn inline_code_line(state: &TuiState, text: &str, base_style: Style) -> Line<'st
     Line::from(inline_code_spans(state, text, base_style))
 }
 
+fn inline_code_wrapped_lines(
+    state: &TuiState,
+    text: &str,
+    base_style: Style,
+    region_width: u16,
+) -> Vec<Line<'static>> {
+    wrap_styled_parts(inline_code_parts(state, text, base_style), region_width)
+}
+
 fn inline_code_spans(state: &TuiState, text: &str, base_style: Style) -> Vec<Span<'static>> {
+    inline_code_parts(state, text, base_style)
+        .into_iter()
+        .map(|part| Span::styled(part.text, part.style))
+        .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StyledTextPart {
+    text: String,
+    style: Style,
+    atomic: bool,
+}
+
+fn inline_code_parts(state: &TuiState, text: &str, base_style: Style) -> Vec<StyledTextPart> {
     let mut spans = Vec::new();
     let mut remainder = text;
     loop {
         let Some(start) = remainder.find('`') else {
             if !remainder.is_empty() {
-                spans.push(Span::styled(remainder.to_owned(), base_style));
+                spans.push(StyledTextPart {
+                    text: remainder.to_owned(),
+                    style: base_style,
+                    atomic: false,
+                });
             }
             return spans;
         };
         let before = &remainder[..start];
         if !before.is_empty() {
-            spans.push(Span::styled(before.to_owned(), base_style));
+            spans.push(StyledTextPart {
+                text: before.to_owned(),
+                style: base_style,
+                atomic: false,
+            });
         }
         let after_start = &remainder[start + 1..];
         let Some(end) = after_start.find('`') else {
-            spans.push(Span::styled(remainder[start..].to_owned(), base_style));
+            spans.push(StyledTextPart {
+                text: remainder[start..].to_owned(),
+                style: base_style,
+                atomic: false,
+            });
             return spans;
         };
         let code = &after_start[..end];
-        spans.push(Span::styled(
-            format!(" {code} "),
-            inline_code_style(state, base_style),
-        ));
+        spans.push(StyledTextPart {
+            text: format!(" {code} "),
+            style: inline_code_style(state, base_style),
+            atomic: true,
+        });
         remainder = &after_start[end + 1..];
+    }
+}
+
+fn wrap_styled_parts(parts: Vec<StyledTextPart>, region_width: u16) -> Vec<Line<'static>> {
+    wrap_styled_parts_with_policy(parts, region_width, false)
+}
+
+fn wrap_styled_parts_preserving_leading_whitespace(
+    parts: Vec<StyledTextPart>,
+    region_width: u16,
+) -> Vec<Line<'static>> {
+    wrap_styled_parts_with_policy(parts, region_width, true)
+}
+
+fn wrap_styled_parts_with_policy(
+    parts: Vec<StyledTextPart>,
+    region_width: u16,
+    preserve_leading_whitespace: bool,
+) -> Vec<Line<'static>> {
+    let max_width = usize::from(region_width).max(1);
+    let mut lines = Vec::new();
+    let mut current = Vec::new();
+    let mut current_width = 0;
+
+    for part in parts {
+        if part.atomic {
+            push_atomic_part(
+                part,
+                max_width,
+                &mut current,
+                &mut current_width,
+                &mut lines,
+            );
+        } else {
+            push_wrappable_part(
+                part,
+                max_width,
+                &mut current,
+                &mut current_width,
+                &mut lines,
+                preserve_leading_whitespace,
+            );
+        }
+    }
+
+    lines.push(Line::from(current));
+    lines
+}
+
+fn push_atomic_part(
+    part: StyledTextPart,
+    max_width: usize,
+    current: &mut Vec<Span<'static>>,
+    current_width: &mut usize,
+    lines: &mut Vec<Line<'static>>,
+) {
+    let width = UnicodeWidthStr::width(part.text.as_str());
+    if *current_width > 0 && *current_width + width > max_width {
+        lines.push(Line::from(std::mem::take(current)));
+        *current_width = 0;
+    }
+    *current_width += width;
+    current.push(Span::styled(part.text, part.style));
+}
+
+fn push_wrappable_part(
+    part: StyledTextPart,
+    max_width: usize,
+    current: &mut Vec<Span<'static>>,
+    current_width: &mut usize,
+    lines: &mut Vec<Line<'static>>,
+    preserve_leading_whitespace: bool,
+) {
+    for token in wrap_tokens(&part.text) {
+        push_wrappable_token(
+            token,
+            part.style,
+            max_width,
+            current,
+            current_width,
+            lines,
+            preserve_leading_whitespace,
+        );
+    }
+}
+
+fn wrap_tokens(text: &str) -> Vec<&str> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+
+    let mut tokens = Vec::new();
+    let mut token_start = 0;
+    let mut previous_was_whitespace: Option<bool> = None;
+    for (index, character) in text.char_indices() {
+        let is_whitespace = character.is_whitespace();
+        if let Some(previous) = previous_was_whitespace
+            && previous != is_whitespace
+        {
+            tokens.push(&text[token_start..index]);
+            token_start = index;
+        }
+        previous_was_whitespace = Some(is_whitespace);
+    }
+    tokens.push(&text[token_start..]);
+    tokens
+}
+
+fn push_wrappable_token(
+    token: &str,
+    style: Style,
+    max_width: usize,
+    current: &mut Vec<Span<'static>>,
+    current_width: &mut usize,
+    lines: &mut Vec<Line<'static>>,
+    preserve_leading_whitespace: bool,
+) {
+    if token.chars().all(char::is_whitespace) {
+        push_whitespace_token(
+            token,
+            style,
+            max_width,
+            current,
+            current_width,
+            lines,
+            preserve_leading_whitespace,
+        );
+        return;
+    }
+
+    let token_width = UnicodeWidthStr::width(token);
+    if token_width <= max_width {
+        if *current_width > 0 && *current_width + token_width > max_width {
+            lines.push(Line::from(std::mem::take(current)));
+            *current_width = 0;
+        }
+        current.push(Span::styled(token.to_owned(), style));
+        *current_width += token_width;
+        return;
+    }
+
+    push_long_token_by_char(token, style, max_width, current, current_width, lines);
+}
+
+fn push_whitespace_token(
+    token: &str,
+    style: Style,
+    max_width: usize,
+    current: &mut Vec<Span<'static>>,
+    current_width: &mut usize,
+    lines: &mut Vec<Line<'static>>,
+    preserve_leading_whitespace: bool,
+) {
+    if *current_width == 0 && !preserve_leading_whitespace {
+        return;
+    }
+
+    let token_width = UnicodeWidthStr::width(token);
+    if token_width > max_width {
+        push_long_token_by_char(token, style, max_width, current, current_width, lines);
+        return;
+    }
+
+    if *current_width > 0 && *current_width + token_width > max_width {
+        lines.push(Line::from(std::mem::take(current)));
+        *current_width = 0;
+        return;
+    }
+
+    current.push(Span::styled(token.to_owned(), style));
+    *current_width += token_width;
+}
+
+fn push_long_token_by_char(
+    token: &str,
+    style: Style,
+    max_width: usize,
+    current: &mut Vec<Span<'static>>,
+    current_width: &mut usize,
+    lines: &mut Vec<Line<'static>>,
+) {
+    let mut chunk = String::new();
+    for character in token.chars() {
+        let width = UnicodeWidthChar::width(character).unwrap_or(0);
+        if *current_width > 0 && *current_width + width > max_width {
+            if !chunk.is_empty() {
+                current.push(Span::styled(std::mem::take(&mut chunk), style));
+            }
+            lines.push(Line::from(std::mem::take(current)));
+            *current_width = 0;
+        }
+        chunk.push(character);
+        *current_width += width;
+    }
+    if !chunk.is_empty() {
+        current.push(Span::styled(chunk, style));
     }
 }
 
