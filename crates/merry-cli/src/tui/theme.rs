@@ -6,7 +6,10 @@ pub(crate) enum SemanticColor {
     Status,
     Muted,
     Focus,
+    Assistant,
     Selection,
+    ToolKeyword,
+    Command,
     DiffAdd,
     DiffDelete,
     Warning,
@@ -28,7 +31,10 @@ impl Default for TuiTheme {
                 (SemanticColor::Status, Color::LightMagenta),
                 (SemanticColor::Muted, Color::DarkGray),
                 (SemanticColor::Focus, Color::LightMagenta),
+                (SemanticColor::Assistant, Color::White),
                 (SemanticColor::Selection, Color::Magenta),
+                (SemanticColor::ToolKeyword, Color::LightCyan),
+                (SemanticColor::Command, Color::LightBlue),
                 (SemanticColor::DiffAdd, Color::LightGreen),
                 (SemanticColor::DiffDelete, Color::LightRed),
                 (SemanticColor::Warning, Color::LightYellow),
@@ -55,8 +61,17 @@ impl TuiTheme {
         if let Some(color) = config.focus.as_deref() {
             theme.set_color(SemanticColor::Focus, parse_color(color)?);
         }
+        if let Some(color) = config.assistant.as_deref() {
+            theme.set_color(SemanticColor::Assistant, parse_color(color)?);
+        }
         if let Some(color) = config.selection.as_deref() {
             theme.set_color(SemanticColor::Selection, parse_color(color)?);
+        }
+        if let Some(color) = config.tool_keyword.as_deref() {
+            theme.set_color(SemanticColor::ToolKeyword, parse_color(color)?);
+        }
+        if let Some(color) = config.command.as_deref() {
+            theme.set_color(SemanticColor::Command, parse_color(color)?);
         }
         if let Some(color) = config.diff_add.as_deref() {
             theme.set_color(SemanticColor::DiffAdd, parse_color(color)?);

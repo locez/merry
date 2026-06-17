@@ -28,7 +28,7 @@ pub(crate) fn render(frame: &mut Frame<'_>, state: &TuiState) {
     let input_viewport = state.input_viewport(usize::from(input_inner.width));
 
     frame.render_widget(
-        Paragraph::new(timeline_lines(state, root[0].height))
+        Paragraph::new(timeline_lines(state, root[0]))
             .wrap(Wrap { trim: false })
             .block(
                 Block::default()
@@ -135,47 +135,26 @@ fn set_input_cursor(frame: &mut Frame<'_>, region: Rect, cursor_column: usize) {
     });
 }
 
-fn timeline_lines(state: &TuiState, region_height: u16) -> Vec<Line<'static>> {
+fn timeline_lines(state: &TuiState, region: Rect) -> Vec<Line<'static>> {
     let lines = state
         .timeline()
         .iter()
-        .flat_map(|item| match item {
-            TimelineItem::User { text, lane } => user_lines(state, text, *lane),
-            TimelineItem::Assistant { text } => vec![inline_code_line(
-                state,
-                text,
-                semantic_style(state, SemanticColor::Focus),
-            )],
-            TimelineItem::Muted { title, detail } => {
-                let mut spans = vec![
-                    Span::styled(title.clone(), semantic_style(state, SemanticColor::Muted)),
-                    Span::styled(": ", semantic_style(state, SemanticColor::Muted)),
-                ];
-                spans.extend(inline_code_spans(
-                    state,
-                    detail,
-                    semantic_style(state, SemanticColor::Muted),
-                ));
-                vec![Line::from(spans)]
-            }
-            TimelineItem::Expanded { title, body } | TimelineItem::Diagnostic { title, body } => {
-                let title_slot = match item {
-                    TimelineItem::Diagnostic { .. } => SemanticColor::Error,
-                    _ => SemanticColor::Focus,
-                };
-                let mut lines = vec![Line::from(Span::styled(
-                    title.clone(),
-                    semantic_style(state, title_slot),
-                ))];
-                lines.extend(body.lines().map(|line| {
-                    inline_code_line(state, line, timeline_body_style(state, item, line))
-                }));
-                lines
-            }
-            TimelineItem::Patch { changes } => patch_lines(state, changes),
+        .enumerate()
+        .flat_map(|(index, item)| {
+            let lines = match item {
+                TimelineItem::User { text, lane } => user_lines(state, text, *lane),
+                TimelineItem::Assistant { text } => assistant_lines(state, text, region.width),
+                TimelineItem::Muted { title, detail } => muted_lines(state, title, detail),
+                TimelineItem::Expanded { title, body }
+                | TimelineItem::Diagnostic { title, body } => {
+                    expanded_lines(state, item, title, body)
+                }
+                TimelineItem::Patch { changes } => patch_lines(state, changes),
+            };
+            spaced_timeline_item(lines, index + 1 < state.timeline().len())
         })
         .collect::<Vec<_>>();
-    let visible_height = usize::from(region_height).saturating_sub(1).max(1);
+    let visible_height = usize::from(region.height).saturating_sub(1).max(1);
     let end = lines
         .len()
         .saturating_sub(state.timeline_scroll_offset())
@@ -183,6 +162,124 @@ fn timeline_lines(state: &TuiState, region_height: u16) -> Vec<Line<'static>> {
         .min(lines.len());
     let start = end.saturating_sub(visible_height);
     lines.into_iter().skip(start).take(end - start).collect()
+}
+
+fn spaced_timeline_item(mut lines: Vec<Line<'static>>, has_next_item: bool) -> Vec<Line<'static>> {
+    if has_next_item && !lines.is_empty() {
+        lines.push(Line::from(""));
+    }
+    lines
+}
+
+fn assistant_lines(state: &TuiState, text: &str, region_width: u16) -> Vec<Line<'static>> {
+    vec![
+        inline_code_line(state, text, semantic_style(state, SemanticColor::Assistant)),
+        assistant_separator_line(state, region_width),
+    ]
+}
+
+fn assistant_separator_line(state: &TuiState, region_width: u16) -> Line<'static> {
+    let width = usize::from(region_width).saturating_sub(1).clamp(12, 120);
+    Line::from(Span::styled(
+        "-".repeat(width),
+        semantic_style(state, SemanticColor::Muted),
+    ))
+}
+
+fn muted_lines(state: &TuiState, title: &str, detail: &str) -> Vec<Line<'static>> {
+    let mut spans = vec![
+        Span::styled(
+            title.to_owned(),
+            semantic_style(state, SemanticColor::Muted),
+        ),
+        Span::styled(": ", semantic_style(state, SemanticColor::Muted)),
+    ];
+    spans.extend(inline_code_spans(
+        state,
+        detail,
+        semantic_style(state, SemanticColor::Muted),
+    ));
+    vec![Line::from(spans)]
+}
+
+fn expanded_lines(
+    state: &TuiState,
+    item: &TimelineItem,
+    title: &str,
+    body: &str,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![expanded_title_line(state, item, title)];
+    lines.extend(
+        body.lines()
+            .map(|line| inline_code_line(state, line, timeline_body_style(state, item, line))),
+    );
+    lines
+}
+
+fn expanded_title_line(state: &TuiState, item: &TimelineItem, title: &str) -> Line<'static> {
+    if matches!(item, TimelineItem::Diagnostic { .. }) {
+        return Line::from(Span::styled(
+            title.to_owned(),
+            semantic_style(state, SemanticColor::Error),
+        ));
+    }
+
+    if let Some(command) = title.strip_prefix("Ran: ") {
+        return ran_title_line(state, command);
+    }
+
+    Line::from(Span::styled(
+        title.to_owned(),
+        semantic_style(state, SemanticColor::Focus),
+    ))
+}
+
+fn ran_title_line(state: &TuiState, detail: &str) -> Line<'static> {
+    let (command, suffix) = split_command_suffix(detail);
+    let mut spans = vec![
+        Span::styled(
+            "Ran".to_owned(),
+            semantic_style(state, SemanticColor::ToolKeyword).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(": ".to_owned(), semantic_style(state, SemanticColor::Muted)),
+    ];
+    spans.extend(command_spans(state, command));
+    if !suffix.is_empty() {
+        spans.push(Span::styled(
+            suffix.to_owned(),
+            semantic_style(state, SemanticColor::Muted),
+        ));
+    }
+    Line::from(spans)
+}
+
+fn split_command_suffix(detail: &str) -> (&str, &str) {
+    let Some((command, _)) = detail.rsplit_once(" (cwd: ") else {
+        return (detail, "");
+    };
+    (command, &detail[command.len()..])
+}
+
+fn command_spans(state: &TuiState, command: &str) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    for (index, word) in command.split_whitespace().enumerate() {
+        if index > 0 {
+            spans.push(Span::raw(" ".to_owned()));
+        }
+        let style = if index == 0 {
+            semantic_style(state, SemanticColor::Command).add_modifier(Modifier::BOLD)
+        } else {
+            semantic_style(state, SemanticColor::Assistant)
+        };
+        spans.push(Span::styled(word.to_owned(), style));
+    }
+    if spans.is_empty() {
+        spans.push(Span::styled(
+            command.to_owned(),
+            semantic_style(state, SemanticColor::Command),
+        ));
+    }
+    spans
 }
 
 fn user_lines(state: &TuiState, text: &str, lane: QueuedInputLane) -> Vec<Line<'static>> {
@@ -392,13 +489,9 @@ fn inline_code_spans(state: &TuiState, text: &str, base_style: Style) -> Vec<Spa
 
 fn inline_code_style(state: &TuiState, base_style: Style) -> Style {
     let foreground = state.theme().color(SemanticColor::Focus);
-    let background = state.theme().color(SemanticColor::Selection).map(dim_color);
     let mut style = base_style.add_modifier(Modifier::BOLD);
     if let Some(foreground) = foreground {
         style = style.fg(foreground);
-    }
-    if let Some(background) = background {
-        style = style.bg(background);
     }
     style
 }
@@ -413,7 +506,13 @@ fn timeline_body_style(state: &TuiState, item: &TimelineItem, line: &str) -> Sty
     if line.starts_with('-') {
         return semantic_style(state, SemanticColor::DiffDelete);
     }
-    semantic_style(state, SemanticColor::Focus)
+    if line.starts_with("  stdout:") || line.starts_with("    ") {
+        return semantic_style(state, SemanticColor::Muted);
+    }
+    if line.starts_with("  stderr:") || line.starts_with("  exit ") {
+        return semantic_style(state, SemanticColor::Error);
+    }
+    semantic_style(state, SemanticColor::Assistant)
 }
 
 fn semantic_style(state: &TuiState, slot: SemanticColor) -> Style {
