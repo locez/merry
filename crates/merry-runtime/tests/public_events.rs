@@ -115,6 +115,44 @@ async fn assistant_output_projects_to_public_assistant_message() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn streamed_text_delta_projects_to_public_assistant_message_delta() {
+    let provider = FakeModelProvider::new(vec![
+        Ok(ModelEvent::OutputTextDelta {
+            delta: "hel".to_owned(),
+        }),
+        Ok(ModelEvent::OutputTextDelta {
+            delta: "lo".to_owned(),
+        }),
+        Ok(completed_text_event("hello")),
+    ]);
+    let runtime = Runtime::builder(session_id("public-assistant-delta"))
+        .model_provider(Arc::new(provider), model_name())
+        .build()
+        .expect("runtime should build");
+
+    let events = collect_public_stream(&runtime, "Say hello.").await;
+
+    assert!(matches!(events[0], RuntimeEvent::SessionStarted { .. }));
+    assert!(matches!(events[1], RuntimeEvent::StepStarted { .. }));
+    assert!(matches!(
+        &events[2],
+        RuntimeEvent::AssistantMessageDelta { delta, source }
+            if delta == "hel" && source.sequence == 2
+    ));
+    assert!(matches!(
+        &events[3],
+        RuntimeEvent::AssistantMessageDelta { delta, source }
+            if delta == "lo" && source.sequence == 3
+    ));
+    assert!(matches!(
+        &events[4],
+        RuntimeEvent::AssistantMessage { text, source, .. }
+            if text == "hello" && source.sequence == 4
+    ));
+    assert!(matches!(events[5], RuntimeEvent::StepCompleted { .. }));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn usage_update_projects_to_public_stream_and_getter() {
     let provider = FakeModelProvider::new(vec![Ok(completed_text_event_with_usage(
         "hello with usage",

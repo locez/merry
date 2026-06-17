@@ -16,11 +16,12 @@ const QUEUE_PREVIEW_HEIGHT: u16 = 5;
 
 #[allow(dead_code)]
 pub(crate) fn render(frame: &mut Frame<'_>, state: &TuiState) {
+    let queue_height = queue_preview_height(state);
     let root = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(3),
-            Constraint::Length(QUEUE_PREVIEW_HEIGHT),
+            Constraint::Length(queue_height),
             Constraint::Length(3),
             Constraint::Length(1),
         ])
@@ -40,14 +41,16 @@ pub(crate) fn render(frame: &mut Frame<'_>, state: &TuiState) {
             ),
         root[0],
     );
-    frame.render_widget(
-        Paragraph::new(queue_lines(state, root[1])).block(
-            Block::default()
-                .title("queue")
-                .border_style(semantic_style(state, SemanticColor::Muted)),
-        ),
-        root[1],
-    );
+    if queue_height > 0 {
+        frame.render_widget(
+            Paragraph::new(queue_lines(state, root[1])).block(
+                Block::default()
+                    .title("queue")
+                    .border_style(semantic_style(state, SemanticColor::Muted)),
+            ),
+            root[1],
+        );
+    }
     frame.render_widget(
         Paragraph::new(input_viewport.text)
             .style(semantic_style(state, SemanticColor::Focus))
@@ -134,6 +137,14 @@ fn set_input_cursor(frame: &mut Frame<'_>, region: Rect, cursor_column: usize) {
         x: region.x.saturating_add(cursor_column).min(max_x),
         y: region.y,
     });
+}
+
+fn queue_preview_height(state: &TuiState) -> u16 {
+    if state.has_queue_preview_items() {
+        QUEUE_PREVIEW_HEIGHT
+    } else {
+        0
+    }
 }
 
 fn timeline_lines(state: &TuiState, region: Rect) -> Vec<Line<'static>> {

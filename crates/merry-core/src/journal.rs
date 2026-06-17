@@ -88,6 +88,12 @@ pub enum RuntimeJournalPayload {
     SessionUsageUpdated { usage: SessionUsage },
     /// An artifact reference was recorded.
     ArtifactRecorded { artifact: ArtifactRef },
+    /// Incremental assistant text output from the active model stream.
+    ///
+    /// This is an ordered progress event. It does not make the text durable or
+    /// provider-visible; the final assistant output is still recorded through
+    /// [`RuntimeJournalPayload::AssistantOutputRecorded`].
+    AssistantOutputDelta { delta: String },
     /// An assistant text output artifact was recorded.
     AssistantOutputRecorded { artifact: ArtifactRef },
     /// Exact evidence was referenced.

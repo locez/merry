@@ -1,10 +1,11 @@
 use super::auto_compaction::{compact_prepared_context, compaction_input_for_hard_watermark};
 use super::journal_emission::{
-    send_assistant_text_output_completed_events, send_assistant_text_output_recorded_event,
-    send_cancelled_event, send_cancelled_if_requested, send_compaction_completed_event,
-    send_compaction_started_event, send_failed_event, send_model_usage_updated_event,
-    send_tool_call_pending_event, stream_model_with_retry_policy, trace_provider_step_cancelled,
-    trace_provider_step_failed, wait_for_model_stream_item, wait_for_retrying_stream_setup,
+    send_assistant_text_output_completed_events, send_assistant_text_output_delta_event,
+    send_assistant_text_output_recorded_event, send_cancelled_event, send_cancelled_if_requested,
+    send_compaction_completed_event, send_compaction_started_event, send_failed_event,
+    send_model_usage_updated_event, send_tool_call_pending_event, stream_model_with_retry_policy,
+    trace_provider_step_cancelled, trace_provider_step_failed, wait_for_model_stream_item,
+    wait_for_retrying_stream_setup,
 };
 use super::memory_activation::{
     ActivationProjectionGuard, clear_current_activated_memories,
@@ -441,6 +442,10 @@ pub(super) async fn run_provider_step(
                         "runtime model stream event received"
                     );
                     commentary_text.push_str(&delta);
+                    if !send_assistant_text_output_delta_event(inner, sender, token, delta).await {
+                        let _ = send_cancelled_if_requested(inner, sender, token).await;
+                        return;
+                    }
                 }
             }
             Some(Ok(ModelEvent::Completed { response })) => {

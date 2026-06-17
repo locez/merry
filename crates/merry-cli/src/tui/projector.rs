@@ -15,6 +15,7 @@ const PROCESS_PREVIEW_MAX_CHARS: usize = 120;
 #[allow(dead_code)]
 pub(crate) struct TuiProjector {
     started_tools: HashMap<ToolCallId, StartedToolView>,
+    streaming_assistant_index: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -31,7 +32,17 @@ impl TuiProjector {
     pub(crate) fn apply(&mut self, event: RuntimeEvent, state: &mut TuiState) {
         match event {
             RuntimeEvent::AssistantMessage { text, .. } => {
-                state.push_timeline_item(TimelineItem::Assistant { text });
+                if let Some(index) = self.streaming_assistant_index.take() {
+                    state.replace_timeline_item(index, TimelineItem::Assistant { text });
+                } else {
+                    state.push_timeline_item(TimelineItem::Assistant { text });
+                }
+            }
+            RuntimeEvent::AssistantMessageDelta { delta, .. } => {
+                if !delta.is_empty() {
+                    self.streaming_assistant_index =
+                        Some(state.append_assistant_delta(self.streaming_assistant_index, &delta));
+                }
             }
             RuntimeEvent::InteractiveRunStateChanged { state: run_state } => {
                 state.set_run_state(run_state);
@@ -52,6 +63,7 @@ impl TuiProjector {
                 state.set_usage(usage);
             }
             RuntimeEvent::ToolCallStarted { call, .. } => {
+                self.streaming_assistant_index = None;
                 let call_id = call.id().clone();
                 let tool_name = call.name().clone();
                 let (title, detail) =
@@ -153,12 +165,14 @@ impl TuiProjector {
             | RuntimeEvent::SubagentCancelled { diagnostic, .. }
             | RuntimeEvent::RunFailed { diagnostic, .. }
             | RuntimeEvent::RunCancelled { diagnostic, .. } => {
+                self.streaming_assistant_index = None;
                 state.push_timeline_item(TimelineItem::Diagnostic {
                     title: diagnostic.code().to_owned(),
                     body: diagnostic.message().to_owned(),
                 });
             }
             RuntimeEvent::Closed => {
+                self.streaming_assistant_index = None;
                 state.push_timeline_item(TimelineItem::Muted {
                     title: "closed".to_owned(),
                     detail: "runtime stream closed".to_owned(),
