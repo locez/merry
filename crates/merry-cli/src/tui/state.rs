@@ -152,6 +152,7 @@ pub(crate) struct TuiState {
     queue_preview: QueuePreviewState,
     timeline: Vec<TimelineItem>,
     timeline_scroll_offset: usize,
+    timeline_review_user_index: Option<usize>,
     pending_local_echoes: Vec<PendingLocalEcho>,
     run_state: InteractiveRunState,
     usage: Option<SessionUsage>,
@@ -181,6 +182,7 @@ impl TuiState {
             queue_preview: QueuePreviewState::from_preview(QueuePreview::empty()),
             timeline: Vec::new(),
             timeline_scroll_offset: 0,
+            timeline_review_user_index: None,
             pending_local_echoes: Vec::new(),
             run_state: InteractiveRunState::WaitingForInput,
             usage: None,
@@ -228,6 +230,7 @@ impl TuiState {
     pub(crate) fn push_timeline_item(&mut self, item: TimelineItem) {
         self.timeline.push(item);
         self.timeline_scroll_offset = 0;
+        self.timeline_review_user_index = None;
     }
 
     pub(crate) fn push_user_timeline_item(&mut self, text: String, lane: QueuedInputLane) {
@@ -259,6 +262,7 @@ impl TuiState {
         if let Some(slot) = self.timeline.get_mut(index) {
             *slot = item;
             self.timeline_scroll_offset = 0;
+            self.timeline_review_user_index = None;
         }
     }
 
@@ -266,12 +270,38 @@ impl TuiState {
         self.timeline_scroll_offset
     }
 
+    pub(crate) fn timeline_review_user_index(&self) -> Option<usize> {
+        self.timeline_review_user_index
+    }
+
     pub(crate) fn scroll_timeline_up(&mut self) {
-        self.timeline_scroll_offset = self.timeline_scroll_offset.saturating_add(1);
+        self.scroll_timeline_up_by(1);
     }
 
     pub(crate) fn scroll_timeline_down(&mut self) {
-        self.timeline_scroll_offset = self.timeline_scroll_offset.saturating_sub(1);
+        self.scroll_timeline_down_by(1);
+    }
+
+    pub(crate) fn scroll_timeline_up_by(&mut self, lines: usize) {
+        self.timeline_review_user_index = None;
+        self.timeline_scroll_offset = self.timeline_scroll_offset.saturating_add(lines);
+    }
+
+    pub(crate) fn scroll_timeline_down_by(&mut self, lines: usize) {
+        self.timeline_review_user_index = None;
+        self.timeline_scroll_offset = self.timeline_scroll_offset.saturating_sub(lines);
+    }
+
+    pub(crate) fn jump_to_previous_user_input(&mut self) {
+        let before = self
+            .timeline_review_user_index
+            .unwrap_or(self.timeline.len());
+        if let Some(index) = self.timeline[..before]
+            .iter()
+            .rposition(|item| matches!(item, TimelineItem::User { .. }))
+        {
+            self.timeline_review_user_index = Some(index);
+        }
     }
 
     pub(crate) fn queue_preview(&self) -> &QueuePreviewState {

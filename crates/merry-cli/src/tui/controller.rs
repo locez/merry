@@ -14,6 +14,8 @@ use merry_runtime::InterruptReason;
 use std::time::Duration;
 use tokio::time;
 
+const TIMELINE_SCROLL_STEP: usize = 5;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ControllerEffect {
     None,
@@ -36,11 +38,15 @@ pub(crate) fn handle_key_action(action: KeyAction, state: &mut TuiState) -> Cont
         KeyAction::Interrupt => ControllerEffect::Interrupt,
         KeyAction::Quit => ControllerEffect::Quit,
         KeyAction::ScrollUp => {
-            state.scroll_timeline_up();
+            state.scroll_timeline_up_by(TIMELINE_SCROLL_STEP);
             ControllerEffect::None
         }
         KeyAction::ScrollDown => {
-            state.scroll_timeline_down();
+            state.scroll_timeline_down_by(TIMELINE_SCROLL_STEP);
+            ControllerEffect::None
+        }
+        KeyAction::ReviewPreviousUserInput => {
+            state.jump_to_previous_user_input();
             ControllerEffect::None
         }
         KeyAction::HistoryPrevious => {
@@ -99,10 +105,10 @@ pub(crate) async fn run_controller(
                         }
                     }
                     TerminalEvent::MouseScrollUp => {
-                        state.scroll_timeline_up();
+                        state.scroll_timeline_up_by(TIMELINE_SCROLL_STEP);
                     }
                     TerminalEvent::MouseScrollDown => {
-                        state.scroll_timeline_down();
+                        state.scroll_timeline_down_by(TIMELINE_SCROLL_STEP);
                     }
                     TerminalEvent::Paste(text) => {
                         state.input_mut().insert_str(&text);

@@ -12,6 +12,7 @@ pub(crate) enum KeyAction {
     Quit,
     ScrollUp,
     ScrollDown,
+    ReviewPreviousUserInput,
     HistoryPrevious,
     HistoryNext,
     ResumeSuspended,
@@ -84,6 +85,10 @@ impl Default for Keymap {
                     KeyAction::ScrollDown,
                 ),
                 (
+                    KeyBinding::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+                    KeyAction::ReviewPreviousUserInput,
+                ),
+                (
                     KeyBinding::new(KeyCode::Up, KeyModifiers::NONE),
                     KeyAction::HistoryPrevious,
                 ),
@@ -119,6 +124,9 @@ impl Keymap {
         }
         if let Some(binding) = config.scroll_down.as_deref() {
             keymap.set_binding(parse_binding(binding)?, KeyAction::ScrollDown);
+        }
+        if let Some(binding) = config.review_previous_user_input.as_deref() {
+            keymap.set_binding(parse_binding(binding)?, KeyAction::ReviewPreviousUserInput);
         }
         if let Some(binding) = config.history_previous.as_deref() {
             keymap.set_binding(parse_binding(binding)?, KeyAction::HistoryPrevious);
@@ -167,6 +175,7 @@ fn parse_binding(value: &str) -> Result<KeyBinding, crate::config::ConfigError> 
         "ctrl+p" => Ok(KeyBinding::new(KeyCode::Char('p'), KeyModifiers::CONTROL)),
         "ctrl+q" => Ok(KeyBinding::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
         "ctrl+r" => Ok(KeyBinding::new(KeyCode::Char('r'), KeyModifiers::CONTROL)),
+        "ctrl+u" => Ok(KeyBinding::new(KeyCode::Char('u'), KeyModifiers::CONTROL)),
         other => Err(crate::config::ConfigError::Invalid(format!(
             "unsupported TUI key binding {other:?}"
         ))),

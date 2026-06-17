@@ -136,32 +136,54 @@ fn set_input_cursor(frame: &mut Frame<'_>, region: Rect, cursor_column: usize) {
 }
 
 fn timeline_lines(state: &TuiState, region: Rect) -> Vec<Line<'static>> {
-    let lines = state
-        .timeline()
-        .iter()
-        .enumerate()
-        .flat_map(|(index, item)| {
-            let lines = match item {
-                TimelineItem::User { text, lane } => user_lines(state, text, *lane),
-                TimelineItem::Assistant { text } => assistant_lines(state, text, region.width),
-                TimelineItem::Muted { title, detail } => muted_lines(state, title, detail),
-                TimelineItem::Expanded { title, body }
-                | TimelineItem::Diagnostic { title, body } => {
-                    expanded_lines(state, item, title, body)
-                }
-                TimelineItem::Patch { changes } => patch_lines(state, changes),
-            };
-            spaced_timeline_item(lines, index + 1 < state.timeline().len())
-        })
-        .collect::<Vec<_>>();
+    let mut user_line_indexes = Vec::new();
+    let mut lines = Vec::new();
+    for (index, item) in state.timeline().iter().enumerate() {
+        if matches!(item, TimelineItem::User { .. }) {
+            user_line_indexes.push((index, lines.len()));
+        }
+        let item_lines = match item {
+            TimelineItem::User { text, lane } => user_lines(state, text, *lane),
+            TimelineItem::Assistant { text } => assistant_lines(state, text, region.width),
+            TimelineItem::Muted { title, detail } => muted_lines(state, title, detail),
+            TimelineItem::Expanded { title, body } | TimelineItem::Diagnostic { title, body } => {
+                expanded_lines(state, item, title, body)
+            }
+            TimelineItem::Patch { changes } => patch_lines(state, changes),
+        };
+        lines.extend(spaced_timeline_item(
+            item_lines,
+            index + 1 < state.timeline().len(),
+        ));
+    }
     let visible_height = usize::from(region.height).saturating_sub(1).max(1);
+    let (start, take) = timeline_viewport(state, &lines, &user_line_indexes, visible_height);
+    lines.into_iter().skip(start).take(take).collect()
+}
+
+fn timeline_viewport(
+    state: &TuiState,
+    lines: &[Line<'static>],
+    user_line_indexes: &[(usize, usize)],
+    visible_height: usize,
+) -> (usize, usize) {
+    if let Some(target_index) = state.timeline_review_user_index()
+        && let Some((_, start)) = user_line_indexes
+            .iter()
+            .find(|(item_index, _)| *item_index == target_index)
+    {
+        let start = (*start).min(lines.len());
+        let end = start.saturating_add(visible_height).min(lines.len());
+        return (start, end.saturating_sub(start));
+    }
+
     let end = lines
         .len()
         .saturating_sub(state.timeline_scroll_offset())
         .max(visible_height)
         .min(lines.len());
     let start = end.saturating_sub(visible_height);
-    lines.into_iter().skip(start).take(end - start).collect()
+    (start, end.saturating_sub(start))
 }
 
 fn spaced_timeline_item(mut lines: Vec<Line<'static>>, has_next_item: bool) -> Vec<Line<'static>> {
