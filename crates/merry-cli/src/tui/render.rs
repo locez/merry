@@ -194,10 +194,12 @@ fn spaced_timeline_item(mut lines: Vec<Line<'static>>, has_next_item: bool) -> V
 }
 
 fn assistant_lines(state: &TuiState, text: &str, region_width: u16) -> Vec<Line<'static>> {
-    vec![
-        inline_code_line(state, text, semantic_style(state, SemanticColor::Assistant)),
-        assistant_separator_line(state, region_width),
-    ]
+    let mut lines = text
+        .split('\n')
+        .map(|line| inline_code_line(state, line, semantic_style(state, SemanticColor::Assistant)))
+        .collect::<Vec<_>>();
+    lines.push(assistant_separator_line(state, region_width));
+    lines
 }
 
 fn assistant_separator_line(state: &TuiState, region_width: u16) -> Line<'static> {
