@@ -160,7 +160,7 @@ fn default_keymap_maps_core_navigation_and_control_keys() {
 }
 
 #[test]
-fn controller_treats_ctrl_c_as_quit_even_when_configured_as_interrupt() {
+fn controller_respects_configured_ctrl_c_interrupt_binding() {
     let mut state = TuiState::new(
         "/repo".into(),
         "gpt-test".to_owned(),
@@ -177,7 +177,7 @@ fn controller_treats_ctrl_c_as_quit_even_when_configured_as_interrupt() {
         &mut state,
     );
 
-    assert_eq!(effect, ControllerEffect::Quit);
+    assert_eq!(effect, ControllerEffect::Interrupt);
 }
 
 #[test]
