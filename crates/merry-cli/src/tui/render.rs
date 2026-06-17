@@ -5,7 +5,7 @@ use super::{
 use merry_core::QueuedInputLane;
 use ratatui::{
     Frame,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout, Position, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph, Wrap},
@@ -24,6 +24,8 @@ pub(crate) fn render(frame: &mut Frame<'_>, state: &TuiState) {
             Constraint::Length(1),
         ])
         .split(frame.area());
+    let input_inner = bordered_inner(root[2]);
+    let input_viewport = state.input_viewport(usize::from(input_inner.width));
 
     frame.render_widget(
         Paragraph::new(timeline_lines(state, root[0].height))
@@ -46,7 +48,7 @@ pub(crate) fn render(frame: &mut Frame<'_>, state: &TuiState) {
         root[1],
     );
     frame.render_widget(
-        Paragraph::new(state.input_text())
+        Paragraph::new(input_viewport.text)
             .style(semantic_style(state, SemanticColor::Focus))
             .block(
                 Block::default()
@@ -58,6 +60,7 @@ pub(crate) fn render(frame: &mut Frame<'_>, state: &TuiState) {
             ),
         root[2],
     );
+    set_input_cursor(frame, input_inner, input_viewport.cursor_column);
     frame.render_widget(
         Paragraph::new(state.status_text()).style(semantic_style(state, SemanticColor::Status)),
         root[3],
@@ -91,6 +94,45 @@ pub(crate) fn render_to_buffer(
         .expect("test render should draw");
 
     terminal.backend().buffer().clone()
+}
+
+#[cfg(test)]
+pub(crate) fn render_to_buffer_and_cursor(
+    state: &TuiState,
+    width: u16,
+    height: u16,
+) -> (ratatui::buffer::Buffer, Position) {
+    let backend = ratatui::backend::TestBackend::new(width, height);
+    let mut terminal = ratatui::Terminal::new(backend).expect("test terminal should build");
+    terminal
+        .draw(|frame| render(frame, state))
+        .expect("test render should draw");
+
+    (
+        terminal.backend().buffer().clone(),
+        terminal.backend().cursor_position(),
+    )
+}
+
+fn bordered_inner(region: Rect) -> Rect {
+    Rect {
+        x: region.x.saturating_add(1),
+        y: region.y.saturating_add(1),
+        width: region.width.saturating_sub(2),
+        height: region.height.saturating_sub(2),
+    }
+}
+
+fn set_input_cursor(frame: &mut Frame<'_>, region: Rect, cursor_column: usize) {
+    if region.width == 0 || region.height == 0 {
+        return;
+    }
+    let cursor_column = u16::try_from(cursor_column).unwrap_or(u16::MAX);
+    let max_x = region.x.saturating_add(region.width.saturating_sub(1));
+    frame.set_cursor_position(Position {
+        x: region.x.saturating_add(cursor_column).min(max_x),
+        y: region.y,
+    });
 }
 
 fn timeline_lines(state: &TuiState, region_height: u16) -> Vec<Line<'static>> {
