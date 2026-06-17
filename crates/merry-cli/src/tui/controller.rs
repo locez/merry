@@ -7,6 +7,7 @@ use super::{
     terminal::{TerminalEvent, TerminalSession},
 };
 use crate::cli_error::{CliError, unexpected};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use futures_util::StreamExt;
 use merry_runtime::InterruptReason;
 use std::time::Duration;
@@ -45,6 +46,17 @@ pub(crate) fn handle_key_action(action: KeyAction, state: &mut TuiState) -> Cont
     }
 }
 
+pub(crate) fn handle_key_event(key: KeyEvent, state: &mut TuiState) -> ControllerEffect {
+    if is_terminal_interrupt_key(key) {
+        return ControllerEffect::Quit;
+    }
+    if let Some(action) = state.keymap().action_for(key.into()) {
+        return handle_key_action(action, state);
+    }
+    state.input_mut().handle_key(key);
+    ControllerEffect::None
+}
+
 pub(crate) async fn run_controller(
     mut terminal: TerminalSession,
     mut session: TuiRuntimeSession,
@@ -67,17 +79,13 @@ pub(crate) async fn run_controller(
 
                 match event {
                     TerminalEvent::Key(key) => {
-                        if let Some(action) = state.keymap().action_for(key.into()) {
-                            let should_quit = dispatch_effect(
-                                handle_key_action(action, &mut state),
-                                &mut session,
-                            )
-                            .await?;
-                            if should_quit {
-                                break;
-                            }
-                        } else {
-                            state.input_mut().handle_key(key);
+                        let should_quit = dispatch_effect(
+                            handle_key_event(key, &mut state),
+                            &mut session,
+                        )
+                        .await?;
+                        if should_quit {
+                            break;
                         }
                     }
                     TerminalEvent::Paste(text) => {
@@ -98,6 +106,10 @@ pub(crate) async fn run_controller(
     }
 
     Ok(())
+}
+
+fn is_terminal_interrupt_key(key: KeyEvent) -> bool {
+    key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
 async fn dispatch_effect(
@@ -123,7 +135,10 @@ async fn dispatch_effect(
             Ok(false)
         }
         ControllerEffect::Quit => {
-            session.control.close().await.map_err(unexpected)?;
+            let control = session.control.clone();
+            tokio::spawn(async move {
+                let _ = control.close().await;
+            });
             Ok(true)
         }
     }

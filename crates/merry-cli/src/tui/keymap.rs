@@ -59,7 +59,7 @@ impl Default for Keymap {
                 ),
                 (
                     KeyBinding::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
-                    KeyAction::Interrupt,
+                    KeyAction::Quit,
                 ),
                 (
                     KeyBinding::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
@@ -67,7 +67,7 @@ impl Default for Keymap {
                 ),
                 (
                     KeyBinding::new(KeyCode::Esc, KeyModifiers::NONE),
-                    KeyAction::CloseOverlay,
+                    KeyAction::Interrupt,
                 ),
                 (
                     KeyBinding::new(KeyCode::Char('q'), KeyModifiers::CONTROL),

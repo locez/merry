@@ -632,7 +632,7 @@ success = "green"
 [tui.keymap]
 submit_next = "enter"
 submit_backlog = "ctrl+b"
-interrupt = "ctrl+c"
+interrupt = "esc"
 quit = "ctrl+q"
 "##,
             ),

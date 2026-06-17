@@ -1,4 +1,4 @@
-use super::controller::{ControllerEffect, handle_key_action};
+use super::controller::{ControllerEffect, handle_key_action, handle_key_event};
 use super::input::TextInput;
 use super::keymap::{KeyAction, KeyBinding, Keymap};
 use super::projector::TuiProjector;
@@ -138,7 +138,7 @@ fn controller_scroll_actions_move_timeline_viewport() {
 }
 
 #[test]
-fn default_keymap_maps_enter_to_submit_next_and_ctrl_b_to_backlog() {
+fn default_keymap_maps_core_navigation_and_control_keys() {
     let keymap = Keymap::default();
 
     assert_eq!(
@@ -149,6 +149,35 @@ fn default_keymap_maps_enter_to_submit_next_and_ctrl_b_to_backlog() {
         keymap.action_for(KeyBinding::new(KeyCode::Char('b'), KeyModifiers::CONTROL,)),
         Some(KeyAction::SubmitBacklog)
     );
+    assert_eq!(
+        keymap.action_for(KeyBinding::new(KeyCode::Char('c'), KeyModifiers::CONTROL,)),
+        Some(KeyAction::Quit)
+    );
+    assert_eq!(
+        keymap.action_for(KeyBinding::new(KeyCode::Esc, KeyModifiers::NONE)),
+        Some(KeyAction::Interrupt)
+    );
+}
+
+#[test]
+fn controller_treats_ctrl_c_as_quit_even_when_configured_as_interrupt() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::from_config(&crate::config::TuiKeymapToml {
+            interrupt: Some("ctrl+c".to_owned()),
+            ..crate::config::TuiKeymapToml::default()
+        })
+        .unwrap(),
+        TuiTheme::default(),
+    );
+
+    let effect = handle_key_event(
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        &mut state,
+    );
+
+    assert_eq!(effect, ControllerEffect::Quit);
 }
 
 #[test]
