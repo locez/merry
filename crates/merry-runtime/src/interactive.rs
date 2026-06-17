@@ -166,6 +166,7 @@ impl InteractiveProducer {
         mut accepted: Vec<QueuedInputView>,
         mut lane: QueuedInputLane,
     ) -> bool {
+        self.interrupted = false;
         loop {
             let Some(input) = step_input_from_accepted(&accepted) else {
                 return false;
