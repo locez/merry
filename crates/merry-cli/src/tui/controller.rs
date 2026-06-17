@@ -98,6 +98,12 @@ pub(crate) async fn run_controller(
                             break;
                         }
                     }
+                    TerminalEvent::MouseScrollUp => {
+                        state.scroll_timeline_up();
+                    }
+                    TerminalEvent::MouseScrollDown => {
+                        state.scroll_timeline_down();
+                    }
                     TerminalEvent::Paste(text) => {
                         state.input_mut().insert_str(&text);
                     }

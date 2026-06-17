@@ -179,7 +179,7 @@ fn assistant_lines(state: &TuiState, text: &str, region_width: u16) -> Vec<Line<
 }
 
 fn assistant_separator_line(state: &TuiState, region_width: u16) -> Line<'static> {
-    let width = usize::from(region_width).saturating_sub(1).clamp(12, 120);
+    let width = usize::from(region_width).max(1);
     Line::from(Span::styled(
         "-".repeat(width),
         semantic_style(state, SemanticColor::Muted),
@@ -187,13 +187,17 @@ fn assistant_separator_line(state: &TuiState, region_width: u16) -> Line<'static
 }
 
 fn muted_lines(state: &TuiState, title: &str, detail: &str) -> Vec<Line<'static>> {
-    let mut spans = vec![
-        Span::styled(
-            title.to_owned(),
-            semantic_style(state, SemanticColor::Muted),
-        ),
-        Span::styled(": ", semantic_style(state, SemanticColor::Muted)),
-    ];
+    let mut spans = vec![Span::styled(
+        title.to_owned(),
+        semantic_style(state, SemanticColor::Muted),
+    )];
+    if detail.is_empty() {
+        return vec![Line::from(spans)];
+    }
+    spans.push(Span::styled(
+        " ",
+        semantic_style(state, SemanticColor::Muted),
+    ));
     spans.extend(inline_code_spans(
         state,
         detail,
@@ -224,7 +228,10 @@ fn expanded_title_line(state: &TuiState, item: &TimelineItem, title: &str) -> Li
         ));
     }
 
-    if let Some(command) = title.strip_prefix("Ran: ") {
+    if let Some(command) = title
+        .strip_prefix("Ran ")
+        .or_else(|| title.strip_prefix("Ran: "))
+    {
         return ran_title_line(state, command);
     }
 
@@ -241,7 +248,7 @@ fn ran_title_line(state: &TuiState, detail: &str) -> Line<'static> {
             "Ran".to_owned(),
             semantic_style(state, SemanticColor::ToolKeyword).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(": ".to_owned(), semantic_style(state, SemanticColor::Muted)),
+        Span::styled(" ".to_owned(), semantic_style(state, SemanticColor::Muted)),
     ];
     spans.extend(command_spans(state, command));
     if !suffix.is_empty() {
