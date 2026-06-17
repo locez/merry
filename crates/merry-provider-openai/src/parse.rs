@@ -73,14 +73,25 @@ impl ResponsesStreamParser {
         &mut self,
         raw_line: &str,
     ) -> Result<Vec<ModelEvent>, OpenAiProviderError> {
-        let line = raw_line.trim();
-        if line.is_empty() || line.starts_with("event: ") {
+        let line = raw_line.trim_end_matches(['\r', '\n']);
+        if line.is_empty() || line.starts_with(':') {
             return Ok(Vec::new());
         }
 
-        let data = line
-            .strip_prefix("data: ")
-            .ok_or_else(|| OpenAiProviderError::protocol("stream line must start with `data: `"))?;
+        let Some((field, value)) = line.split_once(':') else {
+            return Err(unexpected_sse_line(line));
+        };
+        if field != "data" {
+            if is_ignorable_sse_field(field) {
+                return Ok(Vec::new());
+            }
+            return Err(unexpected_sse_line(line));
+        }
+
+        let data = value.strip_prefix(' ').unwrap_or(value);
+        if data.is_empty() {
+            return Ok(Vec::new());
+        }
         if data == "[DONE]" {
             return Ok(Vec::new());
         }
@@ -230,6 +241,29 @@ impl ResponsesStreamParser {
             usage,
         ))
     }
+}
+
+fn is_ignorable_sse_field(field: &str) -> bool {
+    matches!(field, "event" | "id" | "retry")
+}
+
+fn unexpected_sse_line(line: &str) -> OpenAiProviderError {
+    OpenAiProviderError::protocol(format!(
+        "unexpected Responses stream line {}; expected an SSE `data:` field",
+        compact_stream_line(line)
+    ))
+}
+
+fn compact_stream_line(line: &str) -> String {
+    let mut compact = line
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(120)
+        .collect::<String>();
+    if line.chars().count() > 120 {
+        compact.push_str("...");
+    }
+    format!("{compact:?}")
 }
 
 fn parse_response(response: ResponsesResponse) -> Result<ModelResponse, OpenAiProviderError> {
