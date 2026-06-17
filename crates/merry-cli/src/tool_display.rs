@@ -17,6 +17,7 @@ pub(crate) fn format_tool_call_detail(
     match name {
         "run_process" => format_process_call_detail(arguments),
         "request_permissions" => format_permission_call_detail(arguments),
+        "workspace_patch" => format_workspace_patch_call_detail(arguments),
         _ => format_generic_tool_call_detail(arguments),
     }
 }
@@ -90,6 +91,30 @@ fn format_permission_paths(paths: &[Value]) -> String {
     formatted.join(",")
 }
 
+fn format_workspace_patch_call_detail(arguments: &Map<String, Value>) -> Option<String> {
+    let patch = arguments.get("patch")?.as_str()?;
+    let paths = workspace_patch_paths(patch);
+    let bytes = patch.len();
+    let detail = match paths.as_slice() {
+        [] => format!("patch={bytes} bytes"),
+        [path] => format!("patch={} ({bytes} bytes)", compact_inline(path, 80)),
+        [first, ..] => format!(
+            "patch={} +{} files ({bytes} bytes)",
+            compact_inline(first, 80),
+            paths.len() - 1
+        ),
+    };
+    Some(detail)
+}
+
+fn workspace_patch_paths(patch: &str) -> Vec<&str> {
+    patch
+        .lines()
+        .filter_map(|line| line.strip_prefix("*** Update File: ").map(str::trim))
+        .filter(|path| !path.is_empty())
+        .collect()
+}
+
 fn format_generic_tool_call_detail(arguments: &Map<String, Value>) -> Option<String> {
     let mut parts = Vec::new();
     for key in ["path", "cwd", "query", "pattern", "target", "command"] {
@@ -161,4 +186,39 @@ fn is_safe_shell_word_byte(byte: u8) -> bool {
             byte,
             b'_' | b'-' | b'.' | b'/' | b':' | b'=' | b'@' | b'%' | b'+'
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_tool_call_detail;
+    use serde_json::json;
+
+    #[test]
+    fn workspace_patch_detail_names_patch_path_instead_of_argument_count() {
+        let arguments = json!({
+            "patch": "\
+*** Begin Patch
+*** Update File: crates/merry-cli/src/tui/render.rs
+ old
+-old
++new
+*** End Patch"
+        });
+
+        let detail =
+            format_tool_call_detail("workspace_patch", arguments.as_object().unwrap()).unwrap();
+
+        assert!(detail.starts_with("patch=crates/merry-cli/src/tui/render.rs"));
+        assert!(!detail.contains("args=1"));
+    }
+
+    #[test]
+    fn workspace_patch_detail_reports_malformed_patch_payload_size() {
+        let arguments = json!({ "patch": "not a Merry patch" });
+
+        let detail =
+            format_tool_call_detail("workspace_patch", arguments.as_object().unwrap()).unwrap();
+
+        assert_eq!(detail, "patch=17 bytes");
+    }
 }

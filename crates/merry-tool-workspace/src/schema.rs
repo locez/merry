@@ -68,7 +68,7 @@ pub(crate) fn search_text_spec() -> ToolSpec {
 pub(crate) fn workspace_patch_spec() -> ToolSpec {
     ToolSpec::new(
         ToolName::new(WORKSPACE_PATCH_TOOL).expect("static workspace tool name is valid"),
-        "Apply one Merry workspace patch set to UTF-8 files under configured stable workspace roots. Use workspace-relative paths in *** Update File: ... headers. Prefer the smallest unique hunk context needed for a localized edit; do not submit whole-file content for small edits.",
+        "Apply one Merry workspace patch set to existing UTF-8 files under configured stable workspace roots. The patch string must start with *** Begin Patch or *** Begin Workspace Patch, contain one or more *** Update File: <workspace-relative-path> sections, use hunk lines prefixed with space, +, or -, and end with the matching *** End Patch or *** End Workspace Patch. Prefer the smallest unique hunk context needed for a localized edit; do not submit whole-file content for small edits.",
         ToolInputSchema::new(schema_for!(WorkspacePatchArgs))
             .expect("static workspace_patch input schema is valid"),
     )

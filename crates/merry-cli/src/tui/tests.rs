@@ -622,7 +622,34 @@ fn projector_updates_queue_preview_and_usage_without_timeline_noise() {
 
     assert_eq!(state.queue_preview().next[0].text, "urgent");
     assert!(state.timeline().is_empty());
-    assert!(state.status_text().contains("13 tok"));
+    assert!(
+        state
+            .status_text()
+            .contains("last in 10 out 3 | total 13 tok")
+    );
+}
+
+#[test]
+fn status_text_compacts_large_usage_counts_but_keeps_last_in_out_visible() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+
+    state.set_usage(SessionUsage {
+        total: ModelUsage::new(12_000, 1_248),
+        last: ModelUsage::new(11_000, 1_000),
+        context: None,
+        compaction: None,
+    });
+
+    assert!(
+        state
+            .status_text()
+            .contains("last in 11k out 1k | total 13.2k tok")
+    );
 }
 
 #[test]
