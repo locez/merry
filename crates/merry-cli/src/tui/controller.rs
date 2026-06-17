@@ -9,6 +9,7 @@ use super::{
 use crate::cli_error::{CliError, unexpected};
 use crossterm::event::KeyEvent;
 use futures_util::StreamExt;
+use merry_core::QueuedInputLane;
 use merry_runtime::InterruptReason;
 use std::time::Duration;
 use tokio::time;
@@ -19,18 +20,18 @@ pub(crate) enum ControllerEffect {
     SubmitNext(String),
     SubmitBacklog(String),
     Interrupt,
+    ResumeSuspended,
+    DiscardSuspended,
     Quit,
 }
 
 pub(crate) fn handle_key_action(action: KeyAction, state: &mut TuiState) -> ControllerEffect {
     match action {
         KeyAction::SubmitNext => state
-            .input_mut()
-            .take_trimmed()
+            .take_input_for_submit()
             .map_or(ControllerEffect::None, ControllerEffect::SubmitNext),
         KeyAction::SubmitBacklog => state
-            .input_mut()
-            .take_trimmed()
+            .take_input_for_submit()
             .map_or(ControllerEffect::None, ControllerEffect::SubmitBacklog),
         KeyAction::Interrupt => ControllerEffect::Interrupt,
         KeyAction::Quit => ControllerEffect::Quit,
@@ -42,6 +43,16 @@ pub(crate) fn handle_key_action(action: KeyAction, state: &mut TuiState) -> Cont
             state.scroll_timeline_down();
             ControllerEffect::None
         }
+        KeyAction::HistoryPrevious => {
+            state.previous_input_history();
+            ControllerEffect::None
+        }
+        KeyAction::HistoryNext => {
+            state.next_input_history();
+            ControllerEffect::None
+        }
+        KeyAction::ResumeSuspended => ControllerEffect::ResumeSuspended,
+        KeyAction::DiscardSuspended => ControllerEffect::DiscardSuspended,
         _ => ControllerEffect::None,
     }
 }
@@ -76,8 +87,10 @@ pub(crate) async fn run_controller(
 
                 match event {
                     TerminalEvent::Key(key) => {
+                        let effect = handle_key_event(key, &mut state);
+                        project_local_effect(&effect, &mut state);
                         let should_quit = dispatch_effect(
-                            handle_key_event(key, &mut state),
+                            effect,
                             &mut session,
                         )
                         .await?;
@@ -127,6 +140,22 @@ async fn dispatch_effect(
                 .map_err(unexpected)?;
             Ok(false)
         }
+        ControllerEffect::ResumeSuspended => {
+            session
+                .control
+                .resume_suspended()
+                .await
+                .map_err(unexpected)?;
+            Ok(false)
+        }
+        ControllerEffect::DiscardSuspended => {
+            session
+                .control
+                .discard_suspended()
+                .await
+                .map_err(unexpected)?;
+            Ok(false)
+        }
         ControllerEffect::Quit => {
             let control = session.control.clone();
             tokio::spawn(async move {
@@ -134,6 +163,18 @@ async fn dispatch_effect(
             });
             Ok(true)
         }
+    }
+}
+
+fn project_local_effect(effect: &ControllerEffect, state: &mut TuiState) {
+    match effect {
+        ControllerEffect::SubmitNext(text) => {
+            state.push_local_user_echo(text.clone(), QueuedInputLane::Next);
+        }
+        ControllerEffect::SubmitBacklog(text) => {
+            state.push_local_user_echo(text.clone(), QueuedInputLane::Backlog);
+        }
+        _ => {}
     }
 }
 

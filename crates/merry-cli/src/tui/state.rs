@@ -1,4 +1,8 @@
-use super::{input::TextInput, keymap::Keymap, theme::TuiTheme};
+use super::{
+    input::{InputHistory, TextInput},
+    keymap::Keymap,
+    theme::TuiTheme,
+};
 use merry_core::{InteractiveRunState, QueuedInputLane, QueuedInputView, SessionUsage};
 use std::path::PathBuf;
 
@@ -105,11 +109,19 @@ pub(crate) struct TuiState {
     keymap: Keymap,
     theme: TuiTheme,
     input: TextInput,
+    input_history: InputHistory,
     queue_preview: QueuePreviewState,
     timeline: Vec<TimelineItem>,
     timeline_scroll_offset: usize,
+    pending_local_echoes: Vec<PendingLocalEcho>,
     run_state: InteractiveRunState,
     usage: Option<SessionUsage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingLocalEcho {
+    text: String,
+    lane: QueuedInputLane,
 }
 
 #[allow(dead_code)]
@@ -126,9 +138,11 @@ impl TuiState {
             keymap,
             theme,
             input: TextInput::default(),
+            input_history: InputHistory::default(),
             queue_preview: QueuePreviewState::from_preview(QueuePreview::empty()),
             timeline: Vec::new(),
             timeline_scroll_offset: 0,
+            pending_local_echoes: Vec::new(),
             run_state: InteractiveRunState::WaitingForInput,
             usage: None,
         }
@@ -146,6 +160,20 @@ impl TuiState {
         self.input.viewport(max_width)
     }
 
+    pub(crate) fn take_input_for_submit(&mut self) -> Option<String> {
+        let value = self.input.take_trimmed()?;
+        self.input_history.record(&value);
+        Some(value)
+    }
+
+    pub(crate) fn previous_input_history(&mut self) {
+        self.input_history.previous(&mut self.input);
+    }
+
+    pub(crate) fn next_input_history(&mut self) {
+        self.input_history.next(&mut self.input);
+    }
+
     pub(crate) fn keymap(&self) -> &Keymap {
         &self.keymap
     }
@@ -161,6 +189,31 @@ impl TuiState {
     pub(crate) fn push_timeline_item(&mut self, item: TimelineItem) {
         self.timeline.push(item);
         self.timeline_scroll_offset = 0;
+    }
+
+    pub(crate) fn push_user_timeline_item(&mut self, text: String, lane: QueuedInputLane) {
+        self.push_timeline_item(TimelineItem::User { text, lane });
+    }
+
+    pub(crate) fn push_local_user_echo(&mut self, text: String, lane: QueuedInputLane) {
+        self.pending_local_echoes.push(PendingLocalEcho {
+            text: text.clone(),
+            lane,
+        });
+        self.push_user_timeline_item(text, lane);
+    }
+
+    pub(crate) fn confirm_or_push_user_input(&mut self, text: String, lane: QueuedInputLane) {
+        if let Some(index) = self
+            .pending_local_echoes
+            .iter()
+            .position(|echo| echo.text == text && echo.lane == lane)
+        {
+            self.pending_local_echoes.remove(index);
+            return;
+        }
+
+        self.push_user_timeline_item(text, lane);
     }
 
     pub(crate) fn replace_timeline_item(&mut self, index: usize, item: TimelineItem) {
