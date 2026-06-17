@@ -29,12 +29,22 @@ pub(crate) enum ControllerEffect {
 
 pub(crate) fn handle_key_action(action: KeyAction, state: &mut TuiState) -> ControllerEffect {
     match action {
-        KeyAction::SubmitNext => state
-            .take_input_for_submit()
-            .map_or(ControllerEffect::None, ControllerEffect::SubmitNext),
-        KeyAction::SubmitBacklog => state
-            .take_input_for_submit()
-            .map_or(ControllerEffect::None, ControllerEffect::SubmitBacklog),
+        KeyAction::SubmitNext => {
+            if exit_review_if_active(state) {
+                return ControllerEffect::None;
+            }
+            state
+                .take_input_for_submit()
+                .map_or(ControllerEffect::None, ControllerEffect::SubmitNext)
+        }
+        KeyAction::SubmitBacklog => {
+            if exit_review_if_active(state) {
+                return ControllerEffect::None;
+            }
+            state
+                .take_input_for_submit()
+                .map_or(ControllerEffect::None, ControllerEffect::SubmitBacklog)
+        }
         KeyAction::Interrupt => ControllerEffect::Interrupt,
         KeyAction::Quit => ControllerEffect::Quit,
         KeyAction::ScrollUp => {
@@ -61,6 +71,14 @@ pub(crate) fn handle_key_action(action: KeyAction, state: &mut TuiState) -> Cont
         KeyAction::DiscardSuspended => ControllerEffect::DiscardSuspended,
         _ => ControllerEffect::None,
     }
+}
+
+fn exit_review_if_active(state: &mut TuiState) -> bool {
+    if !state.is_timeline_reviewing() {
+        return false;
+    }
+    state.exit_timeline_review();
+    true
 }
 
 pub(crate) fn handle_key_event(key: KeyEvent, state: &mut TuiState) -> ControllerEffect {

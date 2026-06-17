@@ -274,6 +274,15 @@ impl TuiState {
         self.timeline_review_user_index
     }
 
+    pub(crate) fn is_timeline_reviewing(&self) -> bool {
+        self.timeline_review_user_index.is_some()
+    }
+
+    pub(crate) fn exit_timeline_review(&mut self) {
+        self.timeline_review_user_index = None;
+        self.timeline_scroll_offset = 0;
+    }
+
     pub(crate) fn scroll_timeline_up(&mut self) {
         self.scroll_timeline_up_by(1);
     }
