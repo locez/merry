@@ -7,7 +7,7 @@ use super::{
     terminal::{TerminalEvent, TerminalSession},
 };
 use crate::cli_error::{CliError, unexpected};
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::KeyEvent;
 use futures_util::StreamExt;
 use merry_runtime::InterruptReason;
 use std::time::Duration;
@@ -47,9 +47,6 @@ pub(crate) fn handle_key_action(action: KeyAction, state: &mut TuiState) -> Cont
 }
 
 pub(crate) fn handle_key_event(key: KeyEvent, state: &mut TuiState) -> ControllerEffect {
-    if is_terminal_interrupt_key(key) {
-        return ControllerEffect::Quit;
-    }
     if let Some(action) = state.keymap().action_for(key.into()) {
         return handle_key_action(action, state);
     }
@@ -106,10 +103,6 @@ pub(crate) async fn run_controller(
     }
 
     Ok(())
-}
-
-fn is_terminal_interrupt_key(key: KeyEvent) -> bool {
-    key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
 async fn dispatch_effect(
