@@ -626,6 +626,37 @@ fn projector_updates_queue_preview_and_usage_without_timeline_noise() {
 }
 
 #[test]
+fn projector_projects_accepted_user_input_into_timeline() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    let mut projector = TuiProjector::default();
+
+    projector.apply(
+        RuntimeEvent::QueuedInputAccepted {
+            lane: QueuedInputLane::Next,
+            inputs: vec![QueuedInputView {
+                text: "查一下 baidu.com".to_owned(),
+                lane: QueuedInputLane::Next,
+                position: 0,
+            }],
+        },
+        &mut state,
+    );
+
+    assert_eq!(
+        state.timeline(),
+        &[TimelineItem::User {
+            text: "查一下 baidu.com".to_owned(),
+            lane: QueuedInputLane::Next,
+        }]
+    );
+}
+
+#[test]
 fn renderer_shows_status_timeline_queue_and_input() {
     let mut state = TuiState::new(
         "/repo".into(),
@@ -661,6 +692,25 @@ fn renderer_shows_status_timeline_queue_and_input() {
     assert!(text.contains("Backlog"));
     assert!(text.contains("backlog item"));
     assert!(text.contains("hi"));
+}
+
+#[test]
+fn renderer_shows_user_input_in_timeline() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.push_timeline_item(TimelineItem::User {
+        text: "查一下 baidu.com".to_owned(),
+        lane: QueuedInputLane::Next,
+    });
+
+    let text = render_to_text(&state, 80, 16);
+
+    assert!(text.contains("user"));
+    assert!(text.contains("baidu.com"));
 }
 
 #[test]

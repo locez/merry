@@ -36,6 +36,14 @@ impl TuiProjector {
                     backlog: inputs.backlog,
                 });
             }
+            RuntimeEvent::QueuedInputAccepted { lane, inputs } => {
+                for input in inputs {
+                    state.push_timeline_item(TimelineItem::User {
+                        text: input.text,
+                        lane,
+                    });
+                }
+            }
             RuntimeEvent::UsageUpdated { usage, .. } => {
                 state.set_usage(usage);
             }

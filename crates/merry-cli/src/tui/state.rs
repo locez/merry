@@ -1,5 +1,5 @@
 use super::{input::TextInput, keymap::Keymap, theme::TuiTheme};
-use merry_core::{InteractiveRunState, QueuedInputView, SessionUsage};
+use merry_core::{InteractiveRunState, QueuedInputLane, QueuedInputView, SessionUsage};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,6 +89,7 @@ pub(crate) struct PatchChangeView {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
 pub(crate) enum TimelineItem {
+    User { text: String, lane: QueuedInputLane },
     Assistant { text: String },
     Muted { title: String, detail: String },
     Expanded { title: String, body: String },
