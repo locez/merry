@@ -84,8 +84,8 @@ impl TuiProjector {
                         state.replace_timeline_item(
                             tool.timeline_index,
                             TimelineItem::Expanded {
-                                title: tool.title.clone(),
-                                body: format!("{}\n{preview}", tool.detail),
+                                title: expanded_tool_title(tool),
+                                body: preview,
                             },
                         );
                         return;
@@ -125,8 +125,8 @@ impl TuiProjector {
                     state.replace_timeline_item(
                         tool.timeline_index,
                         TimelineItem::Expanded {
-                            title: tool.title.clone(),
-                            body: format!("{}\n{preview}", tool.detail),
+                            title: expanded_tool_title(tool),
+                            body: preview,
                         },
                     );
                 }
@@ -164,6 +164,13 @@ impl TuiProjector {
             _ => {}
         }
     }
+}
+
+fn expanded_tool_title(tool: &StartedToolView) -> String {
+    if tool.detail.is_empty() {
+        return tool.title.clone();
+    }
+    format!("{}: {}", tool.title, tool.detail)
 }
 
 fn tool_output_text(output: Option<ToolOutput>) -> String {

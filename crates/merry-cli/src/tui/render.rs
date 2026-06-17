@@ -249,13 +249,21 @@ fn patch_line(state: &TuiState, line: &PatchLineView) -> Line<'static> {
     };
 
     Line::from(vec![
-        Span::styled(format_line_number(line.old_line), patch_gutter_style(state)),
-        Span::styled(" ", patch_gutter_style(state)),
-        Span::styled(format_line_number(line.new_line), patch_gutter_style(state)),
+        Span::styled(
+            format_line_number(patch_display_line(line)),
+            patch_gutter_style(state),
+        ),
         Span::styled(" ", patch_gutter_style(state)),
         Span::styled(marker.to_owned(), style),
         Span::styled(line.text.clone(), style),
     ])
+}
+
+fn patch_display_line(line: &PatchLineView) -> Option<usize> {
+    match line.kind {
+        super::state::PatchLineKind::Context | super::state::PatchLineKind::Add => line.new_line,
+        super::state::PatchLineKind::Remove => line.old_line,
+    }
 }
 
 fn format_line_number(line: Option<usize>) -> String {
