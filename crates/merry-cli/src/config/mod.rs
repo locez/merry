@@ -445,7 +445,10 @@ pub(crate) struct TuiThemeToml {
     pub(crate) status: Option<String>,
     pub(crate) muted: Option<String>,
     pub(crate) focus: Option<String>,
+    pub(crate) assistant: Option<String>,
     pub(crate) selection: Option<String>,
+    pub(crate) tool_keyword: Option<String>,
+    pub(crate) command: Option<String>,
     pub(crate) diff_add: Option<String>,
     pub(crate) diff_delete: Option<String>,
     pub(crate) warning: Option<String>,
@@ -627,7 +630,10 @@ format = "json"
 status = "cyan"
 muted = "dark_gray"
 focus = "yellow"
+assistant = "white"
 selection = "blue"
+tool_keyword = "light_cyan"
+command = "light_blue"
 diff_add = "green"
 diff_delete = "red"
 warning = "yellow"
@@ -655,6 +661,9 @@ discard_suspended = "ctrl+d"
 
         let tui = config.tui_config().expect("tui config should validate");
         assert_eq!(tui.theme.status.as_deref(), Some("cyan"));
+        assert_eq!(tui.theme.assistant.as_deref(), Some("white"));
+        assert_eq!(tui.theme.tool_keyword.as_deref(), Some("light_cyan"));
+        assert_eq!(tui.theme.command.as_deref(), Some("light_blue"));
         assert_eq!(tui.keymap.submit_next.as_deref(), Some("enter"));
         assert_eq!(tui.keymap.scroll_up.as_deref(), Some("pageup"));
         assert_eq!(tui.keymap.history_previous.as_deref(), Some("up"));
@@ -815,6 +824,9 @@ roots = ["skills", "~/shared-skills", "/opt/company/skills"]
             .tui_config()
             .expect("example TUI config should validate");
         assert_eq!(tui.theme.status.as_deref(), Some("light_magenta"));
+        assert_eq!(tui.theme.assistant.as_deref(), Some("white"));
+        assert_eq!(tui.theme.tool_keyword.as_deref(), Some("light_cyan"));
+        assert_eq!(tui.theme.command.as_deref(), Some("light_blue"));
         assert_eq!(tui.keymap.submit_next.as_deref(), Some("enter"));
         assert_eq!(tui.keymap.scroll_up.as_deref(), Some("pageup"));
         assert_eq!(tui.keymap.history_previous.as_deref(), Some("up"));

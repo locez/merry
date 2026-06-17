@@ -13,7 +13,7 @@ use merry_core::{
     UsageContextWindow,
 };
 use merry_tool_workspace::WORKSPACE_PATCH_TOOL;
-use ratatui::style::Color;
+use ratatui::style::{Color, Modifier};
 use serde_json::json;
 
 fn source() -> RuntimeEventSource {
@@ -415,7 +415,10 @@ fn theme_has_required_semantic_color_slots() {
         SemanticColor::Status,
         SemanticColor::Muted,
         SemanticColor::Focus,
+        SemanticColor::Assistant,
         SemanticColor::Selection,
+        SemanticColor::ToolKeyword,
+        SemanticColor::Command,
         SemanticColor::DiffAdd,
         SemanticColor::DiffDelete,
         SemanticColor::Warning,
@@ -629,7 +632,7 @@ fn projector_renders_process_calls_as_ran_with_preview() {
     };
     assert_eq!(title, "Ran: python3 hello_world.py (cwd: .)");
     assert!(!body.contains("python3 hello_world.py (cwd: .)"));
-    assert!(body.contains("stdout: hello world"));
+    assert!(body.contains("  stdout: hello world"));
 }
 
 #[test]
@@ -675,9 +678,55 @@ fn projector_renders_failed_process_calls_as_ran_with_error_preview() {
     };
     assert_eq!(title, "Ran: cargo test -p merry-cli (cwd: .)");
     assert!(!body.contains("cargo test -p merry-cli (cwd: .)"));
-    assert!(body.contains("exit 101"));
-    assert!(body.contains("stderr: error: test failed"));
-    assert!(body.contains("  rerun with --exact"));
+    assert!(body.contains("  exit 101"));
+    assert!(body.contains("  stderr: error: test failed"));
+    assert!(body.contains("    rerun with --exact"));
+}
+
+#[test]
+fn projector_truncates_process_preview_lines() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    let mut projector = TuiProjector::default();
+
+    projector.apply(
+        RuntimeEvent::ToolCallStarted {
+            call: pending_call_with_args(
+                "call-process",
+                "run_process",
+                json!({ "argv": ["cargo", "test"], "cwd": "." }),
+            ),
+            source: source(),
+        },
+        &mut state,
+    );
+    projector.apply(
+        RuntimeEvent::ToolCallFinished {
+            result: ToolCallResult::succeeded(
+                ToolCallId::new("call-process").unwrap(),
+                text_artifact("process-output"),
+            ),
+            output: Some(ToolOutput::Json {
+                json: format!(
+                    r#"{{"kind":"process_action","status":0,"stdout":{{"text":"{}\n","bytes":160,"truncated":false}},"stderr":{{"text":"","bytes":0,"truncated":false}}}}"#,
+                    "x".repeat(150)
+                ),
+            }),
+            source: source(),
+        },
+        &mut state,
+    );
+
+    let TimelineItem::Expanded { body, .. } = &state.timeline()[0] else {
+        panic!("process call should expand with output preview");
+    };
+    assert!(body.contains("  stdout: "));
+    assert!(body.contains("..."));
+    assert!(!body.contains(&"x".repeat(150)));
 }
 
 #[test]
@@ -1211,7 +1260,7 @@ fn renderer_scrolls_timeline_viewport() {
     state.scroll_timeline_up();
     state.scroll_timeline_up();
     let scrolled = render_to_text(&state, 48, 12);
-    assert!(scrolled.contains("line 8"));
+    assert!(scrolled.contains("line 10"));
     assert!(!scrolled.contains("line 11"));
 }
 
@@ -1221,6 +1270,9 @@ fn renderer_applies_configured_semantic_theme_colors() {
         status: Some("red".to_owned()),
         muted: Some("blue".to_owned()),
         focus: Some("magenta".to_owned()),
+        assistant: Some("white".to_owned()),
+        tool_keyword: Some("cyan".to_owned()),
+        command: Some("light_blue".to_owned()),
         diff_add: Some("green".to_owned()),
         diff_delete: Some("yellow".to_owned()),
         ..crate::config::TuiThemeToml::default()
@@ -1237,6 +1289,10 @@ fn renderer_applies_configured_semantic_theme_colors() {
         detail: "read".to_owned(),
     });
     state.push_timeline_item(TimelineItem::Expanded {
+        title: "Ran: cargo test (cwd: .)".to_owned(),
+        body: "  stdout: ok".to_owned(),
+    });
+    state.push_timeline_item(TimelineItem::Expanded {
         title: "patch".to_owned(),
         body: "+added\n-removed".to_owned(),
     });
@@ -1250,10 +1306,13 @@ fn renderer_applies_configured_semantic_theme_colors() {
         backlog: vec![],
     });
 
-    let buffer = render_to_buffer(&state, 80, 18);
+    let buffer = render_to_buffer(&state, 80, 24);
 
     assert_eq!(find_cell_color(&buffer, "gpt-test"), Some(Color::Red));
     assert_eq!(find_cell_color(&buffer, "tool"), Some(Color::Blue));
+    assert_eq!(find_cell_color(&buffer, "Ran"), Some(Color::Cyan));
+    assert_eq!(find_cell_color(&buffer, "cargo"), Some(Color::LightBlue));
+    assert_eq!(find_cell_color(&buffer, "ok"), Some(Color::Blue));
     assert_eq!(find_cell_color(&buffer, "patch"), Some(Color::Magenta));
     assert_eq!(find_cell_color(&buffer, "+added"), Some(Color::Green));
     assert_eq!(find_cell_color(&buffer, "-removed"), Some(Color::Yellow));
@@ -1274,11 +1333,41 @@ fn renderer_highlights_inline_code_spans() {
     });
 
     let buffer = render_to_buffer(&state, 80, 16);
-    let style =
+    let assistant_style =
+        find_cell_style(&buffer, "call").expect("assistant text should be rendered");
+    let code_style =
         find_cell_style(&buffer, "build_message()").expect("inline code text should be rendered");
 
-    assert_eq!(style.fg, Some(Color::LightMagenta));
-    assert_ne!(style.bg, None);
+    assert_eq!(assistant_style.fg, Some(Color::White));
+    assert_eq!(code_style.fg, Some(Color::LightMagenta));
+    assert_eq!(code_style.bg, Some(Color::Reset));
+    assert!(code_style.add_modifier.contains(Modifier::BOLD));
+}
+
+#[test]
+fn renderer_colors_ran_title_and_indents_process_preview() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.push_timeline_item(TimelineItem::Expanded {
+        title: "Ran: python3 hello_world.py (cwd: .)".to_owned(),
+        body: "  stdout: hello world".to_owned(),
+    });
+
+    let text = render_to_text(&state, 96, 16);
+    assert!(text.contains("Ran: python3 hello_world.py (cwd: .)"));
+    assert!(text.contains("  stdout: hello world"));
+
+    let buffer = render_to_buffer(&state, 96, 16);
+    assert_eq!(find_cell_color(&buffer, "Ran"), Some(Color::LightCyan));
+    assert_eq!(find_cell_color(&buffer, "python3"), Some(Color::LightBlue));
+    assert_eq!(
+        find_cell_color(&buffer, "hello world"),
+        Some(Color::DarkGray)
+    );
 }
 
 #[test]

@@ -8,6 +8,9 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
 
+const PROCESS_PREVIEW_MAX_LINES: usize = 3;
+const PROCESS_PREVIEW_MAX_CHARS: usize = 120;
+
 #[derive(Debug, Default)]
 #[allow(dead_code)]
 pub(crate) struct TuiProjector {
@@ -224,7 +227,7 @@ fn process_output_preview(output: &str) -> Option<String> {
     if let Some(status) = status
         && status != 0
     {
-        lines.push(format!("exit {status}"));
+        lines.push(format!("  exit {status}"));
     }
     append_stream_preview(&mut lines, "stdout", stdout);
     append_stream_preview(&mut lines, "stderr", stderr);
@@ -233,12 +236,30 @@ fn process_output_preview(output: &str) -> Option<String> {
 }
 
 fn append_stream_preview(lines: &mut Vec<String>, label: &str, text: &str) {
-    let mut stream_lines = text.lines().filter(|line| !line.trim().is_empty()).take(3);
+    let mut stream_lines = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .take(PROCESS_PREVIEW_MAX_LINES);
     let Some(first) = stream_lines.next() else {
         return;
     };
-    lines.push(format!("{label}: {first}"));
-    lines.extend(stream_lines.map(|line| format!("  {line}")));
+    lines.push(format!(
+        "  {label}: {}",
+        truncate_chars(first, PROCESS_PREVIEW_MAX_CHARS)
+    ));
+    lines.extend(
+        stream_lines.map(|line| format!("    {}", truncate_chars(line, PROCESS_PREVIEW_MAX_CHARS))),
+    );
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    if max_chars <= 3 {
+        return ".".repeat(max_chars);
+    }
+    if text.chars().count() <= max_chars {
+        return text.to_owned();
+    }
+    text.chars().take(max_chars - 3).collect::<String>() + "..."
 }
 
 fn compact_failed_tool_body(code: &str, message: &str, output: &str) -> String {
