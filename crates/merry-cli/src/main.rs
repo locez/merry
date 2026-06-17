@@ -16,6 +16,7 @@ mod runtime_events;
 mod sandbox;
 mod session_id;
 mod testing;
+mod tool_display;
 mod tui;
 
 use clap::Parser;

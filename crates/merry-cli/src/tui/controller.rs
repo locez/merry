@@ -80,6 +80,9 @@ pub(crate) async fn run_controller(
                             state.input_mut().handle_key(key);
                         }
                     }
+                    TerminalEvent::Paste(text) => {
+                        state.input_mut().insert_str(&text);
+                    }
                     TerminalEvent::Resize => {
                         render_once(&mut terminal, &state)?;
                     }

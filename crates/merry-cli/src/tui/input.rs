@@ -18,6 +18,11 @@ impl TextInput {
         self.cursor += value.len_utf8();
     }
 
+    pub(crate) fn insert_str(&mut self, value: &str) {
+        self.text.insert_str(self.cursor, value);
+        self.cursor += value.len();
+    }
+
     pub(crate) fn backspace(&mut self) {
         if self.cursor == 0 {
             return;

@@ -10,6 +10,7 @@ use std::io::{self, Stdout, stdout};
 
 pub(crate) enum TerminalEvent {
     Key(KeyEvent),
+    Paste(String),
     Resize,
 }
 
@@ -51,6 +52,7 @@ impl TerminalSession {
 
             match event {
                 Event::Key(key) => return Ok(Some(TerminalEvent::Key(key))),
+                Event::Paste(text) => return Ok(Some(TerminalEvent::Paste(text))),
                 Event::Resize(_, _) => return Ok(Some(TerminalEvent::Resize)),
                 _ => {}
             }
