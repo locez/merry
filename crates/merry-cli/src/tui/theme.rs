@@ -25,16 +25,16 @@ impl Default for TuiTheme {
     fn default() -> Self {
         Self {
             colors: vec![
-                (SemanticColor::Status, Color::Cyan),
+                (SemanticColor::Status, Color::LightMagenta),
                 (SemanticColor::Muted, Color::DarkGray),
-                (SemanticColor::Focus, Color::Yellow),
-                (SemanticColor::Selection, Color::Blue),
-                (SemanticColor::DiffAdd, Color::Green),
-                (SemanticColor::DiffDelete, Color::Red),
-                (SemanticColor::Warning, Color::Yellow),
-                (SemanticColor::Error, Color::Red),
+                (SemanticColor::Focus, Color::LightMagenta),
+                (SemanticColor::Selection, Color::Magenta),
+                (SemanticColor::DiffAdd, Color::LightGreen),
+                (SemanticColor::DiffDelete, Color::LightRed),
+                (SemanticColor::Warning, Color::LightYellow),
+                (SemanticColor::Error, Color::LightRed),
                 (SemanticColor::Risk, Color::Magenta),
-                (SemanticColor::Success, Color::Green),
+                (SemanticColor::Success, Color::LightGreen),
             ],
         }
     }
@@ -102,11 +102,17 @@ fn parse_color(value: &str) -> Result<Color, crate::config::ConfigError> {
     match value {
         "black" => Ok(Color::Black),
         "red" => Ok(Color::Red),
+        "light_red" => Ok(Color::LightRed),
         "green" => Ok(Color::Green),
+        "light_green" => Ok(Color::LightGreen),
         "yellow" => Ok(Color::Yellow),
+        "light_yellow" => Ok(Color::LightYellow),
         "blue" => Ok(Color::Blue),
+        "light_blue" => Ok(Color::LightBlue),
         "magenta" => Ok(Color::Magenta),
+        "light_magenta" => Ok(Color::LightMagenta),
         "cyan" => Ok(Color::Cyan),
+        "light_cyan" => Ok(Color::LightCyan),
         "gray" => Ok(Color::Gray),
         "dark_gray" => Ok(Color::DarkGray),
         "white" => Ok(Color::White),

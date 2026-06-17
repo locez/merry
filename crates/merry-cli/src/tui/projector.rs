@@ -18,6 +18,8 @@ pub(crate) struct TuiProjector {
 struct StartedToolView {
     name: ToolName,
     timeline_index: usize,
+    title: String,
+    detail: String,
     patch_argument: Option<String>,
 }
 
@@ -49,22 +51,20 @@ impl TuiProjector {
             RuntimeEvent::ToolCallStarted { call, .. } => {
                 let call_id = call.id().clone();
                 let tool_name = call.name().clone();
-                let detail =
-                    match format_tool_call_detail(tool_name.as_str(), call.arguments().as_object())
-                    {
-                        Some(detail) => format!("{} {detail}", tool_name.as_str()),
-                        None => tool_name.as_str().to_owned(),
-                    };
+                let (title, detail) =
+                    started_tool_title_and_detail(tool_name.as_str(), call.arguments().as_object());
                 let timeline_index = state.timeline().len();
                 state.push_timeline_item(TimelineItem::Muted {
-                    title: "tool".to_owned(),
-                    detail,
+                    title: title.clone(),
+                    detail: detail.clone(),
                 });
                 self.started_tools.insert(
                     call_id,
                     StartedToolView {
                         name: tool_name,
                         timeline_index,
+                        title,
+                        detail,
                         patch_argument: call
                             .arguments()
                             .as_object()
@@ -78,6 +78,18 @@ impl TuiProjector {
                 let text = tool_output_text(output);
                 let tool = self.started_tools.remove(result.call_id());
                 if result.status() == ToolCallResultStatus::Failed {
+                    if let Some(tool) = tool.as_ref()
+                        && let Some(preview) = success_tool_preview(tool.name.as_str(), &text)
+                    {
+                        state.replace_timeline_item(
+                            tool.timeline_index,
+                            TimelineItem::Expanded {
+                                title: tool.title.clone(),
+                                body: format!("{}\n{preview}", tool.detail),
+                            },
+                        );
+                        return;
+                    }
                     let body = result
                         .diagnostic()
                         .map(|diagnostic| {
@@ -107,9 +119,16 @@ impl TuiProjector {
                     } else {
                         state.push_timeline_item(patch_item);
                     }
-                } else {
-                    // Successful non-patch outputs stay in artifacts; the started line already
-                    // shows the human-readable call detail.
+                } else if let Some(tool) = tool.as_ref()
+                    && let Some(preview) = success_tool_preview(tool.name.as_str(), &text)
+                {
+                    state.replace_timeline_item(
+                        tool.timeline_index,
+                        TimelineItem::Expanded {
+                            title: tool.title.clone(),
+                            body: format!("{}\n{preview}", tool.detail),
+                        },
+                    );
                 }
             }
             RuntimeEvent::SubagentCompleted {
@@ -153,6 +172,66 @@ fn tool_output_text(output: Option<ToolOutput>) -> String {
         Some(ToolOutput::Json { json }) => json,
         None => String::new(),
     }
+}
+
+fn started_tool_title_and_detail(
+    name: &str,
+    arguments: &serde_json::Map<String, Value>,
+) -> (String, String) {
+    let detail = format_tool_call_detail(name, arguments).unwrap_or_else(|| name.to_owned());
+    let title = match name {
+        "run_process" => "Ran",
+        "workspace_read_file" => "Read",
+        "workspace_list_dir" => "Listed",
+        "workspace_search_text" => "Searched",
+        "request_permissions" => "Permission",
+        WORKSPACE_PATCH_TOOL => "Patch",
+        _ => "Tool",
+    };
+    (title.to_owned(), detail)
+}
+
+fn success_tool_preview(name: &str, output: &str) -> Option<String> {
+    match name {
+        "run_process" => process_output_preview(output),
+        _ => None,
+    }
+}
+
+fn process_output_preview(output: &str) -> Option<String> {
+    let value = serde_json::from_str::<Value>(output).ok()?;
+    let stdout = value
+        .pointer("/stdout/text")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let stderr = value
+        .pointer("/stderr/text")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let status = value
+        .get("status")
+        .and_then(Value::as_i64)
+        .or_else(|| value.pointer("/status/code").and_then(Value::as_i64));
+
+    let mut lines = Vec::new();
+    if let Some(status) = status
+        && status != 0
+    {
+        lines.push(format!("exit {status}"));
+    }
+    append_stream_preview(&mut lines, "stdout", stdout);
+    append_stream_preview(&mut lines, "stderr", stderr);
+
+    (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
+fn append_stream_preview(lines: &mut Vec<String>, label: &str, text: &str) {
+    let mut stream_lines = text.lines().filter(|line| !line.trim().is_empty()).take(3);
+    let Some(first) = stream_lines.next() else {
+        return;
+    };
+    lines.push(format!("{label}: {first}"));
+    lines.extend(stream_lines.map(|line| format!("  {line}")));
 }
 
 fn compact_failed_tool_body(code: &str, message: &str, output: &str) -> String {
@@ -201,10 +280,22 @@ fn parse_workspace_patch_view(output: &str, patch_argument: Option<&str>) -> Opt
         .changes
         .into_iter()
         .map(|change| {
-            let patch_lines = parsed_patch
+            let patch_lines = change
+                .lines
                 .as_ref()
-                .and_then(|parsed| parsed.change_lines(&change.path))
-                .cloned()
+                .map(|lines| {
+                    lines
+                        .iter()
+                        .filter_map(WorkspacePatchOutputLine::to_patch_line_view)
+                        .collect::<Vec<_>>()
+                })
+                .filter(|lines| !lines.is_empty())
+                .or_else(|| {
+                    parsed_patch
+                        .as_ref()
+                        .and_then(|parsed| parsed.change_lines(&change.path))
+                        .cloned()
+                })
                 .unwrap_or_default();
             let added = patch_lines
                 .iter()
@@ -241,6 +332,33 @@ struct WorkspacePatchOutputChange {
     hunks: usize,
     bytes_before: usize,
     bytes_after: usize,
+    #[serde(default)]
+    lines: Option<Vec<WorkspacePatchOutputLine>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkspacePatchOutputLine {
+    kind: String,
+    old_line: Option<usize>,
+    new_line: Option<usize>,
+    text: String,
+}
+
+impl WorkspacePatchOutputLine {
+    fn to_patch_line_view(&self) -> Option<PatchLineView> {
+        let kind = match self.kind.as_str() {
+            "context" => PatchLineKind::Context,
+            "remove" => PatchLineKind::Remove,
+            "add" => PatchLineKind::Add,
+            _ => return None,
+        };
+        Some(PatchLineView {
+            kind,
+            old_line: self.old_line,
+            new_line: self.new_line,
+            text: self.text.clone(),
+        })
+    }
 }
 
 #[derive(Debug, Default, Clone)]

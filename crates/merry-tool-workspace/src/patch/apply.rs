@@ -66,6 +66,7 @@ pub(super) fn execute_workspace_patch_plan(
             hunks: change.hunks,
             bytes_before: change.bytes_before,
             bytes_after: content_after.len(),
+            lines: change.lines,
         });
     }
 

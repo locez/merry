@@ -584,8 +584,100 @@ fn projector_shows_tool_call_arguments_without_completed_noise() {
     let TimelineItem::Muted { title, detail } = &state.timeline()[0] else {
         panic!("read tool call should render as a compact muted line");
     };
-    assert_eq!(title, "tool");
-    assert_eq!(detail, "workspace_read_file path=AGENTS.md");
+    assert_eq!(title, "Read");
+    assert_eq!(detail, "path=AGENTS.md");
+}
+
+#[test]
+fn projector_renders_process_calls_as_ran_with_preview() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    let mut projector = TuiProjector::default();
+
+    projector.apply(
+        RuntimeEvent::ToolCallStarted {
+            call: pending_call_with_args(
+                "call-process",
+                "run_process",
+                json!({ "argv": ["python3", "hello_world.py"], "cwd": "." }),
+            ),
+            source: source(),
+        },
+        &mut state,
+    );
+    projector.apply(
+        RuntimeEvent::ToolCallFinished {
+            result: ToolCallResult::succeeded(
+                ToolCallId::new("call-process").unwrap(),
+                text_artifact("process-output"),
+            ),
+            output: Some(ToolOutput::Json {
+                json: r#"{"kind":"process_action","status":0,"stdout":{"text":"hello world\n","bytes":12,"truncated":false},"stderr":{"text":"","bytes":0,"truncated":false}}"#.to_owned(),
+            }),
+            source: source(),
+        },
+        &mut state,
+    );
+
+    assert_eq!(state.timeline().len(), 1);
+    let TimelineItem::Expanded { title, body } = &state.timeline()[0] else {
+        panic!("process call should expand with output preview");
+    };
+    assert_eq!(title, "Ran");
+    assert!(body.contains("python3 hello_world.py (cwd: .)"));
+    assert!(body.contains("stdout: hello world"));
+}
+
+#[test]
+fn projector_renders_failed_process_calls_as_ran_with_error_preview() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    let mut projector = TuiProjector::default();
+
+    projector.apply(
+        RuntimeEvent::ToolCallStarted {
+            call: pending_call_with_args(
+                "call-process",
+                "run_process",
+                json!({ "argv": ["cargo", "test", "-p", "merry-cli"], "cwd": "." }),
+            ),
+            source: source(),
+        },
+        &mut state,
+    );
+    projector.apply(
+        RuntimeEvent::ToolCallFinished {
+            result: ToolCallResult::failed(
+                ToolCallId::new("call-process").unwrap(),
+                text_artifact("process-output"),
+                ErrorInfo::new("process_action_failed", "process exited with code 101")
+                    .unwrap(),
+            ),
+            output: Some(ToolOutput::Json {
+                json: r#"{"kind":"process_action","status":{"kind":"exited","code":101},"stdout":{"text":"","bytes":0,"truncated":false},"stderr":{"text":"error: test failed\nrerun with --exact\n","bytes":38,"truncated":false}}"#.to_owned(),
+            }),
+            source: source(),
+        },
+        &mut state,
+    );
+
+    assert_eq!(state.timeline().len(), 1);
+    let TimelineItem::Expanded { title, body } = &state.timeline()[0] else {
+        panic!("failed process call should expand with output preview");
+    };
+    assert_eq!(title, "Ran");
+    assert!(body.contains("cargo test -p merry-cli (cwd: .)"));
+    assert!(body.contains("exit 101"));
+    assert!(body.contains("stderr: error: test failed"));
+    assert!(body.contains("  rerun with --exact"));
 }
 
 #[test]
@@ -623,7 +715,7 @@ fn projector_projects_workspace_patch_using_patch_tool_format() {
                 text_artifact("patch-output"),
             ),
             output: Some(ToolOutput::Json {
-                json: r#"{"ok":true,"tool":"workspace_patch","changes":[{"path":"crates/merry-cli/src/tui/render.rs","hunks":1,"bytes_before":120,"bytes_after":121}]}"#.to_owned(),
+                json: r#"{"ok":true,"tool":"workspace_patch","changes":[{"path":"crates/merry-cli/src/tui/render.rs","hunks":1,"bytes_before":120,"bytes_after":121,"lines":[{"kind":"context","old_line":10,"new_line":10,"text":"    let old = true;"},{"kind":"remove","old_line":11,"text":"    lines.push(old);"},{"kind":"add","new_line":11,"text":"    lines.push(new);"}]}]}"#.to_owned(),
             }),
             source: source(),
         },
@@ -641,9 +733,9 @@ fn projector_projects_workspace_patch_using_patch_tool_format() {
     assert_eq!(
         changes[0].lines,
         vec![
-            PatchLineView::context("    let old = true;", None),
-            PatchLineView::remove("    lines.push(old);", None),
-            PatchLineView::add("    lines.push(new);", None),
+            PatchLineView::context("    let old = true;", Some(10)),
+            PatchLineView::remove("    lines.push(old);", Some(11)),
+            PatchLineView::add("    lines.push(new);", Some(11)),
         ]
     );
 }
@@ -1185,7 +1277,7 @@ fn renderer_highlights_inline_code_spans() {
     let style =
         find_cell_style(&buffer, "build_message()").expect("inline code text should be rendered");
 
-    assert_eq!(style.fg, Some(Color::Yellow));
+    assert_eq!(style.fg, Some(Color::LightMagenta));
     assert_ne!(style.bg, None);
 }
 
@@ -1221,8 +1313,8 @@ fn renderer_shows_patch_line_numbers_and_diff_backgrounds() {
     let buffer = render_to_buffer(&state, 96, 18);
     let remove_style = find_cell_style(&buffer, "-    return").expect("remove line should render");
     let add_style = find_cell_style(&buffer, "+    return").expect("add line should render");
-    assert_eq!(remove_style.fg, Some(Color::Red));
-    assert_eq!(add_style.fg, Some(Color::Green));
+    assert_eq!(remove_style.fg, Some(Color::LightRed));
+    assert_eq!(add_style.fg, Some(Color::LightGreen));
     assert_ne!(remove_style.bg, None);
     assert_ne!(add_style.bg, None);
 }

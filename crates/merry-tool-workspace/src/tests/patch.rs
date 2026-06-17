@@ -29,7 +29,11 @@ fn workspace_patch_executor_replaces_one_hunk_in_existing_utf8_file() {
                 "path": "dir/note.txt",
                 "hunks": 1,
                 "bytes_before": 22,
-                "bytes_after": 22
+                "bytes_after": 22,
+                "lines": [
+                    { "kind": "remove", "old_line": 2, "text": "old value" },
+                    { "kind": "add", "new_line": 2, "text": "new value" }
+                ]
             }]
         })
     );
@@ -144,6 +148,46 @@ fn workspace_patch_executor_accepts_standard_patch_envelope_alias() {
     assert_eq!(
         read_text(&temp.path().join("src/lib.rs")),
         "alpha\nnew value\nomega\n"
+    );
+}
+
+#[test]
+fn workspace_patch_executor_reports_old_and_new_line_numbers_after_prior_hunk_delta() {
+    let temp = TempWorkspace::new("patch-line-number-delta");
+    temp.write_text(
+        "src/lib.rs",
+        "one\ninsert anchor\nmiddle\nremove anchor\nlast\n",
+    );
+    let tools = tools_for(temp.path());
+    let patch = "\
++intro
+ insert anchor
+@@
+-remove anchor
++changed anchor";
+    let patch = format!(
+        "*** Begin Workspace Patch
+*** Update File: src/lib.rs
+{patch}
+*** End Workspace Patch"
+    );
+
+    let outcome = patch_text_outcome(&tools, &patch);
+
+    assert_eq!(outcome.status(), ToolCallResultStatus::Succeeded);
+    assert_eq!(
+        read_text(&temp.path().join("src/lib.rs")),
+        "one\nintro\ninsert anchor\nmiddle\nchanged anchor\nlast\n"
+    );
+    let payload = json_content(&outcome);
+    assert_eq!(
+        payload["changes"][0]["lines"],
+        json!([
+            { "kind": "add", "new_line": 2, "text": "intro" },
+            { "kind": "context", "old_line": 2, "new_line": 3, "text": "insert anchor" },
+            { "kind": "remove", "old_line": 4, "text": "remove anchor" },
+            { "kind": "add", "new_line": 5, "text": "changed anchor" }
+        ])
     );
 }
 

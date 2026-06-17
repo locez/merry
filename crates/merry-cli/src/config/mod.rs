@@ -814,7 +814,7 @@ roots = ["skills", "~/shared-skills", "/opt/company/skills"]
         let tui = config
             .tui_config()
             .expect("example TUI config should validate");
-        assert_eq!(tui.theme.status.as_deref(), Some("cyan"));
+        assert_eq!(tui.theme.status.as_deref(), Some("light_magenta"));
         assert_eq!(tui.keymap.submit_next.as_deref(), Some("enter"));
         assert_eq!(tui.keymap.scroll_up.as_deref(), Some("pageup"));
         assert_eq!(tui.keymap.history_previous.as_deref(), Some("up"));
