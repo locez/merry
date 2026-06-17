@@ -198,7 +198,7 @@ impl TuiState {
         let usage = self
             .usage
             .as_ref()
-            .map(|usage| format!("{} tok", usage.total.total_tokens()))
+            .map(format_session_usage)
             .unwrap_or_else(|| "usage -".to_owned());
         format!(
             "{:?}  {}  {}  {}",
@@ -207,5 +207,28 @@ impl TuiState {
             self.model_label,
             usage
         )
+    }
+}
+
+fn format_session_usage(usage: &SessionUsage) -> String {
+    format!(
+        "last in {} out {} | total {} tok",
+        format_token_count(usage.last.input_tokens()),
+        format_token_count(usage.last.output_tokens()),
+        format_token_count(usage.total.total_tokens())
+    )
+}
+
+fn format_token_count(tokens: u64) -> String {
+    if tokens < 1_000 {
+        return tokens.to_string();
+    }
+
+    let whole = tokens / 1_000;
+    let decimal = (tokens % 1_000) / 100;
+    if decimal == 0 {
+        format!("{whole}k")
+    } else {
+        format!("{whole}.{decimal}k")
     }
 }
