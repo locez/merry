@@ -173,7 +173,7 @@ fn expanded_tool_title(tool: &StartedToolView) -> String {
     if tool.detail.is_empty() {
         return tool.title.clone();
     }
-    format!("{}: {}", tool.title, tool.detail)
+    format!("{} {}", tool.title, tool.detail)
 }
 
 fn tool_output_text(output: Option<ToolOutput>) -> String {
@@ -188,8 +188,13 @@ fn started_tool_title_and_detail(
     name: &str,
     arguments: &serde_json::Map<String, Value>,
 ) -> (String, String) {
-    let detail = format_tool_call_detail(name, arguments).unwrap_or_else(|| name.to_owned());
-    let title = match name {
+    let detail = tui_tool_detail(name, arguments);
+    let title = tui_tool_title(name);
+    (title.to_owned(), detail)
+}
+
+fn tui_tool_title(name: &str) -> &'static str {
+    match name {
         "run_process" => "Ran",
         "workspace_read_file" => "Read",
         "workspace_list_dir" => "Listed",
@@ -197,8 +202,18 @@ fn started_tool_title_and_detail(
         "request_permissions" => "Permission",
         WORKSPACE_PATCH_TOOL => "Patch",
         _ => "Tool",
-    };
-    (title.to_owned(), detail)
+    }
+}
+
+fn tui_tool_detail(name: &str, arguments: &serde_json::Map<String, Value>) -> String {
+    match name {
+        "workspace_read_file" | "workspace_list_dir" => arguments
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or(".")
+            .to_owned(),
+        _ => format_tool_call_detail(name, arguments).unwrap_or_else(|| name.to_owned()),
+    }
 }
 
 fn success_tool_preview(name: &str, output: &str) -> Option<String> {

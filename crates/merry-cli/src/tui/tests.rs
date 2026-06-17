@@ -588,7 +588,32 @@ fn projector_shows_tool_call_arguments_without_completed_noise() {
         panic!("read tool call should render as a compact muted line");
     };
     assert_eq!(title, "Read");
-    assert_eq!(detail, "path=AGENTS.md");
+    assert_eq!(detail, "AGENTS.md");
+}
+
+#[test]
+fn projector_renders_list_dir_as_listed_path_without_field_label() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    let mut projector = TuiProjector::default();
+
+    projector.apply(
+        RuntimeEvent::ToolCallStarted {
+            call: pending_call_with_args("call-list", "workspace_list_dir", json!({ "path": "." })),
+            source: source(),
+        },
+        &mut state,
+    );
+
+    let TimelineItem::Muted { title, detail } = &state.timeline()[0] else {
+        panic!("list tool call should render as a compact muted line");
+    };
+    assert_eq!(title, "Listed");
+    assert_eq!(detail, ".");
 }
 
 #[test]
@@ -630,7 +655,7 @@ fn projector_renders_process_calls_as_ran_with_preview() {
     let TimelineItem::Expanded { title, body } = &state.timeline()[0] else {
         panic!("process call should expand with output preview");
     };
-    assert_eq!(title, "Ran: python3 hello_world.py (cwd: .)");
+    assert_eq!(title, "Ran python3 hello_world.py (cwd: .)");
     assert!(!body.contains("python3 hello_world.py (cwd: .)"));
     assert!(body.contains("  stdout: hello world"));
 }
@@ -676,7 +701,7 @@ fn projector_renders_failed_process_calls_as_ran_with_error_preview() {
     let TimelineItem::Expanded { title, body } = &state.timeline()[0] else {
         panic!("failed process call should expand with output preview");
     };
-    assert_eq!(title, "Ran: cargo test -p merry-cli (cwd: .)");
+    assert_eq!(title, "Ran cargo test -p merry-cli (cwd: .)");
     assert!(!body.contains("cargo test -p merry-cli (cwd: .)"));
     assert!(body.contains("  exit 101"));
     assert!(body.contains("  stderr: error: test failed"));
@@ -1289,7 +1314,7 @@ fn renderer_applies_configured_semantic_theme_colors() {
         detail: "read".to_owned(),
     });
     state.push_timeline_item(TimelineItem::Expanded {
-        title: "Ran: cargo test (cwd: .)".to_owned(),
+        title: "Ran cargo test (cwd: .)".to_owned(),
         body: "  stdout: ok".to_owned(),
     });
     state.push_timeline_item(TimelineItem::Expanded {
@@ -1345,6 +1370,22 @@ fn renderer_highlights_inline_code_spans() {
 }
 
 #[test]
+fn renderer_draws_assistant_separator_across_timeline_width() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.push_timeline_item(TimelineItem::Assistant {
+        text: "done".to_owned(),
+    });
+
+    let text = render_to_text(&state, 40, 12);
+    assert!(text.lines().any(|line| line == "-".repeat(40)));
+}
+
+#[test]
 fn renderer_colors_ran_title_and_indents_process_preview() {
     let mut state = TuiState::new(
         "/repo".into(),
@@ -1353,12 +1394,12 @@ fn renderer_colors_ran_title_and_indents_process_preview() {
         TuiTheme::default(),
     );
     state.push_timeline_item(TimelineItem::Expanded {
-        title: "Ran: python3 hello_world.py (cwd: .)".to_owned(),
+        title: "Ran python3 hello_world.py (cwd: .)".to_owned(),
         body: "  stdout: hello world".to_owned(),
     });
 
     let text = render_to_text(&state, 96, 16);
-    assert!(text.contains("Ran: python3 hello_world.py (cwd: .)"));
+    assert!(text.contains("Ran python3 hello_world.py (cwd: .)"));
     assert!(text.contains("  stdout: hello world"));
 
     let buffer = render_to_buffer(&state, 96, 16);
