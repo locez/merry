@@ -1,5 +1,5 @@
 use super::{
-    state::{TimelineItem, TuiState},
+    state::{PatchChangeView, PatchLineView, TimelineItem, TuiState},
     theme::SemanticColor,
 };
 use ratatui::{
@@ -120,6 +120,7 @@ fn timeline_lines(state: &TuiState, region_height: u16) -> Vec<Line<'static>> {
                 }));
                 lines
             }
+            TimelineItem::Patch { changes } => patch_lines(state, changes),
         })
         .collect::<Vec<_>>();
     let visible_height = usize::from(region_height).saturating_sub(1).max(1);
@@ -130,6 +131,49 @@ fn timeline_lines(state: &TuiState, region_height: u16) -> Vec<Line<'static>> {
         .min(lines.len());
     let start = end.saturating_sub(visible_height);
     lines.into_iter().skip(start).take(end - start).collect()
+}
+
+fn patch_lines(state: &TuiState, changes: &[PatchChangeView]) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for change in changes {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "Edited {} (+{} -{})",
+                change.path, change.added, change.removed
+            ),
+            semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(Span::styled(
+            format!(
+                "  {} hunk(s), {} -> {} bytes",
+                change.hunks,
+                change
+                    .bytes_before
+                    .map_or_else(|| "-".to_owned(), |bytes| bytes.to_string()),
+                change
+                    .bytes_after
+                    .map_or_else(|| "-".to_owned(), |bytes| bytes.to_string())
+            ),
+            semantic_style(state, SemanticColor::Muted),
+        )));
+        for line in &change.lines {
+            lines.push(match line {
+                PatchLineView::Context(text) => Line::from(Span::styled(
+                    format!(" {text}"),
+                    semantic_style(state, SemanticColor::Focus),
+                )),
+                PatchLineView::Remove(text) => Line::from(Span::styled(
+                    format!("-{text}"),
+                    semantic_style(state, SemanticColor::DiffDelete),
+                )),
+                PatchLineView::Add(text) => Line::from(Span::styled(
+                    format!("+{text}"),
+                    semantic_style(state, SemanticColor::DiffAdd),
+                )),
+            });
+        }
+    }
+    lines
 }
 
 fn queue_lines(state: &TuiState, region: Rect) -> Vec<Line<'static>> {

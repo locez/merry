@@ -68,11 +68,32 @@ impl QueuePreviewState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
+pub(crate) enum PatchLineView {
+    Context(String),
+    Add(String),
+    Remove(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) struct PatchChangeView {
+    pub(crate) path: String,
+    pub(crate) added: usize,
+    pub(crate) removed: usize,
+    pub(crate) hunks: usize,
+    pub(crate) bytes_before: Option<usize>,
+    pub(crate) bytes_after: Option<usize>,
+    pub(crate) lines: Vec<PatchLineView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub(crate) enum TimelineItem {
     Assistant { text: String },
     Muted { title: String, detail: String },
     Expanded { title: String, body: String },
     Diagnostic { title: String, body: String },
+    Patch { changes: Vec<PatchChangeView> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,6 +156,13 @@ impl TuiState {
     pub(crate) fn push_timeline_item(&mut self, item: TimelineItem) {
         self.timeline.push(item);
         self.timeline_scroll_offset = 0;
+    }
+
+    pub(crate) fn replace_timeline_item(&mut self, index: usize, item: TimelineItem) {
+        if let Some(slot) = self.timeline.get_mut(index) {
+            *slot = item;
+            self.timeline_scroll_offset = 0;
+        }
     }
 
     pub(crate) fn timeline_scroll_offset(&self) -> usize {

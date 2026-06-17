@@ -3,16 +3,18 @@ use super::input::TextInput;
 use super::keymap::{KeyAction, KeyBinding, Keymap};
 use super::projector::TuiProjector;
 use super::render::{render_to_buffer, render_to_text};
-use super::state::{QueuePreview, TimelineItem, TuiState};
+use super::state::{PatchChangeView, PatchLineView, QueuePreview, TimelineItem, TuiState};
 use super::theme::{SemanticColor, TuiTheme};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use merry_core::{
-    ArtifactId, ArtifactKind, ArtifactRef, ContextWindowSource, ModelUsage, PendingToolCall,
-    QueuedInputLane, QueuedInputView, RuntimeEvent, RuntimeEventSource, SessionId, SessionUsage,
-    ToolCallArguments, ToolCallId, ToolCallResult, ToolName, ToolOutput, UsageContextWindow,
+    ArtifactId, ArtifactKind, ArtifactRef, ContextWindowSource, ErrorInfo, ModelUsage,
+    PendingToolCall, QueuedInputLane, QueuedInputView, RuntimeEvent, RuntimeEventSource, SessionId,
+    SessionUsage, ToolCallArguments, ToolCallId, ToolCallResult, ToolName, ToolOutput,
+    UsageContextWindow,
 };
 use merry_tool_workspace::WORKSPACE_PATCH_TOOL;
 use ratatui::style::Color;
+use serde_json::json;
 
 fn source() -> RuntimeEventSource {
     RuntimeEventSource::new(SessionId::new("tui-test").unwrap(), 1)
@@ -30,6 +32,18 @@ fn pending_call(id: &str, tool_name: &str) -> PendingToolCall {
     )
 }
 
+fn pending_call_with_args(
+    id: &str,
+    tool_name: &str,
+    arguments: serde_json::Value,
+) -> PendingToolCall {
+    PendingToolCall::new(
+        ToolCallId::new(id).unwrap(),
+        ToolName::new(tool_name).unwrap(),
+        ToolCallArguments::try_from(arguments).unwrap(),
+    )
+}
+
 #[test]
 fn text_input_inserts_deletes_and_takes_trimmed_text() {
     let mut input = TextInput::default();
@@ -43,6 +57,16 @@ fn text_input_inserts_deletes_and_takes_trimmed_text() {
     assert_eq!(input.take_trimmed(), Some("h!".to_owned()));
     assert_eq!(input.text(), "");
     assert_eq!(input.take_trimmed(), None);
+}
+
+#[test]
+fn text_input_inserts_pasted_text_at_cursor() {
+    let mut input = TextInput::default();
+
+    input.insert_char('你');
+    input.insert_str("好 world");
+
+    assert_eq!(input.text(), "你好 world");
 }
 
 #[test]
@@ -205,7 +229,7 @@ fn projector_renders_assistant_text_as_primary_timeline_item() {
 }
 
 #[test]
-fn projector_collapses_read_tool_and_expands_patch_tool() {
+fn projector_keeps_successful_non_patch_tool_compact_and_expands_patch_tool() {
     let mut state = TuiState::new(
         "/repo".into(),
         "gpt-test".to_owned(),
@@ -255,10 +279,9 @@ fn projector_collapses_read_tool_and_expands_patch_tool() {
         &mut state,
     );
 
+    assert_eq!(state.timeline().len(), 2);
     assert!(matches!(state.timeline()[0], TimelineItem::Muted { .. }));
-    assert!(matches!(state.timeline()[1], TimelineItem::Muted { .. }));
-    assert!(matches!(state.timeline()[2], TimelineItem::Muted { .. }));
-    assert!(matches!(state.timeline()[3], TimelineItem::Expanded { .. }));
+    assert!(matches!(state.timeline()[1], TimelineItem::Expanded { .. }));
 }
 
 #[test]
@@ -292,13 +315,198 @@ fn projector_keeps_non_patch_tool_results_compact_without_raw_json() {
         &mut state,
     );
 
-    assert_eq!(state.timeline().len(), 2);
+    assert_eq!(state.timeline().len(), 1);
     assert!(matches!(state.timeline()[0], TimelineItem::Muted { .. }));
-    let TimelineItem::Muted { title, detail } = &state.timeline()[1] else {
-        panic!("non-patch tool result should stay muted");
+}
+
+#[test]
+fn projector_shows_tool_call_arguments_without_completed_noise() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    let mut projector = TuiProjector::default();
+
+    projector.apply(
+        RuntimeEvent::ToolCallStarted {
+            call: pending_call_with_args(
+                "call-read",
+                "workspace_read_file",
+                json!({ "path": "AGENTS.md" }),
+            ),
+            source: source(),
+        },
+        &mut state,
+    );
+    projector.apply(
+        RuntimeEvent::ToolCallFinished {
+            result: ToolCallResult::succeeded(
+                ToolCallId::new("call-read").unwrap(),
+                text_artifact("read-output"),
+            ),
+            output: Some(ToolOutput::Json {
+                json: r#"{"ok":true,"tool":"workspace_read_file","path":"AGENTS.md","bytes":19704,"content":"large raw content"}"#.to_owned(),
+            }),
+            source: source(),
+        },
+        &mut state,
+    );
+
+    assert_eq!(state.timeline().len(), 1);
+    let TimelineItem::Muted { title, detail } = &state.timeline()[0] else {
+        panic!("read tool call should render as a compact muted line");
     };
-    assert_eq!(title, "workspace_read_file");
-    assert_eq!(detail, "completed");
+    assert_eq!(title, "tool");
+    assert_eq!(detail, "workspace_read_file path=AGENTS.md");
+}
+
+#[test]
+fn projector_projects_workspace_patch_using_patch_tool_format() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    let mut projector = TuiProjector::default();
+    let patch = "\
+*** Begin Patch
+*** Update File: crates/merry-cli/src/tui/render.rs
+     let old = true;
+-    lines.push(old);
++    lines.push(new);
+*** End Patch";
+
+    projector.apply(
+        RuntimeEvent::ToolCallStarted {
+            call: pending_call_with_args(
+                "call-patch",
+                WORKSPACE_PATCH_TOOL,
+                json!({ "patch": patch }),
+            ),
+            source: source(),
+        },
+        &mut state,
+    );
+    projector.apply(
+        RuntimeEvent::ToolCallFinished {
+            result: ToolCallResult::succeeded(
+                ToolCallId::new("call-patch").unwrap(),
+                text_artifact("patch-output"),
+            ),
+            output: Some(ToolOutput::Json {
+                json: r#"{"ok":true,"tool":"workspace_patch","changes":[{"path":"crates/merry-cli/src/tui/render.rs","hunks":1,"bytes_before":120,"bytes_after":121}]}"#.to_owned(),
+            }),
+            source: source(),
+        },
+        &mut state,
+    );
+
+    assert_eq!(state.timeline().len(), 1);
+    let TimelineItem::Patch { changes } = &state.timeline()[0] else {
+        panic!("workspace patch result should render as a patch view");
+    };
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0].path, "crates/merry-cli/src/tui/render.rs");
+    assert_eq!(changes[0].added, 1);
+    assert_eq!(changes[0].removed, 1);
+    assert_eq!(
+        changes[0].lines,
+        vec![
+            PatchLineView::Context("    let old = true;".to_owned()),
+            PatchLineView::Remove("    lines.push(old);".to_owned()),
+            PatchLineView::Add("    lines.push(new);".to_owned()),
+        ]
+    );
+}
+
+#[test]
+fn projector_compacts_failed_tool_result_without_raw_artifact_json() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    let mut projector = TuiProjector::default();
+
+    projector.apply(
+        RuntimeEvent::ToolCallStarted {
+            call: pending_call_with_args(
+                "call-permission",
+                "request_permissions",
+                json!({
+                    "requested": { "network": true },
+                    "for_action": { "argv": ["cargo", "test"] }
+                }),
+            ),
+            source: source(),
+        },
+        &mut state,
+    );
+    projector.apply(
+        RuntimeEvent::ToolCallFinished {
+            result: ToolCallResult::failed(
+                ToolCallId::new("call-permission").unwrap(),
+                text_artifact("permission-output"),
+                ErrorInfo::new(
+                    "permission_review_failed",
+                    "permission review failed: provider stream Protocol: stream line must start with data:",
+                )
+                .unwrap(),
+            ),
+            output: Some(ToolOutput::Json {
+                json: r#"{"error":{"code":"permission_review_failed","message":"permission review failed: provider stream Protocol: stream line must start with data:"},"guidance":{"kind":"permission_review_failed","message":"Do not assume the requested capability was granted."},"status":"review_failed","tool_call_id":"call-permission"}"#.to_owned(),
+            }),
+            source: source(),
+        },
+        &mut state,
+    );
+
+    assert_eq!(state.timeline().len(), 2);
+    let TimelineItem::Diagnostic { title, body } = &state.timeline()[1] else {
+        panic!("failed tool should render as a compact diagnostic");
+    };
+    assert_eq!(title, "tool failed: request_permissions");
+    assert!(body.contains("permission_review_failed"));
+    assert!(body.contains("Do not assume the requested capability was granted."));
+    assert!(!body.contains("\"tool_call_id\""));
+    assert!(!body.contains("call-permission"));
+}
+
+#[test]
+fn renderer_shows_workspace_patch_as_edited_block() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.push_timeline_item(TimelineItem::Patch {
+        changes: vec![PatchChangeView {
+            path: "crates/merry-cli/src/tui/render.rs".to_owned(),
+            added: 1,
+            removed: 1,
+            hunks: 1,
+            bytes_before: Some(120),
+            bytes_after: Some(121),
+            lines: vec![
+                PatchLineView::Context("    let old = true;".to_owned()),
+                PatchLineView::Remove("    lines.push(old);".to_owned()),
+                PatchLineView::Add("    lines.push(new);".to_owned()),
+            ],
+        }],
+    });
+
+    let text = render_to_text(&state, 96, 16);
+
+    assert!(text.contains("Edited crates/merry-cli/src/tui/render.rs (+1 -1)"));
+    assert!(text.contains("    let old = true;"));
+    assert!(text.contains("-    lines.push(old);"));
+    assert!(text.contains("+    lines.push(new);"));
+    assert!(!text.contains("\"changes\""));
 }
 
 #[test]
@@ -332,7 +540,8 @@ fn projector_expands_workspace_patch_by_tool_name() {
         &mut state,
     );
 
-    assert!(matches!(state.timeline()[1], TimelineItem::Expanded { .. }));
+    assert_eq!(state.timeline().len(), 1);
+    assert!(matches!(state.timeline()[0], TimelineItem::Expanded { .. }));
 }
 
 #[test]
@@ -366,7 +575,8 @@ fn projector_keeps_diff_like_non_patch_output_muted() {
         &mut state,
     );
 
-    assert!(matches!(state.timeline()[1], TimelineItem::Muted { .. }));
+    assert_eq!(state.timeline().len(), 1);
+    assert!(matches!(state.timeline()[0], TimelineItem::Muted { .. }));
 }
 
 #[test]
