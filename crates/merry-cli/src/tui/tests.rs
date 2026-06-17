@@ -627,8 +627,8 @@ fn projector_renders_process_calls_as_ran_with_preview() {
     let TimelineItem::Expanded { title, body } = &state.timeline()[0] else {
         panic!("process call should expand with output preview");
     };
-    assert_eq!(title, "Ran");
-    assert!(body.contains("python3 hello_world.py (cwd: .)"));
+    assert_eq!(title, "Ran: python3 hello_world.py (cwd: .)");
+    assert!(!body.contains("python3 hello_world.py (cwd: .)"));
     assert!(body.contains("stdout: hello world"));
 }
 
@@ -673,8 +673,8 @@ fn projector_renders_failed_process_calls_as_ran_with_error_preview() {
     let TimelineItem::Expanded { title, body } = &state.timeline()[0] else {
         panic!("failed process call should expand with output preview");
     };
-    assert_eq!(title, "Ran");
-    assert!(body.contains("cargo test -p merry-cli (cwd: .)"));
+    assert_eq!(title, "Ran: cargo test -p merry-cli (cwd: .)");
+    assert!(!body.contains("cargo test -p merry-cli (cwd: .)"));
     assert!(body.contains("exit 101"));
     assert!(body.contains("stderr: error: test failed"));
     assert!(body.contains("  rerun with --exact"));
@@ -1306,9 +1306,9 @@ fn renderer_shows_patch_line_numbers_and_diff_backgrounds() {
     });
 
     let text = render_to_text(&state, 96, 18);
-    assert!(text.contains("   4    4  def build_message():"));
-    assert!(text.contains("   5      -    return \"hello   world\""));
-    assert!(text.contains("        5 +    return \"hello world\""));
+    assert!(text.contains("   4  def build_message():"));
+    assert!(text.contains("   5 -    return \"hello   world\""));
+    assert!(text.contains("   5 +    return \"hello world\""));
 
     let buffer = render_to_buffer(&state, 96, 18);
     let remove_style = find_cell_style(&buffer, "-    return").expect("remove line should render");
