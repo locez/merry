@@ -1,6 +1,8 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+const MAX_INPUT_HISTORY: usize = 200;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
 pub(crate) struct TextInputViewport {
@@ -61,6 +63,11 @@ impl TextInput {
         self.cursor += value.len();
     }
 
+    pub(crate) fn replace_text(&mut self, value: String) {
+        self.cursor = value.len();
+        self.text = value;
+    }
+
     pub(crate) fn backspace(&mut self) {
         if self.cursor == 0 {
             return;
@@ -80,6 +87,37 @@ impl TextInput {
         }
         let next = next_char_boundary(&self.text, self.cursor);
         self.text.drain(self.cursor..next);
+    }
+
+    pub(crate) fn delete_before_cursor(&mut self) {
+        self.text.drain(..self.cursor);
+        self.cursor = 0;
+    }
+
+    pub(crate) fn delete_after_cursor(&mut self) {
+        self.text.truncate(self.cursor);
+    }
+
+    pub(crate) fn delete_previous_word(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+
+        let mut start = self.cursor;
+        let mut seen_word = false;
+        for (index, value) in self.text[..self.cursor].char_indices().rev() {
+            if value.is_whitespace() {
+                if seen_word {
+                    break;
+                }
+            } else {
+                seen_word = true;
+            }
+            start = index;
+        }
+
+        self.text.drain(start..self.cursor);
+        self.cursor = start;
     }
 
     pub(crate) fn move_left(&mut self) {
@@ -121,6 +159,21 @@ impl TextInput {
 
     pub(crate) fn handle_key(&mut self, key: KeyEvent) {
         match key.code {
+            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.move_home();
+            }
+            KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.move_end();
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.delete_before_cursor();
+            }
+            KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.delete_after_cursor();
+            }
+            KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.delete_previous_word();
+            }
             KeyCode::Char(value) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.insert_char(value);
             }
@@ -146,6 +199,62 @@ impl TextInput {
             start = index;
         }
         (start, width)
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) struct InputHistory {
+    entries: Vec<String>,
+    navigation: Option<usize>,
+    draft: String,
+}
+
+#[allow(dead_code)]
+impl InputHistory {
+    pub(crate) fn record(&mut self, text: &str) {
+        if text.trim().is_empty() {
+            return;
+        }
+
+        self.entries.push(text.to_owned());
+        if self.entries.len() > MAX_INPUT_HISTORY {
+            self.entries.remove(0);
+        }
+        self.navigation = None;
+        self.draft.clear();
+    }
+
+    pub(crate) fn previous(&mut self, input: &mut TextInput) {
+        if self.entries.is_empty() {
+            return;
+        }
+
+        let index = match self.navigation {
+            Some(index) => index.saturating_sub(1),
+            None => {
+                self.draft = input.text().to_owned();
+                self.entries.len() - 1
+            }
+        };
+        self.navigation = Some(index);
+        input.replace_text(self.entries[index].clone());
+    }
+
+    pub(crate) fn next(&mut self, input: &mut TextInput) {
+        let Some(index) = self.navigation else {
+            return;
+        };
+
+        if index + 1 < self.entries.len() {
+            let index = index + 1;
+            self.navigation = Some(index);
+            input.replace_text(self.entries[index].clone());
+            return;
+        }
+
+        self.navigation = None;
+        input.replace_text(std::mem::take(&mut self.draft));
     }
 }
 

@@ -100,6 +100,23 @@ fn text_input_moves_cursor_and_edits_at_cursor() {
 }
 
 #[test]
+fn text_input_supports_common_shell_line_editing_keys() {
+    let mut input = TextInput::default();
+
+    input.insert_str("alpha beta");
+    input.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+    input.insert_str("> ");
+    input.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
+    input.insert_str(" tail");
+    input.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+    input.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
+    input.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+
+    assert_eq!(input.text(), "");
+    assert_eq!(input.cursor_byte_index(), 0);
+}
+
+#[test]
 fn text_input_viewport_uses_terminal_width_for_wide_chars() {
     let mut input = TextInput::default();
 
@@ -133,6 +150,76 @@ fn controller_submit_next_takes_input_text() {
 
     assert_eq!(effect, ControllerEffect::SubmitNext("now".to_owned()));
     assert_eq!(state.input_text(), "");
+}
+
+#[test]
+fn controller_submit_records_shell_like_input_history() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+
+    state.input_mut().insert_str("first");
+    assert_eq!(
+        handle_key_action(KeyAction::SubmitNext, &mut state),
+        ControllerEffect::SubmitNext("first".to_owned())
+    );
+    state.input_mut().insert_str("second");
+    assert_eq!(
+        handle_key_action(KeyAction::SubmitNext, &mut state),
+        ControllerEffect::SubmitNext("second".to_owned())
+    );
+
+    assert_eq!(
+        handle_key_action(KeyAction::HistoryPrevious, &mut state),
+        ControllerEffect::None
+    );
+    assert_eq!(state.input_text(), "second");
+    assert_eq!(
+        handle_key_action(KeyAction::HistoryPrevious, &mut state),
+        ControllerEffect::None
+    );
+    assert_eq!(state.input_text(), "first");
+    assert_eq!(
+        handle_key_action(KeyAction::HistoryNext, &mut state),
+        ControllerEffect::None
+    );
+    assert_eq!(state.input_text(), "second");
+    assert_eq!(
+        handle_key_action(KeyAction::HistoryNext, &mut state),
+        ControllerEffect::None
+    );
+    assert_eq!(state.input_text(), "");
+}
+
+#[test]
+fn controller_history_restores_unsent_draft() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+
+    state.input_mut().insert_str("sent");
+    assert_eq!(
+        handle_key_action(KeyAction::SubmitNext, &mut state),
+        ControllerEffect::SubmitNext("sent".to_owned())
+    );
+    state.input_mut().insert_str("draft");
+
+    assert_eq!(
+        handle_key_action(KeyAction::HistoryPrevious, &mut state),
+        ControllerEffect::None
+    );
+    assert_eq!(state.input_text(), "sent");
+    assert_eq!(
+        handle_key_action(KeyAction::HistoryNext, &mut state),
+        ControllerEffect::None
+    );
+    assert_eq!(state.input_text(), "draft");
 }
 
 #[test]
@@ -174,6 +261,25 @@ fn controller_scroll_actions_move_timeline_viewport() {
 }
 
 #[test]
+fn controller_suspended_actions_emit_runtime_effects() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+
+    assert_eq!(
+        handle_key_action(KeyAction::ResumeSuspended, &mut state),
+        ControllerEffect::ResumeSuspended
+    );
+    assert_eq!(
+        handle_key_action(KeyAction::DiscardSuspended, &mut state),
+        ControllerEffect::DiscardSuspended
+    );
+}
+
+#[test]
 fn default_keymap_maps_core_navigation_and_control_keys() {
     let keymap = Keymap::default();
 
@@ -192,6 +298,22 @@ fn default_keymap_maps_core_navigation_and_control_keys() {
     assert_eq!(
         keymap.action_for(KeyBinding::new(KeyCode::Esc, KeyModifiers::NONE)),
         Some(KeyAction::Interrupt)
+    );
+    assert_eq!(
+        keymap.action_for(KeyBinding::new(KeyCode::Up, KeyModifiers::NONE)),
+        Some(KeyAction::HistoryPrevious)
+    );
+    assert_eq!(
+        keymap.action_for(KeyBinding::new(KeyCode::Down, KeyModifiers::NONE)),
+        Some(KeyAction::HistoryNext)
+    );
+    assert_eq!(
+        keymap.action_for(KeyBinding::new(KeyCode::PageUp, KeyModifiers::NONE)),
+        Some(KeyAction::ScrollUp)
+    );
+    assert_eq!(
+        keymap.action_for(KeyBinding::new(KeyCode::PageDown, KeyModifiers::NONE)),
+        Some(KeyAction::ScrollDown)
     );
 }
 
@@ -214,6 +336,45 @@ fn controller_respects_configured_ctrl_c_interrupt_binding() {
     );
 
     assert_eq!(effect, ControllerEffect::Interrupt);
+}
+
+#[test]
+fn configured_navigation_bindings_take_precedence() {
+    let keymap = Keymap::from_config(&crate::config::TuiKeymapToml {
+        history_previous: Some("ctrl+p".to_owned()),
+        history_next: Some("ctrl+n".to_owned()),
+        scroll_up: Some("up".to_owned()),
+        scroll_down: Some("down".to_owned()),
+        resume_suspended: Some("ctrl+r".to_owned()),
+        discard_suspended: Some("ctrl+d".to_owned()),
+        ..crate::config::TuiKeymapToml::default()
+    })
+    .unwrap();
+
+    assert_eq!(
+        keymap.action_for(KeyBinding::new(KeyCode::Char('p'), KeyModifiers::CONTROL,)),
+        Some(KeyAction::HistoryPrevious)
+    );
+    assert_eq!(
+        keymap.action_for(KeyBinding::new(KeyCode::Char('n'), KeyModifiers::CONTROL,)),
+        Some(KeyAction::HistoryNext)
+    );
+    assert_eq!(
+        keymap.action_for(KeyBinding::new(KeyCode::Up, KeyModifiers::NONE)),
+        Some(KeyAction::ScrollUp)
+    );
+    assert_eq!(
+        keymap.action_for(KeyBinding::new(KeyCode::Down, KeyModifiers::NONE)),
+        Some(KeyAction::ScrollDown)
+    );
+    assert_eq!(
+        keymap.action_for(KeyBinding::new(KeyCode::Char('r'), KeyModifiers::CONTROL,)),
+        Some(KeyAction::ResumeSuspended)
+    );
+    assert_eq!(
+        keymap.action_for(KeyBinding::new(KeyCode::Char('d'), KeyModifiers::CONTROL,)),
+        Some(KeyAction::DiscardSuspended)
+    );
 }
 
 #[test]
@@ -745,6 +906,45 @@ fn projector_projects_accepted_user_input_into_timeline() {
             text: "查一下 baidu.com".to_owned(),
             lane: QueuedInputLane::Next,
         }]
+    );
+}
+
+#[test]
+fn projector_confirms_local_echo_without_duplicate_user_line() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    let mut projector = TuiProjector::default();
+
+    state.push_local_user_echo("same".to_owned(), QueuedInputLane::Next);
+    state.push_local_user_echo("same".to_owned(), QueuedInputLane::Next);
+    projector.apply(
+        RuntimeEvent::QueuedInputAccepted {
+            lane: QueuedInputLane::Next,
+            inputs: vec![QueuedInputView {
+                text: "same".to_owned(),
+                lane: QueuedInputLane::Next,
+                position: 0,
+            }],
+        },
+        &mut state,
+    );
+
+    assert_eq!(
+        state.timeline(),
+        &[
+            TimelineItem::User {
+                text: "same".to_owned(),
+                lane: QueuedInputLane::Next,
+            },
+            TimelineItem::User {
+                text: "same".to_owned(),
+                lane: QueuedInputLane::Next,
+            },
+        ]
     );
 }
 

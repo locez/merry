@@ -461,6 +461,12 @@ pub(crate) struct TuiKeymapToml {
     pub(crate) submit_backlog: Option<String>,
     pub(crate) interrupt: Option<String>,
     pub(crate) quit: Option<String>,
+    pub(crate) scroll_up: Option<String>,
+    pub(crate) scroll_down: Option<String>,
+    pub(crate) history_previous: Option<String>,
+    pub(crate) history_next: Option<String>,
+    pub(crate) resume_suspended: Option<String>,
+    pub(crate) discard_suspended: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -634,6 +640,12 @@ submit_next = "enter"
 submit_backlog = "ctrl+b"
 interrupt = "esc"
 quit = "ctrl+q"
+scroll_up = "pageup"
+scroll_down = "pagedown"
+history_previous = "up"
+history_next = "down"
+resume_suspended = "ctrl+r"
+discard_suspended = "ctrl+d"
 "##,
             ),
             &paths,
@@ -644,6 +656,8 @@ quit = "ctrl+q"
         let tui = config.tui_config().expect("tui config should validate");
         assert_eq!(tui.theme.status.as_deref(), Some("cyan"));
         assert_eq!(tui.keymap.submit_next.as_deref(), Some("enter"));
+        assert_eq!(tui.keymap.scroll_up.as_deref(), Some("pageup"));
+        assert_eq!(tui.keymap.history_previous.as_deref(), Some("up"));
     }
 
     #[test]
@@ -802,6 +816,8 @@ roots = ["skills", "~/shared-skills", "/opt/company/skills"]
             .expect("example TUI config should validate");
         assert_eq!(tui.theme.status.as_deref(), Some("cyan"));
         assert_eq!(tui.keymap.submit_next.as_deref(), Some("enter"));
+        assert_eq!(tui.keymap.scroll_up.as_deref(), Some("pageup"));
+        assert_eq!(tui.keymap.history_previous.as_deref(), Some("up"));
 
         let provider = config
             .openai_compatible_provider()

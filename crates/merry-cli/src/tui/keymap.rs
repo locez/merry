@@ -12,6 +12,8 @@ pub(crate) enum KeyAction {
     Quit,
     ScrollUp,
     ScrollDown,
+    HistoryPrevious,
+    HistoryNext,
     ResumeSuspended,
     DiscardSuspended,
 }
@@ -74,12 +76,20 @@ impl Default for Keymap {
                     KeyAction::Quit,
                 ),
                 (
-                    KeyBinding::new(KeyCode::Up, KeyModifiers::NONE),
+                    KeyBinding::new(KeyCode::PageUp, KeyModifiers::NONE),
                     KeyAction::ScrollUp,
                 ),
                 (
-                    KeyBinding::new(KeyCode::Down, KeyModifiers::NONE),
+                    KeyBinding::new(KeyCode::PageDown, KeyModifiers::NONE),
                     KeyAction::ScrollDown,
+                ),
+                (
+                    KeyBinding::new(KeyCode::Up, KeyModifiers::NONE),
+                    KeyAction::HistoryPrevious,
+                ),
+                (
+                    KeyBinding::new(KeyCode::Down, KeyModifiers::NONE),
+                    KeyAction::HistoryNext,
                 ),
             ],
         }
@@ -104,6 +114,24 @@ impl Keymap {
         if let Some(binding) = config.quit.as_deref() {
             keymap.set_binding(parse_binding(binding)?, KeyAction::Quit);
         }
+        if let Some(binding) = config.scroll_up.as_deref() {
+            keymap.set_binding(parse_binding(binding)?, KeyAction::ScrollUp);
+        }
+        if let Some(binding) = config.scroll_down.as_deref() {
+            keymap.set_binding(parse_binding(binding)?, KeyAction::ScrollDown);
+        }
+        if let Some(binding) = config.history_previous.as_deref() {
+            keymap.set_binding(parse_binding(binding)?, KeyAction::HistoryPrevious);
+        }
+        if let Some(binding) = config.history_next.as_deref() {
+            keymap.set_binding(parse_binding(binding)?, KeyAction::HistoryNext);
+        }
+        if let Some(binding) = config.resume_suspended.as_deref() {
+            keymap.set_binding(parse_binding(binding)?, KeyAction::ResumeSuspended);
+        }
+        if let Some(binding) = config.discard_suspended.as_deref() {
+            keymap.set_binding(parse_binding(binding)?, KeyAction::DiscardSuspended);
+        }
         Ok(keymap)
     }
 
@@ -122,12 +150,23 @@ impl Keymap {
 }
 
 fn parse_binding(value: &str) -> Result<KeyBinding, crate::config::ConfigError> {
-    match value {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
         "enter" => Ok(KeyBinding::new(KeyCode::Enter, KeyModifiers::NONE)),
         "esc" => Ok(KeyBinding::new(KeyCode::Esc, KeyModifiers::NONE)),
+        "up" => Ok(KeyBinding::new(KeyCode::Up, KeyModifiers::NONE)),
+        "down" => Ok(KeyBinding::new(KeyCode::Down, KeyModifiers::NONE)),
+        "pageup" | "page_up" | "pgup" => Ok(KeyBinding::new(KeyCode::PageUp, KeyModifiers::NONE)),
+        "pagedown" | "page_down" | "pgdown" => {
+            Ok(KeyBinding::new(KeyCode::PageDown, KeyModifiers::NONE))
+        }
         "ctrl+b" => Ok(KeyBinding::new(KeyCode::Char('b'), KeyModifiers::CONTROL)),
         "ctrl+c" => Ok(KeyBinding::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        "ctrl+d" => Ok(KeyBinding::new(KeyCode::Char('d'), KeyModifiers::CONTROL)),
+        "ctrl+n" => Ok(KeyBinding::new(KeyCode::Char('n'), KeyModifiers::CONTROL)),
+        "ctrl+p" => Ok(KeyBinding::new(KeyCode::Char('p'), KeyModifiers::CONTROL)),
         "ctrl+q" => Ok(KeyBinding::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+        "ctrl+r" => Ok(KeyBinding::new(KeyCode::Char('r'), KeyModifiers::CONTROL)),
         other => Err(crate::config::ConfigError::Invalid(format!(
             "unsupported TUI key binding {other:?}"
         ))),

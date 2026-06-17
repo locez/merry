@@ -88,6 +88,12 @@ submit_next = "enter"
 submit_backlog = "ctrl+b"
 interrupt = "esc"
 quit = "ctrl+q"
+scroll_up = "pageup"
+scroll_down = "pagedown"
+history_previous = "up"
+history_next = "down"
+resume_suspended = "ctrl+r"
+discard_suspended = "ctrl+d"
 
 [observability.log]
 # Enable this for smoke/debug runs that should write structured JSON logs.
