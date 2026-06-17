@@ -641,9 +641,65 @@ fn projector_projects_workspace_patch_using_patch_tool_format() {
     assert_eq!(
         changes[0].lines,
         vec![
-            PatchLineView::Context("    let old = true;".to_owned()),
-            PatchLineView::Remove("    lines.push(old);".to_owned()),
-            PatchLineView::Add("    lines.push(new);".to_owned()),
+            PatchLineView::context("    let old = true;", None),
+            PatchLineView::remove("    lines.push(old);", None),
+            PatchLineView::add("    lines.push(new);", None),
+        ]
+    );
+}
+
+#[test]
+fn projector_derives_patch_line_numbers_from_hunk_headers() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    let mut projector = TuiProjector::default();
+    let patch = "\
+*** Begin Patch
+*** Update File: hello_world.py
+@@ -4,2 +4,2 @@
+ def build_message():
+-    return \"hello   world\"
++    return \"hello world\"
+*** End Patch";
+
+    projector.apply(
+        RuntimeEvent::ToolCallStarted {
+            call: pending_call_with_args(
+                "call-numbered-patch",
+                WORKSPACE_PATCH_TOOL,
+                json!({ "patch": patch }),
+            ),
+            source: source(),
+        },
+        &mut state,
+    );
+    projector.apply(
+        RuntimeEvent::ToolCallFinished {
+            result: ToolCallResult::succeeded(
+                ToolCallId::new("call-numbered-patch").unwrap(),
+                text_artifact("patch-output"),
+            ),
+            output: Some(ToolOutput::Json {
+                json: r#"{"ok":true,"tool":"workspace_patch","changes":[{"path":"hello_world.py","hunks":1,"bytes_before":209,"bytes_after":222}]}"#.to_owned(),
+            }),
+            source: source(),
+        },
+        &mut state,
+    );
+
+    let TimelineItem::Patch { changes } = &state.timeline()[0] else {
+        panic!("workspace patch result should render as a patch view");
+    };
+    assert_eq!(
+        changes[0].lines,
+        vec![
+            PatchLineView::context("def build_message():", Some(4)),
+            PatchLineView::remove("    return \"hello   world\"", Some(5)),
+            PatchLineView::add("    return \"hello world\"", Some(5)),
         ]
     );
 }
@@ -719,9 +775,9 @@ fn renderer_shows_workspace_patch_as_edited_block() {
             bytes_before: Some(120),
             bytes_after: Some(121),
             lines: vec![
-                PatchLineView::Context("    let old = true;".to_owned()),
-                PatchLineView::Remove("    lines.push(old);".to_owned()),
-                PatchLineView::Add("    lines.push(new);".to_owned()),
+                PatchLineView::context("    let old = true;", Some(20)),
+                PatchLineView::remove("    lines.push(old);", Some(21)),
+                PatchLineView::add("    lines.push(new);", Some(21)),
             ],
         }],
     });
@@ -1114,6 +1170,64 @@ fn renderer_applies_configured_semantic_theme_colors() {
 }
 
 #[test]
+fn renderer_highlights_inline_code_spans() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.push_timeline_item(TimelineItem::Assistant {
+        text: "call `build_message()` now".to_owned(),
+    });
+
+    let buffer = render_to_buffer(&state, 80, 16);
+    let style =
+        find_cell_style(&buffer, "build_message()").expect("inline code text should be rendered");
+
+    assert_eq!(style.fg, Some(Color::Yellow));
+    assert_ne!(style.bg, None);
+}
+
+#[test]
+fn renderer_shows_patch_line_numbers_and_diff_backgrounds() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.push_timeline_item(TimelineItem::Patch {
+        changes: vec![PatchChangeView {
+            path: "hello_world.py".to_owned(),
+            added: 1,
+            removed: 1,
+            hunks: 1,
+            bytes_before: Some(209),
+            bytes_after: Some(222),
+            lines: vec![
+                PatchLineView::context("def build_message():", Some(4)),
+                PatchLineView::remove("    return \"hello   world\"", Some(5)),
+                PatchLineView::add("    return \"hello world\"", Some(5)),
+            ],
+        }],
+    });
+
+    let text = render_to_text(&state, 96, 18);
+    assert!(text.contains("   4    4  def build_message():"));
+    assert!(text.contains("   5      -    return \"hello   world\""));
+    assert!(text.contains("        5 +    return \"hello world\""));
+
+    let buffer = render_to_buffer(&state, 96, 18);
+    let remove_style = find_cell_style(&buffer, "-    return").expect("remove line should render");
+    let add_style = find_cell_style(&buffer, "+    return").expect("add line should render");
+    assert_eq!(remove_style.fg, Some(Color::Red));
+    assert_eq!(add_style.fg, Some(Color::Green));
+    assert_ne!(remove_style.bg, None);
+    assert_ne!(add_style.bg, None);
+}
+
+#[test]
 fn renderer_ellipsizes_queue_items_to_region_width() {
     let mut state = TuiState::new(
         "/repo".into(),
@@ -1187,6 +1301,10 @@ fn renderer_keeps_input_region_stable_when_queue_count_changes() {
 }
 
 fn find_cell_color(buffer: &ratatui::buffer::Buffer, text: &str) -> Option<Color> {
+    find_cell_style(buffer, text).and_then(|style| style.fg)
+}
+
+fn find_cell_style(buffer: &ratatui::buffer::Buffer, text: &str) -> Option<ratatui::style::Style> {
     let area = buffer.area;
     let first = text.chars().next()?.to_string();
     for y in area.y..area.y + area.height {
@@ -1199,7 +1317,7 @@ fn find_cell_color(buffer: &ratatui::buffer::Buffer, text: &str) -> Option<Color
         };
         for x in area.x + start as u16..area.x + area.width {
             if buffer[(x, y)].symbol() == first {
-                return Some(buffer[(x, y)].fg);
+                return Some(buffer[(x, y)].style());
             }
         }
     }

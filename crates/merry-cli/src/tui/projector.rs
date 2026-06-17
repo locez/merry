@@ -1,4 +1,6 @@
-use super::state::{PatchChangeView, PatchLineView, QueuePreview, TimelineItem, TuiState};
+use super::state::{
+    PatchChangeView, PatchLineKind, PatchLineView, QueuePreview, TimelineItem, TuiState,
+};
 use crate::tool_display::format_tool_call_detail;
 use merry_core::{RuntimeEvent, ToolCallId, ToolCallResultStatus, ToolName, ToolOutput};
 use merry_tool_workspace::WORKSPACE_PATCH_TOOL;
@@ -206,11 +208,11 @@ fn parse_workspace_patch_view(output: &str, patch_argument: Option<&str>) -> Opt
                 .unwrap_or_default();
             let added = patch_lines
                 .iter()
-                .filter(|line| matches!(line, PatchLineView::Add(_)))
+                .filter(|line| line.kind == PatchLineKind::Add)
                 .count();
             let removed = patch_lines
                 .iter()
-                .filter(|line| matches!(line, PatchLineView::Remove(_)))
+                .filter(|line| line.kind == PatchLineKind::Remove)
                 .count();
             PatchChangeView {
                 path: change.path,
@@ -256,23 +258,31 @@ fn parse_workspace_patch_argument(patch: &str) -> ParsedPatchArgument {
     let mut parsed = ParsedPatchArgument::default();
     let mut current_path: Option<String> = None;
     let mut current_lines = Vec::new();
+    let mut line_numbers = PatchLineNumbers::default();
 
     for line in patch.lines() {
         if let Some(path) = line.strip_prefix("*** Update File: ").map(str::trim) {
             flush_patch_change(&mut parsed, &mut current_path, &mut current_lines);
             current_path = Some(path.to_owned());
+            line_numbers = PatchLineNumbers::default();
             continue;
         }
-        if line.starts_with("*** ") || line.starts_with("@@") {
+        if line.starts_with("*** ") {
+            continue;
+        }
+        if line.starts_with("@@") {
+            if let Some(parsed_numbers) = parse_unified_hunk_header(line) {
+                line_numbers = parsed_numbers;
+            }
             continue;
         }
         let Some((prefix, text)) = line.split_at_checked(1) else {
             continue;
         };
         match prefix {
-            " " => current_lines.push(PatchLineView::Context(text.to_owned())),
-            "+" => current_lines.push(PatchLineView::Add(text.to_owned())),
-            "-" => current_lines.push(PatchLineView::Remove(text.to_owned())),
+            " " => current_lines.push(line_numbers.context(text.to_owned())),
+            "+" => current_lines.push(line_numbers.add(text.to_owned())),
+            "-" => current_lines.push(line_numbers.remove(text.to_owned())),
             _ => {}
         }
     }
@@ -292,4 +302,68 @@ fn flush_patch_change(
     };
     let lines = std::mem::take(current_lines);
     parsed.changes.insert(path, lines);
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct PatchLineNumbers {
+    old_next: Option<usize>,
+    new_next: Option<usize>,
+}
+
+impl PatchLineNumbers {
+    fn context(&mut self, text: String) -> PatchLineView {
+        let old_line = self.old_next;
+        let new_line = self.new_next;
+        self.advance_old();
+        self.advance_new();
+        PatchLineView {
+            kind: PatchLineKind::Context,
+            old_line,
+            new_line,
+            text,
+        }
+    }
+
+    fn add(&mut self, text: String) -> PatchLineView {
+        let new_line = self.new_next;
+        self.advance_new();
+        PatchLineView::add(text, new_line)
+    }
+
+    fn remove(&mut self, text: String) -> PatchLineView {
+        let old_line = self.old_next;
+        self.advance_old();
+        PatchLineView::remove(text, old_line)
+    }
+
+    fn advance_old(&mut self) {
+        if let Some(line) = self.old_next.as_mut() {
+            *line += 1;
+        }
+    }
+
+    fn advance_new(&mut self) {
+        if let Some(line) = self.new_next.as_mut() {
+            *line += 1;
+        }
+    }
+}
+
+fn parse_unified_hunk_header(line: &str) -> Option<PatchLineNumbers> {
+    let mut parts = line.split_whitespace();
+    if parts.next()? != "@@" {
+        return None;
+    }
+    let old_next = parse_hunk_start(parts.next()?, '-')?;
+    let new_next = parse_hunk_start(parts.next()?, '+')?;
+    Some(PatchLineNumbers {
+        old_next: Some(old_next),
+        new_next: Some(new_next),
+    })
+}
+
+fn parse_hunk_start(value: &str, prefix: char) -> Option<usize> {
+    let value = value.strip_prefix(prefix)?;
+    let start = value.split_once(',').map_or(value, |(start, _)| start);
+    start.parse().ok()
 }
