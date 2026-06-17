@@ -535,6 +535,104 @@ fn projector_renders_assistant_text_as_primary_timeline_item() {
 }
 
 #[test]
+fn projector_updates_streaming_assistant_delta_until_final_message() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    let mut projector = TuiProjector::default();
+
+    projector.apply(
+        RuntimeEvent::AssistantMessageDelta {
+            delta: "hel".to_owned(),
+            source: source(),
+        },
+        &mut state,
+    );
+    projector.apply(
+        RuntimeEvent::AssistantMessageDelta {
+            delta: "lo".to_owned(),
+            source: source(),
+        },
+        &mut state,
+    );
+
+    assert_eq!(
+        state.timeline(),
+        [TimelineItem::Assistant {
+            text: "hello".to_owned()
+        }]
+    );
+
+    projector.apply(
+        RuntimeEvent::AssistantMessage {
+            text: "hello final".to_owned(),
+            artifact: text_artifact("assistant-final"),
+            source: source(),
+        },
+        &mut state,
+    );
+
+    assert_eq!(
+        state.timeline(),
+        [TimelineItem::Assistant {
+            text: "hello final".to_owned()
+        }]
+    );
+}
+
+#[test]
+fn projector_resets_streaming_assistant_after_terminal_error() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    let mut projector = TuiProjector::default();
+
+    projector.apply(
+        RuntimeEvent::AssistantMessageDelta {
+            delta: "partial".to_owned(),
+            source: source(),
+        },
+        &mut state,
+    );
+    projector.apply(
+        RuntimeEvent::RunFailed {
+            diagnostic: ErrorInfo::new("model_protocol", "stream failed").unwrap(),
+            source: source(),
+        },
+        &mut state,
+    );
+    projector.apply(
+        RuntimeEvent::AssistantMessageDelta {
+            delta: "fresh".to_owned(),
+            source: source(),
+        },
+        &mut state,
+    );
+
+    assert_eq!(
+        state.timeline(),
+        [
+            TimelineItem::Assistant {
+                text: "partial".to_owned()
+            },
+            TimelineItem::Diagnostic {
+                title: "model_protocol".to_owned(),
+                body: "stream failed".to_owned()
+            },
+            TimelineItem::Assistant {
+                text: "fresh".to_owned()
+            }
+        ]
+    );
+}
+
+#[test]
 fn projector_keeps_successful_non_patch_tool_compact_and_expands_patch_tool() {
     let mut state = TuiState::new(
         "/repo".into(),
@@ -1324,20 +1422,25 @@ fn renderer_shows_user_input_in_timeline() {
 }
 
 #[test]
-fn renderer_shows_empty_queue_lanes() {
-    let state = TuiState::new(
+fn renderer_hides_empty_queue_panel_to_preserve_timeline_space() {
+    let mut state = TuiState::new(
         "/repo".into(),
         "gpt-test".to_owned(),
         Keymap::default(),
         TuiTheme::default(),
     );
+    state.push_timeline_item(TimelineItem::User {
+        text: "latest local echo".to_owned(),
+        lane: QueuedInputLane::Next,
+    });
 
     let text = render_to_text(&state, 80, 16);
 
-    assert!(text.contains("Next"));
-    assert!(text.contains("Suspended"));
-    assert!(text.contains("Backlog"));
-    assert!(text.contains("--"));
+    assert!(text.contains("latest local echo"));
+    assert!(!text.contains("queue"));
+    assert!(!text.contains("Next"));
+    assert!(!text.contains("Suspended"));
+    assert!(!text.contains("Backlog"));
 }
 
 #[test]
@@ -1668,19 +1771,28 @@ fn renderer_ellipsizes_queue_items_to_region_width() {
 
 #[test]
 fn renderer_keeps_input_region_stable_when_queue_count_changes() {
-    let empty_state = TuiState::new(
+    let mut one_item_state = TuiState::new(
         "/repo".into(),
         "gpt-test".to_owned(),
         Keymap::default(),
         TuiTheme::default(),
     );
-    let mut queued_state = TuiState::new(
+    one_item_state.update_queue_preview(QueuePreview {
+        next: vec![QueuedInputView {
+            text: "next item".to_owned(),
+            lane: QueuedInputLane::Next,
+            position: 0,
+        }],
+        suspended: vec![],
+        backlog: vec![],
+    });
+    let mut three_lane_state = TuiState::new(
         "/repo".into(),
         "gpt-test".to_owned(),
         Keymap::default(),
         TuiTheme::default(),
     );
-    queued_state.update_queue_preview(QueuePreview {
+    three_lane_state.update_queue_preview(QueuePreview {
         next: vec![QueuedInputView {
             text: "next item".to_owned(),
             lane: QueuedInputLane::Next,
@@ -1698,18 +1810,18 @@ fn renderer_keeps_input_region_stable_when_queue_count_changes() {
         }],
     });
 
-    let empty_text = render_to_text(&empty_state, 80, 18);
-    let queued_text = render_to_text(&queued_state, 80, 18);
-    let empty_input_row = empty_text
+    let one_item_text = render_to_text(&one_item_state, 80, 18);
+    let three_lane_text = render_to_text(&three_lane_state, 80, 18);
+    let one_item_input_row = one_item_text
         .lines()
         .position(|line| line.contains("input"))
-        .expect("empty queue render should show input");
-    let queued_input_row = queued_text
+        .expect("one item queue render should show input");
+    let three_lane_input_row = three_lane_text
         .lines()
         .position(|line| line.contains("input"))
-        .expect("populated queue render should show input");
+        .expect("three lane queue render should show input");
 
-    assert_eq!(empty_input_row, queued_input_row);
+    assert_eq!(one_item_input_row, three_lane_input_row);
 }
 
 fn find_cell_color(buffer: &ratatui::buffer::Buffer, text: &str) -> Option<Color> {

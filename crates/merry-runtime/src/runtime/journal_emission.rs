@@ -84,6 +84,32 @@ pub(super) async fn send_assistant_text_output_recorded_event(
     true
 }
 
+pub(super) async fn send_assistant_text_output_delta_event(
+    inner: &RuntimeInner,
+    sender: &mpsc::Sender<RuntimeJournalEvent>,
+    token: &CancellationToken,
+    delta: String,
+) -> bool {
+    if token.is_cancelled() {
+        return false;
+    }
+
+    let Some(permit) = reserve_normal_event_slot(sender, token).await else {
+        return false;
+    };
+
+    let event = {
+        let mut session = inner.session.lock().await;
+        if token.is_cancelled() {
+            return false;
+        }
+        session.record_transient_event(RuntimeJournalPayload::AssistantOutputDelta { delta })
+    };
+
+    permit.send(event);
+    true
+}
+
 pub(super) async fn send_tool_call_pending_event(
     inner: &RuntimeInner,
     sender: &mpsc::Sender<RuntimeJournalEvent>,

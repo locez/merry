@@ -37,6 +37,14 @@ pub enum RuntimeEvent {
         artifact: ArtifactRef,
         source: RuntimeEventSource,
     },
+    /// Incremental assistant text from the active model stream.
+    ///
+    /// Consumers should treat this as progress and use the following
+    /// [`RuntimeEvent::AssistantMessage`] as the durable completion event.
+    AssistantMessageDelta {
+        delta: String,
+        source: RuntimeEventSource,
+    },
     /// The model requested a tool call.
     ToolCallStarted {
         call: PendingToolCall,

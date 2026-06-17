@@ -151,6 +151,7 @@
                 RuntimeJournalPayload::Cancelled { .. } => "Cancelled",
                 RuntimeJournalPayload::Failed { .. } => "Failed",
                 RuntimeJournalPayload::ArtifactRecorded { .. } => "ArtifactRecorded",
+                RuntimeJournalPayload::AssistantOutputDelta { .. } => "AssistantOutputDelta",
                 RuntimeJournalPayload::AssistantOutputRecorded { .. } => "AssistantOutputRecorded",
                 RuntimeJournalPayload::EvidenceReferenced { .. } => "EvidenceReferenced",
                 RuntimeJournalPayload::ToolCallPending { .. } => "ToolCallPending",

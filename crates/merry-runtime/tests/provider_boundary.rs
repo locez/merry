@@ -595,6 +595,7 @@ fn event_kind_names(events: &[RuntimeJournalEvent]) -> Vec<&'static str> {
             RuntimeJournalPayload::Cancelled { .. } => "Cancelled",
             RuntimeJournalPayload::Failed { .. } => "Failed",
             RuntimeJournalPayload::ArtifactRecorded { .. } => "ArtifactRecorded",
+            RuntimeJournalPayload::AssistantOutputDelta { .. } => "AssistantOutputDelta",
             RuntimeJournalPayload::AssistantOutputRecorded { .. } => "AssistantOutputRecorded",
             RuntimeJournalPayload::EvidenceReferenced { .. } => "EvidenceReferenced",
             RuntimeJournalPayload::ToolCallPending { .. } => "ToolCallPending",
@@ -1036,6 +1037,7 @@ async fn runtime_step_with_provider_compiles_user_text_request_and_records_assis
         [
             "SessionStarted",
             "StepStarted",
+            "AssistantOutputDelta",
             "AssistantOutputRecorded",
             "StepCompleted"
         ]
@@ -1045,10 +1047,10 @@ async fn runtime_step_with_provider_compiles_user_text_request_and_records_assis
             .iter()
             .map(|event| event.sequence)
             .collect::<Vec<_>>(),
-        vec![0, 1, 2, 3]
+        vec![0, 1, 2, 3, 4]
     );
     let artifact = assistant_output_artifact(&events);
-    assert_eq!(artifact.id().as_str(), "assistant-output-2");
+    assert_eq!(artifact.id().as_str(), "assistant-output-3");
     assert_eq!(artifact.kind(), &ArtifactKind::Text);
     let evidence = runtime
         .evidence_ref(artifact.id(), EvidenceLocator::whole_artifact())
@@ -1071,12 +1073,12 @@ async fn runtime_step_with_provider_compiles_user_text_request_and_records_assis
                 kind: LedgerFactKind::StepStarted,
             },
             LedgerProjection::Lifecycle {
-                sequence: 2,
+                sequence: 3,
                 order: 2,
                 kind: LedgerFactKind::ArtifactRecorded,
             },
             LedgerProjection::Lifecycle {
-                sequence: 3,
+                sequence: 4,
                 order: 3,
                 kind: LedgerFactKind::StepCompleted,
             },
@@ -4814,6 +4816,7 @@ async fn provider_tool_call_after_non_empty_text_delta_records_commentary_and_pe
         [
             "SessionStarted",
             "StepStarted",
+            "AssistantOutputDelta",
             "AssistantOutputRecorded",
             "ToolCallPending"
         ]

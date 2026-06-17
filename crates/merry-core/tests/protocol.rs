@@ -682,6 +682,28 @@ fn public_runtime_event_assistant_message_uses_top_level_type() {
 }
 
 #[test]
+fn public_runtime_event_assistant_message_delta_uses_top_level_type() {
+    let source = RuntimeEventSource::new(SessionId::new("session-1").expect("valid session id"), 5);
+    let event = RuntimeEvent::AssistantMessageDelta {
+        delta: "hel".to_owned(),
+        source,
+    };
+
+    assert_eq!(
+        serde_json::to_value(&event).expect("event serializes"),
+        json!({
+            "type": "assistant_message_delta",
+            "delta": "hel",
+            "source": {
+                "session_id": "session-1",
+                "sequence": 5
+            }
+        })
+    );
+    assert_json_round_trip(&event);
+}
+
+#[test]
 fn usage_protocol_round_trips_and_preserves_unknown_subcounts() {
     let last = ModelUsage::with_details(2400, Some(2200), 260, None, 2660);
     let total = ModelUsage::with_details(12000, Some(8000), 1400, None, 13400);

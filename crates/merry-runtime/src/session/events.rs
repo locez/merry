@@ -29,6 +29,15 @@ impl SessionState {
         self.record_event(payload, LedgerFactKind::ModelRetry)
     }
 
+    pub(crate) fn record_transient_event(
+        &mut self,
+        payload: RuntimeJournalPayload,
+    ) -> RuntimeJournalEvent {
+        let sequence = self.next_sequence;
+        self.next_sequence += 1;
+        RuntimeJournalEvent::new(self.session_id.clone(), sequence, payload)
+    }
+
     pub(crate) fn record_step_completed(&mut self) -> RuntimeJournalEvent {
         self.record_event(
             RuntimeJournalPayload::StepCompleted,

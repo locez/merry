@@ -91,6 +91,7 @@ async fn model_retry_events_are_emitted_and_failed_attempt_output_is_not_recorde
             "ModelRetryAttemptStarted",
             "ModelRetryScheduled",
             "ModelRetryAttemptStarted",
+            "AssistantOutputDelta",
             "AssistantOutputRecorded",
             "StepCompleted",
         ]

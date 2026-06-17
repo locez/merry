@@ -101,7 +101,7 @@ mod tests {
     use std::sync::Arc;
 
     #[tokio::test]
-    async fn writes_runtime_lifecycle_jsonl_without_model_events() {
+    async fn writes_runtime_jsonl_deltas_without_model_event_names() {
         let runtime = Runtime::builder(merry_core::SessionId::new("runtime-events-test").unwrap())
             .model_provider(
                 Arc::new(CompletingProvider::new()),
@@ -118,7 +118,7 @@ mod tests {
 
         let text = String::from_utf8(output).expect("output should be utf-8");
         let lines = text.lines().collect::<Vec<_>>();
-        assert_eq!(lines.len(), 4);
+        assert_eq!(lines.len(), 5);
         let event_types = lines
             .iter()
             .map(|line| {
@@ -132,11 +132,13 @@ mod tests {
             [
                 "session_started",
                 "step_started",
+                "assistant_output_delta",
                 "assistant_output_recorded",
                 "step_completed"
             ]
         );
-        assert!(!text.contains("hidden"));
+        assert!(text.contains("\"delta\":\"hidden\""));
+        assert!(!text.contains("output_text_delta"));
     }
 
     #[tokio::test]

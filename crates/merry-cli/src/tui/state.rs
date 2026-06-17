@@ -68,6 +68,10 @@ impl QueuePreviewState {
             backlog: convert(preview.backlog),
         }
     }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.next.is_empty() && self.suspended.is_empty() && self.backlog.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -233,6 +237,23 @@ impl TuiState {
         self.timeline_review_user_index = None;
     }
 
+    pub(crate) fn append_assistant_delta(&mut self, index: Option<usize>, delta: &str) -> usize {
+        let index = if let Some(index) = index
+            && let Some(TimelineItem::Assistant { text }) = self.timeline.get_mut(index)
+        {
+            text.push_str(delta);
+            index
+        } else {
+            self.timeline.push(TimelineItem::Assistant {
+                text: delta.to_owned(),
+            });
+            self.timeline.len().saturating_sub(1)
+        };
+        self.timeline_scroll_offset = 0;
+        self.timeline_review_user_index = None;
+        index
+    }
+
     pub(crate) fn push_user_timeline_item(&mut self, text: String, lane: QueuedInputLane) {
         self.push_timeline_item(TimelineItem::User { text, lane });
     }
@@ -315,6 +336,10 @@ impl TuiState {
 
     pub(crate) fn queue_preview(&self) -> &QueuePreviewState {
         &self.queue_preview
+    }
+
+    pub(crate) fn has_queue_preview_items(&self) -> bool {
+        !self.queue_preview.is_empty()
     }
 
     pub(crate) fn update_queue_preview(&mut self, preview: QueuePreview) {
