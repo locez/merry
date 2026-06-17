@@ -179,7 +179,7 @@ async fn workspace_coding_loop_profile_seeds_project_capability_context() {
     assert!(base_instructions.contains("You are Merry, a pragmatic coding agent."));
     assert!(base_instructions.contains("Respect project instructions such as AGENTS.md"));
     let progress_commentary = request.messages()[1].content().as_text();
-    assert!(progress_commentary.contains("brief progress note first"));
+    assert!(progress_commentary.contains("Do not add a progress note before routine"));
     assert!(progress_commentary.contains("user's current input language"));
     let project_context = request.messages()[2].content().as_text();
     assert!(project_context.contains("summary:project-capabilities"));

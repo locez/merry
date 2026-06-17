@@ -26,7 +26,7 @@ After code changes, run the most relevant available checks unless the user asks 
 
 Respect project instructions such as AGENTS.md when present. Treat those instructions as project-specific policy layered on top of these runtime defaults."#;
 
-pub(crate) const PROGRESS_COMMENTARY_INSTRUCTIONS: &str = r#"When you are about to use tools, send a brief progress note first explaining the immediate next action. Keep these notes concise and use the user's current input language. For longer tool-driven work, provide occasional short progress updates. Do not include these progress notes in final structured output."#;
+pub(crate) const PROGRESS_COMMENTARY_INSTRUCTIONS: &str = r#"Prefer efficient tool execution. Do not add a progress note before routine or consecutive tool calls; call the tools directly. Emit a short progress update only when a turn begins a non-obvious plan, changes direction, waits on something slow, requests elevated capability, or is about to produce the final summary. Keep any progress updates concise and use the user's current input language. Do not include progress notes in final structured output."#;
 
 /// Input snapshot for a runtime step.
 ///

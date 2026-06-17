@@ -113,6 +113,7 @@ pub(crate) async fn run_controller(
                     TerminalEvent::Key(key) => {
                         let effect = handle_key_event(key, &mut state);
                         project_local_effect(&effect, &mut state);
+                        render_once(&mut terminal, &state)?;
                         let should_quit = dispatch_effect(
                             effect,
                             &mut session,
@@ -124,12 +125,15 @@ pub(crate) async fn run_controller(
                     }
                     TerminalEvent::MouseScrollUp => {
                         state.scroll_timeline_up_by(TIMELINE_SCROLL_STEP);
+                        render_once(&mut terminal, &state)?;
                     }
                     TerminalEvent::MouseScrollDown => {
                         state.scroll_timeline_down_by(TIMELINE_SCROLL_STEP);
+                        render_once(&mut terminal, &state)?;
                     }
                     TerminalEvent::Paste(text) => {
                         state.input_mut().insert_str(&text);
+                        render_once(&mut terminal, &state)?;
                     }
                     TerminalEvent::Resize => {
                         render_once(&mut terminal, &state)?;
@@ -141,6 +145,7 @@ pub(crate) async fn run_controller(
                     break;
                 };
                 projector.apply(event, &mut state);
+                render_once(&mut terminal, &state)?;
             }
         }
     }
