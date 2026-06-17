@@ -84,7 +84,8 @@ mod tests {
     use crate::runtime_events::collect_runtime_step_events;
     use crate::testing::ScriptedProvider;
     use merry_llm::{
-        FinishReason, ModelCapabilities, ModelEvent, ModelName, ModelOutput, ModelResponse,
+        FinishReason, GenerationConfig, ModelCapabilities, ModelEvent, ModelName, ModelOutput,
+        ModelResponse,
     };
     use merry_runtime::{RuntimeModelRole, StepContext, StepInput};
     use std::{path::PathBuf, sync::Arc};
@@ -138,7 +139,7 @@ retained_raw_tail_items = 4
             })],
         ])
         .with_capabilities(
-            ModelCapabilities::new(true, true, false, true, Some(420), Some(16))
+            ModelCapabilities::new(true, true, false, true, Some(4_000), Some(16))
                 .expect("valid capabilities"),
         );
         let compactor = ScriptedProvider::new(vec![vec![Ok(ModelEvent::Completed {
@@ -176,33 +177,36 @@ retained_raw_tail_items = 4
         )
         .build()
         .expect("runtime should build");
+        let context = StepContext::default().with_generation_config(
+            GenerationConfig::new(Some(16), false).expect("valid generation config"),
+        );
 
         collect_runtime_step_events(
             &runtime,
-            StepInput::user_text(&"old user from configured builder ".repeat(70))
+            StepInput::user_text(&"old user from configured builder ".repeat(220))
                 .expect("valid input"),
-            StepContext::default(),
+            context.clone(),
         )
         .await
         .expect("old step should run");
         collect_runtime_step_events(
             &runtime,
             StepInput::user_text("tail one user from configured builder").expect("valid input"),
-            StepContext::default(),
+            context.clone(),
         )
         .await
         .expect("tail one step should run");
         collect_runtime_step_events(
             &runtime,
             StepInput::user_text("tail two user from configured builder").expect("valid input"),
-            StepContext::default(),
+            context.clone(),
         )
         .await
         .expect("tail two step should run");
         collect_runtime_step_events(
             &runtime,
             StepInput::user_text("current user from configured builder").expect("valid input"),
-            StepContext::default(),
+            context,
         )
         .await
         .expect("current step should run");

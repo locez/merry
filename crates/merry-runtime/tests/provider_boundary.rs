@@ -1098,6 +1098,12 @@ async fn runtime_step_with_provider_compiles_user_text_request_and_records_assis
             .as_text()
             .contains("You are Merry, a pragmatic coding agent.")
     );
+    let base_instructions = request.messages()[0].content().as_text();
+    assert!(base_instructions.contains("Before reading source code files"));
+    assert!(base_instructions.contains("Avoid whole-file source reads by default"));
+    assert!(base_instructions.contains("roughly 120 lines or fewer"));
+    assert!(base_instructions.contains("over roughly 250 lines"));
+    assert!(base_instructions.contains("where something is defined or handled"));
     assert!(
         !request.messages()[0]
             .content()

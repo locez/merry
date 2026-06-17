@@ -2029,7 +2029,7 @@ async fn provider_step_auto_compacts_before_hard_watermark_request() {
         vec![Ok(completed_text_event("final after automatic compaction"))],
     ])
     .with_capabilities(
-        ModelCapabilities::new(true, true, false, true, Some(400), Some(16))
+        ModelCapabilities::new(true, true, false, true, Some(4_000), Some(16))
             .expect("valid capabilities"),
     );
     let compactor = ScriptedModelProvider::new(vec![vec![Ok(completed_text_event(
@@ -2055,7 +2055,7 @@ async fn provider_step_auto_compacts_before_hard_watermark_request() {
         .build()
         .expect("runtime should build");
 
-    let first = run_default_loop(&runtime, &"old user sentinel ".repeat(70)).await;
+    let first = run_default_loop(&runtime, &"old user sentinel ".repeat(450)).await;
     assert_eq!(first.status(), &AgentLoopStatus::Completed);
     let second = run_default_loop(&runtime, "tail user sentinel").await;
     assert_eq!(second.status(), &AgentLoopStatus::Completed);
@@ -2113,7 +2113,7 @@ async fn auto_compaction_config_controls_retained_raw_tail() {
         ))],
     ])
     .with_capabilities(
-        ModelCapabilities::new(true, true, false, true, Some(420), Some(16))
+        ModelCapabilities::new(true, true, false, true, Some(4_000), Some(16))
             .expect("valid capabilities"),
     );
     let compactor = ScriptedModelProvider::new(vec![vec![Ok(completed_text_event(
@@ -2141,7 +2141,7 @@ async fn auto_compaction_config_controls_retained_raw_tail() {
         .build()
         .expect("runtime should build");
 
-    let first = run_default_loop(&runtime, &"old configurable tail user ".repeat(70)).await;
+    let first = run_default_loop(&runtime, &"old configurable tail user ".repeat(450)).await;
     assert_eq!(first.status(), &AgentLoopStatus::Completed);
     let second = run_default_loop(&runtime, "tail one user").await;
     assert_eq!(second.status(), &AgentLoopStatus::Completed);
