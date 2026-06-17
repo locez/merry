@@ -30,8 +30,8 @@ use super::{
     apply::execute_workspace_patch_plan,
     parse::parse_workspace_patch,
     types::{
-        WorkspacePatchFile, WorkspacePatchHunk, WorkspacePatchOperation, build_patch_replacement,
-        stable_content_fingerprint,
+        WorkspacePatchFile, WorkspacePatchHunk, WorkspacePatchOperation, WorkspacePatchSuccessLine,
+        build_patch_replacement, stable_content_fingerprint,
     },
 };
 
@@ -234,6 +234,7 @@ pub(super) struct WorkspacePatchFilePlan {
     pub(super) bytes_before: usize,
     pub(super) bytes_after: usize,
     pub(super) hunks: usize,
+    pub(super) lines: Vec<WorkspacePatchSuccessLine>,
     pub(super) max_read_bytes: usize,
 }
 
@@ -385,9 +386,8 @@ fn plan_resolved_workspace_patch_file(
         return Err(BlockingToolError::Cancelled);
     }
 
-    let (replacement, preimage_bytes, replacement_bytes) =
-        build_patch_replacement(&content, &hunks)?;
-    if replacement.len() > state.limits.max_write_bytes {
+    let replacement = build_patch_replacement(&content, &hunks)?;
+    if replacement.text.len() > state.limits.max_write_bytes {
         return Err(DomainError::new(
             ERROR_FILE_TOO_LARGE,
             "workspace patch result exceeds the configured write limit",
@@ -399,12 +399,13 @@ fn plan_resolved_workspace_patch_file(
         relative,
         path,
         bytes_before: content.len(),
-        bytes_after: replacement.len(),
-        preimage_bytes,
-        replacement_bytes,
+        bytes_after: replacement.text.len(),
+        preimage_bytes: replacement.preimage_bytes,
+        replacement_bytes: replacement.replacement_bytes,
         hunks: hunks.len(),
+        lines: replacement.lines,
         content_before: content,
-        replacement,
+        replacement: replacement.text,
         max_read_bytes: state.limits.max_read_bytes,
     })
 }

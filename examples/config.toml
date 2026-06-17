@@ -72,16 +72,16 @@ max_depth = 1
 [tui.theme]
 # Semantic color names keep component styling configurable without changing
 # rendering code.
-status = "cyan"
+status = "light_magenta"
 muted = "dark_gray"
-focus = "yellow"
-selection = "blue"
-diff_add = "green"
-diff_delete = "red"
-warning = "yellow"
-error = "red"
+focus = "light_magenta"
+selection = "magenta"
+diff_add = "light_green"
+diff_delete = "light_red"
+warning = "light_yellow"
+error = "light_red"
 risk = "magenta"
-success = "green"
+success = "light_green"
 
 [tui.keymap]
 submit_next = "enter"
