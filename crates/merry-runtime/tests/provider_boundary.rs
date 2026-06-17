@@ -1100,7 +1100,7 @@ async fn runtime_step_with_provider_compiles_user_text_request_and_records_assis
         !request.messages()[0]
             .content()
             .as_text()
-            .contains("brief progress note first"),
+            .contains("Do not add a progress note before routine"),
         "plain runtime requests must not induce tool-progress commentary by default"
     );
     assert_eq!(request.messages()[1].role(), ModelMessageRole::User);
@@ -4745,7 +4745,7 @@ async fn runtime_profile_progress_commentary_adds_stable_prefix_guidance() {
         request.messages()[1]
             .content()
             .as_text()
-            .contains("brief progress note first")
+            .contains("Do not add a progress note before routine")
     );
     assert!(
         request.messages()[1]
