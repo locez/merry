@@ -297,6 +297,38 @@ fn controller_review_previous_user_input_steps_between_user_turns() {
 }
 
 #[test]
+fn controller_submit_exits_review_mode_before_submitting_input() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.push_timeline_item(TimelineItem::User {
+        text: "first".to_owned(),
+        lane: QueuedInputLane::Next,
+    });
+    state.push_timeline_item(TimelineItem::Assistant {
+        text: "answer".to_owned(),
+    });
+    state.input_mut().insert_str("draft");
+    state.jump_to_previous_user_input();
+
+    assert_eq!(
+        handle_key_action(KeyAction::SubmitNext, &mut state),
+        ControllerEffect::None
+    );
+    assert_eq!(state.timeline_review_user_index(), None);
+    assert_eq!(state.timeline_scroll_offset(), 0);
+    assert_eq!(state.input_text(), "draft");
+
+    assert_eq!(
+        handle_key_action(KeyAction::SubmitNext, &mut state),
+        ControllerEffect::SubmitNext("draft".to_owned())
+    );
+}
+
+#[test]
 fn controller_suspended_actions_emit_runtime_effects() {
     let mut state = TuiState::new(
         "/repo".into(),
@@ -1366,6 +1398,10 @@ fn renderer_review_user_input_starts_viewport_at_selected_user_turn() {
     let first = render_to_text(&state, 80, 18);
     assert!(first.contains("user: first request"));
     assert!(first.contains("first answer"));
+
+    state.exit_timeline_review();
+    let bottom = render_to_text(&state, 80, 18);
+    assert!(bottom.contains("second answer"));
 }
 
 #[test]
