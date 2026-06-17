@@ -1485,6 +1485,25 @@ fn renderer_highlights_inline_code_spans() {
 }
 
 #[test]
+fn renderer_preserves_assistant_message_newlines() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.push_timeline_item(TimelineItem::Assistant {
+        text: "Done:\n- changed `hello_world.py`\n- verified output".to_owned(),
+    });
+
+    let text = render_to_text(&state, 80, 18);
+    assert!(text.contains("Done:"));
+    assert!(text.contains("- changed  hello_world.py"));
+    assert!(text.contains("- verified output"));
+    assert!(!text.contains("Done:- changed"));
+}
+
+#[test]
 fn renderer_draws_assistant_separator_across_timeline_width() {
     let mut state = TuiState::new(
         "/repo".into(),
