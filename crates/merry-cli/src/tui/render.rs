@@ -6,7 +6,7 @@ use merry_core::QueuedInputLane;
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Position, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph, Wrap},
 };
@@ -141,12 +141,23 @@ fn timeline_lines(state: &TuiState, region_height: u16) -> Vec<Line<'static>> {
         .iter()
         .flat_map(|item| match item {
             TimelineItem::User { text, lane } => user_lines(state, text, *lane),
-            TimelineItem::Assistant { text } => vec![Line::from(text.clone())],
-            TimelineItem::Muted { title, detail } => vec![Line::from(vec![
-                Span::styled(title.clone(), semantic_style(state, SemanticColor::Muted)),
-                Span::styled(": ", semantic_style(state, SemanticColor::Muted)),
-                Span::styled(detail.clone(), semantic_style(state, SemanticColor::Muted)),
-            ])],
+            TimelineItem::Assistant { text } => vec![inline_code_line(
+                state,
+                text,
+                semantic_style(state, SemanticColor::Focus),
+            )],
+            TimelineItem::Muted { title, detail } => {
+                let mut spans = vec![
+                    Span::styled(title.clone(), semantic_style(state, SemanticColor::Muted)),
+                    Span::styled(": ", semantic_style(state, SemanticColor::Muted)),
+                ];
+                spans.extend(inline_code_spans(
+                    state,
+                    detail,
+                    semantic_style(state, SemanticColor::Muted),
+                ));
+                vec![Line::from(spans)]
+            }
             TimelineItem::Expanded { title, body } | TimelineItem::Diagnostic { title, body } => {
                 let title_slot = match item {
                     TimelineItem::Diagnostic { .. } => SemanticColor::Error,
@@ -157,10 +168,7 @@ fn timeline_lines(state: &TuiState, region_height: u16) -> Vec<Line<'static>> {
                     semantic_style(state, title_slot),
                 ))];
                 lines.extend(body.lines().map(|line| {
-                    Line::from(Span::styled(
-                        line.to_owned(),
-                        timeline_body_style(state, item, line),
-                    ))
+                    inline_code_line(state, line, timeline_body_style(state, item, line))
                 }));
                 lines
             }
@@ -183,14 +191,19 @@ fn user_lines(state: &TuiState, text: &str, lane: QueuedInputLane) -> Vec<Line<'
         QueuedInputLane::Suspended => "user suspended",
         QueuedInputLane::Backlog => "user backlog",
     };
-    vec![Line::from(vec![
+    let mut spans = vec![
         Span::styled(
             label.to_owned(),
             semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD),
         ),
         Span::styled(": ", semantic_style(state, SemanticColor::Muted)),
-        Span::styled(text.to_owned(), semantic_style(state, SemanticColor::Focus)),
-    ])]
+    ];
+    spans.extend(inline_code_spans(
+        state,
+        text,
+        semantic_style(state, SemanticColor::Focus),
+    ));
+    vec![Line::from(spans)]
 }
 
 fn patch_lines(state: &TuiState, changes: &[PatchChangeView]) -> Vec<Line<'static>> {
@@ -217,23 +230,75 @@ fn patch_lines(state: &TuiState, changes: &[PatchChangeView]) -> Vec<Line<'stati
             semantic_style(state, SemanticColor::Muted),
         )));
         for line in &change.lines {
-            lines.push(match line {
-                PatchLineView::Context(text) => Line::from(Span::styled(
-                    format!(" {text}"),
-                    semantic_style(state, SemanticColor::Focus),
-                )),
-                PatchLineView::Remove(text) => Line::from(Span::styled(
-                    format!("-{text}"),
-                    semantic_style(state, SemanticColor::DiffDelete),
-                )),
-                PatchLineView::Add(text) => Line::from(Span::styled(
-                    format!("+{text}"),
-                    semantic_style(state, SemanticColor::DiffAdd),
-                )),
-            });
+            lines.push(patch_line(state, line));
         }
     }
     lines
+}
+
+fn patch_line(state: &TuiState, line: &PatchLineView) -> Line<'static> {
+    let (marker, style) = match line.kind {
+        super::state::PatchLineKind::Context => (
+            " ",
+            semantic_style(state, SemanticColor::Focus).bg(Color::Reset),
+        ),
+        super::state::PatchLineKind::Add => ("+", diff_line_style(state, SemanticColor::DiffAdd)),
+        super::state::PatchLineKind::Remove => {
+            ("-", diff_line_style(state, SemanticColor::DiffDelete))
+        }
+    };
+
+    Line::from(vec![
+        Span::styled(format_line_number(line.old_line), patch_gutter_style(state)),
+        Span::styled(" ", patch_gutter_style(state)),
+        Span::styled(format_line_number(line.new_line), patch_gutter_style(state)),
+        Span::styled(" ", patch_gutter_style(state)),
+        Span::styled(marker.to_owned(), style),
+        Span::styled(line.text.clone(), style),
+    ])
+}
+
+fn format_line_number(line: Option<usize>) -> String {
+    line.map_or_else(|| "    ".to_owned(), |line| format!("{line:>4}"))
+}
+
+fn patch_gutter_style(state: &TuiState) -> Style {
+    semantic_style(state, SemanticColor::Muted)
+}
+
+fn diff_line_style(state: &TuiState, slot: SemanticColor) -> Style {
+    let foreground = state.theme().color(slot);
+    let background = state.theme().color(slot).map(dim_color);
+    match (foreground, background) {
+        (Some(foreground), Some(background)) => Style::default().fg(foreground).bg(background),
+        (Some(foreground), None) => Style::default().fg(foreground),
+        (None, Some(background)) => Style::default().bg(background),
+        (None, None) => Style::default(),
+    }
+}
+
+fn dim_color(color: Color) -> Color {
+    match color {
+        Color::Black => Color::Black,
+        Color::Red => Color::Rgb(45, 16, 24),
+        Color::Green => Color::Rgb(18, 42, 28),
+        Color::Yellow => Color::Rgb(48, 40, 18),
+        Color::Blue => Color::Rgb(18, 30, 48),
+        Color::Magenta => Color::Rgb(42, 20, 44),
+        Color::Cyan => Color::Rgb(16, 42, 45),
+        Color::LightRed => Color::Rgb(58, 20, 28),
+        Color::LightGreen => Color::Rgb(22, 54, 34),
+        Color::LightYellow => Color::Rgb(62, 52, 22),
+        Color::LightBlue => Color::Rgb(22, 38, 62),
+        Color::LightMagenta => Color::Rgb(54, 26, 58),
+        Color::LightCyan => Color::Rgb(20, 54, 58),
+        Color::Gray => Color::DarkGray,
+        Color::DarkGray => Color::Black,
+        Color::White => Color::DarkGray,
+        Color::Rgb(red, green, blue) => Color::Rgb(red / 4, green / 4, blue / 4),
+        Color::Indexed(index) => Color::Indexed(index),
+        Color::Reset => Color::Reset,
+    }
 }
 
 fn queue_lines(state: &TuiState, region: Rect) -> Vec<Line<'static>> {
@@ -283,6 +348,51 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
         return text.to_owned();
     }
     text.chars().take(max_chars - 3).collect::<String>() + "..."
+}
+
+fn inline_code_line(state: &TuiState, text: &str, base_style: Style) -> Line<'static> {
+    Line::from(inline_code_spans(state, text, base_style))
+}
+
+fn inline_code_spans(state: &TuiState, text: &str, base_style: Style) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut remainder = text;
+    loop {
+        let Some(start) = remainder.find('`') else {
+            if !remainder.is_empty() {
+                spans.push(Span::styled(remainder.to_owned(), base_style));
+            }
+            return spans;
+        };
+        let before = &remainder[..start];
+        if !before.is_empty() {
+            spans.push(Span::styled(before.to_owned(), base_style));
+        }
+        let after_start = &remainder[start + 1..];
+        let Some(end) = after_start.find('`') else {
+            spans.push(Span::styled(remainder[start..].to_owned(), base_style));
+            return spans;
+        };
+        let code = &after_start[..end];
+        spans.push(Span::styled(
+            format!(" {code} "),
+            inline_code_style(state, base_style),
+        ));
+        remainder = &after_start[end + 1..];
+    }
+}
+
+fn inline_code_style(state: &TuiState, base_style: Style) -> Style {
+    let foreground = state.theme().color(SemanticColor::Focus);
+    let background = state.theme().color(SemanticColor::Selection).map(dim_color);
+    let mut style = base_style.add_modifier(Modifier::BOLD);
+    if let Some(foreground) = foreground {
+        style = style.fg(foreground);
+    }
+    if let Some(background) = background {
+        style = style.bg(background);
+    }
+    style
 }
 
 fn timeline_body_style(state: &TuiState, item: &TimelineItem, line: &str) -> Style {

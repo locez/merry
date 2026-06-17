@@ -70,12 +70,51 @@ impl QueuePreviewState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum PatchLineKind {
+    Context,
+    Add,
+    Remove,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
-pub(crate) enum PatchLineView {
-    Context(String),
-    Add(String),
-    Remove(String),
+pub(crate) struct PatchLineView {
+    pub(crate) kind: PatchLineKind,
+    pub(crate) old_line: Option<usize>,
+    pub(crate) new_line: Option<usize>,
+    pub(crate) text: String,
+}
+
+#[allow(dead_code)]
+impl PatchLineView {
+    pub(crate) fn context(text: impl Into<String>, line: Option<usize>) -> Self {
+        Self {
+            kind: PatchLineKind::Context,
+            old_line: line,
+            new_line: line,
+            text: text.into(),
+        }
+    }
+
+    pub(crate) fn add(text: impl Into<String>, new_line: Option<usize>) -> Self {
+        Self {
+            kind: PatchLineKind::Add,
+            old_line: None,
+            new_line,
+            text: text.into(),
+        }
+    }
+
+    pub(crate) fn remove(text: impl Into<String>, old_line: Option<usize>) -> Self {
+        Self {
+            kind: PatchLineKind::Remove,
+            old_line,
+            new_line: None,
+            text: text.into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
