@@ -2,6 +2,7 @@ use super::{
     state::{PatchChangeView, PatchLineView, TimelineItem, TuiState},
     theme::SemanticColor,
 };
+use merry_core::QueuedInputLane;
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
@@ -97,6 +98,7 @@ fn timeline_lines(state: &TuiState, region_height: u16) -> Vec<Line<'static>> {
         .timeline()
         .iter()
         .flat_map(|item| match item {
+            TimelineItem::User { text, lane } => user_lines(state, text, *lane),
             TimelineItem::Assistant { text } => vec![Line::from(text.clone())],
             TimelineItem::Muted { title, detail } => vec![Line::from(vec![
                 Span::styled(title.clone(), semantic_style(state, SemanticColor::Muted)),
@@ -131,6 +133,22 @@ fn timeline_lines(state: &TuiState, region_height: u16) -> Vec<Line<'static>> {
         .min(lines.len());
     let start = end.saturating_sub(visible_height);
     lines.into_iter().skip(start).take(end - start).collect()
+}
+
+fn user_lines(state: &TuiState, text: &str, lane: QueuedInputLane) -> Vec<Line<'static>> {
+    let label = match lane {
+        QueuedInputLane::Next => "user",
+        QueuedInputLane::Suspended => "user suspended",
+        QueuedInputLane::Backlog => "user backlog",
+    };
+    vec![Line::from(vec![
+        Span::styled(
+            label.to_owned(),
+            semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(": ", semantic_style(state, SemanticColor::Muted)),
+        Span::styled(text.to_owned(), semantic_style(state, SemanticColor::Focus)),
+    ])]
 }
 
 fn patch_lines(state: &TuiState, changes: &[PatchChangeView]) -> Vec<Line<'static>> {
