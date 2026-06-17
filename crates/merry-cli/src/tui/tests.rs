@@ -251,13 +251,49 @@ fn controller_scroll_actions_move_timeline_viewport() {
         handle_key_action(KeyAction::ScrollUp, &mut state),
         ControllerEffect::None
     );
-    assert_eq!(state.timeline_scroll_offset(), initial.saturating_add(1));
+    assert_eq!(state.timeline_scroll_offset(), initial.saturating_add(5));
 
     assert_eq!(
         handle_key_action(KeyAction::ScrollDown, &mut state),
         ControllerEffect::None
     );
     assert_eq!(state.timeline_scroll_offset(), initial);
+}
+
+#[test]
+fn controller_review_previous_user_input_steps_between_user_turns() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.push_timeline_item(TimelineItem::User {
+        text: "first".to_owned(),
+        lane: QueuedInputLane::Next,
+    });
+    state.push_timeline_item(TimelineItem::Assistant {
+        text: "answer one".to_owned(),
+    });
+    state.push_timeline_item(TimelineItem::User {
+        text: "second".to_owned(),
+        lane: QueuedInputLane::Next,
+    });
+    state.push_timeline_item(TimelineItem::Assistant {
+        text: "answer two".to_owned(),
+    });
+
+    assert_eq!(
+        handle_key_action(KeyAction::ReviewPreviousUserInput, &mut state),
+        ControllerEffect::None
+    );
+    assert_eq!(state.timeline_review_user_index(), Some(2));
+
+    assert_eq!(
+        handle_key_action(KeyAction::ReviewPreviousUserInput, &mut state),
+        ControllerEffect::None
+    );
+    assert_eq!(state.timeline_review_user_index(), Some(0));
 }
 
 #[test]
@@ -315,6 +351,10 @@ fn default_keymap_maps_core_navigation_and_control_keys() {
         keymap.action_for(KeyBinding::new(KeyCode::PageDown, KeyModifiers::NONE)),
         Some(KeyAction::ScrollDown)
     );
+    assert_eq!(
+        keymap.action_for(KeyBinding::new(KeyCode::Char('u'), KeyModifiers::CONTROL)),
+        Some(KeyAction::ReviewPreviousUserInput)
+    );
 }
 
 #[test]
@@ -343,6 +383,7 @@ fn configured_navigation_bindings_take_precedence() {
     let keymap = Keymap::from_config(&crate::config::TuiKeymapToml {
         history_previous: Some("ctrl+p".to_owned()),
         history_next: Some("ctrl+n".to_owned()),
+        review_previous_user_input: Some("ctrl+u".to_owned()),
         scroll_up: Some("up".to_owned()),
         scroll_down: Some("down".to_owned()),
         resume_suspended: Some("ctrl+r".to_owned()),
@@ -366,6 +407,10 @@ fn configured_navigation_bindings_take_precedence() {
     assert_eq!(
         keymap.action_for(KeyBinding::new(KeyCode::Down, KeyModifiers::NONE)),
         Some(KeyAction::ScrollDown)
+    );
+    assert_eq!(
+        keymap.action_for(KeyBinding::new(KeyCode::Char('u'), KeyModifiers::CONTROL,)),
+        Some(KeyAction::ReviewPreviousUserInput)
     );
     assert_eq!(
         keymap.action_for(KeyBinding::new(KeyCode::Char('r'), KeyModifiers::CONTROL,)),
@@ -1287,6 +1332,40 @@ fn renderer_scrolls_timeline_viewport() {
     let scrolled = render_to_text(&state, 48, 12);
     assert!(scrolled.contains("line 10"));
     assert!(!scrolled.contains("line 11"));
+}
+
+#[test]
+fn renderer_review_user_input_starts_viewport_at_selected_user_turn() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.push_timeline_item(TimelineItem::User {
+        text: "first request".to_owned(),
+        lane: QueuedInputLane::Next,
+    });
+    state.push_timeline_item(TimelineItem::Assistant {
+        text: "first answer".to_owned(),
+    });
+    state.push_timeline_item(TimelineItem::User {
+        text: "second request".to_owned(),
+        lane: QueuedInputLane::Next,
+    });
+    state.push_timeline_item(TimelineItem::Assistant {
+        text: "second answer".to_owned(),
+    });
+
+    state.jump_to_previous_user_input();
+    let second = render_to_text(&state, 80, 18);
+    assert!(second.contains("user: second request"));
+    assert!(!second.contains("first request"));
+
+    state.jump_to_previous_user_input();
+    let first = render_to_text(&state, 80, 18);
+    assert!(first.contains("user: first request"));
+    assert!(first.contains("first answer"));
 }
 
 #[test]

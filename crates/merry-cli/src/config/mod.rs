@@ -466,6 +466,7 @@ pub(crate) struct TuiKeymapToml {
     pub(crate) quit: Option<String>,
     pub(crate) scroll_up: Option<String>,
     pub(crate) scroll_down: Option<String>,
+    pub(crate) review_previous_user_input: Option<String>,
     pub(crate) history_previous: Option<String>,
     pub(crate) history_next: Option<String>,
     pub(crate) resume_suspended: Option<String>,
@@ -648,6 +649,7 @@ interrupt = "esc"
 quit = "ctrl+q"
 scroll_up = "pageup"
 scroll_down = "pagedown"
+review_previous_user_input = "ctrl+u"
 history_previous = "up"
 history_next = "down"
 resume_suspended = "ctrl+r"
@@ -666,6 +668,10 @@ discard_suspended = "ctrl+d"
         assert_eq!(tui.theme.command.as_deref(), Some("light_blue"));
         assert_eq!(tui.keymap.submit_next.as_deref(), Some("enter"));
         assert_eq!(tui.keymap.scroll_up.as_deref(), Some("pageup"));
+        assert_eq!(
+            tui.keymap.review_previous_user_input.as_deref(),
+            Some("ctrl+u")
+        );
         assert_eq!(tui.keymap.history_previous.as_deref(), Some("up"));
     }
 
@@ -829,6 +835,10 @@ roots = ["skills", "~/shared-skills", "/opt/company/skills"]
         assert_eq!(tui.theme.command.as_deref(), Some("light_blue"));
         assert_eq!(tui.keymap.submit_next.as_deref(), Some("enter"));
         assert_eq!(tui.keymap.scroll_up.as_deref(), Some("pageup"));
+        assert_eq!(
+            tui.keymap.review_previous_user_input.as_deref(),
+            Some("ctrl+u")
+        );
         assert_eq!(tui.keymap.history_previous.as_deref(), Some("up"));
 
         let provider = config
