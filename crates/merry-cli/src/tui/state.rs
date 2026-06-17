@@ -142,6 +142,10 @@ impl TuiState {
         self.input.text()
     }
 
+    pub(crate) fn input_viewport(&self, max_width: usize) -> super::input::TextInputViewport {
+        self.input.viewport(max_width)
+    }
+
     pub(crate) fn keymap(&self) -> &Keymap {
         &self.keymap
     }

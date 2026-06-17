@@ -2,7 +2,7 @@ use super::controller::{ControllerEffect, handle_key_action, handle_key_event};
 use super::input::TextInput;
 use super::keymap::{KeyAction, KeyBinding, Keymap};
 use super::projector::TuiProjector;
-use super::render::{render_to_buffer, render_to_text};
+use super::render::{render_to_buffer, render_to_buffer_and_cursor, render_to_text};
 use super::state::{PatchChangeView, PatchLineView, QueuePreview, TimelineItem, TuiState};
 use super::theme::{SemanticColor, TuiTheme};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -79,6 +79,42 @@ fn text_input_handles_plain_chars_and_backspace_key_events() {
     input.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
 
     assert_eq!(input.text(), "a");
+}
+
+#[test]
+fn text_input_moves_cursor_and_edits_at_cursor() {
+    let mut input = TextInput::default();
+
+    input.insert_str("abc");
+    input.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+    input.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+    input.insert_char('X');
+    input.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+    input.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+    input.insert_char('!');
+    input.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+    input.insert_char('>');
+
+    assert_eq!(input.text(), ">aXc!");
+    assert_eq!(input.cursor_byte_index(), ">".len());
+}
+
+#[test]
+fn text_input_viewport_uses_terminal_width_for_wide_chars() {
+    let mut input = TextInput::default();
+
+    input.insert_str("a你好b");
+
+    let full_viewport = input.viewport(7);
+    assert_eq!(full_viewport.text, "a你好b");
+    assert_eq!(full_viewport.cursor_column, 6);
+
+    input.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+
+    let viewport = input.viewport(4);
+
+    assert_eq!(viewport.text, "好b");
+    assert_eq!(viewport.cursor_column, 2);
 }
 
 #[test]
@@ -748,6 +784,25 @@ fn renderer_shows_status_timeline_queue_and_input() {
     assert!(text.contains("Backlog"));
     assert!(text.contains("backlog item"));
     assert!(text.contains("hi"));
+}
+
+#[test]
+fn renderer_places_terminal_cursor_inside_input() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.input_mut().insert_str("a你b");
+    state
+        .input_mut()
+        .handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+
+    let (_buffer, cursor) = render_to_buffer_and_cursor(&state, 80, 16);
+
+    assert_eq!(cursor.x, 4);
+    assert_eq!(cursor.y, 13);
 }
 
 #[test]
