@@ -473,8 +473,8 @@ mod tests {
         OpenAiEventStreamEvents, build_and_trace_responses_http_request,
         build_responses_http_request, classify_http_status, trace_openai_request_metadata,
     };
-    use crate::OpenAiProviderConfig;
     use crate::parse::ResponsesStreamParser;
+    use crate::{OpenAiProviderConfig, OpenAiProviderError};
     use merry_core::SessionId;
     use merry_llm::{
         FinishReason, GenerationConfig, ModelContent, ModelEvent, ModelMessage, ModelMessageRole,
@@ -853,6 +853,62 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn parser_accepts_standard_sse_metadata_and_data_without_space() {
+        let mut parser = ResponsesStreamParser::new();
+        let mut events = VecDeque::from([ModelEvent::Started]);
+
+        for line in [
+            ": provider heartbeat",
+            "event: response.output_text.delta",
+            "id: stream-1",
+            "retry: 1000",
+            "data:{\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}",
+            "data:{\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"Hello\"}]}],\"usage\":{\"input_tokens\":4,\"output_tokens\":1}}}",
+        ] {
+            events.extend(
+                parser
+                    .parse_sse_line(line)
+                    .expect("standard SSE line should parse or be ignored"),
+            );
+        }
+        parser.finish().expect("stream should complete");
+
+        assert_eq!(
+            events.into_iter().collect::<Vec<_>>(),
+            vec![
+                ModelEvent::Started,
+                ModelEvent::OutputTextDelta {
+                    delta: "Hello".to_owned()
+                },
+                ModelEvent::Completed {
+                    response: ModelResponse::new(
+                        vec![ModelOutput::text("Hello")],
+                        FinishReason::Stop,
+                        Some(Usage::new(4, 1)),
+                    )
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn parser_reports_unexpected_non_sse_stream_lines() {
+        let mut parser = ResponsesStreamParser::new();
+
+        let error = parser
+            .parse_sse_line(r#"{"error":"bad upstream"}"#)
+            .expect_err("non-SSE line should fail");
+
+        assert!(matches!(error, OpenAiProviderError::Protocol { .. }));
+        assert!(
+            error
+                .to_string()
+                .contains("unexpected Responses stream line")
+        );
+        assert!(error.to_string().contains("expected an SSE `data:` field"));
     }
 
     #[test]
