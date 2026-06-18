@@ -14,11 +14,13 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const QUEUE_PREVIEW_HEIGHT: u16 = 5;
 const MAX_COMPLETION_PREVIEW_HEIGHT: u16 = 6;
+const MAX_INPUT_VISIBLE_ROWS: usize = 5;
 
 #[allow(dead_code)]
 pub(crate) fn render(frame: &mut Frame<'_>, state: &TuiState) {
     let queue_height = queue_preview_height(state);
     let completion_height = completion_preview_height(state);
+    let input_height = input_region_height(state);
     let root = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -26,12 +28,13 @@ pub(crate) fn render(frame: &mut Frame<'_>, state: &TuiState) {
             Constraint::Length(queue_height),
             Constraint::Length(completion_height),
             Constraint::Length(1),
-            Constraint::Length(3),
+            Constraint::Length(input_height),
             Constraint::Length(1),
         ])
         .split(frame.area());
     let input_inner = bordered_inner(root[4]);
-    let input_viewport = state.input_viewport(usize::from(input_inner.width));
+    let input_viewport =
+        state.input_viewport_rows(usize::from(input_inner.width), MAX_INPUT_VISIBLE_ROWS);
 
     frame.render_widget(
         Paragraph::new(timeline_lines(state, root[0]))
@@ -80,7 +83,12 @@ pub(crate) fn render(frame: &mut Frame<'_>, state: &TuiState) {
             ),
         root[4],
     );
-    set_input_cursor(frame, input_inner, input_viewport.cursor_column);
+    set_input_cursor(
+        frame,
+        input_inner,
+        input_viewport.cursor_column,
+        input_viewport.cursor_row,
+    );
     frame.render_widget(
         Paragraph::new(state.status_text()).style(semantic_style(state, SemanticColor::Status)),
         root[5],
@@ -143,15 +151,17 @@ fn bordered_inner(region: Rect) -> Rect {
     }
 }
 
-fn set_input_cursor(frame: &mut Frame<'_>, region: Rect, cursor_column: usize) {
+fn set_input_cursor(frame: &mut Frame<'_>, region: Rect, cursor_column: usize, cursor_row: usize) {
     if region.width == 0 || region.height == 0 {
         return;
     }
     let cursor_column = u16::try_from(cursor_column).unwrap_or(u16::MAX);
+    let cursor_row = u16::try_from(cursor_row).unwrap_or(u16::MAX);
     let max_x = region.x.saturating_add(region.width.saturating_sub(1));
+    let max_y = region.y.saturating_add(region.height.saturating_sub(1));
     frame.set_cursor_position(Position {
         x: region.x.saturating_add(cursor_column).min(max_x),
-        y: region.y,
+        y: region.y.saturating_add(cursor_row).min(max_y),
     });
 }
 
@@ -172,6 +182,13 @@ fn completion_preview_height(state: &TuiState) -> u16 {
                 .min(MAX_COMPLETION_PREVIEW_HEIGHT)
         })
         .unwrap_or(0)
+}
+
+fn input_region_height(state: &TuiState) -> u16 {
+    let visible_rows = state.input_visible_rows(MAX_INPUT_VISIBLE_ROWS);
+    u16::try_from(visible_rows)
+        .unwrap_or(u16::MAX)
+        .saturating_add(2)
 }
 
 fn timeline_lines(state: &TuiState, region: Rect) -> Vec<Line<'static>> {

@@ -310,6 +310,36 @@ fn text_input_viewport_uses_terminal_width_for_wide_chars() {
 }
 
 #[test]
+fn text_input_viewport_reports_multiline_cursor_row() {
+    let mut input = TextInput::default();
+
+    input.insert_str("first");
+    input.insert_newline();
+    input.insert_str("second");
+
+    let viewport = input.viewport_rows(16, 5);
+
+    assert_eq!(viewport.text, "first\nsecond");
+    assert_eq!(viewport.cursor_row, 1);
+    assert_eq!(viewport.cursor_column, 6);
+    assert_eq!(viewport.visible_rows, 2);
+}
+
+#[test]
+fn text_input_multiline_viewport_keeps_cursor_line_visible() {
+    let mut input = TextInput::default();
+
+    input.insert_str("one\ntwo\nthree\nfour\nfive\nsix");
+
+    let viewport = input.viewport_rows(16, 3);
+
+    assert_eq!(viewport.text, "four\nfive\nsix");
+    assert_eq!(viewport.cursor_row, 2);
+    assert_eq!(viewport.cursor_column, 3);
+    assert_eq!(viewport.visible_rows, 3);
+}
+
+#[test]
 fn controller_submit_next_takes_input_text() {
     let mut state = TuiState::new(
         "/repo".into(),
@@ -539,6 +569,10 @@ fn default_keymap_maps_core_navigation_and_control_keys() {
         Some(KeyAction::CancelInputOrQuit)
     );
     assert_eq!(
+        keymap.action_for(KeyBinding::new(KeyCode::Char('j'), KeyModifiers::CONTROL,)),
+        Some(KeyAction::InsertNewline)
+    );
+    assert_eq!(
         keymap.action_for(KeyBinding::new(KeyCode::Esc, KeyModifiers::NONE)),
         Some(KeyAction::Interrupt)
     );
@@ -562,6 +596,48 @@ fn default_keymap_maps_core_navigation_and_control_keys() {
         keymap.action_for(KeyBinding::new(KeyCode::Char('u'), KeyModifiers::CONTROL)),
         Some(KeyAction::ReviewPreviousUserInput)
     );
+}
+
+#[test]
+fn controller_ctrl_j_inserts_newline_without_submitting() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.insert_input_str("first");
+
+    let effect = handle_key_event(
+        KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL),
+        &mut state,
+    );
+    state.insert_input_str("second");
+
+    assert_eq!(effect, ControllerEffect::None);
+    assert_eq!(state.input_text(), "first\nsecond");
+}
+
+#[test]
+fn controller_configured_insert_newline_binding_takes_precedence() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::from_config(&crate::config::TuiKeymapToml {
+            insert_newline: Some("ctrl+r".to_owned()),
+            ..crate::config::TuiKeymapToml::default()
+        })
+        .unwrap(),
+        TuiTheme::default(),
+    );
+
+    let effect = handle_key_event(
+        KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
+        &mut state,
+    );
+
+    assert_eq!(effect, ControllerEffect::None);
+    assert_eq!(state.input_text(), "\n");
 }
 
 #[test]
@@ -1700,6 +1776,26 @@ fn renderer_places_terminal_cursor_inside_input() {
 }
 
 #[test]
+fn renderer_places_terminal_cursor_on_multiline_input_row() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.insert_input_str("first");
+    state.insert_input_newline();
+    state.insert_input_str("second");
+
+    let (buffer, cursor) = render_to_buffer_and_cursor(&state, 80, 16);
+
+    assert!(rendered_buffer_text(&buffer).contains("first"));
+    assert!(rendered_buffer_text(&buffer).contains("second"));
+    assert_eq!(cursor.x, 7);
+    assert_eq!(cursor.y, 13);
+}
+
+#[test]
 fn renderer_shows_user_input_in_timeline() {
     let mut state = TuiState::new(
         "/repo".into(),
@@ -2123,6 +2219,18 @@ fn renderer_keeps_input_region_stable_when_queue_count_changes() {
 
 fn find_cell_color(buffer: &ratatui::buffer::Buffer, text: &str) -> Option<Color> {
     find_cell_style(buffer, text).and_then(|style| style.fg)
+}
+
+fn rendered_buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
+    let area = buffer.area;
+    let mut text = String::new();
+    for y in area.y..area.y + area.height {
+        for x in area.x..area.x + area.width {
+            text.push_str(buffer[(x, y)].symbol());
+        }
+        text.push('\n');
+    }
+    text
 }
 
 fn find_cell_style(buffer: &ratatui::buffer::Buffer, text: &str) -> Option<ratatui::style::Style> {

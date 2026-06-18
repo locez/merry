@@ -6,6 +6,7 @@ pub(crate) enum KeyAction {
     SubmitNext,
     SubmitBacklog,
     CancelInputOrQuit,
+    InsertNewline,
     Interrupt,
     OpenCommandPanel,
     OpenDetails,
@@ -66,6 +67,10 @@ impl Default for Keymap {
                     KeyAction::CancelInputOrQuit,
                 ),
                 (
+                    KeyBinding::new(KeyCode::Char('j'), KeyModifiers::CONTROL),
+                    KeyAction::InsertNewline,
+                ),
+                (
                     KeyBinding::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
                     KeyAction::OpenCommandPanel,
                 ),
@@ -117,6 +122,9 @@ impl Keymap {
         if let Some(binding) = config.cancel_input_or_quit.as_deref() {
             keymap.set_binding(parse_binding(binding)?, KeyAction::CancelInputOrQuit);
         }
+        if let Some(binding) = config.insert_newline.as_deref() {
+            keymap.set_binding(parse_binding(binding)?, KeyAction::InsertNewline);
+        }
         if let Some(binding) = config.interrupt.as_deref() {
             keymap.set_binding(parse_binding(binding)?, KeyAction::Interrupt);
         }
@@ -156,7 +164,9 @@ impl Keymap {
 
     fn set_binding(&mut self, binding: KeyBinding, action: KeyAction) {
         self.bindings
-            .retain(|(_, candidate_action)| *candidate_action != action);
+            .retain(|(candidate_binding, candidate_action)| {
+                *candidate_action != action && *candidate_binding != binding
+            });
         self.bindings.push((binding, action));
     }
 }
@@ -175,6 +185,7 @@ fn parse_binding(value: &str) -> Result<KeyBinding, crate::config::ConfigError> 
         "ctrl+b" => Ok(KeyBinding::new(KeyCode::Char('b'), KeyModifiers::CONTROL)),
         "ctrl+c" => Ok(KeyBinding::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
         "ctrl+d" => Ok(KeyBinding::new(KeyCode::Char('d'), KeyModifiers::CONTROL)),
+        "ctrl+j" => Ok(KeyBinding::new(KeyCode::Char('j'), KeyModifiers::CONTROL)),
         "ctrl+n" => Ok(KeyBinding::new(KeyCode::Char('n'), KeyModifiers::CONTROL)),
         "ctrl+p" => Ok(KeyBinding::new(KeyCode::Char('p'), KeyModifiers::CONTROL)),
         "ctrl+q" => Ok(KeyBinding::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
@@ -202,6 +213,20 @@ mod tests {
         assert_eq!(
             keymap.action_for(KeyBinding::new(KeyCode::Esc, KeyModifiers::NONE)),
             Some(KeyAction::SubmitNext)
+        );
+    }
+
+    #[test]
+    fn configured_binding_replaces_previous_action_on_same_key() {
+        let keymap = Keymap::from_config(&TuiKeymapToml {
+            insert_newline: Some("ctrl+r".to_owned()),
+            ..TuiKeymapToml::default()
+        })
+        .expect("keymap config should validate");
+
+        assert_eq!(
+            keymap.action_for(KeyBinding::new(KeyCode::Char('r'), KeyModifiers::CONTROL)),
+            Some(KeyAction::InsertNewline)
         );
     }
 }

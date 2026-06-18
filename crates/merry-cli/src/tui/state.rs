@@ -223,6 +223,23 @@ impl TuiState {
         self.input.viewport(max_width)
     }
 
+    pub(crate) fn input_viewport_rows(
+        &self,
+        max_width: usize,
+        max_rows: usize,
+    ) -> super::input::TextInputViewport {
+        self.input.viewport_rows(max_width, max_rows)
+    }
+
+    pub(crate) fn input_visible_rows(&self, max_rows: usize) -> usize {
+        self.input
+            .text()
+            .split('\n')
+            .count()
+            .max(1)
+            .min(max_rows.max(1))
+    }
+
     pub(crate) fn take_input_for_submit(&mut self) -> Option<String> {
         self.completion_menu = None;
         self.pending_empty_input_quit = false;
@@ -253,6 +270,12 @@ impl TuiState {
         self.pending_empty_input_quit = false;
         self.input.insert_str(text);
         self.refresh_completion_menu();
+    }
+
+    pub(crate) fn insert_input_newline(&mut self) {
+        self.pending_empty_input_quit = false;
+        self.input.insert_newline();
+        self.close_completion_menu();
     }
 
     pub(crate) fn completion_menu(&self) -> Option<&CompletionMenu> {

@@ -52,6 +52,10 @@ pub(crate) fn handle_key_action(action: KeyAction, state: &mut TuiState) -> Cont
                 ControllerEffect::None
             }
         }
+        KeyAction::InsertNewline => {
+            state.insert_input_newline();
+            ControllerEffect::None
+        }
         KeyAction::Interrupt => ControllerEffect::Interrupt,
         KeyAction::Quit => ControllerEffect::Quit,
         KeyAction::ScrollUp => {
