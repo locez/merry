@@ -152,6 +152,7 @@ pub(crate) enum TimelineItem {
 pub(crate) struct TuiState {
     workspace_root: PathBuf,
     model_label: String,
+    reasoning_effort_label: Option<String>,
     keymap: Keymap,
     theme: TuiTheme,
     input: TextInput,
@@ -187,6 +188,7 @@ impl TuiState {
         Self {
             workspace_root: workspace_root.clone(),
             model_label,
+            reasoning_effort_label: None,
             keymap,
             theme,
             input: TextInput::default(),
@@ -477,6 +479,10 @@ impl TuiState {
         self.usage = Some(usage);
     }
 
+    pub(crate) fn set_reasoning_effort_label(&mut self, label: Option<String>) {
+        self.reasoning_effort_label = label;
+    }
+
     pub(crate) fn is_active_run(&self) -> bool {
         is_active_run_state(self.run_state)
     }
@@ -504,12 +510,8 @@ impl TuiState {
             .as_ref()
             .map(format_session_usage)
             .unwrap_or_else(|| "usage -".to_owned());
-        format!(
-            "{}  {}  {}",
-            self.workspace_root.display(),
-            self.model_label,
-            usage
-        )
+        let model = self.model_status_label();
+        format!("{}  {}  {}", self.workspace_root.display(), model, usage)
     }
 
     pub(crate) fn interaction_status_text(&self) -> String {
@@ -548,6 +550,14 @@ impl TuiState {
             label,
             format_elapsed(elapsed)
         )
+    }
+
+    fn model_status_label(&self) -> String {
+        self.reasoning_effort_label
+            .as_deref()
+            .filter(|label| !label.is_empty())
+            .map(|label| format!("{} {}", self.model_label, label))
+            .unwrap_or_else(|| self.model_label.clone())
     }
 }
 

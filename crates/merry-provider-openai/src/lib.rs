@@ -19,7 +19,7 @@ mod tests {
         FinishReason, GenerationConfig, ModelContent, ModelEvent, ModelMessage, ModelMessageRole,
         ModelName, ModelOutput, ModelRequest, ModelResponseFormat, ModelStructuredOutputFormat,
         ModelToolCall, ModelToolCallId, ModelToolContinuation, ModelToolResult,
-        ModelToolResultContent, ProviderErrorKind, ToolArguments, Usage,
+        ModelToolResultContent, ProviderErrorKind, ReasoningEffort, ToolArguments, Usage,
     };
     use serde_json::{Value, json};
 
@@ -67,6 +67,18 @@ mod tests {
             vec![message(ModelMessageRole::User, "Hello")],
             Vec::new(),
             GenerationConfig::default(),
+        )
+        .expect("valid model request")
+    }
+
+    fn request_with_reasoning_effort() -> ModelRequest {
+        ModelRequest::new(
+            ModelName::new("gpt-5.1").expect("valid model name"),
+            vec![message(ModelMessageRole::User, "Solve this carefully.")],
+            Vec::new(),
+            GenerationConfig::default().with_reasoning_effort(Some(
+                ReasoningEffort::new("high").expect("valid reasoning effort"),
+            )),
         )
         .expect("valid model request")
     }
@@ -338,6 +350,14 @@ mod tests {
         assert!(!object.contains_key("tools"));
         assert!(!object.contains_key("tool_choice"));
         assert!(!object.contains_key("max_output_tokens"));
+    }
+
+    #[test]
+    fn rendered_request_with_reasoning_effort_uses_responses_reasoning_field() {
+        let rendered = crate::render::render_responses_request(&request_with_reasoning_effort())
+            .expect("request should render");
+
+        assert_eq!(rendered["reasoning"], json!({ "effort": "high" }));
     }
 
     #[test]

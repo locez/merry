@@ -1,4 +1,5 @@
 use merry_core::ToolName;
+use merry_llm::ReasoningEffort;
 use std::{
     collections::BTreeSet,
     path::{Component, Path, PathBuf},
@@ -105,6 +106,7 @@ pub struct SubagentTaskSpec {
     write_scope: Vec<PathBuf>,
     forbidden_paths: Vec<PathBuf>,
     expected_output: Option<String>,
+    reasoning_effort: Option<ReasoningEffort>,
 }
 
 impl SubagentTaskSpec {
@@ -124,6 +126,7 @@ impl SubagentTaskSpec {
             write_scope: Vec::new(),
             forbidden_paths: Vec::new(),
             expected_output: None,
+            reasoning_effort: None,
         })
     }
 
@@ -173,6 +176,12 @@ impl SubagentTaskSpec {
     #[must_use]
     pub fn expected_output(&self) -> Option<&str> {
         self.expected_output.as_deref()
+    }
+
+    /// Returns the optional reasoning-effort override for this child task.
+    #[must_use]
+    pub fn reasoning_effort(&self) -> Option<&ReasoningEffort> {
+        self.reasoning_effort.as_ref()
     }
 
     /// Replaces the child's allowed tool list.
@@ -226,6 +235,13 @@ impl SubagentTaskSpec {
     #[must_use]
     pub fn with_expected_output(mut self, expected_output: Option<String>) -> Self {
         self.expected_output = expected_output.filter(|value| !value.trim().is_empty());
+        self
+    }
+
+    /// Replaces the optional reasoning-effort override for this child task.
+    #[must_use]
+    pub fn with_reasoning_effort(mut self, reasoning_effort: Option<ReasoningEffort>) -> Self {
+        self.reasoning_effort = reasoning_effort;
         self
     }
 }

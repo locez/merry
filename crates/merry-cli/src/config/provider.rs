@@ -1,5 +1,5 @@
 use super::{ConfigError, MerryConfig, default_true, resolve_config_relative_path};
-use merry_llm::{ModelRetryPolicy, ModelRetryPolicyError};
+use merry_llm::{ModelRetryPolicy, ModelRetryPolicyError, ReasoningEffort};
 use serde::Deserialize;
 use std::{collections::BTreeMap, fmt, fs, path::PathBuf};
 
@@ -54,8 +54,19 @@ impl MerryConfig {
                 ));
             }
         };
+        let reasoning_effort = default
+            .reasoning_effort
+            .as_deref()
+            .map(ReasoningEffort::new)
+            .transpose()
+            .map_err(|error| {
+                ConfigError::Invalid(format!(
+                    "providers.default.reasoning_effort is invalid: {error}"
+                ))
+            })?;
         Ok(EffectiveOpenAiProviderConfig {
             model: Some(default.model.clone()),
+            reasoning_effort,
             base_url: provider.base_url.clone(),
             api_key,
         })
@@ -76,6 +87,7 @@ impl MerryConfig {
 #[derive(Clone, PartialEq, Eq)]
 pub struct EffectiveOpenAiProviderConfig {
     pub model: Option<String>,
+    pub reasoning_effort: Option<ReasoningEffort>,
     pub base_url: Option<String>,
     pub api_key: EffectiveOpenAiApiKeySource,
 }
@@ -85,6 +97,7 @@ impl fmt::Debug for EffectiveOpenAiProviderConfig {
         formatter
             .debug_struct("EffectiveOpenAiProviderConfig")
             .field("model", &self.model)
+            .field("reasoning_effort", &self.reasoning_effort)
             .field("base_url", &self.base_url)
             .field("api_key", &self.api_key)
             .finish()
@@ -136,6 +149,7 @@ pub(super) struct ProvidersToml {
 pub(super) struct DefaultProviderToml {
     pub(super) provider: String,
     model: String,
+    reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
@@ -222,6 +236,7 @@ mod tests {
 [providers.default]
 provider = "openai-compatible"
 model = "gpt-4.1-mini"
+reasoning_effort = "high"
 
 [providers.openai-compatible]
 base_url = "https://api.example.test/v1"
@@ -245,6 +260,13 @@ jitter = true
             .openai_compatible_provider()
             .expect("provider should validate");
         assert_eq!(provider.model.as_deref(), Some("gpt-4.1-mini"));
+        assert_eq!(
+            provider
+                .reasoning_effort
+                .as_ref()
+                .map(|effort| effort.as_str()),
+            Some("high")
+        );
         assert_eq!(
             provider.base_url.as_deref(),
             Some("https://api.example.test/v1")
@@ -379,6 +401,7 @@ api_key = {api_key:?}
     fn redacted_provider_debug_does_not_include_api_key_file_contents() {
         let provider = EffectiveOpenAiProviderConfig {
             model: Some("gpt-test".to_owned()),
+            reasoning_effort: Some(ReasoningEffort::new("high").expect("valid effort")),
             base_url: Some("https://api.example.test/v1".to_owned()),
             api_key: EffectiveOpenAiApiKeySource::File(PathBuf::from(
                 "/home/alice/.config/merry/secrets/openai.key",

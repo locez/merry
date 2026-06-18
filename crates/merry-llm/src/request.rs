@@ -253,6 +253,8 @@ pub enum ModelInputItem {
 pub struct GenerationConfig {
     max_output_tokens: Option<u64>,
     allow_parallel_tool_calls: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<ReasoningEffort>,
 }
 
 impl GenerationConfig {
@@ -270,7 +272,14 @@ impl GenerationConfig {
         Ok(Self {
             max_output_tokens,
             allow_parallel_tool_calls,
+            reasoning_effort: None,
         })
+    }
+
+    /// Returns a copy with an optional model reasoning-effort hint.
+    pub fn with_reasoning_effort(mut self, reasoning_effort: Option<ReasoningEffort>) -> Self {
+        self.reasoning_effort = reasoning_effort;
+        self
     }
 
     /// Optional maximum output tokens.
@@ -284,6 +293,12 @@ impl GenerationConfig {
     pub fn allow_parallel_tool_calls(&self) -> bool {
         self.allow_parallel_tool_calls
     }
+
+    /// Optional provider-neutral reasoning-effort hint.
+    #[must_use]
+    pub fn reasoning_effort(&self) -> Option<&ReasoningEffort> {
+        self.reasoning_effort.as_ref()
+    }
 }
 
 #[derive(Deserialize)]
@@ -291,6 +306,8 @@ impl GenerationConfig {
 struct GenerationConfigWire {
     max_output_tokens: Option<u64>,
     allow_parallel_tool_calls: bool,
+    #[serde(default)]
+    reasoning_effort: Option<ReasoningEffort>,
 }
 
 impl<'de> Deserialize<'de> for GenerationConfig {
@@ -299,7 +316,74 @@ impl<'de> Deserialize<'de> for GenerationConfig {
         D: Deserializer<'de>,
     {
         let wire = GenerationConfigWire::deserialize(deserializer)?;
-        Self::new(wire.max_output_tokens, wire.allow_parallel_tool_calls).map_err(de::Error::custom)
+        Ok(
+            Self::new(wire.max_output_tokens, wire.allow_parallel_tool_calls)
+                .map_err(de::Error::custom)?
+                .with_reasoning_effort(wire.reasoning_effort),
+        )
+    }
+}
+
+/// Provider-neutral reasoning-effort value.
+///
+/// Merry stores this as a validated string because supported values are model
+/// and provider dependent.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, JsonSchema)]
+#[serde(transparent)]
+pub struct ReasoningEffort(String);
+
+impl ReasoningEffort {
+    /// Creates a validated reasoning-effort value.
+    pub fn new(value: &str) -> Result<Self, ModelError> {
+        validate_provider_identifier("ReasoningEffort", value)?;
+        Ok(Self(value.to_owned()))
+    }
+
+    /// Borrows the configured reasoning-effort value.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ReasoningEffort {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl FromStr for ReasoningEffort {
+    type Err = ModelError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::new(value)
+    }
+}
+
+impl TryFrom<&str> for ReasoningEffort {
+    type Error = ModelError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl TryFrom<String> for ReasoningEffort {
+    type Error = ModelError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        validate_provider_identifier("ReasoningEffort", &value)?;
+        Ok(Self(value))
+    }
+}
+
+impl<'de> Deserialize<'de> for ReasoningEffort {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::try_from(value).map_err(de::Error::custom)
     }
 }
 

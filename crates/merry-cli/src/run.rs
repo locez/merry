@@ -10,7 +10,8 @@ use crate::provider_config::{
     openai_provider_config_bundle,
 };
 use crate::runtime_config::{
-    action_process_backend_options, automatic_compaction_config, subagents_config,
+    action_process_backend_options, automatic_compaction_config, generation_config,
+    subagents_config,
 };
 use crate::sandbox::ChildHandoff as SandboxChildHandoff;
 use crate::tool_display::format_tool_call_progress;
@@ -96,11 +97,14 @@ pub(crate) async fn run(
         subagents: subagents_config(merry_config).map_err(unexpected)?.into(),
     })?;
     let input = StepInput::user_text(&args.task).map_err(unexpected)?;
+    let context = StepContext::default()
+        .with_generation_config(generation_config(merry_config).map_err(unexpected)?);
     if args.events_jsonl {
         write_agent_loop_jsonl_output(
             &runtime,
             input,
             coding_agent_loop_config()?,
+            context,
             tokio::io::stdout(),
         )
         .await
@@ -109,6 +113,7 @@ pub(crate) async fn run(
             &runtime,
             input,
             coding_agent_loop_config()?,
+            context,
             tokio::io::stdout(),
         )
         .await
@@ -123,6 +128,7 @@ pub(crate) async fn write_agent_loop_output<W>(
     runtime: &Runtime,
     input: StepInput,
     config: AgentLoopConfig,
+    context: StepContext,
     writer: W,
 ) -> Result<RunExitStatus, CliError>
 where
@@ -130,7 +136,7 @@ where
 {
     let mut writer = BufWriter::new(writer);
     let mut stream = runtime
-        .run_agent_loop_stream(input, StepContext::default(), config)
+        .run_agent_loop_stream(input, context, config)
         .map_err(unexpected)?;
     let mut pending_commentary = None;
     while let Some(event) = stream.next().await {
@@ -148,6 +154,7 @@ pub(crate) async fn write_agent_loop_jsonl_output<W>(
     runtime: &Runtime,
     input: StepInput,
     config: AgentLoopConfig,
+    context: StepContext,
     writer: W,
 ) -> Result<RunExitStatus, CliError>
 where
@@ -155,7 +162,7 @@ where
 {
     let mut writer = BufWriter::new(writer);
     let mut stream = runtime
-        .run_agent_loop_stream(input, StepContext::default(), config)
+        .run_agent_loop_stream(input, context, config)
         .map_err(unexpected)?;
 
     while let Some(event) = stream.next().await {
@@ -465,7 +472,8 @@ mod tests {
     };
     use merry_runtime::DEFAULT_CODING_AGENT_MAX_MODEL_TURNS;
     use merry_runtime::{
-        AcceptedLocalWorkspaceProcessAdmission, AgentLoopConfig, ProcessRunner, StepInput,
+        AcceptedLocalWorkspaceProcessAdmission, AgentLoopConfig, ProcessRunner, StepContext,
+        StepInput,
     };
     use std::{
         io,
@@ -549,6 +557,7 @@ mod tests {
             &runtime,
             StepInput::user_text("finish").expect("valid input"),
             AgentLoopConfig::new(DEFAULT_CODING_AGENT_MAX_MODEL_TURNS).expect("valid config"),
+            StepContext::default(),
             &mut output,
         )
         .await
@@ -614,6 +623,7 @@ mod tests {
             &runtime,
             StepInput::user_text("ping baidu.com").expect("valid input"),
             AgentLoopConfig::new(DEFAULT_CODING_AGENT_MAX_MODEL_TURNS).expect("valid config"),
+            StepContext::default(),
             &mut output,
         )
         .await
@@ -668,6 +678,7 @@ mod tests {
             &runtime,
             StepInput::user_text("finish").expect("valid input"),
             AgentLoopConfig::new(DEFAULT_CODING_AGENT_MAX_MODEL_TURNS).expect("valid config"),
+            StepContext::default(),
             &mut output,
         )
         .await
@@ -729,6 +740,7 @@ mod tests {
             &runtime,
             StepInput::user_text("read README").expect("valid input"),
             AgentLoopConfig::new(1).expect("valid config"),
+            StepContext::default(),
             &mut output,
         )
         .await

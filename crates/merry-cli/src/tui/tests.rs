@@ -1595,6 +1595,19 @@ fn status_text_compacts_large_usage_counts_but_keeps_last_in_out_visible() {
 }
 
 #[test]
+fn status_text_shows_model_reasoning_effort() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-5.5".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.set_reasoning_effort_label(Some("medium".to_owned()));
+
+    assert!(state.status_text().contains("gpt-5.5 medium"));
+}
+
+#[test]
 fn status_text_shows_merry_motion_and_elapsed_while_running() {
     let mut state = TuiState::new(
         "/repo".into(),
