@@ -2,6 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const MAX_INPUT_HISTORY: usize = 200;
+const PASTE_PLACEHOLDER_THRESHOLD_CHARS: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
@@ -17,6 +18,13 @@ pub(crate) struct TextInputViewport {
 pub(crate) struct TextInput {
     text: String,
     cursor: usize,
+    paste_blocks: Vec<PasteBlock>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PasteBlock {
+    placeholder: String,
+    content: String,
 }
 
 #[allow(dead_code)]
@@ -77,6 +85,21 @@ impl TextInput {
         self.cursor += value.len();
     }
 
+    pub(crate) fn insert_paste(&mut self, value: &str) {
+        let char_count = value.chars().count();
+        if char_count < PASTE_PLACEHOLDER_THRESHOLD_CHARS {
+            self.insert_str(value);
+            return;
+        }
+
+        let placeholder = format!("[pasted {char_count} chars]");
+        self.insert_str(&placeholder);
+        self.paste_blocks.push(PasteBlock {
+            placeholder,
+            content: value.to_owned(),
+        });
+    }
+
     pub(crate) fn insert_newline(&mut self) {
         self.insert_char('\n');
     }
@@ -84,6 +107,7 @@ impl TextInput {
     pub(crate) fn replace_text(&mut self, value: String) {
         self.cursor = value.len();
         self.text = value;
+        self.paste_blocks.clear();
     }
 
     pub(crate) fn replace_range(&mut self, range: std::ops::Range<usize>, value: &str) {
@@ -102,6 +126,12 @@ impl TextInput {
         if self.cursor == 0 {
             return;
         }
+        if let Some(range) = self.paste_placeholder_range_for_backspace() {
+            self.remove_paste_block_for_range(&range);
+            self.text.drain(range.clone());
+            self.cursor = range.start;
+            return;
+        }
         let previous = self.text[..self.cursor]
             .char_indices()
             .last()
@@ -113,6 +143,12 @@ impl TextInput {
 
     pub(crate) fn delete(&mut self) {
         if self.cursor >= self.text.len() {
+            return;
+        }
+        if let Some(range) = self.paste_placeholder_range_for_delete() {
+            self.remove_paste_block_for_range(&range);
+            self.text.drain(range.clone());
+            self.cursor = range.start;
             return;
         }
         let next = next_char_boundary(&self.text, self.cursor);
@@ -154,11 +190,19 @@ impl TextInput {
         if self.cursor == 0 {
             return;
         }
+        if let Some(range) = self.paste_placeholder_range_for_backspace() {
+            self.cursor = range.start;
+            return;
+        }
         self.cursor = previous_char_boundary(&self.text, self.cursor);
     }
 
     pub(crate) fn move_right(&mut self) {
         if self.cursor >= self.text.len() {
+            return;
+        }
+        if let Some(range) = self.paste_placeholder_range_for_delete() {
+            self.cursor = range.end;
             return;
         }
         self.cursor = next_char_boundary(&self.text, self.cursor);
@@ -175,16 +219,70 @@ impl TextInput {
     pub(crate) fn clear(&mut self) {
         self.text.clear();
         self.cursor = 0;
+        self.paste_blocks.clear();
     }
 
     pub(crate) fn take_trimmed(&mut self) -> Option<String> {
-        let trimmed = self.text.trim();
-        if trimmed.is_empty() {
+        let value = self.expanded_text();
+        if value.trim().is_empty() {
             return None;
         }
-        let value = trimmed.to_owned();
         self.clear();
         Some(value)
+    }
+
+    fn expanded_text(&self) -> String {
+        if self.paste_blocks.is_empty() {
+            return self.text.clone();
+        }
+
+        let mut value = self.text.clone();
+        for block in &self.paste_blocks {
+            if let Some(start) = value.find(&block.placeholder) {
+                let end = start + block.placeholder.len();
+                value.replace_range(start..end, &block.content);
+            }
+        }
+        value
+    }
+
+    fn paste_placeholder_range_for_backspace(&self) -> Option<std::ops::Range<usize>> {
+        self.paste_placeholder_ranges()
+            .into_iter()
+            .find(|range| self.cursor > range.start && self.cursor <= range.end)
+    }
+
+    fn paste_placeholder_range_for_delete(&self) -> Option<std::ops::Range<usize>> {
+        self.paste_placeholder_ranges()
+            .into_iter()
+            .find(|range| self.cursor >= range.start && self.cursor < range.end)
+    }
+
+    fn paste_placeholder_ranges(&self) -> Vec<std::ops::Range<usize>> {
+        let mut ranges = Vec::new();
+        for block in &self.paste_blocks {
+            let mut search_start = 0;
+            while let Some(offset) = self.text[search_start..].find(&block.placeholder) {
+                let start = search_start + offset;
+                let end = start + block.placeholder.len();
+                ranges.push(start..end);
+                search_start = end;
+            }
+        }
+        ranges
+    }
+
+    fn remove_paste_block_for_range(&mut self, range: &std::ops::Range<usize>) {
+        let Some(placeholder) = self.text.get(range.clone()) else {
+            return;
+        };
+        if let Some(index) = self
+            .paste_blocks
+            .iter()
+            .position(|block| block.placeholder == placeholder)
+        {
+            self.paste_blocks.remove(index);
+        }
     }
 
     pub(crate) fn handle_key(&mut self, key: KeyEvent) {
@@ -273,7 +371,7 @@ impl TextInput {
 pub(crate) struct InputHistory {
     entries: Vec<String>,
     navigation: Option<usize>,
-    draft: String,
+    draft: TextInput,
 }
 
 #[allow(dead_code)]
@@ -299,7 +397,7 @@ impl InputHistory {
         let index = match self.navigation {
             Some(index) => index.saturating_sub(1),
             None => {
-                self.draft = input.text().to_owned();
+                self.draft = input.clone();
                 self.entries.len() - 1
             }
         };
@@ -320,7 +418,7 @@ impl InputHistory {
         }
 
         self.navigation = None;
-        input.replace_text(std::mem::take(&mut self.draft));
+        *input = std::mem::take(&mut self.draft);
     }
 }
 
