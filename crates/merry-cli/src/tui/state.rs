@@ -1,10 +1,13 @@
 use super::{
+    completion::{CompletionMenu, CompletionSources},
     input::{InputHistory, TextInput},
     keymap::Keymap,
     theme::TuiTheme,
 };
 use merry_core::{InteractiveRunState, QueuedInputLane, QueuedInputView, SessionUsage};
+use merry_runtime::SkillMetadata;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
@@ -152,6 +155,8 @@ pub(crate) struct TuiState {
     keymap: Keymap,
     theme: TuiTheme,
     input: TextInput,
+    completion_sources: CompletionSources,
+    completion_menu: Option<CompletionMenu>,
     input_history: InputHistory,
     queue_preview: QueuePreviewState,
     timeline: Vec<TimelineItem>,
@@ -159,6 +164,9 @@ pub(crate) struct TuiState {
     timeline_review_user_index: Option<usize>,
     pending_local_echoes: Vec<PendingLocalEcho>,
     run_state: InteractiveRunState,
+    active_run_started_at: Option<Instant>,
+    last_completed_run_elapsed: Option<Duration>,
+    pending_empty_input_quit: bool,
     usage: Option<SessionUsage>,
 }
 
@@ -177,11 +185,13 @@ impl TuiState {
         theme: TuiTheme,
     ) -> Self {
         Self {
-            workspace_root,
+            workspace_root: workspace_root.clone(),
             model_label,
             keymap,
             theme,
             input: TextInput::default(),
+            completion_sources: CompletionSources::new(workspace_root.clone(), Vec::new()),
+            completion_menu: None,
             input_history: InputHistory::default(),
             queue_preview: QueuePreviewState::from_preview(QueuePreview::empty()),
             timeline: Vec::new(),
@@ -189,12 +199,20 @@ impl TuiState {
             timeline_review_user_index: None,
             pending_local_echoes: Vec::new(),
             run_state: InteractiveRunState::WaitingForInput,
+            active_run_started_at: None,
+            last_completed_run_elapsed: None,
+            pending_empty_input_quit: false,
             usage: None,
         }
     }
 
     pub(crate) fn input_mut(&mut self) -> &mut TextInput {
         &mut self.input
+    }
+
+    pub(crate) fn set_completion_skills(&mut self, skills: Vec<SkillMetadata>) {
+        self.completion_sources = CompletionSources::new(self.workspace_root.clone(), skills);
+        self.refresh_completion_menu();
     }
 
     pub(crate) fn input_text(&self) -> &str {
@@ -206,17 +224,81 @@ impl TuiState {
     }
 
     pub(crate) fn take_input_for_submit(&mut self) -> Option<String> {
+        self.completion_menu = None;
+        self.pending_empty_input_quit = false;
         let value = self.input.take_trimmed()?;
         self.input_history.record(&value);
         Some(value)
     }
 
     pub(crate) fn previous_input_history(&mut self) {
+        self.pending_empty_input_quit = false;
         self.input_history.previous(&mut self.input);
+        self.refresh_completion_menu();
     }
 
     pub(crate) fn next_input_history(&mut self) {
+        self.pending_empty_input_quit = false;
         self.input_history.next(&mut self.input);
+        self.refresh_completion_menu();
+    }
+
+    pub(crate) fn handle_input_key(&mut self, key: crossterm::event::KeyEvent) {
+        self.pending_empty_input_quit = false;
+        self.input.handle_key(key);
+        self.refresh_completion_menu();
+    }
+
+    pub(crate) fn insert_input_str(&mut self, text: &str) {
+        self.pending_empty_input_quit = false;
+        self.input.insert_str(text);
+        self.refresh_completion_menu();
+    }
+
+    pub(crate) fn completion_menu(&self) -> Option<&CompletionMenu> {
+        self.completion_menu.as_ref()
+    }
+
+    pub(crate) fn close_completion_menu(&mut self) {
+        self.completion_menu = None;
+    }
+
+    pub(crate) fn select_next_completion(&mut self) -> bool {
+        let Some(menu) = self.completion_menu.as_mut() else {
+            return false;
+        };
+        menu.select_next();
+        true
+    }
+
+    pub(crate) fn select_previous_completion(&mut self) -> bool {
+        let Some(menu) = self.completion_menu.as_mut() else {
+            return false;
+        };
+        menu.select_previous();
+        true
+    }
+
+    pub(crate) fn accept_completion(&mut self) -> bool {
+        let Some(menu) = self.completion_menu.take() else {
+            return false;
+        };
+        let Some(replacement) = menu.replacement_text() else {
+            return false;
+        };
+        self.pending_empty_input_quit = false;
+        self.input
+            .replace_range(menu.replacement_range(), &replacement);
+        self.refresh_completion_menu();
+        true
+    }
+
+    fn refresh_completion_menu(&mut self) {
+        self.completion_menu = self.completion_sources.menu_for_input(
+            self.input.text(),
+            self.input.cursor_byte_index(),
+            self.completion_menu.as_ref(),
+        );
     }
 
     pub(crate) fn keymap(&self) -> &Keymap {
@@ -313,11 +395,13 @@ impl TuiState {
     }
 
     pub(crate) fn scroll_timeline_up_by(&mut self, lines: usize) {
+        self.pending_empty_input_quit = false;
         self.timeline_review_user_index = None;
         self.timeline_scroll_offset = self.timeline_scroll_offset.saturating_add(lines);
     }
 
     pub(crate) fn scroll_timeline_down_by(&mut self, lines: usize) {
+        self.pending_empty_input_quit = false;
         self.timeline_review_user_index = None;
         self.timeline_scroll_offset = self.timeline_scroll_offset.saturating_sub(lines);
     }
@@ -330,6 +414,7 @@ impl TuiState {
             .iter()
             .rposition(|item| matches!(item, TimelineItem::User { .. }))
         {
+            self.pending_empty_input_quit = false;
             self.timeline_review_user_index = Some(index);
         }
     }
@@ -347,11 +432,47 @@ impl TuiState {
     }
 
     pub(crate) fn set_run_state(&mut self, state: InteractiveRunState) {
+        self.set_run_state_at(state, Instant::now());
+    }
+
+    pub(crate) fn set_run_state_at(&mut self, state: InteractiveRunState, now: Instant) {
+        let was_active = is_active_run_state(self.run_state);
+        let is_active = is_active_run_state(state);
+        if is_active && !was_active {
+            self.active_run_started_at = Some(now);
+        } else if !is_active {
+            if was_active && let Some(started_at) = self.active_run_started_at.take() {
+                self.last_completed_run_elapsed = Some(now.saturating_duration_since(started_at));
+            } else {
+                self.active_run_started_at = None;
+            }
+        }
         self.run_state = state;
     }
 
     pub(crate) fn set_usage(&mut self, usage: SessionUsage) {
         self.usage = Some(usage);
+    }
+
+    pub(crate) fn is_active_run(&self) -> bool {
+        is_active_run_state(self.run_state)
+    }
+
+    pub(crate) fn cancel_input_or_mark_quit(&mut self) -> bool {
+        if !self.input.text().is_empty() {
+            self.input.replace_text(String::new());
+            self.completion_menu = None;
+            self.pending_empty_input_quit = true;
+            return false;
+        }
+
+        if self.pending_empty_input_quit {
+            self.pending_empty_input_quit = false;
+            return true;
+        }
+
+        self.pending_empty_input_quit = true;
+        false
     }
 
     pub(crate) fn status_text(&self) -> String {
@@ -361,11 +482,48 @@ impl TuiState {
             .map(format_session_usage)
             .unwrap_or_else(|| "usage -".to_owned());
         format!(
-            "{:?}  {}  {}  {}",
-            self.run_state,
+            "{}  {}  {}",
             self.workspace_root.display(),
             self.model_label,
             usage
+        )
+    }
+
+    pub(crate) fn interaction_status_text(&self) -> String {
+        self.interaction_status_text_at(Instant::now())
+    }
+
+    pub(crate) fn interaction_status_text_at(&self, now: Instant) -> String {
+        match self.run_state {
+            InteractiveRunState::WaitingForInput => self.ready_status_text(),
+            InteractiveRunState::RunningModel => self.active_status_text("Running model", now),
+            InteractiveRunState::RunningTool => self.active_status_text("Running tool", now),
+            InteractiveRunState::Interrupting => self.active_status_text("Interrupting", now),
+            InteractiveRunState::Closed => "Closed".to_owned(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_active_run_started_at_for_test(&mut self, started_at: Instant) {
+        self.active_run_started_at = Some(started_at);
+    }
+
+    fn ready_status_text(&self) -> String {
+        self.last_completed_run_elapsed
+            .map(|elapsed| format!("Ready  last run {}", format_elapsed(elapsed)))
+            .unwrap_or_else(|| "Ready".to_owned())
+    }
+
+    fn active_status_text(&self, label: &str, now: Instant) -> String {
+        let elapsed = self
+            .active_run_started_at
+            .map(|started_at| now.saturating_duration_since(started_at))
+            .unwrap_or_default();
+        format!(
+            "{} {} ({})",
+            merry_motion(elapsed),
+            label,
+            format_elapsed(elapsed)
         )
     }
 }
@@ -390,5 +548,72 @@ fn format_token_count(tokens: u64) -> String {
         format!("{whole}k")
     } else {
         format!("{whole}.{decimal}k")
+    }
+}
+
+fn is_active_run_state(state: InteractiveRunState) -> bool {
+    matches!(
+        state,
+        InteractiveRunState::RunningModel
+            | InteractiveRunState::RunningTool
+            | InteractiveRunState::Interrupting
+    )
+}
+
+fn merry_motion(elapsed: Duration) -> String {
+    const TRACK_WIDTH: usize = 9;
+    const SPINNER_FRAMES: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
+    const FRAME_MS: u128 = 70;
+    const HOLD_FRAMES: usize = SPINNER_FRAMES.len();
+    const SPIN_WIDTH: usize = 2;
+    const MOVE_FRAMES: usize = TRACK_WIDTH - SPIN_WIDTH;
+    const LOOP_FRAMES: usize = HOLD_FRAMES + MOVE_FRAMES + HOLD_FRAMES + MOVE_FRAMES;
+
+    let frame = (elapsed.as_millis() / FRAME_MS) as usize % LOOP_FRAMES;
+    if frame < HOLD_FRAMES {
+        return format!(
+            "[{}M{}]",
+            SPINNER_FRAMES[frame],
+            ".".repeat(TRACK_WIDTH - SPIN_WIDTH)
+        );
+    }
+
+    let outbound_start = HOLD_FRAMES;
+    let right_spin_start = outbound_start + MOVE_FRAMES;
+    if frame < right_spin_start {
+        let position = frame - outbound_start + SPIN_WIDTH;
+        return moving_merry_marker(position, TRACK_WIDTH);
+    }
+
+    let inbound_start = right_spin_start + HOLD_FRAMES;
+    if frame < inbound_start {
+        let spin = SPINNER_FRAMES[frame - right_spin_start];
+        return format!("[{}M{}]", ".".repeat(TRACK_WIDTH - SPIN_WIDTH), spin);
+    }
+
+    let position = TRACK_WIDTH - SPIN_WIDTH - (frame - inbound_start);
+    moving_merry_marker(position, TRACK_WIDTH)
+}
+
+fn moving_merry_marker(position: usize, width: usize) -> String {
+    let mut marker = vec!['.'; width];
+    marker[position] = 'M';
+    format!("[{}]", marker.into_iter().collect::<String>())
+}
+
+fn format_elapsed(elapsed: Duration) -> String {
+    let total_seconds = elapsed.as_secs();
+    let seconds = total_seconds % 60;
+    let total_minutes = total_seconds / 60;
+    if total_minutes == 0 {
+        return format!("{seconds}s");
+    }
+
+    let minutes = total_minutes % 60;
+    let hours = total_minutes / 60;
+    if hours == 0 {
+        format!("{total_minutes}m {seconds:02}s")
+    } else {
+        format!("{hours}h {minutes:02}m {seconds:02}s")
     }
 }

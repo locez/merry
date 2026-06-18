@@ -6,6 +6,7 @@ use state::TuiState;
 use terminal::TerminalSession;
 use theme::TuiTheme;
 
+mod completion;
 mod controller;
 mod input;
 pub(crate) mod keymap;
@@ -31,12 +32,13 @@ pub(crate) async fn run(
     let keymap = Keymap::from_config(&tui_config.keymap).map_err(crate::cli_error::unexpected)?;
     let theme = TuiTheme::from_config(&tui_config.theme).map_err(crate::cli_error::unexpected)?;
     let session = runtime::start_tui_runtime_session(sandbox_child_handoff, merry_config).await?;
-    let state = TuiState::new(
+    let mut state = TuiState::new(
         session.workspace_root.clone(),
         session.model_label.clone(),
         keymap,
         theme,
     );
+    state.set_completion_skills(session.skills.clone());
     let terminal = TerminalSession::enter().map_err(crate::cli_error::unexpected)?;
     controller::run_controller(terminal, session, state).await
 }

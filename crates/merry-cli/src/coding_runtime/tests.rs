@@ -79,6 +79,7 @@ async fn projects_skill_metadata_without_body() {
     assert!(stable_text.contains("demo-skill"));
     assert!(stable_text.contains("Use for demo tasks."));
     assert!(stable_text.contains("demo/SKILL.md"));
+    assert!(stable_text.contains("$skill-name"));
     assert!(request_text.contains("workspace_read_file"));
     assert!(request_text.contains("Workspace coding profile"));
     assert!(request_text.contains("user's current input language"));

@@ -12,7 +12,9 @@ use crate::runtime_config::{
     action_process_backend_options, automatic_compaction_config, subagents_config,
 };
 use crate::sandbox::ChildHandoff as SandboxChildHandoff;
-use merry_runtime::{AgentLoopControl, AgentLoopInput, InteractiveRunEventStream, StepContext};
+use merry_runtime::{
+    AgentLoopControl, AgentLoopInput, InteractiveRunEventStream, SkillMetadata, StepContext,
+};
 use std::{env, path::PathBuf};
 
 pub(crate) struct TuiRuntimeSession {
@@ -21,6 +23,7 @@ pub(crate) struct TuiRuntimeSession {
     pub(crate) stream: InteractiveRunEventStream,
     pub(crate) input: AgentLoopInput,
     pub(crate) control: AgentLoopControl,
+    pub(crate) skills: Vec<SkillMetadata>,
 }
 
 pub(crate) async fn start_tui_runtime_session(
@@ -71,6 +74,7 @@ pub(crate) async fn start_tui_runtime_session(
         subagents: subagents_config(merry_config).map_err(unexpected)?.into(),
     })?;
     let loop_config = coding_agent_loop_config()?;
+    let skills = runtime.skills().await;
     let interactive = runtime
         .start_interactive_agent_run(StepContext::new(Default::default()), loop_config)
         .map_err(unexpected)?;
@@ -82,6 +86,7 @@ pub(crate) async fn start_tui_runtime_session(
         stream,
         input,
         control,
+        skills,
     })
 }
 
