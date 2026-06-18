@@ -10,6 +10,7 @@ crossterm.workspace = true
 futures-util.workspace = true
 merry-core = { path = "../merry-core" }
 merry-llm = { path = "../merry-llm" }
+merry-mcp = { path = "../merry-mcp" }
 merry-provider-openai = { path = "../merry-provider-openai" }
 merry-runtime = { path = "../merry-runtime" }
 merry-tool-workspace = { path = "../merry-tool-workspace" }
