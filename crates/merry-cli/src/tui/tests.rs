@@ -2230,6 +2230,53 @@ fn renderer_keeps_input_region_stable_when_queue_count_changes() {
     assert_eq!(one_item_input_row, three_lane_input_row);
 }
 
+#[test]
+fn renderer_keeps_timeline_visible_when_bottom_panes_are_taller_than_short_window() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.push_timeline_item(TimelineItem::Assistant {
+        text: "latest assistant output".to_owned(),
+    });
+    state.update_queue_preview(QueuePreview {
+        next: vec![QueuedInputView {
+            text: "next item".to_owned(),
+            lane: QueuedInputLane::Next,
+            position: 0,
+        }],
+        suspended: vec![QueuedInputView {
+            text: "suspended item".to_owned(),
+            lane: QueuedInputLane::Suspended,
+            position: 0,
+        }],
+        backlog: vec![QueuedInputView {
+            text: "backlog item".to_owned(),
+            lane: QueuedInputLane::Backlog,
+            position: 0,
+        }],
+    });
+    state.insert_input_str("line one\nline two\nline three\nline four\nline five");
+
+    let text = render_to_text(&state, 80, 10);
+
+    assert!(text.contains("latest assistant output"));
+    assert!(text.contains("line five"));
+    assert!(text.contains("input"));
+    assert!(text.contains("gpt-test"));
+    let assistant_row = text
+        .lines()
+        .position(|line| line.contains("latest assistant output"))
+        .expect("assistant output should render");
+    let input_row = text
+        .lines()
+        .position(|line| line.contains("input"))
+        .expect("input panel should render");
+    assert!(input_row.saturating_sub(assistant_row) >= 4, "{text}");
+}
+
 fn find_cell_color(buffer: &ratatui::buffer::Buffer, text: &str) -> Option<Color> {
     find_cell_style(buffer, text).and_then(|style| style.fg)
 }
