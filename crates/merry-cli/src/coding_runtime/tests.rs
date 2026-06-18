@@ -5,18 +5,33 @@ use super::{
 use crate::debug::coding_loop::coding_loop_workspace_call;
 use crate::runtime_events::{collect_runtime_step_events, first_pending_tool_call};
 use crate::testing::{FakeProcessRunner, ScriptedProvider, model_name};
-use merry_core::{RuntimeJournalEvent, ToolCallResult, ToolCallResultStatus, ToolName};
+use merry_core::{
+    RuntimeJournalEvent, ToolCallResult, ToolCallResultStatus, ToolInputSchema, ToolName, ToolSpec,
+};
 use merry_llm::{
     FinishReason, ModelEvent, ModelOutput, ModelResponse, ModelToolCall, ModelToolCallId,
     ToolArguments,
 };
 use merry_runtime::{
     AcceptedLocalWorkspaceProcessAdmission, AgentLoopConfig, AgentLoopStatus, ProcessRunner,
-    StepContext, StepInput, SubagentConfig, ToolExecutionContext,
+    RegisteredTool, StepContext, StepInput, SubagentConfig, ToolExecutionContext,
+    ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture,
 };
 use merry_tool_workspace::{CODING_LOOP_PROCESS_TOOL, WORKSPACE_READ_FILE_TOOL};
 use serde_json::{Map, Value};
 use std::sync::Arc;
+
+struct StaticOkExecutor;
+
+impl ToolExecutor for StaticOkExecutor {
+    fn execute<'a>(
+        &'a self,
+        _call: merry_core::PendingToolCall,
+        _context: ToolExecutionContext,
+    ) -> ToolExecutorFuture<'a> {
+        Box::pin(async { Ok(ToolExecutionOutcome::succeeded_text("ok")) })
+    }
+}
 
 #[tokio::test(flavor = "current_thread")]
 async fn projects_skill_metadata_without_body() {
@@ -48,6 +63,7 @@ async fn projects_skill_metadata_without_body() {
             retry_policy: None,
             context_compaction: None,
             permissioned_process_runner_factory: None,
+            extra_tools: Vec::new(),
             skill_roots: vec![skill_root.clone()],
             subagents: CodingSubagentsConfig::default(),
             workspace_tool_limits: None,
@@ -110,6 +126,7 @@ async fn headless_runtime_uses_coding_agent_profile() {
         model: model_name(),
         runner,
         permissioned_process_runner_factory: permissioned_factory,
+        extra_tools: Vec::new(),
         allow_hidden_workspace_paths: false,
         automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
         retry_policy: None,
@@ -142,6 +159,66 @@ async fn headless_runtime_uses_coding_agent_profile() {
             .tools()
             .iter()
             .any(|tool| tool.name().as_str() == CODING_LOOP_PROCESS_TOOL)
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn headless_runtime_registers_extra_tools() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("mkdir workspace");
+    let provider = ScriptedProvider::new(vec![vec![Ok(ModelEvent::Completed {
+        response: ModelResponse::new(vec![ModelOutput::text("done")], FinishReason::Stop, None),
+    })]]);
+    let runner: Arc<dyn ProcessRunner> = Arc::new(FakeProcessRunner::succeeding(""));
+    let permissioned_factory = Arc::new(
+        merry_runtime::StaticPermissionedProcessRunnerFactory::new(Arc::clone(&runner)),
+    );
+    let schema = schemars::Schema::try_from(serde_json::json!({
+        "type": "object",
+        "properties": {}
+    }))
+    .expect("test schema should be valid");
+    let spec = ToolSpec::new(
+        ToolName::new("mcp_docs_read").expect("valid tool name"),
+        "Read docs through MCP",
+        ToolInputSchema::new(schema).expect("schema should be valid"),
+    )
+    .expect("tool spec should be valid");
+
+    let runtime = build_headless_coding_runtime(HeadlessCodingRuntimeInput {
+        session_id: "headless-coding-runtime-extra-tools",
+        root: &workspace,
+        admission: AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
+        provider: Arc::new(provider.clone()),
+        model: model_name(),
+        runner,
+        permissioned_process_runner_factory: permissioned_factory,
+        allow_hidden_workspace_paths: false,
+        automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
+        retry_policy: None,
+        context_compaction: None,
+        approval_review: None,
+        skill_roots: Vec::new(),
+        subagents: CodingSubagentsConfig::default(),
+        extra_tools: vec![RegisteredTool::read_only(spec, Arc::new(StaticOkExecutor))],
+    })
+    .expect("headless coding runtime should build");
+
+    collect_runtime_step_events(
+        &runtime,
+        StepInput::user_text("Inspect tools.").expect("valid input"),
+        StepContext::default(),
+    )
+    .await
+    .expect("runtime step should complete");
+
+    let request = provider.recorded_requests()[0].clone();
+    assert!(
+        request
+            .tools()
+            .iter()
+            .any(|tool| tool.name().as_str() == "mcp_docs_read")
     );
 }
 
@@ -181,6 +258,7 @@ async fn includes_skill_roots_in_workspace_read_tools() {
             retry_policy: None,
             context_compaction: None,
             permissioned_process_runner_factory: None,
+            extra_tools: Vec::new(),
             skill_roots: vec![skill_root.clone()],
             subagents: CodingSubagentsConfig::default(),
             workspace_tool_limits: None,
@@ -228,6 +306,7 @@ async fn allows_missing_default_skill_root() {
             retry_policy: None,
             context_compaction: None,
             permissioned_process_runner_factory: None,
+            extra_tools: Vec::new(),
             skill_roots: vec![missing_skill_root],
             subagents: CodingSubagentsConfig::default(),
             workspace_tool_limits: None,
@@ -275,6 +354,7 @@ async fn hides_subagent_tools_by_default() {
             retry_policy: None,
             context_compaction: None,
             permissioned_process_runner_factory: None,
+            extra_tools: Vec::new(),
             skill_roots: Vec::new(),
             subagents: CodingSubagentsConfig::default(),
             workspace_tool_limits: None,
@@ -324,6 +404,7 @@ async fn exposes_subagent_tools_when_enabled() {
             retry_policy: None,
             context_compaction: None,
             permissioned_process_runner_factory: None,
+            extra_tools: Vec::new(),
             skill_roots: Vec::new(),
             subagents: CodingSubagentsConfig::enabled(
                 SubagentConfig::new(2, 1).expect("valid subagent config"),
@@ -417,6 +498,7 @@ async fn subagent_with_narrow_tools_keeps_read_only_profile() {
             retry_policy: None,
             context_compaction: None,
             permissioned_process_runner_factory: None,
+            extra_tools: Vec::new(),
             skill_roots: Vec::new(),
             subagents: CodingSubagentsConfig::enabled(
                 SubagentConfig::new(2, 1).expect("valid subagent config"),
