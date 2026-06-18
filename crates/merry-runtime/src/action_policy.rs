@@ -38,6 +38,8 @@ pub(crate) enum ActionRiskTier {
     ProcessHigh,
     /// Uses network access.
     Network,
+    /// Executes a user-configured external tool trusted by configuration.
+    TrustedExternal,
     /// Is forbidden by runtime policy.
     Forbidden,
 }
@@ -215,6 +217,7 @@ pub(crate) fn classify_tool_action_risk(
             _ => ActionRiskTier::ProcessHigh,
         },
         ToolActionKind::Network => ActionRiskTier::Forbidden,
+        ToolActionKind::TrustedExternal => ActionRiskTier::TrustedExternal,
     }
 }
 
@@ -322,6 +325,12 @@ impl DefaultActionPolicy {
                 classify_tool_action_risk(ToolActionKind::Network, None),
                 ActionPolicyDisposition::Deny,
                 "network tool actions are denied by default policy",
+            ),
+            ToolActionKind::TrustedExternal => ActionPolicyDecision::new(
+                ToolActionKind::TrustedExternal,
+                classify_tool_action_risk(ToolActionKind::TrustedExternal, None),
+                ActionPolicyDisposition::Allow,
+                "trusted external tool actions are allowed by default policy",
             ),
         }
     }

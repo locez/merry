@@ -334,6 +334,8 @@ pub enum ToolActionKind {
     CommandExec,
     /// Uses network access.
     Network,
+    /// Executes a user-configured external tool that is trusted by configuration.
+    TrustedExternal,
 }
 
 impl ToolActionKind {
