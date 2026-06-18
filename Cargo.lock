@@ -1318,6 +1318,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "merry-mcp"
+version = "0.1.0"
+dependencies = [
+ "merry-core",
+ "merry-runtime",
+ "reqwest",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "merry-provider-openai"
 version = "0.1.0"
 dependencies = [
