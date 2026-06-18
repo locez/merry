@@ -1,3 +1,4 @@
+use super::completion::{CompletionKind, CompletionSources};
 use super::controller::{ControllerEffect, handle_key_action, handle_key_event};
 use super::input::TextInput;
 use super::keymap::{KeyAction, KeyBinding, Keymap};
@@ -7,14 +8,18 @@ use super::state::{PatchChangeView, PatchLineView, QueuePreview, TimelineItem, T
 use super::theme::{SemanticColor, TuiTheme};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use merry_core::{
-    ArtifactId, ArtifactKind, ArtifactRef, ContextWindowSource, ErrorInfo, ModelUsage,
-    PendingToolCall, QueuedInputLane, QueuedInputView, RuntimeEvent, RuntimeEventSource, SessionId,
-    SessionUsage, ToolCallArguments, ToolCallId, ToolCallResult, ToolName, ToolOutput,
-    UsageContextWindow,
+    ArtifactId, ArtifactKind, ArtifactRef, ContextWindowSource, ErrorInfo, InteractiveRunState,
+    ModelUsage, PendingToolCall, QueuedInputLane, QueuedInputView, RuntimeEvent,
+    RuntimeEventSource, SessionId, SessionUsage, ToolCallArguments, ToolCallId, ToolCallResult,
+    ToolName, ToolOutput, UsageContextWindow,
 };
+use merry_runtime::SkillMetadata;
 use merry_tool_workspace::WORKSPACE_PATCH_TOOL;
 use ratatui::style::{Color, Modifier};
 use serde_json::json;
+use std::fs;
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 fn source() -> RuntimeEventSource {
     RuntimeEventSource::new(SessionId::new("tui-test").unwrap(), 1)
@@ -97,6 +102,176 @@ fn text_input_moves_cursor_and_edits_at_cursor() {
 
     assert_eq!(input.text(), ">aXc!");
     assert_eq!(input.cursor_byte_index(), ">".len());
+}
+
+#[test]
+fn text_input_replaces_completion_token_at_cursor() {
+    let mut input = TextInput::default();
+
+    input.insert_str("open @rend");
+    input.replace_range(
+        "open ".len().."open @rend".len(),
+        "@crates/merry-cli/src/tui/render.rs ",
+    );
+
+    assert_eq!(input.text(), "open @crates/merry-cli/src/tui/render.rs ");
+    assert_eq!(input.cursor_byte_index(), input.text().len());
+}
+
+#[test]
+fn completion_sources_fuzzy_match_workspace_paths() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let nested = temp.path().join("crates/merry-cli/src/tui");
+    fs::create_dir_all(&nested).expect("mkdir nested");
+    fs::write(nested.join("render.rs"), "").expect("write render");
+    fs::write(nested.join("state.rs"), "").expect("write state");
+    let sources = CompletionSources::from_skill_names(temp.path().to_path_buf(), &[]);
+
+    let menu = sources
+        .menu_for_input("edit @cmrender", "edit @cmrender".len(), None)
+        .expect("path completion");
+
+    assert_eq!(menu.items()[0].kind(), &CompletionKind::Path);
+    assert_eq!(
+        menu.items()[0].value(),
+        "crates/merry-cli/src/tui/render.rs"
+    );
+}
+
+#[test]
+fn completion_sources_match_skill_references_without_expanding_text() {
+    let sources = CompletionSources::from_skill_names(
+        std::env::current_dir().expect("cwd"),
+        &["brainstorming", "frontend-design"],
+    );
+
+    let menu = sources
+        .menu_for_input("use $brain", "use $brain".len(), None)
+        .expect("skill completion");
+
+    assert_eq!(menu.items()[0].kind(), &CompletionKind::Skill);
+    assert_eq!(menu.items()[0].value(), "brainstorming");
+    assert_eq!(menu.replacement_text(), Some("$brainstorming ".to_owned()));
+}
+
+#[test]
+fn completion_sources_include_skill_descriptions_as_detail() {
+    let skill = SkillMetadata::new(
+        "brainstorming",
+        "Use for collaborative design work.",
+        PathBuf::from("skills/brainstorming/SKILL.md"),
+        PathBuf::from("/skills"),
+    )
+    .expect("valid skill");
+    let sources = CompletionSources::new(std::env::current_dir().expect("cwd"), vec![skill]);
+
+    let menu = sources
+        .menu_for_input("$brain", "$brain".len(), None)
+        .expect("skill completion");
+
+    assert_eq!(
+        menu.items()[0].detail(),
+        Some("Use for collaborative design work.")
+    );
+}
+
+#[test]
+fn controller_accepts_completion_before_submit() {
+    let mut state = TuiState::new(
+        std::env::current_dir().expect("cwd"),
+        "model".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.set_completion_skills(Vec::new());
+    state.insert_input_str("edit @Cargo");
+
+    let effect = handle_key_event(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut state,
+    );
+
+    assert_eq!(effect, ControllerEffect::None);
+    assert_eq!(state.input_text(), "edit @Cargo.toml ");
+}
+
+#[test]
+fn controller_tab_accepts_completion_like_shells() {
+    let mut state = TuiState::new(
+        std::env::current_dir().expect("cwd"),
+        "model".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.insert_input_str("edit @Cargo");
+
+    let effect = handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &mut state);
+
+    assert_eq!(effect, ControllerEffect::None);
+    assert_eq!(state.input_text(), "edit @Cargo.toml ");
+}
+
+#[test]
+fn controller_moves_completion_selection_with_arrows() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    fs::write(temp.path().join("alpha.rs"), "").expect("write alpha");
+    fs::write(temp.path().join("beta.rs"), "").expect("write beta");
+    let mut state = TuiState::new(
+        temp.path().to_path_buf(),
+        "model".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.insert_input_str("open @rs");
+
+    handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut state);
+    handle_key_event(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut state,
+    );
+
+    assert_eq!(state.input_text(), "open @beta.rs ");
+}
+
+#[test]
+fn renderer_shows_completion_candidates_above_input() {
+    let mut state = TuiState::new(
+        std::env::current_dir().expect("cwd"),
+        "model".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.insert_input_str("open @Cargo");
+
+    let text = render_to_text(&state, 80, 12);
+
+    assert!(text.contains("> Cargo.toml"));
+    assert!(!text.contains("> @ Cargo.toml"));
+    assert!(text.find("> Cargo.toml").unwrap() < text.find("input").unwrap());
+}
+
+#[test]
+fn renderer_shows_skill_completion_descriptions() {
+    let skill = SkillMetadata::new(
+        "brainstorming",
+        "Use for collaborative design work.",
+        PathBuf::from("skills/brainstorming/SKILL.md"),
+        PathBuf::from("/skills"),
+    )
+    .expect("valid skill");
+    let mut state = TuiState::new(
+        std::env::current_dir().expect("cwd"),
+        "model".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.set_completion_skills(vec![skill]);
+    state.insert_input_str("$brain");
+
+    let text = render_to_text(&state, 100, 12);
+
+    assert!(text.contains("> brainstorming"));
+    assert!(text.contains("Use for collaborative"));
 }
 
 #[test]
@@ -361,7 +536,7 @@ fn default_keymap_maps_core_navigation_and_control_keys() {
     );
     assert_eq!(
         keymap.action_for(KeyBinding::new(KeyCode::Char('c'), KeyModifiers::CONTROL,)),
-        Some(KeyAction::Quit)
+        Some(KeyAction::CancelInputOrQuit)
     );
     assert_eq!(
         keymap.action_for(KeyBinding::new(KeyCode::Esc, KeyModifiers::NONE)),
@@ -386,6 +561,74 @@ fn default_keymap_maps_core_navigation_and_control_keys() {
     assert_eq!(
         keymap.action_for(KeyBinding::new(KeyCode::Char('u'), KeyModifiers::CONTROL)),
         Some(KeyAction::ReviewPreviousUserInput)
+    );
+}
+
+#[test]
+fn controller_ctrl_c_clears_input_before_quitting_on_empty_input() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.insert_input_str("draft");
+
+    let first = handle_key_event(
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        &mut state,
+    );
+
+    assert_eq!(first, ControllerEffect::None);
+    assert_eq!(state.input_text(), "");
+
+    let second = handle_key_event(
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        &mut state,
+    );
+
+    assert_eq!(second, ControllerEffect::Quit);
+}
+
+#[test]
+fn controller_ctrl_c_quit_confirmation_resets_after_new_input() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+
+    assert_eq!(
+        handle_key_event(
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &mut state,
+        ),
+        ControllerEffect::None
+    );
+
+    state.insert_input_str("draft");
+
+    assert_eq!(
+        handle_key_action(KeyAction::SubmitNext, &mut state),
+        ControllerEffect::SubmitNext("draft".to_owned())
+    );
+    assert_eq!(state.input_text(), "");
+
+    assert_eq!(
+        handle_key_event(
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &mut state,
+        ),
+        ControllerEffect::None
+    );
+
+    assert_eq!(
+        handle_key_event(
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &mut state,
+        ),
+        ControllerEffect::Quit
     );
 }
 
@@ -1276,6 +1519,59 @@ fn status_text_compacts_large_usage_counts_but_keeps_last_in_out_visible() {
 }
 
 #[test]
+fn status_text_shows_merry_motion_and_elapsed_while_running() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    let now = Instant::now();
+
+    state.set_run_state(InteractiveRunState::RunningModel);
+    state.set_active_run_started_at_for_test(now - Duration::from_secs(37));
+
+    let status = state.interaction_status_text_at(now);
+    assert!(status.starts_with('['));
+    assert!(status.chars().take(11).any(|value| value == 'M'));
+    assert!(status.contains("] Running model (37s)"));
+}
+
+#[test]
+fn status_text_uses_quiet_ready_label_when_waiting() {
+    let state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+
+    let status = state.interaction_status_text();
+    assert_eq!(status, "Ready");
+    assert!(!status.contains("Running"));
+    assert!(!status.contains("[M"));
+}
+
+#[test]
+fn interaction_status_keeps_completed_run_elapsed_after_returning_ready() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    let started = Instant::now();
+
+    state.set_run_state_at(InteractiveRunState::RunningModel, started);
+    state.set_run_state_at(
+        InteractiveRunState::WaitingForInput,
+        started + Duration::from_secs(42),
+    );
+
+    assert_eq!(state.interaction_status_text(), "Ready  last run 42s");
+}
+
+#[test]
 fn projector_projects_accepted_user_input_into_timeline() {
     let mut state = TuiState::new(
         "/repo".into(),
@@ -1374,6 +1670,7 @@ fn renderer_shows_status_timeline_queue_and_input() {
 
     let text = render_to_text(&state, 80, 24);
 
+    assert!(text.contains("Ready"));
     assert!(text.contains("gpt-test"));
     assert!(text.contains("assistant says hello"));
     assert!(text.contains("Next"));

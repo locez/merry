@@ -7,7 +7,7 @@ use super::{
     terminal::{TerminalEvent, TerminalSession},
 };
 use crate::cli_error::{CliError, unexpected};
-use crossterm::event::KeyEvent;
+use crossterm::event::{KeyCode, KeyEvent};
 use futures_util::StreamExt;
 use merry_core::QueuedInputLane;
 use merry_runtime::InterruptReason;
@@ -44,6 +44,13 @@ pub(crate) fn handle_key_action(action: KeyAction, state: &mut TuiState) -> Cont
             state
                 .take_input_for_submit()
                 .map_or(ControllerEffect::None, ControllerEffect::SubmitBacklog)
+        }
+        KeyAction::CancelInputOrQuit => {
+            if state.cancel_input_or_mark_quit() {
+                ControllerEffect::Quit
+            } else {
+                ControllerEffect::None
+            }
         }
         KeyAction::Interrupt => ControllerEffect::Interrupt,
         KeyAction::Quit => ControllerEffect::Quit,
@@ -82,10 +89,32 @@ fn exit_review_if_active(state: &mut TuiState) -> bool {
 }
 
 pub(crate) fn handle_key_event(key: KeyEvent, state: &mut TuiState) -> ControllerEffect {
+    if state.completion_menu().is_some() {
+        match key.code {
+            KeyCode::Enter | KeyCode::Tab => {
+                state.accept_completion();
+                return ControllerEffect::None;
+            }
+            KeyCode::Down => {
+                state.select_next_completion();
+                return ControllerEffect::None;
+            }
+            KeyCode::Up => {
+                state.select_previous_completion();
+                return ControllerEffect::None;
+            }
+            KeyCode::Esc => {
+                state.close_completion_menu();
+                return ControllerEffect::None;
+            }
+            _ => {}
+        }
+    }
+
     if let Some(action) = state.keymap().action_for(key.into()) {
         return handle_key_action(action, state);
     }
-    state.input_mut().handle_key(key);
+    state.handle_input_key(key);
     ControllerEffect::None
 }
 
@@ -132,7 +161,7 @@ pub(crate) async fn run_controller(
                         render_once(&mut terminal, &state)?;
                     }
                     TerminalEvent::Paste(text) => {
-                        state.input_mut().insert_str(&text);
+                        state.insert_input_str(&text);
                         render_once(&mut terminal, &state)?;
                     }
                     TerminalEvent::Resize => {

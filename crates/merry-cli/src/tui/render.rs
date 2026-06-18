@@ -13,20 +13,24 @@ use ratatui::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const QUEUE_PREVIEW_HEIGHT: u16 = 5;
+const MAX_COMPLETION_PREVIEW_HEIGHT: u16 = 6;
 
 #[allow(dead_code)]
 pub(crate) fn render(frame: &mut Frame<'_>, state: &TuiState) {
     let queue_height = queue_preview_height(state);
+    let completion_height = completion_preview_height(state);
     let root = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(3),
             Constraint::Length(queue_height),
+            Constraint::Length(completion_height),
+            Constraint::Length(1),
             Constraint::Length(3),
             Constraint::Length(1),
         ])
         .split(frame.area());
-    let input_inner = bordered_inner(root[2]);
+    let input_inner = bordered_inner(root[4]);
     let input_viewport = state.input_viewport(usize::from(input_inner.width));
 
     frame.render_widget(
@@ -51,6 +55,18 @@ pub(crate) fn render(frame: &mut Frame<'_>, state: &TuiState) {
             root[1],
         );
     }
+    if completion_height > 0 {
+        frame.render_widget(Paragraph::new(completion_lines(state, root[2])), root[2]);
+    }
+    let interaction_style = if state.is_active_run() {
+        semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD)
+    } else {
+        semantic_style(state, SemanticColor::Status)
+    };
+    frame.render_widget(
+        Paragraph::new(state.interaction_status_text()).style(interaction_style),
+        root[3],
+    );
     frame.render_widget(
         Paragraph::new(input_viewport.text)
             .style(semantic_style(state, SemanticColor::Focus))
@@ -62,12 +78,12 @@ pub(crate) fn render(frame: &mut Frame<'_>, state: &TuiState) {
                     .border_style(semantic_style(state, SemanticColor::Focus))
                     .title_style(semantic_style(state, SemanticColor::Focus)),
             ),
-        root[2],
+        root[4],
     );
     set_input_cursor(frame, input_inner, input_viewport.cursor_column);
     frame.render_widget(
         Paragraph::new(state.status_text()).style(semantic_style(state, SemanticColor::Status)),
-        root[3],
+        root[5],
     );
 }
 
@@ -145,6 +161,17 @@ fn queue_preview_height(state: &TuiState) -> u16 {
     } else {
         0
     }
+}
+
+fn completion_preview_height(state: &TuiState) -> u16 {
+    state
+        .completion_menu()
+        .map(|menu| {
+            u16::try_from(menu.items().len())
+                .unwrap_or(MAX_COMPLETION_PREVIEW_HEIGHT)
+                .min(MAX_COMPLETION_PREVIEW_HEIGHT)
+        })
+        .unwrap_or(0)
 }
 
 fn timeline_lines(state: &TuiState, region: Rect) -> Vec<Line<'static>> {
@@ -488,6 +515,45 @@ fn queue_lines(state: &TuiState, region: Rect) -> Vec<Line<'static>> {
         queue_lane(state, "Suspended", &queue.suspended, region.width),
         queue_lane(state, "Backlog", &queue.backlog, region.width),
     ]
+}
+
+fn completion_lines(state: &TuiState, region: Rect) -> Vec<Line<'static>> {
+    let Some(menu) = state.completion_menu() else {
+        return Vec::new();
+    };
+    menu.items()
+        .iter()
+        .take(usize::from(region.height))
+        .enumerate()
+        .map(|(index, item)| {
+            let selected = index == menu.selected_index();
+            let base_style = if selected {
+                semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD)
+            } else {
+                semantic_style(state, SemanticColor::Muted)
+            };
+            let marker = if selected { ">" } else { " " };
+            let label_text = format!("{marker} ");
+            let content_width =
+                usize::from(region.width).saturating_sub(label_text.chars().count());
+            let detail_width = if item.detail().is_some_and(|detail| !detail.is_empty()) {
+                content_width / 2
+            } else {
+                0
+            };
+            let detail_text = item
+                .detail()
+                .filter(|detail| !detail.is_empty() && detail_width > 2)
+                .map(|detail| format!("  {}", truncate_chars(detail, detail_width - 2)))
+                .unwrap_or_default();
+            let value_width = content_width.saturating_sub(detail_text.chars().count());
+            Line::from(vec![
+                Span::styled(label_text, base_style),
+                Span::styled(truncate_chars(item.value(), value_width), base_style),
+                Span::styled(detail_text, semantic_style(state, SemanticColor::Muted)),
+            ])
+        })
+        .collect()
 }
 
 fn queue_lane(

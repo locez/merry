@@ -13,7 +13,7 @@ use std::{
 use thiserror::Error;
 
 const SKILLS_INTRO: &str = "A skill is a set of local instructions stored in a `SKILL.md` file. The list below is for discovery only; skill bodies stay on disk until needed.";
-const SKILLS_HOW_TO_USE: &str = r#"- If the user explicitly names a skill, use it for that turn.
+const SKILLS_HOW_TO_USE: &str = r#"- If the user explicitly names a skill, including with a `$skill-name` token, use it for that turn.
 - If the task clearly matches a skill description, read that skill's `SKILL.md` before relying on it.
 - Use `workspace_read_file` to read the listed `SKILL.md`.
 - Resolve relative paths mentioned by `SKILL.md` relative to that skill directory.

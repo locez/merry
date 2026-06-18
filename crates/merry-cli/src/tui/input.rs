@@ -68,6 +68,18 @@ impl TextInput {
         self.text = value;
     }
 
+    pub(crate) fn replace_range(&mut self, range: std::ops::Range<usize>, value: &str) {
+        if range.start > range.end
+            || range.end > self.text.len()
+            || !self.text.is_char_boundary(range.start)
+            || !self.text.is_char_boundary(range.end)
+        {
+            return;
+        }
+        self.text.replace_range(range.clone(), value);
+        self.cursor = range.start + value.len();
+    }
+
     pub(crate) fn backspace(&mut self) {
         if self.cursor == 0 {
             return;

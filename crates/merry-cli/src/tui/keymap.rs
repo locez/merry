@@ -5,6 +5,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 pub(crate) enum KeyAction {
     SubmitNext,
     SubmitBacklog,
+    CancelInputOrQuit,
     Interrupt,
     OpenCommandPanel,
     OpenDetails,
@@ -62,7 +63,7 @@ impl Default for Keymap {
                 ),
                 (
                     KeyBinding::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
-                    KeyAction::Quit,
+                    KeyAction::CancelInputOrQuit,
                 ),
                 (
                     KeyBinding::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
@@ -112,6 +113,9 @@ impl Keymap {
         }
         if let Some(binding) = config.submit_backlog.as_deref() {
             keymap.set_binding(parse_binding(binding)?, KeyAction::SubmitBacklog);
+        }
+        if let Some(binding) = config.cancel_input_or_quit.as_deref() {
+            keymap.set_binding(parse_binding(binding)?, KeyAction::CancelInputOrQuit);
         }
         if let Some(binding) = config.interrupt.as_deref() {
             keymap.set_binding(parse_binding(binding)?, KeyAction::Interrupt);
