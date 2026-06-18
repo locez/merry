@@ -1086,6 +1086,39 @@ fn projector_shows_tool_call_arguments_without_completed_noise() {
 }
 
 #[test]
+fn projector_renders_mcp_tools_with_server_and_tool_label() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    let mut projector = TuiProjector::default();
+
+    projector.apply(
+        RuntimeEvent::ToolCallStarted {
+            call: pending_call_with_args(
+                "call-mcp-search",
+                "mcp_openaiDeveloperDocs_search_openai_docs",
+                json!({ "query": "Responses API streaming" }),
+            ),
+            source: source(),
+        },
+        &mut state,
+    );
+
+    assert_eq!(state.timeline().len(), 1);
+    let TimelineItem::Muted { title, detail } = &state.timeline()[0] else {
+        panic!("MCP tool call should render as a compact muted line");
+    };
+    assert_eq!(title, "MCP");
+    assert_eq!(
+        detail,
+        "openaiDeveloperDocs/search_openai_docs query=\"Responses API streaming\""
+    );
+}
+
+#[test]
 fn projector_renders_list_dir_as_listed_path_without_field_label() {
     let mut state = TuiState::new(
         "/repo".into(),

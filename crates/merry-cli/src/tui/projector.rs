@@ -208,6 +208,10 @@ fn started_tool_title_and_detail(
 }
 
 fn tui_tool_title(name: &str) -> &'static str {
+    if parse_mcp_tool_name(name).is_some() {
+        return "MCP";
+    }
+
     match name {
         "run_process" => "Ran",
         "workspace_read_file" => "Read",
@@ -220,6 +224,14 @@ fn tui_tool_title(name: &str) -> &'static str {
 }
 
 fn tui_tool_detail(name: &str, arguments: &serde_json::Map<String, Value>) -> String {
+    if let Some((server, tool)) = parse_mcp_tool_name(name) {
+        let detail = format_tool_call_detail(name, arguments);
+        return match detail {
+            Some(detail) if !detail.is_empty() => format!("{server}/{tool} {detail}"),
+            _ => format!("{server}/{tool}"),
+        };
+    }
+
     match name {
         "workspace_read_file" | "workspace_list_dir" => arguments
             .get("path")
@@ -228,6 +240,15 @@ fn tui_tool_detail(name: &str, arguments: &serde_json::Map<String, Value>) -> St
             .to_owned(),
         _ => format_tool_call_detail(name, arguments).unwrap_or_else(|| name.to_owned()),
     }
+}
+
+fn parse_mcp_tool_name(name: &str) -> Option<(&str, &str)> {
+    let rest = name.strip_prefix("mcp_")?;
+    let (server, tool) = rest.split_once('_')?;
+    if server.is_empty() || tool.is_empty() {
+        return None;
+    }
+    Some((server, tool))
 }
 
 fn success_tool_preview(name: &str, output: &str) -> Option<String> {
