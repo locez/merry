@@ -284,6 +284,33 @@ fn generic_executor_admission_allows_read_only_and_rejects_mutating_actions() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn trusted_external_tools_are_allowed_without_commit_lifecycle() {
+    let executor = SuccessfulToolExecutor::new();
+    let (runtime, pending) = register_policy_pending_tool(
+        "runtime-policy-trusted-external",
+        "trusted_external_tool",
+        "call-trusted-external",
+        ToolActionKind::TrustedExternal,
+        executor.clone(),
+    )
+    .await;
+
+    let events = runtime
+        .execute_tool_call(pending.id(), ToolExecutionContext::default())
+        .await
+        .expect("trusted external tool execution should be allowed");
+
+    assert_eq!(executor.call_count(), 1);
+    assert_eq!(
+        event_kind_names_for_tool_execution(&events),
+        ["ArtifactRecorded", "ToolCallResolved"]
+    );
+    let result = resolved_tool_result(&events);
+    assert_eq!(result.status(), merry_core::ToolCallResultStatus::Succeeded);
+    assert!(runtime.pending_tool_calls().await.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn workspace_write_tool_is_denied_before_executor_and_records_sanitized_failure_artifact() {
     let executor = SuccessfulToolExecutor::new();
     let (runtime, pending) = register_policy_pending_tool(
