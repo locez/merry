@@ -9,7 +9,8 @@ use crate::provider_config::{
     openai_provider_config_bundle,
 };
 use crate::runtime_config::{
-    action_process_backend_options, automatic_compaction_config, subagents_config,
+    action_process_backend_options, automatic_compaction_config, generation_config,
+    main_reasoning_effort, subagents_config,
 };
 use crate::sandbox::ChildHandoff as SandboxChildHandoff;
 use merry_runtime::{
@@ -20,6 +21,7 @@ use std::{env, path::PathBuf};
 pub(crate) struct TuiRuntimeSession {
     pub(crate) workspace_root: PathBuf,
     pub(crate) model_label: String,
+    pub(crate) reasoning_effort_label: String,
     pub(crate) stream: InteractiveRunEventStream,
     pub(crate) input: AgentLoopInput,
     pub(crate) control: AgentLoopControl,
@@ -47,6 +49,10 @@ pub(crate) async fn start_tui_runtime_session(
     } = openai_provider_bundle(config, unexpected)?;
     let RuntimePrimaryProviderConfig { provider, model } = primary;
     let model_label = model.as_str().to_owned();
+    let reasoning_effort_label = main_reasoning_effort(merry_config)
+        .map_err(unexpected)?
+        .as_str()
+        .to_owned();
     let workspace_root = env::current_dir().map_err(unexpected)?;
     let backend = action_process_runner(
         &workspace_root,
@@ -76,13 +82,18 @@ pub(crate) async fn start_tui_runtime_session(
     let loop_config = coding_agent_loop_config()?;
     let skills = runtime.skills().await;
     let interactive = runtime
-        .start_interactive_agent_run(StepContext::new(Default::default()), loop_config)
+        .start_interactive_agent_run(
+            StepContext::new(Default::default())
+                .with_generation_config(generation_config(merry_config).map_err(unexpected)?),
+            loop_config,
+        )
         .map_err(unexpected)?;
     let (stream, input, control) = interactive.split();
 
     Ok(TuiRuntimeSession {
         workspace_root,
         model_label,
+        reasoning_effort_label,
         stream,
         input,
         control,

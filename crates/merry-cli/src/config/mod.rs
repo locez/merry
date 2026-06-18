@@ -854,6 +854,13 @@ roots = ["skills", "~/shared-skills", "/opt/company/skills"]
             .expect("example provider should validate");
         assert_eq!(provider.model.as_deref(), Some("gpt-4.1-mini"));
         assert_eq!(
+            provider
+                .reasoning_effort
+                .as_ref()
+                .map(|effort| effort.as_str()),
+            Some("medium")
+        );
+        assert_eq!(
             provider.base_url.as_deref(),
             Some("https://api.openai.com/v1")
         );

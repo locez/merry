@@ -8,6 +8,7 @@ use merry_core::{
     ErrorInfo, RuntimeJournalEvent, RuntimeJournalPayload, SubagentId, SubagentTaskId,
     ToolCallResultStatus, ToolName,
 };
+use merry_llm::GenerationConfig;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     path::PathBuf,
@@ -61,6 +62,8 @@ pub struct ChildRuntimeInput {
     pub workspace_scope: ChildWorkspaceScope,
     /// Delegation depth assigned to this child.
     pub depth: u8,
+    /// Child-scoped model generation controls selected by the parent agent.
+    pub generation_config: GenerationConfig,
 }
 
 /// Parent-authored workspace scope carried into child runtime construction.
@@ -150,6 +153,7 @@ struct ChildLoopLaunch {
     task: SubagentTaskSpec,
     token: CancellationToken,
     runtime: Runtime,
+    generation_config: GenerationConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -371,6 +375,7 @@ impl SubagentManager {
         token: CancellationToken,
     ) {
         let child_session_id = child_session_id();
+        let generation_config = generation_config_for_child_task(&task);
         let runtime = match self.factory.build_child(ChildRuntimeInput {
             session_id: child_session_id,
             task_anchor,
@@ -378,6 +383,7 @@ impl SubagentManager {
             allowed_tools: task.allowed_tools().to_vec(),
             workspace_scope: ChildWorkspaceScope::from_task(&task),
             depth: 1,
+            generation_config: generation_config.clone(),
         }) {
             Ok(runtime) => runtime,
             Err(error) => {
@@ -398,6 +404,7 @@ impl SubagentManager {
                 task,
                 token,
                 runtime,
+                generation_config,
             },
         );
     }
@@ -601,6 +608,7 @@ fn spawn_reserved_child(
     start: &ReservedChildStart,
 ) -> Result<(), RuntimeError> {
     let child_session_id = child_session_id();
+    let generation_config = generation_config_for_child_task(&start.task);
     let runtime = scheduler.factory.build_child(ChildRuntimeInput {
         session_id: child_session_id,
         task_anchor: start.task_anchor.clone(),
@@ -608,6 +616,7 @@ fn spawn_reserved_child(
         allowed_tools: start.task.allowed_tools().to_vec(),
         workspace_scope: ChildWorkspaceScope::from_task(&start.task),
         depth: 1,
+        generation_config: generation_config.clone(),
     })?;
 
     spawn_child_loop(
@@ -617,6 +626,7 @@ fn spawn_reserved_child(
             task: start.task.clone(),
             token: start.cancellation_token.clone(),
             runtime,
+            generation_config,
         },
     );
 
@@ -660,7 +670,11 @@ fn spawn_child_loop(scheduler: ChildScheduler, launch: ChildLoopLaunch) {
 
         let loop_result = launch
             .runtime
-            .run_agent_loop(input, StepContext::new(launch.token), config)
+            .run_agent_loop(
+                input,
+                StepContext::new(launch.token).with_generation_config(launch.generation_config),
+                config,
+            )
             .await;
         let child_projection = match &loop_result {
             Ok(result) => ChildLoopProjection::from_result(&launch.runtime, result).await,
@@ -693,6 +707,10 @@ fn spawn_child_loop(scheduler: ChildScheduler, launch: ChildLoopLaunch) {
         scheduler.notify.notify_waiters();
         start_reserved_children_iteratively(scheduler, to_start).await;
     });
+}
+
+fn generation_config_for_child_task(task: &SubagentTaskSpec) -> GenerationConfig {
+    GenerationConfig::default().with_reasoning_effort(task.reasoning_effort().cloned())
 }
 
 fn paths_to_strings(paths: &[PathBuf]) -> Vec<String> {
@@ -1076,7 +1094,8 @@ mod manager_tests {
     use merry_llm::{
         FinishReason, ModelCapabilities, ModelError, ModelEvent, ModelEventStream, ModelName,
         ModelOutput, ModelProvider, ModelProviderFuture, ModelRequest, ModelResponse,
-        ModelStreamContext, ModelToolCall, ModelToolCallId, ToolArguments,
+        ModelStreamContext, ModelToolCall, ModelToolCallId, ReasoningEffort, ToolArguments,
+        testing::FakeModelProvider,
     };
     use schemars::Schema;
     use serde_json::{Map, json};
@@ -1217,6 +1236,41 @@ mod manager_tests {
                 >();
                 Ok(Box::pin(stream) as merry_llm::ModelEventStream)
             })
+        }
+    }
+
+    #[derive(Clone)]
+    struct RecordingModelChildFactory {
+        provider: FakeModelProvider,
+    }
+
+    impl RecordingModelChildFactory {
+        fn new() -> Self {
+            Self {
+                provider: FakeModelProvider::new(vec![Ok(ModelEvent::Completed {
+                    response: ModelResponse::new(
+                        vec![ModelOutput::text("child done")],
+                        FinishReason::Stop,
+                        None,
+                    ),
+                })]),
+            }
+        }
+
+        fn recorded_requests(&self) -> Vec<ModelRequest> {
+            self.provider.recorded_requests()
+        }
+    }
+
+    impl ChildRuntimeFactory for RecordingModelChildFactory {
+        fn build_child(&self, input: ChildRuntimeInput) -> Result<Runtime, crate::RuntimeError> {
+            Runtime::builder(input.session_id)
+                .task_anchor(input.task_anchor)
+                .model_provider(
+                    Arc::new(self.provider.clone()),
+                    ModelName::new("fake/recording-child").expect("valid model name"),
+                )
+                .build()
         }
     }
 
@@ -1789,6 +1843,77 @@ mod manager_tests {
             vec!["subagent-output.txt".to_owned()]
         );
         assert!(wait.agents[0].output_paths.is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn child_model_request_uses_task_reasoning_effort() {
+        let factory = Arc::new(RecordingModelChildFactory::new());
+        let manager = SubagentManager::new(
+            SessionId::new("parent").expect("valid id"),
+            SubagentConfig::default(),
+            factory.clone(),
+        );
+        let task = SubagentTaskSpec::new("Run a cheap child task.", 1)
+            .expect("valid task")
+            .with_reasoning_effort(Some(
+                ReasoningEffort::new("low").expect("valid reasoning effort"),
+            ));
+        let output = manager
+            .spawn(vec![task], Some(1), CancellationToken::new())
+            .await
+            .expect("spawn should succeed");
+        let agent_id = output.spawned[0].agent_id.clone();
+
+        manager
+            .wait(
+                std::slice::from_ref(&agent_id),
+                WaitMode::All,
+                Some(Duration::from_millis(100)),
+            )
+            .await
+            .expect("child should complete");
+        let requests = factory.recorded_requests();
+
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0]
+                .generation()
+                .reasoning_effort()
+                .map(|effort| effort.as_str()),
+            Some("low")
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn child_model_request_omits_reasoning_effort_when_task_does_not_set_it() {
+        let factory = Arc::new(RecordingModelChildFactory::new());
+        let manager = SubagentManager::new(
+            SessionId::new("parent").expect("valid id"),
+            SubagentConfig::default(),
+            factory.clone(),
+        );
+        let output = manager
+            .spawn(
+                vec![SubagentTaskSpec::new("Run a default child task.", 1).expect("valid task")],
+                Some(1),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("spawn should succeed");
+        let agent_id = output.spawned[0].agent_id.clone();
+
+        manager
+            .wait(
+                std::slice::from_ref(&agent_id),
+                WaitMode::All,
+                Some(Duration::from_millis(100)),
+            )
+            .await
+            .expect("child should complete");
+        let requests = factory.recorded_requests();
+
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].generation().reasoning_effort(), None);
     }
 
     #[tokio::test(flavor = "current_thread")]

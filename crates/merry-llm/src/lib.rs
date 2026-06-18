@@ -18,8 +18,8 @@ pub use event::ModelEvent;
 pub use provider::{ModelEventStream, ModelProvider, ModelProviderFuture, ModelStreamContext};
 pub use request::{
     GenerationConfig, ModelContent, ModelInputItem, ModelMessage, ModelMessageRole, ModelName,
-    ModelRequest, ModelResponseFormat, ModelStructuredOutputFormat, RequestContentHash,
-    ToolProfileHash,
+    ModelRequest, ModelResponseFormat, ModelStructuredOutputFormat, ReasoningEffort,
+    RequestContentHash, ToolProfileHash,
 };
 pub use response::{FinishReason, ModelOutput, ModelResponse};
 pub use retry::{

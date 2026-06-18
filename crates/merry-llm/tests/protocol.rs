@@ -8,7 +8,8 @@ use merry_llm::{
     ModelEventStream, ModelInputItem, ModelMessage, ModelMessageRole, ModelName, ModelOutput,
     ModelProvider, ModelProviderFuture, ModelRequest, ModelResponse, ModelResponseFormat,
     ModelStreamContext, ModelStructuredOutputFormat, ModelToolCall, ModelToolCallId,
-    ModelToolContinuation, ModelToolResult, ModelToolResultContent, ToolArguments, Usage,
+    ModelToolContinuation, ModelToolResult, ModelToolResultContent, ReasoningEffort, ToolArguments,
+    Usage,
 };
 use schemars::{JsonSchema, Schema};
 use serde::{Serialize, de::DeserializeOwned};
@@ -490,6 +491,9 @@ fn validation_rejects_invalid_protocol_values() {
     assert!(ModelName::new(&overlong).is_err());
     assert!(ModelToolCallId::new(&overlong).is_err());
     assert!(GenerationConfig::new(Some(0), false).is_err());
+    assert!(ReasoningEffort::new("").is_err());
+    assert!(ReasoningEffort::new(" leading").is_err());
+    assert!(ReasoningEffort::new("has\nnewline").is_err());
     assert!(ModelCapabilities::new(true, false, false, false, Some(0), None).is_err());
 
     assert!(ToolArguments::try_from(json!("not an object")).is_err());
@@ -725,6 +729,28 @@ fn model_request_constructors_preserve_compatibility_and_continuations() {
     }))
     .expect("old request JSON without continuations should deserialize");
     assert!(decoded_without_continuations.continuations().is_empty());
+
+    let decoded_with_reasoning = serde_json::from_value::<ModelRequest>(json!({
+        "model": "vendor/model-family:2025-04-14",
+        "messages": [{
+            "role": "user",
+            "content": { "type": "text", "text": "Think carefully." }
+        }],
+        "tools": [],
+        "generation": {
+            "max_output_tokens": 128,
+            "allow_parallel_tool_calls": false,
+            "reasoning_effort": "high"
+        }
+    }))
+    .expect("request JSON with reasoning effort should deserialize");
+    assert_eq!(
+        decoded_with_reasoning
+            .generation()
+            .reasoning_effort()
+            .map(|effort| effort.as_str()),
+        Some("high")
+    );
 }
 
 #[test]

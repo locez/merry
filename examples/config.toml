@@ -115,6 +115,10 @@ format = "json"
 [providers.default]
 provider = "openai-compatible"
 model = "gpt-4.1-mini"
+# Optional. Sent as Responses API reasoning.effort when supported by the model.
+# Leave unset to use provider/model defaults. Common OpenAI values include
+# minimal, low, medium, high, and model-dependent xhigh.
+reasoning_effort = "medium"
 
 [providers.retry]
 # Provider-neutral retry policy for transient model setup or stream failures.

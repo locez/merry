@@ -238,7 +238,12 @@ fn task_spec_from_input(
         write_scope,
         forbidden_paths,
         expected_output,
+        reasoning_effort,
     } = input;
+    let reasoning_effort = reasoning_effort
+        .map(|value| merry_llm::ReasoningEffort::new(&value))
+        .transpose()
+        .map_err(|error| InvalidSubagentToolArguments::new(error.to_string()))?;
 
     SubagentTaskSpec::new(task, max_model_turns.unwrap_or(DEFAULT_MAX_MODEL_TURNS))
         .map_err(InvalidSubagentToolArguments::from)?
@@ -250,7 +255,10 @@ fn task_spec_from_input(
         .map_err(InvalidSubagentToolArguments::from)?
         .with_forbidden_paths(forbidden_paths.unwrap_or_default())
         .map_err(InvalidSubagentToolArguments::from)
-        .map(|task| task.with_expected_output(expected_output))
+        .map(|task| {
+            task.with_expected_output(expected_output)
+                .with_reasoning_effort(reasoning_effort)
+        })
 }
 
 fn succeeded_json_output<T>(tool_name: &str, output: &T) -> ToolExecutionResult
@@ -401,7 +409,8 @@ mod tests {
                     "read_scope": ["crates/merry-runtime/src"],
                     "write_scope": ["tmp/subagent-output"],
                     "forbidden_paths": ["target", ".git"],
-                    "expected_output": "Return a compact findings list."
+                    "expected_output": "Return a compact findings list.",
+                    "reasoning_effort": "low"
                 }]
             }),
         );
@@ -466,6 +475,13 @@ mod tests {
         assert_eq!(
             captured[0].task.expected_output(),
             Some("Return a compact findings list.")
+        );
+        assert_eq!(
+            captured[0]
+                .task
+                .reasoning_effort()
+                .map(|effort| effort.as_str()),
+            Some("low")
         );
     }
 
@@ -595,6 +611,7 @@ mod tests {
             json!({ "tasks": [{ "task": " " }] }),
             json!({ "tasks": [{ "task": "Bad path.", "read_scope": ["../secret"] }] }),
             json!({ "tasks": [{ "task": "Bad control path.", "read_scope": ["bad\npath"] }] }),
+            json!({ "tasks": [{ "task": "Bad effort.", "reasoning_effort": "bad\neffort" }] }),
         ] {
             let call = pending_call(SPAWN_SUBAGENTS_TOOL_NAME, arguments);
             let outcome = executor

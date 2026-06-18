@@ -2,7 +2,10 @@ use crate::cli_error::{CliError, unexpected};
 use crate::coding_runtime::ActionProcessBackendOptions;
 use crate::config::{self, EffectiveLogSettings, MerryConfig, XdgPaths};
 use merry_core::SessionId;
+use merry_llm::{GenerationConfig, ReasoningEffort};
 use merry_runtime::{AutomaticCompactionConfig, Runtime, RuntimeBuilder};
+
+const DEFAULT_MAIN_REASONING_EFFORT: &str = "medium";
 
 pub(crate) fn validate_loaded_config(
     config: Option<&MerryConfig>,
@@ -53,6 +56,32 @@ pub(crate) fn subagents_config(
         .map(Option::unwrap_or_default)
 }
 
+pub(crate) fn generation_config(
+    config: Option<&MerryConfig>,
+) -> Result<GenerationConfig, config::ConfigError> {
+    let reasoning_effort = main_reasoning_effort(config)?;
+    Ok(GenerationConfig::default().with_reasoning_effort(Some(reasoning_effort)))
+}
+
+pub(crate) fn main_reasoning_effort(
+    config: Option<&MerryConfig>,
+) -> Result<ReasoningEffort, config::ConfigError> {
+    config
+        .map(MerryConfig::openai_compatible_provider)
+        .transpose()?
+        .and_then(|provider| provider.reasoning_effort)
+        .map_or_else(
+            || {
+                ReasoningEffort::new(DEFAULT_MAIN_REASONING_EFFORT).map_err(|error| {
+                    config::ConfigError::Invalid(format!(
+                        "default reasoning effort is invalid: {error}"
+                    ))
+                })
+            },
+            Ok,
+        )
+}
+
 pub(crate) fn action_process_backend_options(
     config: Option<&MerryConfig>,
 ) -> Result<ActionProcessBackendOptions, config::ConfigError> {
@@ -79,7 +108,7 @@ pub(crate) fn configured_runtime_builder(
 
 #[cfg(test)]
 mod tests {
-    use super::configured_runtime_builder;
+    use super::{configured_runtime_builder, generation_config};
     use crate::config::{MerryConfig, XdgPaths};
     use crate::runtime_events::collect_runtime_step_events;
     use crate::testing::ScriptedProvider;
@@ -89,6 +118,61 @@ mod tests {
     };
     use merry_runtime::{RuntimeModelRole, StepContext, StepInput};
     use std::{path::PathBuf, sync::Arc};
+
+    #[test]
+    fn generation_config_uses_provider_default_reasoning_effort() {
+        let paths = XdgPaths::from_parts(PathBuf::from("/home/alice"), None, None);
+        let config = MerryConfig::load_optional_from_text(
+            Some(
+                r#"
+[providers.default]
+provider = "openai-compatible"
+model = "gpt-test"
+reasoning_effort = "low"
+
+[providers.openai-compatible]
+api_key = "sk-test"
+"#,
+            ),
+            &paths,
+        )
+        .expect("config should parse")
+        .expect("config should be present");
+
+        let generation = generation_config(Some(&config)).expect("generation config should load");
+
+        assert_eq!(
+            generation.reasoning_effort().map(|effort| effort.as_str()),
+            Some("low")
+        );
+    }
+
+    #[test]
+    fn generation_config_defaults_main_reasoning_effort_to_medium() {
+        let paths = XdgPaths::from_parts(PathBuf::from("/home/alice"), None, None);
+        let config = MerryConfig::load_optional_from_text(
+            Some(
+                r#"
+[providers.default]
+provider = "openai-compatible"
+model = "gpt-test"
+
+[providers.openai-compatible]
+api_key = "sk-test"
+"#,
+            ),
+            &paths,
+        )
+        .expect("config should parse")
+        .expect("config should be present");
+
+        let generation = generation_config(Some(&config)).expect("generation config should load");
+
+        assert_eq!(
+            generation.reasoning_effort().map(|effort| effort.as_str()),
+            Some("medium")
+        );
+    }
 
     #[tokio::test]
     async fn configured_runtime_builder_applies_auto_compaction_config() {

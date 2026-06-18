@@ -3,7 +3,8 @@
 use crate::{
     OpenAiProviderError,
     wire::{
-        ResponsesInputItem, ResponsesRequest, ResponsesText, ResponsesTextFormat, ResponsesTool,
+        ResponsesInputItem, ResponsesReasoning, ResponsesRequest, ResponsesText,
+        ResponsesTextFormat, ResponsesTool,
     },
 };
 use merry_llm::{
@@ -53,6 +54,12 @@ pub(crate) fn render_responses_request_with_prompt_cache_key(
         parallel_tool_calls: false,
         prompt_cache_key,
         max_output_tokens: request.generation().max_output_tokens(),
+        reasoning: request
+            .generation()
+            .reasoning_effort()
+            .map(|effort| ResponsesReasoning {
+                effort: effort.as_str(),
+            }),
         text: render_response_format(request.response_format())?,
         tool_choice: if tools.is_empty() { None } else { Some("auto") },
         tools,

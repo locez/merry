@@ -38,6 +38,7 @@ pub(crate) async fn run(
         keymap,
         theme,
     );
+    state.set_reasoning_effort_label(Some(session.reasoning_effort_label.clone()));
     state.set_completion_skills(session.skills.clone());
     let terminal = TerminalSession::enter().map_err(crate::cli_error::unexpected)?;
     controller::run_controller(terminal, session, state).await

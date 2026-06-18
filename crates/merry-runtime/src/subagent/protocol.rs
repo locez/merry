@@ -32,6 +32,8 @@ pub struct SpawnSubagentTaskInput {
     pub forbidden_paths: Option<Vec<String>>,
     /// Optional expected output instruction.
     pub expected_output: Option<String>,
+    /// Optional child model reasoning-effort override.
+    pub reasoning_effort: Option<String>,
 }
 
 /// Provider-visible output for `spawn_subagents`.
