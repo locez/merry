@@ -8,6 +8,8 @@ const MAX_INPUT_HISTORY: usize = 200;
 pub(crate) struct TextInputViewport {
     pub(crate) text: String,
     pub(crate) cursor_column: usize,
+    pub(crate) cursor_row: usize,
+    pub(crate) visible_rows: usize,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -32,11 +34,21 @@ impl TextInput {
     }
 
     pub(crate) fn viewport(&self, max_width: usize) -> TextInputViewport {
+        self.viewport_rows(max_width, usize::MAX)
+    }
+
+    pub(crate) fn viewport_rows(&self, max_width: usize, max_rows: usize) -> TextInputViewport {
         if max_width == 0 {
             return TextInputViewport {
                 text: String::new(),
                 cursor_column: 0,
+                cursor_row: 0,
+                visible_rows: 1,
             };
+        }
+
+        if self.text.contains('\n') {
+            return self.multiline_viewport(max_width, max_rows.max(1));
         }
 
         let full_cursor_column = self.cursor_column();
@@ -50,6 +62,8 @@ impl TextInput {
         TextInputViewport {
             text: self.text[start..end].to_owned(),
             cursor_column,
+            cursor_row: 0,
+            visible_rows: 1,
         }
     }
 
@@ -61,6 +75,10 @@ impl TextInput {
     pub(crate) fn insert_str(&mut self, value: &str) {
         self.text.insert_str(self.cursor, value);
         self.cursor += value.len();
+    }
+
+    pub(crate) fn insert_newline(&mut self) {
+        self.insert_char('\n');
     }
 
     pub(crate) fn replace_text(&mut self, value: String) {
@@ -212,6 +230,42 @@ impl TextInput {
         }
         (start, width)
     }
+
+    fn multiline_viewport(&self, max_width: usize, max_rows: usize) -> TextInputViewport {
+        let cursor_line_index = self.text[..self.cursor]
+            .bytes()
+            .filter(|value| *value == b'\n')
+            .count();
+        let cursor_line_start = self.text[..self.cursor]
+            .rfind('\n')
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        let cursor_line_end = self.text[self.cursor..]
+            .find('\n')
+            .map(|offset| self.cursor + offset)
+            .unwrap_or(self.text.len());
+        let cursor_line = &self.text[cursor_line_start..cursor_line_end];
+        let cursor_byte_index = self.cursor - cursor_line_start;
+        let (cursor_line_text, cursor_column) =
+            visible_line_around_cursor(cursor_line, cursor_byte_index, max_width);
+
+        let mut visible_lines = self
+            .text
+            .split('\n')
+            .map(|line| visible_line_prefix(line, max_width))
+            .collect::<Vec<_>>();
+        visible_lines[cursor_line_index] = cursor_line_text;
+        let start = cursor_line_index.saturating_add(1).saturating_sub(max_rows);
+        let end = start.saturating_add(max_rows).min(visible_lines.len());
+        let visible_lines = visible_lines[start..end].to_vec();
+
+        TextInputViewport {
+            text: visible_lines.join("\n"),
+            cursor_column,
+            cursor_row: cursor_line_index.saturating_sub(start),
+            visible_rows: visible_lines.len().max(1),
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -298,6 +352,40 @@ fn visible_text_end(text: &str, start: usize, max_width: usize) -> usize {
         end = start + offset + value.len_utf8();
     }
     end
+}
+
+fn visible_line_prefix(text: &str, max_width: usize) -> String {
+    text[..visible_text_end(text, 0, max_width)].to_owned()
+}
+
+fn visible_line_around_cursor(
+    line: &str,
+    cursor_byte_index: usize,
+    max_width: usize,
+) -> (String, usize) {
+    let cursor_column = UnicodeWidthStr::width(&line[..cursor_byte_index]);
+    if cursor_column < max_width {
+        return (visible_line_prefix(line, max_width), cursor_column);
+    }
+
+    let (start, visible_cursor_column) =
+        viewport_start_before_text_cursor(&line[..cursor_byte_index], max_width.saturating_sub(1));
+    let end = visible_text_end(line, start, max_width);
+    (line[start..end].to_owned(), visible_cursor_column)
+}
+
+fn viewport_start_before_text_cursor(text: &str, max_width_before_cursor: usize) -> (usize, usize) {
+    let mut start = text.len();
+    let mut width = 0;
+    for (index, value) in text.char_indices().rev() {
+        let value_width = char_width(value);
+        if width + value_width > max_width_before_cursor {
+            break;
+        }
+        width += value_width;
+        start = index;
+    }
+    (start, width)
 }
 
 fn char_width(value: char) -> usize {
