@@ -1273,6 +1273,7 @@ dependencies = [
  "futures-util",
  "merry-core",
  "merry-llm",
+ "merry-mcp",
  "merry-provider-openai",
  "merry-runtime",
  "merry-tool-workspace",

@@ -69,6 +69,15 @@ enabled = false
 max_threads = 6
 max_depth = 1
 
+# User-configured MCP servers are trusted external tools. HTTP MCP endpoints
+# are allowed to use the network because registering them in global config is
+# an explicit user grant.
+#
+# [mcp.context7]
+# url = "https://mcp.example.test/mcp"
+# headers = { Authorization = "Bearer replace-with-your-token" }
+# tools = ["resolve-library-id", "get-library-docs"]
+
 [tui.theme]
 # Semantic color names keep component styling configurable without changing
 # rendering code.

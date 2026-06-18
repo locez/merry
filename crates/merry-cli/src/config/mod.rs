@@ -6,9 +6,11 @@ use std::{
 };
 use thiserror::Error;
 
+mod mcp;
 mod provider;
 mod runtime;
 
+use mcp::McpToml;
 pub use provider::EffectiveOpenAiProviderConfig;
 use provider::ProvidersToml;
 use runtime::RuntimeToml;
@@ -359,6 +361,7 @@ struct MerryConfigToml {
     models: Option<ModelsToml>,
     observability: Option<ObservabilityToml>,
     providers: Option<ProvidersToml>,
+    mcp: Option<McpToml>,
     tui: Option<TuiToml>,
 }
 
@@ -592,6 +595,42 @@ mod tests {
             MerryConfig::load_optional_from_text(None, &XdgPaths::from_parts(home(), None, None))
                 .expect("missing config should not fail optional load");
         assert!(loaded.is_none());
+    }
+
+    #[test]
+    fn parses_mcp_http_servers() {
+        let paths = XdgPaths::from_parts(home(), None, None);
+        let config = MerryConfig::load_optional_from_text(
+            Some(
+                r#"
+[mcp.context7]
+url = "https://mcp.example.test/mcp"
+headers = { Authorization = "Bearer test-token" }
+tools = ["resolve-library-id", "get-library-docs"]
+"#,
+            ),
+            &paths,
+        )
+        .expect("config should parse")
+        .expect("config should be present");
+
+        let servers = config
+            .mcp_servers()
+            .expect("MCP server config should validate");
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].id(), "context7");
+        assert_eq!(servers[0].url(), "https://mcp.example.test/mcp");
+        assert_eq!(
+            servers[0].headers(),
+            &[("Authorization".to_owned(), "Bearer test-token".to_owned())]
+        );
+        assert_eq!(
+            servers[0].tools().expect("tools allowlist should parse"),
+            &[
+                "resolve-library-id".to_owned(),
+                "get-library-docs".to_owned()
+            ]
+        );
     }
 
     #[test]
