@@ -15,26 +15,28 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 const QUEUE_PREVIEW_HEIGHT: u16 = 5;
 const MAX_COMPLETION_PREVIEW_HEIGHT: u16 = 6;
 const MAX_INPUT_VISIBLE_ROWS: usize = 5;
+const INTERACTION_HEIGHT: u16 = 1;
+const STATUS_HEIGHT: u16 = 1;
+const MIN_TIMELINE_HEIGHT: u16 = 3;
+const MIN_INPUT_HEIGHT: u16 = 3;
 
 #[allow(dead_code)]
 pub(crate) fn render(frame: &mut Frame<'_>, state: &TuiState) {
-    let queue_height = queue_preview_height(state);
-    let completion_height = completion_preview_height(state);
-    let input_height = input_region_height(state);
+    let pane_heights = pane_heights(state, frame.area().height);
     let root = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(3),
-            Constraint::Length(queue_height),
-            Constraint::Length(completion_height),
-            Constraint::Length(1),
-            Constraint::Length(input_height),
-            Constraint::Length(1),
+            Constraint::Min(MIN_TIMELINE_HEIGHT),
+            Constraint::Length(pane_heights.queue),
+            Constraint::Length(pane_heights.completion),
+            Constraint::Length(INTERACTION_HEIGHT),
+            Constraint::Length(pane_heights.input),
+            Constraint::Length(STATUS_HEIGHT),
         ])
         .split(frame.area());
     let input_inner = bordered_inner(root[4]);
-    let input_viewport =
-        state.input_viewport_rows(usize::from(input_inner.width), MAX_INPUT_VISIBLE_ROWS);
+    let max_input_rows = usize::from(pane_heights.input.saturating_sub(2)).max(1);
+    let input_viewport = state.input_viewport_rows(usize::from(input_inner.width), max_input_rows);
 
     frame.render_widget(
         Paragraph::new(timeline_lines(state, root[0]))
@@ -48,7 +50,7 @@ pub(crate) fn render(frame: &mut Frame<'_>, state: &TuiState) {
             ),
         root[0],
     );
-    if queue_height > 0 {
+    if pane_heights.queue > 0 {
         frame.render_widget(
             Paragraph::new(queue_lines(state, root[1])).block(
                 Block::default()
@@ -58,7 +60,7 @@ pub(crate) fn render(frame: &mut Frame<'_>, state: &TuiState) {
             root[1],
         );
     }
-    if completion_height > 0 {
+    if pane_heights.completion > 0 {
         frame.render_widget(Paragraph::new(completion_lines(state, root[2])), root[2]);
     }
     let interaction_style = if state.is_active_run() {
@@ -165,7 +167,52 @@ fn set_input_cursor(frame: &mut Frame<'_>, region: Rect, cursor_column: usize, c
     });
 }
 
-fn queue_preview_height(state: &TuiState) -> u16 {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PaneHeights {
+    queue: u16,
+    completion: u16,
+    input: u16,
+}
+
+fn pane_heights(state: &TuiState, total_height: u16) -> PaneHeights {
+    let desired_queue = desired_queue_preview_height(state);
+    let desired_completion = desired_completion_preview_height(state);
+    let desired_input = desired_input_region_height(state, MAX_INPUT_VISIBLE_ROWS);
+    let desired_bottom = desired_queue
+        .saturating_add(desired_completion)
+        .saturating_add(desired_input)
+        .saturating_add(INTERACTION_HEIGHT)
+        .saturating_add(STATUS_HEIGHT);
+
+    if total_height >= desired_bottom.saturating_add(MIN_TIMELINE_HEIGHT) {
+        return PaneHeights {
+            queue: desired_queue,
+            completion: desired_completion,
+            input: desired_input,
+        };
+    }
+
+    let reserved = INTERACTION_HEIGHT
+        .saturating_add(STATUS_HEIGHT)
+        .saturating_add(MIN_TIMELINE_HEIGHT);
+    let mut remaining = total_height.saturating_sub(reserved);
+    let input = desired_input
+        .min(remaining)
+        .max(MIN_INPUT_HEIGHT.min(remaining));
+    remaining = remaining.saturating_sub(input);
+
+    let completion = desired_completion.min(remaining);
+    remaining = remaining.saturating_sub(completion);
+
+    let queue = desired_queue.min(remaining);
+    PaneHeights {
+        queue,
+        completion,
+        input,
+    }
+}
+
+fn desired_queue_preview_height(state: &TuiState) -> u16 {
     if state.has_queue_preview_items() {
         QUEUE_PREVIEW_HEIGHT
     } else {
@@ -173,7 +220,7 @@ fn queue_preview_height(state: &TuiState) -> u16 {
     }
 }
 
-fn completion_preview_height(state: &TuiState) -> u16 {
+fn desired_completion_preview_height(state: &TuiState) -> u16 {
     state
         .completion_menu()
         .map(|menu| {
@@ -184,8 +231,8 @@ fn completion_preview_height(state: &TuiState) -> u16 {
         .unwrap_or(0)
 }
 
-fn input_region_height(state: &TuiState) -> u16 {
-    let visible_rows = state.input_visible_rows(MAX_INPUT_VISIBLE_ROWS);
+fn desired_input_region_height(state: &TuiState, max_rows: usize) -> u16 {
+    let visible_rows = state.input_visible_rows(max_rows);
     u16::try_from(visible_rows)
         .unwrap_or(u16::MAX)
         .saturating_add(2)
