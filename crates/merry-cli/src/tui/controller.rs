@@ -165,7 +165,7 @@ pub(crate) async fn run_controller(
                         render_once(&mut terminal, &state)?;
                     }
                     TerminalEvent::Paste(text) => {
-                        state.insert_input_str(&text);
+                        state.insert_input_paste(&text);
                         render_once(&mut terminal, &state)?;
                     }
                     TerminalEvent::Resize => {

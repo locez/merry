@@ -65,6 +65,71 @@ fn text_input_inserts_deletes_and_takes_trimmed_text() {
 }
 
 #[test]
+fn text_input_preserves_submit_newlines() {
+    let mut input = TextInput::default();
+
+    input.insert_str("\nfirst line\nsecond line\n");
+
+    assert_eq!(
+        input.take_trimmed(),
+        Some("\nfirst line\nsecond line\n".to_owned())
+    );
+    assert_eq!(input.text(), "");
+}
+
+#[test]
+fn text_input_compacts_large_paste_until_submit() {
+    let mut input = TextInput::default();
+    let pasted = "hello world\n".repeat(30);
+    let placeholder = format!("[pasted {} chars]", pasted.chars().count());
+
+    input.insert_str("prefix ");
+    input.insert_paste(&pasted);
+    input.insert_str(" suffix");
+
+    assert_eq!(input.text(), format!("prefix {placeholder} suffix"));
+    assert_eq!(
+        input.take_trimmed(),
+        Some(format!("prefix {pasted} suffix"))
+    );
+}
+
+#[test]
+fn text_input_deletes_large_paste_placeholder_as_one_block() {
+    let mut input = TextInput::default();
+    let pasted = "hello world\n".repeat(30);
+    let placeholder = format!("[pasted {} chars]", pasted.chars().count());
+
+    input.insert_paste(&pasted);
+    assert_eq!(input.text(), placeholder);
+
+    input.backspace();
+
+    assert_eq!(input.text(), "");
+    assert_eq!(input.cursor_byte_index(), 0);
+
+    input.insert_paste(&pasted);
+    input.move_home();
+    input.delete();
+
+    assert_eq!(input.text(), "");
+    assert_eq!(input.cursor_byte_index(), 0);
+}
+
+#[test]
+fn text_input_deleting_paste_placeholder_removes_stale_expansion() {
+    let mut input = TextInput::default();
+    let first = "a".repeat(300);
+    let second = "b".repeat(300);
+
+    input.insert_paste(&first);
+    input.backspace();
+    input.insert_paste(&second);
+
+    assert_eq!(input.take_trimmed(), Some(second));
+}
+
+#[test]
 fn text_input_inserts_pasted_text_at_cursor() {
     let mut input = TextInput::default();
 
@@ -355,6 +420,26 @@ fn controller_submit_next_takes_input_text() {
 
     assert_eq!(effect, ControllerEffect::SubmitNext("now".to_owned()));
     assert_eq!(state.input_text(), "");
+}
+
+#[test]
+fn controller_submit_next_preserves_multiline_input_text() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.insert_input_str("1234");
+    state.insert_input_newline();
+    state.insert_input_str("换行测试");
+
+    let effect = handle_key_action(KeyAction::SubmitNext, &mut state);
+
+    assert_eq!(
+        effect,
+        ControllerEffect::SubmitNext("1234\n换行测试".to_owned())
+    );
 }
 
 #[test]
@@ -1800,6 +1885,26 @@ fn renderer_shows_status_timeline_queue_and_input() {
     assert!(text.contains("Backlog"));
     assert!(text.contains("backlog item"));
     assert!(text.contains("hi"));
+}
+
+#[test]
+fn renderer_preserves_user_message_newlines() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.push_timeline_item(TimelineItem::User {
+        text: "1234\n换行测试".to_owned(),
+        lane: QueuedInputLane::Next,
+    });
+
+    let text = render_to_text(&state, 80, 16);
+
+    assert!(text.contains("user: 1234"));
+    assert!(text.contains("      换 行 测 试"));
+    assert!(!text.contains("user: 1234换行测试"));
 }
 
 #[test]

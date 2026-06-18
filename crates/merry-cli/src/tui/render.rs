@@ -454,19 +454,27 @@ fn user_lines(state: &TuiState, text: &str, lane: QueuedInputLane) -> Vec<Line<'
         QueuedInputLane::Suspended => "user suspended",
         QueuedInputLane::Backlog => "user backlog",
     };
-    let mut spans = vec![
-        Span::styled(
-            label.to_owned(),
-            semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(": ", semantic_style(state, SemanticColor::Muted)),
-    ];
-    spans.extend(inline_code_spans(
-        state,
-        text,
-        semantic_style(state, SemanticColor::Focus),
-    ));
-    vec![Line::from(spans)]
+    let mut lines = Vec::new();
+    for (index, segment) in text.split('\n').enumerate() {
+        let mut spans = if index == 0 {
+            vec![
+                Span::styled(
+                    label.to_owned(),
+                    semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(": ", semantic_style(state, SemanticColor::Muted)),
+            ]
+        } else {
+            vec![Span::raw(" ".repeat(label.chars().count() + 2))]
+        };
+        spans.extend(inline_code_spans(
+            state,
+            segment,
+            semantic_style(state, SemanticColor::Focus),
+        ));
+        lines.push(Line::from(spans));
+    }
+    lines
 }
 
 fn patch_lines(state: &TuiState, changes: &[PatchChangeView]) -> Vec<Line<'static>> {

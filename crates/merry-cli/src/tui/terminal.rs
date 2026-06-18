@@ -30,13 +30,13 @@ impl TerminalSession {
         enable_raw_mode()?;
 
         let mut stdout = stdout();
-        if let Err(err) = execute!(
-            stdout,
-            EnterAlternateScreen,
-            EnableBracketedPaste,
-            EnableMouseCapture,
-            Hide
-        ) {
+        if let Err(err) = execute!(stdout, EnterAlternateScreen, EnableBracketedPaste, Hide) {
+            restore_terminal();
+            return Err(err);
+        }
+        if mouse_capture_enabled()
+            && let Err(err) = execute!(stdout, EnableMouseCapture)
+        {
             restore_terminal();
             return Err(err);
         }
@@ -84,10 +84,12 @@ impl TerminalSession {
 impl Drop for TerminalSession {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
+        if mouse_capture_enabled() {
+            let _ = execute!(self.terminal.backend_mut(), DisableMouseCapture);
+        }
         let _ = execute!(
             self.terminal.backend_mut(),
             Show,
-            DisableMouseCapture,
             DisableBracketedPaste,
             LeaveAlternateScreen
         );
@@ -96,13 +98,15 @@ impl Drop for TerminalSession {
 
 fn restore_terminal() {
     let _ = disable_raw_mode();
-    let _ = execute!(
-        stdout(),
-        Show,
-        DisableMouseCapture,
-        DisableBracketedPaste,
-        LeaveAlternateScreen
-    );
+    let mut stdout = stdout();
+    if mouse_capture_enabled() {
+        let _ = execute!(stdout, DisableMouseCapture);
+    }
+    let _ = execute!(stdout, Show, DisableBracketedPaste, LeaveAlternateScreen);
+}
+
+fn mouse_capture_enabled() -> bool {
+    true
 }
 
 fn mouse_scroll_event(mouse: MouseEvent) -> Option<TerminalEvent> {
@@ -115,7 +119,7 @@ fn mouse_scroll_event(mouse: MouseEvent) -> Option<TerminalEvent> {
 
 #[cfg(test)]
 mod tests {
-    use super::{TerminalEvent, mouse_scroll_event};
+    use super::{TerminalEvent, mouse_capture_enabled, mouse_scroll_event};
     use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
     fn mouse(kind: MouseEventKind) -> MouseEvent {
@@ -152,5 +156,10 @@ mod tests {
         );
         assert_eq!(mouse_scroll_event(mouse(MouseEventKind::ScrollLeft)), None);
         assert_eq!(mouse_scroll_event(mouse(MouseEventKind::ScrollRight)), None);
+    }
+
+    #[test]
+    fn enables_mouse_capture_for_app_owned_timeline_scroll() {
+        assert!(mouse_capture_enabled());
     }
 }

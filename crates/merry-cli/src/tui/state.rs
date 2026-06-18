@@ -274,6 +274,12 @@ impl TuiState {
         self.refresh_completion_menu();
     }
 
+    pub(crate) fn insert_input_paste(&mut self, text: &str) {
+        self.pending_empty_input_quit = false;
+        self.input.insert_paste(text);
+        self.refresh_completion_menu();
+    }
+
     pub(crate) fn insert_input_newline(&mut self) {
         self.pending_empty_input_quit = false;
         self.input.insert_newline();
