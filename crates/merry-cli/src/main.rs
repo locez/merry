@@ -8,6 +8,7 @@ mod cmd;
 mod coding_runtime;
 mod config;
 mod debug;
+mod mcp_tools;
 mod observability;
 mod provider_config;
 mod run;

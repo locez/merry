@@ -5,6 +5,7 @@ use crate::coding_runtime::{
     coding_loop_smoke_admission_from_current_process,
 };
 use crate::config::MerryConfig;
+use crate::mcp_tools::discover_configured_mcp_tools;
 use crate::provider_config::{
     RuntimePrimaryProviderConfig, RuntimeProviderBundle, openai_provider_bundle,
     openai_provider_config_bundle,
@@ -75,6 +76,7 @@ pub(crate) async fn run(
         &root,
         action_process_backend_options(merry_config).map_err(unexpected)?,
     )?;
+    let extra_tools = discover_configured_mcp_tools(merry_config).await?;
     let session_id = default_run_session_id();
     let runtime = build_headless_coding_runtime(HeadlessCodingRuntimeInput {
         session_id: session_id.as_str(),
@@ -84,6 +86,7 @@ pub(crate) async fn run(
         model,
         runner: backend.runner(),
         permissioned_process_runner_factory: backend.permissioned_factory(),
+        extra_tools,
         allow_hidden_workspace_paths: false,
         automatic_compaction: automatic_compaction_config(merry_config).map_err(unexpected)?,
         retry_policy,
@@ -542,6 +545,7 @@ mod tests {
             model: model_name(),
             runner,
             permissioned_process_runner_factory: permissioned_factory,
+            extra_tools: Vec::new(),
             allow_hidden_workspace_paths: false,
             automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
             retry_policy: None,
@@ -608,6 +612,7 @@ mod tests {
             model: model_name(),
             runner,
             permissioned_process_runner_factory: permissioned_factory,
+            extra_tools: Vec::new(),
             allow_hidden_workspace_paths: false,
             automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
             retry_policy: None,
@@ -663,6 +668,7 @@ mod tests {
             model: model_name(),
             runner,
             permissioned_process_runner_factory: permissioned_factory,
+            extra_tools: Vec::new(),
             allow_hidden_workspace_paths: false,
             automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
             retry_policy: None,
@@ -725,6 +731,7 @@ mod tests {
             model: model_name(),
             runner,
             permissioned_process_runner_factory: permissioned_factory,
+            extra_tools: Vec::new(),
             allow_hidden_workspace_paths: false,
             automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
             retry_policy: None,

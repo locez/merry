@@ -8,8 +8,8 @@ use super::roles::RuntimeRoleProviderConfig;
 use merry_llm::{ModelName, ModelProvider, ModelRetryPolicy};
 use merry_runtime::{
     AcceptedLocalWorkspaceProcessAdmission, AutomaticCompactionConfig,
-    DEFAULT_CODING_AGENT_MAX_MODEL_TURNS, PermissionedProcessRunnerFactory, ProcessRunner, Runtime,
-    SubagentConfig, SubagentManager, subagent_registered_tools,
+    DEFAULT_CODING_AGENT_MAX_MODEL_TURNS, PermissionedProcessRunnerFactory, ProcessRunner,
+    RegisteredTool, Runtime, SubagentConfig, SubagentManager, subagent_registered_tools,
 };
 use merry_tool_workspace::WorkspaceCodingLoopProfile;
 use std::{
@@ -31,6 +31,7 @@ pub(crate) struct CodingLoopRuntimeOptions {
     pub(crate) context_compaction: Option<RuntimeRoleProviderConfig>,
     pub(crate) permissioned_process_runner_factory:
         Option<Arc<dyn PermissionedProcessRunnerFactory>>,
+    pub(crate) extra_tools: Vec<RegisteredTool>,
     pub(crate) skill_roots: Vec<PathBuf>,
     pub(crate) subagents: CodingSubagentsConfig,
     pub(crate) workspace_tool_limits: Option<merry_tool_workspace::WorkspaceToolLimits>,
@@ -67,6 +68,7 @@ pub(crate) struct HeadlessCodingRuntimeInput<'a> {
     pub(crate) model: ModelName,
     pub(crate) runner: Arc<dyn ProcessRunner>,
     pub(crate) permissioned_process_runner_factory: Arc<dyn PermissionedProcessRunnerFactory>,
+    pub(crate) extra_tools: Vec<RegisteredTool>,
     pub(crate) allow_hidden_workspace_paths: bool,
     pub(crate) automatic_compaction: AutomaticCompactionConfig,
     pub(crate) retry_policy: Option<ModelRetryPolicy>,
@@ -93,6 +95,7 @@ pub(crate) fn build_headless_coding_runtime(
             retry_policy: input.retry_policy,
             context_compaction: input.context_compaction,
             permissioned_process_runner_factory: Some(input.permissioned_process_runner_factory),
+            extra_tools: input.extra_tools,
             skill_roots: input.skill_roots,
             subagents: input.subagents,
             workspace_tool_limits: None,
@@ -206,6 +209,9 @@ pub(crate) fn build_coding_loop_runtime(
     .with_patch_tool()
     .with_cli_bwrap_permissioned_process_runner(admission, runner, permissioned_factory);
     let mut builder = with_workspace_coding_loop_profile(builder, profile)?;
+    for tool in options.extra_tools {
+        builder = builder.register_tool(tool);
+    }
     if let Some(policy) = options.retry_policy {
         builder = builder.model_retry_policy(policy);
     }
