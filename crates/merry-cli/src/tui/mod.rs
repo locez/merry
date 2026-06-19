@@ -11,6 +11,7 @@ mod controller;
 mod input;
 pub(crate) mod keymap;
 mod layout;
+mod panels;
 mod projector;
 mod render;
 mod runtime;
