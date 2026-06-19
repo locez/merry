@@ -150,16 +150,20 @@ fn render_legacy_timeline_pane(frame: &mut Frame<'_>, state: &TuiState, region: 
 fn render_chat_pane(frame: &mut Frame<'_>, state: &TuiState, region: Rect) {
     let inner = bordered_inner(region);
     frame.render_widget(
-        Paragraph::new(timeline_lines(state, inner))
-            .wrap(Wrap { trim: false })
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Plain)
-                    .title("CHAT")
-                    .border_style(semantic_style(state, SemanticColor::Muted))
-                    .title_style(semantic_style(state, SemanticColor::Muted)),
-            ),
+        Paragraph::new(timeline_lines_with_mode(
+            state,
+            inner,
+            TimelineDetailMode::CompactArtifacts,
+        ))
+        .wrap(Wrap { trim: false })
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Plain)
+                .title("CHAT")
+                .border_style(semantic_style(state, SemanticColor::Muted))
+                .title_style(semantic_style(state, SemanticColor::Muted)),
+        ),
         region,
     );
 }
@@ -202,37 +206,25 @@ fn render_input(frame: &mut Frame<'_>, state: &TuiState, region: Rect, input_hei
     );
 }
 
-fn render_focus_pane(
-    frame: &mut Frame<'_>,
-    state: &TuiState,
-    region: Rect,
-    view: &FocusPanelView,
-) {
+fn render_focus_pane(frame: &mut Frame<'_>, state: &TuiState, region: Rect, view: &FocusPanelView) {
     let inner = bordered_inner(region);
     let lines = focus_lines(state, view, inner);
     frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Plain)
-                    .title(view.title.as_str())
-                    .border_style(semantic_style(state, SemanticColor::Focus))
-                    .title_style(
-                        semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD),
-                    ),
-            ),
+        Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Plain)
+                .title(view.title.as_str())
+                .border_style(semantic_style(state, SemanticColor::Focus))
+                .title_style(
+                    semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD),
+                ),
+        ),
         region,
     );
 }
 
-fn render_plan_pane(
-    frame: &mut Frame<'_>,
-    state: &TuiState,
-    region: Rect,
-    view: &PlanPanelView,
-) {
+fn render_plan_pane(frame: &mut Frame<'_>, state: &TuiState, region: Rect, view: &PlanPanelView) {
     let inner = bordered_inner(region);
     frame.render_widget(
         Paragraph::new(plan_lines(state, view, inner))
@@ -306,7 +298,12 @@ fn plan_lines(state: &TuiState, view: &PlanPanelView, region: Rect) -> Vec<Line<
         &view.queue_suspended,
         width,
     ));
-    lines.push(plan_queue_line(state, "Backlog", &view.queue_backlog, width));
+    lines.push(plan_queue_line(
+        state,
+        "Backlog",
+        &view.queue_backlog,
+        width,
+    ));
 
     if !view.recent_activity.is_empty() {
         lines.push(Line::from(""));
@@ -400,6 +397,12 @@ fn set_input_cursor(frame: &mut Frame<'_>, region: Rect, cursor_column: usize, c
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimelineDetailMode {
+    Full,
+    CompactArtifacts,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PaneHeights {
     queue: u16,
     completion: u16,
@@ -475,6 +478,14 @@ fn desired_input_region_height(state: &TuiState, max_rows: usize) -> u16 {
 }
 
 fn timeline_lines(state: &TuiState, region: Rect) -> Vec<Line<'static>> {
+    timeline_lines_with_mode(state, region, TimelineDetailMode::Full)
+}
+
+fn timeline_lines_with_mode(
+    state: &TuiState,
+    region: Rect,
+    mode: TimelineDetailMode,
+) -> Vec<Line<'static>> {
     let mut user_line_indexes = Vec::new();
     let mut lines = Vec::new();
     for (index, item) in state.timeline().iter().enumerate() {
@@ -486,9 +497,9 @@ fn timeline_lines(state: &TuiState, region: Rect) -> Vec<Line<'static>> {
             TimelineItem::Assistant { text } => assistant_lines(state, text, region.width),
             TimelineItem::Muted { title, detail } => muted_lines(state, title, detail),
             TimelineItem::Expanded { title, body } | TimelineItem::Diagnostic { title, body } => {
-                expanded_lines(state, item, title, body)
+                expanded_lines_for_timeline_mode(state, mode, item, title, body, region.width)
             }
-            TimelineItem::Patch { changes } => patch_lines(state, changes),
+            TimelineItem::Patch { changes } => patch_lines_for_timeline_mode(state, mode, changes),
         };
         lines.extend(spaced_timeline_item(
             item_lines,
@@ -612,6 +623,79 @@ fn expanded_lines(
         body.lines()
             .map(|line| inline_code_line(state, line, timeline_body_style(state, item, line))),
     );
+    lines
+}
+
+fn expanded_lines_for_timeline_mode(
+    state: &TuiState,
+    mode: TimelineDetailMode,
+    item: &TimelineItem,
+    title: &str,
+    body: &str,
+    region_width: u16,
+) -> Vec<Line<'static>> {
+    match mode {
+        TimelineDetailMode::Full => expanded_lines(state, item, title, body),
+        TimelineDetailMode::CompactArtifacts => {
+            compact_expanded_lines(state, item, title, body, region_width)
+        }
+    }
+}
+
+fn compact_expanded_lines(
+    state: &TuiState,
+    item: &TimelineItem,
+    title: &str,
+    body: &str,
+    region_width: u16,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![expanded_title_line(state, item, title)];
+    if let Some(first_line) = body.lines().find(|line| !line.trim().is_empty()) {
+        lines.extend(inline_code_wrapped_lines(
+            state,
+            first_line,
+            timeline_body_style(state, item, first_line),
+            region_width,
+        ));
+    }
+    lines
+}
+
+fn patch_lines_for_timeline_mode(
+    state: &TuiState,
+    mode: TimelineDetailMode,
+    changes: &[PatchChangeView],
+) -> Vec<Line<'static>> {
+    match mode {
+        TimelineDetailMode::Full => patch_lines(state, changes),
+        TimelineDetailMode::CompactArtifacts => compact_patch_lines(state, changes),
+    }
+}
+
+fn compact_patch_lines(state: &TuiState, changes: &[PatchChangeView]) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for change in changes {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "Edited {} (+{} -{})",
+                change.path, change.added, change.removed
+            ),
+            semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(Span::styled(
+            format!(
+                "  {} hunk(s), {} -> {} bytes",
+                change.hunks,
+                change
+                    .bytes_before
+                    .map_or_else(|| "-".to_owned(), |bytes| bytes.to_string()),
+                change
+                    .bytes_after
+                    .map_or_else(|| "-".to_owned(), |bytes| bytes.to_string())
+            ),
+            semantic_style(state, SemanticColor::Muted),
+        )));
+    }
     lines
 }
 

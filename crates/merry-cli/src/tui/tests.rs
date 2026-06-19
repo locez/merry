@@ -2514,6 +2514,71 @@ fn renderer_ellipsizes_queue_items_to_region_width() {
 }
 
 #[test]
+fn plan_panel_truncates_long_queue_content_on_wide_terminal() {
+    let mut state = TuiState::new(
+        "/repo/merry".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.update_queue_preview(QueuePreview {
+        next: vec![QueuedInputView {
+            text: "this queue item is intentionally long enough to exceed the right rail width"
+                .to_owned(),
+            lane: QueuedInputLane::Next,
+            position: 0,
+        }],
+        suspended: vec![],
+        backlog: vec![],
+    });
+
+    let text = render_to_text(&state, 180, 24);
+
+    assert!(text.contains("this queue item"));
+    assert!(text.contains("..."));
+    assert!(!text.contains("exceed the right rail width"));
+}
+
+#[test]
+fn focus_panel_clips_long_command_output_with_ellipsis() {
+    let mut state = TuiState::new(
+        "/repo/merry".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.push_timeline_item(TimelineItem::Expanded {
+        title: "Ran cargo test".to_owned(),
+        body: (0..40)
+            .map(|index| format!("  stdout: line {index}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    });
+
+    let text = render_to_text(&state, 180, 16);
+
+    assert!(text.contains("FOCUS command cargo test"));
+    assert!(text.contains("..."));
+    assert!(!text.contains("stdout: line 39"));
+}
+
+#[test]
+fn very_short_terminal_keeps_input_visible() {
+    let mut state = TuiState::new(
+        "/repo/merry".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.insert_input_str("short terminal input");
+
+    let text = render_to_text(&state, 100, 8);
+
+    assert!(text.contains("input"));
+    assert!(text.contains("gpt-test"));
+}
+
+#[test]
 fn renderer_keeps_input_region_stable_when_queue_count_changes() {
     let mut one_item_state = TuiState::new(
         "/repo".into(),
