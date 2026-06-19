@@ -1888,6 +1888,98 @@ fn renderer_shows_status_timeline_queue_and_input() {
 }
 
 #[test]
+fn renderer_uses_three_pane_cockpit_on_wide_terminal() {
+    let mut state = TuiState::new(
+        "/repo/merry".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.push_timeline_item(TimelineItem::User {
+        text: "make the TUI distinct".to_owned(),
+        lane: QueuedInputLane::Next,
+    });
+    state.push_timeline_item(TimelineItem::Expanded {
+        title: "Ran cargo test -p merry-cli".to_owned(),
+        body: "  stdout: ok".to_owned(),
+    });
+    state.update_queue_preview(QueuePreview {
+        next: vec![QueuedInputView {
+            text: "queued next item".to_owned(),
+            lane: QueuedInputLane::Next,
+            position: 0,
+        }],
+        suspended: vec![],
+        backlog: vec![QueuedInputView {
+            text: "queued backlog item".to_owned(),
+            lane: QueuedInputLane::Backlog,
+            position: 0,
+        }],
+    });
+
+    let text = render_to_text(&state, 180, 32);
+
+    assert!(text.contains("CHAT"));
+    assert!(text.contains("FOCUS command cargo test -p merry-cli"));
+    assert!(text.contains("PLAN"));
+    assert!(text.contains("queued next item"));
+    assert!(text.contains("queued backlog item"));
+    assert!(!text.contains("queue\nNext"));
+}
+
+#[test]
+fn renderer_uses_stacked_work_rail_on_medium_terminal() {
+    let mut state = TuiState::new(
+        "/repo/merry".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.push_timeline_item(TimelineItem::User {
+        text: "review layout".to_owned(),
+        lane: QueuedInputLane::Next,
+    });
+    state.push_timeline_item(TimelineItem::Muted {
+        title: "Read".to_owned(),
+        detail: "AGENTS.md".to_owned(),
+    });
+
+    let text = render_to_text(&state, 140, 28);
+
+    assert!(text.contains("CHAT"));
+    assert!(text.contains("FOCUS read"));
+    assert!(text.contains("PLAN"));
+    assert!(text.contains("review layout"));
+}
+
+#[test]
+fn renderer_keeps_bottom_queue_on_narrow_terminal() {
+    let mut state = TuiState::new(
+        "/repo/merry".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.update_queue_preview(QueuePreview {
+        next: vec![QueuedInputView {
+            text: "narrow next item".to_owned(),
+            lane: QueuedInputLane::Next,
+            position: 0,
+        }],
+        suspended: vec![],
+        backlog: vec![],
+    });
+
+    let text = render_to_text(&state, 100, 24);
+
+    assert!(!text.contains("FOCUS"));
+    assert!(!text.contains("PLAN"));
+    assert!(text.contains("queue"));
+    assert!(text.contains("narrow next item"));
+    assert!(text.contains("input"));
+}
+
+#[test]
 fn renderer_preserves_user_message_newlines() {
     let mut state = TuiState::new(
         "/repo".into(),
@@ -2284,6 +2376,37 @@ fn renderer_shows_patch_line_numbers_and_diff_backgrounds() {
     assert_eq!(add_style.fg, Some(Color::LightGreen));
     assert_ne!(remove_style.bg, None);
     assert_ne!(add_style.bg, None);
+}
+
+#[test]
+fn renderer_promotes_latest_patch_into_focus_pane_on_wide_terminal() {
+    let mut state = TuiState::new(
+        "/repo/merry".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.push_timeline_item(TimelineItem::Patch {
+        changes: vec![PatchChangeView {
+            path: "hello_world.py".to_owned(),
+            added: 1,
+            removed: 1,
+            hunks: 1,
+            bytes_before: Some(20),
+            bytes_after: Some(21),
+            lines: vec![
+                PatchLineView::remove("print('old')", Some(7)),
+                PatchLineView::add("print('new')", Some(7)),
+            ],
+        }],
+    });
+
+    let text = render_to_text(&state, 180, 32);
+
+    assert!(text.contains("FOCUS patch hello_world.py"));
+    assert!(text.contains("Edited hello_world.py (+1 -1)"));
+    assert!(text.contains("   7 -print('old')"));
+    assert!(text.contains("   7 +print('new')"));
 }
 
 #[test]

@@ -1,11 +1,13 @@
 use super::{
+    layout::{BottomPaneHeights, CockpitLayoutMode, cockpit_layout, layout_mode},
+    panels::{FocusPanelBody, FocusPanelView, PlanPanelView, focus_panel_view, plan_panel_view},
     state::{PatchChangeView, PatchLineView, TimelineItem, TuiState},
     theme::SemanticColor,
 };
 use merry_core::QueuedInputLane;
 use ratatui::{
     Frame,
-    layout::{Constraint, Direction, Layout, Position, Rect},
+    layout::{Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph, Wrap},
@@ -22,78 +24,55 @@ const MIN_INPUT_HEIGHT: u16 = 3;
 
 #[allow(dead_code)]
 pub(crate) fn render(frame: &mut Frame<'_>, state: &TuiState) {
-    let pane_heights = pane_heights(state, frame.area().height);
-    let root = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(MIN_TIMELINE_HEIGHT),
-            Constraint::Length(pane_heights.queue),
-            Constraint::Length(pane_heights.completion),
-            Constraint::Length(INTERACTION_HEIGHT),
-            Constraint::Length(pane_heights.input),
-            Constraint::Length(STATUS_HEIGHT),
-        ])
-        .split(frame.area());
-    let input_inner = bordered_inner(root[4]);
-    let max_input_rows = usize::from(pane_heights.input.saturating_sub(2)).max(1);
-    let input_viewport = state.input_viewport_rows(usize::from(input_inner.width), max_input_rows);
-
-    frame.render_widget(
-        Paragraph::new(timeline_lines(state, root[0]))
-            .wrap(Wrap { trim: false })
-            .block(
-                Block::default()
-                    .borders(Borders::BOTTOM)
-                    .border_type(BorderType::Plain)
-                    .border_style(semantic_style(state, SemanticColor::Muted))
-                    .title_style(semantic_style(state, SemanticColor::Muted)),
-            ),
-        root[0],
+    let mode = layout_mode(frame.area().width);
+    let pane_heights = pane_heights(state, frame.area().height, mode);
+    let rects = cockpit_layout(
+        frame.area(),
+        BottomPaneHeights {
+            queue: pane_heights.queue,
+            completion: pane_heights.completion,
+            interaction: INTERACTION_HEIGHT,
+            input: pane_heights.input,
+            status: STATUS_HEIGHT,
+        },
     );
-    if pane_heights.queue > 0 {
+
+    match rects.mode {
+        CockpitLayoutMode::Narrow => render_legacy_timeline_pane(frame, state, rects.chat),
+        CockpitLayoutMode::Wide | CockpitLayoutMode::Medium => {
+            render_chat_pane(frame, state, rects.chat);
+            if let Some(region) = rects.focus {
+                let view = focus_panel_view(state);
+                render_focus_pane(frame, state, region, &view);
+            }
+            if let Some(region) = rects.plan {
+                let view = plan_panel_view(state);
+                render_plan_pane(frame, state, region, &view);
+            }
+        }
+    }
+
+    if let Some(queue_region) = rects.queue {
         frame.render_widget(
-            Paragraph::new(queue_lines(state, root[1])).block(
+            Paragraph::new(queue_lines(state, queue_region)).block(
                 Block::default()
                     .title("queue")
                     .border_style(semantic_style(state, SemanticColor::Muted)),
             ),
-            root[1],
+            queue_region,
         );
     }
     if pane_heights.completion > 0 {
-        frame.render_widget(Paragraph::new(completion_lines(state, root[2])), root[2]);
+        frame.render_widget(
+            Paragraph::new(completion_lines(state, rects.completion)),
+            rects.completion,
+        );
     }
-    let interaction_style = if state.is_active_run() {
-        semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD)
-    } else {
-        semantic_style(state, SemanticColor::Status)
-    };
-    frame.render_widget(
-        Paragraph::new(state.interaction_status_text()).style(interaction_style),
-        root[3],
-    );
-    frame.render_widget(
-        Paragraph::new(input_viewport.text)
-            .style(semantic_style(state, SemanticColor::Focus))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Plain)
-                    .title("input")
-                    .border_style(semantic_style(state, SemanticColor::Focus))
-                    .title_style(semantic_style(state, SemanticColor::Focus)),
-            ),
-        root[4],
-    );
-    set_input_cursor(
-        frame,
-        input_inner,
-        input_viewport.cursor_column,
-        input_viewport.cursor_row,
-    );
+    render_interaction_line(frame, state, rects.interaction);
+    render_input(frame, state, rects.input, pane_heights.input);
     frame.render_widget(
         Paragraph::new(state.status_text()).style(semantic_style(state, SemanticColor::Status)),
-        root[5],
+        rects.status,
     );
 }
 
@@ -153,6 +132,259 @@ fn bordered_inner(region: Rect) -> Rect {
     }
 }
 
+fn render_legacy_timeline_pane(frame: &mut Frame<'_>, state: &TuiState, region: Rect) {
+    frame.render_widget(
+        Paragraph::new(timeline_lines(state, region))
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::default()
+                    .borders(Borders::BOTTOM)
+                    .border_type(BorderType::Plain)
+                    .border_style(semantic_style(state, SemanticColor::Muted))
+                    .title_style(semantic_style(state, SemanticColor::Muted)),
+            ),
+        region,
+    );
+}
+
+fn render_chat_pane(frame: &mut Frame<'_>, state: &TuiState, region: Rect) {
+    let inner = bordered_inner(region);
+    frame.render_widget(
+        Paragraph::new(timeline_lines(state, inner))
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Plain)
+                    .title("CHAT")
+                    .border_style(semantic_style(state, SemanticColor::Muted))
+                    .title_style(semantic_style(state, SemanticColor::Muted)),
+            ),
+        region,
+    );
+}
+
+fn render_interaction_line(frame: &mut Frame<'_>, state: &TuiState, region: Rect) {
+    let interaction_style = if state.is_active_run() {
+        semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD)
+    } else {
+        semantic_style(state, SemanticColor::Status)
+    };
+    frame.render_widget(
+        Paragraph::new(state.interaction_status_text()).style(interaction_style),
+        region,
+    );
+}
+
+fn render_input(frame: &mut Frame<'_>, state: &TuiState, region: Rect, input_height: u16) {
+    let input_inner = bordered_inner(region);
+    let max_input_rows = usize::from(input_height.saturating_sub(2)).max(1);
+    let input_viewport = state.input_viewport_rows(usize::from(input_inner.width), max_input_rows);
+
+    frame.render_widget(
+        Paragraph::new(input_viewport.text)
+            .style(semantic_style(state, SemanticColor::Focus))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Plain)
+                    .title("input")
+                    .border_style(semantic_style(state, SemanticColor::Focus))
+                    .title_style(semantic_style(state, SemanticColor::Focus)),
+            ),
+        region,
+    );
+    set_input_cursor(
+        frame,
+        input_inner,
+        input_viewport.cursor_column,
+        input_viewport.cursor_row,
+    );
+}
+
+fn render_focus_pane(
+    frame: &mut Frame<'_>,
+    state: &TuiState,
+    region: Rect,
+    view: &FocusPanelView,
+) {
+    let inner = bordered_inner(region);
+    let lines = focus_lines(state, view, inner);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Plain)
+                    .title(view.title.as_str())
+                    .border_style(semantic_style(state, SemanticColor::Focus))
+                    .title_style(
+                        semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD),
+                    ),
+            ),
+        region,
+    );
+}
+
+fn render_plan_pane(
+    frame: &mut Frame<'_>,
+    state: &TuiState,
+    region: Rect,
+    view: &PlanPanelView,
+) {
+    let inner = bordered_inner(region);
+    frame.render_widget(
+        Paragraph::new(plan_lines(state, view, inner))
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Plain)
+                    .title("PLAN")
+                    .border_style(semantic_style(state, SemanticColor::Focus))
+                    .title_style(
+                        semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD),
+                    ),
+            ),
+        region,
+    );
+}
+
+fn focus_lines(state: &TuiState, view: &FocusPanelView, region: Rect) -> Vec<Line<'static>> {
+    let mut lines = match &view.body {
+        FocusPanelBody::Empty => vec![Line::from(Span::styled(
+            "No focus item",
+            semantic_style(state, SemanticColor::Muted),
+        ))],
+        FocusPanelBody::Patch { changes } => patch_lines(state, changes),
+        FocusPanelBody::Text { lines } => lines
+            .iter()
+            .flat_map(|line| {
+                inline_code_wrapped_lines(
+                    state,
+                    line,
+                    semantic_style(state, SemanticColor::Assistant),
+                    region.width,
+                )
+            })
+            .collect(),
+    };
+
+    let max_lines = usize::from(region.height).max(1);
+    if lines.len() > max_lines {
+        lines.truncate(max_lines.saturating_sub(1));
+        lines.push(Line::from(Span::styled(
+            "...",
+            semantic_style(state, SemanticColor::Muted),
+        )));
+    }
+    lines
+}
+
+fn plan_lines(state: &TuiState, view: &PlanPanelView, region: Rect) -> Vec<Line<'static>> {
+    let width = usize::from(region.width).max(1);
+    let mut lines = Vec::new();
+    lines.push(Line::from(Span::styled(
+        truncate_chars(&view.run_status, width),
+        semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD),
+    )));
+    if let Some(task) = &view.current_task {
+        lines.push(Line::from(""));
+        lines.push(plan_label_value_line(state, "Task", task, width));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Queue",
+        semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD),
+    )));
+    lines.push(plan_queue_line(state, "Next", &view.queue_next, width));
+    lines.push(plan_queue_line(
+        state,
+        "Suspended",
+        &view.queue_suspended,
+        width,
+    ));
+    lines.push(plan_queue_line(state, "Backlog", &view.queue_backlog, width));
+
+    if !view.recent_activity.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Recent",
+            semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD),
+        )));
+        for activity in &view.recent_activity {
+            lines.push(Line::from(vec![
+                Span::styled("- ", semantic_style(state, SemanticColor::Muted)),
+                Span::styled(
+                    truncate_chars(activity, width.saturating_sub(2)),
+                    semantic_style(state, SemanticColor::Muted),
+                ),
+            ]));
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        truncate_chars(&view.status_line, width),
+        semantic_style(state, SemanticColor::Status),
+    )));
+
+    let max_lines = usize::from(region.height).max(1);
+    if lines.len() > max_lines {
+        lines.truncate(max_lines);
+    }
+    lines
+}
+
+fn plan_label_value_line(
+    state: &TuiState,
+    label: &'static str,
+    value: &str,
+    width: usize,
+) -> Line<'static> {
+    let prefix = format!("{label}: ");
+    let value_width = width.saturating_sub(prefix.chars().count());
+    Line::from(vec![
+        Span::styled(prefix, semantic_style(state, SemanticColor::Focus)),
+        Span::styled(
+            truncate_chars(value, value_width),
+            semantic_style(state, SemanticColor::Assistant),
+        ),
+    ])
+}
+
+fn plan_queue_line(
+    state: &TuiState,
+    label: &'static str,
+    items: &[String],
+    width: usize,
+) -> Line<'static> {
+    let prefix = format!("{label:<10} ");
+    let value = if items.is_empty() {
+        "--".to_owned()
+    } else {
+        items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| format!("{}. {}", index + 1, item))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
+    let value_width = width.saturating_sub(prefix.chars().count());
+    Line::from(vec![
+        Span::styled(
+            prefix,
+            semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            truncate_chars(&value, value_width),
+            semantic_style(state, SemanticColor::Muted),
+        ),
+    ])
+}
+
 fn set_input_cursor(frame: &mut Frame<'_>, region: Rect, cursor_column: usize, cursor_row: usize) {
     if region.width == 0 || region.height == 0 {
         return;
@@ -174,8 +406,12 @@ struct PaneHeights {
     input: u16,
 }
 
-fn pane_heights(state: &TuiState, total_height: u16) -> PaneHeights {
-    let desired_queue = desired_queue_preview_height(state);
+fn pane_heights(state: &TuiState, total_height: u16, mode: CockpitLayoutMode) -> PaneHeights {
+    let desired_queue = if mode.uses_bottom_queue() {
+        desired_queue_preview_height(state)
+    } else {
+        0
+    };
     let desired_completion = desired_completion_preview_height(state);
     let desired_input = desired_input_region_height(state, MAX_INPUT_VISIBLE_ROWS);
     let desired_bottom = desired_queue
