@@ -86,11 +86,7 @@ pub(crate) fn plan_panel_view(state: &TuiState) -> PlanPanelView {
             .iter()
             .map(|item| item.text.clone())
             .collect(),
-        queue_backlog: queue
-            .backlog
-            .iter()
-            .map(|item| item.text.clone())
-            .collect(),
+        queue_backlog: queue.backlog.iter().map(|item| item.text.clone()).collect(),
         recent_activity: recent_activity(state),
         status_line: state.status_text(),
     }
