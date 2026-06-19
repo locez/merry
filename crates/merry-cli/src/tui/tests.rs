@@ -2106,6 +2106,29 @@ fn renderer_scrolls_timeline_viewport() {
 }
 
 #[test]
+fn cockpit_wide_timeline_scroll_still_changes_chat_viewport() {
+    let mut state = TuiState::new(
+        "/repo/merry".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    for index in 0..20 {
+        state.push_timeline_item(TimelineItem::Assistant {
+            text: format!("assistant line {index}"),
+        });
+    }
+
+    let bottom = render_to_text(&state, 180, 24);
+    state.scroll_timeline_up_by(10);
+    let scrolled = render_to_text(&state, 180, 24);
+
+    assert!(bottom.contains("assistant line 19"));
+    assert_ne!(bottom, scrolled);
+    assert!(state.timeline_scroll_offset() >= 10);
+}
+
+#[test]
 fn renderer_review_user_input_starts_viewport_at_selected_user_turn() {
     let mut state = TuiState::new(
         "/repo".into(),
@@ -2141,6 +2164,60 @@ fn renderer_review_user_input_starts_viewport_at_selected_user_turn() {
     state.exit_timeline_review();
     let bottom = render_to_text(&state, 80, 18);
     assert!(bottom.contains("second answer"));
+}
+
+#[test]
+fn cockpit_ctrl_u_review_still_jumps_between_user_turns() {
+    let mut state = TuiState::new(
+        "/repo/merry".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.push_timeline_item(TimelineItem::User {
+        text: "first request".to_owned(),
+        lane: QueuedInputLane::Next,
+    });
+    state.push_timeline_item(TimelineItem::Assistant {
+        text: "first answer".to_owned(),
+    });
+    state.push_timeline_item(TimelineItem::User {
+        text: "second request".to_owned(),
+        lane: QueuedInputLane::Next,
+    });
+    state.push_timeline_item(TimelineItem::Assistant {
+        text: "second answer".to_owned(),
+    });
+
+    handle_key_action(KeyAction::ReviewPreviousUserInput, &mut state);
+    let second = render_to_text(&state, 180, 24);
+    handle_key_action(KeyAction::ReviewPreviousUserInput, &mut state);
+    let first = render_to_text(&state, 180, 24);
+    handle_key_action(KeyAction::SubmitNext, &mut state);
+    let bottom = render_to_text(&state, 180, 24);
+
+    assert!(second.contains("second request"));
+    assert!(first.contains("first request"));
+    assert!(bottom.contains("second answer"));
+    assert_eq!(state.timeline_review_user_index(), None);
+}
+
+#[test]
+fn cockpit_wide_cursor_remains_inside_input_with_cjk_text() {
+    let mut state = TuiState::new(
+        "/repo/merry".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.insert_input_str("你好 cockpit");
+
+    let (buffer, cursor) = render_to_buffer_and_cursor(&state, 180, 24);
+    let input_label = find_text_position(&buffer, "input").expect("input label should render");
+
+    assert!(cursor.y > input_label.1);
+    assert!(cursor.x > input_label.0);
+    assert_eq!(buffer[(cursor.x, cursor.y)].symbol(), " ");
 }
 
 #[test]
@@ -2552,6 +2629,21 @@ fn rendered_buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
         text.push('\n');
     }
     text
+}
+
+fn find_text_position(buffer: &ratatui::buffer::Buffer, needle: &str) -> Option<(u16, u16)> {
+    let area = buffer.area;
+    for y in area.y..area.y + area.height {
+        let mut row = String::new();
+        for x in area.x..area.x + area.width {
+            row.push_str(buffer[(x, y)].symbol());
+        }
+        if let Some(byte_index) = row.find(needle) {
+            let x = row[..byte_index].chars().count();
+            return Some((u16::try_from(x).ok()?, y));
+        }
+    }
+    None
 }
 
 fn find_cell_style(buffer: &ratatui::buffer::Buffer, text: &str) -> Option<ratatui::style::Style> {
