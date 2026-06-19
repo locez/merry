@@ -10,6 +10,7 @@ mod completion;
 mod controller;
 mod input;
 pub(crate) mod keymap;
+mod layout;
 mod projector;
 mod render;
 mod runtime;
