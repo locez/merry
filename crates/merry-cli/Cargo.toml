@@ -14,16 +14,19 @@ merry-mcp = { path = "../merry-mcp" }
 merry-provider-openai = { path = "../merry-provider-openai" }
 merry-runtime = { path = "../merry-runtime" }
 merry-tool-workspace = { path = "../merry-tool-workspace" }
+pulldown-cmark.workspace = true
 ratatui.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+syntect.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["io-std", "io-util", "process"] }
 toml.workspace = true
 tracing.workspace = true
 tracing-appender.workspace = true
 tracing-subscriber.workspace = true
+two-face.workspace = true
 unicode-width.workspace = true
 
 [dev-dependencies]

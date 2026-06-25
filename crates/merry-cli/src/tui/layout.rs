@@ -31,8 +31,8 @@ pub(crate) struct CockpitRects {
 
 pub(crate) fn layout_mode(width: u16) -> CockpitLayoutMode {
     match width {
-        width if width >= 170 => CockpitLayoutMode::Wide,
-        width if width >= 120 => CockpitLayoutMode::Medium,
+        width if width >= 100 => CockpitLayoutMode::Wide,
+        width if width >= 80 => CockpitLayoutMode::Medium,
         _ => CockpitLayoutMode::Narrow,
     }
 }
@@ -140,10 +140,10 @@ mod tests {
     #[test]
     fn mode_thresholds_match_spec() {
         assert_eq!(layout_mode(180), CockpitLayoutMode::Wide);
-        assert_eq!(layout_mode(170), CockpitLayoutMode::Wide);
-        assert_eq!(layout_mode(169), CockpitLayoutMode::Medium);
-        assert_eq!(layout_mode(120), CockpitLayoutMode::Medium);
-        assert_eq!(layout_mode(119), CockpitLayoutMode::Narrow);
+        assert_eq!(layout_mode(100), CockpitLayoutMode::Wide);
+        assert_eq!(layout_mode(99), CockpitLayoutMode::Medium);
+        assert_eq!(layout_mode(80), CockpitLayoutMode::Medium);
+        assert_eq!(layout_mode(79), CockpitLayoutMode::Narrow);
     }
 
     #[test]
@@ -168,7 +168,7 @@ mod tests {
 
     #[test]
     fn medium_layout_has_chat_and_stacked_work_rail() {
-        let rects = cockpit_layout(Rect::new(0, 0, 140, 36), bottom());
+        let rects = cockpit_layout(Rect::new(0, 0, 90, 36), bottom());
         let focus = rects.focus.expect("medium should render focus");
         let plan = rects.plan.expect("medium should render plan");
 
@@ -184,21 +184,21 @@ mod tests {
 
     #[test]
     fn narrow_layout_keeps_single_chat_column_and_bottom_queue() {
-        let rects = cockpit_layout(Rect::new(0, 0, 100, 32), bottom());
+        let rects = cockpit_layout(Rect::new(0, 0, 79, 32), bottom());
 
         assert_eq!(rects.mode, CockpitLayoutMode::Narrow);
         assert!(rects.focus.is_none());
         assert!(rects.plan.is_none());
         assert!(rects.queue.is_some());
         assert_eq!(rects.chat.x, 0);
-        assert_eq!(rects.chat.width, 100);
+        assert_eq!(rects.chat.width, 79);
         assert!(rects.chat.y < rects.queue.unwrap().y);
         assert!(rects.queue.unwrap().y < rects.input.y);
     }
 
     #[test]
     fn tiny_height_preserves_input_and_status_regions() {
-        let rects = cockpit_layout(Rect::new(0, 0, 100, 8), bottom());
+        let rects = cockpit_layout(Rect::new(0, 0, 79, 8), bottom());
 
         assert_eq!(rects.mode, CockpitLayoutMode::Narrow);
         assert!(rects.chat.height >= 1);

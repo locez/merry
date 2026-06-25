@@ -10,6 +10,9 @@ use std::collections::HashMap;
 
 const PROCESS_PREVIEW_MAX_LINES: usize = 3;
 const PROCESS_PREVIEW_MAX_CHARS: usize = 120;
+const READ_FILE_PREVIEW_MAX_LINES: usize = 120;
+const READ_FILE_PREVIEW_MAX_CHARS: usize = 180;
+const LIST_DIR_PREVIEW_MAX_ENTRIES: usize = 80;
 
 #[derive(Debug, Default)]
 #[allow(dead_code)]
@@ -94,13 +97,15 @@ impl TuiProjector {
                 let tool = self.started_tools.remove(result.call_id());
                 if result.status() == ToolCallResultStatus::Failed {
                     if let Some(tool) = tool.as_ref()
-                        && let Some(preview) = success_tool_preview(tool.name.as_str(), &text)
+                        && let Some((preview, focus_body)) =
+                            success_tool_bodies(tool.name.as_str(), &text)
                     {
                         state.replace_timeline_item(
                             tool.timeline_index,
-                            TimelineItem::Expanded {
+                            TimelineItem::ExpandedDetail {
                                 title: expanded_tool_title(tool),
                                 body: preview,
+                                focus_body,
                             },
                         );
                         return;
@@ -135,13 +140,15 @@ impl TuiProjector {
                         state.push_timeline_item(patch_item);
                     }
                 } else if let Some(tool) = tool.as_ref()
-                    && let Some(preview) = success_tool_preview(tool.name.as_str(), &text)
+                    && let Some((preview, focus_body)) =
+                        success_tool_bodies(tool.name.as_str(), &text)
                 {
                     state.replace_timeline_item(
                         tool.timeline_index,
-                        TimelineItem::Expanded {
+                        TimelineItem::ExpandedDetail {
                             title: expanded_tool_title(tool),
                             body: preview,
+                            focus_body,
                         },
                     );
                 }
@@ -251,14 +258,104 @@ fn parse_mcp_tool_name(name: &str) -> Option<(&str, &str)> {
     Some((server, tool))
 }
 
-fn success_tool_preview(name: &str, output: &str) -> Option<String> {
+fn success_tool_bodies(name: &str, output: &str) -> Option<(String, String)> {
     match name {
-        "run_process" => process_output_preview(output),
+        "run_process" => process_output_bodies(output),
+        "workspace_read_file" => read_file_output_bodies(output),
+        "workspace_list_dir" => list_dir_output_bodies(output),
         _ => None,
     }
 }
 
-fn process_output_preview(output: &str) -> Option<String> {
+fn read_file_output_bodies(output: &str) -> Option<(String, String)> {
+    let output = serde_json::from_str::<WorkspaceReadFileOutput>(output).ok()?;
+    if !output.ok || output.tool.as_deref() != Some("workspace_read_file") {
+        return None;
+    }
+
+    let focus_body = if output.content.is_empty() {
+        format!("{} is empty", output.path)
+    } else {
+        output.content.clone()
+    };
+    let mut lines = output
+        .content
+        .lines()
+        .take(READ_FILE_PREVIEW_MAX_LINES)
+        .map(|line| truncate_chars(line, READ_FILE_PREVIEW_MAX_CHARS))
+        .collect::<Vec<_>>();
+    if output.truncated {
+        lines.push("... truncated".to_owned());
+    }
+    if lines.is_empty() {
+        lines.push(format!("{} is empty", output.path));
+    }
+    Some((lines.join("\n"), focus_body))
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkspaceReadFileOutput {
+    ok: bool,
+    tool: Option<String>,
+    path: String,
+    content: String,
+    #[serde(default)]
+    truncated: bool,
+}
+
+fn list_dir_output_bodies(output: &str) -> Option<(String, String)> {
+    let output = serde_json::from_str::<WorkspaceListDirOutput>(output).ok()?;
+    if !output.ok || output.tool.as_deref() != Some("workspace_list_dir") {
+        return None;
+    }
+
+    let all_lines = output
+        .entries
+        .iter()
+        .map(directory_entry_label)
+        .collect::<Vec<_>>();
+    let mut preview_lines = output
+        .entries
+        .iter()
+        .take(LIST_DIR_PREVIEW_MAX_ENTRIES)
+        .map(directory_entry_label)
+        .collect::<Vec<_>>();
+    if output.truncated {
+        preview_lines.push("... truncated".to_owned());
+    }
+    if preview_lines.is_empty() {
+        preview_lines.push(format!("{} is empty", output.path));
+    }
+    let focus_body = if all_lines.is_empty() {
+        format!("{} is empty", output.path)
+    } else {
+        all_lines.join("\n")
+    };
+    Some((preview_lines.join("\n"), focus_body))
+}
+
+fn directory_entry_label(entry: &WorkspaceListDirEntry) -> String {
+    let suffix = if entry.kind == "directory" { "/" } else { "" };
+    format!("{}{}", entry.path, suffix)
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkspaceListDirOutput {
+    ok: bool,
+    tool: Option<String>,
+    path: String,
+    entries: Vec<WorkspaceListDirEntry>,
+    #[serde(default)]
+    truncated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkspaceListDirEntry {
+    path: String,
+    kind: String,
+}
+
+fn process_output_bodies(output: &str) -> Option<(String, String)> {
     let value = serde_json::from_str::<Value>(output).ok()?;
     let stdout = value
         .pointer("/stdout/text")
@@ -282,7 +379,16 @@ fn process_output_preview(output: &str) -> Option<String> {
     append_stream_preview(&mut lines, "stdout", stdout);
     append_stream_preview(&mut lines, "stderr", stderr);
 
-    (!lines.is_empty()).then(|| lines.join("\n"))
+    let mut focus_lines = Vec::new();
+    if let Some(status) = status
+        && status != 0
+    {
+        focus_lines.push(format!("  exit {status}"));
+    }
+    append_stream_full(&mut focus_lines, "stdout", stdout);
+    append_stream_full(&mut focus_lines, "stderr", stderr);
+
+    (!lines.is_empty()).then(|| (lines.join("\n"), focus_lines.join("\n")))
 }
 
 fn append_stream_preview(lines: &mut Vec<String>, label: &str, text: &str) {
@@ -300,6 +406,15 @@ fn append_stream_preview(lines: &mut Vec<String>, label: &str, text: &str) {
     lines.extend(
         stream_lines.map(|line| format!("    {}", truncate_chars(line, PROCESS_PREVIEW_MAX_CHARS))),
     );
+}
+
+fn append_stream_full(lines: &mut Vec<String>, label: &str, text: &str) {
+    let mut stream_lines = text.lines().filter(|line| !line.trim().is_empty());
+    let Some(first) = stream_lines.next() else {
+        return;
+    };
+    lines.push(format!("  {label}: {first}"));
+    lines.extend(stream_lines.map(|line| format!("    {line}")));
 }
 
 fn truncate_chars(text: &str, max_chars: usize) -> String {

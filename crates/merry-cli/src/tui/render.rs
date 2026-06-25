@@ -1,6 +1,11 @@
 use super::{
+    highlight::highlight_code_to_lines,
     layout::{BottomPaneHeights, CockpitLayoutMode, cockpit_layout, layout_mode},
-    panels::{FocusPanelBody, FocusPanelView, PlanPanelView, focus_panel_view, plan_panel_view},
+    markdown::markdown_lines,
+    panels::{
+        DirectoryEntryKind, DirectoryEntryView, FocusPanelBody, FocusPanelView, PlanPanelView,
+        focus_panel_view, plan_panel_view,
+    },
     state::{PatchChangeView, PatchLineView, TimelineItem, TuiState},
     theme::SemanticColor,
 };
@@ -17,8 +22,8 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 const QUEUE_PREVIEW_HEIGHT: u16 = 5;
 const MAX_COMPLETION_PREVIEW_HEIGHT: u16 = 6;
 const MAX_INPUT_VISIBLE_ROWS: usize = 5;
-const INTERACTION_HEIGHT: u16 = 1;
-const STATUS_HEIGHT: u16 = 1;
+pub(crate) const INTERACTION_HEIGHT: u16 = 1;
+pub(crate) const STATUS_HEIGHT: u16 = 1;
 const MIN_TIMELINE_HEIGHT: u16 = 3;
 const MIN_INPUT_HEIGHT: u16 = 3;
 
@@ -74,6 +79,11 @@ pub(crate) fn render(frame: &mut Frame<'_>, state: &TuiState) {
         Paragraph::new(state.status_text()).style(semantic_style(state, SemanticColor::Status)),
         rects.status,
     );
+}
+
+pub(crate) fn pane_heights_for_area(state: &TuiState, area: Rect) -> PaneHeights {
+    let mode = layout_mode(area.width);
+    pane_heights(state, area.height, mode)
 }
 
 #[cfg(test)]
@@ -134,7 +144,7 @@ fn bordered_inner(region: Rect) -> Rect {
 
 fn render_legacy_timeline_pane(frame: &mut Frame<'_>, state: &TuiState, region: Rect) {
     frame.render_widget(
-        Paragraph::new(timeline_lines(state, region))
+        Paragraph::new(timeline_lines_compact(state, region))
             .wrap(Wrap { trim: false })
             .block(
                 Block::default()
@@ -150,20 +160,16 @@ fn render_legacy_timeline_pane(frame: &mut Frame<'_>, state: &TuiState, region: 
 fn render_chat_pane(frame: &mut Frame<'_>, state: &TuiState, region: Rect) {
     let inner = bordered_inner(region);
     frame.render_widget(
-        Paragraph::new(timeline_lines_with_mode(
-            state,
-            inner,
-            TimelineDetailMode::CompactArtifacts,
-        ))
-        .wrap(Wrap { trim: false })
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Plain)
-                .title("CHAT")
-                .border_style(semantic_style(state, SemanticColor::Muted))
-                .title_style(semantic_style(state, SemanticColor::Muted)),
-        ),
+        Paragraph::new(timeline_lines_compact(state, inner))
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Plain)
+                    .title("CHAT")
+                    .border_style(semantic_style(state, SemanticColor::Muted))
+                    .title_style(semantic_style(state, SemanticColor::Muted)),
+            ),
         region,
     );
 }
@@ -233,7 +239,7 @@ fn render_plan_pane(frame: &mut Frame<'_>, state: &TuiState, region: Rect, view:
                 Block::default()
                     .borders(Borders::ALL)
                     .border_type(BorderType::Plain)
-                    .title("PLAN")
+                    .title("RUN")
                     .border_style(semantic_style(state, SemanticColor::Focus))
                     .title_style(
                         semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD),
@@ -250,21 +256,43 @@ fn focus_lines(state: &TuiState, view: &FocusPanelView, region: Rect) -> Vec<Lin
             semantic_style(state, SemanticColor::Muted),
         ))],
         FocusPanelBody::Patch { changes } => patch_lines(state, changes),
-        FocusPanelBody::Text { lines } => lines
+        FocusPanelBody::Source { path, content } => {
+            if let Some(lang) = source_lang_from_path(path) {
+                highlight_code_to_lines(content, lang)
+            } else {
+                content
+                    .lines()
+                    .flat_map(|line| focus_text_wrapped_lines(state, line, region.width))
+                    .collect()
+            }
+        }
+        FocusPanelBody::DirectoryListing { entries } => {
+            directory_listing_lines(state, entries, region.width)
+        }
+        FocusPanelBody::CommandOutput { lines } => lines
             .iter()
-            .flat_map(|line| {
-                inline_code_wrapped_lines(
-                    state,
-                    line,
-                    semantic_style(state, SemanticColor::Assistant),
-                    region.width,
-                )
-            })
+            .flat_map(|line| focus_text_wrapped_lines(state, line, region.width))
             .collect(),
+        FocusPanelBody::Text { lines } => {
+            if let Some(lang) = source_lang_from_focus_title(&view.title) {
+                highlight_code_to_lines(&lines.join("\n"), lang)
+            } else {
+                lines
+                    .iter()
+                    .flat_map(|line| focus_text_wrapped_lines(state, line, region.width))
+                    .collect()
+            }
+        }
     };
 
     let max_lines = usize::from(region.height).max(1);
     if lines.len() > max_lines {
+        let offset = state
+            .focus_scroll_offset()
+            .min(lines.len().saturating_sub(max_lines));
+        if offset > 0 {
+            lines = lines.into_iter().skip(offset).collect();
+        }
         lines.truncate(max_lines.saturating_sub(1));
         lines.push(Line::from(Span::styled(
             "...",
@@ -272,6 +300,54 @@ fn focus_lines(state: &TuiState, view: &FocusPanelView, region: Rect) -> Vec<Lin
         )));
     }
     lines
+}
+
+fn source_lang_from_focus_title(title: &str) -> Option<&str> {
+    let path = title.strip_prefix("FOCUS Read ")?;
+    source_lang_from_path(path)
+}
+
+fn source_lang_from_path(path: &str) -> Option<&str> {
+    path.rsplit_once('.').map(|(_, extension)| extension)
+}
+
+fn directory_listing_lines(
+    state: &TuiState,
+    entries: &[DirectoryEntryView],
+    region_width: u16,
+) -> Vec<Line<'static>> {
+    entries
+        .iter()
+        .flat_map(|entry| directory_entry_lines(state, entry, region_width))
+        .collect()
+}
+
+fn directory_entry_lines(
+    state: &TuiState,
+    entry: &DirectoryEntryView,
+    region_width: u16,
+) -> Vec<Line<'static>> {
+    let style = directory_entry_style(state, entry);
+    wrap_styled_parts(
+        vec![StyledTextPart {
+            text: entry.path.clone(),
+            style,
+            atomic: false,
+        }],
+        region_width,
+    )
+}
+
+fn directory_entry_style(state: &TuiState, entry: &DirectoryEntryView) -> Style {
+    if entry.path.starts_with('.') {
+        return semantic_style(state, SemanticColor::Muted);
+    }
+    match entry.kind {
+        DirectoryEntryKind::Directory => {
+            semantic_style(state, SemanticColor::Command).add_modifier(Modifier::BOLD)
+        }
+        DirectoryEntryKind::File => semantic_style(state, SemanticColor::Assistant),
+    }
 }
 
 fn plan_lines(state: &TuiState, view: &PlanPanelView, region: Rect) -> Vec<Line<'static>> {
@@ -305,6 +381,30 @@ fn plan_lines(state: &TuiState, view: &PlanPanelView, region: Rect) -> Vec<Line<
         width,
     ));
 
+    if !view.artifacts.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Artifacts",
+            semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD),
+        )));
+        let artifact_budget = remaining_line_budget(&lines, region.height, 2);
+        for artifact in view.artifacts.iter().rev().take(artifact_budget).rev() {
+            let marker = if artifact.selected { ">" } else { "-" };
+            let style = if artifact.selected {
+                semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD)
+            } else {
+                semantic_style(state, SemanticColor::Muted)
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!("{marker} "), style),
+                Span::styled(
+                    truncate_chars(&artifact.label, width.saturating_sub(2)),
+                    style,
+                ),
+            ]));
+        }
+    }
+
     if !view.recent_activity.is_empty() {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
@@ -333,6 +433,51 @@ fn plan_lines(state: &TuiState, view: &PlanPanelView, region: Rect) -> Vec<Line<
         lines.truncate(max_lines);
     }
     lines
+}
+
+fn remaining_line_budget(lines: &[Line<'static>], height: u16, reserved_tail: usize) -> usize {
+    usize::from(height)
+        .saturating_sub(lines.len())
+        .saturating_sub(reserved_tail)
+}
+
+fn focus_text_wrapped_lines(state: &TuiState, line: &str, region_width: u16) -> Vec<Line<'static>> {
+    let base_style = semantic_style(state, SemanticColor::Assistant);
+    let Some((label, value)) = line.split_once(": ") else {
+        return inline_code_wrapped_lines(state, line, base_style, region_width);
+    };
+    if !matches!(label.trim(), "stdout" | "stderr") {
+        return inline_code_wrapped_lines(state, line, base_style, region_width);
+    }
+
+    let label_text = format!("{label}: ");
+    let label_width = UnicodeWidthStr::width(label_text.as_str());
+    let content_width = usize::from(region_width).saturating_sub(label_width).max(1);
+    let mut content_lines = inline_code_wrapped_lines(
+        state,
+        value,
+        semantic_style(state, SemanticColor::Muted),
+        u16::try_from(content_width).unwrap_or(u16::MAX),
+    );
+    if content_lines.is_empty() {
+        content_lines.push(Line::from(""));
+    }
+
+    let mut result = Vec::with_capacity(content_lines.len());
+    for (index, content_line) in content_lines.into_iter().enumerate() {
+        let prefix = if index == 0 {
+            label_text.clone()
+        } else {
+            " ".repeat(label_width)
+        };
+        let mut spans = vec![Span::styled(
+            prefix,
+            semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD),
+        )];
+        spans.extend(content_line.spans);
+        result.push(Line::from(spans));
+    }
+    result
 }
 
 fn plan_label_value_line(
@@ -397,16 +542,10 @@ fn set_input_cursor(frame: &mut Frame<'_>, region: Rect, cursor_column: usize, c
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TimelineDetailMode {
-    Full,
-    CompactArtifacts,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct PaneHeights {
-    queue: u16,
-    completion: u16,
-    input: u16,
+pub(crate) struct PaneHeights {
+    pub(crate) queue: u16,
+    pub(crate) completion: u16,
+    pub(crate) input: u16,
 }
 
 fn pane_heights(state: &TuiState, total_height: u16, mode: CockpitLayoutMode) -> PaneHeights {
@@ -477,15 +616,7 @@ fn desired_input_region_height(state: &TuiState, max_rows: usize) -> u16 {
         .saturating_add(2)
 }
 
-fn timeline_lines(state: &TuiState, region: Rect) -> Vec<Line<'static>> {
-    timeline_lines_with_mode(state, region, TimelineDetailMode::Full)
-}
-
-fn timeline_lines_with_mode(
-    state: &TuiState,
-    region: Rect,
-    mode: TimelineDetailMode,
-) -> Vec<Line<'static>> {
+fn timeline_lines_compact(state: &TuiState, region: Rect) -> Vec<Line<'static>> {
     let mut user_line_indexes = Vec::new();
     let mut lines = Vec::new();
     for (index, item) in state.timeline().iter().enumerate() {
@@ -496,10 +627,12 @@ fn timeline_lines_with_mode(
             TimelineItem::User { text, lane } => user_lines(state, text, *lane),
             TimelineItem::Assistant { text } => assistant_lines(state, text, region.width),
             TimelineItem::Muted { title, detail } => muted_lines(state, title, detail),
-            TimelineItem::Expanded { title, body } | TimelineItem::Diagnostic { title, body } => {
-                expanded_lines_for_timeline_mode(state, mode, item, title, body, region.width)
+            TimelineItem::Expanded { title, .. }
+            | TimelineItem::ExpandedDetail { title, .. }
+            | TimelineItem::Diagnostic { title, .. } => {
+                vec![expanded_title_line(state, item, title)]
             }
-            TimelineItem::Patch { changes } => patch_lines_for_timeline_mode(state, mode, changes),
+            TimelineItem::Patch { changes } => compact_patch_lines(state, changes),
         };
         lines.extend(spaced_timeline_item(
             item_lines,
@@ -544,44 +677,9 @@ fn spaced_timeline_item(mut lines: Vec<Line<'static>>, has_next_item: bool) -> V
 }
 
 fn assistant_lines(state: &TuiState, text: &str, region_width: u16) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
-    let mut in_code_fence = false;
-    for line in text.split('\n') {
-        if is_code_fence_line(line) {
-            in_code_fence = !in_code_fence;
-            continue;
-        }
-
-        if in_code_fence {
-            lines.extend(code_block_lines(state, line, region_width));
-        } else {
-            lines.extend(inline_code_wrapped_lines(
-                state,
-                line,
-                semantic_style(state, SemanticColor::Assistant),
-                region_width,
-            ));
-        }
-    }
+    let mut lines = markdown_lines(state, text, region_width);
     lines.push(assistant_separator_line(state, region_width));
     lines
-}
-
-fn is_code_fence_line(line: &str) -> bool {
-    let trimmed = line.trim_start();
-    trimmed.starts_with("```") || trimmed.starts_with("~~~")
-}
-
-fn code_block_lines(state: &TuiState, text: &str, region_width: u16) -> Vec<Line<'static>> {
-    let style = inline_code_style(state, semantic_style(state, SemanticColor::Assistant));
-    wrap_styled_parts_preserving_leading_whitespace(
-        vec![StyledTextPart {
-            text: format!("  {text}"),
-            style,
-            atomic: false,
-        }],
-        region_width,
-    )
 }
 
 fn assistant_separator_line(state: &TuiState, region_width: u16) -> Line<'static> {
@@ -593,6 +691,10 @@ fn assistant_separator_line(state: &TuiState, region_width: u16) -> Line<'static
 }
 
 fn muted_lines(state: &TuiState, title: &str, detail: &str) -> Vec<Line<'static>> {
+    if let Some(line) = tool_title_line_from_parts(state, title, detail) {
+        return vec![line];
+    }
+
     let mut spans = vec![Span::styled(
         title.to_owned(),
         semantic_style(state, SemanticColor::Muted),
@@ -610,66 +712,6 @@ fn muted_lines(state: &TuiState, title: &str, detail: &str) -> Vec<Line<'static>
         semantic_style(state, SemanticColor::Muted),
     ));
     vec![Line::from(spans)]
-}
-
-fn expanded_lines(
-    state: &TuiState,
-    item: &TimelineItem,
-    title: &str,
-    body: &str,
-) -> Vec<Line<'static>> {
-    let mut lines = vec![expanded_title_line(state, item, title)];
-    lines.extend(
-        body.lines()
-            .map(|line| inline_code_line(state, line, timeline_body_style(state, item, line))),
-    );
-    lines
-}
-
-fn expanded_lines_for_timeline_mode(
-    state: &TuiState,
-    mode: TimelineDetailMode,
-    item: &TimelineItem,
-    title: &str,
-    body: &str,
-    region_width: u16,
-) -> Vec<Line<'static>> {
-    match mode {
-        TimelineDetailMode::Full => expanded_lines(state, item, title, body),
-        TimelineDetailMode::CompactArtifacts => {
-            compact_expanded_lines(state, item, title, body, region_width)
-        }
-    }
-}
-
-fn compact_expanded_lines(
-    state: &TuiState,
-    item: &TimelineItem,
-    title: &str,
-    body: &str,
-    region_width: u16,
-) -> Vec<Line<'static>> {
-    let mut lines = vec![expanded_title_line(state, item, title)];
-    if let Some(first_line) = body.lines().find(|line| !line.trim().is_empty()) {
-        lines.extend(inline_code_wrapped_lines(
-            state,
-            first_line,
-            timeline_body_style(state, item, first_line),
-            region_width,
-        ));
-    }
-    lines
-}
-
-fn patch_lines_for_timeline_mode(
-    state: &TuiState,
-    mode: TimelineDetailMode,
-    changes: &[PatchChangeView],
-) -> Vec<Line<'static>> {
-    match mode {
-        TimelineDetailMode::Full => patch_lines(state, changes),
-        TimelineDetailMode::CompactArtifacts => compact_patch_lines(state, changes),
-    }
 }
 
 fn compact_patch_lines(state: &TuiState, changes: &[PatchChangeView]) -> Vec<Line<'static>> {
@@ -707,17 +749,89 @@ fn expanded_title_line(state: &TuiState, item: &TimelineItem, title: &str) -> Li
         ));
     }
 
-    if let Some(command) = title
-        .strip_prefix("Ran ")
-        .or_else(|| title.strip_prefix("Ran: "))
-    {
-        return ran_title_line(state, command);
+    if let Some(line) = tool_title_line(state, title) {
+        return line;
     }
 
     Line::from(Span::styled(
         title.to_owned(),
         semantic_style(state, SemanticColor::Focus),
     ))
+}
+
+fn tool_title_line_from_parts(
+    state: &TuiState,
+    title: &str,
+    detail: &str,
+) -> Option<Line<'static>> {
+    if detail.is_empty() {
+        return tool_title_line(state, title);
+    }
+
+    if title == "Ran" {
+        return Some(ran_title_line(state, detail));
+    }
+    tool_title_keyword(title).map(|keyword| tool_keyword_title_line(state, keyword, detail))
+}
+
+fn tool_title_line(state: &TuiState, title: &str) -> Option<Line<'static>> {
+    if let Some(command) = title
+        .strip_prefix("Ran ")
+        .or_else(|| title.strip_prefix("Ran: "))
+    {
+        return Some(ran_title_line(state, command));
+    }
+
+    for keyword in TOOL_TITLE_KEYWORDS {
+        if let Some(detail) = strip_tool_title_detail(title, keyword) {
+            return Some(tool_keyword_title_line(state, keyword, detail));
+        }
+    }
+
+    None
+}
+
+fn strip_tool_title_detail<'a>(title: &'a str, keyword: &str) -> Option<&'a str> {
+    if title == keyword {
+        return Some("");
+    }
+    title.strip_prefix(keyword)?.strip_prefix(' ')
+}
+
+const TOOL_TITLE_KEYWORDS: &[&str] = &[
+    "Read",
+    "Listed",
+    "Searched",
+    "MCP",
+    "Permission",
+    "Patch",
+    "Tool",
+];
+
+fn tool_title_keyword(title: &str) -> Option<&'static str> {
+    TOOL_TITLE_KEYWORDS
+        .iter()
+        .copied()
+        .find(|keyword| title == *keyword)
+}
+
+fn tool_keyword_title_line(state: &TuiState, keyword: &str, detail: &str) -> Line<'static> {
+    let mut spans = vec![Span::styled(
+        keyword.to_owned(),
+        semantic_style(state, SemanticColor::ToolKeyword).add_modifier(Modifier::BOLD),
+    )];
+    if !detail.is_empty() {
+        spans.push(Span::styled(
+            " ".to_owned(),
+            semantic_style(state, SemanticColor::Muted),
+        ));
+        spans.extend(inline_code_spans(
+            state,
+            detail,
+            semantic_style(state, SemanticColor::Assistant),
+        ));
+    }
+    Line::from(spans)
 }
 
 fn ran_title_line(state: &TuiState, detail: &str) -> Line<'static> {
@@ -988,10 +1102,6 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
     text.chars().take(max_chars - 3).collect::<String>() + "..."
 }
 
-fn inline_code_line(state: &TuiState, text: &str, base_style: Style) -> Line<'static> {
-    Line::from(inline_code_spans(state, text, base_style))
-}
-
 fn inline_code_wrapped_lines(
     state: &TuiState,
     text: &str,
@@ -1009,10 +1119,10 @@ fn inline_code_spans(state: &TuiState, text: &str, base_style: Style) -> Vec<Spa
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct StyledTextPart {
-    text: String,
-    style: Style,
-    atomic: bool,
+pub(crate) struct StyledTextPart {
+    pub(crate) text: String,
+    pub(crate) style: Style,
+    pub(crate) atomic: bool,
 }
 
 fn inline_code_parts(state: &TuiState, text: &str, base_style: Style) -> Vec<StyledTextPart> {
@@ -1056,11 +1166,14 @@ fn inline_code_parts(state: &TuiState, text: &str, base_style: Style) -> Vec<Sty
     }
 }
 
-fn wrap_styled_parts(parts: Vec<StyledTextPart>, region_width: u16) -> Vec<Line<'static>> {
+pub(crate) fn wrap_styled_parts(
+    parts: Vec<StyledTextPart>,
+    region_width: u16,
+) -> Vec<Line<'static>> {
     wrap_styled_parts_with_policy(parts, region_width, false)
 }
 
-fn wrap_styled_parts_preserving_leading_whitespace(
+pub(crate) fn wrap_styled_parts_preserving_leading_whitespace(
     parts: Vec<StyledTextPart>,
     region_width: u16,
 ) -> Vec<Line<'static>> {
@@ -1259,25 +1372,6 @@ fn inline_code_style(state: &TuiState, base_style: Style) -> Style {
         style = style.fg(foreground);
     }
     style
-}
-
-fn timeline_body_style(state: &TuiState, item: &TimelineItem, line: &str) -> Style {
-    if matches!(item, TimelineItem::Diagnostic { .. }) {
-        return semantic_style(state, SemanticColor::Error);
-    }
-    if line.starts_with('+') {
-        return semantic_style(state, SemanticColor::DiffAdd);
-    }
-    if line.starts_with('-') {
-        return semantic_style(state, SemanticColor::DiffDelete);
-    }
-    if line.starts_with("  stdout:") || line.starts_with("    ") {
-        return semantic_style(state, SemanticColor::Muted);
-    }
-    if line.starts_with("  stderr:") || line.starts_with("  exit ") {
-        return semantic_style(state, SemanticColor::Error);
-    }
-    semantic_style(state, SemanticColor::Assistant)
 }
 
 fn semantic_style(state: &TuiState, slot: SemanticColor) -> Style {

@@ -37,11 +37,13 @@ futures-util = "0.3"
 jsonschema = { version = "0.30", default-features = false }
 libc = "0.2"
 pyo3 = { version = "0.28.3", features = ["extension-module"] }
+pulldown-cmark = "0.13"
 ratatui = "0.30"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 schemars = { version = "1.0", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+syntect = "5"
 thiserror = "2.0"
 tokio = { version = "1", features = ["rt", "sync", "macros", "io-util", "fs", "process", "time"] }
 tokio-stream = { version = "0.1", default-features = false, features = ["sync"] }
@@ -51,6 +53,7 @@ tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["fmt", "json", "env-filter"] }
 tempfile = "3"
+two-face = { version = "0.5", default-features = false, features = ["syntect-default-onig"] }
 unicode-width = "0.2"
 uuid = { version = "1", features = ["v4"] }
 

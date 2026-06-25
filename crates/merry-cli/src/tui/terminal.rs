@@ -8,14 +8,15 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use futures_util::StreamExt;
-use ratatui::{Frame, Terminal, backend::CrosstermBackend};
+use ratatui::layout::Size;
+use ratatui::{Frame, Terminal, backend::CrosstermBackend, layout::Position};
 use std::io::{self, Stdout, stdout};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TerminalEvent {
     Key(KeyEvent),
-    MouseScrollUp,
-    MouseScrollDown,
+    MouseScrollUp(Position),
+    MouseScrollDown(Position),
     Paste(String),
     Resize,
 }
@@ -79,6 +80,10 @@ impl TerminalSession {
     pub(crate) fn draw(&mut self, draw: impl FnOnce(&mut Frame<'_>)) -> io::Result<()> {
         self.terminal.draw(draw).map(|_| ())
     }
+
+    pub(crate) fn size(&self) -> io::Result<Size> {
+        self.terminal.size()
+    }
 }
 
 impl Drop for TerminalSession {
@@ -110,9 +115,10 @@ fn mouse_capture_enabled() -> bool {
 }
 
 fn mouse_scroll_event(mouse: MouseEvent) -> Option<TerminalEvent> {
+    let position = Position::new(mouse.column, mouse.row);
     match mouse.kind {
-        MouseEventKind::ScrollUp => Some(TerminalEvent::MouseScrollUp),
-        MouseEventKind::ScrollDown => Some(TerminalEvent::MouseScrollDown),
+        MouseEventKind::ScrollUp => Some(TerminalEvent::MouseScrollUp(position)),
+        MouseEventKind::ScrollDown => Some(TerminalEvent::MouseScrollDown(position)),
         _ => None,
     }
 }
@@ -121,12 +127,13 @@ fn mouse_scroll_event(mouse: MouseEvent) -> Option<TerminalEvent> {
 mod tests {
     use super::{TerminalEvent, mouse_capture_enabled, mouse_scroll_event};
     use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::layout::Position;
 
     fn mouse(kind: MouseEventKind) -> MouseEvent {
         MouseEvent {
             kind,
-            column: 0,
-            row: 0,
+            column: 7,
+            row: 9,
             modifiers: KeyModifiers::NONE,
         }
     }
@@ -135,11 +142,11 @@ mod tests {
     fn maps_mouse_wheel_to_timeline_scroll_events() {
         assert_eq!(
             mouse_scroll_event(mouse(MouseEventKind::ScrollUp)),
-            Some(TerminalEvent::MouseScrollUp)
+            Some(TerminalEvent::MouseScrollUp(Position::new(7, 9)))
         );
         assert_eq!(
             mouse_scroll_event(mouse(MouseEventKind::ScrollDown)),
-            Some(TerminalEvent::MouseScrollDown)
+            Some(TerminalEvent::MouseScrollDown(Position::new(7, 9)))
         );
         assert_eq!(
             mouse_scroll_event(mouse(MouseEventKind::Down(MouseButton::Left))),

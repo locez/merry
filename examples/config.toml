@@ -105,9 +105,12 @@ quit = "ctrl+q"
 scroll_up = "pageup"
 scroll_down = "pagedown"
 review_previous_user_input = "ctrl+u"
+review_previous_artifact = "ctrl+g"
+review_next_artifact = "ctrl+f"
+follow_latest_artifact = "ctrl+r"
 history_previous = "up"
 history_next = "down"
-resume_suspended = "ctrl+r"
+resume_suspended = "ctrl+p"
 discard_suspended = "ctrl+d"
 
 [observability.log]

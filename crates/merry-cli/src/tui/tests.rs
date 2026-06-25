@@ -1,5 +1,7 @@
 use super::completion::{CompletionKind, CompletionSources};
-use super::controller::{ControllerEffect, handle_key_action, handle_key_event};
+use super::controller::{
+    ControllerEffect, handle_key_action, handle_key_event, handle_mouse_scroll_down,
+};
 use super::input::TextInput;
 use super::keymap::{KeyAction, KeyBinding, Keymap};
 use super::projector::TuiProjector;
@@ -15,7 +17,10 @@ use merry_core::{
 };
 use merry_runtime::SkillMetadata;
 use merry_tool_workspace::WORKSPACE_PATCH_TOOL;
-use ratatui::style::{Color, Modifier};
+use ratatui::{
+    layout::{Position, Size},
+    style::{Color, Modifier},
+};
 use serde_json::json;
 use std::fs;
 use std::path::PathBuf;
@@ -551,6 +556,30 @@ fn controller_scroll_actions_move_timeline_viewport() {
 }
 
 #[test]
+fn controller_mouse_scroll_routes_focus_pane_independently_from_chat() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    let size = Size::new(180, 28);
+
+    handle_mouse_scroll_down(Position::new(90, 5), size, &mut state);
+    assert_eq!(state.focus_scroll_offset(), 5);
+    assert_eq!(state.timeline_scroll_offset(), 0);
+
+    handle_mouse_scroll_down(Position::new(10, 5), size, &mut state);
+    assert_eq!(state.focus_scroll_offset(), 5);
+    assert_eq!(state.timeline_scroll_offset(), 0);
+
+    state.scroll_timeline_up_by(10);
+    handle_mouse_scroll_down(Position::new(10, 5), size, &mut state);
+    assert_eq!(state.focus_scroll_offset(), 5);
+    assert_eq!(state.timeline_scroll_offset(), 5);
+}
+
+#[test]
 fn controller_review_previous_user_input_steps_between_user_turns() {
     let mut state = TuiState::new(
         "/repo".into(),
@@ -610,6 +639,65 @@ fn controller_submit_exits_review_mode_before_submitting_input() {
     );
     assert_eq!(state.timeline_review_user_index(), None);
     assert_eq!(state.timeline_scroll_offset(), 0);
+    assert_eq!(state.input_text(), "draft");
+
+    assert_eq!(
+        handle_key_action(KeyAction::SubmitNext, &mut state),
+        ControllerEffect::SubmitNext("draft".to_owned())
+    );
+}
+
+#[test]
+fn controller_artifact_review_steps_through_artifacts_and_submit_returns_to_latest_first() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.push_timeline_item(TimelineItem::Expanded {
+        title: "Ran first command".to_owned(),
+        body: "first output".to_owned(),
+    });
+    state.push_timeline_item(TimelineItem::Expanded {
+        title: "Ran second command".to_owned(),
+        body: "second output".to_owned(),
+    });
+    state.insert_input_str("draft");
+
+    assert_eq!(
+        handle_key_action(KeyAction::ReviewPreviousArtifact, &mut state),
+        ControllerEffect::None
+    );
+    assert_eq!(state.artifact_review_timeline_index(), Some(0));
+
+    state.push_timeline_item(TimelineItem::Expanded {
+        title: "Ran third command".to_owned(),
+        body: "third output".to_owned(),
+    });
+    assert_eq!(state.selected_artifact_timeline_index(), Some(0));
+
+    assert_eq!(
+        handle_key_action(KeyAction::ReviewNextArtifact, &mut state),
+        ControllerEffect::None
+    );
+    assert_eq!(state.artifact_review_timeline_index(), Some(1));
+
+    assert_eq!(
+        handle_key_action(KeyAction::FollowLatestArtifact, &mut state),
+        ControllerEffect::None
+    );
+    assert_eq!(state.selected_artifact_timeline_index(), Some(2));
+
+    assert_eq!(
+        handle_key_action(KeyAction::ReviewPreviousArtifact, &mut state),
+        ControllerEffect::None
+    );
+    assert_eq!(
+        handle_key_action(KeyAction::SubmitNext, &mut state),
+        ControllerEffect::None
+    );
+    assert_eq!(state.artifact_review_timeline_index(), None);
     assert_eq!(state.input_text(), "draft");
 
     assert_eq!(
@@ -680,6 +768,18 @@ fn default_keymap_maps_core_navigation_and_control_keys() {
     assert_eq!(
         keymap.action_for(KeyBinding::new(KeyCode::Char('u'), KeyModifiers::CONTROL)),
         Some(KeyAction::ReviewPreviousUserInput)
+    );
+    assert_eq!(
+        keymap.action_for(KeyBinding::new(KeyCode::Char('g'), KeyModifiers::CONTROL)),
+        Some(KeyAction::ReviewPreviousArtifact)
+    );
+    assert_eq!(
+        keymap.action_for(KeyBinding::new(KeyCode::Char('f'), KeyModifiers::CONTROL)),
+        Some(KeyAction::ReviewNextArtifact)
+    );
+    assert_eq!(
+        keymap.action_for(KeyBinding::new(KeyCode::Char('r'), KeyModifiers::CONTROL)),
+        Some(KeyAction::FollowLatestArtifact)
     );
 }
 
@@ -1124,7 +1224,19 @@ fn projector_keeps_non_patch_tool_results_compact_without_raw_json() {
     );
 
     assert_eq!(state.timeline().len(), 1);
-    assert!(matches!(state.timeline()[0], TimelineItem::Muted { .. }));
+    let TimelineItem::ExpandedDetail {
+        title,
+        body,
+        focus_body,
+    } = &state.timeline()[0]
+    else {
+        panic!("read tool result should expand to a compact preview");
+    };
+    assert_eq!(title, "Read .");
+    assert!(!body.contains("AGENTS.md:1"));
+    assert!(body.contains("large raw content"));
+    assert!(focus_body.contains("large raw content"));
+    assert!(!body.contains(r#""content":"#));
 }
 
 #[test]
@@ -1163,11 +1275,116 @@ fn projector_shows_tool_call_arguments_without_completed_noise() {
     );
 
     assert_eq!(state.timeline().len(), 1);
-    let TimelineItem::Muted { title, detail } = &state.timeline()[0] else {
-        panic!("read tool call should render as a compact muted line");
+    let TimelineItem::ExpandedDetail {
+        title,
+        body,
+        focus_body,
+    } = &state.timeline()[0]
+    else {
+        panic!("read tool call should expand to a compact preview");
     };
-    assert_eq!(title, "Read");
-    assert_eq!(detail, "AGENTS.md");
+    assert_eq!(title, "Read AGENTS.md");
+    assert!(!body.contains("AGENTS.md:1"));
+    assert!(body.contains("large raw content"));
+    assert!(focus_body.contains("large raw content"));
+    assert!(!body.contains("completed"));
+}
+
+#[test]
+fn projector_expands_read_file_output_for_focus_review() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    let mut projector = TuiProjector::default();
+
+    projector.apply(
+        RuntimeEvent::ToolCallStarted {
+            call: pending_call_with_args(
+                "call-read",
+                "workspace_read_file",
+                json!({ "path": "hello_world.py" }),
+            ),
+            source: source(),
+        },
+        &mut state,
+    );
+    projector.apply(
+        RuntimeEvent::ToolCallFinished {
+            result: ToolCallResult::succeeded(
+                ToolCallId::new("call-read").unwrap(),
+                text_artifact("read-output"),
+            ),
+            output: Some(ToolOutput::Json {
+                json: r#"{"ok":true,"tool":"workspace_read_file","path":"hello_world.py","bytes":22,"content":"print(\"Hello, Merry!\")\n"}"#.to_owned(),
+            }),
+            source: source(),
+        },
+        &mut state,
+    );
+
+    assert_eq!(state.timeline().len(), 1);
+    let TimelineItem::ExpandedDetail {
+        title,
+        body,
+        focus_body,
+    } = &state.timeline()[0]
+    else {
+        panic!("read_file result should expand so Focus can show content");
+    };
+    assert_eq!(title, "Read hello_world.py");
+    assert!(!body.contains("hello_world.py:1"));
+    assert!(body.contains("print(\"Hello, Merry!\")"));
+    assert!(focus_body.contains("print(\"Hello, Merry!\")"));
+}
+
+#[test]
+fn projector_expands_list_dir_output_for_focus_review() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    let mut projector = TuiProjector::default();
+
+    projector.apply(
+        RuntimeEvent::ToolCallStarted {
+            call: pending_call_with_args("call-list", "workspace_list_dir", json!({ "path": "." })),
+            source: source(),
+        },
+        &mut state,
+    );
+    projector.apply(
+        RuntimeEvent::ToolCallFinished {
+            result: ToolCallResult::succeeded(
+                ToolCallId::new("call-list").unwrap(),
+                text_artifact("list-output"),
+            ),
+            output: Some(ToolOutput::Json {
+                json: r#"{"ok":true,"tool":"workspace_list_dir","path":".","entries":[{"name":"Cargo.toml","path":"Cargo.toml","kind":"file"},{"name":"crates","path":"crates","kind":"directory"}],"truncated":false}"#.to_owned(),
+            }),
+            source: source(),
+        },
+        &mut state,
+    );
+
+    assert_eq!(state.timeline().len(), 1);
+    let TimelineItem::ExpandedDetail {
+        title,
+        body,
+        focus_body,
+    } = &state.timeline()[0]
+    else {
+        panic!("list_dir result should expand so Focus can show entries");
+    };
+    assert_eq!(title, "Listed .");
+    assert!(body.contains("Cargo.toml"));
+    assert!(body.contains("crates/"));
+    assert!(focus_body.contains("Cargo.toml"));
+    assert!(focus_body.contains("crates/"));
 }
 
 #[test]
@@ -1264,12 +1481,18 @@ fn projector_renders_process_calls_as_ran_with_preview() {
     );
 
     assert_eq!(state.timeline().len(), 1);
-    let TimelineItem::Expanded { title, body } = &state.timeline()[0] else {
+    let TimelineItem::ExpandedDetail {
+        title,
+        body,
+        focus_body,
+    } = &state.timeline()[0]
+    else {
         panic!("process call should expand with output preview");
     };
     assert_eq!(title, "Ran python3 hello_world.py (cwd: .)");
     assert!(!body.contains("python3 hello_world.py (cwd: .)"));
     assert!(body.contains("  stdout: hello world"));
+    assert!(focus_body.contains("  stdout: hello world"));
 }
 
 #[test]
@@ -1310,7 +1533,12 @@ fn projector_renders_failed_process_calls_as_ran_with_error_preview() {
     );
 
     assert_eq!(state.timeline().len(), 1);
-    let TimelineItem::Expanded { title, body } = &state.timeline()[0] else {
+    let TimelineItem::ExpandedDetail {
+        title,
+        body,
+        focus_body,
+    } = &state.timeline()[0]
+    else {
         panic!("failed process call should expand with output preview");
     };
     assert_eq!(title, "Ran cargo test -p merry-cli (cwd: .)");
@@ -1318,6 +1546,9 @@ fn projector_renders_failed_process_calls_as_ran_with_error_preview() {
     assert!(body.contains("  exit 101"));
     assert!(body.contains("  stderr: error: test failed"));
     assert!(body.contains("    rerun with --exact"));
+    assert!(focus_body.contains("  exit 101"));
+    assert!(focus_body.contains("  stderr: error: test failed"));
+    assert!(focus_body.contains("    rerun with --exact"));
 }
 
 #[test]
@@ -1358,12 +1589,64 @@ fn projector_truncates_process_preview_lines() {
         &mut state,
     );
 
-    let TimelineItem::Expanded { body, .. } = &state.timeline()[0] else {
+    let TimelineItem::ExpandedDetail { body, .. } = &state.timeline()[0] else {
         panic!("process call should expand with output preview");
     };
     assert!(body.contains("  stdout: "));
     assert!(body.contains("..."));
     assert!(!body.contains(&"x".repeat(150)));
+}
+
+#[test]
+fn focus_panel_shows_full_process_output_when_preview_is_compact() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    let mut projector = TuiProjector::default();
+
+    projector.apply(
+        RuntimeEvent::ToolCallStarted {
+            call: pending_call_with_args(
+                "call-process",
+                "run_process",
+                json!({ "argv": ["ls"], "cwd": "." }),
+            ),
+            source: source(),
+        },
+        &mut state,
+    );
+    projector.apply(
+        RuntimeEvent::ToolCallFinished {
+            result: ToolCallResult::succeeded(
+                ToolCallId::new("call-process").unwrap(),
+                text_artifact("process-output"),
+            ),
+            output: Some(ToolOutput::Json {
+                json: r#"{"kind":"process_action","status":0,"stdout":{"text":"AGENTS.md\nCargo.lock\nCargo.toml\nREADME.md\ncrates\n","bytes":49,"truncated":false},"stderr":{"text":"","bytes":0,"truncated":false}}"#.to_owned(),
+            }),
+            source: source(),
+        },
+        &mut state,
+    );
+
+    let TimelineItem::ExpandedDetail { body, .. } = &state.timeline()[0] else {
+        panic!("process call should expand with output preview");
+    };
+    assert!(body.contains("AGENTS.md"));
+    assert!(body.contains("Cargo.toml"));
+    assert!(!body.contains("README.md"));
+
+    let text = render_to_text(&state, 180, 24);
+
+    assert!(text.contains("FOCUS command ls"));
+    assert!(text.contains("stdout: AGENTS.md"));
+    assert!(text.contains("Cargo.lock"));
+    assert!(text.contains("Cargo.toml"));
+    assert!(text.contains("README.md"));
+    assert!(text.contains("crates"));
 }
 
 #[test]
@@ -1560,7 +1843,7 @@ fn renderer_shows_workspace_patch_as_edited_block() {
         }],
     });
 
-    let text = render_to_text(&state, 96, 16);
+    let text = render_to_text(&state, 180, 16);
 
     assert!(text.contains("Edited crates/merry-cli/src/tui/render.rs (+1 -1)"));
     assert!(text.contains("    let old = true;"));
@@ -1875,7 +2158,7 @@ fn renderer_shows_status_timeline_queue_and_input() {
     state.input_mut().insert_char('h');
     state.input_mut().insert_char('i');
 
-    let text = render_to_text(&state, 80, 24);
+    let text = render_to_text(&state, 79, 24);
 
     assert!(text.contains("Ready"));
     assert!(text.contains("gpt-test"));
@@ -1921,7 +2204,7 @@ fn renderer_uses_three_pane_cockpit_on_wide_terminal() {
 
     assert!(text.contains("CHAT"));
     assert!(text.contains("FOCUS command cargo test -p merry-cli"));
-    assert!(text.contains("PLAN"));
+    assert!(text.contains("RUN"));
     assert!(text.contains("queued next item"));
     assert!(text.contains("queued backlog item"));
     assert!(!text.contains("queue\nNext"));
@@ -1948,8 +2231,137 @@ fn renderer_uses_stacked_work_rail_on_medium_terminal() {
 
     assert!(text.contains("CHAT"));
     assert!(text.contains("FOCUS read"));
-    assert!(text.contains("PLAN"));
+    assert!(text.contains("RUN"));
     assert!(text.contains("review layout"));
+}
+
+#[test]
+fn renderer_keeps_reviewed_artifact_visible_while_index_shows_newer_items() {
+    let mut state = TuiState::new(
+        "/repo/merry".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.push_timeline_item(TimelineItem::Expanded {
+        title: "Ran first command".to_owned(),
+        body: "stdout: first output".to_owned(),
+    });
+    state.push_timeline_item(TimelineItem::Expanded {
+        title: "Ran second command".to_owned(),
+        body: "stdout: second output".to_owned(),
+    });
+    state.select_previous_artifact();
+
+    let text = render_to_text(&state, 180, 28);
+
+    assert!(text.contains("FOCUS command first command"));
+    assert!(text.contains("stdout"));
+    assert!(text.contains("first output"));
+    assert!(text.contains("> Ran first command"));
+    assert!(text.contains("- Ran second command"));
+}
+
+#[test]
+fn cockpit_chat_keeps_read_artifacts_collapsed_while_focus_shows_content() {
+    let mut state = TuiState::new(
+        "/repo/merry".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.push_timeline_item(TimelineItem::Expanded {
+        title: "Read hello_world.py".to_owned(),
+        body: "print(\"Hello, Merry!\")".to_owned(),
+    });
+
+    let text = render_to_text(&state, 180, 28);
+
+    assert!(text.contains("FOCUS Read hello_world.py"));
+    assert!(text.contains("print(\"Hello, Merry!\")"));
+    assert!(text.contains("Read hello_world.py"));
+
+    let chat_text = text
+        .lines()
+        .map(|line| line.chars().take(72).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!chat_text.contains("print(\"Hello, Merry!\")"));
+}
+
+#[test]
+fn focus_read_file_preserves_code_indentation_and_highlights_by_extension() {
+    let mut state = TuiState::new(
+        "/repo/merry".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.push_timeline_item(TimelineItem::Expanded {
+        title: "Read hello_world.py".to_owned(),
+        body: "def build_greeting(name: str) -> str:\n    period = \"morning\"\n    return f\"Good {period}, {name}!\"".to_owned(),
+    });
+
+    let buffer = render_to_buffer(&state, 180, 28);
+    let text = rendered_buffer_text(&buffer);
+
+    assert!(text.contains("    period = \"morning\""), "{text}");
+    let keyword_style = find_cell_style(&buffer, "def").expect("python keyword should render");
+    assert!(
+        keyword_style.fg.is_some(),
+        "read file focus should syntax-highlight known source extensions"
+    );
+}
+
+#[test]
+fn focus_list_dir_renders_entries_with_semantic_colors() {
+    let mut state = TuiState::new(
+        "/repo/merry".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.push_timeline_item(TimelineItem::Expanded {
+        title: "Listed .".to_owned(),
+        body: "Cargo.toml\ncrates/\n.hidden".to_owned(),
+    });
+
+    let buffer = render_to_buffer(&state, 180, 28);
+
+    assert_eq!(find_cell_color(&buffer, "Cargo.toml"), Some(Color::White));
+    assert_eq!(find_cell_color(&buffer, "crates/"), Some(Color::LightBlue));
+    assert_eq!(find_cell_color(&buffer, ".hidden"), Some(Color::DarkGray));
+}
+
+#[test]
+fn focus_panel_scrolls_independently_from_chat_timeline() {
+    let mut state = TuiState::new(
+        "/repo/merry".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.push_timeline_item(TimelineItem::Assistant {
+        text: "chat anchor".to_owned(),
+    });
+    state.push_timeline_item(TimelineItem::Expanded {
+        title: "Listed .".to_owned(),
+        body: (0..30)
+            .map(|index| format!("entry-{index}.txt"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    });
+
+    let bottom = render_to_text(&state, 180, 24);
+    state.scroll_focus_down_by(10);
+    let scrolled = render_to_text(&state, 180, 24);
+
+    assert!(bottom.contains("entry-0.txt"), "{bottom}");
+    assert!(!bottom.contains("entry-20.txt"), "{bottom}");
+    assert!(!scrolled.contains("entry-0.txt"), "{scrolled}");
+    assert!(scrolled.contains("entry-10.txt"), "{scrolled}");
+    assert_eq!(state.timeline_scroll_offset(), 0);
+    assert!(scrolled.contains("chat anchor"));
 }
 
 #[test]
@@ -1970,13 +2382,52 @@ fn renderer_keeps_bottom_queue_on_narrow_terminal() {
         backlog: vec![],
     });
 
-    let text = render_to_text(&state, 100, 24);
+    let text = render_to_text(&state, 79, 24);
 
     assert!(!text.contains("FOCUS"));
-    assert!(!text.contains("PLAN"));
+    assert!(!text.contains("RUN"));
     assert!(text.contains("queue"));
     assert!(text.contains("narrow next item"));
     assert!(text.contains("input"));
+}
+
+#[test]
+fn narrow_chat_keeps_read_artifacts_collapsed() {
+    let mut state = TuiState::new(
+        "/repo/merry".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.push_timeline_item(TimelineItem::Expanded {
+        title: "Read hello_world.py".to_owned(),
+        body: "print(\"Hello, Merry!\")".to_owned(),
+    });
+
+    let text = render_to_text(&state, 79, 24);
+
+    assert!(text.contains("Read hello_world.py"));
+    assert!(!text.contains("print(\"Hello, Merry!\")"));
+}
+
+#[test]
+fn ipad_width_uses_three_pane_cockpit() {
+    let mut state = TuiState::new(
+        "/repo/merry".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.push_timeline_item(TimelineItem::Expanded {
+        title: "Read hello_world.py".to_owned(),
+        body: "print(\"Hello, Merry!\")".to_owned(),
+    });
+
+    let text = render_to_text(&state, 100, 24);
+
+    assert!(text.contains("CHAT"));
+    assert!(text.contains("FOCUS Read hello_world.py"));
+    assert!(text.contains("RUN"));
 }
 
 #[test]
@@ -2248,9 +2699,19 @@ fn renderer_applies_configured_semantic_theme_colors() {
         title: "Ran cargo test (cwd: .)".to_owned(),
         body: "  stdout: ok".to_owned(),
     });
-    state.push_timeline_item(TimelineItem::Expanded {
-        title: "patch".to_owned(),
-        body: "+added\n-removed".to_owned(),
+    state.push_timeline_item(TimelineItem::Patch {
+        changes: vec![PatchChangeView {
+            path: "patch".to_owned(),
+            added: 1,
+            removed: 1,
+            hunks: 1,
+            bytes_before: Some(8),
+            bytes_after: Some(6),
+            lines: vec![
+                PatchLineView::remove("removed", Some(1)),
+                PatchLineView::add("added", Some(1)),
+            ],
+        }],
     });
     state.update_queue_preview(QueuePreview {
         next: vec![QueuedInputView {
@@ -2262,13 +2723,12 @@ fn renderer_applies_configured_semantic_theme_colors() {
         backlog: vec![],
     });
 
-    let buffer = render_to_buffer(&state, 80, 24);
+    let buffer = render_to_buffer(&state, 180, 24);
 
     assert_eq!(find_cell_color(&buffer, "gpt-test"), Some(Color::Red));
     assert_eq!(find_cell_color(&buffer, "tool"), Some(Color::Blue));
     assert_eq!(find_cell_color(&buffer, "Ran"), Some(Color::Cyan));
     assert_eq!(find_cell_color(&buffer, "cargo"), Some(Color::LightBlue));
-    assert_eq!(find_cell_color(&buffer, "ok"), Some(Color::Blue));
     assert_eq!(find_cell_color(&buffer, "patch"), Some(Color::Magenta));
     assert_eq!(find_cell_color(&buffer, "+added"), Some(Color::Green));
     assert_eq!(find_cell_color(&buffer, "-removed"), Some(Color::Yellow));
@@ -2298,6 +2758,206 @@ fn renderer_highlights_inline_code_spans() {
     assert_eq!(code_style.fg, Some(Color::LightMagenta));
     assert_eq!(code_style.bg, Some(Color::Reset));
     assert!(code_style.add_modifier.contains(Modifier::BOLD));
+}
+
+#[test]
+fn renderer_renders_assistant_markdown_strong_without_markers() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.push_timeline_item(TimelineItem::Assistant {
+        text: "**hello** world".to_owned(),
+    });
+
+    let text = render_to_text(&state, 80, 16);
+    assert!(!text.contains("**hello**"));
+    assert!(text.contains("hello"));
+
+    let buffer = render_to_buffer(&state, 80, 16);
+    let strong_style = find_cell_style(&buffer, "hello").expect("strong text should render");
+    assert_eq!(strong_style.fg, Some(Color::LightMagenta));
+    assert!(strong_style.add_modifier.contains(Modifier::BOLD));
+    assert!(!strong_style.add_modifier.contains(Modifier::UNDERLINED));
+}
+
+#[test]
+fn renderer_does_not_underline_cjk_strong_text_in_nested_lists() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.push_timeline_item(TimelineItem::Assistant {
+        text: "- **橙子**\n  - **血橙**\n  - **脐橙**\n    - **赣南脐橙**".to_owned(),
+    });
+
+    let rendered = render_to_text(&state, 80, 18);
+    let buffer = render_to_buffer(&state, 80, 18);
+    for text in ["橙", "血", "脐", "赣"] {
+        let style = find_cell_style(&buffer, text)
+            .unwrap_or_else(|| panic!("strong CJK list item should render: {text}\n{rendered}"));
+        assert_eq!(style.fg, Some(Color::LightMagenta));
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+        assert!(!style.add_modifier.contains(Modifier::UNDERLINED));
+    }
+}
+
+#[test]
+fn renderer_keeps_plain_assistant_markdown_text_white() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.push_timeline_item(TimelineItem::Assistant {
+        text: "plain text with **strong text**".to_owned(),
+    });
+
+    let buffer = render_to_buffer(&state, 80, 16);
+    let plain_style = find_cell_style(&buffer, "plain text").expect("plain text should render");
+    let trailing_style =
+        find_cell_style(&buffer, "with").expect("trailing plain text should render");
+
+    assert_eq!(plain_style.fg, Some(Color::White));
+    assert_eq!(trailing_style.fg, Some(Color::White));
+}
+
+#[test]
+fn renderer_renders_assistant_markdown_heading_as_title_block() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.push_timeline_item(TimelineItem::Assistant {
+        text: "# Result\nBody text".to_owned(),
+    });
+
+    let text = render_to_text(&state, 80, 16);
+    assert!(!text.contains("# Result"));
+    assert!(text.contains("Result"));
+    assert!(text.contains("Body text"));
+
+    let buffer = render_to_buffer(&state, 80, 16);
+    let heading_style = find_cell_style(&buffer, "Result").expect("heading should render");
+    let body_style = find_cell_style(&buffer, "Body text").expect("body should render");
+    assert_eq!(heading_style.fg, Some(Color::LightMagenta));
+    assert!(heading_style.add_modifier.contains(Modifier::BOLD));
+    assert_eq!(body_style.fg, Some(Color::White));
+}
+
+#[test]
+fn renderer_renders_assistant_markdown_table_with_header_and_cells() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.push_timeline_item(TimelineItem::Assistant {
+        text: "| Name | Status |\n| --- | --- |\n| API | **OK** |\n| UI | pending |".to_owned(),
+    });
+
+    let text = render_to_text(&state, 100, 18);
+    assert!(text.contains("Name"));
+    assert!(text.contains("Status"));
+    assert!(text.contains("API"));
+    assert!(text.contains("OK"));
+    assert!(text.contains("UI"));
+    assert!(text.contains("pending"));
+    assert!(!text.contains("| --- |"));
+
+    let buffer = render_to_buffer(&state, 100, 18);
+    let header_style = find_cell_style(&buffer, "Status").expect("table header should render");
+    let strong_style = find_cell_style(&buffer, "OK").expect("strong table cell should render");
+    assert_eq!(header_style.fg, Some(Color::LightMagenta));
+    assert!(header_style.add_modifier.contains(Modifier::BOLD));
+    assert_eq!(strong_style.fg, Some(Color::LightMagenta));
+    assert!(strong_style.add_modifier.contains(Modifier::BOLD));
+    assert!(!strong_style.add_modifier.contains(Modifier::UNDERLINED));
+}
+
+#[test]
+fn renderer_renders_assistant_markdown_strikethrough_as_muted_crossed_text() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.push_timeline_item(TimelineItem::Assistant {
+        text: "before ~~removed~~ after".to_owned(),
+    });
+
+    let text = render_to_text(&state, 80, 16);
+    assert!(!text.contains("~~removed~~"));
+    assert!(text.contains("removed"));
+
+    let buffer = render_to_buffer(&state, 80, 16);
+    let removed_style =
+        find_cell_style(&buffer, "removed").expect("strikethrough text should render");
+    assert_eq!(removed_style.fg, Some(Color::DarkGray));
+    assert!(removed_style.add_modifier.contains(Modifier::CROSSED_OUT));
+}
+
+#[test]
+fn renderer_prefixes_wrapped_assistant_markdown_block_quotes() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.push_timeline_item(TimelineItem::Assistant {
+        text: "> quoted text wraps onto another visual line".to_owned(),
+    });
+
+    let text = render_to_text(&state, 34, 16);
+    let quote_lines = text
+        .lines()
+        .filter(|line| line.trim_start().starts_with(">"))
+        .collect::<Vec<_>>();
+    assert!(
+        quote_lines.len() >= 2,
+        "wrapped quote should keep quote prefix on each visual line:\n{text}"
+    );
+
+    let buffer = render_to_buffer(&state, 34, 16);
+    let quote_style = find_cell_style(&buffer, ">").expect("quote marker should render");
+    assert_eq!(quote_style.fg, Some(Color::LightMagenta));
+}
+
+#[test]
+fn renderer_keeps_assistant_markdown_link_url_visible() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.push_timeline_item(TimelineItem::Assistant {
+        text: "[OpenAI](https://openai.com) and [https://example.com](https://example.com)"
+            .to_owned(),
+    });
+
+    let text = render_to_text(&state, 100, 16);
+    assert!(text.contains("OpenAI"));
+    assert!(text.contains("https://openai.com"));
+    assert!(text.contains("https://example.com"));
+    assert_eq!(text.matches("https://example.com").count(), 1);
+
+    let buffer = render_to_buffer(&state, 100, 16);
+    let label_style = find_cell_style(&buffer, "OpenAI").expect("link label should render");
+    let url_style = find_cell_style(&buffer, "https://openai.com").expect("link url should render");
+    assert_eq!(label_style.fg, Some(Color::LightBlue));
+    assert_eq!(url_style.fg, Some(Color::LightBlue));
+    assert!(url_style.add_modifier.contains(Modifier::UNDERLINED));
 }
 
 #[test]
@@ -2404,16 +3064,39 @@ fn renderer_colors_ran_title_and_indents_process_preview() {
         body: "  stdout: hello world".to_owned(),
     });
 
-    let text = render_to_text(&state, 96, 16);
+    let text = render_to_text(&state, 79, 16);
     assert!(text.contains("Ran python3 hello_world.py (cwd: .)"));
-    assert!(text.contains("  stdout: hello world"));
+    assert!(!text.contains("  stdout: hello world"));
 
-    let buffer = render_to_buffer(&state, 96, 16);
+    let buffer = render_to_buffer(&state, 79, 16);
     assert_eq!(find_cell_color(&buffer, "Ran"), Some(Color::LightCyan));
     assert_eq!(find_cell_color(&buffer, "python3"), Some(Color::LightBlue));
+}
+
+#[test]
+fn renderer_colors_common_tool_title_keywords() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.push_timeline_item(TimelineItem::Muted {
+        title: "Searched".to_owned(),
+        detail: "query=hello_world.py".to_owned(),
+    });
+    state.push_timeline_item(TimelineItem::Expanded {
+        title: "Listed .".to_owned(),
+        body: "Cargo.toml".to_owned(),
+    });
+
+    let buffer = render_to_buffer(&state, 79, 18);
+
+    assert_eq!(find_cell_color(&buffer, "Searched"), Some(Color::LightCyan));
+    assert_eq!(find_cell_color(&buffer, "Listed"), Some(Color::LightCyan));
     assert_eq!(
-        find_cell_color(&buffer, "hello world"),
-        Some(Color::DarkGray)
+        find_cell_color(&buffer, "query=hello_world.py"),
+        Some(Color::White)
     );
 }
 
@@ -2663,7 +3346,7 @@ fn renderer_keeps_timeline_visible_when_bottom_panes_are_taller_than_short_windo
     });
     state.insert_input_str("line one\nline two\nline three\nline four\nline five");
 
-    let text = render_to_text(&state, 80, 10);
+    let text = render_to_text(&state, 79, 10);
 
     assert!(text.contains("latest assistant output"));
     assert!(text.contains("line five"));
@@ -2713,7 +3396,6 @@ fn find_text_position(buffer: &ratatui::buffer::Buffer, needle: &str) -> Option<
 
 fn find_cell_style(buffer: &ratatui::buffer::Buffer, text: &str) -> Option<ratatui::style::Style> {
     let area = buffer.area;
-    let first = text.chars().next()?.to_string();
     for y in area.y..area.y + area.height {
         let mut row = String::new();
         for x in area.x..area.x + area.width {
@@ -2722,11 +3404,8 @@ fn find_cell_style(buffer: &ratatui::buffer::Buffer, text: &str) -> Option<ratat
         let Some(start) = row.find(text) else {
             continue;
         };
-        for x in area.x + start as u16..area.x + area.width {
-            if buffer[(x, y)].symbol() == first {
-                return Some(buffer[(x, y)].style());
-            }
-        }
+        let x = area.x + u16::try_from(row[..start].chars().count()).ok()?;
+        return Some(buffer[(x, y)].style());
     }
     None
 }

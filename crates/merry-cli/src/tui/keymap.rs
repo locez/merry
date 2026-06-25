@@ -15,6 +15,9 @@ pub(crate) enum KeyAction {
     ScrollUp,
     ScrollDown,
     ReviewPreviousUserInput,
+    ReviewPreviousArtifact,
+    ReviewNextArtifact,
+    FollowLatestArtifact,
     HistoryPrevious,
     HistoryNext,
     ResumeSuspended,
@@ -95,6 +98,18 @@ impl Default for Keymap {
                     KeyAction::ReviewPreviousUserInput,
                 ),
                 (
+                    KeyBinding::new(KeyCode::Char('g'), KeyModifiers::CONTROL),
+                    KeyAction::ReviewPreviousArtifact,
+                ),
+                (
+                    KeyBinding::new(KeyCode::Char('f'), KeyModifiers::CONTROL),
+                    KeyAction::ReviewNextArtifact,
+                ),
+                (
+                    KeyBinding::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
+                    KeyAction::FollowLatestArtifact,
+                ),
+                (
                     KeyBinding::new(KeyCode::Up, KeyModifiers::NONE),
                     KeyAction::HistoryPrevious,
                 ),
@@ -139,6 +154,15 @@ impl Keymap {
         }
         if let Some(binding) = config.review_previous_user_input.as_deref() {
             keymap.set_binding(parse_binding(binding)?, KeyAction::ReviewPreviousUserInput);
+        }
+        if let Some(binding) = config.review_previous_artifact.as_deref() {
+            keymap.set_binding(parse_binding(binding)?, KeyAction::ReviewPreviousArtifact);
+        }
+        if let Some(binding) = config.review_next_artifact.as_deref() {
+            keymap.set_binding(parse_binding(binding)?, KeyAction::ReviewNextArtifact);
+        }
+        if let Some(binding) = config.follow_latest_artifact.as_deref() {
+            keymap.set_binding(parse_binding(binding)?, KeyAction::FollowLatestArtifact);
         }
         if let Some(binding) = config.history_previous.as_deref() {
             keymap.set_binding(parse_binding(binding)?, KeyAction::HistoryPrevious);
@@ -185,6 +209,8 @@ fn parse_binding(value: &str) -> Result<KeyBinding, crate::config::ConfigError> 
         "ctrl+b" => Ok(KeyBinding::new(KeyCode::Char('b'), KeyModifiers::CONTROL)),
         "ctrl+c" => Ok(KeyBinding::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
         "ctrl+d" => Ok(KeyBinding::new(KeyCode::Char('d'), KeyModifiers::CONTROL)),
+        "ctrl+f" => Ok(KeyBinding::new(KeyCode::Char('f'), KeyModifiers::CONTROL)),
+        "ctrl+g" => Ok(KeyBinding::new(KeyCode::Char('g'), KeyModifiers::CONTROL)),
         "ctrl+j" => Ok(KeyBinding::new(KeyCode::Char('j'), KeyModifiers::CONTROL)),
         "ctrl+n" => Ok(KeyBinding::new(KeyCode::Char('n'), KeyModifiers::CONTROL)),
         "ctrl+p" => Ok(KeyBinding::new(KeyCode::Char('p'), KeyModifiers::CONTROL)),
