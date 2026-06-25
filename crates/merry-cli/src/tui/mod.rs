@@ -8,9 +8,11 @@ use theme::TuiTheme;
 
 mod completion;
 mod controller;
+mod highlight;
 mod input;
 pub(crate) mod keymap;
 mod layout;
+mod markdown;
 mod panels;
 mod projector;
 mod render;
