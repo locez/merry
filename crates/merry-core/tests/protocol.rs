@@ -180,6 +180,17 @@ fn tool_name_uses_provider_portable_validation() {
 }
 
 #[test]
+fn tool_name_schema_exposes_provider_portable_validation() {
+    let schema = serde_json::to_value(schemars::schema_for!(ToolName))
+        .expect("tool name schema should serialize");
+
+    assert_eq!(schema["type"], "string");
+    assert_eq!(schema["minLength"], 1);
+    assert_eq!(schema["maxLength"], 64);
+    assert_eq!(schema["pattern"], r"^[A-Za-z_][A-Za-z0-9_-]*$");
+}
+
+#[test]
 fn artifact_and_evidence_references_round_trip_with_stable_json_shapes() {
     let artifact = ArtifactRef::new(
         ArtifactId::new("artifact-1").expect("valid artifact id"),

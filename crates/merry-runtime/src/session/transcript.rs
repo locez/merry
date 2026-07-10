@@ -5,7 +5,6 @@ use crate::{
 };
 use merry_core::{ArtifactId, PendingToolCall, ToolCallId, ToolCallResult};
 use serde::{Deserialize, Serialize};
-#[cfg(test)]
 use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -220,43 +219,30 @@ impl Transcript {
         self.items.retain(|item| retained.contains(&item.id()));
     }
 
-    pub(crate) fn remove_compacted_history_prefix(&mut self, covered_history_item_count: usize) {
-        if covered_history_item_count == 0 {
+    pub(crate) fn remove_compacted_history(&mut self, covered_history_ids: &BTreeSet<u64>) {
+        if covered_history_ids.is_empty() {
             return;
         }
 
-        let mut covered_items = 0usize;
-        let mut remove_count = 0usize;
-        for item in &self.items {
-            let remove = match item {
-                TranscriptItem::UserMessage { .. } | TranscriptItem::AssistantText { .. } => {
-                    if covered_items < covered_history_item_count {
-                        covered_items += 1;
-                        true
-                    } else {
-                        false
-                    }
+        let covered_tool_calls = self
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                TranscriptItem::ToolResult { id, call_id, .. }
+                    if covered_history_ids.contains(&id.as_u64()) =>
+                {
+                    Some(call_id.clone())
                 }
-                TranscriptItem::ToolCall { .. } => covered_items < covered_history_item_count,
-                TranscriptItem::ToolResult { .. } => {
-                    if covered_items < covered_history_item_count {
-                        covered_items += 1;
-                        true
-                    } else {
-                        false
-                    }
-                }
-            };
-
-            if !remove {
-                break;
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        self.items.retain(|item| match item {
+            TranscriptItem::UserMessage { id, .. } | TranscriptItem::AssistantText { id, .. } => {
+                !covered_history_ids.contains(&id.as_u64())
             }
-            remove_count += 1;
-        }
-
-        if remove_count > 0 {
-            self.items.drain(..remove_count);
-        }
+            TranscriptItem::ToolCall { call, .. } => !covered_tool_calls.contains(call.id()),
+            TranscriptItem::ToolResult { id, .. } => !covered_history_ids.contains(&id.as_u64()),
+        });
     }
 
     fn allocate_id(&mut self) -> Result<TranscriptItemId, RuntimeError> {

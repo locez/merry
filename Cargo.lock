@@ -1473,6 +1473,7 @@ dependencies = [
  "merry-core",
  "merry-llm",
  "merry-runtime",
+ "regex",
  "schemars",
  "serde",
  "serde_json",

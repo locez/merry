@@ -10,6 +10,7 @@ use merry_runtime::{
     ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome, ToolExecutor,
     ToolExecutorFuture,
 };
+use regex::Regex;
 use serde::Serialize;
 
 use crate::{
@@ -237,7 +238,23 @@ pub(crate) fn search_text_blocking_checked(
         ));
     }
 
-    let mut search = SearchRun::new(&args.query, max_matches, &state.limits, state.allow_hidden);
+    let regex = match Regex::new(&args.query) {
+        Ok(regex) => regex,
+        Err(error) => {
+            let error = error
+                .to_string()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            return Ok(failed_outcome(
+                WORKSPACE_SEARCH_TEXT_TOOL,
+                ERROR_INVALID_ARGUMENTS,
+                format!("workspace search query is not a valid regular expression: {error}"),
+                None::<String>,
+            ));
+        }
+    };
+    let mut search = SearchRun::new(regex, max_matches, &state.limits, state.allow_hidden);
 
     if let Some(path) = args.path {
         let relative = match validate_relative_path_or_root(&path, state.allow_hidden) {
@@ -312,7 +329,7 @@ pub(crate) fn search_text_blocking_checked(
 
 #[derive(Debug)]
 struct SearchRun<'a> {
-    query: &'a str,
+    regex: Regex,
     max_matches: usize,
     limits: &'a WorkspaceToolLimits,
     allow_hidden: bool,
@@ -326,13 +343,13 @@ struct SearchRun<'a> {
 
 impl<'a> SearchRun<'a> {
     fn new(
-        query: &'a str,
+        regex: Regex,
         max_matches: usize,
         limits: &'a WorkspaceToolLimits,
         allow_hidden: bool,
     ) -> Self {
         Self {
-            query,
+            regex,
             max_matches,
             limits,
             allow_hidden,
@@ -626,7 +643,7 @@ fn search_file(
             return Err(BlockingToolError::Cancelled);
         }
 
-        if line.contains(search.query) {
+        if search.regex.is_match(line) {
             let (line, truncated) = truncate_utf8_line(line, search.limits.max_search_line_bytes);
             search.matches.push(SearchMatch {
                 path: display.to_owned(),

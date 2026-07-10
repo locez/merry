@@ -14,7 +14,7 @@ use crate::{
     context::{CompactedCheckpoint, CompactedCheckpointSummary},
     permission::PermissionReviewContextEntry,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 const PERMISSION_REVIEW_RECENT_CONTEXT_LIMIT: usize = 12;
 
@@ -78,9 +78,10 @@ impl SessionState {
             checkpoint_from_candidate_json(checkpoint_id.clone(), &input, candidate_json)?;
         let compacted = CompactedCheckpoint::from_citation_backed(citation)?;
 
-        let covered_count = input.covered_history_ids().len();
+        let covered_history_ids = input.covered_history_ids().clone();
+        let covered_count = covered_history_ids.len();
         self.transcript
-            .remove_compacted_history_prefix(covered_count);
+            .remove_compacted_history(&covered_history_ids);
         self.compacted_checkpoint = Some(compacted);
 
         Ok(CompactionOutcome::new(
@@ -106,13 +107,27 @@ impl SessionState {
     fn compaction_history_items(&self) -> Result<Vec<CompactionHistoryItem>, RuntimeError> {
         let mut items = Vec::with_capacity(self.transcript.items().len());
         let transcript_items = self.transcript.items();
-        let mut index = 0usize;
+        let mut results = BTreeMap::new();
+        for item in transcript_items {
+            if let TranscriptItem::ToolResult {
+                id,
+                call_id,
+                result,
+                artifact_id,
+            } = item
+                && results
+                    .insert(call_id.clone(), (*id, result, artifact_id))
+                    .is_some()
+            {
+                return Err(CompactionError::StaleWindow.into());
+            }
+        }
+        let mut matched_results = BTreeSet::new();
 
-        while index < transcript_items.len() {
-            match &transcript_items[index] {
+        for item in transcript_items {
+            match item {
                 TranscriptItem::UserMessage { id, text, .. } => {
                     items.push(CompactionHistoryItem::user(id.as_u64(), text.clone()));
-                    index += 1;
                 }
                 TranscriptItem::AssistantText { id, artifact_id } => {
                     let content = self.read_artifact_content(artifact_id)?;
@@ -127,38 +142,19 @@ impl SessionState {
                         id.as_u64(),
                         text.to_owned(),
                     ));
-                    index += 1;
                 }
                 TranscriptItem::ToolCall { call, .. } => {
-                    let Some(next_item) = transcript_items.get(index + 1) else {
+                    let Some(&(id, result, artifact_id)) = results.get(call.id()) else {
                         if self
                             .pending_tool_calls
                             .iter()
                             .any(|pending| pending.id() == call.id())
                         {
-                            index += 1;
                             continue;
                         }
                         return Err(CompactionError::StaleWindow.into());
                     };
-                    let TranscriptItem::ToolResult {
-                        id,
-                        call_id,
-                        result,
-                        artifact_id,
-                    } = next_item
-                    else {
-                        if self
-                            .pending_tool_calls
-                            .iter()
-                            .any(|pending| pending.id() == call.id())
-                        {
-                            index += 1;
-                            continue;
-                        }
-                        return Err(CompactionError::StaleWindow.into());
-                    };
-                    if call.id() != call_id {
+                    if !matched_results.insert(call.id().clone()) {
                         return Err(CompactionError::StaleWindow.into());
                     }
                     let content = self.read_artifact_content(artifact_id)?;
@@ -168,12 +164,13 @@ impl SessionState {
                         result.clone(),
                         content,
                     ));
-                    index += 2;
                 }
-                TranscriptItem::ToolResult { .. } => {
-                    return Err(CompactionError::StaleWindow.into());
-                }
+                TranscriptItem::ToolResult { .. } => {}
             }
+        }
+
+        if matched_results.len() != results.len() {
+            return Err(CompactionError::StaleWindow.into());
         }
 
         Ok(items)
@@ -247,29 +244,25 @@ impl SessionState {
         &self,
         input: &CitationCompactionInput,
     ) -> Result<(), RuntimeError> {
-        let current_ids = self.current_history_id_set()?;
+        let current_ids = self
+            .compaction_history_items()?
+            .into_iter()
+            .map(|item| item.history_id)
+            .collect::<Vec<_>>();
         let covered = input.covered_history_ids();
-        let Some(max_covered_id) = covered.iter().next_back().copied() else {
+        if covered.is_empty() {
             return Err(CompactionError::NoCompressibleWindow.into());
-        };
+        }
 
         let current_prefix = current_ids
             .into_iter()
-            .take_while(|history_id| *history_id <= max_covered_id)
+            .take(covered.len())
             .collect::<BTreeSet<_>>();
         if &current_prefix != covered {
             return Err(CompactionError::StaleWindow.into());
         }
 
         Ok(())
-    }
-
-    fn current_history_id_set(&self) -> Result<BTreeSet<u64>, RuntimeError> {
-        Ok(self
-            .compaction_history_items()?
-            .into_iter()
-            .map(|item| item.history_id)
-            .collect())
     }
 
     fn history_item_count(&self) -> Result<usize, RuntimeError> {

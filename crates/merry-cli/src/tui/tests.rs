@@ -2073,6 +2073,26 @@ fn projector_resets_streaming_assistant_after_terminal_error() {
 }
 
 #[test]
+fn renderer_makes_diagnostic_code_and_reason_visible_in_the_timeline() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.push_timeline_item(TimelineItem::Diagnostic {
+        title: "auto_compaction".to_owned(),
+        body: "compaction state error: compaction window is stale".to_owned(),
+    });
+
+    let rendered = render_to_text(&state, 120, 24);
+
+    assert!(rendered.contains("! Error"));
+    assert!(rendered.contains("auto_compaction"));
+    assert!(rendered.contains("compaction window is stale"));
+}
+
+#[test]
 fn projector_keeps_successful_non_patch_tool_compact_and_expands_patch_tool() {
     let mut state = TuiState::new(
         "/repo".into(),
@@ -2126,6 +2146,121 @@ fn projector_keeps_successful_non_patch_tool_compact_and_expands_patch_tool() {
     assert_eq!(state.timeline().len(), 2);
     assert!(matches!(state.timeline()[0], TimelineItem::Muted { .. }));
     assert!(matches!(state.timeline()[1], TimelineItem::Expanded { .. }));
+}
+
+#[test]
+fn projector_describes_runtime_control_tools() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    let mut projector = TuiProjector::default();
+
+    projector.apply(
+        RuntimeEvent::ToolCallStarted {
+            call: pending_call_with_args(
+                "call-subagents",
+                "spawn_subagents",
+                json!({
+                    "tasks": [
+                        {"task": "inspect runtime"},
+                        {"task": "inspect TUI"}
+                    ],
+                    "max_concurrency": 2
+                }),
+            ),
+            source: source(),
+        },
+        &mut state,
+    );
+    projector.apply(
+        RuntimeEvent::ToolCallStarted {
+            call: pending_call_with_args(
+                "call-checkpoint",
+                "merry_read_checkpoint_ref",
+                json!({"ref": "prior-c1"}),
+            ),
+            source: source(),
+        },
+        &mut state,
+    );
+    projector.apply(
+        RuntimeEvent::ToolCallStarted {
+            call: pending_call_with_args(
+                "call-wait",
+                "wait_subagents",
+                json!({"agent_ids": ["a1", "a2"], "mode": "all", "timeout_ms": 30000}),
+            ),
+            source: source(),
+        },
+        &mut state,
+    );
+    projector.apply(
+        RuntimeEvent::ToolCallStarted {
+            call: pending_call_with_args(
+                "call-cancel",
+                "cancel_subagents",
+                json!({"agent_ids": ["a1", "a2"]}),
+            ),
+            source: source(),
+        },
+        &mut state,
+    );
+
+    assert_eq!(
+        state.timeline(),
+        [
+            TimelineItem::Muted {
+                title: "Delegated".to_owned(),
+                detail: "tasks=2 max=2".to_owned(),
+            },
+            TimelineItem::Muted {
+                title: "Retrieved".to_owned(),
+                detail: "ref=prior-c1".to_owned(),
+            },
+            TimelineItem::Muted {
+                title: "Waited".to_owned(),
+                detail: "agents=2 mode=all timeout=30s".to_owned(),
+            },
+            TimelineItem::Muted {
+                title: "Cancelled".to_owned(),
+                detail: "agents=2".to_owned(),
+            }
+        ]
+    );
+}
+
+#[test]
+fn projector_keeps_the_real_name_for_unknown_tools() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    let mut projector = TuiProjector::default();
+
+    projector.apply(
+        RuntimeEvent::ToolCallStarted {
+            call: pending_call_with_args(
+                "call-custom",
+                "custom_lookup",
+                json!({"source": "docs", "limit": 2}),
+            ),
+            source: source(),
+        },
+        &mut state,
+    );
+
+    assert_eq!(
+        state.timeline(),
+        [TimelineItem::Muted {
+            title: "Tool".to_owned(),
+            detail: "custom_lookup args=2".to_owned(),
+        }]
+    );
 }
 
 #[test]
