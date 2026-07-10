@@ -1115,11 +1115,22 @@ mod tests {
             names,
             ["spawn_subagents", "wait_subagents", "cancel_subagents"]
         );
+        assert!(
+            specs[0]
+                .description()
+                .contains("exact registered Merry tool names")
+        );
+        assert!(specs[0].description().contains("functions.run_process"));
 
-        for spec in specs {
+        for spec in &specs {
             let value = serde_json::to_value(spec.input_schema()).expect("schema serializes");
             assert!(matches!(value, Value::Object(_)));
         }
+
+        let spawn_schema =
+            serde_json::to_string(specs[0].input_schema()).expect("spawn schema should serialize");
+        assert!(spawn_schema.contains("Exact registered Merry tool names"));
+        assert!(spawn_schema.contains("functions.run_process"));
     }
 
     #[test]

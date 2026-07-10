@@ -4,7 +4,8 @@ use super::{
     markdown::markdown_lines,
     overlay_render,
     panels::{
-        DirectoryEntryKind, DirectoryEntryView, FocusPanelBody, FocusPanelView, focus_panel_view,
+        DirectoryEntryKind, DirectoryEntryView, FocusPanelBody, FocusPanelTone, FocusPanelView,
+        focus_panel_view,
     },
     state::{PatchChangeView, PatchLineView, TimelineItem, TuiState},
     theme::{SemanticColor, dim_color},
@@ -223,16 +224,18 @@ fn render_input(frame: &mut Frame<'_>, state: &TuiState, region: Rect, input_hei
 fn render_focus_pane(frame: &mut Frame<'_>, state: &TuiState, region: Rect, view: &FocusPanelView) {
     let inner = bordered_inner(region);
     let lines = focus_lines(state, view, inner);
+    let color = match view.tone {
+        FocusPanelTone::Default => SemanticColor::ToolKeyword,
+        FocusPanelTone::Error => SemanticColor::Error,
+    };
     frame.render_widget(
         Paragraph::new(lines).wrap(Wrap { trim: false }).block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Plain)
                 .title(view.title.strip_prefix("FOCUS ").unwrap_or(&view.title))
-                .border_style(semantic_style(state, SemanticColor::ToolKeyword))
-                .title_style(
-                    semantic_style(state, SemanticColor::ToolKeyword).add_modifier(Modifier::BOLD),
-                ),
+                .border_style(semantic_style(state, color))
+                .title_style(semantic_style(state, color).add_modifier(Modifier::BOLD)),
         ),
         region,
     );
@@ -474,10 +477,11 @@ fn timeline_lines_compact(state: &TuiState, region: Rect) -> Vec<Line<'static>> 
             TimelineItem::User { text, lane } => user_lines(state, text, *lane),
             TimelineItem::Assistant { text } => assistant_lines(state, text, region.width),
             TimelineItem::Muted { title, detail } => muted_lines(state, title, detail),
-            TimelineItem::Expanded { title, .. }
-            | TimelineItem::ExpandedDetail { title, .. }
-            | TimelineItem::Diagnostic { title, .. } => {
-                vec![expanded_title_line(state, item, title)]
+            TimelineItem::Expanded { title, .. } | TimelineItem::ExpandedDetail { title, .. } => {
+                vec![expanded_title_line(state, title)]
+            }
+            TimelineItem::Diagnostic { title, body } => {
+                diagnostic_lines(state, title, body, region.width)
             }
             TimelineItem::Patch { changes } => compact_patch_lines(state, changes),
         };
@@ -588,14 +592,7 @@ fn compact_patch_lines(state: &TuiState, changes: &[PatchChangeView]) -> Vec<Lin
     lines
 }
 
-fn expanded_title_line(state: &TuiState, item: &TimelineItem, title: &str) -> Line<'static> {
-    if matches!(item, TimelineItem::Diagnostic { .. }) {
-        return Line::from(Span::styled(
-            title.to_owned(),
-            semantic_style(state, SemanticColor::Error),
-        ));
-    }
-
+fn expanded_title_line(state: &TuiState, title: &str) -> Line<'static> {
     if let Some(line) = tool_title_line(state, title) {
         return line;
     }
@@ -604,6 +601,38 @@ fn expanded_title_line(state: &TuiState, item: &TimelineItem, title: &str) -> Li
         title.to_owned(),
         semantic_style(state, SemanticColor::Focus),
     ))
+}
+
+fn diagnostic_lines(
+    state: &TuiState,
+    title: &str,
+    body: &str,
+    region_width: u16,
+) -> Vec<Line<'static>> {
+    let reason = body
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("run failed");
+    wrap_styled_parts(
+        vec![
+            StyledTextPart {
+                text: "! Error  ".to_owned(),
+                style: semantic_style(state, SemanticColor::Error).add_modifier(Modifier::BOLD),
+                atomic: true,
+            },
+            StyledTextPart {
+                text: title.to_owned(),
+                style: semantic_style(state, SemanticColor::Error).add_modifier(Modifier::BOLD),
+                atomic: true,
+            },
+            StyledTextPart {
+                text: format!(": {reason}"),
+                style: semantic_style(state, SemanticColor::Assistant),
+                atomic: false,
+            },
+        ],
+        region_width,
+    )
 }
 
 fn tool_title_line_from_parts(

@@ -4,6 +4,13 @@ use super::state::{PatchChangeView, TimelineItem, TuiState};
 pub(crate) struct FocusPanelView {
     pub(crate) title: String,
     pub(crate) body: FocusPanelBody,
+    pub(crate) tone: FocusPanelTone,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FocusPanelTone {
+    Default,
+    Error,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +45,7 @@ pub(crate) fn focus_panel_view(state: &TuiState) -> FocusPanelView {
     FocusPanelView {
         title: "FOCUS".to_owned(),
         body: FocusPanelBody::Empty,
+        tone: FocusPanelTone::Default,
     }
 }
 
@@ -53,35 +61,46 @@ fn focus_view_for_item(item: &TimelineItem) -> FocusPanelView {
                 body: FocusPanelBody::Patch {
                     changes: changes.clone(),
                 },
+                tone: FocusPanelTone::Default,
             }
         }
-        TimelineItem::Expanded { title, body } | TimelineItem::Diagnostic { title, body } => {
-            FocusPanelView {
-                title: focus_title_for_text_item(title),
-                body: focus_body_for_expanded_item(title, body),
-            }
-        }
+        TimelineItem::Expanded { title, body } => FocusPanelView {
+            title: focus_title_for_text_item(title),
+            body: focus_body_for_expanded_item(title, body),
+            tone: FocusPanelTone::Default,
+        },
+        TimelineItem::Diagnostic { title, body } => FocusPanelView {
+            title: format!("ERROR {title}"),
+            body: FocusPanelBody::Text {
+                lines: body.lines().map(str::to_owned).collect(),
+            },
+            tone: FocusPanelTone::Error,
+        },
         TimelineItem::ExpandedDetail {
             title, focus_body, ..
         } => FocusPanelView {
             title: focus_title_for_text_item(title),
             body: focus_body_for_expanded_item(title, focus_body),
+            tone: FocusPanelTone::Default,
         },
         TimelineItem::Muted { title, detail } if !detail.is_empty() => FocusPanelView {
             title: format!("FOCUS {}", title.to_lowercase()),
             body: FocusPanelBody::Text {
                 lines: vec![format!("{title} {detail}")],
             },
+            tone: FocusPanelTone::Default,
         },
         TimelineItem::Muted { title, .. } => FocusPanelView {
             title: format!("FOCUS {}", title.to_lowercase()),
             body: FocusPanelBody::Text {
                 lines: vec![title.clone()],
             },
+            tone: FocusPanelTone::Default,
         },
         TimelineItem::User { .. } | TimelineItem::Assistant { .. } => FocusPanelView {
             title: "FOCUS".to_owned(),
             body: FocusPanelBody::Empty,
+            tone: FocusPanelTone::Default,
         },
     }
 }
@@ -234,5 +253,18 @@ mod tests {
 
         assert_eq!(view.title, "FOCUS");
         assert_eq!(view.body, FocusPanelBody::Empty);
+    }
+
+    #[test]
+    fn focus_panel_marks_diagnostics_as_errors() {
+        let mut state = state();
+        state.push_timeline_item(TimelineItem::Diagnostic {
+            title: "auto_compaction".to_owned(),
+            body: "compaction window is stale".to_owned(),
+        });
+
+        let view = focus_panel_view(&state);
+
+        assert_eq!(view.tone, FocusPanelTone::Error);
     }
 }

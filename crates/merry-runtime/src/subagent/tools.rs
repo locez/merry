@@ -20,7 +20,7 @@ pub fn subagent_tool_specs() -> Result<[ToolSpec; 3], merry_core::CoreError> {
     Ok([
         tool_spec::<SpawnSubagentsInput>(
             SPAWN_SUBAGENTS_TOOL_NAME,
-            "Spawn bounded child agents for parallel delegated tasks.",
+            "Spawn bounded child agents for parallel delegated tasks. In tasks[].allowed_tools, copy exact registered Merry tool names without provider namespace prefixes: use run_process, never functions.run_process.",
         )?,
         tool_spec::<WaitSubagentsInput>(
             WAIT_SUBAGENTS_TOOL_NAME,
@@ -316,6 +316,7 @@ fn invalid_subagent_arguments_outcome(
         "recovery": {
             "input_contract": "Provide arguments matching the subagent tool input schema.",
             "scope_contract": "Paths must be normalized workspace-relative paths.",
+            "tool_name_contract": "allowed_tools entries must be exact registered Merry tool names copied from the current tool list. Use run_process, never functions.run_process.",
         }
     });
 
@@ -628,6 +629,34 @@ mod tests {
             assert_eq!(payload["ok"], false);
             assert_eq!(payload["error"]["code"], SUBAGENT_INVALID_ARGUMENTS_CODE);
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn spawn_tool_recovery_rejects_provider_namespaced_allowed_tools() {
+        let executor =
+            SpawnSubagentsExecutor::new(manager(Arc::new(CapturingChildFactory::default())));
+        let call = pending_call(
+            SPAWN_SUBAGENTS_TOOL_NAME,
+            json!({
+                "tasks": [{
+                    "task": "Inspect the runtime.",
+                    "allowed_tools": ["functions.run_process"]
+                }]
+            }),
+        );
+
+        let outcome = executor
+            .execute(call, ToolExecutionContext::default())
+            .await
+            .expect("invalid input should resolve as a failed tool outcome");
+        let payload = outcome_json(&outcome);
+        let recovery = payload["recovery"]["tool_name_contract"]
+            .as_str()
+            .expect("tool-name recovery should be present");
+
+        assert!(recovery.contains("exact registered Merry tool names"));
+        assert!(recovery.contains("run_process"));
+        assert!(recovery.contains("functions.run_process"));
     }
 
     #[tokio::test(flavor = "current_thread")]

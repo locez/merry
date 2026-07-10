@@ -212,7 +212,7 @@ fn list_dir_rejects_requested_symlink_without_following_it() {
 }
 
 #[test]
-fn search_text_finds_literal_case_sensitive_matches_in_stable_order() {
+fn search_text_finds_case_sensitive_matches_in_stable_order() {
     let temp = TempWorkspace::new("search-success");
     temp.write_text("b.txt", "needle in b\nNeedle uppercase\n");
     temp.write_text("a.txt", "first\nneedle in a\n");
@@ -244,6 +244,50 @@ fn search_text_finds_literal_case_sensitive_matches_in_stable_order() {
             .expect("json content")
             .contains(temp.path().to_str().expect("temp path utf8")),
         "tool output must not include absolute host roots"
+    );
+}
+
+#[test]
+fn search_text_query_is_a_regular_expression() {
+    let temp = TempWorkspace::new("search-regex");
+    temp.write_text(
+        "runtime.rs",
+        "hard_watermark\nsoft_watermark\nauto_compaction\ncompaction\n",
+    );
+    let tools = tools_for(temp.path());
+
+    let outcome = search_outcome(
+        &tools,
+        "^(hard_watermark|auto_compaction)$",
+        Some("runtime.rs"),
+        None,
+    );
+
+    assert_eq!(outcome.status(), ToolCallResultStatus::Succeeded);
+    let payload = json_content(&outcome);
+    assert_eq!(
+        payload["matches"],
+        json!([
+            { "path": "runtime.rs", "line_number": 1, "line": "hard_watermark", "truncated": false },
+            { "path": "runtime.rs", "line_number": 3, "line": "auto_compaction", "truncated": false }
+        ])
+    );
+}
+
+#[test]
+fn search_text_rejects_invalid_regular_expressions() {
+    let temp = TempWorkspace::new("search-invalid-regex");
+    temp.write_text("runtime.rs", "auto_compaction\n");
+    let tools = tools_for(temp.path());
+
+    let outcome = search_outcome(&tools, "(auto_compaction", Some("runtime.rs"), None);
+
+    assert_failed_json_for_tool(
+        &outcome,
+        WORKSPACE_SEARCH_TEXT_TOOL,
+        ERROR_INVALID_ARGUMENTS,
+        None,
+        temp.path(),
     );
 }
 

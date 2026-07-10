@@ -207,7 +207,13 @@ impl SessionId {
 /// Provider-portable tool name.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, JsonSchema)]
 #[serde(transparent)]
-pub struct ToolName(String);
+pub struct ToolName(
+    #[schemars(
+        length(min = 1, max = 64),
+        regex(pattern = r"^[A-Za-z_][A-Za-z0-9_-]*$")
+    )]
+    String,
+);
 
 impl ToolName {
     /// Creates a validated provider-portable tool name.

@@ -38,7 +38,7 @@ pub use tools::ReadOnlyWorkspaceTools;
 pub const WORKSPACE_READ_FILE_TOOL: &str = "workspace_read_file";
 /// Registered tool name for non-recursive read-only directory listing.
 pub const WORKSPACE_LIST_DIR_TOOL: &str = "workspace_list_dir";
-/// Registered tool name for bounded read-only literal text search.
+/// Registered tool name for bounded read-only regular-expression search.
 pub const WORKSPACE_SEARCH_TEXT_TOOL: &str = "workspace_search_text";
 /// Registered tool name for opt-in constrained workspace patches.
 pub const WORKSPACE_PATCH_TOOL: &str = "workspace_patch";

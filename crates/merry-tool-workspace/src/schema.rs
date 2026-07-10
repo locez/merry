@@ -58,7 +58,7 @@ pub(crate) fn list_dir_spec() -> ToolSpec {
 pub(crate) fn search_text_spec() -> ToolSpec {
     ToolSpec::new(
         ToolName::new(WORKSPACE_SEARCH_TEXT_TOOL).expect("static workspace tool name is valid"),
-        "Search UTF-8 files under configured stable workspace roots with literal, case-sensitive matching and bounded traversal, entry inspection, and scanned bytes.",
+        "Search UTF-8 files under configured stable workspace roots with a case-sensitive Rust regular expression. Combine alternatives in one query, for example `(foo|bar|baz)`. Escape regex metacharacters when literal matching is required. Traversal, entry inspection, matches, and scanned bytes are bounded.",
         ToolInputSchema::new(schema_for!(SearchTextArgs))
             .expect("static workspace_search_text input schema is valid"),
     )

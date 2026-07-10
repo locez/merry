@@ -22,7 +22,12 @@ pub struct SpawnSubagentTaskInput {
     pub display_name: Option<String>,
     /// Optional maximum child model turns.
     pub max_model_turns: Option<u32>,
-    /// Optional provider/tool names the child may use.
+    /// Exact registered Merry tool names the child may use. Names are copied
+    /// verbatim from the current tool list without provider namespace prefixes;
+    /// use `run_process`, never `functions.run_process`.
+    #[schemars(
+        description = "Exact registered Merry tool names copied verbatim from the current tool list. Do not add provider namespace prefixes: use `run_process`, never `functions.run_process`."
+    )]
     pub allowed_tools: Option<Vec<ToolName>>,
     /// Optional workspace-relative read scope.
     pub read_scope: Option<Vec<String>>,

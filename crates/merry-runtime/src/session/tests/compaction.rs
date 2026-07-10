@@ -33,6 +33,80 @@ fn compaction_input_excludes_retained_raw_tail() {
 }
 
 #[test]
+fn compaction_accepts_resolved_multi_tool_batches() {
+    let mut session =
+        SessionState::new(SessionId::new("compaction-tool-batch").expect("valid session id"));
+    session
+        .record_user_message_body("old user context")
+        .expect("user records");
+    let call_a = pending_tool_call("batch-call-a");
+    let call_b = pending_tool_call("batch-call-b");
+    session
+        .record_tool_call_batch_pending(
+            PendingToolCallBatch::new(
+                ToolCallBatchId::new("tool-batch-compaction").expect("valid batch id"),
+                vec![call_a.clone(), call_b.clone()],
+            )
+            .expect("valid batch"),
+        )
+        .expect("batch records");
+    let artifact_b = ArtifactRef::new(artifact_id("artifact-b"), ArtifactKind::Json);
+    session
+        .submit_tool_result(
+            ToolCallResult::succeeded(call_b.id().clone(), artifact_b),
+            ArtifactContent::json(r#"{"result":"b"}"#),
+        )
+        .expect("second call resolves first");
+    let artifact_a = ArtifactRef::new(artifact_id("artifact-a"), ArtifactKind::Json);
+    session
+        .submit_tool_result(
+            ToolCallResult::succeeded(call_a.id().clone(), artifact_a),
+            ArtifactContent::json(r#"{"result":"a"}"#),
+        )
+        .expect("first call resolves second");
+    session
+        .record_user_message_body("retained raw tail")
+        .expect("tail records");
+
+    let input = session
+        .build_citation_compaction_input(
+            CitationCompactionPolicy::new(128, None, 4096, 1, 1200, 16).expect("valid policy"),
+        )
+        .expect("resolved batch must not look stale")
+        .expect("old history is compressible");
+    let payload = serde_json::from_str::<serde_json::Value>(
+        &input.to_model_payload_json().expect("payload serializes"),
+    )
+    .expect("payload parses");
+    assert_eq!(payload["window"].as_array().expect("window").len(), 3);
+    assert_eq!(payload["window"][1]["role"], "tool_exchange");
+    assert_eq!(payload["window"][2]["role"], "tool_exchange");
+
+    let outcome = session
+        .install_citation_compaction_candidate(
+            input,
+            r#"{
+              "claims": [
+                {
+                  "id": "c1",
+                  "kind": "completed_action",
+                  "text": "The older context and tool batch were compacted.",
+                  "refs": ["r1", "r2", "r3"]
+                }
+              ],
+              "working_intent": null
+            }"#,
+        )
+        .expect("resolved batch checkpoint installs");
+
+    assert_eq!(outcome.covered_history_item_count(), 3);
+    assert_eq!(
+        session.transcript_items_for_tests(),
+        vec!["user:retained raw tail"]
+    );
+}
+
+#[test]
 fn compaction_retained_raw_tail_is_policy_driven() {
     let mut session =
         SessionState::new(SessionId::new("retained-tail-policy").expect("valid session id"));
