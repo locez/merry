@@ -36,13 +36,10 @@ async fn provider_stream_context_uses_runtime_session_as_prompt_cache_key() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn model_retry_events_are_emitted_and_failed_attempt_output_is_not_recorded() {
+async fn model_retry_events_are_emitted_for_failure_before_output() {
     let provider = RecordingModelProvider::with_script(vec![
         ScriptedModelProviderResponse::Stream(vec![
             Ok(ModelEvent::Started),
-            Ok(ModelEvent::OutputTextDelta {
-                delta: "partial attempt".to_owned(),
-            }),
             Err(ModelError::provider(
                 ProviderErrorKind::Unavailable,
                 "stream interrupted",
@@ -110,6 +107,70 @@ async fn model_retry_events_are_emitted_and_failed_attempt_output_is_not_recorde
         .await
         .expect("artifact should be readable");
     assert_eq!(content.as_text(), Some("successful attempt"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn model_stream_failure_after_output_is_not_retried_or_recorded_as_complete() {
+    let provider = RecordingModelProvider::with_script(vec![
+        ScriptedModelProviderResponse::Stream(vec![
+            Ok(ModelEvent::Started),
+            Ok(ModelEvent::OutputTextDelta {
+                delta: "visible partial output".to_owned(),
+            }),
+            Err(ModelError::provider(
+                ProviderErrorKind::Unavailable,
+                "stream interrupted",
+            )),
+        ]),
+        ScriptedModelProviderResponse::Stream(vec![Ok(completed_event_with(
+            vec![ModelOutput::text("must not be replayed")],
+            FinishReason::Stop,
+        ))]),
+    ]);
+    let runtime = Runtime::builder(session_id("runtime-model-no-retry-after-output"))
+        .model_retry_policy(
+            ModelRetryPolicy::new(
+                true,
+                3,
+                std::time::Duration::from_millis(1),
+                std::time::Duration::from_millis(1),
+                std::time::Duration::from_millis(100),
+                false,
+            )
+            .expect("valid retry policy"),
+        )
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .build()
+        .expect("runtime should build");
+
+    let events = collect_step(
+        &runtime,
+        "Do not replay visible output.",
+        crate::StepContext::default(),
+    )
+    .await;
+
+    assert_eq!(provider.recorded_requests().len(), 1);
+    assert_eq!(
+        event_kind_names(&events),
+        [
+            "SessionStarted",
+            "StepStarted",
+            "ModelRetryAttemptStarted",
+            "AssistantOutputDelta",
+            "Failed",
+        ]
+    );
+    assert!(events.iter().any(|event| matches!(
+        &event.payload,
+        RuntimeJournalPayload::AssistantOutputDelta { delta }
+            if delta == "visible partial output"
+    )));
+    assert!(!events.iter().any(|event| matches!(
+        event.payload,
+        RuntimeJournalPayload::AssistantOutputRecorded { .. }
+            | RuntimeJournalPayload::StepCompleted
+    )));
 }
 
 #[tokio::test(flavor = "current_thread")]
