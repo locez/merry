@@ -29,9 +29,19 @@ pub(crate) async fn coding_loop_smoke_admission_from_current_process(
     )
 }
 
+pub(crate) async fn coding_agent_process_admission(
+    sandbox_child_handoff: Option<SandboxChildHandoff>,
+    no_outer_sandbox: bool,
+) -> Option<AcceptedLocalWorkspaceProcessAdmission> {
+    if no_outer_sandbox {
+        return Some(AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1());
+    }
+    coding_loop_smoke_admission_from_current_process(sandbox_child_handoff).await
+}
+
 pub(crate) fn coding_agent_requires_sandbox_error(command: &str) -> CliError {
     CliError::DebugUsage(format!(
-        "merry {command} must run via `merry --with-sandbox {command}`"
+        "merry {command} requires the automatic bubblewrap sandbox"
     ))
 }
 

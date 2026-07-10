@@ -65,6 +65,15 @@ pub enum ToolRunner {
     Bridge,
 }
 
+/// Runtime execution policy for calls that appear in the same model batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolConcurrency {
+    /// Calls may execute concurrently with adjacent parallel-safe calls.
+    ParallelSafe,
+    /// The call executes alone and acts as a barrier between concurrent waves.
+    Exclusive,
+}
+
 /// Context passed to a tool executor.
 ///
 /// The context is intentionally small for the MVP: cancellation is cooperative
@@ -1058,6 +1067,7 @@ pub struct RegisteredTool {
     action_kind: ToolActionKind,
     proposals_enabled: bool,
     runner: ToolRunner,
+    concurrency: ToolConcurrency,
 }
 
 impl RegisteredTool {
@@ -1078,6 +1088,7 @@ impl RegisteredTool {
             action_kind,
             proposals_enabled: false,
             runner: ToolRunner::Runtime,
+            concurrency: ToolConcurrency::Exclusive,
         }
     }
 
@@ -1088,6 +1099,16 @@ impl RegisteredTool {
     #[must_use]
     pub fn with_action_proposal(mut self) -> Self {
         self.proposals_enabled = true;
+        self
+    }
+
+    /// Opts this tool into bounded concurrent execution within one model batch.
+    ///
+    /// Use this only when concurrent calls cannot race through writes,
+    /// processes, network access, permissions, or runtime-control state.
+    #[must_use]
+    pub fn with_parallel_safe_execution(mut self) -> Self {
+        self.concurrency = ToolConcurrency::ParallelSafe;
         self
     }
 
@@ -1110,6 +1131,7 @@ impl RegisteredTool {
             action_kind: ToolActionKind::ReadOnly,
             proposals_enabled: false,
             runner: ToolRunner::Bridge,
+            concurrency: ToolConcurrency::Exclusive,
         }
     }
 
@@ -1129,6 +1151,12 @@ impl RegisteredTool {
     #[must_use]
     pub fn runner(&self) -> ToolRunner {
         self.runner
+    }
+
+    /// Returns the runtime execution policy for batched calls.
+    #[must_use]
+    pub fn concurrency(&self) -> ToolConcurrency {
+        self.concurrency
     }
 
     /// Returns whether this tool opted into action proposal evidence.
@@ -1167,6 +1195,7 @@ impl std::fmt::Debug for RegisteredTool {
             .field("action_kind", &self.action_kind)
             .field("proposals_enabled", &self.proposals_enabled)
             .field("runner", &self.runner)
+            .field("concurrency", &self.concurrency)
             .finish_non_exhaustive()
     }
 }
@@ -1242,7 +1271,7 @@ pub(crate) enum ToolRegistryError {
 mod tests {
     use super::{
         ActionProposal, ActionProposalError, ActionProposalEvidence, RegisteredTool,
-        ToolActionKind, ToolExecutionContext, ToolExecutionOutcome, ToolExecutor,
+        ToolActionKind, ToolConcurrency, ToolExecutionContext, ToolExecutionOutcome, ToolExecutor,
         ToolExecutorFuture, ToolRunner, WorkspacePatchExecutionEvidence, WorkspacePatchProposal,
     };
     use crate::{ProcessActionIntent, ProcessEnvPolicy};
@@ -1306,6 +1335,36 @@ mod tests {
 
         assert_eq!(tool.runner(), ToolRunner::Bridge);
         assert_eq!(tool.spec().name().as_str(), "lookup_order");
+    }
+
+    #[test]
+    fn registered_tools_default_to_exclusive_execution() {
+        let explicit = RegisteredTool::new(
+            tool_spec("write_tool"),
+            Arc::new(StaticToolExecutor),
+            ToolActionKind::WorkspaceWrite,
+        );
+        let read_only =
+            RegisteredTool::read_only(tool_spec("read_tool"), Arc::new(StaticToolExecutor));
+        let bridge = RegisteredTool::bridge(tool_spec("bridge_tool"));
+
+        assert_eq!(explicit.concurrency(), ToolConcurrency::Exclusive);
+        assert_eq!(read_only.concurrency(), ToolConcurrency::Exclusive);
+        assert_eq!(bridge.concurrency(), ToolConcurrency::Exclusive);
+    }
+
+    #[test]
+    fn parallel_safe_opt_in_changes_only_runtime_metadata() {
+        let tool =
+            RegisteredTool::read_only(tool_spec("lookup_order"), Arc::new(StaticToolExecutor));
+        let visible_spec = serde_json::to_value(tool.spec()).expect("tool spec should serialize");
+        let tool = tool.with_parallel_safe_execution();
+
+        assert_eq!(tool.concurrency(), ToolConcurrency::ParallelSafe);
+        assert_eq!(
+            serde_json::to_value(tool.spec()).expect("tool spec should serialize"),
+            visible_spec
+        );
     }
 
     #[test]

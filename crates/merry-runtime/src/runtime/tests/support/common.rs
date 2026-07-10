@@ -73,8 +73,12 @@
             active_step: Arc::new(AtomicBool::new(false)),
             memory_projection_epoch: AtomicU64::new(0),
             event_buffer_size: NonZeroUsize::new(1).expect("non-zero buffer"),
+            max_parallel_tool_calls: NonZeroUsize::new(4).expect("non-zero limit"),
             model_configs: RuntimeModelConfigs::default(),
-            automatic_compaction: AutomaticCompactionConfig::default(),
+            primary_model_override: tokio::sync::RwLock::new(None),
+            automatic_compaction: tokio::sync::RwLock::new(
+                AutomaticCompactionConfig::default(),
+            ),
             capabilities: crate::RuntimeCapabilities::default(),
             progress_commentary: false,
             tool_registry: ToolRegistry::default(),

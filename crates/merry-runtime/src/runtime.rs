@@ -15,7 +15,7 @@ use crate::{
     },
     judgment::{JudgmentContext, JudgmentError, JudgmentRecord, JudgmentRequest, JudgmentSource},
     memory::MemoryActivationSource,
-    model_config::RuntimeModelConfigs,
+    model_config::{ModelProviderConfig, RuntimeModelConfigs},
     permission::{PermissionAdmissionSource, PermissionReviewMode, RuntimeTrustLevel},
     process::PermissionedProcessRunnerFactory,
     session::SessionState,
@@ -23,8 +23,8 @@ use crate::{
     subagent::SubagentManager,
     tool::{ToolExecutionContext, ToolRegistry},
 };
-use merry_core::{RuntimeEvent, RuntimeJournalEvent, SessionId, ToolCallId};
-use merry_llm::GenerationConfig;
+use merry_core::{PendingToolCall, RuntimeEvent, RuntimeJournalEvent, SessionId, ToolCallId};
+use merry_llm::{GenerationConfig, ModelName, ModelProvider, ModelRetryPolicy};
 use std::{
     num::NonZeroUsize,
     sync::{
@@ -32,7 +32,7 @@ use std::{
         atomic::{AtomicBool, AtomicU64},
     },
 };
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -49,6 +49,7 @@ mod process_execution;
 mod provider_request;
 mod provider_step;
 mod session_access;
+mod tool_batch;
 mod tool_execution;
 
 use self::auto_compaction::compact_context_once_inner;
@@ -193,20 +194,25 @@ impl Runtime {
         &self.inner.session_id
     }
 
-    /// Saves the current resume-safe session state to the configured store.
-    pub async fn save_session(&self) -> Result<(), RuntimeError> {
+    /// Saves the current resume-safe session state to the provided store.
+    pub async fn save_session_to(&self, store: FileSessionStore) -> Result<(), RuntimeError> {
         let _active_permit = self.acquire_active_step_permit()?;
-        let store = self
-            .inner
-            .session_store
-            .clone()
-            .unwrap_or(FileSessionStore::default_store()?);
         let bundle = {
             let session = self.inner.session.lock().await;
             session.persistable_bundle()?
         };
         store.write_bundle(bundle).await?;
         Ok(())
+    }
+
+    /// Saves the current resume-safe session state to the configured store.
+    pub async fn save_session(&self) -> Result<(), RuntimeError> {
+        let store = self
+            .inner
+            .session_store
+            .clone()
+            .unwrap_or(FileSessionStore::default_store()?);
+        self.save_session_to(store).await
     }
 
     /// Returns a compact snapshot of managed subagent statuses when configured.
@@ -327,6 +333,15 @@ impl Runtime {
         _active_permit: &ActiveStepPermit,
     ) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
         tool_execution::execute_tool_call_with_active_permit(&self.inner, call_id, context).await
+    }
+
+    pub(crate) async fn execute_tool_call_batch_with_active_permit(
+        &self,
+        calls: Vec<PendingToolCall>,
+        context: ToolExecutionContext,
+        _active_permit: &ActiveStepPermit,
+    ) -> tool_batch::ToolBatchExecution {
+        tool_batch::execute_tool_call_batch_with_active_permit(&self.inner, calls, context).await
     }
 
     /// Payload-free summary of the installed compacted checkpoint, if any.
@@ -476,8 +491,10 @@ struct RuntimeInner {
     active_step: Arc<AtomicBool>,
     memory_projection_epoch: AtomicU64,
     event_buffer_size: NonZeroUsize,
+    max_parallel_tool_calls: NonZeroUsize,
     model_configs: RuntimeModelConfigs,
-    automatic_compaction: AutomaticCompactionConfig,
+    primary_model_override: RwLock<Option<ModelProviderConfig>>,
+    automatic_compaction: RwLock<AutomaticCompactionConfig>,
     capabilities: RuntimeCapabilities,
     progress_commentary: bool,
     tool_registry: ToolRegistry,
@@ -492,6 +509,76 @@ struct RuntimeInner {
     permissioned_process_runner_factory: Option<Arc<dyn PermissionedProcessRunnerFactory>>,
     subagent_manager: Option<SubagentManager>,
     session_store: Option<FileSessionStore>,
+}
+
+impl RuntimeInner {
+    async fn model_config(&self, role: RuntimeModelRole) -> Option<ModelProviderConfig> {
+        if role == RuntimeModelRole::Primary
+            && let Some(config) = self.primary_model_override.read().await.as_ref()
+        {
+            return Some(config.clone());
+        }
+        self.model_configs.get(role)
+    }
+
+    async fn model_config_with_primary_fallback(
+        &self,
+        role: RuntimeModelRole,
+    ) -> Option<ModelProviderConfig> {
+        if role != RuntimeModelRole::Primary
+            && let Some(config) = self.model_configs.get(role)
+        {
+            return Some(config);
+        }
+        self.model_config(RuntimeModelRole::Primary).await
+    }
+
+    fn visible_tool_specs(&self) -> Vec<merry_core::ToolSpec> {
+        let mut specs = self.tool_registry.tool_specs();
+        if let Some(manager) = self.subagent_manager.as_ref() {
+            specs.retain(|spec| manager.is_tool_visible(spec.name()));
+        }
+        specs
+    }
+}
+
+impl Runtime {
+    /// Returns the automatic compaction policy used by subsequent requests.
+    pub async fn automatic_compaction_config(&self) -> AutomaticCompactionConfig {
+        *self.inner.automatic_compaction.read().await
+    }
+
+    pub(crate) async fn update_interactive_primary_model(
+        &self,
+        provider: Arc<dyn ModelProvider>,
+        model: ModelName,
+        retry_policy: ModelRetryPolicy,
+    ) {
+        *self.inner.primary_model_override.write().await =
+            Some(ModelProviderConfig::new(provider, model, retry_policy));
+    }
+
+    pub(crate) async fn update_interactive_subagents(
+        &self,
+        enabled: bool,
+        config: crate::SubagentConfig,
+    ) -> Result<(), RuntimeError> {
+        let manager =
+            self.inner
+                .subagent_manager
+                .as_ref()
+                .ok_or(RuntimeError::InvalidStepInput {
+                    reason: "interactive subagent runtime control is unavailable",
+                })?;
+        manager.update_policy(enabled, config).await
+    }
+
+    pub(crate) async fn update_interactive_automatic_compaction(
+        &self,
+        config: AutomaticCompactionConfig,
+    ) {
+        *self.inner.automatic_compaction.write().await = config;
+    }
 }
 
 #[derive(Clone)]
@@ -549,7 +636,7 @@ async fn run_step(
         return;
     }
 
-    let Some(provider_config) = inner.model_configs.get(RuntimeModelRole::Primary) else {
+    let Some(provider_config) = inner.model_config(RuntimeModelRole::Primary).await else {
         tracing::debug!(
             category = "no_provider_completion",
             "runtime step completing without provider"

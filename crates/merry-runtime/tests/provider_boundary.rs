@@ -9,7 +9,8 @@ use merry_llm::{
     ModelEventStream, ModelInputItem, ModelMessage, ModelMessageRole, ModelName, ModelOutput,
     ModelProvider, ModelProviderFuture, ModelRequest, ModelResponse, ModelResponseFormat,
     ModelRetryPolicy, ModelStreamContext, ModelStructuredOutputFormat, ModelToolCall,
-    ModelToolCallId, ProviderErrorKind, ToolArguments, testing::FakeModelProvider,
+    ModelToolCallId, ParallelToolCalls, ProviderErrorKind, ToolArguments,
+    testing::FakeModelProvider,
 };
 use merry_provider_openai::{OpenAiProvider, OpenAiProviderConfig};
 use merry_runtime::{
@@ -1182,7 +1183,12 @@ async fn runtime_step_with_provider_compiles_user_text_request_and_records_assis
         "Explain the runtime boundary."
     );
     assert_default_checkpoint_ref_tool(request.tools());
-    assert_eq!(request.generation(), &GenerationConfig::default());
+    assert_eq!(request.generation().max_output_tokens(), None);
+    assert_eq!(request.generation().reasoning_effort(), None);
+    assert_eq!(
+        request.generation().parallel_tool_calls(),
+        ParallelToolCalls::Disabled
+    );
     assert!(!request.generation().allow_parallel_tool_calls());
 }
 
@@ -1314,6 +1320,27 @@ async fn runtime_step_with_provider_uses_step_generation_config() {
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].generation().max_output_tokens(), Some(16));
     assert!(!requests[0].generation().allow_parallel_tool_calls());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_rejects_explicit_parallel_calls_when_provider_lacks_capability() {
+    let provider = FakeModelProvider::new(vec![Ok(completed_event())]);
+    let runtime = runtime_with_provider("provider-parallel-unsupported", provider.clone());
+    let context = StepContext::new(CancellationToken::new()).with_generation_config(
+        GenerationConfig::default().with_parallel_tool_calls(ParallelToolCalls::Enabled),
+    );
+
+    let events = collect_step_with_context(&runtime, "Use parallel tools.", context).await;
+
+    assert_eq!(
+        event_kind_names(&events),
+        ["SessionStarted", "StepStarted", "Failed"]
+    );
+    assert_eq!(
+        failed_code(&events),
+        Some("provider_parallel_tool_calls_unsupported")
+    );
+    assert!(provider.recorded_requests().is_empty());
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -5067,6 +5094,23 @@ async fn provider_completed_with_length_finish_emits_failed_without_step_complet
         ["SessionStarted", "StepStarted", "Failed"]
     );
     assert_eq!(failed_code(&events), Some("model_length"));
+    assert_no_artifact_recorded(&events);
+    assert_no_completion(&events);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn provider_completed_with_blocked_finish_emits_policy_failure() {
+    let provider =
+        FakeModelProvider::new(vec![Ok(completed_event_with_finish(FinishReason::Blocked))]);
+    let runtime = runtime_with_provider("provider-finish-blocked", provider);
+
+    let events = collect_step(&runtime, "Finish blocked.").await;
+
+    assert_eq!(
+        event_kind_names(&events),
+        ["SessionStarted", "StepStarted", "Failed"]
+    );
+    assert_eq!(failed_code(&events), Some("model_blocked"));
     assert_no_artifact_recorded(&events);
     assert_no_completion(&events);
 }

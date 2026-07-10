@@ -423,9 +423,12 @@ impl<'state> MarkdownRenderer<'state> {
             .unwrap_or(block.text.as_str())
             .to_owned();
         if let Some(lang) = block.lang {
-            let highlighted = highlight_code_to_lines(&text, &lang);
-            self.lines
-                .extend(highlighted.into_iter().map(indent_code_line));
+            let highlighted = highlight_code_to_lines(&text, &lang, self.state.code_theme());
+            self.lines.extend(
+                highlighted
+                    .into_iter()
+                    .flat_map(|line| code_block_visual_lines(self.state, line, self.region_width)),
+            );
             return;
         }
         for line in text.split('\n') {
@@ -721,18 +724,53 @@ fn code_block_lang(kind: CodeBlockKind<'_>) -> Option<String> {
     }
 }
 
-fn indent_code_line(mut line: Line<'static>) -> Line<'static> {
-    line.spans.insert(0, Span::raw("  "));
-    line
+fn code_block_visual_lines(
+    state: &TuiState,
+    line: Line<'static>,
+    region_width: u16,
+) -> Vec<Line<'static>> {
+    const RAIL: &str = "▎ ";
+    let rail_width = u16::try_from(UnicodeWidthStr::width(RAIL)).unwrap_or(u16::MAX);
+    let content_width = region_width.saturating_sub(rail_width).max(1);
+    let parts = line
+        .spans
+        .into_iter()
+        .map(|span| StyledTextPart {
+            text: span.content.into_owned(),
+            style: span.style,
+            atomic: false,
+        })
+        .collect();
+    let rail_style = semantic_style(state, SemanticColor::Status).add_modifier(Modifier::BOLD);
+    let background = state.theme().color(SemanticColor::CodeBackground);
+    wrap_styled_parts_preserving_leading_whitespace(parts, content_width)
+        .into_iter()
+        .map(|mut line| {
+            line.spans.insert(0, Span::styled(RAIL, rail_style));
+            if let Some(background) = background {
+                for span in &mut line.spans {
+                    span.style = span.style.bg(background);
+                }
+                let padding = usize::from(region_width).saturating_sub(spans_width(&line.spans));
+                if padding > 0 {
+                    line.spans.push(Span::styled(
+                        " ".repeat(padding),
+                        Style::default().bg(background),
+                    ));
+                }
+            }
+            line
+        })
+        .collect()
 }
 
 fn code_block_lines(state: &TuiState, text: &str, region_width: u16) -> Vec<Line<'static>> {
-    wrap_styled_parts_preserving_leading_whitespace(
-        vec![StyledTextPart {
-            text: format!("  {text}"),
-            style: inline_code_style(state, semantic_style(state, SemanticColor::Assistant)),
-            atomic: false,
-        }],
+    code_block_visual_lines(
+        state,
+        Line::from(Span::styled(
+            text.to_owned(),
+            semantic_style(state, SemanticColor::Assistant),
+        )),
         region_width,
     )
 }

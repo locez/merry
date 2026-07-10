@@ -8,8 +8,9 @@ use super::roles::RuntimeRoleProviderConfig;
 use merry_llm::{ModelName, ModelProvider, ModelRetryPolicy};
 use merry_runtime::{
     AcceptedLocalWorkspaceProcessAdmission, AutomaticCompactionConfig,
-    DEFAULT_CODING_AGENT_MAX_MODEL_TURNS, PermissionedProcessRunnerFactory, ProcessRunner,
-    RegisteredTool, Runtime, SubagentConfig, SubagentManager, subagent_registered_tools,
+    DEFAULT_CODING_AGENT_MAX_MODEL_TURNS, FileSessionStore, PermissionedProcessRunnerFactory,
+    ProcessRunner, RegisteredTool, Runtime, RuntimeBuilder, SubagentConfig, SubagentManager,
+    subagent_registered_tools,
 };
 use merry_tool_workspace::WorkspaceCodingLoopProfile;
 use std::{
@@ -39,6 +40,7 @@ pub(crate) struct CodingLoopRuntimeOptions {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct CodingSubagentsConfig {
+    installed: bool,
     enabled: bool,
     limits: SubagentConfig,
 }
@@ -46,9 +48,22 @@ pub(crate) struct CodingSubagentsConfig {
 impl CodingSubagentsConfig {
     pub(crate) fn enabled(limits: SubagentConfig) -> Self {
         Self {
+            installed: true,
             enabled: true,
             limits,
         }
+    }
+
+    pub(crate) fn runtime_controlled(enabled: bool, limits: SubagentConfig) -> Self {
+        Self {
+            installed: true,
+            enabled,
+            limits,
+        }
+    }
+
+    pub(crate) fn is_installed(self) -> bool {
+        self.installed
     }
 
     pub(crate) fn is_enabled(self) -> bool {
@@ -81,7 +96,27 @@ pub(crate) struct HeadlessCodingRuntimeInput<'a> {
 pub(crate) fn build_headless_coding_runtime(
     input: HeadlessCodingRuntimeInput<'_>,
 ) -> Result<Runtime, CodingRuntimeError> {
-    build_coding_loop_runtime(
+    build_coding_loop_runtime_from_headless_input(input)?
+        .build()
+        .map_err(|source| CodingRuntimeError::RuntimeBuild { source })
+}
+
+pub(crate) async fn resume_headless_coding_runtime(
+    input: HeadlessCodingRuntimeInput<'_>,
+    store: FileSessionStore,
+) -> Result<Runtime, CodingRuntimeError> {
+    build_coding_loop_runtime_from_headless_input(input)?
+        .load_session_from_store(store)
+        .await
+        .map_err(|source| CodingRuntimeError::RuntimeBuild { source })?
+        .build()
+        .map_err(|source| CodingRuntimeError::RuntimeBuild { source })
+}
+
+fn build_coding_loop_runtime_from_headless_input(
+    input: HeadlessCodingRuntimeInput<'_>,
+) -> Result<RuntimeBuilder, CodingRuntimeError> {
+    configure_coding_loop_runtime_builder(
         input.session_id,
         input.root,
         input.admission,
@@ -112,6 +147,22 @@ pub(crate) fn build_coding_loop_runtime(
     runner: Arc<dyn ProcessRunner>,
     options: CodingLoopRuntimeOptions,
 ) -> Result<Runtime, CodingRuntimeError> {
+    configure_coding_loop_runtime_builder(
+        session_id, root, admission, provider, model, runner, options,
+    )?
+    .build()
+    .map_err(|source| CodingRuntimeError::RuntimeBuild { source })
+}
+
+fn configure_coding_loop_runtime_builder(
+    session_id: &str,
+    root: &Path,
+    admission: AcceptedLocalWorkspaceProcessAdmission,
+    provider: Arc<dyn ModelProvider>,
+    model: ModelName,
+    runner: Arc<dyn ProcessRunner>,
+    options: CodingLoopRuntimeOptions,
+) -> Result<RuntimeBuilder, CodingRuntimeError> {
     let parent_session_id = merry_core::SessionId::new(session_id)?;
     let permissioned_factory = options
         .permissioned_process_runner_factory
@@ -167,7 +218,7 @@ pub(crate) fn build_coding_loop_runtime(
         builder = builder.skill_catalog(catalog);
     }
 
-    if options.subagents.is_enabled() {
+    if options.subagents.is_installed() {
         let factory = CodingLoopChildRuntimeFactory::new(
             root,
             admission,
@@ -180,10 +231,11 @@ pub(crate) fn build_coding_loop_runtime(
             options.skill_roots.clone(),
             options.allow_hidden_workspace_paths,
         );
-        let manager = SubagentManager::new(
+        let manager = SubagentManager::runtime_controlled(
             parent_session_id.clone(),
             options.subagents.limits(),
             Arc::new(factory),
+            options.subagents.is_enabled(),
         );
         let [spawn_tool, wait_tool, cancel_tool] = subagent_registered_tools(manager.clone())?;
         builder = builder
@@ -194,6 +246,7 @@ pub(crate) fn build_coding_loop_runtime(
         tracing::info!(
             event = "runtime.subagents.enabled",
             session_id,
+            enabled = options.subagents.is_enabled(),
             max_threads = options.subagents.limits().max_threads(),
             max_depth = options.subagents.limits().max_depth(),
             "runtime subagent tools registered"
@@ -215,7 +268,5 @@ pub(crate) fn build_coding_loop_runtime(
     if let Some(policy) = options.retry_policy {
         builder = builder.model_retry_policy(policy);
     }
-    builder
-        .build()
-        .map_err(|source| CodingRuntimeError::RuntimeBuild { source })
+    Ok(builder)
 }

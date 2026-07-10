@@ -39,6 +39,8 @@ pub(crate) const SANDBOX_TMPDIR: &str = "/tmp";
 pub(crate) const SANDBOX_XDG_CONFIG_HOME: &str = "/home/merry/.config";
 pub(crate) const SANDBOX_XDG_STATE_HOME: &str = "/home/merry/.local/state";
 pub(crate) const SANDBOX_MERRY_CONFIG_DIR: &str = "/home/merry/.config/merry";
+pub(crate) const SANDBOX_MERRY_MANAGED_CONFIG_DIR: &str = "/home/merry/.config/merry/managed";
+pub(crate) const SANDBOX_MERRY_STATE_DIR: &str = "/home/merry/.local/state/merry";
 pub(crate) const SANDBOX_MERRY_LOG_DIR: &str = "/home/merry/.local/state/merry/logs";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -123,7 +125,27 @@ pub(crate) fn maybe_reexec(with_sandbox: bool, args: Vec<OsString>) -> Result<()
     let host = Host::from_env(args)?;
     match plan_bootstrap(with_sandbox, &host)? {
         Bootstrap::Disabled | Bootstrap::AlreadyInside => Ok(()),
-        Bootstrap::Reexec(plan) => exec(plan),
+        Bootstrap::Reexec(plan) => {
+            ensure_host_managed_provider_directories(&host)?;
+            ensure_host_state_directory(&host)?;
+            exec(plan)
+        }
+    }
+}
+
+pub(crate) fn ensure_bubblewrap_available() -> Result<(), Error> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        return Err(Error::UnsupportedPlatform);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let path = env::var_os("PATH")
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| os(DEFAULT_SANDBOX_PATH));
+        find_bwrap_in_path(&path, Path::exists)
+            .map(|_| ())
+            .ok_or(Error::MissingBubblewrap)
     }
 }
 
@@ -164,6 +186,38 @@ fn ensure_host_log_directory(host: &Host) -> Result<(), Error> {
     })
 }
 
+fn ensure_host_state_directory(host: &Host) -> Result<(), Error> {
+    fs::create_dir_all(host.xdg_paths.state_dir()).map_err(|source| Error::StateDirectory {
+        path: host.xdg_paths.state_dir().to_path_buf(),
+        source,
+    })?;
+    ensure_host_log_directory(host)
+}
+
+fn ensure_host_managed_provider_directories(host: &Host) -> Result<(), Error> {
+    for path in [
+        host.xdg_paths.managed_config_dir(),
+        host.xdg_paths.managed_secrets_dir(),
+    ] {
+        fs::create_dir_all(&path).map_err(|source| Error::ManagedConfigDirectory {
+            path: path.clone(),
+            source,
+        })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).map_err(|source| {
+                Error::ManagedConfigDirectory {
+                    path: path.clone(),
+                    source,
+                }
+            })?;
+        }
+    }
+    Ok(())
+}
+
 fn build_plan(host: &Host, path: OsString, bwrap: PathBuf) -> Plan {
     let cwd = host.cwd.as_os_str().to_owned();
     let current_exe = host.current_exe.as_os_str().to_owned();
@@ -193,6 +247,9 @@ fn build_plan(host: &Host, path: OsString, bwrap: PathBuf) -> Plan {
         os("--ro-bind-try"),
         host.xdg_paths.config_dir().as_os_str().to_owned(),
         os(SANDBOX_MERRY_CONFIG_DIR),
+        os("--bind"),
+        host.xdg_paths.managed_config_dir().as_os_str().to_owned(),
+        os(SANDBOX_MERRY_MANAGED_CONFIG_DIR),
         os("--ro-bind"),
         os("/usr"),
         os("/usr"),
@@ -225,6 +282,11 @@ fn build_plan(host: &Host, path: OsString, bwrap: PathBuf) -> Plan {
         cwd.clone(),
         os("--chdir"),
         cwd.clone(),
+    ]);
+    args.extend([
+        os("--bind"),
+        host.xdg_paths.state_dir().as_os_str().to_owned(),
+        os(SANDBOX_MERRY_STATE_DIR),
     ]);
     if let Some(log_settings) = host.log_settings.as_ref()
         && let Some(host_log_dir) = log_settings.path.parent()
@@ -486,6 +548,14 @@ pub(crate) enum Error {
         path: PathBuf,
         source: io::Error,
     },
+    StateDirectory {
+        path: PathBuf,
+        source: io::Error,
+    },
+    ManagedConfigDirectory {
+        path: PathBuf,
+        source: io::Error,
+    },
     #[cfg(not(target_os = "linux"))]
     UnsupportedPlatform,
     MissingBubblewrap,
@@ -512,14 +582,24 @@ impl fmt::Display for Error {
                 "failed to create host log directory {} before sandbox bootstrap: {source}",
                 path.display()
             ),
+            Error::StateDirectory { path, source } => write!(
+                formatter,
+                "failed to create host state directory {} before sandbox bootstrap: {source}",
+                path.display()
+            ),
+            Error::ManagedConfigDirectory { path, source } => write!(
+                formatter,
+                "failed to prepare managed provider directory {} before sandbox bootstrap: {source}",
+                path.display()
+            ),
             #[cfg(not(target_os = "linux"))]
             Error::UnsupportedPlatform => write!(
                 formatter,
-                "merry --with-sandbox is only supported on Linux with bubblewrap (bwrap)"
+                "Merry's product sandbox is supported only on Linux with bubblewrap; debug commands can omit --with-sandbox"
             ),
             Error::MissingBubblewrap => write!(
                 formatter,
-                "bubblewrap executable `bwrap` was not found in PATH; install bubblewrap or run without --with-sandbox"
+                "bubblewrap executable `bwrap` was not found in PATH; install bubblewrap to use TUI/run, or omit --with-sandbox for debug commands"
             ),
             Error::Exec(error) => {
                 write!(

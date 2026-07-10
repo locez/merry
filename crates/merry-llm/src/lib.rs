@@ -3,6 +3,7 @@
 pub mod capability;
 pub mod error;
 pub mod event;
+pub mod model_catalog;
 pub mod provider;
 pub mod request;
 pub mod response;
@@ -15,11 +16,15 @@ pub mod usage;
 pub use capability::ModelCapabilities;
 pub use error::{ModelError, ProviderErrorKind};
 pub use event::ModelEvent;
+pub use model_catalog::{
+    ModelCatalog, ModelCatalogEntry, ModelCatalogError, ModelCatalogErrorKind, ModelCatalogFuture,
+    ModelCatalogProvider,
+};
 pub use provider::{ModelEventStream, ModelProvider, ModelProviderFuture, ModelStreamContext};
 pub use request::{
     GenerationConfig, ModelContent, ModelInputItem, ModelMessage, ModelMessageRole, ModelName,
-    ModelRequest, ModelResponseFormat, ModelStructuredOutputFormat, ReasoningEffort,
-    RequestContentHash, ToolProfileHash,
+    ModelRequest, ModelResponseFormat, ModelStructuredOutputFormat, ParallelToolCalls,
+    ReasoningEffort, RequestContentHash, ToolProfileHash,
 };
 pub use response::{FinishReason, ModelOutput, ModelResponse};
 pub use retry::{

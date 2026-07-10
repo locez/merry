@@ -3,10 +3,22 @@
 use crate::OpenAiProviderError;
 use merry_core::ProviderName;
 use merry_llm::ModelCapabilities;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_PROVIDER_NAME: &str = "openai-compatible";
+
+/// OpenAI-compatible wire protocol used by the provider.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenAiProtocol {
+    /// OpenAI Responses API at `/responses`.
+    #[default]
+    Responses,
+    /// OpenAI Chat Completions API at `/chat/completions`.
+    ChatCompletions,
+}
 
 /// OpenAI-compatible provider configuration.
 #[derive(Clone)]
@@ -17,6 +29,7 @@ pub struct OpenAiProviderConfig {
     project: Option<String>,
     provider_name: ProviderName,
     capabilities: ModelCapabilities,
+    protocol: OpenAiProtocol,
 }
 
 impl OpenAiProviderConfig {
@@ -35,6 +48,7 @@ impl OpenAiProviderConfig {
                 ))
             })?,
             capabilities: default_capabilities()?,
+            protocol: OpenAiProtocol::Responses,
         })
     }
 
@@ -78,6 +92,12 @@ impl OpenAiProviderConfig {
         &self.capabilities
     }
 
+    /// Returns the selected OpenAI-compatible wire protocol.
+    #[must_use]
+    pub fn protocol(&self) -> OpenAiProtocol {
+        self.protocol
+    }
+
     /// Returns a config with a validated replacement base URL.
     pub fn with_base_url(mut self, base_url: &str) -> Result<Self, OpenAiProviderError> {
         validate_base_url(base_url)?;
@@ -113,6 +133,13 @@ impl OpenAiProviderConfig {
         self.capabilities = capabilities;
         self
     }
+
+    /// Returns a config using the selected OpenAI-compatible wire protocol.
+    #[must_use]
+    pub fn with_protocol(mut self, protocol: OpenAiProtocol) -> Self {
+        self.protocol = protocol;
+        self
+    }
 }
 
 impl fmt::Debug for OpenAiProviderConfig {
@@ -125,12 +152,13 @@ impl fmt::Debug for OpenAiProviderConfig {
             .field("project", &self.project)
             .field("provider_name", &self.provider_name)
             .field("capabilities", &self.capabilities)
+            .field("protocol", &self.protocol)
             .finish()
     }
 }
 
 fn default_capabilities() -> Result<ModelCapabilities, OpenAiProviderError> {
-    ModelCapabilities::new(true, true, false, true, None, None).map_err(|error| {
+    ModelCapabilities::new(true, true, true, true, None, None).map_err(|error| {
         OpenAiProviderError::invalid_config(format!("default capabilities are invalid: {error}"))
     })
 }
@@ -159,21 +187,30 @@ fn validate_required_text(field: &'static str, value: &str) -> Result<(), OpenAi
 
 fn validate_base_url(base_url: &str) -> Result<(), OpenAiProviderError> {
     validate_required_text("base_url", base_url)?;
-
-    let host_and_path = if let Some(host_and_path) = base_url.strip_prefix("https://") {
-        host_and_path
-    } else if let Some(host_and_path) = base_url.strip_prefix("http://") {
-        host_and_path
-    } else {
+    let url = reqwest::Url::parse(base_url).map_err(|error| {
+        OpenAiProviderError::invalid_config(format!("base_url is invalid: {error}"))
+    })?;
+    if !matches!(url.scheme(), "http" | "https") {
         return Err(OpenAiProviderError::invalid_config(
             "base_url must use http or https",
         ));
-    };
-
-    let host = host_and_path.split('/').next().unwrap_or_default();
-    if host.is_empty() {
+    }
+    if base_url
+        .split_once("://")
+        .is_none_or(|(_, authority)| authority.starts_with('/'))
+    {
         return Err(OpenAiProviderError::invalid_config(
             "base_url must include a host",
+        ));
+    }
+    if url.host_str().is_none() {
+        return Err(OpenAiProviderError::invalid_config(
+            "base_url must include a host",
+        ));
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err(OpenAiProviderError::invalid_config(
+            "base_url must not include a query or fragment",
         ));
     }
 

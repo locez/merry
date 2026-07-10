@@ -31,7 +31,7 @@ pub(super) fn default_automatic_compaction_policy() -> CitationCompactionPolicy 
 pub(super) async fn compaction_input_for_hard_watermark(
     inner: &RuntimeInner,
 ) -> Result<Option<CitationCompactionInput>, RuntimeError> {
-    let config = inner.automatic_compaction;
+    let config = *inner.automatic_compaction.read().await;
     if !config.is_enabled() {
         return Ok(None);
     }
@@ -88,8 +88,8 @@ async fn compact_prepared_context_inner(
     token: CancellationToken,
 ) -> Result<CompactionOutcome, RuntimeError> {
     let provider_config = inner
-        .model_configs
-        .get_with_primary_fallback(RuntimeModelRole::ContextCompaction)
+        .model_config_with_primary_fallback(RuntimeModelRole::ContextCompaction)
+        .await
         .ok_or(RuntimeError::MissingModelProvider {
             role: RuntimeModelRole::ContextCompaction.as_str(),
         })?;

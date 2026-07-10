@@ -1,5 +1,6 @@
 use super::{
-    InteractiveCommand, InteractiveError, InteractiveRunId, InterruptReason,
+    InteractiveCommand, InteractiveError, InteractiveRunId, InteractiveSettingsUpdate,
+    InterruptReason,
     types::{InputReceipt, InputRecord, InputRecords},
 };
 use futures_core::Stream;
@@ -31,6 +32,28 @@ impl InteractiveRunEventStream {
             inner: Some(inner),
             cancellation_token,
             producer_handle: Some(producer_handle),
+        }
+    }
+
+    pub async fn next_event(&mut self) -> Option<RuntimeEvent> {
+        use futures_util::StreamExt;
+
+        self.next().await
+    }
+
+    pub async fn wait_until_closed(&mut self) {
+        use futures_util::StreamExt;
+
+        if let Some(inner) = self.inner.as_mut() {
+            while let Some(event) = inner.next().await {
+                if matches!(event, RuntimeEvent::Closed) {
+                    break;
+                }
+            }
+        }
+        self.inner.take();
+        if let Some(handle) = self.producer_handle.take() {
+            let _ = handle.await;
         }
     }
 }
@@ -322,6 +345,27 @@ impl AgentLoopControl {
     #[must_use]
     pub fn run_id(&self) -> InteractiveRunId {
         self.run_id
+    }
+
+    pub async fn update_settings(
+        &self,
+        update: InteractiveSettingsUpdate,
+    ) -> Result<(), InteractiveError> {
+        let (ack_sender, ack_receiver) = oneshot::channel();
+        self.command_sender
+            .send(InteractiveCommand::UpdateSettings {
+                update: Box::new(update),
+                ack_sender,
+            })
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?;
+        ack_receiver
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?
     }
 
     pub async fn resume_suspended(&self) -> Result<(), InteractiveError> {

@@ -14,15 +14,39 @@ use crate::tui;
 
 pub(crate) async fn run(cli: Cli, merry_config: Option<MerryConfig>) -> CliExit {
     let sandbox_child_handoff = cli.sandbox_child_handoff;
+    let no_outer_sandbox = cli.no_sandbox;
 
     match cli.command {
         None => map_result(
-            tui::run(sandbox_child_handoff, merry_config.as_ref()).await,
+            tui::run(
+                sandbox_child_handoff,
+                merry_config.as_ref(),
+                tui::LaunchMode::New,
+                no_outer_sandbox,
+            )
+            .await,
+            cli::root_usage,
+            cli::debug_openai_usage,
+        ),
+        Some(CliCommand::Resume) => map_result(
+            tui::run(
+                sandbox_child_handoff,
+                merry_config.as_ref(),
+                tui::LaunchMode::ResumePicker,
+                no_outer_sandbox,
+            )
+            .await,
             cli::root_usage,
             cli::debug_openai_usage,
         ),
         Some(CliCommand::Run(args)) => map_run_result(
-            run_command::run(&args, sandbox_child_handoff, merry_config.as_ref()).await,
+            run_command::run(
+                &args,
+                sandbox_child_handoff,
+                merry_config.as_ref(),
+                no_outer_sandbox,
+            )
+            .await,
         ),
         Some(CliCommand::Cmd(args)) => map_result(
             cmd::run(&args, merry_config.as_ref()).await,

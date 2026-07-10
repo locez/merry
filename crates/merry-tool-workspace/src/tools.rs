@@ -36,17 +36,20 @@ impl ReadOnlyWorkspaceTools {
                 Arc::new(ReadFileExecutor {
                     state: Arc::clone(&self.state),
                 }),
-            ),
+            )
+            .with_parallel_safe_execution(),
             RegisteredTool::read_only(
                 list_dir_spec(),
                 Arc::new(ListDirExecutor {
                     state: Arc::clone(&self.state),
                 }),
-            ),
+            )
+            .with_parallel_safe_execution(),
             RegisteredTool::read_only(
                 search_text_spec(),
                 Arc::new(SearchTextExecutor { state: self.state }),
-            ),
+            )
+            .with_parallel_safe_execution(),
         ]
     }
 

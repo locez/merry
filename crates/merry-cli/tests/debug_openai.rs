@@ -293,7 +293,7 @@ api_key_file = "secrets/openai.key"
         "config errors should not write stdout"
     );
     let stderr = std::str::from_utf8(&output.stderr).expect("stderr should be utf-8");
-    assert!(stderr.contains("unsupported default provider other"));
+    assert!(stderr.contains("[providers.other] is required"));
     assert!(!stderr.contains("Usage: merry debug openai"));
 }
 

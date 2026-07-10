@@ -116,6 +116,7 @@ runtime = merry.Runtime(
             api_key="...",
             model="...",
             base_url="https://api.example.test/v1",
+            protocol="chat_completions",
             retry=merry.ProviderRetryConfig(
                 max_attempts=6,
                 initial_delay_ms=1000,
@@ -129,8 +130,19 @@ runtime = merry.Runtime(
 ```
 
 Python SDK retry is opt-in. When enabled, Merry retries transient provider
-setup or stream failures by replaying the whole model turn; partial failed
-attempt output is not exposed as runtime state.
+setup or stream failures only before the first observable output delta or tool
+call. Once output is visible, errors are forwarded without replay, preventing
+duplicate text and duplicate tool calls.
+
+Anthropic Messages uses the same runtime surface:
+
+```python
+runtime = merry.Runtime.with_anthropic(
+    api_key="...",
+    model="claude-sonnet-4-5",
+    default_max_output_tokens=4096,
+)
+```
 
 ## Session Identity
 

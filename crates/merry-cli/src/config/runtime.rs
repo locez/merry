@@ -83,22 +83,12 @@ impl MerryConfig {
         role: &str,
         provider_alias: &str,
     ) -> Result<(), ConfigError> {
-        if provider_alias != "openai-compatible" {
-            return Err(ConfigError::Invalid(format!(
-                "unsupported provider {provider_alias:?} for [models.{role}]; only openai-compatible is supported"
-            )));
-        }
-        let providers = self.raw.providers.as_ref().ok_or_else(|| {
-            ConfigError::Invalid(format!(
-                "[providers.{provider_alias}] is required for [models.{role}]"
-            ))
-        })?;
-        if !providers.named.contains_key(provider_alias) {
-            return Err(ConfigError::Invalid(format!(
-                "[providers.{provider_alias}] is required for [models.{role}]"
-            )));
-        }
-        Ok(())
+        self.validate_provider_alias(provider_alias)
+            .map_err(|error| {
+                ConfigError::Invalid(format!(
+                    "invalid provider {provider_alias:?} for [models.{role}]: {error}"
+                ))
+            })
     }
 }
 
@@ -199,6 +189,22 @@ impl SubagentsConfig {
     #[must_use]
     pub fn limits(self) -> merry_runtime::SubagentConfig {
         self.limits
+    }
+
+    pub fn with_overrides(
+        self,
+        enabled: Option<bool>,
+        max_threads: Option<usize>,
+    ) -> Result<Self, ConfigError> {
+        let limits = merry_runtime::SubagentConfig::new(
+            max_threads.unwrap_or_else(|| self.limits.max_threads()),
+            self.limits.max_depth(),
+        )
+        .map_err(|error| ConfigError::Invalid(error.to_string()))?;
+        Ok(Self {
+            enabled: enabled.unwrap_or(self.enabled),
+            limits,
+        })
     }
 }
 
@@ -328,6 +334,22 @@ max_depth = 1
         .subagents_config()
         .expect_err("zero max_threads should be invalid");
         assert!(invalid.to_string().contains("max_threads"));
+    }
+
+    #[test]
+    fn runtime_subagents_preferences_override_enabled_and_threads_only() {
+        let base = SubagentsConfig {
+            enabled: false,
+            limits: merry_runtime::SubagentConfig::new(3, 2).unwrap(),
+        };
+
+        let overridden = base
+            .with_overrides(Some(true), Some(6))
+            .expect("preference overrides should validate");
+
+        assert!(overridden.is_enabled());
+        assert_eq!(overridden.limits().max_threads(), 6);
+        assert_eq!(overridden.limits().max_depth(), 2);
     }
 
     #[test]

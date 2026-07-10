@@ -1,8 +1,8 @@
 use super::{Runtime, RuntimeError, persist_resume_safe_savepoint_if_configured};
 use crate::{
     ArtifactContent, ContextEntry, ContextSummary, LedgerProjectionSnapshot,
-    SessionContextSnapshot, events::ActiveStepPermit, session::is_runtime_reserved_artifact_id,
-    tool_input_validation::ToolInputValidationError,
+    SessionContextSnapshot, SessionTranscriptItem, events::ActiveStepPermit,
+    session::is_runtime_reserved_artifact_id, tool_input_validation::ToolInputValidationError,
 };
 use merry_core::{
     ArtifactId, ArtifactRef, ErrorInfo, EvidenceLocator, EvidenceRef, PendingToolCall,
@@ -256,5 +256,17 @@ impl Runtime {
     pub async fn pending_tool_calls(&self) -> Vec<PendingToolCall> {
         let session = self.inner.session.lock().await;
         session.pending_tool_calls()
+    }
+
+    /// Returns the persisted transcript as a UI/SDK-friendly read-only view.
+    pub async fn session_transcript(&self) -> Result<Vec<SessionTranscriptItem>, RuntimeError> {
+        let snapshots = {
+            let session = self.inner.session.lock().await;
+            session.transcript_snapshot()?
+        };
+        Ok(snapshots
+            .into_iter()
+            .map(SessionTranscriptItem::from)
+            .collect())
     }
 }

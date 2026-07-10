@@ -164,7 +164,21 @@ pub(super) async fn run_provider_step(
     let mut projection_guard =
         ActivationProjectionGuard::new(Arc::clone(inner), token.clone(), activation_epoch);
     let provider = provider_config.provider();
-    let mut tool_specs = inner.tool_registry.tool_specs();
+    let generation_config =
+        match generation_config.resolve_parallel_tool_calls(provider.capabilities()) {
+            Ok(generation_config) => generation_config,
+            Err(error) => {
+                clear_current_activated_memories(inner).await;
+                let diagnostic = diagnostic_from_text(
+                    "provider_parallel_tool_calls_unsupported",
+                    error.to_string(),
+                );
+                trace_provider_step_failed(&diagnostic);
+                let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                return;
+            }
+        };
+    let mut tool_specs = inner.visible_tool_specs();
     if let Some(contract) = &final_output_contract {
         tool_specs.push(contract.tool_spec().clone());
     }
@@ -317,10 +331,9 @@ pub(super) async fn run_provider_step(
             }
         }
     }
-    let usage_context_snapshot = step_usage_context_snapshot(
-        request_budget.as_ref().ok(),
-        inner.automatic_compaction.is_enabled(),
-    );
+    let automatic_compaction_enabled = inner.automatic_compaction.read().await.is_enabled();
+    let usage_context_snapshot =
+        step_usage_context_snapshot(request_budget.as_ref().ok(), automatic_compaction_enabled);
     let sent_continuation_count = request.continuations().len();
 
     for text in input.user_texts_for_history() {
@@ -517,6 +530,20 @@ pub(super) async fn run_provider_step(
                             &streamed_tool_calls,
                         ) {
                             Ok(mut calls) => {
+                                if calls.len() > 1
+                                    && final_output_contract.as_ref().is_some_and(|contract| {
+                                        calls.iter().any(|call| call.name() == contract.tool_name())
+                                    })
+                                {
+                                    let diagnostic = diagnostic_from_text(
+                                        "final_output_tool_batch_mixed",
+                                        "final-output tool calls must be the only call in their model batch",
+                                    );
+                                    trace_provider_step_failed(&diagnostic);
+                                    let _ =
+                                        send_failed_event(inner, sender, token, diagnostic).await;
+                                    return;
+                                }
                                 if let Some(commentary) =
                                     tool_call_commentary_text(response.outputs(), &commentary_text)
                                     && !send_assistant_text_output_recorded_event(
@@ -554,6 +581,15 @@ pub(super) async fn run_provider_step(
                         let diagnostic = diagnostic_from_text(
                             "model_length",
                             "model output stopped because it reached a length limit",
+                        );
+                        trace_provider_step_failed(&diagnostic);
+                        let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                        return;
+                    }
+                    FinishReason::Blocked => {
+                        let diagnostic = diagnostic_from_text(
+                            "model_blocked",
+                            "model output was blocked by provider safety or content policy",
                         );
                         trace_provider_step_failed(&diagnostic);
                         let _ = send_failed_event(inner, sender, token, diagnostic).await;

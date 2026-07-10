@@ -25,12 +25,6 @@ pub(crate) fn render_responses_request_with_prompt_cache_key(
     request: &ModelRequest,
     prompt_cache_key: Option<&str>,
 ) -> Result<Value, OpenAiProviderError> {
-    if request.generation().allow_parallel_tool_calls() {
-        return Err(OpenAiProviderError::invalid_request(
-            "parallel tool calls are not supported by the OpenAI provider adapter yet",
-        ));
-    }
-
     let input = render_input_items(request.input())?;
 
     let tools = request
@@ -51,7 +45,7 @@ pub(crate) fn render_responses_request_with_prompt_cache_key(
         input,
         stream: true,
         store: false,
-        parallel_tool_calls: false,
+        parallel_tool_calls: request.generation().allow_parallel_tool_calls(),
         prompt_cache_key,
         max_output_tokens: request.generation().max_output_tokens(),
         reasoning: request

@@ -1,7 +1,10 @@
 use crate::{error, serde_py::json_to_py};
 use futures_core::Stream;
 use futures_util::StreamExt;
-use merry::providers::{OpenAiProviderConfig, RuntimeBuilderProviderExt, openai_compatible};
+use merry::providers::{
+    AnthropicProviderConfig, OpenAiProtocol, OpenAiProviderConfig, RuntimeBuilderProviderExt,
+    anthropic, openai_compatible,
+};
 use merry_core::{
     ArtifactId, ArtifactKind, ArtifactRef, ErrorInfo, PendingToolCall, ProviderName,
     QueuedInputLane, RuntimeEvent, SessionId, ToolCallId, ToolInputSchema, ToolName, ToolSpec,
@@ -27,6 +30,7 @@ use schemars::Schema;
 use serde_json::{Map, Value, json};
 use std::{
     future::Future,
+    num::NonZeroU64,
     pin::Pin,
     sync::{Arc, Mutex, mpsc},
     task::{Context, Poll},
@@ -179,6 +183,11 @@ enum RuntimeScenario {
         model: ModelName,
         retry_policy: Option<ModelRetryPolicy>,
     },
+    Anthropic {
+        config: AnthropicProviderConfig,
+        model: ModelName,
+        retry_policy: Option<ModelRetryPolicy>,
+    },
     FakeResponse {
         final_text: String,
     },
@@ -264,13 +273,14 @@ impl PyRuntime {
     }
 
     #[staticmethod]
-    #[pyo3(signature = (api_key, model, base_url=None, retry=None, session_id=None))]
+    #[pyo3(signature = (api_key, model, base_url=None, retry=None, session_id=None, protocol=None))]
     fn with_openai_compatible(
         api_key: String,
         model: String,
         base_url: Option<String>,
         retry: Option<Bound<'_, PyDict>>,
         session_id: Option<String>,
+        protocol: Option<String>,
     ) -> PyResult<Self> {
         let mut config = OpenAiProviderConfig::new(&api_key).map_err(|source| {
             error::config_message_to_py(
@@ -287,6 +297,20 @@ impl PyRuntime {
                     Some("Use an http or https OpenAI-compatible base URL."),
                 )
             })?;
+        }
+        if let Some(protocol) = protocol {
+            let protocol = match protocol.as_str() {
+                "responses" => OpenAiProtocol::Responses,
+                "chat_completions" => OpenAiProtocol::ChatCompletions,
+                _ => {
+                    return Err(error::config_message_to_py(
+                        "config.openai_invalid",
+                        "protocol must be 'responses' or 'chat_completions'",
+                        Some("Use a supported OpenAI-compatible wire protocol."),
+                    ));
+                }
+            };
+            config = config.with_protocol(protocol);
         }
         let model = ModelName::new(&model).map_err(|source| {
             error::config_message_to_py(
@@ -306,6 +330,85 @@ impl PyRuntime {
         let runtime = build_runtime_from(session_id.clone(), &scenario, &tools)
             .map_err(error::runtime_error_to_py)?;
 
+        Ok(Self {
+            session_id,
+            scenario,
+            tools,
+            runtime,
+        })
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (
+        api_key,
+        model,
+        base_url=None,
+        api_version=None,
+        default_max_output_tokens=None,
+        retry=None,
+        session_id=None
+    ))]
+    fn with_anthropic(
+        api_key: String,
+        model: String,
+        base_url: Option<String>,
+        api_version: Option<String>,
+        default_max_output_tokens: Option<u64>,
+        retry: Option<Bound<'_, PyDict>>,
+        session_id: Option<String>,
+    ) -> PyResult<Self> {
+        let mut config = AnthropicProviderConfig::new(&api_key).map_err(|source| {
+            error::config_message_to_py(
+                "config.anthropic_invalid",
+                &source.to_string(),
+                Some("Pass a non-empty Anthropic API key."),
+            )
+        })?;
+        if let Some(base_url) = base_url {
+            config = config.with_base_url(&base_url).map_err(|source| {
+                error::config_message_to_py(
+                    "config.anthropic_invalid",
+                    &source.to_string(),
+                    Some("Use an http or https Anthropic-compatible base URL."),
+                )
+            })?;
+        }
+        if let Some(api_version) = api_version {
+            config = config.with_api_version(&api_version).map_err(|source| {
+                error::config_message_to_py(
+                    "config.anthropic_invalid",
+                    &source.to_string(),
+                    Some("Use a non-empty Anthropic API version."),
+                )
+            })?;
+        }
+        if let Some(limit) = default_max_output_tokens {
+            let limit = NonZeroU64::new(limit).ok_or_else(|| {
+                error::config_message_to_py(
+                    "config.anthropic_invalid",
+                    "default_max_output_tokens must be greater than zero",
+                    Some("Use a positive Anthropic output-token limit."),
+                )
+            })?;
+            config = config.with_default_max_output_tokens(limit);
+        }
+        let model = ModelName::new(&model).map_err(|source| {
+            error::config_message_to_py(
+                "config.model_invalid",
+                &source.to_string(),
+                Some("Pass a non-empty model name without surrounding whitespace."),
+            )
+        })?;
+        let session_id = resolve_session_id(session_id)?;
+        let retry_policy = py_retry_policy(retry.as_ref())?;
+        let scenario = RuntimeScenario::Anthropic {
+            config,
+            model,
+            retry_policy,
+        };
+        let tools = Vec::new();
+        let runtime = build_runtime_from(session_id.clone(), &scenario, &tools)
+            .map_err(error::runtime_error_to_py)?;
         Ok(Self {
             session_id,
             scenario,
@@ -1057,13 +1160,32 @@ fn runtime_builder_for_scenario(
                     .expect("validated OpenAI-compatible scenario must build"),
             )
         }
+        RuntimeScenario::Anthropic {
+            config,
+            model,
+            retry_policy,
+        } => {
+            let mut provider = anthropic()
+                .provider_config(config.clone())
+                .model(model.clone());
+            if let Some(policy) = retry_policy {
+                provider = provider.retry_policy(*policy);
+            }
+            Runtime::builder(session_id).with_provider(
+                provider
+                    .build()
+                    .expect("validated Anthropic scenario must build"),
+            )
+        }
         _ => configure_scenario(Runtime::builder(session_id), scenario),
     }
 }
 
 fn configure_scenario(builder: RuntimeBuilder, scenario: &RuntimeScenario) -> RuntimeBuilder {
     match scenario {
-        RuntimeScenario::Empty | RuntimeScenario::OpenAiCompatible { .. } => builder,
+        RuntimeScenario::Empty
+        | RuntimeScenario::OpenAiCompatible { .. }
+        | RuntimeScenario::Anthropic { .. } => builder,
         RuntimeScenario::FakeResponse { final_text } => builder.model_provider(
             Arc::new(fake_response_provider(final_text)),
             fake_model_name(),

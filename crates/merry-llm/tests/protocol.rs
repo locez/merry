@@ -4,17 +4,26 @@ use merry_core::{
     ErrorInfo, ProviderName, ToolCallResultStatus, ToolInputSchema, ToolName, ToolSpec,
 };
 use merry_llm::{
-    FinishReason, GenerationConfig, ModelCapabilities, ModelContent, ModelError, ModelEvent,
-    ModelEventStream, ModelInputItem, ModelMessage, ModelMessageRole, ModelName, ModelOutput,
-    ModelProvider, ModelProviderFuture, ModelRequest, ModelResponse, ModelResponseFormat,
-    ModelStreamContext, ModelStructuredOutputFormat, ModelToolBatchContinuation, ModelToolCall,
-    ModelToolCallBatch, ModelToolCallId, ModelToolContinuation, ModelToolResult,
-    ModelToolResultContent, ReasoningEffort, ToolArguments, Usage,
+    FinishReason, GenerationConfig, ModelCapabilities, ModelCatalog, ModelCatalogEntry,
+    ModelCatalogError, ModelCatalogErrorKind, ModelCatalogFuture, ModelCatalogProvider,
+    ModelContent, ModelError, ModelEvent, ModelEventStream, ModelInputItem, ModelMessage,
+    ModelMessageRole, ModelName, ModelOutput, ModelProvider, ModelProviderFuture, ModelRequest,
+    ModelResponse, ModelResponseFormat, ModelStreamContext, ModelStructuredOutputFormat,
+    ModelToolBatchContinuation, ModelToolCall, ModelToolCallBatch, ModelToolCallId,
+    ModelToolContinuation, ModelToolResult, ModelToolResultContent, ParallelToolCalls,
+    ReasoningEffort, ToolArguments, Usage,
 };
 use schemars::{JsonSchema, Schema};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value, json};
-use std::{sync::Arc, task::Poll};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    task::Poll,
+};
+use tokio_util::sync::CancellationToken;
 
 fn assert_json_round_trip<T>(value: &T)
 where
@@ -175,6 +184,129 @@ fn model_provider_trait_is_object_safe() {
         .expect("empty provider should return a stream");
     let events = block_on(stream.collect::<Vec<_>>());
     assert!(events.is_empty());
+}
+
+#[test]
+fn model_catalog_sorts_and_deduplicates_model_ids() {
+    let catalog = ModelCatalog::new(vec![
+        ModelCatalogEntry::new(
+            ModelName::new("vendor/zeta").expect("valid model"),
+            Some("gateway"),
+        )
+        .expect("valid catalog entry"),
+        ModelCatalogEntry::new(
+            ModelName::new("vendor/alpha").expect("valid model"),
+            Some("first-owner"),
+        )
+        .expect("valid catalog entry"),
+        ModelCatalogEntry::new(
+            ModelName::new("vendor/alpha").expect("valid model"),
+            Some("duplicate-owner"),
+        )
+        .expect("valid catalog entry"),
+    ]);
+
+    assert_eq!(catalog.models().len(), 2);
+    assert_eq!(catalog.models()[0].id().as_str(), "vendor/alpha");
+    assert_eq!(catalog.models()[0].owner(), Some("first-owner"));
+    assert_eq!(catalog.models()[1].id().as_str(), "vendor/zeta");
+}
+
+#[test]
+fn model_catalog_rejects_invalid_owner_metadata() {
+    let error = ModelCatalogEntry::new(
+        ModelName::new("vendor/model").expect("valid model"),
+        Some("owner\nsecret"),
+    )
+    .expect_err("control characters should be rejected");
+
+    assert_eq!(error.kind(), ModelCatalogErrorKind::Protocol);
+    assert!(!error.diagnostic().contains("secret"));
+}
+
+#[test]
+fn model_catalog_errors_have_bounded_single_line_diagnostics() {
+    let error = ModelCatalogError::new(
+        ModelCatalogErrorKind::Transport,
+        &format!("request failed\n{}", "x".repeat(2_000)),
+    );
+
+    assert!(!error.diagnostic().contains('\n'));
+    assert!(error.diagnostic().chars().count() <= 512);
+}
+
+#[test]
+fn model_catalog_provider_trait_is_object_safe_and_observes_pre_cancel() {
+    struct CatalogProvider {
+        side_effect_started: Arc<AtomicBool>,
+    }
+
+    impl ModelCatalogProvider for CatalogProvider {
+        fn list_models<'a>(
+            &'a self,
+            cancellation_token: CancellationToken,
+        ) -> ModelCatalogFuture<'a> {
+            Box::pin(async move {
+                if cancellation_token.is_cancelled() {
+                    return Err(ModelCatalogError::cancelled());
+                }
+                self.side_effect_started.store(true, Ordering::SeqCst);
+                Ok(ModelCatalog::default())
+            })
+        }
+    }
+
+    let side_effect_started = Arc::new(AtomicBool::new(false));
+    let provider: Arc<dyn ModelCatalogProvider> = Arc::new(CatalogProvider {
+        side_effect_started: Arc::clone(&side_effect_started),
+    });
+    let cancellation_token = CancellationToken::new();
+    cancellation_token.cancel();
+
+    let error = block_on(provider.list_models(cancellation_token))
+        .expect_err("pre-cancelled discovery should stop");
+
+    assert_eq!(error.kind(), ModelCatalogErrorKind::Cancelled);
+    assert!(!side_effect_started.load(Ordering::SeqCst));
+}
+
+#[test]
+fn generation_parallel_tool_calls_resolve_against_provider_capabilities() {
+    let supported =
+        ModelCapabilities::new(true, true, true, true, None, None).expect("valid capabilities");
+    let unsupported =
+        ModelCapabilities::new(true, true, false, true, None, None).expect("valid capabilities");
+
+    let default = GenerationConfig::default();
+    assert_eq!(default.parallel_tool_calls(), ParallelToolCalls::Auto);
+    assert_eq!(
+        default
+            .clone()
+            .resolve_parallel_tool_calls(&supported)
+            .expect("auto should resolve")
+            .parallel_tool_calls(),
+        ParallelToolCalls::Enabled
+    );
+    assert_eq!(
+        default
+            .resolve_parallel_tool_calls(&unsupported)
+            .expect("auto should resolve")
+            .parallel_tool_calls(),
+        ParallelToolCalls::Disabled
+    );
+    assert!(
+        GenerationConfig::new(None, true)
+            .expect("valid generation config")
+            .resolve_parallel_tool_calls(&unsupported)
+            .is_err()
+    );
+    assert_eq!(
+        serde_json::to_value(GenerationConfig::default()).expect("generation should serialize"),
+        json!({
+            "max_output_tokens": null,
+            "parallel_tool_calls": "auto"
+        })
+    );
 }
 
 #[test]
@@ -443,6 +575,7 @@ fn schema_generation_compiles_for_public_protocol_types() {
     assert_schema_compiles::<ModelMessageRole>();
     assert_schema_compiles::<ModelMessage>();
     assert_schema_compiles::<GenerationConfig>();
+    assert_schema_compiles::<ParallelToolCalls>();
     assert_schema_compiles::<ModelStructuredOutputFormat>();
     assert_schema_compiles::<ModelResponseFormat>();
     assert_schema_compiles::<ModelRequest>();

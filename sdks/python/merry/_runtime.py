@@ -255,6 +255,17 @@ class OpenAICompatibleProvider:
     api_key: str
     model: str
     base_url: str | None = None
+    protocol: str = "responses"
+    retry: ProviderRetryConfig | None = None
+
+
+@dataclass(frozen=True)
+class AnthropicProvider:
+    api_key: str
+    model: str
+    base_url: str | None = None
+    api_version: str | None = None
+    default_max_output_tokens: int | None = None
     retry: ProviderRetryConfig | None = None
 
 
@@ -267,7 +278,7 @@ class WorkspaceConfig:
 
 @dataclass(frozen=True)
 class RuntimeConfig:
-    provider: OpenAICompatibleProvider
+    provider: OpenAICompatibleProvider | AnthropicProvider
     workspace: WorkspaceConfig | None = None
     tools: list["Tool" | Callable[..., object] | Callable[..., Awaitable[object]]] | None = None
     session_id: str | None = None
@@ -391,13 +402,27 @@ class Runtime:
                 )
             )
 
-        runtime = self.with_openai_compatible(
-            api_key=config.provider.api_key,
-            model=config.provider.model,
-            base_url=config.provider.base_url,
-            retry=config.provider.retry,
-            session_id=config.session_id,
-        )
+        if isinstance(config.provider, OpenAICompatibleProvider):
+            runtime = self.with_openai_compatible(
+                api_key=config.provider.api_key,
+                model=config.provider.model,
+                base_url=config.provider.base_url,
+                protocol=config.provider.protocol,
+                retry=config.provider.retry,
+                session_id=config.session_id,
+            )
+        elif isinstance(config.provider, AnthropicProvider):
+            runtime = self.with_anthropic(
+                api_key=config.provider.api_key,
+                model=config.provider.model,
+                base_url=config.provider.base_url,
+                api_version=config.provider.api_version,
+                default_max_output_tokens=config.provider.default_max_output_tokens,
+                retry=config.provider.retry,
+                session_id=config.session_id,
+            )
+        else:
+            raise TypeError("RuntimeConfig.provider must be a supported provider config")
         self._native = runtime._native
         self._tools = {}
         for tool in config.tools or []:
@@ -410,6 +435,7 @@ class Runtime:
         api_key: str,
         model: str,
         base_url: str | None = None,
+        protocol: str = "responses",
         retry: ProviderRetryConfig | None = None,
         session_id: str | None = None,
     ) -> Runtime:
@@ -420,6 +446,35 @@ class Runtime:
                 api_key,
                 model,
                 base_url,
+                None if retry is None else _provider_retry_dict(retry),
+                session_id,
+                protocol,
+            )
+        except NativeMerryError as error:
+            raise _decode_native_error(error) from error
+        return instance
+
+    @classmethod
+    def with_anthropic(
+        cls,
+        *,
+        api_key: str,
+        model: str,
+        base_url: str | None = None,
+        api_version: str | None = None,
+        default_max_output_tokens: int | None = None,
+        retry: ProviderRetryConfig | None = None,
+        session_id: str | None = None,
+    ) -> Runtime:
+        instance = cls.__new__(cls)
+        instance._tools = {}
+        try:
+            instance._native = _merry.Runtime.with_anthropic(
+                api_key,
+                model,
+                base_url,
+                api_version,
+                default_max_output_tokens,
                 None if retry is None else _provider_retry_dict(retry),
                 session_id,
             )

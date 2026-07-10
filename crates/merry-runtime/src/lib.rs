@@ -50,6 +50,7 @@ mod process_tool;
 mod profile;
 mod runtime;
 mod session;
+mod session_projection;
 mod session_store;
 mod skill;
 mod step;
@@ -89,7 +90,8 @@ pub use final_output::{
 };
 pub use interactive::{
     AgentLoopControl, AgentLoopInput, InteractiveAgentRun, InteractiveError, InteractiveInputItem,
-    InteractiveInputSnapshot, InteractiveRunEventStream, InteractiveRunId, InterruptReason,
+    InteractiveInputSnapshot, InteractivePrimaryModel, InteractiveRunEventStream, InteractiveRunId,
+    InteractiveSettingsUpdate, InteractiveSubagentSettings, InterruptReason,
 };
 pub use ledger::{
     CompactLedgerText, LedgerFactKind, LedgerProjection, LedgerProjectionSnapshot, LedgerScope,
@@ -122,6 +124,7 @@ pub use profile::{
     RuntimeCapabilities, RuntimeProfile, RuntimeProfileBuilder, RuntimeProfileError,
 };
 pub use runtime::{AutomaticCompactionConfig, Runtime, RuntimeBuilder};
+pub use session_projection::SessionTranscriptItem;
 pub use session_store::{FileSessionStore, SessionStoreError};
 pub use skill::{SkillCatalog, SkillError, SkillLoadWarning, SkillMetadata};
 pub use step::{StepContext, StepInput};
@@ -136,7 +139,7 @@ pub use subagent::{
 pub use tool::{
     ActionExecutionEvidence, ActionProposal, ActionProposalError, ActionProposalEvidence,
     RegisteredTool, ToolActionKind, ToolActionPreflight, ToolActionProposalFuture,
-    ToolActionProposalResult, ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome,
-    ToolExecutionResult, ToolExecutor, ToolExecutorFuture, ToolRunner,
+    ToolActionProposalResult, ToolConcurrency, ToolExecutionContext, ToolExecutionError,
+    ToolExecutionOutcome, ToolExecutionResult, ToolExecutor, ToolExecutorFuture, ToolRunner,
     WorkspacePatchChangeEvidence, WorkspacePatchExecutionEvidence, WorkspacePatchProposal,
 };

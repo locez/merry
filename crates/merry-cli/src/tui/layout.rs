@@ -1,126 +1,80 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CockpitLayoutMode {
-    Wide,
-    Medium,
+pub(crate) enum TimelineLayoutMode {
     Narrow,
+    Standard,
+    Wide,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct BottomPaneHeights {
     pub(crate) queue: u16,
     pub(crate) completion: u16,
-    pub(crate) interaction: u16,
     pub(crate) input: u16,
     pub(crate) status: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct CockpitRects {
-    pub(crate) mode: CockpitLayoutMode,
-    pub(crate) chat: Rect,
-    pub(crate) focus: Option<Rect>,
-    pub(crate) plan: Option<Rect>,
+pub(crate) struct TimelineRects {
+    pub(crate) mode: TimelineLayoutMode,
+    pub(crate) header: Rect,
+    pub(crate) timeline: Rect,
+    pub(crate) detail: Option<Rect>,
     pub(crate) queue: Option<Rect>,
     pub(crate) completion: Rect,
-    pub(crate) interaction: Rect,
     pub(crate) input: Rect,
     pub(crate) status: Rect,
 }
 
-pub(crate) fn layout_mode(width: u16) -> CockpitLayoutMode {
+pub(crate) fn layout_mode(width: u16) -> TimelineLayoutMode {
     match width {
-        width if width >= 100 => CockpitLayoutMode::Wide,
-        width if width >= 80 => CockpitLayoutMode::Medium,
-        _ => CockpitLayoutMode::Narrow,
+        width if width >= 120 => TimelineLayoutMode::Wide,
+        width if width >= 80 => TimelineLayoutMode::Standard,
+        _ => TimelineLayoutMode::Narrow,
     }
 }
 
-pub(crate) fn cockpit_layout(area: Rect, bottom: BottomPaneHeights) -> CockpitRects {
+pub(crate) fn timeline_layout(
+    area: Rect,
+    bottom: BottomPaneHeights,
+    detail_open: bool,
+) -> TimelineRects {
     let mode = layout_mode(area.width);
-    let bottom_queue_height = if mode.uses_bottom_queue() {
-        bottom.queue
-    } else {
-        0
-    };
-
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
+            Constraint::Length(1),
             Constraint::Min(1),
-            Constraint::Length(bottom_queue_height),
+            Constraint::Length(bottom.queue),
             Constraint::Length(bottom.completion),
-            Constraint::Length(bottom.interaction),
             Constraint::Length(bottom.input),
             Constraint::Length(bottom.status),
         ])
         .split(area);
 
-    let content = rows[0];
-    let queue = (bottom_queue_height > 0).then_some(rows[1]);
-    let completion = rows[2];
-    let interaction = rows[3];
-    let input = rows[4];
-    let status = rows[5];
-
-    let (chat, focus, plan) = match mode {
-        CockpitLayoutMode::Wide => {
-            let columns = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([
-                    Constraint::Percentage(40),
-                    Constraint::Percentage(38),
-                    Constraint::Percentage(22),
-                ])
-                .split(content);
-            (columns[0], Some(columns[1]), Some(columns[2]))
-        }
-        CockpitLayoutMode::Medium => {
+    let (timeline, detail) = match (mode, detail_open) {
+        (TimelineLayoutMode::Wide, true) => {
             let columns = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
-                .split(content);
-            let rail = split_medium_rail(columns[1]);
-            (columns[0], Some(rail.0), Some(rail.1))
+                .split(rows[1]);
+            (columns[0], Some(columns[1]))
         }
-        CockpitLayoutMode::Narrow => (content, None, None),
+        (_, true) => (Rect::default(), Some(rows[1])),
+        (_, false) => (rows[1], None),
     };
 
-    CockpitRects {
+    TimelineRects {
         mode,
-        chat,
-        focus,
-        plan,
-        queue,
-        completion,
-        interaction,
-        input,
-        status,
+        header: rows[0],
+        timeline,
+        detail,
+        queue: (bottom.queue > 0).then_some(rows[2]),
+        completion: rows[3],
+        input: rows[4],
+        status: rows[5],
     }
-}
-
-impl CockpitLayoutMode {
-    pub(crate) fn uses_bottom_queue(self) -> bool {
-        matches!(self, Self::Narrow)
-    }
-}
-
-fn split_medium_rail(region: Rect) -> (Rect, Rect) {
-    let plan_height = medium_plan_height(region.height);
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(plan_height)])
-        .split(region);
-    (rows[0], rows[1])
-}
-
-fn medium_plan_height(height: u16) -> u16 {
-    if height <= 8 {
-        return height / 2;
-    }
-    let third = height / 3;
-    third.clamp(6, 14).min(height.saturating_sub(3))
 }
 
 #[cfg(test)]
@@ -129,81 +83,51 @@ mod tests {
 
     fn bottom() -> BottomPaneHeights {
         BottomPaneHeights {
-            queue: 5,
+            queue: 0,
             completion: 0,
-            interaction: 1,
             input: 3,
             status: 1,
         }
     }
 
     #[test]
-    fn mode_thresholds_match_spec() {
-        assert_eq!(layout_mode(180), CockpitLayoutMode::Wide);
-        assert_eq!(layout_mode(100), CockpitLayoutMode::Wide);
-        assert_eq!(layout_mode(99), CockpitLayoutMode::Medium);
-        assert_eq!(layout_mode(80), CockpitLayoutMode::Medium);
-        assert_eq!(layout_mode(79), CockpitLayoutMode::Narrow);
+    fn mode_thresholds_are_stable() {
+        assert_eq!(layout_mode(50), TimelineLayoutMode::Narrow);
+        assert_eq!(layout_mode(80), TimelineLayoutMode::Standard);
+        assert_eq!(layout_mode(119), TimelineLayoutMode::Standard);
+        assert_eq!(layout_mode(120), TimelineLayoutMode::Wide);
     }
 
     #[test]
-    fn wide_layout_has_three_columns_and_no_bottom_queue() {
-        let rects = cockpit_layout(Rect::new(0, 0, 180, 40), bottom());
+    fn closed_detail_keeps_one_full_width_timeline() {
+        for area in [
+            Rect::new(0, 0, 50, 20),
+            Rect::new(0, 0, 80, 24),
+            Rect::new(0, 0, 140, 40),
+        ] {
+            let rects = timeline_layout(area, bottom(), false);
+            assert_eq!(rects.timeline.width, area.width);
+            assert!(rects.detail.is_none());
+            assert_eq!(rects.header.height, 1);
+            assert_eq!(rects.input.height, 3);
+            assert_eq!(rects.status.height, 1);
+        }
+    }
 
-        assert_eq!(rects.mode, CockpitLayoutMode::Wide);
-        assert!(rects.focus.is_some());
-        assert!(rects.plan.is_some());
+    #[test]
+    fn detail_is_side_by_side_only_on_wide_terminals() {
+        let wide = timeline_layout(Rect::new(0, 0, 140, 40), bottom(), true);
+        assert!(wide.timeline.width > 0);
+        assert!(wide.detail.is_some_and(|detail| detail.x > wide.timeline.x));
+
+        let standard = timeline_layout(Rect::new(0, 0, 80, 24), bottom(), true);
+        assert_eq!(standard.timeline, Rect::default());
+        assert_eq!(standard.detail, Some(Rect::new(0, 1, 80, 19)));
+    }
+
+    #[test]
+    fn queue_gets_no_rectangle_when_empty() {
+        let rects = timeline_layout(Rect::new(0, 0, 80, 24), bottom(), false);
         assert!(rects.queue.is_none());
-        assert_eq!(rects.chat.y, 0);
-        assert_eq!(rects.chat.height, rects.focus.unwrap().height);
-        assert_eq!(rects.chat.height, rects.plan.unwrap().height);
-        assert!(rects.chat.width >= 48);
-        assert!(rects.focus.unwrap().width >= 50);
-        assert!(rects.plan.unwrap().width >= 28);
-        assert!(rects.chat.x < rects.focus.unwrap().x);
-        assert!(rects.focus.unwrap().x < rects.plan.unwrap().x);
-        assert!(rects.interaction.y < rects.input.y);
-        assert!(rects.input.y < rects.status.y);
-    }
-
-    #[test]
-    fn medium_layout_has_chat_and_stacked_work_rail() {
-        let rects = cockpit_layout(Rect::new(0, 0, 90, 36), bottom());
-        let focus = rects.focus.expect("medium should render focus");
-        let plan = rects.plan.expect("medium should render plan");
-
-        assert_eq!(rects.mode, CockpitLayoutMode::Medium);
-        assert!(rects.queue.is_none());
-        assert_eq!(focus.x, plan.x);
-        assert_eq!(focus.width, plan.width);
-        assert!(focus.y < plan.y);
-        assert_eq!(rects.chat.y, focus.y);
-        assert_eq!(rects.chat.height, focus.height + plan.height);
-        assert!(rects.chat.width > focus.width);
-    }
-
-    #[test]
-    fn narrow_layout_keeps_single_chat_column_and_bottom_queue() {
-        let rects = cockpit_layout(Rect::new(0, 0, 79, 32), bottom());
-
-        assert_eq!(rects.mode, CockpitLayoutMode::Narrow);
-        assert!(rects.focus.is_none());
-        assert!(rects.plan.is_none());
-        assert!(rects.queue.is_some());
-        assert_eq!(rects.chat.x, 0);
-        assert_eq!(rects.chat.width, 79);
-        assert!(rects.chat.y < rects.queue.unwrap().y);
-        assert!(rects.queue.unwrap().y < rects.input.y);
-    }
-
-    #[test]
-    fn tiny_height_preserves_input_and_status_regions() {
-        let rects = cockpit_layout(Rect::new(0, 0, 79, 8), bottom());
-
-        assert_eq!(rects.mode, CockpitLayoutMode::Narrow);
-        assert!(rects.chat.height >= 1);
-        assert!(rects.input.height >= 1);
-        assert_eq!(rects.status.height, 1);
-        assert!(rects.input.y < rects.status.y);
     }
 }

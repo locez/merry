@@ -10,6 +10,7 @@ pub(crate) enum SemanticColor {
     Selection,
     ToolKeyword,
     Command,
+    CodeBackground,
     DiffAdd,
     DiffDelete,
     Warning,
@@ -35,6 +36,7 @@ impl Default for TuiTheme {
                 (SemanticColor::Selection, Color::Magenta),
                 (SemanticColor::ToolKeyword, Color::LightCyan),
                 (SemanticColor::Command, Color::LightBlue),
+                (SemanticColor::CodeBackground, Color::Rgb(40, 36, 42)),
                 (SemanticColor::DiffAdd, Color::LightGreen),
                 (SemanticColor::DiffDelete, Color::LightRed),
                 (SemanticColor::Warning, Color::LightYellow),
@@ -134,5 +136,29 @@ fn parse_color(value: &str) -> Result<Color, crate::config::ConfigError> {
         other => Err(crate::config::ConfigError::Invalid(format!(
             "unsupported TUI color {other:?}"
         ))),
+    }
+}
+
+pub(crate) fn dim_color(color: Color) -> Color {
+    match color {
+        Color::Black => Color::Black,
+        Color::Red => Color::Rgb(45, 16, 24),
+        Color::Green => Color::Rgb(18, 42, 28),
+        Color::Yellow => Color::Rgb(48, 40, 18),
+        Color::Blue => Color::Rgb(18, 30, 48),
+        Color::Magenta => Color::Rgb(42, 20, 44),
+        Color::Cyan => Color::Rgb(16, 42, 45),
+        Color::LightRed => Color::Rgb(58, 20, 28),
+        Color::LightGreen => Color::Rgb(22, 54, 34),
+        Color::LightYellow => Color::Rgb(62, 52, 22),
+        Color::LightBlue => Color::Rgb(22, 38, 62),
+        Color::LightMagenta => Color::Rgb(54, 26, 58),
+        Color::LightCyan => Color::Rgb(20, 54, 58),
+        Color::Gray => Color::DarkGray,
+        Color::DarkGray => Color::Black,
+        Color::White => Color::DarkGray,
+        Color::Rgb(red, green, blue) => Color::Rgb(red / 4, green / 4, blue / 4),
+        Color::Indexed(index) => Color::Indexed(index),
+        Color::Reset => Color::Reset,
     }
 }

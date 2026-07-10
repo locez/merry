@@ -14,6 +14,8 @@ pub enum FinishReason {
     ToolCalls,
     /// Model hit a configured or provider token limit.
     Length,
+    /// Model output was blocked by provider safety or content policy.
+    Blocked,
     /// Model work was cancelled.
     Cancelled,
     /// Model stopped because a provider error occurred.

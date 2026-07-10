@@ -21,12 +21,23 @@ For sandboxed live smokes, prefer config-relative `api_key_file =
 #[derive(Debug, Parser)]
 #[command(
     name = "merry",
-    about = "Debug and demonstration CLI for Merry.",
+    about = "Rust-first agent runtime with a streaming terminal interface.",
     disable_version_flag = true
 )]
 pub(crate) struct Cli {
-    #[arg(long, help = "Run the command inside Merry's bubblewrap sandbox")]
+    #[arg(
+        long,
+        conflicts_with = "no_sandbox",
+        help = "Run the command inside Merry's outer bubblewrap sandbox"
+    )]
     pub(crate) with_sandbox: bool,
+
+    #[arg(
+        long,
+        conflicts_with = "with_sandbox",
+        help = "Disable the outer sandbox for TUI/run; tool commands remain sandboxed"
+    )]
+    pub(crate) no_sandbox: bool,
 
     #[arg(
         long = "merry-sandbox-child-handoff",
@@ -40,8 +51,26 @@ pub(crate) struct Cli {
     pub(crate) command: Option<CliCommand>,
 }
 
+impl Cli {
+    pub(crate) fn is_product_surface(&self) -> bool {
+        matches!(
+            &self.command,
+            None | Some(CliCommand::Resume) | Some(CliCommand::Run(_))
+        )
+    }
+
+    pub(crate) fn should_bootstrap_sandbox(&self) -> bool {
+        if self.no_sandbox {
+            return false;
+        }
+        self.with_sandbox || self.is_product_surface()
+    }
+}
+
 #[derive(Debug, Subcommand)]
 pub(crate) enum CliCommand {
+    #[command(about = "Resume a saved Merry TUI session")]
+    Resume,
     #[command(about = "Complete a coding task with Merry's headless agent")]
     Run(crate::run::Args),
     #[command(about = "Generate a shell command plan from a natural-language request")]
@@ -177,10 +206,34 @@ mod tests {
         let cli = Cli::try_parse_from(["merry"]).expect("root args should parse");
 
         assert!(cli.command.is_none());
+        assert!(cli.should_bootstrap_sandbox());
+    }
+
+    #[test]
+    fn no_sandbox_disables_only_default_outer_product_sandbox() {
+        let tui = Cli::try_parse_from(["merry", "--no-sandbox"]).expect("root args parse");
+        let run =
+            Cli::try_parse_from(["merry", "--no-sandbox", "run", "task"]).expect("run parses");
+
+        assert!(!tui.should_bootstrap_sandbox());
+        assert!(!run.should_bootstrap_sandbox());
+    }
+
+    #[test]
+    fn debug_sandbox_remains_explicit() {
+        let plain = Cli::try_parse_from(["merry", "debug"]).expect("debug args parse");
+        let sandboxed =
+            Cli::try_parse_from(["merry", "--with-sandbox", "debug"]).expect("debug parses");
+
+        assert!(!plain.should_bootstrap_sandbox());
+        assert!(sandboxed.should_bootstrap_sandbox());
     }
 
     #[test]
     fn existing_subcommands_still_parse_after_tui_entrypoint() {
+        let resume = Cli::try_parse_from(["merry", "resume"]).expect("resume parses");
+        assert!(matches!(resume.command, Some(CliCommand::Resume)));
+
         let run = Cli::try_parse_from(["merry", "run", "fix the test"]).expect("run parses");
         assert!(matches!(run.command, Some(CliCommand::Run(_))));
 

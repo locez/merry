@@ -42,6 +42,21 @@ def test_runtime_config_constructs_openai_runtime():
     assert isinstance(runtime, merry.Runtime)
 
 
+def test_runtime_config_constructs_anthropic_runtime():
+    config = merry.RuntimeConfig(
+        provider=merry.AnthropicProvider(
+            api_key="sk-ant-test",
+            model="claude-test",
+            base_url="https://anthropic.example.test",
+            default_max_output_tokens=2048,
+        ),
+    )
+
+    runtime = merry.Runtime(config=config)
+
+    assert isinstance(runtime, merry.Runtime)
+
+
 def test_runtime_config_session_id_is_honored():
     config = merry.RuntimeConfig(
         provider=merry.OpenAICompatibleProvider(

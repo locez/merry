@@ -1,4 +1,5 @@
 use super::*;
+use crate::SessionTranscriptItem;
 use crate::{
     ContextEvidence, ContextSummary, FINAL_OUTPUT_TOOL_NAME, FileSessionStore, ProjectRules,
     StepInput, TaskAnchor,
@@ -119,6 +120,81 @@ async fn complete_boundary_savepoint_text_output_step_completed_persists_resume_
             .as_text(),
         Some("persist me")
     );
+    assert_eq!(
+        resumed
+            .session_transcript()
+            .await
+            .expect("transcript resumes"),
+        vec![
+            SessionTranscriptItem::UserMessage {
+                text: "write text".to_owned()
+            },
+            SessionTranscriptItem::AssistantText {
+                text: "persist me".to_owned()
+            }
+        ]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn load_session_from_store_does_not_enable_automatic_savepoints() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = FileSessionStore::new(temp.path());
+    let session_id = session_id("runtime-load-without-savepoint");
+    let runtime = Runtime::builder(session_id.clone())
+        .build()
+        .expect("runtime builds");
+    runtime
+        .save_session_to(store.clone())
+        .await
+        .expect("initial session saves");
+    let provider =
+        RecordingModelProvider::with_script(vec![ScriptedModelProviderResponse::Stream(vec![Ok(
+            completed_event_with(
+                vec![ModelOutput::text("not auto saved")],
+                FinishReason::Stop,
+            ),
+        )])]);
+    let runtime = Runtime::builder(session_id.clone())
+        .model_provider(Arc::new(provider), model_name())
+        .load_session_from_store(store.clone())
+        .await
+        .expect("session loads")
+        .build()
+        .expect("runtime builds from loaded session");
+
+    let events = runtime
+        .step(
+            StepInput::user_text("write text").expect("valid input"),
+            StepContext::default(),
+        )
+        .expect("step starts")
+        .collect::<Vec<_>>()
+        .await;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.payload, RuntimeJournalPayload::StepCompleted))
+    );
+    let artifact_id = events
+        .iter()
+        .find_map(|event| match &event.payload {
+            RuntimeJournalPayload::AssistantOutputRecorded { artifact, .. } => {
+                Some(artifact.id().clone())
+            }
+            _ => None,
+        })
+        .expect("assistant output artifact is emitted");
+
+    let resumed = Runtime::builder(session_id)
+        .resume_from_store(store)
+        .await
+        .expect("runtime resumes original saved state");
+
+    assert!(
+        resumed.read_artifact_content(&artifact_id).await.is_err(),
+        "loaded sessions should not write automatic savepoints"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -216,6 +292,28 @@ async fn complete_boundary_savepoint_submit_tool_result_persists_complete_exchan
             .expect("manual result artifact resumes")
             .as_text(),
         Some(r#"{"ok":true}"#)
+    );
+    assert_eq!(
+        resumed
+            .session_transcript()
+            .await
+            .expect("transcript resumes"),
+        vec![
+            SessionTranscriptItem::ToolCall { call: pending },
+            SessionTranscriptItem::ToolResult {
+                call_id: ToolCallId::new("manual-call").expect("valid call id"),
+                result: ToolCallResult::succeeded(
+                    ToolCallId::new("manual-call").expect("valid call id"),
+                    ArtifactRef::new(
+                        ArtifactId::new("manual-result-artifact").expect("valid artifact id"),
+                        ArtifactKind::Json,
+                    ),
+                ),
+                output: Some(merry_core::ToolOutput::Json {
+                    json: r#"{"ok":true}"#.to_owned()
+                }),
+            }
+        ]
     );
 }
 

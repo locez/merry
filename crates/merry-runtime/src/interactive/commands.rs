@@ -1,5 +1,5 @@
 use super::{
-    InteractiveError, InterruptReason,
+    InteractiveError, InteractiveSettingsUpdate, InterruptReason,
     types::{InputReceipt, InputRecords, QueuedInputId},
 };
 use merry_core::{QueuedInputLane, QueuedInputView};
@@ -30,6 +30,10 @@ pub(super) enum InteractiveCommand {
     },
     Snapshot {
         ack_sender: oneshot::Sender<InputRecords>,
+    },
+    UpdateSettings {
+        update: Box<InteractiveSettingsUpdate>,
+        ack_sender: oneshot::Sender<Result<(), InteractiveError>>,
     },
     ResumeSuspended {
         ack_sender: oneshot::Sender<Result<(), InteractiveError>>,

@@ -165,8 +165,8 @@ async fn review_permission_request(
         .requires_model_review(inner.runtime_trust_level)
     {
         let Some(model_config) = inner
-            .model_configs
-            .get_with_primary_fallback(RuntimeModelRole::ApprovalReview)
+            .model_config_with_primary_fallback(RuntimeModelRole::ApprovalReview)
+            .await
         else {
             return Err(crate::PermissionAdmissionError::ReviewModelUnavailable);
         };
