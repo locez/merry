@@ -2,8 +2,9 @@ use super::{RuntimeInner, diagnostic_from_text, persist_resume_safe_savepoint_if
 use crate::{session::SessionState, tool_input_validation::ToolInputValidationError};
 use futures_util::StreamExt;
 use merry_core::{
-    CompactionUsageWindow, ErrorInfo, ModelUsage, PendingToolCall, RuntimeJournalEvent,
-    RuntimeJournalPayload, ToolCallResultStatus, UsageContextWindow,
+    CompactionUsageWindow, ErrorInfo, ModelUsage, PendingToolCall, PendingToolCallBatch,
+    RuntimeJournalEvent, RuntimeJournalPayload, ToolCallBatchId, ToolCallResultStatus,
+    UsageContextWindow,
 };
 use merry_llm::{
     ModelError, ModelEvent, ModelEventStream, ModelProvider, ModelRequest, ModelRetryEvent,
@@ -156,6 +157,74 @@ pub(super) async fn send_tool_call_pending_event(
             } else {
                 true
             }
+        }
+        Err(diagnostic) => {
+            drop(permit);
+            send_failed_event(inner, sender, token, diagnostic).await
+        }
+    }
+}
+
+pub(super) async fn send_tool_call_batch_pending_event(
+    inner: &RuntimeInner,
+    sender: &mpsc::Sender<RuntimeJournalEvent>,
+    token: &CancellationToken,
+    calls: Vec<PendingToolCall>,
+) -> bool {
+    if token.is_cancelled() {
+        return false;
+    }
+
+    let Some(permit) = reserve_normal_event_slot(sender, token).await else {
+        return false;
+    };
+
+    let event = {
+        let mut session = inner.session.lock().await;
+        if token.is_cancelled() {
+            return false;
+        }
+        let batch_id = ToolCallBatchId::new(&format!("tool-batch-{}", session.next_sequence()))
+            .map_err(|error| diagnostic_from_text("tool_call_batch_id", error.to_string()));
+        batch_id.and_then(|batch_id| {
+            PendingToolCallBatch::new(batch_id, calls)
+                .map_err(|error| diagnostic_from_text("tool_call_batch_invalid", error.to_string()))
+                .and_then(|batch| session.record_tool_call_batch_pending(batch))
+        })
+    };
+
+    match event {
+        Ok(event) => {
+            let bridge_calls = match &event.payload {
+                RuntimeJournalPayload::ToolCallBatchPending { batch } => batch
+                    .calls()
+                    .iter()
+                    .filter(|call| {
+                        inner
+                            .tool_registry
+                            .registered_tool(call.name())
+                            .is_some_and(|tool| tool.runner() == crate::ToolRunner::Bridge)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            };
+            permit.send(event);
+
+            for call in bridge_calls {
+                if let Some(Err(error)) = inner.tool_registry.validate_tool_input(&call) {
+                    if !send_bridge_tool_input_validation_failure_events(
+                        inner, sender, token, &call, error,
+                    )
+                    .await
+                    {
+                        return false;
+                    }
+                } else if !send_bridge_tool_call_requested_event(inner, sender, token, call).await {
+                    return false;
+                }
+            }
+            true
         }
         Err(diagnostic) => {
             drop(permit);

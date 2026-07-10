@@ -3,9 +3,9 @@ use super::journal_emission::{
     send_assistant_text_output_completed_events, send_assistant_text_output_delta_event,
     send_assistant_text_output_recorded_event, send_cancelled_event, send_cancelled_if_requested,
     send_compaction_completed_event, send_compaction_started_event, send_failed_event,
-    send_model_usage_updated_event, send_tool_call_pending_event, stream_model_with_retry_policy,
-    trace_provider_step_cancelled, trace_provider_step_failed, wait_for_model_stream_item,
-    wait_for_retrying_stream_setup,
+    send_model_usage_updated_event, send_tool_call_batch_pending_event,
+    send_tool_call_pending_event, stream_model_with_retry_policy, trace_provider_step_cancelled,
+    trace_provider_step_failed, wait_for_model_stream_item, wait_for_retrying_stream_setup,
 };
 use super::memory_activation::{
     ActivationProjectionGuard, clear_current_activated_memories,
@@ -13,7 +13,7 @@ use super::memory_activation::{
 };
 use super::model_output::{
     DIAGNOSTIC_MODEL_TOOL_CALL_MIXED_OUTPUT, diagnostic_from_model_error, is_cancelled_model_error,
-    pending_tool_call_from_model, pending_tool_call_from_outputs, record_streamed_tool_call,
+    pending_tool_call_from_model, pending_tool_calls_from_outputs, record_streamed_tool_call,
     tool_call_commentary_text,
 };
 use super::provider_request::{
@@ -410,7 +410,7 @@ pub(super) async fn run_provider_step(
     projection_guard.disarm();
 
     let mut commentary_text = String::new();
-    let mut streamed_tool_call: Option<PendingToolCall> = None;
+    let mut streamed_tool_calls: Vec<PendingToolCall> = Vec::new();
 
     loop {
         let item = wait_for_model_stream_item(
@@ -479,7 +479,7 @@ pub(super) async fn run_provider_step(
                 }
                 match response.finish_reason() {
                     FinishReason::Stop => {
-                        if streamed_tool_call.is_some() {
+                        if !streamed_tool_calls.is_empty() {
                             let diagnostic = diagnostic_from_text(
                                 DIAGNOSTIC_MODEL_TOOL_CALL_MIXED_OUTPUT,
                                 "model requested a tool call before completing with text output",
@@ -512,11 +512,11 @@ pub(super) async fn run_provider_step(
                         return;
                     }
                     FinishReason::ToolCalls => {
-                        match pending_tool_call_from_outputs(
+                        match pending_tool_calls_from_outputs(
                             response.outputs(),
-                            streamed_tool_call.as_ref(),
+                            &streamed_tool_calls,
                         ) {
-                            Ok(call) => {
+                            Ok(mut calls) => {
                                 if let Some(commentary) =
                                     tool_call_commentary_text(response.outputs(), &commentary_text)
                                     && !send_assistant_text_output_recorded_event(
@@ -527,7 +527,19 @@ pub(super) async fn run_provider_step(
                                     let _ = send_cancelled_if_requested(inner, sender, token).await;
                                     return;
                                 }
-                                if !send_tool_call_pending_event(inner, sender, token, call).await {
+                                let sent = if calls.len() == 1 {
+                                    send_tool_call_pending_event(
+                                        inner,
+                                        sender,
+                                        token,
+                                        calls.pop().expect("single tool call length checked"),
+                                    )
+                                    .await
+                                } else {
+                                    send_tool_call_batch_pending_event(inner, sender, token, calls)
+                                        .await
+                                };
+                                if !sent {
                                     let _ = send_cancelled_if_requested(inner, sender, token).await;
                                 }
                             }
@@ -569,11 +581,9 @@ pub(super) async fn run_provider_step(
                     "runtime model stream event received"
                 );
                 match pending_tool_call_from_model(&call)
-                    .and_then(|call| record_streamed_tool_call(&mut streamed_tool_call, call))
+                    .and_then(|call| record_streamed_tool_call(&mut streamed_tool_calls, call))
                 {
-                    Ok(call) => {
-                        streamed_tool_call = Some(call);
-                    }
+                    Ok(()) => {}
                     Err(diagnostic) => {
                         trace_provider_step_failed(&diagnostic);
                         let _ = send_failed_event(inner, sender, token, diagnostic).await;

@@ -27,8 +27,8 @@ use crate::{
 };
 use merry_core::{
     ArtifactId, ArtifactKind, ArtifactRef, ErrorInfo, EvidenceLocator, EvidenceRef,
-    PendingToolCall, RuntimeJournalPayload, SessionId, ToolCallArguments, ToolCallId,
-    ToolCallResult, ToolName,
+    PendingToolCall, PendingToolCallBatch, RuntimeJournalPayload, SessionId, ToolCallArguments,
+    ToolCallBatchId, ToolCallId, ToolCallResult, ToolName,
 };
 use serde_json::json;
 

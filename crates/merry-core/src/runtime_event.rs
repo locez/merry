@@ -1,8 +1,8 @@
 //! Public runtime event contract for SDK/UI consumers.
 
 use crate::{
-    ArtifactRef, ErrorInfo, EvidenceRef, PendingToolCall, SessionId, SessionUsage, SubagentId,
-    SubagentTaskId, ToolCallId, ToolCallResult,
+    ArtifactRef, ErrorInfo, EvidenceRef, PendingToolCall, PendingToolCallBatch, SessionId,
+    SessionUsage, SubagentId, SubagentTaskId, ToolCallId, ToolCallResult,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -48,6 +48,11 @@ pub enum RuntimeEvent {
     /// The model requested a tool call.
     ToolCallStarted {
         call: PendingToolCall,
+        source: RuntimeEventSource,
+    },
+    /// The model requested multiple ordered tool calls in one turn.
+    ToolCallBatchStarted {
+        batch: PendingToolCallBatch,
         source: RuntimeEventSource,
     },
     /// A tool call finished with an artifact-backed result.

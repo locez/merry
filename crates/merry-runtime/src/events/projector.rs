@@ -104,6 +104,11 @@ impl RuntimeEventProjector {
                 let inserted = self.started_tool_calls.insert(call.id().clone());
                 Ok(inserted.then_some(RuntimeEvent::ToolCallStarted { call, source }))
             }
+            RuntimeJournalPayload::ToolCallBatchPending { batch } => {
+                self.started_tool_calls
+                    .extend(batch.calls().iter().map(|call| call.id().clone()));
+                Ok(Some(RuntimeEvent::ToolCallBatchStarted { batch, source }))
+            }
             RuntimeJournalPayload::ToolCallResolved { result } => {
                 let output = match runtime.read_artifact_content(result.artifact().id()).await {
                     Ok(content) => public_tool_output(&content),

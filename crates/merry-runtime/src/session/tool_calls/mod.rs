@@ -1,7 +1,8 @@
 use super::SessionState;
 use crate::{RuntimeError, ledger::LedgerFactKind};
 use merry_core::{
-    ErrorInfo, PendingToolCall, RuntimeJournalEvent, RuntimeJournalPayload, ToolCallId,
+    ErrorInfo, PendingToolCall, PendingToolCallBatch, RuntimeJournalEvent, RuntimeJournalPayload,
+    ToolCallId,
 };
 
 mod action;
@@ -49,6 +50,42 @@ impl SessionState {
         self.pending_tool_calls.push(call.clone());
         Ok(self.record_event(
             RuntimeJournalPayload::ToolCallPending { call },
+            LedgerFactKind::ToolCallPending,
+        ))
+    }
+
+    pub(crate) fn record_tool_call_batch_pending(
+        &mut self,
+        batch: PendingToolCallBatch,
+    ) -> Result<RuntimeJournalEvent, ErrorInfo> {
+        for call in batch.calls() {
+            if self
+                .pending_tool_calls
+                .iter()
+                .any(|pending| pending.id() == call.id())
+            {
+                return Err(duplicate_tool_call_diagnostic(call.id(), "already pending"));
+            }
+            if self.resolved_tool_calls.contains(call.id()) {
+                return Err(duplicate_tool_call_diagnostic(
+                    call.id(),
+                    "already resolved",
+                ));
+            }
+        }
+
+        let mut transcript = self.transcript.clone();
+        for call in batch.calls() {
+            transcript
+                .push_tool_call(call.clone())
+                .map_err(transcript_record_diagnostic)?;
+        }
+
+        self.transcript = transcript;
+        self.pending_tool_calls
+            .extend(batch.calls().iter().cloned());
+        Ok(self.record_event(
+            RuntimeJournalPayload::ToolCallBatchPending { batch },
             LedgerFactKind::ToolCallPending,
         ))
     }

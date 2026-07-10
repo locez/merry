@@ -5,27 +5,32 @@ use merry_llm::{ModelError, ModelOutput, ModelToolCall, ProviderErrorKind};
 const DIAGNOSTIC_MODEL_TOOL_CALL_INVALID: &str = "model_tool_call_invalid";
 const DIAGNOSTIC_MODEL_TOOL_CALL_MISSING: &str = "model_tool_call_missing";
 pub(super) const DIAGNOSTIC_MODEL_TOOL_CALL_MIXED_OUTPUT: &str = "model_tool_call_mixed_output";
-const DIAGNOSTIC_MODEL_PARALLEL_TOOL_CALLS_UNSUPPORTED: &str =
-    "model_parallel_tool_calls_unsupported";
+const DIAGNOSTIC_MODEL_TOOL_CALL_STREAM_MISMATCH: &str = "model_tool_call_stream_mismatch";
 
 pub(super) fn record_streamed_tool_call(
-    streamed_tool_call: &mut Option<PendingToolCall>,
+    streamed_tool_calls: &mut Vec<PendingToolCall>,
     call: PendingToolCall,
-) -> Result<PendingToolCall, ErrorInfo> {
-    match streamed_tool_call.as_ref() {
-        Some(existing) if existing == &call => Ok(existing.clone()),
+) -> Result<(), ErrorInfo> {
+    match streamed_tool_calls
+        .iter()
+        .find(|existing| existing.id() == call.id())
+    {
+        Some(existing) if existing == &call => Ok(()),
         Some(_) => Err(diagnostic_from_text(
-            DIAGNOSTIC_MODEL_PARALLEL_TOOL_CALLS_UNSUPPORTED,
-            "model requested multiple streamed tool calls, but runtime policy only supports one pending tool call",
+            DIAGNOSTIC_MODEL_TOOL_CALL_STREAM_MISMATCH,
+            "model streamed conflicting payloads for the same tool call id",
         )),
-        None => Ok(call),
+        None => {
+            streamed_tool_calls.push(call);
+            Ok(())
+        }
     }
 }
 
-pub(super) fn pending_tool_call_from_outputs(
+pub(super) fn pending_tool_calls_from_outputs(
     outputs: &[ModelOutput],
-    streamed_tool_call: Option<&PendingToolCall>,
-) -> Result<PendingToolCall, ErrorInfo> {
+    streamed_tool_calls: &[PendingToolCall],
+) -> Result<Vec<PendingToolCall>, ErrorInfo> {
     if outputs.is_empty() {
         return Err(diagnostic_from_text(
             DIAGNOSTIC_MODEL_TOOL_CALL_MISSING,
@@ -44,32 +49,30 @@ pub(super) fn pending_tool_call_from_outputs(
         ));
     }
 
-    if tool_call_count > 1 {
+    let completed_calls = outputs
+        .iter()
+        .filter_map(|output| match output {
+            ModelOutput::ToolCall { call } => Some(call),
+            ModelOutput::Text { .. } => None,
+        })
+        .map(pending_tool_call_from_model)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut seen = std::collections::BTreeSet::new();
+    if completed_calls.iter().any(|call| !seen.insert(call.id())) {
         return Err(diagnostic_from_text(
-            DIAGNOSTIC_MODEL_PARALLEL_TOOL_CALLS_UNSUPPORTED,
-            "model returned multiple tool calls, but runtime policy only supports one pending tool call",
+            DIAGNOSTIC_MODEL_TOOL_CALL_INVALID,
+            "model returned duplicate tool call ids in one response",
         ));
     }
 
-    let mut tool_calls = outputs.iter().filter_map(|output| match output {
-        ModelOutput::ToolCall { call } => Some(call),
-        ModelOutput::Text { .. } => None,
-    });
-    let Some(call) = tool_calls.next() else {
-        return Err(diagnostic_from_text(
-            DIAGNOSTIC_MODEL_TOOL_CALL_MISSING,
-            "model finished with tool calls but returned no tool call output",
-        ));
-    };
-
-    let completed_call = pending_tool_call_from_model(call)?;
-    match streamed_tool_call {
-        Some(streamed_call) if streamed_call == &completed_call => Ok(streamed_call.clone()),
-        Some(_) => Err(diagnostic_from_text(
-            DIAGNOSTIC_MODEL_PARALLEL_TOOL_CALLS_UNSUPPORTED,
-            "model completed with a different tool call than the streamed pending call",
-        )),
-        None => Ok(completed_call),
+    if streamed_tool_calls.is_empty() || streamed_tool_calls == completed_calls {
+        Ok(completed_calls)
+    } else {
+        Err(diagnostic_from_text(
+            DIAGNOSTIC_MODEL_TOOL_CALL_STREAM_MISMATCH,
+            "model completed with tool calls that differ from the streamed tool calls",
+        ))
     }
 }
 

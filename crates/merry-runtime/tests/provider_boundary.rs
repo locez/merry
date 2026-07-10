@@ -1,8 +1,8 @@
 use futures_util::{StreamExt, stream};
 use merry_core::{
     ArtifactId, ArtifactKind, ArtifactRef, ErrorInfo, EvidenceLocator, PendingToolCall,
-    ProviderName, RuntimeJournalEvent, RuntimeJournalPayload, SessionId, ToolCallId,
-    ToolCallResult, ToolCallResultStatus, ToolInputSchema, ToolName, ToolSpec,
+    PendingToolCallBatch, ProviderName, RuntimeJournalEvent, RuntimeJournalPayload, SessionId,
+    ToolCallId, ToolCallResult, ToolCallResultStatus, ToolInputSchema, ToolName, ToolSpec,
 };
 use merry_llm::{
     FinishReason, GenerationConfig, ModelCapabilities, ModelContent, ModelError, ModelEvent,
@@ -651,6 +651,7 @@ fn event_kind_names(events: &[RuntimeJournalEvent]) -> Vec<&'static str> {
             RuntimeJournalPayload::AssistantOutputRecorded { .. } => "AssistantOutputRecorded",
             RuntimeJournalPayload::EvidenceReferenced { .. } => "EvidenceReferenced",
             RuntimeJournalPayload::ToolCallPending { .. } => "ToolCallPending",
+            RuntimeJournalPayload::ToolCallBatchPending { .. } => "ToolCallBatchPending",
             RuntimeJournalPayload::ToolCallResolved { .. } => "ToolCallResolved",
             RuntimeJournalPayload::SkillUsed { .. } => "SkillUsed",
             _ => "Unknown",
@@ -696,9 +697,11 @@ fn assert_no_artifact_recorded(events: &[RuntimeJournalEvent]) {
 
 fn assert_no_tool_call_pending(events: &[RuntimeJournalEvent]) {
     assert!(
-        events
-            .iter()
-            .all(|event| !matches!(event.payload, RuntimeJournalPayload::ToolCallPending { .. })),
+        events.iter().all(|event| !matches!(
+            event.payload,
+            RuntimeJournalPayload::ToolCallPending { .. }
+                | RuntimeJournalPayload::ToolCallBatchPending { .. }
+        )),
         "terminal failure/cancellation must not record pending tool calls: {events:?}"
     );
 }
@@ -771,6 +774,16 @@ fn pending_tool_call(events: &[RuntimeJournalEvent]) -> &PendingToolCall {
             _ => None,
         })
         .expect("pending tool call should be emitted")
+}
+
+fn pending_tool_call_batch(events: &[RuntimeJournalEvent]) -> &PendingToolCallBatch {
+    events
+        .iter()
+        .find_map(|event| match &event.payload {
+            RuntimeJournalPayload::ToolCallBatchPending { batch } => Some(batch),
+            _ => None,
+        })
+        .expect("pending tool call batch should be emitted")
 }
 
 fn failed_tool_result(
@@ -3604,7 +3617,7 @@ async fn execute_tool_with_bad_or_missing_args_resolves_schema_failure_before_ex
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn provider_streamed_multiple_tool_call_requests_fail_without_partial_pending() {
+async fn provider_streamed_multiple_tool_call_requests_emit_ordered_batch() {
     let provider = FakeModelProvider::new(vec![
         Ok(ModelEvent::Started),
         Ok(ModelEvent::ToolCallRequested {
@@ -3614,7 +3627,10 @@ async fn provider_streamed_multiple_tool_call_requests_fail_without_partial_pend
             call: model_tool_call_with_id("call-2"),
         }),
         Ok(completed_outputs_event(
-            vec![ModelOutput::tool_call(model_tool_call_with_id("call-1"))],
+            vec![
+                ModelOutput::tool_call(model_tool_call_with_id("call-1")),
+                ModelOutput::tool_call(model_tool_call_with_id("call-2")),
+            ],
             FinishReason::ToolCalls,
         )),
     ]);
@@ -3624,13 +3640,16 @@ async fn provider_streamed_multiple_tool_call_requests_fail_without_partial_pend
 
     assert_eq!(
         event_kind_names(&events),
-        ["SessionStarted", "StepStarted", "Failed"]
+        ["SessionStarted", "StepStarted", "ToolCallBatchPending"]
     );
     assert_eq!(
-        failed_code(&events),
-        Some("model_parallel_tool_calls_unsupported")
+        pending_tool_call_batch(&events)
+            .calls()
+            .iter()
+            .map(|call| call.id().as_str())
+            .collect::<Vec<_>>(),
+        ["call-1", "call-2"]
     );
-    assert_no_tool_call_pending(&events);
     assert_no_artifact_recorded(&events);
     assert_no_completion(&events);
 }
@@ -3684,7 +3703,7 @@ async fn provider_streamed_tool_call_then_completed_different_tool_call_fails_wi
     );
     assert_eq!(
         failed_code(&events),
-        Some("model_parallel_tool_calls_unsupported")
+        Some("model_tool_call_stream_mismatch")
     );
     assert_no_tool_call_pending(&events);
     assert_no_artifact_recorded(&events);
@@ -4779,7 +4798,7 @@ async fn provider_completed_with_empty_tool_call_args_succeeds() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn provider_completed_with_multiple_tool_calls_fails_without_partial_pending() {
+async fn provider_completed_with_multiple_tool_calls_emits_ordered_batch() {
     let provider = FakeModelProvider::new(vec![Ok(completed_outputs_event(
         vec![
             ModelOutput::tool_call(model_tool_call_with_id("call-1")),
@@ -4793,13 +4812,16 @@ async fn provider_completed_with_multiple_tool_calls_fails_without_partial_pendi
 
     assert_eq!(
         event_kind_names(&events),
-        ["SessionStarted", "StepStarted", "Failed"]
+        ["SessionStarted", "StepStarted", "ToolCallBatchPending"]
     );
     assert_eq!(
-        failed_code(&events),
-        Some("model_parallel_tool_calls_unsupported")
+        pending_tool_call_batch(&events)
+            .calls()
+            .iter()
+            .map(|call| call.id().as_str())
+            .collect::<Vec<_>>(),
+        ["call-1", "call-2"]
     );
-    assert_no_tool_call_pending(&events);
     assert_no_artifact_recorded(&events);
     assert_no_completion(&events);
 }
