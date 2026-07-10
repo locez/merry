@@ -8,8 +8,8 @@ use merry_llm::{
     FinishReason, GenerationConfig, ModelCapabilities, ModelContent, ModelError, ModelEvent,
     ModelEventStream, ModelInputItem, ModelMessage, ModelMessageRole, ModelName, ModelOutput,
     ModelProvider, ModelProviderFuture, ModelRequest, ModelResponse, ModelResponseFormat,
-    ModelStreamContext, ModelStructuredOutputFormat, ModelToolCall, ModelToolCallId,
-    ProviderErrorKind, ToolArguments, testing::FakeModelProvider,
+    ModelRetryPolicy, ModelStreamContext, ModelStructuredOutputFormat, ModelToolCall,
+    ModelToolCallId, ProviderErrorKind, ToolArguments, testing::FakeModelProvider,
 };
 use merry_provider_openai::{OpenAiProvider, OpenAiProviderConfig};
 use merry_runtime::{
@@ -30,11 +30,15 @@ use std::{
     num::NonZeroUsize,
     path::PathBuf,
     sync::{Arc, Mutex},
+    time::Duration,
 };
+use tokio::{sync::mpsc, time::timeout};
 use tokio_util::sync::CancellationToken;
 
 #[path = "provider_boundary/diagnostics.rs"]
 mod diagnostics;
+
+type GatedModelEventReceiver = mpsc::Receiver<Result<ModelEvent, ModelError>>;
 
 fn session_id(value: &str) -> SessionId {
     SessionId::new(value).expect("valid session id")
@@ -314,6 +318,54 @@ impl ModelProvider for ScriptedModelProvider {
                 }
                 ScriptedProviderStep::SetupError(error) => Err(error),
             }
+        })
+    }
+}
+
+#[derive(Clone)]
+struct GatedStreamingProvider {
+    name: ProviderName,
+    capabilities: ModelCapabilities,
+    receiver: Arc<Mutex<Option<GatedModelEventReceiver>>>,
+}
+
+impl GatedStreamingProvider {
+    fn new(receiver: GatedModelEventReceiver) -> Self {
+        Self {
+            name: ProviderName::new("gated-runtime-provider").expect("valid provider name"),
+            capabilities: ModelCapabilities::new(true, true, false, true, None, None)
+                .expect("valid capabilities"),
+            receiver: Arc::new(Mutex::new(Some(receiver))),
+        }
+    }
+}
+
+impl ModelProvider for GatedStreamingProvider {
+    fn name(&self) -> &ProviderName {
+        &self.name
+    }
+
+    fn capabilities(&self) -> &ModelCapabilities {
+        &self.capabilities
+    }
+
+    fn stream_model<'a>(
+        &'a self,
+        _request: ModelRequest,
+        _context: ModelStreamContext,
+    ) -> ModelProviderFuture<'a, Result<ModelEventStream, ModelError>> {
+        Box::pin(async move {
+            let receiver = self
+                .receiver
+                .lock()
+                .expect("gated provider lock should not be poisoned")
+                .take()
+                .expect("gated provider supports one attempt");
+            let stream = stream::unfold(receiver, |mut receiver| async move {
+                receiver.recv().await.map(|item| (item, receiver))
+            });
+            let stream: ModelEventStream = Box::pin(stream);
+            Ok(stream)
         })
     }
 }
@@ -1119,6 +1171,60 @@ async fn runtime_step_with_provider_compiles_user_text_request_and_records_assis
     assert_default_checkpoint_ref_tool(request.tools());
     assert_eq!(request.generation(), &GenerationConfig::default());
     assert!(!request.generation().allow_parallel_tool_calls());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_step_exposes_live_delta_before_provider_completion() {
+    let (sender, receiver) = mpsc::channel(8);
+    let runtime = Runtime::builder(session_id("provider-live-delta"))
+        .model_provider(
+            Arc::new(GatedStreamingProvider::new(receiver)),
+            model_name(),
+        )
+        .model_retry_policy(ModelRetryPolicy::coding_agent_default())
+        .build()
+        .expect("runtime should build");
+    let mut events = runtime
+        .step(
+            StepInput::user_text("Stream this response.").expect("valid step input"),
+            StepContext::new(CancellationToken::new()),
+        )
+        .expect("step should start");
+
+    sender
+        .send(Ok(ModelEvent::Started))
+        .await
+        .expect("provider receiver should be open");
+    sender
+        .send(Ok(ModelEvent::OutputTextDelta {
+            delta: "live".to_owned(),
+        }))
+        .await
+        .expect("provider receiver should be open");
+
+    loop {
+        let event = timeout(Duration::from_millis(100), events.next())
+            .await
+            .expect("runtime delta should arrive before completion")
+            .expect("runtime event stream should remain open");
+        if matches!(
+            event.payload,
+            RuntimeJournalPayload::AssistantOutputDelta { ref delta } if delta == "live"
+        ) {
+            break;
+        }
+    }
+
+    sender
+        .send(Ok(completed_text_event("live")))
+        .await
+        .expect("provider receiver should be open");
+    let remaining = events.collect::<Vec<_>>().await;
+    assert!(
+        remaining
+            .iter()
+            .any(|event| matches!(event.payload, RuntimeJournalPayload::StepCompleted))
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

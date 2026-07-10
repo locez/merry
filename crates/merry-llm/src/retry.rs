@@ -14,6 +14,7 @@ const DEFAULT_MAX_ATTEMPTS: usize = 1;
 const DEFAULT_INITIAL_DELAY: Duration = Duration::from_secs(1);
 const DEFAULT_MAX_DELAY: Duration = Duration::from_secs(120);
 const DEFAULT_MAX_ELAPSED: Duration = Duration::from_secs(300);
+const RETRY_STREAM_BUFFER: usize = 16;
 
 /// Provider-neutral retry policy for one model turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -295,128 +296,205 @@ impl RetryingModelProvider {
         context: RetryModelStreamContext,
     ) -> ModelProviderFuture<'a, Result<ModelEventStream, ModelError>> {
         Box::pin(async move {
-            if !self.policy.can_retry() {
-                return self
-                    .inner
-                    .stream_model(request, context.stream_context())
-                    .await;
-            }
-
-            let events = self.collect_successful_attempt(request, context).await?;
-            Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
-        })
-    }
-
-    async fn collect_successful_attempt(
-        &self,
-        request: ModelRequest,
-        context: RetryModelStreamContext,
-    ) -> Result<Vec<ModelEvent>, ModelError> {
-        let started = Instant::now();
-        let mut attempt = 1;
-
-        loop {
             if context.stream_context.cancellation_token().is_cancelled() {
                 return Err(ModelError::Cancelled);
             }
 
+            let (sender, receiver) = tokio::sync::mpsc::channel(RETRY_STREAM_BUFFER);
+            let inner = Arc::clone(&self.inner);
+            let policy = self.policy;
+            tokio::spawn(async move {
+                run_retry_stream(inner, policy, request, context, sender).await;
+            });
+            let stream = stream::unfold(receiver, |mut receiver| async move {
+                receiver.recv().await.map(|item| (item, receiver))
+            });
+            let stream: ModelEventStream = Box::pin(stream);
+            Ok(stream)
+        })
+    }
+}
+
+async fn run_retry_stream(
+    inner: Arc<dyn ModelProvider>,
+    policy: ModelRetryPolicy,
+    request: ModelRequest,
+    context: RetryModelStreamContext,
+    sender: tokio::sync::mpsc::Sender<Result<ModelEvent, ModelError>>,
+) {
+    let token = context.stream_context.cancellation_token().clone();
+    if !send_stream_item(&sender, &token, Ok(ModelEvent::Started)).await {
+        send_cancelled_if_open(&sender);
+        return;
+    }
+
+    let started = Instant::now();
+    let mut attempt = 1;
+
+    loop {
+        if token.is_cancelled() {
+            send_cancelled_if_open(&sender);
+            return;
+        }
+
+        if policy.can_retry() {
             context
                 .emit(ModelRetryEvent::AttemptStarted {
                     attempt,
-                    max_attempts: self.policy.max_attempts,
+                    max_attempts: policy.max_attempts,
                 })
                 .await;
+        }
 
-            match self
-                .collect_attempt_events(request.clone(), context.stream_context())
-                .await
-            {
-                Ok(events) => return Ok(events),
-                Err(error) => {
-                    if !self.policy.is_retryable(&error) || attempt >= self.policy.max_attempts {
-                        if self.policy.is_retryable(&error) {
-                            context
-                                .emit(ModelRetryEvent::RetryExhausted {
-                                    attempts_run: attempt,
-                                    max_attempts: self.policy.max_attempts,
-                                    error_kind: error.kind(),
-                                })
-                                .await;
+        let setup = tokio::select! {
+            biased;
+            () = token.cancelled() => {
+                send_cancelled_if_open(&sender);
+                return;
+            }
+            () = sender.closed() => return,
+            result = inner.stream_model(request.clone(), context.stream_context()) => result,
+        };
+
+        let error = match setup {
+            Ok(mut stream) => {
+                let mut committed = false;
+                loop {
+                    let item = tokio::select! {
+                        biased;
+                        () = token.cancelled() => {
+                            send_cancelled_if_open(&sender);
+                            return;
                         }
-                        return Err(error);
-                    }
+                        () = sender.closed() => return,
+                        item = stream.next() => item,
+                    };
 
-                    let retry_index = attempt;
-                    let delay = self.policy.retry_delay(&error, retry_index);
-                    if started.elapsed().saturating_add(delay) > self.policy.max_elapsed {
-                        context
-                            .emit(ModelRetryEvent::RetryExhausted {
-                                attempts_run: attempt,
-                                max_attempts: self.policy.max_attempts,
-                                error_kind: error.kind(),
-                            })
+                    match item {
+                        Some(Ok(ModelEvent::Started)) => {}
+                        Some(Ok(event)) => {
+                            committed |= commits_output(&event);
+                            let completed = matches!(event, ModelEvent::Completed { .. });
+                            if !send_stream_item(&sender, &token, Ok(event)).await {
+                                send_cancelled_if_open(&sender);
+                                return;
+                            }
+                            if completed {
+                                return;
+                            }
+                        }
+                        Some(Err(error)) if committed => {
+                            let _ = send_stream_item(&sender, &token, Err(error)).await;
+                            return;
+                        }
+                        Some(Err(error)) => break error,
+                        None if committed => {
+                            let _ = send_stream_item(
+                                &sender,
+                                &token,
+                                Err(model_stream_ended_before_completion()),
+                            )
                             .await;
-                        return Err(error);
+                            return;
+                        }
+                        None => break model_stream_ended_before_completion(),
                     }
-
-                    context
-                        .emit(ModelRetryEvent::RetryScheduled {
-                            attempt,
-                            next_attempt: attempt + 1,
-                            max_attempts: self.policy.max_attempts,
-                            delay,
-                            error_kind: error.kind(),
-                        })
-                        .await;
-
-                    if !sleep_with_cancellation(
-                        delay,
-                        context.stream_context.cancellation_token().clone(),
-                    )
-                    .await
-                    {
-                        return Err(ModelError::Cancelled);
-                    }
-
-                    attempt += 1;
                 }
             }
+            Err(error) => error,
+        };
+
+        let Some(delay) = retry_delay(policy, &context, started, attempt, &error).await else {
+            let _ = send_stream_item(&sender, &token, Err(error)).await;
+            return;
+        };
+
+        tokio::select! {
+            biased;
+            () = token.cancelled() => {
+                send_cancelled_if_open(&sender);
+                return;
+            }
+            () = sender.closed() => return,
+            () = tokio::time::sleep(delay) => {}
         }
+        attempt += 1;
+    }
+}
+
+async fn retry_delay(
+    policy: ModelRetryPolicy,
+    context: &RetryModelStreamContext,
+    started: Instant,
+    attempt: usize,
+    error: &ModelError,
+) -> Option<Duration> {
+    if !policy.is_retryable(error) || attempt >= policy.max_attempts {
+        if policy.is_retryable(error) {
+            context
+                .emit(ModelRetryEvent::RetryExhausted {
+                    attempts_run: attempt,
+                    max_attempts: policy.max_attempts,
+                    error_kind: error.kind(),
+                })
+                .await;
+        }
+        return None;
     }
 
-    async fn collect_attempt_events(
-        &self,
-        request: ModelRequest,
-        stream_context: ModelStreamContext,
-    ) -> Result<Vec<ModelEvent>, ModelError> {
-        let token = stream_context.cancellation_token().clone();
-        let mut stream = self.inner.stream_model(request, stream_context).await?;
-        let mut events = Vec::new();
+    let delay = policy.retry_delay(error, attempt);
+    if started.elapsed().saturating_add(delay) > policy.max_elapsed {
+        context
+            .emit(ModelRetryEvent::RetryExhausted {
+                attempts_run: attempt,
+                max_attempts: policy.max_attempts,
+                error_kind: error.kind(),
+            })
+            .await;
+        return None;
+    }
 
-        loop {
-            let item = tokio::select! {
-                biased;
-                () = token.cancelled() => return Err(ModelError::Cancelled),
-                item = stream.next() => item,
-            };
+    context
+        .emit(ModelRetryEvent::RetryScheduled {
+            attempt,
+            next_attempt: attempt + 1,
+            max_attempts: policy.max_attempts,
+            delay,
+            error_kind: error.kind(),
+        })
+        .await;
+    Some(delay)
+}
 
-            match item {
-                Some(Ok(event)) => {
-                    let completed = matches!(event, ModelEvent::Completed { .. });
-                    events.push(event);
-                    if completed {
-                        return Ok(events);
-                    }
-                }
-                Some(Err(error)) => return Err(error),
-                None => {
-                    return Err(ModelError::provider(
-                        ProviderErrorKind::Unavailable,
-                        "model stream ended before completion",
-                    ));
-                }
-            }
-        }
+fn commits_output(event: &ModelEvent) -> bool {
+    matches!(
+        event,
+        ModelEvent::OutputTextDelta { .. }
+            | ModelEvent::ToolCallRequested { .. }
+            | ModelEvent::Completed { .. }
+    )
+}
+
+fn model_stream_ended_before_completion() -> ModelError {
+    ModelError::provider(
+        ProviderErrorKind::Unavailable,
+        "model stream ended before completion",
+    )
+}
+
+fn send_cancelled_if_open(sender: &tokio::sync::mpsc::Sender<Result<ModelEvent, ModelError>>) {
+    let _ = sender.try_send(Err(ModelError::Cancelled));
+}
+
+async fn send_stream_item(
+    sender: &tokio::sync::mpsc::Sender<Result<ModelEvent, ModelError>>,
+    token: &tokio_util::sync::CancellationToken,
+    item: Result<ModelEvent, ModelError>,
+) -> bool {
+    tokio::select! {
+        biased;
+        () = token.cancelled() => false,
+        result = sender.send(item) => result.is_ok(),
     }
 }
 
@@ -438,193 +516,9 @@ impl ModelProvider for RetryingModelProvider {
     }
 }
 
-async fn sleep_with_cancellation(
-    delay: Duration,
-    token: tokio_util::sync::CancellationToken,
-) -> bool {
-    tokio::select! {
-        biased;
-        () = token.cancelled() => false,
-        () = tokio::time::sleep(delay) => !token.is_cancelled(),
-    }
-}
-
 fn duration_millis_u64(duration: Duration) -> u64 {
     duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{ModelRetryPolicy, RetryModelStreamContext, RetryingModelProvider};
-    use crate::{
-        FinishReason, GenerationConfig, ModelCapabilities, ModelContent, ModelError, ModelEvent,
-        ModelEventStream, ModelMessage, ModelMessageRole, ModelName, ModelOutput, ModelProvider,
-        ModelProviderFuture, ModelRequest, ModelResponse, ModelStreamContext, ProviderErrorKind,
-    };
-    use futures_util::{StreamExt, stream};
-    use merry_core::ProviderName;
-    use std::{
-        sync::{Arc, Mutex},
-        time::Duration,
-    };
-
-    type AttemptScript = Vec<Result<ModelEvent, ModelError>>;
-    type AttemptScripts = Vec<AttemptScript>;
-
-    fn request() -> ModelRequest {
-        ModelRequest::new(
-            ModelName::new("debug-model").expect("valid model name"),
-            vec![
-                ModelMessage::new(
-                    ModelMessageRole::User,
-                    ModelContent::text("hello").expect("valid text"),
-                )
-                .expect("valid message"),
-            ],
-            Vec::new(),
-            GenerationConfig::default(),
-        )
-        .expect("valid request")
-    }
-
-    fn completed(text: &str) -> ModelEvent {
-        ModelEvent::Completed {
-            response: ModelResponse::new(vec![ModelOutput::text(text)], FinishReason::Stop, None),
-        }
-    }
-
-    #[derive(Clone)]
-    struct AttemptScriptProvider {
-        name: ProviderName,
-        capabilities: ModelCapabilities,
-        attempts: Arc<Mutex<AttemptScripts>>,
-    }
-
-    impl AttemptScriptProvider {
-        fn new(attempts: AttemptScripts) -> Self {
-            Self {
-                name: ProviderName::new("attempt-script").expect("valid provider name"),
-                capabilities: ModelCapabilities::new(true, true, false, true, None, None)
-                    .expect("valid capabilities"),
-                attempts: Arc::new(Mutex::new(attempts)),
-            }
-        }
-
-        fn attempts_remaining(&self) -> usize {
-            self.attempts
-                .lock()
-                .expect("attempts lock should not be poisoned")
-                .len()
-        }
-    }
-
-    impl ModelProvider for AttemptScriptProvider {
-        fn name(&self) -> &ProviderName {
-            &self.name
-        }
-
-        fn capabilities(&self) -> &ModelCapabilities {
-            &self.capabilities
-        }
-
-        fn stream_model<'a>(
-            &'a self,
-            _request: ModelRequest,
-            _context: ModelStreamContext,
-        ) -> ModelProviderFuture<'a, Result<ModelEventStream, ModelError>> {
-            Box::pin(async move {
-                let attempt = self
-                    .attempts
-                    .lock()
-                    .expect("attempts lock should not be poisoned")
-                    .remove(0);
-                let stream: ModelEventStream = Box::pin(stream::iter(attempt));
-                Ok(stream)
-            })
-        }
-    }
-
-    #[tokio::test]
-    async fn retrying_provider_replays_whole_turn_after_stream_error() {
-        let inner = AttemptScriptProvider::new(vec![
-            vec![
-                Ok(ModelEvent::Started),
-                Ok(ModelEvent::OutputTextDelta {
-                    delta: "partial".to_owned(),
-                }),
-                Err(ModelError::provider(
-                    ProviderErrorKind::Unavailable,
-                    "stream broke",
-                )),
-            ],
-            vec![
-                Ok(ModelEvent::Started),
-                Ok(ModelEvent::OutputTextDelta {
-                    delta: "final".to_owned(),
-                }),
-                Ok(completed("final")),
-            ],
-        ]);
-        let retrying = RetryingModelProvider::new(
-            Arc::new(inner.clone()),
-            ModelRetryPolicy::new(
-                true,
-                3,
-                Duration::from_millis(1),
-                Duration::from_millis(1),
-                Duration::from_millis(100),
-                false,
-            )
-            .expect("valid policy"),
-        );
-        let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
-
-        let events = retrying
-            .stream_model_with_retry_events(
-                request(),
-                RetryModelStreamContext::new(ModelStreamContext::default())
-                    .with_retry_events(sender),
-            )
-            .await
-            .expect("retrying setup should succeed")
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .expect("successful retry stream should collect");
-
-        assert_eq!(
-            events,
-            vec![
-                ModelEvent::Started,
-                ModelEvent::OutputTextDelta {
-                    delta: "final".to_owned(),
-                },
-                completed("final"),
-            ]
-        );
-        assert_eq!(inner.attempts_remaining(), 0);
-
-        let mut retry_events = Vec::new();
-        while let Ok(event) = receiver.try_recv() {
-            retry_events.push(event);
-        }
-        assert_eq!(retry_events.len(), 3);
-        assert!(matches!(
-            retry_events[0],
-            super::ModelRetryEvent::AttemptStarted { attempt: 1, .. }
-        ));
-        assert!(matches!(
-            retry_events[1],
-            super::ModelRetryEvent::RetryScheduled {
-                attempt: 1,
-                next_attempt: 2,
-                ..
-            }
-        ));
-        assert!(matches!(
-            retry_events[2],
-            super::ModelRetryEvent::AttemptStarted { attempt: 2, .. }
-        ));
-    }
-}
+mod tests;
