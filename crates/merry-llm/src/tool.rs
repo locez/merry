@@ -5,7 +5,7 @@ use merry_core::{ErrorInfo, ToolCallResultStatus, ToolName};
 use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_json::{Map, Value};
-use std::{borrow::Cow, fmt, str::FromStr};
+use std::{borrow::Cow, collections::BTreeMap, fmt, str::FromStr};
 
 const MAX_PROVIDER_IDENTIFIER_LEN: usize = 256;
 
@@ -381,6 +381,148 @@ impl<'de> Deserialize<'de> for ModelToolResult {
         let wire = ModelToolResultWire::deserialize(deserializer)?;
         Self::new(wire.call_id, wire.status, wire.content, wire.diagnostic)
             .map_err(de::Error::custom)
+    }
+}
+
+/// Ordered non-empty tool calls requested by one model turn.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ModelToolCallBatch {
+    calls: Vec<ModelToolCall>,
+}
+
+impl ModelToolCallBatch {
+    /// Creates a validated ordered tool call batch.
+    pub fn new(calls: Vec<ModelToolCall>) -> Result<Self, ModelError> {
+        if calls.is_empty() {
+            return Err(ModelError::invalid_request(
+                "ModelToolCallBatch calls must not be empty",
+            ));
+        }
+
+        let mut seen = BTreeMap::new();
+        for call in &calls {
+            if seen.insert(call.id(), ()).is_some() {
+                return Err(ModelError::invalid_request(format!(
+                    "ModelToolCallBatch contains duplicate call id {}",
+                    call.id()
+                )));
+            }
+        }
+
+        Ok(Self { calls })
+    }
+
+    /// Borrows the ordered calls.
+    #[must_use]
+    pub fn calls(&self) -> &[ModelToolCall] {
+        &self.calls
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelToolCallBatchWire {
+    calls: Vec<ModelToolCall>,
+}
+
+impl<'de> Deserialize<'de> for ModelToolCallBatch {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = ModelToolCallBatchWire::deserialize(deserializer)?;
+        Self::new(wire.calls).map_err(de::Error::custom)
+    }
+}
+
+/// Complete ordered continuation for one model tool-call batch.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ModelToolBatchContinuation {
+    batch: ModelToolCallBatch,
+    results: Vec<ModelToolResult>,
+}
+
+impl ModelToolBatchContinuation {
+    /// Creates a complete continuation and normalizes results to call order.
+    pub fn new(
+        batch: ModelToolCallBatch,
+        results: Vec<ModelToolResult>,
+    ) -> Result<Self, ModelError> {
+        let mut results_by_id = BTreeMap::new();
+        for result in results {
+            let call_id = result.call_id().clone();
+            if results_by_id.insert(call_id.clone(), result).is_some() {
+                return Err(ModelError::invalid_request(format!(
+                    "ModelToolBatchContinuation contains duplicate result for call id {call_id}"
+                )));
+            }
+        }
+
+        let mut ordered_results = Vec::with_capacity(batch.calls().len());
+        for call in batch.calls() {
+            let Some(result) = results_by_id.remove(call.id()) else {
+                return Err(ModelError::invalid_request(format!(
+                    "ModelToolBatchContinuation is missing result for call id {}",
+                    call.id()
+                )));
+            };
+            ordered_results.push(result);
+        }
+
+        if let Some(call_id) = results_by_id.keys().next() {
+            return Err(ModelError::invalid_request(format!(
+                "ModelToolBatchContinuation contains result for unknown call id {call_id}"
+            )));
+        }
+
+        Ok(Self {
+            batch,
+            results: ordered_results,
+        })
+    }
+
+    /// Borrows the original ordered call batch.
+    #[must_use]
+    pub fn batch(&self) -> &ModelToolCallBatch {
+        &self.batch
+    }
+
+    /// Borrows results normalized to the original call order.
+    #[must_use]
+    pub fn results(&self) -> &[ModelToolResult] {
+        &self.results
+    }
+
+    pub(crate) fn single_continuations(&self) -> Vec<ModelToolContinuation> {
+        self.batch
+            .calls()
+            .iter()
+            .cloned()
+            .zip(self.results.iter().cloned())
+            .map(|(call, result)| {
+                ModelToolContinuation::new(call, result)
+                    .expect("validated batch continuation ids remain aligned")
+            })
+            .collect()
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelToolBatchContinuationWire {
+    batch: ModelToolCallBatch,
+    results: Vec<ModelToolResult>,
+}
+
+impl<'de> Deserialize<'de> for ModelToolBatchContinuation {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = ModelToolBatchContinuationWire::deserialize(deserializer)?;
+        Self::new(wire.batch, wire.results).map_err(de::Error::custom)
     }
 }
 

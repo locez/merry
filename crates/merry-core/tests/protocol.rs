@@ -1,11 +1,11 @@
 use merry_core::{
     ArtifactId, ArtifactKind, ArtifactRef, CompactionUsageWindow, ContextWindowSource, CoreError,
     ErrorInfo, EvidenceLocator, EvidenceRef, MerryErrorDomain, MerryErrorInfo, MerryRetryability,
-    ModelUsage, PendingToolCall, ProviderName, QueuedInputLane, QueuedInputView, QueuedInputsView,
-    RuntimeEvent, RuntimeEventSource, RuntimeJournalEvent, RuntimeJournalPayload, SessionId,
-    SessionUsage, SkillId, SubagentId, SubagentStatus, SubagentTaskId, ToolCallArguments,
-    ToolCallId, ToolCallResult, ToolCallResultStatus, ToolInputSchema, ToolName, ToolOutput,
-    ToolSpec, UsageContextWindow,
+    ModelUsage, PendingToolCall, PendingToolCallBatch, ProviderName, QueuedInputLane,
+    QueuedInputView, QueuedInputsView, RuntimeEvent, RuntimeEventSource, RuntimeJournalEvent,
+    RuntimeJournalPayload, SessionId, SessionUsage, SkillId, SubagentId, SubagentStatus,
+    SubagentTaskId, ToolCallArguments, ToolCallBatchId, ToolCallId, ToolCallResult,
+    ToolCallResultStatus, ToolInputSchema, ToolName, ToolOutput, ToolSpec, UsageContextWindow,
 };
 use schemars::{JsonSchema, Schema};
 use serde::{Serialize, de::DeserializeOwned};
@@ -426,6 +426,37 @@ fn pending_tool_call_event_uses_provider_neutral_payload_shape() {
         })
     );
     assert_json_round_trip(&event);
+}
+
+#[test]
+fn pending_tool_call_batch_validates_identity_order_and_unique_calls() {
+    let call_a = PendingToolCall::new(
+        ToolCallId::new("call-a").expect("valid call id"),
+        ToolName::new("lookup_weather").expect("valid tool name"),
+        ToolCallArguments::try_from(json!({ "city": "Shanghai" })).expect("valid arguments"),
+    );
+    let call_b = PendingToolCall::new(
+        ToolCallId::new("call-b").expect("valid call id"),
+        ToolName::new("lookup_weather").expect("valid tool name"),
+        ToolCallArguments::try_from(json!({ "city": "Tokyo" })).expect("valid arguments"),
+    );
+    let batch_id = ToolCallBatchId::new("tool-batch-7").expect("valid batch id");
+
+    let batch = PendingToolCallBatch::new(batch_id.clone(), vec![call_a.clone(), call_b])
+        .expect("valid ordered batch");
+    assert_eq!(batch.id(), &batch_id);
+    assert_eq!(
+        batch
+            .calls()
+            .iter()
+            .map(|call| call.id().as_str())
+            .collect::<Vec<_>>(),
+        ["call-a", "call-b"]
+    );
+    assert_json_round_trip(&batch);
+
+    assert!(PendingToolCallBatch::new(batch_id.clone(), Vec::new()).is_err());
+    assert!(PendingToolCallBatch::new(batch_id, vec![call_a.clone(), call_a]).is_err());
 }
 
 #[test]

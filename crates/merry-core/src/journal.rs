@@ -1,8 +1,8 @@
 //! Internal ordered runtime journal contract.
 
 use crate::{
-    ArtifactRef, ErrorInfo, EvidenceRef, PendingToolCall, SessionId, SessionUsage, SubagentId,
-    SubagentTaskId, ToolCallId, ToolCallResult,
+    ArtifactRef, ErrorInfo, EvidenceRef, PendingToolCall, PendingToolCallBatch, SessionId,
+    SessionUsage, SubagentId, SubagentTaskId, ToolCallId, ToolCallResult,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -100,6 +100,8 @@ pub enum RuntimeJournalPayload {
     EvidenceReferenced { evidence: EvidenceRef },
     /// A model requested a tool call that is waiting for runtime policy/execution.
     ToolCallPending { call: PendingToolCall },
+    /// A model requested an ordered batch of tool calls in one turn.
+    ToolCallBatchPending { batch: PendingToolCallBatch },
     /// A model requested a bridge tool call that must be executed by an external runner.
     BridgeToolCallRequested { call: PendingToolCall },
     /// A pending tool call was resolved with an artifact-backed result.

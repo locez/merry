@@ -1,9 +1,12 @@
 //! Tool specification and invocation vocabulary.
 
-use crate::{ArtifactRef, CoreError, ErrorInfo, ToolCallId, ToolInputSchema, ToolName};
+use crate::{
+    ArtifactRef, CoreError, ErrorInfo, ToolCallBatchId, ToolCallId, ToolInputSchema, ToolName,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_json::{Map, Value};
+use std::collections::BTreeSet;
 
 const MAX_TOOL_DESCRIPTION_LEN: usize = 4096;
 
@@ -118,6 +121,63 @@ impl<'de> Deserialize<'de> for PendingToolCall {
     {
         let wire = PendingToolCallWire::deserialize(deserializer)?;
         Ok(Self::new(wire.id, wire.name, wire.arguments))
+    }
+}
+
+/// Ordered pending tool calls produced by one model turn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PendingToolCallBatch {
+    id: ToolCallBatchId,
+    calls: Vec<PendingToolCall>,
+}
+
+impl PendingToolCallBatch {
+    /// Creates a validated non-empty pending batch.
+    pub fn new(id: ToolCallBatchId, calls: Vec<PendingToolCall>) -> Result<Self, CoreError> {
+        if calls.is_empty() {
+            return Err(CoreError::InvalidToolCall {
+                reason: "PendingToolCallBatch calls must not be empty",
+            });
+        }
+
+        let mut seen = BTreeSet::new();
+        if calls.iter().any(|call| !seen.insert(call.id())) {
+            return Err(CoreError::InvalidToolCall {
+                reason: "PendingToolCallBatch call ids must be unique",
+            });
+        }
+
+        Ok(Self { id, calls })
+    }
+
+    /// Borrows the runtime-owned batch id.
+    #[must_use]
+    pub fn id(&self) -> &ToolCallBatchId {
+        &self.id
+    }
+
+    /// Borrows calls in model order.
+    #[must_use]
+    pub fn calls(&self) -> &[PendingToolCall] {
+        &self.calls
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PendingToolCallBatchWire {
+    id: ToolCallBatchId,
+    calls: Vec<PendingToolCall>,
+}
+
+impl<'de> Deserialize<'de> for PendingToolCallBatch {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = PendingToolCallBatchWire::deserialize(deserializer)?;
+        Self::new(wire.id, wire.calls).map_err(de::Error::custom)
     }
 }
 

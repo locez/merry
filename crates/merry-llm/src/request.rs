@@ -2,7 +2,10 @@
 
 use crate::{
     ModelError,
-    tool::{ModelToolCall, ModelToolContinuation, ModelToolResult, validate_provider_identifier},
+    tool::{
+        ModelToolBatchContinuation, ModelToolCall, ModelToolCallBatch, ModelToolContinuation,
+        ModelToolResult, validate_provider_identifier,
+    },
 };
 use merry_core::ToolSpec;
 use schemars::{JsonSchema, Schema, SchemaGenerator};
@@ -496,6 +499,8 @@ pub struct ModelRequest {
     tools: Vec<ToolSpec>,
     #[serde(default)]
     continuations: Vec<ModelToolContinuation>,
+    #[serde(skip)]
+    batch_continuations: Vec<ModelToolBatchContinuation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     response_format: Option<ModelResponseFormat>,
     generation: GenerationConfig,
@@ -666,7 +671,11 @@ impl ModelRequest {
         }
 
         let messages = messages_from_input(&input);
-        let continuations = continuations_from_input(&input)?;
+        let batch_continuations = batch_continuations_from_input(&input)?;
+        let continuations = batch_continuations
+            .iter()
+            .flat_map(ModelToolBatchContinuation::single_continuations)
+            .collect();
         let tool_profile_hash = tool_profile_hash(&tools);
         let stable_prefix_hash = stable_input_prefix_hash(
             &input[..stable_prefix_item_count],
@@ -681,6 +690,7 @@ impl ModelRequest {
             messages,
             tools,
             continuations,
+            batch_continuations,
             response_format,
             generation,
             stable_prefix_message_count: stable_prefix_item_count,
@@ -718,6 +728,12 @@ impl ModelRequest {
     #[must_use]
     pub fn continuations(&self) -> &[ModelToolContinuation] {
         &self.continuations
+    }
+
+    /// Ordered complete tool-call batches visible to the model.
+    #[must_use]
+    pub fn batch_continuations(&self) -> &[ModelToolBatchContinuation] {
+        &self.batch_continuations
     }
 
     /// Optional contract for model response shape.
@@ -952,25 +968,50 @@ fn messages_from_input(input: &[ModelInputItem]) -> Vec<ModelMessage> {
         .collect()
 }
 
-fn continuations_from_input(
+fn batch_continuations_from_input(
     input: &[ModelInputItem],
-) -> Result<Vec<ModelToolContinuation>, ModelError> {
-    let mut continuations = Vec::new();
+) -> Result<Vec<ModelToolBatchContinuation>, ModelError> {
+    let mut batches = Vec::new();
     let mut index = 0;
     while index < input.len() {
         match &input[index] {
-            ModelInputItem::ToolCall(call) => {
-                let Some(ModelInputItem::ToolResult(result)) = input.get(index + 1) else {
+            ModelInputItem::ToolCall(_) => {
+                let call_start = index;
+                while matches!(input.get(index), Some(ModelInputItem::ToolCall(_))) {
+                    index += 1;
+                }
+                let calls = input[call_start..index]
+                    .iter()
+                    .filter_map(|item| match item {
+                        ModelInputItem::ToolCall(call) => Some(call.clone()),
+                        ModelInputItem::Message(_) | ModelInputItem::ToolResult(_) => None,
+                    })
+                    .collect::<Vec<_>>();
+
+                let result_start = index;
+                while matches!(input.get(index), Some(ModelInputItem::ToolResult(_))) {
+                    index += 1;
+                }
+                let results = input[result_start..index]
+                    .iter()
+                    .filter_map(|item| match item {
+                        ModelInputItem::ToolResult(result) => Some(result.clone()),
+                        ModelInputItem::Message(_) | ModelInputItem::ToolCall(_) => None,
+                    })
+                    .collect::<Vec<_>>();
+
+                if results.len() != calls.len() {
                     return Err(ModelError::invalid_request(
-                        "ModelRequest tool call input items must be followed by matching tool results",
+                        "ModelRequest tool call batches must be followed by one result for every call",
                     ));
-                };
-                continuations.push(ModelToolContinuation::new(call.clone(), result.clone())?);
-                index += 2;
+                }
+
+                let batch = ModelToolCallBatch::new(calls)?;
+                batches.push(ModelToolBatchContinuation::new(batch, results)?);
             }
             ModelInputItem::ToolResult(_) => {
                 return Err(ModelError::invalid_request(
-                    "ModelRequest tool result input items must follow matching tool calls",
+                    "ModelRequest tool result input items must follow a matching tool call batch",
                 ));
             }
             ModelInputItem::Message(_) => {
@@ -978,7 +1019,7 @@ fn continuations_from_input(
             }
         }
     }
-    Ok(continuations)
+    Ok(batches)
 }
 
 fn stable_chunk<T>(kind: &'static str, value: &T) -> String

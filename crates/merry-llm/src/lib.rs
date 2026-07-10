@@ -27,7 +27,7 @@ pub use retry::{
     RetryModelStreamContext, RetryingModelProvider,
 };
 pub use tool::{
-    ModelToolCall, ModelToolCallId, ModelToolContinuation, ModelToolResult, ModelToolResultContent,
-    ToolArguments,
+    ModelToolBatchContinuation, ModelToolCall, ModelToolCallBatch, ModelToolCallId,
+    ModelToolContinuation, ModelToolResult, ModelToolResultContent, ToolArguments,
 };
 pub use usage::Usage;

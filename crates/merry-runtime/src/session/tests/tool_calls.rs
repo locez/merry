@@ -1,6 +1,61 @@
 use super::*;
 
 #[test]
+fn pending_tool_call_batch_records_atomically_in_model_order() {
+    let mut session = SessionState::new(session_id());
+    let call_a = pending_tool_call("batch-call-a");
+    let call_b = pending_tool_call("batch-call-b");
+    let batch = PendingToolCallBatch::new(
+        ToolCallBatchId::new("tool-batch-0").expect("valid batch id"),
+        vec![call_a.clone(), call_b.clone()],
+    )
+    .expect("valid batch");
+
+    let event = session
+        .record_tool_call_batch_pending(batch.clone())
+        .expect("batch should record");
+
+    assert!(matches!(
+        &event.payload,
+        RuntimeJournalPayload::ToolCallBatchPending { batch: recorded } if recorded == &batch
+    ));
+    assert_eq!(session.pending_tool_calls(), vec![call_a, call_b]);
+    assert_eq!(
+        session.transcript_items_for_tests(),
+        [
+            "tool_call:batch-call-a".to_owned(),
+            "tool_call:batch-call-b".to_owned(),
+        ]
+    );
+}
+
+#[test]
+fn pending_tool_call_batch_conflict_leaves_session_unchanged() {
+    let mut session = SessionState::new(session_id());
+    let existing = pending_tool_call("batch-conflict");
+    session
+        .record_tool_call_pending(existing.clone())
+        .expect("existing call should record");
+    let pending_before = session.pending_tool_calls();
+    let transcript_before = session.transcript_items_for_tests();
+    let projection_before = session.ledger_projection();
+
+    let batch = PendingToolCallBatch::new(
+        ToolCallBatchId::new("tool-batch-conflict").expect("valid batch id"),
+        vec![pending_tool_call("batch-new"), existing],
+    )
+    .expect("batch shape should be valid");
+    let error = session
+        .record_tool_call_batch_pending(batch)
+        .expect_err("conflicting batch should reject");
+
+    assert_eq!(error.code(), "tool_call_duplicate");
+    assert_eq!(session.pending_tool_calls(), pending_before);
+    assert_eq!(session.transcript_items_for_tests(), transcript_before);
+    assert_eq!(session.ledger_projection(), projection_before);
+}
+
+#[test]
 fn denied_tool_action_records_audit_lifecycle_before_artifact_and_resolution() {
     let mut session = SessionState::new(session_id());
     let call = pending_tool_call("denied-action-call");

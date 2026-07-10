@@ -7,9 +7,9 @@ use merry_llm::{
     FinishReason, GenerationConfig, ModelCapabilities, ModelContent, ModelError, ModelEvent,
     ModelEventStream, ModelInputItem, ModelMessage, ModelMessageRole, ModelName, ModelOutput,
     ModelProvider, ModelProviderFuture, ModelRequest, ModelResponse, ModelResponseFormat,
-    ModelStreamContext, ModelStructuredOutputFormat, ModelToolCall, ModelToolCallId,
-    ModelToolContinuation, ModelToolResult, ModelToolResultContent, ReasoningEffort, ToolArguments,
-    Usage,
+    ModelStreamContext, ModelStructuredOutputFormat, ModelToolBatchContinuation, ModelToolCall,
+    ModelToolCallBatch, ModelToolCallId, ModelToolContinuation, ModelToolResult,
+    ModelToolResultContent, ReasoningEffort, ToolArguments, Usage,
 };
 use schemars::{JsonSchema, Schema};
 use serde::{Serialize, de::DeserializeOwned};
@@ -87,11 +87,15 @@ fn named_tool(name: &str) -> ToolSpec {
 }
 
 fn test_tool_call() -> ModelToolCall {
+    test_tool_call_with_id("call.provider/abc-123")
+}
+
+fn test_tool_call_with_id(id: &str) -> ModelToolCall {
     let mut arguments = Map::new();
     arguments.insert("city".to_owned(), Value::String("Shanghai".to_owned()));
 
     ModelToolCall::new(
-        ModelToolCallId::new("call.provider/abc-123").expect("valid tool call id"),
+        ModelToolCallId::new(id).expect("valid tool call id"),
         ToolName::new("lookup_weather").expect("valid tool name"),
         ToolArguments::new(arguments),
     )
@@ -699,6 +703,110 @@ fn tool_continuation_rejects_call_result_id_mismatch() {
             }
         }))
         .is_err()
+    );
+}
+
+#[test]
+fn model_tool_call_batch_rejects_empty_and_duplicate_calls() {
+    assert!(ModelToolCallBatch::new(Vec::new()).is_err());
+
+    let call = test_tool_call();
+    assert!(ModelToolCallBatch::new(vec![call.clone(), call]).is_err());
+
+    let batch = ModelToolCallBatch::new(vec![
+        test_tool_call_with_id("call-a"),
+        test_tool_call_with_id("call-b"),
+    ])
+    .expect("unique non-empty batch should be valid");
+    assert_eq!(
+        batch
+            .calls()
+            .iter()
+            .map(|call| call.id().as_str())
+            .collect::<Vec<_>>(),
+        ["call-a", "call-b"]
+    );
+    assert_json_round_trip(&batch);
+}
+
+#[test]
+fn model_tool_batch_continuation_validates_and_orders_results() {
+    let call_a = test_tool_call_with_id("call-a");
+    let call_b = test_tool_call_with_id("call-b");
+    let batch = ModelToolCallBatch::new(vec![call_a.clone(), call_b.clone()])
+        .expect("valid tool call batch");
+    let result_a = ModelToolResult::succeeded(
+        call_a.id().clone(),
+        ModelToolResultContent::text("a").expect("valid content"),
+    );
+    let result_b = ModelToolResult::succeeded(
+        call_b.id().clone(),
+        ModelToolResultContent::text("b").expect("valid content"),
+    );
+
+    let continuation = ModelToolBatchContinuation::new(batch.clone(), vec![result_b, result_a])
+        .expect("out-of-order complete results should normalize");
+    assert_eq!(continuation.batch(), &batch);
+    assert_eq!(
+        continuation
+            .results()
+            .iter()
+            .map(|result| result.call_id().as_str())
+            .collect::<Vec<_>>(),
+        ["call-a", "call-b"]
+    );
+    assert_json_round_trip(&continuation);
+
+    assert!(ModelToolBatchContinuation::new(batch.clone(), Vec::new()).is_err());
+    assert!(
+        ModelToolBatchContinuation::new(
+            batch,
+            vec![ModelToolResult::succeeded(
+                ModelToolCallId::new("call-unknown").expect("valid call id"),
+                ModelToolResultContent::text("unknown").expect("valid content"),
+            )],
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn model_request_accepts_grouped_tool_calls_and_results() {
+    let call_a = test_tool_call_with_id("call-a");
+    let call_b = test_tool_call_with_id("call-b");
+    let result_a = ModelToolResult::succeeded(
+        call_a.id().clone(),
+        ModelToolResultContent::text("a").expect("valid content"),
+    );
+    let result_b = ModelToolResult::succeeded(
+        call_b.id().clone(),
+        ModelToolResultContent::text("b").expect("valid content"),
+    );
+
+    let request = ModelRequest::new_with_input_and_stable_prefix(
+        ModelName::new("batch-model").expect("valid model name"),
+        vec![
+            ModelInputItem::Message(user_message("run both")),
+            ModelInputItem::ToolCall(call_a),
+            ModelInputItem::ToolCall(call_b),
+            ModelInputItem::ToolResult(result_b),
+            ModelInputItem::ToolResult(result_a),
+        ],
+        vec![weather_tool()],
+        GenerationConfig::new(None, true).expect("valid generation config"),
+        0,
+    )
+    .expect("grouped tool history should be valid");
+
+    assert_eq!(request.batch_continuations().len(), 1);
+    assert_eq!(request.continuations().len(), 2);
+    assert_eq!(
+        request.batch_continuations()[0]
+            .results()
+            .iter()
+            .map(|result| result.call_id().as_str())
+            .collect::<Vec<_>>(),
+        ["call-a", "call-b"]
     );
 }
 
