@@ -4,19 +4,26 @@ use merry_core::{
     ToolInputSchema, ToolName, ToolSpec,
 };
 use merry_llm::{
-    FinishReason, ModelCapabilities, ModelError, ModelEvent, ModelEventStream, ModelMessageRole,
-    ModelName, ModelOutput, ModelProvider, ModelProviderFuture, ModelRequest, ModelResponse,
-    ModelStreamContext, ModelToolCall, ModelToolCallId, ToolArguments,
+    FinishReason, GenerationConfig, ModelCapabilities, ModelError, ModelEvent, ModelEventStream,
+    ModelMessageRole, ModelName, ModelOutput, ModelProvider, ModelProviderFuture, ModelRequest,
+    ModelResponse, ModelRetryPolicy, ModelStreamContext, ModelToolCall, ModelToolCallId,
+    ReasoningEffort, ToolArguments,
 };
 use merry_runtime::{
-    AgentLoopConfig, InterruptReason, Runtime, StepContext, ToolExecutionContext,
-    ToolExecutionError, ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture,
+    AgentLoopConfig, AutomaticCompactionConfig, ChildRuntimeFactory, ChildRuntimeInput,
+    CitationCompactionPolicy, InteractivePrimaryModel, InteractiveSettingsUpdate,
+    InteractiveSubagentSettings, InterruptReason, Runtime, StepContext, SubagentConfig,
+    SubagentManager, ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome, ToolExecutor,
+    ToolExecutorFuture, subagent_registered_tools,
 };
 use schemars::Schema;
 use serde_json::json;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::{
+    num::NonZeroUsize,
+    sync::{Arc, Mutex, OnceLock},
+};
 use tokio::{
-    sync::{Mutex as AsyncMutex, oneshot},
+    sync::{Barrier, Mutex as AsyncMutex, oneshot},
     time::{Duration, timeout},
 };
 use tokio_util::sync::CancellationToken;
@@ -56,6 +63,16 @@ fn completed_tool_call_event(call: ModelToolCall) -> ModelEvent {
     }
 }
 
+fn completed_tool_call_batch_event(calls: Vec<ModelToolCall>) -> ModelEvent {
+    ModelEvent::Completed {
+        response: ModelResponse::new(
+            calls.into_iter().map(ModelOutput::tool_call).collect(),
+            FinishReason::ToolCalls,
+            None,
+        ),
+    }
+}
+
 fn tool_spec(name: &str) -> ToolSpec {
     let schema = Schema::try_from(json!({
         "type": "object",
@@ -78,6 +95,20 @@ fn tool_spec(name: &str) -> ToolSpec {
 struct RecordingProvider {
     requests: Arc<Mutex<Vec<ModelRequest>>>,
     steps: Arc<Mutex<ScriptedProviderSteps>>,
+}
+
+#[derive(Clone)]
+struct NoopChildFactory;
+
+impl ChildRuntimeFactory for NoopChildFactory {
+    fn build_child(
+        &self,
+        input: ChildRuntimeInput,
+    ) -> Result<Runtime, merry_runtime::RuntimeError> {
+        Runtime::builder(input.session_id)
+            .task_anchor(input.task_anchor)
+            .build()
+    }
 }
 
 impl RecordingProvider {
@@ -261,6 +292,35 @@ impl ToolExecutor for CancelFirstThenSucceedToolExecutor {
     }
 }
 
+#[derive(Clone)]
+struct BarrierToolExecutor {
+    barrier: Arc<Barrier>,
+}
+
+impl BarrierToolExecutor {
+    fn new(parties: usize) -> Self {
+        Self {
+            barrier: Arc::new(Barrier::new(parties)),
+        }
+    }
+}
+
+impl ToolExecutor for BarrierToolExecutor {
+    fn execute<'a>(
+        &'a self,
+        call: PendingToolCall,
+        _context: ToolExecutionContext,
+    ) -> ToolExecutorFuture<'a> {
+        Box::pin(async move {
+            self.barrier.wait().await;
+            Ok(ToolExecutionOutcome::succeeded_text(format!(
+                "result for {}",
+                call.id()
+            )))
+        })
+    }
+}
+
 #[tokio::test]
 async fn interactive_run_starts_waiting_for_input() {
     let provider = RecordingProvider::new();
@@ -322,6 +382,333 @@ async fn submit_next_while_waiting_starts_model_turn() {
     }
     assert!(saw_accepted);
     assert_eq!(provider.recorded_requests().len(), 1);
+}
+
+#[tokio::test]
+async fn interactive_settings_update_changes_the_next_request_generation_config() {
+    let provider = RecordingProvider::new_with_steps(vec![
+        vec![Ok(completed_text_event("first"))],
+        vec![Ok(completed_text_event("second"))],
+    ]);
+    let runtime = Runtime::builder(session_id("interactive-update-generation"))
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .build()
+        .expect("runtime builds");
+    let initial_generation = GenerationConfig::default().with_reasoning_effort(Some(
+        ReasoningEffort::new("low").expect("valid reasoning effort"),
+    ));
+    let run = runtime
+        .start_interactive_agent_run(
+            StepContext::new(CancellationToken::new()).with_generation_config(initial_generation),
+            AgentLoopConfig::default(),
+        )
+        .expect("interactive run starts");
+    let (mut stream, input, control) = run.split();
+    let _ = stream.next().await.expect("waiting state");
+
+    input.submit_next("first").await.expect("first queued");
+    wait_for_interactive_waiting(&mut stream).await;
+    let updated_generation = GenerationConfig::default().with_reasoning_effort(Some(
+        ReasoningEffort::new("high").expect("valid reasoning effort"),
+    ));
+    control
+        .update_settings(
+            InteractiveSettingsUpdate::default().with_generation_config(updated_generation),
+        )
+        .await
+        .expect("settings update accepted");
+    input.submit_next("second").await.expect("second queued");
+    wait_for_interactive_waiting(&mut stream).await;
+
+    let requests = provider.recorded_requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[0]
+            .generation()
+            .reasoning_effort()
+            .map(ReasoningEffort::as_str),
+        Some("low")
+    );
+    assert_eq!(
+        requests[1]
+            .generation()
+            .reasoning_effort()
+            .map(ReasoningEffort::as_str),
+        Some("high")
+    );
+}
+
+#[tokio::test]
+async fn interactive_settings_update_changes_the_next_request_primary_model() {
+    let first_provider =
+        RecordingProvider::new_with_steps(vec![vec![Ok(completed_text_event("first"))]]);
+    let second_provider =
+        RecordingProvider::new_with_steps(vec![vec![Ok(completed_text_event("second"))]]);
+    let first_model = ModelName::new("fake/first").expect("valid first model");
+    let second_model = ModelName::new("fake/second").expect("valid second model");
+    let runtime = Runtime::builder(session_id("interactive-update-primary"))
+        .model_provider(Arc::new(first_provider.clone()), first_model.clone())
+        .build()
+        .expect("runtime builds");
+    let run = runtime
+        .start_interactive_agent_run(
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default(),
+        )
+        .expect("interactive run starts");
+    let (mut stream, input, control) = run.split();
+    let _ = stream.next().await.expect("waiting state");
+
+    input.submit_next("first").await.expect("first queued");
+    wait_for_interactive_waiting(&mut stream).await;
+    control
+        .update_settings(InteractiveSettingsUpdate::default().with_primary_model(
+            InteractivePrimaryModel::new(
+                Arc::new(second_provider.clone()),
+                second_model.clone(),
+                ModelRetryPolicy::disabled(),
+            ),
+        ))
+        .await
+        .expect("settings update accepted");
+    input.submit_next("second").await.expect("second queued");
+    wait_for_interactive_waiting(&mut stream).await;
+
+    let first_requests = first_provider.recorded_requests();
+    let second_requests = second_provider.recorded_requests();
+    assert_eq!(first_requests.len(), 1);
+    assert_eq!(first_requests[0].model(), &first_model);
+    assert_eq!(second_requests.len(), 1);
+    assert_eq!(second_requests[0].model(), &second_model);
+}
+
+#[tokio::test]
+async fn interactive_settings_update_changes_automatic_compaction_at_request_boundary() {
+    let provider = RecordingProvider::new_with_steps(Vec::new());
+    let runtime = Runtime::builder(session_id("interactive-update-compaction"))
+        .model_provider(Arc::new(provider), model_name())
+        .automatic_compaction(AutomaticCompactionConfig::disabled())
+        .build()
+        .expect("runtime builds");
+    let run = runtime
+        .start_interactive_agent_run(
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default(),
+        )
+        .expect("interactive run starts");
+    let (mut stream, _input, control) = run.split();
+    let _ = stream.next().await.expect("waiting state");
+    let policy = CitationCompactionPolicy::new(128, Some(192), 6144, 1, 900, 12)
+        .expect("valid compact policy");
+    let updated = AutomaticCompactionConfig::enabled(policy);
+
+    control
+        .update_settings(InteractiveSettingsUpdate::default().with_automatic_compaction(updated))
+        .await
+        .expect("settings update accepted");
+
+    assert_eq!(runtime.automatic_compaction_config().await, updated);
+}
+
+#[tokio::test]
+async fn interactive_settings_update_does_not_interrupt_the_active_model_request() {
+    let (started_tx, started_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let first_provider = BlockingFirstProvider::new(started_tx, release_rx);
+    let second_provider =
+        RecordingProvider::new_with_steps(vec![vec![Ok(completed_text_event("second"))]]);
+    let first_model = ModelName::new("fake/first").expect("valid first model");
+    let second_model = ModelName::new("fake/second").expect("valid second model");
+    let runtime = Runtime::builder(session_id("interactive-update-running-primary"))
+        .model_provider(Arc::new(first_provider.clone()), first_model.clone())
+        .build()
+        .expect("runtime builds");
+    let run = runtime
+        .start_interactive_agent_run(
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default(),
+        )
+        .expect("interactive run starts");
+    let (mut stream, input, control) = run.split();
+    let _ = stream.next().await.expect("waiting state");
+
+    input.submit_next("first").await.expect("first queued");
+    timeout(Duration::from_secs(1), started_rx)
+        .await
+        .expect("first request starts")
+        .expect("start signal sent");
+    timeout(
+        Duration::from_secs(1),
+        control.update_settings(InteractiveSettingsUpdate::default().with_primary_model(
+            InteractivePrimaryModel::new(
+                Arc::new(second_provider.clone()),
+                second_model.clone(),
+                ModelRetryPolicy::disabled(),
+            ),
+        )),
+    )
+    .await
+    .expect("settings update is accepted while the request is active")
+    .expect("settings update succeeds");
+
+    assert_eq!(first_provider.recorded_requests().len(), 1);
+    assert!(second_provider.recorded_requests().is_empty());
+    release_tx.send(()).expect("release first request");
+    wait_for_interactive_waiting(&mut stream).await;
+
+    input.submit_next("second").await.expect("second queued");
+    wait_for_interactive_waiting(&mut stream).await;
+
+    let first_requests = first_provider.recorded_requests();
+    let second_requests = second_provider.recorded_requests();
+    assert_eq!(first_requests.len(), 1);
+    assert_eq!(first_requests[0].model(), &first_model);
+    assert_eq!(second_requests.len(), 1);
+    assert_eq!(second_requests[0].model(), &second_model);
+}
+
+#[tokio::test]
+async fn interactive_subagent_setting_changes_the_next_request_tool_profile() {
+    let provider = RecordingProvider::new_with_steps(vec![
+        vec![Ok(completed_text_event("disabled"))],
+        vec![Ok(completed_text_event("enabled"))],
+    ]);
+    let manager = SubagentManager::runtime_controlled(
+        session_id("interactive-update-subagents"),
+        SubagentConfig::default(),
+        Arc::new(NoopChildFactory),
+        false,
+    );
+    let [spawn, wait, cancel] =
+        subagent_registered_tools(manager.clone()).expect("subagent tools build");
+    let runtime = Runtime::builder(session_id("interactive-update-subagents"))
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .subagent_manager(manager)
+        .register_tool(spawn)
+        .register_tool(wait)
+        .register_tool(cancel)
+        .build()
+        .expect("runtime builds");
+    let run = runtime
+        .start_interactive_agent_run(
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default(),
+        )
+        .expect("interactive run starts");
+    let (mut stream, input, control) = run.split();
+    let _ = stream.next().await.expect("waiting state");
+
+    input.submit_next("first").await.expect("first queued");
+    wait_for_interactive_waiting(&mut stream).await;
+    control
+        .update_settings(InteractiveSettingsUpdate::default().with_subagents(
+            InteractiveSubagentSettings::new(true, SubagentConfig::default()),
+        ))
+        .await
+        .expect("settings update accepted");
+    input.submit_next("second").await.expect("second queued");
+    wait_for_interactive_waiting(&mut stream).await;
+
+    let requests = provider.recorded_requests();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        !requests[0]
+            .tools()
+            .iter()
+            .any(|tool| tool.name().as_str() == "spawn_subagents")
+    );
+    assert!(
+        requests[1]
+            .tools()
+            .iter()
+            .any(|tool| tool.name().as_str() == "spawn_subagents")
+    );
+}
+
+async fn wait_for_interactive_waiting(stream: &mut merry_runtime::InteractiveRunEventStream) {
+    while let Some(event) = stream.next().await {
+        if matches!(
+            event,
+            RuntimeEvent::InteractiveRunStateChanged {
+                state: InteractiveRunState::WaitingForInput
+            }
+        ) {
+            return;
+        }
+    }
+    panic!("interactive run closed before returning to waiting");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn interactive_run_executes_parallel_safe_tool_batch_before_waiting() {
+    let provider = RecordingProvider::new_with_steps(vec![
+        vec![Ok(completed_tool_call_batch_event(vec![
+            model_tool_call("call-1", "search_notes"),
+            model_tool_call("call-2", "search_notes"),
+        ]))],
+        vec![Ok(completed_text_event("done"))],
+    ]);
+    let runtime = Runtime::builder(session_id("interactive-parallel-tool-batch"))
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .register_tool(
+            merry_runtime::RegisteredTool::read_only(
+                tool_spec("search_notes"),
+                Arc::new(BarrierToolExecutor::new(2)),
+            )
+            .with_parallel_safe_execution(),
+        )
+        .max_parallel_tool_calls(NonZeroUsize::new(2).expect("non-zero limit"))
+        .build()
+        .expect("runtime builds");
+
+    let run = runtime
+        .start_interactive_agent_run(
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default(),
+        )
+        .expect("interactive run starts");
+    let (mut stream, input, _control) = run.split();
+    assert!(matches!(
+        stream.next().await.expect("initial waiting state"),
+        RuntimeEvent::InteractiveRunStateChanged {
+            state: InteractiveRunState::WaitingForInput
+        }
+    ));
+
+    input
+        .submit_next("search twice")
+        .await
+        .expect("input queued");
+    let observed = timeout(Duration::from_secs(1), async {
+        let mut finished = 0;
+        let mut saw_answer = false;
+        while let Some(event) = stream.next().await {
+            match event {
+                RuntimeEvent::ToolCallFinished { .. } => finished += 1,
+                RuntimeEvent::AssistantMessage { .. } => saw_answer = true,
+                RuntimeEvent::InteractiveRunStateChanged {
+                    state: InteractiveRunState::WaitingForInput,
+                } if saw_answer => return finished,
+                _ => {}
+            }
+        }
+        finished
+    })
+    .await
+    .expect("interactive batch should complete without serial barrier deadlock");
+
+    assert_eq!(observed, 2);
+    assert!(runtime.pending_tool_calls().await.is_empty());
+    let requests = provider.recorded_requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[1].batch_continuations()[0]
+            .results()
+            .iter()
+            .map(|result| result.call_id().as_str())
+            .collect::<Vec<_>>(),
+        ["call-1", "call-2"]
+    );
 }
 
 #[tokio::test]
@@ -423,6 +810,41 @@ async fn next_burst_before_boundary_becomes_two_user_messages_in_one_request() {
         .map(|message| message.content().as_text().to_owned())
         .collect::<Vec<_>>();
     assert!(user_texts.ends_with(&["first".to_owned(), "second".to_owned()]));
+}
+
+#[tokio::test]
+async fn close_during_running_model_reaches_closed_event() {
+    let (started_tx, started_rx) = oneshot::channel();
+    let (_release_tx, release_rx) = oneshot::channel();
+    let provider = BlockingFirstProvider::new(started_tx, release_rx);
+    let runtime = Runtime::builder(session_id("interactive-close-running"))
+        .model_provider(Arc::new(provider), model_name())
+        .build()
+        .expect("runtime builds");
+
+    let run = runtime
+        .start_interactive_agent_run(
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default(),
+        )
+        .expect("interactive run starts");
+    let (mut stream, input, control) = run.split();
+    let _ = stream.next().await.expect("waiting state");
+    input.submit_next("initial").await.expect("initial queued");
+    started_rx.await.expect("provider step starts");
+
+    control.close().await.expect("close accepted");
+
+    timeout(Duration::from_secs(1), async {
+        while let Some(event) = stream.next().await {
+            if matches!(event, RuntimeEvent::Closed) {
+                return;
+            }
+        }
+        panic!("stream ended before closed event");
+    })
+    .await
+    .expect("close while running should reach closed event");
 }
 
 #[tokio::test]

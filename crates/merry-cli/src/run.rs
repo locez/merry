@@ -1,14 +1,12 @@
 use crate::cli_error::{CliError, debug_openai_usage_error, stdout_error, unexpected};
 use crate::coding_runtime::{
     HeadlessCodingRuntimeInput, action_process_runner, build_headless_coding_runtime,
-    coding_agent_loop_config, coding_agent_requires_sandbox_error,
-    coding_loop_smoke_admission_from_current_process,
+    coding_agent_loop_config, coding_agent_process_admission, coding_agent_requires_sandbox_error,
 };
 use crate::config::MerryConfig;
 use crate::mcp_tools::discover_configured_mcp_tools;
 use crate::provider_config::{
-    RuntimePrimaryProviderConfig, RuntimeProviderBundle, openai_provider_bundle,
-    openai_provider_config_bundle,
+    RuntimePrimaryProviderConfig, RuntimeProviderBundle, runtime_provider_bundle_from_config,
 };
 use crate::runtime_config::{
     action_process_backend_options, automatic_compaction_config, generation_config,
@@ -56,20 +54,20 @@ pub(crate) async fn run(
     args: &Args,
     sandbox_child_handoff: Option<SandboxChildHandoff>,
     merry_config: Option<&MerryConfig>,
+    no_outer_sandbox: bool,
 ) -> Result<RunExitStatus, CliError> {
     let Some(admission) =
-        coding_loop_smoke_admission_from_current_process(sandbox_child_handoff).await
+        coding_agent_process_admission(sandbox_child_handoff, no_outer_sandbox).await
     else {
         return Err(coding_agent_requires_sandbox_error("run"));
     };
 
-    let config = openai_provider_config_bundle(None, merry_config, debug_openai_usage_error)?;
     let RuntimeProviderBundle {
         primary,
         context_compaction,
         approval_review,
         retry_policy,
-    } = openai_provider_bundle(config, unexpected)?;
+    } = runtime_provider_bundle_from_config(merry_config, debug_openai_usage_error)?;
     let RuntimePrimaryProviderConfig { provider, model } = primary;
     let root = env::current_dir().map_err(unexpected)?;
     let backend = action_process_runner(
@@ -289,6 +287,14 @@ where
                 write_progress_commentary(&commentary, writer).await?;
             }
             write_human_progress_line(writer, format_tool_call_progress("tool", call)).await?;
+        }
+        RuntimeEvent::ToolCallBatchStarted { batch, .. } => {
+            if let Some(commentary) = pending_commentary.take() {
+                write_progress_commentary(&commentary, writer).await?;
+            }
+            for call in batch.calls() {
+                write_human_progress_line(writer, format_tool_call_progress("tool", call)).await?;
+            }
         }
         RuntimeEvent::ToolCallFinished { result, .. }
             if result.status() == ToolCallResultStatus::Failed =>

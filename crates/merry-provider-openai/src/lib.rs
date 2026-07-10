@@ -1,13 +1,15 @@
 //! OpenAI-compatible provider adapter for Merry.
 
+mod chat_completions;
 mod config;
 mod error;
+mod models;
 mod parse;
 mod provider;
 mod render;
 mod wire;
 
-pub use config::OpenAiProviderConfig;
+pub use config::{OpenAiProtocol, OpenAiProviderConfig};
 pub use error::OpenAiProviderError;
 pub use provider::OpenAiProvider;
 
@@ -182,7 +184,8 @@ mod tests {
         assert_eq!(config.provider_name().as_str(), "openai-compatible");
         assert!(config.capabilities().supports_streaming());
         assert!(config.capabilities().supports_tool_calls());
-        assert!(!config.capabilities().supports_parallel_tool_calls());
+        assert!(config.capabilities().supports_parallel_tool_calls());
+        assert_eq!(config.protocol(), OpenAiProtocol::Responses);
         assert!(config.capabilities().supports_usage_reporting());
         assert_eq!(config.capabilities().max_input_tokens(), None);
         assert_eq!(config.capabilities().max_output_tokens(), None);
@@ -190,6 +193,12 @@ mod tests {
         let debug = format!("{config:?}");
         assert!(!debug.contains("sk-test"));
         assert!(debug.contains("<redacted>"));
+        assert!(debug.contains("Responses"));
+
+        let chat = config
+            .clone()
+            .with_protocol(OpenAiProtocol::ChatCompletions);
+        assert_eq!(chat.protocol(), OpenAiProtocol::ChatCompletions);
 
         for invalid_key in ["", "   ", " sk-test", "sk-test ", "sk-\ntest"] {
             assert!(
@@ -233,6 +242,16 @@ mod tests {
                 .and_then(|config| config.with_base_url("https:///v1"))
                 .is_err()
         );
+        for invalid in [
+            "https://api.example.test/v1?tenant=one",
+            "https://api.example.test/v1#fragment",
+        ] {
+            assert!(
+                OpenAiProviderConfig::new("sk-test")
+                    .and_then(|config| config.with_base_url(invalid))
+                    .is_err()
+            );
+        }
         assert!(
             OpenAiProviderConfig::new("sk-test")
                 .and_then(|config| config.with_organization("   "))
@@ -531,11 +550,11 @@ mod tests {
     }
 
     #[test]
-    fn rendered_request_rejects_parallel_tool_calls() {
-        let error = crate::render::render_responses_request(&request_with_parallel_tool_calls())
-            .expect_err("parallel tool calls should be rejected");
+    fn rendered_request_enables_parallel_tool_calls() {
+        let rendered = crate::render::render_responses_request(&request_with_parallel_tool_calls())
+            .expect("parallel tool calls should render");
 
-        assert!(matches!(error, OpenAiProviderError::InvalidRequest { .. }));
+        assert_eq!(rendered["parallel_tool_calls"], true);
     }
 
     #[test]

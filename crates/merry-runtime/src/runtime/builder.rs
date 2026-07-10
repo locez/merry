@@ -23,7 +23,7 @@ use std::{
         atomic::{AtomicBool, AtomicU64},
     },
 };
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
 const DEFAULT_EVENT_BUFFER_SIZE: usize = 16;
 
@@ -86,6 +86,7 @@ impl Default for AutomaticCompactionConfig {
 pub struct RuntimeBuilder {
     session_id: SessionId,
     event_buffer_size: NonZeroUsize,
+    max_parallel_tool_calls: NonZeroUsize,
     model_configs: RuntimeModelConfigs,
     model_retry_policy: ModelRetryPolicy,
     automatic_compaction: AutomaticCompactionConfig,
@@ -118,6 +119,8 @@ impl RuntimeBuilder {
             session_id,
             event_buffer_size: NonZeroUsize::new(DEFAULT_EVENT_BUFFER_SIZE)
                 .expect("default event buffer size is non-zero"),
+            max_parallel_tool_calls: NonZeroUsize::new(4)
+                .expect("default parallel tool-call limit is non-zero"),
             model_configs: RuntimeModelConfigs::default(),
             model_retry_policy: ModelRetryPolicy::default(),
             automatic_compaction: AutomaticCompactionConfig::default(),
@@ -153,6 +156,13 @@ impl RuntimeBuilder {
     #[must_use]
     pub fn event_buffer_size(mut self, event_buffer_size: NonZeroUsize) -> Self {
         self.event_buffer_size = event_buffer_size;
+        self
+    }
+
+    /// Sets the maximum number of adjacent parallel-safe calls executed together.
+    #[must_use]
+    pub fn max_parallel_tool_calls(mut self, limit: NonZeroUsize) -> Self {
+        self.max_parallel_tool_calls = limit;
         self
     }
 
@@ -498,6 +508,15 @@ impl RuntimeBuilder {
         self.build()
     }
 
+    /// Loads persisted session state without enabling automatic savepoints.
+    pub async fn load_session_from_store(
+        mut self,
+        store: FileSessionStore,
+    ) -> Result<Self, RuntimeError> {
+        self.loaded_session = Some(SessionState::load_from(&store, &self.session_id).await?);
+        Ok(self)
+    }
+
     /// Builds the runtime.
     ///
     /// Duplicate tool names are rejected before the runtime is constructed.
@@ -559,8 +578,10 @@ impl RuntimeBuilder {
                 active_step: Arc::new(AtomicBool::new(false)),
                 memory_projection_epoch: AtomicU64::new(0),
                 event_buffer_size: self.event_buffer_size,
+                max_parallel_tool_calls: self.max_parallel_tool_calls,
                 model_configs: self.model_configs,
-                automatic_compaction: self.automatic_compaction,
+                primary_model_override: RwLock::new(None),
+                automatic_compaction: RwLock::new(self.automatic_compaction),
                 capabilities: self.capabilities,
                 progress_commentary: self.progress_commentary,
                 tool_registry,

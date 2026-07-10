@@ -1,6 +1,7 @@
 mod commands;
 mod handles;
 mod queue;
+mod settings;
 mod types;
 
 use self::{
@@ -15,7 +16,8 @@ use crate::{
 };
 use futures_util::StreamExt;
 use merry_core::{
-    InteractiveRunState, QueuedInputLane, QueuedInputView, RuntimeEvent, RuntimeJournalEvent,
+    InteractiveRunState, PendingToolCall, QueuedInputLane, QueuedInputView, RuntimeEvent,
+    RuntimeJournalEvent,
 };
 use merry_llm::GenerationConfig;
 use tokio::sync::mpsc;
@@ -25,6 +27,9 @@ use tokio_util::sync::CancellationToken;
 pub use self::handles::{
     AgentLoopControl, AgentLoopInput, InteractiveAgentRun, InteractiveInputItem,
     InteractiveInputSnapshot, InteractiveRunEventStream,
+};
+pub use self::settings::{
+    InteractivePrimaryModel, InteractiveSettingsUpdate, InteractiveSubagentSettings,
 };
 pub use self::types::{InteractiveError, InteractiveRunId, InterruptReason};
 
@@ -323,6 +328,26 @@ impl InteractiveProducer {
             StepOutcome::Pending(PendingLoopToolCall::Runtime(call)) if !self.interrupted => {
                 self.run_runtime_tool(call).await
             }
+            StepOutcome::PendingBatch(calls)
+                if !self.interrupted
+                    && calls
+                        .iter()
+                        .all(|call| matches!(call, PendingLoopToolCall::Runtime(_))) =>
+            {
+                self.run_runtime_tool_batch(
+                    calls
+                        .into_iter()
+                        .map(|call| match call {
+                            PendingLoopToolCall::Runtime(call) => call,
+                            PendingLoopToolCall::Bridge(_)
+                            | PendingLoopToolCall::FinalOutput(_) => {
+                                unreachable!("guard accepts runtime tool calls only")
+                            }
+                        })
+                        .collect(),
+                )
+                .await
+            }
             StepOutcome::ToolResultRecorded => Some(!self.interrupted),
             _ => Some(false),
         }
@@ -393,6 +418,84 @@ impl InteractiveProducer {
             }
             Err(error) => {
                 tracing::debug!(error = %error, "interactive runtime tool failed");
+                None
+            }
+        }
+    }
+
+    async fn run_runtime_tool_batch(&mut self, calls: Vec<PendingToolCall>) -> Option<bool> {
+        if !self.send_state(InteractiveRunState::RunningTool).await {
+            return None;
+        }
+
+        let phase_token = self.loop_token.child_token();
+        self.phase_token = Some(phase_token.clone());
+        let runtime = self.runtime.clone();
+        let loop_permit = self.loop_permit.clone();
+        let call_ids = calls
+            .iter()
+            .map(|call| call.id().clone())
+            .collect::<Vec<_>>();
+        let execution_permit = loop_permit.clone();
+        let execution = async move {
+            runtime
+                .execute_tool_call_batch_with_active_permit(
+                    calls,
+                    ToolExecutionContext::new(phase_token),
+                    &execution_permit,
+                )
+                .await
+        };
+        tokio::pin!(execution);
+        let mut commands_open = true;
+
+        let result = loop {
+            tokio::select! {
+                result = &mut execution => break result,
+                command = self.command_receiver.recv(), if commands_open => {
+                    let Some(command) = command else {
+                        commands_open = false;
+                        continue;
+                    };
+                    self.handle_command(command, CommandHandlingMode::Running).await?;
+                }
+            }
+        };
+        self.phase_token = None;
+
+        let (events, error) = result.into_parts();
+        if !self.send_runtime_events(events).await {
+            return None;
+        }
+
+        match error {
+            None => Some(!self.interrupted),
+            Some(RuntimeError::ToolExecutionCancelled { .. }) => {
+                let pending_ids = self
+                    .runtime
+                    .pending_tool_calls()
+                    .await
+                    .into_iter()
+                    .map(|call| call.id().clone())
+                    .collect::<std::collections::BTreeSet<_>>();
+                for call_id in call_ids
+                    .into_iter()
+                    .filter(|call_id| pending_ids.contains(call_id))
+                {
+                    let events = self
+                        .runtime
+                        .submit_tool_interrupt_failure_with_active_permit(&call_id, &loop_permit)
+                        .await
+                        .ok()?;
+                    if !self.send_runtime_events(events).await {
+                        return None;
+                    }
+                }
+                self.interrupted = true;
+                Some(false)
+            }
+            Some(error) => {
+                tracing::debug!(error = %error, "interactive runtime tool batch failed");
                 None
             }
         }
@@ -546,6 +649,36 @@ impl InteractiveProducer {
                 let _ = ack_sender.send(self.queue.input_records());
                 Some(CommandDecision::Continue)
             }
+            InteractiveCommand::UpdateSettings { update, ack_sender } => {
+                let result = if let Some(subagents) = update.subagents {
+                    self.runtime
+                        .update_interactive_subagents(subagents.enabled, subagents.config)
+                        .await
+                } else {
+                    Ok(())
+                };
+                if result.is_ok() {
+                    if let Some(generation_config) = update.generation_config {
+                        self.generation_config = generation_config;
+                    }
+                    if let Some(primary_model) = update.primary_model {
+                        self.runtime
+                            .update_interactive_primary_model(
+                                primary_model.provider,
+                                primary_model.model,
+                                primary_model.retry_policy,
+                            )
+                            .await;
+                    }
+                    if let Some(automatic_compaction) = update.automatic_compaction {
+                        self.runtime
+                            .update_interactive_automatic_compaction(automatic_compaction)
+                            .await;
+                    }
+                }
+                let _ = ack_sender.send(result.map_err(InteractiveError::from));
+                Some(CommandDecision::Continue)
+            }
             InteractiveCommand::ResumeSuspended { ack_sender } => {
                 self.suspended_resume_requested = true;
                 let _ = ack_sender.send(Ok(()));
@@ -573,6 +706,13 @@ impl InteractiveProducer {
             }
             InteractiveCommand::Close { ack_sender } => {
                 let _ = ack_sender.send(Ok(()));
+                if mode == CommandHandlingMode::Running {
+                    self.loop_token.cancel();
+                    if let Some(token) = self.phase_token.as_ref() {
+                        token.cancel();
+                    }
+                    return Some(CommandDecision::Continue);
+                }
                 Some(CommandDecision::Close)
             }
         }

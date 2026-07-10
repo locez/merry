@@ -117,6 +117,11 @@ fn into_registered_tools_exposes_read_list_and_search() {
             WORKSPACE_SEARCH_TEXT_TOOL
         ]
     );
+    assert!(
+        tools
+            .iter()
+            .all(|tool| tool.concurrency() == ToolConcurrency::ParallelSafe)
+    );
 }
 
 #[test]
@@ -136,6 +141,7 @@ fn patch_tool_registration_is_opt_in_and_workspace_write() {
         .find(|tool| tool.spec().name().as_str() == WORKSPACE_PATCH_TOOL)
         .expect("patch tool should be registered only by opt-in method");
     assert_eq!(patch.action_kind(), ToolActionKind::WorkspaceWrite);
+    assert_eq!(patch.concurrency(), ToolConcurrency::Exclusive);
     assert!(patch.proposals_enabled());
     assert_eq!(tools.len(), 4);
     assert!(

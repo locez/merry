@@ -17,6 +17,7 @@ from ._errors import (
 from ._runtime import (
     AgentLoopControl,
     AgentLoopInput,
+    AnthropicProvider,
     InteractiveInputItem,
     InteractiveInputSnapshot,
     InteractiveRun,
@@ -50,6 +51,7 @@ __all__ = [
     "NativeMerryError",
     "AgentLoopControl",
     "AgentLoopInput",
+    "AnthropicProvider",
     "InteractiveInputItem",
     "InteractiveInputSnapshot",
     "InteractiveRun",

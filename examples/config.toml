@@ -6,12 +6,17 @@
 # Usually required edits:
 # - Set [providers.default].model for your provider.
 # - Set [providers.openai-compatible].base_url for non-OpenAI-compatible hosts.
+# - Set protocol = "chat_completions" for vendors that expose Chat Completions
+#   instead of the OpenAI Responses API.
 # - Set exactly one credential source in [providers.openai-compatible]:
 #     api_key = "sk-..."
 #   or:
 #     api_key_file = "secrets/openai.key"
 #
 # Keep credentials out of this file when committing changes.
+# Provider profiles created in the TUI are stored separately in
+# $XDG_CONFIG_HOME/merry/managed/providers.toml. This tracked example remains
+# the contract for user-authored config.toml.
 
 [global]
 profile = "default"
@@ -110,12 +115,12 @@ review_next_artifact = "ctrl+f"
 follow_latest_artifact = "ctrl+r"
 history_previous = "up"
 history_next = "down"
-resume_suspended = "ctrl+p"
+resume_suspended = "ctrl+n"
 discard_suspended = "ctrl+d"
 
 [observability.log]
 # Enable this for smoke/debug runs that should write structured JSON logs.
-enabled = true
+enabled = false
 level = "debug"
 format = "json"
 # Optional. If omitted, Merry writes to:
@@ -130,7 +135,7 @@ model = "gpt-4.1-mini"
 # Optional. Sent as Responses API reasoning.effort when supported by the model.
 # Leave unset to use provider/model defaults. Common OpenAI values include
 # minimal, low, medium, high, and model-dependent xhigh.
-reasoning_effort = "medium"
+# reasoning_effort = "medium"
 
 [providers.retry]
 # Provider-neutral retry policy for transient model setup or stream failures.
@@ -153,7 +158,23 @@ model = "gpt-4.1-mini"
 model = "gpt-4.1-mini"
 
 [providers.openai-compatible]
+display_name = "OpenAI"
+default_model = "gpt-4.1-mini"
+type = "openai-compatible"
+protocol = "responses"
 base_url = "https://api.openai.com/v1"
 # Prefer api_key_file for local sandboxed smoke runs so the key stays in the
 # mounted config directory instead of argv or process environment.
 api_key_file = "secrets/openai.key"
+
+# Anthropic Messages can be selected by changing
+# [providers.default].provider to "anthropic" and using a Claude model.
+#
+# [providers.anthropic]
+# display_name = "Anthropic"
+# default_model = "claude-sonnet-4-5"
+# type = "anthropic"
+# base_url = "https://api.anthropic.com"
+# api_version = "2023-06-01"
+# default_max_output_tokens = 4096
+# api_key_file = "secrets/anthropic.key"

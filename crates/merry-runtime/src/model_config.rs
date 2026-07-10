@@ -95,14 +95,6 @@ impl RuntimeModelConfigs {
         self.configs.get(&role).cloned()
     }
 
-    pub(crate) fn get_with_primary_fallback(
-        &self,
-        role: RuntimeModelRole,
-    ) -> Option<ModelProviderConfig> {
-        self.get(role)
-            .or_else(|| self.get(RuntimeModelRole::Primary))
-    }
-
     pub(crate) fn contains_role(&self, role: RuntimeModelRole) -> bool {
         self.configs.contains_key(&role)
     }

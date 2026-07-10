@@ -186,12 +186,46 @@ impl Keymap {
             .find_map(|(candidate, action)| (*candidate == binding).then_some(*action))
     }
 
+    pub(crate) fn binding_label_for(&self, action: KeyAction) -> Option<String> {
+        self.bindings
+            .iter()
+            .rev()
+            .find_map(|(binding, candidate)| (*candidate == action).then(|| binding.label()))
+    }
+
     fn set_binding(&mut self, binding: KeyBinding, action: KeyAction) {
         self.bindings
             .retain(|(candidate_binding, candidate_action)| {
                 *candidate_action != action && *candidate_binding != binding
             });
         self.bindings.push((binding, action));
+    }
+}
+
+impl KeyBinding {
+    fn label(self) -> String {
+        let mut parts = Vec::new();
+        if self.modifiers.contains(KeyModifiers::CONTROL) {
+            parts.push("Ctrl".to_owned());
+        }
+        if self.modifiers.contains(KeyModifiers::ALT) {
+            parts.push("Alt".to_owned());
+        }
+        if self.modifiers.contains(KeyModifiers::SHIFT) {
+            parts.push("Shift".to_owned());
+        }
+        parts.push(match self.code {
+            KeyCode::Char(value) => value.to_ascii_uppercase().to_string(),
+            KeyCode::Enter => "Enter".to_owned(),
+            KeyCode::Esc => "Esc".to_owned(),
+            KeyCode::Up => "Up".to_owned(),
+            KeyCode::Down => "Down".to_owned(),
+            KeyCode::PageUp => "PageUp".to_owned(),
+            KeyCode::PageDown => "PageDown".to_owned(),
+            KeyCode::Tab => "Tab".to_owned(),
+            other => format!("{other:?}"),
+        });
+        parts.join("+")
     }
 }
 

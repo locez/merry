@@ -26,10 +26,11 @@ use schemars::Schema;
 use serde_json::{Value, json};
 use std::{
     future::Future,
+    num::NonZeroUsize,
     sync::{Arc, Mutex, OnceLock},
     time::Duration,
 };
-use tokio::sync::{Mutex as AsyncMutex, oneshot};
+use tokio::sync::{Barrier, Mutex as AsyncMutex, oneshot};
 use tokio_util::sync::CancellationToken;
 
 #[path = "agent_loop/diagnostics.rs"]
@@ -179,6 +180,16 @@ fn completed_tool_call_event(call: ModelToolCall) -> ModelEvent {
     ModelEvent::Completed {
         response: ModelResponse::new(
             vec![ModelOutput::tool_call(call)],
+            FinishReason::ToolCalls,
+            None,
+        ),
+    }
+}
+
+fn completed_tool_call_batch_event(calls: Vec<ModelToolCall>) -> ModelEvent {
+    ModelEvent::Completed {
+        response: ModelResponse::new(
+            calls.into_iter().map(ModelOutput::tool_call).collect(),
             FinishReason::ToolCalls,
             None,
         ),
@@ -392,6 +403,90 @@ impl ToolExecutor for ScriptedToolExecutor {
                     Err(ToolExecutionError::infrastructure(message.clone()))
                 }
             }
+        })
+    }
+}
+
+#[derive(Clone)]
+struct BarrierToolExecutor {
+    barrier: Arc<Barrier>,
+    calls: Arc<Mutex<Vec<PendingToolCall>>>,
+    markers: Arc<Mutex<Vec<String>>>,
+}
+
+impl BarrierToolExecutor {
+    fn new(parties: usize) -> Self {
+        Self::with_markers(parties, Arc::new(Mutex::new(Vec::new())))
+    }
+
+    fn with_markers(parties: usize, markers: Arc<Mutex<Vec<String>>>) -> Self {
+        Self {
+            barrier: Arc::new(Barrier::new(parties)),
+            calls: Arc::new(Mutex::new(Vec::new())),
+            markers,
+        }
+    }
+
+    fn calls(&self) -> Vec<PendingToolCall> {
+        self.calls
+            .lock()
+            .expect("tool calls mutex should not be poisoned")
+            .clone()
+    }
+}
+
+impl ToolExecutor for BarrierToolExecutor {
+    fn execute<'a>(
+        &'a self,
+        call: PendingToolCall,
+        _context: ToolExecutionContext,
+    ) -> ToolExecutorFuture<'a> {
+        Box::pin(async move {
+            self.calls
+                .lock()
+                .expect("tool calls mutex should not be poisoned")
+                .push(call.clone());
+            self.markers
+                .lock()
+                .expect("markers mutex should not be poisoned")
+                .push(format!("start:{}", call.id()));
+            self.barrier.wait().await;
+            self.markers
+                .lock()
+                .expect("markers mutex should not be poisoned")
+                .push(format!("end:{}", call.id()));
+            Ok(ToolExecutionOutcome::succeeded_text(format!(
+                "result for {}",
+                call.id()
+            )))
+        })
+    }
+}
+
+#[derive(Clone)]
+struct MarkerToolExecutor {
+    marker: &'static str,
+    markers: Arc<Mutex<Vec<String>>>,
+}
+
+impl MarkerToolExecutor {
+    fn new(marker: &'static str, markers: Arc<Mutex<Vec<String>>>) -> Self {
+        Self { marker, markers }
+    }
+}
+
+impl ToolExecutor for MarkerToolExecutor {
+    fn execute<'a>(
+        &'a self,
+        _call: PendingToolCall,
+        _context: ToolExecutionContext,
+    ) -> ToolExecutorFuture<'a> {
+        Box::pin(async move {
+            self.markers
+                .lock()
+                .expect("markers mutex should not be poisoned")
+                .push(self.marker.to_owned());
+            Ok(ToolExecutionOutcome::succeeded_text(self.marker))
         })
     }
 }
@@ -849,6 +944,61 @@ async fn run_agent_loop_stream_resumes_same_loop_after_bridge_tool_result() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn run_agent_loop_stream_resumes_after_multiple_bridge_results_in_model_order() {
+    let provider = ScriptedModelProvider::new(vec![
+        vec![Ok(completed_tool_call_batch_event(vec![
+            model_tool_call("call-bridge-1", "search_notes"),
+            model_tool_call("call-bridge-2", "search_notes"),
+        ]))],
+        vec![Ok(completed_text_event("final answer"))],
+    ]);
+    let runtime = runtime_with_bridge_tool("agent-loop-stream-bridge-batch", provider.clone());
+    let mut stream = runtime
+        .run_agent_loop_stream(
+            StepInput::user_text("Search two sources.").expect("valid step input"),
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default(),
+        )
+        .expect("agent loop stream should start");
+
+    let mut requested = Vec::new();
+    while let Some(message) = stream.next_driver_message().await {
+        if let AgentLoopStreamMessage::BridgeToolRequest { call } = message {
+            let call_id = call.id().clone();
+            requested.push(call_id.as_str().to_owned());
+            let artifact = ArtifactRef::new(
+                ArtifactId::new(&format!("sdk-result-{}", call_id.as_str()))
+                    .expect("valid artifact id"),
+                ArtifactKind::Json,
+            );
+            stream
+                .submit_bridge_tool_result(
+                    ToolCallResult::succeeded(call_id, artifact),
+                    merry_runtime::ArtifactContent::json(r#"{"ok":true}"#),
+                )
+                .await
+                .expect("bridge result should submit to the active loop");
+        }
+    }
+
+    let result = stream.result().await.expect("stream should produce result");
+    assert_eq!(result.status(), &AgentLoopStatus::Completed);
+    assert_eq!(requested, ["call-bridge-1", "call-bridge-2"]);
+    assert!(runtime.pending_tool_calls().await.is_empty());
+
+    let requests = provider.recorded_requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[1].batch_continuations()[0]
+            .results()
+            .iter()
+            .map(|result| result.call_id().as_str())
+            .collect::<Vec<_>>(),
+        ["call-bridge-1", "call-bridge-2"]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn run_agent_loop_stream_completes_final_output_without_continuation_budget() {
     let provider = ScriptedModelProvider::new(vec![vec![Ok(completed_tool_call_event(
         model_tool_call_with_arguments(
@@ -1115,6 +1265,48 @@ async fn agent_loop_executes_runtime_tool_before_final_output_tool() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn agent_loop_rejects_final_output_mixed_with_other_tool_calls_before_execution() {
+    let provider =
+        ScriptedModelProvider::new(vec![vec![Ok(completed_tool_call_batch_event(vec![
+            model_tool_call("call-search", "search_notes"),
+            model_tool_call_with_arguments(
+                "call-final",
+                FINAL_OUTPUT_TOOL_NAME,
+                json!({"summary": "Order A123 shipped."}),
+            ),
+        ]))]]);
+    let executor = ScriptedToolExecutor::succeeding_text("search result\n");
+    let runtime = runtime_with_tool(
+        "agent-loop-mixed-final-output-batch",
+        provider,
+        executor.clone(),
+    );
+
+    let result = runtime
+        .run_agent_loop(
+            StepInput::user_text("Search notes and return structured status.")
+                .expect("valid step input"),
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default().with_final_output_contract(final_output_contract()),
+        )
+        .await
+        .expect("protocol failure should be returned as loop status");
+
+    assert_eq!(
+        result.status(),
+        &AgentLoopStatus::Failed {
+            diagnostic: merry_core::ErrorInfo::new(
+                "final_output_tool_batch_mixed",
+                "final-output tool calls must be the only call in their model batch",
+            )
+            .expect("valid diagnostic"),
+        }
+    );
+    assert!(executor.calls().is_empty());
+    assert!(runtime.pending_tool_calls().await.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn agent_loop_blocks_text_completion_when_final_output_contract_is_active() {
     let provider =
         ScriptedModelProvider::new(vec![vec![Ok(completed_text_event("Order A123 shipped."))]]);
@@ -1156,6 +1348,7 @@ fn event_kind_names(events: &[RuntimeJournalEvent]) -> Vec<&'static str> {
             RuntimeJournalPayload::AssistantOutputRecorded { .. } => "AssistantOutputRecorded",
             RuntimeJournalPayload::EvidenceReferenced { .. } => "EvidenceReferenced",
             RuntimeJournalPayload::ToolCallPending { .. } => "ToolCallPending",
+            RuntimeJournalPayload::ToolCallBatchPending { .. } => "ToolCallBatchPending",
             RuntimeJournalPayload::BridgeToolCallRequested { .. } => "BridgeToolCallRequested",
             RuntimeJournalPayload::ToolCallResolved { .. } => "ToolCallResolved",
             RuntimeJournalPayload::FinalOutputRecorded { .. } => "FinalOutputRecorded",
@@ -1176,6 +1369,7 @@ fn public_event_kind_names(events: &[RuntimeEvent]) -> Vec<&'static str> {
             RuntimeEvent::CompactionCompleted { .. } => "CompactionCompleted",
             RuntimeEvent::AssistantMessage { .. } => "AssistantMessage",
             RuntimeEvent::ToolCallStarted { .. } => "ToolCallStarted",
+            RuntimeEvent::ToolCallBatchStarted { .. } => "ToolCallBatchStarted",
             RuntimeEvent::ToolCallFinished { .. } => "ToolCallFinished",
             RuntimeEvent::FinalOutputRecorded { .. } => "FinalOutputRecorded",
             RuntimeEvent::ModelRetryAttemptStarted { .. } => "ModelRetryAttemptStarted",
@@ -1423,6 +1617,136 @@ async fn agent_loop_executes_one_tool_and_continues_to_final_completion() {
         requests[1].continuations()[0].result().status(),
         ToolCallResultStatus::Succeeded
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn agent_loop_executes_parallel_safe_batch_and_continues_in_model_order() {
+    let provider = ScriptedModelProvider::new(vec![
+        vec![Ok(completed_tool_call_batch_event(vec![
+            model_tool_call("call-1", "search_notes"),
+            model_tool_call("call-2", "search_notes"),
+        ]))],
+        vec![Ok(completed_text_event("final answer"))],
+    ]);
+    let executor = BarrierToolExecutor::new(2);
+    let runtime = Runtime::builder(session_id("agent-loop-parallel-safe-batch"))
+        .register_tool(
+            merry_runtime::RegisteredTool::read_only(
+                tool_spec("search_notes"),
+                Arc::new(executor.clone()),
+            )
+            .with_parallel_safe_execution(),
+        )
+        .max_parallel_tool_calls(NonZeroUsize::new(2).expect("non-zero limit"))
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .build()
+        .expect("runtime should build");
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(1),
+        run_default_loop(&runtime, "Search notes twice."),
+    )
+    .await
+    .expect("parallel-safe calls should reach the barrier together");
+
+    assert_eq!(result.status(), &AgentLoopStatus::Completed);
+    assert_eq!(result.model_turns_run(), 2);
+    assert_eq!(
+        event_kind_names(result.events()),
+        [
+            "SessionStarted",
+            "StepStarted",
+            "ToolCallBatchPending",
+            "ArtifactRecorded",
+            "ToolCallResolved",
+            "ArtifactRecorded",
+            "ToolCallResolved",
+            "StepStarted",
+            "AssistantOutputRecorded",
+            "StepCompleted",
+        ]
+    );
+    assert!(runtime.pending_tool_calls().await.is_empty());
+    assert_eq!(executor.calls().len(), 2);
+
+    let requests = provider.recorded_requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1].batch_continuations().len(), 1);
+    assert_eq!(
+        requests[1].batch_continuations()[0]
+            .results()
+            .iter()
+            .map(|result| result.call_id().as_str())
+            .collect::<Vec<_>>(),
+        ["call-1", "call-2"]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn agent_loop_treats_exclusive_tool_as_barrier_between_parallel_waves() {
+    let provider = ScriptedModelProvider::new(vec![
+        vec![Ok(completed_tool_call_batch_event(vec![
+            model_tool_call("call-1", "parallel_before"),
+            model_tool_call("call-2", "parallel_before"),
+            model_tool_call("call-3", "exclusive"),
+            model_tool_call("call-4", "parallel_after"),
+        ]))],
+        vec![Ok(completed_text_event("final answer"))],
+    ]);
+    let markers = Arc::new(Mutex::new(Vec::new()));
+    let before = BarrierToolExecutor::with_markers(2, Arc::clone(&markers));
+    let runtime = Runtime::builder(session_id("agent-loop-exclusive-batch-barrier"))
+        .register_tool(
+            merry_runtime::RegisteredTool::read_only(
+                tool_spec("parallel_before"),
+                Arc::new(before),
+            )
+            .with_parallel_safe_execution(),
+        )
+        .register_tool(merry_runtime::RegisteredTool::read_only(
+            tool_spec("exclusive"),
+            Arc::new(MarkerToolExecutor::new("exclusive", Arc::clone(&markers))),
+        ))
+        .register_tool(
+            merry_runtime::RegisteredTool::read_only(
+                tool_spec("parallel_after"),
+                Arc::new(MarkerToolExecutor::new("after", Arc::clone(&markers))),
+            )
+            .with_parallel_safe_execution(),
+        )
+        .max_parallel_tool_calls(NonZeroUsize::new(2).expect("non-zero limit"))
+        .model_provider(Arc::new(provider), model_name())
+        .build()
+        .expect("runtime should build");
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(1),
+        run_default_loop(&runtime, "Run the mixed batch."),
+    )
+    .await
+    .expect("parallel wave should complete before the exclusive barrier");
+
+    assert_eq!(result.status(), &AgentLoopStatus::Completed);
+    let markers = markers
+        .lock()
+        .expect("markers mutex should not be poisoned")
+        .clone();
+    let exclusive_index = markers
+        .iter()
+        .position(|marker| marker == "exclusive")
+        .expect("exclusive marker should be present");
+    let after_index = markers
+        .iter()
+        .position(|marker| marker == "after")
+        .expect("after marker should be present");
+    assert_eq!(
+        markers[..exclusive_index]
+            .iter()
+            .filter(|marker| marker.starts_with("end:"))
+            .count(),
+        2
+    );
+    assert!(after_index > exclusive_index);
 }
 
 #[tokio::test(flavor = "current_thread")]

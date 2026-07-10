@@ -1,7 +1,7 @@
 //! Provider-neutral model requests.
 
 use crate::{
-    ModelError,
+    ModelCapabilities, ModelError,
     tool::{
         ModelToolBatchContinuation, ModelToolCall, ModelToolCallBatch, ModelToolContinuation,
         ModelToolResult, validate_provider_identifier,
@@ -251,11 +251,11 @@ pub enum ModelInputItem {
 }
 
 /// Provider-neutral generation controls.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GenerationConfig {
     max_output_tokens: Option<u64>,
-    allow_parallel_tool_calls: bool,
+    parallel_tool_calls: ParallelToolCalls,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<ReasoningEffort>,
 }
@@ -274,9 +274,20 @@ impl GenerationConfig {
 
         Ok(Self {
             max_output_tokens,
-            allow_parallel_tool_calls,
+            parallel_tool_calls: if allow_parallel_tool_calls {
+                ParallelToolCalls::Enabled
+            } else {
+                ParallelToolCalls::Disabled
+            },
             reasoning_effort: None,
         })
+    }
+
+    /// Returns a copy with an explicit parallel tool-call preference.
+    #[must_use]
+    pub fn with_parallel_tool_calls(mut self, parallel_tool_calls: ParallelToolCalls) -> Self {
+        self.parallel_tool_calls = parallel_tool_calls;
+        self
     }
 
     /// Returns a copy with an optional model reasoning-effort hint.
@@ -294,7 +305,33 @@ impl GenerationConfig {
     /// Whether multiple pending tool calls may be requested in one response.
     #[must_use]
     pub fn allow_parallel_tool_calls(&self) -> bool {
-        self.allow_parallel_tool_calls
+        self.parallel_tool_calls == ParallelToolCalls::Enabled
+    }
+
+    /// Returns the unresolved or explicit parallel tool-call preference.
+    #[must_use]
+    pub fn parallel_tool_calls(&self) -> ParallelToolCalls {
+        self.parallel_tool_calls
+    }
+
+    /// Resolves automatic parallel tool-call behavior against provider capabilities.
+    pub fn resolve_parallel_tool_calls(
+        mut self,
+        capabilities: &ModelCapabilities,
+    ) -> Result<Self, ModelError> {
+        self.parallel_tool_calls = match self.parallel_tool_calls {
+            ParallelToolCalls::Auto if capabilities.supports_parallel_tool_calls() => {
+                ParallelToolCalls::Enabled
+            }
+            ParallelToolCalls::Auto => ParallelToolCalls::Disabled,
+            ParallelToolCalls::Enabled if !capabilities.supports_parallel_tool_calls() => {
+                return Err(ModelError::invalid_request(
+                    "parallel tool calls were enabled but the provider does not support them",
+                ));
+            }
+            explicit => explicit,
+        };
+        Ok(self)
     }
 
     /// Optional provider-neutral reasoning-effort hint.
@@ -308,7 +345,10 @@ impl GenerationConfig {
 #[serde(deny_unknown_fields)]
 struct GenerationConfigWire {
     max_output_tokens: Option<u64>,
-    allow_parallel_tool_calls: bool,
+    #[serde(default)]
+    parallel_tool_calls: Option<ParallelToolCalls>,
+    #[serde(default)]
+    allow_parallel_tool_calls: Option<bool>,
     #[serde(default)]
     reasoning_effort: Option<ReasoningEffort>,
 }
@@ -319,12 +359,49 @@ impl<'de> Deserialize<'de> for GenerationConfig {
         D: Deserializer<'de>,
     {
         let wire = GenerationConfigWire::deserialize(deserializer)?;
-        Ok(
-            Self::new(wire.max_output_tokens, wire.allow_parallel_tool_calls)
-                .map_err(de::Error::custom)?
-                .with_reasoning_effort(wire.reasoning_effort),
-        )
+        if wire.parallel_tool_calls.is_some() && wire.allow_parallel_tool_calls.is_some() {
+            return Err(de::Error::custom(
+                "GenerationConfig must not contain both parallel_tool_calls and allow_parallel_tool_calls",
+            ));
+        }
+        let parallel_tool_calls = wire.parallel_tool_calls.unwrap_or_else(|| {
+            wire.allow_parallel_tool_calls
+                .map_or(ParallelToolCalls::Auto, |enabled| {
+                    if enabled {
+                        ParallelToolCalls::Enabled
+                    } else {
+                        ParallelToolCalls::Disabled
+                    }
+                })
+        });
+        Ok(Self::new(wire.max_output_tokens, false)
+            .map_err(de::Error::custom)?
+            .with_parallel_tool_calls(parallel_tool_calls)
+            .with_reasoning_effort(wire.reasoning_effort))
     }
+}
+
+impl Default for GenerationConfig {
+    fn default() -> Self {
+        Self {
+            max_output_tokens: None,
+            parallel_tool_calls: ParallelToolCalls::Auto,
+            reasoning_effort: None,
+        }
+    }
+}
+
+/// Provider-neutral preference for model-generated parallel tool calls.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ParallelToolCalls {
+    /// Enable when the selected provider declares support.
+    #[default]
+    Auto,
+    /// Require provider support and enable parallel calls.
+    Enabled,
+    /// Force one tool call per model turn.
+    Disabled,
 }
 
 /// Provider-neutral reasoning-effort value.

@@ -9,6 +9,7 @@ mod sandbox;
 pub(crate) use builder::{
     CodingLoopRuntimeOptions, CodingSubagentsConfig, HeadlessCodingRuntimeInput,
     build_coding_loop_runtime, build_headless_coding_runtime, coding_agent_loop_config,
+    resume_headless_coding_runtime,
 };
 pub(crate) use error::CodingRuntimeError;
 pub(crate) use process::{
@@ -19,7 +20,8 @@ pub(crate) use profile::{
 };
 pub(crate) use roles::RuntimeRoleProviderConfig;
 pub(crate) use sandbox::{
-    coding_agent_requires_sandbox_error, coding_loop_smoke_admission_from_current_process,
+    coding_agent_process_admission, coding_agent_requires_sandbox_error,
+    coding_loop_smoke_admission_from_current_process,
 };
 
 #[cfg(test)]

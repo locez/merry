@@ -1,21 +1,26 @@
 use super::completion::{CompletionKind, CompletionSources};
 use super::controller::{
     ControllerEffect, handle_key_action, handle_key_event, handle_mouse_scroll_down,
+    handle_mouse_scroll_up, handle_paste_event,
 };
 use super::input::TextInput;
 use super::keymap::{KeyAction, KeyBinding, Keymap};
+use super::overlay::Overlay;
+use super::preferences::CodeTheme;
 use super::projector::TuiProjector;
+use super::provider_overlay::{ModelListItem, ProviderListItem};
 use super::render::{render_to_buffer, render_to_buffer_and_cursor, render_to_text};
 use super::state::{PatchChangeView, PatchLineView, QueuePreview, TimelineItem, TuiState};
 use super::theme::{SemanticColor, TuiTheme};
+use crate::config::{ConfiguredProviderKind, ProviderConfigSource};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use merry_core::{
     ArtifactId, ArtifactKind, ArtifactRef, ContextWindowSource, ErrorInfo, InteractiveRunState,
-    ModelUsage, PendingToolCall, QueuedInputLane, QueuedInputView, RuntimeEvent,
-    RuntimeEventSource, SessionId, SessionUsage, ToolCallArguments, ToolCallId, ToolCallResult,
-    ToolName, ToolOutput, UsageContextWindow,
+    ModelUsage, PendingToolCall, PendingToolCallBatch, QueuedInputLane, QueuedInputView,
+    RuntimeEvent, RuntimeEventSource, SessionId, SessionUsage, ToolCallArguments, ToolCallBatchId,
+    ToolCallId, ToolCallResult, ToolName, ToolOutput, UsageContextWindow,
 };
-use merry_runtime::SkillMetadata;
+use merry_runtime::{SessionTranscriptItem, SkillMetadata};
 use merry_tool_workspace::WORKSPACE_PATCH_TOOL;
 use ratatui::{
     layout::{Position, Size},
@@ -52,6 +57,10 @@ fn pending_call_with_args(
         ToolName::new(tool_name).unwrap(),
         ToolCallArguments::try_from(arguments).unwrap(),
     )
+}
+
+fn pending_batch(id: &str, calls: Vec<PendingToolCall>) -> PendingToolCallBatch {
+    PendingToolCallBatch::new(ToolCallBatchId::new(id).unwrap(), calls).unwrap()
 }
 
 #[test]
@@ -317,7 +326,7 @@ fn renderer_shows_completion_candidates_above_input() {
 
     assert!(text.contains("> Cargo.toml"));
     assert!(!text.contains("> @ Cargo.toml"));
-    assert!(text.find("> Cargo.toml").unwrap() < text.find("input").unwrap());
+    assert!(text.find("> Cargo.toml").unwrap() < text.find('M').unwrap());
 }
 
 #[test]
@@ -564,8 +573,13 @@ fn controller_mouse_scroll_routes_focus_pane_independently_from_chat() {
         TuiTheme::default(),
     );
     let size = Size::new(180, 28);
+    state.push_timeline_item(TimelineItem::Expanded {
+        title: "Ran cargo test".to_owned(),
+        body: "output".to_owned(),
+    });
+    state.select_previous_artifact();
 
-    handle_mouse_scroll_down(Position::new(90, 5), size, &mut state);
+    handle_mouse_scroll_down(Position::new(150, 5), size, &mut state);
     assert_eq!(state.focus_scroll_offset(), 5);
     assert_eq!(state.timeline_scroll_offset(), 0);
 
@@ -669,13 +683,19 @@ fn controller_artifact_review_steps_through_artifacts_and_submit_returns_to_late
         handle_key_action(KeyAction::ReviewPreviousArtifact, &mut state),
         ControllerEffect::None
     );
-    assert_eq!(state.artifact_review_timeline_index(), Some(0));
+    assert_eq!(state.artifact_review_timeline_index(), Some(1));
 
     state.push_timeline_item(TimelineItem::Expanded {
         title: "Ran third command".to_owned(),
         body: "third output".to_owned(),
     });
-    assert_eq!(state.selected_artifact_timeline_index(), Some(0));
+    assert_eq!(state.selected_artifact_timeline_index(), Some(1));
+
+    assert_eq!(
+        handle_key_action(KeyAction::ReviewPreviousArtifact, &mut state),
+        ControllerEffect::None
+    );
+    assert_eq!(state.artifact_review_timeline_index(), Some(0));
 
     assert_eq!(
         handle_key_action(KeyAction::ReviewNextArtifact, &mut state),
@@ -704,6 +724,37 @@ fn controller_artifact_review_steps_through_artifacts_and_submit_returns_to_late
         handle_key_action(KeyAction::SubmitNext, &mut state),
         ControllerEffect::SubmitNext("draft".to_owned())
     );
+}
+
+#[test]
+fn controller_follow_latest_clears_every_review_and_scroll_state() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.push_timeline_item(TimelineItem::User {
+        text: "first request".to_owned(),
+        lane: QueuedInputLane::Next,
+    });
+    state.push_timeline_item(TimelineItem::Expanded {
+        title: "Ran command".to_owned(),
+        body: "full output".to_owned(),
+    });
+    state.scroll_timeline_up_by(25);
+    state.jump_to_previous_user_input();
+    state.select_previous_artifact();
+
+    assert_eq!(
+        handle_key_action(KeyAction::FollowLatestArtifact, &mut state),
+        ControllerEffect::None
+    );
+
+    assert_eq!(state.timeline_scroll_offset(), 0);
+    assert_eq!(state.timeline_review_user_index(), None);
+    assert_eq!(state.artifact_review_timeline_index(), None);
+    assert_eq!(state.focus_scroll_offset(), 0);
 }
 
 #[test]
@@ -801,6 +852,818 @@ fn controller_ctrl_j_inserts_newline_without_submitting() {
 
     assert_eq!(effect, ControllerEffect::None);
     assert_eq!(state.input_text(), "first\nsecond");
+}
+
+#[test]
+fn controller_ctrl_p_opens_searchable_command_palette_and_settings() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+
+    handle_key_event(
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        &mut state,
+    );
+
+    let palette = render_to_text(&state, 100, 30);
+    assert!(palette.contains("Commands"));
+    assert!(palette.contains("Settings"));
+    assert!(palette.contains("Follow latest"));
+
+    for character in "settings".chars() {
+        handle_key_event(
+            KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+            &mut state,
+        );
+    }
+    handle_key_event(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut state,
+    );
+
+    let settings = render_to_text(&state, 100, 30);
+    assert!(settings.contains("Settings"));
+    assert!(settings.contains("Code theme"));
+    assert!(settings.contains("Default provider"));
+}
+
+#[test]
+fn command_palette_renders_categories_as_single_group_headers() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    handle_key_event(
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        &mut state,
+    );
+
+    let palette = render_to_text(&state, 100, 30);
+
+    assert_eq!(palette.matches("Navigation").count(), 1);
+    assert_eq!(palette.matches("Runtime").count(), 1);
+    assert_eq!(palette.matches("Session").count(), 1);
+}
+
+#[test]
+fn command_palette_search_has_no_redundant_brand_and_commands_are_indented() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    handle_key_event(
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        &mut state,
+    );
+
+    let buffer = render_to_buffer(&state, 100, 30);
+    let (search_x, search_y) =
+        find_text_position(&buffer, "Search commands").expect("search placeholder");
+    let (group_x, _) = find_text_position(&buffer, "Navigation").expect("group heading");
+    let (command_x, _) = find_text_position(&buffer, "Follow latest").expect("group command");
+
+    assert_ne!(buffer[(search_x.saturating_sub(2), search_y)].symbol(), "M");
+    assert!(command_x > group_x);
+}
+
+#[test]
+fn provider_manager_escape_returns_to_command_palette() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.open_command_palette();
+    state.open_provider_manager(vec![ProviderListItem::new(
+        "opencode",
+        "OpenCode",
+        ConfiguredProviderKind::OpenAiCompatible,
+        ProviderConfigSource::Managed,
+        Some(merry_provider_openai::OpenAiProtocol::ChatCompletions),
+        Some("model-a"),
+    )]);
+
+    let effect = handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut state);
+
+    assert_eq!(effect, ControllerEffect::None);
+    assert!(matches!(
+        state.overlay(),
+        Some(super::overlay::Overlay::CommandPalette(_))
+    ));
+}
+
+#[test]
+fn provider_manager_escape_returns_to_settings_when_opened_from_settings() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.open_settings();
+    state.open_provider_manager(Vec::new());
+
+    let effect = handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut state);
+
+    assert_eq!(effect, ControllerEffect::None);
+    assert!(matches!(
+        state.overlay(),
+        Some(super::overlay::Overlay::Settings(_))
+    ));
+}
+
+#[test]
+fn provider_error_dialog_wraps_and_restores_provider_manager() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.open_provider_manager(vec![ProviderListItem::new(
+        "opencode",
+        "OpenCode",
+        ConfiguredProviderKind::OpenAiCompatible,
+        ProviderConfigSource::Managed,
+        Some(merry_provider_openai::OpenAiProtocol::Responses),
+        Some("model-a"),
+    )]);
+    state.set_provider_overlay_error(
+        "provider opencode is defined in config.toml and cannot be edited from this interface"
+            .to_owned(),
+    );
+
+    let text = render_to_text(&state, 50, 18);
+    assert!(text.contains("Provider error"));
+    assert!(text.contains("config.toml"));
+    assert!(text.contains("interface"));
+    assert!(matches!(
+        state.overlay(),
+        Some(super::overlay::Overlay::Dialog(_))
+    ));
+
+    handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut state);
+    assert!(matches!(
+        state.overlay(),
+        Some(super::overlay::Overlay::ProviderManager(_))
+    ));
+}
+
+#[test]
+fn model_discovery_error_dialog_returns_to_model_picker() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.open_model_picker("opencode".to_owned(), "OpenCode".to_owned(), Vec::new());
+
+    state.update_model_picker(
+        "opencode",
+        Err("the model endpoint returned a response that could not be parsed".to_owned()),
+    );
+
+    assert!(render_to_text(&state, 60, 18).contains("Model discovery failed"));
+    handle_key_event(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut state,
+    );
+    assert!(matches!(
+        state.overlay(),
+        Some(super::overlay::Overlay::ModelPicker(_))
+    ));
+}
+
+#[test]
+fn command_palette_uses_a_magenta_selection_surface() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    handle_key_event(
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        &mut state,
+    );
+
+    let buffer = render_to_buffer(&state, 100, 30);
+    let selected = find_cell_style(&buffer, "Settings").expect("selected command should render");
+
+    assert_eq!(selected.bg, Some(Color::Rgb(54, 26, 58)));
+    assert_eq!(selected.fg, Some(Color::White));
+}
+
+#[test]
+fn command_palette_displays_configured_shortcuts_instead_of_stale_defaults() {
+    let keymap = Keymap::from_config(&crate::config::TuiKeymapToml {
+        follow_latest_artifact: Some("ctrl+n".to_owned()),
+        ..crate::config::TuiKeymapToml::default()
+    })
+    .expect("configured keymap should validate");
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        keymap,
+        TuiTheme::default(),
+    );
+    handle_key_event(
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        &mut state,
+    );
+
+    let palette = render_to_text(&state, 100, 30);
+    let follow_latest = palette
+        .lines()
+        .find(|line| line.contains("Follow latest"))
+        .expect("follow latest command should render");
+
+    assert!(follow_latest.contains("Ctrl+N"));
+    assert!(!follow_latest.contains("Ctrl+R"));
+}
+
+#[test]
+fn command_palette_executes_follow_latest_instead_of_only_describing_it() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.push_timeline_item(TimelineItem::User {
+        text: "old request".to_owned(),
+        lane: QueuedInputLane::Next,
+    });
+    state.push_timeline_item(TimelineItem::Expanded {
+        title: "Ran command".to_owned(),
+        body: "output".to_owned(),
+    });
+    state.scroll_timeline_up_by(20);
+    state.jump_to_previous_user_input();
+    state.select_previous_artifact();
+    handle_key_event(
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        &mut state,
+    );
+    for character in "follow latest".chars() {
+        handle_key_event(
+            KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+            &mut state,
+        );
+    }
+
+    handle_key_event(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut state,
+    );
+
+    assert_eq!(state.timeline_scroll_offset(), 0);
+    assert_eq!(state.timeline_review_user_index(), None);
+    assert_eq!(state.artifact_review_timeline_index(), None);
+    assert!(state.overlay().is_none());
+}
+
+#[test]
+fn command_palette_and_cursor_fit_a_narrow_terminal() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    handle_key_event(
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        &mut state,
+    );
+    handle_key_event(
+        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+        &mut state,
+    );
+
+    let (buffer, cursor) = render_to_buffer_and_cursor(&state, 32, 12);
+    let text = rendered_buffer_text(&buffer);
+
+    assert!(text.contains("Commands"));
+    assert!(text.contains("Settings"));
+    assert!(cursor.x < 32);
+    assert!(cursor.y < 12);
+}
+
+#[test]
+fn command_palette_keeps_the_selected_command_visible_in_a_short_terminal() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    handle_key_event(
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        &mut state,
+    );
+    for _ in 0..10 {
+        handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut state);
+    }
+
+    let palette = render_to_text(&state, 40, 12);
+
+    assert!(palette.contains("Quit Merry"));
+}
+
+#[test]
+fn provider_surfaces_fit_supported_terminal_sizes_without_secret_exposure() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.open_provider_manager(vec![ProviderListItem::new(
+        "opencode",
+        "OpenCode Gateway",
+        ConfiguredProviderKind::OpenAiCompatible,
+        ProviderConfigSource::Managed,
+        Some(merry_provider_openai::OpenAiProtocol::ChatCompletions),
+        Some("deepseek-v4-pro"),
+    )]);
+    let manager = render_to_text(&state, 100, 30);
+    assert!(manager.contains("Protocol"));
+    assert!(manager.contains("Chat completions"));
+    assert!(manager.contains("N Add"));
+    assert!(manager.contains("Enter Edit"));
+    assert!(manager.contains("M Models"));
+    assert!(manager.contains("D Delete"));
+    for (width, height) in [(100, 30), (80, 24), (40, 16)] {
+        let text = render_to_text(&state, width, height);
+        assert!(text.contains("Providers"));
+        assert!(text.contains("OpenCode"));
+    }
+
+    state.open_provider_form("provider".to_owned(), Default::default());
+    handle_paste_event("OpenCode", &mut state);
+    let form = render_to_text(&state, 100, 30);
+    assert!(form.contains("API protocol"));
+    assert!(form.contains("Responses"));
+    assert!(form.contains("Save provider"));
+    assert!(form.contains("Ctrl+S Save"));
+    for (width, height) in [(100, 30), (80, 24), (40, 16)] {
+        let (buffer, cursor) = render_to_buffer_and_cursor(&state, width, height);
+        let text = rendered_buffer_text(&buffer);
+        assert!(text.contains("Add provider"));
+        assert!(!text.contains("sk-super-secret"));
+        assert!(cursor.x < width);
+        assert!(cursor.y < height);
+    }
+
+    state.open_provider_editor(
+        super::provider_overlay::ProviderFormSeed {
+            original_alias: "opencode".to_owned(),
+            display_name: "OpenCode Gateway".to_owned(),
+            alias: "opencode".to_owned(),
+            kind: crate::config::ManagedProviderKind::OpenAiCompatible,
+            protocol: Some(merry_provider_openai::OpenAiProtocol::ChatCompletions),
+            base_url: "https://gateway.example.test/v1".to_owned(),
+            model: "deepseek-v4-pro".to_owned(),
+        },
+        Default::default(),
+    );
+    let edit = render_to_text(&state, 100, 30);
+    assert!(edit.contains("Edit provider"));
+    assert!(edit.contains("Chat Completions"));
+    assert!(edit.contains("unchanged"));
+
+    state.open_model_picker(
+        "opencode".to_owned(),
+        "OpenCode Gateway".to_owned(),
+        vec![ModelListItem::new("deepseek-v4-pro", Some("gateway"))],
+    );
+    let models = render_to_text(&state, 100, 30);
+    assert!(models.contains("Enter Use"));
+    assert!(models.contains("F5 Refresh"));
+    for (width, height) in [(100, 30), (80, 24), (40, 16)] {
+        let (buffer, cursor) = render_to_buffer_and_cursor(&state, width, height);
+        let text = rendered_buffer_text(&buffer);
+        assert!(text.contains("Models"));
+        assert!(text.contains("deepseek"));
+        assert!(cursor.x < width);
+        assert!(cursor.y < height);
+    }
+}
+
+#[test]
+fn provider_form_model_picker_returns_selection_to_the_form() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.open_provider_editor(
+        super::provider_overlay::ProviderFormSeed {
+            original_alias: "opencode".to_owned(),
+            display_name: "OpenCode".to_owned(),
+            alias: "opencode".to_owned(),
+            kind: crate::config::ManagedProviderKind::OpenAiCompatible,
+            protocol: Some(merry_provider_openai::OpenAiProtocol::ChatCompletions),
+            base_url: "https://opencode.example.test/v1".to_owned(),
+            model: "model-a".to_owned(),
+        },
+        Default::default(),
+    );
+
+    assert!(state.open_provider_form_model_picker("opencode".to_owned(), "OpenCode".to_owned(),));
+    assert!(state.select_provider_form_model("model-b"));
+
+    let Some(Overlay::ProviderForm(form)) = state.overlay() else {
+        panic!("provider form should be restored");
+    };
+    assert_eq!(
+        form.field(super::provider_overlay::ProviderFormField::Model),
+        "model-b"
+    );
+    assert_eq!(
+        form.selected_field(),
+        super::provider_overlay::ProviderFormField::Model
+    );
+}
+
+#[test]
+fn provider_form_model_picker_escape_preserves_unsaved_form() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.open_provider_form("provider".to_owned(), Default::default());
+    handle_paste_event("Unsaved Provider", &mut state);
+    assert!(state.open_provider_form_model_picker(
+        "unsaved-provider".to_owned(),
+        "Unsaved Provider".to_owned(),
+    ));
+
+    let effect = handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut state);
+
+    assert_eq!(effect, ControllerEffect::BackToProviderForm);
+    state.back_overlay();
+    let Some(Overlay::ProviderForm(form)) = state.overlay() else {
+        panic!("provider form should be restored");
+    };
+    assert_eq!(
+        form.field(super::provider_overlay::ProviderFormField::DisplayName),
+        "Unsaved Provider"
+    );
+}
+
+#[test]
+fn paste_is_routed_to_the_command_palette_instead_of_chat_input() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    handle_key_event(
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        &mut state,
+    );
+
+    handle_paste_event("settings", &mut state);
+
+    let palette = render_to_text(&state, 100, 30);
+    assert!(palette.contains("settings"));
+    assert!(palette.contains("Settings"));
+    assert_eq!(state.input_text(), "");
+}
+
+#[test]
+fn command_palette_blocks_mouse_scroll_from_mutating_the_hidden_timeline() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.push_timeline_item(TimelineItem::Assistant {
+        text: (0..30)
+            .map(|index| format!("line {index}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    });
+    handle_key_event(
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        &mut state,
+    );
+
+    handle_mouse_scroll_up(Position::new(1, 1), Size::new(80, 24), &mut state);
+
+    assert_eq!(state.timeline_scroll_offset(), 0);
+}
+
+#[test]
+fn settings_cycles_code_theme_without_leaking_keys_to_chat_input() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    handle_key_event(
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        &mut state,
+    );
+    for character in "settings".chars() {
+        handle_key_event(
+            KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+            &mut state,
+        );
+    }
+    handle_key_event(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut state,
+    );
+
+    let effect = handle_key_event(
+        KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+        &mut state,
+    );
+
+    let settings = render_to_text(&state, 100, 30);
+    assert!(settings.contains("Catppuccin Mocha"));
+    assert_eq!(state.input_text(), "");
+    assert!(matches!(
+        effect,
+        ControllerEffect::PersistPreferences(preferences)
+            if preferences.code_theme == CodeTheme::CatppuccinMocha
+    ));
+}
+
+#[test]
+fn settings_reasoning_change_applies_to_the_current_runtime() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    handle_key_event(
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        &mut state,
+    );
+    for character in "settings".chars() {
+        handle_key_event(
+            KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+            &mut state,
+        );
+    }
+    handle_key_event(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut state,
+    );
+    for _ in 0..3 {
+        handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut state);
+    }
+
+    let effect = handle_key_event(
+        KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+        &mut state,
+    );
+
+    assert!(matches!(
+        effect,
+        ControllerEffect::ApplyRuntimePreferences(preferences)
+            if preferences.reasoning_effort.is_some()
+    ));
+    assert_eq!(state.settings_notice(), Some("Applied"));
+}
+
+#[test]
+fn settings_compaction_change_applies_to_the_current_runtime() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    handle_key_event(
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        &mut state,
+    );
+    for character in "settings".chars() {
+        handle_key_event(
+            KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+            &mut state,
+        );
+    }
+    handle_key_event(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut state,
+    );
+    for _ in 0..4 {
+        handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut state);
+    }
+
+    let effect = handle_key_event(
+        KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+        &mut state,
+    );
+
+    assert!(matches!(
+        effect,
+        ControllerEffect::ApplyRuntimePreferences(preferences)
+            if preferences.auto_compaction_enabled == Some(true)
+    ));
+    assert_eq!(state.settings_notice(), Some("Applied"));
+}
+
+#[test]
+fn settings_do_not_describe_runtime_changes_as_next_session() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    handle_key_event(
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        &mut state,
+    );
+    for character in "settings".chars() {
+        handle_key_event(
+            KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+            &mut state,
+        );
+    }
+    handle_key_event(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut state,
+    );
+
+    let settings = render_to_text(&state, 100, 30);
+
+    assert!(!settings.contains("next session"));
+}
+
+#[test]
+fn code_theme_setting_applies_to_existing_code_blocks_immediately() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.push_timeline_item(TimelineItem::Assistant {
+        text: "```python\ndef greet():\n    return 'hello'\n```".to_owned(),
+    });
+    handle_key_event(
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        &mut state,
+    );
+    for character in "settings".chars() {
+        handle_key_event(
+            KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+            &mut state,
+        );
+    }
+    handle_key_event(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut state,
+    );
+    handle_key_event(
+        KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+        &mut state,
+    );
+    handle_key_event(
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        &mut state,
+    );
+
+    let buffer = render_to_buffer(&state, 80, 18);
+    let keyword = find_cell_style(&buffer, "def").expect("python keyword should render");
+
+    assert_eq!(keyword.fg, Some(Color::Rgb(203, 166, 247)));
+}
+
+#[test]
+fn shortcuts_opened_from_settings_return_to_settings() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    handle_key_event(
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        &mut state,
+    );
+    for character in "settings".chars() {
+        handle_key_event(
+            KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+            &mut state,
+        );
+    }
+    handle_key_event(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut state,
+    );
+    for _ in 0..8 {
+        handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut state);
+    }
+    handle_key_event(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut state,
+    );
+    assert!(render_to_text(&state, 100, 30).contains("Command palette"));
+
+    handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut state);
+
+    let settings = render_to_text(&state, 100, 30);
+    assert!(settings.contains("Code theme"));
+    assert!(settings.contains("Default provider"));
+}
+
+#[test]
+fn settings_model_editor_owns_the_visible_cursor() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    handle_key_event(
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        &mut state,
+    );
+    for character in "settings".chars() {
+        handle_key_event(
+            KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+            &mut state,
+        );
+    }
+    handle_key_event(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut state,
+    );
+    for _ in 0..2 {
+        handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut state);
+    }
+    handle_key_event(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut state,
+    );
+    for character in "custom-model".chars() {
+        handle_key_event(
+            KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+            &mut state,
+        );
+    }
+
+    let (buffer, cursor) = render_to_buffer_and_cursor(&state, 100, 30);
+    let (_, editor_row) =
+        find_text_position(&buffer, "custom-model").expect("model editor should render");
+
+    assert_eq!(cursor.y, editor_row);
+    assert!(cursor.x > 30);
+}
+
+#[test]
+fn settings_keep_the_selected_row_visible_in_a_short_terminal() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    handle_key_event(
+        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        &mut state,
+    );
+    for character in "settings".chars() {
+        handle_key_event(
+            KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+            &mut state,
+        );
+    }
+    handle_key_event(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut state,
+    );
+    for _ in 0..8 {
+        handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut state);
+    }
+
+    let settings = render_to_text(&state, 40, 12);
+
+    assert!(settings.contains("Keyboard shortcuts"));
 }
 
 #[test]
@@ -905,6 +1768,7 @@ fn controller_respects_configured_ctrl_c_interrupt_binding() {
         .unwrap(),
         TuiTheme::default(),
     );
+    state.set_run_state(InteractiveRunState::RunningModel);
 
     let effect = handle_key_event(
         KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
@@ -1000,6 +1864,7 @@ fn theme_has_required_semantic_color_slots() {
         SemanticColor::Selection,
         SemanticColor::ToolKeyword,
         SemanticColor::Command,
+        SemanticColor::CodeBackground,
         SemanticColor::DiffAdd,
         SemanticColor::DiffDelete,
         SemanticColor::Warning,
@@ -1036,6 +1901,77 @@ fn projector_renders_assistant_text_as_primary_timeline_item() {
             text: "hello from assistant".to_owned()
         }]
     );
+}
+
+#[test]
+fn projector_rebuilds_resume_transcript_history() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    let mut projector = TuiProjector::default();
+    let call = pending_call_with_args(
+        "call-read",
+        "workspace_read_file",
+        json!({"path": "hello_world.py"}),
+    );
+    let result = ToolCallResult::succeeded(
+        call.id().clone(),
+        ArtifactRef::new(
+            ArtifactId::new("read-result").expect("valid artifact id"),
+            ArtifactKind::Json,
+        ),
+    );
+
+    projector.apply_transcript_item(
+        SessionTranscriptItem::UserMessage {
+            text: "看看 hello_world.py".to_owned(),
+        },
+        &mut state,
+    );
+    projector.apply_transcript_item(
+        SessionTranscriptItem::AssistantText {
+            text: "我先读一下文件。".to_owned(),
+        },
+        &mut state,
+    );
+    projector.apply_transcript_item(SessionTranscriptItem::ToolCall { call }, &mut state);
+    projector.apply_transcript_item(
+        SessionTranscriptItem::ToolResult {
+            call_id: ToolCallId::new("call-read").expect("valid call id"),
+            result,
+            output: Some(ToolOutput::Json {
+                json: json!({
+                    "ok": true,
+                    "tool": "workspace_read_file",
+                    "path": "hello_world.py",
+                    "content": "print('hi')\n",
+                    "bytes": 12,
+                    "truncated": false
+                })
+                .to_string(),
+            }),
+        },
+        &mut state,
+    );
+
+    assert!(matches!(
+        &state.timeline()[0],
+        TimelineItem::User { text, lane: QueuedInputLane::Next } if text == "看看 hello_world.py"
+    ));
+    assert!(matches!(
+        &state.timeline()[1],
+        TimelineItem::Assistant { text } if text == "我先读一下文件。"
+    ));
+    assert!(matches!(
+        &state.timeline()[2],
+        TimelineItem::ExpandedDetail { title, body, focus_body }
+            if title == "Read hello_world.py"
+                && body.contains("print('hi')")
+                && focus_body.contains("print('hi')")
+    ));
 }
 
 #[test]
@@ -1190,6 +2126,53 @@ fn projector_keeps_successful_non_patch_tool_compact_and_expands_patch_tool() {
     assert_eq!(state.timeline().len(), 2);
     assert!(matches!(state.timeline()[0], TimelineItem::Muted { .. }));
     assert!(matches!(state.timeline()[1], TimelineItem::Expanded { .. }));
+}
+
+#[test]
+fn projector_expands_tool_batches_in_model_order() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    let mut projector = TuiProjector::default();
+
+    projector.apply(
+        RuntimeEvent::ToolCallBatchStarted {
+            batch: pending_batch(
+                "batch-1",
+                vec![
+                    pending_call_with_args(
+                        "call-first",
+                        "workspace_read_file",
+                        json!({"path": "first.rs"}),
+                    ),
+                    pending_call_with_args(
+                        "call-second",
+                        "workspace_list_dir",
+                        json!({"path": "src"}),
+                    ),
+                ],
+            ),
+            source: source(),
+        },
+        &mut state,
+    );
+
+    assert_eq!(
+        state.timeline(),
+        [
+            TimelineItem::Muted {
+                title: "Read".to_owned(),
+                detail: "first.rs".to_owned(),
+            },
+            TimelineItem::Muted {
+                title: "Listed".to_owned(),
+                detail: "src".to_owned(),
+            },
+        ]
+    );
 }
 
 #[test]
@@ -1639,9 +2622,10 @@ fn focus_panel_shows_full_process_output_when_preview_is_compact() {
     assert!(body.contains("Cargo.toml"));
     assert!(!body.contains("README.md"));
 
+    state.select_previous_artifact();
     let text = render_to_text(&state, 180, 24);
 
-    assert!(text.contains("FOCUS command ls"));
+    assert!(text.contains("command ls"));
     assert!(text.contains("stdout: AGENTS.md"));
     assert!(text.contains("Cargo.lock"));
     assert!(text.contains("Cargo.toml"));
@@ -1842,6 +2826,7 @@ fn renderer_shows_workspace_patch_as_edited_block() {
             ],
         }],
     });
+    state.select_previous_artifact();
 
     let text = render_to_text(&state, 180, 16);
 
@@ -2009,7 +2994,7 @@ fn status_text_shows_model_reasoning_effort() {
 }
 
 #[test]
-fn status_text_shows_merry_motion_and_elapsed_while_running() {
+fn status_text_shows_compact_merry_shuttle_and_elapsed_while_running() {
     let mut state = TuiState::new(
         "/repo".into(),
         "gpt-test".to_owned(),
@@ -2019,12 +3004,25 @@ fn status_text_shows_merry_motion_and_elapsed_while_running() {
     let now = Instant::now();
 
     state.set_run_state(InteractiveRunState::RunningModel);
-    state.set_active_run_started_at_for_test(now - Duration::from_secs(37));
+    let frames = [
+        (0, "[M··]"),
+        (100, "[·M·]"),
+        (200, "[··M]"),
+        (300, "[·M·]"),
+        (400, "[M··]"),
+    ];
+    for (elapsed_ms, expected) in frames {
+        state.set_active_run_started_at_for_test(now - Duration::from_millis(elapsed_ms));
+        let status = state.interaction_status_text_at(now);
+        assert_eq!(status.split_whitespace().next(), Some(expected));
+    }
 
-    let status = state.interaction_status_text_at(now);
-    assert!(status.starts_with('['));
-    assert!(status.chars().take(11).any(|value| value == 'M'));
-    assert!(status.contains("] Running model (37s)"));
+    state.set_active_run_started_at_for_test(now - Duration::from_secs(37));
+    assert!(
+        state
+            .interaction_status_text_at(now)
+            .contains("Running model (37s)")
+    );
 }
 
 #[test]
@@ -2171,7 +3169,7 @@ fn renderer_shows_status_timeline_queue_and_input() {
 }
 
 #[test]
-fn renderer_uses_three_pane_cockpit_on_wide_terminal() {
+fn renderer_uses_one_timeline_without_permanent_side_rails() {
     let mut state = TuiState::new(
         "/repo/merry".into(),
         "gpt-test".to_owned(),
@@ -2202,16 +3200,18 @@ fn renderer_uses_three_pane_cockpit_on_wide_terminal() {
 
     let text = render_to_text(&state, 180, 32);
 
-    assert!(text.contains("CHAT"));
-    assert!(text.contains("FOCUS command cargo test -p merry-cli"));
-    assert!(text.contains("RUN"));
+    assert!(text.contains("merry"));
+    assert!(text.contains("make the TUI distinct"));
+    assert!(text.contains("Ran cargo test -p merry-cli"));
     assert!(text.contains("queued next item"));
     assert!(text.contains("queued backlog item"));
-    assert!(!text.contains("queue\nNext"));
+    assert!(!text.contains("CHAT"));
+    assert!(!text.contains("FOCUS"));
+    assert!(!text.contains("RUN"));
 }
 
 #[test]
-fn renderer_uses_stacked_work_rail_on_medium_terminal() {
+fn renderer_keeps_medium_terminal_focused_on_the_timeline() {
     let mut state = TuiState::new(
         "/repo/merry".into(),
         "gpt-test".to_owned(),
@@ -2229,10 +3229,10 @@ fn renderer_uses_stacked_work_rail_on_medium_terminal() {
 
     let text = render_to_text(&state, 140, 28);
 
-    assert!(text.contains("CHAT"));
-    assert!(text.contains("FOCUS read"));
-    assert!(text.contains("RUN"));
     assert!(text.contains("review layout"));
+    assert!(text.contains("Read AGENTS.md"));
+    assert!(!text.contains("FOCUS"));
+    assert!(!text.contains("RUN"));
 }
 
 #[test]
@@ -2252,18 +3252,19 @@ fn renderer_keeps_reviewed_artifact_visible_while_index_shows_newer_items() {
         body: "stdout: second output".to_owned(),
     });
     state.select_previous_artifact();
+    state.select_previous_artifact();
 
     let text = render_to_text(&state, 180, 28);
 
-    assert!(text.contains("FOCUS command first command"));
+    assert!(text.contains("command first command"));
     assert!(text.contains("stdout"));
     assert!(text.contains("first output"));
-    assert!(text.contains("> Ran first command"));
-    assert!(text.contains("- Ran second command"));
+    assert!(text.contains("Ran second command"));
+    assert!(!text.contains("RUN"));
 }
 
 #[test]
-fn cockpit_chat_keeps_read_artifacts_collapsed_while_focus_shows_content() {
+fn detail_opens_read_content_without_replacing_the_wide_timeline() {
     let mut state = TuiState::new(
         "/repo/merry".into(),
         "gpt-test".to_owned(),
@@ -2274,12 +3275,13 @@ fn cockpit_chat_keeps_read_artifacts_collapsed_while_focus_shows_content() {
         title: "Read hello_world.py".to_owned(),
         body: "print(\"Hello, Merry!\")".to_owned(),
     });
+    state.select_previous_artifact();
 
     let text = render_to_text(&state, 180, 28);
 
-    assert!(text.contains("FOCUS Read hello_world.py"));
-    assert!(text.contains("print(\"Hello, Merry!\")"));
     assert!(text.contains("Read hello_world.py"));
+    assert!(text.contains("print(\"Hello, Merry!\")"));
+    assert!(!text.contains("FOCUS"));
 
     let chat_text = text
         .lines()
@@ -2301,6 +3303,7 @@ fn focus_read_file_preserves_code_indentation_and_highlights_by_extension() {
         title: "Read hello_world.py".to_owned(),
         body: "def build_greeting(name: str) -> str:\n    period = \"morning\"\n    return f\"Good {period}, {name}!\"".to_owned(),
     });
+    state.select_previous_artifact();
 
     let buffer = render_to_buffer(&state, 180, 28);
     let text = rendered_buffer_text(&buffer);
@@ -2325,6 +3328,7 @@ fn focus_list_dir_renders_entries_with_semantic_colors() {
         title: "Listed .".to_owned(),
         body: "Cargo.toml\ncrates/\n.hidden".to_owned(),
     });
+    state.select_previous_artifact();
 
     let buffer = render_to_buffer(&state, 180, 28);
 
@@ -2351,6 +3355,7 @@ fn focus_panel_scrolls_independently_from_chat_timeline() {
             .collect::<Vec<_>>()
             .join("\n"),
     });
+    state.select_previous_artifact();
 
     let bottom = render_to_text(&state, 180, 24);
     state.scroll_focus_down_by(10);
@@ -2388,7 +3393,8 @@ fn renderer_keeps_bottom_queue_on_narrow_terminal() {
     assert!(!text.contains("RUN"));
     assert!(text.contains("queue"));
     assert!(text.contains("narrow next item"));
-    assert!(text.contains("input"));
+    assert!(text.contains("M"));
+    assert!(!text.contains("input"));
 }
 
 #[test]
@@ -2411,7 +3417,7 @@ fn narrow_chat_keeps_read_artifacts_collapsed() {
 }
 
 #[test]
-fn ipad_width_uses_three_pane_cockpit() {
+fn standard_width_uses_detail_as_the_content_surface() {
     let mut state = TuiState::new(
         "/repo/merry".into(),
         "gpt-test".to_owned(),
@@ -2422,12 +3428,15 @@ fn ipad_width_uses_three_pane_cockpit() {
         title: "Read hello_world.py".to_owned(),
         body: "print(\"Hello, Merry!\")".to_owned(),
     });
+    state.select_previous_artifact();
 
     let text = render_to_text(&state, 100, 24);
 
-    assert!(text.contains("CHAT"));
-    assert!(text.contains("FOCUS Read hello_world.py"));
-    assert!(text.contains("RUN"));
+    assert!(text.contains("Read hello_world.py"));
+    assert!(text.contains("print(\"Hello, Merry!\")"));
+    assert!(!text.contains("CHAT"));
+    assert!(!text.contains("FOCUS"));
+    assert!(!text.contains("RUN"));
 }
 
 #[test]
@@ -2445,9 +3454,9 @@ fn renderer_preserves_user_message_newlines() {
 
     let text = render_to_text(&state, 80, 16);
 
-    assert!(text.contains("user: 1234"));
-    assert!(text.contains("      换 行 测 试"));
-    assert!(!text.contains("user: 1234换行测试"));
+    assert!(text.contains("▌ 1234"));
+    assert!(text.contains("▌ 换 行 测 试"));
+    assert!(!text.contains("user:"));
 }
 
 #[test]
@@ -2502,10 +3511,17 @@ fn renderer_shows_user_input_in_timeline() {
         lane: QueuedInputLane::Next,
     });
 
-    let text = render_to_text(&state, 80, 16);
+    let buffer = render_to_buffer(&state, 80, 16);
+    let text = rendered_buffer_text(&buffer);
 
-    assert!(text.contains("user"));
+    assert!(text.contains("▌ 查"));
+    assert!(!text.contains("user:"));
     assert!(text.contains("baidu.com"));
+    let accent_style = find_cell_style(&buffer, "▌").expect("user accent should render");
+    let body_style = find_cell_style(&buffer, "baidu.com").expect("user body should render");
+    assert_eq!(accent_style.fg, Some(Color::LightMagenta));
+    assert!(accent_style.add_modifier.contains(Modifier::BOLD));
+    assert_eq!(body_style.fg, Some(Color::White));
 }
 
 #[test]
@@ -2604,12 +3620,12 @@ fn renderer_review_user_input_starts_viewport_at_selected_user_turn() {
 
     state.jump_to_previous_user_input();
     let second = render_to_text(&state, 80, 18);
-    assert!(second.contains("user: second request"));
+    assert!(second.contains("▌ second request"));
     assert!(!second.contains("first request"));
 
     state.jump_to_previous_user_input();
     let first = render_to_text(&state, 80, 18);
-    assert!(first.contains("user: first request"));
+    assert!(first.contains("▌ first request"));
     assert!(first.contains("first answer"));
 
     state.exit_timeline_review();
@@ -2664,7 +3680,7 @@ fn cockpit_wide_cursor_remains_inside_input_with_cjk_text() {
     state.insert_input_str("你好 cockpit");
 
     let (buffer, cursor) = render_to_buffer_and_cursor(&state, 180, 24);
-    let input_label = find_text_position(&buffer, "input").expect("input label should render");
+    let input_label = find_text_position(&buffer, "M").expect("input brand should render");
 
     assert!(cursor.y > input_label.1);
     assert!(cursor.x > input_label.0);
@@ -2722,18 +3738,52 @@ fn renderer_applies_configured_semantic_theme_colors() {
         suspended: vec![],
         backlog: vec![],
     });
+    state.select_previous_artifact();
 
     let buffer = render_to_buffer(&state, 180, 24);
 
-    assert_eq!(find_cell_color(&buffer, "gpt-test"), Some(Color::Red));
+    assert_eq!(find_cell_color(&buffer, "merry"), Some(Color::Red));
+    assert_eq!(find_cell_color(&buffer, "/repo"), Some(Color::LightBlue));
+    assert_eq!(find_cell_color(&buffer, "gpt-test"), Some(Color::Cyan));
     assert_eq!(find_cell_color(&buffer, "tool"), Some(Color::Blue));
     assert_eq!(find_cell_color(&buffer, "Ran"), Some(Color::Cyan));
     assert_eq!(find_cell_color(&buffer, "cargo"), Some(Color::LightBlue));
-    assert_eq!(find_cell_color(&buffer, "patch"), Some(Color::Magenta));
+    assert_eq!(find_cell_color(&buffer, "patch"), Some(Color::Cyan));
     assert_eq!(find_cell_color(&buffer, "+added"), Some(Color::Green));
     assert_eq!(find_cell_color(&buffer, "-removed"), Some(Color::Yellow));
     assert_eq!(find_cell_color(&buffer, "Next"), Some(Color::Magenta));
     assert_eq!(find_cell_color(&buffer, "queued"), Some(Color::Blue));
+}
+
+#[test]
+fn renderer_uses_colored_header_bar_and_branded_input() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.insert_input_str("draft");
+
+    let buffer = render_to_buffer(&state, 80, 16);
+    let text = rendered_buffer_text(&buffer);
+    let path_style = find_cell_style(&buffer, "/repo").expect("workspace path should render");
+    let model_style = find_cell_style(&buffer, "gpt-test").expect("model should render");
+    let usage_style = find_cell_style(&buffer, "usage -").expect("usage should render");
+    let input_brand_style = find_cell_style(&buffer, "M").expect("input brand should render");
+    let input_style = find_cell_style(&buffer, "draft").expect("input text should render");
+
+    assert!(!text.contains("input"));
+    assert_eq!(path_style.fg, Some(Color::LightBlue));
+    assert_eq!(model_style.fg, Some(Color::LightCyan));
+    assert!(model_style.add_modifier.contains(Modifier::BOLD));
+    assert_eq!(usage_style.fg, Some(Color::White));
+    assert!(usage_style.add_modifier.contains(Modifier::DIM));
+    assert_eq!(path_style.bg, Some(Color::Rgb(54, 26, 58)));
+    assert_eq!(model_style.bg, Some(Color::Rgb(54, 26, 58)));
+    assert_eq!(input_brand_style.fg, Some(Color::LightMagenta));
+    assert!(input_brand_style.add_modifier.contains(Modifier::BOLD));
+    assert_eq!(input_style.fg, Some(Color::White));
 }
 
 #[test]
@@ -2991,12 +4041,44 @@ fn renderer_renders_assistant_fenced_code_blocks_without_fence_markers() {
         text: "Output:\n```text\nhello world\n```\nDone".to_owned(),
     });
 
-    let text = render_to_text(&state, 80, 18);
-    eprintln!("{text}");
+    let buffer = render_to_buffer(&state, 80, 18);
+    let text = rendered_buffer_text(&buffer);
     assert!(text.contains("Output:"));
-    assert!(text.contains("  hello world"));
+    assert!(text.contains("▎ hello world"));
     assert!(text.contains("Done"));
     assert!(!text.contains("```"));
+
+    let rail_style = find_cell_style(&buffer, "▎").expect("code rail should render");
+    let code_style = find_cell_style(&buffer, "hello world").expect("code should render");
+    let (_, code_row) = find_text_position(&buffer, "hello world").expect("code should render");
+    assert_eq!(rail_style.fg, Some(Color::LightMagenta));
+    assert_eq!(rail_style.bg, Some(Color::Rgb(40, 36, 42)));
+    assert_eq!(code_style.bg, Some(Color::Rgb(40, 36, 42)));
+    assert_eq!(
+        buffer[(40, code_row)].style().bg,
+        Some(Color::Rgb(40, 36, 42))
+    );
+}
+
+#[test]
+fn renderer_repeats_code_rail_on_wrapped_visual_lines() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.push_timeline_item(TimelineItem::Assistant {
+        text: "```text\nalpha beta gamma delta epsilon\n```".to_owned(),
+    });
+
+    let text = render_to_text(&state, 20, 18);
+    let code_lines = text.lines().filter(|line| line.contains('▎')).count();
+
+    assert!(
+        code_lines >= 2,
+        "wrapped code should repeat the rail:\n{text}"
+    );
 }
 
 #[test]
@@ -3123,6 +4205,7 @@ fn renderer_shows_patch_line_numbers_and_diff_backgrounds() {
             ],
         }],
     });
+    state.select_previous_artifact();
 
     let text = render_to_text(&state, 96, 18);
     assert!(text.contains("   4  def build_message():"));
@@ -3139,7 +4222,7 @@ fn renderer_shows_patch_line_numbers_and_diff_backgrounds() {
 }
 
 #[test]
-fn renderer_promotes_latest_patch_into_focus_pane_on_wide_terminal() {
+fn renderer_opens_latest_patch_in_on_demand_detail() {
     let mut state = TuiState::new(
         "/repo/merry".into(),
         "gpt-test".to_owned(),
@@ -3160,10 +4243,11 @@ fn renderer_promotes_latest_patch_into_focus_pane_on_wide_terminal() {
             ],
         }],
     });
+    state.select_previous_artifact();
 
     let text = render_to_text(&state, 180, 32);
 
-    assert!(text.contains("FOCUS patch hello_world.py"));
+    assert!(text.contains("patch hello_world.py"));
     assert!(text.contains("Edited hello_world.py (+1 -1)"));
     assert!(text.contains("   7 -print('old')"));
     assert!(text.contains("   7 +print('new')"));
@@ -3197,7 +4281,7 @@ fn renderer_ellipsizes_queue_items_to_region_width() {
 }
 
 #[test]
-fn plan_panel_truncates_long_queue_content_on_wide_terminal() {
+fn queue_preview_truncates_long_content_on_narrow_terminal() {
     let mut state = TuiState::new(
         "/repo/merry".into(),
         "gpt-test".to_owned(),
@@ -3215,7 +4299,7 @@ fn plan_panel_truncates_long_queue_content_on_wide_terminal() {
         backlog: vec![],
     });
 
-    let text = render_to_text(&state, 180, 24);
+    let text = render_to_text(&state, 50, 24);
 
     assert!(text.contains("this queue item"));
     assert!(text.contains("..."));
@@ -3237,10 +4321,11 @@ fn focus_panel_clips_long_command_output_with_ellipsis() {
             .collect::<Vec<_>>()
             .join("\n"),
     });
+    state.select_previous_artifact();
 
     let text = render_to_text(&state, 180, 16);
 
-    assert!(text.contains("FOCUS command cargo test"));
+    assert!(text.contains("command cargo test"));
     assert!(text.contains("..."));
     assert!(!text.contains("stdout: line 39"));
 }
@@ -3257,7 +4342,7 @@ fn very_short_terminal_keeps_input_visible() {
 
     let text = render_to_text(&state, 100, 8);
 
-    assert!(text.contains("input"));
+    assert!(text.contains("M"));
     assert!(text.contains("gpt-test"));
 }
 
@@ -3306,11 +4391,11 @@ fn renderer_keeps_input_region_stable_when_queue_count_changes() {
     let three_lane_text = render_to_text(&three_lane_state, 80, 18);
     let one_item_input_row = one_item_text
         .lines()
-        .position(|line| line.contains("input"))
+        .position(|line| line.contains("M"))
         .expect("one item queue render should show input");
     let three_lane_input_row = three_lane_text
         .lines()
-        .position(|line| line.contains("input"))
+        .position(|line| line.contains("M"))
         .expect("three lane queue render should show input");
 
     assert_eq!(one_item_input_row, three_lane_input_row);
@@ -3350,7 +4435,8 @@ fn renderer_keeps_timeline_visible_when_bottom_panes_are_taller_than_short_windo
 
     assert!(text.contains("latest assistant output"));
     assert!(text.contains("line five"));
-    assert!(text.contains("input"));
+    assert!(text.contains("M"));
+    assert!(!text.contains("input"));
     assert!(text.contains("gpt-test"));
     let assistant_row = text
         .lines()
@@ -3358,9 +4444,9 @@ fn renderer_keeps_timeline_visible_when_bottom_panes_are_taller_than_short_windo
         .expect("assistant output should render");
     let input_row = text
         .lines()
-        .position(|line| line.contains("input"))
+        .position(|line| line.contains("M"))
         .expect("input panel should render");
-    assert!(input_row.saturating_sub(assistant_row) >= 4, "{text}");
+    assert!(input_row > assistant_row, "{text}");
 }
 
 fn find_cell_color(buffer: &ratatui::buffer::Buffer, text: &str) -> Option<Color> {

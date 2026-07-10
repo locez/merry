@@ -354,7 +354,9 @@ pub enum AgentLoopStatus {
 pub enum AgentLoopBlockedReason {
     /// The configured model-turn budget has been reached.
     MaxModelTurnsReached { max_model_turns: usize },
-    /// A step emitted more than one pending tool call. The MVP loop is serial.
+    /// Legacy blocked status retained for compatibility with older loop results.
+    ///
+    /// Current runtime-owned loops execute supported pending batches directly.
     MultiplePendingToolCalls { pending_count: usize },
     /// A step emitted both completion and pending tool-call state.
     StepCompletedWithPendingToolCall { pending_count: usize },
@@ -412,22 +414,24 @@ impl AgentLoopError {
 }
 
 impl Runtime {
-    /// Runs a bounded, serial runtime-owned agent loop.
+    /// Runs a bounded runtime-owned agent loop.
     ///
     /// The loop starts with one [`Runtime::step`]. If the step completes, fails,
     /// or is cancelled, the corresponding status is returned with all observed
-    /// events. If the step records exactly one pending tool call and more step
-    /// budget remains, the loop executes that call through
-    /// [`Runtime::execute_tool_call`], appends its events, and starts a
-    /// continuation step without adding a new user message.
+    /// events. If the step records pending tool calls and more step budget
+    /// remains, the loop executes registered runtime tools, appends their
+    /// events, and starts a continuation step without adding a new user
+    /// message.
     ///
-    /// The MVP loop does not support parallel tool calls and does not introduce
-    /// provider conversation state. It owns the runtime active-step permit for
-    /// the full step -> tool execution -> continuation sequence. While the loop
-    /// is running, cloned runtime handles reject concurrent direct mutation
-    /// APIs with [`RuntimeError::StepAlreadyActive`]. Cancellation and
-    /// generation controls are reused from `context` for every step and tool
-    /// execution.
+    /// A batch preserves model order around exclusive tools. Adjacent tools
+    /// explicitly registered as parallel-safe may execute concurrently up to
+    /// the runtime limit; all other tools execute serially. The loop does not
+    /// introduce provider conversation state. It owns the runtime active-step
+    /// permit for the full step -> tool execution -> continuation sequence.
+    /// While the loop is running, cloned runtime handles reject concurrent
+    /// direct mutation APIs with [`RuntimeError::StepAlreadyActive`].
+    /// Cancellation and generation controls are reused from `context` for
+    /// every step and tool execution.
     pub async fn run_agent_loop(
         &self,
         input: StepInput,
@@ -670,6 +674,86 @@ impl Runtime {
                         session_usage,
                     ));
                 }
+                StepOutcome::PendingBatch(calls) => {
+                    if model_turns_run >= config.max_model_turns() {
+                        let session_usage = self.usage().await;
+                        return Ok(AgentLoopResult::new(
+                            AgentLoopStatus::Blocked {
+                                reason: AgentLoopBlockedReason::MaxModelTurnsReached {
+                                    max_model_turns: config.max_model_turns(),
+                                },
+                            },
+                            events,
+                            model_turns_run,
+                            None,
+                            session_usage,
+                        ));
+                    }
+
+                    if let Some(call) = calls.iter().find_map(|call| match call {
+                        PendingLoopToolCall::Bridge(call) => Some(call),
+                        PendingLoopToolCall::Runtime(_) | PendingLoopToolCall::FinalOutput(_) => {
+                            None
+                        }
+                    }) {
+                        let session_usage = self.usage().await;
+                        return Ok(AgentLoopResult::new(
+                            AgentLoopStatus::Blocked {
+                                reason: AgentLoopBlockedReason::BridgeToolCallRequested {
+                                    call_id: call.id().clone(),
+                                    tool_name: call.name().clone(),
+                                },
+                            },
+                            events,
+                            model_turns_run,
+                            None,
+                            session_usage,
+                        ));
+                    }
+
+                    let runtime_calls = calls
+                        .into_iter()
+                        .map(|call| match call {
+                            PendingLoopToolCall::Runtime(call) => call,
+                            PendingLoopToolCall::FinalOutput(_) => {
+                                unreachable!(
+                                    "mixed final-output batches are rejected by provider step"
+                                )
+                            }
+                            PendingLoopToolCall::Bridge(_) => {
+                                unreachable!("bridge batches return before runtime execution")
+                            }
+                        })
+                        .collect();
+                    let execution = self
+                        .execute_tool_call_batch_with_active_permit(
+                            runtime_calls,
+                            ToolExecutionContext::new(loop_token.clone()),
+                            &loop_permit,
+                        )
+                        .await;
+                    let (mut execution_events, error) = execution.into_parts();
+                    events.append(&mut execution_events);
+
+                    if let Some(error) = error {
+                        if let RuntimeError::ToolExecutionCancelled { call_id, .. } = error {
+                            let session_usage = self.usage().await;
+                            return Ok(AgentLoopResult::new(
+                                AgentLoopStatus::Cancelled {
+                                    diagnostic: tool_execution_cancelled_diagnostic(&call_id),
+                                },
+                                events,
+                                model_turns_run,
+                                None,
+                                session_usage,
+                            ));
+                        }
+                        trace_loop_error(self.session_id().as_str(), model_turns_run, &error);
+                        return Err(AgentLoopError::new(events, error));
+                    }
+
+                    next_input = Some(continuation_step_input());
+                }
                 StepOutcome::Pending(PendingLoopToolCall::Runtime(call)) => {
                     if model_turns_run >= config.max_model_turns() {
                         trace_loop_finish(
@@ -764,7 +848,7 @@ impl Runtime {
         }
     }
 
-    /// Starts a bounded, serial runtime-owned agent loop and returns live events.
+    /// Starts a bounded runtime-owned agent loop and returns live events.
     ///
     /// This has the same loop semantics as [`Runtime::run_agent_loop`], but it
     /// yields each observed [`RuntimeJournalEvent`] as soon as the underlying step or
@@ -921,6 +1005,101 @@ async fn run_agent_loop_stream_producer(
                         None,
                         session_usage,
                     ));
+                }
+
+                next_input = Some(continuation_step_input());
+            }
+            StepOutcome::PendingBatch(calls) => {
+                if model_turns_run >= config.max_model_turns() {
+                    let session_usage = runtime.usage().await;
+                    return Some(AgentLoopResult::new(
+                        AgentLoopStatus::Blocked {
+                            reason: AgentLoopBlockedReason::MaxModelTurnsReached {
+                                max_model_turns: config.max_model_turns(),
+                            },
+                        },
+                        events,
+                        model_turns_run,
+                        None,
+                        session_usage,
+                    ));
+                }
+
+                let mut runtime_wave = Vec::new();
+                for call in calls {
+                    match call {
+                        PendingLoopToolCall::Runtime(call) => runtime_wave.push(call),
+                        PendingLoopToolCall::Bridge(call) => {
+                            if let Some(error) = execute_stream_runtime_batch(
+                                &runtime,
+                                std::mem::take(&mut runtime_wave),
+                                &loop_token,
+                                &loop_permit,
+                                &mut projector,
+                                &sender,
+                                &mut events,
+                            )
+                            .await?
+                            {
+                                if let RuntimeError::ToolExecutionCancelled { call_id, .. } = error
+                                {
+                                    let session_usage = runtime.usage().await;
+                                    return Some(AgentLoopResult::new(
+                                        AgentLoopStatus::Cancelled {
+                                            diagnostic: tool_execution_cancelled_diagnostic(
+                                                &call_id,
+                                            ),
+                                        },
+                                        events,
+                                        model_turns_run,
+                                        None,
+                                        session_usage,
+                                    ));
+                                }
+                                return None;
+                            }
+                            receive_and_publish_bridge_tool_result(
+                                &runtime,
+                                call,
+                                &loop_token,
+                                &loop_permit,
+                                &mut bridge_receiver,
+                                &mut projector,
+                                &sender,
+                                &mut events,
+                            )
+                            .await?;
+                        }
+                        PendingLoopToolCall::FinalOutput(_) => {
+                            unreachable!("mixed final-output batches are rejected by provider step")
+                        }
+                    }
+                }
+
+                if let Some(error) = execute_stream_runtime_batch(
+                    &runtime,
+                    runtime_wave,
+                    &loop_token,
+                    &loop_permit,
+                    &mut projector,
+                    &sender,
+                    &mut events,
+                )
+                .await?
+                {
+                    if let RuntimeError::ToolExecutionCancelled { call_id, .. } = error {
+                        let session_usage = runtime.usage().await;
+                        return Some(AgentLoopResult::new(
+                            AgentLoopStatus::Cancelled {
+                                diagnostic: tool_execution_cancelled_diagnostic(&call_id),
+                            },
+                            events,
+                            model_turns_run,
+                            None,
+                            session_usage,
+                        ));
+                    }
+                    return None;
                 }
 
                 next_input = Some(continuation_step_input());
@@ -1302,9 +1481,11 @@ pub(crate) enum StepOutcome {
     Cancelled(ErrorInfo),
     ToolResultRecorded,
     Pending(PendingLoopToolCall),
+    PendingBatch(Vec<PendingLoopToolCall>),
     Blocked(AgentLoopBlockedReason),
 }
 
+#[derive(Clone)]
 pub(crate) enum PendingLoopToolCall {
     Runtime(PendingToolCall),
     Bridge(PendingToolCall),
@@ -1315,12 +1496,13 @@ pub(crate) fn classify_step_events(
     events: &[RuntimeJournalEvent],
     final_output_contract: Option<&FinalOutputContract>,
 ) -> StepOutcome {
-    if let Some(call) = events.iter().rev().find_map(|event| match &event.payload {
-        RuntimeJournalPayload::BridgeToolCallRequested { call } => Some(call.clone()),
-        _ => None,
-    }) {
-        return StepOutcome::Pending(PendingLoopToolCall::Bridge(call));
-    }
+    let bridge_call_ids = events
+        .iter()
+        .filter_map(|event| match &event.payload {
+            RuntimeJournalPayload::BridgeToolCallRequested { call } => Some(call.id().clone()),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
 
     let resolved_call_ids = events
         .iter()
@@ -1333,13 +1515,19 @@ pub(crate) fn classify_step_events(
 
     let mut pending = events
         .iter()
-        .filter_map(|event| match &event.payload {
+        .flat_map(|event| match &event.payload {
             RuntimeJournalPayload::ToolCallPending { call }
                 if !resolved_call_ids.contains(call.id()) =>
             {
-                Some(call.clone())
+                vec![call.clone()]
             }
-            _ => None,
+            RuntimeJournalPayload::ToolCallBatchPending { batch } => batch
+                .calls()
+                .iter()
+                .filter(|call| !resolved_call_ids.contains(call.id()))
+                .cloned()
+                .collect(),
+            _ => Vec::new(),
         })
         .collect::<Vec<_>>();
 
@@ -1379,15 +1567,34 @@ pub(crate) fn classify_step_events(
         0 => StepOutcome::Blocked(AgentLoopBlockedReason::StepEndedWithoutTerminalEvent),
         1 => {
             let call = pending.pop().expect("one pending call is present");
-            if final_output_contract.is_some_and(|contract| call.name() == contract.tool_name()) {
-                StepOutcome::Pending(PendingLoopToolCall::FinalOutput(call))
-            } else {
-                StepOutcome::Pending(PendingLoopToolCall::Runtime(call))
-            }
+            StepOutcome::Pending(classify_pending_tool_call(
+                call,
+                &bridge_call_ids,
+                final_output_contract,
+            ))
         }
-        count => StepOutcome::Blocked(AgentLoopBlockedReason::MultiplePendingToolCalls {
-            pending_count: count,
-        }),
+        _ => StepOutcome::PendingBatch(
+            pending
+                .into_iter()
+                .map(|call| {
+                    classify_pending_tool_call(call, &bridge_call_ids, final_output_contract)
+                })
+                .collect(),
+        ),
+    }
+}
+
+fn classify_pending_tool_call(
+    call: PendingToolCall,
+    bridge_call_ids: &BTreeSet<ToolCallId>,
+    final_output_contract: Option<&FinalOutputContract>,
+) -> PendingLoopToolCall {
+    if final_output_contract.is_some_and(|contract| call.name() == contract.tool_name()) {
+        PendingLoopToolCall::FinalOutput(call)
+    } else if bridge_call_ids.contains(call.id()) {
+        PendingLoopToolCall::Bridge(call)
+    } else {
+        PendingLoopToolCall::Runtime(call)
     }
 }
 
@@ -1398,5 +1605,75 @@ async fn receive_bridge_tool_result(
     tokio::select! {
         command = receiver.recv() => command,
         () = token.cancelled() => None,
+    }
+}
+
+async fn execute_stream_runtime_batch(
+    runtime: &Runtime,
+    calls: Vec<PendingToolCall>,
+    token: &tokio_util::sync::CancellationToken,
+    loop_permit: &ActiveStepPermit,
+    projector: &mut RuntimeEventProjector,
+    sender: &mpsc::Sender<AgentLoopStreamMessage>,
+    events: &mut Vec<RuntimeJournalEvent>,
+) -> Option<Option<RuntimeError>> {
+    if calls.is_empty() {
+        return Some(None);
+    }
+
+    let execution = runtime
+        .execute_tool_call_batch_with_active_permit(
+            calls,
+            ToolExecutionContext::new(token.clone()),
+            loop_permit,
+        )
+        .await;
+    let (execution_events, error) = execution.into_parts();
+    for event in execution_events {
+        if !publish_journal_event(runtime, projector, sender, events, event).await {
+            return None;
+        }
+    }
+    Some(error)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn receive_and_publish_bridge_tool_result(
+    runtime: &Runtime,
+    call: PendingToolCall,
+    token: &tokio_util::sync::CancellationToken,
+    loop_permit: &ActiveStepPermit,
+    receiver: &mut mpsc::Receiver<BridgeToolResultCommand>,
+    projector: &mut RuntimeEventProjector,
+    sender: &mpsc::Sender<AgentLoopStreamMessage>,
+    events: &mut Vec<RuntimeJournalEvent>,
+) -> Option<()> {
+    let command = receive_bridge_tool_result(receiver, token).await?;
+    let call_id = command.result.call_id().clone();
+    let result = if call_id == *call.id() {
+        runtime
+            .submit_tool_result_with_active_permit(command.result, command.content, loop_permit)
+            .await
+    } else {
+        Err(RuntimeError::UnknownToolCall {
+            session_id: runtime.session_id().clone(),
+            call_id,
+        })
+    };
+
+    match result {
+        Ok(result_events) => {
+            let _ = command.ack_sender.send(Ok(()));
+            for event in result_events {
+                if !publish_journal_event(runtime, projector, sender, events, event).await {
+                    return None;
+                }
+            }
+            Some(())
+        }
+        Err(error) => {
+            let _ = command.ack_sender.send(Err(error));
+            None
+        }
     }
 }

@@ -1,3 +1,4 @@
+use super::preferences::CodeTheme;
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -5,24 +6,35 @@ use ratatui::{
 use std::sync::OnceLock;
 use syntect::{
     easy::HighlightLines,
-    highlighting::{Color as SyntectColor, FontStyle, Style as SyntectStyle, Theme, ThemeSet},
+    highlighting::{Color as SyntectColor, FontStyle, Style as SyntectStyle, Theme},
     parsing::{SyntaxReference, SyntaxSet},
     util::LinesWithEndings,
 };
+use two_face::theme::EmbeddedThemeName;
 
 const MAX_HIGHLIGHT_BYTES: usize = 512 * 1024;
 const MAX_HIGHLIGHT_LINES: usize = 10_000;
 
 static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
-static THEME: OnceLock<Theme> = OnceLock::new();
+static DRACULA_THEME: OnceLock<Theme> = OnceLock::new();
+static CATPPUCCIN_MOCHA_THEME: OnceLock<Theme> = OnceLock::new();
+static MONOKAI_BRIGHT_THEME: OnceLock<Theme> = OnceLock::new();
 
-pub(crate) fn highlight_code_to_lines(code: &str, lang: &str) -> Vec<Line<'static>> {
-    highlight_to_line_spans(code, lang)
+pub(crate) fn highlight_code_to_lines(
+    code: &str,
+    lang: &str,
+    code_theme: CodeTheme,
+) -> Vec<Line<'static>> {
+    highlight_to_line_spans(code, lang, code_theme)
         .map(|lines| lines.into_iter().map(Line::from).collect())
         .unwrap_or_else(|| plain_code_lines(code))
 }
 
-fn highlight_to_line_spans(code: &str, lang: &str) -> Option<Vec<Vec<Span<'static>>>> {
+fn highlight_to_line_spans(
+    code: &str,
+    lang: &str,
+    code_theme: CodeTheme,
+) -> Option<Vec<Vec<Span<'static>>>> {
     if code.is_empty()
         || code.len() > MAX_HIGHLIGHT_BYTES
         || code.lines().count() > MAX_HIGHLIGHT_LINES
@@ -31,7 +43,7 @@ fn highlight_to_line_spans(code: &str, lang: &str) -> Option<Vec<Vec<Span<'stati
     }
 
     let syntax = find_syntax(lang)?;
-    let mut highlighter = HighlightLines::new(syntax, theme());
+    let mut highlighter = HighlightLines::new(syntax, theme(code_theme));
     let mut lines = Vec::new();
     for line in LinesWithEndings::from(code) {
         let ranges = highlighter.highlight_line(line, syntax_set()).ok()?;
@@ -66,16 +78,20 @@ fn syntax_set() -> &'static SyntaxSet {
     SYNTAX_SET.get_or_init(two_face::syntax::extra_newlines)
 }
 
-fn theme() -> &'static Theme {
-    THEME.get_or_init(|| {
-        let themes = ThemeSet::load_defaults();
-        themes
-            .themes
-            .get("base16-ocean.dark")
-            .cloned()
-            .or_else(|| themes.themes.values().next().cloned())
-            .unwrap_or_default()
-    })
+fn theme(code_theme: CodeTheme) -> &'static Theme {
+    match code_theme {
+        CodeTheme::Dracula => {
+            DRACULA_THEME.get_or_init(|| embedded_theme(EmbeddedThemeName::Dracula))
+        }
+        CodeTheme::CatppuccinMocha => CATPPUCCIN_MOCHA_THEME
+            .get_or_init(|| embedded_theme(EmbeddedThemeName::CatppuccinMocha)),
+        CodeTheme::MonokaiBright => MONOKAI_BRIGHT_THEME
+            .get_or_init(|| embedded_theme(EmbeddedThemeName::MonokaiExtendedBright)),
+    }
+}
+
+fn embedded_theme(name: EmbeddedThemeName) -> Theme {
+    two_face::theme::extra().get(name).clone()
 }
 
 fn find_syntax(lang: &str) -> Option<&'static SyntaxReference> {
@@ -131,5 +147,34 @@ fn ansi_palette_color(index: u8) -> Color {
         0x06 => Color::Cyan,
         0x07 => Color::Gray,
         other => Color::Indexed(other),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn python_highlighting_uses_bright_magenta_forward_colors() {
+        let lines = highlight_code_to_lines(
+            "def greet(name):\n    return \"hello\"",
+            "python",
+            CodeTheme::Dracula,
+        );
+        let spans = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .collect::<Vec<_>>();
+        let keyword = spans
+            .iter()
+            .find(|span| span.content == "def")
+            .expect("python keyword should render");
+        let string = spans
+            .iter()
+            .find(|span| span.content.contains("hello"))
+            .expect("python string should render");
+
+        assert_eq!(keyword.style.fg, Some(Color::Rgb(255, 121, 198)));
+        assert_eq!(string.style.fg, Some(Color::Rgb(241, 250, 140)));
     }
 }

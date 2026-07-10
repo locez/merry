@@ -292,6 +292,62 @@ fn plan_mounts_merry_config_dir_read_only_and_sets_xdg_config_home() {
 }
 
 #[test]
+fn plan_mounts_only_managed_provider_config_read_write() {
+    let host = sandbox_host();
+    let Bootstrap::Reexec(plan) =
+        plan_sandbox(true, &host).expect("sandbox planning should succeed")
+    else {
+        panic!("expected sandbox reexec plan");
+    };
+    let args = plan_args(&plan);
+
+    assert!(contains_sequence(
+        &args,
+        &[
+            "--ro-bind-try",
+            "/host/config/merry",
+            SANDBOX_MERRY_CONFIG_DIR,
+        ]
+    ));
+    assert!(contains_sequence(
+        &args,
+        &[
+            "--bind",
+            "/host/config/merry/managed",
+            SANDBOX_MERRY_MANAGED_CONFIG_DIR,
+        ]
+    ));
+    assert!(!contains_sequence(
+        &args,
+        &["--bind", "/host/config/merry", SANDBOX_MERRY_CONFIG_DIR]
+    ));
+    assert!(!contains_sequence(
+        &args,
+        &["--bind-try", "/host/config/merry", SANDBOX_MERRY_CONFIG_DIR,]
+    ));
+}
+
+#[test]
+fn plan_mounts_merry_state_dir_read_write_for_persistent_sessions() {
+    let host = sandbox_host();
+    let Bootstrap::Reexec(plan) =
+        plan_sandbox(true, &host).expect("sandbox planning should succeed")
+    else {
+        panic!("expected sandbox reexec plan");
+    };
+    let args = plan_args(&plan);
+
+    assert!(contains_sequence(
+        &args,
+        &["--bind", "/host/state/merry", SANDBOX_MERRY_STATE_DIR]
+    ));
+    assert!(contains_sequence(
+        &args,
+        &["--setenv", "XDG_STATE_HOME", SANDBOX_XDG_STATE_HOME]
+    ));
+}
+
+#[test]
 fn plan_applies_trusted_global_path_rules_as_outer_guard() {
     let mut host = sandbox_host();
     host.trusted_path_rules = vec![
@@ -571,7 +627,7 @@ fn planning_errors_when_bwrap_is_missing_from_path() {
     assert!(matches!(error, Error::MissingBubblewrap));
     assert_eq!(
         error.to_string(),
-        "bubblewrap executable `bwrap` was not found in PATH; install bubblewrap or run without --with-sandbox"
+        "bubblewrap executable `bwrap` was not found in PATH; install bubblewrap to use TUI/run, or omit --with-sandbox for debug commands"
     );
 }
 

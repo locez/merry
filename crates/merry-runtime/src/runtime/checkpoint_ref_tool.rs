@@ -32,7 +32,8 @@ pub(super) fn merry_read_checkpoint_ref_tool() -> Result<RegisteredTool, CoreErr
         spec,
         Arc::new(MerryReadCheckpointRefExecutor),
         ToolActionKind::ReadOnly,
-    ))
+    )
+    .with_parallel_safe_execution())
 }
 
 fn merry_read_checkpoint_ref_input_schema() -> Result<ToolInputSchema, CoreError> {

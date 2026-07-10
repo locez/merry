@@ -1,13 +1,13 @@
 use super::{
     highlight::highlight_code_to_lines,
-    layout::{BottomPaneHeights, CockpitLayoutMode, cockpit_layout, layout_mode},
+    layout::{BottomPaneHeights, timeline_layout},
     markdown::markdown_lines,
+    overlay_render,
     panels::{
-        DirectoryEntryKind, DirectoryEntryView, FocusPanelBody, FocusPanelView, PlanPanelView,
-        focus_panel_view, plan_panel_view,
+        DirectoryEntryKind, DirectoryEntryView, FocusPanelBody, FocusPanelView, focus_panel_view,
     },
     state::{PatchChangeView, PatchLineView, TimelineItem, TuiState},
-    theme::SemanticColor,
+    theme::{SemanticColor, dim_color},
 };
 use merry_core::QueuedInputLane;
 use ratatui::{
@@ -22,39 +22,32 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 const QUEUE_PREVIEW_HEIGHT: u16 = 5;
 const MAX_COMPLETION_PREVIEW_HEIGHT: u16 = 6;
 const MAX_INPUT_VISIBLE_ROWS: usize = 5;
-pub(crate) const INTERACTION_HEIGHT: u16 = 1;
 pub(crate) const STATUS_HEIGHT: u16 = 1;
+const HEADER_HEIGHT: u16 = 1;
 const MIN_TIMELINE_HEIGHT: u16 = 3;
 const MIN_INPUT_HEIGHT: u16 = 3;
 
 #[allow(dead_code)]
 pub(crate) fn render(frame: &mut Frame<'_>, state: &TuiState) {
-    let mode = layout_mode(frame.area().width);
-    let pane_heights = pane_heights(state, frame.area().height, mode);
-    let rects = cockpit_layout(
+    let pane_heights = pane_heights(state, frame.area().height);
+    let rects = timeline_layout(
         frame.area(),
         BottomPaneHeights {
             queue: pane_heights.queue,
             completion: pane_heights.completion,
-            interaction: INTERACTION_HEIGHT,
             input: pane_heights.input,
             status: STATUS_HEIGHT,
         },
+        state.is_artifact_reviewing(),
     );
 
-    match rects.mode {
-        CockpitLayoutMode::Narrow => render_legacy_timeline_pane(frame, state, rects.chat),
-        CockpitLayoutMode::Wide | CockpitLayoutMode::Medium => {
-            render_chat_pane(frame, state, rects.chat);
-            if let Some(region) = rects.focus {
-                let view = focus_panel_view(state);
-                render_focus_pane(frame, state, region, &view);
-            }
-            if let Some(region) = rects.plan {
-                let view = plan_panel_view(state);
-                render_plan_pane(frame, state, region, &view);
-            }
-        }
+    render_header(frame, state, rects.header);
+    if rects.timeline.width > 0 && rects.timeline.height > 0 {
+        render_timeline_pane(frame, state, rects.timeline);
+    }
+    if let Some(region) = rects.detail {
+        let view = focus_panel_view(state);
+        render_focus_pane(frame, state, region, &view);
     }
 
     if let Some(queue_region) = rects.queue {
@@ -73,17 +66,13 @@ pub(crate) fn render(frame: &mut Frame<'_>, state: &TuiState) {
             rects.completion,
         );
     }
-    render_interaction_line(frame, state, rects.interaction);
     render_input(frame, state, rects.input, pane_heights.input);
-    frame.render_widget(
-        Paragraph::new(state.status_text()).style(semantic_style(state, SemanticColor::Status)),
-        rects.status,
-    );
+    render_status(frame, state, rects.status);
+    overlay_render::render_overlay(frame, state);
 }
 
 pub(crate) fn pane_heights_for_area(state: &TuiState, area: Rect) -> PaneHeights {
-    let mode = layout_mode(area.width);
-    pane_heights(state, area.height, mode)
+    pane_heights(state, area.height)
 }
 
 #[cfg(test)]
@@ -142,7 +131,41 @@ fn bordered_inner(region: Rect) -> Rect {
     }
 }
 
-fn render_legacy_timeline_pane(frame: &mut Frame<'_>, state: &TuiState, region: Rect) {
+fn render_header(frame: &mut Frame<'_>, state: &TuiState, region: Rect) {
+    let [workspace, model, usage] = state.status_parts();
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                "merry",
+                semantic_style(state, SemanticColor::Status).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  ", Style::default()),
+            Span::styled(workspace, semantic_style(state, SemanticColor::Command)),
+            Span::styled("  ", Style::default()),
+            Span::styled(
+                model,
+                semantic_style(state, SemanticColor::ToolKeyword).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  ", Style::default()),
+            Span::styled(
+                usage,
+                semantic_style(state, SemanticColor::Assistant).add_modifier(Modifier::DIM),
+            ),
+        ]))
+        .style(header_background_style(state)),
+        region,
+    );
+}
+
+fn header_background_style(state: &TuiState) -> Style {
+    state
+        .theme()
+        .color(SemanticColor::Status)
+        .map(dim_color)
+        .map_or_else(Style::default, |color| Style::default().bg(color))
+}
+
+fn render_timeline_pane(frame: &mut Frame<'_>, state: &TuiState, region: Rect) {
     frame.render_widget(
         Paragraph::new(timeline_lines_compact(state, region))
             .wrap(Wrap { trim: false })
@@ -157,28 +180,11 @@ fn render_legacy_timeline_pane(frame: &mut Frame<'_>, state: &TuiState, region: 
     );
 }
 
-fn render_chat_pane(frame: &mut Frame<'_>, state: &TuiState, region: Rect) {
-    let inner = bordered_inner(region);
-    frame.render_widget(
-        Paragraph::new(timeline_lines_compact(state, inner))
-            .wrap(Wrap { trim: false })
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Plain)
-                    .title("CHAT")
-                    .border_style(semantic_style(state, SemanticColor::Muted))
-                    .title_style(semantic_style(state, SemanticColor::Muted)),
-            ),
-        region,
-    );
-}
-
-fn render_interaction_line(frame: &mut Frame<'_>, state: &TuiState, region: Rect) {
+fn render_status(frame: &mut Frame<'_>, state: &TuiState, region: Rect) {
     let interaction_style = if state.is_active_run() {
         semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD)
     } else {
-        semantic_style(state, SemanticColor::Status)
+        semantic_style(state, SemanticColor::Muted)
     };
     frame.render_widget(
         Paragraph::new(state.interaction_status_text()).style(interaction_style),
@@ -193,14 +199,16 @@ fn render_input(frame: &mut Frame<'_>, state: &TuiState, region: Rect, input_hei
 
     frame.render_widget(
         Paragraph::new(input_viewport.text)
-            .style(semantic_style(state, SemanticColor::Focus))
+            .style(semantic_style(state, SemanticColor::Assistant))
             .block(
                 Block::default()
                     .borders(Borders::ALL)
                     .border_type(BorderType::Plain)
-                    .title("input")
-                    .border_style(semantic_style(state, SemanticColor::Focus))
-                    .title_style(semantic_style(state, SemanticColor::Focus)),
+                    .title(Line::from(Span::styled(
+                        " M ",
+                        semantic_style(state, SemanticColor::Status).add_modifier(Modifier::BOLD),
+                    )))
+                    .border_style(semantic_style(state, SemanticColor::Focus)),
             ),
         region,
     );
@@ -220,31 +228,12 @@ fn render_focus_pane(frame: &mut Frame<'_>, state: &TuiState, region: Rect, view
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Plain)
-                .title(view.title.as_str())
-                .border_style(semantic_style(state, SemanticColor::Focus))
+                .title(view.title.strip_prefix("FOCUS ").unwrap_or(&view.title))
+                .border_style(semantic_style(state, SemanticColor::ToolKeyword))
                 .title_style(
-                    semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD),
+                    semantic_style(state, SemanticColor::ToolKeyword).add_modifier(Modifier::BOLD),
                 ),
         ),
-        region,
-    );
-}
-
-fn render_plan_pane(frame: &mut Frame<'_>, state: &TuiState, region: Rect, view: &PlanPanelView) {
-    let inner = bordered_inner(region);
-    frame.render_widget(
-        Paragraph::new(plan_lines(state, view, inner))
-            .wrap(Wrap { trim: false })
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Plain)
-                    .title("RUN")
-                    .border_style(semantic_style(state, SemanticColor::Focus))
-                    .title_style(
-                        semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD),
-                    ),
-            ),
         region,
     );
 }
@@ -258,7 +247,7 @@ fn focus_lines(state: &TuiState, view: &FocusPanelView, region: Rect) -> Vec<Lin
         FocusPanelBody::Patch { changes } => patch_lines(state, changes),
         FocusPanelBody::Source { path, content } => {
             if let Some(lang) = source_lang_from_path(path) {
-                highlight_code_to_lines(content, lang)
+                highlight_code_to_lines(content, lang, state.code_theme())
             } else {
                 content
                     .lines()
@@ -275,7 +264,7 @@ fn focus_lines(state: &TuiState, view: &FocusPanelView, region: Rect) -> Vec<Lin
             .collect(),
         FocusPanelBody::Text { lines } => {
             if let Some(lang) = source_lang_from_focus_title(&view.title) {
-                highlight_code_to_lines(&lines.join("\n"), lang)
+                highlight_code_to_lines(&lines.join("\n"), lang, state.code_theme())
             } else {
                 lines
                     .iter()
@@ -350,97 +339,6 @@ fn directory_entry_style(state: &TuiState, entry: &DirectoryEntryView) -> Style 
     }
 }
 
-fn plan_lines(state: &TuiState, view: &PlanPanelView, region: Rect) -> Vec<Line<'static>> {
-    let width = usize::from(region.width).max(1);
-    let mut lines = Vec::new();
-    lines.push(Line::from(Span::styled(
-        truncate_chars(&view.run_status, width),
-        semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD),
-    )));
-    if let Some(task) = &view.current_task {
-        lines.push(Line::from(""));
-        lines.push(plan_label_value_line(state, "Task", task, width));
-    }
-
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "Queue",
-        semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD),
-    )));
-    lines.push(plan_queue_line(state, "Next", &view.queue_next, width));
-    lines.push(plan_queue_line(
-        state,
-        "Suspended",
-        &view.queue_suspended,
-        width,
-    ));
-    lines.push(plan_queue_line(
-        state,
-        "Backlog",
-        &view.queue_backlog,
-        width,
-    ));
-
-    if !view.artifacts.is_empty() {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "Artifacts",
-            semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD),
-        )));
-        let artifact_budget = remaining_line_budget(&lines, region.height, 2);
-        for artifact in view.artifacts.iter().rev().take(artifact_budget).rev() {
-            let marker = if artifact.selected { ">" } else { "-" };
-            let style = if artifact.selected {
-                semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD)
-            } else {
-                semantic_style(state, SemanticColor::Muted)
-            };
-            lines.push(Line::from(vec![
-                Span::styled(format!("{marker} "), style),
-                Span::styled(
-                    truncate_chars(&artifact.label, width.saturating_sub(2)),
-                    style,
-                ),
-            ]));
-        }
-    }
-
-    if !view.recent_activity.is_empty() {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "Recent",
-            semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD),
-        )));
-        for activity in &view.recent_activity {
-            lines.push(Line::from(vec![
-                Span::styled("- ", semantic_style(state, SemanticColor::Muted)),
-                Span::styled(
-                    truncate_chars(activity, width.saturating_sub(2)),
-                    semantic_style(state, SemanticColor::Muted),
-                ),
-            ]));
-        }
-    }
-
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        truncate_chars(&view.status_line, width),
-        semantic_style(state, SemanticColor::Status),
-    )));
-
-    let max_lines = usize::from(region.height).max(1);
-    if lines.len() > max_lines {
-        lines.truncate(max_lines);
-    }
-    lines
-}
-
-fn remaining_line_budget(lines: &[Line<'static>], height: u16, reserved_tail: usize) -> usize {
-    usize::from(height)
-        .saturating_sub(lines.len())
-        .saturating_sub(reserved_tail)
-}
-
 fn focus_text_wrapped_lines(state: &TuiState, line: &str, region_width: u16) -> Vec<Line<'static>> {
     let base_style = semantic_style(state, SemanticColor::Assistant);
     let Some((label, value)) = line.split_once(": ") else {
@@ -480,53 +378,6 @@ fn focus_text_wrapped_lines(state: &TuiState, line: &str, region_width: u16) -> 
     result
 }
 
-fn plan_label_value_line(
-    state: &TuiState,
-    label: &'static str,
-    value: &str,
-    width: usize,
-) -> Line<'static> {
-    let prefix = format!("{label}: ");
-    let value_width = width.saturating_sub(prefix.chars().count());
-    Line::from(vec![
-        Span::styled(prefix, semantic_style(state, SemanticColor::Focus)),
-        Span::styled(
-            truncate_chars(value, value_width),
-            semantic_style(state, SemanticColor::Assistant),
-        ),
-    ])
-}
-
-fn plan_queue_line(
-    state: &TuiState,
-    label: &'static str,
-    items: &[String],
-    width: usize,
-) -> Line<'static> {
-    let prefix = format!("{label:<10} ");
-    let value = if items.is_empty() {
-        "--".to_owned()
-    } else {
-        items
-            .iter()
-            .enumerate()
-            .map(|(index, item)| format!("{}. {}", index + 1, item))
-            .collect::<Vec<_>>()
-            .join(" | ")
-    };
-    let value_width = width.saturating_sub(prefix.chars().count());
-    Line::from(vec![
-        Span::styled(
-            prefix,
-            semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            truncate_chars(&value, value_width),
-            semantic_style(state, SemanticColor::Muted),
-        ),
-    ])
-}
-
 fn set_input_cursor(frame: &mut Frame<'_>, region: Rect, cursor_column: usize, cursor_row: usize) {
     if region.width == 0 || region.height == 0 {
         return;
@@ -548,19 +399,15 @@ pub(crate) struct PaneHeights {
     pub(crate) input: u16,
 }
 
-fn pane_heights(state: &TuiState, total_height: u16, mode: CockpitLayoutMode) -> PaneHeights {
-    let desired_queue = if mode.uses_bottom_queue() {
-        desired_queue_preview_height(state)
-    } else {
-        0
-    };
+fn pane_heights(state: &TuiState, total_height: u16) -> PaneHeights {
+    let desired_queue = desired_queue_preview_height(state);
     let desired_completion = desired_completion_preview_height(state);
     let desired_input = desired_input_region_height(state, MAX_INPUT_VISIBLE_ROWS);
     let desired_bottom = desired_queue
         .saturating_add(desired_completion)
         .saturating_add(desired_input)
-        .saturating_add(INTERACTION_HEIGHT)
-        .saturating_add(STATUS_HEIGHT);
+        .saturating_add(STATUS_HEIGHT)
+        .saturating_add(HEADER_HEIGHT);
 
     if total_height >= desired_bottom.saturating_add(MIN_TIMELINE_HEIGHT) {
         return PaneHeights {
@@ -570,7 +417,7 @@ fn pane_heights(state: &TuiState, total_height: u16, mode: CockpitLayoutMode) ->
         };
     }
 
-    let reserved = INTERACTION_HEIGHT
+    let reserved = HEADER_HEIGHT
         .saturating_add(STATUS_HEIGHT)
         .saturating_add(MIN_TIMELINE_HEIGHT);
     let mut remaining = total_height.saturating_sub(reserved);
@@ -883,28 +730,29 @@ fn command_spans(state: &TuiState, command: &str) -> Vec<Span<'static>> {
 }
 
 fn user_lines(state: &TuiState, text: &str, lane: QueuedInputLane) -> Vec<Line<'static>> {
-    let label = match lane {
-        QueuedInputLane::Next => "user",
-        QueuedInputLane::Suspended => "user suspended",
-        QueuedInputLane::Backlog => "user backlog",
+    let lane_label = match lane {
+        QueuedInputLane::Next => None,
+        QueuedInputLane::Suspended => Some(("suspended", SemanticColor::Warning)),
+        QueuedInputLane::Backlog => Some(("backlog", SemanticColor::Muted)),
     };
     let mut lines = Vec::new();
     for (index, segment) in text.split('\n').enumerate() {
-        let mut spans = if index == 0 {
-            vec![
-                Span::styled(
-                    label.to_owned(),
-                    semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(": ", semantic_style(state, SemanticColor::Muted)),
-            ]
-        } else {
-            vec![Span::raw(" ".repeat(label.chars().count() + 2))]
-        };
+        let mut spans = vec![Span::styled(
+            "▌ ",
+            semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD),
+        )];
+        if index == 0
+            && let Some((label, color)) = lane_label
+        {
+            spans.push(Span::styled(
+                format!("{label}  "),
+                semantic_style(state, color).add_modifier(Modifier::BOLD),
+            ));
+        }
         spans.extend(inline_code_spans(
             state,
             segment,
-            semantic_style(state, SemanticColor::Focus),
+            semantic_style(state, SemanticColor::Assistant),
         ));
         lines.push(Line::from(spans));
     }
@@ -987,30 +835,6 @@ fn diff_line_style(state: &TuiState, slot: SemanticColor) -> Style {
         (Some(foreground), None) => Style::default().fg(foreground),
         (None, Some(background)) => Style::default().bg(background),
         (None, None) => Style::default(),
-    }
-}
-
-fn dim_color(color: Color) -> Color {
-    match color {
-        Color::Black => Color::Black,
-        Color::Red => Color::Rgb(45, 16, 24),
-        Color::Green => Color::Rgb(18, 42, 28),
-        Color::Yellow => Color::Rgb(48, 40, 18),
-        Color::Blue => Color::Rgb(18, 30, 48),
-        Color::Magenta => Color::Rgb(42, 20, 44),
-        Color::Cyan => Color::Rgb(16, 42, 45),
-        Color::LightRed => Color::Rgb(58, 20, 28),
-        Color::LightGreen => Color::Rgb(22, 54, 34),
-        Color::LightYellow => Color::Rgb(62, 52, 22),
-        Color::LightBlue => Color::Rgb(22, 38, 62),
-        Color::LightMagenta => Color::Rgb(54, 26, 58),
-        Color::LightCyan => Color::Rgb(20, 54, 58),
-        Color::Gray => Color::DarkGray,
-        Color::DarkGray => Color::Black,
-        Color::White => Color::DarkGray,
-        Color::Rgb(red, green, blue) => Color::Rgb(red / 4, green / 4, blue / 4),
-        Color::Indexed(index) => Color::Indexed(index),
-        Color::Reset => Color::Reset,
     }
 }
 

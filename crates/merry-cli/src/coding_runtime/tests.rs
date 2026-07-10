@@ -1,7 +1,8 @@
 use super::{
     CodingLoopRuntimeOptions, CodingSubagentsConfig, HeadlessCodingRuntimeInput,
-    build_coding_loop_runtime, build_headless_coding_runtime,
+    build_coding_loop_runtime, build_headless_coding_runtime, coding_agent_process_admission,
 };
+
 use crate::debug::coding_loop::coding_loop_workspace_call;
 use crate::runtime_events::{collect_runtime_step_events, first_pending_tool_call};
 use crate::testing::{FakeProcessRunner, ScriptedProvider, model_name};
@@ -20,6 +21,18 @@ use merry_runtime::{
 use merry_tool_workspace::{CODING_LOOP_PROCESS_TOOL, WORKSPACE_READ_FILE_TOOL};
 use serde_json::{Map, Value};
 use std::sync::Arc;
+
+#[tokio::test(flavor = "current_thread")]
+async fn no_outer_sandbox_still_admits_the_inner_bwrap_process_profile() {
+    let admission = coding_agent_process_admission(None, true)
+        .await
+        .expect("explicit host mode should retain inner process admission");
+
+    assert_eq!(
+        admission.sandbox_profile(),
+        merry_runtime::LocalWorkspaceProcessSandboxProfile::CliBwrapV1
+    );
+}
 
 struct StaticOkExecutor;
 

@@ -514,11 +514,10 @@ fn read_byte_range(
 fn line_range_bounds(text: &str, start: u64, end: u64) -> Option<(usize, usize)> {
     debug_assert!(start <= end);
 
-    let mut line_number = 1_u64;
     let mut line_start = 0_usize;
     let mut selected_start = None;
 
-    for segment in text.split_inclusive('\n') {
+    for (line_number, segment) in (1_u64..).zip(text.split_inclusive('\n')) {
         let line_end = line_start + segment.len();
         if line_number == start {
             selected_start = Some(line_start);
@@ -530,7 +529,6 @@ fn line_range_bounds(text: &str, start: u64, end: u64) -> Option<(usize, usize)>
         }
 
         line_start = line_end;
-        line_number += 1;
     }
 
     None

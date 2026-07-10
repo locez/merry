@@ -22,9 +22,11 @@ async def _assert_runtime_run_returns_final_output_and_events():
     assert [event["type"] for event in result.events] == [
         "session_started",
         "step_started",
+        "assistant_message_delta",
         "assistant_message",
         "step_completed",
     ]
+    assert result.events[2]["delta"] == "done"
 
 
 def test_runtime_run_returns_final_output_and_events():
@@ -58,9 +60,11 @@ async def _assert_runtime_run_stream_yields_event_dicts_in_order():
     assert event_types == [
         "session_started",
         "step_started",
+        "assistant_message_delta",
         "assistant_message",
         "step_completed",
     ]
+    assert events[2]["delta"] == "streamed"
 
 
 def test_runtime_run_stream_yields_event_dicts_in_order():

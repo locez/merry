@@ -2,12 +2,20 @@ use super::{
     completion::{CompletionMenu, CompletionSources},
     input::{InputHistory, TextInput},
     keymap::Keymap,
+    overlay::{MessageDialogKind, MessageDialogOverlay, Overlay, SettingsOverlay, ShortcutsBack},
+    preferences::{TuiPreferences, TuiSettingsDefaults},
+    provider_overlay::{
+        ModelListItem, ModelPickerOverlay, ProviderFormOverlay, ProviderFormSeed,
+        ProviderFormValues, ProviderListItem, ProviderManagerOverlay,
+    },
     theme::TuiTheme,
 };
 use merry_core::{InteractiveRunState, QueuedInputLane, QueuedInputView, SessionUsage};
 use merry_runtime::SkillMetadata;
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
+use std::{collections::BTreeSet, path::PathBuf};
+
+mod settings;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
@@ -192,6 +200,18 @@ pub(crate) struct TuiState {
     last_completed_run_elapsed: Option<Duration>,
     pending_empty_input_quit: bool,
     usage: Option<SessionUsage>,
+    overlay: Option<Overlay>,
+    dialog_back: Option<Box<Overlay>>,
+    provider_overlay_back: Option<ProviderOverlayBack>,
+    provider_form_back: Option<ProviderFormOverlay>,
+    preferences: TuiPreferences,
+    settings_defaults: TuiSettingsDefaults,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ProviderOverlayBack {
+    CommandPalette,
+    Settings(SettingsOverlay),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -230,6 +250,12 @@ impl TuiState {
             last_completed_run_elapsed: None,
             pending_empty_input_quit: false,
             usage: None,
+            overlay: None,
+            dialog_back: None,
+            provider_overlay_back: None,
+            provider_form_back: None,
+            preferences: TuiPreferences::default(),
+            settings_defaults: TuiSettingsDefaults::default(),
         }
     }
 
@@ -365,8 +391,247 @@ impl TuiState {
         &self.theme
     }
 
+    pub(crate) fn overlay(&self) -> Option<&Overlay> {
+        self.overlay.as_ref()
+    }
+
+    pub(crate) fn overlay_mut(&mut self) -> Option<&mut Overlay> {
+        self.overlay.as_mut()
+    }
+
+    pub(crate) fn insert_overlay_paste(&mut self, text: &str) -> bool {
+        let Some(overlay) = self.overlay.as_mut() else {
+            return false;
+        };
+        overlay.insert_paste(text);
+        true
+    }
+
+    pub(crate) fn open_command_palette(&mut self) {
+        self.completion_menu = None;
+        self.dialog_back = None;
+        self.provider_overlay_back = None;
+        self.overlay = Some(Overlay::command_palette());
+    }
+
+    pub(crate) fn open_settings(&mut self) {
+        self.dialog_back = None;
+        self.provider_overlay_back = None;
+        self.overlay = Some(Overlay::settings());
+    }
+
+    pub(crate) fn open_provider_manager(&mut self, items: Vec<ProviderListItem>) {
+        self.provider_form_back = None;
+        match self.overlay.take() {
+            Some(Overlay::CommandPalette(_)) => {
+                self.provider_overlay_back = Some(ProviderOverlayBack::CommandPalette);
+            }
+            Some(Overlay::Settings(settings)) => {
+                self.provider_overlay_back = Some(ProviderOverlayBack::Settings(settings));
+            }
+            Some(
+                Overlay::ProviderManager(_) | Overlay::ProviderForm(_) | Overlay::ModelPicker(_),
+            ) => {}
+            Some(Overlay::Dialog(_) | Overlay::Shortcuts(_)) | None => {
+                self.provider_overlay_back
+                    .get_or_insert(ProviderOverlayBack::CommandPalette);
+            }
+        }
+        let current = self.current_provider_alias().map(str::to_owned);
+        self.overlay = Some(Overlay::ProviderManager(ProviderManagerOverlay::new(
+            items,
+            current.as_deref(),
+        )));
+    }
+
+    pub(crate) fn open_provider_form(&mut self, alias: String, used_aliases: BTreeSet<String>) {
+        self.provider_form_back = None;
+        self.overlay = Some(Overlay::ProviderForm(ProviderFormOverlay::new(
+            alias,
+            used_aliases,
+        )));
+    }
+
+    pub(crate) fn open_provider_editor(
+        &mut self,
+        seed: ProviderFormSeed,
+        used_aliases: BTreeSet<String>,
+    ) {
+        self.provider_form_back = None;
+        self.overlay = Some(Overlay::ProviderForm(ProviderFormOverlay::edit(
+            seed,
+            used_aliases,
+        )));
+    }
+
+    pub(crate) fn open_model_picker(
+        &mut self,
+        alias: String,
+        display_name: String,
+        models: Vec<ModelListItem>,
+    ) {
+        self.provider_form_back = None;
+        self.overlay = Some(Overlay::ModelPicker(ModelPickerOverlay::new(
+            alias,
+            display_name,
+            models,
+            true,
+        )));
+    }
+
+    pub(crate) fn open_provider_form_model_picker(
+        &mut self,
+        alias: String,
+        display_name: String,
+    ) -> bool {
+        let form = match self.overlay.take() {
+            Some(Overlay::ProviderForm(form)) => form,
+            overlay => {
+                self.overlay = overlay;
+                return false;
+            }
+        };
+        self.provider_form_back = Some(form);
+        self.overlay = Some(Overlay::ModelPicker(ModelPickerOverlay::for_provider_form(
+            alias,
+            display_name,
+            Vec::new(),
+        )));
+        true
+    }
+
+    pub(crate) fn provider_form_discovery_request(
+        &self,
+    ) -> Option<(Option<String>, ProviderFormValues)> {
+        self.provider_form_back
+            .as_ref()
+            .map(ProviderFormOverlay::discovery_request)
+    }
+
+    pub(crate) fn select_provider_form_model(&mut self, model: &str) -> bool {
+        let Some(mut form) = self.provider_form_back.take() else {
+            return false;
+        };
+        form.set_model(model);
+        self.overlay = Some(Overlay::ProviderForm(form));
+        true
+    }
+
+    pub(crate) fn update_model_picker(
+        &mut self,
+        alias: &str,
+        result: Result<Vec<ModelListItem>, String>,
+    ) {
+        match result {
+            Ok(models) => {
+                if let Some(Overlay::ModelPicker(picker)) = self.overlay.as_mut()
+                    && picker.alias() == alias
+                {
+                    picker.set_models(models);
+                }
+            }
+            Err(error) => {
+                if self.overlay.as_ref().is_some_and(
+                    |overlay| matches!(overlay, Overlay::ModelPicker(picker) if picker.alias() == alias),
+                ) {
+                    self.show_error_dialog("Model discovery failed", error);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn mark_model_picker_loading(&mut self, alias: &str) {
+        if let Some(Overlay::ModelPicker(picker)) = self.overlay.as_mut()
+            && picker.alias() == alias
+        {
+            picker.set_loading();
+        }
+    }
+
+    pub(crate) fn set_provider_overlay_error(&mut self, error: String) {
+        self.show_error_dialog("Provider error", error);
+    }
+
+    pub(crate) fn show_info_dialog(&mut self, title: &str, message: String) {
+        self.show_dialog(MessageDialogKind::Info, title, message);
+    }
+
+    pub(crate) fn show_error_dialog(&mut self, title: &str, message: String) {
+        self.show_dialog(MessageDialogKind::Error, title, message);
+    }
+
+    fn show_dialog(&mut self, kind: MessageDialogKind, title: &str, message: String) {
+        if !matches!(self.overlay, Some(Overlay::Dialog(_))) {
+            self.dialog_back = self.overlay.take().map(Box::new);
+        }
+        self.overlay = Some(Overlay::Dialog(MessageDialogOverlay::new(
+            kind, title, message,
+        )));
+    }
+
+    pub(crate) fn replace_settings_defaults(&mut self, defaults: TuiSettingsDefaults) {
+        self.settings_defaults = defaults;
+    }
+
+    pub(crate) fn current_provider_alias(&self) -> Option<&str> {
+        self.preferences
+            .provider
+            .as_deref()
+            .or(self.settings_defaults.provider.as_deref())
+    }
+
+    pub(crate) fn replace_preferences(&mut self, preferences: TuiPreferences) {
+        self.preferences = preferences;
+    }
+
+    pub(crate) fn open_shortcuts(&mut self) {
+        let back = match self.overlay.take() {
+            Some(Overlay::Settings(settings)) => ShortcutsBack::Settings(settings),
+            _ => ShortcutsBack::CommandPalette,
+        };
+        self.overlay = Some(Overlay::Shortcuts(back));
+    }
+
+    pub(crate) fn close_overlay(&mut self) {
+        self.overlay = None;
+        self.dialog_back = None;
+        self.provider_overlay_back = None;
+        self.provider_form_back = None;
+    }
+
+    pub(crate) fn back_overlay(&mut self) {
+        self.overlay = match self.overlay.take() {
+            Some(Overlay::Shortcuts(ShortcutsBack::Settings(settings))) => {
+                Some(Overlay::Settings(settings))
+            }
+            Some(Overlay::Shortcuts(ShortcutsBack::CommandPalette))
+            | Some(Overlay::Settings(_)) => Some(Overlay::command_palette()),
+            Some(Overlay::ProviderManager(_)) => match self.provider_overlay_back.take() {
+                Some(ProviderOverlayBack::Settings(settings)) => Some(Overlay::Settings(settings)),
+                Some(ProviderOverlayBack::CommandPalette) | None => {
+                    Some(Overlay::command_palette())
+                }
+            },
+            Some(Overlay::Dialog(_)) => self.dialog_back.take().map(|overlay| *overlay),
+            Some(Overlay::ModelPicker(_)) => {
+                self.provider_form_back.take().map(Overlay::ProviderForm)
+            }
+            _ => None,
+        };
+    }
+
     pub(crate) fn timeline(&self) -> &[TimelineItem] {
         &self.timeline
+    }
+
+    pub(crate) fn latest_user_input_title(&self) -> Option<String> {
+        self.timeline.iter().rev().find_map(|item| {
+            let TimelineItem::User { text, .. } = item else {
+                return None;
+            };
+            let title = compact_title(text);
+            (!title.is_empty()).then_some(title)
+        })
     }
 
     pub(crate) fn artifact_timeline_indexes(&self) -> Vec<usize> {
@@ -483,8 +748,22 @@ impl TuiState {
         self.focus_scroll_offset = 0;
     }
 
+    pub(crate) fn follow_latest(&mut self) {
+        self.timeline_scroll_offset = 0;
+        self.focus_scroll_offset = 0;
+        self.timeline_review_user_index = None;
+        self.artifact_review_timeline_index = None;
+        self.pending_empty_input_quit = false;
+    }
+
     pub(crate) fn select_previous_artifact(&mut self) {
         let indexes = self.artifact_timeline_indexes();
+        if self.artifact_review_timeline_index.is_none() {
+            self.artifact_review_timeline_index = indexes.last().copied();
+            self.focus_scroll_offset = 0;
+            self.pending_empty_input_quit = false;
+            return;
+        }
         let Some(selected) = self.selected_artifact_timeline_index() else {
             return;
         };
@@ -599,6 +878,10 @@ impl TuiState {
         self.reasoning_effort_label = label;
     }
 
+    pub(crate) fn set_model_label(&mut self, label: String) {
+        self.model_label = label;
+    }
+
     pub(crate) fn is_active_run(&self) -> bool {
         is_active_run_state(self.run_state)
     }
@@ -621,13 +904,17 @@ impl TuiState {
     }
 
     pub(crate) fn status_text(&self) -> String {
+        self.status_parts().join("  ")
+    }
+
+    pub(crate) fn status_parts(&self) -> [String; 3] {
         let usage = self
             .usage
             .as_ref()
             .map(format_session_usage)
             .unwrap_or_else(|| "usage -".to_owned());
         let model = self.model_status_label();
-        format!("{}  {}  {}", self.workspace_root.display(), model, usage)
+        [self.workspace_root.display().to_string(), model, usage]
     }
 
     pub(crate) fn interaction_status_text(&self) -> String {
@@ -709,6 +996,19 @@ fn is_active_run_state(state: InteractiveRunState) -> bool {
     )
 }
 
+fn compact_title(text: &str) -> String {
+    const MAX_CHARS: usize = 60;
+    let title = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if title.chars().count() <= MAX_CHARS {
+        return title;
+    }
+    title
+        .chars()
+        .take(MAX_CHARS.saturating_sub(1))
+        .collect::<String>()
+        + "..."
+}
+
 impl TimelineItem {
     pub(crate) fn is_artifact_candidate(&self) -> bool {
         matches!(
@@ -722,45 +1022,11 @@ impl TimelineItem {
     }
 }
 
-fn merry_motion(elapsed: Duration) -> String {
-    const TRACK_WIDTH: usize = 9;
-    const SPINNER_FRAMES: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
-    const FRAME_MS: u128 = 70;
-    const HOLD_FRAMES: usize = SPINNER_FRAMES.len();
-    const SPIN_WIDTH: usize = 2;
-    const MOVE_FRAMES: usize = TRACK_WIDTH - SPIN_WIDTH;
-    const LOOP_FRAMES: usize = HOLD_FRAMES + MOVE_FRAMES + HOLD_FRAMES + MOVE_FRAMES;
-
-    let frame = (elapsed.as_millis() / FRAME_MS) as usize % LOOP_FRAMES;
-    if frame < HOLD_FRAMES {
-        return format!(
-            "[{}M{}]",
-            SPINNER_FRAMES[frame],
-            ".".repeat(TRACK_WIDTH - SPIN_WIDTH)
-        );
-    }
-
-    let outbound_start = HOLD_FRAMES;
-    let right_spin_start = outbound_start + MOVE_FRAMES;
-    if frame < right_spin_start {
-        let position = frame - outbound_start + SPIN_WIDTH;
-        return moving_merry_marker(position, TRACK_WIDTH);
-    }
-
-    let inbound_start = right_spin_start + HOLD_FRAMES;
-    if frame < inbound_start {
-        let spin = SPINNER_FRAMES[frame - right_spin_start];
-        return format!("[{}M{}]", ".".repeat(TRACK_WIDTH - SPIN_WIDTH), spin);
-    }
-
-    let position = TRACK_WIDTH - SPIN_WIDTH - (frame - inbound_start);
-    moving_merry_marker(position, TRACK_WIDTH)
-}
-
-fn moving_merry_marker(position: usize, width: usize) -> String {
-    let mut marker = vec!['.'; width];
-    marker[position] = 'M';
-    format!("[{}]", marker.into_iter().collect::<String>())
+fn merry_motion(elapsed: Duration) -> &'static str {
+    const FRAMES: [&str; 4] = ["[M··]", "[·M·]", "[··M]", "[·M·]"];
+    const FRAME_MS: u128 = 100;
+    let frame = (elapsed.as_millis() / FRAME_MS) as usize % FRAMES.len();
+    FRAMES[frame]
 }
 
 fn format_elapsed(elapsed: Duration) -> String {

@@ -1,6 +1,9 @@
 //! Provider implementation for the OpenAI Responses adapter.
 
-use crate::{OpenAiProviderConfig, OpenAiProviderError, parse::ResponsesStreamParser};
+use crate::{
+    OpenAiProtocol, OpenAiProviderConfig, OpenAiProviderError,
+    chat_completions::parse::ChatStreamParser, parse::ResponsesStreamParser,
+};
 use futures_util::stream;
 use merry_core::ProviderName;
 use merry_llm::{
@@ -24,7 +27,7 @@ const OPENAI_PROJECT_HEADER: &str = "OpenAI-Project";
 #[derive(Debug, Clone)]
 pub struct OpenAiProvider {
     config: OpenAiProviderConfig,
-    client: reqwest::Client,
+    pub(crate) client: reqwest::Client,
 }
 
 impl OpenAiProvider {
@@ -79,7 +82,7 @@ impl ModelProvider for OpenAiProvider {
                     return Err(ModelError::Cancelled);
                 }
 
-                let http_request = build_and_trace_responses_http_request(
+                let http_request = build_and_trace_openai_http_request(
                     &self.config,
                     &request,
                     &context,
@@ -112,7 +115,9 @@ impl ModelProvider for OpenAiProvider {
                 } else {
                     let error_kind = classify_http_status(status);
                     tracing::debug!("openai http status received and classified");
-                    let error = map_status_error(response, &token, error_kind).await;
+                    let error =
+                        map_status_error(response, &token, error_kind, self.config.protocol())
+                            .await;
                     if matches!(error, ModelError::Cancelled) {
                         tracing::debug!("openai stream setup cancelled");
                     }
@@ -120,7 +125,12 @@ impl ModelProvider for OpenAiProvider {
                 }
 
                 let event_stream = stream::unfold(
-                    OpenAiEventStreamState::new(response, token, event_stream_span),
+                    OpenAiEventStreamState::new(
+                        response,
+                        token,
+                        event_stream_span,
+                        self.config.protocol(),
+                    ),
                     |state| async move { state.next_item().await },
                 );
                 let event_stream: ModelEventStream = Box::pin(event_stream);
@@ -145,10 +155,11 @@ impl OpenAiEventStreamState {
         response: reqwest::Response,
         cancellation_token: tokio_util::sync::CancellationToken,
         span: tracing::Span,
+        protocol: OpenAiProtocol,
     ) -> Self {
         Self {
             response,
-            events: OpenAiEventStreamEvents::new(),
+            events: OpenAiEventStreamEvents::new(protocol),
             cancellation_token,
             span,
             done: false,
@@ -237,15 +248,22 @@ impl OpenAiEventStreamState {
 }
 
 struct OpenAiEventStreamEvents {
-    parser: ResponsesStreamParser,
+    parser: OpenAiStreamParser,
     line_buffer: Vec<u8>,
     pending: VecDeque<ModelEvent>,
 }
 
 impl OpenAiEventStreamEvents {
-    fn new() -> Self {
+    fn new(protocol: OpenAiProtocol) -> Self {
         Self {
-            parser: ResponsesStreamParser::new(),
+            parser: match protocol {
+                OpenAiProtocol::Responses => {
+                    OpenAiStreamParser::Responses(ResponsesStreamParser::new())
+                }
+                OpenAiProtocol::ChatCompletions => {
+                    OpenAiStreamParser::ChatCompletions(ChatStreamParser::new())
+                }
+            },
             line_buffer: Vec::new(),
             pending: VecDeque::from([ModelEvent::Started]),
         }
@@ -286,6 +304,27 @@ impl OpenAiEventStreamEvents {
     fn finish_stream_and_pop_pending(&mut self) -> Result<Option<ModelEvent>, OpenAiProviderError> {
         self.finish_stream()?;
         Ok(self.pop_pending())
+    }
+}
+
+enum OpenAiStreamParser {
+    Responses(ResponsesStreamParser),
+    ChatCompletions(ChatStreamParser),
+}
+
+impl OpenAiStreamParser {
+    fn parse_sse_line(&mut self, line: &str) -> Result<Vec<ModelEvent>, OpenAiProviderError> {
+        match self {
+            Self::Responses(parser) => parser.parse_sse_line(line),
+            Self::ChatCompletions(parser) => parser.parse_sse_line(line),
+        }
+    }
+
+    fn finish(&self) -> Result<(), OpenAiProviderError> {
+        match self {
+            Self::Responses(parser) => parser.finish(),
+            Self::ChatCompletions(parser) => parser.finish(),
+        }
     }
 }
 
@@ -356,6 +395,35 @@ fn build_responses_http_request(
     })
 }
 
+fn build_openai_http_request(
+    config: &OpenAiProviderConfig,
+    request: &ModelRequest,
+    context: &ModelStreamContext,
+) -> Result<ResponsesHttpRequest, ModelError> {
+    match config.protocol() {
+        OpenAiProtocol::Responses => build_responses_http_request(config, request, context),
+        OpenAiProtocol::ChatCompletions => {
+            let mut http = build_responses_http_request(config, request, context)?;
+            http.endpoint = chat_completions_endpoint(config.base_url())?;
+            http.body = crate::chat_completions::render::render_chat_request(request)?;
+            Ok(http)
+        }
+    }
+}
+
+fn build_and_trace_openai_http_request(
+    config: &OpenAiProviderConfig,
+    request: &ModelRequest,
+    context: &ModelStreamContext,
+    span: &tracing::Span,
+) -> Result<ResponsesHttpRequest, ModelError> {
+    let http_request = build_openai_http_request(config, request, context)?;
+    span.record("endpoint_path", http_request.endpoint.path());
+    trace_openai_request_metadata(config, request, http_request.endpoint.path());
+    Ok(http_request)
+}
+
+#[cfg(test)]
 fn build_and_trace_responses_http_request(
     config: &OpenAiProviderConfig,
     request: &ModelRequest,
@@ -397,26 +465,58 @@ fn responses_endpoint(base_url: &str) -> Result<reqwest::Url, ModelError> {
     })
 }
 
+fn chat_completions_endpoint(base_url: &str) -> Result<reqwest::Url, ModelError> {
+    let endpoint = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+    reqwest::Url::parse(&endpoint).map_err(|error| {
+        OpenAiProviderError::invalid_config(format!(
+            "base_url does not form a valid Chat Completions endpoint: {error}"
+        ))
+        .into()
+    })
+}
+
 async fn map_status_error(
-    response: reqwest::Response,
+    mut response: reqwest::Response,
     cancellation_token: &tokio_util::sync::CancellationToken,
     kind: ProviderErrorKind,
+    protocol: OpenAiProtocol,
 ) -> ModelError {
     let status = response.status();
     let retry_after = response
         .headers()
         .get(reqwest::header::RETRY_AFTER)
         .and_then(parse_retry_after_header);
-    let body = tokio::select! {
-        () = cancellation_token.cancelled() => return ModelError::Cancelled,
-        body = response.text() => body.unwrap_or_else(|error| {
-            format!("failed to read provider error body: {error}")
-        }),
+    let request_id = ["x-request-id", "request-id", "openai-request-id"]
+        .into_iter()
+        .find_map(|name| response.headers().get(name))
+        .and_then(|value| value.to_str().ok())
+        .and_then(bounded_provider_metadata);
+    let mut body = Vec::new();
+    while body.len() < 8 * 1024 {
+        let chunk = tokio::select! {
+            () = cancellation_token.cancelled() => return ModelError::Cancelled,
+            chunk = response.chunk() => chunk,
+        };
+        match chunk {
+            Ok(Some(chunk)) => {
+                let remaining = 8 * 1024 - body.len();
+                body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+            }
+            Ok(None) | Err(_) => break,
+        }
+    }
+    let error_code = provider_error_code(&body);
+    let protocol_name = match protocol {
+        OpenAiProtocol::Responses => "Responses",
+        OpenAiProtocol::ChatCompletions => "Chat Completions",
     };
-    let message = format!(
-        "OpenAI Responses request returned HTTP {status}: {}",
-        truncate_for_error(body.trim())
-    );
+    let mut message = format!("OpenAI {protocol_name} request returned HTTP {status}");
+    if let Some(error_code) = error_code {
+        message.push_str(&format!(" (code: {error_code})"));
+    }
+    if let Some(request_id) = request_id {
+        message.push_str(&format!(" (request_id: {request_id})"));
+    }
 
     ModelError::from(OpenAiProviderError::provider_with_retry_after(
         kind,
@@ -455,26 +555,33 @@ fn parse_retry_after_header(value: &reqwest::header::HeaderValue) -> Option<Dura
     Some(Duration::from_secs(seconds))
 }
 
-fn truncate_for_error(value: &str) -> String {
-    const MAX_LEN: usize = 512;
-    let mut output = String::new();
-    for character in value.chars().take(MAX_LEN) {
-        output.push(character);
-    }
-    if value.chars().count() > MAX_LEN {
-        output.push_str("...");
-    }
-    output
+fn provider_error_code(body: &[u8]) -> Option<String> {
+    let value = serde_json::from_slice::<Value>(body).ok()?;
+    let error = value.get("error")?;
+    error
+        .get("code")
+        .or_else(|| error.get("type"))
+        .and_then(Value::as_str)
+        .and_then(bounded_provider_metadata)
+}
+
+fn bounded_provider_metadata(value: &str) -> Option<String> {
+    (!value.is_empty()
+        && value.len() <= 128
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "._-:/".contains(character)))
+    .then(|| value.to_owned())
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        OpenAiEventStreamEvents, build_and_trace_responses_http_request,
+        OpenAiEventStreamEvents, build_and_trace_responses_http_request, build_openai_http_request,
         build_responses_http_request, classify_http_status, trace_openai_request_metadata,
     };
     use crate::parse::ResponsesStreamParser;
-    use crate::{OpenAiProviderConfig, OpenAiProviderError};
+    use crate::{OpenAiProtocol, OpenAiProviderConfig, OpenAiProviderError};
     use merry_core::SessionId;
     use merry_llm::{
         FinishReason, GenerationConfig, ModelContent, ModelEvent, ModelMessage, ModelMessageRole,
@@ -681,6 +788,28 @@ mod tests {
     }
 
     #[test]
+    fn builds_chat_completions_http_request_without_responses_state() {
+        let config = OpenAiProviderConfig::new("sk-test")
+            .expect("valid config")
+            .with_base_url("https://api.example.test/v1")
+            .expect("valid base url")
+            .with_protocol(OpenAiProtocol::ChatCompletions);
+        let request =
+            build_openai_http_request(&config, &request(), &ModelStreamContext::default())
+                .expect("request should build");
+
+        assert_eq!(
+            request.endpoint.as_str(),
+            "https://api.example.test/v1/chat/completions"
+        );
+        assert_eq!(request.body["model"], "debug-model");
+        assert_eq!(request.body["stream"], true);
+        assert_eq!(request.body["stream_options"]["include_usage"], true);
+        assert!(request.body.get("store").is_none());
+        assert!(request.body.get("prompt_cache_key").is_none());
+    }
+
+    #[test]
     fn provider_trace_metadata_does_not_include_api_key_or_prompt_text() {
         let config = OpenAiProviderConfig::new("sk-secret-trace-key")
             .expect("valid config")
@@ -815,6 +944,23 @@ mod tests {
     }
 
     #[test]
+    fn provider_error_metadata_does_not_expose_error_body_content() {
+        let body = br#"{
+            "error": {
+                "code": "invalid_request_error",
+                "message": "prompt secret sk-test-sensitive user request"
+            }
+        }"#;
+
+        assert_eq!(
+            super::provider_error_code(body).as_deref(),
+            Some("invalid_request_error")
+        );
+        assert!(super::bounded_provider_metadata("req_abc-123").is_some());
+        assert!(super::bounded_provider_metadata("secret value with spaces").is_none());
+    }
+
+    #[test]
     fn parses_sse_lines_to_started_deltas_and_completed_without_network() {
         let mut parser = ResponsesStreamParser::new();
         let mut events = VecDeque::from([ModelEvent::Started]);
@@ -913,7 +1059,7 @@ mod tests {
 
     #[test]
     fn stream_state_emits_completed_from_final_usage_line_without_trailing_newline() {
-        let mut events = OpenAiEventStreamEvents::new();
+        let mut events = OpenAiEventStreamEvents::new(OpenAiProtocol::Responses);
 
         assert_eq!(events.pop_pending(), Some(ModelEvent::Started));
         events
@@ -949,7 +1095,7 @@ mod tests {
 
     #[test]
     fn eof_finalization_returns_completed_from_final_usage_line_without_trailing_newline() {
-        let mut events = OpenAiEventStreamEvents::new();
+        let mut events = OpenAiEventStreamEvents::new(OpenAiProtocol::Responses);
         assert_eq!(events.pop_pending(), Some(ModelEvent::Started));
         events
             .parse_bytes(b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"Done\"}\n")

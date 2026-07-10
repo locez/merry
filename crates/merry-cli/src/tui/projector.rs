@@ -3,6 +3,7 @@ use super::state::{
 };
 use crate::tool_display::format_tool_call_detail;
 use merry_core::{RuntimeEvent, ToolCallId, ToolCallResultStatus, ToolName, ToolOutput};
+use merry_runtime::SessionTranscriptItem;
 use merry_tool_workspace::WORKSPACE_PATCH_TOOL;
 use serde::Deserialize;
 use serde_json::Value;
@@ -32,6 +33,41 @@ struct StartedToolView {
 
 #[allow(dead_code)]
 impl TuiProjector {
+    pub(crate) fn apply_transcript_item(
+        &mut self,
+        item: SessionTranscriptItem,
+        state: &mut TuiState,
+    ) {
+        match item {
+            SessionTranscriptItem::UserMessage { text } => {
+                state.confirm_or_push_user_input(text, merry_core::QueuedInputLane::Next);
+            }
+            SessionTranscriptItem::AssistantText { text } => {
+                self.streaming_assistant_index = None;
+                state.push_timeline_item(TimelineItem::Assistant { text });
+            }
+            SessionTranscriptItem::ToolCall { call } => {
+                self.apply(
+                    RuntimeEvent::ToolCallStarted {
+                        call,
+                        source: transcript_source(),
+                    },
+                    state,
+                );
+            }
+            SessionTranscriptItem::ToolResult { result, output, .. } => {
+                self.apply(
+                    RuntimeEvent::ToolCallFinished {
+                        result,
+                        output,
+                        source: transcript_source(),
+                    },
+                    state,
+                );
+            }
+        }
+    }
+
     pub(crate) fn apply(&mut self, event: RuntimeEvent, state: &mut TuiState) {
         match event {
             RuntimeEvent::AssistantMessage { text, .. } => {
@@ -41,12 +77,11 @@ impl TuiProjector {
                     state.push_timeline_item(TimelineItem::Assistant { text });
                 }
             }
-            RuntimeEvent::AssistantMessageDelta { delta, .. } => {
-                if !delta.is_empty() {
-                    self.streaming_assistant_index =
-                        Some(state.append_assistant_delta(self.streaming_assistant_index, &delta));
-                }
+            RuntimeEvent::AssistantMessageDelta { delta, .. } if !delta.is_empty() => {
+                self.streaming_assistant_index =
+                    Some(state.append_assistant_delta(self.streaming_assistant_index, &delta));
             }
+            RuntimeEvent::AssistantMessageDelta { .. } => {}
             RuntimeEvent::InteractiveRunStateChanged { state: run_state } => {
                 state.set_run_state(run_state);
             }
@@ -65,32 +100,11 @@ impl TuiProjector {
             RuntimeEvent::UsageUpdated { usage, .. } => {
                 state.set_usage(usage);
             }
-            RuntimeEvent::ToolCallStarted { call, .. } => {
-                self.streaming_assistant_index = None;
-                let call_id = call.id().clone();
-                let tool_name = call.name().clone();
-                let (title, detail) =
-                    started_tool_title_and_detail(tool_name.as_str(), call.arguments().as_object());
-                let timeline_index = state.timeline().len();
-                state.push_timeline_item(TimelineItem::Muted {
-                    title: title.clone(),
-                    detail: detail.clone(),
-                });
-                self.started_tools.insert(
-                    call_id,
-                    StartedToolView {
-                        name: tool_name,
-                        timeline_index,
-                        title,
-                        detail,
-                        patch_argument: call
-                            .arguments()
-                            .as_object()
-                            .get("patch")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned),
-                    },
-                );
+            RuntimeEvent::ToolCallStarted { call, .. } => self.start_tool(call, state),
+            RuntimeEvent::ToolCallBatchStarted { batch, .. } => {
+                for call in batch.calls() {
+                    self.start_tool(call.clone(), state);
+                }
             }
             RuntimeEvent::ToolCallFinished { result, output, .. } => {
                 let text = tool_output_text(output);
@@ -188,6 +202,42 @@ impl TuiProjector {
             _ => {}
         }
     }
+
+    fn start_tool(&mut self, call: merry_core::PendingToolCall, state: &mut TuiState) {
+        self.streaming_assistant_index = None;
+        let call_id = call.id().clone();
+        let tool_name = call.name().clone();
+        let (title, detail) =
+            started_tool_title_and_detail(tool_name.as_str(), call.arguments().as_object());
+        let timeline_index = state.timeline().len();
+        state.push_timeline_item(TimelineItem::Muted {
+            title: title.clone(),
+            detail: detail.clone(),
+        });
+        self.started_tools.insert(
+            call_id,
+            StartedToolView {
+                name: tool_name,
+                timeline_index,
+                title,
+                detail,
+                patch_argument: call
+                    .arguments()
+                    .as_object()
+                    .get("patch")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+            },
+        );
+    }
+}
+
+fn transcript_source() -> merry_core::RuntimeEventSource {
+    merry_core::RuntimeEventSource::new(
+        merry_core::SessionId::new("resume-transcript")
+            .expect("static resume transcript session id is valid"),
+        0,
+    )
 }
 
 fn expanded_tool_title(tool: &StartedToolView) -> String {

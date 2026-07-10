@@ -14,7 +14,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -113,7 +113,9 @@ pub trait ChildRuntimeFactory: Send + Sync {
 /// Runtime-owned manager for bounded child agent execution.
 #[derive(Clone)]
 pub struct SubagentManager {
-    config: SubagentConfig,
+    enabled: Arc<AtomicBool>,
+    max_threads: Arc<AtomicUsize>,
+    has_agents: Arc<AtomicBool>,
     factory: Arc<dyn ChildRuntimeFactory>,
     state: Arc<Mutex<SubagentManagerState>>,
     notify: Arc<Notify>,
@@ -145,7 +147,18 @@ struct ChildScheduler {
     factory: Arc<dyn ChildRuntimeFactory>,
     state: Arc<Mutex<SubagentManagerState>>,
     notify: Arc<Notify>,
-    max_threads: usize,
+    enabled: Arc<AtomicBool>,
+    max_threads: Arc<AtomicUsize>,
+}
+
+impl ChildScheduler {
+    fn effective_max_threads(&self) -> usize {
+        if self.enabled.load(Ordering::Acquire) {
+            self.max_threads.load(Ordering::Acquire)
+        } else {
+            0
+        }
+    }
 }
 
 struct ChildLoopLaunch {
@@ -176,17 +189,65 @@ impl SubagentManager {
     /// Creates a subagent manager for one parent session.
     #[must_use]
     pub fn new(
-        _parent_session_id: merry_core::SessionId,
+        parent_session_id: merry_core::SessionId,
         config: SubagentConfig,
         factory: Arc<dyn ChildRuntimeFactory>,
     ) -> Self {
+        Self::runtime_controlled(parent_session_id, config, factory, true)
+    }
+
+    /// Creates a manager whose spawn policy can be changed by interactive runtime control.
+    #[must_use]
+    pub fn runtime_controlled(
+        _parent_session_id: merry_core::SessionId,
+        config: SubagentConfig,
+        factory: Arc<dyn ChildRuntimeFactory>,
+        enabled: bool,
+    ) -> Self {
         Self {
-            config,
+            enabled: Arc::new(AtomicBool::new(enabled)),
+            max_threads: Arc::new(AtomicUsize::new(config.max_threads())),
+            has_agents: Arc::new(AtomicBool::new(false)),
             factory,
             state: Arc::new(Mutex::new(SubagentManagerState::default())),
             notify: Arc::new(Notify::new()),
             next_id: Arc::new(AtomicU64::new(1)),
             next_batch_id: Arc::new(AtomicU64::new(1)),
+        }
+    }
+
+    pub(crate) fn is_tool_visible(&self, tool_name: &ToolName) -> bool {
+        match tool_name.as_str() {
+            SPAWN_SUBAGENTS_TOOL_NAME => self.enabled.load(Ordering::Acquire),
+            WAIT_SUBAGENTS_TOOL_NAME | CANCEL_SUBAGENTS_TOOL_NAME => {
+                self.enabled.load(Ordering::Acquire) || self.has_agents.load(Ordering::Acquire)
+            }
+            _ => true,
+        }
+    }
+
+    pub(crate) async fn update_policy(
+        &self,
+        enabled: bool,
+        config: SubagentConfig,
+    ) -> Result<(), RuntimeError> {
+        self.max_threads
+            .store(config.max_threads(), Ordering::Release);
+        self.enabled.store(enabled, Ordering::Release);
+        if enabled {
+            let mut state = self.state.lock().await;
+            let starts = self.reserve_queued_starts_locked(&mut state);
+            drop(state);
+            self.start_reserved_children(starts).await?;
+        }
+        Ok(())
+    }
+
+    fn effective_max_threads(&self) -> usize {
+        if self.enabled.load(Ordering::Acquire) {
+            self.max_threads.load(Ordering::Acquire)
+        } else {
+            0
         }
     }
 
@@ -207,6 +268,17 @@ impl SubagentManager {
         max_concurrency: Option<usize>,
         parent_token: CancellationToken,
     ) -> Result<SpawnSubagentsOutput, RuntimeError> {
+        if !self.enabled.load(Ordering::Acquire) {
+            return Ok(SpawnSubagentsOutput {
+                spawned: Vec::new(),
+                rejected: (0..tasks.len())
+                    .map(|task_index| RejectedSubagentView {
+                        task_index,
+                        reason: "subagent spawning is disabled".to_owned(),
+                    })
+                    .collect(),
+            });
+        }
         if let Err(error) = validate_no_write_scope_conflicts(&tasks) {
             return Ok(SpawnSubagentsOutput {
                 spawned: Vec::new(),
@@ -229,10 +301,13 @@ impl SubagentManager {
             .collect::<Result<Vec<_>, _>>()?;
         let mut spawned = Vec::with_capacity(task_inputs.len());
         let mut to_start = Vec::new();
+        if !task_inputs.is_empty() {
+            self.has_agents.store(true, Ordering::Release);
+        }
         let batch_id = self.next_batch_id.fetch_add(1, Ordering::SeqCst);
         let batch_max_concurrency = max_concurrency
             .unwrap_or(task_inputs.len())
-            .min(self.config.max_threads());
+            .min(task_inputs.len());
         let mut state = self.state.lock().await;
         state.batches.insert(
             batch_id,
@@ -246,7 +321,7 @@ impl SubagentManager {
             let agent_id = SubagentId::new(&format!("agent-{number}"))?;
             let task_id = SubagentTaskId::new(&format!("task-{number}"))?;
             let child_token = parent_token.child_token();
-            let starts_now = running_child_count(&state) < self.config.max_threads()
+            let starts_now = running_child_count(&state) < self.effective_max_threads()
                 && batch_running_child_count(&state, batch_id) < batch_max_concurrency;
             let managed_status = if starts_now {
                 SubagentStatusLabel::Running
@@ -434,7 +509,7 @@ impl SubagentManager {
         &self,
         state: &mut SubagentManagerState,
     ) -> Vec<ReservedChildStart> {
-        reserve_queued_starts_locked(state, self.config.max_threads())
+        reserve_queued_starts_locked(state, self.effective_max_threads())
     }
 
     fn child_scheduler(&self) -> ChildScheduler {
@@ -442,7 +517,8 @@ impl SubagentManager {
             factory: Arc::clone(&self.factory),
             state: Arc::clone(&self.state),
             notify: Arc::clone(&self.notify),
-            max_threads: self.config.max_threads(),
+            enabled: Arc::clone(&self.enabled),
+            max_threads: Arc::clone(&self.max_threads),
         }
     }
 
@@ -594,7 +670,7 @@ async fn start_reserved_children_iteratively(
                 }
                 pending.extend(reserve_queued_starts_locked(
                     &mut state_guard,
-                    scheduler.max_threads,
+                    scheduler.effective_max_threads(),
                 ));
                 drop(state_guard);
                 scheduler.notify.notify_waiters();
@@ -643,7 +719,7 @@ fn spawn_child_loop(scheduler: ChildScheduler, launch: ChildLoopLaunch) {
                     &launch.agent_id,
                     "child task input was rejected",
                     error_info("subagent_input_error", error.to_string()),
-                    scheduler.max_threads,
+                    scheduler.effective_max_threads(),
                 )
                 .await;
                 scheduler.notify.notify_waiters();
@@ -659,7 +735,7 @@ fn spawn_child_loop(scheduler: ChildScheduler, launch: ChildLoopLaunch) {
                     &launch.agent_id,
                     "child loop configuration was rejected",
                     error_info("subagent_config_error", error.to_string()),
-                    scheduler.max_threads,
+                    scheduler.effective_max_threads(),
                 )
                 .await;
                 scheduler.notify.notify_waiters();
@@ -684,8 +760,10 @@ fn spawn_child_loop(scheduler: ChildScheduler, launch: ChildLoopLaunch) {
         let mut state_guard = scheduler.state.lock().await;
         if let Some(agent) = state_guard.agents.get_mut(&launch.agent_id) {
             if agent.status == SubagentStatusLabel::Cancelled {
-                let to_start =
-                    reserve_queued_starts_locked(&mut state_guard, scheduler.max_threads);
+                let to_start = reserve_queued_starts_locked(
+                    &mut state_guard,
+                    scheduler.effective_max_threads(),
+                );
                 drop(state_guard);
                 scheduler.notify.notify_waiters();
                 start_reserved_children_iteratively(scheduler, to_start).await;
@@ -702,7 +780,8 @@ fn spawn_child_loop(scheduler: ChildScheduler, launch: ChildLoopLaunch) {
                 }
             }
         }
-        let to_start = reserve_queued_starts_locked(&mut state_guard, scheduler.max_threads);
+        let to_start =
+            reserve_queued_starts_locked(&mut state_guard, scheduler.effective_max_threads());
         drop(state_guard);
         scheduler.notify.notify_waiters();
         start_reserved_children_iteratively(scheduler, to_start).await;
@@ -1113,6 +1192,105 @@ mod manager_tests {
         started: Arc<AtomicUsize>,
     }
 
+    #[tokio::test]
+    async fn runtime_controlled_manager_changes_spawn_tool_visibility() {
+        let manager = SubagentManager::runtime_controlled(
+            merry_core::SessionId::new("dynamic-subagents").unwrap(),
+            SubagentConfig::default(),
+            Arc::new(FakeChildFactory::new()),
+            false,
+        );
+        let spawn = ToolName::new(SPAWN_SUBAGENTS_TOOL_NAME).unwrap();
+        let workspace_read = ToolName::new("workspace_read_file").unwrap();
+
+        assert!(!manager.is_tool_visible(&spawn));
+        assert!(manager.is_tool_visible(&workspace_read));
+
+        manager
+            .update_policy(true, SubagentConfig::default())
+            .await
+            .expect("policy update should apply");
+
+        assert!(manager.is_tool_visible(&spawn));
+    }
+
+    #[tokio::test]
+    async fn runtime_controlled_manager_rejects_spawn_after_it_is_disabled() {
+        let factory = Arc::new(FakeChildFactory::new());
+        let manager = SubagentManager::runtime_controlled(
+            SessionId::new("dynamic-subagents-disabled").expect("valid session id"),
+            SubagentConfig::default(),
+            factory.clone(),
+            true,
+        );
+        manager
+            .update_policy(false, SubagentConfig::default())
+            .await
+            .expect("policy update should apply");
+
+        let output = manager
+            .spawn(
+                vec![SubagentTaskSpec::new("Must not start.", 1).expect("valid task")],
+                None,
+                CancellationToken::new(),
+            )
+            .await
+            .expect("disabled spawn returns a structured rejection");
+
+        assert!(output.spawned.is_empty());
+        assert_eq!(output.rejected.len(), 1);
+        assert_eq!(output.rejected[0].reason, "subagent spawning is disabled");
+        assert_eq!(factory.started.load(Ordering::SeqCst), 0);
+        assert!(manager.snapshot().await.is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn runtime_controlled_manager_promotes_queued_children_after_thread_limit_increase() {
+        let factory = Arc::new(AlwaysPendingChildFactory::new());
+        let manager = SubagentManager::runtime_controlled(
+            SessionId::new("dynamic-subagents-threads").expect("valid session id"),
+            SubagentConfig::new(1, 1).expect("valid initial config"),
+            factory.clone(),
+            true,
+        );
+        let output = manager
+            .spawn(
+                vec![
+                    SubagentTaskSpec::new("First pending task.", 1).expect("valid task"),
+                    SubagentTaskSpec::new("Second queued task.", 1).expect("valid task"),
+                ],
+                None,
+                CancellationToken::new(),
+            )
+            .await
+            .expect("spawn should succeed");
+
+        assert_eq!(
+            output.spawned[0].status,
+            SpawnedSubagentStatusLabel::Running
+        );
+        assert_eq!(output.spawned[1].status, SpawnedSubagentStatusLabel::Queued);
+        assert_eq!(factory.started.load(Ordering::SeqCst), 1);
+
+        manager
+            .update_policy(
+                true,
+                SubagentConfig::new(2, 1).expect("valid updated config"),
+            )
+            .await
+            .expect("thread limit update should apply");
+
+        assert_eq!(factory.started.load(Ordering::SeqCst), 2);
+        let statuses = manager.snapshot().await;
+        assert_eq!(
+            statuses
+                .iter()
+                .filter(|agent| agent.status == SubagentStatusLabel::Running)
+                .count(),
+            2
+        );
+    }
+
     impl FakeChildFactory {
         fn new() -> Self {
             Self {
@@ -1190,6 +1368,32 @@ mod manager_tests {
                 .model_provider(
                     Arc::new(provider),
                     merry_llm::ModelName::new("fake/pending").expect("valid model name"),
+                )
+                .build()
+        }
+    }
+
+    #[derive(Clone)]
+    struct AlwaysPendingChildFactory {
+        started: Arc<AtomicUsize>,
+    }
+
+    impl AlwaysPendingChildFactory {
+        fn new() -> Self {
+            Self {
+                started: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    impl ChildRuntimeFactory for AlwaysPendingChildFactory {
+        fn build_child(&self, input: ChildRuntimeInput) -> Result<Runtime, crate::RuntimeError> {
+            self.started.fetch_add(1, Ordering::SeqCst);
+            Runtime::builder(input.session_id)
+                .task_anchor(input.task_anchor)
+                .model_provider(
+                    Arc::new(PendingModelProvider::new()),
+                    ModelName::new("fake/pending").expect("valid model name"),
                 )
                 .build()
         }

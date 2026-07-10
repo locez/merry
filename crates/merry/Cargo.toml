@@ -8,6 +8,7 @@ publish = false
 [dependencies]
 merry-core = { path = "../merry-core" }
 merry-llm = { path = "../merry-llm" }
+merry-provider-anthropic = { path = "../merry-provider-anthropic" }
 merry-provider-openai = { path = "../merry-provider-openai" }
 merry-runtime = { path = "../merry-runtime" }
 merry-tool-workspace = { path = "../merry-tool-workspace" }

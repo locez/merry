@@ -1,4 +1,4 @@
-//! Debug and demonstration CLI for Merry.
+//! Merry terminal client and headless agent entrypoint.
 
 mod cli;
 mod cli_error;
@@ -11,6 +11,7 @@ mod debug;
 mod mcp_tools;
 mod observability;
 mod provider_config;
+mod provider_management;
 mod run;
 mod runtime_config;
 mod runtime_events;
@@ -51,9 +52,17 @@ fn main() -> CliExit {
         Err(error) => return CliExit::Unexpected(error.to_string()),
     };
 
-    if let Err(error) =
-        sandbox::maybe_reexec(cli.with_sandbox, argv.iter().skip(1).cloned().collect())
+    if cli.no_sandbox
+        && cli.is_product_surface()
+        && let Err(error) = sandbox::ensure_bubblewrap_available()
     {
+        return CliExit::Unexpected(error.to_string());
+    }
+
+    if let Err(error) = sandbox::maybe_reexec(
+        cli.should_bootstrap_sandbox(),
+        argv.iter().skip(1).cloned().collect(),
+    ) {
         return CliExit::Unexpected(error.to_string());
     }
 

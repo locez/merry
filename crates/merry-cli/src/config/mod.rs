@@ -1,18 +1,27 @@
 use merry_runtime::{PathAccess, PathAccessRule, PathAccessRuleSource};
 use serde::Deserialize;
 use std::{
+    collections::BTreeSet,
     env, fs, io,
     path::{Path, PathBuf},
 };
 use thiserror::Error;
 
+pub(crate) mod managed_provider;
 mod mcp;
 mod provider;
 mod runtime;
 
+pub(crate) use managed_provider::{
+    ManagedProviderDefinition, ManagedProviderKind, ManagedProviderStore,
+    ManagedProviderStoreError, ProviderAlias, derive_provider_alias,
+};
 use mcp::McpToml;
-pub use provider::EffectiveOpenAiProviderConfig;
 use provider::ProvidersToml;
+pub(crate) use provider::{
+    ConfiguredProviderKind, ConfiguredProviderProfile, ProviderConfigSource,
+};
+pub use provider::{EffectiveOpenAiProviderConfig, EffectiveProviderConfig};
 use runtime::RuntimeToml;
 pub use runtime::SubagentsConfig;
 
@@ -94,6 +103,26 @@ impl XdgPaths {
         &self.default_log_file
     }
 
+    pub fn tui_preferences_file(&self) -> PathBuf {
+        self.state_dir.join("tui-preferences.toml")
+    }
+
+    pub fn managed_config_dir(&self) -> PathBuf {
+        self.config_dir.join("managed")
+    }
+
+    pub fn managed_providers_file(&self) -> PathBuf {
+        self.managed_config_dir().join("providers.toml")
+    }
+
+    pub fn managed_secrets_dir(&self) -> PathBuf {
+        self.managed_config_dir().join("secrets")
+    }
+
+    pub fn model_catalog_cache_dir(&self) -> PathBuf {
+        self.state_dir.join("model-catalogs")
+    }
+
     fn home(&self) -> &Path {
         &self.home
     }
@@ -111,20 +140,47 @@ pub struct MerryConfig {
     raw: MerryConfigToml,
     config_dir: PathBuf,
     home: PathBuf,
+    managed_provider_aliases: BTreeSet<String>,
 }
 
 impl MerryConfig {
     pub fn load_optional(paths: &XdgPaths) -> Result<Option<Self>, ConfigError> {
-        match fs::read_to_string(paths.config_file()) {
-            Ok(text) => Self::load_optional_from_text(Some(&text), paths),
-            Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(source) => Err(ConfigError::Read {
-                path: paths.config_file().to_path_buf(),
-                source,
-            }),
+        let user_text = read_optional_config_text(paths.config_file())?;
+        let managed_path = paths.managed_providers_file();
+        let managed_text = read_optional_config_text(&managed_path)?;
+        if user_text.is_none() && managed_text.is_none() {
+            return Ok(None);
         }
+
+        let mut raw = user_text
+            .as_deref()
+            .map(|text| parse_config_text(text, paths.config_file()))
+            .transpose()?
+            .unwrap_or_default();
+        let mut managed_provider_aliases = BTreeSet::new();
+        if let Some(text) = managed_text.as_deref() {
+            let managed = managed_provider::parse_managed_providers(text, &managed_path)?;
+            let providers = raw.providers.get_or_insert_with(ProvidersToml::default);
+            for (alias, provider) in managed {
+                if providers.named.contains_key(&alias) {
+                    return Err(ConfigError::Invalid(format!(
+                        "provider alias {alias:?} exists in both user and managed config"
+                    )));
+                }
+                managed_provider_aliases.insert(alias.clone());
+                providers.named.insert(alias, provider);
+            }
+        }
+
+        Ok(Some(Self {
+            raw,
+            config_dir: paths.config_dir().to_path_buf(),
+            home: paths.home().to_path_buf(),
+            managed_provider_aliases,
+        }))
     }
 
+    #[cfg(test)]
     pub fn load_optional_from_text(
         text: Option<&str>,
         paths: &XdgPaths,
@@ -132,14 +188,12 @@ impl MerryConfig {
         let Some(text) = text else {
             return Ok(None);
         };
-        let raw = toml::from_str::<MerryConfigToml>(text).map_err(|source| ConfigError::Parse {
-            path: paths.config_file().to_path_buf(),
-            source,
-        })?;
+        let raw = parse_config_text(text, paths.config_file())?;
         Ok(Some(Self {
             raw,
             config_dir: paths.config_dir().to_path_buf(),
             home: paths.home().to_path_buf(),
+            managed_provider_aliases: BTreeSet::new(),
         }))
     }
 
@@ -250,6 +304,24 @@ impl MerryConfig {
         }
         Ok(roots)
     }
+}
+
+fn read_optional_config_text(path: &Path) -> Result<Option<String>, ConfigError> {
+    match fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(ConfigError::Read {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+fn parse_config_text(text: &str, path: &Path) -> Result<MerryConfigToml, ConfigError> {
+    toml::from_str::<MerryConfigToml>(text).map_err(|source| ConfigError::Parse {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
 fn resolve_user_path(value: &str, config_dir: &Path, home: &Path) -> Result<PathBuf, ConfigError> {
@@ -540,7 +612,7 @@ fn default_log_format() -> LogFormat {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::provider::EffectiveOpenAiApiKeySource;
+    use crate::config::provider::{EffectiveOpenAiApiKeySource, ProviderConfigSource};
     use std::path::{Path, PathBuf};
 
     fn home() -> PathBuf {
@@ -598,6 +670,97 @@ mod tests {
             MerryConfig::load_optional_from_text(None, &XdgPaths::from_parts(home(), None, None))
                 .expect("missing config should not fail optional load");
         assert!(loaded.is_none());
+    }
+
+    #[test]
+    fn loads_managed_provider_without_user_default_provider() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let paths = XdgPaths::from_parts(
+            temp.path().join("home"),
+            Some(temp.path().join("config")),
+            Some(temp.path().join("state")),
+        );
+        fs::create_dir_all(paths.managed_secrets_dir()).expect("managed secrets dir");
+        fs::write(
+            paths.managed_secrets_dir().join("opencode.key"),
+            "sk-test\n",
+        )
+        .expect("managed secret");
+        fs::write(
+            paths.managed_providers_file(),
+            r#"
+version = 1
+
+[providers.opencode]
+display_name = "OpenCode"
+default_model = "deepseek-v4-pro"
+type = "openai-compatible"
+base_url = "https://opencode.example.test/v1"
+api_key_file = "managed/secrets/opencode.key"
+"#,
+        )
+        .expect("managed providers file");
+
+        let config = MerryConfig::load_optional(&paths)
+            .expect("managed config should load")
+            .expect("managed provider should create config");
+        let profile = config
+            .provider_profile("opencode")
+            .expect("managed profile should resolve");
+
+        assert_eq!(profile.display_name(), "OpenCode");
+        assert_eq!(profile.source(), ProviderConfigSource::Managed);
+        let EffectiveProviderConfig::OpenAiCompatible(provider) = config
+            .provider_by_alias("opencode")
+            .expect("managed provider should materialize")
+        else {
+            panic!("OpenAI-compatible provider expected");
+        };
+        assert_eq!(
+            provider.resolve_api_key().expect("key should resolve"),
+            "sk-test"
+        );
+    }
+
+    #[test]
+    fn rejects_user_and_managed_alias_collision() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let paths = XdgPaths::from_parts(
+            temp.path().join("home"),
+            Some(temp.path().join("config")),
+            Some(temp.path().join("state")),
+        );
+        fs::create_dir_all(paths.managed_config_dir()).expect("managed config dir");
+        fs::write(
+            paths.config_file(),
+            r#"
+[providers.default]
+provider = "opencode"
+model = "model-a"
+
+[providers.opencode]
+api_key = "sk-user"
+"#,
+        )
+        .expect("user config");
+        fs::write(
+            paths.managed_providers_file(),
+            r#"
+version = 1
+
+[providers.opencode]
+display_name = "Managed OpenCode"
+default_model = "model-b"
+type = "openai-compatible"
+api_key = "sk-managed"
+"#,
+        )
+        .expect("managed config");
+
+        let error = MerryConfig::load_optional(&paths).expect_err("collision should fail");
+
+        assert!(error.to_string().contains("opencode"));
+        assert!(error.to_string().contains("both user and managed"));
     }
 
     #[test]
@@ -701,7 +864,7 @@ review_next_artifact = "ctrl+f"
 follow_latest_artifact = "ctrl+r"
 history_previous = "up"
 history_next = "down"
-resume_suspended = "ctrl+p"
+resume_suspended = "ctrl+n"
 discard_suspended = "ctrl+d"
 "##,
             ),
@@ -875,13 +1038,13 @@ roots = ["skills", "~/shared-skills", "/opt/company/skills"]
             .expect("example config should be present");
 
         assert_eq!(config.profile(), Some("default"));
-        let log = config
-            .effective_log_settings(&paths)
-            .expect("example log settings should validate")
-            .expect("example should enable logs for smoke/debug use");
-        assert_eq!(log.level, LogLevel::Debug);
-        assert_eq!(log.format, LogFormat::Json);
-        assert_eq!(log.path, paths.default_log_file());
+        assert!(
+            config
+                .effective_log_settings(&paths)
+                .expect("example log settings should validate")
+                .is_none(),
+            "the user-facing example should not enable persistent logging by default"
+        );
 
         let tui = config
             .tui_config()
@@ -915,7 +1078,7 @@ roots = ["skills", "~/shared-skills", "/opt/company/skills"]
                 .reasoning_effort
                 .as_ref()
                 .map(|effort| effort.as_str()),
-            Some("medium")
+            None
         );
         assert_eq!(
             provider.base_url.as_deref(),

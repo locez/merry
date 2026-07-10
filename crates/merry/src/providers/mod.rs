@@ -1,12 +1,17 @@
 //! Provider components for Merry runtime construction.
 
+mod anthropic;
 mod openai_compatible;
 
 use merry_llm::{ModelName, ModelProvider, ModelRetryPolicy};
 use merry_runtime::{RuntimeBuilder, RuntimeModelRole};
 use std::sync::Arc;
 
-pub use merry_provider_openai::{OpenAiProviderConfig, OpenAiProviderError};
+pub use anthropic::{AnthropicProviderBuildError, AnthropicProviderBuilder, anthropic};
+pub use merry_provider_anthropic::{
+    AnthropicProvider, AnthropicProviderConfig, AnthropicProviderError,
+};
+pub use merry_provider_openai::{OpenAiProtocol, OpenAiProviderConfig, OpenAiProviderError};
 pub use openai_compatible::{
     OpenAiCompatibleProviderBuildError, OpenAiCompatibleProviderBuilder, openai_compatible,
 };

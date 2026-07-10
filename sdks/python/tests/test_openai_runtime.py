@@ -14,6 +14,23 @@ def test_openai_compatible_constructor_validates_without_network():
     assert isinstance(runtime, merry.Runtime)
 
 
+def test_openai_chat_completions_and_anthropic_validate_without_network():
+    chat = merry.Runtime.with_openai_compatible(
+        api_key="sk-test",
+        model="gpt-test",
+        base_url="https://api.example.test/v1",
+        protocol="chat_completions",
+    )
+    anthropic = merry.Runtime.with_anthropic(
+        api_key="sk-ant-test",
+        model="claude-test",
+        base_url="https://anthropic.example.test",
+    )
+
+    assert isinstance(chat, merry.Runtime)
+    assert isinstance(anthropic, merry.Runtime)
+
+
 def test_openai_compatible_constructor_uses_random_session_id_by_default():
     first = merry.Runtime.with_openai_compatible(
         api_key="sk-test",
