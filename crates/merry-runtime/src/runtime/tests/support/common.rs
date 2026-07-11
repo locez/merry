@@ -79,6 +79,7 @@
             automatic_compaction: tokio::sync::RwLock::new(
                 AutomaticCompactionConfig::default(),
             ),
+            context_window_tokens: tokio::sync::RwLock::new(None),
             capabilities: crate::RuntimeCapabilities::default(),
             progress_commentary: false,
             tool_registry: ToolRegistry::default(),

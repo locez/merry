@@ -582,6 +582,7 @@ impl RuntimeBuilder {
                 model_configs: self.model_configs,
                 primary_model_override: RwLock::new(None),
                 automatic_compaction: RwLock::new(self.automatic_compaction),
+                context_window_tokens: RwLock::new(None),
                 capabilities: self.capabilities,
                 progress_commentary: self.progress_commentary,
                 tool_registry,

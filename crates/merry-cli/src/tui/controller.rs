@@ -218,6 +218,17 @@ pub(crate) fn handle_key_event(key: KeyEvent, state: &mut TuiState) -> Controlle
                     ControllerEffect::None
                 }
             }
+            OverlayKeyResult::BeginContextWindowEdit => {
+                state.begin_settings_context_window_edit();
+                ControllerEffect::None
+            }
+            OverlayKeyResult::CommitContextWindow(value) => {
+                if state.commit_settings_context_window(value) {
+                    ControllerEffect::ApplyRuntimePreferences(state.preferences().clone())
+                } else {
+                    ControllerEffect::None
+                }
+            }
             OverlayKeyResult::OpenShortcuts => {
                 state.open_shortcuts();
                 ControllerEffect::None

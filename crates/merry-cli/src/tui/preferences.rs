@@ -80,6 +80,8 @@ pub(crate) struct TuiPreferences {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) reasoning_effort: Option<ReasoningEffort>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) context_window_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) auto_compaction_enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) compaction_strategy: Option<CompactionStrategy>,
@@ -97,6 +99,7 @@ impl Default for TuiPreferences {
             provider: None,
             models: BTreeMap::new(),
             reasoning_effort: None,
+            context_window_tokens: None,
             auto_compaction_enabled: None,
             compaction_strategy: None,
             subagents_enabled: None,
@@ -142,6 +145,7 @@ pub(crate) struct TuiSettingsDefaults {
     pub(crate) provider: Option<String>,
     pub(crate) model: Option<String>,
     pub(crate) reasoning_effort: Option<ReasoningEffort>,
+    pub(crate) context_window_tokens: u64,
     pub(crate) subagents_enabled: bool,
     pub(crate) subagent_max_threads: usize,
     pub(crate) auto_compaction_enabled: bool,
@@ -156,6 +160,7 @@ impl Default for TuiSettingsDefaults {
             provider: None,
             model: None,
             reasoning_effort: None,
+            context_window_tokens: merry_runtime::DEFAULT_CONTEXT_WINDOW_FALLBACK_TOKENS,
             subagents_enabled: false,
             subagent_max_threads: limits.max_threads(),
             auto_compaction_enabled: true,
@@ -183,6 +188,7 @@ impl TuiSettingsDefaults {
                 .as_ref()
                 .map(|provider| provider.model.clone()),
             reasoning_effort: default_provider.and_then(|provider| provider.reasoning_effort),
+            context_window_tokens: merry_runtime::DEFAULT_CONTEXT_WINDOW_FALLBACK_TOKENS,
             subagents_enabled: subagents.is_enabled(),
             subagent_max_threads: subagents.limits().max_threads(),
             auto_compaction_enabled: auto_compaction.is_enabled(),
@@ -313,6 +319,11 @@ impl TuiPreferences {
                 "subagent_max_threads must be greater than zero".to_owned(),
             ));
         }
+        if self.context_window_tokens == Some(0) {
+            return Err(PreferencesError::Invalid(
+                "context_window_tokens must be greater than zero".to_owned(),
+            ));
+        }
         Ok(())
     }
 }
@@ -356,6 +367,7 @@ impl TuiPreferencesV1 {
             provider: self.provider,
             models: BTreeMap::new(),
             reasoning_effort: self.reasoning_effort,
+            context_window_tokens: None,
             auto_compaction_enabled: None,
             compaction_strategy: None,
             subagents_enabled: self.subagents_enabled,
@@ -430,6 +442,7 @@ mod tests {
             code_theme: CodeTheme::CatppuccinMocha,
             provider: Some("anthropic".to_owned()),
             reasoning_effort: Some(ReasoningEffort::new("high").unwrap()),
+            context_window_tokens: Some(272_000),
             subagents_enabled: Some(true),
             subagent_max_threads: Some(6),
             ..TuiPreferences::default()

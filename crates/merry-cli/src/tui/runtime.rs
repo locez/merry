@@ -25,7 +25,7 @@ use merry_runtime::{
     InteractivePrimaryModel, InteractiveRunEventStream, InteractiveSettingsUpdate,
     InteractiveSubagentSettings, Runtime, SessionTranscriptItem, SkillMetadata, StepContext,
 };
-use std::{env, path::PathBuf};
+use std::{env, num::NonZeroU64, path::PathBuf};
 
 pub(crate) struct TuiRuntimeSession {
     pub(crate) workspace_root: PathBuf,
@@ -136,6 +136,16 @@ pub(crate) async fn start_tui_runtime_session(
         )
         .map_err(unexpected)?;
     let (stream, input, control) = interactive.split();
+    if preferences.context_window_tokens.is_some() {
+        control
+            .update_settings(
+                InteractiveSettingsUpdate::default().with_context_window_tokens(
+                    context_window_tokens_with_preferences(preferences)?,
+                ),
+            )
+            .await
+            .map_err(unexpected)?;
+    }
 
     Ok(TuiRuntimeSession {
         workspace_root,
@@ -198,7 +208,8 @@ impl TuiRuntimeSession {
                 subagents.is_enabled(),
                 subagents.limits(),
             ))
-            .with_automatic_compaction(automatic_compaction);
+            .with_automatic_compaction(automatic_compaction)
+            .with_context_window_tokens(context_window_tokens_with_preferences(preferences)?);
         self.control
             .update_settings(update)
             .await
@@ -302,6 +313,18 @@ fn automatic_compaction_config_with_preferences(
     } else {
         AutomaticCompactionConfig::disabled()
     })
+}
+
+fn context_window_tokens_with_preferences(
+    preferences: &TuiPreferences,
+) -> Result<Option<NonZeroU64>, CliError> {
+    preferences
+        .context_window_tokens
+        .map(|tokens| {
+            NonZeroU64::new(tokens)
+                .ok_or_else(|| unexpected("context window preference must be greater than zero"))
+        })
+        .transpose()
 }
 
 #[cfg(test)]

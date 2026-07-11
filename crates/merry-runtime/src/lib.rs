@@ -80,8 +80,9 @@ pub use compaction::{
 pub use context::{
     CheckpointDecision, CompactedCheckpoint, CompactedCheckpointSummary, CompiledContext,
     CompiledContextSection, ContextBudget, ContextBudgetPolicy, ContextCompiler, ContextEntry,
-    ContextError, ContextEvidence, ContextSummary, ProjectRules, ResolvedContextWindow,
-    SessionContextSnapshot, TaskAnchor, decide_checkpoint, resolve_context_window,
+    ContextError, ContextEvidence, ContextSummary, DEFAULT_CONTEXT_WINDOW_FALLBACK_TOKENS,
+    ProjectRules, ResolvedContextWindow, SessionContextSnapshot, TaskAnchor, decide_checkpoint,
+    resolve_context_window,
 };
 pub use error::RuntimeError;
 pub use events::{RuntimeEventStream, RuntimeJournalEventStream};

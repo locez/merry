@@ -1,7 +1,7 @@
 use futures_util::{StreamExt, stream};
 use merry_core::{
-    InteractiveRunState, PendingToolCall, ProviderName, QueuedInputLane, RuntimeEvent, SessionId,
-    ToolInputSchema, ToolName, ToolSpec,
+    InteractiveRunState, ModelUsage, PendingToolCall, ProviderName, QueuedInputLane, RuntimeEvent,
+    SessionId, ToolInputSchema, ToolName, ToolSpec,
 };
 use merry_llm::{
     FinishReason, GenerationConfig, ModelCapabilities, ModelError, ModelEvent, ModelEventStream,
@@ -19,7 +19,7 @@ use merry_runtime::{
 use schemars::Schema;
 use serde_json::json;
 use std::{
-    num::NonZeroUsize,
+    num::{NonZeroU64, NonZeroUsize},
     sync::{Arc, Mutex, OnceLock},
 };
 use tokio::{
@@ -42,6 +42,16 @@ type ScriptedProviderSteps = Vec<ScriptedModelEvents>;
 fn completed_text_event(text: &str) -> ModelEvent {
     ModelEvent::Completed {
         response: ModelResponse::new(vec![ModelOutput::text(text)], FinishReason::Stop, None),
+    }
+}
+
+fn completed_text_event_with_usage(text: &str) -> ModelEvent {
+    ModelEvent::Completed {
+        response: ModelResponse::new(
+            vec![ModelOutput::text(text)],
+            FinishReason::Stop,
+            Some(ModelUsage::new(100, 10)),
+        ),
     }
 }
 
@@ -508,6 +518,54 @@ async fn interactive_settings_update_changes_automatic_compaction_at_request_bou
         .expect("settings update accepted");
 
     assert_eq!(runtime.automatic_compaction_config().await, updated);
+}
+
+#[tokio::test]
+async fn interactive_settings_update_changes_context_window_at_request_boundary() {
+    let provider = RecordingProvider::new_with_steps(vec![
+        vec![Ok(completed_text_event_with_usage("first"))],
+        vec![Ok(completed_text_event_with_usage("second"))],
+    ]);
+    let runtime = Runtime::builder(session_id("interactive-update-context-window"))
+        .model_provider(Arc::new(provider), model_name())
+        .build()
+        .expect("runtime builds");
+    let run = runtime
+        .start_interactive_agent_run(
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default(),
+        )
+        .expect("interactive run starts");
+    let (mut stream, input, control) = run.split();
+    let _ = stream.next().await.expect("waiting state");
+
+    input.submit_next("first").await.expect("first queued");
+    wait_for_interactive_waiting(&mut stream).await;
+    let fallback = runtime.usage().await.expect("fallback usage");
+    let fallback_context = fallback.context.expect("fallback context");
+    assert_eq!(fallback_context.resolved_model_window_tokens, 272_000);
+    assert_eq!(
+        fallback_context.source,
+        merry_core::ContextWindowSource::Fallback
+    );
+
+    control
+        .update_settings(
+            InteractiveSettingsUpdate::default()
+                .with_context_window_tokens(NonZeroU64::new(128_000)),
+        )
+        .await
+        .expect("settings update accepted");
+    input.submit_next("second").await.expect("second queued");
+    wait_for_interactive_waiting(&mut stream).await;
+
+    let configured = runtime.usage().await.expect("configured usage");
+    let configured_context = configured.context.expect("configured context");
+    assert_eq!(configured_context.resolved_model_window_tokens, 128_000);
+    assert_eq!(
+        configured_context.source,
+        merry_core::ContextWindowSource::ExplicitConfig
+    );
 }
 
 #[tokio::test]

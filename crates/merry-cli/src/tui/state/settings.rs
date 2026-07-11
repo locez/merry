@@ -37,6 +37,13 @@ impl TuiState {
         }
     }
 
+    pub(crate) fn settings_context_window_editor(&self) -> Option<&TextInput> {
+        match self.overlay.as_ref() {
+            Some(Overlay::Settings(settings)) => settings.context_window_editor(),
+            _ => None,
+        }
+    }
+
     pub(crate) fn settings_notice(&self) -> Option<&str> {
         match self.overlay.as_ref() {
             Some(Overlay::Settings(settings)) => settings.notice(),
@@ -84,6 +91,31 @@ impl TuiState {
         }
     }
 
+    pub(crate) fn begin_settings_context_window_edit(&mut self) {
+        let value = self
+            .preferences
+            .context_window_tokens
+            .map(|tokens| tokens.to_string())
+            .unwrap_or_default();
+        if let Some(Overlay::Settings(settings)) = self.overlay.as_mut() {
+            settings.begin_context_window_edit(value);
+        }
+    }
+
+    pub(crate) fn commit_settings_context_window(&mut self, value: String) -> bool {
+        match parse_context_window_tokens(&value) {
+            Ok(tokens) => {
+                self.preferences.context_window_tokens = Some(tokens);
+                self.set_settings_notice(Some("Applied".to_owned()));
+                true
+            }
+            Err(error) => {
+                self.set_settings_notice(Some(error));
+                false
+            }
+        }
+    }
+
     pub(crate) fn adjust_setting(
         &mut self,
         item: SettingItem,
@@ -99,6 +131,7 @@ impl TuiState {
             SettingItem::DefaultProvider => self.adjust_provider(direction),
             SettingItem::DefaultModel | SettingItem::KeyboardShortcuts => return false,
             SettingItem::ReasoningEffort => self.adjust_reasoning(direction),
+            SettingItem::ContextWindow => self.adjust_context_window(direction),
             SettingItem::AutoCompaction => self.adjust_auto_compaction(direction),
             SettingItem::ContextStrategy => self.adjust_compaction_strategy(direction),
             SettingItem::Subagents => self.adjust_subagents(direction),
@@ -118,6 +151,7 @@ impl TuiState {
                 }
             }
             SettingItem::ReasoningEffort => self.preferences.reasoning_effort = None,
+            SettingItem::ContextWindow => self.preferences.context_window_tokens = None,
             SettingItem::AutoCompaction => self.preferences.auto_compaction_enabled = None,
             SettingItem::ContextStrategy => self.preferences.compaction_strategy = None,
             SettingItem::Subagents => self.preferences.subagents_enabled = None,
@@ -149,6 +183,16 @@ impl TuiState {
                     .as_ref()
                     .map(merry_llm::ReasoningEffort::as_str),
             ),
+            SettingItem::ContextWindow => self
+                .preferences
+                .context_window_tokens
+                .map(format_context_window_tokens)
+                .unwrap_or_else(|| {
+                    format!(
+                        "Inherit ({} fallback)",
+                        format_context_window_tokens(self.settings_defaults.context_window_tokens)
+                    )
+                }),
             SettingItem::AutoCompaction => self
                 .preferences
                 .auto_compaction_enabled
@@ -255,6 +299,27 @@ impl TuiState {
         self.preferences.auto_compaction_enabled = VALUES[next];
     }
 
+    fn adjust_context_window(&mut self, direction: SettingDirection) {
+        const VALUES: [Option<u64>; 7] = [
+            None,
+            Some(64_000),
+            Some(128_000),
+            Some(256_000),
+            Some(272_000),
+            Some(372_000),
+            Some(1_000_000),
+        ];
+        let current = VALUES
+            .iter()
+            .position(|value| *value == self.preferences.context_window_tokens)
+            .unwrap_or(0);
+        let next = match direction {
+            SettingDirection::Previous => (current + VALUES.len() - 1) % VALUES.len(),
+            SettingDirection::Next => (current + 1) % VALUES.len(),
+        };
+        self.preferences.context_window_tokens = VALUES[next];
+    }
+
     fn adjust_compaction_strategy(&mut self, direction: SettingDirection) {
         const VALUES: [Option<CompactionStrategy>; 4] = [
             None,
@@ -314,4 +379,34 @@ fn inherited_value(value: Option<&str>, inherited: Option<&str>) -> String {
 
 fn on_off(value: bool) -> &'static str {
     if value { "On" } else { "Off" }
+}
+
+fn parse_context_window_tokens(value: &str) -> Result<u64, String> {
+    let normalized = value.trim().to_ascii_lowercase();
+    let (digits, multiplier) = if let Some(digits) = normalized.strip_suffix('k') {
+        (digits, 1_000)
+    } else if let Some(digits) = normalized.strip_suffix('m') {
+        (digits, 1_000_000)
+    } else {
+        (normalized.as_str(), 1)
+    };
+    let tokens = digits
+        .parse::<u64>()
+        .ok()
+        .and_then(|value| value.checked_mul(multiplier))
+        .filter(|value| *value > 0)
+        .ok_or_else(|| {
+            "Context window must be a positive token count (for example 272k)".to_owned()
+        })?;
+    Ok(tokens)
+}
+
+fn format_context_window_tokens(tokens: u64) -> String {
+    if tokens >= 1_000_000 && tokens.is_multiple_of(1_000_000) {
+        format!("{}m", tokens / 1_000_000)
+    } else if tokens >= 1_000 && tokens.is_multiple_of(1_000) {
+        format!("{}k", tokens / 1_000)
+    } else {
+        tokens.to_string()
+    }
 }

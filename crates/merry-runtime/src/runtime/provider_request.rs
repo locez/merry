@@ -1,7 +1,7 @@
 use crate::{
-    CheckpointDecision, ContextBudget, ContextBudgetPolicy, ContextCompiler, ProjectRules,
-    ResolvedContextWindow, RuntimeError, SessionContextSnapshot, SkillCatalog, TaskAnchor,
-    decide_checkpoint, resolve_context_window,
+    CheckpointDecision, ContextBudget, ContextBudgetPolicy, ContextCompiler,
+    DEFAULT_CONTEXT_WINDOW_FALLBACK_TOKENS, ProjectRules, ResolvedContextWindow, RuntimeError,
+    SessionContextSnapshot, SkillCatalog, TaskAnchor, decide_checkpoint, resolve_context_window,
     session::{SessionState, TranscriptItemSnapshot},
     step::{StepInput, StepModelRequestParts, compile_step_model_request},
 };
@@ -10,7 +10,6 @@ use merry_llm::{GenerationConfig, ModelError, ModelName};
 
 use super::diagnostic_from_text;
 
-const DEFAULT_CONTEXT_WINDOW_FALLBACK_TOKENS: u64 = 64_000;
 const DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT: u8 = 95;
 const DEFAULT_OUTPUT_RESERVE_WINDOW_DIVISOR: u64 = 20;
 const DEFAULT_OUTPUT_RESERVE_MIN_TOKENS: u64 = 3_200;
@@ -217,9 +216,10 @@ pub(super) fn step_usage_context_snapshot(
 pub(super) fn request_context_budget(
     capabilities: &merry_llm::ModelCapabilities,
     request: &merry_llm::ModelRequest,
+    context_window_override: Option<u64>,
 ) -> Result<RequestContextBudget, crate::ContextError> {
     let window = resolve_context_window(
-        None,
+        context_window_override,
         capabilities.max_input_tokens(),
         None,
         DEFAULT_CONTEXT_WINDOW_FALLBACK_TOKENS,

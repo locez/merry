@@ -1448,6 +1448,70 @@ fn settings_reasoning_change_applies_to_the_current_runtime() {
 }
 
 #[test]
+fn settings_context_window_editor_applies_to_the_current_runtime() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.open_settings();
+    for _ in 0..4 {
+        handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut state);
+    }
+
+    handle_key_event(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut state,
+    );
+    handle_paste_event("128k", &mut state);
+    let effect = handle_key_event(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut state,
+    );
+
+    assert!(matches!(
+        effect,
+        ControllerEffect::ApplyRuntimePreferences(preferences)
+            if preferences.context_window_tokens == Some(128_000)
+    ));
+    assert!(render_to_text(&state, 100, 30).contains("128k"));
+    assert_eq!(state.settings_notice(), Some("Applied"));
+}
+
+#[test]
+fn settings_context_window_editor_rejects_zero() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.open_settings();
+    for _ in 0..4 {
+        handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut state);
+    }
+    handle_key_event(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut state,
+    );
+    handle_paste_event("0", &mut state);
+
+    let effect = handle_key_event(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut state,
+    );
+
+    assert_eq!(effect, ControllerEffect::None);
+    assert_eq!(state.preferences().context_window_tokens, None);
+    assert!(
+        state
+            .settings_notice()
+            .is_some_and(|notice| notice.contains("positive token count"))
+    );
+}
+
+#[test]
 fn settings_compaction_change_applies_to_the_current_runtime() {
     let mut state = TuiState::new(
         "/repo".into(),
@@ -1469,7 +1533,7 @@ fn settings_compaction_change_applies_to_the_current_runtime() {
         KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         &mut state,
     );
-    for _ in 0..4 {
+    for _ in 0..5 {
         handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut state);
     }
 
@@ -1576,7 +1640,7 @@ fn shortcuts_opened_from_settings_return_to_settings() {
         KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         &mut state,
     );
-    for _ in 0..8 {
+    for _ in 0..9 {
         handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut state);
     }
     handle_key_event(
@@ -1658,7 +1722,7 @@ fn settings_keep_the_selected_row_visible_in_a_short_terminal() {
         KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         &mut state,
     );
-    for _ in 0..8 {
+    for _ in 0..9 {
         handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut state);
     }
 

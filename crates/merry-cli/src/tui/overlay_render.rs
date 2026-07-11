@@ -120,6 +120,13 @@ fn render_settings(frame: &mut Frame<'_>, state: &TuiState) {
         .as_ref()
         .map(|viewport| format!("{}  editing", viewport.text))
         .unwrap_or_else(|| state.setting_value(SettingItem::DefaultModel));
+    let context_window_editor_viewport = state
+        .settings_context_window_editor()
+        .map(|input| input.viewport(inner.width.saturating_sub(36).max(1).into()));
+    let context_window_value = context_window_editor_viewport
+        .as_ref()
+        .map(|viewport| format!("{}  editing", viewport.text))
+        .unwrap_or_else(|| state.setting_value(SettingItem::ContextWindow));
     let lines = vec![
         section_line(state, "Appearance"),
         setting_line(
@@ -150,6 +157,12 @@ fn render_settings(frame: &mut Frame<'_>, state: &TuiState) {
         ),
         Line::default(),
         section_line(state, "Context"),
+        setting_line(
+            state,
+            "Context window",
+            &context_window_value,
+            selected == Some(SettingItem::ContextWindow),
+        ),
         setting_line(
             state,
             "Auto compaction",
@@ -211,6 +224,20 @@ fn render_settings(frame: &mut Frame<'_>, state: &TuiState) {
             ));
         }
     }
+    if let Some(viewport) = context_window_editor_viewport {
+        let value_x = inner.x.saturating_add(26);
+        let context_window_row = setting_line_index(SettingItem::ContextWindow);
+        if let Some(visible_row) = context_window_row.checked_sub(scroll_offset)
+            && visible_row < visible_height
+        {
+            frame.set_cursor_position(Position::new(
+                value_x
+                    .saturating_add(viewport.cursor_column as u16)
+                    .min(inner.right().saturating_sub(1)),
+                inner.y.saturating_add(visible_row as u16),
+            ));
+        }
+    }
 }
 
 fn setting_line_index(item: SettingItem) -> usize {
@@ -219,11 +246,12 @@ fn setting_line_index(item: SettingItem) -> usize {
         SettingItem::DefaultProvider => 4,
         SettingItem::DefaultModel => 5,
         SettingItem::ReasoningEffort => 6,
-        SettingItem::AutoCompaction => 9,
-        SettingItem::ContextStrategy => 10,
-        SettingItem::Subagents => 13,
-        SettingItem::MaxThreads => 14,
-        SettingItem::KeyboardShortcuts => 16,
+        SettingItem::ContextWindow => 9,
+        SettingItem::AutoCompaction => 10,
+        SettingItem::ContextStrategy => 11,
+        SettingItem::Subagents => 14,
+        SettingItem::MaxThreads => 15,
+        SettingItem::KeyboardShortcuts => 17,
     }
 }
 
