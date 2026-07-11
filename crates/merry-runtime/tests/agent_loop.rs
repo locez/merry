@@ -2355,11 +2355,13 @@ async fn agent_loop_traces_loop_steps_tool_process_and_terminal_status() {
 async fn provider_step_auto_compacts_before_hard_watermark_request() {
     let primary = ScriptedModelProvider::new(vec![
         vec![Ok(completed_text_event("old assistant sentinel"))],
-        vec![Ok(completed_text_event("tail assistant sentinel"))],
+        vec![Ok(completed_text_event(
+            &"tail assistant sentinel ".repeat(350),
+        ))],
         vec![Ok(completed_text_event("final after automatic compaction"))],
     ])
     .with_capabilities(
-        ModelCapabilities::new(true, true, false, true, Some(4_000), Some(16))
+        ModelCapabilities::new(true, true, false, true, Some(8_000), Some(16))
             .expect("valid capabilities"),
     );
     let compactor = ScriptedModelProvider::new(vec![vec![Ok(completed_text_event(
@@ -2394,7 +2396,7 @@ async fn provider_step_auto_compacts_before_hard_watermark_request() {
         .build()
         .expect("runtime should build");
 
-    let first = run_default_loop(&runtime, &"old user sentinel ".repeat(450)).await;
+    let first = run_default_loop(&runtime, &"old user sentinel ".repeat(800)).await;
     assert_eq!(first.status(), &AgentLoopStatus::Completed);
     let second = run_default_loop(&runtime, "tail user sentinel").await;
     assert_eq!(second.status(), &AgentLoopStatus::Completed);
@@ -2430,7 +2432,11 @@ async fn provider_step_auto_compacts_before_hard_watermark_request() {
     assert!(final_text.contains("Old turn was compacted automatically."));
     assert!(final_text.contains("tail user sentinel"));
     assert!(final_text.contains("tail assistant sentinel"));
-    assert!(final_text.contains("current user sentinel"));
+    assert_eq!(
+        final_text.matches("current user sentinel").count(),
+        1,
+        "current input must enter the final primary request exactly once"
+    );
     assert!(
         !final_text.contains("old user sentinel"),
         "covered raw history should be replaced by checkpoint projection"
@@ -2446,13 +2452,13 @@ async fn auto_compaction_config_controls_retained_model_turns() {
     let primary = ScriptedModelProvider::new(vec![
         vec![Ok(completed_text_event("old assistant configurable tail"))],
         vec![Ok(completed_text_event("tail one assistant"))],
-        vec![Ok(completed_text_event("tail two assistant"))],
+        vec![Ok(completed_text_event(&"tail two assistant ".repeat(300)))],
         vec![Ok(completed_text_event(
             "final after configurable automatic compaction",
         ))],
     ])
     .with_capabilities(
-        ModelCapabilities::new(true, true, false, true, Some(4_000), Some(16))
+        ModelCapabilities::new(true, true, false, true, Some(8_000), Some(16))
             .expect("valid capabilities"),
     );
     let compactor = ScriptedModelProvider::new(vec![vec![Ok(completed_text_event(
@@ -2486,7 +2492,7 @@ async fn auto_compaction_config_controls_retained_model_turns() {
         .build()
         .expect("runtime should build");
 
-    let first = run_default_loop(&runtime, &"old configurable tail user ".repeat(450)).await;
+    let first = run_default_loop(&runtime, &"old configurable tail user ".repeat(650)).await;
     assert_eq!(first.status(), &AgentLoopStatus::Completed);
     let second = run_default_loop(&runtime, "tail one user").await;
     assert_eq!(second.status(), &AgentLoopStatus::Completed);
@@ -2543,7 +2549,7 @@ async fn auto_compaction_keeps_current_tool_turn_raw_during_continuation() {
         ))],
     ])
     .with_capabilities(
-        ModelCapabilities::new(true, true, false, true, Some(520), Some(16))
+        ModelCapabilities::new(true, true, false, true, Some(4_000), Some(16))
             .expect("valid capabilities"),
     );
     let compactor = ScriptedModelProvider::new(vec![vec![Ok(completed_text_event(
@@ -2638,7 +2644,14 @@ async fn auto_compacted_agent_loop_continuation_keeps_checkpoint_refs_and_stable
         "inspect-read-patch-verify ".repeat(80)
     );
     let primary = ScriptedModelProvider::new(vec![
-        vec![Ok(completed_text_event("prelude assistant sentinel"))],
+        vec![Ok(completed_text_event(&format!(
+            "prelude assistant sentinel {}",
+            "prelude ballast ".repeat(700)
+        )))],
+        vec![Ok(completed_text_event(&format!(
+            "retained prelude assistant {}",
+            "retained prelude ballast ".repeat(450)
+        )))],
         vec![Ok(completed_tool_call_event(model_tool_call(
             "call-covered-search",
             "search_notes",
@@ -2652,7 +2665,7 @@ async fn auto_compacted_agent_loop_continuation_keeps_checkpoint_refs_and_stable
         ))],
     ])
     .with_capabilities(
-        ModelCapabilities::new(true, true, false, true, Some(520), Some(16))
+        ModelCapabilities::new(true, true, false, true, Some(8_000), Some(16))
             .expect("valid capabilities"),
     );
     let compactor = ScriptedModelProvider::new(vec![
@@ -2691,7 +2704,7 @@ async fn auto_compacted_agent_loop_continuation_keeps_checkpoint_refs_and_stable
             {
               "id": "c3",
               "text": "The prior checkpoint and first covered tool result were checkpointed.",
-              "refs": ["h0", "h1", "h2", "h4"]
+              "refs": ["h0", "h1", "h4", "h6"]
             }
           ],
           "open_questions": [],
@@ -2730,7 +2743,10 @@ async fn auto_compacted_agent_loop_continuation_keeps_checkpoint_refs_and_stable
                     "covered tool result sentinel {}\n",
                     "covered-result-evidence ".repeat(90)
                 ),
-                "retained tool result sentinel\n".to_owned(),
+                format!(
+                    "retained tool result sentinel {}\n",
+                    "retained-result-evidence ".repeat(350)
+                ),
             ])),
         ))
         .model_provider(Arc::new(primary.clone()), model_name())
@@ -2745,6 +2761,8 @@ async fn auto_compacted_agent_loop_continuation_keeps_checkpoint_refs_and_stable
 
     let prelude = run_default_loop(&runtime, "prelude user sentinel").await;
     assert_eq!(prelude.status(), &AgentLoopStatus::Completed);
+    let retained_prelude = run_default_loop(&runtime, "retained prelude user sentinel").await;
+    assert_eq!(retained_prelude.status(), &AgentLoopStatus::Completed);
 
     let result = runtime
         .run_agent_loop(
@@ -2785,10 +2803,10 @@ async fn auto_compacted_agent_loop_continuation_keeps_checkpoint_refs_and_stable
     assert!(!second_compaction_request_text.contains("Continue after tool result."));
 
     let primary_requests = primary.recorded_requests();
-    assert_eq!(primary_requests.len(), 4);
-    let opening_request = &primary_requests[1];
-    let first_continuation_request = &primary_requests[2];
-    let final_continuation_request = &primary_requests[3];
+    assert_eq!(primary_requests.len(), 5);
+    let opening_request = &primary_requests[2];
+    let first_continuation_request = &primary_requests[3];
+    let final_continuation_request = &primary_requests[4];
     assert_eq!(
         opening_request.stable_prefix_hash(),
         final_continuation_request.stable_prefix_hash(),
@@ -2851,7 +2869,7 @@ async fn auto_compacted_agent_loop_continuation_keeps_checkpoint_refs_and_stable
 
     let ref_page = runtime
         .read_checkpoint_ref_page(
-            &merry_runtime::CheckpointRefId::new("h4").expect("valid ref id"),
+            &merry_runtime::CheckpointRefId::new("h6").expect("valid ref id"),
             0,
             4096,
         )

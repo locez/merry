@@ -3,8 +3,10 @@ use super::{
 };
 use crate::{
     CitationCompactionInput, CitationCompactionPolicy, CompactionError, CompactionOutcome,
-    ResolvedContextWindow, RuntimeError, RuntimeModelRole,
-    compaction::compile_citation_compaction_model_request,
+    ResolvedCitationCompactionBudget, ResolvedContextWindow, RuntimeError, RuntimeModelRole,
+    compaction::{
+        CompactionPreparation, CompactionWindowBudget, compile_citation_compaction_model_request,
+    },
 };
 use futures_util::StreamExt;
 use merry_llm::{FinishReason, ModelEvent, ModelOutput, ModelStreamContext};
@@ -14,16 +16,14 @@ pub(super) fn default_automatic_compaction_policy() -> CitationCompactionPolicy 
     CitationCompactionPolicy::default()
 }
 
-pub(super) async fn compaction_input_for_hard_watermark(
+pub(super) async fn compaction_preparation_for_hard_watermark(
     inner: &RuntimeInner,
-    primary_window: ResolvedContextWindow,
-) -> Result<Option<CitationCompactionInput>, RuntimeError> {
-    let config = *inner.automatic_compaction.read().await;
-    if !config.is_enabled() {
-        return Ok(None);
-    }
-
-    build_compaction_input(inner, config.policy(), primary_window).await
+    policy: CitationCompactionPolicy,
+    resolved_budget: ResolvedCitationCompactionBudget,
+    window_budget: CompactionWindowBudget,
+) -> Result<Option<CompactionPreparation>, RuntimeError> {
+    let session = inner.session.lock().await;
+    session.build_compaction_preparation_with_window_budget(policy, resolved_budget, window_budget)
 }
 
 pub(super) async fn compaction_input_for_policy(

@@ -102,7 +102,7 @@ async fn provider_request_trace_includes_checkpoint_budget_diagnostics_without_p
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn provider_request_still_runs_when_context_budget_diagnostic_is_unavailable() {
+async fn provider_request_is_blocked_when_context_budget_is_unavailable() {
     let provider = ScriptedModelProvider::new(vec![vec![Ok(completed_text_event("final answer"))]])
         .with_capabilities(
             ModelCapabilities::new(true, true, false, true, Some(100), Some(100))
@@ -115,6 +115,43 @@ async fn provider_request_still_runs_when_context_budget_diagnostic_is_unavailab
 
     let (result, logs) = capture_traces_for(
         "agent-loop-context-budget-unavailable",
+        runtime.run_agent_loop(
+            StepInput::user_text("Use a short request.").expect("valid step input"),
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::new(2).expect("valid config"),
+        ),
+    )
+    .await;
+
+    let result = result.expect("agent loop should run");
+    assert!(matches!(
+        result.status(),
+        AgentLoopStatus::Failed { diagnostic }
+            if diagnostic.code() == "auto_compaction"
+                && diagnostic.message().contains(
+                    "cannot confirm request budget before automatic context reduction"
+                )
+    ));
+    assert!(logs.contains("\"event\":\"runtime.provider.request.context_budget_unavailable\""));
+    assert!(!logs.contains("\"event\":\"runtime.provider.request\""));
+    assert!(provider.recorded_requests().is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn provider_request_still_runs_when_budget_is_unavailable_and_auto_compaction_is_disabled() {
+    let provider = ScriptedModelProvider::new(vec![vec![Ok(completed_text_event("final answer"))]])
+        .with_capabilities(
+            ModelCapabilities::new(true, true, false, true, Some(100), Some(100))
+                .expect("valid capabilities"),
+        );
+    let runtime = Runtime::builder(session_id("agent-loop-disabled-context-budget-unavailable"))
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .automatic_compaction(AutomaticCompactionConfig::disabled())
+        .build()
+        .expect("runtime should build");
+
+    let (result, logs) = capture_traces_for(
+        "agent-loop-disabled-context-budget-unavailable",
         runtime.run_agent_loop(
             StepInput::user_text("Use a short request.").expect("valid step input"),
             StepContext::new(CancellationToken::new()),

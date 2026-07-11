@@ -208,12 +208,8 @@ async fn usage_none_does_not_emit_usage_update() {
 #[tokio::test(flavor = "current_thread")]
 async fn auto_compaction_lifecycle_projects_to_public_stream() {
     let primary = FakeModelProvider::with_capabilities(
-        vec![
-            Ok(completed_text_event("seed one")),
-            Ok(completed_text_event("seed two")),
-            Ok(completed_text_event("primary answer")),
-        ],
-        ModelCapabilities::new(true, true, false, true, Some(4_000), None)
+        vec![Ok(completed_text_event(&"seed one ".repeat(310)))],
+        ModelCapabilities::new(true, true, false, true, Some(16_000), None)
             .expect("valid capabilities"),
     );
     let compactor = FakeModelProvider::new(vec![Ok(completed_text_event(
@@ -252,7 +248,7 @@ async fn auto_compaction_lifecycle_projects_to_public_stream() {
         &runtime,
         &format!(
             "old user message for public compaction\n{}",
-            "ballast ".repeat(1_200)
+            "ballast ".repeat(4_150)
         ),
     )
     .await;

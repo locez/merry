@@ -1,4 +1,4 @@
-use super::auto_compaction::{compact_prepared_context, compaction_input_for_hard_watermark};
+use super::auto_compaction::{compact_prepared_context, compaction_preparation_for_hard_watermark};
 use super::journal_emission::{
     send_assistant_text_output_completed_events, send_assistant_text_output_delta_event,
     send_cancelled_event, send_compaction_completed_event, send_compaction_started_event,
@@ -16,13 +16,15 @@ use super::model_output::{
     tool_call_commentary_text,
 };
 use super::provider_request::{
-    compile_step_request_from_inputs, request_context_budget, step_request_compile_diagnostic,
-    step_request_inputs_from_session, step_usage_context_snapshot, trace_provider_request,
-    trace_provider_request_budget_unavailable,
+    compile_step_request_from_inputs, estimate_compaction_fixed_dynamic_tokens,
+    request_context_budget, step_request_compile_diagnostic, step_request_inputs_from_session,
+    step_usage_context_snapshot, trace_provider_request, trace_provider_request_budget_unavailable,
 };
 use super::{DIAGNOSTIC_TOOL_CALL_RESULT_REQUIRED, RuntimeInner, diagnostic_from_text};
 use crate::{
-    CheckpointDecision,
+    CheckpointDecision, CompactionError,
+    compaction::{CompactionPreparation, CompactionWindowBudget},
+    context::compacted_checkpoint_wrapper_token_ceiling,
     events::RuntimeJournalEventBatch,
     memory::MemoryActivationContext,
     model_config::ModelProviderConfig,
@@ -236,6 +238,7 @@ pub(super) async fn run_provider_step(
         .map(std::num::NonZeroU64::get);
     let mut request_budget =
         request_context_budget(provider.capabilities(), &request, context_window_override);
+    let automatic_config = *inner.automatic_compaction.read().await;
     if let Err(error) = &request_budget {
         trace_provider_request_budget_unavailable(
             inner.session_id.as_str(),
@@ -243,101 +246,85 @@ pub(super) async fn run_provider_step(
             &request,
             error,
         );
+        if automatic_config.is_enabled() {
+            clear_current_activated_memories(inner).await;
+            let diagnostic = diagnostic_from_text(
+                "auto_compaction",
+                format!(
+                    "cannot confirm request budget before automatic context reduction: {error}"
+                ),
+            );
+            trace_provider_step_failed(&diagnostic);
+            let _ = send_failed_event(inner, sender, token, diagnostic).await;
+            return;
+        }
     }
-    if matches!(
-        request_budget.as_ref().map(|budget| budget.decision),
-        Ok(CheckpointDecision::RequireCheckpoint)
-    ) {
-        match compaction_input_for_hard_watermark(
-            inner,
-            request_budget
-                .as_ref()
-                .expect("checkpoint decision requires a resolved request budget")
-                .window,
+    if automatic_config.is_enabled()
+        && matches!(
+            request_budget.as_ref().map(|budget| budget.decision),
+            Ok(CheckpointDecision::RequireCheckpoint)
         )
-        .await
-        {
-            Ok(Some(compaction_input)) => {
-                if !send_compaction_started_event(inner, sender, token).await {
-                    return;
-                }
-                let outcome = match compact_prepared_context(inner, compaction_input, token.clone())
-                    .await
-                {
-                    Ok(outcome) => outcome,
-                    Err(error) => {
-                        clear_current_activated_memories(inner).await;
-                        if token.is_cancelled() {
-                            trace_provider_step_cancelled();
-                            let _ = send_cancelled_event(inner, sender).await;
-                            return;
-                        }
-                        let diagnostic = diagnostic_from_text("auto_compaction", error.to_string());
-                        trace_provider_step_failed(&diagnostic);
-                        let _ = send_failed_event(inner, sender, token, diagnostic).await;
-                        return;
-                    }
-                };
-                if !send_compaction_completed_event(
+    {
+        let current_request_budget = request_budget
+            .as_ref()
+            .expect("checkpoint decision requires a resolved request budget");
+        let fixed_dynamic_body_tokens = match estimate_compaction_fixed_dynamic_tokens(
+            &input,
+            provider_config.model(),
+            &request_inputs,
+            tool_specs.clone(),
+            generation_config.clone(),
+            inner.progress_commentary,
+        ) {
+            Ok(tokens) => tokens,
+            Err(error) => {
+                clear_current_activated_memories(inner).await;
+                let diagnostic = step_request_compile_diagnostic(&error);
+                trace_provider_step_failed(&diagnostic);
+                let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                return;
+            }
+        };
+        let policy = automatic_config.policy();
+        let resolved_budget = policy.resolve(current_request_budget.window.tokens());
+        let window_budget = resolved_budget.and_then(|resolved_budget| {
+            let checkpoint_output_ceiling_tokens = resolved_budget
+                .output_token_limit()
+                .checked_add(compacted_checkpoint_wrapper_token_ceiling())
+                .ok_or(CompactionError::BudgetOverflow)?;
+            CompactionWindowBudget::new(
+                current_request_budget.window.tokens(),
+                current_request_budget.budget.hard_water_tokens(),
+                fixed_dynamic_body_tokens.replacement,
+                fixed_dynamic_body_tokens.archive_only,
+                checkpoint_output_ceiling_tokens,
+            )
+            .map(|window_budget| (resolved_budget, window_budget))
+        });
+        let preparation = match window_budget {
+            Ok((resolved_budget, window_budget)) => {
+                compaction_preparation_for_hard_watermark(
                     inner,
-                    sender,
-                    token,
-                    outcome.checkpoint_id().as_str().to_owned(),
-                    outcome.covered_history_item_count(),
+                    policy,
+                    resolved_budget,
+                    window_budget,
                 )
                 .await
-                {
-                    return;
-                }
-                let refreshed = {
-                    let session = inner.session.lock().await;
-                    match step_request_inputs_from_session(&session) {
-                        Ok(inputs) => inputs,
-                        Err(error) => {
-                            clear_current_activated_memories(inner).await;
-                            let diagnostic = diagnostic_from_text(
-                                "auto_compaction_projection",
-                                error.to_string(),
-                            );
-                            trace_provider_step_failed(&diagnostic);
-                            let _ = send_failed_event(inner, sender, token, diagnostic).await;
-                            return;
-                        }
-                    }
-                };
-                request_inputs = refreshed;
-                request = match compile_step_request_from_inputs(
-                    &input,
-                    provider_config.model(),
-                    &request_inputs,
-                    tool_specs.clone(),
-                    generation_config.clone(),
-                    inner.progress_commentary,
-                ) {
-                    Ok(request) => request,
-                    Err(error) => {
-                        clear_current_activated_memories(inner).await;
-                        let diagnostic = step_request_compile_diagnostic(&error);
-                        trace_provider_step_failed(&diagnostic);
-                        let _ = send_failed_event(inner, sender, token, diagnostic).await;
-                        return;
-                    }
-                };
-                request_budget = request_context_budget(
-                    provider.capabilities(),
-                    &request,
-                    context_window_override,
-                );
-                if let Err(error) = &request_budget {
-                    trace_provider_request_budget_unavailable(
-                        inner.session_id.as_str(),
-                        provider.name().as_str(),
-                        &request,
-                        error,
-                    );
-                }
             }
-            Ok(None) => {}
+            Err(source) => Err(crate::RuntimeError::Compaction { source }),
+        };
+        let preparation = match preparation {
+            Ok(Some(preparation)) => preparation,
+            Ok(None) => {
+                clear_current_activated_memories(inner).await;
+                let diagnostic = diagnostic_from_text(
+                    "auto_compaction",
+                    CompactionError::NoCompressibleWindow.to_string(),
+                );
+                trace_provider_step_failed(&diagnostic);
+                let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                return;
+            }
             Err(error) => {
                 clear_current_activated_memories(inner).await;
                 if token.is_cancelled() {
@@ -350,6 +337,151 @@ pub(super) async fn run_provider_step(
                 let _ = send_failed_event(inner, sender, token, diagnostic).await;
                 return;
             }
+        };
+
+        let replacement_outcome = match preparation {
+            CompactionPreparation::ReplaceCheckpoint(compaction_input) => {
+                if !send_compaction_started_event(inner, sender, token).await {
+                    return;
+                }
+                let outcome =
+                    match compact_prepared_context(inner, *compaction_input, token.clone()).await {
+                        Ok(outcome) => outcome,
+                        Err(error) => {
+                            clear_current_activated_memories(inner).await;
+                            if token.is_cancelled() {
+                                trace_provider_step_cancelled();
+                                let _ = send_cancelled_event(inner, sender).await;
+                                return;
+                            }
+                            let diagnostic =
+                                diagnostic_from_text("auto_compaction", error.to_string());
+                            trace_provider_step_failed(&diagnostic);
+                            let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                            return;
+                        }
+                    };
+                Some(outcome)
+            }
+            CompactionPreparation::ArchiveToolResults(archive_input) => {
+                if token.is_cancelled() {
+                    clear_current_activated_memories(inner).await;
+                    trace_provider_step_cancelled();
+                    let _ = send_cancelled_event(inner, sender).await;
+                    return;
+                }
+                let install_result = {
+                    let mut session = inner.session.lock().await;
+                    if token.is_cancelled() {
+                        None
+                    } else {
+                        Some(session.install_archive_only_compaction(archive_input))
+                    }
+                };
+                let Some(install_result) = install_result else {
+                    clear_current_activated_memories(inner).await;
+                    trace_provider_step_cancelled();
+                    let _ = send_cancelled_event(inner, sender).await;
+                    return;
+                };
+                if let Err(error) = install_result {
+                    clear_current_activated_memories(inner).await;
+                    let diagnostic = diagnostic_from_text("auto_compaction", error.to_string());
+                    trace_provider_step_failed(&diagnostic);
+                    let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                    return;
+                }
+                tracing::debug!(
+                    event = "runtime.compaction.archive_only",
+                    session_id = inner.session_id.as_str(),
+                    "archived retained tool results without replacing the checkpoint"
+                );
+                None
+            }
+        };
+
+        let refreshed = {
+            let session = inner.session.lock().await;
+            match step_request_inputs_from_session(&session) {
+                Ok(inputs) => inputs,
+                Err(error) => {
+                    clear_current_activated_memories(inner).await;
+                    let diagnostic =
+                        diagnostic_from_text("auto_compaction_projection", error.to_string());
+                    trace_provider_step_failed(&diagnostic);
+                    let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                    return;
+                }
+            }
+        };
+        request_inputs = refreshed;
+        request = match compile_step_request_from_inputs(
+            &input,
+            provider_config.model(),
+            &request_inputs,
+            tool_specs.clone(),
+            generation_config.clone(),
+            inner.progress_commentary,
+        ) {
+            Ok(request) => request,
+            Err(error) => {
+                clear_current_activated_memories(inner).await;
+                let diagnostic = step_request_compile_diagnostic(&error);
+                trace_provider_step_failed(&diagnostic);
+                let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                return;
+            }
+        };
+        request_budget =
+            request_context_budget(provider.capabilities(), &request, context_window_override);
+        match &request_budget {
+            Ok(post_compaction_budget)
+                if post_compaction_budget.decision == CheckpointDecision::RequireCheckpoint =>
+            {
+                clear_current_activated_memories(inner).await;
+                let diagnostic = diagnostic_from_text(
+                    "auto_compaction",
+                    "compiled request remains at or above the hard context watermark after automatic context reduction",
+                );
+                trace_provider_step_failed(&diagnostic);
+                let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                return;
+            }
+            Ok(_) => {}
+            Err(error) => {
+                trace_provider_request_budget_unavailable(
+                    inner.session_id.as_str(),
+                    provider.name().as_str(),
+                    &request,
+                    error,
+                );
+                clear_current_activated_memories(inner).await;
+                let diagnostic = diagnostic_from_text(
+                    "auto_compaction",
+                    format!(
+                        "cannot confirm request budget after automatic context reduction: {error}"
+                    ),
+                );
+                trace_provider_step_failed(&diagnostic);
+                let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                return;
+            }
+        }
+        let compaction_event_sent = match replacement_outcome {
+            Some(outcome) => {
+                send_compaction_completed_event(
+                    inner,
+                    sender,
+                    token,
+                    outcome.checkpoint_id().as_str().to_owned(),
+                    outcome.covered_history_item_count(),
+                )
+                .await
+            }
+            None => true,
+        };
+        if !compaction_event_sent {
+            return;
         }
     }
     let automatic_compaction_enabled = inner.automatic_compaction.read().await.is_enabled();

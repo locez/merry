@@ -155,6 +155,54 @@ pub(super) fn compile_step_request_from_inputs(
     .map_err(StepRequestCompileError::from)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct CompactionFixedDynamicTokens {
+    pub(super) replacement: u64,
+    pub(super) archive_only: u64,
+}
+
+pub(super) fn estimate_compaction_fixed_dynamic_tokens(
+    input: &StepInput,
+    model: &ModelName,
+    inputs: &StepRequestInputs,
+    tool_specs: Vec<merry_core::ToolSpec>,
+    generation_config: GenerationConfig,
+    progress_commentary: bool,
+) -> Result<CompactionFixedDynamicTokens, StepRequestCompileError> {
+    let replacement_context =
+        ContextCompiler::new().compile_without_compacted_checkpoint(&inputs.snapshot)?;
+    let replacement_request = compile_step_model_request(StepModelRequestParts {
+        input,
+        model,
+        skill_catalog: inputs.skill_catalog.as_ref(),
+        project_rules: inputs.project_rules.as_ref(),
+        task_anchor: inputs.task_anchor.as_ref(),
+        context: &replacement_context,
+        transcript: &[],
+        tool_specs: tool_specs.clone(),
+        generation_config: generation_config.clone(),
+        progress_commentary,
+    })?;
+    let archive_only_context = ContextCompiler::new().compile(&inputs.snapshot)?;
+    let archive_only_request = compile_step_model_request(StepModelRequestParts {
+        input,
+        model,
+        skill_catalog: inputs.skill_catalog.as_ref(),
+        project_rules: inputs.project_rules.as_ref(),
+        task_anchor: inputs.task_anchor.as_ref(),
+        context: &archive_only_context,
+        transcript: &[],
+        tool_specs,
+        generation_config,
+        progress_commentary,
+    })?;
+
+    Ok(CompactionFixedDynamicTokens {
+        replacement: estimate_model_input_tokens(replacement_request.dynamic_input()),
+        archive_only: estimate_model_input_tokens(archive_only_request.dynamic_input()),
+    })
+}
+
 pub(super) fn step_request_compile_diagnostic(error: &StepRequestCompileError) -> ErrorInfo {
     match error {
         StepRequestCompileError::Context { .. } => {
@@ -263,4 +311,72 @@ fn default_output_reserve_tokens(window_tokens: u64) -> u64 {
         DEFAULT_OUTPUT_RESERVE_MIN_TOKENS,
         DEFAULT_OUTPUT_RESERVE_MAX_TOKENS,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{CompactedCheckpoint, session::SessionState};
+    use merry_core::SessionId;
+
+    #[test]
+    fn compaction_fixed_estimates_keep_checkpoint_only_for_archive_only() {
+        let mut session = SessionState::new(
+            SessionId::new("fixed-compaction-estimates").expect("valid session id"),
+        );
+        let input = StepInput::user_text("current input").expect("valid step input");
+        let model = ModelName::new("test/model").expect("valid model name");
+
+        let without_checkpoint = StepRequestInputs::from_session(&session, Vec::new());
+        let baseline = estimate_compaction_fixed_dynamic_tokens(
+            &input,
+            &model,
+            &without_checkpoint,
+            Vec::new(),
+            GenerationConfig::default(),
+            false,
+        )
+        .expect("baseline estimate builds");
+        assert_eq!(baseline.replacement, baseline.archive_only);
+
+        session.set_compacted_checkpoint(
+            CompactedCheckpoint::new("checkpoint body ".repeat(200)).expect("valid checkpoint"),
+        );
+        let with_checkpoint = StepRequestInputs::from_session(&session, Vec::new());
+        let checkpoint_estimates = estimate_compaction_fixed_dynamic_tokens(
+            &input,
+            &model,
+            &with_checkpoint,
+            Vec::new(),
+            GenerationConfig::default(),
+            false,
+        )
+        .expect("checkpoint estimates build");
+        assert_eq!(checkpoint_estimates.replacement, baseline.replacement);
+        assert!(checkpoint_estimates.archive_only > baseline.archive_only);
+
+        let turn_id = session.begin_model_turn().expect("history turn begins");
+        session
+            .record_user_message_body(turn_id, &"history ballast ".repeat(1_000))
+            .expect("history records");
+        session
+            .close_model_response(turn_id, false)
+            .expect("history turn completes");
+        let with_history = StepRequestInputs::from_session(
+            &session,
+            session
+                .provider_transcript_snapshot()
+                .expect("provider transcript builds"),
+        );
+        let history_estimates = estimate_compaction_fixed_dynamic_tokens(
+            &input,
+            &model,
+            &with_history,
+            Vec::new(),
+            GenerationConfig::default(),
+            false,
+        )
+        .expect("history estimates build");
+        assert_eq!(history_estimates, checkpoint_estimates);
+    }
 }

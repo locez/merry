@@ -14,18 +14,63 @@ use crate::{
         CheckpointSourceKind,
     },
     compaction::{
-        CitationCompactionInput, CitationCompactionInputPolicy, CitationCompactionPolicy,
-        CitationCompactionPreviousCheckpointInput, CompactionError, CompactionOutcome,
-        ResolvedCitationCompactionBudget, checkpoint_from_candidate_json,
-        previous_checkpoint_payload,
+        ArchiveOnlyCompactionInput, CitationCompactionInput, CitationCompactionInputParts,
+        CitationCompactionInputPolicy, CitationCompactionModelTurn, CitationCompactionPolicy,
+        CitationCompactionPreviousCheckpointInput, CitationCompactionWindowBundle, CompactionError,
+        CompactionOutcome, CompactionPreparation, CompactionWindowBudget,
+        CompactionWindowFingerprint, CompactionWindowPlan, ResolvedCitationCompactionBudget,
+        checkpoint_from_candidate_json, previous_checkpoint_payload, retained_turn_fallbacks,
     },
     context::{CompactedCheckpoint, CompactedCheckpointSummary},
     permission::PermissionReviewContextEntry,
+    token_estimate::estimate_text_tokens,
 };
-use merry_core::{ArtifactId, EvidenceLocator, EvidenceRef};
+use merry_core::{ArtifactId, EvidenceLocator, EvidenceRef, ToolCallId};
 use std::collections::{BTreeMap, BTreeSet};
 
 const PERMISSION_REVIEW_RECENT_CONTEXT_LIMIT: usize = 12;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ArchivedRefManifest {
+    refs: Vec<CheckpointRef>,
+}
+
+impl ArchivedRefManifest {
+    pub(crate) fn new(refs: Vec<CheckpointRef>) -> Result<Self, CheckpointError> {
+        let mut seen = BTreeSet::new();
+        for reference in &refs {
+            if !seen.insert(reference.id().clone()) {
+                return Err(CheckpointError::DuplicateRef {
+                    ref_id: reference.id().as_str().to_owned(),
+                });
+            }
+        }
+        Ok(Self { refs })
+    }
+
+    pub(crate) fn refs(&self) -> &[CheckpointRef] {
+        &self.refs
+    }
+
+    fn get(&self, ref_id: &CheckpointRefId) -> Option<&CheckpointRef> {
+        self.refs.iter().find(|reference| reference.id() == ref_id)
+    }
+
+    fn fingerprint_material(&self) -> Vec<(String, CheckpointSourceKind, u64, u64, EvidenceRef)> {
+        self.refs
+            .iter()
+            .map(|reference| {
+                (
+                    reference.id().as_str().to_owned(),
+                    reference.source_kind(),
+                    reference.sequence_range().start(),
+                    reference.sequence_range().end(),
+                    reference.evidence().clone(),
+                )
+            })
+            .collect()
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum HiddenToolExchangeVisibility {
@@ -43,6 +88,47 @@ struct ModelTurnHistory {
 struct CompactionHistoryRecord {
     item: CompactionHistoryItem,
     reference: CheckpointRef,
+}
+
+impl ModelTurnHistory {
+    fn projected_token_estimate(
+        &self,
+        archived_tool_call_ids: &BTreeSet<ToolCallId>,
+    ) -> Result<u64, RuntimeError> {
+        self.items.iter().try_fold(0_u64, |total, record| {
+            total
+                .checked_add(
+                    record
+                        .item
+                        .projected_token_estimate(archived_tool_call_ids)?,
+                )
+                .ok_or_else(|| RuntimeError::from(CompactionError::BudgetOverflow))
+        })
+    }
+
+    fn existing_archived_tool_call_ids(&self) -> BTreeSet<ToolCallId> {
+        self.items
+            .iter()
+            .filter_map(|record| record.item.tool_result_archive_candidate())
+            .filter_map(|(_, call_id, already_archived)| already_archived.then_some(call_id))
+            .collect()
+    }
+
+    fn archive_candidates_in_result_order(&self) -> Vec<(u64, ToolCallId)> {
+        if self.status != ModelTurnStatus::Completed {
+            return Vec::new();
+        }
+        let mut candidates = self
+            .items
+            .iter()
+            .filter_map(|record| record.item.tool_result_archive_candidate())
+            .filter_map(|(result_item_id, call_id, already_archived)| {
+                (!already_archived).then_some((result_item_id, call_id))
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by_key(|(result_item_id, _)| *result_item_id);
+        candidates
+    }
 }
 
 impl SessionState {
@@ -86,18 +172,26 @@ impl SessionState {
         offset: usize,
         max_bytes: usize,
     ) -> Result<(CheckpointSourceKind, TextEvidencePage), RuntimeError> {
-        let Some(checkpoint) = self
+        let checkpoint_reference = self
             .compacted_checkpoint
             .as_ref()
             .and_then(CompactedCheckpoint::citation_backed)
+            .and_then(|checkpoint| {
+                checkpoint
+                    .manifest()
+                    .refs()
+                    .iter()
+                    .find(|reference| reference.id() == ref_id)
+            });
+        let Some(reference) =
+            checkpoint_reference.or_else(|| self.archived_ref_manifest.get(ref_id))
         else {
             return Err(CheckpointError::RefNotFound {
-                checkpoint_id: "current".to_owned(),
+                checkpoint_id: "current-or-archive".to_owned(),
                 ref_id: ref_id.as_str().to_owned(),
             }
             .into());
         };
-        let reference = checkpoint.read_ref(ref_id)?;
         let page =
             self.artifacts
                 .read_text_evidence_page(reference.evidence(), offset, max_bytes)?;
@@ -109,47 +203,85 @@ impl SessionState {
         policy: CitationCompactionPolicy,
         resolved_budget: ResolvedCitationCompactionBudget,
     ) -> Result<Option<CitationCompactionInput>, RuntimeError> {
+        let window_budget = CompactionWindowBudget::unbounded_for_manual_compaction(
+            resolved_budget.output_token_limit(),
+        )?;
+        self.build_citation_compaction_input_with_window_budget(
+            policy,
+            resolved_budget,
+            window_budget,
+        )
+    }
+
+    pub(crate) fn build_citation_compaction_input_with_window_budget(
+        &self,
+        policy: CitationCompactionPolicy,
+        resolved_budget: ResolvedCitationCompactionBudget,
+        window_budget: CompactionWindowBudget,
+    ) -> Result<Option<CitationCompactionInput>, RuntimeError> {
+        match self.build_compaction_preparation_with_window_budget(
+            policy,
+            resolved_budget,
+            window_budget,
+        )? {
+            Some(CompactionPreparation::ReplaceCheckpoint(input)) => Ok(Some(*input)),
+            Some(CompactionPreparation::ArchiveToolResults(_)) | None => Ok(None),
+        }
+    }
+
+    pub(crate) fn build_compaction_preparation_with_window_budget(
+        &self,
+        policy: CitationCompactionPolicy,
+        resolved_budget: ResolvedCitationCompactionBudget,
+        window_budget: CompactionWindowBudget,
+    ) -> Result<Option<CompactionPreparation>, RuntimeError> {
         if !self.pending_tool_calls.is_empty() {
             return Err(CompactionError::PendingToolCalls.into());
         }
 
         let turns = self.model_turn_histories(HiddenToolExchangeVisibility::Include, true)?;
-        let first_open = turns
-            .iter()
-            .position(|turn| turn.status.is_open())
-            .unwrap_or(turns.len());
-        if turns[first_open..]
-            .iter()
-            .any(|turn| !turn.status.is_open())
-        {
-            return Err(CompactionError::StaleWindow.into());
-        }
-        let closed_turns = &turns[..first_open];
-        let mut completed_seen = 0;
-        let retained_start = closed_turns
-            .iter()
-            .enumerate()
-            .rev()
-            .find_map(|(index, turn)| {
-                if turn.status == ModelTurnStatus::Completed {
-                    completed_seen += 1;
-                    (completed_seen == policy.retained_model_turns()).then_some(index)
-                } else {
-                    None
-                }
-            });
-        let Some(retained_start) = retained_start else {
+        let Some(plan) = self.plan_compaction_window_from_turns(policy, window_budget, &turns)?
+        else {
             return Ok(None);
         };
-        let covered = closed_turns[..retained_start]
-            .iter()
-            .flat_map(|turn| turn.items.iter().cloned())
-            .collect::<Vec<_>>();
-        if covered.is_empty() {
-            return Ok(None);
+        let archived_refs = archived_refs_for_plan(&turns, &plan)?;
+        if plan.covered_turn_ids().is_empty() {
+            return Ok(Some(CompactionPreparation::ArchiveToolResults(
+                ArchiveOnlyCompactionInput::new(plan, archived_refs),
+            )));
         }
-        self.citation_compaction_input_from_history(policy, resolved_budget, &covered)
-            .map(Some)
+        let covered_turn_ids = plan
+            .covered_turn_ids()
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let covered = turns
+            .iter()
+            .filter(|turn| covered_turn_ids.contains(&turn.id))
+            .collect::<Vec<_>>();
+        self.citation_compaction_input_from_history(
+            policy,
+            resolved_budget,
+            &covered,
+            plan,
+            archived_refs,
+        )
+        .map(Box::new)
+        .map(CompactionPreparation::ReplaceCheckpoint)
+        .map(Some)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn plan_compaction_window(
+        &self,
+        policy: CitationCompactionPolicy,
+        window_budget: CompactionWindowBudget,
+    ) -> Result<Option<CompactionWindowPlan>, RuntimeError> {
+        if !self.pending_tool_calls.is_empty() {
+            return Err(CompactionError::PendingToolCalls.into());
+        }
+        let turns = self.model_turn_histories(HiddenToolExchangeVisibility::Include, true)?;
+        self.plan_compaction_window_from_turns(policy, window_budget, &turns)
     }
 
     pub(crate) fn install_citation_compaction_candidate(
@@ -161,21 +293,61 @@ impl SessionState {
             return Err(CompactionError::PendingToolCalls.into());
         }
         let compacted_through = self.validate_compaction_window_is_current(&input)?;
+        let next_archive_manifest = ArchivedRefManifest::new(input.archived_refs().to_vec())?;
 
         let checkpoint_id = input.manifest().checkpoint_id().clone();
         let citation =
             checkpoint_from_candidate_json(checkpoint_id.clone(), &input, candidate_json)?;
+        let estimated_tokens = estimate_text_tokens(&citation.render_prompt_text());
+        if estimated_tokens > input.resolved_budget().output_token_limit() {
+            return Err(CompactionError::RenderedCheckpointTooLarge {
+                estimated_tokens,
+                max_tokens: input.resolved_budget().output_token_limit(),
+            }
+            .into());
+        }
         let compacted = CompactedCheckpoint::from_citation_backed(citation)?;
 
         let covered_count = input.covered_history_ids().len();
+        self.transcript
+            .archive_tool_results(input.window_plan().archived_tool_call_ids())?;
         self.advance_prompt_history_projection(compacted_through)?;
         self.compacted_checkpoint = Some(compacted);
+        self.archived_ref_manifest = next_archive_manifest;
 
         Ok(CompactionOutcome::new(
             checkpoint_id,
             covered_count,
             self.provider_history_item_count()?,
         ))
+    }
+
+    pub(crate) fn install_archive_only_compaction(
+        &mut self,
+        input: ArchiveOnlyCompactionInput,
+    ) -> Result<(), RuntimeError> {
+        if !self.pending_tool_calls.is_empty() {
+            return Err(CompactionError::PendingToolCalls.into());
+        }
+        if !input.window_plan().covered_turn_ids().is_empty()
+            || input.window_plan().new_boundary().is_some()
+        {
+            return Err(CompactionError::StaleWindow.into());
+        }
+        self.validate_window_plan_is_current(input.window_plan())?;
+        let current_refs = archived_refs_for_plan(
+            &self.model_turn_histories(HiddenToolExchangeVisibility::Include, true)?,
+            input.window_plan(),
+        )?;
+        if current_refs != input.archived_refs() {
+            return Err(CompactionError::StaleWindow.into());
+        }
+        let next_archive_manifest = ArchivedRefManifest::new(input.archived_refs().to_vec())?;
+
+        self.transcript
+            .archive_tool_results(input.window_plan().archived_tool_call_ids())?;
+        self.archived_ref_manifest = next_archive_manifest;
+        Ok(())
     }
 
     pub(crate) fn permission_review_context_snapshot(
@@ -328,6 +500,8 @@ impl SessionState {
                             call.clone(),
                             result.clone(),
                             content,
+                            *call_projection,
+                            result_projection,
                         ),
                         reference: history_checkpoint_ref(
                             id,
@@ -347,13 +521,135 @@ impl SessionState {
         Ok(items)
     }
 
+    fn plan_compaction_window_from_turns(
+        &self,
+        policy: CitationCompactionPolicy,
+        window_budget: CompactionWindowBudget,
+        turns: &[ModelTurnHistory],
+    ) -> Result<Option<CompactionWindowPlan>, RuntimeError> {
+        debug_assert!(
+            window_budget.max_dynamic_body_tokens() <= window_budget.primary_window_tokens()
+        );
+        let first_open = turns
+            .iter()
+            .position(|turn| turn.status.is_open())
+            .unwrap_or(turns.len());
+        if turns[first_open..]
+            .iter()
+            .any(|turn| !turn.status.is_open())
+        {
+            return Err(CompactionError::StaleWindow.into());
+        }
+        let closed_turns = &turns[..first_open];
+        let open_turns = &turns[first_open..];
+
+        let fingerprint = self.compaction_window_fingerprint()?;
+        let mut saw_completed_turn = false;
+        let available_completed = closed_turns
+            .iter()
+            .filter(|turn| turn.status == ModelTurnStatus::Completed)
+            .count();
+        for retained_completed_count in
+            retained_turn_fallbacks(policy.retained_model_turns(), available_completed)
+        {
+            let Some(retained_start) =
+                retained_start_for_completed_count(closed_turns, retained_completed_count)
+            else {
+                continue;
+            };
+            saw_completed_turn = true;
+            let candidate_covered = &closed_turns[..retained_start];
+            let covered_has_evidence = candidate_covered.iter().any(|turn| !turn.items.is_empty());
+            let (covered, raw_turns, base_tokens) = if covered_has_evidence {
+                (
+                    candidate_covered,
+                    &turns[retained_start..],
+                    window_budget
+                        .replacement_fixed_dynamic_body_tokens()
+                        .checked_add(window_budget.checkpoint_output_ceiling_tokens())
+                        .ok_or(CompactionError::BudgetOverflow)?,
+                )
+            } else {
+                (
+                    &closed_turns[..0],
+                    turns,
+                    window_budget.archive_only_fixed_dynamic_body_tokens(),
+                )
+            };
+            let mut archived_tool_call_ids = existing_archived_tool_call_ids(raw_turns);
+            let fits = |archived_tool_call_ids: &BTreeSet<ToolCallId>| {
+                retained_projection_fits(
+                    base_tokens,
+                    raw_turns,
+                    archived_tool_call_ids,
+                    window_budget.max_dynamic_body_tokens(),
+                )
+            };
+
+            if fits(&archived_tool_call_ids)? {
+                if covered.is_empty() {
+                    return Ok(None);
+                }
+                return Ok(Some(compaction_window_plan(
+                    covered,
+                    raw_turns,
+                    archived_tool_call_ids,
+                    fingerprint,
+                )?));
+            }
+
+            let mut archive_candidates = raw_turns
+                .iter()
+                .flat_map(ModelTurnHistory::archive_candidates_in_result_order)
+                .collect::<Vec<_>>();
+            archive_candidates.sort_by_key(|(result_item_id, _)| *result_item_id);
+            for (_, call_id) in archive_candidates {
+                archived_tool_call_ids.insert(call_id);
+                if fits(&archived_tool_call_ids)? {
+                    return Ok(Some(compaction_window_plan(
+                        covered,
+                        raw_turns,
+                        archived_tool_call_ids,
+                        fingerprint,
+                    )?));
+                }
+            }
+
+            if retained_completed_count == 1 {
+                let existing_open_archives = existing_archived_tool_call_ids(open_turns);
+                let current_only_tokens = base_tokens
+                    .checked_add(projected_turn_tokens(open_turns, &existing_open_archives)?)
+                    .ok_or(CompactionError::BudgetOverflow)?;
+                return if current_only_tokens >= window_budget.max_dynamic_body_tokens() {
+                    Err(CompactionError::UncompressibleCurrentInput.into())
+                } else {
+                    Err(CompactionError::MinimumRawTurnCannotFit.into())
+                };
+            }
+        }
+
+        if !saw_completed_turn {
+            let existing_open_archives = existing_archived_tool_call_ids(open_turns);
+            let current_only_tokens = window_budget
+                .archive_only_fixed_dynamic_body_tokens()
+                .checked_add(projected_turn_tokens(open_turns, &existing_open_archives)?)
+                .ok_or(CompactionError::BudgetOverflow)?;
+            if current_only_tokens >= window_budget.max_dynamic_body_tokens() {
+                return Err(CompactionError::UncompressibleCurrentInput.into());
+            }
+        }
+        Ok(None)
+    }
+
     fn citation_compaction_input_from_history(
         &self,
         policy: CitationCompactionPolicy,
         resolved_budget: ResolvedCitationCompactionBudget,
-        covered: &[CompactionHistoryRecord],
+        covered: &[&ModelTurnHistory],
+        plan: CompactionWindowPlan,
+        archived_refs: Vec<CheckpointRef>,
     ) -> Result<CitationCompactionInput, RuntimeError> {
-        if covered.is_empty() {
+        if covered.iter().all(|turn| turn.items.is_empty()) {
             return Err(CompactionError::NoCompressibleWindow.into());
         }
 
@@ -379,20 +675,40 @@ impl SessionState {
             }
             Some(CitationCompactionPreviousCheckpointInput::PlainText { .. }) | None => Vec::new(),
         };
-        let mut refs = Vec::with_capacity(prior_refs.len() + covered.len());
-        refs.extend(prior_refs);
+        let mut refs_by_id = BTreeMap::new();
+        for reference in prior_refs {
+            refs_by_id.insert(reference.id().clone(), reference);
+        }
         let mut window = Vec::with_capacity(covered.len());
 
-        for record in covered {
-            covered_history_ids.insert(record.item.history_id);
-            let window_item = record
-                .item
-                .to_compaction_window_item(record.reference.id().as_str(), policy)?;
-            refs.push(record.reference.clone());
-            window.push(window_item);
+        for turn in covered {
+            let mut items = Vec::with_capacity(turn.items.len());
+            for record in &turn.items {
+                covered_history_ids.insert(record.item.history_id);
+                items.push(
+                    record
+                        .item
+                        .to_compaction_turn_item(record.reference.id().as_str())?,
+                );
+                refs_by_id
+                    .entry(record.reference.id().clone())
+                    .or_insert_with(|| record.reference.clone());
+            }
+            window.push(CitationCompactionModelTurn::new(
+                turn.id,
+                turn.status,
+                items,
+            )?);
         }
 
-        let manifest = crate::CheckpointRefManifest::new(checkpoint_id, refs)?;
+        for reference in &archived_refs {
+            refs_by_id
+                .entry(reference.id().clone())
+                .or_insert_with(|| reference.clone());
+        }
+
+        let manifest =
+            crate::CheckpointRefManifest::new(checkpoint_id, refs_by_id.into_values().collect())?;
         let previous_checkpoint_snapshot = self
             .compacted_checkpoint
             .as_ref()
@@ -401,13 +717,19 @@ impl SessionState {
         let previous_checkpoint = previous_checkpoint_input.map(previous_checkpoint_payload);
 
         Ok(CitationCompactionInput::new(
-            CitationCompactionInputPolicy::new(policy, resolved_budget),
-            self.task_anchor.clone(),
-            manifest,
-            covered_history_ids,
-            window,
-            previous_checkpoint,
-            previous_checkpoint_snapshot,
+            CitationCompactionInputParts {
+                input_policy: CitationCompactionInputPolicy::new(policy, resolved_budget),
+                task_anchor_snapshot: self.task_anchor.clone(),
+                manifest,
+                previous_checkpoint,
+                previous_checkpoint_snapshot,
+            },
+            CitationCompactionWindowBundle {
+                covered_history_ids,
+                window,
+                window_plan: plan,
+                archived_refs,
+            },
         ))
     }
 
@@ -415,30 +737,113 @@ impl SessionState {
         &self,
         input: &CitationCompactionInput,
     ) -> Result<ModelTurnId, RuntimeError> {
-        let covered = input.covered_history_ids();
-        if covered.is_empty() {
+        let covered_history_ids = input.covered_history_ids();
+        if covered_history_ids.is_empty() {
             return Err(CompactionError::NoCompressibleWindow.into());
         }
 
+        self.validate_window_plan_is_current(input.window_plan())?;
         let turns = self.model_turn_histories(HiddenToolExchangeVisibility::Include, true)?;
-        let mut current_prefix = BTreeSet::new();
-        let mut matched_boundary = None;
-        for turn in turns {
-            if turn.status.is_open() {
-                break;
-            }
-            for item in &turn.items {
-                if !covered.contains(&item.item.history_id) {
-                    return matched_boundary
-                        .ok_or_else(|| RuntimeError::from(CompactionError::StaleWindow));
-                }
-                current_prefix.insert(item.item.history_id);
-            }
-            if &current_prefix == covered {
-                matched_boundary = Some(turn.id);
-            }
+        let covered_count = input.window_plan().covered_turn_ids().len();
+        let current_history_ids = turns
+            .iter()
+            .take(covered_count)
+            .flat_map(|turn| turn.items.iter().map(|record| record.item.history_id))
+            .collect::<BTreeSet<_>>();
+        if &current_history_ids != covered_history_ids {
+            return Err(CompactionError::StaleWindow.into());
         }
-        matched_boundary.ok_or_else(|| RuntimeError::from(CompactionError::StaleWindow))
+        input
+            .window_plan()
+            .new_boundary()
+            .ok_or_else(|| RuntimeError::from(CompactionError::NoCompressibleWindow))
+    }
+
+    fn validate_window_plan_is_current(
+        &self,
+        plan: &CompactionWindowPlan,
+    ) -> Result<(), RuntimeError> {
+        if self.compaction_window_fingerprint()? != plan.fingerprint() {
+            return Err(CompactionError::StaleWindow.into());
+        }
+        let turns = self.model_turn_histories(HiddenToolExchangeVisibility::Include, true)?;
+        let covered_count = plan.covered_turn_ids().len();
+        let current_covered_ids = turns
+            .iter()
+            .take(covered_count)
+            .map(|turn| turn.id)
+            .collect::<Vec<_>>();
+        let current_retained_ids = turns
+            .iter()
+            .skip(covered_count)
+            .map(|turn| turn.id)
+            .collect::<Vec<_>>();
+        if current_covered_ids != plan.covered_turn_ids()
+            || current_retained_ids != plan.retained_turn_ids()
+            || current_covered_ids.last().copied() != plan.new_boundary()
+        {
+            return Err(CompactionError::StaleWindow.into());
+        }
+        Ok(())
+    }
+
+    fn compaction_window_fingerprint(&self) -> Result<CompactionWindowFingerprint, RuntimeError> {
+        let bytes = serde_json::to_vec(&(
+            self.transcript.persisted(),
+            self.prompt_history_projection,
+            self.compacted_checkpoint
+                .as_ref()
+                .map(CompactedCheckpoint::persisted),
+            self.task_anchor.as_ref().map(|anchor| anchor.objective()),
+            self.archived_ref_manifest.fingerprint_material(),
+        ))
+        .map_err(|error| CompactionError::PayloadSerialization {
+            message: error.to_string(),
+        })?;
+        let mut hash = 0xcbf29ce484222325_u64;
+        for byte in bytes {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        Ok(CompactionWindowFingerprint::new(hash))
+    }
+
+    pub(crate) fn validate_archived_ref_manifest(&self) -> Result<(), RuntimeError> {
+        let expected = self.current_archived_refs()?;
+        if expected != self.archived_ref_manifest.refs() {
+            return Err(CompactionError::StaleWindow.into());
+        }
+        for reference in self.archived_ref_manifest.refs() {
+            self.artifacts
+                .validate_text_evidence(reference.evidence())?;
+        }
+        Ok(())
+    }
+
+    fn current_archived_refs(&self) -> Result<Vec<CheckpointRef>, RuntimeError> {
+        let compacted_through = self.prompt_history_projection.compacted_through();
+        let mut refs = Vec::new();
+        for item in self.transcript.items() {
+            let TranscriptItem::ToolResult {
+                id,
+                model_turn_id,
+                artifact_id,
+                prompt_projection: ToolResultPromptProjection::ArtifactNotice,
+                ..
+            } = item
+            else {
+                continue;
+            };
+            if compacted_through.is_some_and(|boundary| *model_turn_id <= boundary) {
+                continue;
+            }
+            refs.push(history_checkpoint_ref(
+                *id,
+                CheckpointSourceKind::ToolResult,
+                artifact_id,
+            )?);
+        }
+        Ok(refs)
     }
 
     fn provider_history_item_count(&self) -> Result<usize, RuntimeError> {
@@ -448,6 +853,98 @@ impl SessionState {
             .map(|turn| turn.items.len())
             .sum())
     }
+}
+
+fn retained_start_for_completed_count(
+    closed_turns: &[ModelTurnHistory],
+    retained_completed_count: usize,
+) -> Option<usize> {
+    let mut completed_seen = 0;
+    closed_turns
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, turn)| {
+            if turn.status == ModelTurnStatus::Completed {
+                completed_seen += 1;
+                (completed_seen == retained_completed_count).then_some(index)
+            } else {
+                None
+            }
+        })
+}
+
+fn existing_archived_tool_call_ids(turns: &[ModelTurnHistory]) -> BTreeSet<ToolCallId> {
+    turns
+        .iter()
+        .flat_map(ModelTurnHistory::existing_archived_tool_call_ids)
+        .collect()
+}
+
+fn archived_refs_for_plan(
+    turns: &[ModelTurnHistory],
+    plan: &CompactionWindowPlan,
+) -> Result<Vec<CheckpointRef>, RuntimeError> {
+    let mut found_call_ids = BTreeSet::new();
+    let mut refs = Vec::new();
+    for turn in turns {
+        if !plan.retained_turn_ids().contains(&turn.id) {
+            continue;
+        }
+        for record in &turn.items {
+            let Some((result_item_id, call_id, _)) = record.item.tool_result_archive_candidate()
+            else {
+                continue;
+            };
+            if plan.archived_tool_call_ids().contains(&call_id) {
+                found_call_ids.insert(call_id);
+                refs.push((result_item_id, record.reference.clone()));
+            }
+        }
+    }
+    if found_call_ids != *plan.archived_tool_call_ids() {
+        return Err(CompactionError::StaleWindow.into());
+    }
+    refs.sort_by_key(|(result_item_id, _)| *result_item_id);
+    Ok(refs.into_iter().map(|(_, reference)| reference).collect())
+}
+
+fn projected_turn_tokens(
+    turns: &[ModelTurnHistory],
+    archived_tool_call_ids: &BTreeSet<ToolCallId>,
+) -> Result<u64, RuntimeError> {
+    turns.iter().try_fold(0_u64, |total, turn| {
+        total
+            .checked_add(turn.projected_token_estimate(archived_tool_call_ids)?)
+            .ok_or_else(|| RuntimeError::from(CompactionError::BudgetOverflow))
+    })
+}
+
+fn retained_projection_fits(
+    base_tokens: u64,
+    raw_turns: &[ModelTurnHistory],
+    archived_tool_call_ids: &BTreeSet<ToolCallId>,
+    max_dynamic_body_tokens: u64,
+) -> Result<bool, RuntimeError> {
+    Ok(base_tokens
+        .checked_add(projected_turn_tokens(raw_turns, archived_tool_call_ids)?)
+        .ok_or(CompactionError::BudgetOverflow)?
+        < max_dynamic_body_tokens)
+}
+
+fn compaction_window_plan(
+    covered: &[ModelTurnHistory],
+    raw_turns: &[ModelTurnHistory],
+    archived_tool_call_ids: BTreeSet<ToolCallId>,
+    fingerprint: CompactionWindowFingerprint,
+) -> Result<CompactionWindowPlan, RuntimeError> {
+    Ok(CompactionWindowPlan::new(
+        covered.iter().map(|turn| turn.id).collect(),
+        raw_turns.iter().map(|turn| turn.id).collect(),
+        archived_tool_call_ids,
+        covered.last().map(|turn| turn.id),
+        fingerprint,
+    ))
 }
 
 fn history_checkpoint_ref(

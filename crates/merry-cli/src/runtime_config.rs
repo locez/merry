@@ -233,7 +233,7 @@ retained_model_turns = 2
             vec![Ok(ModelEvent::Completed {
                 response: ModelResponse::new(
                     vec![ModelOutput::text(
-                        "tail two assistant from configured builder",
+                        &"tail two assistant from configured builder ".repeat(300),
                     )],
                     FinishReason::Stop,
                     None,
@@ -248,7 +248,7 @@ retained_model_turns = 2
             })],
         ])
         .with_capabilities(
-            ModelCapabilities::new(true, true, false, true, Some(4_000), Some(16))
+            ModelCapabilities::new(true, true, false, true, Some(12_000), Some(16))
                 .expect("valid capabilities"),
         );
         let compactor = ScriptedProvider::new(vec![vec![Ok(ModelEvent::Completed {
@@ -298,7 +298,7 @@ retained_model_turns = 2
 
         collect_runtime_step_events(
             &runtime,
-            StepInput::user_text(&"old user from configured builder ".repeat(220))
+            StepInput::user_text(&"old user from configured builder ".repeat(850))
                 .expect("valid input"),
             context.clone(),
         )

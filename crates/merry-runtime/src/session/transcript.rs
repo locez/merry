@@ -5,12 +5,13 @@ use super::{
 use crate::{
     RuntimeError,
     artifact::{ArtifactContent, ArtifactError, ArtifactRegistry},
+    compaction::CompactionError,
 };
 use merry_core::{
     ArtifactId, ArtifactKind, ArtifactRef, PendingToolCall, ToolCallId, ToolCallResult,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -25,6 +26,23 @@ pub(crate) enum ToolResultPromptProjection {
     Full,
     ArtifactNotice,
     Hidden,
+}
+
+pub(super) fn archived_tool_result_notice_json(
+    item_id: TranscriptItemId,
+    status: merry_core::ToolCallResultStatus,
+    artifact_id: &ArtifactId,
+) -> String {
+    serde_json::json!({
+        "merry_archived": true,
+        "status": match status {
+            merry_core::ToolCallResultStatus::Succeeded => "succeeded",
+            merry_core::ToolCallResultStatus::Failed => "failed",
+        },
+        "artifact_id": artifact_id.as_str(),
+        "ref": format!("h{}", item_id.as_u64()),
+    })
+    .to_string()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -357,6 +375,57 @@ impl Transcript {
         Ok(())
     }
 
+    pub(crate) fn archive_tool_results(
+        &mut self,
+        call_ids: &BTreeSet<ToolCallId>,
+    ) -> Result<(), RuntimeError> {
+        if call_ids.is_empty() {
+            return Ok(());
+        }
+
+        let mut full_calls = BTreeSet::new();
+        let mut eligible_results = BTreeSet::new();
+        for item in &self.items {
+            match item {
+                TranscriptItem::ToolCall {
+                    call,
+                    prompt_projection: ToolCallPromptProjection::Full,
+                    ..
+                } if call_ids.contains(call.id()) => {
+                    full_calls.insert(call.id().clone());
+                }
+                TranscriptItem::ToolResult {
+                    call_id,
+                    prompt_projection:
+                        ToolResultPromptProjection::Full | ToolResultPromptProjection::ArtifactNotice,
+                    ..
+                } if call_ids.contains(call_id) => {
+                    eligible_results.insert(call_id.clone());
+                }
+                TranscriptItem::UserMessage { .. }
+                | TranscriptItem::AssistantText { .. }
+                | TranscriptItem::ToolCall { .. }
+                | TranscriptItem::ToolResult { .. } => {}
+            }
+        }
+        if &full_calls != call_ids || &eligible_results != call_ids {
+            return Err(CompactionError::StaleWindow.into());
+        }
+
+        for item in &mut self.items {
+            if let TranscriptItem::ToolResult {
+                call_id,
+                prompt_projection,
+                ..
+            } = item
+                && call_ids.contains(call_id)
+            {
+                *prompt_projection = ToolResultPromptProjection::ArtifactNotice;
+            }
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(crate) fn retain_ids(&mut self, retained: std::collections::BTreeSet<TranscriptItemId>) {
         self.items.retain(|item| retained.contains(&item.id()));
@@ -666,6 +735,7 @@ impl SessionState {
                         TranscriptItemSnapshot::ToolCall { call: call.clone() }
                     }
                     TranscriptItem::ToolResult {
+                        id,
                         call_id,
                         result,
                         artifact_id,
@@ -682,8 +752,10 @@ impl SessionState {
                                 self.read_artifact_content(artifact_id)?
                             }
                             (true, ToolResultPromptProjection::ArtifactNotice) => {
-                                ArtifactContent::text(format!(
-                                    "Tool result content is stored in artifact {artifact_id}."
+                                ArtifactContent::json(archived_tool_result_notice_json(
+                                    *id,
+                                    result.status(),
+                                    artifact_id,
                                 ))
                             }
                             (true, ToolResultPromptProjection::Hidden) => unreachable!(
