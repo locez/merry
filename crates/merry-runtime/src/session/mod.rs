@@ -28,6 +28,7 @@ mod tool_result;
 mod transcript;
 mod usage;
 
+pub(crate) use self::checkpoint_window::PreparedCompactionInstall;
 pub(crate) use self::{
     artifacts::is_runtime_reserved_artifact_id,
     model_turns::{ModelTurn, ModelTurnId, ModelTurnStatus, PromptHistoryProjection},

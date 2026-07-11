@@ -53,7 +53,10 @@ mod session_access;
 mod tool_batch;
 mod tool_execution;
 
-use self::auto_compaction::{compact_context_once_inner, compaction_input_for_policy};
+use self::auto_compaction::{
+    compact_context_once_inner, compaction_input_for_policy,
+    install_citation_compaction_candidate_transactionally,
+};
 pub use self::builder::{AutomaticCompactionConfig, RuntimeBuilder};
 #[cfg(test)]
 use self::checkpoint_ref_tool::merry_read_checkpoint_ref_tool_name;
@@ -102,9 +105,10 @@ impl Runtime {
     /// Starts a runtime step and returns its event stream.
     ///
     /// Only one step or direct mutation may own the runtime at a time. The
-    /// step producer owns the active-step permit. Dropping the
-    /// returned [`RuntimeJournalEventStream`] cancels and aborts the producer; the
-    /// permit is released when that producer future stops and drops its state.
+    /// step producer owns the initial active-step permit. Dropping the returned
+    /// [`RuntimeJournalEventStream`] cancels and aborts the producer; the runtime
+    /// becomes available after the producer and any in-flight persistence
+    /// transaction have dropped their permit handles.
     ///
     /// All events emitted by the step are provider-neutral [`RuntimeJournalEvent`]
     /// values. The runtime records session, ledger, artifact, and pending-tool
@@ -112,7 +116,9 @@ impl Runtime {
     ///
     /// Cancellation records a cancelled event when the producer reaches a
     /// cancellation checkpoint. Pending tool calls remain pending unless a
-    /// durable result has already been recorded.
+    /// durable result has already been recorded. If compaction persistence is
+    /// already in flight, its transaction keeps the active-step permit until
+    /// the staged state is discarded or durably installed.
     pub fn step(
         &self,
         input: StepInput,
@@ -379,12 +385,18 @@ impl Runtime {
         input: CitationCompactionInput,
         candidate_json: &str,
     ) -> Result<CompactionOutcome, RuntimeError> {
-        let _active_permit = ActiveStepPermit::acquire(Arc::clone(&self.inner.active_step))
+        let active_permit = ActiveStepPermit::acquire(Arc::clone(&self.inner.active_step))
             .ok_or_else(|| RuntimeError::StepAlreadyActive {
                 session_id: self.inner.session_id.clone(),
             })?;
-        let mut session = self.inner.session.lock().await;
-        session.install_citation_compaction_candidate(input, candidate_json)
+        install_citation_compaction_candidate_transactionally(
+            Arc::clone(&self.inner),
+            input,
+            candidate_json,
+            CancellationToken::new(),
+            active_permit,
+        )
+        .await
     }
 
     /// Runs one model-backed compaction pass when a compressible history prefix exists.
@@ -393,7 +405,7 @@ impl Runtime {
         policy: CitationCompactionPolicy,
         context: StepContext,
     ) -> Result<Option<CompactionOutcome>, RuntimeError> {
-        let _active_permit = ActiveStepPermit::acquire(Arc::clone(&self.inner.active_step))
+        let active_permit = ActiveStepPermit::acquire(Arc::clone(&self.inner.active_step))
             .ok_or_else(|| RuntimeError::StepAlreadyActive {
                 session_id: self.inner.session_id.clone(),
             })?;
@@ -407,7 +419,7 @@ impl Runtime {
             });
         }
 
-        compact_context_once_inner(&self.inner, policy, token).await
+        compact_context_once_inner(&self.inner, policy, token, active_permit).await
     }
 
     #[allow(dead_code)]
@@ -600,7 +612,7 @@ async fn run_step(
     input: StepInput,
     generation_config: GenerationConfig,
     final_output_contract: Option<crate::FinalOutputContract>,
-    _active_permit: ActiveStepPermit,
+    active_permit: ActiveStepPermit,
 ) {
     tracing::debug!(category = "started", "runtime step started");
 
@@ -664,7 +676,7 @@ async fn run_step(
     provider_step::run_provider_step(
         &inner,
         &sender,
-        &token,
+        provider_step::ProviderStepControl::new(&token, &active_permit),
         input,
         generation_config,
         final_output_contract,
@@ -678,6 +690,7 @@ mod tests {
     mod bridge_tool_flow;
     mod builder_checkpoint;
     mod checkpoint_ref_tool;
+    mod compaction_transaction;
     mod event_cancellation;
     mod memory_activation_flow;
     mod model_role_flow;

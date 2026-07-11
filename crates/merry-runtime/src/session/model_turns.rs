@@ -2,7 +2,7 @@ use super::{
     SessionState,
     transcript::{Transcript, TranscriptItem},
 };
-use crate::RuntimeError;
+use crate::{RuntimeError, context::CompactedCheckpoint};
 use merry_core::{ToolCallId, ToolCallResult};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -63,6 +63,76 @@ impl PromptHistoryProjection {
     #[must_use]
     pub(crate) const fn compacted_through(self) -> Option<ModelTurnId> {
         self.compacted_through
+    }
+
+    pub(crate) fn advanced_through(
+        self,
+        transcript: &Transcript,
+        compacted_through: ModelTurnId,
+    ) -> Result<Self, RuntimeError> {
+        if self
+            .compacted_through
+            .is_some_and(|current| current > compacted_through)
+        {
+            return Err(invalid_turn_transition(
+                compacted_through,
+                "move prompt history projection backwards",
+            ));
+        }
+
+        let current = self.compacted_through;
+        let mut found_target = false;
+        for turn in transcript.model_turns()? {
+            if current.is_some_and(|current| turn.id() <= current) {
+                continue;
+            }
+            if turn.id() > compacted_through {
+                break;
+            }
+            if turn.status().is_open() {
+                return Err(invalid_turn_transition(
+                    turn.id(),
+                    "compact an open model turn",
+                ));
+            }
+            found_target |= turn.id() == compacted_through;
+        }
+        if !found_target && current != Some(compacted_through) {
+            return Err(RuntimeError::UnknownModelTurn {
+                model_turn_id: compacted_through.as_u64(),
+            });
+        }
+
+        Ok(Self {
+            compacted_through: Some(compacted_through),
+        })
+    }
+
+    pub(crate) fn validate(
+        self,
+        transcript: &Transcript,
+        compacted_checkpoint: Option<&CompactedCheckpoint>,
+    ) -> Result<(), RuntimeError> {
+        let Some(compacted_through) = self.compacted_through else {
+            return Ok(());
+        };
+        if compacted_checkpoint.is_none() {
+            return Err(invalid_turn_transition(
+                compacted_through,
+                "restore prompt history projection without checkpoint",
+            ));
+        }
+        transcript
+            .model_turns()?
+            .into_iter()
+            .find(|turn| turn.id() == compacted_through && !turn.status().is_open())
+            .ok_or_else(|| {
+                invalid_turn_transition(
+                    compacted_through,
+                    "restore invalid prompt history projection",
+                )
+            })
+            .map(|_| ())
     }
 }
 
@@ -370,72 +440,27 @@ impl SessionState {
     }
 
     #[must_use]
+    #[cfg(test)]
     pub(crate) const fn prompt_history_projection(&self) -> PromptHistoryProjection {
         self.prompt_history_projection
     }
 
+    #[cfg(test)]
     pub(crate) fn advance_prompt_history_projection(
         &mut self,
         compacted_through: ModelTurnId,
     ) -> Result<(), RuntimeError> {
-        if self
+        self.prompt_history_projection = self
             .prompt_history_projection
-            .compacted_through
-            .is_some_and(|current| current > compacted_through)
-        {
-            return Err(invalid_turn_transition(
-                compacted_through,
-                "move prompt history projection backwards",
-            ));
-        }
-
-        let current = self.prompt_history_projection.compacted_through;
-        let mut found_target = false;
-        for turn in self.transcript.model_turns()? {
-            if current.is_some_and(|current| turn.id() <= current) {
-                continue;
-            }
-            if turn.id() > compacted_through {
-                break;
-            }
-            if turn.status().is_open() {
-                return Err(invalid_turn_transition(
-                    turn.id(),
-                    "compact an open model turn",
-                ));
-            }
-            found_target |= turn.id() == compacted_through;
-        }
-        if !found_target && current != Some(compacted_through) {
-            return Err(RuntimeError::UnknownModelTurn {
-                model_turn_id: compacted_through.as_u64(),
-            });
-        }
-        self.prompt_history_projection.compacted_through = Some(compacted_through);
+            .advanced_through(&self.transcript, compacted_through)?;
         Ok(())
     }
 
+    #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn validate_prompt_history_projection(&self) -> Result<(), RuntimeError> {
-        let Some(compacted_through) = self.prompt_history_projection.compacted_through else {
-            return Ok(());
-        };
-        if self.compacted_checkpoint.is_none() {
-            return Err(invalid_turn_transition(
-                compacted_through,
-                "restore prompt history projection without checkpoint",
-            ));
-        }
-        self.transcript
-            .model_turns()?
-            .into_iter()
-            .find(|turn| turn.id() == compacted_through && !turn.status().is_open())
-            .ok_or_else(|| {
-                invalid_turn_transition(
-                    compacted_through,
-                    "restore invalid prompt history projection",
-                )
-            })
-            .map(|_| ())
+        self.prompt_history_projection
+            .validate(&self.transcript, self.compacted_checkpoint.as_ref())
     }
 }
 

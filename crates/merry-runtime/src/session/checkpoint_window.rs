@@ -1,5 +1,5 @@
 use super::{
-    ModelTurn, ModelTurnId, ModelTurnStatus, SessionState,
+    ModelTurn, ModelTurnId, ModelTurnStatus, PromptHistoryProjection, SessionState, Transcript,
     history::CompactionHistoryItem,
     history::permission_review_context_entry,
     transcript::{
@@ -68,6 +68,70 @@ impl ArchivedRefManifest {
                 )
             })
             .collect()
+    }
+}
+
+#[derive(Debug)]
+#[allow(private_interfaces)]
+pub(crate) enum PreparedCompactionInstall {
+    ReplaceCheckpoint {
+        state: PreparedCompactionState,
+        outcome: CompactionOutcome,
+    },
+    ArchiveOnly {
+        state: PreparedCompactionState,
+    },
+}
+
+#[derive(Debug)]
+struct PreparedCompactionState {
+    transcript: Transcript,
+    prompt_history_projection: PromptHistoryProjection,
+    compacted_checkpoint: Option<CompactedCheckpoint>,
+    archived_ref_manifest: ArchivedRefManifest,
+    original_fingerprint: CompactionWindowFingerprint,
+}
+
+impl PreparedCompactionInstall {
+    fn state(&self) -> &PreparedCompactionState {
+        match self {
+            Self::ReplaceCheckpoint { state, .. } | Self::ArchiveOnly { state } => state,
+        }
+    }
+
+    fn into_parts(self) -> (PreparedCompactionState, Option<CompactionOutcome>) {
+        match self {
+            Self::ReplaceCheckpoint { state, outcome } => (state, Some(outcome)),
+            Self::ArchiveOnly { state } => (state, None),
+        }
+    }
+
+    pub(crate) fn transcript(&self) -> &Transcript {
+        &self.state().transcript
+    }
+
+    pub(crate) fn prompt_history_projection(&self) -> PromptHistoryProjection {
+        self.state().prompt_history_projection
+    }
+
+    pub(crate) fn compacted_checkpoint(&self) -> Option<&CompactedCheckpoint> {
+        self.state().compacted_checkpoint.as_ref()
+    }
+
+    pub(crate) fn archived_ref_manifest(&self) -> &ArchivedRefManifest {
+        &self.state().archived_ref_manifest
+    }
+
+    pub(crate) fn original_fingerprint(&self) -> CompactionWindowFingerprint {
+        self.state().original_fingerprint
+    }
+
+    #[cfg(test)]
+    pub(crate) fn outcome(&self) -> Option<&CompactionOutcome> {
+        match self {
+            Self::ReplaceCheckpoint { outcome, .. } => Some(outcome),
+            Self::ArchiveOnly { .. } => None,
+        }
     }
 }
 
@@ -283,15 +347,29 @@ impl SessionState {
         self.plan_compaction_window_from_turns(policy, window_budget, &turns)
     }
 
+    #[cfg(test)]
     pub(crate) fn install_citation_compaction_candidate(
         &mut self,
         input: CitationCompactionInput,
         candidate_json: &str,
     ) -> Result<CompactionOutcome, RuntimeError> {
+        let prepared = self.prepare_citation_compaction_install(input, candidate_json)?;
+        self.revalidate_prepared_compaction_install(&prepared)?;
+        Ok(self
+            .commit_prepared_compaction_install(prepared)
+            .expect("prepared checkpoint replacement must carry an outcome"))
+    }
+
+    pub(crate) fn prepare_citation_compaction_install(
+        &self,
+        input: CitationCompactionInput,
+        candidate_json: &str,
+    ) -> Result<PreparedCompactionInstall, RuntimeError> {
         if !self.pending_tool_calls.is_empty() {
             return Err(CompactionError::PendingToolCalls.into());
         }
         let compacted_through = self.validate_compaction_window_is_current(&input)?;
+        let original_fingerprint = input.window_plan().fingerprint();
         let next_archive_manifest = ArchivedRefManifest::new(input.archived_refs().to_vec())?;
 
         let checkpoint_id = input.manifest().checkpoint_id().clone();
@@ -300,23 +378,55 @@ impl SessionState {
         let compacted = CompactedCheckpoint::from_citation_backed(citation)?;
 
         let covered_count = input.covered_history_ids().len();
-        self.transcript
-            .archive_tool_results(input.window_plan().archived_tool_call_ids())?;
-        self.advance_prompt_history_projection(compacted_through)?;
-        self.compacted_checkpoint = Some(compacted);
-        self.archived_ref_manifest = next_archive_manifest;
-
-        Ok(CompactionOutcome::new(
+        let mut transcript = self.transcript.clone();
+        transcript.archive_tool_results(input.window_plan().archived_tool_call_ids())?;
+        let prompt_history_projection = self
+            .prompt_history_projection
+            .advanced_through(&transcript, compacted_through)?;
+        let compacted_checkpoint = Some(compacted);
+        prompt_history_projection.validate(&transcript, compacted_checkpoint.as_ref())?;
+        self.validate_archived_ref_manifest_for(
+            &transcript,
+            prompt_history_projection,
+            &next_archive_manifest,
+        )?;
+        let outcome = CompactionOutcome::new(
             checkpoint_id,
             covered_count,
-            self.provider_history_item_count()?,
-        ))
+            self.provider_history_item_count_for(&transcript, prompt_history_projection)?,
+        );
+
+        Ok(PreparedCompactionInstall::ReplaceCheckpoint {
+            state: PreparedCompactionState {
+                transcript,
+                prompt_history_projection,
+                compacted_checkpoint,
+                archived_ref_manifest: next_archive_manifest,
+                original_fingerprint,
+            },
+            outcome,
+        })
     }
 
+    #[cfg(test)]
     pub(crate) fn install_archive_only_compaction(
         &mut self,
         input: ArchiveOnlyCompactionInput,
     ) -> Result<(), RuntimeError> {
+        let prepared = self.prepare_archive_only_compaction_install(input)?;
+        self.revalidate_prepared_compaction_install(&prepared)?;
+        let outcome = self.commit_prepared_compaction_install(prepared);
+        debug_assert!(
+            outcome.is_none(),
+            "prepared archive-only install must not carry an outcome"
+        );
+        Ok(())
+    }
+
+    pub(crate) fn prepare_archive_only_compaction_install(
+        &self,
+        input: ArchiveOnlyCompactionInput,
+    ) -> Result<PreparedCompactionInstall, RuntimeError> {
         if !self.pending_tool_calls.is_empty() {
             return Err(CompactionError::PendingToolCalls.into());
         }
@@ -333,12 +443,53 @@ impl SessionState {
         if current_refs != input.archived_refs() {
             return Err(CompactionError::StaleWindow.into());
         }
+        let original_fingerprint = input.window_plan().fingerprint();
         let next_archive_manifest = ArchivedRefManifest::new(input.archived_refs().to_vec())?;
 
-        self.transcript
-            .archive_tool_results(input.window_plan().archived_tool_call_ids())?;
-        self.archived_ref_manifest = next_archive_manifest;
+        let mut transcript = self.transcript.clone();
+        transcript.archive_tool_results(input.window_plan().archived_tool_call_ids())?;
+        let prompt_history_projection = self.prompt_history_projection;
+        let compacted_checkpoint = self.compacted_checkpoint.clone();
+        prompt_history_projection.validate(&transcript, compacted_checkpoint.as_ref())?;
+        self.validate_archived_ref_manifest_for(
+            &transcript,
+            prompt_history_projection,
+            &next_archive_manifest,
+        )?;
+
+        Ok(PreparedCompactionInstall::ArchiveOnly {
+            state: PreparedCompactionState {
+                transcript,
+                prompt_history_projection,
+                compacted_checkpoint,
+                archived_ref_manifest: next_archive_manifest,
+                original_fingerprint,
+            },
+        })
+    }
+
+    pub(crate) fn revalidate_prepared_compaction_install(
+        &self,
+        prepared: &PreparedCompactionInstall,
+    ) -> Result<(), RuntimeError> {
+        if !self.pending_tool_calls.is_empty()
+            || self.compaction_window_fingerprint()? != prepared.original_fingerprint()
+        {
+            return Err(CompactionError::StaleWindow.into());
+        }
         Ok(())
+    }
+
+    pub(crate) fn commit_prepared_compaction_install(
+        &mut self,
+        prepared: PreparedCompactionInstall,
+    ) -> Option<CompactionOutcome> {
+        let (state, outcome) = prepared.into_parts();
+        self.transcript = state.transcript;
+        self.prompt_history_projection = state.prompt_history_projection;
+        self.compacted_checkpoint = state.compacted_checkpoint;
+        self.archived_ref_manifest = state.archived_ref_manifest;
+        outcome
     }
 
     pub(crate) fn permission_review_context_snapshot(
@@ -363,10 +514,25 @@ impl SessionState {
         hidden_tool_exchanges: HiddenToolExchangeVisibility,
         apply_prompt_projection: bool,
     ) -> Result<Vec<ModelTurnHistory>, RuntimeError> {
+        self.model_turn_histories_for(
+            &self.transcript,
+            self.prompt_history_projection,
+            hidden_tool_exchanges,
+            apply_prompt_projection,
+        )
+    }
+
+    fn model_turn_histories_for(
+        &self,
+        transcript: &Transcript,
+        prompt_history_projection: PromptHistoryProjection,
+        hidden_tool_exchanges: HiddenToolExchangeVisibility,
+        apply_prompt_projection: bool,
+    ) -> Result<Vec<ModelTurnHistory>, RuntimeError> {
         let compacted_through = apply_prompt_projection
-            .then(|| self.prompt_history_projection().compacted_through())
+            .then(|| prompt_history_projection.compacted_through())
             .flatten();
-        self.transcript
+        transcript
             .model_turns()
             .map_err(|_| RuntimeError::from(CompactionError::StaleWindow))?
             .into_iter()
@@ -778,7 +944,9 @@ impl SessionState {
         Ok(())
     }
 
-    fn compaction_window_fingerprint(&self) -> Result<CompactionWindowFingerprint, RuntimeError> {
+    pub(crate) fn compaction_window_fingerprint(
+        &self,
+    ) -> Result<CompactionWindowFingerprint, RuntimeError> {
         let bytes = serde_json::to_vec(&(
             self.transcript.persisted(),
             self.prompt_history_projection,
@@ -800,21 +968,38 @@ impl SessionState {
     }
 
     pub(crate) fn validate_archived_ref_manifest(&self) -> Result<(), RuntimeError> {
-        let expected = self.current_archived_refs()?;
-        if expected != self.archived_ref_manifest.refs() {
+        self.validate_archived_ref_manifest_for(
+            &self.transcript,
+            self.prompt_history_projection,
+            &self.archived_ref_manifest,
+        )
+    }
+
+    pub(crate) fn validate_archived_ref_manifest_for(
+        &self,
+        transcript: &Transcript,
+        prompt_history_projection: PromptHistoryProjection,
+        archived_ref_manifest: &ArchivedRefManifest,
+    ) -> Result<(), RuntimeError> {
+        let expected = self.current_archived_refs_for(transcript, prompt_history_projection)?;
+        if expected != archived_ref_manifest.refs() {
             return Err(CompactionError::StaleWindow.into());
         }
-        for reference in self.archived_ref_manifest.refs() {
+        for reference in archived_ref_manifest.refs() {
             self.artifacts
                 .validate_text_evidence(reference.evidence())?;
         }
         Ok(())
     }
 
-    fn current_archived_refs(&self) -> Result<Vec<CheckpointRef>, RuntimeError> {
-        let compacted_through = self.prompt_history_projection.compacted_through();
+    fn current_archived_refs_for(
+        &self,
+        transcript: &Transcript,
+        prompt_history_projection: PromptHistoryProjection,
+    ) -> Result<Vec<CheckpointRef>, RuntimeError> {
+        let compacted_through = prompt_history_projection.compacted_through();
         let mut refs = Vec::new();
-        for item in self.transcript.items() {
+        for item in transcript.items() {
             let TranscriptItem::ToolResult {
                 id,
                 model_turn_id,
@@ -837,9 +1022,18 @@ impl SessionState {
         Ok(refs)
     }
 
-    fn provider_history_item_count(&self) -> Result<usize, RuntimeError> {
+    fn provider_history_item_count_for(
+        &self,
+        transcript: &Transcript,
+        prompt_history_projection: PromptHistoryProjection,
+    ) -> Result<usize, RuntimeError> {
         Ok(self
-            .model_turn_histories(HiddenToolExchangeVisibility::Exclude, true)?
+            .model_turn_histories_for(
+                transcript,
+                prompt_history_projection,
+                HiddenToolExchangeVisibility::Exclude,
+                true,
+            )?
             .into_iter()
             .map(|turn| turn.items.len())
             .sum())

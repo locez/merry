@@ -2,7 +2,7 @@ use super::*;
 use crate::SessionTranscriptItem;
 use crate::{
     ContextEvidence, ContextSummary, FINAL_OUTPUT_TOOL_NAME, FileSessionStore, ProjectRules,
-    StepInput, TaskAnchor,
+    StepInput, TaskAnchor, session::ModelTurnId,
 };
 use merry_core::ToolCallResult;
 
