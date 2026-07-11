@@ -81,8 +81,9 @@ impl Iterator for RuntimeJournalEventBatchIter {
 /// A stream is returned by [`crate::Runtime::step`] and
 /// [`crate::Runtime::journal_stream`]. It should be driven until completion
 /// when callers want the producer to finish normally. Dropping it is the
-/// cancellation path for the active step, but the permit may remain active
-/// briefly until the producer future is stopped.
+/// cancellation path for the active step. The permit may remain active after
+/// the producer stops while an in-flight persistence transaction finishes
+/// discarding staged state or installing a durable commit.
 pub struct RuntimeJournalEventStream {
     inner: Option<ReceiverStream<RuntimeJournalEventBatch>>,
     pending: Option<RuntimeJournalEventBatchIter>,

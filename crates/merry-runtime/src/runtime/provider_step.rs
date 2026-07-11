@@ -1,4 +1,7 @@
-use super::auto_compaction::{compact_prepared_context, compaction_preparation_for_hard_watermark};
+use super::auto_compaction::{
+    compact_prepared_context, compaction_preparation_for_hard_watermark,
+    install_archive_only_compaction_transactionally,
+};
 use super::journal_emission::{
     send_assistant_text_output_completed_events, send_assistant_text_output_delta_event,
     send_cancelled_event, send_compaction_completed_event, send_compaction_started_event,
@@ -25,7 +28,7 @@ use crate::{
     CheckpointDecision, CompactionError,
     compaction::{CompactionPreparation, CompactionWindowBudget},
     context::compacted_checkpoint_wrapper_token_ceiling,
-    events::RuntimeJournalEventBatch,
+    events::{ActiveStepPermit, RuntimeJournalEventBatch},
     memory::MemoryActivationContext,
     model_config::ModelProviderConfig,
     session::{ModelTurnId, ModelTurnStatus},
@@ -42,15 +45,36 @@ async fn has_unresolved_pending_tool_calls(inner: &RuntimeInner) -> bool {
     session.has_pending_tool_calls()
 }
 
+pub(super) struct ProviderStepControl<'a> {
+    token: &'a CancellationToken,
+    active_permit: &'a ActiveStepPermit,
+}
+
+impl<'a> ProviderStepControl<'a> {
+    pub(super) const fn new(
+        token: &'a CancellationToken,
+        active_permit: &'a ActiveStepPermit,
+    ) -> Self {
+        Self {
+            token,
+            active_permit,
+        }
+    }
+}
+
 pub(super) async fn run_provider_step(
     inner: &Arc<RuntimeInner>,
     sender: &mpsc::Sender<RuntimeJournalEventBatch>,
-    token: &CancellationToken,
+    control: ProviderStepControl<'_>,
     input: StepInput,
     generation_config: GenerationConfig,
     final_output_contract: Option<crate::FinalOutputContract>,
     provider_config: ModelProviderConfig,
 ) {
+    let ProviderStepControl {
+        token,
+        active_permit,
+    } = control;
     if has_unresolved_pending_tool_calls(inner).await {
         tracing::debug!(
             category = "unresolved_pending_tool_gate",
@@ -349,6 +373,7 @@ pub(super) async fn run_provider_step(
                     *compaction_input,
                     current_request_budget.window.tokens(),
                     token.clone(),
+                    active_permit,
                 )
                 .await
                 {
@@ -375,22 +400,20 @@ pub(super) async fn run_provider_step(
                     let _ = send_cancelled_event(inner, sender).await;
                     return;
                 }
-                let install_result = {
-                    let mut session = inner.session.lock().await;
+                if let Err(error) = install_archive_only_compaction_transactionally(
+                    Arc::clone(inner),
+                    archive_input,
+                    token.clone(),
+                    active_permit.clone(),
+                )
+                .await
+                {
+                    clear_current_activated_memories(inner).await;
                     if token.is_cancelled() {
-                        None
-                    } else {
-                        Some(session.install_archive_only_compaction(archive_input))
+                        trace_provider_step_cancelled();
+                        let _ = send_cancelled_event(inner, sender).await;
+                        return;
                     }
-                };
-                let Some(install_result) = install_result else {
-                    clear_current_activated_memories(inner).await;
-                    trace_provider_step_cancelled();
-                    let _ = send_cancelled_event(inner, sender).await;
-                    return;
-                };
-                if let Err(error) = install_result {
-                    clear_current_activated_memories(inner).await;
                     let diagnostic = diagnostic_from_text("auto_compaction", error.to_string());
                     trace_provider_step_failed(&diagnostic);
                     let _ = send_failed_event(inner, sender, token, diagnostic).await;

@@ -911,6 +911,68 @@ async fn archive_only_manifest_resolves_refs_and_round_trips_through_store() {
 }
 
 #[test]
+fn prepared_archive_only_install_is_read_only_until_commit() {
+    let mut session = SessionState::new(
+        SessionId::new("prepared-archive-only-install").expect("valid session id"),
+    );
+    for turn in 1..=5 {
+        record_completed_tool_turn(
+            &mut session,
+            &format!("prepared-archive-call-{turn}"),
+            &format!("prepared-archive-result-{turn}"),
+            &format!("prepared archive body {turn} {}", "x".repeat(1_000)),
+        );
+    }
+    let preparation = session
+        .build_compaction_preparation_with_window_budget(
+            policy(5),
+            policy(5).resolve(64_000).expect("budget resolves"),
+            window_budget(1_300),
+        )
+        .expect("preparation builds")
+        .expect("archive-only preparation exists");
+    let CompactionPreparation::ArchiveToolResults(input) = preparation else {
+        panic!("expected archive-only preparation");
+    };
+    let bundle_before = session
+        .persistable_bundle()
+        .expect("session is persistable before prepare")
+        .document_bytes;
+    let transcript_before = session.transcript.persisted();
+    let projection_before = session.prompt_history_projection();
+    let checkpoint_before = session.compacted_checkpoint.clone();
+    let archive_manifest_before = session.archived_ref_manifest.clone();
+
+    let prepared = session
+        .prepare_archive_only_compaction_install(input)
+        .expect("archive-only install prepares");
+
+    assert_eq!(session.transcript.persisted(), transcript_before);
+    assert_eq!(session.prompt_history_projection(), projection_before);
+    assert_eq!(session.compacted_checkpoint, checkpoint_before);
+    assert_eq!(session.archived_ref_manifest, archive_manifest_before);
+    assert_eq!(
+        session
+            .persistable_bundle()
+            .expect("session remains persistable after prepare")
+            .document_bytes,
+        bundle_before
+    );
+    assert_ne!(prepared.transcript().persisted(), transcript_before);
+    assert_eq!(prepared.prompt_history_projection(), projection_before);
+    assert_eq!(prepared.compacted_checkpoint(), checkpoint_before.as_ref());
+    assert_ne!(prepared.archived_ref_manifest(), &archive_manifest_before);
+    assert_eq!(prepared.outcome(), None);
+    session
+        .revalidate_prepared_compaction_install(&prepared)
+        .expect("unchanged session revalidates");
+
+    assert_eq!(session.commit_prepared_compaction_install(prepared), None);
+    assert_ne!(session.transcript.persisted(), transcript_before);
+    assert_ne!(session.archived_ref_manifest, archive_manifest_before);
+}
+
+#[test]
 fn failed_archived_result_notice_has_exact_four_json_fields() {
     let mut session = SessionState::new(SessionId::new("rolling-failed-notice").expect("valid id"));
     let turn_id = session.begin_model_turn().expect("failed tool turn begins");

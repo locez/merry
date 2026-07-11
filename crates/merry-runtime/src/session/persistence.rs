@@ -1,5 +1,5 @@
 use super::{
-    ModelTurnId, ModelTurnStatus, PromptHistoryProjection, SessionState,
+    ModelTurnId, ModelTurnStatus, PreparedCompactionInstall, PromptHistoryProjection, SessionState,
     checkpoint_window::ArchivedRefManifest,
     transcript::{
         PersistedTranscript, PersistedTranscriptV1, ToolCallPromptProjection,
@@ -158,17 +158,52 @@ impl SessionState {
     }
 
     pub(crate) fn persistable_bundle(&self) -> Result<PersistableSessionBundle, SessionStoreError> {
+        self.persistable_bundle_for(
+            &self.transcript,
+            self.prompt_history_projection,
+            self.compacted_checkpoint.as_ref(),
+            &self.archived_ref_manifest,
+        )
+    }
+
+    pub(crate) fn persistable_bundle_with_compaction(
+        &self,
+        prepared: &PreparedCompactionInstall,
+    ) -> Result<PersistableSessionBundle, SessionStoreError> {
+        self.persistable_bundle_for(
+            prepared.transcript(),
+            prepared.prompt_history_projection(),
+            prepared.compacted_checkpoint(),
+            prepared.archived_ref_manifest(),
+        )
+    }
+
+    fn persistable_bundle_for(
+        &self,
+        transcript: &Transcript,
+        prompt_history_projection: PromptHistoryProjection,
+        compacted_checkpoint: Option<&CompactedCheckpoint>,
+        archived_ref_manifest: &ArchivedRefManifest,
+    ) -> Result<PersistableSessionBundle, SessionStoreError> {
         if !self.pending_tool_calls.is_empty() {
             return Err(SessionStoreError::UnsafePendingToolCalls {
                 session_id: self.session_id.clone(),
                 pending_count: self.pending_tool_calls.len(),
             });
         }
-        self.validate_persisted_transcript()?;
-        self.validate_persisted_context_entries()?;
-        self.validate_persisted_checkpoint_evidence()?;
-        self.validate_archived_ref_manifest()
-            .map_err(runtime_error_to_invalid_document)?;
+        self.validate_persisted_transcript_for(
+            transcript,
+            prompt_history_projection,
+            compacted_checkpoint,
+        )?;
+        self.validate_persisted_context_entries_with_checkpoint(compacted_checkpoint)?;
+        self.validate_persisted_checkpoint_evidence_for(compacted_checkpoint)?;
+        self.validate_archived_ref_manifest_for(
+            transcript,
+            prompt_history_projection,
+            archived_ref_manifest,
+        )
+        .map_err(runtime_error_to_invalid_document)?;
 
         let artifacts = self
             .artifacts
@@ -184,23 +219,19 @@ impl SessionState {
             session_started: self.session_started,
             ledger: self.ledger.persisted_entries(),
             artifacts,
-            compacted_checkpoint: self
-                .compacted_checkpoint
-                .as_ref()
-                .map(CompactedCheckpoint::persisted),
-            archived_ref_manifest: self
-                .archived_ref_manifest
+            compacted_checkpoint: compacted_checkpoint.map(CompactedCheckpoint::persisted),
+            archived_ref_manifest: archived_ref_manifest
                 .refs()
                 .iter()
                 .map(StoredArchivedRef::from)
                 .collect(),
-            prompt_history_projection: Some(self.prompt_history_projection),
+            prompt_history_projection: Some(prompt_history_projection),
             context_entries: self
                 .context_entries
                 .iter()
                 .map(StoredContextEntry::from)
                 .collect(),
-            transcript: self.transcript.persisted(),
+            transcript: transcript.persisted(),
             resolved_tool_calls: self.resolved_tool_calls.iter().cloned().collect(),
             usage: self.usage.clone(),
             task_anchor: self.task_anchor.as_ref().map(|anchor| StoredTaskAnchor {
@@ -318,9 +349,16 @@ impl SessionState {
             );
         }
 
-        session.validate_persisted_transcript()?;
-        session.validate_persisted_context_entries()?;
-        session.validate_persisted_checkpoint_evidence()?;
+        session.validate_persisted_transcript_for(
+            &session.transcript,
+            session.prompt_history_projection,
+            session.compacted_checkpoint.as_ref(),
+        )?;
+        session.validate_persisted_context_entries_with_checkpoint(
+            session.compacted_checkpoint.as_ref(),
+        )?;
+        session
+            .validate_persisted_checkpoint_evidence_for(session.compacted_checkpoint.as_ref())?;
         session
             .validate_archived_ref_manifest()
             .map_err(runtime_error_to_invalid_document)?;
@@ -405,12 +443,15 @@ impl SessionState {
         })
     }
 
-    fn validate_persisted_context_entries(&self) -> Result<(), SessionStoreError> {
+    fn validate_persisted_context_entries_with_checkpoint(
+        &self,
+        compacted_checkpoint: Option<&CompactedCheckpoint>,
+    ) -> Result<(), SessionStoreError> {
         let snapshot = SessionContextSnapshot::new(
             self.context_entries.clone(),
             self.artifacts.clone(),
             Vec::new(),
-            self.compacted_checkpoint.clone(),
+            compacted_checkpoint.cloned(),
         );
         ContextCompiler::new()
             .compile(&snapshot)
@@ -418,19 +459,28 @@ impl SessionState {
             .map_err(|_| invalid_document("stored context evidence is invalid"))
     }
 
-    fn validate_persisted_checkpoint_evidence(&self) -> Result<(), SessionStoreError> {
-        let Some(checkpoint) = self.compacted_checkpoint.as_ref() else {
+    fn validate_persisted_checkpoint_evidence_for(
+        &self,
+        compacted_checkpoint: Option<&CompactedCheckpoint>,
+    ) -> Result<(), SessionStoreError> {
+        let Some(checkpoint) = compacted_checkpoint else {
             return Ok(());
         };
         self.validate_compacted_checkpoint_evidence(checkpoint)
             .map_err(|_| invalid_document("stored checkpoint evidence is invalid"))
     }
 
-    fn validate_persisted_transcript(&self) -> Result<(), SessionStoreError> {
-        self.transcript
+    fn validate_persisted_transcript_for(
+        &self,
+        transcript: &Transcript,
+        prompt_history_projection: PromptHistoryProjection,
+        compacted_checkpoint: Option<&CompactedCheckpoint>,
+    ) -> Result<(), SessionStoreError> {
+        transcript
             .model_turns()
             .map_err(runtime_error_to_invalid_document)?;
-        self.validate_prompt_history_projection()
+        prompt_history_projection
+            .validate(transcript, compacted_checkpoint)
             .map_err(runtime_error_to_invalid_document)?;
         let mut calls_by_turn =
             BTreeMap::<ModelTurnId, BTreeMap<ToolCallId, ToolCallPromptProjection>>::new();
@@ -453,7 +503,7 @@ impl SessionState {
             Ok(())
         };
 
-        for item in self.transcript.items() {
+        for item in transcript.items() {
             match item {
                 TranscriptItem::UserMessage {
                     id, artifact_id, ..
@@ -525,7 +575,7 @@ impl SessionState {
             }
         }
 
-        for (turn_id, status) in self.transcript.persisted().model_turns {
+        for (turn_id, status) in transcript.persisted().model_turns {
             let calls = calls_by_turn.get(&turn_id);
             let results = results_by_turn.get(&turn_id);
             match status {
@@ -584,12 +634,23 @@ impl SessionState {
 }
 
 impl FileSessionStore {
+    pub(crate) async fn stage_bundle(
+        &self,
+        bundle: PersistableSessionBundle,
+    ) -> Result<crate::session_store::StagedSessionBundle, SessionStoreError> {
+        self.stage_state_bytes(&bundle.session_id, &bundle.document_bytes)
+            .await
+    }
+
     pub(crate) async fn write_bundle(
         &self,
         bundle: PersistableSessionBundle,
     ) -> Result<(), SessionStoreError> {
-        self.write_state_bytes(&bundle.session_id, &bundle.document_bytes)
-            .await
+        self.stage_bundle(bundle)
+            .await?
+            .commit()
+            .await?
+            .require_durable()
     }
 }
 

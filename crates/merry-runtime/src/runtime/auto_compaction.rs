@@ -3,11 +3,16 @@ use crate::{
     CitationCompactionInput, CitationCompactionPolicy, CompactionError, CompactionOutcome,
     ResolvedCitationCompactionBudget, ResolvedContextWindow, RuntimeError, RuntimeModelRole,
     compaction::{
-        CompactionPreparation, CompactionWindowBudget, compile_citation_compaction_model_request,
-        generate_validated_compaction_candidate, validate_compaction_model_window,
+        ArchiveOnlyCompactionInput, CompactionPreparation, CompactionWindowBudget,
+        compile_citation_compaction_model_request, generate_validated_compaction_candidate,
+        validate_compaction_model_window,
     },
+    events::ActiveStepPermit,
+    session::{PreparedCompactionInstall, SessionState},
+    session_store::StagedSessionBundle,
 };
 use merry_llm::ModelStreamContext;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 pub(super) fn default_automatic_compaction_policy() -> CitationCompactionPolicy {
@@ -63,10 +68,11 @@ async fn resolved_primary_context_window(
 }
 
 pub(super) async fn compact_prepared_context(
-    inner: &RuntimeInner,
+    inner: &Arc<RuntimeInner>,
     input: CitationCompactionInput,
     primary_window_tokens: u64,
     token: CancellationToken,
+    active_permit: &ActiveStepPermit,
 ) -> Result<CompactionOutcome, RuntimeError> {
     if token.is_cancelled() {
         return Err(RuntimeError::Compaction {
@@ -76,13 +82,14 @@ pub(super) async fn compact_prepared_context(
         });
     }
 
-    compact_prepared_context_inner(inner, input, primary_window_tokens, token).await
+    compact_prepared_context_inner(inner, input, primary_window_tokens, token, active_permit).await
 }
 
 pub(super) async fn compact_context_once_inner(
-    inner: &RuntimeInner,
+    inner: &Arc<RuntimeInner>,
     policy: CitationCompactionPolicy,
     token: CancellationToken,
+    active_permit: ActiveStepPermit,
 ) -> Result<Option<CompactionOutcome>, RuntimeError> {
     if token.is_cancelled() {
         return Err(RuntimeError::Compaction {
@@ -98,16 +105,17 @@ pub(super) async fn compact_context_once_inner(
         return Ok(None);
     };
 
-    compact_prepared_context_inner(inner, input, primary_window.tokens(), token)
+    compact_prepared_context_inner(inner, input, primary_window.tokens(), token, &active_permit)
         .await
         .map(Some)
 }
 
 async fn compact_prepared_context_inner(
-    inner: &RuntimeInner,
+    inner: &Arc<RuntimeInner>,
     input: CitationCompactionInput,
     primary_window_tokens: u64,
     token: CancellationToken,
+    active_permit: &ActiveStepPermit,
 ) -> Result<CompactionOutcome, RuntimeError> {
     let provider_config = inner
         .model_config_with_primary_fallback(RuntimeModelRole::ContextCompaction)
@@ -134,6 +142,54 @@ async fn compact_prepared_context_inner(
         generate_validated_compaction_candidate(provider, request, stream_context, &input, &token)
             .await?;
 
+    install_citation_compaction_candidate_transactionally(
+        Arc::clone(inner),
+        input,
+        &candidate_json,
+        token,
+        active_permit.clone(),
+    )
+    .await
+}
+
+pub(super) async fn install_citation_compaction_candidate_transactionally(
+    inner: Arc<RuntimeInner>,
+    input: CitationCompactionInput,
+    candidate_json: &str,
+    token: CancellationToken,
+    active_permit: ActiveStepPermit,
+) -> Result<CompactionOutcome, RuntimeError> {
+    let outcome = install_compaction_transaction(inner, &token, active_permit, move |session| {
+        session.prepare_citation_compaction_install(input, candidate_json)
+    })
+    .await?;
+    Ok(outcome.expect("prepared checkpoint replacement must carry an outcome"))
+}
+
+pub(super) async fn install_archive_only_compaction_transactionally(
+    inner: Arc<RuntimeInner>,
+    input: ArchiveOnlyCompactionInput,
+    token: CancellationToken,
+    active_permit: ActiveStepPermit,
+) -> Result<(), RuntimeError> {
+    let outcome = install_compaction_transaction(inner, &token, active_permit, move |session| {
+        session.prepare_archive_only_compaction_install(input)
+    })
+    .await?;
+    debug_assert!(
+        outcome.is_none(),
+        "prepared archive-only install must not carry an outcome"
+    );
+    Ok(())
+}
+
+async fn install_compaction_transaction(
+    inner: Arc<RuntimeInner>,
+    token: &CancellationToken,
+    active_permit: ActiveStepPermit,
+    prepare: impl FnOnce(&SessionState) -> Result<PreparedCompactionInstall, RuntimeError>,
+) -> Result<Option<CompactionOutcome>, RuntimeError> {
+    let store = inner.session_store.clone();
     let mut session = tokio::select! {
         biased;
         () = token.cancelled() => return Err(compaction_cancelled_before_install()),
@@ -142,7 +198,107 @@ async fn compact_prepared_context_inner(
     if token.is_cancelled() {
         return Err(compaction_cancelled_before_install());
     }
-    session.install_citation_compaction_candidate(input, &candidate_json)
+
+    let prepared = prepare(&session)?;
+    let bundle = session.persistable_bundle_with_compaction(&prepared)?;
+    let Some(store) = store else {
+        if token.is_cancelled() {
+            return Err(compaction_cancelled_before_install());
+        }
+        session.revalidate_prepared_compaction_install(&prepared)?;
+        if token.is_cancelled() {
+            return Err(compaction_cancelled_before_install());
+        }
+        return Ok(session.commit_prepared_compaction_install(prepared));
+    };
+    drop(session);
+
+    let token = token.clone();
+    let trace_token = token.clone();
+    let session_id = inner.session_id.clone();
+    let commit_task = tokio::spawn(async move {
+        let result = async {
+            if token.is_cancelled() {
+                return Err(compaction_cancelled_before_install());
+            }
+            let staged = store.stage_bundle(bundle).await?;
+            complete_staged_compaction(inner, staged, prepared, token, active_permit).await
+        }
+        .await;
+        if let Err(error) = &result {
+            if matches!(error, RuntimeError::SessionStore { .. }) || !trace_token.is_cancelled() {
+                tracing::warn!(
+                    session_id = %session_id,
+                    error = %error,
+                    "compaction transaction task failed"
+                );
+            } else {
+                tracing::debug!(
+                    session_id = %session_id,
+                    error = %error,
+                    "compaction transaction task cancelled"
+                );
+            }
+        }
+        result
+    });
+    commit_task
+        .await
+        .map_err(|error| RuntimeError::CompactionModelStream {
+            message: format!("compaction commit task failed: {error}"),
+        })?
+}
+
+async fn complete_staged_compaction(
+    inner: Arc<RuntimeInner>,
+    staged: StagedSessionBundle,
+    prepared: PreparedCompactionInstall,
+    token: CancellationToken,
+    _active_permit: ActiveStepPermit,
+) -> Result<Option<CompactionOutcome>, RuntimeError> {
+    if token.is_cancelled() {
+        return Err(discard_staged_with_error(staged, compaction_cancelled_before_install()).await);
+    }
+
+    if let Err(error) = revalidate_staged_compaction(&inner, &token, &prepared).await {
+        return Err(discard_staged_with_error(staged, error).await);
+    }
+
+    if token.is_cancelled() {
+        return Err(discard_staged_with_error(staged, compaction_cancelled_before_install()).await);
+    }
+    let commit = staged.commit().await?;
+    let mut session = inner.session.lock().await;
+    let outcome = session.commit_prepared_compaction_install(prepared);
+    drop(session);
+    commit.require_durable()?;
+    Ok(outcome)
+}
+
+async fn revalidate_staged_compaction(
+    inner: &RuntimeInner,
+    token: &CancellationToken,
+    prepared: &PreparedCompactionInstall,
+) -> Result<(), RuntimeError> {
+    let session = tokio::select! {
+        biased;
+        () = token.cancelled() => return Err(compaction_cancelled_before_install()),
+        session = inner.session.lock() => session,
+    };
+    if token.is_cancelled() {
+        return Err(compaction_cancelled_before_install());
+    }
+    session.revalidate_prepared_compaction_install(prepared)
+}
+
+async fn discard_staged_with_error(
+    staged: StagedSessionBundle,
+    error: RuntimeError,
+) -> RuntimeError {
+    match staged.discard().await {
+        Ok(()) => error,
+        Err(discard_error) => discard_error.into(),
+    }
 }
 
 fn compaction_cancelled_before_install() -> RuntimeError {
