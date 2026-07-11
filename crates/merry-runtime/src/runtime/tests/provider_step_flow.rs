@@ -921,7 +921,7 @@ async fn duplicate_tool_call_response_aborts_turn_before_failed_event() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn cancellation_after_tool_response_reduction_preserves_awaiting_turn() {
+async fn cancellation_after_atomic_tool_response_preserves_awaiting_turn() {
     let call = model_tool_call("reduced-before-cancel");
     let provider =
         RecordingModelProvider::with_script(vec![ScriptedModelProviderResponse::Stream(vec![Ok(
@@ -964,13 +964,12 @@ async fn cancellation_after_tool_response_reduction_preserves_awaiting_turn() {
 
     assert_eq!(
         event_kind_names(&remaining),
-        ["ToolCallPending", "Cancelled"],
-        "committed response events must drain before cancellation becomes observable"
+        ["ToolCallPending"],
+        "the already-committed response must drain without retroactive cancellation"
     );
     assert!(
-        remaining[0].sequence == commentary.sequence + 1
-            && remaining[1].sequence == remaining[0].sequence + 1,
-        "committed response and cancellation events must have contiguous sequences"
+        remaining[0].sequence == commentary.sequence + 1,
+        "the atomic response batch must preserve contiguous sequences"
     );
     assert_eq!(runtime.pending_tool_calls().await.len(), 1);
     assert_eq!(

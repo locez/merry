@@ -1,5 +1,6 @@
 use super::{RuntimeInner, diagnostic_from_text, persist_resume_safe_savepoint_if_configured};
 use crate::{
+    events::RuntimeJournalEventBatch,
     session::{ModelTurnId, ModelTurnStatus, SessionState},
     tool_input_validation::ToolInputValidationError,
 };
@@ -19,7 +20,7 @@ use tokio_util::sync::CancellationToken;
 
 pub(super) async fn send_assistant_text_output_completed_events(
     inner: &RuntimeInner,
-    sender: &mpsc::Sender<RuntimeJournalEvent>,
+    sender: &mpsc::Sender<RuntimeJournalEventBatch>,
     token: &CancellationToken,
     turn_id: ModelTurnId,
     text: String,
@@ -28,11 +29,11 @@ pub(super) async fn send_assistant_text_output_completed_events(
         return false;
     }
 
-    let Some(artifact_permit) = reserve_normal_event_slot(sender, token).await else {
+    let Some(permit) = reserve_normal_event_slot(sender, token).await else {
         return false;
     };
 
-    let artifact_event = {
+    let events = {
         let mut session = inner.session.lock().await;
         if token.is_cancelled() {
             return false;
@@ -41,12 +42,13 @@ pub(super) async fn send_assistant_text_output_completed_events(
             .record_assistant_text_output(turn_id, text)
             .and_then(|event| {
                 session.close_model_response(turn_id, false)?;
-                Ok(event)
+                let completed = session.record_step_completed();
+                Ok((event, completed))
             })
     };
 
-    let Ok(artifact_event) = artifact_event else {
-        drop(artifact_permit);
+    let Ok((artifact_event, completed_event)) = events else {
+        drop(permit);
         abort_model_turn_before_terminal_event(inner, turn_id).await;
         let diagnostic = diagnostic_from_text(
             "assistant_output_artifact",
@@ -54,29 +56,18 @@ pub(super) async fn send_assistant_text_output_completed_events(
         );
         return send_failed_event(inner, sender, token, diagnostic).await;
     };
-    artifact_permit.send(artifact_event);
-
-    let Some(completed_permit) = reserve_normal_event_slot(sender, token).await else {
-        return false;
-    };
-    let completed_event = {
-        let mut session = inner.session.lock().await;
-        if token.is_cancelled() {
-            drop(completed_permit);
-            let _ = send_cancelled_event(inner, sender).await;
-            return false;
-        }
-        session.record_step_completed()
-    };
+    permit.send(RuntimeJournalEventBatch::pair(
+        artifact_event,
+        completed_event,
+    ));
 
     persist_resume_safe_savepoint_if_configured(inner).await;
-    completed_permit.send(completed_event);
     true
 }
 
 pub(super) async fn send_assistant_text_output_delta_event(
     inner: &RuntimeInner,
-    sender: &mpsc::Sender<RuntimeJournalEvent>,
+    sender: &mpsc::Sender<RuntimeJournalEventBatch>,
     token: &CancellationToken,
     delta: String,
 ) -> bool {
@@ -96,13 +87,13 @@ pub(super) async fn send_assistant_text_output_delta_event(
         session.record_transient_event(RuntimeJournalPayload::AssistantOutputDelta { delta })
     };
 
-    permit.send(event);
+    permit.send(event.into());
     true
 }
 
 pub(super) async fn send_model_tool_call_response_events(
     inner: &RuntimeInner,
-    sender: &mpsc::Sender<RuntimeJournalEvent>,
+    sender: &mpsc::Sender<RuntimeJournalEventBatch>,
     token: &CancellationToken,
     turn_id: ModelTurnId,
     commentary: Option<String>,
@@ -116,44 +107,16 @@ pub(super) async fn send_model_tool_call_response_events(
         return false;
     };
 
-    let prepared = {
-        let session = inner.session.lock().await;
+    let events = {
+        let mut session = inner.session.lock().await;
         if token.is_cancelled() {
             return false;
         }
-        session.prepare_model_tool_call_response(turn_id, commentary, calls)
+        session.record_model_tool_call_response(turn_id, commentary, calls)
     };
 
-    match prepared {
-        Ok(mut prepared) => {
-            let had_commentary = prepared.has_commentary();
-            let tool_permit = if had_commentary {
-                let commentary_event = {
-                    let mut session = inner.session.lock().await;
-                    if token.is_cancelled() {
-                        return false;
-                    }
-                    session
-                        .record_prepared_model_commentary(&mut prepared)
-                        .expect("prepared commentary exists when the response reports commentary")
-                };
-                permit.send(commentary_event);
-                let Some(tool_permit) = reserve_event_slot_ignoring_cancellation(sender).await
-                else {
-                    return false;
-                };
-                tool_permit
-            } else {
-                permit
-            };
-
-            let tool_event = {
-                let mut session = inner.session.lock().await;
-                if !had_commentary && token.is_cancelled() {
-                    return false;
-                }
-                session.record_prepared_model_tool_calls(prepared)
-            };
+    match events {
+        Ok((commentary_event, tool_event)) => {
             let bridge_calls = match &tool_event.payload {
                 RuntimeJournalPayload::ToolCallPending { call } => {
                     if inner
@@ -179,7 +142,13 @@ pub(super) async fn send_model_tool_call_response_events(
                     .collect::<Vec<_>>(),
                 _ => Vec::new(),
             };
-            tool_permit.send(tool_event);
+            let batch = match commentary_event {
+                Some(commentary_event) => {
+                    RuntimeJournalEventBatch::pair(commentary_event, tool_event)
+                }
+                None => tool_event.into(),
+            };
+            permit.send(batch);
 
             if token.is_cancelled() {
                 return false;
@@ -227,7 +196,7 @@ async fn abort_model_turn_before_terminal_event(inner: &RuntimeInner, turn_id: M
 
 pub(super) async fn send_model_usage_updated_event(
     inner: &RuntimeInner,
-    sender: &mpsc::Sender<RuntimeJournalEvent>,
+    sender: &mpsc::Sender<RuntimeJournalEventBatch>,
     token: &CancellationToken,
     model_usage: ModelUsage,
     context: Option<UsageContextWindow>,
@@ -249,13 +218,13 @@ pub(super) async fn send_model_usage_updated_event(
         session.record_model_usage(model_usage, context, compaction)?
     };
 
-    permit.send(event);
+    permit.send(event.into());
     Ok(true)
 }
 
 pub(super) async fn send_compaction_started_event(
     inner: &RuntimeInner,
-    sender: &mpsc::Sender<RuntimeJournalEvent>,
+    sender: &mpsc::Sender<RuntimeJournalEventBatch>,
     token: &CancellationToken,
 ) -> bool {
     if token.is_cancelled() {
@@ -274,13 +243,13 @@ pub(super) async fn send_compaction_started_event(
         session.record_compaction_started()
     };
 
-    permit.send(event);
+    permit.send(event.into());
     true
 }
 
 pub(super) async fn send_compaction_completed_event(
     inner: &RuntimeInner,
-    sender: &mpsc::Sender<RuntimeJournalEvent>,
+    sender: &mpsc::Sender<RuntimeJournalEventBatch>,
     token: &CancellationToken,
     checkpoint_id: String,
     covered_history_item_count: usize,
@@ -301,13 +270,13 @@ pub(super) async fn send_compaction_completed_event(
         session.record_compaction_completed(checkpoint_id, covered_history_item_count)
     };
 
-    permit.send(event);
+    permit.send(event.into());
     true
 }
 
 async fn send_bridge_tool_call_requested_event(
     inner: &RuntimeInner,
-    sender: &mpsc::Sender<RuntimeJournalEvent>,
+    sender: &mpsc::Sender<RuntimeJournalEventBatch>,
     token: &CancellationToken,
     call: PendingToolCall,
 ) -> bool {
@@ -327,13 +296,13 @@ async fn send_bridge_tool_call_requested_event(
         session.record_bridge_tool_call_requested(call)
     };
 
-    permit.send(event);
+    permit.send(event.into());
     true
 }
 
 async fn send_bridge_tool_input_validation_failure_events(
     inner: &RuntimeInner,
-    sender: &mpsc::Sender<RuntimeJournalEvent>,
+    sender: &mpsc::Sender<RuntimeJournalEventBatch>,
     token: &CancellationToken,
     call: &PendingToolCall,
     error: ToolInputValidationError,
@@ -341,6 +310,10 @@ async fn send_bridge_tool_input_validation_failure_events(
     if token.is_cancelled() {
         return false;
     }
+
+    let Some(permit) = reserve_normal_event_slot(sender, token).await else {
+        return false;
+    };
 
     let result = {
         let mut session = inner.session.lock().await;
@@ -358,29 +331,20 @@ async fn send_bridge_tool_input_validation_failure_events(
 
     match result {
         Ok(events) => {
-            let mut events = events.into_iter();
-            let Some(artifact_event) = events.next() else {
-                return false;
+            let Some(batch) = RuntimeJournalEventBatch::from_events(events) else {
+                drop(permit);
+                let diagnostic = diagnostic_from_text(
+                    "tool_input_validation_events",
+                    "validated bridge tool outcome produced no journal events",
+                );
+                return send_failed_event(inner, sender, token, diagnostic).await;
             };
-            let Some(resolved_event) = events.next() else {
-                return false;
-            };
-            debug_assert!(events.next().is_none());
-
+            permit.send(batch);
             persist_resume_safe_savepoint_if_configured(inner).await;
-
-            let Some(artifact_permit) = reserve_normal_event_slot(sender, token).await else {
-                return false;
-            };
-            artifact_permit.send(artifact_event);
-
-            let Some(resolved_permit) = reserve_normal_event_slot(sender, token).await else {
-                return false;
-            };
-            resolved_permit.send(resolved_event);
             true
         }
         Err(error) => {
+            drop(permit);
             let diagnostic =
                 diagnostic_from_text("tool_input_validation_result", error.to_string());
             send_failed_event(inner, sender, token, diagnostic).await
@@ -390,7 +354,7 @@ async fn send_bridge_tool_input_validation_failure_events(
 
 pub(super) async fn wait_for_retrying_stream_setup<F>(
     inner: &RuntimeInner,
-    sender: &mpsc::Sender<RuntimeJournalEvent>,
+    sender: &mpsc::Sender<RuntimeJournalEventBatch>,
     token: &CancellationToken,
     setup: F,
     retry_events: &mut mpsc::Receiver<ModelRetryEvent>,
@@ -436,7 +400,7 @@ pub(super) async fn stream_model_with_retry_policy(
 
 pub(super) async fn wait_for_model_stream_item(
     inner: &RuntimeInner,
-    sender: &mpsc::Sender<RuntimeJournalEvent>,
+    sender: &mpsc::Sender<RuntimeJournalEventBatch>,
     token: &CancellationToken,
     stream: &mut Pin<Box<dyn futures_core::Stream<Item = Result<ModelEvent, ModelError>> + Send>>,
     retry_events: &mut mpsc::Receiver<ModelRetryEvent>,
@@ -457,7 +421,7 @@ pub(super) async fn wait_for_model_stream_item(
 
 async fn send_model_retry_event(
     inner: &RuntimeInner,
-    sender: &mpsc::Sender<RuntimeJournalEvent>,
+    sender: &mpsc::Sender<RuntimeJournalEventBatch>,
     token: &CancellationToken,
     event: ModelRetryEvent,
 ) -> bool {
@@ -476,13 +440,13 @@ async fn send_model_retry_event(
         }
         session.record_model_retry_event(kind)
     };
-    permit.send(event);
+    permit.send(event.into());
     true
 }
 
 pub(super) async fn send_failed_event(
     inner: &RuntimeInner,
-    sender: &mpsc::Sender<RuntimeJournalEvent>,
+    sender: &mpsc::Sender<RuntimeJournalEventBatch>,
     token: &CancellationToken,
     diagnostic: ErrorInfo,
 ) -> bool {
@@ -564,7 +528,7 @@ pub(super) fn trace_provider_step_cancelled() {
 
 pub(super) async fn send_normal_event(
     inner: &RuntimeInner,
-    sender: &mpsc::Sender<RuntimeJournalEvent>,
+    sender: &mpsc::Sender<RuntimeJournalEventBatch>,
     token: &CancellationToken,
     make_event: impl FnOnce(&mut SessionState) -> Option<RuntimeJournalEvent>,
 ) -> bool {
@@ -585,16 +549,16 @@ pub(super) async fn send_normal_event(
     };
 
     if let Some(event) = event {
-        permit.send(event);
+        permit.send(event.into());
     }
 
     true
 }
 
 async fn reserve_normal_event_slot<'a>(
-    sender: &'a mpsc::Sender<RuntimeJournalEvent>,
+    sender: &'a mpsc::Sender<RuntimeJournalEventBatch>,
     token: &CancellationToken,
-) -> Option<Permit<'a, RuntimeJournalEvent>> {
+) -> Option<Permit<'a, RuntimeJournalEventBatch>> {
     if token.is_cancelled() || sender.is_closed() {
         return None;
     }
@@ -609,7 +573,7 @@ async fn reserve_normal_event_slot<'a>(
 
 pub(super) async fn send_cancelled_if_requested(
     inner: &RuntimeInner,
-    sender: &mpsc::Sender<RuntimeJournalEvent>,
+    sender: &mpsc::Sender<RuntimeJournalEventBatch>,
     token: &CancellationToken,
 ) -> bool {
     if !token.is_cancelled() {
@@ -621,7 +585,7 @@ pub(super) async fn send_cancelled_if_requested(
 
 pub(super) async fn send_cancelled_event(
     inner: &RuntimeInner,
-    sender: &mpsc::Sender<RuntimeJournalEvent>,
+    sender: &mpsc::Sender<RuntimeJournalEventBatch>,
 ) -> bool {
     let Some(permit) = reserve_cancelled_event_slot(sender).await else {
         return false;
@@ -637,19 +601,19 @@ pub(super) async fn send_cancelled_event(
         let mut session = inner.session.lock().await;
         session.record_cancelled(diagnostic)
     };
-    permit.send(event);
+    permit.send(event.into());
     true
 }
 
 async fn reserve_cancelled_event_slot<'a>(
-    sender: &'a mpsc::Sender<RuntimeJournalEvent>,
-) -> Option<Permit<'a, RuntimeJournalEvent>> {
+    sender: &'a mpsc::Sender<RuntimeJournalEventBatch>,
+) -> Option<Permit<'a, RuntimeJournalEventBatch>> {
     reserve_event_slot_ignoring_cancellation(sender).await
 }
 
 async fn reserve_event_slot_ignoring_cancellation<'a>(
-    sender: &'a mpsc::Sender<RuntimeJournalEvent>,
-) -> Option<Permit<'a, RuntimeJournalEvent>> {
+    sender: &'a mpsc::Sender<RuntimeJournalEventBatch>,
+) -> Option<Permit<'a, RuntimeJournalEventBatch>> {
     if sender.is_closed() {
         return None;
     }

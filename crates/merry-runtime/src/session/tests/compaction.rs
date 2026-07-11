@@ -1,4 +1,10 @@
 use super::*;
+use crate::{
+    FileSessionStore,
+    session::transcript::{
+        PersistedTranscriptItem, ToolCallPromptProjection, ToolResultPromptProjection,
+    },
+};
 
 #[test]
 fn compaction_input_excludes_retained_raw_tail() {
@@ -107,7 +113,7 @@ fn compaction_accepts_resolved_multi_tool_batches() {
 }
 
 #[test]
-fn compaction_and_permission_review_include_hidden_final_output_exchange_in_full_history() {
+fn permission_review_includes_hidden_final_output_but_compaction_window_skips_it() {
     let mut session =
         SessionState::new(SessionId::new("compaction-hidden-final").expect("valid session id"));
     session
@@ -145,14 +151,11 @@ fn compaction_and_permission_review_include_hidden_final_output_exchange_in_full
     )
     .expect("payload parses");
     let window = payload["window"].as_array().expect("window is an array");
-    assert_eq!(window.len(), 2);
+    assert_eq!(window.len(), 1);
     assert_eq!(window[0]["role"], "user");
-    assert_eq!(window[1]["role"], "tool_exchange");
-    assert_eq!(window[1]["tool_call"]["name"], "lookup");
     assert!(
-        window[1]["excerpt"]
-            .as_str()
-            .expect("tool excerpt is text")
+        !payload
+            .to_string()
             .contains("must-not-reenter-model-context")
     );
 
@@ -180,6 +183,145 @@ fn compaction_and_permission_review_include_hidden_final_output_exchange_in_full
         item,
         crate::session::TranscriptItemSnapshot::UserMessage { .. }
     )));
+}
+
+#[tokio::test]
+async fn installing_compaction_preserves_hidden_final_output_in_full_and_stored_transcript() {
+    let session_id = SessionId::new("install-hidden-final").expect("valid session id");
+    let mut session = SessionState::new(session_id.clone());
+    session
+        .record_test_user_message_body("old visible context")
+        .expect("old user context records");
+    let final_call = pending_tool_call("hidden-install-final-call");
+    session
+        .record_test_tool_call_pending(final_call.clone())
+        .expect("final-output call records");
+    session
+        .record_final_output(
+            final_call.id().clone(),
+            r#"{"private_final_output":"preserve-after-install"}"#.to_owned(),
+        )
+        .expect("final output records");
+    session
+        .record_test_user_message_body("retained visible tail")
+        .expect("tail records");
+
+    let policy = CitationCompactionPolicy::new(128, None, 4096, 1, 1200, 16).expect("valid policy");
+    let input = session
+        .build_citation_compaction_input(policy)
+        .expect("compaction input builds")
+        .expect("old visible context should be compressible");
+    session
+        .install_citation_compaction_candidate(
+            input,
+            r#"{
+              "claims": [
+                {
+                  "id": "c1",
+                  "kind": "completed_action",
+                  "text": "The old visible context was compacted.",
+                  "refs": ["r1"]
+                }
+              ],
+              "working_intent": null
+            }"#,
+        )
+        .expect("checkpoint installs");
+
+    let full = session
+        .transcript_snapshot()
+        .expect("full transcript remains readable");
+    assert_eq!(full.len(), 3);
+    assert!(matches!(
+        &full[0],
+        crate::session::TranscriptItemSnapshot::ToolCall { call }
+            if call.id() == final_call.id()
+    ));
+    assert!(matches!(
+        &full[1],
+        crate::session::TranscriptItemSnapshot::ToolResult { content, .. }
+            if content.as_text()
+                == Some(r#"{"private_final_output":"preserve-after-install"}"#)
+    ));
+    assert!(matches!(
+        &full[2],
+        crate::session::TranscriptItemSnapshot::UserMessage { text, .. }
+            if text == "retained visible tail"
+    ));
+
+    let prompt = session
+        .transcript_prompt_snapshot()
+        .expect("prompt transcript remains readable");
+    assert_eq!(prompt.len(), 1);
+    assert!(matches!(
+        &prompt[0],
+        crate::session::TranscriptItemSnapshot::UserMessage { text, .. }
+            if text == "retained visible tail"
+    ));
+
+    let stored: serde_json::Value = serde_json::from_slice(
+        &session
+            .persistable_bundle()
+            .expect("post-compaction session is persistable")
+            .document_bytes,
+    )
+    .expect("stored session is JSON");
+    let stored_items = stored["transcript"]["items"]
+        .as_array()
+        .expect("stored transcript items are an array");
+    assert_eq!(stored_items.len(), 3);
+    assert_eq!(stored_items[0]["type"], "tool_call");
+    assert_eq!(stored_items[1]["type"], "tool_result");
+    assert_eq!(stored_items[2]["type"], "user_message");
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = FileSessionStore::new(temp.path());
+    session.save_to(&store).await.expect("session saves");
+    let loaded = SessionState::load_from(&store, &session_id)
+        .await
+        .expect("compacted session loads");
+    let loaded_transcript = loaded.transcript.persisted();
+    assert!(matches!(
+        &loaded_transcript.items[0],
+        PersistedTranscriptItem::ToolCall {
+            call,
+            prompt_projection: ToolCallPromptProjection::Hidden,
+            ..
+        } if call.id() == final_call.id()
+    ));
+    assert!(matches!(
+        &loaded_transcript.items[1],
+        PersistedTranscriptItem::ToolResult {
+            call_id,
+            prompt_projection: ToolResultPromptProjection::Hidden,
+            ..
+        } if call_id == final_call.id()
+    ));
+    assert!(matches!(
+        &loaded
+            .transcript_snapshot()
+            .expect("loaded full transcript remains readable")[1],
+        crate::session::TranscriptItemSnapshot::ToolResult { content, .. }
+            if content.as_text()
+                == Some(r#"{"private_final_output":"preserve-after-install"}"#)
+    ));
+    assert_eq!(
+        loaded
+            .transcript_prompt_snapshot()
+            .expect("loaded prompt transcript remains readable"),
+        vec![crate::session::TranscriptItemSnapshot::UserMessage {
+            text: "retained visible tail".to_owned(),
+            origin: crate::session::UserInputOrigin::ExternalUser,
+        }]
+    );
+
+    assert!(
+        loaded
+            .build_citation_compaction_input(policy)
+            .expect("next compaction window builds")
+            .is_none(),
+        "the preserved hidden exchange must not be covered again"
+    );
 }
 
 #[test]

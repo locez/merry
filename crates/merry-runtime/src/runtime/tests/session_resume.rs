@@ -137,6 +137,85 @@ async fn complete_boundary_savepoint_text_output_step_completed_persists_resume_
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn dropping_text_stream_while_savepoint_is_blocked_keeps_terminal_batch_committed() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = FileSessionStore::new(temp.path());
+    let provider =
+        RecordingModelProvider::with_script(vec![ScriptedModelProviderResponse::Stream(vec![Ok(
+            completed_event_with(
+                vec![ModelOutput::text("atomic terminal response")],
+                FinishReason::Stop,
+            ),
+        )])]);
+    let runtime = Runtime::builder(session_id("runtime-savepoint-text-drop"))
+        .event_buffer_size(NonZeroUsize::new(1).expect("non-zero event buffer"))
+        .session_store(store)
+        .model_provider(Arc::new(provider), model_name())
+        .build()
+        .expect("runtime builds");
+    let mut stream = runtime
+        .step(
+            StepInput::user_text("write terminal text").expect("valid input"),
+            StepContext::default(),
+        )
+        .expect("step starts");
+
+    assert_eq!(
+        stream.next().await.expect("session start event").sequence,
+        0
+    );
+    assert_eq!(stream.next().await.expect("step start event").sequence, 1);
+    let session = loop {
+        let session = runtime.inner.session.lock().await;
+        let assistant_recorded = session
+            .transcript_snapshot()
+            .expect("transcript remains readable")
+            .iter()
+            .any(|item| {
+                matches!(
+                    item,
+                    crate::session::TranscriptItemSnapshot::AssistantText { text }
+                        if text == "atomic terminal response"
+                )
+            });
+        if assistant_recorded {
+            break session;
+        }
+        drop(session);
+        tokio::task::yield_now().await;
+    };
+
+    let assistant = stream.next().await.expect("assistant output event");
+    assert_eq!(assistant.sequence, 2);
+    assert!(matches!(
+        assistant.payload,
+        RuntimeJournalPayload::AssistantOutputRecorded { .. }
+    ));
+    assert_eq!(
+        session.next_sequence(),
+        4,
+        "StepCompleted must commit before the terminal batch becomes observable"
+    );
+    assert!(session.ledger_projection().entries().iter().any(|entry| {
+        matches!(
+            entry,
+            LedgerProjection::Lifecycle {
+                sequence: 3,
+                kind: LedgerFactKind::StepCompleted,
+                ..
+            }
+        )
+    }));
+
+    drop(stream);
+    assert_eq!(session.next_sequence(), 4);
+    assert_eq!(
+        session.model_turn_status(ModelTurnId::new(1)),
+        Some(ModelTurnStatus::Completed)
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn load_session_from_store_does_not_enable_automatic_savepoints() {
     let temp = tempfile::tempdir().expect("tempdir");
     let store = FileSessionStore::new(temp.path());

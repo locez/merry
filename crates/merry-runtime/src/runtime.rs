@@ -11,7 +11,8 @@ use crate::{
     CompactionOutcome, FileSessionStore, ProcessRunner, RuntimeCapabilities, RuntimeError,
     RuntimeModelRole,
     events::{
-        ActiveStepPermit, RuntimeEventProjector, RuntimeEventStream, RuntimeJournalEventStream,
+        ActiveStepPermit, RuntimeEventProjector, RuntimeEventStream, RuntimeJournalEventBatch,
+        RuntimeJournalEventStream,
     },
     judgment::{JudgmentContext, JudgmentError, JudgmentRecord, JudgmentRequest, JudgmentSource},
     memory::MemoryActivationSource,
@@ -597,7 +598,7 @@ struct AcceptedLocalWorkspaceProcessRunner {
 
 async fn run_step(
     inner: Arc<RuntimeInner>,
-    sender: mpsc::Sender<RuntimeJournalEvent>,
+    sender: mpsc::Sender<RuntimeJournalEventBatch>,
     token: CancellationToken,
     input: StepInput,
     generation_config: GenerationConfig,

@@ -438,12 +438,37 @@ impl Transcript {
             return;
         }
 
+        let hidden_tool_calls = self
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                TranscriptItem::ToolCall {
+                    call,
+                    prompt_projection: ToolCallPromptProjection::Hidden,
+                    ..
+                } => Some(call.id().clone()),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        let protected_hidden_tool_calls = self
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                TranscriptItem::ToolResult {
+                    call_id,
+                    prompt_projection: ToolResultPromptProjection::Hidden,
+                    ..
+                } if hidden_tool_calls.contains(call_id) => Some(call_id.clone()),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
         let covered_tool_calls = self
             .items
             .iter()
             .filter_map(|item| match item {
                 TranscriptItem::ToolResult { id, call_id, .. }
-                    if covered_history_ids.contains(&id.as_u64()) =>
+                    if covered_history_ids.contains(&id.as_u64())
+                        && !protected_hidden_tool_calls.contains(call_id) =>
                 {
                     Some(call_id.clone())
                 }
@@ -455,7 +480,10 @@ impl Transcript {
                 !covered_history_ids.contains(&id.as_u64())
             }
             TranscriptItem::ToolCall { call, .. } => !covered_tool_calls.contains(call.id()),
-            TranscriptItem::ToolResult { id, .. } => !covered_history_ids.contains(&id.as_u64()),
+            TranscriptItem::ToolResult { id, call_id, .. } => {
+                protected_hidden_tool_calls.contains(call_id)
+                    || !covered_history_ids.contains(&id.as_u64())
+            }
         });
     }
 
