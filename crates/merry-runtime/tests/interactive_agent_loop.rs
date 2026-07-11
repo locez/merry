@@ -508,8 +508,8 @@ async fn interactive_settings_update_changes_automatic_compaction_at_request_bou
         .expect("interactive run starts");
     let (mut stream, _input, control) = run.split();
     let _ = stream.next().await.expect("waiting state");
-    let policy = CitationCompactionPolicy::new(128, Some(192), 6144, 1, 900, 12)
-        .expect("valid compact policy");
+    let policy =
+        CitationCompactionPolicy::new(Some(128), Some(6144), 1).expect("valid compact policy");
     let updated = AutomaticCompactionConfig::enabled(policy);
 
     control

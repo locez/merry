@@ -2098,7 +2098,7 @@ async fn runtime_compaction_input_excludes_retained_raw_tail() {
 
     let input = runtime
         .citation_compaction_input(
-            CitationCompactionPolicy::new(128, None, 4096, 2, 1200, 16).expect("valid policy"),
+            CitationCompactionPolicy::new(Some(128), Some(4096), 1).expect("valid policy"),
         )
         .await
         .expect("input builds")
@@ -2125,7 +2125,7 @@ async fn citation_compaction_fixture_preserves_required_design_meanings() {
 
     let outcome = runtime
         .compact_context_once(
-            CitationCompactionPolicy::new(384, None, 8192, 4, 1200, 16).expect("valid policy"),
+            CitationCompactionPolicy::new(Some(384), Some(8192), 2).expect("valid policy"),
             StepContext::default(),
         )
         .await
@@ -2224,8 +2224,7 @@ async fn live_compactor_summarizes_messy_1k_token_window_with_refs() {
         );
     }
 
-    let policy =
-        CitationCompactionPolicy::new(420, None, 12_000, 4, 1200, 16).expect("valid policy");
+    let policy = CitationCompactionPolicy::new(Some(420), Some(12_000), 2).expect("valid policy");
     let input = runtime
         .citation_compaction_input(policy)
         .await
@@ -2258,7 +2257,7 @@ async fn live_compactor_summarizes_messy_1k_token_window_with_refs() {
         ],
         Vec::new(),
         Vec::new(),
-        GenerationConfig::new(policy.model_output_token_limit(), false)
+        GenerationConfig::new(Some(input.resolved_budget().output_token_limit()), false)
             .expect("generation config is valid"),
         1,
         Some(response_format),
@@ -2366,7 +2365,7 @@ async fn installed_checkpoint_replaces_old_body_but_keeps_raw_tail_in_next_reque
 
     let input = runtime
         .citation_compaction_input(
-            CitationCompactionPolicy::new(128, None, 4096, 2, 1200, 16).expect("valid policy"),
+            CitationCompactionPolicy::new(Some(128), Some(4096), 1).expect("valid policy"),
         )
         .await
         .expect("input builds")
@@ -2466,7 +2465,7 @@ async fn dynamic_context_projection_keeps_checkpoint_tail_and_current_input_outs
 
     let input = runtime
         .citation_compaction_input(
-            CitationCompactionPolicy::new(128, None, 4096, 4, 1200, 16).expect("valid policy"),
+            CitationCompactionPolicy::new(Some(128), Some(4096), 2).expect("valid policy"),
         )
         .await
         .expect("input builds")
@@ -2615,7 +2614,7 @@ async fn compaction_model_request_excludes_retained_tail_and_tools() {
 
     runtime
         .compact_context_once(
-            CitationCompactionPolicy::new(128, None, 4096, 2, 1200, 16).expect("valid policy"),
+            CitationCompactionPolicy::new(Some(128), Some(4096), 1).expect("valid policy"),
             StepContext::default(),
         )
         .await

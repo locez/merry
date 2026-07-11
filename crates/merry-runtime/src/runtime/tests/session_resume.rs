@@ -41,9 +41,11 @@ async fn resumed_runtime_reads_runtime_generated_checkpoint_ref_evidence() {
     session
         .record_test_user_message_body("retained user history")
         .expect("retained user history records");
+    let policy = CitationCompactionPolicy::new(Some(128), Some(4096), 1).expect("valid policy");
     let input = session
         .build_citation_compaction_input(
-            CitationCompactionPolicy::new(128, None, 4096, 1, 1200, 16).expect("valid policy"),
+            policy,
+            policy.resolve(64_000).expect("test budget resolves"),
         )
         .expect("compaction input builds")
         .expect("covered user history is compressible");

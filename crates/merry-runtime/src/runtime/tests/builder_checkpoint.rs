@@ -235,9 +235,11 @@ async fn manual_bootstrap_ref_can_roll_with_new_runtime_history_refs() {
         .record_test_user_message_body("new retained history")
         .expect("retained history records");
 
+    let policy = CitationCompactionPolicy::new(Some(128), Some(4096), 1).expect("valid policy");
     let input = session
         .build_citation_compaction_input(
-            CitationCompactionPolicy::new(128, None, 4096, 1, 1200, 16).expect("valid policy"),
+            policy,
+            policy.resolve(64_000).expect("test budget resolves"),
         )
         .expect("rolling input builds")
         .expect("new history is compressible");

@@ -4,6 +4,7 @@ use crate::{
     SessionContextSnapshot, SkillCatalog, TaskAnchor, decide_checkpoint, resolve_context_window,
     session::{SessionState, TranscriptItemSnapshot},
     step::{StepInput, StepModelRequestParts, compile_step_model_request},
+    token_estimate::estimate_model_input_tokens,
 };
 use merry_core::{CompactionUsageWindow, ErrorInfo, UsageContextWindow};
 use merry_llm::{GenerationConfig, ModelError, ModelName};
@@ -218,12 +219,7 @@ pub(super) fn request_context_budget(
     request: &merry_llm::ModelRequest,
     context_window_override: Option<u64>,
 ) -> Result<RequestContextBudget, crate::ContextError> {
-    let window = resolve_context_window(
-        context_window_override,
-        capabilities.max_input_tokens(),
-        None,
-        DEFAULT_CONTEXT_WINDOW_FALLBACK_TOKENS,
-    )?;
+    let window = resolve_request_context_window(capabilities, context_window_override)?;
     let output_reserve_tokens = request
         .generation()
         .max_output_tokens()
@@ -250,35 +246,21 @@ pub(super) fn request_context_budget(
     })
 }
 
+pub(super) fn resolve_request_context_window(
+    capabilities: &merry_llm::ModelCapabilities,
+    context_window_override: Option<u64>,
+) -> Result<ResolvedContextWindow, crate::ContextError> {
+    resolve_context_window(
+        context_window_override,
+        capabilities.max_input_tokens(),
+        None,
+        DEFAULT_CONTEXT_WINDOW_FALLBACK_TOKENS,
+    )
+}
+
 fn default_output_reserve_tokens(window_tokens: u64) -> u64 {
     (window_tokens / DEFAULT_OUTPUT_RESERVE_WINDOW_DIVISOR).clamp(
         DEFAULT_OUTPUT_RESERVE_MIN_TOKENS,
         DEFAULT_OUTPUT_RESERVE_MAX_TOKENS,
     )
-}
-
-fn estimate_model_input_tokens(input: &[merry_llm::ModelInputItem]) -> u64 {
-    input.iter().map(estimate_model_input_item_tokens).sum()
-}
-
-fn estimate_model_input_item_tokens(item: &merry_llm::ModelInputItem) -> u64 {
-    match item {
-        merry_llm::ModelInputItem::Message(message) => {
-            estimate_text_tokens(message.content().as_text())
-        }
-        merry_llm::ModelInputItem::ToolCall(call) => {
-            estimate_text_tokens(call.name().as_str())
-                + estimate_text_tokens(
-                    &serde_json::to_string(call.arguments().as_object())
-                        .expect("tool arguments must serialize for budget estimation"),
-                )
-        }
-        merry_llm::ModelInputItem::ToolResult(result) => {
-            estimate_text_tokens(result.content().as_str())
-        }
-    }
-}
-
-fn estimate_text_tokens(text: &str) -> u64 {
-    u64::try_from(text.len().div_ceil(4)).expect("usize should fit in u64 on supported targets")
 }

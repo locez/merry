@@ -21,9 +21,9 @@ use crate::tui::session_picker::SessionPickerSelection;
 use merry_core::SessionId;
 use merry_llm::GenerationConfig;
 use merry_runtime::{
-    AgentLoopControl, AgentLoopInput, AutomaticCompactionConfig, CitationCompactionPolicy,
-    InteractivePrimaryModel, InteractiveRunEventStream, InteractiveSettingsUpdate,
-    InteractiveSubagentSettings, Runtime, SessionTranscriptItem, SkillMetadata, StepContext,
+    AgentLoopControl, AgentLoopInput, AutomaticCompactionConfig, InteractivePrimaryModel,
+    InteractiveRunEventStream, InteractiveSettingsUpdate, InteractiveSubagentSettings, Runtime,
+    SessionTranscriptItem, SkillMetadata, StepContext,
 };
 use std::{env, num::NonZeroU64, path::PathBuf};
 
@@ -297,13 +297,14 @@ fn automatic_compaction_config_with_preferences(
     let inherited = automatic_compaction_config(merry_config).map_err(unexpected)?;
     let policy = match preferences.compaction_strategy {
         None | Some(CompactionStrategy::Balanced) => inherited.policy(),
-        Some(CompactionStrategy::Compact) => {
-            CitationCompactionPolicy::new(128, Some(192), 6144, 1, 900, 12).map_err(unexpected)?
-        }
-        Some(CompactionStrategy::PreserveDetail) => {
-            CitationCompactionPolicy::new(320, Some(384), 12_288, 4, 1800, 24)
-                .map_err(unexpected)?
-        }
+        Some(CompactionStrategy::Compact) => inherited
+            .policy()
+            .with_retained_model_turns(3)
+            .map_err(unexpected)?,
+        Some(CompactionStrategy::PreserveDetail) => inherited
+            .policy()
+            .with_retained_model_turns(7)
+            .map_err(unexpected)?,
     };
     let enabled = preferences
         .auto_compaction_enabled
@@ -375,5 +376,39 @@ api_key = "sk-test"
             generation.reasoning_effort().map(|effort| effort.as_str()),
             Some("high")
         );
+    }
+
+    #[test]
+    fn tui_compaction_strategies_only_change_retained_model_turns() {
+        let paths = XdgPaths::from_parts(std::path::PathBuf::from("/home/alice"), None, None);
+        let config = MerryConfig::load_optional_from_text(
+            Some(
+                r#"
+[runtime.auto_compaction]
+target_output_tokens = 9000
+max_accepted_output_bytes = 72000
+retained_model_turns = 5
+"#,
+            ),
+            &paths,
+        )
+        .expect("config should parse")
+        .expect("config should exist");
+
+        for (strategy, expected_turns) in [
+            (CompactionStrategy::Compact, 3),
+            (CompactionStrategy::Balanced, 5),
+            (CompactionStrategy::PreserveDetail, 7),
+        ] {
+            let mut preferences = TuiPreferences::default();
+            preferences.compaction_strategy = Some(strategy);
+            let policy = automatic_compaction_config_with_preferences(Some(&config), &preferences)
+                .expect("TUI compaction config should build")
+                .policy();
+
+            assert_eq!(policy.retained_model_turns(), expected_turns);
+            assert_eq!(policy.target_output_tokens(), Some(9_000));
+            assert_eq!(policy.max_accepted_output_bytes(), Some(72_000));
+        }
     }
 }

@@ -24,10 +24,13 @@ pub enum CompactionError {
     #[error("compaction policy field {field} must be greater than zero")]
     InvalidPolicy { field: &'static str },
 
+    #[error("compaction budget arithmetic overflowed")]
+    BudgetOverflow,
+
     #[error("cannot compact while pending tool calls exist")]
     PendingToolCalls,
 
-    #[error("no compressible history exists before retained raw tail")]
+    #[error("no compressible history exists before retained model turns")]
     NoCompressibleWindow,
 
     #[error("compaction payload serialization failed: {message}")]
@@ -42,92 +45,147 @@ pub enum CompactionError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CitationCompactionPolicy {
-    target_output_tokens: u64,
-    model_output_token_limit: Option<u64>,
-    max_accepted_output_bytes: usize,
-    retained_raw_tail_items: usize,
-    max_ref_excerpt_bytes: usize,
-    max_carried_prior_refs: usize,
+    target_output_tokens: Option<u64>,
+    max_accepted_output_bytes: Option<usize>,
+    retained_model_turns: usize,
 }
+
+const DEFAULT_CHECKPOINT_WINDOW_PERCENT: u64 = 8;
+const MIN_CHECKPOINT_OUTPUT_TOKENS: u64 = 2_048;
+const MAX_CHECKPOINT_OUTPUT_TOKENS: u64 = 32_768;
+const DEFAULT_ACCEPTED_BYTES_PER_TOKEN: u64 = 8;
+const DEFAULT_RETAINED_MODEL_TURNS: usize = 5;
+const DEFAULT_MAX_REF_EXCERPT_BYTES: usize = 1_200;
 
 impl CitationCompactionPolicy {
     pub fn new(
-        target_output_tokens: u64,
-        model_output_token_limit: Option<u64>,
-        max_accepted_output_bytes: usize,
-        retained_raw_tail_items: usize,
-        max_ref_excerpt_bytes: usize,
-        max_carried_prior_refs: usize,
+        target_output_tokens: Option<u64>,
+        max_accepted_output_bytes: Option<usize>,
+        retained_model_turns: usize,
     ) -> Result<Self, CompactionError> {
-        if target_output_tokens == 0 {
+        if target_output_tokens == Some(0) {
             return Err(CompactionError::InvalidPolicy {
                 field: "target_output_tokens",
             });
         }
-        if model_output_token_limit == Some(0) {
-            return Err(CompactionError::InvalidPolicy {
-                field: "model_output_token_limit",
-            });
-        }
-        if max_accepted_output_bytes == 0 {
+        if max_accepted_output_bytes == Some(0) {
             return Err(CompactionError::InvalidPolicy {
                 field: "max_accepted_output_bytes",
             });
         }
-        if retained_raw_tail_items == 0 {
+        if retained_model_turns == 0 {
             return Err(CompactionError::InvalidPolicy {
-                field: "retained_raw_tail_items",
-            });
-        }
-        if max_ref_excerpt_bytes == 0 {
-            return Err(CompactionError::InvalidPolicy {
-                field: "max_ref_excerpt_bytes",
-            });
-        }
-        if max_carried_prior_refs == 0 {
-            return Err(CompactionError::InvalidPolicy {
-                field: "max_carried_prior_refs",
+                field: "retained_model_turns",
             });
         }
 
         Ok(Self {
             target_output_tokens,
-            model_output_token_limit,
             max_accepted_output_bytes,
-            retained_raw_tail_items,
-            max_ref_excerpt_bytes,
-            max_carried_prior_refs,
+            retained_model_turns,
         })
     }
 
     #[must_use]
-    pub fn target_output_tokens(self) -> u64 {
+    pub fn target_output_tokens(self) -> Option<u64> {
         self.target_output_tokens
     }
 
     #[must_use]
-    pub fn model_output_token_limit(self) -> Option<u64> {
-        self.model_output_token_limit
+    pub fn max_accepted_output_bytes(self) -> Option<usize> {
+        self.max_accepted_output_bytes
+    }
+
+    #[must_use]
+    pub fn retained_model_turns(self) -> usize {
+        self.retained_model_turns
+    }
+
+    pub fn with_retained_model_turns(
+        self,
+        retained_model_turns: usize,
+    ) -> Result<Self, CompactionError> {
+        Self::new(
+            self.target_output_tokens,
+            self.max_accepted_output_bytes,
+            retained_model_turns,
+        )
+    }
+
+    pub fn resolve(
+        self,
+        primary_window_tokens: u64,
+    ) -> Result<ResolvedCitationCompactionBudget, CompactionError> {
+        if primary_window_tokens == 0 {
+            return Err(CompactionError::InvalidPolicy {
+                field: "primary_window_tokens",
+            });
+        }
+        let automatic = primary_window_tokens
+            .checked_mul(DEFAULT_CHECKPOINT_WINDOW_PERCENT)
+            .and_then(|value| value.checked_div(100))
+            .ok_or(CompactionError::BudgetOverflow)?
+            .clamp(MIN_CHECKPOINT_OUTPUT_TOKENS, MAX_CHECKPOINT_OUTPUT_TOKENS);
+        let output_token_limit = self.target_output_tokens.unwrap_or(automatic);
+        let derived_bytes = output_token_limit
+            .checked_mul(DEFAULT_ACCEPTED_BYTES_PER_TOKEN)
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or(CompactionError::BudgetOverflow)?;
+
+        Ok(ResolvedCitationCompactionBudget {
+            output_token_limit,
+            max_accepted_output_bytes: self.max_accepted_output_bytes.unwrap_or(derived_bytes),
+        })
+    }
+
+    pub(crate) const fn max_ref_excerpt_bytes(self) -> usize {
+        DEFAULT_MAX_REF_EXCERPT_BYTES
+    }
+}
+
+impl Default for CitationCompactionPolicy {
+    fn default() -> Self {
+        Self {
+            target_output_tokens: None,
+            max_accepted_output_bytes: None,
+            retained_model_turns: DEFAULT_RETAINED_MODEL_TURNS,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedCitationCompactionBudget {
+    output_token_limit: u64,
+    max_accepted_output_bytes: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CitationCompactionInputPolicy {
+    policy: CitationCompactionPolicy,
+    resolved_budget: ResolvedCitationCompactionBudget,
+}
+
+impl CitationCompactionInputPolicy {
+    pub(crate) const fn new(
+        policy: CitationCompactionPolicy,
+        resolved_budget: ResolvedCitationCompactionBudget,
+    ) -> Self {
+        Self {
+            policy,
+            resolved_budget,
+        }
+    }
+}
+
+impl ResolvedCitationCompactionBudget {
+    #[must_use]
+    pub fn output_token_limit(self) -> u64 {
+        self.output_token_limit
     }
 
     #[must_use]
     pub fn max_accepted_output_bytes(self) -> usize {
         self.max_accepted_output_bytes
-    }
-
-    #[must_use]
-    pub fn retained_raw_tail_items(self) -> usize {
-        self.retained_raw_tail_items
-    }
-
-    #[must_use]
-    pub fn max_ref_excerpt_bytes(self) -> usize {
-        self.max_ref_excerpt_bytes
-    }
-
-    #[must_use]
-    pub fn max_carried_prior_refs(self) -> usize {
-        self.max_carried_prior_refs
     }
 }
 
@@ -261,11 +319,12 @@ pub struct CitationCompactionInput {
     task_anchor_snapshot: Option<TaskAnchor>,
     previous_checkpoint_snapshot: Option<CitationBackedCheckpoint>,
     policy: CitationCompactionPolicy,
+    resolved_budget: ResolvedCitationCompactionBudget,
 }
 
 impl CitationCompactionInput {
     pub(crate) fn new(
-        policy: CitationCompactionPolicy,
+        input_policy: CitationCompactionInputPolicy,
         task_anchor_snapshot: Option<TaskAnchor>,
         manifest: CheckpointRefManifest,
         covered_history_ids: BTreeSet<u64>,
@@ -273,15 +332,20 @@ impl CitationCompactionInput {
         previous_checkpoint: Option<CitationCompactionPreviousCheckpoint>,
         previous_checkpoint_snapshot: Option<CitationBackedCheckpoint>,
     ) -> Self {
+        let CitationCompactionInputPolicy {
+            policy,
+            resolved_budget,
+        } = input_policy;
         let payload = CitationCompactionPayload {
             policy: CitationCompactionPayloadPolicy {
-                target_output_tokens: policy.target_output_tokens(),
-                suggested_max_claims: suggested_max_claims(policy.target_output_tokens()),
+                target_output_tokens: resolved_budget.output_token_limit(),
+                suggested_max_claims: suggested_max_claims(resolved_budget.output_token_limit()),
                 suggested_max_claim_text_words: 22,
                 suggested_max_working_intent_words: 18,
-                output_budget_instruction: output_budget_instruction(policy.target_output_tokens()),
-                max_accepted_output_bytes: policy.max_accepted_output_bytes(),
-                model_output_token_limit: policy.model_output_token_limit(),
+                output_budget_instruction: output_budget_instruction(
+                    resolved_budget.output_token_limit(),
+                ),
+                max_accepted_output_bytes: resolved_budget.max_accepted_output_bytes(),
             },
             control: CitationCompactionControl {
                 task_anchor: task_anchor_snapshot
@@ -300,6 +364,7 @@ impl CitationCompactionInput {
             task_anchor_snapshot,
             previous_checkpoint_snapshot,
             policy,
+            resolved_budget,
         }
     }
 
@@ -329,6 +394,11 @@ impl CitationCompactionInput {
     #[must_use]
     pub fn policy(&self) -> CitationCompactionPolicy {
         self.policy
+    }
+
+    #[must_use]
+    pub fn resolved_budget(&self) -> ResolvedCitationCompactionBudget {
+        self.resolved_budget
     }
 
     pub(crate) fn previous_checkpoint_snapshot(&self) -> Option<&CitationBackedCheckpoint> {
@@ -383,10 +453,10 @@ pub(crate) fn checkpoint_from_candidate_json(
     input: &CitationCompactionInput,
     candidate_json: &str,
 ) -> Result<CitationBackedCheckpoint, RuntimeError> {
-    if candidate_json.len() > input.policy().max_accepted_output_bytes() {
+    if candidate_json.len() > input.resolved_budget().max_accepted_output_bytes() {
         return Err(CheckpointError::OutputTooLarge {
             actual_bytes: candidate_json.len(),
-            max_bytes: input.policy().max_accepted_output_bytes(),
+            max_bytes: input.resolved_budget().max_accepted_output_bytes(),
         }
         .into());
     }
@@ -426,7 +496,8 @@ pub(crate) fn compile_citation_compaction_model_request(
         )?,
         ModelMessage::new(ModelMessageRole::User, ModelContent::text(&payload)?)?,
     ];
-    let generation = GenerationConfig::new(input.policy().model_output_token_limit(), false)?;
+    let generation =
+        GenerationConfig::new(Some(input.resolved_budget().output_token_limit()), false)?;
     let response_format = ModelResponseFormat::StructuredOutput(ModelStructuredOutputFormat::new(
         "compacted_checkpoint_candidate",
         citation_compaction_response_schema(),
@@ -459,7 +530,6 @@ struct CitationCompactionPayloadPolicy {
     suggested_max_working_intent_words: usize,
     output_budget_instruction: String,
     max_accepted_output_bytes: usize,
-    model_output_token_limit: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -633,6 +703,10 @@ pub(crate) fn bounded_excerpt(text: &str, max_bytes: usize) -> String {
 }
 
 #[cfg(test)]
+#[path = "compaction/budget_tests.rs"]
+mod budget_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::checkpoint::{
@@ -646,15 +720,6 @@ mod tests {
             ArtifactId::new(artifact_id).expect("valid artifact id"),
             EvidenceLocator::whole_artifact(),
         )
-    }
-
-    #[test]
-    fn compaction_policy_rejects_zero_limits() {
-        assert!(CitationCompactionPolicy::new(0, None, 4096, 2, 1200, 16).is_err());
-        assert!(CitationCompactionPolicy::new(128, Some(0), 4096, 2, 1200, 16).is_err());
-        assert!(CitationCompactionPolicy::new(128, None, 0, 2, 1200, 16).is_err());
-        assert!(CitationCompactionPolicy::new(128, None, 4096, 0, 1200, 16).is_err());
-        assert!(CitationCompactionPolicy::new(128, None, 4096, 2, 0, 16).is_err());
     }
 
     #[test]
@@ -700,7 +765,7 @@ mod tests {
     #[test]
     fn compaction_payload_carries_soft_output_budget_guidance() {
         let policy =
-            CitationCompactionPolicy::new(420, None, 12_000, 4, 1200, 16).expect("valid policy");
+            CitationCompactionPolicy::new(Some(420), Some(12_000), 4).expect("valid policy");
         let manifest = CheckpointRefManifest::new(
             CheckpointId::new("checkpoint-budget").expect("valid checkpoint id"),
             vec![CheckpointRef::new(
@@ -712,7 +777,10 @@ mod tests {
         )
         .expect("valid manifest");
         let input = CitationCompactionInput::new(
-            policy,
+            CitationCompactionInputPolicy::new(
+                policy,
+                policy.resolve(64_000).expect("test budget resolves"),
+            ),
             None,
             manifest,
             [1].into_iter().collect(),
@@ -820,8 +888,7 @@ mod tests {
 
     #[test]
     fn compaction_model_request_uses_structured_checkpoint_output_schema() {
-        let policy =
-            CitationCompactionPolicy::new(128, None, 4096, 2, 1200, 16).expect("valid policy");
+        let policy = CitationCompactionPolicy::new(Some(128), Some(4096), 2).expect("valid policy");
         let checkpoint_id = CheckpointId::new("checkpoint-1").expect("valid checkpoint id");
         let manifest = CheckpointRefManifest::new(
             checkpoint_id,
@@ -834,7 +901,10 @@ mod tests {
         )
         .expect("valid manifest");
         let input = CitationCompactionInput::new(
-            policy,
+            CitationCompactionInputPolicy::new(
+                policy,
+                policy.resolve(64_000).expect("test budget resolves"),
+            ),
             None,
             manifest,
             [1].into_iter().collect(),

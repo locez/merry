@@ -56,16 +56,13 @@ roots = [
 # Automatic compaction runs when dynamic context crosses the runtime hard
 # watermark. Current user input is not included in the compaction input.
 enabled = true
-# Soft output guidance for the compaction model; runtime still validates shape,
-# refs, and max_accepted_output_bytes.
-target_output_tokens = 192
-# Optional hard generation limit for the compaction model request.
-# model_output_token_limit = 256
-max_accepted_output_bytes = 8192
-# Retain the most recent history items raw after checkpoint installation.
-retained_raw_tail_items = 2
-max_ref_excerpt_bytes = 1200
-max_carried_prior_refs = 16
+# Retain this many recent completed model turns verbatim. Aborted turns after
+# the retained boundary stay verbatim without consuming this count.
+retained_model_turns = 5
+# By default the checkpoint output budget is 8% of the primary model window,
+# clamped to 2048-32768 tokens. These optional fields override that calculation.
+# target_output_tokens = 8192
+# max_accepted_output_bytes = 65536
 
 [runtime.subagents]
 # Disabled by default. Enable this to expose spawn_subagents, wait_subagents,

@@ -1104,12 +1104,9 @@ roots = ["skills", "~/shared-skills", "/opt/company/skills"]
             .expect("example auto compaction config should validate");
         assert!(auto_compaction.is_enabled());
         let policy = auto_compaction.policy();
-        assert_eq!(policy.target_output_tokens(), 192);
-        assert_eq!(policy.model_output_token_limit(), None);
-        assert_eq!(policy.max_accepted_output_bytes(), 8192);
-        assert_eq!(policy.retained_raw_tail_items(), 2);
-        assert_eq!(policy.max_ref_excerpt_bytes(), 1200);
-        assert_eq!(policy.max_carried_prior_refs(), 16);
+        assert_eq!(policy.target_output_tokens(), None);
+        assert_eq!(policy.max_accepted_output_bytes(), None);
+        assert_eq!(policy.retained_model_turns(), 5);
         assert_eq!(
             config
                 .skill_roots()

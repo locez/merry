@@ -248,7 +248,15 @@ pub(super) async fn run_provider_step(
         request_budget.as_ref().map(|budget| budget.decision),
         Ok(CheckpointDecision::RequireCheckpoint)
     ) {
-        match compaction_input_for_hard_watermark(inner).await {
+        match compaction_input_for_hard_watermark(
+            inner,
+            request_budget
+                .as_ref()
+                .expect("checkpoint decision requires a resolved request budget")
+                .window,
+        )
+        .await
+        {
             Ok(Some(compaction_input)) => {
                 if !send_compaction_started_event(inner, sender, token).await {
                     return;

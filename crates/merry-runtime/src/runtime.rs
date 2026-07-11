@@ -53,7 +53,7 @@ mod session_access;
 mod tool_batch;
 mod tool_execution;
 
-use self::auto_compaction::compact_context_once_inner;
+use self::auto_compaction::{compact_context_once_inner, compaction_input_for_policy};
 pub use self::builder::{AutomaticCompactionConfig, RuntimeBuilder};
 #[cfg(test)]
 use self::checkpoint_ref_tool::merry_read_checkpoint_ref_tool_name;
@@ -371,8 +371,7 @@ impl Runtime {
             .ok_or_else(|| RuntimeError::StepAlreadyActive {
                 session_id: self.inner.session_id.clone(),
             })?;
-        let session = self.inner.session.lock().await;
-        session.build_citation_compaction_input(policy)
+        compaction_input_for_policy(&self.inner, policy).await
     }
 
     /// Installs a validated citation compaction candidate and removes the covered history prefix.

@@ -20,8 +20,8 @@ fn checkpoint_refs_point_to_original_user_and_assistant_artifacts() {
         .expect("tail records");
 
     let input = session
-        .build_citation_compaction_input(
-            CitationCompactionPolicy::new(128, None, 4096, 1, 1200, 16).expect("valid policy"),
+        .build_test_citation_compaction_input(
+            CitationCompactionPolicy::new(Some(128), Some(4096), 1).expect("valid policy"),
         )
         .expect("input builds")
         .expect("covered turn is compressible");
@@ -90,8 +90,8 @@ fn checkpoint_tool_result_refs_preserve_b_after_a_result_identity() {
         .expect("tail records");
 
     let input = session
-        .build_citation_compaction_input(
-            CitationCompactionPolicy::new(128, None, 4096, 1, 1200, 16).expect("valid policy"),
+        .build_test_citation_compaction_input(
+            CitationCompactionPolicy::new(Some(128), Some(4096), 1).expect("valid policy"),
         )
         .expect("input builds")
         .expect("old history is compressible");
@@ -121,9 +121,9 @@ fn rolling_compaction_carries_original_refs_unchanged() {
     session
         .record_test_user_message_body("first retained source")
         .expect("first tail records");
-    let policy = CitationCompactionPolicy::new(128, None, 4096, 1, 1200, 16).expect("valid policy");
+    let policy = CitationCompactionPolicy::new(Some(128), Some(4096), 1).expect("valid policy");
     let first_input = session
-        .build_citation_compaction_input(policy)
+        .build_test_citation_compaction_input(policy)
         .expect("first input builds")
         .expect("first prefix is compressible");
     let original = first_input
@@ -158,7 +158,7 @@ fn rolling_compaction_carries_original_refs_unchanged() {
         .expect("second tail records");
 
     let second_input = session
-        .build_citation_compaction_input(policy)
+        .build_test_citation_compaction_input(policy)
         .expect("second input builds")
         .expect("former tail is compressible");
     let carried = second_input
@@ -226,8 +226,8 @@ fn checkpoint_manifest_drops_refs_unused_by_candidate() {
         .record_test_user_message_body("retained tail")
         .expect("tail records");
     let input = session
-        .build_citation_compaction_input(
-            CitationCompactionPolicy::new(128, None, 4096, 1, 1200, 16).expect("valid policy"),
+        .build_test_citation_compaction_input(
+            CitationCompactionPolicy::new(Some(128), Some(4096), 1).expect("valid policy"),
         )
         .expect("input builds")
         .expect("covered turn is compressible");
