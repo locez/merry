@@ -388,6 +388,81 @@ async fn hard_watermark_auto_compaction_emits_lifecycle_events() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn pre_turn_auto_compaction_failure_does_not_consume_model_turn_id() {
+    let primary = RecordingModelProvider::with_script_and_capabilities(
+        vec![
+            ScriptedModelProviderResponse::Stream(vec![Ok(completed_event())]),
+            ScriptedModelProviderResponse::Stream(vec![Ok(completed_event())]),
+            ScriptedModelProviderResponse::Stream(vec![Ok(completed_event())]),
+        ],
+        ModelCapabilities::new(true, true, false, true, Some(4_000), None)
+            .expect("valid capabilities"),
+    );
+    let compactor =
+        RecordingModelProvider::with_script(vec![ScriptedModelProviderResponse::Stream(vec![Ok(
+            completed_event_with(
+                vec![ModelOutput::text("not a valid compaction candidate")],
+                FinishReason::Stop,
+            ),
+        )])]);
+    let runtime = Runtime::builder(session_id("pre-turn-compaction-failure"))
+        .model_provider(Arc::new(primary), model_name())
+        .model_provider_for_role(
+            RuntimeModelRole::ContextCompaction,
+            Arc::new(compactor),
+            ModelName::new("compaction-model").expect("valid model"),
+        )
+        .build()
+        .expect("runtime builds");
+    seed_two_history_items_for_compaction(&runtime).await;
+
+    let failed = collect_step(
+        &runtime,
+        &format!(
+            "Trigger failing pre-turn compaction.\n{}",
+            "ballast ".repeat(1_200)
+        ),
+        StepContext::default(),
+    )
+    .await;
+
+    assert!(
+        failed
+            .iter()
+            .any(|event| matches!(event.payload, RuntimeJournalPayload::Failed { .. }))
+    );
+    assert_eq!(
+        runtime
+            .inner
+            .session
+            .lock()
+            .await
+            .model_turn_status(ModelTurnId::new(3)),
+        None,
+        "pre-turn compaction failure must not allocate the next model turn"
+    );
+
+    *runtime.inner.automatic_compaction.write().await = AutomaticCompactionConfig::disabled();
+    let recovered = collect_step(
+        &runtime,
+        "Use the still-next model turn after compaction failure.",
+        StepContext::default(),
+    )
+    .await;
+    assert!(
+        recovered
+            .iter()
+            .any(|event| matches!(event.payload, RuntimeJournalPayload::StepCompleted))
+    );
+    let session = runtime.inner.session.lock().await;
+    assert_eq!(
+        session.model_turn_status(ModelTurnId::new(3)),
+        Some(ModelTurnStatus::Completed)
+    );
+    assert_eq!(session.model_turn_status(ModelTurnId::new(4)), None);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn hard_watermark_without_compressible_history_skips_compaction_lifecycle_events() {
     let primary = RecordingModelProvider::with_script_and_capabilities(
         vec![ScriptedModelProviderResponse::Stream(vec![Ok(

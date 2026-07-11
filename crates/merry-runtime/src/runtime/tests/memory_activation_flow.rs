@@ -340,7 +340,7 @@ async fn unresolved_pending_tool_call_blocks_memory_activation() {
     {
         let mut session = runtime.inner.session.lock().await;
         session
-            .record_tool_call_pending(pending_tool_call("pending-call"))
+            .record_test_tool_call_pending(pending_tool_call("pending-call"))
             .expect("pending call records");
     }
 

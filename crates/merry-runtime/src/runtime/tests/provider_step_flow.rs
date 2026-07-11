@@ -36,6 +36,42 @@ async fn provider_stream_context_uses_runtime_session_as_prompt_cache_key() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn user_text_burst_records_every_item_in_one_model_turn() {
+    let runtime = Runtime::builder(session_id("runtime-user-burst-one-turn"))
+        .model_provider(Arc::new(RecordingModelProvider::new()), model_name())
+        .build()
+        .expect("runtime should build");
+    let stream = runtime
+        .step(
+            crate::StepInput::user_texts(["first exact user item", "second exact user item"])
+                .expect("valid user burst"),
+            crate::StepContext::default(),
+        )
+        .expect("step should start");
+    let events = stream.collect::<Vec<_>>().await;
+
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.payload, RuntimeJournalPayload::StepCompleted))
+    );
+    assert_eq!(
+        runtime
+            .inner
+            .session
+            .lock()
+            .await
+            .transcript_model_turn_ids_for_tests(),
+        [
+            ModelTurnId::new(1),
+            ModelTurnId::new(1),
+            ModelTurnId::new(1),
+        ],
+        "both user source items and the response belong to one durable model turn"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn model_retry_events_are_emitted_for_failure_before_output() {
     let provider = RecordingModelProvider::with_script(vec![
         ScriptedModelProviderResponse::Stream(vec![
@@ -107,6 +143,61 @@ async fn model_retry_events_are_emitted_for_failure_before_output() {
         .await
         .expect("artifact should be readable");
     assert_eq!(content.as_text(), Some("successful attempt"));
+    let session = runtime.inner.session.lock().await;
+    assert_eq!(
+        session.model_turn_status(ModelTurnId::new(1)),
+        Some(ModelTurnStatus::Completed)
+    );
+    assert_eq!(session.model_turn_status(ModelTurnId::new(2)), None);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn provider_setup_retry_reuses_one_model_turn() {
+    let provider = RecordingModelProvider::with_script(vec![
+        ScriptedModelProviderResponse::SetupError(ModelError::provider(
+            ProviderErrorKind::Unavailable,
+            "retry setup",
+        )),
+        ScriptedModelProviderResponse::Stream(vec![Ok(completed_event_with(
+            vec![ModelOutput::text("setup retry succeeded")],
+            FinishReason::Stop,
+        ))]),
+    ]);
+    let runtime = Runtime::builder(session_id("runtime-setup-retry-turn"))
+        .model_retry_policy(
+            ModelRetryPolicy::new(
+                true,
+                2,
+                std::time::Duration::from_millis(1),
+                std::time::Duration::from_millis(1),
+                std::time::Duration::from_millis(100),
+                false,
+            )
+            .expect("valid retry policy"),
+        )
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .build()
+        .expect("runtime should build");
+
+    let events = collect_step(
+        &runtime,
+        "Retry setup with one turn.",
+        crate::StepContext::default(),
+    )
+    .await;
+
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.payload, RuntimeJournalPayload::StepCompleted))
+    );
+    assert_eq!(provider.recorded_requests().len(), 2);
+    let session = runtime.inner.session.lock().await;
+    assert_eq!(
+        session.model_turn_status(ModelTurnId::new(1)),
+        Some(ModelTurnStatus::Completed)
+    );
+    assert_eq!(session.model_turn_status(ModelTurnId::new(2)), None);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -171,6 +262,15 @@ async fn model_stream_failure_after_output_is_not_retried_or_recorded_as_complet
         RuntimeJournalPayload::AssistantOutputRecorded { .. }
             | RuntimeJournalPayload::StepCompleted
     )));
+    assert_eq!(
+        runtime
+            .inner
+            .session
+            .lock()
+            .await
+            .model_turn_status(ModelTurnId::new(1)),
+        Some(ModelTurnStatus::Aborted)
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -254,6 +354,16 @@ async fn dropping_step_during_provider_setup_clears_activated_memory_projection(
     tokio::task::yield_now().await;
 
     assert_activated_memory_projection_cleared(&runtime).await;
+    assert_eq!(
+        runtime
+            .inner
+            .session
+            .lock()
+            .await
+            .model_turn_status(ModelTurnId::new(1)),
+        Some(ModelTurnStatus::Aborted),
+        "dropping the producer must not leave its allocated turn in progress"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -308,11 +418,37 @@ async fn dropping_step_during_provider_setup_with_held_session_lock_defers_proje
         snapshot.contains("memory:memory-provider-setup-drop-spawned"),
         "projection should remain while spawned cleanup is waiting for session lock; snapshot:\n{snapshot}"
     );
+    assert_eq!(
+        session.model_turn_status(ModelTurnId::new(1)),
+        Some(ModelTurnStatus::InProgress),
+        "turn cleanup must wait without blocking while the session lock is held"
+    );
 
     drop(session);
-    tokio::task::yield_now().await;
+    for _ in 0..32 {
+        if runtime
+            .inner
+            .session
+            .lock()
+            .await
+            .model_turn_status(ModelTurnId::new(1))
+            == Some(ModelTurnStatus::Aborted)
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
 
     assert_activated_memory_projection_cleared(&runtime).await;
+    assert_eq!(
+        runtime
+            .inner
+            .session
+            .lock()
+            .await
+            .model_turn_status(ModelTurnId::new(1)),
+        Some(ModelTurnStatus::Aborted)
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -343,6 +479,15 @@ async fn provider_setup_error_before_stream_clears_activated_memory_projection()
     assert_eq!(failed_code(&events), Some("model_unavailable"));
     assert_eq!(source.call_count(), 1);
     assert_eq!(provider.recorded_requests().len(), 1);
+    assert_eq!(
+        runtime
+            .inner
+            .session
+            .lock()
+            .await
+            .model_turn_status(ModelTurnId::new(1)),
+        Some(ModelTurnStatus::Aborted)
+    );
     assert_activated_memory_projection_cleared(&runtime).await;
 }
 
@@ -410,6 +555,15 @@ async fn provider_stream_cancelled_error_retains_activated_memory_projection() {
     );
     assert_eq!(source.call_count(), 1);
     assert_eq!(provider.recorded_requests().len(), 1);
+    assert_eq!(
+        runtime
+            .inner
+            .session
+            .lock()
+            .await
+            .model_turn_status(ModelTurnId::new(1)),
+        Some(ModelTurnStatus::Aborted)
+    );
     assert_activated_memory_projection_retained(
         &runtime,
         "memory-provider-stream-cancelled-error",
@@ -580,10 +734,224 @@ async fn provider_stop_completion_retains_activated_memory_projection() {
     );
     assert_eq!(source.call_count(), 1);
     assert_eq!(provider.recorded_requests().len(), 1);
+    assert_eq!(
+        runtime
+            .inner
+            .session
+            .lock()
+            .await
+            .model_turn_status(ModelTurnId::new(1)),
+        Some(ModelTurnStatus::Completed)
+    );
     assert_activated_memory_projection_retained(
         &runtime,
         "memory-provider-stop",
         "Activated memory must survive provider stop completion after setup.",
     )
     .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn provider_continuation_without_user_input_starts_a_new_model_turn() {
+    let provider = RecordingModelProvider::with_script(vec![
+        ScriptedModelProviderResponse::Stream(vec![Ok(completed_event_with(
+            vec![ModelOutput::text("first response")],
+            FinishReason::Stop,
+        ))]),
+        ScriptedModelProviderResponse::Stream(vec![Ok(completed_event_with(
+            vec![ModelOutput::text("continuation response")],
+            FinishReason::Stop,
+        ))]),
+    ]);
+    let runtime = Runtime::builder(session_id("runtime-no-input-new-turn"))
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .build()
+        .expect("runtime should build");
+
+    collect_step(&runtime, "Start the loop.", crate::StepContext::default()).await;
+    runtime
+        .step(
+            crate::StepInput::no_new_user_input(),
+            crate::StepContext::default(),
+        )
+        .expect("continuation step should start")
+        .collect::<Vec<_>>()
+        .await;
+
+    assert_eq!(provider.recorded_requests().len(), 2);
+    let session = runtime.inner.session.lock().await;
+    assert_eq!(
+        session.model_turn_status(ModelTurnId::new(1)),
+        Some(ModelTurnStatus::Completed)
+    );
+    assert_eq!(
+        session.model_turn_status(ModelTurnId::new(2)),
+        Some(ModelTurnStatus::Completed)
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn duplicate_tool_call_response_aborts_turn_before_failed_event() {
+    let duplicate = model_tool_call("duplicate-turn-call");
+    let provider = RecordingModelProvider::with_script(vec![
+        ScriptedModelProviderResponse::Stream(vec![Ok(completed_event_with(
+            vec![ModelOutput::tool_call(duplicate.clone())],
+            FinishReason::ToolCalls,
+        ))]),
+        ScriptedModelProviderResponse::Stream(vec![Ok(completed_event_with(
+            vec![
+                ModelOutput::text("commentary that must not partially commit"),
+                ModelOutput::tool_call(duplicate),
+            ],
+            FinishReason::ToolCalls,
+        ))]),
+    ]);
+    let runtime = Runtime::builder(session_id("runtime-duplicate-call-aborts-turn"))
+        .model_provider(Arc::new(provider), model_name())
+        .build()
+        .expect("runtime should build");
+
+    collect_step(
+        &runtime,
+        "Request the first call.",
+        crate::StepContext::default(),
+    )
+    .await;
+    let pending = runtime
+        .pending_tool_calls()
+        .await
+        .into_iter()
+        .next()
+        .expect("first call should be pending");
+    runtime
+        .submit_tool_result(
+            ToolCallResult::succeeded(
+                pending.id().clone(),
+                ArtifactRef::new(artifact_id("duplicate-turn-result"), ArtifactKind::Text),
+            ),
+            ArtifactContent::text("resolved"),
+        )
+        .await
+        .expect("first call should resolve");
+    let transcript_before = runtime
+        .inner
+        .session
+        .lock()
+        .await
+        .transcript_snapshot()
+        .expect("transcript should be readable");
+
+    let events = collect_step(
+        &runtime,
+        "Repeat the same call id.",
+        crate::StepContext::default(),
+    )
+    .await;
+
+    assert_eq!(failed_code(&events), Some("tool_call_duplicate"));
+    assert_eq!(
+        event_kind_names(&events),
+        ["StepStarted", "Failed"],
+        "a rejected compound response must not hide a committed commentary event"
+    );
+    assert!(
+        events
+            .windows(2)
+            .all(|pair| pair[1].sequence == pair[0].sequence + 1),
+        "rejected response events must not contain an unobservable sequence gap"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.payload, RuntimeJournalPayload::Cancelled { .. }))
+    );
+    let session = runtime.inner.session.lock().await;
+    assert_eq!(
+        session.model_turn_status(ModelTurnId::new(2)),
+        Some(ModelTurnStatus::Aborted)
+    );
+    let transcript_after = session
+        .transcript_snapshot()
+        .expect("transcript should remain readable");
+    assert_eq!(
+        &transcript_after[..transcript_before.len()],
+        transcript_before
+    );
+    assert!(matches!(
+        transcript_after.last(),
+        Some(crate::session::TranscriptItemSnapshot::UserMessage { text, .. })
+            if text == "Repeat the same call id."
+    ));
+    assert_eq!(
+        transcript_after.len(),
+        transcript_before.len() + 1,
+        "only the new user source may survive rejected tool-call admission"
+    );
+    assert_eq!(
+        session.next_sequence(),
+        events.last().expect("failed event should exist").sequence + 1
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cancellation_after_tool_response_reduction_preserves_awaiting_turn() {
+    let call = model_tool_call("reduced-before-cancel");
+    let provider =
+        RecordingModelProvider::with_script(vec![ScriptedModelProviderResponse::Stream(vec![Ok(
+            completed_event_with(
+                vec![
+                    ModelOutput::text("Tool commentary."),
+                    ModelOutput::tool_call(call),
+                ],
+                FinishReason::ToolCalls,
+            ),
+        )])]);
+    let runtime = Runtime::builder(session_id("runtime-reduced-tool-response-cancel"))
+        .event_buffer_size(NonZeroUsize::new(1).expect("non-zero event buffer"))
+        .model_provider(Arc::new(provider), model_name())
+        .build()
+        .expect("runtime should build");
+    let token = CancellationToken::new();
+    let mut stream = runtime
+        .step(
+            crate::StepInput::user_text("Request a tool call.").expect("valid input"),
+            crate::StepContext::new(token.clone()),
+        )
+        .expect("step should start");
+
+    assert!(matches!(
+        stream.next().await.expect("session start event").payload,
+        RuntimeJournalPayload::SessionStarted
+    ));
+    assert!(matches!(
+        stream.next().await.expect("step start event").payload,
+        RuntimeJournalPayload::StepStarted
+    ));
+    while runtime.pending_tool_calls().await.is_empty() {
+        tokio::task::yield_now().await;
+    }
+    token.cancel();
+    let remaining = stream.collect::<Vec<_>>().await;
+
+    assert_eq!(
+        event_kind_names(&remaining),
+        ["AssistantOutputRecorded", "ToolCallPending", "Cancelled"],
+        "committed response events must drain before cancellation becomes observable"
+    );
+    assert!(
+        remaining
+            .windows(2)
+            .all(|pair| pair[1].sequence == pair[0].sequence + 1),
+        "committed response and cancellation events must have contiguous sequences"
+    );
+    assert_eq!(runtime.pending_tool_calls().await.len(), 1);
+    assert_eq!(
+        runtime
+            .inner
+            .session
+            .lock()
+            .await
+            .model_turn_status(ModelTurnId::new(1)),
+        Some(ModelTurnStatus::AwaitingToolResults)
+    );
 }

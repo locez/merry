@@ -1,10 +1,12 @@
 use super::{RuntimeInner, diagnostic_from_text, persist_resume_safe_savepoint_if_configured};
-use crate::{session::SessionState, tool_input_validation::ToolInputValidationError};
+use crate::{
+    session::{ModelTurnId, SessionState},
+    tool_input_validation::ToolInputValidationError,
+};
 use futures_util::StreamExt;
 use merry_core::{
-    CompactionUsageWindow, ErrorInfo, ModelUsage, PendingToolCall, PendingToolCallBatch,
-    RuntimeJournalEvent, RuntimeJournalPayload, ToolCallBatchId, ToolCallResultStatus,
-    UsageContextWindow,
+    CompactionUsageWindow, ErrorInfo, ModelUsage, PendingToolCall, RuntimeJournalEvent,
+    RuntimeJournalPayload, ToolCallResultStatus, UsageContextWindow,
 };
 use merry_llm::{
     ModelError, ModelEvent, ModelEventStream, ModelProvider, ModelRequest, ModelRetryEvent,
@@ -19,40 +21,7 @@ pub(super) async fn send_assistant_text_output_completed_events(
     inner: &RuntimeInner,
     sender: &mpsc::Sender<RuntimeJournalEvent>,
     token: &CancellationToken,
-    text: String,
-) -> bool {
-    if !send_assistant_text_output_recorded_event(inner, sender, token, text).await {
-        return false;
-    }
-
-    if token.is_cancelled() {
-        let _ = send_cancelled_event(inner, sender).await;
-        return false;
-    }
-
-    let Some(completed_permit) = reserve_normal_event_slot(sender, token).await else {
-        return false;
-    };
-
-    let completed_event = {
-        let mut session = inner.session.lock().await;
-        if token.is_cancelled() {
-            drop(completed_permit);
-            let _ = send_cancelled_event(inner, sender).await;
-            return false;
-        }
-        session.record_step_completed()
-    };
-
-    persist_resume_safe_savepoint_if_configured(inner).await;
-    completed_permit.send(completed_event);
-    true
-}
-
-pub(super) async fn send_assistant_text_output_recorded_event(
-    inner: &RuntimeInner,
-    sender: &mpsc::Sender<RuntimeJournalEvent>,
-    token: &CancellationToken,
+    turn_id: ModelTurnId,
     text: String,
 ) -> bool {
     if token.is_cancelled() {
@@ -68,20 +37,40 @@ pub(super) async fn send_assistant_text_output_recorded_event(
         if token.is_cancelled() {
             return false;
         }
-        session.record_assistant_text_output(text)
+        session
+            .record_assistant_text_output(turn_id, text)
+            .and_then(|event| {
+                session.close_model_response(turn_id, false)?;
+                Ok(event)
+            })
     };
 
     let Ok(artifact_event) = artifact_event else {
         drop(artifact_permit);
+        abort_model_turn_before_terminal_event(inner, turn_id).await;
         let diagnostic = diagnostic_from_text(
             "assistant_output_artifact",
-            "assistant output artifact could not be recorded",
+            "assistant output artifact or model turn could not be recorded",
         );
-        let _ = send_failed_event(inner, sender, token, diagnostic).await;
+        return send_failed_event(inner, sender, token, diagnostic).await;
+    };
+    artifact_permit.send(artifact_event);
+
+    let Some(completed_permit) = reserve_normal_event_slot(sender, token).await else {
         return false;
     };
+    let completed_event = {
+        let mut session = inner.session.lock().await;
+        if token.is_cancelled() {
+            drop(completed_permit);
+            let _ = send_cancelled_event(inner, sender).await;
+            return false;
+        }
+        session.record_step_completed()
+    };
 
-    artifact_permit.send(artifact_event);
+    persist_resume_safe_savepoint_if_configured(inner).await;
+    completed_permit.send(completed_event);
     true
 }
 
@@ -111,64 +100,12 @@ pub(super) async fn send_assistant_text_output_delta_event(
     true
 }
 
-pub(super) async fn send_tool_call_pending_event(
+pub(super) async fn send_model_tool_call_response_events(
     inner: &RuntimeInner,
     sender: &mpsc::Sender<RuntimeJournalEvent>,
     token: &CancellationToken,
-    call: PendingToolCall,
-) -> bool {
-    if token.is_cancelled() {
-        return false;
-    }
-
-    let Some(permit) = reserve_normal_event_slot(sender, token).await else {
-        return false;
-    };
-
-    let event = {
-        let mut session = inner.session.lock().await;
-        if token.is_cancelled() {
-            return false;
-        }
-        session.record_tool_call_pending(call)
-    };
-
-    match event {
-        Ok(event) => {
-            let bridge_call = match &event.payload {
-                RuntimeJournalPayload::ToolCallPending { call } => inner
-                    .tool_registry
-                    .registered_tool(call.name())
-                    .is_some_and(|tool| tool.runner() == crate::ToolRunner::Bridge)
-                    .then(|| call.clone()),
-                _ => None,
-            };
-            permit.send(event);
-
-            if let Some(call) = bridge_call {
-                if let Some(Err(error)) = inner.tool_registry.validate_tool_input(&call) {
-                    return send_bridge_tool_input_validation_failure_events(
-                        inner, sender, token, &call, error,
-                    )
-                    .await;
-                }
-
-                send_bridge_tool_call_requested_event(inner, sender, token, call).await
-            } else {
-                true
-            }
-        }
-        Err(diagnostic) => {
-            drop(permit);
-            send_failed_event(inner, sender, token, diagnostic).await
-        }
-    }
-}
-
-pub(super) async fn send_tool_call_batch_pending_event(
-    inner: &RuntimeInner,
-    sender: &mpsc::Sender<RuntimeJournalEvent>,
-    token: &CancellationToken,
+    turn_id: ModelTurnId,
+    commentary: Option<String>,
     calls: Vec<PendingToolCall>,
 ) -> bool {
     if token.is_cancelled() {
@@ -179,23 +116,28 @@ pub(super) async fn send_tool_call_batch_pending_event(
         return false;
     };
 
-    let event = {
+    let events = {
         let mut session = inner.session.lock().await;
         if token.is_cancelled() {
             return false;
         }
-        let batch_id = ToolCallBatchId::new(&format!("tool-batch-{}", session.next_sequence()))
-            .map_err(|error| diagnostic_from_text("tool_call_batch_id", error.to_string()));
-        batch_id.and_then(|batch_id| {
-            PendingToolCallBatch::new(batch_id, calls)
-                .map_err(|error| diagnostic_from_text("tool_call_batch_invalid", error.to_string()))
-                .and_then(|batch| session.record_tool_call_batch_pending(batch))
-        })
+        session.record_model_tool_call_response(turn_id, commentary, calls)
     };
 
-    match event {
-        Ok(event) => {
-            let bridge_calls = match &event.payload {
+    match events {
+        Ok((commentary_event, tool_event)) => {
+            let bridge_calls = match &tool_event.payload {
+                RuntimeJournalPayload::ToolCallPending { call } => {
+                    if inner
+                        .tool_registry
+                        .registered_tool(call.name())
+                        .is_some_and(|tool| tool.runner() == crate::ToolRunner::Bridge)
+                    {
+                        vec![call.clone()]
+                    } else {
+                        Vec::new()
+                    }
+                }
                 RuntimeJournalPayload::ToolCallBatchPending { batch } => batch
                     .calls()
                     .iter()
@@ -209,7 +151,20 @@ pub(super) async fn send_tool_call_batch_pending_event(
                     .collect::<Vec<_>>(),
                 _ => Vec::new(),
             };
-            permit.send(event);
+            if let Some(commentary_event) = commentary_event {
+                permit.send(commentary_event);
+                let Some(tool_permit) = reserve_event_slot_ignoring_cancellation(sender).await
+                else {
+                    return false;
+                };
+                tool_permit.send(tool_event);
+            } else {
+                permit.send(tool_event);
+            }
+
+            if token.is_cancelled() {
+                return false;
+            }
 
             for call in bridge_calls {
                 if let Some(Err(error)) = inner.tool_registry.validate_tool_input(&call) {
@@ -228,8 +183,21 @@ pub(super) async fn send_tool_call_batch_pending_event(
         }
         Err(diagnostic) => {
             drop(permit);
+            abort_model_turn_before_terminal_event(inner, turn_id).await;
             send_failed_event(inner, sender, token, diagnostic).await
         }
+    }
+}
+
+async fn abort_model_turn_before_terminal_event(inner: &RuntimeInner, turn_id: ModelTurnId) {
+    let mut session = inner.session.lock().await;
+    if let Err(error) = session.abort_model_turn(turn_id) {
+        tracing::error!(
+            category = "model_turn_abort",
+            model_turn_id = turn_id.as_u64(),
+            error = %error,
+            "failed to abort model turn before terminal journal event"
+        );
     }
 }
 
@@ -650,6 +618,12 @@ pub(super) async fn send_cancelled_event(
 }
 
 async fn reserve_cancelled_event_slot<'a>(
+    sender: &'a mpsc::Sender<RuntimeJournalEvent>,
+) -> Option<Permit<'a, RuntimeJournalEvent>> {
+    reserve_event_slot_ignoring_cancellation(sender).await
+}
+
+async fn reserve_event_slot_ignoring_cancellation<'a>(
     sender: &'a mpsc::Sender<RuntimeJournalEvent>,
 ) -> Option<Permit<'a, RuntimeJournalEvent>> {
     if sender.is_closed() {

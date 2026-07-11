@@ -1,5 +1,5 @@
 use super::{
-    SessionState,
+    ModelTurnId, SessionState,
     artifacts::{assistant_output_id, process_input_id},
 };
 use crate::{
@@ -53,15 +53,19 @@ impl SessionState {
 
     pub(crate) fn record_assistant_text_output(
         &mut self,
+        turn_id: ModelTurnId,
         text: String,
     ) -> Result<RuntimeJournalEvent, RuntimeError> {
         let artifact_sequence = self.next_sequence();
         let artifact = ArtifactRef::new(assistant_output_id(artifact_sequence), ArtifactKind::Text);
         let content = ArtifactContent::text(text);
         let content_bytes = content.as_bytes().len();
-        let recorded = self.record_artifact_state(artifact, content)?;
+        self.artifacts.ensure_recordable(&artifact, &content)?;
+        let mut transcript = self.transcript.clone();
+        transcript.push_assistant_text(turn_id, artifact.id().clone())?;
+        let recorded = self.artifacts.record_preflighted(artifact, content);
         Self::trace_artifact_record(self.session_id.as_str(), &recorded, content_bytes);
-        self.transcript.push_assistant_text(recorded.id().clone())?;
+        self.transcript = transcript;
         Ok(self.record_event(
             RuntimeJournalPayload::AssistantOutputRecorded { artifact: recorded },
             LedgerFactKind::ArtifactRecorded,

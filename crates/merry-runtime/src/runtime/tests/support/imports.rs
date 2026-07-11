@@ -30,7 +30,7 @@
         ProcessPermissionProfileId, ProcessRunner, ProcessRunnerContext, ProcessRunnerError,
         ProcessRunnerFuture, ProcessRunnerOutput, stable_process_input_fingerprint,
     };
-    use crate::session::SessionState;
+    use crate::session::{ModelTurnId, ModelTurnStatus, SessionState};
     use crate::tool::{
         ActionExecutionEvidence, ActionProposal, ActionProposalEvidence, RegisteredTool,
         ToolActionKind, ToolActionPreflight, ToolActionProposalFuture, ToolExecutionContext,
@@ -46,9 +46,9 @@
     };
     use futures_util::StreamExt;
     use merry_core::{
-        ArtifactId, ArtifactKind, ArtifactRef, EvidenceLocator, EvidenceRef, PendingToolCall,
+        ArtifactId, ArtifactKind, ArtifactRef, ErrorInfo, EvidenceLocator, EvidenceRef, PendingToolCall,
         RuntimeJournalEvent, RuntimeJournalPayload, SessionId, ToolCallArguments, ToolCallId,
-        ToolCallResultStatus, ToolInputSchema, ToolName, ToolSpec,
+        ToolCallResult, ToolCallResultStatus, ToolInputSchema, ToolName, ToolSpec,
     };
     use merry_llm::{
         FinishReason, GenerationConfig, ModelCapabilities, ModelContent, ModelError, ModelEvent,

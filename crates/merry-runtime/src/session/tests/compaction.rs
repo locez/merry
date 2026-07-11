@@ -6,16 +6,16 @@ fn compaction_input_excludes_retained_raw_tail() {
         SessionState::new(SessionId::new("compaction-input-tail").expect("valid session id"));
     session.set_task_anchor(TaskAnchor::new("Keep the current task").expect("valid anchor"));
     session
-        .record_user_message_body("old user message to compact")
+        .record_test_user_message_body("old user message to compact")
         .expect("user records");
     session
-        .record_assistant_text_output("old assistant message to compact".to_owned())
+        .record_test_assistant_text_output("old assistant message to compact".to_owned())
         .expect("assistant records");
     session
-        .record_user_message_body("retained raw tail user sentinel")
+        .record_test_user_message_body("retained raw tail user sentinel")
         .expect("user records");
     session
-        .record_assistant_text_output("retained raw tail assistant sentinel".to_owned())
+        .record_test_assistant_text_output("retained raw tail assistant sentinel".to_owned())
         .expect("assistant records");
 
     let policy = CitationCompactionPolicy::new(128, None, 4096, 2, 1200, 16).expect("valid policy");
@@ -37,12 +37,12 @@ fn compaction_accepts_resolved_multi_tool_batches() {
     let mut session =
         SessionState::new(SessionId::new("compaction-tool-batch").expect("valid session id"));
     session
-        .record_user_message_body("old user context")
+        .record_test_user_message_body("old user context")
         .expect("user records");
     let call_a = pending_tool_call("batch-call-a");
     let call_b = pending_tool_call("batch-call-b");
     session
-        .record_tool_call_batch_pending(
+        .record_test_tool_call_batch_pending(
             PendingToolCallBatch::new(
                 ToolCallBatchId::new("tool-batch-compaction").expect("valid batch id"),
                 vec![call_a.clone(), call_b.clone()],
@@ -65,7 +65,7 @@ fn compaction_accepts_resolved_multi_tool_batches() {
         )
         .expect("first call resolves second");
     session
-        .record_user_message_body("retained raw tail")
+        .record_test_user_message_body("retained raw tail")
         .expect("tail records");
 
     let input = session
@@ -107,26 +107,103 @@ fn compaction_accepts_resolved_multi_tool_batches() {
 }
 
 #[test]
+fn compaction_and_permission_review_exclude_hidden_final_output_exchange() {
+    let mut session =
+        SessionState::new(SessionId::new("compaction-hidden-final").expect("valid session id"));
+    session
+        .record_test_user_message_body("old visible context")
+        .expect("old user context records");
+    let final_call = pending_tool_call("hidden-final-call");
+    session
+        .record_test_tool_call_pending(final_call.clone())
+        .expect("final-output call records");
+    session
+        .record_final_output(
+            final_call.id().clone(),
+            r#"{"private_final_output":"must-not-reenter-model-context"}"#.to_owned(),
+        )
+        .expect("final output records");
+    session
+        .record_test_user_message_body("retained visible tail")
+        .expect("tail records");
+
+    let review_context = session
+        .permission_review_context_snapshot()
+        .expect("permission context builds");
+    let review_debug = format!("{review_context:?}");
+    assert!(!review_debug.contains("hidden-final-call"));
+    assert!(!review_debug.contains("must-not-reenter-model-context"));
+
+    let input = session
+        .build_citation_compaction_input(
+            CitationCompactionPolicy::new(128, None, 4096, 1, 1200, 16).expect("valid policy"),
+        )
+        .expect("compaction input builds")
+        .expect("old visible context should be compressible");
+    let payload = input.to_model_payload_json().expect("payload serializes");
+    assert!(payload.contains("old visible context"));
+    assert!(!payload.contains("hidden-final-call"));
+    assert!(!payload.contains("must-not-reenter-model-context"));
+
+    let outcome = session
+        .install_citation_compaction_candidate(
+            input,
+            r#"{
+              "claims": [
+                {
+                  "id": "c1",
+                  "kind": "completed_action",
+                  "text": "The old visible context was compacted.",
+                  "refs": ["r1"]
+                }
+              ],
+              "working_intent": null
+            }"#,
+        )
+        .expect("visible-only checkpoint installs");
+
+    assert_eq!(outcome.covered_history_item_count(), 1);
+    assert_eq!(
+        session.transcript_items_for_tests(),
+        [
+            "tool_call:hidden-final-call".to_owned(),
+            "tool_result:hidden-final-call:{\"private_final_output\":\"must-not-reenter-model-context\"}"
+                .to_owned(),
+            "user:retained visible tail".to_owned(),
+        ],
+        "compaction must retain the durable hidden exchange while removing visible history"
+    );
+    assert_eq!(
+        session
+            .transcript_prompt_snapshot()
+            .expect("prompt transcript builds")
+            .len(),
+        1,
+        "hidden final-output exchange remains excluded from model prompts"
+    );
+}
+
+#[test]
 fn compaction_retained_raw_tail_is_policy_driven() {
     let mut session =
         SessionState::new(SessionId::new("retained-tail-policy").expect("valid session id"));
     session
-        .record_user_message_body("covered user sentinel")
+        .record_test_user_message_body("covered user sentinel")
         .expect("user records");
     session
-        .record_assistant_text_output("covered assistant sentinel".to_owned())
+        .record_test_assistant_text_output("covered assistant sentinel".to_owned())
         .expect("assistant records");
     session
-        .record_user_message_body("tail user one sentinel")
+        .record_test_user_message_body("tail user one sentinel")
         .expect("user records");
     session
-        .record_assistant_text_output("tail assistant one sentinel".to_owned())
+        .record_test_assistant_text_output("tail assistant one sentinel".to_owned())
         .expect("assistant records");
     session
-        .record_user_message_body("tail user two sentinel")
+        .record_test_user_message_body("tail user two sentinel")
         .expect("user records");
     session
-        .record_assistant_text_output("tail assistant two sentinel".to_owned())
+        .record_test_assistant_text_output("tail assistant two sentinel".to_owned())
         .expect("assistant records");
 
     let input = session
@@ -154,10 +231,10 @@ fn compaction_input_includes_previous_checkpoint_without_old_raw_body() {
     );
     session.set_compacted_checkpoint(checkpoint);
     session
-        .record_user_message_body("new user message to compact")
+        .record_test_user_message_body("new user message to compact")
         .expect("user records");
     session
-        .record_user_message_body("retained tail")
+        .record_test_user_message_body("retained tail")
         .expect("user records");
 
     let input = session
@@ -184,10 +261,10 @@ fn rolling_compaction_candidate_can_cite_prior_claim_and_new_window_ref() {
     );
     session.set_compacted_checkpoint(checkpoint);
     session
-        .record_user_message_body("new compacted work")
+        .record_test_user_message_body("new compacted work")
         .expect("user records");
     session
-        .record_user_message_body("retained tail")
+        .record_test_user_message_body("retained tail")
         .expect("user records");
 
     let input = session
@@ -242,13 +319,13 @@ fn installing_valid_checkpoint_removes_only_covered_history() {
     let mut session =
         SessionState::new(SessionId::new("install-checkpoint").expect("valid session id"));
     session
-        .record_user_message_body("old user")
+        .record_test_user_message_body("old user")
         .expect("user records");
     session
-        .record_assistant_text_output("old assistant".to_owned())
+        .record_test_assistant_text_output("old assistant".to_owned())
         .expect("assistant records");
     session
-        .record_user_message_body("tail user")
+        .record_test_user_message_body("tail user")
         .expect("user records");
 
     let policy = CitationCompactionPolicy::new(128, None, 4096, 1, 1200, 16).expect("valid policy");
@@ -287,10 +364,10 @@ fn failed_checkpoint_install_keeps_history_unchanged() {
     let mut session =
         SessionState::new(SessionId::new("install-checkpoint-rollback").expect("valid session id"));
     session
-        .record_user_message_body("old user")
+        .record_test_user_message_body("old user")
         .expect("user records");
     session
-        .record_user_message_body("tail user")
+        .record_test_user_message_body("tail user")
         .expect("user records");
 
     let policy = CitationCompactionPolicy::new(128, None, 4096, 1, 1200, 16).expect("valid policy");

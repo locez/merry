@@ -1424,6 +1424,10 @@ fn runtime_error_code(error: &RuntimeError) -> &'static str {
         }
         RuntimeError::UnsupportedToolResultContent { .. } => "unsupported_tool_result_content",
         RuntimeError::TranscriptItemIdExhausted => "transcript_item_id_exhausted",
+        RuntimeError::ModelTurnIdExhausted => "model_turn_id_exhausted",
+        RuntimeError::UnknownModelTurn { .. } => "unknown_model_turn",
+        RuntimeError::InvalidModelTurnTransition { .. } => "invalid_model_turn_transition",
+        RuntimeError::TranscriptToolCallMissing { .. } => "transcript_tool_call_missing",
         RuntimeError::Core { .. } => "core_error",
         RuntimeError::Artifact { .. } => "artifact_error",
         RuntimeError::Context { .. } => "context_error",

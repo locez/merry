@@ -135,7 +135,7 @@
             let mut session = runtime.inner.session.lock().await;
             session.record_session_started_if_needed();
             session
-                .record_tool_call_pending(pending.clone())
+                .record_test_tool_call_pending(pending.clone())
                 .expect("pending call should record");
         }
         (runtime, pending)
@@ -159,12 +159,12 @@
         {
             let mut session = runtime.inner.session.lock().await;
             session.record_session_started_if_needed();
-            session.record_user_message_body(
+            session.record_test_user_message_body(
                 "Please run cargo test; if network is blocked, request network for that command.",
             )
             .expect("user records");
             session
-                .record_tool_call_pending(pending.clone())
+                .record_test_tool_call_pending(pending.clone())
                 .expect("pending call should record");
         }
         (runtime, pending)

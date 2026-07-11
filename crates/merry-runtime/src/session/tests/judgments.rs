@@ -242,7 +242,7 @@ fn accepted_summary_draft_promotion_writes_one_compiled_context_summary_only() {
         .expect("session starts");
     let pending = pending_tool_call("promotion-pending-call");
     let pending_event = session
-        .record_tool_call_pending(pending.clone())
+        .record_test_tool_call_pending(pending.clone())
         .expect("pending tool call records");
     let evidence = judgment_evidence(
         "selected promotion line",
@@ -830,7 +830,7 @@ fn high_tool_risk_review_does_not_mutate_pending_tool_or_context_state() {
     let mut session = SessionState::new(session_id());
     let call = pending_tool_call("risky-call");
     session
-        .record_tool_call_pending(call.clone())
+        .record_test_tool_call_pending(call.clone())
         .expect("pending tool call records");
     let pending_before = session.pending_tool_calls();
     let projection_before = session.ledger_projection();

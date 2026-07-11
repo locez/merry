@@ -29,7 +29,7 @@ fn assistant_output_artifact_id_uses_artifact_event_sequence() {
     let _step_started = session.record_step_started();
 
     let artifact = session
-        .record_assistant_text_output("hello".to_owned())
+        .record_test_assistant_text_output("hello".to_owned())
         .expect("assistant output should record");
     let completed = session.record_step_completed();
 
@@ -64,7 +64,7 @@ fn assistant_output_content_is_stored_before_event_is_observable() {
     let mut session = SessionState::new(session_id());
 
     let event = session
-        .record_assistant_text_output("stored assistant".to_owned())
+        .record_test_assistant_text_output("stored assistant".to_owned())
         .expect("assistant output should record");
 
     let RuntimeJournalPayload::AssistantOutputRecorded { artifact } = &event.payload else {
@@ -83,7 +83,7 @@ fn assistant_transcript_refers_to_recorded_output_artifact() {
     let mut session = SessionState::new(session_id());
 
     let event = session
-        .record_assistant_text_output("transcript assistant".to_owned())
+        .record_test_assistant_text_output("transcript assistant".to_owned())
         .expect("assistant output should record");
 
     let RuntimeJournalPayload::AssistantOutputRecorded { artifact } = &event.payload else {
@@ -100,7 +100,7 @@ fn submit_tool_result_stores_exact_content_before_resolved_event() {
     let mut session = SessionState::new(session_id());
     let call = pending_tool_call("call-1");
     session
-        .record_tool_call_pending(call.clone())
+        .record_test_tool_call_pending(call.clone())
         .expect("pending call should record");
     let artifact = ArtifactRef::new(artifact_id("tool-result-exact"), ArtifactKind::Text);
     let result = ToolCallResult::succeeded(call.id().clone(), artifact.clone());
@@ -126,15 +126,15 @@ fn session_transcript_records_messages_and_tool_exchange_in_order() {
     let mut session =
         SessionState::new(SessionId::new("transcript-order").expect("valid session id"));
     session
-        .record_user_message_body("first user")
+        .record_test_user_message_body("first user")
         .expect("user records");
     session
-        .record_assistant_text_output("first assistant".to_owned())
+        .record_test_assistant_text_output("first assistant".to_owned())
         .expect("assistant output records");
 
     let call = pending_tool_call("call-history");
     session
-        .record_tool_call_pending(call.clone())
+        .record_test_tool_call_pending(call.clone())
         .expect("tool call pending records");
     let artifact = ArtifactRef::new(artifact_id("tool-result-history"), ArtifactKind::Text);
     let result = ToolCallResult::succeeded(call.id().clone(), artifact);

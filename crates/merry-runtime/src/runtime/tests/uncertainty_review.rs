@@ -12,7 +12,7 @@ async fn uncertainty_review_preflight_rejects_unreadable_evidence() {
             .try_lock()
             .expect("session lock is free");
         session
-            .record_tool_call_pending(pending_tool_call("review-preflight-call"))
+            .record_test_tool_call_pending(pending_tool_call("review-preflight-call"))
             .expect("pending tool call records");
     }
     let before = judgment_harness_state(&runtime).await;
@@ -56,7 +56,7 @@ async fn uncertainty_review_records_one_internal_payload_and_no_public_state() {
             .try_lock()
             .expect("session lock is free");
         session
-            .record_tool_call_pending(pending_tool_call("review-success-call"))
+            .record_test_tool_call_pending(pending_tool_call("review-success-call"))
             .expect("pending tool call records");
     }
     let evidence = judgment_evidence(
@@ -159,7 +159,7 @@ async fn uncertainty_review_model_backed_source_records_llm_judgment_and_no_publ
             .try_lock()
             .expect("session lock is free");
         session
-            .record_tool_call_pending(pending_tool_call("model-backed-review-call"))
+            .record_test_tool_call_pending(pending_tool_call("model-backed-review-call"))
             .expect("pending tool call records");
     }
     let evidence = judgment_evidence(
@@ -317,7 +317,7 @@ async fn uncertainty_review_model_backed_source_preflight_rejects_unreadable_evi
             .try_lock()
             .expect("session lock is free");
         session
-            .record_tool_call_pending(pending_tool_call("model-backed-preflight-call"))
+            .record_test_tool_call_pending(pending_tool_call("model-backed-preflight-call"))
             .expect("pending tool call records");
     }
     let request = tool_risk_review_request(vec![judgment_evidence(
@@ -379,7 +379,7 @@ async fn uncertainty_review_model_backed_source_invalid_model_output_records_not
             .try_lock()
             .expect("session lock is free");
         session
-            .record_tool_call_pending(pending_tool_call("model-backed-invalid-call"))
+            .record_test_tool_call_pending(pending_tool_call("model-backed-invalid-call"))
             .expect("pending tool call records");
     }
     let request = tool_risk_review_request(vec![judgment_evidence(
@@ -420,7 +420,7 @@ async fn uncertainty_review_rejects_bad_outcome_evidence_without_registry_write(
             .try_lock()
             .expect("session lock is free");
         session
-            .record_tool_call_pending(pending_tool_call("review-bad-outcome-call"))
+            .record_test_tool_call_pending(pending_tool_call("review-bad-outcome-call"))
             .expect("pending tool call records");
     }
     let request = tool_risk_review_request(vec![judgment_evidence(
@@ -484,7 +484,7 @@ async fn uncertainty_review_cancelled_while_source_future_in_flight_records_noth
             .try_lock()
             .expect("session lock is free");
         session
-            .record_tool_call_pending(pending_tool_call("review-in-flight-call"))
+            .record_test_tool_call_pending(pending_tool_call("review-in-flight-call"))
             .expect("pending tool call records");
     }
     let before = judgment_harness_state(&runtime).await;
@@ -547,7 +547,7 @@ async fn uncertainty_review_source_error_or_cancel_records_nothing() {
                 .try_lock()
                 .expect("session lock is free");
             state
-                .record_tool_call_pending(pending_tool_call(&format!("{session}-call")))
+                .record_test_tool_call_pending(pending_tool_call(&format!("{session}-call")))
                 .expect("pending tool call records");
         }
         let before = judgment_harness_state(&runtime).await;
@@ -592,7 +592,7 @@ async fn uncertainty_review_high_and_unknown_tool_risk_remain_non_authoritative(
                 .try_lock()
                 .expect("session lock is free");
             state
-                .record_tool_call_pending(pending_tool_call(&format!("{session}-call")))
+                .record_test_tool_call_pending(pending_tool_call(&format!("{session}-call")))
                 .expect("pending tool call records");
         }
         let public_before = {

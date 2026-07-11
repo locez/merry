@@ -262,7 +262,7 @@ async fn complete_boundary_savepoint_submit_tool_result_persists_complete_exchan
         let mut session = runtime.inner.session.lock().await;
         session.record_session_started_if_needed();
         session
-            .record_tool_call_pending(pending.clone())
+            .record_test_tool_call_pending(pending.clone())
             .expect("pending call records");
     }
     let artifact = ArtifactRef::new(
@@ -333,7 +333,7 @@ async fn automatic_savepoint_failure_does_not_fail_submitted_tool_result() {
         let mut session = runtime.inner.session.lock().await;
         session.record_session_started_if_needed();
         session
-            .record_tool_call_pending(pending.clone())
+            .record_test_tool_call_pending(pending.clone())
             .expect("pending call records");
     }
     let artifact = ArtifactRef::new(
@@ -448,7 +448,7 @@ async fn complete_boundary_savepoint_final_output_tool_call_persists_complete_bo
         let mut session = runtime.inner.session.lock().await;
         session.record_session_started_if_needed();
         session
-            .record_tool_call_pending(pending.clone())
+            .record_test_tool_call_pending(pending.clone())
             .expect("pending final output records");
     }
 

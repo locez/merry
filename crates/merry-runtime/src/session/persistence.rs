@@ -1,6 +1,10 @@
 use super::{
     SessionState,
-    transcript::{PersistedTranscript, Transcript},
+    transcript::{
+        ModelTurnId, ModelTurnStatus, PersistedTranscript, PersistedTranscriptV1,
+        ToolCallPromptProjection, ToolResultPromptProjection, Transcript, TranscriptItem,
+        TranscriptV1MigrationError,
+    },
 };
 use crate::{
     FileSessionStore, RuntimeError, SessionStoreError,
@@ -17,11 +21,12 @@ use crate::{
         PersistedSummaryDraftPromotionRegistry, SummaryDraftPromotionRegistry,
     },
 };
-use merry_core::{ArtifactRef, EvidenceRef, SessionId, SessionUsage, ToolCallId};
+use merry_core::{ArtifactKind, ArtifactRef, EvidenceRef, SessionId, SessionUsage, ToolCallId};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-const SESSION_STATE_FORMAT_VERSION: u32 = 1;
+const LEGACY_SESSION_STATE_FORMAT_VERSION: u32 = 1;
+const SESSION_STATE_FORMAT_VERSION: u32 = 2;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct StoredSessionDocumentHeader {
@@ -31,7 +36,7 @@ struct StoredSessionDocumentHeader {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct StoredSessionDocument {
+struct StoredSessionDocument<T> {
     format_version: u32,
     session_id: SessionId,
     next_sequence: u64,
@@ -40,12 +45,15 @@ struct StoredSessionDocument {
     artifacts: Vec<StoredArtifact>,
     compacted_checkpoint: Option<PersistedCompactedCheckpoint>,
     context_entries: Vec<StoredContextEntry>,
-    transcript: PersistedTranscript,
+    transcript: T,
     resolved_tool_calls: Vec<ToolCallId>,
     usage: Option<SessionUsage>,
     task_anchor: Option<StoredTaskAnchor>,
     registries: StoredRegistries,
 }
+
+type StoredSessionDocumentV1 = StoredSessionDocument<PersistedTranscriptV1>;
+type StoredSessionDocumentV2 = StoredSessionDocument<PersistedTranscript>;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -104,7 +112,10 @@ impl SessionState {
     ) -> Result<Self, SessionStoreError> {
         let bytes = store.read_state_bytes(session_id).await?;
         let header: StoredSessionDocumentHeader = serde_json::from_slice(&bytes)?;
-        if header.format_version != SESSION_STATE_FORMAT_VERSION {
+        if !matches!(
+            header.format_version,
+            LEGACY_SESSION_STATE_FORMAT_VERSION | SESSION_STATE_FORMAT_VERSION
+        ) {
             return Err(SessionStoreError::UnsupportedFormatVersion {
                 actual: header.format_version,
             });
@@ -116,8 +127,17 @@ impl SessionState {
             });
         }
 
-        let document: StoredSessionDocument = serde_json::from_slice(&bytes)?;
-        Self::from_stored_document(document)
+        match header.format_version {
+            LEGACY_SESSION_STATE_FORMAT_VERSION => {
+                let document: StoredSessionDocumentV1 = serde_json::from_slice(&bytes)?;
+                Self::from_stored_document_v1(document)
+            }
+            SESSION_STATE_FORMAT_VERSION => {
+                let document: StoredSessionDocumentV2 = serde_json::from_slice(&bytes)?;
+                Self::from_stored_document(document)
+            }
+            _ => unreachable!("supported session format version checked before body decode"),
+        }
     }
 
     pub(crate) fn persistable_bundle(&self) -> Result<PersistableSessionBundle, SessionStoreError> {
@@ -127,6 +147,7 @@ impl SessionState {
                 pending_count: self.pending_tool_calls.len(),
             });
         }
+        self.validate_persisted_transcript()?;
         self.validate_persisted_context_entries()?;
 
         let artifacts = self
@@ -181,7 +202,7 @@ impl SessionState {
         }
     }
 
-    fn from_stored_document(document: StoredSessionDocument) -> Result<Self, SessionStoreError> {
+    fn from_stored_document(document: StoredSessionDocumentV2) -> Result<Self, SessionStoreError> {
         if document.format_version != SESSION_STATE_FORMAT_VERSION {
             return Err(SessionStoreError::UnsupportedFormatVersion {
                 actual: document.format_version,
@@ -240,8 +261,83 @@ impl SessionState {
             );
         }
 
+        session.validate_persisted_transcript()?;
         session.validate_persisted_context_entries()?;
         Ok(session)
+    }
+
+    fn from_stored_document_v1(
+        document: StoredSessionDocumentV1,
+    ) -> Result<Self, SessionStoreError> {
+        if document.format_version != LEGACY_SESSION_STATE_FORMAT_VERSION {
+            return Err(SessionStoreError::UnsupportedFormatVersion {
+                actual: document.format_version,
+            });
+        }
+        if document.compacted_checkpoint.is_some() {
+            return Err(SessionStoreError::LegacyCompactedHistoryUnavailable {
+                session_id: document.session_id,
+            });
+        }
+
+        let StoredSessionDocument {
+            format_version: _,
+            session_id,
+            next_sequence,
+            session_started,
+            ledger,
+            artifacts,
+            compacted_checkpoint: _,
+            context_entries,
+            transcript,
+            resolved_tool_calls,
+            usage,
+            task_anchor,
+            registries,
+        } = document;
+
+        let artifacts = artifacts
+            .into_iter()
+            .map(PersistedArtifactRecord::from)
+            .collect();
+        let artifacts = ArtifactRegistry::from_persisted_records(artifacts)
+            .map_err(|_| invalid_document("stored artifact registry is invalid"))?;
+        let (transcript, artifacts) = Transcript::from_persisted_v1(transcript, &artifacts)
+            .map_err(|error| match error {
+                TranscriptV1MigrationError::Artifact(
+                    crate::artifact::ArtifactError::DuplicateId { id },
+                ) => SessionStoreError::LegacyUserArtifactCollision { artifact_id: id },
+                TranscriptV1MigrationError::Artifact(_) => {
+                    invalid_document("legacy user message artifact is invalid")
+                }
+                TranscriptV1MigrationError::Transcript(error) => {
+                    tracing::debug!(
+                        error = %error,
+                        "legacy session transcript migration rejected invalid transcript"
+                    );
+                    invalid_document("legacy transcript is invalid")
+                }
+            })?;
+
+        Self::from_stored_document(StoredSessionDocument {
+            format_version: SESSION_STATE_FORMAT_VERSION,
+            session_id,
+            next_sequence,
+            session_started,
+            ledger,
+            artifacts: artifacts
+                .persisted_records()
+                .into_iter()
+                .map(StoredArtifact::from)
+                .collect(),
+            compacted_checkpoint: None,
+            context_entries,
+            transcript: transcript.persisted(),
+            resolved_tool_calls,
+            usage,
+            task_anchor,
+            registries,
+        })
     }
 
     fn validate_persisted_context_entries(&self) -> Result<(), SessionStoreError> {
@@ -255,6 +351,140 @@ impl SessionState {
             .compile(&snapshot)
             .map(|_| ())
             .map_err(|_| invalid_document("stored context evidence is invalid"))
+    }
+
+    fn validate_persisted_transcript(&self) -> Result<(), SessionStoreError> {
+        let mut calls_by_turn =
+            BTreeMap::<ModelTurnId, BTreeMap<ToolCallId, ToolCallPromptProjection>>::new();
+        let mut results_by_turn =
+            BTreeMap::<ModelTurnId, BTreeMap<ToolCallId, ToolResultPromptProjection>>::new();
+
+        for item in self.transcript.items() {
+            match item {
+                TranscriptItem::UserMessage { artifact_id, .. }
+                | TranscriptItem::AssistantText { artifact_id, .. } => {
+                    let artifact = self
+                        .artifacts
+                        .read_ref(artifact_id)
+                        .map_err(|_| invalid_document("stored transcript artifact is missing"))?;
+                    let content = self
+                        .artifacts
+                        .read_content(artifact_id)
+                        .map_err(|_| invalid_document("stored transcript artifact is missing"))?;
+                    if artifact.kind() != &ArtifactKind::Text || content.as_text().is_none() {
+                        return Err(invalid_document(
+                            "stored user or assistant transcript artifact is not text",
+                        ));
+                    }
+                }
+                TranscriptItem::ToolCall {
+                    model_turn_id,
+                    call,
+                    prompt_projection,
+                    ..
+                } => {
+                    calls_by_turn
+                        .entry(*model_turn_id)
+                        .or_default()
+                        .insert(call.id().clone(), *prompt_projection);
+                }
+                TranscriptItem::ToolResult {
+                    model_turn_id,
+                    call_id,
+                    result,
+                    artifact_id,
+                    prompt_projection,
+                    ..
+                } => {
+                    if result.call_id() != call_id || result.artifact().id() != artifact_id {
+                        return Err(invalid_document(
+                            "stored transcript tool result identity is inconsistent",
+                        ));
+                    }
+                    let artifact = self.artifacts.read_ref(artifact_id).map_err(|_| {
+                        invalid_document("stored transcript tool result artifact is missing")
+                    })?;
+                    let content = self.artifacts.read_content(artifact_id).map_err(|_| {
+                        invalid_document("stored transcript tool result artifact is missing")
+                    })?;
+                    if artifact != result.artifact()
+                        || !matches!(artifact.kind(), ArtifactKind::Text | ArtifactKind::Json)
+                        || content.as_text().is_none()
+                    {
+                        return Err(invalid_document(
+                            "stored transcript tool result artifact is inconsistent",
+                        ));
+                    }
+                    if !self.resolved_tool_calls.contains(call_id) {
+                        return Err(invalid_document(
+                            "stored transcript tool result is not marked resolved",
+                        ));
+                    }
+                    if results_by_turn
+                        .entry(*model_turn_id)
+                        .or_default()
+                        .insert(call_id.clone(), *prompt_projection)
+                        .is_some()
+                    {
+                        return Err(invalid_document(
+                            "stored transcript contains duplicate tool results",
+                        ));
+                    }
+                }
+            }
+        }
+
+        for (turn_id, status) in self.transcript.persisted().model_turns {
+            let calls = calls_by_turn.get(&turn_id);
+            let results = results_by_turn.get(&turn_id);
+            match status {
+                ModelTurnStatus::InProgress | ModelTurnStatus::AwaitingToolResults => {
+                    return Err(invalid_document(
+                        "stored transcript contains a nonterminal model turn",
+                    ));
+                }
+                ModelTurnStatus::Completed => {
+                    let projections_are_consistent = match (calls, results) {
+                        (None, None) => true,
+                        (Some(calls), Some(results)) if calls.keys().eq(results.keys()) => {
+                            calls.iter().all(|(call_id, call_projection)| {
+                                let result_projection = results
+                                    .get(call_id)
+                                    .expect("completed call/result key sets were compared");
+                                matches!(
+                                    (call_projection, result_projection),
+                                    (
+                                        ToolCallPromptProjection::Full,
+                                        ToolResultPromptProjection::Full
+                                            | ToolResultPromptProjection::ArtifactNotice
+                                    ) | (
+                                        ToolCallPromptProjection::Hidden,
+                                        ToolResultPromptProjection::Hidden
+                                    )
+                                )
+                            })
+                        }
+                        (Some(_), None) | (None, Some(_)) | (Some(_), Some(_)) => false,
+                    };
+                    if !projections_are_consistent {
+                        return Err(invalid_document(
+                            "stored completed model turn has unresolved calls or inconsistent projections",
+                        ));
+                    }
+                }
+                ModelTurnStatus::Aborted => {
+                    if calls.is_some_and(|calls| !calls.is_empty())
+                        || results.is_some_and(|results| !results.is_empty())
+                    {
+                        return Err(invalid_document(
+                            "stored aborted model turn contains tool exchange state",
+                        ));
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 
     pub(crate) fn session_id(&self) -> &SessionId {

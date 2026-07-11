@@ -1,4 +1,7 @@
-use super::{ProposedToolExecutionOutcome, SessionState, ToolResultLedgerObservation};
+use super::{
+    ModelTurnStatus, ProposedToolExecutionOutcome, SessionState, ToolResultLedgerObservation,
+    TranscriptItem,
+};
 use crate::{
     ActionExecutionEvidence, ActionProposal, ActionProposalEvidence, CitationCompactionPolicy,
     RuntimeError, TaskAnchor, WorkspacePatchExecutionEvidence, WorkspacePatchProposal,
@@ -60,6 +63,67 @@ fn pending_tool_call(id: &str) -> PendingToolCall {
         ToolCallArguments::try_from(json!({ "query": "value" }))
             .expect("object arguments are valid"),
     )
+}
+
+trait SessionStateTestExt {
+    fn record_test_user_message_body(&mut self, text: &str) -> Result<(), RuntimeError>;
+    fn record_test_assistant_text_output(
+        &mut self,
+        text: String,
+    ) -> Result<merry_core::RuntimeJournalEvent, RuntimeError>;
+    fn record_test_tool_call_pending(
+        &mut self,
+        call: PendingToolCall,
+    ) -> Result<merry_core::RuntimeJournalEvent, ErrorInfo>;
+    fn record_test_tool_call_batch_pending(
+        &mut self,
+        batch: PendingToolCallBatch,
+    ) -> Result<merry_core::RuntimeJournalEvent, ErrorInfo>;
+}
+
+impl SessionStateTestExt for SessionState {
+    fn record_test_user_message_body(&mut self, text: &str) -> Result<(), RuntimeError> {
+        let turn_id = self.begin_model_turn()?;
+        self.record_user_message_body(turn_id, text)?;
+        self.close_model_response(turn_id, false)
+    }
+
+    fn record_test_assistant_text_output(
+        &mut self,
+        text: String,
+    ) -> Result<merry_core::RuntimeJournalEvent, RuntimeError> {
+        let turn_id = self.begin_model_turn()?;
+        let event = self.record_assistant_text_output(turn_id, text)?;
+        self.close_model_response(turn_id, false)?;
+        Ok(event)
+    }
+
+    fn record_test_tool_call_pending(
+        &mut self,
+        call: PendingToolCall,
+    ) -> Result<merry_core::RuntimeJournalEvent, ErrorInfo> {
+        let turn_id = self.begin_model_turn().map_err(test_turn_diagnostic)?;
+        let event = self.record_tool_call_pending(turn_id, call)?;
+        self.close_model_response(turn_id, true)
+            .map_err(test_turn_diagnostic)?;
+        Ok(event)
+    }
+
+    fn record_test_tool_call_batch_pending(
+        &mut self,
+        batch: PendingToolCallBatch,
+    ) -> Result<merry_core::RuntimeJournalEvent, ErrorInfo> {
+        let turn_id = self.begin_model_turn().map_err(test_turn_diagnostic)?;
+        let event = self.record_tool_call_batch_pending(turn_id, batch)?;
+        self.close_model_response(turn_id, true)
+            .map_err(test_turn_diagnostic)?;
+        Ok(event)
+    }
+}
+
+fn test_turn_diagnostic(error: RuntimeError) -> ErrorInfo {
+    ErrorInfo::new("test_model_turn", &error.to_string())
+        .expect("test model turn diagnostic should be valid")
 }
 
 fn citation_plain_runtime_checkpoint_for_tests(
