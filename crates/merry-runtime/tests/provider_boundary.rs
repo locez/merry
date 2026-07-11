@@ -2538,10 +2538,10 @@ async fn dynamic_context_projection_keeps_checkpoint_tail_and_current_input_outs
         .iter()
         .map(|message| message.content().as_text())
         .collect::<Vec<_>>();
-    assert!(dynamic_text[0].contains("task-anchor:"));
-    assert!(dynamic_text[1].contains("compacted-checkpoint:"));
-    assert!(dynamic_text[1].contains("The covered request was compacted."));
-    assert!(dynamic_text[1].contains("[h0,h1]"));
+    assert!(dynamic_text[0].contains("compacted-checkpoint:"));
+    assert!(dynamic_text[0].contains("The covered request was compacted."));
+    assert!(dynamic_text[0].contains("[h0,h1]"));
+    assert!(dynamic_text[1].contains("task-anchor:"));
     assert_eq!(dynamic_text[2], "tail user one sentinel");
     assert_eq!(dynamic_text[3], "tail assistant one sentinel");
     assert_eq!(dynamic_text[4], "tail user two sentinel");
@@ -2628,7 +2628,7 @@ async fn compaction_model_request_excludes_retained_tail_and_tools() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn compacted_checkpoint_renders_after_task_anchor_before_transcript_body() {
+async fn compacted_checkpoint_renders_before_task_anchor_and_transcript_body() {
     let provider = FakeModelProvider::new(vec![
         Ok(completed_text_event("transcript assistant sentinel")),
         Ok(completed_event()),
@@ -2676,7 +2676,7 @@ async fn compacted_checkpoint_renders_after_task_anchor_before_transcript_body()
         .expect("current user input should render");
 
     assert_eq!(requests[1].stable_prefix_message_count(), 1);
-    assert!(task_anchor_index < checkpoint_index);
+    assert!(checkpoint_index < task_anchor_index);
     assert!(checkpoint_index < append_user_index);
     assert!(append_user_index < append_assistant_index);
     assert!(append_assistant_index < current_user_index);

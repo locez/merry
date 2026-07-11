@@ -741,6 +741,7 @@ fn compaction_accepts_resolved_multi_tool_batches() {
         )
         .expect("resolved batch checkpoint installs");
 
+    assert_eq!(outcome.covered_model_turn_count(), 2);
     assert_eq!(outcome.covered_history_item_count(), 3);
     assert_eq!(
         session.transcript_items_for_tests(),

@@ -691,6 +691,7 @@ mod tests {
     mod builder_checkpoint;
     mod checkpoint_ref_tool;
     mod compaction_transaction;
+    mod context_cache;
     mod event_cancellation;
     mod memory_activation_flow;
     mod model_role_flow;

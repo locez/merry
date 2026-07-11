@@ -390,8 +390,10 @@ impl SessionState {
             prompt_history_projection,
             &next_archive_manifest,
         )?;
+        let covered_model_turn_count = input.window_plan().covered_turn_ids().len();
         let outcome = CompactionOutcome::new(
             checkpoint_id,
+            covered_model_turn_count,
             covered_count,
             self.provider_history_item_count_for(&transcript, prompt_history_projection)?,
         );

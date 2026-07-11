@@ -263,7 +263,8 @@ pub(crate) fn compile_step_model_request(
         progress_commentary,
     } = parts;
 
-    let context_snapshot = context.to_snapshot();
+    let checkpoint_snapshot = context.checkpoint_snapshot();
+    let context_body_snapshot = context.body_snapshot();
     let skill_metadata_text = skill_catalog.and_then(SkillCatalog::to_stable_prefix_message_text);
     let stable_prefix_message_count = 1
         + usize::from(progress_commentary)
@@ -271,16 +272,17 @@ pub(crate) fn compile_step_model_request(
         + usize::from(project_rules.is_some());
     let mut messages = Vec::with_capacity(
         stable_prefix_message_count
+            + usize::from(!checkpoint_snapshot.is_empty())
             + usize::from(task_anchor.is_some())
-            + if context_snapshot.is_empty() { 1 } else { 2 }
+            + usize::from(!context_body_snapshot.is_empty())
             + transcript.len()
             + input.user_texts_for_request().len(),
     );
 
     // Keep provider prompt projection allowlisted and ordered:
     // stable runtime instructions, available skill metadata, project rules,
-    // task anchor control-plane context, explicit compiled context, prior
-    // ordered transcript, then the current user or loop-control input.
+    // the current checkpoint, task anchor control-plane context, live compiled
+    // context, prior ordered transcript, then current user or loop-control input.
     messages.push(ModelInputItem::Message(ModelMessage::new(
         ModelMessageRole::System,
         ModelContent::text(DEFAULT_RUNTIME_BASE_INSTRUCTIONS)?,
@@ -307,6 +309,13 @@ pub(crate) fn compile_step_model_request(
         )?));
     }
 
+    if !checkpoint_snapshot.is_empty() {
+        messages.push(ModelInputItem::Message(ModelMessage::new(
+            ModelMessageRole::System,
+            ModelContent::text(&checkpoint_snapshot)?,
+        )?));
+    }
+
     if let Some(task_anchor) = task_anchor {
         messages.push(ModelInputItem::Message(ModelMessage::new(
             ModelMessageRole::System,
@@ -314,10 +323,10 @@ pub(crate) fn compile_step_model_request(
         )?));
     }
 
-    if !context_snapshot.is_empty() {
+    if !context_body_snapshot.is_empty() {
         messages.push(ModelInputItem::Message(ModelMessage::new(
             ModelMessageRole::System,
-            ModelContent::text(&context_snapshot)?,
+            ModelContent::text(&context_body_snapshot)?,
         )?));
     }
 

@@ -221,6 +221,7 @@ impl ResolvedCitationCompactionBudget {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompactionOutcome {
     checkpoint_id: CheckpointId,
+    covered_model_turn_count: usize,
     covered_history_item_count: usize,
     retained_history_item_count: usize,
 }
@@ -228,11 +229,13 @@ pub struct CompactionOutcome {
 impl CompactionOutcome {
     pub(crate) fn new(
         checkpoint_id: CheckpointId,
+        covered_model_turn_count: usize,
         covered_history_item_count: usize,
         retained_history_item_count: usize,
     ) -> Self {
         Self {
             checkpoint_id,
+            covered_model_turn_count,
             covered_history_item_count,
             retained_history_item_count,
         }
@@ -241,6 +244,12 @@ impl CompactionOutcome {
     #[must_use]
     pub fn checkpoint_id(&self) -> &CheckpointId {
         &self.checkpoint_id
+    }
+
+    /// Number of model turns newly covered by this compaction.
+    #[must_use]
+    pub fn covered_model_turn_count(&self) -> usize {
+        self.covered_model_turn_count
     }
 
     #[must_use]
