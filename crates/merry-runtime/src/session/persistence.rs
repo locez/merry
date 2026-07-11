@@ -1,9 +1,8 @@
 use super::{
-    SessionState,
+    ModelTurnId, ModelTurnStatus, PromptHistoryProjection, SessionState,
     transcript::{
-        ModelTurnId, ModelTurnStatus, PersistedTranscript, PersistedTranscriptV1,
-        ToolCallPromptProjection, ToolResultPromptProjection, Transcript, TranscriptItem,
-        TranscriptV1MigrationError,
+        PersistedTranscript, PersistedTranscriptV1, ToolCallPromptProjection,
+        ToolResultPromptProjection, Transcript, TranscriptItem, TranscriptV1MigrationError,
     },
 };
 use crate::{
@@ -46,6 +45,8 @@ struct StoredSessionDocument<T> {
     ledger: Vec<PersistedLedgerEntry>,
     artifacts: Vec<StoredArtifact>,
     compacted_checkpoint: Option<PersistedCompactedCheckpoint>,
+    #[serde(default)]
+    prompt_history_projection: Option<PromptHistoryProjection>,
     context_entries: Vec<StoredContextEntry>,
     transcript: T,
     resolved_tool_calls: Vec<ToolCallId>,
@@ -170,6 +171,7 @@ impl SessionState {
                 .compacted_checkpoint
                 .as_ref()
                 .map(CompactedCheckpoint::persisted),
+            prompt_history_projection: Some(self.prompt_history_projection),
             context_entries: self
                 .context_entries
                 .iter()
@@ -211,6 +213,24 @@ impl SessionState {
             });
         }
 
+        let compacted_checkpoint = document
+            .compacted_checkpoint
+            .map(CompactedCheckpoint::from_persisted)
+            .transpose()
+            .map_err(|_| invalid_document("stored compacted checkpoint is invalid"))?;
+        let prompt_history_projection = match document.prompt_history_projection {
+            Some(projection) => projection,
+            None if compacted_checkpoint
+                .as_ref()
+                .is_some_and(|checkpoint| checkpoint.citation_backed().is_some()) =>
+            {
+                return Err(invalid_document(
+                    "stored compacted V2 session has no prompt history projection",
+                ));
+            }
+            None => PromptHistoryProjection::default(),
+        };
+
         let artifacts = document
             .artifacts
             .into_iter()
@@ -228,11 +248,8 @@ impl SessionState {
             skill_catalog: None,
             project_rules: None,
             task_anchor: None,
-            compacted_checkpoint: document
-                .compacted_checkpoint
-                .map(CompactedCheckpoint::from_persisted)
-                .transpose()
-                .map_err(|_| invalid_document("stored compacted checkpoint is invalid"))?,
+            compacted_checkpoint,
+            prompt_history_projection,
             context_entries: document
                 .context_entries
                 .into_iter()
@@ -290,6 +307,7 @@ impl SessionState {
             ledger,
             artifacts,
             compacted_checkpoint: _,
+            prompt_history_projection: _,
             context_entries,
             transcript,
             resolved_tool_calls,
@@ -333,6 +351,7 @@ impl SessionState {
                 .map(StoredArtifact::from)
                 .collect(),
             compacted_checkpoint: None,
+            prompt_history_projection: Some(PromptHistoryProjection::default()),
             context_entries,
             transcript: transcript.persisted(),
             resolved_tool_calls,
@@ -356,6 +375,11 @@ impl SessionState {
     }
 
     fn validate_persisted_transcript(&self) -> Result<(), SessionStoreError> {
+        self.transcript
+            .model_turns()
+            .map_err(runtime_error_to_invalid_document)?;
+        self.validate_prompt_history_projection()
+            .map_err(runtime_error_to_invalid_document)?;
         let mut calls_by_turn =
             BTreeMap::<ModelTurnId, BTreeMap<ToolCallId, ToolCallPromptProjection>>::new();
         let mut results_by_turn =

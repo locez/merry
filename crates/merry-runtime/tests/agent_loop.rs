@@ -2507,7 +2507,7 @@ async fn auto_compaction_config_controls_retained_raw_tail() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn auto_compacted_agent_loop_continuation_preserves_original_task_text() {
+async fn auto_compaction_keeps_current_tool_turn_raw_during_continuation() {
     let original_task = format!(
         "original long task sentinel {}",
         "keep-this-exact-task ".repeat(80)
@@ -2568,44 +2568,39 @@ async fn auto_compacted_agent_loop_continuation_preserves_original_task_text() {
     assert_eq!(result.status(), &AgentLoopStatus::Completed);
     assert_eq!(
         compactor.recorded_requests().len(),
-        1,
-        "continuation request should compact the covered opening task turn"
+        0,
+        "the current user/tool/result turn must stay whole instead of being partly compacted"
     );
 
     let primary_requests = primary.recorded_requests();
     assert_eq!(primary_requests.len(), 2);
-    let continuation_request_text = primary_requests[1]
+    let continuation_request = &primary_requests[1];
+    let continuation_request_text = continuation_request
         .messages()
         .iter()
         .map(|message| message.content().as_text())
         .collect::<Vec<_>>()
         .join("\n---\n");
-    assert!(continuation_request_text.contains("compacted-checkpoint:"));
-    assert!(
-        continuation_request_text
-            .contains("The opening task turn was compacted before tool continuation.")
-    );
+    assert!(!continuation_request_text.contains("compacted-checkpoint:"));
     assert!(!continuation_request_text.contains("Continue after tool result."));
     assert!(!continuation_request_text.contains("Original task:"));
     assert!(
-        !continuation_request_text.contains(&original_task),
-        "covered task text should move behind checkpoint refs instead of remaining raw"
+        continuation_request_text.contains(&original_task),
+        "the user text must stay raw while its tool exchange remains in the retained turn"
     );
-
-    let ref_excerpt = runtime
-        .read_checkpoint_ref(
-            &merry_runtime::CheckpointId::new(
-                "checkpoint-agent-loop-auto-compaction-keeps-original-task-3",
-            )
-            .expect("valid checkpoint id"),
-            &merry_runtime::CheckpointRefId::new("r1").expect("valid ref id"),
-        )
-        .await
-        .expect("checkpoint ref resolves");
-    assert!(
-        ref_excerpt
-            .excerpt()
-            .contains("original long task sentinel")
+    assert_eq!(continuation_request.continuations().len(), 1);
+    let continuation = &continuation_request.continuations()[0];
+    assert_eq!(
+        continuation.call().id().as_str(),
+        "call-auto-compact-continuation"
+    );
+    assert_eq!(
+        continuation.result().status(),
+        ToolCallResultStatus::Succeeded
+    );
+    assert_eq!(
+        continuation.result().content().as_text(),
+        Some("tool result sentinel\n")
     );
 }
 
@@ -2616,6 +2611,7 @@ async fn auto_compacted_agent_loop_continuation_keeps_checkpoint_refs_and_stable
         "inspect-read-patch-verify ".repeat(80)
     );
     let primary = ScriptedModelProvider::new(vec![
+        vec![Ok(completed_text_event("prelude assistant sentinel"))],
         vec![Ok(completed_tool_call_event(model_tool_call(
             "call-covered-search",
             "search_notes",
@@ -2639,12 +2635,12 @@ async fn auto_compacted_agent_loop_continuation_keeps_checkpoint_refs_and_stable
             {
               "id": "c1",
               "kind": "completed_action",
-              "text": "The covered opening task was checkpointed.",
-              "refs": ["r1"]
+              "text": "The prelude turn was checkpointed.",
+              "refs": ["r1", "r2"]
             }
           ],
           "working_intent": {
-            "text": "Continue the original coding-loop task from the raw continuation request.",
+            "text": "Continue from the compacted prelude into the raw current task.",
             "refs": ["r1"],
             "confidence": 0.77
           }
@@ -2657,7 +2653,7 @@ async fn auto_compacted_agent_loop_continuation_keeps_checkpoint_refs_and_stable
               "id": "c1",
               "kind": "completed_action",
               "text": "The prior checkpoint and first covered tool result were checkpointed.",
-              "refs": ["prior-c1", "r1"]
+              "refs": ["prior-c1", "r1", "r2"]
             }
           ],
           "working_intent": null
@@ -2694,6 +2690,9 @@ async fn auto_compacted_agent_loop_continuation_keeps_checkpoint_refs_and_stable
         .build()
         .expect("runtime should build");
 
+    let prelude = run_default_loop(&runtime, "prelude user sentinel").await;
+    assert_eq!(prelude.status(), &AgentLoopStatus::Completed);
+
     let result = runtime
         .run_agent_loop(
             StepInput::user_text(&original_task).expect("valid step input"),
@@ -2714,7 +2713,9 @@ async fn auto_compacted_agent_loop_continuation_keeps_checkpoint_refs_and_stable
         .map(|message| message.content().as_text())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(first_compaction_request_text.contains("long coding loop task sentinel"));
+    assert!(first_compaction_request_text.contains("prelude user sentinel"));
+    assert!(first_compaction_request_text.contains("prelude assistant sentinel"));
+    assert!(!first_compaction_request_text.contains("long coding loop task sentinel"));
     assert!(!first_compaction_request_text.contains("covered tool result sentinel"));
     assert!(!first_compaction_request_text.contains("Continue after tool result."));
 
@@ -2724,16 +2725,17 @@ async fn auto_compacted_agent_loop_continuation_keeps_checkpoint_refs_and_stable
         .map(|message| message.content().as_text())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(second_compaction_request_text.contains("The covered opening task was checkpointed."));
+    assert!(second_compaction_request_text.contains("The prelude turn was checkpointed."));
+    assert!(second_compaction_request_text.contains("long coding loop task sentinel"));
     assert!(second_compaction_request_text.contains("covered tool result sentinel"));
     assert!(!second_compaction_request_text.contains("retained tool result sentinel"));
     assert!(!second_compaction_request_text.contains("Continue after tool result."));
 
     let primary_requests = primary.recorded_requests();
-    assert_eq!(primary_requests.len(), 3);
-    let opening_request = &primary_requests[0];
-    let first_continuation_request = &primary_requests[1];
-    let final_continuation_request = &primary_requests[2];
+    assert_eq!(primary_requests.len(), 4);
+    let opening_request = &primary_requests[1];
+    let first_continuation_request = &primary_requests[2];
+    let final_continuation_request = &primary_requests[3];
     assert_eq!(
         opening_request.stable_prefix_hash(),
         final_continuation_request.stable_prefix_hash(),
@@ -2785,7 +2787,7 @@ async fn auto_compacted_agent_loop_continuation_keeps_checkpoint_refs_and_stable
         dynamic_text
             .contains("The prior checkpoint and first covered tool result were checkpointed.")
     );
-    assert!(!dynamic_text.contains("The covered opening task was checkpointed."));
+    assert!(!dynamic_text.contains("The prelude turn was checkpointed."));
     assert!(!dynamic_text.contains("Continue after tool result."));
     assert!(!dynamic_text.contains("Original task:"));
     assert!(
@@ -2797,10 +2799,10 @@ async fn auto_compacted_agent_loop_continuation_keeps_checkpoint_refs_and_stable
     let ref_excerpt = runtime
         .read_checkpoint_ref(
             &merry_runtime::CheckpointId::new(
-                "checkpoint-agent-loop-auto-compaction-checkpoint-refs-5",
+                "checkpoint-agent-loop-auto-compaction-checkpoint-refs-7",
             )
             .expect("valid checkpoint id"),
-            &merry_runtime::CheckpointRefId::new("r1").expect("valid ref id"),
+            &merry_runtime::CheckpointRefId::new("r2").expect("valid ref id"),
         )
         .await
         .expect("checkpoint ref resolves");

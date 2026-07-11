@@ -19,8 +19,8 @@ use merry_runtime::{
     CheckpointValidationPolicy, CitationBackedCheckpoint, CitationCompactionPolicy,
     CompactedCheckpoint, CompactedCheckpointCandidate, ContextCompiler, ContextEvidence,
     ContextSummary, LedgerFactKind, LedgerProjection, ProjectRules, RegisteredTool, Runtime,
-    RuntimeModelRole, SkillCatalog, SkillMetadata, StepContext, StepInput, TaskAnchor,
-    TokioProcessRunner, ToolActionKind, ToolExecutionContext, ToolExecutionError,
+    RuntimeModelRole, SessionTranscriptItem, SkillCatalog, SkillMetadata, StepContext, StepInput,
+    TaskAnchor, TokioProcessRunner, ToolActionKind, ToolExecutionContext, ToolExecutionError,
     ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture, citation_compaction_response_schema,
     citation_compaction_system_prompt, process_command_tool,
 };
@@ -2345,10 +2345,10 @@ async fn live_compactor_summarizes_messy_1k_token_window_with_refs() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn installed_checkpoint_replaces_old_body_but_keeps_raw_tail_in_next_request() {
-    let provider = FakeModelProvider::new(vec![
-        Ok(completed_text_event("old assistant")),
-        Ok(completed_event()),
-        Ok(completed_event()),
+    let provider = ScriptedModelProvider::new(vec![
+        vec![Ok(completed_text_event("old assistant"))],
+        vec![Ok(completed_event())],
+        vec![Ok(completed_event())],
     ]);
     let runtime = Runtime::builder(session_id("checkpoint-install-request"))
         .model_provider(Arc::new(provider.clone()), model_name())
@@ -2383,6 +2383,27 @@ async fn installed_checkpoint_replaces_old_body_but_keeps_raw_tail_in_next_reque
         )
         .await
         .expect("install succeeds");
+
+    assert_eq!(
+        runtime
+            .session_transcript()
+            .await
+            .expect("public transcript remains readable after compaction"),
+        vec![
+            SessionTranscriptItem::UserMessage {
+                text: "old user".to_owned(),
+            },
+            SessionTranscriptItem::AssistantText {
+                text: "old assistant".to_owned(),
+            },
+            SessionTranscriptItem::UserMessage {
+                text: "tail user".to_owned(),
+            },
+            SessionTranscriptItem::AssistantText {
+                text: "model result".to_owned(),
+            },
+        ]
+    );
 
     collect_step(&runtime, "current user").await;
     let requests = provider.recorded_requests();

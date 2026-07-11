@@ -1,4 +1,7 @@
-use super::SessionState;
+use super::{
+    SessionState,
+    model_turns::{ModelTurnId, ModelTurnStatus, invalid_turn_transition},
+};
 use crate::{
     RuntimeError,
     artifact::{ArtifactContent, ArtifactError, ArtifactRegistry},
@@ -7,39 +10,7 @@ use merry_core::{
     ArtifactId, ArtifactKind, ArtifactRef, PendingToolCall, ToolCallId, ToolCallResult,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub(crate) struct ModelTurnId(u64);
-
-impl ModelTurnId {
-    #[must_use]
-    pub(crate) const fn new(value: u64) -> Self {
-        Self(value)
-    }
-
-    #[must_use]
-    pub(crate) const fn as_u64(self) -> u64 {
-        self.0
-    }
-
-    fn checked_next(self) -> Result<Self, RuntimeError> {
-        self.0
-            .checked_add(1)
-            .map(Self)
-            .ok_or(RuntimeError::ModelTurnIdExhausted)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum ModelTurnStatus {
-    InProgress,
-    AwaitingToolResults,
-    Completed,
-    Aborted,
-}
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -252,10 +223,10 @@ pub(crate) enum TranscriptItemSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Transcript {
-    items: Vec<TranscriptItem>,
-    next_id: TranscriptItemId,
-    model_turns: BTreeMap<ModelTurnId, ModelTurnStatus>,
-    next_model_turn_id: ModelTurnId,
+    pub(super) items: Vec<TranscriptItem>,
+    pub(super) next_id: TranscriptItemId,
+    pub(super) model_turns: BTreeMap<ModelTurnId, ModelTurnStatus>,
+    pub(super) next_model_turn_id: ModelTurnId,
 }
 
 impl Transcript {
@@ -277,48 +248,6 @@ impl Transcript {
     #[must_use]
     pub(crate) const fn next_id(&self) -> TranscriptItemId {
         self.next_id
-    }
-
-    pub(crate) fn begin_model_turn(&mut self) -> Result<ModelTurnId, RuntimeError> {
-        let turn_id = self.next_model_turn_id;
-        let next_model_turn_id = turn_id.checked_next()?;
-        let previous = self
-            .model_turns
-            .insert(turn_id, ModelTurnStatus::InProgress);
-        debug_assert!(previous.is_none());
-        self.next_model_turn_id = next_model_turn_id;
-        Ok(turn_id)
-    }
-
-    pub(crate) fn close_model_response(
-        &mut self,
-        turn_id: ModelTurnId,
-        requested_tool_calls: bool,
-    ) -> Result<(), RuntimeError> {
-        let status = self.model_turn_status_mut(turn_id)?;
-        if *status != ModelTurnStatus::InProgress {
-            return Err(invalid_turn_transition(turn_id, "close model response"));
-        }
-        *status = if requested_tool_calls {
-            ModelTurnStatus::AwaitingToolResults
-        } else {
-            ModelTurnStatus::Completed
-        };
-        Ok(())
-    }
-
-    pub(crate) fn abort_model_turn(&mut self, turn_id: ModelTurnId) -> Result<(), RuntimeError> {
-        let status = self.model_turn_status_mut(turn_id)?;
-        if *status != ModelTurnStatus::InProgress {
-            return Err(invalid_turn_transition(turn_id, "abort model turn"));
-        }
-        *status = ModelTurnStatus::Aborted;
-        Ok(())
-    }
-
-    #[must_use]
-    pub(crate) fn status(&self, turn_id: ModelTurnId) -> Option<ModelTurnStatus> {
-        self.model_turns.get(&turn_id).copied()
     }
 
     #[must_use]
@@ -429,62 +358,8 @@ impl Transcript {
     }
 
     #[cfg(test)]
-    pub(crate) fn retain_ids(&mut self, retained: BTreeSet<TranscriptItemId>) {
+    pub(crate) fn retain_ids(&mut self, retained: std::collections::BTreeSet<TranscriptItemId>) {
         self.items.retain(|item| retained.contains(&item.id()));
-    }
-
-    pub(crate) fn remove_compacted_history(&mut self, covered_history_ids: &BTreeSet<u64>) {
-        if covered_history_ids.is_empty() {
-            return;
-        }
-
-        let hidden_tool_calls = self
-            .items
-            .iter()
-            .filter_map(|item| match item {
-                TranscriptItem::ToolCall {
-                    call,
-                    prompt_projection: ToolCallPromptProjection::Hidden,
-                    ..
-                } => Some(call.id().clone()),
-                _ => None,
-            })
-            .collect::<BTreeSet<_>>();
-        let protected_hidden_tool_calls = self
-            .items
-            .iter()
-            .filter_map(|item| match item {
-                TranscriptItem::ToolResult {
-                    call_id,
-                    prompt_projection: ToolResultPromptProjection::Hidden,
-                    ..
-                } if hidden_tool_calls.contains(call_id) => Some(call_id.clone()),
-                _ => None,
-            })
-            .collect::<BTreeSet<_>>();
-        let covered_tool_calls = self
-            .items
-            .iter()
-            .filter_map(|item| match item {
-                TranscriptItem::ToolResult { id, call_id, .. }
-                    if covered_history_ids.contains(&id.as_u64())
-                        && !protected_hidden_tool_calls.contains(call_id) =>
-                {
-                    Some(call_id.clone())
-                }
-                _ => None,
-            })
-            .collect::<BTreeSet<_>>();
-        self.items.retain(|item| match item {
-            TranscriptItem::UserMessage { id, .. } | TranscriptItem::AssistantText { id, .. } => {
-                !covered_history_ids.contains(&id.as_u64())
-            }
-            TranscriptItem::ToolCall { call, .. } => !covered_tool_calls.contains(call.id()),
-            TranscriptItem::ToolResult { id, call_id, .. } => {
-                protected_hidden_tool_calls.contains(call_id)
-                    || !covered_history_ids.contains(&id.as_u64())
-            }
-        });
     }
 
     fn allocate_id(&mut self) -> Result<TranscriptItemId, RuntimeError> {
@@ -580,132 +455,6 @@ impl Transcript {
             next_model_turn_id: 1,
         })?;
         Ok((transcript, migrated_artifacts))
-    }
-
-    fn ensure_model_turn_in_progress(&self, turn_id: ModelTurnId) -> Result<(), RuntimeError> {
-        match self.status(turn_id) {
-            Some(ModelTurnStatus::InProgress) => Ok(()),
-            Some(_) => Err(invalid_turn_transition(turn_id, "record model output")),
-            None => Err(RuntimeError::UnknownModelTurn {
-                model_turn_id: turn_id.as_u64(),
-            }),
-        }
-    }
-
-    fn model_turn_status_mut(
-        &mut self,
-        turn_id: ModelTurnId,
-    ) -> Result<&mut ModelTurnStatus, RuntimeError> {
-        self.model_turns
-            .get_mut(&turn_id)
-            .ok_or(RuntimeError::UnknownModelTurn {
-                model_turn_id: turn_id.as_u64(),
-            })
-    }
-
-    fn all_tool_calls_resolved(&self, turn_id: ModelTurnId) -> bool {
-        let result_call_ids = self
-            .items
-            .iter()
-            .filter_map(|item| match item {
-                TranscriptItem::ToolResult {
-                    model_turn_id,
-                    call_id,
-                    ..
-                } if *model_turn_id == turn_id => Some(call_id),
-                _ => None,
-            })
-            .collect::<BTreeSet<_>>();
-        let mut has_tool_call = false;
-        let all_resolved = self.items.iter().all(|item| match item {
-            TranscriptItem::ToolCall {
-                model_turn_id,
-                call,
-                ..
-            } if *model_turn_id == turn_id => {
-                has_tool_call = true;
-                result_call_ids.contains(call.id())
-            }
-            _ => true,
-        });
-        has_tool_call && all_resolved
-    }
-
-    fn validate_persisted_turns(&self) -> Result<(), RuntimeError> {
-        if self.next_model_turn_id.as_u64() == 0 {
-            return Err(RuntimeError::UnknownModelTurn { model_turn_id: 0 });
-        }
-        let mut item_ids = BTreeSet::new();
-        let mut tool_call_turns = BTreeMap::new();
-        for item in &self.items {
-            if !item_ids.insert(item.id().as_u64()) || item.id().as_u64() >= self.next_id.as_u64() {
-                return Err(RuntimeError::InvalidModelTurnTransition {
-                    model_turn_id: item.model_turn_id().as_u64(),
-                    attempted: "restore invalid transcript item ids",
-                });
-            }
-            if !self.model_turns.contains_key(&item.model_turn_id()) {
-                return Err(RuntimeError::UnknownModelTurn {
-                    model_turn_id: item.model_turn_id().as_u64(),
-                });
-            }
-            match item {
-                TranscriptItem::ToolCall {
-                    model_turn_id,
-                    call,
-                    ..
-                } => {
-                    if tool_call_turns.insert(call.id(), *model_turn_id).is_some() {
-                        return Err(RuntimeError::TranscriptToolCallMissing {
-                            call_id: call.id().clone(),
-                        });
-                    }
-                }
-                TranscriptItem::ToolResult {
-                    model_turn_id,
-                    call_id,
-                    ..
-                } => {
-                    if tool_call_turns.get(call_id).copied() != Some(*model_turn_id) {
-                        return Err(RuntimeError::TranscriptToolCallMissing {
-                            call_id: call_id.clone(),
-                        });
-                    }
-                }
-                TranscriptItem::UserMessage { .. } | TranscriptItem::AssistantText { .. } => {}
-            }
-        }
-        let next_model_turn_id = self.next_model_turn_id.as_u64();
-        let mut expected_turn_id = 1_u64;
-        for turn_id in self
-            .model_turns
-            .keys()
-            .copied()
-            .filter(|turn_id| turn_id.as_u64() != 0)
-        {
-            if turn_id.as_u64() != expected_turn_id || turn_id.as_u64() >= next_model_turn_id {
-                return Err(RuntimeError::InvalidModelTurnTransition {
-                    model_turn_id: turn_id.as_u64(),
-                    attempted: "restore unreachable model turn sequence",
-                });
-            }
-            expected_turn_id = expected_turn_id
-                .checked_add(1)
-                .ok_or(RuntimeError::ModelTurnIdExhausted)?;
-        }
-        if expected_turn_id != next_model_turn_id {
-            return Err(RuntimeError::UnknownModelTurn {
-                model_turn_id: next_model_turn_id,
-            });
-        }
-        Ok(())
-    }
-}
-
-fn invalid_turn_transition(turn_id: ModelTurnId, attempted: &'static str) -> RuntimeError {
-    RuntimeError::InvalidModelTurnTransition {
-        model_turn_id: turn_id.as_u64(),
-        attempted,
     }
 }
 
@@ -842,33 +591,13 @@ impl TryFrom<PersistedTranscriptItem> for TranscriptItem {
 }
 
 impl SessionState {
-    pub(crate) fn begin_model_turn(&mut self) -> Result<ModelTurnId, RuntimeError> {
-        self.transcript.begin_model_turn()
-    }
-
-    pub(crate) fn close_model_response(
-        &mut self,
-        turn_id: ModelTurnId,
-        requested_tool_calls: bool,
-    ) -> Result<(), RuntimeError> {
-        self.transcript
-            .close_model_response(turn_id, requested_tool_calls)
-    }
-
-    pub(crate) fn abort_model_turn(&mut self, turn_id: ModelTurnId) -> Result<(), RuntimeError> {
-        self.transcript.abort_model_turn(turn_id)
-    }
-
-    #[must_use]
-    pub(crate) fn model_turn_status(&self, turn_id: ModelTurnId) -> Option<ModelTurnStatus> {
-        self.transcript.status(turn_id)
-    }
-
-    pub(crate) fn transcript_snapshot(&self) -> Result<Vec<TranscriptItemSnapshot>, ArtifactError> {
+    pub(crate) fn full_transcript_snapshot(
+        &self,
+    ) -> Result<Vec<TranscriptItemSnapshot>, ArtifactError> {
         self.build_transcript_snapshot(false)
     }
 
-    pub(crate) fn transcript_prompt_snapshot(
+    pub(crate) fn provider_transcript_snapshot(
         &self,
     ) -> Result<Vec<TranscriptItemSnapshot>, ArtifactError> {
         self.build_transcript_snapshot(true)
@@ -878,8 +607,21 @@ impl SessionState {
         &self,
         apply_prompt_projection: bool,
     ) -> Result<Vec<TranscriptItemSnapshot>, ArtifactError> {
-        let mut snapshot = Vec::with_capacity(self.transcript.items().len());
-        for item in self.transcript.items() {
+        let transcript_items = self.transcript.items();
+        let visible_items = if apply_prompt_projection {
+            match self.prompt_history_projection.compacted_through() {
+                Some(boundary) => {
+                    let start =
+                        transcript_items.partition_point(|item| item.model_turn_id() <= boundary);
+                    &transcript_items[start..]
+                }
+                None => transcript_items,
+            }
+        } else {
+            transcript_items
+        };
+        let mut snapshot = Vec::with_capacity(visible_items.len());
+        for item in visible_items {
             let item =
                 match item {
                     TranscriptItem::UserMessage {
@@ -958,28 +700,5 @@ impl SessionState {
             snapshot.push(item);
         }
         Ok(snapshot)
-    }
-}
-
-#[cfg(test)]
-mod turn_id_exhaustion_tests {
-    use super::*;
-
-    #[test]
-    fn model_turn_id_exhaustion_does_not_mutate_transcript() {
-        let mut transcript = Transcript {
-            items: Vec::new(),
-            next_id: TranscriptItemId::new(0),
-            model_turns: BTreeMap::new(),
-            next_model_turn_id: ModelTurnId::new(u64::MAX),
-        };
-        let before = transcript.persisted();
-
-        let error = transcript
-            .begin_model_turn()
-            .expect_err("exhausted model turn id should reject allocation");
-
-        assert!(matches!(error, RuntimeError::ModelTurnIdExhausted));
-        assert_eq!(transcript.persisted(), before);
     }
 }

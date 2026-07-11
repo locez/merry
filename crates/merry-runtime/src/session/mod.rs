@@ -20,6 +20,7 @@ mod events;
 mod history;
 mod judgments;
 mod messages;
+mod model_turns;
 mod persistence;
 mod recording;
 mod tool_calls;
@@ -29,10 +30,9 @@ mod usage;
 
 pub(crate) use self::{
     artifacts::is_runtime_reserved_artifact_id,
+    model_turns::{ModelTurn, ModelTurnId, ModelTurnStatus, PromptHistoryProjection},
     tool_result::{ProposedToolExecutionOutcome, ToolResultLedgerObservation},
-    transcript::{
-        ModelTurnId, ModelTurnStatus, Transcript, TranscriptItemSnapshot, UserInputOrigin,
-    },
+    transcript::{Transcript, TranscriptItemSnapshot, UserInputOrigin},
 };
 
 #[cfg(test)]
@@ -51,6 +51,7 @@ pub(crate) struct SessionState {
     project_rules: Option<ProjectRules>,
     task_anchor: Option<TaskAnchor>,
     compacted_checkpoint: Option<CompactedCheckpoint>,
+    prompt_history_projection: PromptHistoryProjection,
     context_entries: Vec<ContextEntry>,
     activated_memories: Vec<ActivatedMemory>,
     #[allow(dead_code)]
@@ -76,6 +77,7 @@ impl SessionState {
             project_rules: None,
             task_anchor: None,
             compacted_checkpoint: None,
+            prompt_history_projection: PromptHistoryProjection::new(),
             context_entries: Vec::new(),
             activated_memories: Vec::new(),
             judgments: JudgmentRegistry::default(),

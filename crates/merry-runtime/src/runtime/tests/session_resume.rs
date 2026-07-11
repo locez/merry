@@ -168,7 +168,7 @@ async fn dropping_text_stream_while_savepoint_is_blocked_keeps_terminal_batch_co
     let session = loop {
         let session = runtime.inner.session.lock().await;
         let assistant_recorded = session
-            .transcript_snapshot()
+            .full_transcript_snapshot()
             .expect("transcript remains readable")
             .iter()
             .any(|item| {

@@ -73,7 +73,7 @@ async fn one_slot_commentary_observes_atomically_committed_tool_response() {
     let session = loop {
         let session = runtime.inner.session.lock().await;
         let commentary_recorded = session
-            .transcript_snapshot()
+            .full_transcript_snapshot()
             .expect("transcript should be readable")
             .iter()
             .any(|item| {
@@ -105,7 +105,7 @@ async fn one_slot_commentary_observes_atomically_committed_tool_response() {
     );
     assert_eq!(
         session
-            .transcript_snapshot()
+            .full_transcript_snapshot()
             .expect("transcript should remain readable")
             .len(),
         3,

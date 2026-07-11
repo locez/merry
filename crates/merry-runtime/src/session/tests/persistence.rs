@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     ContextCompiler, ContextEntry, ContextEvidence, ContextSummary, FileSessionStore, ProjectRules,
-    SkillCatalog, TaskAnchor, artifact::ArtifactContent,
+    SkillCatalog, TaskAnchor, artifact::ArtifactContent, session::PromptHistoryProjection,
 };
 use merry_core::{
     ArtifactKind, ArtifactRef, EvidenceLocator, EvidenceRef, ToolCallResult, ToolCallResultStatus,
@@ -46,6 +46,23 @@ async fn session_state_v2_round_trip_preserves_turns_user_artifact_and_projectio
     let transcript_before = session.transcript.persisted();
 
     session.save_to(&store).await.expect("session should save");
+    let stored: serde_json::Value = serde_json::from_slice(
+        &store
+            .read_state_bytes(&session_id())
+            .await
+            .expect("saved state should read"),
+    )
+    .expect("saved state should be JSON");
+    assert_eq!(
+        stored["prompt_history_projection"]["compacted_through"],
+        serde_json::Value::Null
+    );
+    assert!(
+        stored["transcript"]
+            .get("prompt_history_projection")
+            .is_none(),
+        "the provider projection belongs to session state, not the transcript"
+    );
     let loaded = SessionState::load_from(&store, &session_id())
         .await
         .expect("session should load");
@@ -53,7 +70,7 @@ async fn session_state_v2_round_trip_preserves_turns_user_artifact_and_projectio
     assert_eq!(loaded.transcript.persisted(), transcript_before);
     assert_eq!(
         loaded
-            .transcript_snapshot()
+            .full_transcript_snapshot()
             .expect("full transcript should remain readable")
             .len(),
         4,
@@ -284,6 +301,77 @@ fn literal_v2_document() -> serde_json::Value {
 }
 
 #[tokio::test]
+async fn session_state_v2_without_projection_or_checkpoint_migrates_on_next_save() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = FileSessionStore::new(temp.path());
+    let document = literal_v2_document();
+    assert!(document.get("prompt_history_projection").is_none());
+    store
+        .write_state_bytes(
+            &session_id(),
+            &serde_json::to_vec_pretty(&document).expect("literal V2 document should serialize"),
+        )
+        .await
+        .expect("legacy V2 state should write");
+
+    let loaded = SessionState::load_from(&store, &session_id())
+        .await
+        .expect("uncompacted V2 state should migrate");
+    assert_eq!(
+        loaded.prompt_history_projection(),
+        PromptHistoryProjection::default()
+    );
+    loaded
+        .save_to(&store)
+        .await
+        .expect("migrated V2 state should save");
+
+    let rewritten: serde_json::Value = serde_json::from_slice(
+        &store
+            .read_state_bytes(&session_id())
+            .await
+            .expect("rewritten state should read"),
+    )
+    .expect("rewritten state should be JSON");
+    assert_eq!(
+        rewritten["prompt_history_projection"]["compacted_through"],
+        serde_json::Value::Null
+    );
+}
+
+#[tokio::test]
+async fn session_state_v2_with_checkpoint_but_without_projection_is_rejected() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = FileSessionStore::new(temp.path());
+    let mut document = literal_v2_document();
+    document["compacted_checkpoint"] = serde_json::to_value(
+        citation_plain_runtime_checkpoint_for_tests(
+            "projection-missing-checkpoint",
+            "the old body may already have been physically deleted",
+        )
+        .persisted(),
+    )
+    .expect("checkpoint should serialize");
+    assert!(document.get("prompt_history_projection").is_none());
+    store
+        .write_state_bytes(
+            &session_id(),
+            &serde_json::to_vec_pretty(&document).expect("literal V2 document should serialize"),
+        )
+        .await
+        .expect("legacy compacted V2 state should write");
+
+    let error = SessionState::load_from(&store, &session_id())
+        .await
+        .expect_err("compacted V2 state without a projection must reject resume");
+
+    assert!(matches!(
+        error,
+        crate::SessionStoreError::InvalidDocument { .. }
+    ));
+}
+
+#[tokio::test]
 async fn session_state_save_load_round_trips_next_reasoning_state() {
     let temp = tempfile::tempdir().expect("tempdir");
     let store = FileSessionStore::new(temp.path());
@@ -445,6 +533,32 @@ fn session_state_save_rejects_in_progress_model_turn() {
     let error = session
         .persistable_bundle()
         .expect_err("in-progress model turns are not resume-safe");
+
+    assert!(matches!(
+        error,
+        crate::SessionStoreError::InvalidDocument { .. }
+    ));
+}
+
+#[test]
+fn session_state_save_rejects_prompt_projection_without_checkpoint() {
+    let mut session = SessionState::new(session_id());
+    let turn_id = session
+        .begin_model_turn()
+        .expect("completed turn fixture should begin");
+    session
+        .record_user_message_body(turn_id, "covered without checkpoint")
+        .expect("user message should record");
+    session
+        .close_model_response(turn_id, false)
+        .expect("turn should complete");
+    session
+        .advance_prompt_history_projection(turn_id)
+        .expect("in-memory install stage may advance the projection");
+
+    let error = session
+        .persistable_bundle()
+        .expect_err("a projection without its checkpoint is not resume-safe");
 
     assert!(matches!(
         error,
