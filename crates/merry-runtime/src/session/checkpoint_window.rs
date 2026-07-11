@@ -358,7 +358,7 @@ impl SessionState {
             sanitize_checkpoint_component(self.session_id.as_str()),
             self.transcript.next_id().as_u64()
         ))?;
-        let previous_checkpoint = self.compacted_checkpoint.as_ref().map(|checkpoint| {
+        let previous_checkpoint_input = self.compacted_checkpoint.as_ref().map(|checkpoint| {
             match checkpoint.citation_backed() {
                 Some(citation) => {
                     CitationCompactionPreviousCheckpointInput::CitationBacked(citation)
@@ -368,7 +368,7 @@ impl SessionState {
                 },
             }
         });
-        let prior_refs = match previous_checkpoint {
+        let prior_refs = match previous_checkpoint_input.as_ref() {
             Some(CitationCompactionPreviousCheckpointInput::CitationBacked(checkpoint)) => {
                 checkpoint.manifest().refs().to_vec()
             }
@@ -388,9 +388,12 @@ impl SessionState {
         }
 
         let manifest = crate::CheckpointRefManifest::new(checkpoint_id, refs)?;
-        let previous_checkpoint = previous_checkpoint.map(|checkpoint| {
-            previous_checkpoint_payload(checkpoint, policy.max_carried_prior_refs())
-        });
+        let previous_checkpoint_snapshot = self
+            .compacted_checkpoint
+            .as_ref()
+            .and_then(crate::CompactedCheckpoint::citation_backed)
+            .cloned();
+        let previous_checkpoint = previous_checkpoint_input.map(previous_checkpoint_payload);
 
         Ok(CitationCompactionInput::new(
             policy,
@@ -399,6 +402,7 @@ impl SessionState {
             covered_history_ids,
             window,
             previous_checkpoint,
+            previous_checkpoint_snapshot,
         ))
     }
 

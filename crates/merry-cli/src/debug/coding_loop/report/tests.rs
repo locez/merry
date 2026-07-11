@@ -206,15 +206,20 @@ async fn task_live_smoke_report_includes_compaction_summary_without_checkpoint_t
     .expect("valid manifest");
     let candidate = CompactedCheckpointCandidate::from_json(
         r#"{
-          "claims": [
-            {
-              "id": "c1",
-              "kind": "current_state",
-              "text": "The old task window was compacted.",
-              "refs": ["r1"]
-            }
-          ],
-          "working_intent": null
+          "confirmed_decisions": [{
+            "id": "d1",
+            "text": "The old task window was compacted.",
+            "rationale": "The exact source remains available by ref.",
+            "refs": ["r1"]
+          }],
+          "rejected_approaches": [],
+          "constraints_preferences_boundaries": [],
+          "corrected_misunderstandings": [],
+          "durable_conclusions": [],
+          "open_questions": [],
+          "current_progress_and_next_steps": [],
+          "exact_details": [],
+          "handoffs": []
         }"#,
     )
     .expect("valid candidate");
@@ -255,7 +260,8 @@ async fn task_live_smoke_report_includes_compaction_summary_without_checkpoint_t
     assert!(text.contains("\"checkpoint_present\":true"));
     assert!(text.contains("\"citation_backed\":true"));
     assert!(text.contains("\"checkpoint_id\":\"checkpoint-task-live-smoke\""));
-    assert!(text.contains("\"claim_count\":1"));
+    assert!(text.contains("\"entry_count\":1"));
+    assert!(!text.contains("\"claim_count\""));
     assert!(text.contains("\"ref_count\":1"));
     assert!(!text.contains("The old task window was compacted."));
     assert!(!text.contains("sensitive old task detail"));

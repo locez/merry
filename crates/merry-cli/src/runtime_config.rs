@@ -255,15 +255,21 @@ retained_raw_tail_items = 4
             response: ModelResponse::new(
                 vec![ModelOutput::text(
                     r#"{
-                      "claims": [
+                      "confirmed_decisions": [],
+                      "rejected_approaches": [],
+                      "constraints_preferences_boundaries": [],
+                      "corrected_misunderstandings": [],
+                      "durable_conclusions": [
                         {
                           "id": "c1",
-                          "kind": "completed_action",
                           "text": "Configured builder compacted the old turn only.",
-                          "refs": ["r1", "r2"]
+                          "refs": ["h0", "h1"]
                         }
                       ],
-                      "working_intent": null
+                      "open_questions": [],
+                      "current_progress_and_next_steps": [],
+                      "exact_details": [],
+                      "handoffs": []
                     }"#,
                 )],
                 FinishReason::Stop,

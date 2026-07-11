@@ -215,15 +215,21 @@ async fn auto_compaction_lifecycle_projects_to_public_stream() {
     );
     let compactor = FakeModelProvider::new(vec![Ok(completed_text_event(
         r#"{
-          "claims": [
+          "confirmed_decisions": [],
+          "rejected_approaches": [],
+          "constraints_preferences_boundaries": [],
+          "corrected_misunderstandings": [],
+          "durable_conclusions": [
             {
               "id": "c1",
-              "kind": "completed_action",
               "text": "Old history was compacted for the public event stream.",
               "refs": ["h0", "h1"]
             }
           ],
-          "working_intent": null
+          "open_questions": [],
+          "current_progress_and_next_steps": [],
+          "exact_details": [],
+          "handoffs": []
         }"#,
     ))]);
     let runtime = Runtime::builder(session_id("public-auto-compaction"))

@@ -69,8 +69,9 @@ pub use artifact::{
     TextEvidencePage,
 };
 pub use checkpoint::{
-    CheckpointClaimId, CheckpointClaimKind, CheckpointError, CheckpointId, CheckpointRef,
-    CheckpointRefId, CheckpointRefManifest, CheckpointSequenceRange, CheckpointSourceKind,
+    CheckpointEntry, CheckpointEntryId, CheckpointError, CheckpointHandoff,
+    CheckpointHandoffAction, CheckpointId, CheckpointRef, CheckpointRefId, CheckpointRefManifest,
+    CheckpointSection, CheckpointSections, CheckpointSequenceRange, CheckpointSourceKind,
     CheckpointValidationPolicy, CitationBackedCheckpoint, CompactedCheckpointCandidate,
 };
 pub use compaction::{

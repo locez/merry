@@ -51,13 +51,19 @@ async fn resumed_runtime_reads_runtime_generated_checkpoint_ref_evidence() {
         .install_citation_compaction_candidate(
             input,
             r#"{
-              "claims": [{
+              "confirmed_decisions": [],
+              "rejected_approaches": [],
+              "constraints_preferences_boundaries": [],
+              "corrected_misunderstandings": [],
+              "durable_conclusions": [{
                 "id": "c1",
-                "kind": "current_state",
                 "text": "Keep the exact persisted user source.",
                 "refs": ["h0"]
               }],
-              "working_intent": null
+              "open_questions": [],
+              "current_progress_and_next_steps": [],
+              "exact_details": [],
+              "handoffs": []
             }"#,
         )
         .expect("checkpoint installs");

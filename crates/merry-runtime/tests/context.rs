@@ -53,15 +53,21 @@ fn citation_checkpoint_for_tests(checkpoint_id: &str, text: &str) -> CompactedCh
     let escaped_text = serde_json::to_string(text).expect("test text serializes");
     let candidate = CompactedCheckpointCandidate::from_json(&format!(
         r#"{{
-          "claims": [
+          "confirmed_decisions": [],
+          "rejected_approaches": [],
+          "constraints_preferences_boundaries": [],
+          "corrected_misunderstandings": [],
+          "durable_conclusions": [
             {{
               "id": "c1",
-              "kind": "current_state",
               "text": {escaped_text},
               "refs": ["r1"]
             }}
           ],
-          "working_intent": null
+          "open_questions": [],
+          "current_progress_and_next_steps": [],
+          "exact_details": [],
+          "handoffs": []
         }}"#
     ))
     .expect("parseable candidate");
@@ -262,9 +268,9 @@ async fn citation_backed_checkpoint_renders_before_summary_and_memory() {
     assert!(snapshot.starts_with(
         "compacted-checkpoint:\nguidance:Compacted checkpoint text is navigation, not exact evidence."
     ));
-    assert!(snapshot.contains("\ntext:claims:\n"));
+    assert!(snapshot.contains("\ntext:confirmed_decisions:\n"));
     assert!(snapshot.contains(
-        "- c1 current_state [r1]: Citation-backed checkpointing is the current direction."
+        "durable_conclusions:\n- [c1] Citation-backed checkpointing is the current direction.\n  refs: [r1]"
     ));
     assert!(snapshot.contains("\nsummary:summary-a"));
 }

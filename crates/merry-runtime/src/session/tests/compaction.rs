@@ -77,13 +77,19 @@ fn compaction_install_advances_prompt_boundary_without_deleting_full_transcript(
         .install_citation_compaction_candidate(
             input,
             r#"{
-              "claims": [{
+              "confirmed_decisions": [],
+              "rejected_approaches": [],
+              "constraints_preferences_boundaries": [],
+              "corrected_misunderstandings": [],
+              "durable_conclusions": [{
                 "id": "c1",
-                "kind": "completed_action",
                 "text": "The first complete turn was compacted.",
                 "refs": ["h0", "h1"]
               }],
-              "working_intent": null
+              "open_questions": [],
+              "current_progress_and_next_steps": [],
+              "exact_details": [],
+              "handoffs": []
             }"#,
         )
         .expect("checkpoint installs");
@@ -141,13 +147,19 @@ fn compaction_install_advances_boundary_through_trailing_empty_aborted_turn() {
         .install_citation_compaction_candidate(
             input,
             r#"{
-              "claims": [{
+              "confirmed_decisions": [],
+              "rejected_approaches": [],
+              "constraints_preferences_boundaries": [],
+              "corrected_misunderstandings": [],
+              "durable_conclusions": [{
                 "id": "c1",
-                "kind": "completed_action",
                 "text": "The prefix before the retained turn was compacted.",
                 "refs": ["h0"]
               }],
-              "working_intent": null
+              "open_questions": [],
+              "current_progress_and_next_steps": [],
+              "exact_details": [],
+              "handoffs": []
             }"#,
         )
         .expect("checkpoint installs");
@@ -184,13 +196,19 @@ fn rolling_compaction_rejects_old_input_and_starts_after_current_boundary() {
         .expect("first prefix is compressible");
     let stale_input = input.clone();
     let candidate = r#"{
-      "claims": [{
+      "confirmed_decisions": [],
+      "rejected_approaches": [],
+      "constraints_preferences_boundaries": [],
+      "corrected_misunderstandings": [],
+      "durable_conclusions": [{
         "id": "c1",
-        "kind": "completed_action",
         "text": "The first user turn was compacted.",
         "refs": ["h0"]
       }],
-      "working_intent": null
+      "open_questions": [],
+      "current_progress_and_next_steps": [],
+      "exact_details": [],
+      "handoffs": []
     }"#;
     session
         .install_citation_compaction_candidate(input, candidate)
@@ -560,13 +578,19 @@ fn artifact_notice_is_provider_only_and_compaction_reads_exact_content() {
         .install_citation_compaction_candidate(
             input,
             r#"{
-              "claims": [{
+              "confirmed_decisions": [],
+              "rejected_approaches": [],
+              "constraints_preferences_boundaries": [],
+              "corrected_misunderstandings": [],
+              "durable_conclusions": [{
                 "id": "c1",
-                "kind": "completed_action",
                 "text": "The exact tool exchange was compacted.",
                 "refs": ["h1"]
               }],
-              "working_intent": null
+              "open_questions": [],
+              "current_progress_and_next_steps": [],
+              "exact_details": [],
+              "handoffs": []
             }"#,
         )
         .expect("checkpoint installs");
@@ -675,15 +699,21 @@ fn compaction_accepts_resolved_multi_tool_batches() {
         .install_citation_compaction_candidate(
             input,
             r#"{
-              "claims": [
+              "confirmed_decisions": [],
+              "rejected_approaches": [],
+              "constraints_preferences_boundaries": [],
+              "corrected_misunderstandings": [],
+              "durable_conclusions": [
                 {
                   "id": "c1",
-                  "kind": "completed_action",
                   "text": "The older context and tool batch were compacted.",
                   "refs": ["h0", "h4", "h3"]
                 }
               ],
-              "working_intent": null
+              "open_questions": [],
+              "current_progress_and_next_steps": [],
+              "exact_details": [],
+              "handoffs": []
             }"#,
         )
         .expect("resolved batch checkpoint installs");
@@ -815,15 +845,21 @@ async fn installing_compaction_preserves_hidden_final_output_in_full_and_stored_
         .install_citation_compaction_candidate(
             input,
             r#"{
-              "claims": [
+              "confirmed_decisions": [],
+              "rejected_approaches": [],
+              "constraints_preferences_boundaries": [],
+              "corrected_misunderstandings": [],
+              "durable_conclusions": [
                 {
                   "id": "c1",
-                  "kind": "completed_action",
                   "text": "The old visible context was compacted.",
                   "refs": ["h0"]
                 }
               ],
-              "working_intent": null
+              "open_questions": [],
+              "current_progress_and_next_steps": [],
+              "exact_details": [],
+              "handoffs": []
             }"#,
         )
         .expect("checkpoint installs");
@@ -1024,15 +1060,21 @@ fn installing_valid_checkpoint_hides_only_covered_history_from_provider() {
         .expect("input builds")
         .expect("input exists");
     let candidate_json = r#"{
-          "claims": [
+          "confirmed_decisions": [],
+          "rejected_approaches": [],
+          "constraints_preferences_boundaries": [],
+          "corrected_misunderstandings": [],
+          "durable_conclusions": [
             {
               "id": "c1",
-              "kind": "completed_action",
               "text": "The older user and assistant messages were covered by compaction.",
               "refs": ["h0", "h1"]
             }
           ],
-          "working_intent": null
+          "open_questions": [],
+          "current_progress_and_next_steps": [],
+          "exact_details": [],
+          "handoffs": []
         }"#;
 
     let outcome = session
@@ -1078,15 +1120,21 @@ fn failed_checkpoint_install_keeps_history_unchanged() {
         .expect("input builds")
         .expect("input exists");
     let bad_candidate_json = r#"{
-          "claims": [
+          "confirmed_decisions": [],
+          "rejected_approaches": [],
+          "constraints_preferences_boundaries": [
             {
               "id": "c1",
-              "kind": "constraint",
               "text": "This cites a missing ref.",
               "refs": ["r-missing"]
             }
           ],
-          "working_intent": null
+          "corrected_misunderstandings": [],
+          "durable_conclusions": [],
+          "open_questions": [],
+          "current_progress_and_next_steps": [],
+          "exact_details": [],
+          "handoffs": []
         }"#;
 
     let error = session

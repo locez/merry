@@ -23,13 +23,19 @@ fn citation_checkpoint_with_evidence(
     .expect("valid manifest");
     let candidate = CompactedCheckpointCandidate::from_json(&format!(
         r#"{{
-          "claims": [{{
+          "confirmed_decisions": [],
+          "rejected_approaches": [],
+          "constraints_preferences_boundaries": [],
+          "corrected_misunderstandings": [],
+          "durable_conclusions": [{{
             "id": "c1",
-            "kind": "current_state",
             "text": "The checkpoint keeps an exact source.",
             "refs": [{ref_id}]
           }}],
-          "working_intent": null
+          "open_questions": [],
+          "current_progress_and_next_steps": [],
+          "exact_details": [],
+          "handoffs": []
         }}"#,
         ref_id = serde_json::to_string(ref_id).expect("ref id serializes"),
     ))
