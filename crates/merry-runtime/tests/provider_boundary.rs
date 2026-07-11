@@ -16,8 +16,9 @@ use merry_llm::{
 use merry_provider_openai::{OpenAiProvider, OpenAiProviderConfig};
 use merry_runtime::{
     ArtifactContent, ArtifactContentKind, ArtifactError, CheckpointId, CheckpointRef,
-    CheckpointRefId, CheckpointRefManifest, CheckpointSequenceRange, CheckpointSourceKind,
-    CheckpointValidationPolicy, CitationBackedCheckpoint, CitationCompactionPolicy,
+    CheckpointRefId, CheckpointRefManifest, CheckpointSection, CheckpointSections,
+    CheckpointSequenceRange, CheckpointSourceKind, CheckpointValidationPolicy,
+    CitationBackedCheckpoint, CitationCompactionInput, CitationCompactionPolicy,
     CompactedCheckpoint, CompactedCheckpointCandidate, ContextCompiler, ContextEvidence,
     ContextSummary, LedgerFactKind, LedgerProjection, ProjectRules, RegisteredTool, Runtime,
     RuntimeModelRole, SessionTranscriptItem, SkillCatalog, SkillMetadata, StepContext, StepInput,
@@ -28,6 +29,7 @@ use merry_runtime::{
 use schemars::Schema;
 use serde_json::{Map, Value, json};
 use std::{
+    collections::BTreeSet,
     env,
     num::NonZeroUsize,
     path::PathBuf,
@@ -185,8 +187,27 @@ fn runtime_with_scripted_provider(session: &str, provider: ScriptedModelProvider
 
 #[derive(Debug, serde::Deserialize)]
 struct CitationCompactionFixture {
+    semantic_values: CitationCompactionSemanticValues,
     messages: Vec<FixtureMessage>,
-    candidate: serde_json::Value,
+    candidates: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct CitationCompactionSemanticValues {
+    confirmed_decision: String,
+    decision_reason: String,
+    rejected_approach: String,
+    rejection_reason: String,
+    constraint: String,
+    correction: String,
+    durable_conclusion: String,
+    loss_conclusion: String,
+    open_question: String,
+    progress_generations: Vec<String>,
+    next_step: String,
+    exact_path: String,
+    exact_number: u64,
+    exact_interface: String,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -432,7 +453,13 @@ fn fixture_provider_steps(
     }
     steps.push(vec![Ok(completed_outputs_event(
         vec![ModelOutput::text(
-            &serde_json::to_string(&fixture.candidate).expect("candidate serializes"),
+            &serde_json::to_string(
+                fixture
+                    .candidates
+                    .first()
+                    .expect("fixture has an initial candidate"),
+            )
+            .expect("candidate serializes"),
         )],
         FinishReason::Stop,
     ))]);
@@ -457,145 +484,243 @@ async fn seed_fixture_messages(runtime: &Runtime, messages: &[FixtureMessage]) {
     }
 }
 
-fn messy_live_compaction_user_messages() -> Vec<String> {
-    vec![
-        concat!(
-            "We need compaction for long sessions, but the conversation keeps looping. ",
-            "A previous assistant suggested just keeping the full chat because it feels safer. ",
-            "That is not acceptable: raw context will eventually exceed the window, and the ",
-            "continuation should survive without replaying every correction and false start. ",
-            "Please remember that this is a runtime compaction problem, not a branding problem."
+async fn request_live_compaction_candidate(
+    compactor: &OpenAiProvider,
+    compaction_model: &ModelName,
+    input: &CitationCompactionInput,
+) -> String {
+    let payload = input
+        .to_model_payload_json()
+        .expect("compaction payload serializes");
+    let response_format = ModelResponseFormat::StructuredOutput(
+        ModelStructuredOutputFormat::new(
+            "compacted_checkpoint_candidate",
+            citation_compaction_response_schema(),
         )
-        .to_owned(),
-        concat!(
-            "Here is a noisy correction. The artifact graph idea sounds attractive because it ",
-            "can attach evidence to everything, but it is not the current context-growth solution. ",
-            "For this slice, artifacts are exact reads and tool outputs; they are not a permanent ",
-            "semantic evidence graph. If the summary revives artifact graph as the main solution, ",
-            "the compactor has failed the design conversation."
-        )
-        .to_owned(),
-        concat!(
-            "Another detour: maybe runtime rules can decide what is important. That is wrong in ",
-            "the open-ended semantic case. Runtime can validate shape, refs, pending-call boundaries, ",
-            "byte budgets, and deterministic rendering. Runtime cannot know whether a nuanced design ",
-            "claim is semantically true. The LLM must summarize, and runtime must treat that output as ",
-            "a checkpoint candidate, not as proven truth."
-        )
-        .to_owned(),
-        concat!(
-            "Function-call continuity is especially annoying. Tool call and tool result pairs must ",
-            "remain provider-visible until a checkpoint replaces the covered window. Do not summarize ",
-            "a tool result immediately just because an artifact exists. The provider still needs protocol ",
-            "continuity until compaction. Once compaction succeeds, covered continuations may disappear ",
-            "from the next request and the checkpoint should carry only the needed claim with refs."
-        )
-        .to_owned(),
-        concat!(
-            "There was also a long argument about pins, modes, resource indexes, repository timelines, ",
-            "and tree-sitter scans. They may be future tools, but they are not the core short-term solution. ",
-            "The runtime has no intelligence; a pin suggestion might help a human, but automatic pinning ",
-            "would either be too rigid to generalize or too loose to mean anything. Keep this as a rejected ",
-            "or non-current path when it matters."
-        )
-        .to_owned(),
-        concat!(
-            "The retained raw tail must stay outside the compactor input. This is important because the ",
-            "current user message and recent tail will still be projected raw after the checkpoint. If the ",
-            "compactor summarizes the tail, the next prompt will duplicate it and the model may confuse old ",
-            "working intent with the actual current user message. Working intent, when present, belongs near ",
-            "the checkpoint footer, subordinate to task anchor and raw user text."
-        )
-        .to_owned(),
-        concat!(
-            "Messy filler with useful signal hidden inside: earlier we worried that citation refs might create ",
-            "a permanent database, then decided refs are local to the installed checkpoint. They should answer ",
-            "why a claim exists and allow bounded source inspection. They do not prove semantic truth. They should ",
-            "not force the runtime to keep every old prompt body forever. Rolling compaction may cite prior checkpoint ",
-            "claims with capped lineage."
-        )
-        .to_owned(),
-        concat!(
-            "More noise: if this were a coding agent over a git repo, exact file reads may be cheaper than storing ",
-            "file artifacts forever. If this were a general local agent with no stable files, artifacts may matter more. ",
-            "Do not let this distract the checkpoint. The current checkpoint should capture the execution and evidence ",
-            "context needed for continuation, and exact evidence should be re-read only when needed."
-        )
-        .to_owned(),
-        concat!(
-            "A deliberately rambling implementation note: someone says to add a reducer, someone else says that sounds ",
-            "like fake engineering, then the discussion circles back to the fact that the runtime can normalize tool events ",
-            "but cannot decide open semantic importance. There are examples about a repository task, a general assistant, ",
-            "a Python business workflow, and a game helper. Most of those examples are not decisions; they are pressure tests. ",
-            "The useful durable point is that checkpoint compaction should keep the current task direction small, inspectable, ",
-            "and subordinate to exact evidence reads. It should not transform every observed event into prompt text."
-        )
-        .to_owned(),
-        concat!(
-            "Another noisy paragraph about user decisions: durable decisions are hard unless a user explicitly confirms them. ",
-            "A model can suggest that a correction looks like a decision, but the runtime should not invent an authoritative ",
-            "user decision from ordinary conversation. In this checkpoint smoke, keep user corrections as cited constraints or ",
-            "rejected paths, not as a separate decision database. If a future slash command confirms a decision, that can be a ",
-            "different feature. For now, do not pretend the compactor has authority it does not have."
-        )
-        .to_owned(),
-        concat!(
-            "Yet more mixed context: there was confusion about stable prefix versus dynamic control context. Stable prefix is ",
-            "for cacheable instructions and tool descriptions. Task anchor, checkpoint, transcript body, tool exchanges, ",
-            "and current user input are dynamic. Working intent is not a new top-level stable segment; it is checkpoint-adjacent ",
-            "footer content and must not compete with the current user message. This should survive the summary because it affects ",
-            "prompt assembly and prevents duplicated or stale intent."
-        )
-        .to_owned(),
-        concat!(
-            "A low-value but realistic tangent says maybe tree-sitter repository scans, resource keys, or file timelines could ",
-            "provide a compass. The conclusion was not to build that now. For git repositories, exact reads and tests often beat ",
-            "storing huge stale artifacts. For non-file agents, some durable storage may matter later. This is context, not the ",
-            "current implementation target. The checkpoint should compress it into a short non-current path if it matters, or drop ",
-            "it if it does not affect continuation."
-        )
-        .to_owned(),
-        concat!(
-            "There is also frustration in the conversation: summaries can hallucinate, previous assistant replies can be wrong, ",
-            "and model-generated plans can drift. A citation-backed checkpoint does not magically solve truth. It gives later turns ",
-            "a way to inspect why a claim entered the checkpoint. Claims with no ref should be rejected. Claims that cite irrelevant ",
-            "refs are still possible and must be evaluated in live smoke. That is exactly why this test wants a messy live compactor ",
-            "run, not only a scripted candidate."
-        )
-        .to_owned(),
-        concat!(
-            "One more process note before the actual tail: the live compactor quality test should call only the compaction model. ",
-            "It should not run a shell, patch files, or require bubblewrap. The seed history can use a scripted primary provider, ",
-            "while RuntimeModelRole::ContextCompaction points at the real OpenAI-compatible provider. The output should be printed ",
-            "with --nocapture so a human can inspect whether the summary preserved constraints, rejected paths, and local refs."
-        )
-        .to_owned(),
-        concat!(
-            "The final direction for this live compactor smoke: produce citation-backed checkpoint claims with local refs. ",
-            "Preserve rejected paths and corrected misunderstandings. Keep claims short. Do not include the retained tail. ",
-            "Do not invent completed implementation work. If evidence is ambiguous, write an open question instead of a fake fact."
-        )
-        .to_owned(),
-        concat!(
-            "Retained tail sentinel one: this recent note should remain raw after compaction and must not appear in the ",
-            "compactor input or the checkpoint candidate. It talks about running live smoke manually and should not be ",
-            "compressed into the durable checkpoint."
-        )
-        .to_owned(),
-        concat!(
-            "Retained tail sentinel two: the next request after compaction should still see this exact recent tail as raw ",
-            "history. If a checkpoint claim mentions this sentinel, the test should be treated as low quality."
-        )
-        .to_owned(),
-    ]
+        .expect("structured output format is valid"),
+    );
+    let request = ModelRequest::new_with_continuations_and_stable_prefix_and_response_format(
+        compaction_model.clone(),
+        vec![
+            ModelMessage::new(
+                ModelMessageRole::System,
+                ModelContent::text(citation_compaction_system_prompt())
+                    .expect("system prompt is valid"),
+            )
+            .expect("system message is valid"),
+            ModelMessage::new(
+                ModelMessageRole::User,
+                ModelContent::text(&payload).expect("payload is valid model content"),
+            )
+            .expect("user message is valid"),
+        ],
+        Vec::new(),
+        Vec::new(),
+        GenerationConfig::new(Some(input.resolved_budget().output_token_limit()), false)
+            .expect("generation config is valid"),
+        1,
+        Some(response_format),
+    )
+    .expect("compaction request is valid");
+    let stream = compactor
+        .stream_model(request, ModelStreamContext::new(CancellationToken::new()))
+        .await
+        .expect("live compactor stream starts");
+    collect_text_output(stream)
+        .await
+        .expect("live compactor returns text")
 }
 
-fn rough_token_count(text: &str) -> usize {
-    text.split_whitespace().count()
+fn assert_live_candidate_meaning(
+    candidate: &CompactedCheckpointCandidate,
+    expected: &CitationCompactionSemanticValues,
+    cycle: usize,
+) {
+    let sections = candidate.sections();
+    assert_candidate_entry_contains(
+        sections,
+        CheckpointSection::ConfirmedDecision,
+        &["five", "completed model turn"],
+        &["short", "tool", "frequent"],
+    );
+    assert_candidate_entry_contains(
+        sections,
+        CheckpointSection::RejectedApproach,
+        &["compress", "soft watermark"],
+        &["distortion", "cache"],
+    );
+    for (section, required) in [
+        (
+            CheckpointSection::ConstraintPreferenceBoundary,
+            &["checkpoint replacement", "cache", "boundary"][..],
+        ),
+        (
+            CheckpointSection::CorrectedMisunderstanding,
+            &["task ledger", "not", "context compression"][..],
+        ),
+        (
+            CheckpointSection::DurableConclusion,
+            &["refs", "exact", "continuation"][..],
+        ),
+        (
+            CheckpointSection::DurableConclusion,
+            &["lossy", "distortion"][..],
+        ),
+        (
+            CheckpointSection::OpenQuestion,
+            &["live", "semantic retention", "deterministic"][..],
+        ),
+    ] {
+        assert_candidate_entry_contains(sections, section, required, &[]);
+    }
+    let progress_words = live_progress_words(cycle);
+    assert_candidate_entry_contains(
+        sections,
+        CheckpointSection::CurrentProgressAndNextStep,
+        progress_words,
+        &[],
+    );
+    assert_candidate_entry_contains(
+        sections,
+        CheckpointSection::CurrentProgressAndNextStep,
+        &["256k", "three-cycle"],
+        &[],
+    );
+    for other_cycle in (0..3).filter(|other| *other != cycle) {
+        let other_words = live_progress_words(other_cycle);
+        assert!(
+            sections
+                .entries(CheckpointSection::CurrentProgressAndNextStep)
+                .iter()
+                .all(|entry| {
+                    let text = entry.text().to_ascii_lowercase();
+                    !other_words.iter().all(|word| text.contains(word))
+                }),
+            "live checkpoint retained the wrong progress generation {}",
+            other_cycle + 1
+        );
+    }
+    for exact in [
+        expected.exact_path.as_str(),
+        expected.exact_interface.as_str(),
+    ] {
+        assert_candidate_exact_entry(sections, CheckpointSection::ExactDetail, exact);
+    }
+    assert_candidate_exact_entry(
+        sections,
+        CheckpointSection::ExactDetail,
+        &expected.exact_number.to_string(),
+    );
 }
 
-fn contains_any(haystack: &str, needles: &[&str]) -> bool {
-    needles.iter().any(|needle| haystack.contains(needle))
+fn live_progress_words(cycle: usize) -> &'static [&'static str] {
+    match cycle {
+        0 => &["design", "approved", "rolling replacement"],
+        1 => &["first rolling checkpoint", "next replacement"],
+        2 => &["two rolling checkpoint", "third generation"],
+        _ => panic!("live test has exactly three cycles"),
+    }
+}
+
+fn assert_candidate_entry_contains(
+    sections: &CheckpointSections,
+    section: CheckpointSection,
+    text_needles: &[&str],
+    rationale_needles: &[&str],
+) {
+    assert!(
+        sections.entries(section).iter().any(|entry| {
+            let text = entry.text().to_ascii_lowercase();
+            let rationale = entry.rationale().unwrap_or_default().to_ascii_lowercase();
+            text_needles.iter().all(|needle| text.contains(needle))
+                && rationale_needles
+                    .iter()
+                    .all(|needle| rationale.contains(needle))
+        }),
+        "live checkpoint section {} lost required meaning {:?} or reason {:?}",
+        section.as_str(),
+        text_needles,
+        rationale_needles
+    );
+}
+
+fn assert_candidate_exact_entry(
+    sections: &CheckpointSections,
+    section: CheckpointSection,
+    exact: &str,
+) {
+    assert!(
+        sections
+            .entries(section)
+            .iter()
+            .any(|entry| entry.text() == exact),
+        "live checkpoint section {} lost exact literal: {exact}",
+        section.as_str()
+    );
+}
+
+fn candidate_entry_ids(candidate: &CompactedCheckpointCandidate) -> BTreeSet<String> {
+    CheckpointSection::ALL
+        .into_iter()
+        .flat_map(|section| candidate.sections().entries(section))
+        .map(|entry| entry.id().as_str().to_owned())
+        .collect()
+}
+
+fn assert_candidate_handoffs(
+    candidate: &CompactedCheckpointCandidate,
+    previous_ids: &BTreeSet<String>,
+) {
+    let handed_off = candidate
+        .handoffs()
+        .iter()
+        .map(|handoff| handoff.old_id().as_str().to_owned())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(&handed_off, previous_ids);
+}
+
+async fn assert_candidate_refs_resolve_original_sources(
+    runtime: &Runtime,
+    candidate: &CompactedCheckpointCandidate,
+    original_sources: &[String],
+) {
+    let refs = CheckpointSection::ALL
+        .into_iter()
+        .flat_map(|section| candidate.sections().entries(section))
+        .flat_map(|entry| entry.refs().iter().cloned())
+        .collect::<BTreeSet<_>>();
+    assert!(
+        !refs.is_empty(),
+        "live checkpoint must cite original sources"
+    );
+    for ref_id in refs {
+        let content = read_full_checkpoint_ref(runtime, &ref_id).await;
+        assert!(
+            original_sources.iter().any(|source| source == &content),
+            "checkpoint ref {} did not resolve to an original transcript artifact",
+            ref_id.as_str()
+        );
+    }
+}
+
+async fn read_full_checkpoint_ref(runtime: &Runtime, ref_id: &CheckpointRefId) -> String {
+    let mut content = String::new();
+    let mut offset = 0usize;
+    loop {
+        let page = runtime
+            .read_checkpoint_ref_page(ref_id, offset, 4096)
+            .await
+            .expect("checkpoint ref page reads");
+        assert_eq!(page.offset(), offset);
+        content.push_str(page.content());
+        match page.next_offset() {
+            Some(next) => offset = next,
+            None => {
+                assert_eq!(content.len(), page.total_bytes());
+                return content;
+            }
+        }
+    }
 }
 
 async fn collect_text_output(stream: ModelEventStream) -> Result<String, String> {
@@ -2115,6 +2240,8 @@ async fn runtime_compaction_input_excludes_retained_raw_tail() {
 async fn citation_compaction_fixture_preserves_required_design_meanings() {
     let fixture = include_str!("fixtures/citation_compaction_design_fixture.json");
     let fixture: CitationCompactionFixture = serde_json::from_str(fixture).expect("fixture parses");
+    assert_eq!(fixture.candidates.len(), 3);
+    assert_eq!(fixture.semantic_values.progress_generations.len(), 3);
     let provider = ScriptedModelProvider::new(fixture_provider_steps(&fixture));
     let runtime = Runtime::builder(session_id("citation-fixture"))
         .model_provider(Arc::new(provider.clone()), model_name())
@@ -2145,7 +2272,10 @@ async fn citation_compaction_fixture_preserves_required_design_meanings() {
         .map(|message| message.content().as_text())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(compaction_request_text.contains("Do not make the artifact/evidence graph"));
+    assert!(
+        compaction_request_text.contains(&fixture.semantic_values.confirmed_decision),
+        "the compactor must receive the covered source containing all approved meanings"
+    );
     assert!(
         !compaction_request_text.contains("Retained tail sentinel"),
         "retained raw tail must stay out of the compactor request"
@@ -2156,16 +2286,23 @@ async fn citation_compaction_fixture_preserves_required_design_meanings() {
         .expect("context compiles")
         .to_snapshot();
 
+    let semantics = &fixture.semantic_values;
+    let exact_number = semantics.exact_number.to_string();
     for expected in [
-        "Compaction is required",
-        "Do not use an artifact/evidence graph",
-        "Runtime cannot validate open-ended semantic truth",
-        "Do not store every artifact and event forever",
-        "Function-call continuity remains raw until compaction",
-        "Retained raw tail is not part of compaction input",
-        "Pins, modes, resource indexes, and artifact graphs are not the current core solution",
-        "citation-backed checkpoint entries and local ref lookup",
-        "current_progress_and_next_steps:",
+        semantics.confirmed_decision.as_str(),
+        semantics.decision_reason.as_str(),
+        semantics.rejected_approach.as_str(),
+        semantics.rejection_reason.as_str(),
+        semantics.constraint.as_str(),
+        semantics.correction.as_str(),
+        semantics.durable_conclusion.as_str(),
+        semantics.loss_conclusion.as_str(),
+        semantics.open_question.as_str(),
+        semantics.progress_generations[0].as_str(),
+        semantics.next_step.as_str(),
+        semantics.exact_path.as_str(),
+        exact_number.as_str(),
+        semantics.exact_interface.as_str(),
     ] {
         assert!(
             snapshot.contains(expected),
@@ -2173,38 +2310,38 @@ async fn citation_compaction_fixture_preserves_required_design_meanings() {
         );
     }
 
+    let summary = runtime
+        .compacted_checkpoint_summary()
+        .await
+        .expect("citation checkpoint is installed");
+    assert_eq!(summary.entry_count(), 12);
+    assert_eq!(summary.ref_count(), 1);
+
     let page = runtime
-        .read_checkpoint_ref_page(&CheckpointRefId::new("h2").expect("valid ref id"), 0, 4096)
+        .read_checkpoint_ref_page(&CheckpointRefId::new("h0").expect("valid ref id"), 0, 4096)
         .await
         .expect("ref resolves");
-    assert!(
-        page.content()
-            .contains("Do not make the artifact/evidence graph")
-    );
+    let first_user_message = fixture
+        .messages
+        .iter()
+        .find(|message| message.role == "user")
+        .expect("fixture has a user source message");
+    assert_eq!(page.content(), first_user_message.text);
 }
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires live OpenAI-compatible compactor; set MERRY_OPENAI_LIVE_TESTS=1, MERRY_OPENAI_API_KEY or OPENAI_API_KEY, and MERRY_OPENAI_MODEL"]
-async fn live_compactor_summarizes_messy_1k_token_window_with_refs() {
+async fn live_compactor_preserves_eight_categories_across_three_rolls() {
     let Some((compactor, compaction_model)) = live_openai_provider_from_env() else {
         return;
     };
-    let messages = messy_live_compaction_user_messages();
-    let source_text = messages.join("\n");
-    let source_tokens = rough_token_count(&source_text);
-    assert!(
-        source_tokens >= 1_000,
-        "live fixture must be large enough to judge compaction quality; got {source_tokens}"
-    );
-
-    let mut primary_steps = Vec::with_capacity(messages.len());
-    for index in 0..messages.len() {
-        primary_steps.push(vec![Ok(completed_text_event(&format!(
-            "acknowledged messy input {index}"
-        )))]);
-    }
-    let primary = ScriptedModelProvider::new(primary_steps);
-    let runtime = Runtime::builder(session_id("live-compactor-quality"))
+    let fixture: CitationCompactionFixture = serde_json::from_str(include_str!(
+        "fixtures/citation_compaction_design_fixture.json"
+    ))
+    .expect("live rolling fixture parses");
+    let primary_output = "live primary acknowledgement";
+    let primary = FakeModelProvider::new(vec![Ok(completed_text_event(primary_output))]);
+    let runtime = Runtime::builder(session_id("live-compactor-three-roll-quality"))
         .model_provider(Arc::new(primary), model_name())
         .model_provider_for_role(
             RuntimeModelRole::ContextCompaction,
@@ -2214,130 +2351,65 @@ async fn live_compactor_summarizes_messy_1k_token_window_with_refs() {
         .build()
         .expect("runtime builds");
 
-    for message in &messages {
-        let events = collect_step(&runtime, message).await;
-        assert!(
-            events
-                .iter()
-                .any(|event| matches!(event.payload, RuntimeJournalPayload::StepCompleted)),
-            "seed message should complete"
+    let mut original_sources = vec![primary_output.to_owned()];
+    let policy = CitationCompactionPolicy::new(Some(1_024), None, 2).expect("valid policy");
+    let mut previous_ids: Option<BTreeSet<String>> = None;
+
+    for (cycle, range) in [0..5, 5..8, 8..11].into_iter().enumerate() {
+        for (offset, fixture_message) in fixture.messages[range].iter().enumerate() {
+            assert_eq!(fixture_message.role, "user");
+            let message = if cycle > 0 && offset == 0 {
+                format!(
+                    "Progress update; preserve this exact sentence in the progress section: {}\n{}",
+                    fixture.semantic_values.progress_generations[cycle], fixture_message.text
+                )
+            } else {
+                fixture_message.text.clone()
+            };
+            let events = collect_step(&runtime, &message).await;
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event.payload, RuntimeJournalPayload::StepCompleted)),
+                "live fixture message should complete"
+            );
+            original_sources.push(message);
+        }
+
+        let input = runtime
+            .citation_compaction_input(policy)
+            .await
+            .expect("live compaction input builds")
+            .expect("live compaction input exists");
+        let candidate_json =
+            request_live_compaction_candidate(&compactor, &compaction_model, &input).await;
+        eprintln!(
+            "live rolling compactor generation {} raw candidate:\n{candidate_json}",
+            cycle + 1
         );
-    }
+        let candidate = CompactedCheckpointCandidate::from_json(&candidate_json)
+            .expect("live candidate uses the checkpoint schema");
+        assert_live_candidate_meaning(&candidate, &fixture.semantic_values, cycle);
+        match &previous_ids {
+            Some(ids) => assert_candidate_handoffs(&candidate, ids),
+            None => assert!(candidate.handoffs().is_empty()),
+        }
+        let current_ids = candidate_entry_ids(&candidate);
 
-    let policy = CitationCompactionPolicy::new(Some(420), Some(12_000), 2).expect("valid policy");
-    let input = runtime
-        .citation_compaction_input(policy)
-        .await
-        .expect("compaction input builds")
-        .expect("compaction input exists");
-    let payload = input
-        .to_model_payload_json()
-        .expect("compaction payload serializes");
-    let response_format = ModelResponseFormat::StructuredOutput(
-        ModelStructuredOutputFormat::new(
-            "compacted_checkpoint_candidate",
-            citation_compaction_response_schema(),
-        )
-        .expect("structured output format is valid"),
-    );
-    let request = ModelRequest::new_with_continuations_and_stable_prefix_and_response_format(
-        compaction_model,
-        vec![
-            ModelMessage::new(
-                ModelMessageRole::System,
-                ModelContent::text(citation_compaction_system_prompt())
-                    .expect("system prompt is valid"),
-            )
-            .expect("system message is valid"),
-            ModelMessage::new(
-                ModelMessageRole::User,
-                ModelContent::text(&payload).expect("payload is valid model content"),
-            )
-            .expect("user message is valid"),
-        ],
-        Vec::new(),
-        Vec::new(),
-        GenerationConfig::new(Some(input.resolved_budget().output_token_limit()), false)
-            .expect("generation config is valid"),
-        1,
-        Some(response_format),
-    )
-    .expect("compaction request is valid");
-    let stream = compactor
-        .stream_model(request, ModelStreamContext::new(CancellationToken::new()))
-        .await
-        .expect("live compactor stream starts");
-    let candidate_json = collect_text_output(stream)
-        .await
-        .expect("live compactor returns text");
-    eprintln!("live compactor raw candidate:\n{candidate_json}");
-    let outcome = runtime
-        .install_citation_compaction_candidate(input, &candidate_json)
-        .await
-        .expect("live compaction candidate installs");
-
-    let snapshot = ContextCompiler::new()
-        .compile(&runtime.context_snapshot().await)
-        .expect("context compiles")
-        .to_snapshot();
-    let checkpoint = snapshot.as_str();
-    let checkpoint_tokens = rough_token_count(checkpoint);
-
-    eprintln!("live compactor source_tokens={source_tokens}");
-    eprintln!(
-        "live compactor covered_history_items={}",
-        outcome.covered_history_item_count()
-    );
-    eprintln!("live compactor checkpoint_tokens={checkpoint_tokens}");
-    eprintln!("live compactor checkpoint:\n{checkpoint}");
-
-    assert!(
-        checkpoint_tokens * 3 < source_tokens,
-        "live checkpoint should approach 3x compression after prompt-budget tuning"
-    );
-    let checkpoint_lowercase = checkpoint.to_lowercase();
-    for (expected, alternatives) in [
-        ("artifact", &["artifact"][..]),
-        ("runtime", &["runtime"][..]),
-        (
-            "tool/function-call continuity",
-            &[
-                "function-call",
-                "function call",
-                "tool call",
-                "tool result",
-                "continuity",
-            ][..],
-        ),
-        ("retained raw tail", &["retained raw tail", "raw tail"][..]),
-        ("citation", &["citation", "ref", "refs"][..]),
-    ] {
-        assert!(
-            contains_any(&checkpoint_lowercase, alternatives),
-            "live checkpoint missed expected design signal: {expected}"
+        let outcome = runtime
+            .install_citation_compaction_candidate(input, &candidate_json)
+            .await
+            .expect("live compaction candidate installs");
+        eprintln!(
+            "live rolling compactor generation {} covered_history_items={} checkpoint_entries={}",
+            cycle + 1,
+            outcome.covered_history_item_count(),
+            current_ids.len()
         );
+        assert_candidate_refs_resolve_original_sources(&runtime, &candidate, &original_sources)
+            .await;
+        previous_ids = Some(current_ids);
     }
-    for forbidden in [
-        "produce this checkpoint",
-        "checkpoint candidate",
-        "summarize the covered window",
-        "compactor",
-    ] {
-        assert!(
-            !checkpoint_lowercase.contains(forbidden),
-            "current progress must describe main-agent continuation, not compactor work"
-        );
-    }
-    assert!(
-        !checkpoint.contains("Retained tail sentinel"),
-        "live checkpoint must not summarize retained raw tail"
-    );
-
-    let page = runtime
-        .read_checkpoint_ref_page(&CheckpointRefId::new("h2").expect("valid ref id"), 0, 4096)
-        .await
-        .expect("ref resolves");
-    eprintln!("live compactor sample h2 page:\n{}", page.content());
 }
 
 #[tokio::test(flavor = "current_thread")]
