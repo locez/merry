@@ -1,52 +1,60 @@
 {
+  "semantic_values": {
+    "confirmed_decision": "Retain exactly five completed model turns by default.",
+    "decision_reason": "Five turns cover short discussion and tool-only continuation without frequent compression.",
+    "rejected_approach": "Do not compress every time the soft watermark is crossed.",
+    "rejection_reason": "Frequent lossy rewrites increase distortion and rebuild the prompt cache.",
+    "constraint": "Checkpoint replacement is the only compaction-driven cache rebuild boundary.",
+    "correction": "The task ledger is not part of semantic context compression.",
+    "durable_conclusion": "Refs verify exact source but are not the normal continuation path.",
+    "loss_conclusion": "Rolling compression is lossy, so compressing less often reduces repeated distortion.",
+    "open_question": "Measure live-model semantic retention separately from deterministic protocol tests.",
+    "progress_generations": [
+      "Design is approved and implementation is validating rolling replacement.",
+      "The first rolling checkpoint is installed and implementation is validating the next replacement.",
+      "Two rolling checkpoint replacements are complete and implementation is validating the third generation."
+    ],
+    "next_step": "Run the 256k three-cycle case.",
+    "exact_path": "crates/merry-runtime/src/session/checkpoint_window.rs",
+    "exact_number": 20480,
+    "exact_interface": "retained_model_turns"
+  },
   "messages": [
     {
       "role": "user",
-      "text": "Compaction is required for long-running sessions; raw context will exceed the window."
-    },
-    {
-      "role": "assistant",
-      "text": "Maybe an artifact evidence graph should be the main solution."
+      "text": "Approved rolling-compaction values follow. Retain exactly five completed model turns by default. Five turns cover short discussion and tool-only continuation without frequent compression. Do not compress every time the soft watermark is crossed. Frequent lossy rewrites increase distortion and rebuild the prompt cache. Checkpoint replacement is the only compaction-driven cache rebuild boundary. The task ledger is not part of semantic context compression. Refs verify exact source but are not the normal continuation path. Rolling compression is lossy, so compressing less often reduces repeated distortion. Measure live-model semantic retention separately from deterministic protocol tests. Use these progress statements in order: Design is approved and implementation is validating rolling replacement. The first rolling checkpoint is installed and implementation is validating the next replacement. Two rolling checkpoint replacements are complete and implementation is validating the third generation. Run the 256k three-cycle case. Preserve the exact path crates/merry-runtime/src/session/checkpoint_window.rs, the exact number 20480, and the exact interface retained_model_turns."
     },
     {
       "role": "user",
-      "text": "Do not make the artifact/evidence graph the current context-growth solution."
-    },
-    {
-      "role": "assistant",
-      "text": "Maybe runtime rules can determine exactly what semantic content to keep."
+      "text": "Ordinary discussion turn 2 checks that the first source remains older than the raw tail."
     },
     {
       "role": "user",
-      "text": "Runtime has no general intelligence and cannot validate open semantic truth."
-    },
-    {
-      "role": "assistant",
-      "text": "Maybe storing every artifact and event forever will solve context drift."
+      "text": "Ordinary discussion turn 3 adds no durable decision."
     },
     {
       "role": "user",
-      "text": "Artifacts are not the main solution to context growth; exact evidence can be read only when needed."
-    },
-    {
-      "role": "assistant",
-      "text": "Maybe function-call continuity can be summarized immediately after each tool result."
+      "text": "Ordinary discussion turn 4 leaves the approved values unchanged."
     },
     {
       "role": "user",
-      "text": "Provider-visible function-call continuity remains raw until a checkpoint boundary replaces it."
+      "text": "Ordinary discussion turn 5 exercises normal conversational growth."
     },
     {
       "role": "user",
-      "text": "Retained raw tail must not be sent to the compactor."
+      "text": "Ordinary discussion turn 6 does not alter checkpoint policy."
     },
     {
       "role": "user",
-      "text": "Working intent belongs as checkpoint footer content, not as a top-level control segment."
+      "text": "Ordinary discussion turn 7 keeps exact evidence available without reading it."
     },
     {
       "role": "user",
-      "text": "Pins, modes, resource indexes, and artifact graphs were considered but are not the current core solution."
+      "text": "Ordinary discussion turn 8 keeps the semantic source in the covered prefix."
+    },
+    {
+      "role": "user",
+      "text": "Ordinary discussion turn 9 prepares the retained raw boundary."
     },
     {
       "role": "user",
@@ -57,62 +65,285 @@
       "text": "Retained tail sentinel: the next user request should remain raw after checkpoint install."
     }
   ],
-  "candidate": {
-    "confirmed_decisions": [],
-    "rejected_approaches": [
-      {
-        "id": "c2",
-        "text": "Do not use an artifact/evidence graph as the current context-growth solution; exact evidence can be read when needed.",
-        "rationale": "Artifact refs preserve exact evidence without making an evidence graph the prompt source of truth.",
-        "refs": ["h1", "h2"]
-      },
-      {
-        "id": "c4",
-        "text": "Do not store every artifact and event forever as the answer to context drift.",
-        "rationale": "Durable artifacts can remain available without keeping every event in active context.",
-        "refs": ["h5", "h6"]
-      },
-      {
-        "id": "c7",
-        "text": "Pins, modes, resource indexes, and artifact graphs are not the current core solution.",
-        "rationale": "Those mechanisms do not provide deterministic rolling context replacement.",
-        "refs": ["h14"]
-      }
-    ],
-    "constraints_preferences_boundaries": [
-      {
-        "id": "c1",
-        "text": "Compaction is required for long-running sessions.",
-        "refs": ["h0"]
-      },
-      {
-        "id": "c3",
-        "text": "Runtime cannot validate open-ended semantic truth.",
-        "refs": ["h3", "h4"]
-      },
-      {
-        "id": "c6",
-        "text": "Retained raw tail is not part of compaction input, and current progress belongs in its dedicated checkpoint section.",
-        "refs": ["h10", "h12"]
-      }
-    ],
-    "corrected_misunderstandings": [],
-    "durable_conclusions": [
-      {
-        "id": "c5",
-        "text": "Function-call continuity remains raw until compaction replaces the covered context.",
-        "refs": ["h7", "h8"]
-      }
-    ],
-    "open_questions": [],
-    "current_progress_and_next_steps": [
-      {
-        "id": "c8",
-        "text": "Continue implementing citation-backed checkpoint entries and local ref lookup.",
-        "refs": ["h10", "h12"]
-      }
-    ],
-    "exact_details": [],
-    "handoffs": []
-  }
+  "candidates": [
+    {
+      "confirmed_decisions": [
+        {
+          "id": "d1",
+          "text": "Retain exactly five completed model turns by default.",
+          "rationale": "Five turns cover short discussion and tool-only continuation without frequent compression.",
+          "refs": ["h0"]
+        }
+      ],
+      "rejected_approaches": [
+        {
+          "id": "r1",
+          "text": "Do not compress every time the soft watermark is crossed.",
+          "rationale": "Frequent lossy rewrites increase distortion and rebuild the prompt cache.",
+          "refs": ["h0"]
+        }
+      ],
+      "constraints_preferences_boundaries": [
+        {
+          "id": "b1",
+          "text": "Checkpoint replacement is the only compaction-driven cache rebuild boundary.",
+          "refs": ["h0"]
+        }
+      ],
+      "corrected_misunderstandings": [
+        {
+          "id": "m1",
+          "text": "The task ledger is not part of semantic context compression.",
+          "refs": ["h0"]
+        }
+      ],
+      "durable_conclusions": [
+        {
+          "id": "c1",
+          "text": "Refs verify exact source but are not the normal continuation path.",
+          "refs": ["h0"]
+        },
+        {
+          "id": "c2",
+          "text": "Rolling compression is lossy, so compressing less often reduces repeated distortion.",
+          "refs": ["h0"]
+        }
+      ],
+      "open_questions": [
+        {
+          "id": "q1",
+          "text": "Measure live-model semantic retention separately from deterministic protocol tests.",
+          "refs": ["h0"]
+        }
+      ],
+      "current_progress_and_next_steps": [
+        {
+          "id": "p1",
+          "text": "Design is approved and implementation is validating rolling replacement.",
+          "refs": ["h0"]
+        },
+        {
+          "id": "n1",
+          "text": "Run the 256k three-cycle case.",
+          "refs": ["h0"]
+        }
+      ],
+      "exact_details": [
+        {
+          "id": "x1",
+          "text": "crates/merry-runtime/src/session/checkpoint_window.rs",
+          "refs": ["h0"]
+        },
+        {
+          "id": "x2",
+          "text": "20480",
+          "refs": ["h0"]
+        },
+        {
+          "id": "x3",
+          "text": "retained_model_turns",
+          "refs": ["h0"]
+        }
+      ],
+      "handoffs": []
+    },
+    {
+      "confirmed_decisions": [
+        {
+          "id": "d1",
+          "text": "Retain exactly five completed model turns by default.",
+          "rationale": "Five turns cover short discussion and tool-only continuation without frequent compression.",
+          "refs": ["h0"]
+        }
+      ],
+      "rejected_approaches": [
+        {
+          "id": "r1",
+          "text": "Do not compress every time the soft watermark is crossed.",
+          "rationale": "Frequent lossy rewrites increase distortion and rebuild the prompt cache.",
+          "refs": ["h0"]
+        }
+      ],
+      "constraints_preferences_boundaries": [
+        {
+          "id": "b1",
+          "text": "Checkpoint replacement is the only compaction-driven cache rebuild boundary.",
+          "refs": ["h0"]
+        }
+      ],
+      "corrected_misunderstandings": [
+        {
+          "id": "m1",
+          "text": "The task ledger is not part of semantic context compression.",
+          "refs": ["h0"]
+        }
+      ],
+      "durable_conclusions": [
+        {
+          "id": "c1",
+          "text": "Refs verify exact source but are not the normal continuation path.",
+          "refs": ["h0"]
+        },
+        {
+          "id": "c2",
+          "text": "Rolling compression is lossy, so compressing less often reduces repeated distortion.",
+          "refs": ["h0"]
+        }
+      ],
+      "open_questions": [
+        {
+          "id": "q1",
+          "text": "Measure live-model semantic retention separately from deterministic protocol tests.",
+          "refs": ["h0"]
+        }
+      ],
+      "current_progress_and_next_steps": [
+        {
+          "id": "p2",
+          "text": "The first rolling checkpoint is installed and implementation is validating the next replacement.",
+          "refs": ["h0"]
+        },
+        {
+          "id": "n1",
+          "text": "Run the 256k three-cycle case.",
+          "refs": ["h0"]
+        }
+      ],
+      "exact_details": [
+        {
+          "id": "x1",
+          "text": "crates/merry-runtime/src/session/checkpoint_window.rs",
+          "refs": ["h0"]
+        },
+        {
+          "id": "x2",
+          "text": "20480",
+          "refs": ["h0"]
+        },
+        {
+          "id": "x3",
+          "text": "retained_model_turns",
+          "refs": ["h0"]
+        }
+      ],
+      "handoffs": [
+        {"action": "keep", "old_id": "d1"},
+        {"action": "keep", "old_id": "r1"},
+        {"action": "keep", "old_id": "b1"},
+        {"action": "keep", "old_id": "m1"},
+        {"action": "keep", "old_id": "c1"},
+        {"action": "keep", "old_id": "c2"},
+        {"action": "keep", "old_id": "q1"},
+        {
+          "action": "replace",
+          "old_id": "p1",
+          "new_ids": ["p2"],
+          "reason": "The first rolling checkpoint is now installed."
+        },
+        {"action": "keep", "old_id": "n1"},
+        {"action": "keep", "old_id": "x1"},
+        {"action": "keep", "old_id": "x2"},
+        {"action": "keep", "old_id": "x3"}
+      ]
+    },
+    {
+      "confirmed_decisions": [
+        {
+          "id": "d1",
+          "text": "Retain exactly five completed model turns by default.",
+          "rationale": "Five turns cover short discussion and tool-only continuation without frequent compression.",
+          "refs": ["h0"]
+        }
+      ],
+      "rejected_approaches": [
+        {
+          "id": "r1",
+          "text": "Do not compress every time the soft watermark is crossed.",
+          "rationale": "Frequent lossy rewrites increase distortion and rebuild the prompt cache.",
+          "refs": ["h0"]
+        }
+      ],
+      "constraints_preferences_boundaries": [
+        {
+          "id": "b1",
+          "text": "Checkpoint replacement is the only compaction-driven cache rebuild boundary.",
+          "refs": ["h0"]
+        }
+      ],
+      "corrected_misunderstandings": [
+        {
+          "id": "m1",
+          "text": "The task ledger is not part of semantic context compression.",
+          "refs": ["h0"]
+        }
+      ],
+      "durable_conclusions": [
+        {
+          "id": "c1",
+          "text": "Refs verify exact source but are not the normal continuation path.",
+          "refs": ["h0"]
+        },
+        {
+          "id": "c2",
+          "text": "Rolling compression is lossy, so compressing less often reduces repeated distortion.",
+          "refs": ["h0"]
+        }
+      ],
+      "open_questions": [
+        {
+          "id": "q1",
+          "text": "Measure live-model semantic retention separately from deterministic protocol tests.",
+          "refs": ["h0"]
+        }
+      ],
+      "current_progress_and_next_steps": [
+        {
+          "id": "p3",
+          "text": "Two rolling checkpoint replacements are complete and implementation is validating the third generation.",
+          "refs": ["h0"]
+        },
+        {
+          "id": "n1",
+          "text": "Run the 256k three-cycle case.",
+          "refs": ["h0"]
+        }
+      ],
+      "exact_details": [
+        {
+          "id": "x1",
+          "text": "crates/merry-runtime/src/session/checkpoint_window.rs",
+          "refs": ["h0"]
+        },
+        {
+          "id": "x2",
+          "text": "20480",
+          "refs": ["h0"]
+        },
+        {
+          "id": "x3",
+          "text": "retained_model_turns",
+          "refs": ["h0"]
+        }
+      ],
+      "handoffs": [
+        {"action": "keep", "old_id": "d1"},
+        {"action": "keep", "old_id": "r1"},
+        {"action": "keep", "old_id": "b1"},
+        {"action": "keep", "old_id": "m1"},
+        {"action": "keep", "old_id": "c1"},
+        {"action": "keep", "old_id": "c2"},
+        {"action": "keep", "old_id": "q1"},
+        {
+          "action": "replace",
+          "old_id": "p2",
+          "new_ids": ["p3"],
+          "reason": "The second rolling checkpoint replacement is now complete."
+        },
+        {"action": "keep", "old_id": "n1"},
+        {"action": "keep", "old_id": "x1"},
+        {"action": "keep", "old_id": "x2"},
+        {"action": "keep", "old_id": "x3"}
+      ]
+    }
+  ]
 }
