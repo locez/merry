@@ -217,6 +217,10 @@ impl CitationCompactionModelTurn {
             items,
         })
     }
+
+    pub(crate) fn ref_ids(&self) -> impl Iterator<Item = &str> {
+        self.items.iter().map(CitationCompactionTurnItem::ref_id)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -250,6 +254,14 @@ pub(crate) enum CitationCompactionTurnItem {
 }
 
 impl CitationCompactionTurnItem {
+    fn ref_id(&self) -> &str {
+        match self {
+            Self::User { ref_id, .. }
+            | Self::Assistant { ref_id, .. }
+            | Self::ToolExchange { ref_id, .. } => ref_id,
+        }
+    }
+
     pub(crate) fn user(history_id: u64, ref_id: String, text: String) -> Self {
         Self::User {
             history_id,

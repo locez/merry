@@ -64,7 +64,6 @@ use self::diagnostics::{
 };
 use self::journal_emission::{
     send_cancelled_event, send_cancelled_if_requested, send_normal_event,
-    stream_model_with_retry_policy,
 };
 #[cfg(test)]
 use self::memory_activation::memory_activation_seed_from_step_input;

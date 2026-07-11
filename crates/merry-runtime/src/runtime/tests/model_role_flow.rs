@@ -2,6 +2,9 @@ use super::*;
 use merry_core::{PendingToolCallBatch, ToolCallBatchId};
 use std::time::Duration;
 
+#[path = "model_role_flow/compaction_generation.rs"]
+mod compaction_generation;
+
 #[test]
 fn role_model_config_stores_all_roles_independently_and_overrides_same_role() {
     let first_primary_model = named_model("fake/primary-v1");
@@ -520,6 +523,17 @@ async fn hard_watermark_auto_compaction_emits_lifecycle_events() {
         Some(5_120),
         "automatic compaction budget must come from the 64k primary window"
     );
+    let compactor_request = &compactor.recorded_requests()[0];
+    let compactor_input = compactor_request
+        .input()
+        .iter()
+        .map(|item| serde_json::to_string(item).expect("compactor input serializes"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(compactor_input.contains("Old compressible ballast."));
+    assert!(!compactor_input.contains("Retained tail ballast."));
+    assert!(!compactor_input.contains("Trigger automatic compaction with a small current input."));
+    assert!(compactor_request.tools().is_empty());
 }
 
 #[tokio::test(flavor = "current_thread")]

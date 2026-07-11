@@ -7,10 +7,12 @@ mod reference;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use candidate::PersistedCitationBackedCheckpoint;
 pub use candidate::{
     CheckpointEntry, CheckpointEntryId, CheckpointHandoff, CheckpointHandoffAction,
     CheckpointSection, CheckpointSections, CompactedCheckpointCandidate,
+};
+pub(crate) use candidate::{
+    PersistedCitationBackedCheckpoint, compacted_checkpoint_candidate_schema,
 };
 pub use domain::CitationBackedCheckpoint;
 pub use reference::{CheckpointRef, CheckpointRefManifest, CheckpointSourceKind};

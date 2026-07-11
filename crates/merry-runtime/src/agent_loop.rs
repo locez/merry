@@ -1436,6 +1436,8 @@ fn runtime_error_code(error: &RuntimeError) -> &'static str {
         RuntimeError::SessionStore { .. } => "session_store",
         RuntimeError::MissingModelProvider { .. } => "missing_model_provider",
         RuntimeError::CompactionModelRequest { .. } => "compaction_model_request",
+        RuntimeError::CompactionModelWindowTooSmall { .. } => "compaction_model_window_too_small",
+        RuntimeError::CompactionModelInputTooLarge { .. } => "compaction_model_input_too_large",
         RuntimeError::CompactionModelSetup { .. } => "compaction_model_setup",
         RuntimeError::CompactionModelStream { .. } => "compaction_model_stream",
     }

@@ -23,7 +23,6 @@ use crate::{
     },
     context::{CompactedCheckpoint, CompactedCheckpointSummary},
     permission::PermissionReviewContextEntry,
-    token_estimate::estimate_text_tokens,
 };
 use merry_core::{ArtifactId, EvidenceLocator, EvidenceRef, ToolCallId};
 use std::collections::{BTreeMap, BTreeSet};
@@ -298,14 +297,6 @@ impl SessionState {
         let checkpoint_id = input.manifest().checkpoint_id().clone();
         let citation =
             checkpoint_from_candidate_json(checkpoint_id.clone(), &input, candidate_json)?;
-        let estimated_tokens = estimate_text_tokens(&citation.render_prompt_text());
-        if estimated_tokens > input.resolved_budget().output_token_limit() {
-            return Err(CompactionError::RenderedCheckpointTooLarge {
-                estimated_tokens,
-                max_tokens: input.resolved_budget().output_token_limit(),
-            }
-            .into());
-        }
         let compacted = CompactedCheckpoint::from_citation_backed(citation)?;
 
         let covered_count = input.covered_history_ids().len();

@@ -1,15 +1,13 @@
-use super::{
-    RuntimeInner, provider_request::resolve_request_context_window, stream_model_with_retry_policy,
-};
+use super::{RuntimeInner, provider_request::resolve_request_context_window};
 use crate::{
     CitationCompactionInput, CitationCompactionPolicy, CompactionError, CompactionOutcome,
     ResolvedCitationCompactionBudget, ResolvedContextWindow, RuntimeError, RuntimeModelRole,
     compaction::{
         CompactionPreparation, CompactionWindowBudget, compile_citation_compaction_model_request,
+        generate_validated_compaction_candidate, validate_compaction_model_window,
     },
 };
-use futures_util::StreamExt;
-use merry_llm::{FinishReason, ModelEvent, ModelOutput, ModelStreamContext};
+use merry_llm::ModelStreamContext;
 use tokio_util::sync::CancellationToken;
 
 pub(super) fn default_automatic_compaction_policy() -> CitationCompactionPolicy {
@@ -67,6 +65,7 @@ async fn resolved_primary_context_window(
 pub(super) async fn compact_prepared_context(
     inner: &RuntimeInner,
     input: CitationCompactionInput,
+    primary_window_tokens: u64,
     token: CancellationToken,
 ) -> Result<CompactionOutcome, RuntimeError> {
     if token.is_cancelled() {
@@ -77,7 +76,7 @@ pub(super) async fn compact_prepared_context(
         });
     }
 
-    compact_prepared_context_inner(inner, input, token).await
+    compact_prepared_context_inner(inner, input, primary_window_tokens, token).await
 }
 
 pub(super) async fn compact_context_once_inner(
@@ -93,12 +92,13 @@ pub(super) async fn compact_context_once_inner(
         });
     }
 
-    let input = compaction_input_for_policy(inner, policy).await?;
+    let primary_window = resolved_primary_context_window(inner).await?;
+    let input = build_compaction_input(inner, policy, primary_window).await?;
     let Some(input) = input else {
         return Ok(None);
     };
 
-    compact_prepared_context_inner(inner, input, token)
+    compact_prepared_context_inner(inner, input, primary_window.tokens(), token)
         .await
         .map(Some)
 }
@@ -106,6 +106,7 @@ pub(super) async fn compact_context_once_inner(
 async fn compact_prepared_context_inner(
     inner: &RuntimeInner,
     input: CitationCompactionInput,
+    primary_window_tokens: u64,
     token: CancellationToken,
 ) -> Result<CompactionOutcome, RuntimeError> {
     let provider_config = inner
@@ -119,75 +120,33 @@ async fn compact_prepared_context_inner(
         .map_err(|error| RuntimeError::CompactionModelRequest {
             message: error.to_string(),
         })?;
+    let provider = provider_config.provider();
+    validate_compaction_model_window(
+        provider.capabilities(),
+        &request,
+        primary_window_tokens,
+        &inner.session_id,
+        provider.name(),
+    )?;
     let stream_context =
         ModelStreamContext::new(token.clone()).with_prompt_cache_key(inner.session_id.clone());
-    let provider = provider_config.provider();
-    let stream = stream_model_with_retry_policy(
-        provider,
-        provider_config.retry_policy(),
-        request,
-        stream_context,
-        None,
-    )
-    .await
-    .map_err(|error| RuntimeError::CompactionModelSetup {
-        message: error.to_string(),
-    })?;
-    let candidate_json = collect_compaction_candidate_json(stream, token).await?;
+    let candidate_json =
+        generate_validated_compaction_candidate(provider, request, stream_context, &input, &token)
+            .await?;
 
-    let mut session = inner.session.lock().await;
+    let mut session = tokio::select! {
+        biased;
+        () = token.cancelled() => return Err(compaction_cancelled_before_install()),
+        session = inner.session.lock() => session,
+    };
+    if token.is_cancelled() {
+        return Err(compaction_cancelled_before_install());
+    }
     session.install_citation_compaction_candidate(input, &candidate_json)
 }
 
-async fn collect_compaction_candidate_json(
-    mut stream: merry_llm::ModelEventStream,
-    token: CancellationToken,
-) -> Result<String, RuntimeError> {
-    loop {
-        let item = tokio::select! {
-            biased;
-            () = token.cancelled() => {
-                return Err(RuntimeError::CompactionModelStream {
-                    message: "compaction cancelled while reading model stream".to_owned(),
-                });
-            }
-            item = stream.next() => item,
-        };
-
-        match item {
-            Some(Ok(ModelEvent::Started)) => {}
-            Some(Ok(ModelEvent::OutputTextDelta { .. })) => {}
-            Some(Ok(ModelEvent::ToolCallRequested { .. })) => {
-                return Err(RuntimeError::CompactionModelStream {
-                    message: "compaction model requested a tool call".to_owned(),
-                });
-            }
-            Some(Ok(ModelEvent::Completed { response })) => {
-                if response.finish_reason() != FinishReason::Stop {
-                    return Err(RuntimeError::CompactionModelStream {
-                        message: format!(
-                            "compaction model finished with {:?}",
-                            response.finish_reason()
-                        ),
-                    });
-                }
-                let [ModelOutput::Text { text }] = response.outputs() else {
-                    return Err(RuntimeError::CompactionModelStream {
-                        message: "compaction model must return exactly one text output".to_owned(),
-                    });
-                };
-                return Ok(text.clone());
-            }
-            Some(Err(error)) => {
-                return Err(RuntimeError::CompactionModelStream {
-                    message: error.to_string(),
-                });
-            }
-            None => {
-                return Err(RuntimeError::CompactionModelStream {
-                    message: "compaction model stream ended before completion".to_owned(),
-                });
-            }
-        }
+fn compaction_cancelled_before_install() -> RuntimeError {
+    RuntimeError::CompactionModelStream {
+        message: "compaction cancelled before checkpoint install".to_owned(),
     }
 }
