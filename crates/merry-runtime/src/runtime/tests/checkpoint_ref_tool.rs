@@ -209,7 +209,7 @@ async fn checkpoint_ref_tool_returns_bounded_excerpt_json() {
         let mut session = runtime.inner.session.lock().await;
         session.record_session_started_if_needed();
         session
-            .record_tool_call_pending(pending.clone())
+            .record_test_tool_call_pending(pending.clone())
             .expect("pending call should record");
     }
 
@@ -291,7 +291,7 @@ async fn assert_checkpoint_ref_not_found(call_id: &str, ref_id: &str, runtime: R
         let mut session = runtime.inner.session.lock().await;
         session.record_session_started_if_needed();
         session
-            .record_tool_call_pending(pending.clone())
+            .record_test_tool_call_pending(pending.clone())
             .expect("pending call should record");
     }
 
@@ -347,7 +347,7 @@ async fn checkpoint_ref_tool_invalid_input_uses_schema_validation() {
             let mut session = runtime.inner.session.lock().await;
             session.record_session_started_if_needed();
             session
-                .record_tool_call_pending(pending.clone())
+                .record_test_tool_call_pending(pending.clone())
                 .expect("pending call should record");
         }
 

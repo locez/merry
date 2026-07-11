@@ -3,6 +3,7 @@ use crate::{
     ActionExecutionEvidence, RuntimeError,
     artifact::{ArtifactContent, ArtifactError},
     ledger::{LedgerFactKind, LedgerUpdateKind},
+    session::transcript::ToolResultPromptProjection,
 };
 use merry_core::{
     ArtifactId, ArtifactKind, ArtifactRef, ErrorInfo, RuntimeJournalEvent, RuntimeJournalPayload,
@@ -33,6 +34,12 @@ impl SessionState {
             };
         };
 
+        self.transcript
+            .model_turn_id_for_tool_call(&call_id)
+            .ok_or_else(|| RuntimeError::TranscriptToolCallMissing {
+                call_id: call_id.clone(),
+            })?;
+
         let artifact_sequence = self.next_sequence();
         let artifact = ArtifactRef::new(
             super::super::artifacts::final_output_id(artifact_sequence),
@@ -40,11 +47,21 @@ impl SessionState {
         );
         let content = ArtifactContent::json(json.clone());
         let content_bytes = content.as_bytes().len();
-        let recorded = self.record_artifact_state(artifact, content)?;
+        self.artifacts.ensure_recordable(&artifact, &content)?;
+        let result = ToolCallResult::succeeded(call_id.clone(), artifact.clone());
+        let mut transcript = self.transcript.clone();
+        transcript.hide_tool_call(&call_id)?;
+        transcript.push_tool_result(
+            call_id.clone(),
+            result,
+            artifact.id().clone(),
+            ToolResultPromptProjection::Hidden,
+        )?;
+        let recorded = self.artifacts.record_preflighted(artifact, content);
         Self::trace_artifact_record(self.session_id.as_str(), &recorded, content_bytes);
+        self.transcript = transcript;
         self.pending_tool_calls.remove(pending_index);
         self.resolved_tool_calls.insert(call_id.clone());
-        self.transcript.remove_tool_call(&call_id);
 
         let mut events = Vec::with_capacity(if self.session_started { 2 } else { 3 });
         if let Some(started) = self.record_session_started_if_needed() {
@@ -90,17 +107,29 @@ impl SessionState {
             };
         };
 
-        self.validate_tool_result_content(&result, &content)?;
-        let content_bytes = content.as_bytes().len();
-        let recorded = self.record_artifact_state(result.artifact().clone(), content)?;
-        Self::trace_artifact_record(self.session_id.as_str(), &recorded, content_bytes);
-        debug_assert_eq!(&recorded, result.artifact());
+        self.transcript
+            .model_turn_id_for_tool_call(result.call_id())
+            .ok_or_else(|| RuntimeError::TranscriptToolCallMissing {
+                call_id: result.call_id().clone(),
+            })?;
 
-        self.transcript.push_tool_result(
+        self.validate_tool_result_content(&result, &content)?;
+        self.artifacts
+            .ensure_recordable(result.artifact(), &content)?;
+        let mut transcript = self.transcript.clone();
+        transcript.push_tool_result(
             result.call_id().clone(),
             result.clone(),
             result.artifact().id().clone(),
+            ToolResultPromptProjection::Full,
         )?;
+        let content_bytes = content.as_bytes().len();
+        let recorded = self
+            .artifacts
+            .record_preflighted(result.artifact().clone(), content);
+        Self::trace_artifact_record(self.session_id.as_str(), &recorded, content_bytes);
+        debug_assert_eq!(&recorded, result.artifact());
+        self.transcript = transcript;
         let pending = self.pending_tool_calls.remove(pending_index);
         let pending_for_skill_event = pending.clone();
         self.resolved_tool_calls.insert(result.call_id().clone());

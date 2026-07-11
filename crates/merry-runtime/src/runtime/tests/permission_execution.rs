@@ -25,7 +25,7 @@ async fn request_permissions_invalid_arguments_skip_review_and_runner() {
         let mut session = runtime.inner.session.lock().await;
         session.record_session_started_if_needed();
         session
-            .record_tool_call_pending(pending.clone())
+            .record_test_tool_call_pending(pending.clone())
             .expect("pending call should record");
     }
 

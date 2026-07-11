@@ -141,6 +141,25 @@ pub enum RuntimeError {
     #[error("transcript item id space is exhausted")]
     TranscriptItemIdExhausted,
 
+    /// Model turn ids are exhausted for this session.
+    #[error("model turn id space is exhausted")]
+    ModelTurnIdExhausted,
+
+    /// A transcript mutation referenced a model turn that is not recorded.
+    #[error("model turn {model_turn_id} is not recorded")]
+    UnknownModelTurn { model_turn_id: u64 },
+
+    /// A transcript mutation attempted to change a terminal or incompatible turn.
+    #[error("model turn {model_turn_id} cannot {attempted} from its current status")]
+    InvalidModelTurnTransition {
+        model_turn_id: u64,
+        attempted: &'static str,
+    },
+
+    /// A pending tool call was not represented in the durable transcript.
+    #[error("tool call {call_id} has no originating transcript item")]
+    TranscriptToolCallMissing { call_id: ToolCallId },
+
     /// A core protocol value could not be constructed.
     #[error("core protocol error while constructing runtime state: {source}")]
     Core {

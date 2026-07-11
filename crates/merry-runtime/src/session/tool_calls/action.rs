@@ -1,9 +1,11 @@
 use super::SessionState;
 use crate::{
     ActionExecutionEvidence, ActionProposal, RuntimeError, ToolActionKind,
-    action_audit::ActionAuditPolicy, action_policy::ActionPolicyDecision,
-    artifact::ArtifactContent, ledger::LedgerFactKind,
-    session::tool_result::ProposedToolExecutionOutcome,
+    action_audit::ActionAuditPolicy,
+    action_policy::ActionPolicyDecision,
+    artifact::ArtifactContent,
+    ledger::LedgerFactKind,
+    session::{tool_result::ProposedToolExecutionOutcome, transcript::ToolResultPromptProjection},
 };
 use merry_core::{
     ArtifactRef, ErrorInfo, PendingToolCall, RuntimeJournalEvent, RuntimeJournalPayload,
@@ -62,6 +64,12 @@ impl SessionState {
             };
         };
 
+        self.transcript
+            .model_turn_id_for_tool_call(&call_id)
+            .ok_or_else(|| RuntimeError::TranscriptToolCallMissing {
+                call_id: call_id.clone(),
+            })?;
+
         let artifact_kind = self.tool_result_artifact_kind(&content)?;
         let artifact = ArtifactRef::new(self.next_tool_result_artifact_id(), artifact_kind);
         let result = match status {
@@ -86,6 +94,13 @@ impl SessionState {
         self.validate_tool_result_content(&result, &content)?;
         self.artifacts
             .ensure_recordable(result.artifact(), &content)?;
+        let mut transcript = self.transcript.clone();
+        transcript.push_tool_result(
+            result.call_id().clone(),
+            result.clone(),
+            result.artifact().id().clone(),
+            ToolResultPromptProjection::Full,
+        )?;
 
         let pending = self.pending_tool_calls.remove(pending_index);
         let pending_for_skill_event = pending.clone();
@@ -110,11 +125,7 @@ impl SessionState {
             .record_preflighted(result.artifact().clone(), content);
         Self::trace_artifact_record(self.session_id.as_str(), &recorded, content_bytes);
         debug_assert_eq!(&recorded, result.artifact());
-        self.transcript.push_tool_result(
-            result.call_id().clone(),
-            result.clone(),
-            result.artifact().id().clone(),
-        )?;
+        self.transcript = transcript;
         self.resolved_tool_calls.insert(result.call_id().clone());
 
         events.push(self.record_event(
@@ -165,6 +176,12 @@ impl SessionState {
             };
         };
 
+        self.transcript
+            .model_turn_id_for_tool_call(pending.id())
+            .ok_or_else(|| RuntimeError::TranscriptToolCallMissing {
+                call_id: pending.id().clone(),
+            })?;
+
         let artifact_kind = self.tool_result_artifact_kind(&content)?;
         let artifact = ArtifactRef::new(self.next_tool_result_artifact_id(), artifact_kind);
         let result = ToolCallResult::failed(pending.id().clone(), artifact, diagnostic);
@@ -172,6 +189,13 @@ impl SessionState {
         self.validate_tool_result_content(&result, &content)?;
         self.artifacts
             .ensure_recordable(result.artifact(), &content)?;
+        let mut transcript = self.transcript.clone();
+        transcript.push_tool_result(
+            result.call_id().clone(),
+            result.clone(),
+            result.artifact().id().clone(),
+            ToolResultPromptProjection::Full,
+        )?;
 
         let pending = self.pending_tool_calls.remove(pending_index);
         if let Some(started) = self.record_session_started_if_needed() {
@@ -185,11 +209,7 @@ impl SessionState {
                 .record_preflighted(result.artifact().clone(), content);
             Self::trace_artifact_record(self.session_id.as_str(), &artifact, content_bytes);
             debug_assert_eq!(artifact, *result.artifact());
-            self.transcript.push_tool_result(
-                result.call_id().clone(),
-                result.clone(),
-                result.artifact().id().clone(),
-            )?;
+            self.transcript = transcript;
             self.resolved_tool_calls.insert(result.call_id().clone());
             return Ok(vec![
                 started,
@@ -214,11 +234,7 @@ impl SessionState {
             .record_preflighted(result.artifact().clone(), content);
         Self::trace_artifact_record(self.session_id.as_str(), &artifact, content_bytes);
         debug_assert_eq!(artifact, *result.artifact());
-        self.transcript.push_tool_result(
-            result.call_id().clone(),
-            result.clone(),
-            result.artifact().id().clone(),
-        )?;
+        self.transcript = transcript;
         self.resolved_tool_calls.insert(result.call_id().clone());
         Ok(vec![
             self.record_event(

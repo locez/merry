@@ -1,4 +1,4 @@
-use merry_core::SessionId;
+use merry_core::{ArtifactId, SessionId};
 use std::{
     env,
     ffi::OsStr,
@@ -26,6 +26,12 @@ pub enum SessionStoreError {
     },
     #[error("session document format version {actual} is not supported")]
     UnsupportedFormatVersion { actual: u32 },
+    #[error(
+        "session {session_id} uses legacy compacted history whose covered source transcript was physically deleted and cannot satisfy exact evidence recovery"
+    )]
+    LegacyCompactedHistoryUnavailable { session_id: SessionId },
+    #[error("legacy user message migration collides with existing artifact id {artifact_id}")]
+    LegacyUserArtifactCollision { artifact_id: ArtifactId },
     #[error("session document id {actual} does not match requested session {requested}")]
     SessionIdMismatch {
         requested: SessionId,

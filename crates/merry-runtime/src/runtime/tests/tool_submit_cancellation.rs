@@ -16,7 +16,7 @@ async fn cancelling_unregistered_tool_while_waiting_to_submit_keeps_pending() {
 
     let mut initial_session_guard = runtime.inner.session.lock().await;
     initial_session_guard
-        .record_tool_call_pending(pending.clone())
+        .record_test_tool_call_pending(pending.clone())
         .expect("pending call should record");
     let projection_before = initial_session_guard.ledger_projection();
 
@@ -90,7 +90,7 @@ async fn cancelling_registered_tool_after_success_before_submit_keeps_pending() 
 
     let mut initial_session_guard = runtime.inner.session.lock().await;
     initial_session_guard
-        .record_tool_call_pending(pending.clone())
+        .record_test_tool_call_pending(pending.clone())
         .expect("pending call should record");
     let projection_before = initial_session_guard.ledger_projection();
 

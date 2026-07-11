@@ -8,13 +8,232 @@ use merry_core::{
 };
 
 #[tokio::test]
+async fn session_state_v2_round_trip_preserves_turns_user_artifact_and_projections() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = FileSessionStore::new(temp.path());
+    let mut session = SessionState::new(session_id());
+    let text_turn = session.begin_model_turn().expect("text turn should begin");
+    session
+        .record_user_message_body(text_turn, "  exact persisted user text\n")
+        .expect("user message should record");
+    session
+        .record_assistant_text_output(text_turn, "persisted assistant".to_owned())
+        .expect("assistant output should record");
+    session
+        .close_model_response(text_turn, false)
+        .expect("text response should close");
+
+    let final_turn = session
+        .begin_model_turn()
+        .expect("final-output turn should begin");
+    let final_call = pending_tool_call("persisted-final-output");
+    session
+        .record_tool_call_pending(final_turn, final_call.clone())
+        .expect("final-output call should record");
+    session
+        .close_model_response(final_turn, true)
+        .expect("final-output response should close");
+    session
+        .record_final_output(final_call.id().clone(), r#"{"ok":true}"#.to_owned())
+        .expect("final output should record");
+
+    let aborted_turn = session
+        .begin_model_turn()
+        .expect("aborted turn should begin");
+    session
+        .abort_model_turn(aborted_turn)
+        .expect("aborted turn should close");
+    let transcript_before = session.transcript.persisted();
+
+    session.save_to(&store).await.expect("session should save");
+    let loaded = SessionState::load_from(&store, &session_id())
+        .await
+        .expect("session should load");
+
+    assert_eq!(loaded.transcript.persisted(), transcript_before);
+    assert_eq!(
+        loaded
+            .transcript_snapshot()
+            .expect("full transcript should remain readable")
+            .len(),
+        4,
+        "hidden final-output exchange remains in the full transcript view"
+    );
+    assert_eq!(
+        loaded
+            .read_artifact_content(&artifact_id("user-message-0"))
+            .expect("user artifact should load")
+            .as_text(),
+        Some("  exact persisted user text\n")
+    );
+    assert_eq!(
+        loaded.model_turn_status(text_turn),
+        Some(ModelTurnStatus::Completed)
+    );
+    assert_eq!(
+        loaded.model_turn_status(final_turn),
+        Some(ModelTurnStatus::Completed)
+    );
+    assert_eq!(
+        loaded.model_turn_status(aborted_turn),
+        Some(ModelTurnStatus::Aborted)
+    );
+    assert!(matches!(
+        &transcript_before.items[2],
+        crate::session::transcript::PersistedTranscriptItem::ToolCall {
+            prompt_projection: crate::session::transcript::ToolCallPromptProjection::Hidden,
+            ..
+        }
+    ));
+    assert!(matches!(
+        &transcript_before.items[3],
+        crate::session::transcript::PersistedTranscriptItem::ToolResult {
+            prompt_projection: crate::session::transcript::ToolResultPromptProjection::Hidden,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn session_state_v1_without_compaction_migrates_to_legacy_turn_and_user_artifact() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = FileSessionStore::new(temp.path());
+    let document = legacy_v1_document(vec![serde_json::json!({
+        "type": "user_message",
+        "id": 0,
+        "text": "  exact legacy user text\n",
+        "origin": "external_user"
+    })]);
+    store
+        .write_state_bytes(
+            &session_id(),
+            &serde_json::to_vec_pretty(&document).expect("legacy document should serialize"),
+        )
+        .await
+        .expect("legacy state should write");
+
+    let loaded = SessionState::load_from(&store, &session_id())
+        .await
+        .expect("uncompacted V1 state should migrate");
+
+    assert_eq!(
+        loaded.model_turn_status(crate::session::ModelTurnId::new(0)),
+        Some(ModelTurnStatus::Completed)
+    );
+    assert_eq!(
+        loaded
+            .read_artifact_content(&artifact_id("user-message-0"))
+            .expect("migrated user artifact should load")
+            .as_text(),
+        Some("  exact legacy user text\n")
+    );
+    let next_turn = loaded.transcript.persisted().next_model_turn_id;
+    assert_eq!(next_turn, 1);
+    assert!(matches!(
+        &loaded.transcript.persisted().items[0],
+        crate::session::transcript::PersistedTranscriptItem::UserMessage {
+            model_turn_id,
+            artifact_id,
+            ..
+        } if *model_turn_id == crate::session::ModelTurnId::new(0)
+            && artifact_id.as_str() == "user-message-0"
+    ));
+}
+
+#[tokio::test]
+async fn session_state_v1_with_compacted_checkpoint_is_rejected_as_exact_history_unavailable() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = FileSessionStore::new(temp.path());
+    let mut document = legacy_v1_document(Vec::new());
+    document["compacted_checkpoint"] = serde_json::to_value(
+        citation_plain_runtime_checkpoint_for_tests("legacy-checkpoint", "deleted history")
+            .persisted(),
+    )
+    .expect("checkpoint should serialize");
+    store
+        .write_state_bytes(
+            &session_id(),
+            &serde_json::to_vec_pretty(&document).expect("legacy document should serialize"),
+        )
+        .await
+        .expect("legacy state should write");
+
+    let error = SessionState::load_from(&store, &session_id())
+        .await
+        .expect_err("compacted V1 state should be rejected");
+
+    assert!(matches!(
+        error,
+        crate::SessionStoreError::LegacyCompactedHistoryUnavailable { .. }
+    ));
+    assert!(error.to_string().contains("physically deleted"));
+}
+
+#[tokio::test]
+async fn session_state_v1_user_artifact_collision_is_rejected_without_overwrite() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = FileSessionStore::new(temp.path());
+    let mut document = legacy_v1_document(vec![serde_json::json!({
+        "type": "user_message",
+        "id": 0,
+        "text": "legacy source",
+        "origin": "external_user"
+    })]);
+    document["artifacts"] = serde_json::json!([{
+        "artifact": ArtifactRef::new(artifact_id("user-message-0"), ArtifactKind::Text),
+        "content": ArtifactContent::text("collision")
+    }]);
+    store
+        .write_state_bytes(
+            &session_id(),
+            &serde_json::to_vec_pretty(&document).expect("legacy document should serialize"),
+        )
+        .await
+        .expect("legacy state should write");
+
+    let error = SessionState::load_from(&store, &session_id())
+        .await
+        .expect_err("colliding V1 user artifact should be rejected");
+
+    assert!(matches!(
+        error,
+        crate::SessionStoreError::LegacyUserArtifactCollision { .. }
+    ));
+}
+
+fn legacy_v1_document(items: Vec<serde_json::Value>) -> serde_json::Value {
+    serde_json::json!({
+        "format_version": 1,
+        "session_id": session_id(),
+        "next_sequence": 0,
+        "session_started": false,
+        "ledger": [],
+        "artifacts": [],
+        "compacted_checkpoint": null,
+        "context_entries": [],
+        "transcript": {
+            "items": items,
+            "next_id": 1
+        },
+        "resolved_tool_calls": [],
+        "usage": null,
+        "task_anchor": null,
+        "registries": {
+            "judgments": { "records": [] },
+            "summary_draft_promotions": { "records": [] },
+            "action_audits": { "records": [] }
+        }
+    })
+}
+
+#[tokio::test]
 async fn session_state_save_load_round_trips_next_reasoning_state() {
     let temp = tempfile::tempdir().expect("tempdir");
     let store = FileSessionStore::new(temp.path());
     let mut session = SessionState::new(session_id());
 
     session
-        .record_user_message_body("remember this user fact")
+        .record_test_user_message_body("remember this user fact")
         .expect("user message records");
     let artifact = ArtifactRef::new(artifact_id("resume-source"), ArtifactKind::Text);
     session
@@ -36,7 +255,7 @@ async fn session_state_save_load_round_trips_next_reasoning_state() {
         "resume checkpoint text",
     ));
     session
-        .record_tool_call_pending(pending_tool_call("call-resume"))
+        .record_test_tool_call_pending(pending_tool_call("call-resume"))
         .expect("pending call records");
     session
         .submit_tool_result(
@@ -80,7 +299,7 @@ async fn session_state_save_rejects_pending_tool_calls() {
     let mut session = SessionState::new(session_id());
 
     session
-        .record_tool_call_pending(pending_tool_call("pending-save"))
+        .record_test_tool_call_pending(pending_tool_call("pending-save"))
         .expect("pending records");
 
     let error = session
@@ -157,6 +376,192 @@ async fn session_state_load_rejects_context_evidence_without_artifact() {
         .await
         .expect_err("corrupted context evidence is rejected");
     assert!(error.to_string().contains("session document is invalid"));
+}
+
+#[test]
+fn session_state_save_rejects_in_progress_model_turn() {
+    let mut session = SessionState::new(session_id());
+    session
+        .begin_model_turn()
+        .expect("in-progress turn fixture should begin");
+
+    let error = session
+        .persistable_bundle()
+        .expect_err("in-progress model turns are not resume-safe");
+
+    assert!(matches!(
+        error,
+        crate::SessionStoreError::InvalidDocument { .. }
+    ));
+}
+
+#[tokio::test]
+async fn session_state_v2_load_rejects_missing_user_source_artifact() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = FileSessionStore::new(temp.path());
+    let mut session = SessionState::new(session_id());
+    session
+        .record_test_user_message_body("exact source must survive resume")
+        .expect("user source records");
+    session.save_to(&store).await.expect("session saves");
+
+    let mut document: serde_json::Value = serde_json::from_slice(
+        &store
+            .read_state_bytes(&session_id())
+            .await
+            .expect("state reads"),
+    )
+    .expect("state is json");
+    document["artifacts"] = serde_json::Value::Array(Vec::new());
+    store
+        .write_state_bytes(
+            &session_id(),
+            &serde_json::to_vec_pretty(&document).expect("corrupt document serializes"),
+        )
+        .await
+        .expect("corrupt state writes");
+
+    let error = SessionState::load_from(&store, &session_id())
+        .await
+        .expect_err("missing transcript source artifact must reject resume");
+    assert!(matches!(
+        error,
+        crate::SessionStoreError::InvalidDocument { .. }
+    ));
+}
+
+#[tokio::test]
+async fn session_state_v2_load_rejects_nonterminal_or_unresolved_turns() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = FileSessionStore::new(temp.path());
+    SessionState::new(session_id())
+        .save_to(&store)
+        .await
+        .expect("empty session saves");
+    let base: serde_json::Value = serde_json::from_slice(
+        &store
+            .read_state_bytes(&session_id())
+            .await
+            .expect("state reads"),
+    )
+    .expect("state is json");
+
+    let mut in_progress = base.clone();
+    in_progress["transcript"] = serde_json::json!({
+        "items": [],
+        "next_id": 0,
+        "model_turns": { "1": "in_progress" },
+        "next_model_turn_id": 2
+    });
+    store
+        .write_state_bytes(
+            &session_id(),
+            &serde_json::to_vec_pretty(&in_progress).expect("document serializes"),
+        )
+        .await
+        .expect("in-progress state writes");
+    assert!(matches!(
+        SessionState::load_from(&store, &session_id())
+            .await
+            .expect_err("in-progress turn must reject resume"),
+        crate::SessionStoreError::InvalidDocument { .. }
+    ));
+
+    let call = pending_tool_call("unresolved-completed-call");
+    let mut unresolved = base;
+    unresolved["transcript"] = serde_json::json!({
+        "items": [{
+            "type": "tool_call",
+            "id": 0,
+            "model_turn_id": 1,
+            "call": call,
+            "prompt_projection": "full"
+        }],
+        "next_id": 1,
+        "model_turns": { "1": "completed" },
+        "next_model_turn_id": 2
+    });
+    store
+        .write_state_bytes(
+            &session_id(),
+            &serde_json::to_vec_pretty(&unresolved).expect("document serializes"),
+        )
+        .await
+        .expect("unresolved state writes");
+    assert!(matches!(
+        SessionState::load_from(&store, &session_id())
+            .await
+            .expect_err("completed turn with unresolved call must reject resume"),
+        crate::SessionStoreError::InvalidDocument { .. }
+    ));
+}
+
+#[tokio::test]
+async fn session_state_v2_load_rejects_mismatched_tool_result_identity() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = FileSessionStore::new(temp.path());
+    let mut session = SessionState::new(session_id());
+    let call = pending_tool_call("persisted-result-call");
+    session
+        .record_test_tool_call_pending(call.clone())
+        .expect("call records");
+    session
+        .submit_tool_result(
+            ToolCallResult::succeeded(
+                call.id().clone(),
+                ArtifactRef::new(artifact_id("persisted-result-artifact"), ArtifactKind::Text),
+            ),
+            ArtifactContent::text("result"),
+        )
+        .expect("result records");
+    session.save_to(&store).await.expect("session saves");
+
+    let mut document: serde_json::Value = serde_json::from_slice(
+        &store
+            .read_state_bytes(&session_id())
+            .await
+            .expect("state reads"),
+    )
+    .expect("state is json");
+    let valid_document = document.clone();
+    document["transcript"]["items"][1]["result"]["call_id"] =
+        serde_json::Value::String("different-result-call".to_owned());
+    store
+        .write_state_bytes(
+            &session_id(),
+            &serde_json::to_vec_pretty(&document).expect("document serializes"),
+        )
+        .await
+        .expect("mismatched result state writes");
+
+    assert!(matches!(
+        SessionState::load_from(&store, &session_id())
+            .await
+            .expect_err("mismatched result identity must reject resume"),
+        crate::SessionStoreError::InvalidDocument { .. }
+    ));
+
+    let mut duplicate_result = valid_document;
+    let mut repeated = duplicate_result["transcript"]["items"][1].clone();
+    repeated["id"] = serde_json::Value::from(2);
+    duplicate_result["transcript"]["items"]
+        .as_array_mut()
+        .expect("transcript items are an array")
+        .push(repeated);
+    duplicate_result["transcript"]["next_id"] = serde_json::Value::from(3);
+    store
+        .write_state_bytes(
+            &session_id(),
+            &serde_json::to_vec_pretty(&duplicate_result).expect("document serializes"),
+        )
+        .await
+        .expect("duplicate result state writes");
+    assert!(matches!(
+        SessionState::load_from(&store, &session_id())
+            .await
+            .expect_err("duplicate tool results must reject resume"),
+        crate::SessionStoreError::InvalidDocument { .. }
+    ));
 }
 
 #[tokio::test]
@@ -236,7 +641,7 @@ async fn session_state_save_load_round_trips_recoverable_registries() {
 
     let executed_call = pending_tool_call("registry-executed-call");
     session
-        .record_tool_call_pending(executed_call.clone())
+        .record_test_tool_call_pending(executed_call.clone())
         .expect("pending executed call records");
     let proposal_evidence = ActionProposalEvidence::WorkspacePatch(
         WorkspacePatchProposal::new(
@@ -292,7 +697,7 @@ async fn session_state_save_load_round_trips_recoverable_registries() {
     let diagnostic = ErrorInfo::new("action_policy_denied", "blocked by persistence test")
         .expect("valid diagnostic");
     session
-        .record_tool_call_pending(call.clone())
+        .record_test_tool_call_pending(call.clone())
         .expect("pending call records");
     session
         .submit_denied_tool_action(

@@ -54,7 +54,7 @@ async fn registered_tool_arguments_are_validated_before_execution() {
         let mut session = runtime.inner.session.lock().await;
         session.record_session_started_if_needed();
         session
-            .record_tool_call_pending(pending.clone())
+            .record_test_tool_call_pending(pending.clone())
             .expect("pending call should record");
     }
 

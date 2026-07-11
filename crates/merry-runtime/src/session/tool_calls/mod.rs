@@ -1,8 +1,8 @@
-use super::SessionState;
-use crate::{RuntimeError, ledger::LedgerFactKind};
+use super::{ModelTurnId, SessionState, artifacts::assistant_output_id};
+use crate::{RuntimeError, artifact::ArtifactContent, ledger::LedgerFactKind};
 use merry_core::{
-    ErrorInfo, PendingToolCall, PendingToolCallBatch, RuntimeJournalEvent, RuntimeJournalPayload,
-    ToolCallId,
+    ArtifactKind, ArtifactRef, ErrorInfo, PendingToolCall, PendingToolCallBatch,
+    RuntimeJournalEvent, RuntimeJournalPayload, ToolCallBatchId, ToolCallId,
 };
 
 mod action;
@@ -25,8 +25,10 @@ impl SessionState {
         !self.pending_tool_calls.is_empty()
     }
 
+    #[cfg(test)]
     pub(crate) fn record_tool_call_pending(
         &mut self,
+        turn_id: ModelTurnId,
         call: PendingToolCall,
     ) -> Result<RuntimeJournalEvent, ErrorInfo> {
         if self
@@ -44,9 +46,11 @@ impl SessionState {
             ));
         }
 
-        self.transcript
-            .push_tool_call(call.clone())
+        let mut transcript = self.transcript.clone();
+        transcript
+            .push_tool_call(turn_id, call.clone())
             .map_err(transcript_record_diagnostic)?;
+        self.transcript = transcript;
         self.pending_tool_calls.push(call.clone());
         Ok(self.record_event(
             RuntimeJournalPayload::ToolCallPending { call },
@@ -54,8 +58,10 @@ impl SessionState {
         ))
     }
 
+    #[cfg(test)]
     pub(crate) fn record_tool_call_batch_pending(
         &mut self,
+        turn_id: ModelTurnId,
         batch: PendingToolCallBatch,
     ) -> Result<RuntimeJournalEvent, ErrorInfo> {
         for call in batch.calls() {
@@ -77,7 +83,7 @@ impl SessionState {
         let mut transcript = self.transcript.clone();
         for call in batch.calls() {
             transcript
-                .push_tool_call(call.clone())
+                .push_tool_call(turn_id, call.clone())
                 .map_err(transcript_record_diagnostic)?;
         }
 
@@ -88,6 +94,88 @@ impl SessionState {
             RuntimeJournalPayload::ToolCallBatchPending { batch },
             LedgerFactKind::ToolCallPending,
         ))
+    }
+
+    pub(crate) fn record_model_tool_call_response(
+        &mut self,
+        turn_id: ModelTurnId,
+        commentary: Option<String>,
+        calls: Vec<PendingToolCall>,
+    ) -> Result<(Option<RuntimeJournalEvent>, RuntimeJournalEvent), ErrorInfo> {
+        let tool_payload = if calls.len() == 1 {
+            RuntimeJournalPayload::ToolCallPending {
+                call: calls[0].clone(),
+            }
+        } else {
+            let batch_id = ToolCallBatchId::new(&format!("tool-batch-{}", self.next_sequence()))
+                .map_err(|error| tool_response_diagnostic("tool_call_batch_id", error))?;
+            let batch = PendingToolCallBatch::new(batch_id, calls.clone())
+                .map_err(|error| tool_response_diagnostic("tool_call_batch_invalid", error))?;
+            RuntimeJournalPayload::ToolCallBatchPending { batch }
+        };
+
+        for call in &calls {
+            if self
+                .pending_tool_calls
+                .iter()
+                .any(|pending| pending.id() == call.id())
+            {
+                return Err(duplicate_tool_call_diagnostic(call.id(), "already pending"));
+            }
+            if self.resolved_tool_calls.contains(call.id()) {
+                return Err(duplicate_tool_call_diagnostic(
+                    call.id(),
+                    "already resolved",
+                ));
+            }
+        }
+
+        let mut transcript = self.transcript.clone();
+        let commentary_record = commentary
+            .map(|text| {
+                let artifact = ArtifactRef::new(
+                    assistant_output_id(self.next_sequence()),
+                    ArtifactKind::Text,
+                );
+                let content = ArtifactContent::text(text);
+                self.artifacts
+                    .ensure_recordable(&artifact, &content)
+                    .map_err(|error| {
+                        tool_response_diagnostic("assistant_output_artifact", error)
+                    })?;
+                transcript
+                    .push_assistant_text(turn_id, artifact.id().clone())
+                    .map_err(|error| {
+                        tool_response_diagnostic("assistant_output_artifact", error)
+                    })?;
+                Ok((artifact, content))
+            })
+            .transpose()?;
+        for call in &calls {
+            transcript
+                .push_tool_call(turn_id, call.clone())
+                .map_err(transcript_record_diagnostic)?;
+        }
+        transcript
+            .close_model_response(turn_id, true)
+            .map_err(|error| tool_response_diagnostic("model_turn_close", error))?;
+
+        let recorded_commentary = commentary_record.map(|(artifact, content)| {
+            let content_bytes = content.as_bytes().len();
+            let recorded = self.artifacts.record_preflighted(artifact, content);
+            Self::trace_artifact_record(self.session_id.as_str(), &recorded, content_bytes);
+            recorded
+        });
+        self.transcript = transcript;
+        self.pending_tool_calls.extend(calls);
+        let commentary_event = recorded_commentary.map(|artifact| {
+            self.record_event(
+                RuntimeJournalPayload::AssistantOutputRecorded { artifact },
+                LedgerFactKind::ArtifactRecorded,
+            )
+        });
+        let tool_event = self.record_event(tool_payload, LedgerFactKind::ToolCallPending);
+        Ok((commentary_event, tool_event))
     }
 
     pub(crate) fn record_bridge_tool_call_requested(
@@ -112,4 +200,9 @@ fn duplicate_tool_call_diagnostic(call_id: &ToolCallId, state: &'static str) -> 
 fn transcript_record_diagnostic(error: RuntimeError) -> ErrorInfo {
     ErrorInfo::new("transcript_record", &error.to_string())
         .expect("transcript diagnostic uses static code")
+}
+
+fn tool_response_diagnostic(code: &'static str, error: impl std::fmt::Display) -> ErrorInfo {
+    ErrorInfo::new(code, &error.to_string())
+        .expect("tool response diagnostic uses a static code and non-empty error message")
 }

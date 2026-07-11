@@ -1,6 +1,106 @@
 use super::*;
 
 #[test]
+fn tool_result_inherits_originating_model_turn() {
+    let mut session = SessionState::new(session_id());
+    let turn_id = session.begin_model_turn().expect("model turn should begin");
+    let call = pending_tool_call("turn-call");
+    session
+        .record_tool_call_pending(turn_id, call.clone())
+        .expect("tool call should record");
+    session
+        .close_model_response(turn_id, true)
+        .expect("tool-call response should close");
+
+    let result = ToolCallResult::succeeded(
+        call.id().clone(),
+        ArtifactRef::new(artifact_id("turn-result"), ArtifactKind::Text),
+    );
+    session
+        .submit_tool_result(result, ArtifactContent::text("result"))
+        .expect("tool result should record");
+
+    let result_turn = session
+        .transcript
+        .items()
+        .iter()
+        .find_map(|item| match item {
+            TranscriptItem::ToolResult {
+                call_id,
+                model_turn_id,
+                ..
+            } if call_id == call.id() => Some(*model_turn_id),
+            _ => None,
+        })
+        .expect("tool result should remain in transcript");
+    assert_eq!(result_turn, turn_id);
+    assert_eq!(
+        session.model_turn_status(turn_id),
+        Some(ModelTurnStatus::Completed)
+    );
+}
+
+#[test]
+fn out_of_order_batch_results_complete_originating_turn_only_after_last_result() {
+    let mut session = SessionState::new(session_id());
+    let turn_id = session.begin_model_turn().expect("model turn should begin");
+    let call_a = pending_tool_call("turn-batch-a");
+    let call_b = pending_tool_call("turn-batch-b");
+    let batch = PendingToolCallBatch::new(
+        ToolCallBatchId::new("turn-batch").expect("valid batch id"),
+        vec![call_a.clone(), call_b.clone()],
+    )
+    .expect("valid batch");
+    session
+        .record_tool_call_batch_pending(turn_id, batch)
+        .expect("batch should record");
+    session
+        .close_model_response(turn_id, true)
+        .expect("tool-call response should close");
+
+    session
+        .submit_tool_result(
+            ToolCallResult::succeeded(
+                call_b.id().clone(),
+                ArtifactRef::new(artifact_id("turn-b-result"), ArtifactKind::Text),
+            ),
+            ArtifactContent::text("b"),
+        )
+        .expect("second result should record first");
+    assert_eq!(
+        session.model_turn_status(turn_id),
+        Some(ModelTurnStatus::AwaitingToolResults)
+    );
+
+    session
+        .submit_tool_result(
+            ToolCallResult::succeeded(
+                call_a.id().clone(),
+                ArtifactRef::new(artifact_id("turn-a-result"), ArtifactKind::Text),
+            ),
+            ArtifactContent::text("a"),
+        )
+        .expect("first result should record last");
+
+    assert_eq!(
+        session.model_turn_status(turn_id),
+        Some(ModelTurnStatus::Completed)
+    );
+    assert_eq!(
+        session
+            .transcript
+            .items()
+            .iter()
+            .filter_map(|item| match item {
+                TranscriptItem::ToolResult { model_turn_id, .. } => Some(*model_turn_id),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec![turn_id, turn_id]
+    );
+}
+
+#[test]
 fn pending_tool_call_batch_records_atomically_in_model_order() {
     let mut session = SessionState::new(session_id());
     let call_a = pending_tool_call("batch-call-a");
@@ -12,7 +112,7 @@ fn pending_tool_call_batch_records_atomically_in_model_order() {
     .expect("valid batch");
 
     let event = session
-        .record_tool_call_batch_pending(batch.clone())
+        .record_test_tool_call_batch_pending(batch.clone())
         .expect("batch should record");
 
     assert!(matches!(
@@ -34,7 +134,7 @@ fn pending_tool_call_batch_conflict_leaves_session_unchanged() {
     let mut session = SessionState::new(session_id());
     let existing = pending_tool_call("batch-conflict");
     session
-        .record_tool_call_pending(existing.clone())
+        .record_test_tool_call_pending(existing.clone())
         .expect("existing call should record");
     let pending_before = session.pending_tool_calls();
     let transcript_before = session.transcript_items_for_tests();
@@ -46,7 +146,7 @@ fn pending_tool_call_batch_conflict_leaves_session_unchanged() {
     )
     .expect("batch shape should be valid");
     let error = session
-        .record_tool_call_batch_pending(batch)
+        .record_test_tool_call_batch_pending(batch)
         .expect_err("conflicting batch should reject");
 
     assert_eq!(error.code(), "tool_call_duplicate");
@@ -66,7 +166,7 @@ fn denied_tool_action_records_audit_lifecycle_before_artifact_and_resolution() {
         .record_session_started_if_needed()
         .expect("session should start");
     session
-        .record_tool_call_pending(call.clone())
+        .record_test_tool_call_pending(call.clone())
         .expect("pending call should record");
 
     let events = session
@@ -137,7 +237,7 @@ fn proposed_tool_execution_records_executed_audit_before_artifact_and_resolution
         .record_session_started_if_needed()
         .expect("session should start");
     session
-        .record_tool_call_pending(call.clone())
+        .record_test_tool_call_pending(call.clone())
         .expect("pending call should record");
 
     let proposal_evidence = ActionProposalEvidence::WorkspacePatch(
@@ -256,7 +356,7 @@ fn proposed_tool_execution_can_record_observation_after_artifact_before_resoluti
         .record_session_started_if_needed()
         .expect("session should start");
     session
-        .record_tool_call_pending(call.clone())
+        .record_test_tool_call_pending(call.clone())
         .expect("pending call should record");
 
     let proposal_evidence = ActionProposalEvidence::WorkspacePatch(
@@ -378,7 +478,7 @@ fn guarded_tool_action_records_internal_audit_without_events_or_resolution() {
         .record_session_started_if_needed()
         .expect("session should start");
     session
-        .record_tool_call_pending(call.clone())
+        .record_test_tool_call_pending(call.clone())
         .expect("pending call should record");
     let projection_before = session.ledger_projection();
     let next_sequence_before = session.next_sequence();
@@ -444,9 +544,16 @@ fn guarded_tool_action_records_internal_audit_without_events_or_resolution() {
 #[test]
 fn submit_tool_result_starts_session_before_artifact_and_resolution_when_needed() {
     let mut session = SessionState::new(session_id());
+    let pending = pending_tool_call("pre-start-call");
+    let turn_id = session.begin_model_turn().expect("model turn should begin");
     session
-        .pending_tool_calls
-        .push(pending_tool_call("pre-start-call"));
+        .transcript
+        .push_tool_call(turn_id, pending.clone())
+        .expect("fixture call should enter transcript");
+    session
+        .close_model_response(turn_id, true)
+        .expect("fixture response should close");
+    session.pending_tool_calls.push(pending);
     let artifact = ArtifactRef::new(artifact_id("pre-start-result"), ArtifactKind::Json);
     let result = ToolCallResult::succeeded(tool_call_id("pre-start-call"), artifact.clone());
 
@@ -480,11 +587,11 @@ fn duplicate_tool_call_pending_is_rejected_without_second_pending_or_sequence() 
     let mut session = SessionState::new(session_id());
     let call = pending_tool_call("duplicate-call");
     let first = session
-        .record_tool_call_pending(call.clone())
+        .record_test_tool_call_pending(call.clone())
         .expect("first pending call should record");
 
     let err = session
-        .record_tool_call_pending(call.clone())
+        .record_test_tool_call_pending(call.clone())
         .expect_err("duplicate pending call id should be rejected");
 
     assert_eq!(err.code(), "tool_call_duplicate");

@@ -30,8 +30,13 @@ mod usage;
 pub(crate) use self::{
     artifacts::is_runtime_reserved_artifact_id,
     tool_result::{ProposedToolExecutionOutcome, ToolResultLedgerObservation},
-    transcript::{Transcript, TranscriptItemSnapshot, UserInputOrigin},
+    transcript::{
+        ModelTurnId, ModelTurnStatus, Transcript, TranscriptItemSnapshot, UserInputOrigin,
+    },
 };
+
+#[cfg(test)]
+pub(crate) use self::transcript::TranscriptItem;
 
 /// Mutable runtime state for one session.
 #[derive(Debug)]
@@ -98,7 +103,15 @@ impl SessionState {
             .items()
             .iter()
             .map(|item| match item {
-                transcript::TranscriptItem::UserMessage { text, .. } => format!("user:{text}"),
+                transcript::TranscriptItem::UserMessage { artifact_id, .. } => {
+                    let content = self
+                        .read_artifact_content(artifact_id)
+                        .expect("user transcript artifact should be readable");
+                    let text = content
+                        .as_text()
+                        .expect("user transcript artifact should be text");
+                    format!("user:{text}")
+                }
                 transcript::TranscriptItem::AssistantText { artifact_id, .. } => {
                     let content = self
                         .read_artifact_content(artifact_id)
@@ -125,6 +138,15 @@ impl SessionState {
                     format!("tool_result:{}:{text}", call_id.as_str())
                 }
             })
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn transcript_model_turn_ids_for_tests(&self) -> Vec<ModelTurnId> {
+        self.transcript
+            .items()
+            .iter()
+            .map(transcript::TranscriptItem::model_turn_id)
             .collect()
     }
 

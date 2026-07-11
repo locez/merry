@@ -190,6 +190,38 @@
             .await
     }
 
+    trait RuntimeSessionStateTestExt {
+        fn record_test_user_message_body(&mut self, text: &str) -> Result<(), RuntimeError>;
+        fn record_test_tool_call_pending(
+            &mut self,
+            call: PendingToolCall,
+        ) -> Result<RuntimeJournalEvent, ErrorInfo>;
+    }
+
+    impl RuntimeSessionStateTestExt for SessionState {
+        fn record_test_user_message_body(&mut self, text: &str) -> Result<(), RuntimeError> {
+            let turn_id = self.begin_model_turn()?;
+            self.record_user_message_body(turn_id, text)?;
+            self.close_model_response(turn_id, false)
+        }
+
+        fn record_test_tool_call_pending(
+            &mut self,
+            call: PendingToolCall,
+        ) -> Result<RuntimeJournalEvent, ErrorInfo> {
+            let turn_id = self.begin_model_turn().map_err(runtime_test_turn_diagnostic)?;
+            let event = self.record_tool_call_pending(turn_id, call)?;
+            self.close_model_response(turn_id, true)
+                .map_err(runtime_test_turn_diagnostic)?;
+            Ok(event)
+        }
+    }
+
+    fn runtime_test_turn_diagnostic(error: RuntimeError) -> ErrorInfo {
+        ErrorInfo::new("test_model_turn", &error.to_string())
+            .expect("test model turn diagnostic should be valid")
+    }
+
     fn pending_tool_call(id: &str) -> PendingToolCall {
         PendingToolCall::new(
             ToolCallId::new(id).expect("valid tool call id"),

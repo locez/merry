@@ -1,11 +1,10 @@
 use super::auto_compaction::{compact_prepared_context, compaction_input_for_hard_watermark};
 use super::journal_emission::{
     send_assistant_text_output_completed_events, send_assistant_text_output_delta_event,
-    send_assistant_text_output_recorded_event, send_cancelled_event, send_cancelled_if_requested,
-    send_compaction_completed_event, send_compaction_started_event, send_failed_event,
-    send_model_usage_updated_event, send_tool_call_batch_pending_event,
-    send_tool_call_pending_event, stream_model_with_retry_policy, trace_provider_step_cancelled,
-    trace_provider_step_failed, wait_for_model_stream_item, wait_for_retrying_stream_setup,
+    send_cancelled_event, send_compaction_completed_event, send_compaction_started_event,
+    send_failed_event, send_model_tool_call_response_events, send_model_usage_updated_event,
+    stream_model_with_retry_policy, trace_provider_step_cancelled, trace_provider_step_failed,
+    wait_for_model_stream_item, wait_for_retrying_stream_setup,
 };
 use super::memory_activation::{
     ActivationProjectionGuard, clear_current_activated_memories,
@@ -23,7 +22,10 @@ use super::provider_request::{
 };
 use super::{DIAGNOSTIC_TOOL_CALL_RESULT_REQUIRED, RuntimeInner, diagnostic_from_text};
 use crate::{
-    CheckpointDecision, memory::MemoryActivationContext, model_config::ModelProviderConfig,
+    CheckpointDecision,
+    memory::MemoryActivationContext,
+    model_config::ModelProviderConfig,
+    session::{ModelTurnId, ModelTurnStatus},
     step::StepInput,
 };
 use merry_core::{PendingToolCall, RuntimeJournalEvent};
@@ -346,7 +348,7 @@ pub(super) async fn run_provider_step(
         step_usage_context_snapshot(request_budget.as_ref().ok(), automatic_compaction_enabled);
     let sent_continuation_count = request.continuations().len();
 
-    for text in input.user_texts_for_history() {
+    let turn_id = {
         let mut session = inner.session.lock().await;
         if token.is_cancelled() {
             drop(session);
@@ -354,13 +356,37 @@ pub(super) async fn run_provider_step(
             let _ = send_cancelled_event(inner, sender).await;
             return;
         }
-        if let Err(error) = session.record_user_message_body(text) {
+        match session.begin_model_turn() {
+            Ok(turn_id) => turn_id,
+            Err(error) => {
+                drop(session);
+                let diagnostic = diagnostic_from_text("model_turn_begin", error.to_string());
+                trace_provider_step_failed(&diagnostic);
+                let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                return;
+            }
+        }
+    };
+    let _model_turn_guard = InProgressModelTurnGuard::new(Arc::clone(inner), turn_id);
+
+    let user_record_result = {
+        let mut session = inner.session.lock().await;
+        if token.is_cancelled() {
+            let _ = session.abort_model_turn(turn_id);
             drop(session);
-            let diagnostic = diagnostic_from_text("transcript_record", error.to_string());
-            trace_provider_step_failed(&diagnostic);
-            let _ = send_failed_event(inner, sender, token, diagnostic).await;
+            trace_provider_step_cancelled();
+            let _ = send_cancelled_event(inner, sender).await;
             return;
         }
+        input
+            .user_texts_for_history()
+            .iter()
+            .try_for_each(|text| session.record_user_message_body(turn_id, text))
+    };
+    if let Err(error) = user_record_result {
+        let diagnostic = diagnostic_from_text("transcript_record", error.to_string());
+        fail_model_turn(inner, sender, token, turn_id, diagnostic).await;
+        return;
     }
 
     let stream_context =
@@ -396,8 +422,7 @@ pub(super) async fn run_provider_step(
         Some(result) => result,
         None => {
             clear_current_activated_memories(inner).await;
-            trace_provider_step_cancelled();
-            let _ = send_cancelled_event(inner, sender).await;
+            cancel_model_turn(inner, sender, turn_id).await;
             return;
         }
     };
@@ -419,14 +444,12 @@ pub(super) async fn run_provider_step(
                 "runtime provider stream setup failed"
             );
             if is_cancelled_model_error(&error) {
-                trace_provider_step_cancelled();
-                let _ = send_cancelled_event(inner, sender).await;
+                cancel_model_turn(inner, sender, turn_id).await;
                 return;
             }
 
             let diagnostic = diagnostic_from_model_error(error);
-            trace_provider_step_failed(&diagnostic);
-            let _ = send_failed_event(inner, sender, token, diagnostic).await;
+            fail_model_turn(inner, sender, token, turn_id, diagnostic).await;
             return;
         }
     };
@@ -448,8 +471,7 @@ pub(super) async fn run_provider_step(
         let item = match item {
             Some(item) => item,
             None => {
-                trace_provider_step_cancelled();
-                let _ = send_cancelled_event(inner, sender).await;
+                cancel_model_turn(inner, sender, turn_id).await;
                 return;
             }
         };
@@ -466,7 +488,7 @@ pub(super) async fn run_provider_step(
                     );
                     commentary_text.push_str(&delta);
                     if !send_assistant_text_output_delta_event(inner, sender, token, delta).await {
-                        let _ = send_cancelled_if_requested(inner, sender, token).await;
+                        cancel_model_turn(inner, sender, turn_id).await;
                         return;
                     }
                 }
@@ -490,12 +512,11 @@ pub(super) async fn run_provider_step(
                     {
                         Ok(true) => {}
                         Ok(false) => {
-                            let _ = send_cancelled_if_requested(inner, sender, token).await;
+                            cancel_model_turn(inner, sender, turn_id).await;
                             return;
                         }
                         Err(diagnostic) => {
-                            trace_provider_step_failed(&diagnostic);
-                            let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                            fail_model_turn(inner, sender, token, turn_id, diagnostic).await;
                             return;
                         }
                     }
@@ -507,8 +528,7 @@ pub(super) async fn run_provider_step(
                                 DIAGNOSTIC_MODEL_TOOL_CALL_MIXED_OUTPUT,
                                 "model requested a tool call before completing with text output",
                             );
-                            trace_provider_step_failed(&diagnostic);
-                            let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                            fail_model_turn(inner, sender, token, turn_id, diagnostic).await;
                             return;
                         }
 
@@ -517,8 +537,7 @@ pub(super) async fn run_provider_step(
                                 "model_output_unsupported",
                                 "model stop output must contain exactly one text item",
                             );
-                            trace_provider_step_failed(&diagnostic);
-                            let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                            fail_model_turn(inner, sender, token, turn_id, diagnostic).await;
                             return;
                         };
 
@@ -526,11 +545,12 @@ pub(super) async fn run_provider_step(
                             inner,
                             sender,
                             token,
+                            turn_id,
                             text.clone(),
                         )
                         .await
                         {
-                            let _ = send_cancelled_if_requested(inner, sender, token).await;
+                            cancel_model_turn(inner, sender, turn_id).await;
                         }
                         return;
                     }
@@ -539,7 +559,7 @@ pub(super) async fn run_provider_step(
                             response.outputs(),
                             &streamed_tool_calls,
                         ) {
-                            Ok(mut calls) => {
+                            Ok(calls) => {
                                 if calls.len() > 1
                                     && final_output_contract.as_ref().is_some_and(|contract| {
                                         calls.iter().any(|call| call.name() == contract.tool_name())
@@ -549,40 +569,22 @@ pub(super) async fn run_provider_step(
                                         "final_output_tool_batch_mixed",
                                         "final-output tool calls must be the only call in their model batch",
                                     );
-                                    trace_provider_step_failed(&diagnostic);
-                                    let _ =
-                                        send_failed_event(inner, sender, token, diagnostic).await;
+                                    fail_model_turn(inner, sender, token, turn_id, diagnostic)
+                                        .await;
                                     return;
                                 }
-                                if let Some(commentary) =
-                                    tool_call_commentary_text(response.outputs(), &commentary_text)
-                                    && !send_assistant_text_output_recorded_event(
-                                        inner, sender, token, commentary,
-                                    )
-                                    .await
-                                {
-                                    let _ = send_cancelled_if_requested(inner, sender, token).await;
-                                    return;
-                                }
-                                let sent = if calls.len() == 1 {
-                                    send_tool_call_pending_event(
-                                        inner,
-                                        sender,
-                                        token,
-                                        calls.pop().expect("single tool call length checked"),
-                                    )
-                                    .await
-                                } else {
-                                    send_tool_call_batch_pending_event(inner, sender, token, calls)
-                                        .await
-                                };
+                                let commentary =
+                                    tool_call_commentary_text(response.outputs(), &commentary_text);
+                                let sent = send_model_tool_call_response_events(
+                                    inner, sender, token, turn_id, commentary, calls,
+                                )
+                                .await;
                                 if !sent {
-                                    let _ = send_cancelled_if_requested(inner, sender, token).await;
+                                    cancel_model_turn(inner, sender, turn_id).await;
                                 }
                             }
                             Err(diagnostic) => {
-                                trace_provider_step_failed(&diagnostic);
-                                let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                                fail_model_turn(inner, sender, token, turn_id, diagnostic).await;
                             }
                         }
                         return;
@@ -592,8 +594,7 @@ pub(super) async fn run_provider_step(
                             "model_length",
                             "model output stopped because it reached a length limit",
                         );
-                        trace_provider_step_failed(&diagnostic);
-                        let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                        fail_model_turn(inner, sender, token, turn_id, diagnostic).await;
                         return;
                     }
                     FinishReason::Blocked => {
@@ -601,13 +602,11 @@ pub(super) async fn run_provider_step(
                             "model_blocked",
                             "model output was blocked by provider safety or content policy",
                         );
-                        trace_provider_step_failed(&diagnostic);
-                        let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                        fail_model_turn(inner, sender, token, turn_id, diagnostic).await;
                         return;
                     }
                     FinishReason::Cancelled => {
-                        trace_provider_step_cancelled();
-                        let _ = send_cancelled_event(inner, sender).await;
+                        cancel_model_turn(inner, sender, turn_id).await;
                         return;
                     }
                     FinishReason::Error => {
@@ -615,8 +614,7 @@ pub(super) async fn run_provider_step(
                             "model_finish_error",
                             "model output stopped because the provider reported a finish error",
                         );
-                        trace_provider_step_failed(&diagnostic);
-                        let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                        fail_model_turn(inner, sender, token, turn_id, diagnostic).await;
                         return;
                     }
                 }
@@ -631,8 +629,7 @@ pub(super) async fn run_provider_step(
                 {
                     Ok(()) => {}
                     Err(diagnostic) => {
-                        trace_provider_step_failed(&diagnostic);
-                        let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                        fail_model_turn(inner, sender, token, turn_id, diagnostic).await;
                         return;
                     }
                 }
@@ -645,14 +642,12 @@ pub(super) async fn run_provider_step(
                     "runtime model stream event received"
                 );
                 if is_cancelled_model_error(&error) {
-                    trace_provider_step_cancelled();
-                    let _ = send_cancelled_event(inner, sender).await;
+                    cancel_model_turn(inner, sender, turn_id).await;
                     return;
                 }
 
                 let diagnostic = diagnostic_from_model_error(error);
-                trace_provider_step_failed(&diagnostic);
-                let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                fail_model_turn(inner, sender, token, turn_id, diagnostic).await;
                 return;
             }
             None => {
@@ -661,10 +656,105 @@ pub(super) async fn run_provider_step(
                     "model_stream_eof",
                     "model stream ended before completion",
                 );
-                trace_provider_step_failed(&diagnostic);
-                let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                fail_model_turn(inner, sender, token, turn_id, diagnostic).await;
                 return;
             }
         }
+    }
+}
+
+async fn fail_model_turn(
+    inner: &RuntimeInner,
+    sender: &mpsc::Sender<RuntimeJournalEvent>,
+    token: &CancellationToken,
+    turn_id: ModelTurnId,
+    diagnostic: merry_core::ErrorInfo,
+) {
+    {
+        let mut session = inner.session.lock().await;
+        if let Err(error) = session.abort_model_turn(turn_id) {
+            tracing::error!(
+                category = "model_turn_abort",
+                model_turn_id = turn_id.as_u64(),
+                error = %error,
+                "failed to abort model turn before provider failure event"
+            );
+        }
+    }
+    trace_provider_step_failed(&diagnostic);
+    let _ = send_failed_event(inner, sender, token, diagnostic).await;
+}
+
+async fn cancel_model_turn(
+    inner: &RuntimeInner,
+    sender: &mpsc::Sender<RuntimeJournalEvent>,
+    turn_id: ModelTurnId,
+) {
+    {
+        let mut session = inner.session.lock().await;
+        let result = if session.model_turn_status(turn_id) == Some(ModelTurnStatus::InProgress) {
+            session.abort_model_turn(turn_id)
+        } else {
+            Ok(())
+        };
+        if let Err(error) = result {
+            tracing::error!(
+                category = "model_turn_abort",
+                model_turn_id = turn_id.as_u64(),
+                error = %error,
+                "failed to abort model turn before provider cancellation event"
+            );
+        }
+    }
+    trace_provider_step_cancelled();
+    let _ = send_cancelled_event(inner, sender).await;
+}
+
+/// Ensures task abortion cannot strand a turn before async cancellation code runs.
+struct InProgressModelTurnGuard {
+    inner: Arc<RuntimeInner>,
+    turn_id: ModelTurnId,
+}
+
+impl InProgressModelTurnGuard {
+    fn new(inner: Arc<RuntimeInner>, turn_id: ModelTurnId) -> Self {
+        Self { inner, turn_id }
+    }
+}
+
+impl Drop for InProgressModelTurnGuard {
+    fn drop(&mut self) {
+        if abort_in_progress_turn_if_unlocked(&self.inner, self.turn_id) {
+            return;
+        }
+
+        let inner = Arc::clone(&self.inner);
+        let turn_id = self.turn_id;
+        tokio::spawn(async move {
+            let mut session = inner.session.lock().await;
+            abort_in_progress_turn(&mut session, turn_id);
+        });
+    }
+}
+
+fn abort_in_progress_turn_if_unlocked(inner: &RuntimeInner, turn_id: ModelTurnId) -> bool {
+    let Ok(mut session) = inner.session.try_lock() else {
+        return false;
+    };
+    abort_in_progress_turn(&mut session, turn_id);
+    true
+}
+
+fn abort_in_progress_turn(session: &mut crate::session::SessionState, turn_id: ModelTurnId) {
+    if session.model_turn_status(turn_id) != Some(ModelTurnStatus::InProgress) {
+        return;
+    }
+    if let Err(error) = session.abort_model_turn(turn_id) {
+        tracing::error!(
+            category = "model_turn_abort",
+            model_turn_id = turn_id.as_u64(),
+            error = %error,
+            "failed to abort in-progress model turn while dropping provider step"
+        );
     }
 }

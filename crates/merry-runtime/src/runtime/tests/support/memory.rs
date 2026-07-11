@@ -83,7 +83,7 @@
             .expect("valid arguments"),
         );
         session
-            .record_tool_call_pending(call.clone())
+            .record_test_tool_call_pending(call.clone())
             .expect("prior pending call records");
         session
             .submit_tool_execution_outcome(
