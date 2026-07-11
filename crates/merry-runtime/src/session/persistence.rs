@@ -21,7 +21,9 @@ use crate::{
         PersistedSummaryDraftPromotionRegistry, SummaryDraftPromotionRegistry,
     },
 };
-use merry_core::{ArtifactKind, ArtifactRef, EvidenceRef, SessionId, SessionUsage, ToolCallId};
+use merry_core::{
+    ArtifactId, ArtifactKind, ArtifactRef, EvidenceRef, SessionId, SessionUsage, ToolCallId,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -358,24 +360,37 @@ impl SessionState {
             BTreeMap::<ModelTurnId, BTreeMap<ToolCallId, ToolCallPromptProjection>>::new();
         let mut results_by_turn =
             BTreeMap::<ModelTurnId, BTreeMap<ToolCallId, ToolResultPromptProjection>>::new();
+        let validate_text_artifact = |artifact_id: &ArtifactId| -> Result<(), SessionStoreError> {
+            let artifact = self
+                .artifacts
+                .read_ref(artifact_id)
+                .map_err(|_| invalid_document("stored transcript artifact is missing"))?;
+            let content = self
+                .artifacts
+                .read_content(artifact_id)
+                .map_err(|_| invalid_document("stored transcript artifact is missing"))?;
+            if artifact.kind() != &ArtifactKind::Text || content.as_text().is_none() {
+                return Err(invalid_document(
+                    "stored user or assistant transcript artifact is not text",
+                ));
+            }
+            Ok(())
+        };
 
         for item in self.transcript.items() {
             match item {
-                TranscriptItem::UserMessage { artifact_id, .. }
-                | TranscriptItem::AssistantText { artifact_id, .. } => {
-                    let artifact = self
-                        .artifacts
-                        .read_ref(artifact_id)
-                        .map_err(|_| invalid_document("stored transcript artifact is missing"))?;
-                    let content = self
-                        .artifacts
-                        .read_content(artifact_id)
-                        .map_err(|_| invalid_document("stored transcript artifact is missing"))?;
-                    if artifact.kind() != &ArtifactKind::Text || content.as_text().is_none() {
+                TranscriptItem::UserMessage {
+                    id, artifact_id, ..
+                } => {
+                    if artifact_id != &super::artifacts::user_message_id(*id) {
                         return Err(invalid_document(
-                            "stored user or assistant transcript artifact is not text",
+                            "stored user transcript artifact identity is inconsistent",
                         ));
                     }
+                    validate_text_artifact(artifact_id)?;
+                }
+                TranscriptItem::AssistantText { artifact_id, .. } => {
+                    validate_text_artifact(artifact_id)?;
                 }
                 TranscriptItem::ToolCall {
                     model_turn_id,

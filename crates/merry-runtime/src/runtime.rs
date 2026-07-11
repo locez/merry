@@ -687,6 +687,7 @@ mod tests {
     mod process_execution;
     mod process_shell_execution;
     mod provider_step_flow;
+    mod provider_step_turn_lifecycle;
     mod session_resume;
     mod tool_execution;
     mod tool_submit_cancellation;

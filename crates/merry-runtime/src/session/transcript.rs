@@ -309,10 +309,7 @@ impl Transcript {
 
     pub(crate) fn abort_model_turn(&mut self, turn_id: ModelTurnId) -> Result<(), RuntimeError> {
         let status = self.model_turn_status_mut(turn_id)?;
-        if !matches!(
-            *status,
-            ModelTurnStatus::InProgress | ModelTurnStatus::AwaitingToolResults
-        ) {
+        if *status != ModelTurnStatus::InProgress {
             return Err(invalid_turn_transition(turn_id, "abort model turn"));
         }
         *status = ModelTurnStatus::Aborted;
@@ -650,13 +647,27 @@ impl Transcript {
                 TranscriptItem::UserMessage { .. } | TranscriptItem::AssistantText { .. } => {}
             }
         }
-        if self
+        let next_model_turn_id = self.next_model_turn_id.as_u64();
+        let mut expected_turn_id = 1_u64;
+        for turn_id in self
             .model_turns
             .keys()
-            .any(|turn_id| turn_id.as_u64() != 0 && *turn_id >= self.next_model_turn_id)
+            .copied()
+            .filter(|turn_id| turn_id.as_u64() != 0)
         {
+            if turn_id.as_u64() != expected_turn_id || turn_id.as_u64() >= next_model_turn_id {
+                return Err(RuntimeError::InvalidModelTurnTransition {
+                    model_turn_id: turn_id.as_u64(),
+                    attempted: "restore unreachable model turn sequence",
+                });
+            }
+            expected_turn_id = expected_turn_id
+                .checked_add(1)
+                .ok_or(RuntimeError::ModelTurnIdExhausted)?;
+        }
+        if expected_turn_id != next_model_turn_id {
             return Err(RuntimeError::UnknownModelTurn {
-                model_turn_id: self.next_model_turn_id.as_u64(),
+                model_turn_id: next_model_turn_id,
             });
         }
         Ok(())
@@ -919,5 +930,28 @@ impl SessionState {
             snapshot.push(item);
         }
         Ok(snapshot)
+    }
+}
+
+#[cfg(test)]
+mod turn_id_exhaustion_tests {
+    use super::*;
+
+    #[test]
+    fn model_turn_id_exhaustion_does_not_mutate_transcript() {
+        let mut transcript = Transcript {
+            items: Vec::new(),
+            next_id: TranscriptItemId::new(0),
+            model_turns: BTreeMap::new(),
+            next_model_turn_id: ModelTurnId::new(u64::MAX),
+        };
+        let before = transcript.persisted();
+
+        let error = transcript
+            .begin_model_turn()
+            .expect_err("exhausted model turn id should reject allocation");
+
+        assert!(matches!(error, RuntimeError::ModelTurnIdExhausted));
+        assert_eq!(transcript.persisted(), before);
     }
 }
