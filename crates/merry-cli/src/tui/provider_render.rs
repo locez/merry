@@ -113,13 +113,19 @@ pub(super) fn render_provider_manager(
         if manager.selected_source() == Some(ProviderConfigSource::Managed) {
             &[
                 ("N", "Add"),
-                ("Enter", "Edit"),
+                ("Enter", "Switch"),
                 ("M", "Models"),
+                ("E", "Edit"),
                 ("D", "Delete"),
                 ("Esc", "Back"),
             ]
         } else {
-            &[("N", "Add"), ("M", "Models"), ("Esc", "Back")]
+            &[
+                ("N", "Add"),
+                ("Enter", "Switch"),
+                ("M", "Models"),
+                ("Esc", "Back"),
+            ]
         };
     lines.push(action_hint_line(state, actions));
     frame.render_widget(Paragraph::new(lines), inner);

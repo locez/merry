@@ -759,6 +759,7 @@ fn usage_protocol_round_trips_and_preserves_unknown_subcounts() {
         }),
         compaction: Some(CompactionUsageWindow {
             auto_compaction_enabled: true,
+            dynamic_body_estimated_tokens: Some(64000),
             body_budget_tokens: 90000,
             soft_water_tokens: 70000,
             hard_water_tokens: 82000,
@@ -794,12 +795,26 @@ fn usage_protocol_round_trips_and_preserves_unknown_subcounts() {
             },
             "compaction": {
                 "auto_compaction_enabled": true,
+                "dynamic_body_estimated_tokens": 64000,
                 "body_budget_tokens": 90000,
                 "soft_water_tokens": 70000,
                 "hard_water_tokens": 82000
             }
         })
     );
+}
+
+#[test]
+fn compaction_usage_accepts_sessions_without_dynamic_body_estimate() {
+    let usage: CompactionUsageWindow = serde_json::from_value(json!({
+        "auto_compaction_enabled": true,
+        "body_budget_tokens": 90000,
+        "soft_water_tokens": 70000,
+        "hard_water_tokens": 82000
+    }))
+    .expect("older compaction usage should remain readable");
+
+    assert_eq!(usage.dynamic_body_estimated_tokens, None);
 }
 
 #[test]

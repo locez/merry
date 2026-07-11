@@ -20,6 +20,7 @@ const LIST_DIR_PREVIEW_MAX_ENTRIES: usize = 80;
 pub(crate) struct TuiProjector {
     started_tools: HashMap<ToolCallId, StartedToolView>,
     streaming_assistant_index: Option<usize>,
+    compaction_timeline_index: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -95,6 +96,30 @@ impl TuiProjector {
             RuntimeEvent::QueuedInputAccepted { lane, inputs } => {
                 for input in inputs {
                     state.confirm_or_push_user_input(input.text, lane);
+                }
+            }
+            RuntimeEvent::CompactionStarted { .. } => {
+                self.streaming_assistant_index = None;
+                let timeline_index = state.timeline().len();
+                state.push_timeline_item(TimelineItem::Muted {
+                    title: "Compacting".to_owned(),
+                    detail: "preparing checkpoint".to_owned(),
+                });
+                self.compaction_timeline_index = Some(timeline_index);
+            }
+            RuntimeEvent::CompactionCompleted {
+                checkpoint_id,
+                covered_history_item_count,
+                ..
+            } => {
+                let item = TimelineItem::Muted {
+                    title: "Compacted".to_owned(),
+                    detail: format!("{covered_history_item_count} history items · {checkpoint_id}"),
+                };
+                if let Some(index) = self.compaction_timeline_index.take() {
+                    state.replace_timeline_item(index, item);
+                } else {
+                    state.push_timeline_item(item);
                 }
             }
             RuntimeEvent::UsageUpdated { usage, .. } => {
@@ -183,14 +208,47 @@ impl TuiProjector {
                 });
             }
             RuntimeEvent::SubagentFailed { diagnostic, .. }
-            | RuntimeEvent::SubagentCancelled { diagnostic, .. }
-            | RuntimeEvent::RunFailed { diagnostic, .. }
-            | RuntimeEvent::RunCancelled { diagnostic, .. } => {
+            | RuntimeEvent::SubagentCancelled { diagnostic, .. } => {
                 self.streaming_assistant_index = None;
                 state.push_timeline_item(TimelineItem::Diagnostic {
                     title: diagnostic.code().to_owned(),
                     body: diagnostic.message().to_owned(),
                 });
+            }
+            RuntimeEvent::RunFailed { diagnostic, .. } => {
+                self.streaming_assistant_index = None;
+                let item = TimelineItem::Diagnostic {
+                    title: if self.compaction_timeline_index.is_some() {
+                        "compaction failed".to_owned()
+                    } else {
+                        diagnostic.code().to_owned()
+                    },
+                    body: diagnostic.message().to_owned(),
+                };
+                if let Some(index) = self.compaction_timeline_index.take() {
+                    state.replace_timeline_item(index, item);
+                } else {
+                    state.push_timeline_item(item);
+                }
+            }
+            RuntimeEvent::RunCancelled { diagnostic, .. } => {
+                self.streaming_assistant_index = None;
+                let item = if self.compaction_timeline_index.is_some() {
+                    TimelineItem::Muted {
+                        title: "Compaction cancelled".to_owned(),
+                        detail: diagnostic.message().to_owned(),
+                    }
+                } else {
+                    TimelineItem::Diagnostic {
+                        title: diagnostic.code().to_owned(),
+                        body: diagnostic.message().to_owned(),
+                    }
+                };
+                if let Some(index) = self.compaction_timeline_index.take() {
+                    state.replace_timeline_item(index, item);
+                } else {
+                    state.push_timeline_item(item);
+                }
             }
             RuntimeEvent::Closed => {
                 self.streaming_assistant_index = None;

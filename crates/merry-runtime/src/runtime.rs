@@ -68,7 +68,7 @@ use self::journal_emission::{
 #[cfg(test)]
 use self::memory_activation::memory_activation_seed_from_step_input;
 #[cfg(test)]
-use self::provider_request::request_context_budget;
+use self::provider_request::{request_context_budget, step_usage_context_snapshot};
 #[cfg(test)]
 use self::tool_execution::admit_action_to_generic_executor;
 

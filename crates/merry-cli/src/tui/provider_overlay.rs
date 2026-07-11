@@ -116,11 +116,23 @@ impl ProviderManagerOverlay {
                 self.pending_delete_alias = None;
                 ProviderOverlayAction::Consumed
             }
-            KeyCode::Enter => self
+            KeyCode::Enter => self.items.get(self.selected).map_or(
+                ProviderOverlayAction::OpenProviderForm,
+                |item| match item.model() {
+                    Some(model) => ProviderOverlayAction::SelectModel {
+                        alias: item.alias().to_owned(),
+                        model: model.to_owned(),
+                        target: ModelPickerTarget::ActiveProvider,
+                    },
+                    None => ProviderOverlayAction::OpenModelPicker(item.alias().to_owned()),
+                },
+            ),
+            KeyCode::Char('e') => self
                 .items
                 .get(self.selected)
-                .map_or(ProviderOverlayAction::OpenProviderForm, |item| {
-                    ProviderOverlayAction::OpenProviderEditor(item.alias.clone())
+                .filter(|item| item.source() == ProviderConfigSource::Managed)
+                .map_or(ProviderOverlayAction::Consumed, |item| {
+                    ProviderOverlayAction::OpenProviderEditor(item.alias().to_owned())
                 }),
             KeyCode::Char('m') => self
                 .items
@@ -790,7 +802,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_manager_separates_edit_and_model_actions() {
+    fn provider_manager_enter_switches_the_resolved_model_and_e_edits() {
         let item = ProviderListItem::new(
             "opencode",
             "OpenCode",
@@ -799,15 +811,44 @@ mod tests {
             Some(OpenAiProtocol::ChatCompletions),
             Some("model-a"),
         );
+        let mut switch_manager = ProviderManagerOverlay::new(vec![item.clone()], None);
         let mut edit_manager = ProviderManagerOverlay::new(vec![item.clone()], None);
         let mut model_manager = ProviderManagerOverlay::new(vec![item], None);
 
         assert_eq!(
-            edit_manager.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            switch_manager.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            ProviderOverlayAction::SelectModel {
+                alias: "opencode".to_owned(),
+                model: "model-a".to_owned(),
+                target: ModelPickerTarget::ActiveProvider,
+            }
+        );
+        assert_eq!(
+            edit_manager.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE)),
             ProviderOverlayAction::OpenProviderEditor("opencode".to_owned())
         );
         assert_eq!(
             model_manager.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE)),
+            ProviderOverlayAction::OpenModelPicker("opencode".to_owned())
+        );
+    }
+
+    #[test]
+    fn provider_manager_enter_opens_models_when_no_model_is_resolved() {
+        let mut manager = ProviderManagerOverlay::new(
+            vec![ProviderListItem::new(
+                "opencode",
+                "OpenCode",
+                ConfiguredProviderKind::OpenAiCompatible,
+                ProviderConfigSource::Managed,
+                Some(OpenAiProtocol::ChatCompletions),
+                None,
+            )],
+            None,
+        );
+
+        assert_eq!(
+            manager.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             ProviderOverlayAction::OpenModelPicker("opencode".to_owned())
         );
     }
