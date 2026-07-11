@@ -91,7 +91,7 @@ where
             "checkpoint_present": true,
             "citation_backed": summary.citation_backed(),
             "checkpoint_id": summary.checkpoint_id().map(merry_runtime::CheckpointId::as_str),
-            "claim_count": summary.claim_count(),
+            "entry_count": summary.entry_count(),
             "ref_count": summary.ref_count(),
         }),
         None => serde_json::json!({
@@ -99,7 +99,7 @@ where
             "checkpoint_present": false,
             "citation_backed": false,
             "checkpoint_id": null,
-            "claim_count": 0,
+            "entry_count": 0,
             "ref_count": 0,
         }),
     };

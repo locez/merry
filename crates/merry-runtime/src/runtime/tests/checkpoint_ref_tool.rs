@@ -181,14 +181,21 @@ fn citation_checkpoint_for_runtime_tool() -> CompactedCheckpoint {
     .expect("valid manifest");
     let candidate = CompactedCheckpointCandidate::from_json(
         r#"{
-            "claims": [
+            "confirmed_decisions": [],
+            "rejected_approaches": [],
+            "constraints_preferences_boundaries": [],
+            "corrected_misunderstandings": [],
+            "durable_conclusions": [
                 {
                     "id": "c1",
-                    "kind": "current_state",
                     "text": "The task depends on bootstrap-ref.",
                     "refs": ["bootstrap-ref"]
                 }
-            ]
+            ],
+            "open_questions": [],
+            "current_progress_and_next_steps": [],
+            "exact_details": [],
+            "handoffs": []
         }"#,
     )
     .expect("valid candidate");

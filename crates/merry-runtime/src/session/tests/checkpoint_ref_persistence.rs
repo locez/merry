@@ -16,13 +16,19 @@ fn citation_checkpoint_with_evidence(evidence: EvidenceRef) -> crate::CompactedC
     .expect("valid manifest");
     let candidate = CompactedCheckpointCandidate::from_json(
         r#"{
-          "claims": [{
+          "confirmed_decisions": [],
+          "rejected_approaches": [],
+          "constraints_preferences_boundaries": [{
             "id": "c1",
-            "kind": "constraint",
             "text": "The persisted checkpoint keeps exact source evidence.",
             "refs": ["h42"]
           }],
-          "working_intent": null
+          "corrected_misunderstandings": [],
+          "durable_conclusions": [],
+          "open_questions": [],
+          "current_progress_and_next_steps": [],
+          "exact_details": [],
+          "handoffs": []
         }"#,
     )
     .expect("candidate parses");

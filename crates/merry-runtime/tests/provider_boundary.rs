@@ -70,15 +70,21 @@ fn citation_checkpoint_for_provider_tests(
     .expect("valid manifest");
     let candidate = CompactedCheckpointCandidate::from_json(&format!(
         r#"{{
-          "claims": [
+          "confirmed_decisions": [],
+          "rejected_approaches": [],
+          "constraints_preferences_boundaries": [
             {{
               "id": "c1",
-              "kind": "constraint",
               "text": {excerpt_json},
               "refs": [{ref_json}]
             }}
           ],
-          "working_intent": null
+          "corrected_misunderstandings": [],
+          "durable_conclusions": [],
+          "open_questions": [],
+          "current_progress_and_next_steps": [],
+          "exact_details": [],
+          "handoffs": []
         }}"#,
         excerpt_json = serde_json::to_string(excerpt).expect("excerpt serializes"),
         ref_json = serde_json::to_string(ref_id).expect("ref id serializes"),
@@ -2158,8 +2164,8 @@ async fn citation_compaction_fixture_preserves_required_design_meanings() {
         "Function-call continuity remains raw until compaction",
         "Retained raw tail is not part of compaction input",
         "Pins, modes, resource indexes, and artifact graphs are not the current core solution",
-        "citation-backed checkpoint claims and local ref lookup",
-        "working_intent",
+        "citation-backed checkpoint entries and local ref lookup",
+        "current_progress_and_next_steps:",
     ] {
         assert!(
             snapshot.contains(expected),
@@ -2290,10 +2296,13 @@ async fn live_compactor_summarizes_messy_1k_token_window_with_refs() {
         checkpoint_tokens * 3 < source_tokens,
         "live checkpoint should approach 3x compression after prompt-budget tuning"
     );
-    let claim_count = checkpoint.matches("\n- c").count();
+    let entry_count = checkpoint
+        .lines()
+        .filter(|line| line.starts_with("- ["))
+        .count();
     assert!(
-        claim_count <= 8,
-        "live checkpoint should prefer 6-8 claims, got {claim_count}"
+        entry_count <= 8,
+        "live checkpoint should prefer 6-8 entries, got {entry_count}"
     );
     let checkpoint_lowercase = checkpoint.to_lowercase();
     for (expected, alternatives) in [
@@ -2317,22 +2326,16 @@ async fn live_compactor_summarizes_messy_1k_token_window_with_refs() {
             "live checkpoint missed expected design signal: {expected}"
         );
     }
-    if let Some(working_intent) = checkpoint
-        .lines()
-        .find(|line| line.starts_with("working_intent "))
-    {
-        let working_intent = working_intent.to_lowercase();
-        for forbidden in [
-            "produce this checkpoint",
-            "checkpoint candidate",
-            "summarize the covered window",
-            "compactor",
-        ] {
-            assert!(
-                !working_intent.contains(forbidden),
-                "working_intent must describe main-agent continuation, not compactor work"
-            );
-        }
+    for forbidden in [
+        "produce this checkpoint",
+        "checkpoint candidate",
+        "summarize the covered window",
+        "compactor",
+    ] {
+        assert!(
+            !checkpoint_lowercase.contains(forbidden),
+            "current progress must describe main-agent continuation, not compactor work"
+        );
     }
     assert!(
         !checkpoint.contains("Retained tail sentinel"),
@@ -2373,15 +2376,21 @@ async fn installed_checkpoint_replaces_old_body_but_keeps_raw_tail_in_next_reque
         .install_citation_compaction_candidate(
             input,
             r#"{
-              "claims": [
+              "confirmed_decisions": [],
+              "rejected_approaches": [],
+              "constraints_preferences_boundaries": [],
+              "corrected_misunderstandings": [],
+              "durable_conclusions": [
                 {
                   "id": "c1",
-                  "kind": "completed_action",
                   "text": "The old request was compacted.",
                   "refs": ["h0", "h1"]
                 }
               ],
-              "working_intent": null
+              "open_questions": [],
+              "current_progress_and_next_steps": [],
+              "exact_details": [],
+              "handoffs": []
             }"#,
         )
         .await
@@ -2467,15 +2476,21 @@ async fn dynamic_context_projection_keeps_checkpoint_tail_and_current_input_outs
         .install_citation_compaction_candidate(
             input,
             r#"{
-              "claims": [
+              "confirmed_decisions": [],
+              "rejected_approaches": [],
+              "constraints_preferences_boundaries": [],
+              "corrected_misunderstandings": [],
+              "durable_conclusions": [
                 {
                   "id": "c1",
-                  "kind": "completed_action",
                   "text": "The covered request was compacted.",
                   "refs": ["h0", "h1"]
                 }
               ],
-              "working_intent": null
+              "open_questions": [],
+              "current_progress_and_next_steps": [],
+              "exact_details": [],
+              "handoffs": []
             }"#,
         )
         .await
@@ -2566,15 +2581,21 @@ async fn compaction_model_request_excludes_retained_tail_and_tools() {
         vec![Ok(completed_outputs_event(
             vec![ModelOutput::text(
                 r#"{
-                  "claims": [
+                  "confirmed_decisions": [],
+                  "rejected_approaches": [],
+                  "constraints_preferences_boundaries": [],
+                  "corrected_misunderstandings": [],
+                  "durable_conclusions": [
                     {
                       "id": "c1",
-                      "kind": "completed_action",
                       "text": "Old history was compacted.",
                       "refs": ["h0", "h1"]
                     }
                   ],
-                  "working_intent": null
+                  "open_questions": [],
+                  "current_progress_and_next_steps": [],
+                  "exact_details": [],
+                  "handoffs": []
                 }"#,
             )],
             FinishReason::Stop,

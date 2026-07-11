@@ -1859,15 +1859,21 @@ async fn compaction_removes_only_covered_tool_exchanges_after_successful_install
         vec![Ok(completed_text_event("tail assistant"))],
         vec![Ok(completed_text_event(
             r#"{
-              "claims": [
+              "confirmed_decisions": [],
+              "rejected_approaches": [],
+              "constraints_preferences_boundaries": [],
+              "corrected_misunderstandings": [],
+              "durable_conclusions": [
                 {
                   "id": "c1",
-                  "kind": "completed_action",
                   "text": "The old tool result was compacted.",
                   "refs": ["h0", "h2"]
                 }
               ],
-              "working_intent": null
+              "open_questions": [],
+              "current_progress_and_next_steps": [],
+              "exact_details": [],
+              "handoffs": []
             }"#,
         ))],
         vec![Ok(completed_text_event("final answer"))],
@@ -2358,15 +2364,21 @@ async fn provider_step_auto_compacts_before_hard_watermark_request() {
     );
     let compactor = ScriptedModelProvider::new(vec![vec![Ok(completed_text_event(
         r#"{
-          "claims": [
+          "confirmed_decisions": [],
+          "rejected_approaches": [],
+          "constraints_preferences_boundaries": [],
+          "corrected_misunderstandings": [],
+          "durable_conclusions": [
             {
               "id": "c1",
-              "kind": "completed_action",
               "text": "Old turn was compacted automatically.",
               "refs": ["h0", "h1"]
             }
           ],
-          "working_intent": null
+          "open_questions": [],
+          "current_progress_and_next_steps": [],
+          "exact_details": [],
+          "handoffs": []
         }"#,
     ))]]);
     let runtime = Runtime::builder(session_id("agent-loop-auto-compaction-hard-watermark"))
@@ -2442,15 +2454,21 @@ async fn auto_compaction_config_controls_retained_raw_tail() {
     );
     let compactor = ScriptedModelProvider::new(vec![vec![Ok(completed_text_event(
         r#"{
-          "claims": [
+          "confirmed_decisions": [],
+          "rejected_approaches": [],
+          "constraints_preferences_boundaries": [],
+          "corrected_misunderstandings": [],
+          "durable_conclusions": [
             {
               "id": "c1",
-              "kind": "completed_action",
               "text": "Only the old configurable-tail turn was compacted.",
               "refs": ["h0", "h1"]
             }
           ],
-          "working_intent": null
+          "open_questions": [],
+          "current_progress_and_next_steps": [],
+          "exact_details": [],
+          "handoffs": []
         }"#,
     ))]]);
     let policy = CitationCompactionPolicy::new(192, None, 8192, 4, 1200, 16).expect("valid policy");
@@ -2527,15 +2545,21 @@ async fn auto_compaction_keeps_current_tool_turn_raw_during_continuation() {
     );
     let compactor = ScriptedModelProvider::new(vec![vec![Ok(completed_text_event(
         r#"{
-          "claims": [
+          "confirmed_decisions": [],
+          "rejected_approaches": [],
+          "constraints_preferences_boundaries": [],
+          "corrected_misunderstandings": [],
+          "durable_conclusions": [
             {
               "id": "c1",
-              "kind": "current_state",
               "text": "The opening task turn was compacted before tool continuation.",
               "refs": ["h0"]
             }
           ],
-          "working_intent": null
+          "open_questions": [],
+          "current_progress_and_next_steps": [],
+          "exact_details": [],
+          "handoffs": []
         }"#,
     ))]]);
     let policy = CitationCompactionPolicy::new(192, None, 8192, 1, 1200, 16).expect("valid policy");
@@ -2631,32 +2655,58 @@ async fn auto_compacted_agent_loop_continuation_keeps_checkpoint_refs_and_stable
     let compactor = ScriptedModelProvider::new(vec![
         vec![Ok(completed_text_event(
             r#"{
-          "claims": [
+          "confirmed_decisions": [],
+          "rejected_approaches": [],
+          "constraints_preferences_boundaries": [],
+          "corrected_misunderstandings": [],
+          "durable_conclusions": [
             {
               "id": "c1",
-              "kind": "completed_action",
               "text": "The prelude turn was checkpointed.",
               "refs": ["h0", "h1"]
             }
           ],
-          "working_intent": {
-            "text": "Continue from the compacted prelude into the raw current task.",
-            "refs": ["h0"],
-            "confidence": 0.77
-          }
+          "open_questions": [],
+          "current_progress_and_next_steps": [
+            {
+              "id": "c2",
+              "text": "Continue from the compacted prelude into the raw current task.",
+              "refs": ["h0"]
+            }
+          ],
+          "exact_details": [],
+          "handoffs": []
         }"#,
         ))],
         vec![Ok(completed_text_event(
             r#"{
-          "claims": [
+          "confirmed_decisions": [],
+          "rejected_approaches": [],
+          "constraints_preferences_boundaries": [],
+          "corrected_misunderstandings": [],
+          "durable_conclusions": [
             {
-              "id": "c1",
-              "kind": "completed_action",
+              "id": "c3",
               "text": "The prior checkpoint and first covered tool result were checkpointed.",
               "refs": ["h0", "h1", "h2", "h4"]
             }
           ],
-          "working_intent": null
+          "open_questions": [],
+          "current_progress_and_next_steps": [],
+          "exact_details": [],
+          "handoffs": [
+            {
+              "action": "replace",
+              "old_id": "c1",
+              "new_ids": ["c3"],
+              "reason": "The new conclusion combines the prior checkpoint with newly covered evidence."
+            },
+            {
+              "action": "drop",
+              "old_id": "c2",
+              "reason": "The next step was completed by the newly covered tool exchange."
+            }
+          ]
         }"#,
         ))],
     ]);
@@ -2821,15 +2871,21 @@ async fn auto_compaction_config_can_disable_hard_watermark_compaction() {
     );
     let compactor = ScriptedModelProvider::new(vec![vec![Ok(completed_text_event(
         r#"{
-          "claims": [
+          "confirmed_decisions": [],
+          "rejected_approaches": [],
+          "constraints_preferences_boundaries": [],
+          "corrected_misunderstandings": [],
+          "durable_conclusions": [
             {
               "id": "c1",
-              "kind": "completed_action",
               "text": "This checkpoint should not be requested.",
               "refs": ["h0"]
             }
           ],
-          "working_intent": null
+          "open_questions": [],
+          "current_progress_and_next_steps": [],
+          "exact_details": [],
+          "handoffs": []
         }"#,
     ))]]);
     let runtime = Runtime::builder(session_id("agent-loop-auto-compaction-disabled"))

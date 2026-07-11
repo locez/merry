@@ -137,13 +137,19 @@ fn rolling_compaction_carries_original_refs_unchanged() {
         .install_citation_compaction_candidate(
             first_input,
             r#"{
-              "claims": [{
-                "id": "c1",
-                "kind": "constraint",
+              "confirmed_decisions": [],
+              "rejected_approaches": [],
+              "constraints_preferences_boundaries": [],
+              "corrected_misunderstandings": [],
+              "durable_conclusions": [],
+              "open_questions": [],
+              "current_progress_and_next_steps": [],
+              "exact_details": [{
+                "id": "x1",
                 "text": "Keep the first exact source.",
                 "refs": ["h0"]
               }],
-              "working_intent": null
+              "handoffs": []
             }"#,
         )
         .expect("first checkpoint installs");
@@ -166,13 +172,23 @@ fn rolling_compaction_carries_original_refs_unchanged() {
         .install_citation_compaction_candidate(
             second_input,
             r#"{
-              "claims": [{
-                "id": "c2",
-                "kind": "constraint",
-                "text": "Keep both exact sources.",
-                "refs": ["h0", "h1"]
+              "confirmed_decisions": [],
+              "rejected_approaches": [],
+              "constraints_preferences_boundaries": [],
+              "corrected_misunderstandings": [],
+              "durable_conclusions": [],
+              "open_questions": [],
+              "current_progress_and_next_steps": [],
+              "exact_details": [{
+                "id": "x1",
+                "text": "Keep the first exact source.",
+                "refs": ["h0"]
+              }, {
+                "id": "x2",
+                "text": "Keep the second exact source.",
+                "refs": ["h1"]
               }],
-              "working_intent": null
+              "handoffs": [{"action":"keep","old_id":"x1"}]
             }"#,
         )
         .expect("second checkpoint installs");
@@ -221,13 +237,19 @@ fn checkpoint_manifest_drops_refs_unused_by_candidate() {
         .install_citation_compaction_candidate(
             input,
             r#"{
-              "claims": [{
-                "id": "c1",
-                "kind": "constraint",
+              "confirmed_decisions": [],
+              "rejected_approaches": [],
+              "constraints_preferences_boundaries": [],
+              "corrected_misunderstandings": [],
+              "durable_conclusions": [],
+              "open_questions": [],
+              "current_progress_and_next_steps": [],
+              "exact_details": [{
+                "id": "x1",
                 "text": "Keep only the user source.",
                 "refs": ["h0"]
               }],
-              "working_intent": null
+              "handoffs": []
             }"#,
         )
         .expect("checkpoint installs");

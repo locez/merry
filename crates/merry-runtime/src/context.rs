@@ -697,7 +697,7 @@ pub(crate) struct PersistedCompactedCheckpoint {
 pub struct CompactedCheckpointSummary {
     checkpoint_id: Option<CheckpointId>,
     citation_backed: bool,
-    claim_count: usize,
+    entry_count: usize,
     ref_count: usize,
 }
 
@@ -714,10 +714,10 @@ impl CompactedCheckpointSummary {
         self.citation_backed
     }
 
-    /// Number of claims in the structured checkpoint, or zero for plain checkpoints.
+    /// Number of entries in the structured checkpoint, or zero for plain checkpoints.
     #[must_use]
-    pub fn claim_count(&self) -> usize {
-        self.claim_count
+    pub fn entry_count(&self) -> usize {
+        self.entry_count
     }
 
     /// Number of local refs in the structured checkpoint manifest, or zero for plain checkpoints.
@@ -766,20 +766,20 @@ impl CompactedCheckpoint {
         self.citation_backed.as_ref()
     }
 
-    /// Payload-free summary for diagnostics. This excludes claim text and evidence content.
+    /// Payload-free summary for diagnostics. This excludes entry text and evidence content.
     #[must_use]
     pub fn summary(&self) -> CompactedCheckpointSummary {
         match &self.citation_backed {
             Some(checkpoint) => CompactedCheckpointSummary {
                 checkpoint_id: Some(checkpoint.id().clone()),
                 citation_backed: true,
-                claim_count: checkpoint.claims().len(),
+                entry_count: checkpoint.sections().entry_count(),
                 ref_count: checkpoint.manifest().refs().len(),
             },
             None => CompactedCheckpointSummary {
                 checkpoint_id: None,
                 citation_backed: false,
-                claim_count: 0,
+                entry_count: 0,
                 ref_count: 0,
             },
         }
@@ -1504,15 +1504,20 @@ mod tests {
 
         let candidate = CompactedCheckpointCandidate::from_json(
             r#"{
-              "claims": [
-                {
-                  "id": "c1",
-                  "kind": "current_state",
-                  "text": "Citation-backed checkpointing is the current direction.",
-                  "refs": ["r1"]
-                }
-              ],
-              "working_intent": null
+              "confirmed_decisions": [{
+                "id": "d1",
+                "text": "Citation-backed checkpointing is the current direction.",
+                "rationale": "It preserves exact source evidence.",
+                "refs": ["r1"]
+              }],
+              "rejected_approaches": [],
+              "constraints_preferences_boundaries": [],
+              "corrected_misunderstandings": [],
+              "durable_conclusions": [],
+              "open_questions": [],
+              "current_progress_and_next_steps": [],
+              "exact_details": [],
+              "handoffs": []
             }"#,
         )
         .expect("parseable candidate");
@@ -1528,7 +1533,8 @@ mod tests {
             CompactedCheckpoint::from_citation_backed(citation).expect("valid checkpoint");
 
         assert!(checkpoint.citation_backed().is_some());
-        assert!(checkpoint.text().contains("current_state [r1]"));
+        assert!(checkpoint.text().contains("confirmed_decisions:"));
+        assert_eq!(checkpoint.summary().entry_count(), 1);
     }
 
     #[test]

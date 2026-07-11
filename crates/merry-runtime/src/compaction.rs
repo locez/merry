@@ -3,9 +3,8 @@
 use crate::{
     RuntimeError,
     checkpoint::{
-        CheckpointError, CheckpointId, CheckpointRefId, CheckpointRefManifest,
-        CheckpointSourceKind, CheckpointValidationPolicy, CitationBackedCheckpoint,
-        CompactedCheckpointCandidate,
+        CheckpointError, CheckpointId, CheckpointRefManifest, CheckpointSourceKind,
+        CheckpointValidationPolicy, CitationBackedCheckpoint, CompactedCheckpointCandidate,
     },
     context::TaskAnchor,
 };
@@ -260,6 +259,7 @@ pub struct CitationCompactionInput {
     manifest: CheckpointRefManifest,
     covered_history_ids: BTreeSet<u64>,
     task_anchor_snapshot: Option<TaskAnchor>,
+    previous_checkpoint_snapshot: Option<CitationBackedCheckpoint>,
     policy: CitationCompactionPolicy,
 }
 
@@ -271,6 +271,7 @@ impl CitationCompactionInput {
         covered_history_ids: BTreeSet<u64>,
         window: Vec<CitationCompactionWindowItem>,
         previous_checkpoint: Option<CitationCompactionPreviousCheckpoint>,
+        previous_checkpoint_snapshot: Option<CitationBackedCheckpoint>,
     ) -> Self {
         let payload = CitationCompactionPayload {
             policy: CitationCompactionPayloadPolicy {
@@ -297,6 +298,7 @@ impl CitationCompactionInput {
             manifest,
             covered_history_ids,
             task_anchor_snapshot,
+            previous_checkpoint_snapshot,
             policy,
         }
     }
@@ -328,6 +330,10 @@ impl CitationCompactionInput {
     pub fn policy(&self) -> CitationCompactionPolicy {
         self.policy
     }
+
+    pub(crate) fn previous_checkpoint_snapshot(&self) -> Option<&CitationBackedCheckpoint> {
+        self.previous_checkpoint_snapshot.as_ref()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -338,25 +344,24 @@ pub(crate) enum CitationCompactionPreviousCheckpointInput<'a> {
 
 pub(crate) fn previous_checkpoint_payload(
     input: CitationCompactionPreviousCheckpointInput<'_>,
-    max_claims: usize,
 ) -> CitationCompactionPreviousCheckpoint {
     match input {
         CitationCompactionPreviousCheckpointInput::CitationBacked(checkpoint) => {
             CitationCompactionPreviousCheckpoint {
                 checkpoint_id: checkpoint.id().as_str().to_owned(),
                 text: None,
-                claims: checkpoint
-                    .claims()
+                entries: checkpoint
+                    .sections()
                     .iter()
-                    .take(max_claims)
-                    .map(|claim| CitationCompactionPriorClaim {
-                        claim_id: claim.id().as_str().to_owned(),
-                        kind: claim.kind().as_str().to_owned(),
-                        text: claim.text().to_owned(),
-                        refs: claim
+                    .map(|(section, entry)| CitationCompactionPriorEntry {
+                        entry_id: entry.id().as_str().to_owned(),
+                        section: section.as_str().to_owned(),
+                        text: entry.text().to_owned(),
+                        rationale: entry.rationale().map(str::to_owned),
+                        refs: entry
                             .refs()
                             .iter()
-                            .map(CheckpointRefId::as_str)
+                            .map(|ref_id| ref_id.as_str())
                             .map(str::to_owned)
                             .collect(),
                     })
@@ -367,7 +372,7 @@ pub(crate) fn previous_checkpoint_payload(
             CitationCompactionPreviousCheckpoint {
                 checkpoint_id: "plain-text-checkpoint".to_owned(),
                 text: Some(text.to_owned()),
-                claims: Vec::new(),
+                entries: Vec::new(),
             }
         }
     }
@@ -387,13 +392,23 @@ pub(crate) fn checkpoint_from_candidate_json(
     }
 
     let candidate = CompactedCheckpointCandidate::from_json(candidate_json)?;
-    CitationBackedCheckpoint::from_candidate(
-        checkpoint_id,
-        candidate,
-        input.manifest().clone(),
-        CheckpointValidationPolicy::default()
-            .with_max_ref_excerpt_bytes(input.policy().max_ref_excerpt_bytes()),
-    )
+    let policy = CheckpointValidationPolicy::default()
+        .with_max_ref_excerpt_bytes(input.policy().max_ref_excerpt_bytes());
+    match input.previous_checkpoint_snapshot() {
+        Some(previous) => CitationBackedCheckpoint::from_rolling_candidate(
+            checkpoint_id,
+            candidate,
+            previous,
+            input.manifest().clone(),
+            policy,
+        ),
+        None => CitationBackedCheckpoint::from_candidate(
+            checkpoint_id,
+            candidate,
+            input.manifest().clone(),
+            policy,
+        ),
+    }
     .map_err(RuntimeError::from)
 }
 
@@ -458,14 +473,16 @@ pub(crate) struct CitationCompactionPreviousCheckpoint {
     checkpoint_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     text: Option<String>,
-    claims: Vec<CitationCompactionPriorClaim>,
+    entries: Vec<CitationCompactionPriorEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct CitationCompactionPriorClaim {
-    claim_id: String,
-    kind: String,
+pub(crate) struct CitationCompactionPriorEntry {
+    entry_id: String,
+    section: String,
     text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rationale: Option<String>,
     refs: Vec<String>,
 }
 
@@ -705,6 +722,7 @@ mod tests {
                 "Need compact checkpoint output.".to_owned(),
             )],
             None,
+            None,
         );
         let payload = serde_json::from_str::<serde_json::Value>(
             &input.to_model_payload_json().expect("payload serializes"),
@@ -719,6 +737,85 @@ mod tests {
             payload["policy"]["output_budget_instruction"],
             "Aim for no more than 420 output tokens total, 6-8 claims, one concise sentence per claim."
         );
+    }
+
+    #[test]
+    fn previous_checkpoint_payload_keeps_all_entries_above_legacy_cap() {
+        let durable_conclusions = (0..17)
+            .map(|index| {
+                if index == 0 {
+                    serde_json::json!({
+                        "id": "entry-0",
+                        "text": "Durable conclusion 0.",
+                        "rationale": "Preserve the original ordering metadata.",
+                        "refs": ["r2", "r1"]
+                    })
+                } else {
+                    serde_json::json!({
+                        "id": format!("entry-{index}"),
+                        "text": format!("Durable conclusion {index}."),
+                        "refs": ["r1"]
+                    })
+                }
+            })
+            .collect::<Vec<_>>();
+        let candidate_json = serde_json::json!({
+            "confirmed_decisions": [],
+            "rejected_approaches": [],
+            "constraints_preferences_boundaries": [],
+            "corrected_misunderstandings": [],
+            "durable_conclusions": durable_conclusions,
+            "open_questions": [],
+            "current_progress_and_next_steps": [],
+            "exact_details": [],
+            "handoffs": []
+        })
+        .to_string();
+        let checkpoint_id = CheckpointId::new("checkpoint-prior-payload").expect("valid id");
+        let manifest = CheckpointRefManifest::new(
+            checkpoint_id.clone(),
+            vec![
+                CheckpointRef::new(
+                    CheckpointRefId::new("r1").expect("valid ref id"),
+                    CheckpointSourceKind::UserMessage,
+                    CheckpointSequenceRange::new(1, 1).expect("valid range"),
+                    evidence("prior-payload-source-1"),
+                ),
+                CheckpointRef::new(
+                    CheckpointRefId::new("r2").expect("valid ref id"),
+                    CheckpointSourceKind::AssistantMessage,
+                    CheckpointSequenceRange::new(2, 2).expect("valid range"),
+                    evidence("prior-payload-source-2"),
+                ),
+            ],
+        )
+        .expect("valid manifest");
+        let candidate =
+            CompactedCheckpointCandidate::from_json(&candidate_json).expect("candidate parses");
+        let checkpoint = CitationBackedCheckpoint::from_candidate(
+            checkpoint_id,
+            candidate,
+            manifest,
+            CheckpointValidationPolicy::default(),
+        )
+        .expect("checkpoint builds");
+
+        let payload = serde_json::to_value(previous_checkpoint_payload(
+            CitationCompactionPreviousCheckpointInput::CitationBacked(&checkpoint),
+        ))
+        .expect("previous checkpoint payload serializes");
+        let entries = payload["entries"].as_array().expect("entries array");
+
+        assert_eq!(entries.len(), 17);
+        assert_eq!(entries[0]["entry_id"], "entry-0");
+        assert_eq!(entries[0]["section"], "durable_conclusions");
+        assert_eq!(entries[0]["text"], "Durable conclusion 0.");
+        assert_eq!(
+            entries[0]["rationale"],
+            "Preserve the original ordering metadata."
+        );
+        assert_eq!(entries[0]["refs"], serde_json::json!(["r2", "r1"]));
+        assert_eq!(entries[16]["entry_id"], "entry-16");
     }
 
     #[test]
@@ -746,6 +843,7 @@ mod tests {
                 "r1".to_owned(),
                 "Need strict checkpoint JSON.".to_owned(),
             )],
+            None,
             None,
         );
 
