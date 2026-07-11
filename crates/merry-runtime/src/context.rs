@@ -891,7 +891,24 @@ impl CompiledContext {
         let mut lines = Vec::new();
 
         self.checkpoint.append_prompt_lines(&mut lines);
+        self.append_body_prompt_lines(&mut lines);
 
+        lines.join("\n")
+    }
+
+    pub(crate) fn checkpoint_snapshot(&self) -> String {
+        let mut lines = Vec::new();
+        self.checkpoint.append_prompt_lines(&mut lines);
+        lines.join("\n")
+    }
+
+    pub(crate) fn body_snapshot(&self) -> String {
+        let mut lines = Vec::new();
+        self.append_body_prompt_lines(&mut lines);
+        lines.join("\n")
+    }
+
+    fn append_body_prompt_lines(&self, lines: &mut Vec<String>) {
         for section in &self.sections {
             match section {
                 CompiledContextSection::Summary { id, text, evidence } => {
@@ -969,8 +986,6 @@ impl CompiledContext {
                 }
             }
         }
-
-        lines.join("\n")
     }
 }
 
@@ -1010,8 +1025,8 @@ impl ContextCheckpointSegment {
 /// A section in the compiled context snapshot.
 ///
 /// The public compiled section view is summary-only in the MVP. Crate-internal
-/// projections may still be present in [`CompiledContext::to_snapshot`] for
-/// runtime-owned provider request compilation.
+/// projections remain available to runtime-owned provider request compilation
+/// and in [`CompiledContext::to_snapshot`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompiledContextSection {
     /// Navigation summary plus exact retrievable evidence references.

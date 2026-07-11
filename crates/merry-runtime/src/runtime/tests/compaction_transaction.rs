@@ -1,9 +1,10 @@
 use super::*;
 use crate::{
-    CompactionError, FileSessionStore, TaskAnchor,
+    CompactionError, FileSessionStore, StepInput, TaskAnchor,
     session::ModelTurnId,
     session_store::{SessionStoreCommitPause, SessionStoreStagePause},
 };
+use futures_util::FutureExt;
 use std::time::Duration;
 
 const TRANSACTIONAL_COMPACTION_CANDIDATE: &str = r#"{
@@ -374,6 +375,100 @@ async fn successful_compaction_commit_resumes_exact_transactional_state() {
             .expect("provider transcript resumes")
             .len(),
         1
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn automatic_compaction_completed_waits_for_directory_durability() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let durable_store = FileSessionStore::new(temp.path());
+    let pause = SessionStoreCommitPause::new();
+    let paused_store = durable_store
+        .clone()
+        .with_commit_pause_for_tests(pause.clone());
+    let (runtime, id, _before_memory, _before_disk) = transactional_compaction_fixture(
+        "runtime-auto-compaction-durable-event",
+        &durable_store,
+        paused_store,
+    )
+    .await;
+    {
+        let mut session = runtime.inner.session.lock().await;
+        for text in [
+            format!("covered ballast\n{}", "ballast ".repeat(24_000)),
+            format!("retained tail\n{}", "tail ".repeat(6_400)),
+        ] {
+            let turn_id = session.begin_model_turn().expect("turn begins");
+            session
+                .record_user_message_body(turn_id, &text)
+                .expect("user message records");
+            session
+                .close_model_response(turn_id, false)
+                .expect("turn completes");
+        }
+    }
+    *runtime.inner.automatic_compaction.write().await = AutomaticCompactionConfig::enabled(
+        CitationCompactionPolicy::new(None, None, 1).expect("valid policy"),
+    );
+
+    let mut events = runtime
+        .step(
+            StepInput::user_text("Trigger durable automatic compaction.")
+                .expect("valid step input"),
+            StepContext::default(),
+        )
+        .expect("step starts");
+    loop {
+        let event = events.next().await.expect("compaction should start");
+        match event.payload {
+            RuntimeJournalPayload::SessionStarted | RuntimeJournalPayload::StepStarted => {}
+            RuntimeJournalPayload::CompactionStarted => break,
+            payload => panic!("unexpected event before compaction starts: {payload:?}"),
+        }
+    }
+
+    tokio::select! {
+        biased;
+        event = events.next() => {
+            panic!("event became visible before directory durability: {event:?}");
+        }
+        () = pause.wait_until_committed() => {}
+    }
+    assert!(
+        events.next().now_or_never().is_none(),
+        "CompactionCompleted must remain blocked before the parent directory is synced"
+    );
+
+    pause.resume();
+    let completed = events
+        .next()
+        .await
+        .expect("durable compaction should emit completion");
+    let checkpoint_id = match completed.payload {
+        RuntimeJournalPayload::CompactionCompleted {
+            checkpoint_id,
+            covered_history_item_count: 3,
+        } => checkpoint_id,
+        payload => panic!("expected durable compaction completion, got {payload:?}"),
+    };
+    let resumed = Runtime::builder(id)
+        .resume_from_store(durable_store)
+        .await
+        .expect("completed checkpoint should already be resumable");
+    let summary = resumed
+        .compacted_checkpoint_summary()
+        .await
+        .expect("resumed checkpoint should exist");
+    assert_eq!(
+        summary.checkpoint_id().map(CheckpointId::as_str),
+        Some(checkpoint_id.as_str())
+    );
+
+    let remaining = events.collect::<Vec<_>>().await;
+    assert!(
+        remaining
+            .iter()
+            .any(|event| matches!(event.payload, RuntimeJournalPayload::StepCompleted))
     );
 }
 
