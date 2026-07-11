@@ -471,6 +471,15 @@ fn request_context_budget_uses_dynamic_estimate_watermarks() {
     assert_eq!(budget.decision, CheckpointDecision::PlanCheckpoint);
     assert!(budget.dynamic_body_estimated_tokens >= budget.budget.soft_water_tokens());
     assert!(budget.dynamic_body_estimated_tokens < budget.budget.hard_water_tokens());
+
+    let usage = step_usage_context_snapshot(Some(&budget), true);
+    assert_eq!(
+        usage
+            .compaction
+            .expect("compaction usage should be available")
+            .dynamic_body_estimated_tokens,
+        Some(budget.dynamic_body_estimated_tokens)
+    );
 }
 
 #[test]

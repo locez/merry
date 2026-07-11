@@ -133,7 +133,7 @@ fn bordered_inner(region: Rect) -> Rect {
 }
 
 fn render_header(frame: &mut Frame<'_>, state: &TuiState, region: Rect) {
-    let [workspace, model, usage] = state.status_parts();
+    let [workspace, model, usage] = state.header_status_parts(region.width);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(

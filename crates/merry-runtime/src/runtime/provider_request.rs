@@ -206,6 +206,7 @@ pub(super) fn step_usage_context_snapshot(
         }),
         compaction: Some(CompactionUsageWindow {
             auto_compaction_enabled,
+            dynamic_body_estimated_tokens: Some(request_budget.dynamic_body_estimated_tokens),
             body_budget_tokens: request_budget.budget.body_budget_tokens(),
             soft_water_tokens: request_budget.budget.soft_water_tokens(),
             hard_water_tokens: request_budget.budget.hard_water_tokens(),

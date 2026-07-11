@@ -43,6 +43,7 @@ mod runtime;
 mod session_list;
 mod session_picker;
 mod state;
+mod status;
 mod terminal;
 pub(crate) mod theme;
 

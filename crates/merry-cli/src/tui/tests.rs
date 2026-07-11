@@ -15,10 +15,10 @@ use super::theme::{SemanticColor, TuiTheme};
 use crate::config::{ConfiguredProviderKind, ProviderConfigSource};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use merry_core::{
-    ArtifactId, ArtifactKind, ArtifactRef, ContextWindowSource, ErrorInfo, InteractiveRunState,
-    ModelUsage, PendingToolCall, PendingToolCallBatch, QueuedInputLane, QueuedInputView,
-    RuntimeEvent, RuntimeEventSource, SessionId, SessionUsage, ToolCallArguments, ToolCallBatchId,
-    ToolCallId, ToolCallResult, ToolName, ToolOutput, UsageContextWindow,
+    ArtifactId, ArtifactKind, ArtifactRef, CompactionUsageWindow, ContextWindowSource, ErrorInfo,
+    InteractiveRunState, ModelUsage, PendingToolCall, PendingToolCallBatch, QueuedInputLane,
+    QueuedInputView, RuntimeEvent, RuntimeEventSource, SessionId, SessionUsage, ToolCallArguments,
+    ToolCallBatchId, ToolCallId, ToolCallResult, ToolName, ToolOutput, UsageContextWindow,
 };
 use merry_runtime::{SessionTranscriptItem, SkillMetadata};
 use merry_tool_workspace::WORKSPACE_PATCH_TOOL;
@@ -1199,8 +1199,9 @@ fn provider_surfaces_fit_supported_terminal_sizes_without_secret_exposure() {
     assert!(manager.contains("Protocol"));
     assert!(manager.contains("Chat completions"));
     assert!(manager.contains("N Add"));
-    assert!(manager.contains("Enter Edit"));
+    assert!(manager.contains("Enter Switch"));
     assert!(manager.contains("M Models"));
+    assert!(manager.contains("E Edit"));
     assert!(manager.contains("D Delete"));
     for (width, height) in [(100, 30), (80, 24), (40, 16)] {
         let text = render_to_text(&state, width, height);
@@ -2069,6 +2070,109 @@ fn projector_resets_streaming_assistant_after_terminal_error() {
                 text: "fresh".to_owned()
             }
         ]
+    );
+}
+
+#[test]
+fn projector_replaces_compaction_progress_with_a_durable_timeline_trace() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    let mut projector = TuiProjector::default();
+
+    projector.apply(
+        RuntimeEvent::CompactionStarted { source: source() },
+        &mut state,
+    );
+    assert_eq!(
+        state.timeline(),
+        [TimelineItem::Muted {
+            title: "Compacting".to_owned(),
+            detail: "preparing checkpoint".to_owned(),
+        }]
+    );
+
+    projector.apply(
+        RuntimeEvent::CompactionCompleted {
+            checkpoint_id: "checkpoint-session-42".to_owned(),
+            covered_history_item_count: 48,
+            source: source(),
+        },
+        &mut state,
+    );
+
+    assert_eq!(
+        state.timeline(),
+        [TimelineItem::Muted {
+            title: "Compacted".to_owned(),
+            detail: "48 history items · checkpoint-session-42".to_owned(),
+        }]
+    );
+}
+
+#[test]
+fn projector_replaces_compaction_progress_with_failure() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    let mut projector = TuiProjector::default();
+
+    projector.apply(
+        RuntimeEvent::CompactionStarted { source: source() },
+        &mut state,
+    );
+    projector.apply(
+        RuntimeEvent::RunFailed {
+            diagnostic: ErrorInfo::new("auto_compaction", "compaction response was invalid")
+                .unwrap(),
+            source: source(),
+        },
+        &mut state,
+    );
+
+    assert_eq!(
+        state.timeline(),
+        [TimelineItem::Diagnostic {
+            title: "compaction failed".to_owned(),
+            body: "compaction response was invalid".to_owned(),
+        }]
+    );
+}
+
+#[test]
+fn projector_replaces_compaction_progress_with_cancellation() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    let mut projector = TuiProjector::default();
+
+    projector.apply(
+        RuntimeEvent::CompactionStarted { source: source() },
+        &mut state,
+    );
+    projector.apply(
+        RuntimeEvent::RunCancelled {
+            diagnostic: ErrorInfo::new("run_cancelled", "cancelled by user").unwrap(),
+            source: source(),
+        },
+        &mut state,
+    );
+
+    assert_eq!(
+        state.timeline(),
+        [TimelineItem::Muted {
+            title: "Compaction cancelled".to_owned(),
+            detail: "cancelled by user".to_owned(),
+        }]
     );
 }
 
@@ -3069,14 +3173,20 @@ fn projector_updates_queue_preview_and_usage_without_timeline_noise() {
     projector.apply(
         RuntimeEvent::UsageUpdated {
             usage: SessionUsage {
-                total: ModelUsage::new(10, 3),
-                last: ModelUsage::new(10, 3),
+                total: ModelUsage::with_details(20_000, Some(18_000), 1_000, None, 21_000),
+                last: ModelUsage::with_details(20_000, Some(18_000), 1_000, None, 21_000),
                 context: Some(UsageContextWindow {
-                    resolved_model_window_tokens: 128000,
-                    effective_window_tokens: 128000,
-                    source: ContextWindowSource::ProviderCapabilities,
+                    resolved_model_window_tokens: 64_000,
+                    effective_window_tokens: 60_800,
+                    source: ContextWindowSource::Fallback,
                 }),
-                compaction: None,
+                compaction: Some(CompactionUsageWindow {
+                    auto_compaction_enabled: true,
+                    dynamic_body_estimated_tokens: Some(20_200),
+                    body_budget_tokens: 56_792,
+                    soft_water_tokens: 46_792,
+                    hard_water_tokens: 54_792,
+                }),
             },
             source: source(),
         },
@@ -3085,11 +3195,75 @@ fn projector_updates_queue_preview_and_usage_without_timeline_noise() {
 
     assert_eq!(state.queue_preview().next[0].text, "urgent");
     assert!(state.timeline().is_empty());
+    assert!(state.status_text().contains("ctx 20.2k/54.8k"));
+    assert!(state.status_text().contains("win 64k fallback"));
+    assert!(state.status_text().contains("cache 90%"));
     assert!(
         state
             .status_text()
-            .contains("last in 10 out 3 | total 13 tok")
+            .contains("last in 20k out 1k | total 21k tok")
     );
+}
+
+#[test]
+fn narrow_header_preserves_context_pressure_before_secondary_usage() {
+    let mut state = TuiState::new(
+        "/home/locez/source/rust/merry".into(),
+        "gpt-5.6-sol xhigh".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.set_usage(SessionUsage {
+        total: ModelUsage::with_details(2_627_620, Some(2_045_312), 31_541, None, 2_659_161),
+        last: ModelUsage::with_details(29_021, Some(28_160), 1_301, None, 30_322),
+        context: Some(UsageContextWindow {
+            resolved_model_window_tokens: 64_000,
+            effective_window_tokens: 60_800,
+            source: ContextWindowSource::Fallback,
+        }),
+        compaction: Some(CompactionUsageWindow {
+            auto_compaction_enabled: true,
+            dynamic_body_estimated_tokens: Some(20_200),
+            body_budget_tokens: 56_792,
+            soft_water_tokens: 46_792,
+            hard_water_tokens: 54_792,
+        }),
+    });
+
+    let rendered = render_to_text(&state, 72, 16);
+
+    assert!(rendered.contains("ctx 20.2k/54.8k"));
+    assert!(!rendered.contains("total 2659.1k"));
+}
+
+#[test]
+fn narrow_header_counts_wide_characters_when_preserving_context() {
+    let mut state = TuiState::new(
+        "/home/用户/项目/非常长的中文目录/merry".into(),
+        "模型-gpt-5.6-超高".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.set_usage(SessionUsage {
+        total: ModelUsage::with_details(20_000, Some(18_000), 1_000, None, 21_000),
+        last: ModelUsage::with_details(20_000, Some(18_000), 1_000, None, 21_000),
+        context: Some(UsageContextWindow {
+            resolved_model_window_tokens: 64_000,
+            effective_window_tokens: 60_800,
+            source: ContextWindowSource::Fallback,
+        }),
+        compaction: Some(CompactionUsageWindow {
+            auto_compaction_enabled: true,
+            dynamic_body_estimated_tokens: Some(20_200),
+            body_budget_tokens: 56_792,
+            soft_water_tokens: 46_792,
+            hard_water_tokens: 54_792,
+        }),
+    });
+
+    let rendered = render_to_text(&state, 48, 16);
+
+    assert!(rendered.contains("ctx 20.2k/54.8k"));
 }
 
 #[test]

@@ -8,6 +8,7 @@ use super::{
         ModelListItem, ModelPickerOverlay, ProviderFormOverlay, ProviderFormSeed,
         ProviderFormValues, ProviderListItem, ProviderManagerOverlay,
     },
+    status::{format_header_status_parts, format_session_usage_full},
     theme::TuiTheme,
 };
 use merry_core::{InteractiveRunState, QueuedInputLane, QueuedInputView, SessionUsage};
@@ -908,13 +909,14 @@ impl TuiState {
     }
 
     pub(crate) fn status_parts(&self) -> [String; 3] {
-        let usage = self
-            .usage
-            .as_ref()
-            .map(format_session_usage)
-            .unwrap_or_else(|| "usage -".to_owned());
+        let usage = format_session_usage_full(self.usage.as_ref());
         let model = self.model_status_label();
         [self.workspace_root.display().to_string(), model, usage]
+    }
+
+    pub(crate) fn header_status_parts(&self, width: u16) -> [String; 3] {
+        let model = self.model_status_label();
+        format_header_status_parts(&self.workspace_root, &model, self.usage.as_ref(), width)
     }
 
     pub(crate) fn interaction_status_text(&self) -> String {
@@ -961,29 +963,6 @@ impl TuiState {
             .filter(|label| !label.is_empty())
             .map(|label| format!("{} {}", self.model_label, label))
             .unwrap_or_else(|| self.model_label.clone())
-    }
-}
-
-fn format_session_usage(usage: &SessionUsage) -> String {
-    format!(
-        "last in {} out {} | total {} tok",
-        format_token_count(usage.last.input_tokens()),
-        format_token_count(usage.last.output_tokens()),
-        format_token_count(usage.total.total_tokens())
-    )
-}
-
-fn format_token_count(tokens: u64) -> String {
-    if tokens < 1_000 {
-        return tokens.to_string();
-    }
-
-    let whole = tokens / 1_000;
-    let decimal = (tokens % 1_000) / 100;
-    if decimal == 0 {
-        format!("{whole}k")
-    } else {
-        format!("{whole}.{decimal}k")
     }
 }
 

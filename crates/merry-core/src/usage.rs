@@ -122,6 +122,11 @@ pub struct UsageContextWindow {
 #[serde(deny_unknown_fields)]
 pub struct CompactionUsageWindow {
     pub auto_compaction_enabled: bool,
+    /// Estimated dynamic-body tokens in the request that produced this usage.
+    ///
+    /// This is optional so persisted sessions written before the field existed
+    /// remain loadable.
+    pub dynamic_body_estimated_tokens: Option<u64>,
     pub body_budget_tokens: u64,
     pub soft_water_tokens: u64,
     pub hard_water_tokens: u64,
