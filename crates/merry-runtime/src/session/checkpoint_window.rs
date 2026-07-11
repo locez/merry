@@ -14,9 +14,10 @@ use crate::{
         CheckpointSourceKind,
     },
     compaction::{
-        CitationCompactionInput, CitationCompactionPolicy,
+        CitationCompactionInput, CitationCompactionInputPolicy, CitationCompactionPolicy,
         CitationCompactionPreviousCheckpointInput, CompactionError, CompactionOutcome,
-        checkpoint_from_candidate_json, previous_checkpoint_payload,
+        ResolvedCitationCompactionBudget, checkpoint_from_candidate_json,
+        previous_checkpoint_payload,
     },
     context::{CompactedCheckpoint, CompactedCheckpointSummary},
     permission::PermissionReviewContextEntry,
@@ -106,6 +107,7 @@ impl SessionState {
     pub(crate) fn build_citation_compaction_input(
         &self,
         policy: CitationCompactionPolicy,
+        resolved_budget: ResolvedCitationCompactionBudget,
     ) -> Result<Option<CitationCompactionInput>, RuntimeError> {
         if !self.pending_tool_calls.is_empty() {
             return Err(CompactionError::PendingToolCalls.into());
@@ -122,29 +124,31 @@ impl SessionState {
         {
             return Err(CompactionError::StaleWindow.into());
         }
-        let completed_turns = &turns[..first_open];
-        let history_count = completed_turns
+        let closed_turns = &turns[..first_open];
+        let mut completed_seen = 0;
+        let retained_start = closed_turns
             .iter()
-            .map(|turn| turn.items.len())
-            .sum::<usize>();
-        if history_count <= policy.retained_raw_tail_items() {
+            .enumerate()
+            .rev()
+            .find_map(|(index, turn)| {
+                if turn.status == ModelTurnStatus::Completed {
+                    completed_seen += 1;
+                    (completed_seen == policy.retained_model_turns()).then_some(index)
+                } else {
+                    None
+                }
+            });
+        let Some(retained_start) = retained_start else {
             return Ok(None);
-        }
-
-        let mut retained_count = 0;
-        let mut covered_turn_count = completed_turns.len();
-        while covered_turn_count > 0 && retained_count < policy.retained_raw_tail_items() {
-            covered_turn_count -= 1;
-            retained_count += completed_turns[covered_turn_count].items.len();
-        }
-        let covered = completed_turns[..covered_turn_count]
+        };
+        let covered = closed_turns[..retained_start]
             .iter()
             .flat_map(|turn| turn.items.iter().cloned())
             .collect::<Vec<_>>();
         if covered.is_empty() {
             return Ok(None);
         }
-        self.citation_compaction_input_from_history(policy, &covered)
+        self.citation_compaction_input_from_history(policy, resolved_budget, &covered)
             .map(Some)
     }
 
@@ -346,6 +350,7 @@ impl SessionState {
     fn citation_compaction_input_from_history(
         &self,
         policy: CitationCompactionPolicy,
+        resolved_budget: ResolvedCitationCompactionBudget,
         covered: &[CompactionHistoryRecord],
     ) -> Result<CitationCompactionInput, RuntimeError> {
         if covered.is_empty() {
@@ -396,7 +401,7 @@ impl SessionState {
         let previous_checkpoint = previous_checkpoint_input.map(previous_checkpoint_payload);
 
         Ok(CitationCompactionInput::new(
-            policy,
+            CitationCompactionInputPolicy::new(policy, resolved_budget),
             self.task_anchor.clone(),
             manifest,
             covered_history_ids,

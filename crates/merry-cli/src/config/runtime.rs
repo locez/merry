@@ -117,8 +117,9 @@ struct AutoCompactionToml {
     #[serde(default = "default_true")]
     enabled: bool,
     target_output_tokens: Option<u64>,
-    model_output_token_limit: Option<u64>,
     max_accepted_output_bytes: Option<usize>,
+    retained_model_turns: Option<usize>,
+    model_output_token_limit: Option<u64>,
     retained_raw_tail_items: Option<usize>,
     max_ref_excerpt_bytes: Option<usize>,
     max_carried_prior_refs: Option<usize>,
@@ -126,6 +127,7 @@ struct AutoCompactionToml {
 
 impl AutoCompactionToml {
     fn to_config(&self) -> Result<AutomaticCompactionConfig, ConfigError> {
+        self.validate_removed_fields()?;
         if !self.enabled {
             return Ok(AutomaticCompactionConfig::disabled());
         }
@@ -133,21 +135,46 @@ impl AutoCompactionToml {
         let defaults = AutomaticCompactionConfig::default().policy();
         let policy = CitationCompactionPolicy::new(
             self.target_output_tokens
-                .unwrap_or_else(|| defaults.target_output_tokens()),
-            self.model_output_token_limit
-                .or_else(|| defaults.model_output_token_limit()),
+                .or_else(|| defaults.target_output_tokens()),
             self.max_accepted_output_bytes
-                .unwrap_or_else(|| defaults.max_accepted_output_bytes()),
-            self.retained_raw_tail_items
-                .unwrap_or_else(|| defaults.retained_raw_tail_items()),
-            self.max_ref_excerpt_bytes
-                .unwrap_or_else(|| defaults.max_ref_excerpt_bytes()),
-            self.max_carried_prior_refs
-                .unwrap_or_else(|| defaults.max_carried_prior_refs()),
+                .or_else(|| defaults.max_accepted_output_bytes()),
+            self.retained_model_turns
+                .unwrap_or_else(|| defaults.retained_model_turns()),
         )
         .map_err(|error| ConfigError::Invalid(error.to_string()))?;
         Ok(AutomaticCompactionConfig::enabled(policy))
     }
+
+    fn validate_removed_fields(&self) -> Result<(), ConfigError> {
+        if self.retained_model_turns.is_some() && self.retained_raw_tail_items.is_some() {
+            return Err(ConfigError::Invalid(
+                "runtime.auto_compaction cannot set both retained_model_turns and removed field retained_raw_tail_items"
+                    .to_owned(),
+            ));
+        }
+        if self.model_output_token_limit.is_some() {
+            return Err(removed_auto_compaction_field("model_output_token_limit"));
+        }
+        if self.retained_raw_tail_items.is_some() {
+            return Err(ConfigError::Invalid(
+                "runtime.auto_compaction.retained_raw_tail_items was removed; use retained_model_turns and choose the value explicitly"
+                    .to_owned(),
+            ));
+        }
+        if self.max_ref_excerpt_bytes.is_some() {
+            return Err(removed_auto_compaction_field("max_ref_excerpt_bytes"));
+        }
+        if self.max_carried_prior_refs.is_some() {
+            return Err(removed_auto_compaction_field("max_carried_prior_refs"));
+        }
+        Ok(())
+    }
+}
+
+fn removed_auto_compaction_field(field: &str) -> ConfigError {
+    ConfigError::Invalid(format!(
+        "runtime.auto_compaction.{field} was removed; supported fields are enabled, retained_model_turns, target_output_tokens, and max_accepted_output_bytes"
+    ))
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
@@ -237,11 +264,8 @@ mod tests {
 [runtime.auto_compaction]
 enabled = true
 target_output_tokens = 160
-model_output_token_limit = 256
 max_accepted_output_bytes = 4096
-retained_raw_tail_items = 4
-max_ref_excerpt_bytes = 900
-max_carried_prior_refs = 12
+retained_model_turns = 4
 "#,
             ),
             &paths,
@@ -254,12 +278,9 @@ max_carried_prior_refs = 12
             .expect("auto compaction config should validate");
         assert!(auto_compaction.is_enabled());
         let policy = auto_compaction.policy();
-        assert_eq!(policy.target_output_tokens(), 160);
-        assert_eq!(policy.model_output_token_limit(), Some(256));
-        assert_eq!(policy.max_accepted_output_bytes(), 4096);
-        assert_eq!(policy.retained_raw_tail_items(), 4);
-        assert_eq!(policy.max_ref_excerpt_bytes(), 900);
-        assert_eq!(policy.max_carried_prior_refs(), 12);
+        assert_eq!(policy.target_output_tokens(), Some(160));
+        assert_eq!(policy.max_accepted_output_bytes(), Some(4096));
+        assert_eq!(policy.retained_model_turns(), 4);
     }
 
     #[test]
@@ -277,7 +298,7 @@ max_carried_prior_refs = 12
                 r#"
 [runtime.auto_compaction]
 enabled = false
-retained_raw_tail_items = 4
+retained_model_turns = 4
 "#,
             ),
             &paths,
@@ -290,6 +311,67 @@ retained_raw_tail_items = 4
         assert_eq!(
             disabled.policy(),
             merry_runtime::AutomaticCompactionConfig::default().policy()
+        );
+    }
+
+    #[test]
+    fn runtime_auto_compaction_rejects_removed_fields_even_when_disabled() {
+        let paths = XdgPaths::from_parts(home(), None, None);
+        let cases = [
+            (
+                "model_output_token_limit = 256",
+                "Merry config is invalid: runtime.auto_compaction.model_output_token_limit was removed; supported fields are enabled, retained_model_turns, target_output_tokens, and max_accepted_output_bytes",
+            ),
+            (
+                "retained_raw_tail_items = 4",
+                "Merry config is invalid: runtime.auto_compaction.retained_raw_tail_items was removed; use retained_model_turns and choose the value explicitly",
+            ),
+            (
+                "max_ref_excerpt_bytes = 900",
+                "Merry config is invalid: runtime.auto_compaction.max_ref_excerpt_bytes was removed; supported fields are enabled, retained_model_turns, target_output_tokens, and max_accepted_output_bytes",
+            ),
+            (
+                "max_carried_prior_refs = 12",
+                "Merry config is invalid: runtime.auto_compaction.max_carried_prior_refs was removed; supported fields are enabled, retained_model_turns, target_output_tokens, and max_accepted_output_bytes",
+            ),
+        ];
+
+        for (field, expected) in cases {
+            let text = format!("[runtime.auto_compaction]\nenabled = false\n{field}\n");
+            let config = MerryConfig::load_optional_from_text(Some(&text), &paths)
+                .expect("removed fields remain readable for precise validation")
+                .expect("config should be present");
+            let error = config
+                .automatic_compaction_config()
+                .expect_err("removed field must fail even when disabled");
+
+            assert_eq!(error.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn runtime_auto_compaction_rejects_old_and_new_retention_fields_together() {
+        let paths = XdgPaths::from_parts(home(), None, None);
+        let config = MerryConfig::load_optional_from_text(
+            Some(
+                r#"
+[runtime.auto_compaction]
+retained_model_turns = 5
+retained_raw_tail_items = 10
+"#,
+            ),
+            &paths,
+        )
+        .expect("removed field remains readable for precise validation")
+        .expect("config should be present");
+
+        let error = config
+            .automatic_compaction_config()
+            .expect_err("old and new retention fields must conflict");
+
+        assert_eq!(
+            error.to_string(),
+            "Merry config is invalid: runtime.auto_compaction cannot set both retained_model_turns and removed field retained_raw_tail_items"
         );
     }
 

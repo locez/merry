@@ -27,8 +27,8 @@ fn compaction_window_retains_complete_model_turns_without_splitting() {
         .expect("retained turn completes");
 
     let input = session
-        .build_citation_compaction_input(
-            CitationCompactionPolicy::new(128, None, 4096, 1, 1200, 16).expect("valid policy"),
+        .build_test_citation_compaction_input(
+            CitationCompactionPolicy::new(Some(128), Some(4096), 1).expect("valid policy"),
         )
         .expect("input builds")
         .expect("covered turn is compressible");
@@ -68,8 +68,8 @@ fn compaction_install_advances_prompt_boundary_without_deleting_full_transcript(
         .expect("retained turn completes");
 
     let input = session
-        .build_citation_compaction_input(
-            CitationCompactionPolicy::new(128, None, 4096, 1, 1200, 16).expect("valid policy"),
+        .build_test_citation_compaction_input(
+            CitationCompactionPolicy::new(Some(128), Some(4096), 1).expect("valid policy"),
         )
         .expect("input builds")
         .expect("covered turn is compressible");
@@ -138,8 +138,8 @@ fn compaction_install_advances_boundary_through_trailing_empty_aborted_turn() {
         .expect("retained turn completes");
 
     let input = session
-        .build_citation_compaction_input(
-            CitationCompactionPolicy::new(128, None, 4096, 1, 1200, 16).expect("valid policy"),
+        .build_test_citation_compaction_input(
+            CitationCompactionPolicy::new(Some(128), Some(4096), 1).expect("valid policy"),
         )
         .expect("input builds")
         .expect("covered prefix is compressible");
@@ -189,9 +189,9 @@ fn rolling_compaction_rejects_old_input_and_starts_after_current_boundary() {
     session
         .record_test_user_message_body("first retained user")
         .expect("retained user records");
-    let policy = CitationCompactionPolicy::new(128, None, 4096, 1, 1200, 16).expect("valid policy");
+    let policy = CitationCompactionPolicy::new(Some(128), Some(4096), 1).expect("valid policy");
     let input = session
-        .build_citation_compaction_input(policy)
+        .build_test_citation_compaction_input(policy)
         .expect("first input builds")
         .expect("first prefix is compressible");
     let stale_input = input.clone();
@@ -228,7 +228,7 @@ fn rolling_compaction_rejects_old_input_and_starts_after_current_boundary() {
         .record_test_user_message_body("second retained user")
         .expect("new retained user records");
     let next_input = session
-        .build_citation_compaction_input(policy)
+        .build_test_citation_compaction_input(policy)
         .expect("next input builds")
         .expect("the former tail is now compressible");
     let next_payload = next_input
@@ -268,8 +268,8 @@ fn compaction_window_never_covers_in_progress_model_turn() {
         .expect("open assistant records");
 
     let input = session
-        .build_citation_compaction_input(
-            CitationCompactionPolicy::new(128, None, 4096, 1, 1200, 16).expect("valid policy"),
+        .build_test_citation_compaction_input(
+            CitationCompactionPolicy::new(Some(128), Some(4096), 1).expect("valid policy"),
         )
         .expect("input builds")
         .expect("completed prefix remains compressible");
@@ -369,8 +369,8 @@ fn compaction_groups_user_commentary_and_two_tool_pairs_in_one_turn() {
     ));
 
     let input = session
-        .build_citation_compaction_input(
-            CitationCompactionPolicy::new(128, None, 4096, 1, 1200, 16).expect("valid policy"),
+        .build_test_citation_compaction_input(
+            CitationCompactionPolicy::new(Some(128), Some(4096), 1).expect("valid policy"),
         )
         .expect("input builds")
         .expect("tool turn is compressible");
@@ -494,8 +494,8 @@ fn compaction_structure_errors_map_to_stale_window() {
         };
 
         let error = session
-            .build_citation_compaction_input(
-                CitationCompactionPolicy::new(128, None, 4096, 1, 1200, 16).expect("valid policy"),
+            .build_test_citation_compaction_input(
+                CitationCompactionPolicy::new(Some(128), Some(4096), 1).expect("valid policy"),
             )
             .expect_err("invalid turn grouping must reject compaction");
 
@@ -565,8 +565,8 @@ fn artifact_notice_is_provider_only_and_compaction_reads_exact_content() {
     ));
 
     let input = session
-        .build_citation_compaction_input(
-            CitationCompactionPolicy::new(128, None, 4096, 1, 1200, 16).expect("valid policy"),
+        .build_test_citation_compaction_input(
+            CitationCompactionPolicy::new(Some(128), Some(4096), 1).expect("valid policy"),
         )
         .expect("input builds")
         .expect("tool turn is compressible");
@@ -631,9 +631,9 @@ fn compaction_input_excludes_retained_raw_tail() {
         .record_test_assistant_text_output("retained raw tail assistant sentinel".to_owned())
         .expect("assistant records");
 
-    let policy = CitationCompactionPolicy::new(128, None, 4096, 2, 1200, 16).expect("valid policy");
+    let policy = CitationCompactionPolicy::new(Some(128), Some(4096), 2).expect("valid policy");
     let input = session
-        .build_citation_compaction_input(policy)
+        .build_test_citation_compaction_input(policy)
         .expect("input builds")
         .expect("old prefix should be compressible");
     let payload = input.to_model_payload_json().expect("payload serializes");
@@ -682,8 +682,8 @@ fn compaction_accepts_resolved_multi_tool_batches() {
         .expect("tail records");
 
     let input = session
-        .build_citation_compaction_input(
-            CitationCompactionPolicy::new(128, None, 4096, 1, 1200, 16).expect("valid policy"),
+        .build_test_citation_compaction_input(
+            CitationCompactionPolicy::new(Some(128), Some(4096), 1).expect("valid policy"),
         )
         .expect("resolved batch must not look stale")
         .expect("old history is compressible");
@@ -770,8 +770,8 @@ fn compaction_uses_full_hidden_exchange_while_provider_projection_skips_it() {
     assert!(review_debug.contains("must-not-reenter-model-context"));
 
     let input = session
-        .build_citation_compaction_input(
-            CitationCompactionPolicy::new(128, None, 4096, 1, 1200, 16).expect("valid policy"),
+        .build_test_citation_compaction_input(
+            CitationCompactionPolicy::new(Some(128), Some(4096), 1).expect("valid policy"),
         )
         .expect("compaction input builds")
         .expect("old visible context should be compressible");
@@ -836,9 +836,9 @@ async fn installing_compaction_preserves_hidden_final_output_in_full_and_stored_
         .record_test_user_message_body("retained visible tail")
         .expect("tail records");
 
-    let policy = CitationCompactionPolicy::new(128, None, 4096, 1, 1200, 16).expect("valid policy");
+    let policy = CitationCompactionPolicy::new(Some(128), Some(4096), 1).expect("valid policy");
     let input = session
-        .build_citation_compaction_input(policy)
+        .build_test_citation_compaction_input(policy)
         .expect("compaction input builds")
         .expect("old visible context should be compressible");
     session
@@ -965,7 +965,7 @@ async fn installing_compaction_preserves_hidden_final_output_in_full_and_stored_
 
     assert!(
         loaded
-            .build_citation_compaction_input(policy)
+            .build_test_citation_compaction_input(policy)
             .expect("next compaction window builds")
             .is_none(),
         "the preserved hidden exchange must not be covered again"
@@ -996,8 +996,8 @@ fn compaction_retained_raw_tail_is_policy_driven() {
         .expect("assistant records");
 
     let input = session
-        .build_citation_compaction_input(
-            CitationCompactionPolicy::new(128, None, 4096, 4, 1200, 16).expect("valid policy"),
+        .build_test_citation_compaction_input(
+            CitationCompactionPolicy::new(Some(128), Some(4096), 4).expect("valid policy"),
         )
         .expect("input builds")
         .expect("old prefix should be compressible");
@@ -1009,6 +1009,134 @@ fn compaction_retained_raw_tail_is_policy_driven() {
     assert!(!payload.contains("tail assistant one sentinel"));
     assert!(!payload.contains("tail user two sentinel"));
     assert!(!payload.contains("tail assistant two sentinel"));
+}
+
+#[test]
+fn compaction_retains_recent_completed_turns_and_later_aborted_turns() {
+    let mut session =
+        SessionState::new(SessionId::new("retained-model-turn-policy").expect("valid session id"));
+
+    let covered_aborted = session.begin_model_turn().expect("aborted turn begins");
+    session
+        .record_user_message_body(covered_aborted, "covered aborted sentinel")
+        .expect("aborted content records");
+    session
+        .abort_model_turn(covered_aborted)
+        .expect("old aborted turn closes");
+
+    session
+        .record_test_user_message_body("covered completed sentinel")
+        .expect("old completed turn records");
+    session
+        .record_test_user_message_body("retained completed boundary sentinel")
+        .expect("retained completed boundary records");
+
+    let retained_aborted = session.begin_model_turn().expect("aborted turn begins");
+    session
+        .record_user_message_body(retained_aborted, "retained aborted sentinel")
+        .expect("retained aborted content records");
+    session
+        .abort_model_turn(retained_aborted)
+        .expect("recent aborted turn closes");
+
+    session
+        .record_test_user_message_body("retained latest completed sentinel")
+        .expect("latest completed turn records");
+
+    let open_turn = session.begin_model_turn().expect("open turn begins");
+    session
+        .record_user_message_body(open_turn, "open turn sentinel")
+        .expect("open content records");
+
+    let input = session
+        .build_test_citation_compaction_input(
+            CitationCompactionPolicy::new(None, None, 2).expect("valid policy"),
+        )
+        .expect("input builds")
+        .expect("older closed turns are compressible");
+    let payload = input.to_model_payload_json().expect("payload serializes");
+
+    assert!(payload.contains("covered aborted sentinel"));
+    assert!(payload.contains("covered completed sentinel"));
+    assert!(!payload.contains("retained completed boundary sentinel"));
+    assert!(!payload.contains("retained aborted sentinel"));
+    assert!(!payload.contains("retained latest completed sentinel"));
+    assert!(!payload.contains("open turn sentinel"));
+}
+
+#[test]
+fn compaction_retains_an_entire_multi_item_tool_turn() {
+    let mut session =
+        SessionState::new(SessionId::new("retained-tool-turn").expect("valid session id"));
+    session
+        .record_test_user_message_body("covered old turn sentinel")
+        .expect("old turn records");
+
+    let turn_id = session.begin_model_turn().expect("tool turn begins");
+    session
+        .record_user_message_body(turn_id, "retained tool user sentinel")
+        .expect("tool user records");
+    session
+        .record_assistant_text_output(turn_id, "retained tool commentary sentinel".to_owned())
+        .expect("tool commentary records");
+    let call_a = pending_tool_call("retained-turn-call-a");
+    let call_b = pending_tool_call("retained-turn-call-b");
+    session
+        .record_tool_call_batch_pending(
+            turn_id,
+            PendingToolCallBatch::new(
+                ToolCallBatchId::new("retained-turn-batch").expect("valid batch id"),
+                vec![call_a.clone(), call_b.clone()],
+            )
+            .expect("valid batch"),
+        )
+        .expect("tool calls record");
+    session
+        .close_model_response(turn_id, true)
+        .expect("tool response closes");
+    for (call, artifact, content) in [
+        (
+            &call_a,
+            "retained-turn-result-a",
+            "retained tool result a sentinel",
+        ),
+        (
+            &call_b,
+            "retained-turn-result-b",
+            "retained tool result b sentinel",
+        ),
+    ] {
+        session
+            .submit_tool_result(
+                ToolCallResult::succeeded(
+                    call.id().clone(),
+                    ArtifactRef::new(artifact_id(artifact), ArtifactKind::Text),
+                ),
+                ArtifactContent::text(content),
+            )
+            .expect("tool result records");
+    }
+
+    let input = session
+        .build_test_citation_compaction_input(
+            CitationCompactionPolicy::new(None, None, 1).expect("valid policy"),
+        )
+        .expect("input builds")
+        .expect("old turn is compressible");
+    let payload = input.to_model_payload_json().expect("payload serializes");
+
+    assert!(payload.contains("covered old turn sentinel"));
+    for retained in [
+        "retained tool user sentinel",
+        "retained tool commentary sentinel",
+        "retained tool result a sentinel",
+        "retained tool result b sentinel",
+    ] {
+        assert!(
+            !payload.contains(retained),
+            "retained complete turn leaked: {retained}"
+        );
+    }
 }
 
 #[test]
@@ -1027,8 +1155,8 @@ fn compaction_input_includes_previous_checkpoint_without_old_raw_body() {
         .expect("user records");
 
     let input = session
-        .build_citation_compaction_input(
-            CitationCompactionPolicy::new(128, None, 4096, 1, 1200, 16).expect("valid policy"),
+        .build_test_citation_compaction_input(
+            CitationCompactionPolicy::new(Some(128), Some(4096), 1).expect("valid policy"),
         )
         .expect("input builds")
         .expect("input exists");
@@ -1054,9 +1182,9 @@ fn installing_valid_checkpoint_hides_only_covered_history_from_provider() {
         .record_test_user_message_body("tail user")
         .expect("user records");
 
-    let policy = CitationCompactionPolicy::new(128, None, 4096, 1, 1200, 16).expect("valid policy");
+    let policy = CitationCompactionPolicy::new(Some(128), Some(4096), 1).expect("valid policy");
     let input = session
-        .build_citation_compaction_input(policy)
+        .build_test_citation_compaction_input(policy)
         .expect("input builds")
         .expect("input exists");
     let candidate_json = r#"{
@@ -1114,9 +1242,9 @@ fn failed_checkpoint_install_keeps_history_unchanged() {
         .record_test_user_message_body("tail user")
         .expect("user records");
 
-    let policy = CitationCompactionPolicy::new(128, None, 4096, 1, 1200, 16).expect("valid policy");
+    let policy = CitationCompactionPolicy::new(Some(128), Some(4096), 1).expect("valid policy");
     let input = session
-        .build_citation_compaction_input(policy)
+        .build_test_citation_compaction_input(policy)
         .expect("input builds")
         .expect("input exists");
     let bad_candidate_json = r#"{

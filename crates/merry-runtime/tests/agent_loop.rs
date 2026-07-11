@@ -1896,7 +1896,7 @@ async fn compaction_removes_only_covered_tool_exchanges_after_successful_install
 
     runtime
         .compact_context_once(
-            CitationCompactionPolicy::new(128, None, 4096, 1, 1200, 16).expect("valid policy"),
+            CitationCompactionPolicy::new(Some(128), Some(4096), 1).expect("valid policy"),
             StepContext::default(),
         )
         .await
@@ -2388,6 +2388,9 @@ async fn provider_step_auto_compacts_before_hard_watermark_request() {
             Arc::new(compactor.clone()),
             ModelName::new("fake/compactor").expect("valid model"),
         )
+        .automatic_compaction(AutomaticCompactionConfig::enabled(
+            CitationCompactionPolicy::new(None, None, 1).expect("valid policy"),
+        ))
         .build()
         .expect("runtime should build");
 
@@ -2439,7 +2442,7 @@ async fn provider_step_auto_compacts_before_hard_watermark_request() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn auto_compaction_config_controls_retained_raw_tail() {
+async fn auto_compaction_config_controls_retained_model_turns() {
     let primary = ScriptedModelProvider::new(vec![
         vec![Ok(completed_text_event("old assistant configurable tail"))],
         vec![Ok(completed_text_event("tail one assistant"))],
@@ -2471,7 +2474,7 @@ async fn auto_compaction_config_controls_retained_raw_tail() {
           "handoffs": []
         }"#,
     ))]]);
-    let policy = CitationCompactionPolicy::new(192, None, 8192, 4, 1200, 16).expect("valid policy");
+    let policy = CitationCompactionPolicy::new(Some(192), Some(8192), 2).expect("valid policy");
     let runtime = Runtime::builder(session_id("agent-loop-auto-compaction-config-tail"))
         .model_provider(Arc::new(primary.clone()), model_name())
         .model_provider_for_role(
@@ -2562,7 +2565,7 @@ async fn auto_compaction_keeps_current_tool_turn_raw_during_continuation() {
           "handoffs": []
         }"#,
     ))]]);
-    let policy = CitationCompactionPolicy::new(192, None, 8192, 1, 1200, 16).expect("valid policy");
+    let policy = CitationCompactionPolicy::new(Some(192), Some(8192), 1).expect("valid policy");
     let runtime = Runtime::builder(session_id("agent-loop-auto-compaction-keeps-original-task"))
         .register_tool(merry_runtime::RegisteredTool::read_only(
             tool_spec("search_notes"),
@@ -2710,7 +2713,7 @@ async fn auto_compacted_agent_loop_continuation_keeps_checkpoint_refs_and_stable
         }"#,
         ))],
     ]);
-    let policy = CitationCompactionPolicy::new(192, None, 8192, 1, 1200, 16).expect("valid policy");
+    let policy = CitationCompactionPolicy::new(Some(192), Some(8192), 1).expect("valid policy");
     let runtime = Runtime::builder(session_id("agent-loop-auto-compaction-checkpoint-refs"))
         .project_rules(
             ProjectRules::new("AGENTS.md", "Stable prefix rules sentinel.")

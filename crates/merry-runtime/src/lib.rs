@@ -56,6 +56,7 @@ mod skill;
 mod step;
 mod subagent;
 mod summary_draft_promotion;
+mod token_estimate;
 mod tool;
 mod tool_input_validation;
 
@@ -76,7 +77,8 @@ pub use checkpoint::{
 };
 pub use compaction::{
     CitationCompactionInput, CitationCompactionPolicy, CompactionError, CompactionOutcome,
-    citation_compaction_response_schema, citation_compaction_system_prompt,
+    ResolvedCitationCompactionBudget, citation_compaction_response_schema,
+    citation_compaction_system_prompt,
 };
 pub use context::{
     CheckpointDecision, CompactedCheckpoint, CompactedCheckpointSummary, CompiledContext,

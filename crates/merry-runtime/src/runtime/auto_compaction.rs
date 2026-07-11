@@ -1,43 +1,67 @@
-use super::{RuntimeInner, stream_model_with_retry_policy};
+use super::{
+    RuntimeInner, provider_request::resolve_request_context_window, stream_model_with_retry_policy,
+};
 use crate::{
     CitationCompactionInput, CitationCompactionPolicy, CompactionError, CompactionOutcome,
-    RuntimeError, RuntimeModelRole, compaction::compile_citation_compaction_model_request,
+    ResolvedContextWindow, RuntimeError, RuntimeModelRole,
+    compaction::compile_citation_compaction_model_request,
 };
 use futures_util::StreamExt;
 use merry_llm::{FinishReason, ModelEvent, ModelOutput, ModelStreamContext};
 use tokio_util::sync::CancellationToken;
 
-// MVP automatic compaction policy. Retaining two history items usually keeps
-// the latest completed user/assistant pair raw; it is a policy default, not a
-// semantic invariant.
-const DEFAULT_AUTO_COMPACTION_TARGET_OUTPUT_TOKENS: u64 = 192;
-const DEFAULT_AUTO_COMPACTION_MAX_OUTPUT_BYTES: usize = 8192;
-const DEFAULT_AUTO_COMPACTION_RETAINED_RAW_TAIL_ITEMS: usize = 2;
-const DEFAULT_AUTO_COMPACTION_MAX_REF_EXCERPT_BYTES: usize = 1200;
-const DEFAULT_AUTO_COMPACTION_MAX_CARRIED_PRIOR_REFS: usize = 16;
-
 pub(super) fn default_automatic_compaction_policy() -> CitationCompactionPolicy {
-    CitationCompactionPolicy::new(
-        DEFAULT_AUTO_COMPACTION_TARGET_OUTPUT_TOKENS,
-        None,
-        DEFAULT_AUTO_COMPACTION_MAX_OUTPUT_BYTES,
-        DEFAULT_AUTO_COMPACTION_RETAINED_RAW_TAIL_ITEMS,
-        DEFAULT_AUTO_COMPACTION_MAX_REF_EXCERPT_BYTES,
-        DEFAULT_AUTO_COMPACTION_MAX_CARRIED_PRIOR_REFS,
-    )
-    .expect("static automatic compaction policy must be valid")
+    CitationCompactionPolicy::default()
 }
 
 pub(super) async fn compaction_input_for_hard_watermark(
     inner: &RuntimeInner,
+    primary_window: ResolvedContextWindow,
 ) -> Result<Option<CitationCompactionInput>, RuntimeError> {
     let config = *inner.automatic_compaction.read().await;
     if !config.is_enabled() {
         return Ok(None);
     }
 
+    build_compaction_input(inner, config.policy(), primary_window).await
+}
+
+pub(super) async fn compaction_input_for_policy(
+    inner: &RuntimeInner,
+    policy: CitationCompactionPolicy,
+) -> Result<Option<CitationCompactionInput>, RuntimeError> {
+    let primary_window = resolved_primary_context_window(inner).await?;
+    build_compaction_input(inner, policy, primary_window).await
+}
+
+async fn build_compaction_input(
+    inner: &RuntimeInner,
+    policy: CitationCompactionPolicy,
+    primary_window: ResolvedContextWindow,
+) -> Result<Option<CitationCompactionInput>, RuntimeError> {
+    let resolved_budget = policy.resolve(primary_window.tokens())?;
     let session = inner.session.lock().await;
-    session.build_citation_compaction_input(config.policy())
+    session.build_citation_compaction_input(policy, resolved_budget)
+}
+
+async fn resolved_primary_context_window(
+    inner: &RuntimeInner,
+) -> Result<ResolvedContextWindow, RuntimeError> {
+    let provider_config = inner.model_config(RuntimeModelRole::Primary).await.ok_or(
+        RuntimeError::MissingModelProvider {
+            role: RuntimeModelRole::Primary.as_str(),
+        },
+    )?;
+    let context_window_override = inner
+        .context_window_tokens
+        .read()
+        .await
+        .map(std::num::NonZeroU64::get);
+    resolve_request_context_window(
+        provider_config.provider().capabilities(),
+        context_window_override,
+    )
+    .map_err(RuntimeError::from)
 }
 
 pub(super) async fn compact_prepared_context(
@@ -69,10 +93,7 @@ pub(super) async fn compact_context_once_inner(
         });
     }
 
-    let input = {
-        let session = inner.session.lock().await;
-        session.build_citation_compaction_input(policy)?
-    };
+    let input = compaction_input_for_policy(inner, policy).await?;
     let Some(input) = input else {
         return Ok(None);
     };

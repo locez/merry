@@ -65,11 +65,8 @@ where
         "type": "runtime_compaction_config_summary",
         "auto_compaction_enabled": automatic_compaction.is_enabled(),
         "target_output_tokens": policy.target_output_tokens(),
-        "model_output_token_limit": policy.model_output_token_limit(),
         "max_accepted_output_bytes": policy.max_accepted_output_bytes(),
-        "retained_raw_tail_items": policy.retained_raw_tail_items(),
-        "max_ref_excerpt_bytes": policy.max_ref_excerpt_bytes(),
-        "max_carried_prior_refs": policy.max_carried_prior_refs(),
+        "retained_model_turns": policy.retained_model_turns(),
     });
     let line = serde_json::to_string(&line).map_err(unexpected)?;
     writer

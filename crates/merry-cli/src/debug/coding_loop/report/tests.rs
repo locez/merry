@@ -276,11 +276,8 @@ async fn task_live_smoke_report_includes_effective_compaction_config_from_toml()
 [runtime.auto_compaction]
 enabled = true
 target_output_tokens = 144
-model_output_token_limit = 233
 max_accepted_output_bytes = 3456
-retained_raw_tail_items = 5
-max_ref_excerpt_bytes = 789
-max_carried_prior_refs = 10
+retained_model_turns = 5
 "#,
         ),
         &paths,
@@ -303,9 +300,10 @@ max_carried_prior_refs = 10
     assert!(text.contains("\"type\":\"runtime_compaction_config_summary\""));
     assert!(text.contains("\"auto_compaction_enabled\":true"));
     assert!(text.contains("\"target_output_tokens\":144"));
-    assert!(text.contains("\"model_output_token_limit\":233"));
     assert!(text.contains("\"max_accepted_output_bytes\":3456"));
-    assert!(text.contains("\"retained_raw_tail_items\":5"));
-    assert!(text.contains("\"max_ref_excerpt_bytes\":789"));
-    assert!(text.contains("\"max_carried_prior_refs\":10"));
+    assert!(text.contains("\"retained_model_turns\":5"));
+    assert!(!text.contains("model_output_token_limit"));
+    assert!(!text.contains("retained_raw_tail_items"));
+    assert!(!text.contains("max_ref_excerpt_bytes"));
+    assert!(!text.contains("max_carried_prior_refs"));
 }

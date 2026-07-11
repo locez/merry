@@ -3,8 +3,9 @@ use super::{
     TranscriptItem,
 };
 use crate::{
-    ActionExecutionEvidence, ActionProposal, ActionProposalEvidence, CitationCompactionPolicy,
-    RuntimeError, TaskAnchor, WorkspacePatchExecutionEvidence, WorkspacePatchProposal,
+    ActionExecutionEvidence, ActionProposal, ActionProposalEvidence, CitationCompactionInput,
+    CitationCompactionPolicy, RuntimeError, TaskAnchor, WorkspacePatchExecutionEvidence,
+    WorkspacePatchProposal,
     action_audit::{ActionAuditPolicy, ActionAuditStatus},
     action_policy::{ActionPolicyDisposition, ActionRiskTier, DefaultActionPolicy},
     artifact::{ArtifactContent, ArtifactError},
@@ -68,6 +69,10 @@ fn pending_tool_call(id: &str) -> PendingToolCall {
 }
 
 trait SessionStateTestExt {
+    fn build_test_citation_compaction_input(
+        &self,
+        policy: CitationCompactionPolicy,
+    ) -> Result<Option<CitationCompactionInput>, RuntimeError>;
     fn record_test_user_message_body(&mut self, text: &str) -> Result<(), RuntimeError>;
     fn record_test_assistant_text_output(
         &mut self,
@@ -84,6 +89,16 @@ trait SessionStateTestExt {
 }
 
 impl SessionStateTestExt for SessionState {
+    fn build_test_citation_compaction_input(
+        &self,
+        policy: CitationCompactionPolicy,
+    ) -> Result<Option<CitationCompactionInput>, RuntimeError> {
+        self.build_citation_compaction_input(
+            policy,
+            policy.resolve(64_000).map_err(RuntimeError::from)?,
+        )
+    }
+
     fn record_test_user_message_body(&mut self, text: &str) -> Result<(), RuntimeError> {
         let turn_id = self.begin_model_turn()?;
         self.record_user_message_body(turn_id, text)?;

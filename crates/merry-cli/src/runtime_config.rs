@@ -206,7 +206,7 @@ api_key = "sk-test"
             Some(
                 r#"
 [runtime.auto_compaction]
-retained_raw_tail_items = 4
+retained_model_turns = 2
 "#,
             ),
             &paths,

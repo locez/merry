@@ -7,7 +7,10 @@ use merry_llm::{
     FinishReason, ModelCapabilities, ModelEvent, ModelOutput, ModelResponse, ModelToolCall,
     ModelToolCallId, ToolArguments, testing::FakeModelProvider,
 };
-use merry_runtime::{RegisteredTool, Runtime, RuntimeModelRole, StepContext, StepInput};
+use merry_runtime::{
+    AutomaticCompactionConfig, CitationCompactionPolicy, RegisteredTool, Runtime, RuntimeModelRole,
+    StepContext, StepInput,
+};
 use schemars::Schema;
 use serde_json::{Map, json};
 use std::{num::NonZeroUsize, sync::Arc};
@@ -239,20 +242,24 @@ async fn auto_compaction_lifecycle_projects_to_public_stream() {
             Arc::new(compactor),
             merry_llm::ModelName::new("fake/compactor").expect("valid model"),
         )
+        .automatic_compaction(AutomaticCompactionConfig::enabled(
+            CitationCompactionPolicy::new(None, None, 1).expect("valid policy"),
+        ))
         .build()
         .expect("runtime should build");
 
-    let _ = collect_public_stream(&runtime, "old user message for public compaction").await;
-    let _ = collect_public_stream(&runtime, "retained tail for public compaction").await;
-
-    let events = collect_public_stream(
+    let _ = collect_public_stream(
         &runtime,
         &format!(
-            "Trigger auto compaction for public stream.\n{}",
+            "old user message for public compaction\n{}",
             "ballast ".repeat(1_200)
         ),
     )
     .await;
+    let _ = collect_public_stream(&runtime, "retained tail for public compaction").await;
+
+    let events =
+        collect_public_stream(&runtime, "Trigger auto compaction for public stream.").await;
 
     assert!(
         events
