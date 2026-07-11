@@ -1,12 +1,10 @@
 use super::{
-    SessionState,
-    history::CompactionHistoryItem,
-    history::permission_review_context_entry,
-    transcript::{ToolCallPromptProjection, ToolResultPromptProjection, TranscriptItem},
+    SessionState, history::CompactionHistoryItem, history::permission_review_context_entry,
+    transcript::TranscriptItem,
 };
 use crate::{
     RuntimeError,
-    artifact::{ArtifactContent, ArtifactError},
+    artifact::ArtifactError,
     checkpoint::{CheckpointError, CheckpointId, CheckpointRefExcerpt, CheckpointRefId},
     compaction::{
         CitationCompactionInput, CitationCompactionPolicy,
@@ -116,14 +114,10 @@ impl SessionState {
                 call_id,
                 result,
                 artifact_id,
-                prompt_projection,
                 ..
             } = item
                 && results
-                    .insert(
-                        call_id.clone(),
-                        (*id, result, artifact_id, *prompt_projection),
-                    )
+                    .insert(call_id.clone(), (*id, result, artifact_id))
                     .is_some()
             {
                 return Err(CompactionError::StaleWindow.into());
@@ -162,14 +156,8 @@ impl SessionState {
                         text.to_owned(),
                     ));
                 }
-                TranscriptItem::ToolCall {
-                    call,
-                    prompt_projection: call_projection,
-                    ..
-                } => {
-                    let Some(&(id, result, artifact_id, result_projection)) =
-                        results.get(call.id())
-                    else {
+                TranscriptItem::ToolCall { call, .. } => {
+                    let Some(&(id, result, artifact_id)) = results.get(call.id()) else {
                         if self
                             .pending_tool_calls
                             .iter()
@@ -182,24 +170,7 @@ impl SessionState {
                     if !matched_results.insert(call.id().clone()) {
                         return Err(CompactionError::StaleWindow.into());
                     }
-                    let content = match (*call_projection, result_projection) {
-                        (ToolCallPromptProjection::Hidden, ToolResultPromptProjection::Hidden) => {
-                            continue;
-                        }
-                        (ToolCallPromptProjection::Full, ToolResultPromptProjection::Full) => {
-                            self.read_artifact_content(artifact_id)?
-                        }
-                        (
-                            ToolCallPromptProjection::Full,
-                            ToolResultPromptProjection::ArtifactNotice,
-                        ) => ArtifactContent::text(format!(
-                            "Tool result content is stored in artifact {artifact_id}."
-                        )),
-                        (ToolCallPromptProjection::Hidden, _)
-                        | (ToolCallPromptProjection::Full, ToolResultPromptProjection::Hidden) => {
-                            return Err(CompactionError::StaleWindow.into());
-                        }
-                    };
+                    let content = self.read_artifact_content(artifact_id)?;
                     items.push(CompactionHistoryItem::tool_exchange(
                         id.as_u64(),
                         call.clone(),

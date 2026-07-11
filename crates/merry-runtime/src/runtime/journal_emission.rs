@@ -1,6 +1,6 @@
 use super::{RuntimeInner, diagnostic_from_text, persist_resume_safe_savepoint_if_configured};
 use crate::{
-    session::{ModelTurnId, SessionState},
+    session::{ModelTurnId, ModelTurnStatus, SessionState},
     tool_input_validation::ToolInputValidationError,
 };
 use futures_util::StreamExt;
@@ -116,16 +116,44 @@ pub(super) async fn send_model_tool_call_response_events(
         return false;
     };
 
-    let events = {
-        let mut session = inner.session.lock().await;
+    let prepared = {
+        let session = inner.session.lock().await;
         if token.is_cancelled() {
             return false;
         }
-        session.record_model_tool_call_response(turn_id, commentary, calls)
+        session.prepare_model_tool_call_response(turn_id, commentary, calls)
     };
 
-    match events {
-        Ok((commentary_event, tool_event)) => {
+    match prepared {
+        Ok(mut prepared) => {
+            let had_commentary = prepared.has_commentary();
+            let tool_permit = if had_commentary {
+                let commentary_event = {
+                    let mut session = inner.session.lock().await;
+                    if token.is_cancelled() {
+                        return false;
+                    }
+                    session
+                        .record_prepared_model_commentary(&mut prepared)
+                        .expect("prepared commentary exists when the response reports commentary")
+                };
+                permit.send(commentary_event);
+                let Some(tool_permit) = reserve_event_slot_ignoring_cancellation(sender).await
+                else {
+                    return false;
+                };
+                tool_permit
+            } else {
+                permit
+            };
+
+            let tool_event = {
+                let mut session = inner.session.lock().await;
+                if !had_commentary && token.is_cancelled() {
+                    return false;
+                }
+                session.record_prepared_model_tool_calls(prepared)
+            };
             let bridge_calls = match &tool_event.payload {
                 RuntimeJournalPayload::ToolCallPending { call } => {
                     if inner
@@ -151,16 +179,7 @@ pub(super) async fn send_model_tool_call_response_events(
                     .collect::<Vec<_>>(),
                 _ => Vec::new(),
             };
-            if let Some(commentary_event) = commentary_event {
-                permit.send(commentary_event);
-                let Some(tool_permit) = reserve_event_slot_ignoring_cancellation(sender).await
-                else {
-                    return false;
-                };
-                tool_permit.send(tool_event);
-            } else {
-                permit.send(tool_event);
-            }
+            tool_permit.send(tool_event);
 
             if token.is_cancelled() {
                 return false;
@@ -191,7 +210,12 @@ pub(super) async fn send_model_tool_call_response_events(
 
 async fn abort_model_turn_before_terminal_event(inner: &RuntimeInner, turn_id: ModelTurnId) {
     let mut session = inner.session.lock().await;
-    if let Err(error) = session.abort_model_turn(turn_id) {
+    let result = if session.model_turn_status(turn_id) == Some(ModelTurnStatus::InProgress) {
+        session.abort_model_turn(turn_id)
+    } else {
+        Ok(())
+    };
+    if let Err(error) = result {
         tracing::error!(
             category = "model_turn_abort",
             model_turn_id = turn_id.as_u64(),

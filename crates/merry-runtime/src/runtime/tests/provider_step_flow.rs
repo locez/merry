@@ -521,6 +521,15 @@ async fn provider_stream_error_after_stream_start_retains_activated_memory_proje
     assert_eq!(failed_code(&events), Some("model_unavailable"));
     assert_eq!(source.call_count(), 1);
     assert_eq!(provider.recorded_requests().len(), 1);
+    assert_eq!(
+        runtime
+            .inner
+            .session
+            .lock()
+            .await
+            .model_turn_status(ModelTurnId::new(1)),
+        Some(ModelTurnStatus::Aborted)
+    );
     assert_activated_memory_projection_retained(
         &runtime,
         "memory-provider-stream-error",
@@ -599,6 +608,15 @@ async fn provider_cancelled_finish_retains_activated_memory_projection() {
     );
     assert_eq!(source.call_count(), 1);
     assert_eq!(provider.recorded_requests().len(), 1);
+    assert_eq!(
+        runtime
+            .inner
+            .session
+            .lock()
+            .await
+            .model_turn_status(ModelTurnId::new(1)),
+        Some(ModelTurnStatus::Aborted)
+    );
     assert_activated_memory_projection_retained(
         &runtime,
         "memory-provider-cancelled-finish",
@@ -635,6 +653,15 @@ async fn provider_completed_with_error_finish_retains_activated_memory_projectio
     assert_eq!(failed_code(&events), Some("model_finish_error"));
     assert_eq!(source.call_count(), 1);
     assert_eq!(provider.recorded_requests().len(), 1);
+    assert_eq!(
+        runtime
+            .inner
+            .session
+            .lock()
+            .await
+            .model_turn_status(ModelTurnId::new(1)),
+        Some(ModelTurnStatus::Aborted)
+    );
     assert_activated_memory_projection_retained(
         &runtime,
         "memory-provider-finish-error",
@@ -927,21 +954,22 @@ async fn cancellation_after_tool_response_reduction_preserves_awaiting_turn() {
         stream.next().await.expect("step start event").payload,
         RuntimeJournalPayload::StepStarted
     ));
-    while runtime.pending_tool_calls().await.is_empty() {
-        tokio::task::yield_now().await;
-    }
+    let commentary = stream.next().await.expect("commentary event");
+    assert!(matches!(
+        commentary.payload,
+        RuntimeJournalPayload::AssistantOutputRecorded { .. }
+    ));
     token.cancel();
     let remaining = stream.collect::<Vec<_>>().await;
 
     assert_eq!(
         event_kind_names(&remaining),
-        ["AssistantOutputRecorded", "ToolCallPending", "Cancelled"],
+        ["ToolCallPending", "Cancelled"],
         "committed response events must drain before cancellation becomes observable"
     );
     assert!(
-        remaining
-            .windows(2)
-            .all(|pair| pair[1].sequence == pair[0].sequence + 1),
+        remaining[0].sequence == commentary.sequence + 1
+            && remaining[1].sequence == remaining[0].sequence + 1,
         "committed response and cancellation events must have contiguous sequences"
     );
     assert_eq!(runtime.pending_tool_calls().await.len(), 1);

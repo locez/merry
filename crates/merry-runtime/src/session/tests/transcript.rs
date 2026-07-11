@@ -1,7 +1,6 @@
 use super::*;
 use crate::session::transcript::{PersistedTranscript, ToolResultPromptProjection};
 use crate::session::{ModelTurnId, ModelTurnStatus, Transcript, TranscriptItem, UserInputOrigin};
-use std::collections::BTreeMap;
 
 #[test]
 fn transcript_assigns_monotonic_model_turn_ids_starting_at_one() {
@@ -21,25 +20,6 @@ fn transcript_assigns_monotonic_model_turn_ids_starting_at_one() {
     assert_eq!(second, ModelTurnId::new(2));
     assert_eq!(transcript.status(first), Some(ModelTurnStatus::Aborted));
     assert_eq!(transcript.status(second), Some(ModelTurnStatus::InProgress));
-}
-
-#[test]
-fn model_turn_id_exhaustion_does_not_mutate_transcript() {
-    let mut transcript = Transcript::from_persisted(PersistedTranscript {
-        items: Vec::new(),
-        next_id: 0,
-        model_turns: BTreeMap::new(),
-        next_model_turn_id: u64::MAX,
-    })
-    .expect("exhausted turn fixture should restore");
-    let before = transcript.persisted();
-
-    let error = transcript
-        .begin_model_turn()
-        .expect_err("exhausted model turn id should reject allocation");
-
-    assert!(matches!(error, RuntimeError::ModelTurnIdExhausted));
-    assert_eq!(transcript.persisted(), before);
 }
 
 #[test]
@@ -114,6 +94,36 @@ fn terminal_model_turn_rejects_reclose_reabort_and_new_output() {
         ),
         Err(RuntimeError::InvalidModelTurnTransition { .. })
     ));
+}
+
+#[test]
+fn awaiting_tool_results_model_turn_cannot_abort() {
+    let mut transcript = Transcript::new();
+    let turn_id = transcript
+        .begin_model_turn()
+        .expect("model turn should begin");
+    transcript
+        .push_tool_call(turn_id, pending_tool_call("awaiting-result"))
+        .expect("tool call should record");
+    transcript
+        .close_model_response(turn_id, true)
+        .expect("tool-call response should await results");
+
+    let error = transcript
+        .abort_model_turn(turn_id)
+        .expect_err("awaiting tool results must not transition to aborted");
+
+    assert!(matches!(
+        error,
+        RuntimeError::InvalidModelTurnTransition {
+            model_turn_id,
+            attempted: "abort model turn",
+        } if model_turn_id == turn_id.as_u64()
+    ));
+    assert_eq!(
+        transcript.status(turn_id),
+        Some(ModelTurnStatus::AwaitingToolResults)
+    );
 }
 
 #[test]

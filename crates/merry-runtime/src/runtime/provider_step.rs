@@ -672,7 +672,12 @@ async fn fail_model_turn(
 ) {
     {
         let mut session = inner.session.lock().await;
-        if let Err(error) = session.abort_model_turn(turn_id) {
+        let result = if session.model_turn_status(turn_id) == Some(ModelTurnStatus::InProgress) {
+            session.abort_model_turn(turn_id)
+        } else {
+            Ok(())
+        };
+        if let Err(error) = result {
             tracing::error!(
                 category = "model_turn_abort",
                 model_turn_id = turn_id.as_u64(),

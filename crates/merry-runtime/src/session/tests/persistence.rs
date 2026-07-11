@@ -112,7 +112,7 @@ async fn session_state_v1_without_compaction_migrates_to_legacy_turn_and_user_ar
         .await
         .expect("legacy state should write");
 
-    let loaded = SessionState::load_from(&store, &session_id())
+    let mut loaded = SessionState::load_from(&store, &session_id())
         .await
         .expect("uncompacted V1 state should migrate");
 
@@ -138,6 +138,36 @@ async fn session_state_v1_without_compaction_migrates_to_legacy_turn_and_user_ar
         } if *model_turn_id == crate::session::ModelTurnId::new(0)
             && artifact_id.as_str() == "user-message-0"
     ));
+
+    let post_migration_turn = loaded
+        .begin_model_turn()
+        .expect("post-migration turn should begin at one");
+    loaded
+        .record_user_message_body(post_migration_turn, "post-migration user text")
+        .expect("post-migration user message should record");
+    loaded
+        .record_assistant_text_output(post_migration_turn, "post-migration response".to_owned())
+        .expect("post-migration assistant output should record");
+    loaded
+        .close_model_response(post_migration_turn, false)
+        .expect("post-migration turn should complete");
+    loaded
+        .save_to(&store)
+        .await
+        .expect("migrated session should save as V2");
+
+    let reloaded = SessionState::load_from(&store, &session_id())
+        .await
+        .expect("V2 session with legacy turn zero should reload");
+    assert_eq!(
+        reloaded.model_turn_status(crate::session::ModelTurnId::new(0)),
+        Some(ModelTurnStatus::Completed)
+    );
+    assert_eq!(
+        reloaded.model_turn_status(post_migration_turn),
+        Some(ModelTurnStatus::Completed)
+    );
+    assert_eq!(reloaded.transcript.persisted().next_model_turn_id, 2);
 }
 
 #[tokio::test]
@@ -214,6 +244,33 @@ fn legacy_v1_document(items: Vec<serde_json::Value>) -> serde_json::Value {
         "transcript": {
             "items": items,
             "next_id": 1
+        },
+        "resolved_tool_calls": [],
+        "usage": null,
+        "task_anchor": null,
+        "registries": {
+            "judgments": { "records": [] },
+            "summary_draft_promotions": { "records": [] },
+            "action_audits": { "records": [] }
+        }
+    })
+}
+
+fn literal_v2_document() -> serde_json::Value {
+    serde_json::json!({
+        "format_version": 2,
+        "session_id": session_id(),
+        "next_sequence": 0,
+        "session_started": false,
+        "ledger": [],
+        "artifacts": [],
+        "compacted_checkpoint": null,
+        "context_entries": [],
+        "transcript": {
+            "items": [],
+            "next_id": 0,
+            "model_turns": {},
+            "next_model_turn_id": 1
         },
         "resolved_tool_calls": [],
         "usage": null,
@@ -428,6 +485,87 @@ async fn session_state_v2_load_rejects_missing_user_source_artifact() {
         error,
         crate::SessionStoreError::InvalidDocument { .. }
     ));
+}
+
+#[tokio::test]
+async fn session_state_v2_load_rejects_user_message_cross_linked_to_readable_text_artifact() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = FileSessionStore::new(temp.path());
+    let mut document = literal_v2_document();
+    document["artifacts"] = serde_json::json!([{
+        "artifact": ArtifactRef::new(artifact_id("unrelated-user-source"), ArtifactKind::Text),
+        "content": ArtifactContent::text("readable but not the stable user source")
+    }]);
+    document["transcript"] = serde_json::json!({
+        "items": [{
+            "type": "user_message",
+            "id": 0,
+            "model_turn_id": 1,
+            "artifact_id": "unrelated-user-source",
+            "origin": "external_user"
+        }],
+        "next_id": 1,
+        "model_turns": { "1": "completed" },
+        "next_model_turn_id": 2
+    });
+    store
+        .write_state_bytes(
+            &session_id(),
+            &serde_json::to_vec_pretty(&document).expect("literal V2 document serializes"),
+        )
+        .await
+        .expect("corrupted V2 state writes");
+
+    let error = SessionState::load_from(&store, &session_id())
+        .await
+        .expect_err("cross-linked user source artifact must reject resume");
+
+    assert!(matches!(
+        error,
+        crate::SessionStoreError::InvalidDocument { .. }
+    ));
+}
+
+#[tokio::test]
+async fn session_state_v2_load_rejects_unreachable_model_turn_sequences() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = FileSessionStore::new(temp.path());
+    let cases = [
+        ("empty map with advanced counter", serde_json::json!({}), 2),
+        (
+            "gap in positive turn ids",
+            serde_json::json!({ "1": "completed", "3": "completed" }),
+            4,
+        ),
+        (
+            "counter jump after contiguous turns",
+            serde_json::json!({ "1": "completed" }),
+            3,
+        ),
+    ];
+
+    for (case, model_turns, next_model_turn_id) in cases {
+        let mut document = literal_v2_document();
+        document["transcript"]["model_turns"] = model_turns;
+        document["transcript"]["next_model_turn_id"] = serde_json::Value::from(next_model_turn_id);
+        store
+            .write_state_bytes(
+                &session_id(),
+                &serde_json::to_vec_pretty(&document).expect("literal V2 document serializes"),
+            )
+            .await
+            .expect("corrupted V2 state writes");
+
+        assert!(
+            matches!(
+                SessionState::load_from(&store, &session_id())
+                    .await
+                    .expect_err("unreachable model turn sequence must reject resume"),
+                crate::SessionStoreError::InvalidDocument { .. }
+            ),
+            "case {case}"
+        );
+    }
 }
 
 #[tokio::test]

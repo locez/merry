@@ -107,7 +107,7 @@ fn compaction_accepts_resolved_multi_tool_batches() {
 }
 
 #[test]
-fn compaction_and_permission_review_exclude_hidden_final_output_exchange() {
+fn compaction_and_permission_review_include_hidden_final_output_exchange_in_full_history() {
     let mut session =
         SessionState::new(SessionId::new("compaction-hidden-final").expect("valid session id"));
     session
@@ -131,8 +131,8 @@ fn compaction_and_permission_review_exclude_hidden_final_output_exchange() {
         .permission_review_context_snapshot()
         .expect("permission context builds");
     let review_debug = format!("{review_context:?}");
-    assert!(!review_debug.contains("hidden-final-call"));
-    assert!(!review_debug.contains("must-not-reenter-model-context"));
+    assert!(review_debug.contains("tool_call:lookup"));
+    assert!(review_debug.contains("must-not-reenter-model-context"));
 
     let input = session
         .build_citation_compaction_input(
@@ -140,47 +140,46 @@ fn compaction_and_permission_review_exclude_hidden_final_output_exchange() {
         )
         .expect("compaction input builds")
         .expect("old visible context should be compressible");
-    let payload = input.to_model_payload_json().expect("payload serializes");
-    assert!(payload.contains("old visible context"));
-    assert!(!payload.contains("hidden-final-call"));
-    assert!(!payload.contains("must-not-reenter-model-context"));
-
-    let outcome = session
-        .install_citation_compaction_candidate(
-            input,
-            r#"{
-              "claims": [
-                {
-                  "id": "c1",
-                  "kind": "completed_action",
-                  "text": "The old visible context was compacted.",
-                  "refs": ["r1"]
-                }
-              ],
-              "working_intent": null
-            }"#,
-        )
-        .expect("visible-only checkpoint installs");
-
-    assert_eq!(outcome.covered_history_item_count(), 1);
-    assert_eq!(
-        session.transcript_items_for_tests(),
-        [
-            "tool_call:hidden-final-call".to_owned(),
-            "tool_result:hidden-final-call:{\"private_final_output\":\"must-not-reenter-model-context\"}"
-                .to_owned(),
-            "user:retained visible tail".to_owned(),
-        ],
-        "compaction must retain the durable hidden exchange while removing visible history"
+    let payload = serde_json::from_str::<serde_json::Value>(
+        &input.to_model_payload_json().expect("payload serializes"),
+    )
+    .expect("payload parses");
+    let window = payload["window"].as_array().expect("window is an array");
+    assert_eq!(window.len(), 2);
+    assert_eq!(window[0]["role"], "user");
+    assert_eq!(window[1]["role"], "tool_exchange");
+    assert_eq!(window[1]["tool_call"]["name"], "lookup");
+    assert!(
+        window[1]["excerpt"]
+            .as_str()
+            .expect("tool excerpt is text")
+            .contains("must-not-reenter-model-context")
     );
-    assert_eq!(
-        session
-            .transcript_prompt_snapshot()
-            .expect("prompt transcript builds")
-            .len(),
-        1,
-        "hidden final-output exchange remains excluded from model prompts"
-    );
+
+    let full = session
+        .transcript_snapshot()
+        .expect("full transcript builds");
+    assert_eq!(full.len(), 4);
+    assert!(matches!(
+        &full[1],
+        crate::session::TranscriptItemSnapshot::ToolCall { call }
+            if call.id() == final_call.id()
+    ));
+    assert!(matches!(
+        &full[2],
+        crate::session::TranscriptItemSnapshot::ToolResult { content, .. }
+            if content.as_text()
+                == Some(r#"{"private_final_output":"must-not-reenter-model-context"}"#)
+    ));
+
+    let prompt = session
+        .transcript_prompt_snapshot()
+        .expect("prompt transcript builds");
+    assert_eq!(prompt.len(), 2);
+    assert!(prompt.iter().all(|item| matches!(
+        item,
+        crate::session::TranscriptItemSnapshot::UserMessage { .. }
+    )));
 }
 
 #[test]
