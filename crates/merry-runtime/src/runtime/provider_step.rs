@@ -23,12 +23,13 @@ use super::provider_request::{
 use super::{DIAGNOSTIC_TOOL_CALL_RESULT_REQUIRED, RuntimeInner, diagnostic_from_text};
 use crate::{
     CheckpointDecision,
+    events::RuntimeJournalEventBatch,
     memory::MemoryActivationContext,
     model_config::ModelProviderConfig,
     session::{ModelTurnId, ModelTurnStatus},
     step::StepInput,
 };
-use merry_core::{PendingToolCall, RuntimeJournalEvent};
+use merry_core::PendingToolCall;
 use merry_llm::{FinishReason, GenerationConfig, ModelEvent, ModelOutput, ModelStreamContext};
 use std::sync::{Arc, atomic::Ordering};
 use tokio::sync::mpsc;
@@ -41,7 +42,7 @@ async fn has_unresolved_pending_tool_calls(inner: &RuntimeInner) -> bool {
 
 pub(super) async fn run_provider_step(
     inner: &Arc<RuntimeInner>,
-    sender: &mpsc::Sender<RuntimeJournalEvent>,
+    sender: &mpsc::Sender<RuntimeJournalEventBatch>,
     token: &CancellationToken,
     input: StepInput,
     generation_config: GenerationConfig,
@@ -665,7 +666,7 @@ pub(super) async fn run_provider_step(
 
 async fn fail_model_turn(
     inner: &RuntimeInner,
-    sender: &mpsc::Sender<RuntimeJournalEvent>,
+    sender: &mpsc::Sender<RuntimeJournalEventBatch>,
     token: &CancellationToken,
     turn_id: ModelTurnId,
     diagnostic: merry_core::ErrorInfo,
@@ -692,7 +693,7 @@ async fn fail_model_turn(
 
 async fn cancel_model_turn(
     inner: &RuntimeInner,
-    sender: &mpsc::Sender<RuntimeJournalEvent>,
+    sender: &mpsc::Sender<RuntimeJournalEventBatch>,
     turn_id: ModelTurnId,
 ) {
     {

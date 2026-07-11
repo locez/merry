@@ -1,6 +1,8 @@
 use super::{
-    SessionState, history::CompactionHistoryItem, history::permission_review_context_entry,
-    transcript::TranscriptItem,
+    SessionState,
+    history::CompactionHistoryItem,
+    history::permission_review_context_entry,
+    transcript::{ToolCallPromptProjection, ToolResultPromptProjection, TranscriptItem},
 };
 use crate::{
     RuntimeError,
@@ -17,6 +19,12 @@ use crate::{
 use std::collections::{BTreeMap, BTreeSet};
 
 const PERMISSION_REVIEW_RECENT_CONTEXT_LIMIT: usize = 12;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HiddenToolExchangeVisibility {
+    Include,
+    Exclude,
+}
 
 impl SessionState {
     pub(crate) fn set_compacted_checkpoint(&mut self, checkpoint: CompactedCheckpoint) {
@@ -52,7 +60,7 @@ impl SessionState {
             return Err(CompactionError::PendingToolCalls.into());
         }
 
-        let history = self.compaction_history_items()?;
+        let history = self.history_items(HiddenToolExchangeVisibility::Exclude)?;
         if history.len() <= policy.retained_raw_tail_items() {
             return Ok(None);
         }
@@ -94,7 +102,7 @@ impl SessionState {
     pub(crate) fn permission_review_context_snapshot(
         &self,
     ) -> Result<Vec<PermissionReviewContextEntry>, RuntimeError> {
-        let items = self.compaction_history_items()?;
+        let items = self.history_items(HiddenToolExchangeVisibility::Include)?;
         let start = items
             .len()
             .saturating_sub(PERMISSION_REVIEW_RECENT_CONTEXT_LIMIT);
@@ -104,7 +112,10 @@ impl SessionState {
             .collect())
     }
 
-    fn compaction_history_items(&self) -> Result<Vec<CompactionHistoryItem>, RuntimeError> {
+    fn history_items(
+        &self,
+        hidden_tool_exchanges: HiddenToolExchangeVisibility,
+    ) -> Result<Vec<CompactionHistoryItem>, RuntimeError> {
         let mut items = Vec::with_capacity(self.transcript.items().len());
         let transcript_items = self.transcript.items();
         let mut results = BTreeMap::new();
@@ -114,10 +125,14 @@ impl SessionState {
                 call_id,
                 result,
                 artifact_id,
+                prompt_projection,
                 ..
             } = item
                 && results
-                    .insert(call_id.clone(), (*id, result, artifact_id))
+                    .insert(
+                        call_id.clone(),
+                        (*id, result, artifact_id, *prompt_projection),
+                    )
                     .is_some()
             {
                 return Err(CompactionError::StaleWindow.into());
@@ -156,8 +171,14 @@ impl SessionState {
                         text.to_owned(),
                     ));
                 }
-                TranscriptItem::ToolCall { call, .. } => {
-                    let Some(&(id, result, artifact_id)) = results.get(call.id()) else {
+                TranscriptItem::ToolCall {
+                    call,
+                    prompt_projection: call_projection,
+                    ..
+                } => {
+                    let Some(&(id, result, artifact_id, result_projection)) =
+                        results.get(call.id())
+                    else {
                         if self
                             .pending_tool_calls
                             .iter()
@@ -169,6 +190,23 @@ impl SessionState {
                     };
                     if !matched_results.insert(call.id().clone()) {
                         return Err(CompactionError::StaleWindow.into());
+                    }
+                    match (*call_projection, result_projection) {
+                        (ToolCallPromptProjection::Hidden, ToolResultPromptProjection::Hidden)
+                            if hidden_tool_exchanges == HiddenToolExchangeVisibility::Exclude =>
+                        {
+                            continue;
+                        }
+                        (ToolCallPromptProjection::Hidden, ToolResultPromptProjection::Hidden)
+                        | (ToolCallPromptProjection::Full, ToolResultPromptProjection::Full)
+                        | (
+                            ToolCallPromptProjection::Full,
+                            ToolResultPromptProjection::ArtifactNotice,
+                        ) => {}
+                        (ToolCallPromptProjection::Hidden, _)
+                        | (ToolCallPromptProjection::Full, ToolResultPromptProjection::Hidden) => {
+                            return Err(CompactionError::StaleWindow.into());
+                        }
                     }
                     let content = self.read_artifact_content(artifact_id)?;
                     items.push(CompactionHistoryItem::tool_exchange(
@@ -258,7 +296,7 @@ impl SessionState {
         input: &CitationCompactionInput,
     ) -> Result<(), RuntimeError> {
         let current_ids = self
-            .compaction_history_items()?
+            .history_items(HiddenToolExchangeVisibility::Exclude)?
             .into_iter()
             .map(|item| item.history_id)
             .collect::<Vec<_>>();
@@ -279,7 +317,9 @@ impl SessionState {
     }
 
     fn history_item_count(&self) -> Result<usize, RuntimeError> {
-        Ok(self.compaction_history_items()?.len())
+        Ok(self
+            .history_items(HiddenToolExchangeVisibility::Exclude)?
+            .len())
     }
 }
 

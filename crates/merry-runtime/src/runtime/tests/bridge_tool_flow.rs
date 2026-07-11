@@ -202,3 +202,74 @@ async fn invalid_bridge_tool_arguments_resolve_with_single_slot_event_buffer() {
     );
     assert_eq!(runtime.pending_tool_calls().await, Vec::new());
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn invalid_bridge_terminal_events_share_one_slot_without_stranding_producer() {
+    let call = model_tool_call("call-invalid-bridge-atomic-terminal");
+    let provider =
+        RecordingModelProvider::with_script(vec![ScriptedModelProviderResponse::Stream(vec![Ok(
+            completed_event_with(vec![ModelOutput::tool_call(call)], FinishReason::ToolCalls),
+        )])]);
+    let runtime = Runtime::builder(session_id("runtime-bridge-atomic-terminal"))
+        .event_buffer_size(NonZeroUsize::new(1).expect("non-zero buffer"))
+        .allow_bridge_tools()
+        .model_provider(Arc::new(provider), model_name())
+        .register_tool(RegisteredTool::bridge(required_query_tool_spec("lookup")))
+        .build()
+        .expect("bridge opt-in should allow bridge tool registration");
+    let mut first_stream = runtime
+        .step(
+            crate::StepInput::user_text("Topic request.").expect("valid input"),
+            crate::StepContext::default(),
+        )
+        .expect("first step starts");
+
+    assert_eq!(
+        first_stream
+            .next()
+            .await
+            .expect("session start event")
+            .sequence,
+        0
+    );
+    assert_eq!(
+        first_stream
+            .next()
+            .await
+            .expect("step start event")
+            .sequence,
+        1
+    );
+    let pending = first_stream.next().await.expect("pending tool event");
+    assert_eq!(pending.sequence, 2);
+    assert!(matches!(
+        pending.payload,
+        RuntimeJournalPayload::ToolCallPending { .. }
+    ));
+
+    while !runtime.pending_tool_calls().await.is_empty() {
+        tokio::task::yield_now().await;
+    }
+    let second_stream = 'start: {
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+            match runtime.step(
+                crate::StepInput::user_text("Producer must not remain stranded.")
+                    .expect("valid input"),
+                crate::StepContext::default(),
+            ) {
+                Ok(stream) => break 'start stream,
+                Err(RuntimeError::StepAlreadyActive { .. }) => continue,
+                Err(error) => panic!("unexpected second-step error: {error}"),
+            }
+        }
+        panic!("separate terminal event sends stranded the first producer");
+    };
+
+    drop(first_stream);
+    let second_events = second_stream.collect::<Vec<_>>().await;
+    assert_eq!(
+        second_events.first().expect("second step event").sequence,
+        5
+    );
+}

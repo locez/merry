@@ -9,27 +9,6 @@ mod action;
 mod result;
 mod skill;
 
-pub(crate) struct PreparedModelToolCallResponse {
-    commentary: Option<PreparedModelCommentary>,
-    transcript: super::Transcript,
-    calls: Vec<PendingToolCall>,
-    tool_payload: RuntimeJournalPayload,
-    tool_sequence: u64,
-}
-
-struct PreparedModelCommentary {
-    artifact: ArtifactRef,
-    content: ArtifactContent,
-    transcript: super::Transcript,
-    sequence: u64,
-}
-
-impl PreparedModelToolCallResponse {
-    pub(crate) const fn has_commentary(&self) -> bool {
-        self.commentary.is_some()
-    }
-}
-
 impl SessionState {
     pub(crate) fn pending_tool_calls(&self) -> Vec<PendingToolCall> {
         self.pending_tool_calls.clone()
@@ -117,14 +96,12 @@ impl SessionState {
         ))
     }
 
-    pub(crate) fn prepare_model_tool_call_response(
-        &self,
+    pub(crate) fn record_model_tool_call_response(
+        &mut self,
         turn_id: ModelTurnId,
         commentary: Option<String>,
         calls: Vec<PendingToolCall>,
-    ) -> Result<PreparedModelToolCallResponse, ErrorInfo> {
-        let commentary_sequence = self.next_sequence();
-        let tool_sequence = commentary_sequence + u64::from(commentary.is_some());
+    ) -> Result<(Option<RuntimeJournalEvent>, RuntimeJournalEvent), ErrorInfo> {
         let tool_payload = if calls.len() == 1 {
             RuntimeJournalPayload::ToolCallPending {
                 call: calls[0].clone(),
@@ -154,10 +131,12 @@ impl SessionState {
         }
 
         let mut transcript = self.transcript.clone();
-        let prepared_commentary = match commentary {
-            Some(text) => {
-                let artifact =
-                    ArtifactRef::new(assistant_output_id(commentary_sequence), ArtifactKind::Text);
+        let commentary_record = commentary
+            .map(|text| {
+                let artifact = ArtifactRef::new(
+                    assistant_output_id(self.next_sequence()),
+                    ArtifactKind::Text,
+                );
                 let content = ArtifactContent::text(text);
                 self.artifacts
                     .ensure_recordable(&artifact, &content)
@@ -169,15 +148,9 @@ impl SessionState {
                     .map_err(|error| {
                         tool_response_diagnostic("assistant_output_artifact", error)
                     })?;
-                Some(PreparedModelCommentary {
-                    artifact,
-                    content,
-                    transcript: transcript.clone(),
-                    sequence: commentary_sequence,
-                })
-            }
-            None => None,
-        };
+                Ok((artifact, content))
+            })
+            .transpose()?;
         for call in &calls {
             transcript
                 .push_tool_call(turn_id, call.clone())
@@ -187,42 +160,22 @@ impl SessionState {
             .close_model_response(turn_id, true)
             .map_err(|error| tool_response_diagnostic("model_turn_close", error))?;
 
-        Ok(PreparedModelToolCallResponse {
-            commentary: prepared_commentary,
-            transcript,
-            calls,
-            tool_payload,
-            tool_sequence,
-        })
-    }
-
-    pub(crate) fn record_prepared_model_commentary(
-        &mut self,
-        prepared: &mut PreparedModelToolCallResponse,
-    ) -> Option<RuntimeJournalEvent> {
-        let commentary = prepared.commentary.take()?;
-        debug_assert_eq!(self.next_sequence(), commentary.sequence);
-        let content_bytes = commentary.content.as_bytes().len();
-        let recorded = self
-            .artifacts
-            .record_preflighted(commentary.artifact, commentary.content);
-        Self::trace_artifact_record(self.session_id.as_str(), &recorded, content_bytes);
-        self.transcript = commentary.transcript;
-        Some(self.record_event(
-            RuntimeJournalPayload::AssistantOutputRecorded { artifact: recorded },
-            LedgerFactKind::ArtifactRecorded,
-        ))
-    }
-
-    pub(crate) fn record_prepared_model_tool_calls(
-        &mut self,
-        prepared: PreparedModelToolCallResponse,
-    ) -> RuntimeJournalEvent {
-        debug_assert!(prepared.commentary.is_none());
-        debug_assert_eq!(self.next_sequence(), prepared.tool_sequence);
-        self.transcript = prepared.transcript;
-        self.pending_tool_calls.extend(prepared.calls);
-        self.record_event(prepared.tool_payload, LedgerFactKind::ToolCallPending)
+        let recorded_commentary = commentary_record.map(|(artifact, content)| {
+            let content_bytes = content.as_bytes().len();
+            let recorded = self.artifacts.record_preflighted(artifact, content);
+            Self::trace_artifact_record(self.session_id.as_str(), &recorded, content_bytes);
+            recorded
+        });
+        self.transcript = transcript;
+        self.pending_tool_calls.extend(calls);
+        let commentary_event = recorded_commentary.map(|artifact| {
+            self.record_event(
+                RuntimeJournalPayload::AssistantOutputRecorded { artifact },
+                LedgerFactKind::ArtifactRecorded,
+            )
+        });
+        let tool_event = self.record_event(tool_payload, LedgerFactKind::ToolCallPending);
+        Ok((commentary_event, tool_event))
     }
 
     pub(crate) fn record_bridge_tool_call_requested(

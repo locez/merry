@@ -150,9 +150,12 @@ impl RuntimeBuilder {
 
     /// Sets the bounded event channel buffer size.
     ///
-    /// Runtime event production uses a bounded channel. Backpressure is part of
-    /// the state-before-event contract: producers reserve an event slot before
-    /// mutating durable session state for the corresponding event.
+    /// Runtime event production uses a bounded channel. Capacity counts
+    /// internal emission batches rather than individual public events, so one
+    /// slot may carry consecutive events whose state must be committed and
+    /// enqueued together. Backpressure is part of the state-before-event
+    /// contract: producers reserve a batch slot before mutating durable session
+    /// state for the corresponding events.
     #[must_use]
     pub fn event_buffer_size(mut self, event_buffer_size: NonZeroUsize) -> Self {
         self.event_buffer_size = event_buffer_size;

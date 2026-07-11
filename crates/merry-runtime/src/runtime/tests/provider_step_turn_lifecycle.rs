@@ -41,7 +41,7 @@ async fn provider_failure_finishes_and_eof_abort_in_progress_turns() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn dropping_one_slot_stream_after_commentary_does_not_commit_hidden_tool_call_event() {
+async fn one_slot_commentary_observes_atomically_committed_tool_response() {
     let call = model_tool_call("drop-after-commentary");
     let provider =
         RecordingModelProvider::with_script(vec![ScriptedModelProviderResponse::Stream(vec![Ok(
@@ -96,45 +96,50 @@ async fn dropping_one_slot_stream_after_commentary_does_not_commit_hidden_tool_c
         commentary.payload,
         RuntimeJournalPayload::AssistantOutputRecorded { .. }
     ));
-    drop(stream);
-    tokio::task::yield_now().await;
 
-    assert!(
-        session.pending_tool_calls().is_empty(),
-        "tool state must remain uncommitted while its event delivery waits for session access"
-    );
-    assert_eq!(session.next_sequence(), 3);
+    assert_eq!(session.pending_tool_calls().len(), 1);
+    assert_eq!(session.next_sequence(), 4);
     assert_eq!(
         session.model_turn_status(ModelTurnId::new(1)),
-        Some(ModelTurnStatus::InProgress)
+        Some(ModelTurnStatus::AwaitingToolResults)
     );
     assert_eq!(
         session
             .transcript_snapshot()
             .expect("transcript should remain readable")
             .len(),
-        2,
-        "only user input and delivered commentary should be durable before tool event commit"
+        3,
+        "user input, commentary, and tool call must commit before commentary is observable"
     );
+    assert!(session.ledger_projection().entries().iter().any(|entry| {
+        matches!(
+            entry,
+            LedgerProjection::Lifecycle {
+                sequence: 2,
+                kind: LedgerFactKind::ArtifactRecorded,
+                ..
+            }
+        )
+    }));
+    assert!(session.ledger_projection().entries().iter().any(|entry| {
+        matches!(
+            entry,
+            LedgerProjection::Lifecycle {
+                sequence: 3,
+                kind: LedgerFactKind::ToolCallPending,
+                ..
+            }
+        )
+    }));
 
+    drop(stream);
     drop(session);
-    for _ in 0..32 {
-        if runtime
-            .inner
-            .session
-            .lock()
-            .await
-            .model_turn_status(ModelTurnId::new(1))
-            == Some(ModelTurnStatus::Aborted)
-        {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
+    tokio::task::yield_now().await;
     let session = runtime.inner.session.lock().await;
+    assert_eq!(session.pending_tool_calls().len(), 1);
     assert_eq!(
         session.model_turn_status(ModelTurnId::new(1)),
-        Some(ModelTurnStatus::Aborted)
+        Some(ModelTurnStatus::AwaitingToolResults)
     );
-    assert_eq!(session.next_sequence(), 3);
+    assert_eq!(session.next_sequence(), 4);
 }

@@ -10,7 +10,7 @@ use merry_llm::{
 use merry_runtime::{RegisteredTool, Runtime, RuntimeModelRole, StepContext, StepInput};
 use schemars::Schema;
 use serde_json::{Map, json};
-use std::sync::Arc;
+use std::{num::NonZeroUsize, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
 fn session_id(value: &str) -> SessionId {
@@ -279,6 +279,56 @@ async fn tool_call_pending_projects_to_public_started_event() {
         events.iter().find(|event| matches!(event, RuntimeEvent::ToolCallStarted { .. })),
         Some(RuntimeEvent::ToolCallStarted { call, .. })
             if call.id().as_str() == "call-public-tool" && call.name().as_str() == "lookup"
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn one_slot_commentary_tool_batch_projects_in_order_after_atomic_state_commit() {
+    let call = model_tool_call("call-public-commentary-tool", "lookup");
+    let provider = FakeModelProvider::new(vec![Ok(ModelEvent::Completed {
+        response: ModelResponse::new(
+            vec![
+                ModelOutput::text("Public commentary before tool."),
+                ModelOutput::tool_call(call),
+            ],
+            FinishReason::ToolCalls,
+            None,
+        ),
+    })]);
+    let runtime = Runtime::builder(session_id("public-commentary-tool-batch"))
+        .event_buffer_size(NonZeroUsize::new(1).expect("non-zero event buffer"))
+        .model_provider(Arc::new(provider), model_name())
+        .build()
+        .expect("runtime should build");
+    let mut events = runtime
+        .stream(
+            StepInput::user_text("Comment before calling lookup.").expect("valid step input"),
+            StepContext::new(CancellationToken::new()),
+        )
+        .expect("public stream should start");
+
+    assert!(matches!(
+        events.next().await.expect("session started"),
+        RuntimeEvent::SessionStarted { .. }
+    ));
+    assert!(matches!(
+        events.next().await.expect("step started"),
+        RuntimeEvent::StepStarted { .. }
+    ));
+    assert!(matches!(
+        events.next().await.expect("assistant commentary"),
+        RuntimeEvent::AssistantMessage { text, source, .. }
+            if text == "Public commentary before tool." && source.sequence == 2
+    ));
+    assert_eq!(
+        runtime.pending_tool_calls().await.len(),
+        1,
+        "tool state must already be committed when commentary is visible"
+    );
+    assert!(matches!(
+        events.next().await.expect("tool started"),
+        RuntimeEvent::ToolCallStarted { call, source }
+            if call.id().as_str() == "call-public-commentary-tool" && source.sequence == 3
     ));
 }
 
