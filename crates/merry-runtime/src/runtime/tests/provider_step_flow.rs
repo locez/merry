@@ -865,7 +865,7 @@ async fn duplicate_tool_call_response_aborts_turn_before_failed_event() {
         .session
         .lock()
         .await
-        .transcript_snapshot()
+        .full_transcript_snapshot()
         .expect("transcript should be readable");
 
     let events = collect_step(
@@ -898,7 +898,7 @@ async fn duplicate_tool_call_response_aborts_turn_before_failed_event() {
         Some(ModelTurnStatus::Aborted)
     );
     let transcript_after = session
-        .transcript_snapshot()
+        .full_transcript_snapshot()
         .expect("transcript should remain readable");
     assert_eq!(
         &transcript_after[..transcript_before.len()],

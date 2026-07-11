@@ -262,7 +262,7 @@ impl Runtime {
     pub async fn session_transcript(&self) -> Result<Vec<SessionTranscriptItem>, RuntimeError> {
         let snapshots = {
             let session = self.inner.session.lock().await;
-            session.transcript_snapshot()?
+            session.full_transcript_snapshot()?
         };
         Ok(snapshots
             .into_iter()

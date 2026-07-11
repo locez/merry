@@ -126,7 +126,7 @@ pub(super) enum StepRequestCompileError {
 pub(super) fn step_request_inputs_from_session(
     session: &SessionState,
 ) -> Result<StepRequestInputs, RuntimeError> {
-    let transcript = session.transcript_prompt_snapshot()?;
+    let transcript = session.provider_transcript_snapshot()?;
     Ok(StepRequestInputs::from_session(session, transcript))
 }
 

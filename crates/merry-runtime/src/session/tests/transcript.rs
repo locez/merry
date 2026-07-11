@@ -254,7 +254,7 @@ fn transcript_assigns_monotonic_ids_and_never_reuses_after_retain() {
 }
 
 #[test]
-fn compacted_history_removal_keeps_uncovered_batch_pairs_intact() {
+fn model_turn_grouping_keeps_full_batch_pairs_intact() {
     let mut transcript = Transcript::new();
     let turn_id = transcript
         .begin_model_turn()
@@ -303,15 +303,28 @@ fn compacted_history_removal_keeps_uncovered_batch_pairs_intact() {
         )
         .expect("tail records");
 
-    transcript.remove_compacted_history(&[result_a_id.as_u64()].into_iter().collect());
+    let turns = transcript.model_turns().expect("model turns should group");
 
+    assert_eq!(turns.len(), 2);
+    assert_eq!(turns[0].id(), turn_id);
+    assert_eq!(turns[0].status(), ModelTurnStatus::Completed);
+    assert_eq!(turns[0].items().len(), 4);
+    assert_eq!(turns[1].id(), tail_turn_id);
+    assert_eq!(turns[1].status(), ModelTurnStatus::InProgress);
+    assert_eq!(turns[1].items().len(), 1);
     assert_eq!(
         transcript
             .items()
             .iter()
             .map(|item| item.id().as_u64())
             .collect::<Vec<_>>(),
-        vec![1, result_b_id.as_u64(), tail_id.as_u64()]
+        vec![
+            0,
+            1,
+            result_b_id.as_u64(),
+            result_a_id.as_u64(),
+            tail_id.as_u64()
+        ]
     );
 }
 

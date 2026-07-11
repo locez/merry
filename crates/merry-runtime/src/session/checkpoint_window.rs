@@ -1,5 +1,5 @@
 use super::{
-    SessionState,
+    ModelTurn, ModelTurnId, ModelTurnStatus, SessionState,
     history::CompactionHistoryItem,
     history::permission_review_context_entry,
     transcript::{ToolCallPromptProjection, ToolResultPromptProjection, TranscriptItem},
@@ -24,6 +24,12 @@ const PERMISSION_REVIEW_RECENT_CONTEXT_LIMIT: usize = 12;
 enum HiddenToolExchangeVisibility {
     Include,
     Exclude,
+}
+
+struct ModelTurnHistory {
+    id: ModelTurnId,
+    status: ModelTurnStatus,
+    items: Vec<CompactionHistoryItem>,
 }
 
 impl SessionState {
@@ -60,14 +66,40 @@ impl SessionState {
             return Err(CompactionError::PendingToolCalls.into());
         }
 
-        let history = self.history_items(HiddenToolExchangeVisibility::Exclude)?;
-        if history.len() <= policy.retained_raw_tail_items() {
+        let turns = self.model_turn_histories(HiddenToolExchangeVisibility::Include, true)?;
+        let first_open = turns
+            .iter()
+            .position(|turn| turn.status.is_open())
+            .unwrap_or(turns.len());
+        if turns[first_open..]
+            .iter()
+            .any(|turn| !turn.status.is_open())
+        {
+            return Err(CompactionError::StaleWindow.into());
+        }
+        let completed_turns = &turns[..first_open];
+        let history_count = completed_turns
+            .iter()
+            .map(|turn| turn.items.len())
+            .sum::<usize>();
+        if history_count <= policy.retained_raw_tail_items() {
             return Ok(None);
         }
 
-        let covered_count = history.len() - policy.retained_raw_tail_items();
-        let covered = &history[..covered_count];
-        self.citation_compaction_input_from_history(policy, covered)
+        let mut retained_count = 0;
+        let mut covered_turn_count = completed_turns.len();
+        while covered_turn_count > 0 && retained_count < policy.retained_raw_tail_items() {
+            covered_turn_count -= 1;
+            retained_count += completed_turns[covered_turn_count].items.len();
+        }
+        let covered = completed_turns[..covered_turn_count]
+            .iter()
+            .flat_map(|turn| turn.items.iter().cloned())
+            .collect::<Vec<_>>();
+        if covered.is_empty() {
+            return Ok(None);
+        }
+        self.citation_compaction_input_from_history(policy, &covered)
             .map(Some)
     }
 
@@ -79,30 +111,32 @@ impl SessionState {
         if !self.pending_tool_calls.is_empty() {
             return Err(CompactionError::PendingToolCalls.into());
         }
-        self.validate_compaction_window_is_current(&input)?;
+        let compacted_through = self.validate_compaction_window_is_current(&input)?;
 
         let checkpoint_id = input.manifest().checkpoint_id().clone();
         let citation =
             checkpoint_from_candidate_json(checkpoint_id.clone(), &input, candidate_json)?;
         let compacted = CompactedCheckpoint::from_citation_backed(citation)?;
 
-        let covered_history_ids = input.covered_history_ids().clone();
-        let covered_count = covered_history_ids.len();
-        self.transcript
-            .remove_compacted_history(&covered_history_ids);
+        let covered_count = input.covered_history_ids().len();
+        self.advance_prompt_history_projection(compacted_through)?;
         self.compacted_checkpoint = Some(compacted);
 
         Ok(CompactionOutcome::new(
             checkpoint_id,
             covered_count,
-            self.history_item_count()?,
+            self.provider_history_item_count()?,
         ))
     }
 
     pub(crate) fn permission_review_context_snapshot(
         &self,
     ) -> Result<Vec<PermissionReviewContextEntry>, RuntimeError> {
-        let items = self.history_items(HiddenToolExchangeVisibility::Include)?;
+        let items = self
+            .model_turn_histories(HiddenToolExchangeVisibility::Include, true)?
+            .into_iter()
+            .flat_map(|turn| turn.items)
+            .collect::<Vec<_>>();
         let start = items
             .len()
             .saturating_sub(PERMISSION_REVIEW_RECENT_CONTEXT_LIMIT);
@@ -112,14 +146,37 @@ impl SessionState {
             .collect())
     }
 
-    fn history_items(
+    fn model_turn_histories(
         &self,
         hidden_tool_exchanges: HiddenToolExchangeVisibility,
+        apply_prompt_projection: bool,
+    ) -> Result<Vec<ModelTurnHistory>, RuntimeError> {
+        let compacted_through = apply_prompt_projection
+            .then(|| self.prompt_history_projection().compacted_through())
+            .flatten();
+        self.transcript
+            .model_turns()
+            .map_err(|_| RuntimeError::from(CompactionError::StaleWindow))?
+            .into_iter()
+            .filter(|turn| compacted_through.is_none_or(|boundary| turn.id() > boundary))
+            .map(|turn| {
+                Ok(ModelTurnHistory {
+                    id: turn.id(),
+                    status: turn.status(),
+                    items: self.history_items_for_model_turn(&turn, hidden_tool_exchanges)?,
+                })
+            })
+            .collect()
+    }
+
+    fn history_items_for_model_turn(
+        &self,
+        turn: &ModelTurn<'_>,
+        hidden_tool_exchanges: HiddenToolExchangeVisibility,
     ) -> Result<Vec<CompactionHistoryItem>, RuntimeError> {
-        let mut items = Vec::with_capacity(self.transcript.items().len());
-        let transcript_items = self.transcript.items();
+        let mut items = Vec::with_capacity(turn.items().len());
         let mut results = BTreeMap::new();
-        for item in transcript_items {
+        for item in turn.items() {
             if let TranscriptItem::ToolResult {
                 id,
                 call_id,
@@ -140,7 +197,7 @@ impl SessionState {
         }
         let mut matched_results = BTreeSet::new();
 
-        for item in transcript_items {
+        for item in turn.items() {
             match item {
                 TranscriptItem::UserMessage {
                     id, artifact_id, ..
@@ -179,11 +236,7 @@ impl SessionState {
                     let Some(&(id, result, artifact_id, result_projection)) =
                         results.get(call.id())
                     else {
-                        if self
-                            .pending_tool_calls
-                            .iter()
-                            .any(|pending| pending.id() == call.id())
-                        {
+                        if turn.status().is_open() {
                             continue;
                         }
                         return Err(CompactionError::StaleWindow.into());
@@ -294,32 +347,39 @@ impl SessionState {
     fn validate_compaction_window_is_current(
         &self,
         input: &CitationCompactionInput,
-    ) -> Result<(), RuntimeError> {
-        let current_ids = self
-            .history_items(HiddenToolExchangeVisibility::Exclude)?
-            .into_iter()
-            .map(|item| item.history_id)
-            .collect::<Vec<_>>();
+    ) -> Result<ModelTurnId, RuntimeError> {
         let covered = input.covered_history_ids();
         if covered.is_empty() {
             return Err(CompactionError::NoCompressibleWindow.into());
         }
 
-        let current_prefix = current_ids
-            .into_iter()
-            .take(covered.len())
-            .collect::<BTreeSet<_>>();
-        if &current_prefix != covered {
-            return Err(CompactionError::StaleWindow.into());
+        let turns = self.model_turn_histories(HiddenToolExchangeVisibility::Include, true)?;
+        let mut current_prefix = BTreeSet::new();
+        let mut matched_boundary = None;
+        for turn in turns {
+            if turn.status.is_open() {
+                break;
+            }
+            for item in &turn.items {
+                if !covered.contains(&item.history_id) {
+                    return matched_boundary
+                        .ok_or_else(|| RuntimeError::from(CompactionError::StaleWindow));
+                }
+                current_prefix.insert(item.history_id);
+            }
+            if &current_prefix == covered {
+                matched_boundary = Some(turn.id);
+            }
         }
-
-        Ok(())
+        matched_boundary.ok_or_else(|| RuntimeError::from(CompactionError::StaleWindow))
     }
 
-    fn history_item_count(&self) -> Result<usize, RuntimeError> {
+    fn provider_history_item_count(&self) -> Result<usize, RuntimeError> {
         Ok(self
-            .history_items(HiddenToolExchangeVisibility::Exclude)?
-            .len())
+            .model_turn_histories(HiddenToolExchangeVisibility::Exclude, true)?
+            .into_iter()
+            .map(|turn| turn.items.len())
+            .sum())
     }
 }
 
