@@ -344,23 +344,28 @@ pub(super) async fn run_provider_step(
                 if !send_compaction_started_event(inner, sender, token).await {
                     return;
                 }
-                let outcome =
-                    match compact_prepared_context(inner, *compaction_input, token.clone()).await {
-                        Ok(outcome) => outcome,
-                        Err(error) => {
-                            clear_current_activated_memories(inner).await;
-                            if token.is_cancelled() {
-                                trace_provider_step_cancelled();
-                                let _ = send_cancelled_event(inner, sender).await;
-                                return;
-                            }
-                            let diagnostic =
-                                diagnostic_from_text("auto_compaction", error.to_string());
-                            trace_provider_step_failed(&diagnostic);
-                            let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                let outcome = match compact_prepared_context(
+                    inner,
+                    *compaction_input,
+                    current_request_budget.window.tokens(),
+                    token.clone(),
+                )
+                .await
+                {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        clear_current_activated_memories(inner).await;
+                        if token.is_cancelled() {
+                            trace_provider_step_cancelled();
+                            let _ = send_cancelled_event(inner, sender).await;
                             return;
                         }
-                    };
+                        let diagnostic = diagnostic_from_text("auto_compaction", error.to_string());
+                        trace_provider_step_failed(&diagnostic);
+                        let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                        return;
+                    }
+                };
                 Some(outcome)
             }
             CompactionPreparation::ArchiveToolResults(archive_input) => {

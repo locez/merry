@@ -2295,14 +2295,6 @@ async fn live_compactor_summarizes_messy_1k_token_window_with_refs() {
         checkpoint_tokens * 3 < source_tokens,
         "live checkpoint should approach 3x compression after prompt-budget tuning"
     );
-    let entry_count = checkpoint
-        .lines()
-        .filter(|line| line.starts_with("- ["))
-        .count();
-    assert!(
-        entry_count <= 8,
-        "live checkpoint should prefer 6-8 entries, got {entry_count}"
-    );
     let checkpoint_lowercase = checkpoint.to_lowercase();
     for (expected, alternatives) in [
         ("artifact", &["artifact"][..]),

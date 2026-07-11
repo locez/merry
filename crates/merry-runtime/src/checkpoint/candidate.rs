@@ -3,7 +3,7 @@ use super::{
     domain::CitationBackedCheckpoint, reference::PersistedCheckpointRef, validate_identifier,
     validate_text_field,
 };
-use schemars::JsonSchema;
+use schemars::{JsonSchema, Schema, schema_for};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -489,6 +489,10 @@ pub(crate) struct CompactedCheckpointCandidateWire {
     current_progress_and_next_steps: Vec<CheckpointEntryWire>,
     exact_details: Vec<CheckpointEntryWire>,
     handoffs: Vec<CheckpointHandoffWire>,
+}
+
+pub(crate) fn compacted_checkpoint_candidate_schema() -> Schema {
+    schema_for!(CompactedCheckpointCandidateWire)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

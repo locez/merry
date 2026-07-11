@@ -222,6 +222,28 @@ pub enum RuntimeError {
         message: String,
     },
 
+    /// The configured compaction model cannot accept the primary model's context window.
+    #[error(
+        "compaction model input window {compactor_window_tokens} tokens is smaller than primary context window {primary_window_tokens} tokens"
+    )]
+    CompactionModelWindowTooSmall {
+        /// Resolved primary model context window.
+        primary_window_tokens: u64,
+        /// Provider-reported compaction model input window.
+        compactor_window_tokens: u64,
+    },
+
+    /// The compiled compaction request cannot fit in the compaction model input window.
+    #[error(
+        "compaction model request estimated input {estimated_input_tokens} tokens exceeds compaction model input window {compactor_window_tokens} tokens"
+    )]
+    CompactionModelInputTooLarge {
+        /// Deterministic estimate of the compiled provider-neutral request input.
+        estimated_input_tokens: u64,
+        /// Reported or primary-window-assumed compaction input window.
+        compactor_window_tokens: u64,
+    },
+
     /// Compaction model setup failed before a stream was returned.
     #[error("compaction model setup error: {message}")]
     CompactionModelSetup {
