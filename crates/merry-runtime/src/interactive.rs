@@ -675,6 +675,11 @@ impl InteractiveProducer {
                             .update_interactive_automatic_compaction(automatic_compaction)
                             .await;
                     }
+                    if let Some(context_window_tokens) = update.context_window_tokens {
+                        self.runtime
+                            .update_interactive_context_window_tokens(context_window_tokens)
+                            .await;
+                    }
                 }
                 let _ = ack_sender.send(result.map_err(InteractiveError::from));
                 Some(CommandDecision::Continue)

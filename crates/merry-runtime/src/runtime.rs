@@ -26,7 +26,7 @@ use crate::{
 use merry_core::{PendingToolCall, RuntimeEvent, RuntimeJournalEvent, SessionId, ToolCallId};
 use merry_llm::{GenerationConfig, ModelName, ModelProvider, ModelRetryPolicy};
 use std::{
-    num::NonZeroUsize,
+    num::{NonZeroU64, NonZeroUsize},
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64},
@@ -495,6 +495,7 @@ struct RuntimeInner {
     model_configs: RuntimeModelConfigs,
     primary_model_override: RwLock<Option<ModelProviderConfig>>,
     automatic_compaction: RwLock<AutomaticCompactionConfig>,
+    context_window_tokens: RwLock<Option<NonZeroU64>>,
     capabilities: RuntimeCapabilities,
     progress_commentary: bool,
     tool_registry: ToolRegistry,
@@ -578,6 +579,13 @@ impl Runtime {
         config: AutomaticCompactionConfig,
     ) {
         *self.inner.automatic_compaction.write().await = config;
+    }
+
+    pub(crate) async fn update_interactive_context_window_tokens(
+        &self,
+        context_window_tokens: Option<NonZeroU64>,
+    ) {
+        *self.inner.context_window_tokens.write().await = context_window_tokens;
     }
 }
 

@@ -226,7 +226,13 @@ pub(super) async fn run_provider_step(
         }
     };
 
-    let mut request_budget = request_context_budget(provider.capabilities(), &request);
+    let context_window_override = inner
+        .context_window_tokens
+        .read()
+        .await
+        .map(std::num::NonZeroU64::get);
+    let mut request_budget =
+        request_context_budget(provider.capabilities(), &request, context_window_override);
     if let Err(error) = &request_budget {
         trace_provider_request_budget_unavailable(
             inner.session_id.as_str(),
@@ -306,7 +312,11 @@ pub(super) async fn run_provider_step(
                         return;
                     }
                 };
-                request_budget = request_context_budget(provider.capabilities(), &request);
+                request_budget = request_context_budget(
+                    provider.capabilities(),
+                    &request,
+                    context_window_override,
+                );
                 if let Err(error) = &request_budget {
                     trace_provider_request_budget_unavailable(
                         inner.session_id.as_str(),

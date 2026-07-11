@@ -1,6 +1,6 @@
 use crate::{AutomaticCompactionConfig, SubagentConfig};
 use merry_llm::{GenerationConfig, ModelName, ModelProvider, ModelRetryPolicy};
-use std::sync::Arc;
+use std::{num::NonZeroU64, sync::Arc};
 
 /// Provider-neutral primary model selection for subsequent interactive requests.
 #[derive(Clone)]
@@ -46,6 +46,7 @@ pub struct InteractiveSettingsUpdate {
     pub(super) primary_model: Option<InteractivePrimaryModel>,
     pub(super) subagents: Option<InteractiveSubagentSettings>,
     pub(super) automatic_compaction: Option<AutomaticCompactionConfig>,
+    pub(super) context_window_tokens: Option<Option<NonZeroU64>>,
 }
 
 impl InteractiveSettingsUpdate {
@@ -77,6 +78,13 @@ impl InteractiveSettingsUpdate {
         automatic_compaction: AutomaticCompactionConfig,
     ) -> Self {
         self.automatic_compaction = Some(automatic_compaction);
+        self
+    }
+
+    /// Replaces or clears the explicit context-window override for subsequent requests.
+    #[must_use]
+    pub fn with_context_window_tokens(mut self, context_window_tokens: Option<NonZeroU64>) -> Self {
+        self.context_window_tokens = Some(context_window_tokens);
         self
     }
 }

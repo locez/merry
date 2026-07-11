@@ -157,6 +157,7 @@ pub(crate) enum SettingItem {
     DefaultProvider,
     DefaultModel,
     ReasoningEffort,
+    ContextWindow,
     AutoCompaction,
     ContextStrategy,
     Subagents,
@@ -165,11 +166,12 @@ pub(crate) enum SettingItem {
 }
 
 impl SettingItem {
-    pub(crate) const ALL: [Self; 9] = [
+    pub(crate) const ALL: [Self; 10] = [
         Self::CodeTheme,
         Self::DefaultProvider,
         Self::DefaultModel,
         Self::ReasoningEffort,
+        Self::ContextWindow,
         Self::AutoCompaction,
         Self::ContextStrategy,
         Self::Subagents,
@@ -188,6 +190,7 @@ pub(crate) enum SettingDirection {
 pub(crate) struct SettingsOverlay {
     selected: usize,
     model_editor: Option<TextInput>,
+    context_window_editor: Option<TextInput>,
     notice: Option<String>,
 }
 
@@ -207,6 +210,8 @@ pub(crate) enum OverlayKeyResult {
     ResetSetting(SettingItem),
     BeginModelEdit,
     CommitModel(String),
+    BeginContextWindowEdit,
+    CommitContextWindow(String),
     OpenShortcuts,
     Provider(ProviderOverlayAction),
 }
@@ -280,6 +285,10 @@ impl SettingsOverlay {
         self.model_editor.as_ref()
     }
 
+    pub(crate) fn context_window_editor(&self) -> Option<&TextInput> {
+        self.context_window_editor.as_ref()
+    }
+
     pub(crate) fn notice(&self) -> Option<&str> {
         self.notice.as_deref()
     }
@@ -291,12 +300,21 @@ impl SettingsOverlay {
         self.notice = None;
     }
 
+    pub(crate) fn begin_context_window_edit(&mut self, value: String) {
+        let mut input = TextInput::default();
+        input.replace_text(value);
+        self.context_window_editor = Some(input);
+        self.notice = None;
+    }
+
     pub(crate) fn set_notice(&mut self, notice: Option<String>) {
         self.notice = notice;
     }
 
     fn insert_paste(&mut self, text: &str) {
         if let Some(editor) = self.model_editor.as_mut() {
+            editor.insert_str(text);
+        } else if let Some(editor) = self.context_window_editor.as_mut() {
             editor.insert_str(text);
         }
     }
@@ -312,6 +330,24 @@ impl SettingsOverlay {
                     let value = editor.text().to_owned();
                     self.model_editor = None;
                     OverlayKeyResult::CommitModel(value)
+                }
+                _ => {
+                    editor.handle_key(key);
+                    OverlayKeyResult::Consumed
+                }
+            };
+        }
+
+        if let Some(editor) = self.context_window_editor.as_mut() {
+            return match key.code {
+                KeyCode::Esc => {
+                    self.context_window_editor = None;
+                    OverlayKeyResult::Consumed
+                }
+                KeyCode::Enter => {
+                    let value = editor.text().to_owned();
+                    self.context_window_editor = None;
+                    OverlayKeyResult::CommitContextWindow(value)
                 }
                 _ => {
                     editor.handle_key(key);
@@ -354,6 +390,7 @@ impl SettingsOverlay {
             }
             KeyCode::Enter => match self.selected_item() {
                 SettingItem::DefaultModel => OverlayKeyResult::BeginModelEdit,
+                SettingItem::ContextWindow => OverlayKeyResult::BeginContextWindowEdit,
                 SettingItem::DefaultProvider => {
                     OverlayKeyResult::Provider(ProviderOverlayAction::OpenProviderManager)
                 }

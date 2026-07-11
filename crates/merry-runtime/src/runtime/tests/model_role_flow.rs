@@ -461,7 +461,8 @@ fn request_context_budget_uses_dynamic_estimate_watermarks() {
     )
     .expect("valid request");
 
-    let budget = request_context_budget(&capabilities, &request).expect("budget should calculate");
+    let budget =
+        request_context_budget(&capabilities, &request, None).expect("budget should calculate");
 
     assert_eq!(
         budget.window.source(),
@@ -512,11 +513,69 @@ fn request_context_budget_derives_default_output_reserve_from_window() {
         let capabilities = ModelCapabilities::new(true, true, false, true, Some(window), None)
             .expect("valid capabilities");
         let budget =
-            request_context_budget(&capabilities, &request).expect("budget should calculate");
+            request_context_budget(&capabilities, &request, None).expect("budget should calculate");
 
         assert_eq!(
             budget.budget.output_reserve_tokens(),
             expected_output_reserve
         );
     }
+}
+
+#[test]
+fn request_context_budget_uses_codex_style_fallback_for_unknown_models() {
+    let capabilities =
+        ModelCapabilities::new(true, true, false, true, None, None).expect("valid capabilities");
+    let request = ModelRequest::new_with_continuations_and_stable_prefix(
+        named_model("unknown/model"),
+        vec![
+            ModelMessage::new(
+                ModelMessageRole::User,
+                ModelContent::text("Need budget.").expect("valid content"),
+            )
+            .expect("valid message"),
+        ],
+        Vec::new(),
+        Vec::new(),
+        GenerationConfig::default(),
+        0,
+    )
+    .expect("valid request");
+
+    let budget =
+        request_context_budget(&capabilities, &request, None).expect("budget should calculate");
+
+    assert_eq!(budget.window.tokens(), 272_000);
+    assert_eq!(budget.window.source(), crate::ContextWindowSource::Fallback);
+    assert_eq!(budget.budget.effective_window_tokens(), 258_400);
+}
+
+#[test]
+fn request_context_budget_prefers_an_explicit_window_override() {
+    let capabilities = ModelCapabilities::new(true, true, false, true, Some(64_000), None)
+        .expect("valid capabilities");
+    let request = ModelRequest::new_with_continuations_and_stable_prefix(
+        named_model("configured/model"),
+        vec![
+            ModelMessage::new(
+                ModelMessageRole::User,
+                ModelContent::text("Need budget.").expect("valid content"),
+            )
+            .expect("valid message"),
+        ],
+        Vec::new(),
+        Vec::new(),
+        GenerationConfig::default(),
+        0,
+    )
+    .expect("valid request");
+
+    let budget = request_context_budget(&capabilities, &request, Some(128_000))
+        .expect("budget should calculate");
+
+    assert_eq!(budget.window.tokens(), 128_000);
+    assert_eq!(
+        budget.window.source(),
+        crate::ContextWindowSource::ExplicitConfig
+    );
 }

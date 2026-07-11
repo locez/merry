@@ -32,6 +32,9 @@ use std::{
 };
 use thiserror::Error;
 
+/// Coding-agent fallback used when config, provider metadata, and model catalogs are absent.
+pub const DEFAULT_CONTEXT_WINDOW_FALLBACK_TOKENS: u64 = 272_000;
+
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x100000001b3;
 

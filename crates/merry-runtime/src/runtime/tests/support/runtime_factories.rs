@@ -19,6 +19,7 @@
                 automatic_compaction: tokio::sync::RwLock::new(
                     AutomaticCompactionConfig::default(),
                 ),
+                context_window_tokens: tokio::sync::RwLock::new(None),
                 capabilities: crate::RuntimeCapabilities::default(),
                 tool_registry: ToolRegistry::default(),
                 memory_activation_source: Arc::new(source),
@@ -50,6 +51,7 @@
                 automatic_compaction: tokio::sync::RwLock::new(
                     AutomaticCompactionConfig::default(),
                 ),
+                context_window_tokens: tokio::sync::RwLock::new(None),
                 capabilities: crate::RuntimeCapabilities::default(),
                 tool_registry: ToolRegistry::default(),
                 memory_activation_source: Arc::new(crate::memory::StoredMemoryActivationSource),
@@ -85,6 +87,7 @@
                 automatic_compaction: tokio::sync::RwLock::new(
                     AutomaticCompactionConfig::default(),
                 ),
+                context_window_tokens: tokio::sync::RwLock::new(None),
                 capabilities: crate::RuntimeCapabilities::default(),
                 tool_registry: ToolRegistry::default(),
                 memory_activation_source: Arc::new(source),
