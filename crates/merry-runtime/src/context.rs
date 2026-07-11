@@ -23,6 +23,7 @@ use crate::{
     checkpoint::{
         CheckpointError, CheckpointId, CitationBackedCheckpoint, PersistedCitationBackedCheckpoint,
     },
+    token_estimate::estimate_text_tokens,
 };
 use merry_core::{ArtifactId, ContextWindowSource, EvidenceLocator, EvidenceRef};
 use std::{
@@ -393,6 +394,18 @@ impl ContextCompiler {
             snapshot.artifacts(),
             snapshot.memories(),
             snapshot.compacted_checkpoint(),
+        )
+    }
+
+    pub(crate) fn compile_without_compacted_checkpoint(
+        &self,
+        snapshot: &SessionContextSnapshot,
+    ) -> Result<CompiledContext, ContextError> {
+        compile_entries(
+            snapshot.entries(),
+            snapshot.artifacts(),
+            snapshot.memories(),
+            None,
         )
     }
 }
@@ -966,6 +979,17 @@ struct ContextCheckpointSegment {
     checkpoint: Option<CompactedCheckpoint>,
 }
 
+const COMPACTED_CHECKPOINT_HEADER: &str = "compacted-checkpoint:";
+const COMPACTED_CHECKPOINT_GUIDANCE: &str = "guidance:Compacted checkpoint text is navigation, not exact evidence. Re-read cited artifacts or current workspace files before editing, verifying, or relying on summarized details.";
+const COMPACTED_CHECKPOINT_TEXT_PREFIX: &str = "text:";
+
+pub(crate) fn compacted_checkpoint_wrapper_token_ceiling() -> u64 {
+    let wrapper = format!(
+        "{COMPACTED_CHECKPOINT_HEADER}\n{COMPACTED_CHECKPOINT_GUIDANCE}\n{COMPACTED_CHECKPOINT_TEXT_PREFIX}"
+    );
+    estimate_text_tokens(&wrapper).saturating_add(1)
+}
+
 impl ContextCheckpointSegment {
     fn new(checkpoint: Option<CompactedCheckpoint>) -> Self {
         Self { checkpoint }
@@ -973,9 +997,12 @@ impl ContextCheckpointSegment {
 
     fn append_prompt_lines(&self, lines: &mut Vec<String>) {
         if let Some(checkpoint) = &self.checkpoint {
-            lines.push("compacted-checkpoint:".to_owned());
-            lines.push("guidance:Compacted checkpoint text is navigation, not exact evidence. Re-read cited artifacts or current workspace files before editing, verifying, or relying on summarized details.".to_owned());
-            lines.push(format!("text:{}", checkpoint.text()));
+            lines.push(COMPACTED_CHECKPOINT_HEADER.to_owned());
+            lines.push(COMPACTED_CHECKPOINT_GUIDANCE.to_owned());
+            lines.push(format!(
+                "{COMPACTED_CHECKPOINT_TEXT_PREFIX}{}",
+                checkpoint.text()
+            ));
         }
     }
 }

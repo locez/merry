@@ -37,7 +37,14 @@ fn compaction_window_retains_complete_model_turns_without_splitting() {
             .expect("payload parses");
 
     let window = payload["window"].as_array().expect("window is an array");
-    assert_eq!(window.len(), 2);
+    assert_eq!(window.len(), 1);
+    assert_eq!(
+        window[0]["items"]
+            .as_array()
+            .expect("turn items are an array")
+            .len(),
+        2
+    );
     let payload = payload.to_string();
     assert!(payload.contains("covered user"));
     assert!(payload.contains("covered assistant"));
@@ -377,9 +384,11 @@ fn compaction_groups_user_commentary_and_two_tool_pairs_in_one_turn() {
     let payload: serde_json::Value =
         serde_json::from_str(&input.to_model_payload_json().expect("payload serializes"))
             .expect("payload parses");
-    let roles = payload["window"]
+    let window = payload["window"].as_array().expect("window is an array");
+    assert_eq!(window.len(), 1);
+    let roles = window[0]["items"]
         .as_array()
-        .expect("window is an array")
+        .expect("turn items are an array")
         .iter()
         .map(|item| item["role"].as_str().expect("role is text"))
         .collect::<Vec<_>>();
@@ -557,12 +566,23 @@ fn artifact_notice_is_provider_only_and_compaction_reads_exact_content() {
         crate::session::TranscriptItemSnapshot::ToolCall { call: provider_call }
             if provider_call.id() == call.id()
     ));
-    assert!(matches!(
-        &provider[1],
-        crate::session::TranscriptItemSnapshot::ToolResult { content, .. }
-            if content.as_text()
-                == Some("Tool result content is stored in artifact artifact-notice-result.")
-    ));
+    let notice = match &provider[1] {
+        crate::session::TranscriptItemSnapshot::ToolResult { content, .. } => {
+            serde_json::from_str::<serde_json::Value>(
+                content.as_text().expect("artifact notice is textual JSON"),
+            )
+            .expect("artifact notice parses")
+        }
+        other => panic!("expected tool result, got {other:?}"),
+    };
+    assert_eq!(notice["merry_archived"], true);
+    assert_eq!(notice["status"], "succeeded");
+    assert_eq!(notice["artifact_id"], "artifact-notice-result");
+    assert!(
+        notice["ref"]
+            .as_str()
+            .is_some_and(|value| value.starts_with('h'))
+    );
 
     let input = session
         .build_test_citation_compaction_input(
@@ -572,7 +592,7 @@ fn artifact_notice_is_provider_only_and_compaction_reads_exact_content() {
         .expect("tool turn is compressible");
     let payload = input.to_model_payload_json().expect("payload serializes");
     assert!(payload.contains(exact_content));
-    assert!(!payload.contains("Tool result content is stored in artifact"));
+    assert!(!payload.contains("merry_archived"));
 
     session
         .install_citation_compaction_candidate(
@@ -691,9 +711,12 @@ fn compaction_accepts_resolved_multi_tool_batches() {
         &input.to_model_payload_json().expect("payload serializes"),
     )
     .expect("payload parses");
-    assert_eq!(payload["window"].as_array().expect("window").len(), 3);
-    assert_eq!(payload["window"][1]["role"], "tool_exchange");
-    assert_eq!(payload["window"][2]["role"], "tool_exchange");
+    let window = payload["window"].as_array().expect("window");
+    assert_eq!(window.len(), 2);
+    let tool_items = window[1]["items"].as_array().expect("tool turn items");
+    assert_eq!(tool_items.len(), 2);
+    assert_eq!(tool_items[0]["role"], "tool_exchange");
+    assert_eq!(tool_items[1]["role"], "tool_exchange");
 
     let outcome = session
         .install_citation_compaction_candidate(
@@ -781,8 +804,8 @@ fn compaction_uses_full_hidden_exchange_while_provider_projection_skips_it() {
     .expect("payload parses");
     let window = payload["window"].as_array().expect("window is an array");
     assert_eq!(window.len(), 2);
-    assert_eq!(window[0]["role"], "user");
-    assert_eq!(window[1]["role"], "tool_exchange");
+    assert_eq!(window[0]["items"][0]["role"], "user");
+    assert_eq!(window[1]["items"][0]["role"], "tool_exchange");
     assert!(
         payload
             .to_string()

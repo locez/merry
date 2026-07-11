@@ -1,4 +1,5 @@
 use super::*;
+use merry_core::{PendingToolCallBatch, ToolCallBatchId};
 use std::time::Duration;
 
 #[test]
@@ -459,6 +460,9 @@ async fn hard_watermark_auto_compaction_emits_lifecycle_events() {
         ModelCapabilities::new(true, true, false, true, Some(256_000), None)
             .expect("valid compactor capabilities"),
     );
+    let automatic_compaction = AutomaticCompactionConfig::enabled(
+        CitationCompactionPolicy::new(None, None, 1).expect("valid policy"),
+    );
     let runtime = Runtime::builder(session_id("auto-compaction-events"))
         .model_provider(Arc::new(primary), model_name())
         .model_provider_for_role(
@@ -466,12 +470,11 @@ async fn hard_watermark_auto_compaction_emits_lifecycle_events() {
             Arc::new(compactor.clone()),
             ModelName::new("compaction-model").expect("valid model"),
         )
-        .automatic_compaction(AutomaticCompactionConfig::enabled(
-            CitationCompactionPolicy::new(None, None, 1).expect("valid policy"),
-        ))
+        .automatic_compaction(automatic_compaction)
         .build()
         .expect("runtime builds");
 
+    *runtime.inner.automatic_compaction.write().await = AutomaticCompactionConfig::disabled();
     for seed in [
         format!("Old compressible ballast.\n{}", "ballast ".repeat(24_000)),
         format!("Retained tail ballast.\n{}", "tail ".repeat(6_400)),
@@ -484,6 +487,7 @@ async fn hard_watermark_auto_compaction_emits_lifecycle_events() {
             "seed step should complete"
         );
     }
+    *runtime.inner.automatic_compaction.write().await = automatic_compaction;
 
     let events = collect_step(
         &runtime,
@@ -597,7 +601,7 @@ async fn pre_turn_auto_compaction_failure_does_not_consume_model_turn_id() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn hard_watermark_without_compressible_history_skips_compaction_lifecycle_events() {
+async fn fixed_current_input_over_hard_watermark_calls_neither_provider() {
     let primary = RecordingModelProvider::with_script_and_capabilities(
         vec![ScriptedModelProviderResponse::Stream(vec![Ok(
             completed_event(),
@@ -610,7 +614,7 @@ async fn hard_watermark_without_compressible_history_skips_compaction_lifecycle_
             completed_event(),
         )])]);
     let runtime = Runtime::builder(session_id("auto-compaction-skip-events"))
-        .model_provider(Arc::new(primary), model_name())
+        .model_provider(Arc::new(primary.clone()), model_name())
         .model_provider_for_role(
             RuntimeModelRole::ContextCompaction,
             Arc::new(compactor.clone()),
@@ -631,18 +635,132 @@ async fn hard_watermark_without_compressible_history_skips_compaction_lifecycle_
 
     assert_eq!(
         event_kind_names(&events),
-        [
-            "SessionStarted",
-            "StepStarted",
-            "AssistantOutputRecorded",
-            "StepCompleted"
-        ]
+        ["SessionStarted", "StepStarted", "Failed"]
+    );
+    let diagnostic = events
+        .iter()
+        .find_map(|event| match &event.payload {
+            RuntimeJournalPayload::Failed { diagnostic } => Some(diagnostic),
+            _ => None,
+        })
+        .expect("oversized fixed current input should fail");
+    assert_eq!(diagnostic.code(), "auto_compaction");
+    assert!(
+        diagnostic
+            .message()
+            .contains("current input and fixed dynamic context cannot fit")
+    );
+    assert!(
+        primary.recorded_requests().is_empty(),
+        "the oversized primary request must not be sent"
     );
     assert_eq!(
         compactor.recorded_requests().len(),
         0,
-        "skip should not call the compaction model"
+        "fixed-input overflow must fail before calling the compaction model"
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn hard_watermark_archives_tool_results_without_replacing_five_retained_turns() {
+    let primary = RecordingModelProvider::with_script_and_capabilities(
+        vec![ScriptedModelProviderResponse::Stream(vec![Ok(
+            completed_event(),
+        )])],
+        ModelCapabilities::new(true, true, false, true, Some(64_000), None)
+            .expect("valid capabilities"),
+    );
+    let compactor = RecordingModelProvider::new();
+    let runtime = Runtime::builder(session_id("auto-compaction-archive-only"))
+        .model_provider(Arc::new(primary.clone()), model_name())
+        .model_provider_for_role(
+            RuntimeModelRole::ContextCompaction,
+            Arc::new(compactor.clone()),
+            ModelName::new("compaction-model").expect("valid model"),
+        )
+        .automatic_compaction(AutomaticCompactionConfig::enabled(
+            CitationCompactionPolicy::new(None, None, 5).expect("valid policy"),
+        ))
+        .build()
+        .expect("runtime builds");
+
+    {
+        let mut session = runtime.inner.session.lock().await;
+        for index in 1..=5 {
+            let turn_id = session.begin_model_turn().expect("tool turn begins");
+            session
+                .record_user_message_body(turn_id, &format!("tool turn {index}"))
+                .expect("tool user message records");
+            let call = pending_tool_call(&format!("archive-call-{index}"));
+            session
+                .record_tool_call_batch_pending(
+                    turn_id,
+                    PendingToolCallBatch::new(
+                        ToolCallBatchId::new(&format!("archive-batch-{index}"))
+                            .expect("valid batch id"),
+                        vec![call.clone()],
+                    )
+                    .expect("valid tool batch"),
+                )
+                .expect("tool call records");
+            session
+                .close_model_response(turn_id, true)
+                .expect("tool response closes");
+            session
+                .submit_tool_result(
+                    ToolCallResult::succeeded(
+                        call.id().clone(),
+                        ArtifactRef::new(
+                            artifact_id(&format!("archive-result-{index}")),
+                            ArtifactKind::Text,
+                        ),
+                    ),
+                    ArtifactContent::text(format!(
+                        "large tool result {index} {}",
+                        "archive ballast ".repeat(4_000)
+                    )),
+                )
+                .expect("tool result records");
+        }
+    }
+
+    let current_sentinel = "archive-only current sentinel";
+    let events = collect_step(&runtime, current_sentinel, StepContext::default()).await;
+
+    assert_eq!(
+        event_kind_names(&events),
+        ["StepStarted", "AssistantOutputRecorded", "StepCompleted"]
+    );
+    assert!(
+        compactor.recorded_requests().is_empty(),
+        "archive-only compaction must not call the compaction model"
+    );
+    let requests = primary.recorded_requests();
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert_eq!(
+        request.continuations().len(),
+        5,
+        "all five tool turns must remain in the primary request"
+    );
+    let request_text = request
+        .input()
+        .iter()
+        .map(|item| serde_json::to_string(item).expect("request item serializes"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(request_text.matches(current_sentinel).count(), 1);
+    assert!(!request_text.contains("compacted-checkpoint:"));
+    assert!(request.continuations().iter().any(|continuation| {
+        continuation
+            .result()
+            .content()
+            .as_str()
+            .contains("\"merry_archived\":true")
+    }));
+    for index in 1..=5 {
+        assert!(request_text.contains(&format!("archive-call-{index}")));
+    }
 }
 
 #[test]

@@ -3,12 +3,11 @@
 use crate::{
     RuntimeError,
     checkpoint::{
-        CheckpointError, CheckpointId, CheckpointRefManifest, CheckpointSourceKind,
+        CheckpointError, CheckpointId, CheckpointRef, CheckpointRefManifest,
         CheckpointValidationPolicy, CitationBackedCheckpoint, CompactedCheckpointCandidate,
     },
     context::TaskAnchor,
 };
-use merry_core::{ArtifactId, ToolCallResultStatus};
 use merry_llm::{
     GenerationConfig, ModelContent, ModelError, ModelMessage, ModelMessageRole, ModelName,
     ModelRequest, ModelResponseFormat, ModelStructuredOutputFormat,
@@ -39,9 +38,32 @@ pub enum CompactionError {
     #[error("compaction window is stale")]
     StaleWindow,
 
+    #[error("current input and fixed dynamic context cannot fit below the hard watermark")]
+    UncompressibleCurrentInput,
+
+    #[error("the minimum retained raw completed turn cannot fit below the hard watermark")]
+    MinimumRawTurnCannotFit,
+
+    #[error(
+        "rendered checkpoint is estimated at {estimated_tokens} tokens, above output limit {max_tokens}"
+    )]
+    RenderedCheckpointTooLarge {
+        estimated_tokens: u64,
+        max_tokens: u64,
+    },
+
     #[error("compaction model response shape is invalid: {reason}")]
     InvalidModelResponseShape { reason: &'static str },
 }
+
+#[path = "compaction/window.rs"]
+mod window;
+
+pub(crate) use window::{
+    ArchiveOnlyCompactionInput, CitationCompactionModelTurn, CitationCompactionToolResult,
+    CitationCompactionTurnItem, CompactionWindowBudget, CompactionWindowFingerprint,
+    CompactionWindowPlan, retained_turn_fallbacks,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CitationCompactionPolicy {
@@ -55,7 +77,6 @@ const MIN_CHECKPOINT_OUTPUT_TOKENS: u64 = 2_048;
 const MAX_CHECKPOINT_OUTPUT_TOKENS: u64 = 32_768;
 const DEFAULT_ACCEPTED_BYTES_PER_TOKEN: u64 = 8;
 const DEFAULT_RETAINED_MODEL_TURNS: usize = 5;
-const DEFAULT_MAX_REF_EXCERPT_BYTES: usize = 1_200;
 
 impl CitationCompactionPolicy {
     pub fn new(
@@ -137,10 +158,6 @@ impl CitationCompactionPolicy {
             max_accepted_output_bytes: self.max_accepted_output_bytes.unwrap_or(derived_bytes),
         })
     }
-
-    pub(crate) const fn max_ref_excerpt_bytes(self) -> usize {
-        DEFAULT_MAX_REF_EXCERPT_BYTES
-    }
 }
 
 impl Default for CitationCompactionPolicy {
@@ -161,19 +178,15 @@ pub struct ResolvedCitationCompactionBudget {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CitationCompactionInputPolicy {
-    policy: CitationCompactionPolicy,
     resolved_budget: ResolvedCitationCompactionBudget,
 }
 
 impl CitationCompactionInputPolicy {
     pub(crate) const fn new(
-        policy: CitationCompactionPolicy,
+        _policy: CitationCompactionPolicy,
         resolved_budget: ResolvedCitationCompactionBudget,
     ) -> Self {
-        Self {
-            policy,
-            resolved_budget,
-        }
+        Self { resolved_budget }
     }
 }
 
@@ -318,24 +331,50 @@ pub struct CitationCompactionInput {
     covered_history_ids: BTreeSet<u64>,
     task_anchor_snapshot: Option<TaskAnchor>,
     previous_checkpoint_snapshot: Option<CitationBackedCheckpoint>,
-    policy: CitationCompactionPolicy,
+    window_plan: CompactionWindowPlan,
+    pinned_refs: BTreeSet<crate::CheckpointRefId>,
+    archived_refs: Vec<CheckpointRef>,
     resolved_budget: ResolvedCitationCompactionBudget,
+}
+
+pub(crate) struct CitationCompactionInputParts {
+    pub(crate) input_policy: CitationCompactionInputPolicy,
+    pub(crate) task_anchor_snapshot: Option<TaskAnchor>,
+    pub(crate) manifest: CheckpointRefManifest,
+    pub(crate) previous_checkpoint: Option<CitationCompactionPreviousCheckpoint>,
+    pub(crate) previous_checkpoint_snapshot: Option<CitationBackedCheckpoint>,
+}
+
+pub(crate) struct CitationCompactionWindowBundle {
+    pub(crate) covered_history_ids: BTreeSet<u64>,
+    pub(crate) window: Vec<CitationCompactionModelTurn>,
+    pub(crate) window_plan: CompactionWindowPlan,
+    pub(crate) archived_refs: Vec<CheckpointRef>,
 }
 
 impl CitationCompactionInput {
     pub(crate) fn new(
-        input_policy: CitationCompactionInputPolicy,
-        task_anchor_snapshot: Option<TaskAnchor>,
-        manifest: CheckpointRefManifest,
-        covered_history_ids: BTreeSet<u64>,
-        window: Vec<CitationCompactionWindowItem>,
-        previous_checkpoint: Option<CitationCompactionPreviousCheckpoint>,
-        previous_checkpoint_snapshot: Option<CitationBackedCheckpoint>,
+        parts: CitationCompactionInputParts,
+        window_bundle: CitationCompactionWindowBundle,
     ) -> Self {
-        let CitationCompactionInputPolicy {
-            policy,
-            resolved_budget,
-        } = input_policy;
+        let CitationCompactionInputParts {
+            input_policy,
+            task_anchor_snapshot,
+            manifest,
+            previous_checkpoint,
+            previous_checkpoint_snapshot,
+        } = parts;
+        let CitationCompactionWindowBundle {
+            covered_history_ids,
+            window,
+            window_plan,
+            archived_refs,
+        } = window_bundle;
+        let CitationCompactionInputPolicy { resolved_budget } = input_policy;
+        let pinned_refs = archived_refs
+            .iter()
+            .map(|reference| reference.id().clone())
+            .collect();
         let payload = CitationCompactionPayload {
             policy: CitationCompactionPayloadPolicy {
                 target_output_tokens: resolved_budget.output_token_limit(),
@@ -363,7 +402,9 @@ impl CitationCompactionInput {
             covered_history_ids,
             task_anchor_snapshot,
             previous_checkpoint_snapshot,
-            policy,
+            window_plan,
+            pinned_refs,
+            archived_refs,
             resolved_budget,
         }
     }
@@ -392,11 +433,6 @@ impl CitationCompactionInput {
     }
 
     #[must_use]
-    pub fn policy(&self) -> CitationCompactionPolicy {
-        self.policy
-    }
-
-    #[must_use]
     pub fn resolved_budget(&self) -> ResolvedCitationCompactionBudget {
         self.resolved_budget
     }
@@ -404,6 +440,24 @@ impl CitationCompactionInput {
     pub(crate) fn previous_checkpoint_snapshot(&self) -> Option<&CitationBackedCheckpoint> {
         self.previous_checkpoint_snapshot.as_ref()
     }
+
+    pub(crate) fn window_plan(&self) -> &CompactionWindowPlan {
+        &self.window_plan
+    }
+
+    pub(crate) fn pinned_refs(&self) -> &BTreeSet<crate::CheckpointRefId> {
+        &self.pinned_refs
+    }
+
+    pub(crate) fn archived_refs(&self) -> &[CheckpointRef] {
+        &self.archived_refs
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CompactionPreparation {
+    ReplaceCheckpoint(Box<CitationCompactionInput>),
+    ArchiveToolResults(ArchiveOnlyCompactionInput),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -462,21 +516,22 @@ pub(crate) fn checkpoint_from_candidate_json(
     }
 
     let candidate = CompactedCheckpointCandidate::from_json(candidate_json)?;
-    let policy = CheckpointValidationPolicy::default()
-        .with_max_ref_excerpt_bytes(input.policy().max_ref_excerpt_bytes());
+    let policy = CheckpointValidationPolicy::default();
     match input.previous_checkpoint_snapshot() {
-        Some(previous) => CitationBackedCheckpoint::from_rolling_candidate(
+        Some(previous) => CitationBackedCheckpoint::from_rolling_candidate_with_pinned_refs(
             checkpoint_id,
             candidate,
+            input.manifest().clone(),
             previous,
-            input.manifest().clone(),
             policy,
+            input.pinned_refs(),
         ),
-        None => CitationBackedCheckpoint::from_candidate(
+        None => CitationBackedCheckpoint::from_candidate_with_pinned_refs(
             checkpoint_id,
             candidate,
             input.manifest().clone(),
             policy,
+            input.pinned_refs(),
         ),
     }
     .map_err(RuntimeError::from)
@@ -519,7 +574,7 @@ struct CitationCompactionPayload {
     policy: CitationCompactionPayloadPolicy,
     control: CitationCompactionControl,
     previous_checkpoint: Option<CitationCompactionPreviousCheckpoint>,
-    window: Vec<CitationCompactionWindowItem>,
+    window: Vec<CitationCompactionModelTurn>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -556,130 +611,6 @@ pub(crate) struct CitationCompactionPriorEntry {
     refs: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct CitationCompactionWindowItem {
-    history_id: u64,
-    ref_id: String,
-    source_kind: String,
-    source_id: String,
-    locator: String,
-    excerpt: String,
-    role: CitationCompactionWindowRole,
-    tool_call: Option<CitationCompactionToolCall>,
-    tool_result: Option<CitationCompactionToolResult>,
-}
-
-impl CitationCompactionWindowItem {
-    pub(crate) fn user(history_id: u64, ref_id: String, excerpt: String) -> Self {
-        Self::new(
-            history_id,
-            ref_id,
-            CheckpointSourceKind::UserMessage,
-            CitationCompactionWindowRole::User,
-            excerpt,
-            None,
-            None,
-        )
-    }
-
-    pub(crate) fn assistant(history_id: u64, ref_id: String, excerpt: String) -> Self {
-        Self::new(
-            history_id,
-            ref_id,
-            CheckpointSourceKind::AssistantMessage,
-            CitationCompactionWindowRole::Assistant,
-            excerpt,
-            None,
-            None,
-        )
-    }
-
-    pub(crate) fn tool_exchange(
-        history_id: u64,
-        ref_id: String,
-        excerpt: String,
-        tool_call: CitationCompactionToolCall,
-        tool_result: CitationCompactionToolResult,
-    ) -> Self {
-        Self::new(
-            history_id,
-            ref_id,
-            CheckpointSourceKind::ToolResult,
-            CitationCompactionWindowRole::ToolExchange,
-            excerpt,
-            Some(tool_call),
-            Some(tool_result),
-        )
-    }
-
-    fn new(
-        history_id: u64,
-        ref_id: String,
-        source_kind: CheckpointSourceKind,
-        role: CitationCompactionWindowRole,
-        excerpt: String,
-        tool_call: Option<CitationCompactionToolCall>,
-        tool_result: Option<CitationCompactionToolResult>,
-    ) -> Self {
-        Self {
-            history_id,
-            source_id: format!("history:{history_id}"),
-            locator: format!("history[{history_id}]"),
-            ref_id,
-            source_kind: source_kind.as_str().to_owned(),
-            excerpt,
-            role,
-            tool_call,
-            tool_result,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum CitationCompactionWindowRole {
-    User,
-    Assistant,
-    ToolExchange,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct CitationCompactionToolCall {
-    name: String,
-    arguments_json: String,
-}
-
-impl CitationCompactionToolCall {
-    pub(crate) fn new(name: String, arguments_json: String) -> Self {
-        Self {
-            name,
-            arguments_json,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct CitationCompactionToolResult {
-    status: String,
-    artifact_id: String,
-}
-
-impl CitationCompactionToolResult {
-    pub(crate) fn new(status: ToolCallResultStatus, artifact_id: &ArtifactId) -> Self {
-        Self {
-            status: tool_call_result_status_label(status).to_owned(),
-            artifact_id: artifact_id.as_str().to_owned(),
-        }
-    }
-}
-
-fn tool_call_result_status_label(status: ToolCallResultStatus) -> &'static str {
-    match status {
-        ToolCallResultStatus::Succeeded => "succeeded",
-        ToolCallResultStatus::Failed => "failed",
-    }
-}
-
 fn suggested_max_claims(target_output_tokens: u64) -> usize {
     ((target_output_tokens as usize) / 52).clamp(6, 8)
 }
@@ -714,6 +645,34 @@ mod tests {
         CheckpointSequenceRange, CheckpointSourceKind,
     };
     use merry_core::{ArtifactId, EvidenceLocator, EvidenceRef};
+
+    fn test_window(
+        history_id: u64,
+        ref_id: &str,
+        text: &str,
+    ) -> (Vec<CitationCompactionModelTurn>, CompactionWindowPlan) {
+        let turn_id = crate::session::ModelTurnId::new(1);
+        let window = vec![
+            CitationCompactionModelTurn::new(
+                turn_id,
+                crate::session::ModelTurnStatus::Completed,
+                vec![CitationCompactionTurnItem::user(
+                    history_id,
+                    ref_id.to_owned(),
+                    text.to_owned(),
+                )],
+            )
+            .expect("valid test turn"),
+        ];
+        let plan = CompactionWindowPlan::new(
+            vec![turn_id],
+            Vec::new(),
+            BTreeSet::new(),
+            Some(turn_id),
+            CompactionWindowFingerprint::new(0),
+        );
+        (window, plan)
+    }
 
     fn evidence(artifact_id: &str) -> EvidenceRef {
         EvidenceRef::new(
@@ -776,21 +735,24 @@ mod tests {
             )],
         )
         .expect("valid manifest");
+        let (window, plan) = test_window(1, "r1", "Need compact checkpoint output.");
         let input = CitationCompactionInput::new(
-            CitationCompactionInputPolicy::new(
-                policy,
-                policy.resolve(64_000).expect("test budget resolves"),
-            ),
-            None,
-            manifest,
-            [1].into_iter().collect(),
-            vec![CitationCompactionWindowItem::user(
-                1,
-                "r1".to_owned(),
-                "Need compact checkpoint output.".to_owned(),
-            )],
-            None,
-            None,
+            CitationCompactionInputParts {
+                input_policy: CitationCompactionInputPolicy::new(
+                    policy,
+                    policy.resolve(64_000).expect("test budget resolves"),
+                ),
+                task_anchor_snapshot: None,
+                manifest,
+                previous_checkpoint: None,
+                previous_checkpoint_snapshot: None,
+            },
+            CitationCompactionWindowBundle {
+                covered_history_ids: [1].into_iter().collect(),
+                window,
+                window_plan: plan,
+                archived_refs: Vec::new(),
+            },
         );
         let payload = serde_json::from_str::<serde_json::Value>(
             &input.to_model_payload_json().expect("payload serializes"),
@@ -900,21 +862,24 @@ mod tests {
             )],
         )
         .expect("valid manifest");
+        let (window, plan) = test_window(1, "r1", "Need strict checkpoint JSON.");
         let input = CitationCompactionInput::new(
-            CitationCompactionInputPolicy::new(
-                policy,
-                policy.resolve(64_000).expect("test budget resolves"),
-            ),
-            None,
-            manifest,
-            [1].into_iter().collect(),
-            vec![CitationCompactionWindowItem::user(
-                1,
-                "r1".to_owned(),
-                "Need strict checkpoint JSON.".to_owned(),
-            )],
-            None,
-            None,
+            CitationCompactionInputParts {
+                input_policy: CitationCompactionInputPolicy::new(
+                    policy,
+                    policy.resolve(64_000).expect("test budget resolves"),
+                ),
+                task_anchor_snapshot: None,
+                manifest,
+                previous_checkpoint: None,
+                previous_checkpoint_snapshot: None,
+            },
+            CitationCompactionWindowBundle {
+                covered_history_ids: [1].into_iter().collect(),
+                window,
+                window_plan: plan,
+                archived_refs: Vec::new(),
+            },
         );
 
         let request = compile_citation_compaction_model_request(

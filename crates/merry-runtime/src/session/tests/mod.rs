@@ -43,6 +43,7 @@ mod context_memory;
 mod judgments;
 mod lifecycle;
 mod persistence;
+mod rolling_compaction;
 mod tool_calls;
 mod transcript;
 mod usage;

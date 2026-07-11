@@ -1,5 +1,6 @@
 use super::{
     ModelTurnId, ModelTurnStatus, PromptHistoryProjection, SessionState,
+    checkpoint_window::ArchivedRefManifest,
     transcript::{
         PersistedTranscript, PersistedTranscriptV1, ToolCallPromptProjection,
         ToolResultPromptProjection, Transcript, TranscriptItem, TranscriptV1MigrationError,
@@ -9,6 +10,7 @@ use crate::{
     FileSessionStore, RuntimeError, SessionStoreError,
     action_audit::{ActionAuditRegistry, PersistedActionAuditRegistry},
     artifact::{ArtifactContent, ArtifactRegistry, PersistedArtifactRecord},
+    checkpoint::{CheckpointRef, CheckpointRefId, CheckpointSequenceRange, CheckpointSourceKind},
     context::{
         CompactedCheckpoint, ContextCompiler, ContextEntry, ContextError, ContextEvidence,
         ContextSummary, PersistedCompactedCheckpoint, SessionContextSnapshot,
@@ -46,6 +48,8 @@ struct StoredSessionDocument<T> {
     artifacts: Vec<StoredArtifact>,
     compacted_checkpoint: Option<PersistedCompactedCheckpoint>,
     #[serde(default)]
+    archived_ref_manifest: Vec<StoredArchivedRef>,
+    #[serde(default)]
     prompt_history_projection: Option<PromptHistoryProjection>,
     context_entries: Vec<StoredContextEntry>,
     transcript: T,
@@ -62,6 +66,16 @@ type StoredSessionDocumentV2 = StoredSessionDocument<PersistedTranscript>;
 #[serde(deny_unknown_fields)]
 struct StoredTaskAnchor {
     objective: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredArchivedRef {
+    id: String,
+    source_kind: CheckpointSourceKind,
+    sequence_start: u64,
+    sequence_end: u64,
+    evidence: EvidenceRef,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -153,6 +167,8 @@ impl SessionState {
         self.validate_persisted_transcript()?;
         self.validate_persisted_context_entries()?;
         self.validate_persisted_checkpoint_evidence()?;
+        self.validate_archived_ref_manifest()
+            .map_err(runtime_error_to_invalid_document)?;
 
         let artifacts = self
             .artifacts
@@ -172,6 +188,12 @@ impl SessionState {
                 .compacted_checkpoint
                 .as_ref()
                 .map(CompactedCheckpoint::persisted),
+            archived_ref_manifest: self
+                .archived_ref_manifest
+                .refs()
+                .iter()
+                .map(StoredArchivedRef::from)
+                .collect(),
             prompt_history_projection: Some(self.prompt_history_projection),
             context_entries: self
                 .context_entries
@@ -236,6 +258,15 @@ impl SessionState {
             }
             None => PromptHistoryProjection::default(),
         };
+        let archived_ref_manifest = ArchivedRefManifest::new(
+            document
+                .archived_ref_manifest
+                .into_iter()
+                .map(CheckpointRef::try_from)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| invalid_document("stored archived ref manifest is invalid"))?,
+        )
+        .map_err(|_| invalid_document("stored archived ref manifest is invalid"))?;
 
         let artifacts = document
             .artifacts
@@ -255,6 +286,7 @@ impl SessionState {
             project_rules: None,
             task_anchor: None,
             compacted_checkpoint,
+            archived_ref_manifest,
             prompt_history_projection,
             context_entries: document
                 .context_entries
@@ -289,6 +321,9 @@ impl SessionState {
         session.validate_persisted_transcript()?;
         session.validate_persisted_context_entries()?;
         session.validate_persisted_checkpoint_evidence()?;
+        session
+            .validate_archived_ref_manifest()
+            .map_err(runtime_error_to_invalid_document)?;
         Ok(session)
     }
 
@@ -314,6 +349,7 @@ impl SessionState {
             ledger,
             artifacts,
             compacted_checkpoint: _,
+            archived_ref_manifest: _,
             prompt_history_projection: _,
             context_entries,
             transcript,
@@ -358,6 +394,7 @@ impl SessionState {
                 .map(StoredArtifact::from)
                 .collect(),
             compacted_checkpoint: None,
+            archived_ref_manifest: Vec::new(),
             prompt_history_projection: Some(PromptHistoryProjection::default()),
             context_entries,
             transcript: transcript.persisted(),
@@ -571,6 +608,31 @@ impl From<StoredArtifact> for PersistedArtifactRecord {
             artifact: value.artifact,
             content: value.content,
         }
+    }
+}
+
+impl From<&CheckpointRef> for StoredArchivedRef {
+    fn from(reference: &CheckpointRef) -> Self {
+        Self {
+            id: reference.id().as_str().to_owned(),
+            source_kind: reference.source_kind(),
+            sequence_start: reference.sequence_range().start(),
+            sequence_end: reference.sequence_range().end(),
+            evidence: reference.evidence().clone(),
+        }
+    }
+}
+
+impl TryFrom<StoredArchivedRef> for CheckpointRef {
+    type Error = crate::CheckpointError;
+
+    fn try_from(reference: StoredArchivedRef) -> Result<Self, Self::Error> {
+        Ok(Self::new(
+            CheckpointRefId::new(&reference.id)?,
+            reference.source_kind,
+            CheckpointSequenceRange::new(reference.sequence_start, reference.sequence_end)?,
+            reference.evidence,
+        ))
     }
 }
 
