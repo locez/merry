@@ -220,7 +220,7 @@ async fn auto_compaction_lifecycle_projects_to_public_stream() {
               "id": "c1",
               "kind": "completed_action",
               "text": "Old history was compacted for the public event stream.",
-              "refs": ["r1", "r2"]
+              "refs": ["h0", "h1"]
             }
           ],
           "working_intent": null

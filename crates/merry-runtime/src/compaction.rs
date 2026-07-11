@@ -3,9 +3,9 @@
 use crate::{
     RuntimeError,
     checkpoint::{
-        CheckpointError, CheckpointId, CheckpointRef, CheckpointRefId, CheckpointRefManifest,
-        CheckpointSequenceRange, CheckpointSourceKind, CheckpointValidationPolicy,
-        CitationBackedCheckpoint, CompactedCheckpointCandidate,
+        CheckpointError, CheckpointId, CheckpointRefId, CheckpointRefManifest,
+        CheckpointSourceKind, CheckpointValidationPolicy, CitationBackedCheckpoint,
+        CompactedCheckpointCandidate,
     },
     context::TaskAnchor,
 };
@@ -350,7 +350,6 @@ pub(crate) fn previous_checkpoint_payload(
                     .iter()
                     .take(max_claims)
                     .map(|claim| CitationCompactionPriorClaim {
-                        ref_id: format!("prior-{}", claim.id().as_str()),
                         claim_id: claim.id().as_str().to_owned(),
                         kind: claim.kind().as_str().to_owned(),
                         text: claim.text().to_owned(),
@@ -464,7 +463,6 @@ pub(crate) struct CitationCompactionPreviousCheckpoint {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct CitationCompactionPriorClaim {
-    ref_id: String,
     claim_id: String,
     kind: String,
     text: String,
@@ -548,25 +546,6 @@ impl CitationCompactionWindowItem {
             tool_result,
         }
     }
-
-    pub(crate) fn to_checkpoint_ref(
-        &self,
-        max_ref_excerpt_bytes: usize,
-    ) -> Result<CheckpointRef, CheckpointError> {
-        let source_kind = match self.role {
-            CitationCompactionWindowRole::User => CheckpointSourceKind::UserMessage,
-            CitationCompactionWindowRole::Assistant => CheckpointSourceKind::AssistantMessage,
-            CitationCompactionWindowRole::ToolExchange => CheckpointSourceKind::ToolResult,
-        };
-        CheckpointRef::new(
-            CheckpointRefId::new(&self.ref_id)?,
-            source_kind,
-            self.source_id.clone(),
-            CheckpointSequenceRange::new(self.history_id, self.history_id)?,
-            self.locator.clone(),
-            bounded_excerpt(&self.excerpt, max_ref_excerpt_bytes),
-        )
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -643,6 +622,14 @@ mod tests {
         CheckpointId, CheckpointRef, CheckpointRefId, CheckpointRefManifest,
         CheckpointSequenceRange, CheckpointSourceKind,
     };
+    use merry_core::{ArtifactId, EvidenceLocator, EvidenceRef};
+
+    fn evidence(artifact_id: &str) -> EvidenceRef {
+        EvidenceRef::new(
+            ArtifactId::new(artifact_id).expect("valid artifact id"),
+            EvidenceLocator::whole_artifact(),
+        )
+    }
 
     #[test]
     fn compaction_policy_rejects_zero_limits() {
@@ -699,17 +686,12 @@ mod tests {
             CitationCompactionPolicy::new(420, None, 12_000, 4, 1200, 16).expect("valid policy");
         let manifest = CheckpointRefManifest::new(
             CheckpointId::new("checkpoint-budget").expect("valid checkpoint id"),
-            vec![
-                CheckpointRef::new(
-                    CheckpointRefId::new("r1").expect("valid ref id"),
-                    CheckpointSourceKind::UserMessage,
-                    "history:1",
-                    CheckpointSequenceRange::new(1, 1).expect("valid range"),
-                    "history[1]",
-                    "Need compact checkpoint output.",
-                )
-                .expect("valid ref"),
-            ],
+            vec![CheckpointRef::new(
+                CheckpointRefId::new("r1").expect("valid ref id"),
+                CheckpointSourceKind::UserMessage,
+                CheckpointSequenceRange::new(1, 1).expect("valid range"),
+                evidence("user-message-1"),
+            )],
         )
         .expect("valid manifest");
         let input = CitationCompactionInput::new(
@@ -746,17 +728,12 @@ mod tests {
         let checkpoint_id = CheckpointId::new("checkpoint-1").expect("valid checkpoint id");
         let manifest = CheckpointRefManifest::new(
             checkpoint_id,
-            vec![
-                CheckpointRef::new(
-                    CheckpointRefId::new("r1").expect("valid ref id"),
-                    CheckpointSourceKind::UserMessage,
-                    "history:1",
-                    CheckpointSequenceRange::new(1, 1).expect("valid range"),
-                    "history[1]",
-                    "Need strict checkpoint JSON.",
-                )
-                .expect("valid ref"),
-            ],
+            vec![CheckpointRef::new(
+                CheckpointRefId::new("r1").expect("valid ref id"),
+                CheckpointSourceKind::UserMessage,
+                CheckpointSequenceRange::new(1, 1).expect("valid range"),
+                evidence("user-message-1"),
+            )],
         )
         .expect("valid manifest");
         let input = CitationCompactionInput::new(

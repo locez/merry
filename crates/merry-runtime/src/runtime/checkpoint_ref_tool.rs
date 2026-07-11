@@ -1,5 +1,6 @@
 use crate::{
-    CheckpointRefId, RuntimeError, ToolExecutionError, ToolExecutor, ToolExecutorFuture,
+    CheckpointError, CheckpointRefId, RuntimeError, ToolExecutionError, ToolExecutor,
+    ToolExecutorFuture,
     tool::{RegisteredTool, ToolActionKind, ToolExecutionContext, ToolExecutionOutcome},
 };
 use merry_core::{
@@ -13,6 +14,9 @@ use super::{RuntimeInner, persist_resume_safe_savepoint_if_configured};
 
 pub(super) const MERRY_READ_CHECKPOINT_REF_TOOL_NAME: &str = "merry_read_checkpoint_ref";
 const CHECKPOINT_REF_NOT_FOUND: &str = "checkpoint_ref_not_found";
+const CHECKPOINT_REF_READ_FAILED: &str = "checkpoint_ref_read_failed";
+const CHECKPOINT_REF_ARGUMENTS_INVALID: &str = "checkpoint_ref_arguments_invalid";
+const DEFAULT_CHECKPOINT_REF_PAGE_BYTES: usize = 4096;
 
 pub(super) fn merry_read_checkpoint_ref_tool_name() -> ToolName {
     ToolName::new(MERRY_READ_CHECKPOINT_REF_TOOL_NAME).expect("static tool name is valid")
@@ -25,7 +29,7 @@ pub(super) fn is_merry_read_checkpoint_ref_tool(tool_name: &ToolName) -> bool {
 pub(super) fn merry_read_checkpoint_ref_tool() -> Result<RegisteredTool, CoreError> {
     let spec = ToolSpec::new(
         merry_read_checkpoint_ref_tool_name(),
-        "Read a bounded excerpt for a ref from the current compacted checkpoint.",
+        "Read a bounded page from a ref's original artifact in the current compacted checkpoint.",
         merry_read_checkpoint_ref_input_schema()?,
     )?;
     Ok(RegisteredTool::new(
@@ -44,12 +48,49 @@ fn merry_read_checkpoint_ref_input_schema() -> Result<ToolInputSchema, CoreError
         "properties": {
             "ref": {
                 "type": "string",
-                "description": "Checkpoint ref id from the current compacted checkpoint, such as r1 or prior-c1."
+                "description": "Checkpoint ref id from the current compacted checkpoint, such as h42."
+            },
+            "offset": {
+                "type": "integer",
+                "minimum": 0
+            },
+            "max_bytes": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 16384
             }
         }
     }))
     .expect("static checkpoint ref schema should be a JSON object");
     ToolInputSchema::new(schema)
+}
+
+fn checkpoint_ref_read_failed_outcome(ref_id: &str, error: &RuntimeError) -> ToolExecutionOutcome {
+    let payload = json!({
+        "error": CHECKPOINT_REF_READ_FAILED,
+        "ref": ref_id,
+        "message": error.to_string(),
+    });
+    ToolExecutionOutcome::failed_json(
+        payload.to_string(),
+        ErrorInfo::new(
+            CHECKPOINT_REF_READ_FAILED,
+            "checkpoint ref page could not be read",
+        )
+        .expect("static diagnostic is valid"),
+    )
+}
+
+fn checkpoint_ref_arguments_invalid_outcome(reason: &'static str) -> ToolExecutionOutcome {
+    ToolExecutionOutcome::failed_json(
+        json!({
+            "error": CHECKPOINT_REF_ARGUMENTS_INVALID,
+            "message": reason,
+        })
+        .to_string(),
+        ErrorInfo::new(CHECKPOINT_REF_ARGUMENTS_INVALID, reason)
+            .expect("static diagnostic is valid"),
+    )
 }
 
 #[derive(Debug)]
@@ -93,31 +134,41 @@ pub(super) async fn execute_merry_read_checkpoint_ref_tool_call(
         });
     }
 
-    let ref_value = checkpoint_ref_argument(pending);
-    let outcome = match CheckpointRefId::new(&ref_value) {
-        Ok(ref_id) => {
-            let excerpt = {
-                let session = inner.session.lock().await;
-                session
-                    .compacted_checkpoint_summary()
-                    .and_then(|summary| summary.checkpoint_id().cloned())
-                    .and_then(|checkpoint_id| {
-                        session.read_checkpoint_ref(&checkpoint_id, &ref_id).ok()
-                    })
-            };
+    let outcome = match checkpoint_ref_arguments(pending) {
+        Ok(CheckpointRefArguments {
+            ref_id: ref_value,
+            offset,
+            max_bytes,
+        }) => match CheckpointRefId::new(&ref_value) {
+            Ok(ref_id) => {
+                let page = {
+                    let session = inner.session.lock().await;
+                    session.read_checkpoint_ref_page_with_source(&ref_id, offset, max_bytes)
+                };
 
-            match excerpt {
-                Some(excerpt) => {
-                    let payload = json!({
-                        "ref": excerpt.ref_id().as_str(),
-                        "excerpt": excerpt.excerpt(),
-                    });
-                    ToolExecutionOutcome::succeeded_json(payload.to_string())
+                match page {
+                    Ok((source_kind, page)) => {
+                        let payload = json!({
+                            "ref": ref_id.as_str(),
+                            "source_kind": source_kind.as_str(),
+                            "artifact_id": page.artifact_id().as_str(),
+                            "offset": page.offset(),
+                            "content": page.content(),
+                            "next_offset": page.next_offset(),
+                            "total_bytes": page.total_bytes(),
+                            "done": page.next_offset().is_none(),
+                        });
+                        ToolExecutionOutcome::succeeded_json(payload.to_string())
+                    }
+                    Err(RuntimeError::Checkpoint {
+                        source: CheckpointError::RefNotFound { .. },
+                    }) => checkpoint_ref_not_found_outcome(&ref_value),
+                    Err(error) => checkpoint_ref_read_failed_outcome(&ref_value, &error),
                 }
-                None => checkpoint_ref_not_found_outcome(&ref_value),
             }
-        }
-        Err(_) => checkpoint_ref_not_found_outcome(&ref_value),
+            Err(_) => checkpoint_ref_not_found_outcome(&ref_value),
+        },
+        Err(reason) => checkpoint_ref_arguments_invalid_outcome(reason),
     };
 
     let (status, content, diagnostic, execution_evidence) = outcome.into_parts();
@@ -136,12 +187,76 @@ pub(super) async fn execute_merry_read_checkpoint_ref_tool_call(
     Ok(events)
 }
 
-fn checkpoint_ref_argument(pending: &PendingToolCall) -> String {
-    pending
-        .arguments()
-        .as_object()
-        .get("ref")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default()
-        .to_owned()
+struct CheckpointRefArguments {
+    ref_id: String,
+    offset: usize,
+    max_bytes: usize,
+}
+
+fn checkpoint_ref_arguments(
+    pending: &PendingToolCall,
+) -> Result<CheckpointRefArguments, &'static str> {
+    let arguments = pending.arguments().as_object();
+    let offset = optional_page_argument(arguments, "offset", 0)?;
+    let max_bytes =
+        optional_page_argument(arguments, "max_bytes", DEFAULT_CHECKPOINT_REF_PAGE_BYTES)?;
+    if max_bytes == 0 || max_bytes > 16_384 {
+        return Err("max_bytes must be between 1 and 16384");
+    }
+
+    Ok(CheckpointRefArguments {
+        ref_id: arguments
+            .get("ref")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        offset,
+        max_bytes,
+    })
+}
+
+fn optional_page_argument(
+    arguments: &serde_json::Map<String, serde_json::Value>,
+    field: &'static str,
+    default: usize,
+) -> Result<usize, &'static str> {
+    let Some(value) = arguments.get(field) else {
+        return Ok(default);
+    };
+    let Some(value) = value.as_u64() else {
+        return Err("checkpoint ref page arguments must be non-negative integers");
+    };
+    usize::try_from(value).map_err(|_| "checkpoint ref page argument is outside platform bounds")
+}
+
+#[cfg(test)]
+mod argument_tests {
+    use super::*;
+    use merry_core::{ToolCallArguments, ToolCallId};
+
+    fn pending(arguments: serde_json::Value) -> PendingToolCall {
+        PendingToolCall::new(
+            ToolCallId::new("checkpoint-ref-argument-test").expect("valid call id"),
+            merry_read_checkpoint_ref_tool_name(),
+            ToolCallArguments::try_from(arguments).expect("valid JSON arguments"),
+        )
+    }
+
+    #[test]
+    fn present_unparseable_page_arguments_are_rejected_instead_of_defaulted() {
+        let invalid_offset = pending(json!({ "ref": "h1", "offset": "0" }));
+        let invalid_max_bytes = pending(json!({ "ref": "h1", "max_bytes": "4096" }));
+
+        assert!(checkpoint_ref_arguments(&invalid_offset).is_err());
+        assert!(checkpoint_ref_arguments(&invalid_max_bytes).is_err());
+    }
+
+    #[test]
+    fn absent_page_arguments_use_defaults() {
+        let arguments = checkpoint_ref_arguments(&pending(json!({ "ref": "h1" })))
+            .expect("missing optional page arguments should use defaults");
+
+        assert_eq!(arguments.offset, 0);
+        assert_eq!(arguments.max_bytes, DEFAULT_CHECKPOINT_REF_PAGE_BYTES);
+    }
 }

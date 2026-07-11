@@ -10,8 +10,8 @@ use crate::{
     action_audit::{ActionAuditRegistry, PersistedActionAuditRegistry},
     artifact::{ArtifactContent, ArtifactRegistry, PersistedArtifactRecord},
     context::{
-        CompactedCheckpoint, ContextCompiler, ContextEntry, ContextEvidence, ContextSummary,
-        PersistedCompactedCheckpoint, SessionContextSnapshot,
+        CompactedCheckpoint, ContextCompiler, ContextEntry, ContextError, ContextEvidence,
+        ContextSummary, PersistedCompactedCheckpoint, SessionContextSnapshot,
     },
     judgment::{JudgmentRegistry, PersistedJudgmentRegistry},
     ledger::{PersistedLedgerEntry, TaskLedger},
@@ -152,6 +152,7 @@ impl SessionState {
         }
         self.validate_persisted_transcript()?;
         self.validate_persisted_context_entries()?;
+        self.validate_persisted_checkpoint_evidence()?;
 
         let artifacts = self
             .artifacts
@@ -217,7 +218,12 @@ impl SessionState {
             .compacted_checkpoint
             .map(CompactedCheckpoint::from_persisted)
             .transpose()
-            .map_err(|_| invalid_document("stored compacted checkpoint is invalid"))?;
+            .map_err(|error| match error {
+                ContextError::Checkpoint {
+                    source: crate::CheckpointError::LegacyExcerptRefUnsupported { .. },
+                } => invalid_document("legacy checkpoint excerpt refs are unsupported"),
+                _ => invalid_document("stored compacted checkpoint is invalid"),
+            })?;
         let prompt_history_projection = match document.prompt_history_projection {
             Some(projection) => projection,
             None if compacted_checkpoint
@@ -282,6 +288,7 @@ impl SessionState {
 
         session.validate_persisted_transcript()?;
         session.validate_persisted_context_entries()?;
+        session.validate_persisted_checkpoint_evidence()?;
         Ok(session)
     }
 
@@ -372,6 +379,14 @@ impl SessionState {
             .compile(&snapshot)
             .map(|_| ())
             .map_err(|_| invalid_document("stored context evidence is invalid"))
+    }
+
+    fn validate_persisted_checkpoint_evidence(&self) -> Result<(), SessionStoreError> {
+        let Some(checkpoint) = self.compacted_checkpoint.as_ref() else {
+            return Ok(());
+        };
+        self.validate_compacted_checkpoint_evidence(checkpoint)
+            .map_err(|_| invalid_document("stored checkpoint evidence is invalid"))
     }
 
     fn validate_persisted_transcript(&self) -> Result<(), SessionStoreError> {

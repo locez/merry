@@ -6,10 +6,10 @@
 //! provider wire details behind the `merry-llm` provider boundary.
 
 use crate::{
-    AcceptedLocalWorkspaceProcessAdmission, CheckpointId, CheckpointRefExcerpt, CheckpointRefId,
-    CitationCompactionInput, CitationCompactionPolicy, CompactedCheckpointSummary, CompactionError,
-    CompactionOutcome, FileSessionStore, ProcessRunner, RuntimeCapabilities, RuntimeError,
-    RuntimeModelRole,
+    AcceptedLocalWorkspaceProcessAdmission, CheckpointRefId, CitationCompactionInput,
+    CitationCompactionPolicy, CompactedCheckpointSummary, CompactionError, CompactionOutcome,
+    FileSessionStore, ProcessRunner, RuntimeCapabilities, RuntimeError, RuntimeModelRole,
+    TextEvidencePage,
     events::{
         ActiveStepPermit, RuntimeEventProjector, RuntimeEventStream, RuntimeJournalEventBatch,
         RuntimeJournalEventStream,
@@ -351,16 +351,15 @@ impl Runtime {
         session.compacted_checkpoint_summary()
     }
 
-    /// Reads a bounded source excerpt from the installed citation-backed checkpoint.
-    pub async fn read_checkpoint_ref(
+    /// Reads one bounded page from a checkpoint ref's original artifact evidence.
+    pub async fn read_checkpoint_ref_page(
         &self,
-        checkpoint_id: &CheckpointId,
         ref_id: &CheckpointRefId,
-    ) -> Result<CheckpointRefExcerpt, RuntimeError> {
+        offset: usize,
+        max_bytes: usize,
+    ) -> Result<TextEvidencePage, RuntimeError> {
         let session = self.inner.session.lock().await;
-        session
-            .read_checkpoint_ref(checkpoint_id, ref_id)
-            .map_err(RuntimeError::from)
+        session.read_checkpoint_ref_page(ref_id, offset, max_bytes)
     }
 
     /// Builds a model-facing citation compaction input for the compressible history prefix.
@@ -679,6 +678,7 @@ async fn run_step(
 #[cfg(test)]
 mod tests {
     mod bridge_tool_flow;
+    mod builder_checkpoint;
     mod checkpoint_ref_tool;
     mod event_cancellation;
     mod memory_activation_flow;

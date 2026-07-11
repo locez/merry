@@ -224,7 +224,7 @@ async fn compaction_uses_context_compaction_role_when_configured() {
                           "id": "c1",
                           "kind": "completed_action",
                           "text": "Old history was compacted.",
-                          "refs": ["r1", "r2"]
+                          "refs": ["h0", "h1"]
                         }
                       ],
                       "working_intent": null
@@ -276,7 +276,7 @@ async fn compaction_accepts_streamed_text_delta_before_completed_response() {
               "id": "c1",
               "kind": "completed_action",
               "text": "Old history was compacted.",
-              "refs": ["r1", "r2"]
+              "refs": ["h0", "h1"]
             }
           ],
           "working_intent": null
@@ -337,7 +337,7 @@ async fn hard_watermark_auto_compaction_emits_lifecycle_events() {
                           "id": "c1",
                           "kind": "completed_action",
                           "text": "Old history was compacted for UI lifecycle visibility.",
-                          "refs": ["r1", "r2"]
+                          "refs": ["h0", "h1"]
                         }
                       ],
                       "working_intent": null

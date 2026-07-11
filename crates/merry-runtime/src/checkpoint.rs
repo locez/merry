@@ -1,6 +1,11 @@
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use thiserror::Error;
+
+mod reference;
+
+use reference::PersistedCheckpointRef;
+pub use reference::{CheckpointRef, CheckpointRefManifest, CheckpointSourceKind};
 
 const DEFAULT_MAX_REF_EXCERPT_BYTES: usize = 1200;
 
@@ -33,8 +38,17 @@ pub enum CheckpointError {
     #[error("checkpoint claim {claim_id} references unknown ref {ref_id}")]
     UnknownRef { claim_id: String, ref_id: String },
 
+    #[error("checkpoint pinned ref {ref_id} does not exist in the ref manifest")]
+    PinnedRefNotFound { ref_id: String },
+
+    #[error("manual checkpoint ref {ref_id} uses the runtime-reserved history ref namespace")]
+    ManualCheckpointHistoryRefReserved { ref_id: String },
+
     #[error("checkpoint ref {ref_id} is duplicated")]
     DuplicateRef { ref_id: String },
+
+    #[error("legacy checkpoint excerpt ref {ref_id} has no original artifact evidence")]
+    LegacyExcerptRefUnsupported { ref_id: String },
 
     #[error("checkpoint claim {claim_id} is duplicated")]
     DuplicateClaim { claim_id: String },
@@ -43,14 +57,6 @@ pub enum CheckpointError {
     RefNotFound {
         checkpoint_id: String,
         ref_id: String,
-    },
-
-    #[error(
-        "checkpoint id {checkpoint_id} does not match requested checkpoint {requested_checkpoint_id}"
-    )]
-    CheckpointIdMismatch {
-        checkpoint_id: String,
-        requested_checkpoint_id: String,
     },
 
     #[error("checkpoint output is {actual_bytes} bytes, above accepted byte cap {max_bytes}")]
@@ -93,6 +99,14 @@ macro_rules! impl_checkpoint_id {
 impl_checkpoint_id!(CheckpointId, "checkpoint id");
 impl_checkpoint_id!(CheckpointClaimId, "checkpoint claim id");
 impl_checkpoint_id!(CheckpointRefId, "checkpoint ref id");
+
+impl CheckpointRefId {
+    pub(crate) fn is_runtime_history_ref(&self) -> bool {
+        self.as_str().strip_prefix('h').is_some_and(|suffix| {
+            !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+        })
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CheckpointSequenceRange {
@@ -149,17 +163,6 @@ impl CheckpointClaimKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CheckpointSourceKind {
-    UserMessage,
-    AssistantMessage,
-    ToolCall,
-    ToolResult,
-    ArtifactRange,
-    PriorCheckpointClaim,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PersistedCitationBackedCheckpoint {
@@ -178,174 +181,12 @@ struct PersistedCheckpointClaim {
     refs: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PersistedCheckpointRef {
-    id: String,
-    source_kind: CheckpointSourceKind,
-    source_id: String,
-    sequence_start: u64,
-    sequence_end: u64,
-    locator: String,
-    excerpt: String,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PersistedCheckpointWorkingIntent {
     text: String,
     refs: Vec<String>,
     confidence: f32,
-}
-
-impl CheckpointSourceKind {
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::UserMessage => "user_message",
-            Self::AssistantMessage => "assistant_message",
-            Self::ToolCall => "tool_call",
-            Self::ToolResult => "tool_result",
-            Self::ArtifactRange => "artifact_range",
-            Self::PriorCheckpointClaim => "prior_checkpoint_claim",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CheckpointRef {
-    id: CheckpointRefId,
-    source_kind: CheckpointSourceKind,
-    source_id: String,
-    sequence_range: CheckpointSequenceRange,
-    locator: String,
-    excerpt: String,
-}
-
-impl CheckpointRef {
-    pub fn new(
-        id: CheckpointRefId,
-        source_kind: CheckpointSourceKind,
-        source_id: impl Into<String>,
-        sequence_range: CheckpointSequenceRange,
-        locator: impl Into<String>,
-        excerpt: impl Into<String>,
-    ) -> Result<Self, CheckpointError> {
-        let source_id = source_id.into();
-        validate_text_field("checkpoint ref source id", &source_id)?;
-        let locator = locator.into();
-        validate_text_field("checkpoint ref locator", &locator)?;
-        let excerpt = excerpt.into();
-        validate_text_field("checkpoint ref excerpt", &excerpt)?;
-
-        Ok(Self {
-            id,
-            source_kind,
-            source_id,
-            sequence_range,
-            locator,
-            excerpt,
-        })
-    }
-
-    #[must_use]
-    pub fn id(&self) -> &CheckpointRefId {
-        &self.id
-    }
-
-    #[must_use]
-    pub fn source_kind(&self) -> CheckpointSourceKind {
-        self.source_kind
-    }
-
-    #[must_use]
-    pub fn source_id(&self) -> &str {
-        &self.source_id
-    }
-
-    #[must_use]
-    pub fn sequence_range(&self) -> CheckpointSequenceRange {
-        self.sequence_range
-    }
-
-    #[must_use]
-    pub fn locator(&self) -> &str {
-        &self.locator
-    }
-
-    #[must_use]
-    pub fn excerpt(&self) -> &str {
-        &self.excerpt
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CheckpointRefManifest {
-    checkpoint_id: CheckpointId,
-    refs: Vec<CheckpointRef>,
-}
-
-impl CheckpointRefManifest {
-    pub fn new(
-        checkpoint_id: CheckpointId,
-        refs: Vec<CheckpointRef>,
-    ) -> Result<Self, CheckpointError> {
-        let mut seen = BTreeSet::new();
-        for item in &refs {
-            if !seen.insert(item.id().clone()) {
-                return Err(CheckpointError::DuplicateRef {
-                    ref_id: item.id().as_str().to_owned(),
-                });
-            }
-        }
-
-        Ok(Self {
-            checkpoint_id,
-            refs,
-        })
-    }
-
-    pub fn from_prior_checkpoint_claims(
-        checkpoint_id: CheckpointId,
-        prior: &CitationBackedCheckpoint,
-        max_claim_refs: usize,
-    ) -> Result<Self, CheckpointError> {
-        let refs = prior
-            .claims()
-            .iter()
-            .take(max_claim_refs)
-            .map(|claim| {
-                CheckpointRef::new(
-                    CheckpointRefId::new(&format!("prior-{}", claim.id().as_str()))?,
-                    CheckpointSourceKind::PriorCheckpointClaim,
-                    format!(
-                        "checkpoint:{}:claim:{}",
-                        prior.id().as_str(),
-                        claim.id().as_str()
-                    ),
-                    CheckpointSequenceRange::new(0, 0)?,
-                    format!("checkpoint_claim:{}", claim.id().as_str()),
-                    claim.text(),
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        Self::new(checkpoint_id, refs)
-    }
-
-    #[must_use]
-    pub fn checkpoint_id(&self) -> &CheckpointId {
-        &self.checkpoint_id
-    }
-
-    #[must_use]
-    pub fn refs(&self) -> &[CheckpointRef] {
-        &self.refs
-    }
-
-    fn get(&self, id: &CheckpointRefId) -> Option<&CheckpointRef> {
-        self.refs.iter().find(|item| item.id() == id)
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -441,12 +282,30 @@ impl CitationBackedCheckpoint {
         manifest: CheckpointRefManifest,
         policy: CheckpointValidationPolicy,
     ) -> Result<Self, CheckpointError> {
+        Self::from_candidate_with_pinned_refs(id, candidate, manifest, policy, &BTreeSet::new())
+    }
+
+    pub(crate) fn from_candidate_with_pinned_refs(
+        id: CheckpointId,
+        candidate: CompactedCheckpointCandidate,
+        manifest: CheckpointRefManifest,
+        _policy: CheckpointValidationPolicy,
+        pinned_refs: &BTreeSet<CheckpointRefId>,
+    ) -> Result<Self, CheckpointError> {
         let mut seen_claims = BTreeSet::new();
+        let mut used_refs = pinned_refs.clone();
         let manifest_refs = manifest
             .refs()
             .iter()
             .map(|item| item.id().clone())
             .collect::<BTreeSet<_>>();
+        for ref_id in pinned_refs {
+            if !manifest_refs.contains(ref_id) {
+                return Err(CheckpointError::PinnedRefNotFound {
+                    ref_id: ref_id.as_str().to_owned(),
+                });
+            }
+        }
 
         for claim in candidate.claims() {
             if !seen_claims.insert(claim.id().clone()) {
@@ -466,6 +325,7 @@ impl CitationBackedCheckpoint {
                         ref_id: ref_id.as_str().to_owned(),
                     });
                 }
+                used_refs.insert(ref_id.clone());
             }
         }
 
@@ -480,28 +340,14 @@ impl CitationBackedCheckpoint {
                         ref_id: ref_id.as_str().to_owned(),
                     });
                 }
+                used_refs.insert(ref_id.clone());
             }
         }
-
-        let bounded_refs = manifest
-            .refs()
-            .iter()
-            .map(|item| {
-                CheckpointRef::new(
-                    item.id().clone(),
-                    item.source_kind(),
-                    item.source_id(),
-                    item.sequence_range(),
-                    item.locator(),
-                    bounded_excerpt(item.excerpt(), policy.max_ref_excerpt_bytes()),
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?;
 
         Ok(Self {
             id: id.clone(),
             claims: candidate.claims,
-            manifest: CheckpointRefManifest::new(id, bounded_refs)?,
+            manifest: manifest.filtered_for_checkpoint(id, &used_refs)?,
             working_intent: candidate.working_intent,
         })
     }
@@ -550,41 +396,14 @@ impl CitationBackedCheckpoint {
         lines.join("\n")
     }
 
-    pub fn read_ref(
-        &self,
-        ref_id: &CheckpointRefId,
-    ) -> Result<CheckpointRefExcerpt, CheckpointError> {
+    pub fn read_ref(&self, ref_id: &CheckpointRefId) -> Result<&CheckpointRef, CheckpointError> {
         let Some(item) = self.manifest.get(ref_id) else {
             return Err(CheckpointError::RefNotFound {
                 checkpoint_id: self.id.as_str().to_owned(),
                 ref_id: ref_id.as_str().to_owned(),
             });
         };
-
-        Ok(CheckpointRefExcerpt {
-            checkpoint_id: self.id.clone(),
-            ref_id: item.id().clone(),
-            source_kind: item.source_kind(),
-            source_id: item.source_id().to_owned(),
-            sequence_range: item.sequence_range(),
-            locator: item.locator().to_owned(),
-            excerpt: item.excerpt().to_owned(),
-        })
-    }
-
-    pub fn read_ref_for_checkpoint(
-        &self,
-        checkpoint_id: &CheckpointId,
-        ref_id: &CheckpointRefId,
-    ) -> Result<CheckpointRefExcerpt, CheckpointError> {
-        if checkpoint_id != &self.id {
-            return Err(CheckpointError::CheckpointIdMismatch {
-                checkpoint_id: self.id.as_str().to_owned(),
-                requested_checkpoint_id: checkpoint_id.as_str().to_owned(),
-            });
-        }
-
-        self.read_ref(ref_id)
+        Ok(item)
     }
 
     pub(crate) fn persisted(&self) -> PersistedCitationBackedCheckpoint {
@@ -608,15 +427,7 @@ impl CitationBackedCheckpoint {
                 .manifest()
                 .refs()
                 .iter()
-                .map(|item| PersistedCheckpointRef {
-                    id: item.id().as_str().to_owned(),
-                    source_kind: item.source_kind(),
-                    source_id: item.source_id().to_owned(),
-                    sequence_start: item.sequence_range().start(),
-                    sequence_end: item.sequence_range().end(),
-                    locator: item.locator().to_owned(),
-                    excerpt: item.excerpt().to_owned(),
-                })
+                .map(PersistedCheckpointRef::from)
                 .collect(),
             working_intent: self
                 .working_intent()
@@ -641,6 +452,10 @@ impl CitationBackedCheckpoint {
             .into_iter()
             .map(CheckpointRef::try_from)
             .collect::<Result<Vec<_>, _>>()?;
+        let persisted_refs = refs
+            .iter()
+            .map(|reference| reference.id().clone())
+            .collect::<BTreeSet<_>>();
         let manifest = CheckpointRefManifest::new(id.clone(), refs)?;
         let candidate = CompactedCheckpointCandidate {
             claims: persisted
@@ -653,11 +468,12 @@ impl CitationBackedCheckpoint {
                 .map(CheckpointWorkingIntent::try_from)
                 .transpose()?,
         };
-        Self::from_candidate(
+        Self::from_candidate_with_pinned_refs(
             id,
             candidate,
             manifest,
             CheckpointValidationPolicy::default(),
+            &persisted_refs,
         )
     }
 }
@@ -681,21 +497,6 @@ impl TryFrom<PersistedCheckpointClaim> for CheckpointClaim {
     }
 }
 
-impl TryFrom<PersistedCheckpointRef> for CheckpointRef {
-    type Error = CheckpointError;
-
-    fn try_from(value: PersistedCheckpointRef) -> Result<Self, Self::Error> {
-        Self::new(
-            CheckpointRefId::new(&value.id)?,
-            value.source_kind,
-            value.source_id,
-            CheckpointSequenceRange::new(value.sequence_start, value.sequence_end)?,
-            value.locator,
-            value.excerpt,
-        )
-    }
-}
-
 impl TryFrom<PersistedCheckpointWorkingIntent> for CheckpointWorkingIntent {
     type Error = CheckpointError;
 
@@ -711,54 +512,6 @@ impl TryFrom<PersistedCheckpointWorkingIntent> for CheckpointWorkingIntent {
             refs,
             confidence_millis: confidence_to_millis(value.confidence)?,
         })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CheckpointRefExcerpt {
-    checkpoint_id: CheckpointId,
-    ref_id: CheckpointRefId,
-    source_kind: CheckpointSourceKind,
-    source_id: String,
-    sequence_range: CheckpointSequenceRange,
-    locator: String,
-    excerpt: String,
-}
-
-impl CheckpointRefExcerpt {
-    #[must_use]
-    pub fn checkpoint_id(&self) -> &CheckpointId {
-        &self.checkpoint_id
-    }
-
-    #[must_use]
-    pub fn ref_id(&self) -> &CheckpointRefId {
-        &self.ref_id
-    }
-
-    #[must_use]
-    pub fn source_kind(&self) -> CheckpointSourceKind {
-        self.source_kind
-    }
-
-    #[must_use]
-    pub fn source_id(&self) -> &str {
-        &self.source_id
-    }
-
-    #[must_use]
-    pub fn sequence_range(&self) -> CheckpointSequenceRange {
-        self.sequence_range
-    }
-
-    #[must_use]
-    pub fn locator(&self) -> &str {
-        &self.locator
-    }
-
-    #[must_use]
-    pub fn excerpt(&self) -> &str {
-        &self.excerpt
     }
 }
 
@@ -917,18 +670,6 @@ fn confidence_to_millis(value: f32) -> Result<u16, CheckpointError> {
     Ok((value * 1000.0).round() as u16)
 }
 
-fn bounded_excerpt(text: &str, max_bytes: usize) -> String {
-    if text.len() <= max_bytes {
-        return text.to_owned();
-    }
-
-    let mut end = max_bytes;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}...[truncated]", &text[..end])
-}
-
 fn format_ref_list(refs: &[CheckpointRefId]) -> String {
     refs.iter()
         .map(CheckpointRefId::as_str)
@@ -936,18 +677,35 @@ fn format_ref_list(refs: &[CheckpointRefId]) -> String {
         .join(",")
 }
 
-#[allow(dead_code)]
-fn refs_by_id(manifest: &CheckpointRefManifest) -> BTreeMap<&str, &CheckpointRef> {
-    manifest
-        .refs()
-        .iter()
-        .map(|item| (item.id().as_str(), item))
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use merry_core::{ArtifactId, EvidenceLocator, EvidenceRef};
+
+    fn evidence(artifact_id: &str) -> EvidenceRef {
+        EvidenceRef::new(
+            ArtifactId::new(artifact_id).expect("valid artifact id"),
+            EvidenceLocator::whole_artifact(),
+        )
+    }
+
+    #[test]
+    fn runtime_history_ref_namespace_requires_h_and_decimal_digits() {
+        for reserved in ["h0", "h1", "h42", "h001"] {
+            assert!(
+                CheckpointRefId::new(reserved)
+                    .expect("valid ref id")
+                    .is_runtime_history_ref()
+            );
+        }
+        for available in ["h", "history", "h1x", "bootstrap-ref", "r1"] {
+            assert!(
+                !CheckpointRefId::new(available)
+                    .expect("valid ref id")
+                    .is_runtime_history_ref()
+            );
+        }
+    }
 
     fn ref_manifest() -> CheckpointRefManifest {
         CheckpointRefManifest::new(
@@ -956,75 +714,18 @@ mod tests {
                 CheckpointRef::new(
                     CheckpointRefId::new("r1").expect("valid ref id"),
                     CheckpointSourceKind::UserMessage,
-                    "history:1",
                     CheckpointSequenceRange::new(1, 1).expect("valid range"),
-                    "body[0]",
-                    "user corrected the direction",
-                )
-                .expect("valid ref"),
+                    evidence("user-message-1"),
+                ),
                 CheckpointRef::new(
                     CheckpointRefId::new("r2").expect("valid ref id"),
                     CheckpointSourceKind::AssistantMessage,
-                    "history:2",
                     CheckpointSequenceRange::new(2, 2).expect("valid range"),
-                    "body[1]",
-                    "assistant proposed the rejected artifact graph path",
-                )
-                .expect("valid ref"),
+                    evidence("assistant-output-2"),
+                ),
             ],
         )
         .expect("valid manifest")
-    }
-
-    fn citation_checkpoint_with_one_claim_for_tests(
-        checkpoint_id: &str,
-        claim_id: &str,
-        kind: &str,
-        text: &str,
-        ref_id: &str,
-        excerpt: &str,
-    ) -> CitationBackedCheckpoint {
-        let manifest = CheckpointRefManifest::new(
-            CheckpointId::new(checkpoint_id).expect("valid checkpoint id"),
-            vec![
-                CheckpointRef::new(
-                    CheckpointRefId::new(ref_id).expect("valid ref id"),
-                    CheckpointSourceKind::UserMessage,
-                    "history:1",
-                    CheckpointSequenceRange::new(1, 1).expect("valid range"),
-                    "body[0]",
-                    excerpt,
-                )
-                .expect("valid ref"),
-            ],
-        )
-        .expect("valid manifest");
-        let candidate = CompactedCheckpointCandidate::from_json(&format!(
-            r#"{{
-              "claims": [
-                {{
-                  "id": {claim_id_json},
-                  "kind": {kind_json},
-                  "text": {text_json},
-                  "refs": [{ref_id_json}]
-                }}
-              ],
-              "working_intent": null
-            }}"#,
-            claim_id_json = serde_json::to_string(claim_id).expect("claim id serializes"),
-            kind_json = serde_json::to_string(kind).expect("kind serializes"),
-            text_json = serde_json::to_string(text).expect("text serializes"),
-            ref_id_json = serde_json::to_string(ref_id).expect("ref id serializes"),
-        ))
-        .expect("candidate parses");
-
-        CitationBackedCheckpoint::from_candidate(
-            CheckpointId::new(checkpoint_id).expect("valid checkpoint id"),
-            candidate,
-            manifest,
-            CheckpointValidationPolicy::default(),
-        )
-        .expect("citation checkpoint builds")
     }
 
     #[test]
@@ -1120,7 +821,7 @@ mod tests {
     }
 
     #[test]
-    fn citation_checkpoint_ref_lookup_returns_bounded_excerpt() {
+    fn citation_checkpoint_ref_lookup_returns_original_evidence() {
         let candidate_json = r#"{
           "claims": [
             {
@@ -1143,41 +844,25 @@ mod tests {
         )
         .expect("valid checkpoint");
 
-        let excerpt = checkpoint
+        let reference = checkpoint
             .read_ref(&CheckpointRefId::new("r1").expect("valid ref id"))
             .expect("ref should exist");
 
-        assert_eq!(excerpt.ref_id().as_str(), "r1");
-        assert_eq!(excerpt.source_kind(), CheckpointSourceKind::UserMessage);
-        assert_eq!(excerpt.excerpt(), "user corrected the direction");
+        assert_eq!(reference.id().as_str(), "r1");
+        assert_eq!(reference.source_kind(), CheckpointSourceKind::UserMessage);
+        assert_eq!(reference.evidence().artifact_id.as_str(), "user-message-1");
     }
 
     #[test]
-    fn rolling_checkpoint_can_cite_prior_checkpoint_claim() {
-        let first = citation_checkpoint_with_one_claim_for_tests(
-            "checkpoint-first",
-            "c1",
-            "constraint",
-            "Runtime cannot validate open semantic truth.",
-            "r1",
-            "user correction source excerpt",
-        );
-
-        let manifest = CheckpointRefManifest::from_prior_checkpoint_claims(
-            CheckpointId::new("checkpoint-second").expect("valid id"),
-            &first,
-            16,
-        )
-        .expect("prior claims become refs");
-
+    fn citation_checkpoint_filters_manifest_to_used_original_refs() {
         let candidate = CompactedCheckpointCandidate::from_json(
             r#"{
               "claims": [
                 {
-                  "id": "c2",
+                  "id": "c1",
                   "kind": "constraint",
-                  "text": "Carry forward that runtime cannot validate open semantic truth.",
-                  "refs": ["prior-c1"]
+                  "text": "Only the user source is needed.",
+                  "refs": ["r1"]
                 }
               ],
               "working_intent": null
@@ -1185,25 +870,126 @@ mod tests {
         )
         .expect("candidate parses");
 
-        let second = CitationBackedCheckpoint::from_candidate(
-            CheckpointId::new("checkpoint-second").expect("valid id"),
+        let checkpoint = CitationBackedCheckpoint::from_candidate(
+            CheckpointId::new("checkpoint-filtered").expect("valid id"),
             candidate,
-            manifest,
+            ref_manifest(),
             CheckpointValidationPolicy::default(),
         )
-        .expect("rolling checkpoint builds");
+        .expect("checkpoint builds");
 
-        let excerpt = second
-            .read_ref(&CheckpointRefId::new("prior-c1").expect("valid ref id"))
-            .expect("prior claim ref resolves");
+        assert_eq!(checkpoint.manifest().refs().len(), 1);
+        assert_eq!(checkpoint.manifest().refs()[0].id().as_str(), "r1");
+    }
+
+    #[test]
+    fn citation_checkpoint_keeps_explicitly_pinned_original_refs() {
+        let candidate = CompactedCheckpointCandidate::from_json(
+            r#"{
+              "claims": [{
+                "id": "c1",
+                "kind": "constraint",
+                "text": "The user source remains in the checkpoint.",
+                "refs": ["r1"]
+              }],
+              "working_intent": null
+            }"#,
+        )
+        .expect("candidate parses");
+        let pinned = [CheckpointRefId::new("r2").expect("valid ref id")]
+            .into_iter()
+            .collect();
+
+        let checkpoint = CitationBackedCheckpoint::from_candidate_with_pinned_refs(
+            CheckpointId::new("checkpoint-pinned").expect("valid id"),
+            candidate,
+            ref_manifest(),
+            CheckpointValidationPolicy::default(),
+            &pinned,
+        )
+        .expect("checkpoint builds");
+
         assert_eq!(
-            excerpt.source_kind(),
-            CheckpointSourceKind::PriorCheckpointClaim
+            checkpoint
+                .manifest()
+                .refs()
+                .iter()
+                .map(|reference| reference.id().as_str())
+                .collect::<Vec<_>>(),
+            ["r1", "r2"]
         );
-        assert!(
-            excerpt
-                .excerpt()
-                .contains("Runtime cannot validate open semantic truth")
+    }
+
+    #[test]
+    fn citation_checkpoint_reports_missing_pinned_ref_directly() {
+        let candidate = CompactedCheckpointCandidate::from_json(
+            r#"{
+              "claims": [{
+                "id": "c1",
+                "kind": "constraint",
+                "text": "The user source remains in the checkpoint.",
+                "refs": ["r1"]
+              }],
+              "working_intent": null
+            }"#,
+        )
+        .expect("candidate parses");
+        let pinned = [CheckpointRefId::new("missing").expect("valid ref id")]
+            .into_iter()
+            .collect();
+
+        let error = CitationBackedCheckpoint::from_candidate_with_pinned_refs(
+            CheckpointId::new("checkpoint-missing-pinned").expect("valid id"),
+            candidate,
+            ref_manifest(),
+            CheckpointValidationPolicy::default(),
+            &pinned,
+        )
+        .expect_err("a pinned ref must exist in the manifest");
+
+        assert!(matches!(
+            error,
+            CheckpointError::PinnedRefNotFound { ref_id } if ref_id == "missing"
+        ));
+    }
+
+    #[test]
+    fn persisted_checkpoint_keeps_prevalidated_pinned_refs() {
+        let candidate = CompactedCheckpointCandidate::from_json(
+            r#"{
+              "claims": [{
+                "id": "c1",
+                "kind": "constraint",
+                "text": "The user source remains in the checkpoint.",
+                "refs": ["r1"]
+              }],
+              "working_intent": null
+            }"#,
+        )
+        .expect("candidate parses");
+        let pinned = [CheckpointRefId::new("r2").expect("valid ref id")]
+            .into_iter()
+            .collect();
+        let checkpoint = CitationBackedCheckpoint::from_candidate_with_pinned_refs(
+            CheckpointId::new("checkpoint-pinned-round-trip").expect("valid id"),
+            candidate,
+            ref_manifest(),
+            CheckpointValidationPolicy::default(),
+            &pinned,
+        )
+        .expect("checkpoint builds");
+
+        let loaded = CitationBackedCheckpoint::from_persisted(checkpoint.persisted())
+            .expect("persisted checkpoint loads");
+
+        assert_eq!(
+            loaded
+                .manifest()
+                .refs()
+                .iter()
+                .map(|reference| reference.id().as_str())
+                .collect::<Vec<_>>(),
+            ["r1", "r2"]
         );
     }
 }

@@ -156,6 +156,48 @@ impl ArtifactRecord {
     }
 }
 
+/// One bounded UTF-8 page read from an exact evidence reference.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextEvidencePage {
+    artifact_id: ArtifactId,
+    content: String,
+    offset: usize,
+    next_offset: Option<usize>,
+    total_bytes: usize,
+}
+
+impl TextEvidencePage {
+    /// Borrows the source artifact identifier.
+    #[must_use]
+    pub fn artifact_id(&self) -> &ArtifactId {
+        &self.artifact_id
+    }
+
+    /// Borrows the exact page content.
+    #[must_use]
+    pub fn content(&self) -> &str {
+        &self.content
+    }
+
+    /// Returns this page's byte offset inside the selected evidence range.
+    #[must_use]
+    pub fn offset(&self) -> usize {
+        self.offset
+    }
+
+    /// Returns the next byte offset, or `None` when this page reaches the end.
+    #[must_use]
+    pub fn next_offset(&self) -> Option<usize> {
+        self.next_offset
+    }
+
+    /// Returns the selected evidence range length in bytes.
+    #[must_use]
+    pub fn total_bytes(&self) -> usize {
+        self.total_bytes
+    }
+}
+
 /// Errors raised by artifact registry operations.
 ///
 /// These errors describe artifact-state validation and read failures at the MVP
@@ -205,6 +247,22 @@ pub enum ArtifactError {
         id: ArtifactId,
         /// Locator kind name.
         locator_kind: &'static str,
+    },
+
+    /// The requested evidence page cannot be represented safely.
+    #[error("artifact id {id} has invalid evidence page: {reason}")]
+    InvalidEvidencePage {
+        /// Artifact identifier.
+        id: ArtifactId,
+        /// Actionable reason.
+        reason: &'static str,
+    },
+
+    /// The requested evidence is not UTF-8 text.
+    #[error("artifact id {id} is not textual evidence")]
+    NonTextEvidencePage {
+        /// Artifact identifier.
+        id: ArtifactId,
     },
 }
 
@@ -312,6 +370,15 @@ impl ArtifactRegistry {
         validate_locator(record.artifact.id(), record.content(), &evidence.locator)
     }
 
+    /// Validates that an evidence reference can be read through text paging.
+    ///
+    /// This performs no content allocation. Text and JSON artifacts are
+    /// accepted when the locator selects a valid range; binary and media
+    /// artifacts are rejected even when their generic evidence locator is valid.
+    pub fn validate_text_evidence(&self, evidence: &EvidenceRef) -> Result<(), ArtifactError> {
+        self.validated_text_evidence_range(evidence).map(|_| ())
+    }
+
     /// Reads exact evidence content referenced by a recorded evidence reference.
     ///
     /// The returned content is a cloned exact slice or payload for the selected
@@ -319,6 +386,86 @@ impl ArtifactRegistry {
     pub fn read_evidence(&self, evidence: &EvidenceRef) -> Result<ArtifactContent, ArtifactError> {
         let record = self.read_record(&evidence.artifact_id)?;
         read_located_content(record.artifact.id(), record.content(), &evidence.locator)
+    }
+
+    /// Reads one bounded UTF-8 page from the selected evidence range.
+    ///
+    /// `offset` is measured from the start of the selected evidence range, not
+    /// from the start of the containing artifact.
+    pub fn read_text_evidence_page(
+        &self,
+        evidence: &EvidenceRef,
+        offset: usize,
+        max_bytes: usize,
+    ) -> Result<TextEvidencePage, ArtifactError> {
+        let (text, range_start, range_end) = self.validated_text_evidence_range(evidence)?;
+        let total_bytes = range_end - range_start;
+
+        if max_bytes == 0 {
+            return Err(invalid_page(
+                &evidence.artifact_id,
+                "max_bytes must be greater than zero",
+            ));
+        }
+        if offset > total_bytes {
+            return Err(invalid_page(
+                &evidence.artifact_id,
+                "offset is outside the selected evidence range",
+            ));
+        }
+
+        let page_start = range_start + offset;
+        if !text.is_char_boundary(page_start) {
+            return Err(invalid_page(
+                &evidence.artifact_id,
+                "offset must align to a UTF-8 character boundary",
+            ));
+        }
+        if offset == total_bytes {
+            return Ok(TextEvidencePage {
+                artifact_id: evidence.artifact_id.clone(),
+                content: String::new(),
+                offset,
+                next_offset: None,
+                total_bytes,
+            });
+        }
+
+        let requested_end = offset.saturating_add(max_bytes).min(total_bytes);
+        let mut page_end = range_start + requested_end;
+        while page_end > page_start && !text.is_char_boundary(page_end) {
+            page_end -= 1;
+        }
+        if page_end == page_start {
+            return Err(invalid_page(
+                &evidence.artifact_id,
+                "max_bytes is too small to include the next UTF-8 character",
+            ));
+        }
+
+        let consumed_end = page_end - range_start;
+        Ok(TextEvidencePage {
+            artifact_id: evidence.artifact_id.clone(),
+            content: text[page_start..page_end].to_owned(),
+            offset,
+            next_offset: (consumed_end < total_bytes).then_some(consumed_end),
+            total_bytes,
+        })
+    }
+
+    fn validated_text_evidence_range<'a>(
+        &'a self,
+        evidence: &EvidenceRef,
+    ) -> Result<(&'a str, usize, usize), ArtifactError> {
+        let record = self.read_record(&evidence.artifact_id)?;
+        let Some(text) = record.content().as_text() else {
+            return Err(ArtifactError::NonTextEvidencePage {
+                id: evidence.artifact_id.clone(),
+            });
+        };
+        let (range_start, range_end) =
+            text_evidence_bounds(record.artifact.id(), record.content(), &evidence.locator)?;
+        Ok((text, range_start, range_end))
     }
 
     pub(crate) fn persisted_records(&self) -> Vec<PersistedArtifactRecord> {
@@ -357,6 +504,44 @@ fn validate_content_kind(
         artifact_kind: artifact.kind().clone(),
         content_kind: actual,
     })
+}
+
+fn text_evidence_bounds(
+    artifact_id: &ArtifactId,
+    content: &ArtifactContent,
+    locator: &EvidenceLocator,
+) -> Result<(usize, usize), ArtifactError> {
+    let text = content
+        .as_text()
+        .ok_or_else(|| ArtifactError::NonTextEvidencePage {
+            id: artifact_id.clone(),
+        })?;
+    if locator.is_whole_artifact() {
+        return Ok((0, text.len()));
+    }
+
+    if let Some((start, end)) = locator.as_line_range() {
+        line_range_bounds(text, start, end)
+            .ok_or_else(|| invalid_locator(artifact_id, "line range is outside artifact content"))
+    } else if let Some((start, end)) = locator.as_byte_range() {
+        validate_byte_range(artifact_id, content, start, end)?;
+        Ok((
+            usize::try_from(start).expect("validated byte range start fits usize"),
+            usize::try_from(end).expect("validated byte range end fits usize"),
+        ))
+    } else if locator.as_json_pointer().is_some() {
+        Err(ArtifactError::UnsupportedEvidenceLocator {
+            id: artifact_id.clone(),
+            locator_kind: "json_pointer",
+        })
+    } else if locator.as_named_section().is_some() {
+        Err(ArtifactError::UnsupportedEvidenceLocator {
+            id: artifact_id.clone(),
+            locator_kind: "named_section",
+        })
+    } else {
+        Err(invalid_locator(artifact_id, "unknown evidence locator"))
+    }
 }
 
 fn content_kind_for_artifact(kind: &ArtifactKind) -> ArtifactContentKind {
@@ -547,6 +732,13 @@ fn line_content_end(bytes: &[u8], line_start: usize, line_end: usize) -> usize {
 
 fn invalid_locator(artifact_id: &ArtifactId, reason: &'static str) -> ArtifactError {
     ArtifactError::InvalidEvidenceLocator {
+        id: artifact_id.clone(),
+        reason,
+    }
+}
+
+fn invalid_page(artifact_id: &ArtifactId, reason: &'static str) -> ArtifactError {
+    ArtifactError::InvalidEvidencePage {
         id: artifact_id.clone(),
         reason,
     }

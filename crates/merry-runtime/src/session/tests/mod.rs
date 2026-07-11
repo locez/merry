@@ -35,6 +35,8 @@ use merry_core::{
 };
 use serde_json::json;
 
+mod checkpoint_ref_persistence;
+mod checkpoint_refs;
 mod compaction;
 mod context_memory;
 mod judgments;
@@ -132,17 +134,15 @@ fn citation_plain_runtime_checkpoint_for_tests(
 ) -> crate::CompactedCheckpoint {
     let manifest = CheckpointRefManifest::new(
         CheckpointId::new(checkpoint_id).expect("valid checkpoint id"),
-        vec![
-            CheckpointRef::new(
-                CheckpointRefId::new("r1").expect("valid ref id"),
-                CheckpointSourceKind::UserMessage,
-                "history:1",
-                CheckpointSequenceRange::new(1, 1).expect("valid range"),
-                "body[0]",
-                text,
-            )
-            .expect("valid ref"),
-        ],
+        vec![CheckpointRef::new(
+            CheckpointRefId::new("r1").expect("valid ref id"),
+            CheckpointSourceKind::UserMessage,
+            CheckpointSequenceRange::new(1, 1).expect("valid range"),
+            EvidenceRef::new(
+                artifact_id("checkpoint-test-source"),
+                EvidenceLocator::whole_artifact(),
+            ),
+        )],
     )
     .expect("valid manifest");
     let candidate = CompactedCheckpointCandidate::from_json(&format!(

@@ -63,48 +63,48 @@
         "id": "c1",
         "kind": "constraint",
         "text": "Compaction is required for long-running sessions.",
-        "refs": ["r1"]
+        "refs": ["h0"]
       },
       {
         "id": "c2",
         "kind": "rejected_path",
         "text": "Do not use an artifact/evidence graph as the current context-growth solution; exact evidence can be read when needed.",
-        "refs": ["r2", "r3"]
+        "refs": ["h1", "h2"]
       },
       {
         "id": "c3",
         "kind": "constraint",
         "text": "Runtime cannot validate open-ended semantic truth.",
-        "refs": ["r4", "r5"]
+        "refs": ["h3", "h4"]
       },
       {
         "id": "c4",
         "kind": "rejected_path",
         "text": "Do not store every artifact and event forever as the answer to context drift.",
-        "refs": ["r6", "r7"]
+        "refs": ["h5", "h6"]
       },
       {
         "id": "c5",
         "kind": "current_state",
         "text": "Function-call continuity remains raw until compaction replaces the covered context.",
-        "refs": ["r8", "r9"]
+        "refs": ["h7", "h8"]
       },
       {
         "id": "c6",
         "kind": "constraint",
         "text": "Retained raw tail is not part of compaction input, and working intent belongs as checkpoint footer content.",
-        "refs": ["r11", "r13"]
+        "refs": ["h10", "h12"]
       },
       {
         "id": "c7",
         "kind": "rejected_path",
         "text": "Pins, modes, resource indexes, and artifact graphs are not the current core solution.",
-        "refs": ["r15"]
+        "refs": ["h14"]
       }
     ],
     "working_intent": {
       "text": "Continue implementing citation-backed checkpoint claims and local ref lookup.",
-      "refs": ["r11", "r13"],
+      "refs": ["h10", "h12"],
       "confidence": 0.86
     }
   }

@@ -2,12 +2,17 @@ use super::{
     ModelTurn, ModelTurnId, ModelTurnStatus, SessionState,
     history::CompactionHistoryItem,
     history::permission_review_context_entry,
-    transcript::{ToolCallPromptProjection, ToolResultPromptProjection, TranscriptItem},
+    transcript::{
+        ToolCallPromptProjection, ToolResultPromptProjection, TranscriptItem, TranscriptItemId,
+    },
 };
 use crate::{
     RuntimeError,
-    artifact::ArtifactError,
-    checkpoint::{CheckpointError, CheckpointId, CheckpointRefExcerpt, CheckpointRefId},
+    artifact::{ArtifactError, TextEvidencePage},
+    checkpoint::{
+        CheckpointError, CheckpointRef, CheckpointRefId, CheckpointSequenceRange,
+        CheckpointSourceKind,
+    },
     compaction::{
         CitationCompactionInput, CitationCompactionPolicy,
         CitationCompactionPreviousCheckpointInput, CompactionError, CompactionOutcome,
@@ -16,6 +21,7 @@ use crate::{
     context::{CompactedCheckpoint, CompactedCheckpointSummary},
     permission::PermissionReviewContextEntry,
 };
+use merry_core::{ArtifactId, EvidenceLocator, EvidenceRef};
 use std::collections::{BTreeMap, BTreeSet};
 
 const PERMISSION_REVIEW_RECENT_CONTEXT_LIMIT: usize = 12;
@@ -29,7 +35,13 @@ enum HiddenToolExchangeVisibility {
 struct ModelTurnHistory {
     id: ModelTurnId,
     status: ModelTurnStatus,
-    items: Vec<CompactionHistoryItem>,
+    items: Vec<CompactionHistoryRecord>,
+}
+
+#[derive(Clone)]
+struct CompactionHistoryRecord {
+    item: CompactionHistoryItem,
+    reference: CheckpointRef,
 }
 
 impl SessionState {
@@ -43,19 +55,52 @@ impl SessionState {
             .map(CompactedCheckpoint::summary)
     }
 
-    pub(crate) fn read_checkpoint_ref(
+    pub(crate) fn validate_compacted_checkpoint_evidence(
         &self,
-        checkpoint_id: &CheckpointId,
-        ref_id: &CheckpointRefId,
-    ) -> Result<CheckpointRefExcerpt, CheckpointError> {
-        let Some(checkpoint) = &self.compacted_checkpoint else {
-            return Err(CheckpointError::RefNotFound {
-                checkpoint_id: checkpoint_id.as_str().to_owned(),
-                ref_id: ref_id.as_str().to_owned(),
-            });
+        checkpoint: &CompactedCheckpoint,
+    ) -> Result<(), ArtifactError> {
+        let Some(checkpoint) = checkpoint.citation_backed() else {
+            return Ok(());
         };
+        for reference in checkpoint.manifest().refs() {
+            self.artifacts
+                .validate_text_evidence(reference.evidence())?;
+        }
+        Ok(())
+    }
 
-        checkpoint.read_checkpoint_ref(checkpoint_id, ref_id)
+    pub(crate) fn read_checkpoint_ref_page(
+        &self,
+        ref_id: &CheckpointRefId,
+        offset: usize,
+        max_bytes: usize,
+    ) -> Result<TextEvidencePage, RuntimeError> {
+        self.read_checkpoint_ref_page_with_source(ref_id, offset, max_bytes)
+            .map(|(_, page)| page)
+    }
+
+    pub(crate) fn read_checkpoint_ref_page_with_source(
+        &self,
+        ref_id: &CheckpointRefId,
+        offset: usize,
+        max_bytes: usize,
+    ) -> Result<(CheckpointSourceKind, TextEvidencePage), RuntimeError> {
+        let Some(checkpoint) = self
+            .compacted_checkpoint
+            .as_ref()
+            .and_then(CompactedCheckpoint::citation_backed)
+        else {
+            return Err(CheckpointError::RefNotFound {
+                checkpoint_id: "current".to_owned(),
+                ref_id: ref_id.as_str().to_owned(),
+            }
+            .into());
+        };
+        let reference = checkpoint.read_ref(ref_id)?;
+        let page =
+            self.artifacts
+                .read_text_evidence_page(reference.evidence(), offset, max_bytes)?;
+        Ok((reference.source_kind(), page))
     }
 
     pub(crate) fn build_citation_compaction_input(
@@ -142,7 +187,7 @@ impl SessionState {
             .saturating_sub(PERMISSION_REVIEW_RECENT_CONTEXT_LIMIT);
         Ok(items[start..]
             .iter()
-            .map(permission_review_context_entry)
+            .map(|record| permission_review_context_entry(&record.item))
             .collect())
     }
 
@@ -173,7 +218,7 @@ impl SessionState {
         &self,
         turn: &ModelTurn<'_>,
         hidden_tool_exchanges: HiddenToolExchangeVisibility,
-    ) -> Result<Vec<CompactionHistoryItem>, RuntimeError> {
+    ) -> Result<Vec<CompactionHistoryRecord>, RuntimeError> {
         let mut items = Vec::with_capacity(turn.items().len());
         let mut results = BTreeMap::new();
         for item in turn.items() {
@@ -210,7 +255,14 @@ impl SessionState {
                                 id: artifact_id.clone(),
                                 reason: "user transcript artifact is not textual",
                             })?;
-                    items.push(CompactionHistoryItem::user(id.as_u64(), text.to_owned()));
+                    items.push(CompactionHistoryRecord {
+                        item: CompactionHistoryItem::user(id.as_u64(), text.to_owned()),
+                        reference: history_checkpoint_ref(
+                            *id,
+                            CheckpointSourceKind::UserMessage,
+                            artifact_id,
+                        )?,
+                    });
                 }
                 TranscriptItem::AssistantText {
                     id, artifact_id, ..
@@ -223,10 +275,14 @@ impl SessionState {
                                 id: artifact_id.clone(),
                                 reason: "assistant transcript artifact is not textual",
                             })?;
-                    items.push(CompactionHistoryItem::assistant(
-                        id.as_u64(),
-                        text.to_owned(),
-                    ));
+                    items.push(CompactionHistoryRecord {
+                        item: CompactionHistoryItem::assistant(id.as_u64(), text.to_owned()),
+                        reference: history_checkpoint_ref(
+                            *id,
+                            CheckpointSourceKind::AssistantMessage,
+                            artifact_id,
+                        )?,
+                    });
                 }
                 TranscriptItem::ToolCall {
                     call,
@@ -262,12 +318,19 @@ impl SessionState {
                         }
                     }
                     let content = self.read_artifact_content(artifact_id)?;
-                    items.push(CompactionHistoryItem::tool_exchange(
-                        id.as_u64(),
-                        call.clone(),
-                        result.clone(),
-                        content,
-                    ));
+                    items.push(CompactionHistoryRecord {
+                        item: CompactionHistoryItem::tool_exchange(
+                            id.as_u64(),
+                            call.clone(),
+                            result.clone(),
+                            content,
+                        ),
+                        reference: history_checkpoint_ref(
+                            id,
+                            CheckpointSourceKind::ToolResult,
+                            artifact_id,
+                        )?,
+                    });
                 }
                 TranscriptItem::ToolResult { .. } => {}
             }
@@ -283,7 +346,7 @@ impl SessionState {
     fn citation_compaction_input_from_history(
         &self,
         policy: CitationCompactionPolicy,
-        covered: &[CompactionHistoryItem],
+        covered: &[CompactionHistoryRecord],
     ) -> Result<CitationCompactionInput, RuntimeError> {
         if covered.is_empty() {
             return Err(CompactionError::NoCompressibleWindow.into());
@@ -307,13 +370,7 @@ impl SessionState {
         });
         let prior_refs = match previous_checkpoint {
             Some(CitationCompactionPreviousCheckpointInput::CitationBacked(checkpoint)) => {
-                crate::CheckpointRefManifest::from_prior_checkpoint_claims(
-                    checkpoint_id.clone(),
-                    checkpoint,
-                    policy.max_carried_prior_refs(),
-                )?
-                .refs()
-                .to_vec()
+                checkpoint.manifest().refs().to_vec()
             }
             Some(CitationCompactionPreviousCheckpointInput::PlainText { .. }) | None => Vec::new(),
         };
@@ -321,11 +378,12 @@ impl SessionState {
         refs.extend(prior_refs);
         let mut window = Vec::with_capacity(covered.len());
 
-        for (index, item) in covered.iter().enumerate() {
-            covered_history_ids.insert(item.history_id);
-            let ref_id = format!("r{}", index + 1);
-            let window_item = item.to_compaction_window_item(&ref_id, policy)?;
-            refs.push(window_item.to_checkpoint_ref(policy.max_ref_excerpt_bytes())?);
+        for record in covered {
+            covered_history_ids.insert(record.item.history_id);
+            let window_item = record
+                .item
+                .to_compaction_window_item(record.reference.id().as_str(), policy)?;
+            refs.push(record.reference.clone());
             window.push(window_item);
         }
 
@@ -361,11 +419,11 @@ impl SessionState {
                 break;
             }
             for item in &turn.items {
-                if !covered.contains(&item.history_id) {
+                if !covered.contains(&item.item.history_id) {
                     return matched_boundary
                         .ok_or_else(|| RuntimeError::from(CompactionError::StaleWindow));
                 }
-                current_prefix.insert(item.history_id);
+                current_prefix.insert(item.item.history_id);
             }
             if &current_prefix == covered {
                 matched_boundary = Some(turn.id);
@@ -381,6 +439,23 @@ impl SessionState {
             .map(|turn| turn.items.len())
             .sum())
     }
+}
+
+fn history_checkpoint_ref(
+    item_id: TranscriptItemId,
+    source_kind: CheckpointSourceKind,
+    artifact_id: &ArtifactId,
+) -> Result<CheckpointRef, CheckpointError> {
+    Ok(CheckpointRef::new(
+        history_ref_id(item_id)?,
+        source_kind,
+        CheckpointSequenceRange::new(item_id.as_u64(), item_id.as_u64())?,
+        EvidenceRef::new(artifact_id.clone(), EvidenceLocator::whole_artifact()),
+    ))
+}
+
+fn history_ref_id(item_id: TranscriptItemId) -> Result<CheckpointRefId, CheckpointError> {
+    CheckpointRefId::new(&format!("h{}", item_id.as_u64()))
 }
 
 fn sanitize_checkpoint_component(value: &str) -> String {

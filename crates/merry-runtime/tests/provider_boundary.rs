@@ -1,8 +1,9 @@
 use futures_util::{StreamExt, stream};
 use merry_core::{
-    ArtifactId, ArtifactKind, ArtifactRef, ErrorInfo, EvidenceLocator, PendingToolCall,
-    PendingToolCallBatch, ProviderName, RuntimeJournalEvent, RuntimeJournalPayload, SessionId,
-    ToolCallId, ToolCallResult, ToolCallResultStatus, ToolInputSchema, ToolName, ToolSpec,
+    ArtifactId, ArtifactKind, ArtifactRef, ErrorInfo, EvidenceLocator, EvidenceRef,
+    PendingToolCall, PendingToolCallBatch, ProviderName, RuntimeJournalEvent,
+    RuntimeJournalPayload, SessionId, ToolCallId, ToolCallResult, ToolCallResultStatus,
+    ToolInputSchema, ToolName, ToolSpec,
 };
 use merry_llm::{
     FinishReason, GenerationConfig, ModelCapabilities, ModelContent, ModelError, ModelEvent,
@@ -56,17 +57,15 @@ fn citation_checkpoint_for_provider_tests(
 ) -> CompactedCheckpoint {
     let manifest = CheckpointRefManifest::new(
         CheckpointId::new(checkpoint_id).expect("valid checkpoint id"),
-        vec![
-            CheckpointRef::new(
-                CheckpointRefId::new(ref_id).expect("valid ref id"),
-                CheckpointSourceKind::UserMessage,
-                "history:1",
-                CheckpointSequenceRange::new(1, 1).expect("valid range"),
-                "body[0]",
-                excerpt,
-            )
-            .expect("valid ref"),
-        ],
+        vec![CheckpointRef::new(
+            CheckpointRefId::new(ref_id).expect("valid ref id"),
+            CheckpointSourceKind::UserMessage,
+            CheckpointSequenceRange::new(1, 1).expect("valid range"),
+            EvidenceRef::new(
+                artifact_id(&format!("provider-checkpoint-source-{ref_id}")),
+                EvidenceLocator::whole_artifact(),
+            ),
+        )],
     )
     .expect("valid manifest");
     let candidate = CompactedCheckpointCandidate::from_json(&format!(
@@ -2043,27 +2042,38 @@ async fn empty_checkpoint_slot_renders_no_prompt_text() {
 async fn runtime_reads_checkpoint_ref_by_checkpoint_and_ref_id() {
     let checkpoint = citation_checkpoint_for_provider_tests(
         "checkpoint-lookup",
-        "r1",
+        "bootstrap-ref",
         "user rejected resource timelines for this slice",
     );
     let runtime = Runtime::builder(session_id("checkpoint-ref-lookup"))
         .compacted_checkpoint(checkpoint)
+        .compacted_checkpoint_evidence(
+            ArtifactRef::new(
+                artifact_id("provider-checkpoint-source-bootstrap-ref"),
+                ArtifactKind::Text,
+            ),
+            ArtifactContent::text("user rejected resource timelines for this slice"),
+        )
         .build()
         .expect("runtime should build");
 
-    let excerpt = runtime
-        .read_checkpoint_ref(
-            &CheckpointId::new("checkpoint-lookup").expect("valid checkpoint id"),
-            &CheckpointRefId::new("r1").expect("valid ref id"),
+    let page = runtime
+        .read_checkpoint_ref_page(
+            &CheckpointRefId::new("bootstrap-ref").expect("valid ref id"),
+            0,
+            4096,
         )
         .await
         .expect("ref should resolve");
 
     assert_eq!(
-        excerpt.excerpt(),
+        page.content(),
         "user rejected resource timelines for this slice"
     );
-    assert_eq!(excerpt.source_kind(), CheckpointSourceKind::UserMessage);
+    assert_eq!(
+        page.artifact_id().as_str(),
+        "provider-checkpoint-source-bootstrap-ref"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -2157,16 +2167,12 @@ async fn citation_compaction_fixture_preserves_required_design_meanings() {
         );
     }
 
-    let excerpt = runtime
-        .read_checkpoint_ref(
-            outcome.checkpoint_id(),
-            &CheckpointRefId::new("r3").expect("valid ref id"),
-        )
+    let page = runtime
+        .read_checkpoint_ref_page(&CheckpointRefId::new("h2").expect("valid ref id"), 0, 4096)
         .await
         .expect("ref resolves");
     assert!(
-        excerpt
-            .excerpt()
+        page.content()
             .contains("Do not make the artifact/evidence graph")
     );
 }
@@ -2333,14 +2339,11 @@ async fn live_compactor_summarizes_messy_1k_token_window_with_refs() {
         "live checkpoint must not summarize retained raw tail"
     );
 
-    let excerpt = runtime
-        .read_checkpoint_ref(
-            outcome.checkpoint_id(),
-            &CheckpointRefId::new("r3").expect("valid ref id"),
-        )
+    let page = runtime
+        .read_checkpoint_ref_page(&CheckpointRefId::new("h2").expect("valid ref id"), 0, 4096)
         .await
         .expect("ref resolves");
-    eprintln!("live compactor sample r3 excerpt:\n{}", excerpt.excerpt());
+    eprintln!("live compactor sample h2 page:\n{}", page.content());
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -2375,7 +2378,7 @@ async fn installed_checkpoint_replaces_old_body_but_keeps_raw_tail_in_next_reque
                   "id": "c1",
                   "kind": "completed_action",
                   "text": "The old request was compacted.",
-                  "refs": ["r1", "r2"]
+                  "refs": ["h0", "h1"]
                 }
               ],
               "working_intent": null
@@ -2460,7 +2463,7 @@ async fn dynamic_context_projection_keeps_checkpoint_tail_and_current_input_outs
         .expect("input builds")
         .expect("input exists");
 
-    let outcome = runtime
+    let _outcome = runtime
         .install_citation_compaction_candidate(
             input,
             r#"{
@@ -2469,7 +2472,7 @@ async fn dynamic_context_projection_keeps_checkpoint_tail_and_current_input_outs
                   "id": "c1",
                   "kind": "completed_action",
                   "text": "The covered request was compacted.",
-                  "refs": ["r1", "r2"]
+                  "refs": ["h0", "h1"]
                 }
               ],
               "working_intent": null
@@ -2532,7 +2535,7 @@ async fn dynamic_context_projection_keeps_checkpoint_tail_and_current_input_outs
     assert!(dynamic_text[0].contains("task-anchor:"));
     assert!(dynamic_text[1].contains("compacted-checkpoint:"));
     assert!(dynamic_text[1].contains("The covered request was compacted."));
-    assert!(dynamic_text[1].contains("[r1,r2]"));
+    assert!(dynamic_text[1].contains("[h0,h1]"));
     assert_eq!(dynamic_text[2], "tail user one sentinel");
     assert_eq!(dynamic_text[3], "tail assistant one sentinel");
     assert_eq!(dynamic_text[4], "tail user two sentinel");
@@ -2544,16 +2547,13 @@ async fn dynamic_context_projection_keeps_checkpoint_tail_and_current_input_outs
     assert!(!request_text.contains("covered assistant sentinel"));
     assert!(after_compaction.continuations().is_empty());
 
-    let ref_excerpt = runtime
-        .read_checkpoint_ref(
-            outcome.checkpoint_id(),
-            &CheckpointRefId::new("r1").expect("valid ref id"),
-        )
+    let ref_page = runtime
+        .read_checkpoint_ref_page(&CheckpointRefId::new("h0").expect("valid ref id"), 0, 4096)
         .await
         .expect("checkpoint ref resolves");
     assert!(
-        ref_excerpt
-            .excerpt()
+        ref_page
+            .content()
             .contains("covered user sentinel should only remain reachable through checkpoint refs")
     );
 }
@@ -2571,7 +2571,7 @@ async fn compaction_model_request_excludes_retained_tail_and_tools() {
                       "id": "c1",
                       "kind": "completed_action",
                       "text": "Old history was compacted.",
-                      "refs": ["r1", "r2"]
+                      "refs": ["h0", "h1"]
                     }
                   ],
                   "working_intent": null
