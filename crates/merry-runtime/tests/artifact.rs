@@ -1,4 +1,4 @@
-use merry_core::{ArtifactId, ArtifactKind, ArtifactRef, EvidenceLocator};
+use merry_core::{ArtifactId, ArtifactKind, ArtifactRef, EvidenceLocator, EvidenceRef};
 use merry_runtime::{ArtifactContent, ArtifactError, ArtifactRegistry};
 
 fn artifact_id(value: &str) -> ArtifactId {
@@ -142,4 +142,189 @@ fn evidence_refs_point_to_exact_recorded_artifact_locations() {
         exact.as_text(),
         Some("exact evidence alpha\nexact evidence beta")
     );
+}
+
+fn registry_with_text(value: &str) -> (ArtifactRegistry, EvidenceRef) {
+    let mut registry = ArtifactRegistry::default();
+    let artifact = registry
+        .record(
+            artifact_ref("paged-text", ArtifactKind::Text),
+            ArtifactContent::text(value),
+        )
+        .expect("artifact should record");
+    let evidence = EvidenceRef::new(artifact.id().clone(), EvidenceLocator::whole_artifact());
+    (registry, evidence)
+}
+
+#[test]
+fn text_evidence_pages_continue_from_original_content() {
+    let content = format!("{}SENTINEL_AFTER_1200_BYTES", "x".repeat(1200));
+    let (registry, evidence) = registry_with_text(&content);
+
+    let first = registry
+        .read_text_evidence_page(&evidence, 0, 1024)
+        .expect("first page should read");
+    let second = registry
+        .read_text_evidence_page(
+            &evidence,
+            first.next_offset().expect("first page should continue"),
+            1024,
+        )
+        .expect("second page should read");
+
+    assert_eq!(first.content().len(), 1024);
+    assert!(second.content().contains("SENTINEL_AFTER_1200_BYTES"));
+    assert_eq!(second.artifact_id(), first.artifact_id());
+    assert_eq!(second.total_bytes(), content.len());
+    assert_eq!(second.next_offset(), None);
+}
+
+#[test]
+fn evidence_page_offset_is_relative_to_selected_range() {
+    let mut registry = ArtifactRegistry::default();
+    let artifact = registry
+        .record(
+            artifact_ref("selected-range", ArtifactKind::Text),
+            ArtifactContent::text("ignored\nselected-value\nignored-again\n"),
+        )
+        .expect("artifact should record");
+    let evidence = EvidenceRef::new(
+        artifact.id().clone(),
+        EvidenceLocator::line_range(2, 2).expect("valid line range"),
+    );
+
+    let page = registry
+        .read_text_evidence_page(&evidence, 9, 5)
+        .expect("selected evidence page should read");
+
+    assert_eq!(page.offset(), 9);
+    assert_eq!(page.content(), "value");
+    assert_eq!(page.total_bytes(), "selected-value".len());
+    assert_eq!(page.next_offset(), None);
+}
+
+#[test]
+fn evidence_page_rejects_non_utf8_boundary() {
+    let (registry, evidence) = registry_with_text("甲乙丙");
+
+    let error = registry
+        .read_text_evidence_page(&evidence, 1, 4)
+        .expect_err("offset inside a UTF-8 character must reject");
+
+    assert!(matches!(error, ArtifactError::InvalidEvidencePage { .. }));
+}
+
+#[test]
+fn evidence_page_rejects_max_bytes_too_small_to_make_progress() {
+    let (registry, evidence) = registry_with_text("甲乙丙");
+
+    let error = registry
+        .read_text_evidence_page(&evidence, 0, 1)
+        .expect_err("a page that cannot hold one character must reject");
+
+    assert!(matches!(error, ArtifactError::InvalidEvidencePage { .. }));
+}
+
+#[test]
+fn evidence_page_rejects_zero_and_out_of_range_offsets() {
+    let (registry, evidence) = registry_with_text("short text");
+
+    let zero_page = registry
+        .read_text_evidence_page(&evidence, 0, 0)
+        .expect_err("zero-sized pages must reject");
+    let past_end = registry
+        .read_text_evidence_page(&evidence, "short text".len() + 1, 4)
+        .expect_err("offsets after the evidence range must reject");
+
+    assert!(matches!(
+        zero_page,
+        ArtifactError::InvalidEvidencePage { .. }
+    ));
+    assert!(matches!(
+        past_end,
+        ArtifactError::InvalidEvidencePage { .. }
+    ));
+}
+
+#[test]
+fn evidence_page_at_end_is_complete() {
+    let (registry, evidence) = registry_with_text("short text");
+
+    let page = registry
+        .read_text_evidence_page(&evidence, "short text".len(), 4)
+        .expect("offset at the end should return a complete empty page");
+
+    assert_eq!(page.content(), "");
+    assert_eq!(page.next_offset(), None);
+}
+
+#[test]
+fn evidence_page_rejects_non_text_and_missing_artifacts() {
+    let mut registry = ArtifactRegistry::default();
+    let binary = registry
+        .record(
+            artifact_ref("binary-evidence", ArtifactKind::Binary),
+            ArtifactContent::binary([1, 2, 3]),
+        )
+        .expect("binary artifact should record");
+    let binary_evidence = EvidenceRef::new(binary.id().clone(), EvidenceLocator::whole_artifact());
+    let missing_evidence = EvidenceRef::new(
+        artifact_id("missing-evidence"),
+        EvidenceLocator::whole_artifact(),
+    );
+
+    let non_text = registry
+        .read_text_evidence_page(&binary_evidence, 0, 4)
+        .expect_err("binary evidence must reject text paging");
+    let missing = registry
+        .read_text_evidence_page(&missing_evidence, 0, 4)
+        .expect_err("missing evidence must reject paging");
+
+    assert!(matches!(
+        non_text,
+        ArtifactError::NonTextEvidencePage { ref id } if id == binary.id()
+    ));
+    assert!(matches!(
+        missing,
+        ArtifactError::MissingArtifact { ref id } if id == &missing_evidence.artifact_id
+    ));
+}
+
+#[test]
+fn text_evidence_validation_rejects_non_text_whole_and_byte_ranges() {
+    let mut registry = ArtifactRegistry::default();
+    let text = registry
+        .record(
+            artifact_ref("validated-text-evidence", ArtifactKind::Text),
+            ArtifactContent::text("first line\nsecond line\n"),
+        )
+        .expect("text artifact should record");
+    let binary = registry
+        .record(
+            artifact_ref("validated-binary-evidence", ArtifactKind::Binary),
+            ArtifactContent::binary([1, 2, 3, 4]),
+        )
+        .expect("binary artifact should record");
+    let text_evidence = EvidenceRef::new(
+        text.id().clone(),
+        EvidenceLocator::line_range(2, 2).expect("valid line range"),
+    );
+    let binary_whole = EvidenceRef::new(binary.id().clone(), EvidenceLocator::whole_artifact());
+    let binary_range = EvidenceRef::new(
+        binary.id().clone(),
+        EvidenceLocator::byte_range(0, 2).expect("valid byte range"),
+    );
+
+    registry
+        .validate_text_evidence(&text_evidence)
+        .expect("text evidence readable by paging should validate");
+    for evidence in [binary_whole, binary_range] {
+        let error = registry
+            .validate_text_evidence(&evidence)
+            .expect_err("non-text evidence must reject checkpoint text paging");
+        assert!(matches!(
+            error,
+            ArtifactError::NonTextEvidencePage { ref id } if id == binary.id()
+        ));
+    }
 }

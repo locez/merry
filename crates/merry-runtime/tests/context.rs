@@ -39,17 +39,15 @@ fn runtime(value: &str) -> Runtime {
 fn citation_checkpoint_for_tests(checkpoint_id: &str, text: &str) -> CompactedCheckpoint {
     let manifest = CheckpointRefManifest::new(
         CheckpointId::new(checkpoint_id).expect("valid checkpoint id"),
-        vec![
-            CheckpointRef::new(
-                CheckpointRefId::new("r1").expect("valid ref id"),
-                CheckpointSourceKind::UserMessage,
-                "history:1",
-                CheckpointSequenceRange::new(1, 1).expect("valid range"),
-                "body[0]",
-                text,
-            )
-            .expect("valid ref"),
-        ],
+        vec![CheckpointRef::new(
+            CheckpointRefId::new("r1").expect("valid ref id"),
+            CheckpointSourceKind::UserMessage,
+            CheckpointSequenceRange::new(1, 1).expect("valid range"),
+            EvidenceRef::new(
+                artifact_id("checkpoint-context-source"),
+                EvidenceLocator::whole_artifact(),
+            ),
+        )],
     )
     .expect("valid manifest");
     let escaped_text = serde_json::to_string(text).expect("test text serializes");
@@ -245,6 +243,10 @@ async fn citation_backed_checkpoint_renders_before_summary_and_memory() {
     );
     let runtime = Runtime::builder(session_id("citation-context-render-order"))
         .compacted_checkpoint(checkpoint)
+        .compacted_checkpoint_evidence(
+            ArtifactRef::new(artifact_id("checkpoint-context-source"), ArtifactKind::Text),
+            ArtifactContent::text("Citation-backed checkpointing is the current direction."),
+        )
         .initial_context_summary(
             "summary-a",
             "Summary should render after the compacted checkpoint.",

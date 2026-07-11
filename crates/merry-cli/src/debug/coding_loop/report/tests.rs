@@ -7,14 +7,16 @@ use crate::debug::coding_loop::{
 use crate::runtime_config::automatic_compaction_config;
 use crate::runtime_events::{collect_runtime_step_events, first_pending_tool_call};
 use crate::testing::{FakeProcessRunner, FakeProcessRunnerStep, ScriptedProvider};
-use merry_core::RuntimeJournalEvent;
+use merry_core::{
+    ArtifactId, ArtifactKind, ArtifactRef, EvidenceLocator, EvidenceRef, RuntimeJournalEvent,
+};
 use merry_llm::ModelName;
 use merry_runtime::{
-    AcceptedLocalWorkspaceProcessAdmission, AgentLoopConfig, CheckpointId, CheckpointRef,
-    CheckpointRefId, CheckpointRefManifest, CheckpointSequenceRange, CheckpointSourceKind,
-    CheckpointValidationPolicy, CitationBackedCheckpoint, CompactedCheckpoint,
-    CompactedCheckpointCandidate, Runtime, RuntimeProfile, StepContext, StepInput,
-    ToolExecutionContext,
+    AcceptedLocalWorkspaceProcessAdmission, AgentLoopConfig, ArtifactContent, CheckpointId,
+    CheckpointRef, CheckpointRefId, CheckpointRefManifest, CheckpointSequenceRange,
+    CheckpointSourceKind, CheckpointValidationPolicy, CitationBackedCheckpoint,
+    CompactedCheckpoint, CompactedCheckpointCandidate, Runtime, RuntimeProfile, StepContext,
+    StepInput, ToolExecutionContext,
 };
 use merry_tool_workspace::{
     WorkspaceCodingLoopProfile, WorkspaceRuntimeProfileBuilderExt, WorkspaceToolsConfig,
@@ -191,17 +193,15 @@ async fn permission_network_smoke_report_includes_tool_calls_and_process_preview
 async fn task_live_smoke_report_includes_compaction_summary_without_checkpoint_text() {
     let manifest = CheckpointRefManifest::new(
         CheckpointId::new("checkpoint-task-live-smoke").expect("valid checkpoint id"),
-        vec![
-            CheckpointRef::new(
-                CheckpointRefId::new("r1").expect("valid ref id"),
-                CheckpointSourceKind::UserMessage,
-                "history:1",
-                CheckpointSequenceRange::new(1, 1).expect("valid sequence range"),
-                "body[0]",
-                "sensitive old task detail should not appear in smoke report",
-            )
-            .expect("valid ref"),
-        ],
+        vec![CheckpointRef::new(
+            CheckpointRefId::new("r1").expect("valid ref id"),
+            CheckpointSourceKind::UserMessage,
+            CheckpointSequenceRange::new(1, 1).expect("valid sequence range"),
+            EvidenceRef::new(
+                ArtifactId::new("smoke-checkpoint-source").expect("valid artifact id"),
+                EvidenceLocator::whole_artifact(),
+            ),
+        )],
     )
     .expect("valid manifest");
     let candidate = CompactedCheckpointCandidate::from_json(
@@ -229,6 +229,13 @@ async fn task_live_smoke_report_includes_compaction_summary_without_checkpoint_t
     let runtime =
         Runtime::builder(merry_core::SessionId::new("coding-loop-task-live-smoke").unwrap())
             .compacted_checkpoint(checkpoint)
+            .compacted_checkpoint_evidence(
+                ArtifactRef::new(
+                    ArtifactId::new("smoke-checkpoint-source").expect("valid artifact id"),
+                    ArtifactKind::Text,
+                ),
+                ArtifactContent::text("The old task window was compacted."),
+            )
             .build()
             .expect("runtime should build");
     let mut output = Vec::new();

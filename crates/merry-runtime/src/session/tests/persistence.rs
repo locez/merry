@@ -395,6 +395,12 @@ async fn session_state_save_load_round_trips_next_reasoning_state() {
             .expect("summary"),
         ))
         .expect("context records");
+    session
+        .record_artifact_events(
+            ArtifactRef::new(artifact_id("checkpoint-test-source"), ArtifactKind::Text),
+            ArtifactContent::text("resume checkpoint exact source"),
+        )
+        .expect("checkpoint source records");
     session.set_compacted_checkpoint(citation_plain_runtime_checkpoint_for_tests(
         "resume-checkpoint",
         "resume checkpoint text",

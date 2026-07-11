@@ -30,6 +30,53 @@ async fn builder_resumes_session_from_store_and_reinjects_construction_context()
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn resumed_runtime_reads_runtime_generated_checkpoint_ref_evidence() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = FileSessionStore::new(temp.path());
+    let id = session_id("runtime-resume-checkpoint-ref");
+    let mut session = SessionState::new(id.clone());
+    session
+        .record_test_user_message_body("exact persisted user source")
+        .expect("covered user history records");
+    session
+        .record_test_user_message_body("retained user history")
+        .expect("retained user history records");
+    let input = session
+        .build_citation_compaction_input(
+            CitationCompactionPolicy::new(128, None, 4096, 1, 1200, 16).expect("valid policy"),
+        )
+        .expect("compaction input builds")
+        .expect("covered user history is compressible");
+    session
+        .install_citation_compaction_candidate(
+            input,
+            r#"{
+              "claims": [{
+                "id": "c1",
+                "kind": "current_state",
+                "text": "Keep the exact persisted user source.",
+                "refs": ["h0"]
+              }],
+              "working_intent": null
+            }"#,
+        )
+        .expect("checkpoint installs");
+    session.save_to(&store).await.expect("session saves");
+
+    let resumed = Runtime::builder(id)
+        .resume_from_store(store)
+        .await
+        .expect("runtime resumes with checkpoint evidence");
+    let page = resumed
+        .read_checkpoint_ref_page(&CheckpointRefId::new("h0").expect("valid ref id"), 0, 4096)
+        .await
+        .expect("runtime-generated checkpoint ref reads after resume");
+
+    assert_eq!(page.artifact_id().as_str(), "user-message-0");
+    assert_eq!(page.content(), "exact persisted user source");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn runtime_resume_uses_default_store_constructor_shape() {
     let session_id = session_id("runtime-resume-default-shape");
     let _resume_fn = Runtime::resume;

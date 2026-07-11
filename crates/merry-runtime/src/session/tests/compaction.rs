@@ -81,7 +81,7 @@ fn compaction_install_advances_prompt_boundary_without_deleting_full_transcript(
                 "id": "c1",
                 "kind": "completed_action",
                 "text": "The first complete turn was compacted.",
-                "refs": ["r1", "r2"]
+                "refs": ["h0", "h1"]
               }],
               "working_intent": null
             }"#,
@@ -145,7 +145,7 @@ fn compaction_install_advances_boundary_through_trailing_empty_aborted_turn() {
                 "id": "c1",
                 "kind": "completed_action",
                 "text": "The prefix before the retained turn was compacted.",
-                "refs": ["r1"]
+                "refs": ["h0"]
               }],
               "working_intent": null
             }"#,
@@ -188,7 +188,7 @@ fn rolling_compaction_rejects_old_input_and_starts_after_current_boundary() {
         "id": "c1",
         "kind": "completed_action",
         "text": "The first user turn was compacted.",
-        "refs": ["r1"]
+        "refs": ["h0"]
       }],
       "working_intent": null
     }"#;
@@ -564,7 +564,7 @@ fn artifact_notice_is_provider_only_and_compaction_reads_exact_content() {
                 "id": "c1",
                 "kind": "completed_action",
                 "text": "The exact tool exchange was compacted.",
-                "refs": ["r1"]
+                "refs": ["h1"]
               }],
               "working_intent": null
             }"#,
@@ -680,7 +680,7 @@ fn compaction_accepts_resolved_multi_tool_batches() {
                   "id": "c1",
                   "kind": "completed_action",
                   "text": "The older context and tool batch were compacted.",
-                  "refs": ["r1", "r2", "r3"]
+                  "refs": ["h0", "h4", "h3"]
                 }
               ],
               "working_intent": null
@@ -820,7 +820,7 @@ async fn installing_compaction_preserves_hidden_final_output_in_full_and_stored_
                   "id": "c1",
                   "kind": "completed_action",
                   "text": "The old visible context was compacted.",
-                  "refs": ["r1"]
+                  "refs": ["h0"]
                 }
               ],
               "working_intent": null
@@ -1005,69 +1005,6 @@ fn compaction_input_includes_previous_checkpoint_without_old_raw_body() {
 }
 
 #[test]
-fn rolling_compaction_candidate_can_cite_prior_claim_and_new_window_ref() {
-    let mut session =
-        SessionState::new(SessionId::new("rolling-install").expect("valid session id"));
-    let checkpoint = citation_plain_runtime_checkpoint_for_tests(
-        "checkpoint-existing",
-        "Runtime cannot validate open semantic truth.",
-    );
-    session.set_compacted_checkpoint(checkpoint);
-    session
-        .record_test_user_message_body("new compacted work")
-        .expect("user records");
-    session
-        .record_test_user_message_body("retained tail")
-        .expect("user records");
-
-    let input = session
-        .build_citation_compaction_input(
-            CitationCompactionPolicy::new(128, None, 4096, 1, 1200, 16).expect("valid policy"),
-        )
-        .expect("input builds")
-        .expect("input exists");
-    let checkpoint_id = input.manifest().checkpoint_id().clone();
-
-    session
-            .install_citation_compaction_candidate(
-                input,
-                r#"{
-                  "claims": [
-                    {
-                      "id": "c2",
-                      "kind": "constraint",
-                      "text": "Carry the prior semantic-validation constraint while adding new compacted work.",
-                      "refs": ["prior-c1", "r1"]
-                    }
-                  ],
-                  "working_intent": null
-                }"#,
-            )
-            .expect("install succeeds with prior and new refs");
-
-    let prior_excerpt = session
-        .read_checkpoint_ref(
-            &checkpoint_id,
-            &CheckpointRefId::new("prior-c1").expect("valid ref id"),
-        )
-        .expect("prior claim ref remains inspectable");
-    let new_excerpt = session
-        .read_checkpoint_ref(
-            &checkpoint_id,
-            &CheckpointRefId::new("r1").expect("valid ref id"),
-        )
-        .expect("new window ref remains inspectable");
-
-    assert_eq!(
-        prior_excerpt.source_kind(),
-        CheckpointSourceKind::PriorCheckpointClaim
-    );
-    assert!(prior_excerpt.excerpt().contains("open semantic truth"));
-    assert_eq!(new_excerpt.source_kind(), CheckpointSourceKind::UserMessage);
-    assert_eq!(new_excerpt.excerpt(), "new compacted work");
-}
-
-#[test]
 fn installing_valid_checkpoint_hides_only_covered_history_from_provider() {
     let mut session =
         SessionState::new(SessionId::new("install-checkpoint").expect("valid session id"));
@@ -1092,7 +1029,7 @@ fn installing_valid_checkpoint_hides_only_covered_history_from_provider() {
               "id": "c1",
               "kind": "completed_action",
               "text": "The older user and assistant messages were covered by compaction.",
-              "refs": ["r1", "r2"]
+              "refs": ["h0", "h1"]
             }
           ],
           "working_intent": null

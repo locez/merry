@@ -139,11 +139,17 @@ fn final_output_contract() -> crate::FinalOutputContract {
 }
 
 fn checkpoint_ref_pending_tool_call(call_id: &str, ref_id: &str) -> PendingToolCall {
+    checkpoint_ref_pending_tool_call_with_arguments(call_id, json!({ "ref": ref_id }))
+}
+
+fn checkpoint_ref_pending_tool_call_with_arguments(
+    call_id: &str,
+    arguments: serde_json::Value,
+) -> PendingToolCall {
     PendingToolCall::new(
         ToolCallId::new(call_id).expect("valid tool call id"),
         merry_read_checkpoint_ref_tool_name(),
-        ToolCallArguments::try_from(json!({ "ref": ref_id }))
-            .expect("valid checkpoint ref tool arguments"),
+        ToolCallArguments::try_from(arguments).expect("valid checkpoint ref tool arguments"),
     )
 }
 
@@ -162,17 +168,15 @@ fn citation_checkpoint_for_runtime_tool() -> CompactedCheckpoint {
     let checkpoint_id = CheckpointId::new("checkpoint-runtime-tool").expect("valid checkpoint id");
     let manifest = CheckpointRefManifest::new(
         checkpoint_id.clone(),
-        vec![
-            CheckpointRef::new(
-                CheckpointRefId::new("r1").expect("valid ref id"),
-                CheckpointSourceKind::UserMessage,
-                "history:1",
-                CheckpointSequenceRange::new(1, 1).expect("valid range"),
-                "history:1",
-                "bounded excerpt from the original turn",
-            )
-            .expect("valid checkpoint ref"),
-        ],
+        vec![CheckpointRef::new(
+            CheckpointRefId::new("bootstrap-ref").expect("valid ref id"),
+            CheckpointSourceKind::UserMessage,
+            CheckpointSequenceRange::new(1, 1).expect("valid range"),
+            EvidenceRef::new(
+                ArtifactId::new("runtime-checkpoint-source").expect("valid artifact id"),
+                EvidenceLocator::whole_artifact(),
+            ),
+        )],
     )
     .expect("valid manifest");
     let candidate = CompactedCheckpointCandidate::from_json(
@@ -181,8 +185,8 @@ fn citation_checkpoint_for_runtime_tool() -> CompactedCheckpoint {
                 {
                     "id": "c1",
                     "kind": "current_state",
-                    "text": "The task depends on r1.",
-                    "refs": ["r1"]
+                    "text": "The task depends on bootstrap-ref.",
+                    "refs": ["bootstrap-ref"]
                 }
             ]
         }"#,
@@ -198,13 +202,37 @@ fn citation_checkpoint_for_runtime_tool() -> CompactedCheckpoint {
     CompactedCheckpoint::from_citation_backed(checkpoint).expect("valid compacted checkpoint")
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn checkpoint_ref_tool_returns_bounded_excerpt_json() {
-    let pending = checkpoint_ref_pending_tool_call("call-read-checkpoint-ref", "r1");
-    let runtime = Runtime::builder(session_id("runtime-checkpoint-ref-tool-success"))
+fn checkpoint_ref_source_artifact() -> ArtifactRef {
+    ArtifactRef::new(
+        ArtifactId::new("runtime-checkpoint-source").expect("valid artifact id"),
+        ArtifactKind::Text,
+    )
+}
+
+fn runtime_builder_with_checkpoint_ref_source(
+    session: &str,
+    content: impl Into<String>,
+) -> RuntimeBuilder {
+    Runtime::builder(session_id(session))
         .compacted_checkpoint(citation_checkpoint_for_runtime_tool())
+        .compacted_checkpoint_evidence(
+            checkpoint_ref_source_artifact(),
+            ArtifactContent::text(content),
+        )
+}
+
+fn runtime_with_checkpoint_ref_source(session: &str, content: String) -> Runtime {
+    runtime_builder_with_checkpoint_ref_source(session, content)
         .build()
-        .expect("runtime should build");
+        .expect("checkpoint and source should build together")
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn checkpoint_ref_tool_returns_default_original_page_json() {
+    let pending = checkpoint_ref_pending_tool_call("call-read-checkpoint-ref", "bootstrap-ref");
+    let source = format!("{}PAGE_TWO", "x".repeat(5000));
+    let runtime =
+        runtime_with_checkpoint_ref_source("runtime-checkpoint-ref-tool-success", source.clone());
     {
         let mut session = runtime.inner.session.lock().await;
         session.record_session_started_if_needed();
@@ -237,18 +265,47 @@ async fn checkpoint_ref_tool_returns_bounded_excerpt_json() {
     assert_eq!(
         payload,
         json!({
-            "ref": "r1",
-            "excerpt": "bounded excerpt from the original turn"
+            "ref": "bootstrap-ref",
+            "source_kind": "user_message",
+            "artifact_id": "runtime-checkpoint-source",
+            "offset": 0,
+            "content": &source[..4096],
+            "next_offset": 4096,
+            "total_bytes": source.len(),
+            "done": false
         })
     );
     assert!(runtime.pending_tool_calls().await.is_empty());
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn checkpoint_ref_page_reads_second_page_from_original_content() {
+    let source = format!("{}SENTINEL_AFTER_1200_BYTES", "x".repeat(1200));
+    let runtime = runtime_with_checkpoint_ref_source("runtime-checkpoint-ref-page-second", source);
+    let ref_id = CheckpointRefId::new("bootstrap-ref").expect("valid ref id");
+
+    let first = runtime
+        .read_checkpoint_ref_page(&ref_id, 0, 1024)
+        .await
+        .expect("first page should read");
+    let second = runtime
+        .read_checkpoint_ref_page(
+            &ref_id,
+            first.next_offset().expect("first page should continue"),
+            1024,
+        )
+        .await
+        .expect("second page should read");
+
+    assert!(second.content().contains("SENTINEL_AFTER_1200_BYTES"));
+    assert_eq!(second.artifact_id(), first.artifact_id());
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn checkpoint_ref_tool_reports_not_found_without_checkpoint() {
     assert_checkpoint_ref_not_found(
         "call-missing-checkpoint",
-        "r1",
+        "bootstrap-ref",
         Runtime::builder(session_id("runtime-checkpoint-ref-tool-no-checkpoint"))
             .build()
             .expect("runtime should build"),
@@ -264,24 +321,77 @@ async fn checkpoint_ref_tool_reports_not_found_for_plain_checkpoint() {
         )
         .build()
         .expect("runtime should build");
-    assert_checkpoint_ref_not_found("call-plain-checkpoint", "r1", runtime).await;
+    assert_checkpoint_ref_not_found("call-plain-checkpoint", "bootstrap-ref", runtime).await;
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn checkpoint_ref_tool_reports_not_found_for_unknown_ref() {
-    let runtime = Runtime::builder(session_id("runtime-checkpoint-ref-tool-unknown"))
-        .compacted_checkpoint(citation_checkpoint_for_runtime_tool())
-        .build()
-        .expect("runtime should build");
+    let runtime = runtime_builder_with_checkpoint_ref_source(
+        "runtime-checkpoint-ref-tool-unknown",
+        "exact checkpoint source",
+    )
+    .build()
+    .expect("runtime should build");
     assert_checkpoint_ref_not_found("call-unknown-checkpoint-ref", "r9", runtime).await;
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn checkpoint_ref_tool_invalid_ref_string_reports_not_found() {
-    let runtime = Runtime::builder(session_id("runtime-checkpoint-ref-tool-invalid-ref-string"))
-        .compacted_checkpoint(citation_checkpoint_for_runtime_tool())
+async fn checkpoint_ref_tool_reports_read_failed_when_ref_artifact_is_missing() {
+    let pending =
+        checkpoint_ref_pending_tool_call("call-missing-checkpoint-artifact", "bootstrap-ref");
+    let runtime = Runtime::builder(session_id("runtime-checkpoint-ref-tool-missing-artifact"))
         .build()
         .expect("runtime should build");
+    {
+        let mut session = runtime.inner.session.lock().await;
+        session.set_compacted_checkpoint(citation_checkpoint_for_runtime_tool());
+        session.record_session_started_if_needed();
+        session
+            .record_test_tool_call_pending(pending.clone())
+            .expect("pending call should record");
+    }
+
+    let events = runtime
+        .execute_tool_call(pending.id(), ToolExecutionContext::default())
+        .await
+        .expect("missing checkpoint evidence should resolve as a domain failure");
+    let result = resolved_tool_result(&events);
+    assert_eq!(result.status(), ToolCallResultStatus::Failed);
+    assert_eq!(
+        result
+            .diagnostic()
+            .expect("read failure should include diagnostic")
+            .code(),
+        "checkpoint_ref_read_failed"
+    );
+    let content = runtime
+        .read_artifact_content(result.artifact().id())
+        .await
+        .expect("failure artifact should be readable");
+    let payload: serde_json::Value = serde_json::from_str(
+        content
+            .as_text()
+            .expect("checkpoint ref failure should be textual JSON"),
+    )
+    .expect("checkpoint ref failure should parse as JSON");
+    assert_eq!(payload["error"], "checkpoint_ref_read_failed");
+    assert_eq!(payload["ref"], "bootstrap-ref");
+    assert!(
+        payload["message"]
+            .as_str()
+            .expect("read failure should include message")
+            .contains("runtime-checkpoint-source")
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn checkpoint_ref_tool_invalid_ref_string_reports_not_found() {
+    let runtime = runtime_builder_with_checkpoint_ref_source(
+        "runtime-checkpoint-ref-tool-invalid-ref-string",
+        "exact checkpoint source",
+    )
+    .build()
+    .expect("runtime should build");
     assert_checkpoint_ref_not_found("call-invalid-ref-string", " bad ref ", runtime).await;
 }
 
@@ -334,15 +444,33 @@ async fn checkpoint_ref_tool_invalid_input_uses_schema_validation() {
         ("call-checkpoint-ref-missing-ref", json!({})),
         (
             "call-checkpoint-ref-extra-field",
-            json!({ "ref": "r1", "checkpoint_id": "c1" }),
+            json!({ "ref": "bootstrap-ref", "checkpoint_id": "c1" }),
         ),
         ("call-checkpoint-ref-non-string", json!({ "ref": 9 })),
+        (
+            "call-checkpoint-ref-negative-offset",
+            json!({ "ref": "bootstrap-ref", "offset": -1 }),
+        ),
+        (
+            "call-checkpoint-ref-zero-page",
+            json!({ "ref": "bootstrap-ref", "max_bytes": 0 }),
+        ),
+        (
+            "call-checkpoint-ref-page-too-large",
+            json!({ "ref": "bootstrap-ref", "max_bytes": 16_385 }),
+        ),
+        (
+            "call-checkpoint-ref-fractional-page",
+            json!({ "ref": "bootstrap-ref", "max_bytes": 1.5 }),
+        ),
     ] {
         let pending = invalid_checkpoint_ref_pending_tool_call(call_id, arguments);
-        let runtime = Runtime::builder(session_id(&format!("runtime-{call_id}")))
-            .compacted_checkpoint(citation_checkpoint_for_runtime_tool())
-            .build()
-            .expect("runtime should build");
+        let runtime = runtime_builder_with_checkpoint_ref_source(
+            &format!("runtime-{call_id}"),
+            "exact checkpoint source",
+        )
+        .build()
+        .expect("runtime should build");
         {
             let mut session = runtime.inner.session.lock().await;
             session.record_session_started_if_needed();

@@ -1864,7 +1864,7 @@ async fn compaction_removes_only_covered_tool_exchanges_after_successful_install
                   "id": "c1",
                   "kind": "completed_action",
                   "text": "The old tool result was compacted.",
-                  "refs": ["r1", "r2"]
+                  "refs": ["h0", "h2"]
                 }
               ],
               "working_intent": null
@@ -2363,7 +2363,7 @@ async fn provider_step_auto_compacts_before_hard_watermark_request() {
               "id": "c1",
               "kind": "completed_action",
               "text": "Old turn was compacted automatically.",
-              "refs": ["r1", "r2"]
+              "refs": ["h0", "h1"]
             }
           ],
           "working_intent": null
@@ -2447,7 +2447,7 @@ async fn auto_compaction_config_controls_retained_raw_tail() {
               "id": "c1",
               "kind": "completed_action",
               "text": "Only the old configurable-tail turn was compacted.",
-              "refs": ["r1", "r2"]
+              "refs": ["h0", "h1"]
             }
           ],
           "working_intent": null
@@ -2532,7 +2532,7 @@ async fn auto_compaction_keeps_current_tool_turn_raw_during_continuation() {
               "id": "c1",
               "kind": "current_state",
               "text": "The opening task turn was compacted before tool continuation.",
-              "refs": ["r1"]
+              "refs": ["h0"]
             }
           ],
           "working_intent": null
@@ -2636,12 +2636,12 @@ async fn auto_compacted_agent_loop_continuation_keeps_checkpoint_refs_and_stable
               "id": "c1",
               "kind": "completed_action",
               "text": "The prelude turn was checkpointed.",
-              "refs": ["r1", "r2"]
+              "refs": ["h0", "h1"]
             }
           ],
           "working_intent": {
             "text": "Continue from the compacted prelude into the raw current task.",
-            "refs": ["r1"],
+            "refs": ["h0"],
             "confidence": 0.77
           }
         }"#,
@@ -2653,7 +2653,7 @@ async fn auto_compacted_agent_loop_continuation_keeps_checkpoint_refs_and_stable
               "id": "c1",
               "kind": "completed_action",
               "text": "The prior checkpoint and first covered tool result were checkpointed.",
-              "refs": ["prior-c1", "r1", "r2"]
+              "refs": ["h0", "h1", "h2", "h4"]
             }
           ],
           "working_intent": null
@@ -2796,21 +2796,15 @@ async fn auto_compacted_agent_loop_continuation_keeps_checkpoint_refs_and_stable
     );
     assert!(!dynamic_text.contains("covered tool result sentinel"));
 
-    let ref_excerpt = runtime
-        .read_checkpoint_ref(
-            &merry_runtime::CheckpointId::new(
-                "checkpoint-agent-loop-auto-compaction-checkpoint-refs-7",
-            )
-            .expect("valid checkpoint id"),
-            &merry_runtime::CheckpointRefId::new("r2").expect("valid ref id"),
+    let ref_page = runtime
+        .read_checkpoint_ref_page(
+            &merry_runtime::CheckpointRefId::new("h4").expect("valid ref id"),
+            0,
+            4096,
         )
         .await
         .expect("checkpoint ref resolves");
-    assert!(
-        ref_excerpt
-            .excerpt()
-            .contains("covered tool result sentinel")
-    );
+    assert!(ref_page.content().contains("covered tool result sentinel"));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -2832,7 +2826,7 @@ async fn auto_compaction_config_can_disable_hard_watermark_compaction() {
               "id": "c1",
               "kind": "completed_action",
               "text": "This checkpoint should not be requested.",
-              "refs": ["r1"]
+              "refs": ["h0"]
             }
           ],
           "working_intent": null

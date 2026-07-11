@@ -21,8 +21,7 @@ use crate::memory::{
 use crate::{
     artifact::{ArtifactError, ArtifactRegistry},
     checkpoint::{
-        CheckpointError, CheckpointId, CheckpointRefExcerpt, CheckpointRefId,
-        CitationBackedCheckpoint, PersistedCitationBackedCheckpoint,
+        CheckpointError, CheckpointId, CitationBackedCheckpoint, PersistedCitationBackedCheckpoint,
     },
 };
 use merry_core::{ArtifactId, ContextWindowSource, EvidenceLocator, EvidenceRef};
@@ -767,7 +766,7 @@ impl CompactedCheckpoint {
         self.citation_backed.as_ref()
     }
 
-    /// Payload-free summary for diagnostics. This intentionally excludes claim text and ref excerpts.
+    /// Payload-free summary for diagnostics. This excludes claim text and evidence content.
     #[must_use]
     pub fn summary(&self) -> CompactedCheckpointSummary {
         match &self.citation_backed {
@@ -784,22 +783,6 @@ impl CompactedCheckpoint {
                 ref_count: 0,
             },
         }
-    }
-
-    /// Reads a bounded checkpoint ref excerpt from the installed citation manifest.
-    pub fn read_checkpoint_ref(
-        &self,
-        checkpoint_id: &CheckpointId,
-        ref_id: &CheckpointRefId,
-    ) -> Result<CheckpointRefExcerpt, CheckpointError> {
-        let Some(checkpoint) = &self.citation_backed else {
-            return Err(CheckpointError::RefNotFound {
-                checkpoint_id: checkpoint_id.as_str().to_owned(),
-                ref_id: ref_id.as_str().to_owned(),
-            });
-        };
-
-        checkpoint.read_ref_for_checkpoint(checkpoint_id, ref_id)
     }
 
     pub(crate) fn persisted(&self) -> PersistedCompactedCheckpoint {
@@ -1384,7 +1367,7 @@ mod tests {
             MemoryItemSelection,
         },
     };
-    use merry_core::{ArtifactKind, ArtifactRef};
+    use merry_core::{ArtifactId, ArtifactKind, ArtifactRef, EvidenceLocator, EvidenceRef};
 
     #[test]
     fn to_snapshot_includes_activated_memory_text_and_reasons() {
@@ -1507,17 +1490,15 @@ mod tests {
     fn compacted_checkpoint_can_wrap_citation_backed_checkpoint() {
         let manifest = CheckpointRefManifest::new(
             CheckpointId::new("checkpoint-context").expect("valid checkpoint id"),
-            vec![
-                CheckpointRef::new(
-                    CheckpointRefId::new("r1").expect("valid ref id"),
-                    CheckpointSourceKind::UserMessage,
-                    "history:1",
-                    CheckpointSequenceRange::new(1, 1).expect("valid range"),
-                    "body[0]",
-                    "user said citation-backed checkpointing is the current direction",
-                )
-                .expect("valid ref"),
-            ],
+            vec![CheckpointRef::new(
+                CheckpointRefId::new("r1").expect("valid ref id"),
+                CheckpointSourceKind::UserMessage,
+                CheckpointSequenceRange::new(1, 1).expect("valid range"),
+                EvidenceRef::new(
+                    ArtifactId::new("user-message-1").expect("valid artifact id"),
+                    EvidenceLocator::whole_artifact(),
+                ),
+            )],
         )
         .expect("valid manifest");
 

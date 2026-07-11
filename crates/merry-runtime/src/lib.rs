@@ -66,12 +66,12 @@ pub use agent_loop::{
 };
 pub use artifact::{
     ArtifactContent, ArtifactContentKind, ArtifactError, ArtifactRecord, ArtifactRegistry,
+    TextEvidencePage,
 };
 pub use checkpoint::{
     CheckpointClaimId, CheckpointClaimKind, CheckpointError, CheckpointId, CheckpointRef,
-    CheckpointRefExcerpt, CheckpointRefId, CheckpointRefManifest, CheckpointSequenceRange,
-    CheckpointSourceKind, CheckpointValidationPolicy, CitationBackedCheckpoint,
-    CompactedCheckpointCandidate,
+    CheckpointRefId, CheckpointRefManifest, CheckpointSequenceRange, CheckpointSourceKind,
+    CheckpointValidationPolicy, CitationBackedCheckpoint, CompactedCheckpointCandidate,
 };
 pub use compaction::{
     CitationCompactionInput, CitationCompactionPolicy, CompactionError, CompactionOutcome,
