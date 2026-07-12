@@ -1,8 +1,9 @@
 use super::*;
 use crate::SessionTranscriptItem;
 use crate::{
-    ContextCompiler, ContextEvidence, ContextSummary, FINAL_OUTPUT_TOOL_NAME, FileSessionStore,
-    ProjectRules, StepInput, TaskAnchor, session::ModelTurnId,
+    CompiledContextSection, ContextCompiler, ContextEntry, ContextEvidence, ContextSummary,
+    FINAL_OUTPUT_TOOL_NAME, FileSessionStore, ProjectRules, StepInput, TaskAnchor,
+    session::ModelTurnId,
 };
 use merry_core::ToolCallResult;
 
@@ -137,6 +138,98 @@ async fn resumed_runtime_preserves_same_id_manual_context_summary() {
     assert_eq!(snapshot.matches(NEW).count(), 1);
     assert_eq!(snapshot.matches(MANUAL).count(), 1);
     assert_eq!(snapshot.matches("summary:project-capabilities").count(), 2);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn resumed_runtime_preserves_manual_summary_backed_by_another_seed_refresh_artifact() {
+    const MANUAL: &str = "manual cross-seed text";
+    const CURRENT: &str = "current target seed text";
+
+    let refresh_artifact_id = |seed_id: &str| {
+        let mut session = SessionState::new(session_id("runtime-cross-seed-refresh-id-source"));
+        session
+            .reconcile_construction_context_seed(seed_id, &format!("old {seed_id} text"))
+            .expect("legacy construction seed records");
+        session
+            .reconcile_construction_context_seed(seed_id, MANUAL)
+            .expect("refresh construction seed records");
+        let context = ContextCompiler::new()
+            .compile(&session.context_snapshot())
+            .expect("refresh construction seed context compiles");
+        context
+            .sections()
+            .iter()
+            .find_map(|section| match section {
+                CompiledContextSection::Summary { id, text, evidence }
+                    if id == seed_id && text == MANUAL =>
+                {
+                    evidence
+                        .first()
+                        .map(|item| item.reference().artifact_id.clone())
+                }
+                _ => None,
+            })
+            .expect("refresh construction seed evidence exists")
+    };
+    let other_seed_refresh_artifact_id = refresh_artifact_id("other-seed");
+    let target_seed_refresh_artifact_id = refresh_artifact_id("target-seed");
+    assert!(
+        other_seed_refresh_artifact_id
+            .as_str()
+            .starts_with("context-seed-refresh-")
+    );
+    assert_ne!(
+        other_seed_refresh_artifact_id,
+        target_seed_refresh_artifact_id
+    );
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = FileSessionStore::new(temp.path());
+    let target_session_id = session_id("runtime-resume-preserves-cross-seed-refresh-summary");
+    let mut target_session = SessionState::new(target_session_id.clone());
+    target_session
+        .record_artifact_state(
+            ArtifactRef::new(other_seed_refresh_artifact_id.clone(), ArtifactKind::Text),
+            ArtifactContent::text(MANUAL),
+        )
+        .expect("cross-seed refresh artifact records");
+    let manual_evidence = target_session
+        .evidence_ref(
+            &other_seed_refresh_artifact_id,
+            EvidenceLocator::whole_artifact(),
+        )
+        .expect("cross-seed refresh evidence resolves");
+    target_session
+        .record_context_entry(ContextEntry::summary(
+            ContextSummary::new(
+                "target-seed",
+                MANUAL,
+                vec![
+                    ContextEvidence::new("seeded runtime context", manual_evidence)
+                        .expect("manual seeded-label evidence builds"),
+                ],
+            )
+            .expect("manual cross-seed summary builds"),
+        ))
+        .expect("manual cross-seed summary records");
+    target_session
+        .save_to(&store)
+        .await
+        .expect("target session saves");
+
+    let resumed = Runtime::builder(target_session_id)
+        .initial_context_summary("target-seed", CURRENT)
+        .resume_from_store(store)
+        .await
+        .expect("target runtime resumes");
+    let snapshot = ContextCompiler::new()
+        .compile(&resumed.context_snapshot().await)
+        .expect("resumed target context compiles")
+        .to_snapshot();
+
+    assert_eq!(snapshot.matches(MANUAL).count(), 1);
+    assert_eq!(snapshot.matches(CURRENT).count(), 1);
+    assert_eq!(snapshot.matches("summary:target-seed").count(), 2);
 }
 
 #[tokio::test(flavor = "current_thread")]
