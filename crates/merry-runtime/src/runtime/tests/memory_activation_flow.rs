@@ -63,7 +63,7 @@ async fn default_stored_source_projects_session_memory_before_user_message() {
         requests[0].messages()[0]
             .content()
             .as_text()
-            .contains("You are Merry, a pragmatic coding agent.")
+            .contains("You are Merry, a software engineering agent")
     );
     assert_eq!(requests[0].messages()[1].role(), ModelMessageRole::System);
     assert_eq!(requests[0].messages()[2].role(), ModelMessageRole::User);
@@ -127,7 +127,7 @@ async fn unmatched_stored_memory_does_not_add_system_message() {
         requests[0].messages()[0]
             .content()
             .as_text()
-            .contains("You are Merry, a pragmatic coding agent.")
+            .contains("You are Merry, a software engineering agent")
     );
     assert_eq!(requests[0].messages()[1].role(), ModelMessageRole::User);
     assert_eq!(
@@ -236,7 +236,7 @@ async fn provider_step_replaces_activated_memories_between_requests() {
         requests[1].messages()[0]
             .content()
             .as_text()
-            .contains("You are Merry, a pragmatic coding agent.")
+            .contains("You are Merry, a software engineering agent")
     );
     assert_eq!(requests[1].messages()[1].role(), ModelMessageRole::User);
     assert_eq!(

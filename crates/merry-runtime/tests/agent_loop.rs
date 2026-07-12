@@ -1599,7 +1599,7 @@ async fn agent_loop_executes_one_tool_and_continues_to_final_completion() {
         requests[0].messages()[0]
             .content()
             .as_text()
-            .contains("You are Merry, a pragmatic coding agent.")
+            .contains("You are Merry, a software engineering agent")
     );
     assert_eq!(requests[0].messages()[1].role(), ModelMessageRole::User);
     assert_eq!(

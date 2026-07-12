@@ -1292,14 +1292,19 @@ async fn runtime_step_with_provider_compiles_user_text_request_and_records_assis
         request.messages()[0]
             .content()
             .as_text()
-            .contains("You are Merry, a pragmatic coding agent.")
+            .contains("You are Merry, a software engineering agent")
     );
     let base_instructions = request.messages()[0].content().as_text();
-    assert!(base_instructions.contains("Before reading source code files"));
-    assert!(base_instructions.contains("Avoid whole-file source reads by default"));
-    assert!(base_instructions.contains("roughly 120 lines or fewer"));
-    assert!(base_instructions.contains("over roughly 250 lines"));
-    assert!(base_instructions.contains("where something is defined or handled"));
+    assert!(base_instructions.contains("Interpret the request before acting:"));
+    assert!(base_instructions.contains("Work from evidence."));
+    assert!(base_instructions.contains("Choose the right scope."));
+    assert!(base_instructions.contains("Do not stop after a fixed number of attempts."));
+    assert!(base_instructions.contains("Request broader capability only for an exact action"));
+    assert!(!base_instructions.contains("roughly 120"));
+    assert!(!base_instructions.contains("roughly 250"));
+    assert!(!base_instructions.contains("merry_outer_sandbox:"));
+    assert!(!base_instructions.contains("OpenAI"));
+    assert!(!base_instructions.contains("Anthropic"));
     assert!(
         !request.messages()[0]
             .content()
@@ -1495,7 +1500,7 @@ async fn runtime_step_with_provider_includes_compiled_context_as_system_message(
         request.messages()[0]
             .content()
             .as_text()
-            .contains("You are Merry, a pragmatic coding agent.")
+            .contains("You are Merry, a software engineering agent")
     );
     assert_eq!(request.messages()[1].role(), ModelMessageRole::System);
     assert_eq!(request.messages()[1].content().as_text(), expected_snapshot);
@@ -1598,7 +1603,7 @@ async fn second_provider_step_continues_sequences_and_replays_transcript() {
         requests[1].messages()[0]
             .content()
             .as_text()
-            .contains("You are Merry, a pragmatic coding agent.")
+            .contains("You are Merry, a software engineering agent")
     );
     assert_eq!(requests[1].messages()[1].role(), ModelMessageRole::User);
     assert_eq!(
