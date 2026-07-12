@@ -4,6 +4,7 @@ use super::process::ActionProcessBackend;
 use super::profile::{
     coding_loop_workspace_roots, with_workspace_coding_loop_profile, workspace_tools_config,
 };
+use super::project_rules::load_root_project_rules;
 use super::roles::RuntimeRoleProviderConfig;
 use merry_llm::{ModelName, ModelProvider, ModelRetryPolicy};
 use merry_runtime::{
@@ -163,6 +164,7 @@ fn configure_coding_loop_runtime_builder(
     runner: Arc<dyn ProcessRunner>,
     options: CodingLoopRuntimeOptions,
 ) -> Result<RuntimeBuilder, CodingRuntimeError> {
+    let project_rules = load_root_project_rules(root)?;
     let parent_session_id = merry_core::SessionId::new(session_id)?;
     let permissioned_factory = options
         .permissioned_process_runner_factory
@@ -228,6 +230,7 @@ fn configure_coding_loop_runtime_builder(
                 Arc::clone(&runner),
                 Arc::clone(&permissioned_factory),
             ),
+            project_rules.clone(),
             options.skill_roots.clone(),
             options.allow_hidden_workspace_paths,
         );
@@ -262,6 +265,9 @@ fn configure_coding_loop_runtime_builder(
     .with_patch_tool()
     .with_cli_bwrap_permissioned_process_runner(admission, runner, permissioned_factory);
     let mut builder = with_workspace_coding_loop_profile(builder, profile)?;
+    if let Some(project_rules) = project_rules {
+        builder = builder.project_rules(project_rules);
+    }
     for tool in options.extra_tools {
         builder = builder.register_tool(tool);
     }

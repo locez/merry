@@ -1,6 +1,7 @@
 use super::{
     CodingLoopRuntimeOptions, CodingSubagentsConfig, HeadlessCodingRuntimeInput,
     build_coding_loop_runtime, build_headless_coding_runtime, coding_agent_process_admission,
+    resume_headless_coding_runtime,
 };
 
 use crate::debug::coding_loop::coding_loop_workspace_call;
@@ -10,17 +11,17 @@ use merry_core::{
     RuntimeJournalEvent, ToolCallResult, ToolCallResultStatus, ToolInputSchema, ToolName, ToolSpec,
 };
 use merry_llm::{
-    FinishReason, ModelEvent, ModelOutput, ModelResponse, ModelToolCall, ModelToolCallId,
-    ToolArguments,
+    FinishReason, ModelEvent, ModelOutput, ModelProvider, ModelResponse, ModelToolCall,
+    ModelToolCallId, ToolArguments,
 };
 use merry_runtime::{
-    AcceptedLocalWorkspaceProcessAdmission, AgentLoopConfig, AgentLoopStatus, ProcessRunner,
-    RegisteredTool, StepContext, StepInput, SubagentConfig, ToolExecutionContext,
-    ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture,
+    AcceptedLocalWorkspaceProcessAdmission, AgentLoopConfig, AgentLoopStatus, FileSessionStore,
+    PermissionedProcessRunnerFactory, ProcessRunner, RegisteredTool, StepContext, StepInput,
+    SubagentConfig, ToolExecutionContext, ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture,
 };
 use merry_tool_workspace::{CODING_LOOP_PROCESS_TOOL, WORKSPACE_READ_FILE_TOOL};
 use serde_json::{Map, Value};
-use std::sync::Arc;
+use std::{path::Path, sync::Arc};
 
 #[tokio::test(flavor = "current_thread")]
 async fn no_outer_sandbox_still_admits_the_inner_bwrap_process_profile() {
@@ -44,6 +45,230 @@ impl ToolExecutor for StaticOkExecutor {
     ) -> ToolExecutorFuture<'a> {
         Box::pin(async { Ok(ToolExecutionOutcome::succeeded_text("ok")) })
     }
+}
+
+fn headless_input<'a>(
+    session_id: &'a str,
+    root: &'a Path,
+    provider: Arc<dyn ModelProvider>,
+    runner: Arc<dyn ProcessRunner>,
+    permissioned_process_runner_factory: Arc<dyn PermissionedProcessRunnerFactory>,
+) -> HeadlessCodingRuntimeInput<'a> {
+    HeadlessCodingRuntimeInput {
+        session_id,
+        root,
+        admission: AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
+        provider,
+        model: model_name(),
+        runner,
+        permissioned_process_runner_factory,
+        extra_tools: Vec::new(),
+        allow_hidden_workspace_paths: false,
+        automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
+        retry_policy: None,
+        context_compaction: None,
+        approval_review: None,
+        skill_roots: Vec::new(),
+        subagents: CodingSubagentsConfig::default(),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn coding_runtime_projects_root_agents_in_the_stable_prefix() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("mkdir workspace");
+    std::fs::write(
+        workspace.join("AGENTS.md"),
+        "Use root project rule sentinel.\n",
+    )
+    .expect("write root project rules");
+
+    let provider = ScriptedProvider::new(vec![vec![Ok(ModelEvent::Completed {
+        response: ModelResponse::new(vec![ModelOutput::text("done")], FinishReason::Stop, None),
+    })]]);
+    let runtime = build_coding_loop_runtime(
+        "coding-loop-root-project-rules",
+        &workspace,
+        AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
+        Arc::new(provider.clone()),
+        model_name(),
+        Arc::new(FakeProcessRunner::succeeding("")),
+        CodingLoopRuntimeOptions {
+            allow_hidden_workspace_paths: false,
+            approval_review: None,
+            automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
+            retry_policy: None,
+            context_compaction: None,
+            permissioned_process_runner_factory: None,
+            extra_tools: Vec::new(),
+            skill_roots: Vec::new(),
+            subagents: CodingSubagentsConfig::default(),
+            workspace_tool_limits: None,
+        },
+    )
+    .expect("runtime should build");
+
+    collect_runtime_step_events(
+        &runtime,
+        StepInput::user_text("Inspect project rules.").expect("valid input"),
+        StepContext::default(),
+    )
+    .await
+    .expect("runtime step should complete");
+
+    let requests = provider.recorded_requests();
+    let request = &requests[0];
+    let stable_text = request
+        .stable_prefix_messages()
+        .iter()
+        .map(|message| message.content().as_text())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(request.stable_prefix_message_count(), 3);
+    assert!(stable_text.contains("project-rules-source:AGENTS.md"));
+    assert!(stable_text.contains("Use root project rule sentinel."));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn coding_runtime_omits_project_rules_when_root_agents_is_missing() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("mkdir workspace");
+
+    let provider = ScriptedProvider::new(vec![vec![Ok(ModelEvent::Completed {
+        response: ModelResponse::new(vec![ModelOutput::text("done")], FinishReason::Stop, None),
+    })]]);
+    let runtime = build_coding_loop_runtime(
+        "coding-loop-missing-root-project-rules",
+        &workspace,
+        AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
+        Arc::new(provider.clone()),
+        model_name(),
+        Arc::new(FakeProcessRunner::succeeding("")),
+        CodingLoopRuntimeOptions {
+            allow_hidden_workspace_paths: false,
+            approval_review: None,
+            automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
+            retry_policy: None,
+            context_compaction: None,
+            permissioned_process_runner_factory: None,
+            extra_tools: Vec::new(),
+            skill_roots: Vec::new(),
+            subagents: CodingSubagentsConfig::default(),
+            workspace_tool_limits: None,
+        },
+    )
+    .expect("runtime should build");
+
+    collect_runtime_step_events(
+        &runtime,
+        StepInput::user_text("Inspect project rules.").expect("valid input"),
+        StepContext::default(),
+    )
+    .await
+    .expect("runtime step should complete");
+
+    let requests = provider.recorded_requests();
+    let request = &requests[0];
+    assert!(request.stable_prefix_messages().iter().all(|message| {
+        !message
+            .content()
+            .as_text()
+            .contains("project-rules-source:")
+    }));
+    assert!(request.messages().iter().all(|message| {
+        !message
+            .content()
+            .as_text()
+            .contains("AGENTS.md unavailable")
+    }));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn resumed_coding_runtime_reloads_current_root_agents() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("mkdir workspace");
+    let rules_path = workspace.join("AGENTS.md");
+    std::fs::write(&rules_path, "Use saved project rule A.\n").expect("write rule A");
+    let store = FileSessionStore::new(temp.path().join("sessions"));
+    let runner: Arc<dyn ProcessRunner> = Arc::new(FakeProcessRunner::succeeding(""));
+    let permissioned_factory: Arc<dyn PermissionedProcessRunnerFactory> = Arc::new(
+        merry_runtime::StaticPermissionedProcessRunnerFactory::new(Arc::clone(&runner)),
+    );
+
+    let first_provider = ScriptedProvider::new(vec![vec![Ok(ModelEvent::Completed {
+        response: ModelResponse::new(
+            vec![ModelOutput::text("first done")],
+            FinishReason::Stop,
+            None,
+        ),
+    })]]);
+    let first_runtime = build_headless_coding_runtime(headless_input(
+        "headless-resume-reloads-project-rules",
+        &workspace,
+        Arc::new(first_provider.clone()),
+        Arc::clone(&runner),
+        Arc::clone(&permissioned_factory),
+    ))
+    .expect("first runtime should build");
+    collect_runtime_step_events(
+        &first_runtime,
+        StepInput::user_text("Inspect rule A.").expect("valid input"),
+        StepContext::default(),
+    )
+    .await
+    .expect("first runtime step should complete");
+    first_runtime
+        .save_session_to(store.clone())
+        .await
+        .expect("first runtime should save");
+    let first_requests = first_provider.recorded_requests();
+    let first_stable_prefix_hash = first_requests[0].stable_prefix_hash().clone();
+
+    std::fs::write(&rules_path, "Use current project rule B.\n").expect("write rule B");
+    let resumed_provider = ScriptedProvider::new(vec![vec![Ok(ModelEvent::Completed {
+        response: ModelResponse::new(
+            vec![ModelOutput::text("resumed done")],
+            FinishReason::Stop,
+            None,
+        ),
+    })]]);
+    let resumed_runtime = resume_headless_coding_runtime(
+        headless_input(
+            "headless-resume-reloads-project-rules",
+            &workspace,
+            Arc::new(resumed_provider.clone()),
+            runner,
+            permissioned_factory,
+        ),
+        store,
+    )
+    .await
+    .expect("runtime should resume");
+    collect_runtime_step_events(
+        &resumed_runtime,
+        StepInput::user_text("Inspect current rules.").expect("valid input"),
+        StepContext::default(),
+    )
+    .await
+    .expect("resumed runtime step should complete");
+
+    let resumed_requests = resumed_provider.recorded_requests();
+    let resumed_request = &resumed_requests[0];
+    let resumed_stable_text = resumed_request
+        .stable_prefix_messages()
+        .iter()
+        .map(|message| message.content().as_text())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(resumed_stable_text.contains("Use current project rule B."));
+    assert!(!resumed_stable_text.contains("Use saved project rule A."));
+    assert_ne!(
+        resumed_request.stable_prefix_hash(),
+        &first_stable_prefix_hash
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -452,6 +677,11 @@ async fn subagent_with_narrow_tools_keeps_read_only_profile() {
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(&workspace).expect("mkdir workspace");
     std::fs::write(workspace.join("README.md"), "child fixture\n").expect("write fixture");
+    std::fs::write(
+        workspace.join("AGENTS.md"),
+        "Child must receive root rule sentinel.\n",
+    )
+    .expect("write root project rules");
 
     let provider = ScriptedProvider::new(vec![
         vec![Ok(ModelEvent::Completed {
@@ -547,6 +777,14 @@ async fn subagent_with_narrow_tools_keeps_read_only_profile() {
         .iter()
         .map(|tool| tool.name().as_str())
         .collect::<Vec<_>>();
+    let child_stable_text = child_request
+        .stable_prefix_messages()
+        .iter()
+        .map(|message| message.content().as_text())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(child_stable_text.contains("project-rules-source:AGENTS.md"));
+    assert!(child_stable_text.contains("Child must receive root rule sentinel."));
     assert!(child_tool_names.contains(&"workspace_read_file"));
     assert!(child_tool_names.contains(&"workspace_list_dir"));
     assert!(child_tool_names.contains(&"workspace_search_text"));
