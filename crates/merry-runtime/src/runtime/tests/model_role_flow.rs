@@ -2,6 +2,9 @@ use super::*;
 use merry_core::{PendingToolCallBatch, ToolCallBatchId};
 use std::time::Duration;
 
+// Keep tight-window fixtures on compaction boundaries instead of the conservative no-cap fallback.
+const TIGHT_WINDOW_OUTPUT_CAP_TOKENS: u64 = 512;
+
 #[path = "model_role_flow/compaction_generation.rs"]
 mod compaction_generation;
 
@@ -544,8 +547,15 @@ async fn pre_turn_auto_compaction_failure_does_not_consume_model_turn_id() {
             ScriptedModelProviderResponse::Stream(vec![Ok(completed_event())]),
             ScriptedModelProviderResponse::Stream(vec![Ok(completed_event())]),
         ],
-        ModelCapabilities::new(true, true, false, true, Some(4_000), Some(512))
-            .expect("valid capabilities"),
+        ModelCapabilities::new(
+            true,
+            true,
+            false,
+            true,
+            Some(4_000),
+            Some(TIGHT_WINDOW_OUTPUT_CAP_TOKENS),
+        )
+        .expect("valid capabilities"),
     );
     let compactor =
         RecordingModelProvider::with_script(vec![ScriptedModelProviderResponse::Stream(vec![Ok(
@@ -620,8 +630,15 @@ async fn fixed_current_input_over_hard_watermark_calls_neither_provider() {
         vec![ScriptedModelProviderResponse::Stream(vec![Ok(
             completed_event(),
         )])],
-        ModelCapabilities::new(true, true, false, true, Some(4_000), Some(512))
-            .expect("valid capabilities"),
+        ModelCapabilities::new(
+            true,
+            true,
+            false,
+            true,
+            Some(4_000),
+            Some(TIGHT_WINDOW_OUTPUT_CAP_TOKENS),
+        )
+        .expect("valid capabilities"),
     );
     let compactor =
         RecordingModelProvider::with_script(vec![ScriptedModelProviderResponse::Stream(vec![Ok(
