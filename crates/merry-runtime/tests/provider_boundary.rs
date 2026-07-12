@@ -1305,6 +1305,8 @@ async fn runtime_step_with_provider_compiles_user_text_request_and_records_assis
     assert!(!base_instructions.contains("merry_outer_sandbox:"));
     assert!(!base_instructions.contains("OpenAI"));
     assert!(!base_instructions.contains("Anthropic"));
+    assert!(!base_instructions.contains("GPT-"));
+    assert!(!base_instructions.contains("workspace_search_text"));
     assert!(
         !request.messages()[0]
             .content()

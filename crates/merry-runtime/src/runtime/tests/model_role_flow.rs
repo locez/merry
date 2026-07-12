@@ -544,7 +544,7 @@ async fn pre_turn_auto_compaction_failure_does_not_consume_model_turn_id() {
             ScriptedModelProviderResponse::Stream(vec![Ok(completed_event())]),
             ScriptedModelProviderResponse::Stream(vec![Ok(completed_event())]),
         ],
-        ModelCapabilities::new(true, true, false, true, Some(4_000), None)
+        ModelCapabilities::new(true, true, false, true, Some(4_000), Some(512))
             .expect("valid capabilities"),
     );
     let compactor =
@@ -620,7 +620,7 @@ async fn fixed_current_input_over_hard_watermark_calls_neither_provider() {
         vec![ScriptedModelProviderResponse::Stream(vec![Ok(
             completed_event(),
         )])],
-        ModelCapabilities::new(true, true, false, true, Some(4_000), None)
+        ModelCapabilities::new(true, true, false, true, Some(4_000), Some(512))
             .expect("valid capabilities"),
     );
     let compactor =

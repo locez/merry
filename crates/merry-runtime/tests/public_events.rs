@@ -209,7 +209,7 @@ async fn usage_none_does_not_emit_usage_update() {
 async fn auto_compaction_lifecycle_projects_to_public_stream() {
     let primary = FakeModelProvider::with_capabilities(
         vec![Ok(completed_text_event(&"seed one ".repeat(310)))],
-        ModelCapabilities::new(true, true, false, true, Some(16_000), None)
+        ModelCapabilities::new(true, true, false, true, Some(16_000), Some(2_560))
             .expect("valid capabilities"),
     );
     let compactor = FakeModelProvider::new(vec![Ok(completed_text_event(
