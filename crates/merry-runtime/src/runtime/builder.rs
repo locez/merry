@@ -324,11 +324,14 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Seeds deterministic runtime context without emitting observable events.
+    /// Reconciles deterministic runtime context without emitting observable events.
     ///
     /// This is for startup-owned facts such as a compact project capability
-    /// summary. It is not a substitute for runtime artifacts produced during a
-    /// step, and repeated ids are replaced before build-time validation.
+    /// summary. The supplied id becomes the current construction-owned seed on
+    /// both new and resumed sessions; construction seeds omitted from this
+    /// builder are left untouched. It is not a substitute for runtime artifacts
+    /// produced during a step, and repeated builder ids are replaced before
+    /// build-time validation.
     #[must_use]
     pub fn initial_context_summary(mut self, id: &str, text: &str) -> Self {
         self.initial_context_summaries
@@ -599,9 +602,6 @@ impl RuntimeBuilder {
                     }
                     session.record_artifact_state(artifact, content)?;
                 }
-                for (id, text) in self.initial_context_summaries {
-                    session.seed_context_summary(&id, &text)?;
-                }
                 if let Some(checkpoint) = self.compacted_checkpoint {
                     session.validate_compacted_checkpoint_evidence(&checkpoint)?;
                     session.set_compacted_checkpoint(checkpoint);
@@ -616,6 +616,9 @@ impl RuntimeBuilder {
                     actual: session.session_id().clone(),
                 },
             });
+        }
+        for (id, text) in self.initial_context_summaries {
+            session.reconcile_construction_context_seed(&id, &text)?;
         }
         if let Some(project_rules) = self.project_rules {
             session.set_project_rules(project_rules);

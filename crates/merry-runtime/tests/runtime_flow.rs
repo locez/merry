@@ -461,7 +461,7 @@ async fn record_artifact_is_rejected_while_step_is_active() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn record_artifact_rejects_reserved_assistant_output_id_without_mutation() {
+async fn record_artifact_rejects_reserved_runtime_ids_without_mutation() {
     let runtime = Runtime::builder(session_id())
         .build()
         .expect("runtime should build");
@@ -475,6 +475,11 @@ async fn record_artifact_rejects_reserved_assistant_output_id_without_mutation()
             "process-input-3",
             ArtifactKind::Json,
             ArtifactContent::json(r#"{"kind":"external-shadow"}"#),
+        ),
+        (
+            "context-seed-project-capabilities",
+            ArtifactKind::Text,
+            ArtifactContent::text("external construction context shadow\n"),
         ),
     ] {
         let artifact = ArtifactRef::new(artifact_id(reserved_id), artifact_kind);

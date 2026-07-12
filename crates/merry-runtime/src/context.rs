@@ -1228,6 +1228,22 @@ pub enum ContextError {
         reason: &'static str,
     },
 
+    /// More than one persisted summary matched the construction-owned seed fingerprint.
+    #[error("construction context seed {id} has multiple managed predecessors")]
+    AmbiguousConstructionContextSeed {
+        /// Construction context summary identifier with ambiguous ownership.
+        id: String,
+    },
+
+    /// A deterministic construction seed artifact id was occupied by different content.
+    #[error("construction context seed {id} conflicts with artifact {artifact_id}")]
+    ConstructionContextSeedArtifactConflict {
+        /// Construction context summary identifier being reconciled.
+        id: String,
+        /// Occupied deterministic artifact identifier.
+        artifact_id: ArtifactId,
+    },
+
     /// Summary text was provided without exact evidence metadata.
     #[error("context summary {id} has no exact evidence references")]
     SummaryWithoutEvidence {
@@ -1294,7 +1310,7 @@ fn validate_no_control_characters(field: &'static str, value: &str) -> Result<()
     Ok(())
 }
 
-fn stable_content_hash(bytes: &[u8]) -> String {
+pub(crate) fn stable_content_hash(bytes: &[u8]) -> String {
     let mut hash = FNV_OFFSET_BASIS;
     for byte in bytes {
         hash = (hash ^ u64::from(*byte)).wrapping_mul(FNV_PRIME);

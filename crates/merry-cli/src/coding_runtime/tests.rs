@@ -8,7 +8,8 @@ use crate::debug::coding_loop::coding_loop_workspace_call;
 use crate::runtime_events::{collect_runtime_step_events, first_pending_tool_call};
 use crate::testing::{FakeProcessRunner, ScriptedProvider, model_name};
 use merry_core::{
-    RuntimeJournalEvent, ToolCallResult, ToolCallResultStatus, ToolInputSchema, ToolName, ToolSpec,
+    RuntimeJournalEvent, SessionId, ToolCallResult, ToolCallResultStatus, ToolInputSchema,
+    ToolName, ToolSpec,
 };
 use merry_llm::{
     FinishReason, ModelEvent, ModelOutput, ModelProvider, ModelResponse, ModelToolCall,
@@ -16,8 +17,9 @@ use merry_llm::{
 };
 use merry_runtime::{
     AcceptedLocalWorkspaceProcessAdmission, AgentLoopConfig, AgentLoopStatus, FileSessionStore,
-    PermissionedProcessRunnerFactory, ProcessRunner, RegisteredTool, StepContext, StepInput,
-    SubagentConfig, ToolExecutionContext, ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture,
+    PermissionedProcessRunnerFactory, ProcessRunner, ProjectRules, RegisteredTool, Runtime,
+    StepContext, StepInput, SubagentConfig, ToolExecutionContext, ToolExecutionOutcome,
+    ToolExecutor, ToolExecutorFuture,
 };
 use merry_tool_workspace::{CODING_LOOP_PROCESS_TOOL, WORKSPACE_READ_FILE_TOOL};
 use serde_json::{Map, Value};
@@ -269,6 +271,93 @@ async fn resumed_coding_runtime_reloads_current_root_agents() {
         resumed_request.stable_prefix_hash(),
         &first_stable_prefix_hash
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn resumed_coding_runtime_replaces_stale_project_capability_seed() {
+    const SESSION_ID: &str = "headless-resume-refreshes-project-capabilities";
+    const OLD_LANGUAGE_RULE: &str = "- Respond in the user's current input language by default unless the user explicitly requests another language.";
+    const OLD_AGENTS_CAPABILITY: &str = "Detected AGENTS.md at the workspace root; read and follow it as project-specific instructions before substantial work.";
+    const OLD_CAPABILITY_TEXT: &str = "Workspace coding profile:\n- Respond in the user's current input language by default unless the user explicitly requests another language.\nDetected AGENTS.md at the workspace root; read and follow it as project-specific instructions before substantial work.";
+    const CURRENT_RULE: &str = "Use current resume rule sentinel.\n";
+    const OLD_RULE: &str = "Use old persisted rule sentinel.\n";
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("mkdir workspace");
+    std::fs::write(
+        workspace.join("Cargo.toml"),
+        "[package]\nname = \"resume-context-fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .expect("write Cargo.toml");
+    std::fs::write(workspace.join("AGENTS.md"), CURRENT_RULE).expect("write current rules");
+    let store = FileSessionStore::new(temp.path().join("sessions"));
+    let old_runtime = Runtime::builder(SessionId::new(SESSION_ID).expect("valid session id"))
+        .initial_context_summary("project-capabilities", OLD_CAPABILITY_TEXT)
+        .project_rules(ProjectRules::new("AGENTS.md", OLD_RULE).expect("old project rules"))
+        .build()
+        .expect("old runtime builds");
+    old_runtime
+        .save_session_to(store.clone())
+        .await
+        .expect("old runtime saves");
+
+    let runner: Arc<dyn ProcessRunner> = Arc::new(FakeProcessRunner::succeeding(""));
+    let permissioned_factory: Arc<dyn PermissionedProcessRunnerFactory> = Arc::new(
+        merry_runtime::StaticPermissionedProcessRunnerFactory::new(Arc::clone(&runner)),
+    );
+    let provider = ScriptedProvider::new(vec![vec![Ok(ModelEvent::Completed {
+        response: ModelResponse::new(
+            vec![ModelOutput::text("resumed done")],
+            FinishReason::Stop,
+            None,
+        ),
+    })]]);
+    let resumed_runtime = resume_headless_coding_runtime(
+        headless_input(
+            SESSION_ID,
+            &workspace,
+            Arc::new(provider.clone()),
+            runner,
+            permissioned_factory,
+        ),
+        store,
+    )
+    .await
+    .expect("coding runtime resumes");
+    collect_runtime_step_events(
+        &resumed_runtime,
+        StepInput::user_text("Inspect current capabilities.").expect("valid input"),
+        StepContext::default(),
+    )
+    .await
+    .expect("resumed runtime step completes");
+
+    let requests = provider.recorded_requests();
+    let request = &requests[0];
+    let request_text = request
+        .messages()
+        .iter()
+        .map(|message| message.content().as_text())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        request_text.matches("summary:project-capabilities").count(),
+        1
+    );
+    assert!(request_text.contains("Workspace coding profile:"));
+    assert!(request_text.contains("Cargo.toml is present"));
+    assert!(!request_text.contains(OLD_LANGUAGE_RULE));
+    assert!(!request_text.contains(OLD_AGENTS_CAPABILITY));
+
+    let stable_text = request
+        .stable_prefix_messages()
+        .iter()
+        .map(|message| message.content().as_text())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(stable_text.matches(CURRENT_RULE.trim()).count(), 1);
+    assert!(!stable_text.contains(OLD_RULE.trim()));
 }
 
 #[tokio::test(flavor = "current_thread")]

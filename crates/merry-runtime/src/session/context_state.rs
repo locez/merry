@@ -1,35 +1,108 @@
-use super::SessionState;
+use super::{SessionState, artifacts::CONTEXT_SEED_ARTIFACT_PREFIX};
 use crate::{
     RuntimeError,
-    artifact::{ArtifactContent, ArtifactError},
+    artifact::{ArtifactContent, ArtifactError, ArtifactRegistry},
     context::{
         ContextCompiler, ContextEntry, ContextError, ContextEvidence, ContextSummary, ProjectRules,
-        SessionContextSnapshot, TaskAnchor,
+        SessionContextSnapshot, TaskAnchor, stable_content_hash,
     },
     memory::{ActivatedMemory, MemoryError, MemoryItem, MemoryStore},
     skill::SkillCatalog,
 };
 use merry_core::{ArtifactId, ArtifactKind, ArtifactRef, EvidenceLocator, EvidenceRef};
 
+const CONTEXT_SEED_REFRESH_ARTIFACT_PREFIX: &str = "context-seed-refresh-";
+const SEEDED_RUNTIME_CONTEXT_LABEL: &str = "seeded runtime context";
+
 impl SessionState {
-    pub(crate) fn seed_context_summary(
+    pub(crate) fn reconcile_construction_context_seed(
         &mut self,
         id: &str,
         text: &str,
     ) -> Result<(), RuntimeError> {
-        let artifact_id = ArtifactId::new(&format!("context-seed-{id}"))?;
-        let artifact = ArtifactRef::new(artifact_id.clone(), ArtifactKind::Text);
-        let content = ArtifactContent::text(text);
-        let recorded = self.artifacts.record(artifact, content)?;
-        let evidence = self
-            .artifacts
-            .evidence_ref(recorded.id(), EvidenceLocator::whole_artifact())?;
+        let legacy_artifact_id = legacy_context_seed_artifact_id(id)?;
+        let mut managed_predecessor = None;
+        for (index, entry) in self.context_entries.iter().enumerate() {
+            if !is_managed_construction_context_seed(
+                entry.as_summary(),
+                id,
+                &legacy_artifact_id,
+                &self.artifacts,
+            ) {
+                continue;
+            }
+            if managed_predecessor.replace(index).is_some() {
+                return Err(
+                    ContextError::AmbiguousConstructionContextSeed { id: id.to_owned() }.into(),
+                );
+            }
+        }
+
+        if managed_predecessor
+            .is_some_and(|index| self.context_entries[index].as_summary().text() == text)
+        {
+            return Ok(());
+        }
+
+        let mut candidate_artifacts = self.artifacts.clone();
+        let mut candidate_entries = self.context_entries.clone();
+        if let Some(index) = managed_predecessor {
+            candidate_entries.remove(index);
+        }
+
+        let target_artifact_id = if managed_predecessor.is_none()
+            && matches!(
+                candidate_artifacts.read_record(&legacy_artifact_id),
+                Err(ArtifactError::MissingArtifact { .. })
+            ) {
+            legacy_artifact_id
+        } else {
+            refreshed_context_seed_artifact_id(id, text)?
+        };
+        let recorded = match candidate_artifacts.read_record(&target_artifact_id) {
+            Ok(record)
+                if record.artifact().kind() == &ArtifactKind::Text
+                    && matches!(
+                        record.content(),
+                        ArtifactContent::Text { content } if content == text
+                    ) =>
+            {
+                record.artifact().clone()
+            }
+            Ok(_) => {
+                return Err(ContextError::ConstructionContextSeedArtifactConflict {
+                    id: id.to_owned(),
+                    artifact_id: target_artifact_id,
+                }
+                .into());
+            }
+            Err(ArtifactError::MissingArtifact { .. }) => candidate_artifacts.record(
+                ArtifactRef::new(target_artifact_id, ArtifactKind::Text),
+                ArtifactContent::text(text),
+            )?,
+            Err(source) => return Err(source.into()),
+        };
+        let evidence =
+            candidate_artifacts.evidence_ref(recorded.id(), EvidenceLocator::whole_artifact())?;
         let summary = ContextSummary::new(
             id,
             text,
-            vec![ContextEvidence::new("seeded runtime context", evidence)?],
+            vec![ContextEvidence::new(
+                SEEDED_RUNTIME_CONTEXT_LABEL,
+                evidence,
+            )?],
         )?;
-        self.record_checked_context_entry(ContextEntry::summary(summary))?;
+        candidate_entries.push(ContextEntry::summary(summary));
+        let candidate_snapshot = SessionContextSnapshot::new(
+            candidate_entries.clone(),
+            candidate_artifacts.clone(),
+            self.activated_memories.clone(),
+            self.compacted_checkpoint.clone(),
+        );
+        ContextCompiler::new().compile(&candidate_snapshot)?;
+
+        self.artifacts = candidate_artifacts;
+        self.context_entries = candidate_entries;
         Ok(())
     }
 
@@ -118,4 +191,49 @@ impl SessionState {
             self.compacted_checkpoint.clone(),
         )
     }
+}
+
+fn legacy_context_seed_artifact_id(id: &str) -> Result<ArtifactId, RuntimeError> {
+    ArtifactId::new(&format!("{CONTEXT_SEED_ARTIFACT_PREFIX}{id}")).map_err(Into::into)
+}
+
+fn refreshed_context_seed_artifact_id(id: &str, text: &str) -> Result<ArtifactId, RuntimeError> {
+    let mut hash_input = String::with_capacity(id.len() + 1 + text.len());
+    hash_input.push_str(id);
+    hash_input.push('\0');
+    hash_input.push_str(text);
+    ArtifactId::new(&format!(
+        "{CONTEXT_SEED_REFRESH_ARTIFACT_PREFIX}{}",
+        stable_content_hash(hash_input.as_bytes())
+    ))
+    .map_err(Into::into)
+}
+
+fn is_managed_construction_context_seed(
+    summary: &ContextSummary,
+    id: &str,
+    legacy_artifact_id: &ArtifactId,
+    artifacts: &ArtifactRegistry,
+) -> bool {
+    if summary.id() != id || summary.evidence().len() != 1 {
+        return false;
+    }
+
+    let evidence = &summary.evidence()[0];
+    let reference = evidence.reference();
+    if evidence.label() != SEEDED_RUNTIME_CONTEXT_LABEL
+        || !reference.locator.is_whole_artifact()
+        || (reference.artifact_id != *legacy_artifact_id
+            && !reference
+                .artifact_id
+                .as_str()
+                .starts_with(CONTEXT_SEED_REFRESH_ARTIFACT_PREFIX))
+    {
+        return false;
+    }
+
+    matches!(
+        artifacts.read_content(&reference.artifact_id),
+        Ok(ArtifactContent::Text { content }) if content == summary.text()
+    )
 }
