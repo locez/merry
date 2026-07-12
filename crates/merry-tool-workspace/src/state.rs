@@ -7,7 +7,7 @@ use std::{
 use crate::config::{WorkspaceToolConfigError, WorkspaceToolLimits, WorkspaceToolsConfig};
 
 const CODING_PROFILE_CAPABILITY_SUMMARY: &str = "\
-Workspace coding profile:\n- Workspace file tool paths are relative to configured workspace roots, not host-absolute paths.\n- Respond in the user's current input language by default unless the user explicitly requests another language.\n- Process execution runs through Merry runtime policy and the configured sandbox/profile, so filesystem and network access may be intentionally restricted.\n- For run_process, omit cwd or set cwd=\".\" for the workspace root; do not pass an empty cwd string.\n- The default process profile may block network access and paths outside the configured workspace or trusted path rules.\n- If an exact process action is blocked only because it needs additional filesystem or network capability for the current task, call request_permissions for that exact action after observing the failure.\n- request_permissions is not a reusable grant. It must name the exact planned action, request only the minimum needed capability, and the runtime may approve, deny, or fail the request.";
+Workspace coding profile:\n- Workspace file tool paths are relative to configured workspace roots, not host-absolute paths.\n- Process execution runs through Merry runtime policy and the configured sandbox/profile, so filesystem and network access may be intentionally restricted.\n- For run_process, omit cwd or set cwd=\".\" for the workspace root; do not pass an empty cwd string.\n- The default process profile may block network access and paths outside the configured workspace or trusted path rules.\n- If an exact process action is blocked only because it needs additional filesystem or network capability for the current task, call request_permissions for that exact action after observing the failure.\n- request_permissions is not a reusable grant. It must name the exact planned action, request only the minimum needed capability, and the runtime may approve, deny, or fail the request.";
 
 #[derive(Debug)]
 pub(crate) struct WorkspaceToolState {
@@ -192,13 +192,6 @@ fn project_capability_summary_for_root(root: &Path) -> Option<String> {
 
     if root.join("pyproject.toml").is_file() {
         lines.push("Detected Python project metadata: pyproject.toml is present.".to_owned());
-    }
-
-    if root.join("AGENTS.md").is_file() {
-        lines.push(
-            "Detected AGENTS.md at the workspace root; read and follow it as project-specific instructions before substantial work."
-                .to_owned(),
-        );
     }
 
     if !checks.is_empty() {
