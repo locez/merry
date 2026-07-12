@@ -27,6 +27,15 @@ pub(crate) enum CodingRuntimeError {
         source: io::Error,
     },
 
+    #[error("project rules path is denied at {path}: {reason}")]
+    ProjectRulesPathDenied { path: PathBuf, reason: &'static str },
+
+    #[error("project rules path is not a regular file: {path}")]
+    ProjectRulesNotRegularFile { path: PathBuf },
+
+    #[error("project rules at {path} exceed the {max_bytes}-byte limit")]
+    ProjectRulesTooLarge { path: PathBuf, max_bytes: usize },
+
     #[error("invalid project rules at {path}: {source}")]
     ProjectRulesInvalid {
         path: PathBuf,

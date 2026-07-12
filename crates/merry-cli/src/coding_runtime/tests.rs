@@ -751,6 +751,12 @@ async fn subagent_with_narrow_tools_keeps_read_only_profile() {
     )
     .expect("runtime should build");
 
+    std::fs::write(
+        workspace.join("AGENTS.md"),
+        "Child must not reread changed root rule sentinel.\n",
+    )
+    .expect("replace root project rules after parent build");
+
     let result = runtime
         .run_agent_loop(
             StepInput::user_text("Delegate fixture inspection.").expect("valid input"),
@@ -785,6 +791,7 @@ async fn subagent_with_narrow_tools_keeps_read_only_profile() {
         .join("\n");
     assert!(child_stable_text.contains("project-rules-source:AGENTS.md"));
     assert!(child_stable_text.contains("Child must receive root rule sentinel."));
+    assert!(!child_stable_text.contains("Child must not reread changed root rule sentinel."));
     assert!(child_tool_names.contains(&"workspace_read_file"));
     assert!(child_tool_names.contains(&"workspace_list_dir"));
     assert!(child_tool_names.contains(&"workspace_search_text"));

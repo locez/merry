@@ -164,8 +164,8 @@ fn configure_coding_loop_runtime_builder(
     runner: Arc<dyn ProcessRunner>,
     options: CodingLoopRuntimeOptions,
 ) -> Result<RuntimeBuilder, CodingRuntimeError> {
-    let project_rules = load_root_project_rules(root)?;
     let parent_session_id = merry_core::SessionId::new(session_id)?;
+    let project_rules = load_root_project_rules(root)?;
     let permissioned_factory = options
         .permissioned_process_runner_factory
         .unwrap_or_else(|| {
