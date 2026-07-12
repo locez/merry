@@ -82,7 +82,7 @@ async fn coding_runtime_projects_root_agents_in_the_stable_prefix() {
     std::fs::create_dir_all(&workspace).expect("mkdir workspace");
     std::fs::write(
         workspace.join("AGENTS.md"),
-        "Use root project rule sentinel.\n",
+        "Use root project rule sentinel.\r\nSecond root project rule sentinel.\r\n",
     )
     .expect("write root project rules");
 
@@ -129,7 +129,11 @@ async fn coding_runtime_projects_root_agents_in_the_stable_prefix() {
         .join("\n");
     assert_eq!(request.stable_prefix_message_count(), 3);
     assert!(stable_text.contains("project-rules-source:AGENTS.md"));
-    assert!(stable_text.contains("Use root project rule sentinel."));
+    assert!(
+        stable_text
+            .contains("Use root project rule sentinel.\nSecond root project rule sentinel.\n")
+    );
+    assert!(!stable_text.contains('\r'));
 }
 
 #[tokio::test(flavor = "current_thread")]
