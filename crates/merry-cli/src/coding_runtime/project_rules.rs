@@ -4,10 +4,6 @@ use std::{fs, io::ErrorKind, path::Path};
 
 const ROOT_PROJECT_RULES_FILE: &str = "AGENTS.md";
 
-#[allow(
-    dead_code,
-    reason = "wired into coding runtime builders in the next Stage A slice"
-)]
 pub(super) fn load_root_project_rules(
     root: &Path,
 ) -> Result<Option<ProjectRules>, CodingRuntimeError> {
