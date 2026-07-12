@@ -1,8 +1,8 @@
 use super::*;
 use crate::SessionTranscriptItem;
 use crate::{
-    ContextEvidence, ContextSummary, FINAL_OUTPUT_TOOL_NAME, FileSessionStore, ProjectRules,
-    StepInput, TaskAnchor, session::ModelTurnId,
+    ContextCompiler, ContextEvidence, ContextSummary, FINAL_OUTPUT_TOOL_NAME, FileSessionStore,
+    ProjectRules, StepInput, TaskAnchor, session::ModelTurnId,
 };
 use merry_core::ToolCallResult;
 
@@ -27,6 +27,116 @@ async fn builder_resumes_session_from_store_and_reinjects_construction_context()
 
     assert_eq!(resumed.session_id(), &session_id);
     assert!(resumed.pending_tool_calls().await.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn resumed_runtime_replaces_changed_construction_context_seed() {
+    const OLD: &str = "old construction context sentinel";
+    const NEW: &str = "new construction context sentinel";
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = FileSessionStore::new(temp.path());
+    let session_id = session_id("runtime-resume-refreshes-context-seed");
+    let runtime = Runtime::builder(session_id.clone())
+        .initial_context_summary("project-capabilities", OLD)
+        .build()
+        .expect("runtime builds with old construction context");
+    runtime
+        .save_session_to(store.clone())
+        .await
+        .expect("old session saves");
+
+    let resumed = Runtime::builder(session_id.clone())
+        .initial_context_summary("project-capabilities", NEW)
+        .resume_from_store(store.clone())
+        .await
+        .expect("runtime resumes with current construction context");
+    let snapshot = ContextCompiler::new()
+        .compile(&resumed.context_snapshot().await)
+        .expect("resumed context compiles")
+        .to_snapshot();
+
+    assert_eq!(snapshot.matches(OLD).count(), 0);
+    assert_eq!(snapshot.matches(NEW).count(), 1);
+    assert_eq!(snapshot.matches("summary:project-capabilities").count(), 1);
+
+    resumed
+        .save_session()
+        .await
+        .expect("refreshed session saves");
+    let resumed_again = Runtime::builder(session_id)
+        .initial_context_summary("project-capabilities", NEW)
+        .resume_from_store(store)
+        .await
+        .expect("runtime resumes idempotently with unchanged construction context");
+    let snapshot = ContextCompiler::new()
+        .compile(&resumed_again.context_snapshot().await)
+        .expect("idempotently resumed context compiles")
+        .to_snapshot();
+
+    assert_eq!(snapshot.matches(OLD).count(), 0);
+    assert_eq!(snapshot.matches(NEW).count(), 1);
+    assert_eq!(snapshot.matches("summary:project-capabilities").count(), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn resumed_runtime_preserves_same_id_manual_context_summary() {
+    const OLD: &str = "old managed construction context sentinel";
+    const NEW: &str = "new managed construction context sentinel";
+    const MANUAL: &str = "manual same-id context sentinel";
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = FileSessionStore::new(temp.path());
+    let session_id = session_id("runtime-resume-preserves-manual-same-id-summary");
+    let runtime = Runtime::builder(session_id.clone())
+        .initial_context_summary("project-capabilities", OLD)
+        .build()
+        .expect("runtime builds with old construction context");
+    let manual_artifact = ArtifactRef::new(
+        ArtifactId::new("manual-project-capabilities-evidence").expect("valid artifact id"),
+        ArtifactKind::Text,
+    );
+    runtime
+        .record_artifact(manual_artifact.clone(), ArtifactContent::text(MANUAL))
+        .await
+        .expect("manual evidence artifact records");
+    let manual_evidence = runtime
+        .evidence_ref(manual_artifact.id(), EvidenceLocator::whole_artifact())
+        .await
+        .expect("manual evidence resolves");
+    runtime
+        .record_context_summary(
+            ContextSummary::new(
+                "project-capabilities",
+                MANUAL,
+                vec![
+                    ContextEvidence::new("manual project capability evidence", manual_evidence)
+                        .expect("manual context evidence builds"),
+                ],
+            )
+            .expect("manual context summary builds"),
+        )
+        .await
+        .expect("manual same-id summary records");
+    runtime
+        .save_session_to(store.clone())
+        .await
+        .expect("old session saves");
+
+    let resumed = Runtime::builder(session_id)
+        .initial_context_summary("project-capabilities", NEW)
+        .resume_from_store(store)
+        .await
+        .expect("runtime resumes with current construction context");
+    let snapshot = ContextCompiler::new()
+        .compile(&resumed.context_snapshot().await)
+        .expect("resumed context compiles")
+        .to_snapshot();
+
+    assert_eq!(snapshot.matches(OLD).count(), 0);
+    assert_eq!(snapshot.matches(NEW).count(), 1);
+    assert_eq!(snapshot.matches(MANUAL).count(), 1);
+    assert_eq!(snapshot.matches("summary:project-capabilities").count(), 2);
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -2,6 +2,7 @@ use super::transcript::TranscriptItemId;
 use merry_core::ArtifactId;
 
 const ASSISTANT_OUTPUT_ARTIFACT_PREFIX: &str = "assistant-output-";
+pub(crate) const CONTEXT_SEED_ARTIFACT_PREFIX: &str = "context-seed-";
 const FINAL_OUTPUT_ARTIFACT_PREFIX: &str = "final-output-";
 const PROCESS_INPUT_ARTIFACT_PREFIX: &str = "process-input-";
 const TOOL_RESULT_ARTIFACT_PREFIX: &str = "tool-result-";
@@ -11,6 +12,9 @@ pub(crate) fn is_runtime_reserved_artifact_id(artifact_id: &ArtifactId) -> bool 
     artifact_id
         .as_str()
         .starts_with(ASSISTANT_OUTPUT_ARTIFACT_PREFIX)
+        || artifact_id
+            .as_str()
+            .starts_with(CONTEXT_SEED_ARTIFACT_PREFIX)
         || artifact_id
             .as_str()
             .starts_with(PROCESS_INPUT_ARTIFACT_PREFIX)
