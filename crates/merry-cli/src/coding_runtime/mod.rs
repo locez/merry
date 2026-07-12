@@ -3,6 +3,7 @@ mod child_runtime;
 mod error;
 mod process;
 mod profile;
+mod project_rules;
 mod roles;
 mod sandbox;
 

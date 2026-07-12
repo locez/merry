@@ -1,6 +1,9 @@
 use merry_core::CoreError;
-use merry_runtime::{AgentLoopConfigError, RuntimeError, RuntimeProfileError, SkillError};
+use merry_runtime::{
+    AgentLoopConfigError, ContextError, RuntimeError, RuntimeProfileError, SkillError,
+};
 use merry_tool_workspace::{WorkspaceCodingLoopProfileError, WorkspaceToolConfigError};
+use std::{io, path::PathBuf};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -15,6 +18,20 @@ pub(crate) enum CodingRuntimeError {
     Core {
         #[from]
         source: CoreError,
+    },
+
+    #[error("failed to read project rules at {path}: {source}")]
+    ProjectRulesRead {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+
+    #[error("invalid project rules at {path}: {source}")]
+    ProjectRulesInvalid {
+        path: PathBuf,
+        #[source]
+        source: Box<ContextError>,
     },
 
     #[error("failed to load skill catalog: {source}")]
