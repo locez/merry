@@ -184,7 +184,8 @@ async fn workspace_coding_loop_profile_seeds_project_capability_context() {
     let project_context = request.messages()[2].content().as_text();
     assert!(project_context.contains("summary:project-capabilities"));
     assert!(project_context.contains("Cargo.toml is present"));
-    assert!(project_context.contains("Detected AGENTS.md"));
+    assert!(!project_context.contains("user's current input language"));
+    assert!(!project_context.contains("Detected AGENTS.md"));
     assert!(project_context.contains("cargo fmt --all --check"));
     assert!(project_context.contains("cargo test --all"));
     assert!(
