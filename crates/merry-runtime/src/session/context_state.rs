@@ -23,12 +23,7 @@ impl SessionState {
         let legacy_artifact_id = legacy_context_seed_artifact_id(id)?;
         let mut managed_predecessor = None;
         for (index, entry) in self.context_entries.iter().enumerate() {
-            if !is_managed_construction_context_seed(
-                entry.as_summary(),
-                id,
-                &legacy_artifact_id,
-                &self.artifacts,
-            ) {
+            if !is_managed_construction_context_seed(entry.as_summary(), id, &self.artifacts)? {
                 continue;
             }
             if managed_predecessor.replace(index).is_some() {
@@ -212,28 +207,27 @@ fn refreshed_context_seed_artifact_id(id: &str, text: &str) -> Result<ArtifactId
 fn is_managed_construction_context_seed(
     summary: &ContextSummary,
     id: &str,
-    legacy_artifact_id: &ArtifactId,
     artifacts: &ArtifactRegistry,
-) -> bool {
+) -> Result<bool, RuntimeError> {
     if summary.id() != id || summary.evidence().len() != 1 {
-        return false;
+        return Ok(false);
     }
 
     let evidence = &summary.evidence()[0];
     let reference = evidence.reference();
-    if evidence.label() != SEEDED_RUNTIME_CONTEXT_LABEL
-        || !reference.locator.is_whole_artifact()
-        || (reference.artifact_id != *legacy_artifact_id
-            && !reference
-                .artifact_id
-                .as_str()
-                .starts_with(CONTEXT_SEED_REFRESH_ARTIFACT_PREFIX))
-    {
-        return false;
+    if evidence.label() != SEEDED_RUNTIME_CONTEXT_LABEL || !reference.locator.is_whole_artifact() {
+        return Ok(false);
     }
 
-    matches!(
+    let legacy_artifact_id = legacy_context_seed_artifact_id(summary.id())?;
+    let refreshed_artifact_id = refreshed_context_seed_artifact_id(summary.id(), summary.text())?;
+    if reference.artifact_id != legacy_artifact_id && reference.artifact_id != refreshed_artifact_id
+    {
+        return Ok(false);
+    }
+
+    Ok(matches!(
         artifacts.read_content(&reference.artifact_id),
         Ok(ArtifactContent::Text { content }) if content == summary.text()
-    )
+    ))
 }
