@@ -82,6 +82,11 @@ pub(super) fn load_root_project_rules(
             });
         }
     };
+    let text = if text.contains("\r\n") {
+        text.replace("\r\n", "\n")
+    } else {
+        text
+    };
 
     ProjectRules::new(ROOT_PROJECT_RULES_FILE, text)
         .map(Some)
@@ -130,6 +135,36 @@ mod tests {
 
         assert_eq!(rules.source_path(), "AGENTS.md");
         assert_eq!(rules.text(), "Use fixture rule.\n");
+    }
+
+    #[test]
+    fn loads_crlf_root_agents_as_normalized_project_rules() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            temp.path().join("AGENTS.md"),
+            "Use CRLF rule.\r\nSecond line.\r\n",
+        )
+        .expect("write CRLF rules");
+
+        let rules = load_root_project_rules(temp.path())
+            .expect("CRLF rules load")
+            .expect("rules exist");
+
+        assert_eq!(rules.text(), "Use CRLF rule.\nSecond line.\n");
+    }
+
+    #[test]
+    fn lone_carriage_return_remains_invalid() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("AGENTS.md");
+        std::fs::write(&path, "Use rule.\rNot a CRLF line.").expect("write lone CR rules");
+
+        let error = load_root_project_rules(temp.path()).expect_err("lone CR rules reject");
+
+        assert!(matches!(
+            error,
+            CodingRuntimeError::ProjectRulesInvalid { path: actual, .. } if actual == path
+        ));
     }
 
     #[test]
