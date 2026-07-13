@@ -6,13 +6,17 @@
     where
         S: MemoryActivationSource + 'static,
     {
+        let event_buffer_size = NonZeroUsize::new(16).expect("non-zero buffer");
+        let id = session_id(session);
+        let (session_state, plan_controller) =
+            runtime_session_and_plan_controller(id.clone(), event_buffer_size);
         Runtime {
             inner: Arc::new(RuntimeInner {
-                session_id: session_id(session),
-                session: Mutex::new(SessionState::new(session_id(session))),
+                session_id: id,
+                session: session_state,
                 active_step: Arc::new(AtomicBool::new(false)),
                 memory_projection_epoch: AtomicU64::new(0),
-                event_buffer_size: NonZeroUsize::new(16).expect("non-zero buffer"),
+                event_buffer_size,
                 max_parallel_tool_calls: NonZeroUsize::new(4).expect("non-zero limit"),
                 model_configs: model_configs_with_primary(provider),
                 primary_model_override: tokio::sync::RwLock::new(None),
@@ -33,18 +37,23 @@
                 permission_admission_source: None,
                 permissioned_process_runner_factory: None,
                 subagent_manager: None,
+                plan_controller,
                 session_store: None,
             }),
         }
     }
     fn runtime_with_provider(session: &str, provider: RecordingModelProvider) -> Runtime {
+        let event_buffer_size = NonZeroUsize::new(16).expect("non-zero buffer");
+        let id = session_id(session);
+        let (session_state, plan_controller) =
+            runtime_session_and_plan_controller(id.clone(), event_buffer_size);
         Runtime {
             inner: Arc::new(RuntimeInner {
-                session_id: session_id(session),
-                session: Mutex::new(SessionState::new(session_id(session))),
+                session_id: id,
+                session: session_state,
                 active_step: Arc::new(AtomicBool::new(false)),
                 memory_projection_epoch: AtomicU64::new(0),
-                event_buffer_size: NonZeroUsize::new(16).expect("non-zero buffer"),
+                event_buffer_size,
                 max_parallel_tool_calls: NonZeroUsize::new(4).expect("non-zero limit"),
                 model_configs: model_configs_with_primary(provider),
                 primary_model_override: tokio::sync::RwLock::new(None),
@@ -65,6 +74,7 @@
                 permission_admission_source: None,
                 permissioned_process_runner_factory: None,
                 subagent_manager: None,
+                plan_controller,
                 session_store: None,
             }),
         }
@@ -74,13 +84,17 @@
     where
         S: MemoryActivationSource + 'static,
     {
+        let event_buffer_size = NonZeroUsize::new(16).expect("non-zero buffer");
+        let id = session_id(session);
+        let (session_state, plan_controller) =
+            runtime_session_and_plan_controller(id.clone(), event_buffer_size);
         Runtime {
             inner: Arc::new(RuntimeInner {
-                session_id: session_id(session),
-                session: Mutex::new(SessionState::new(session_id(session))),
+                session_id: id,
+                session: session_state,
                 active_step: Arc::new(AtomicBool::new(false)),
                 memory_projection_epoch: AtomicU64::new(0),
-                event_buffer_size: NonZeroUsize::new(16).expect("non-zero buffer"),
+                event_buffer_size,
                 max_parallel_tool_calls: NonZeroUsize::new(4).expect("non-zero limit"),
                 model_configs: RuntimeModelConfigs::default(),
                 primary_model_override: tokio::sync::RwLock::new(None),
@@ -101,6 +115,7 @@
                 permission_admission_source: None,
                 permissioned_process_runner_factory: None,
                 subagent_manager: None,
+                plan_controller,
                 session_store: None,
             }),
         }

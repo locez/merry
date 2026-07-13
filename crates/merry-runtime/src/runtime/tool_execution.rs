@@ -8,6 +8,7 @@ use crate::{
         is_low_risk_workspace_patch_proposal, is_read_only_shell_process_action_proposal,
     },
     permission::is_request_permissions_tool,
+    plan::tools::is_plan_tool,
     tool::{ActionProposalEvidence, ToolActionPreflight, ToolExecutionContext, ToolExecutionError},
 };
 use merry_core::{
@@ -20,6 +21,7 @@ use super::checkpoint_ref_tool::{
     execute_merry_read_checkpoint_ref_tool_call, is_merry_read_checkpoint_ref_tool,
 };
 use super::permission_execution::execute_permission_request_tool_call;
+use super::plan_tool_execution::execute_plan_tool_call;
 use super::process_execution::execute_admitted_process_action;
 use super::{
     DIAGNOSTIC_TOOL_ACTION_POLICY_DENIED, DIAGNOSTIC_TOOL_NOT_REGISTERED, RuntimeInner,
@@ -115,6 +117,10 @@ pub(super) async fn execute_tool_call_with_active_permit(
 
     if is_merry_read_checkpoint_ref_tool(pending.name()) {
         return execute_merry_read_checkpoint_ref_tool_call(inner, &pending, context).await;
+    }
+
+    if is_plan_tool(pending.name()) {
+        return execute_plan_tool_call(inner, &pending, context).await;
     }
 
     if is_request_permissions_tool(pending.name())

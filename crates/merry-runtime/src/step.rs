@@ -131,6 +131,7 @@ pub(crate) struct StepModelRequestParts<'a> {
     pub(crate) skill_catalog: Option<&'a SkillCatalog>,
     pub(crate) project_rules: Option<&'a ProjectRules>,
     pub(crate) task_anchor: Option<&'a TaskAnchor>,
+    pub(crate) plan_control: Option<&'a str>,
     pub(crate) context: &'a CompiledContext,
     pub(crate) transcript: &'a [TranscriptItemSnapshot],
     pub(crate) tool_specs: Vec<ToolSpec>,
@@ -147,6 +148,7 @@ pub(crate) fn compile_step_model_request(
         skill_catalog,
         project_rules,
         task_anchor,
+        plan_control,
         context,
         transcript,
         tool_specs,
@@ -165,6 +167,7 @@ pub(crate) fn compile_step_model_request(
         stable_prefix_message_count
             + usize::from(!checkpoint_snapshot.is_empty())
             + usize::from(task_anchor.is_some())
+            + usize::from(plan_control.is_some())
             + usize::from(!context_body_snapshot.is_empty())
             + transcript.len()
             + input.user_messages_for_request().len(),
@@ -211,6 +214,13 @@ pub(crate) fn compile_step_model_request(
         messages.push(ModelInputItem::Message(ModelMessage::new(
             ModelMessageRole::System,
             ModelContent::text(&task_anchor.to_dynamic_control_message_text())?,
+        )?));
+    }
+
+    if let Some(plan_control) = plan_control {
+        messages.push(ModelInputItem::Message(ModelMessage::new(
+            ModelMessageRole::System,
+            ModelContent::text(plan_control)?,
         )?));
     }
 

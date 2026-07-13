@@ -44,6 +44,7 @@ mod ledger;
 mod memory;
 mod model_config;
 mod permission;
+mod plan;
 mod process;
 mod process_runner;
 mod process_tool;
@@ -109,6 +110,11 @@ pub use permission::{
     PermissionAdmissionFuture, PermissionAdmissionReview, PermissionAdmissionSource,
     PermissionRequest, PermissionReviewMode, PermissionedAction, RequestedCapability,
     RequestedPathCapability, RuntimeTrustLevel, request_permissions_tool,
+};
+pub use plan::{
+    BeginPlanInput, BeginPlanOutput, ControlPlanAttemptInput, PlanChangeInput, PlanControllerError,
+    PlanDecompositionInput, PlanError, PlanExecutionIntent, PlanNodeInput, PlanNodeReferenceInput,
+    ReadPlanInput, ReportPlanAttemptInput, ReportPlanProgressInput, UpdatePlanInput,
 };
 pub use process::{
     AcceptedLocalWorkspaceProcessAdmission, LocalWorkspaceProcessSandboxProfile,

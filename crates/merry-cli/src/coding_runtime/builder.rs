@@ -175,6 +175,7 @@ fn configure_coding_loop_runtime_builder(
         });
     let mut builder = Runtime::builder(parent_session_id.clone())
         .automatic_compaction(options.automatic_compaction)
+        .coordinator_plan_tools()
         .model_provider(Arc::clone(&provider), model.clone());
     if let Some(role_provider) = options.context_compaction {
         builder = builder.model_provider_for_role(

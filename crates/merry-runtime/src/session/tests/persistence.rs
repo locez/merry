@@ -1,11 +1,15 @@
 use super::*;
 use crate::{
     ContextCompiler, ContextEntry, ContextEvidence, ContextSummary, FileSessionStore, ProjectRules,
-    SkillCatalog, TaskAnchor, UserImageInput, UserMessageInput, artifact::ArtifactContent,
+    SkillCatalog, TaskAnchor, UserImageInput, UserMessageInput,
+    artifact::ArtifactContent,
+    plan::{PlanChangeInput, PlanExecutionIntent, PlanNodeInput, PlanState, UpdatePlanInput},
     session::PromptHistoryProjection,
 };
 use merry_core::{
-    ArtifactKind, ArtifactRef, EvidenceLocator, EvidenceRef, ToolCallResult, ToolCallResultStatus,
+    ArtifactKind, ArtifactRef, EvidenceLocator, EvidenceRef, PlanActivationSource,
+    PlanExecutorPolicy, PlanHarnessSnapshot, PlanId, PlanRecoveryPolicySnapshot,
+    PlanResourcePolicySnapshot, ToolCallResult, ToolCallResultStatus,
 };
 use std::sync::Arc;
 
@@ -1152,4 +1156,89 @@ async fn session_state_saved_document_omits_construction_context_and_memory_stor
     assert!(!json.contains("memory_store"));
     assert!(!json.contains("activated_memories"));
     assert!(json.contains("resume task"));
+}
+
+fn persisted_test_plan() -> PlanState {
+    let mut plan = PlanState::empty(
+        PlanId::new("persisted-plan").expect("valid plan id"),
+        PlanActivationSource::Coordinator {
+            reason: "persist the plan".to_owned(),
+            governing_skill_id: None,
+        },
+        PlanResourcePolicySnapshot::default(),
+    );
+    plan.update(UpdatePlanInput {
+        reason: "define persisted root".to_owned(),
+        execution_intent: PlanExecutionIntent::ContinuePlanning,
+        coordinator_node_id: None,
+        max_concurrency_hint: Some(2),
+        change: PlanChangeInput::DefinePlan {
+            expected_plan_revision: 0,
+            root: PlanNodeInput {
+                id: None,
+                client_key: Some("root".to_owned()),
+                objective: "Persist and resume the plan".to_owned(),
+                acceptance: vec!["same ids and revisions after load".to_owned()],
+                executor_policy: PlanExecutorPolicy::Local,
+                harness: PlanHarnessSnapshot::default(),
+                recovery_policy: PlanRecoveryPolicySnapshot::default(),
+                depends_on: Vec::new(),
+                children: Vec::new(),
+            },
+        },
+    })
+    .expect("valid persisted plan");
+    plan
+}
+
+#[tokio::test]
+async fn session_state_current_format_without_plan_loads_with_none_and_rewrites_current_format() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = FileSessionStore::new(temp.path());
+    let document = literal_v2_document();
+    store
+        .write_state_bytes(
+            &session_id(),
+            &serde_json::to_vec_pretty(&document).expect("literal V2 document serializes"),
+        )
+        .await
+        .expect("V2 state writes");
+
+    let loaded = SessionState::load_from(&store, &session_id())
+        .await
+        .expect("V2 state loads without a plan");
+    assert!(loaded.active_plan().is_none());
+    loaded.save_to(&store).await.expect("migrated state saves");
+
+    let rewritten: serde_json::Value = serde_json::from_slice(
+        &store
+            .read_state_bytes(&session_id())
+            .await
+            .expect("rewritten state reads"),
+    )
+    .expect("rewritten state is JSON");
+    assert_eq!(rewritten["format_version"], 3);
+    assert_eq!(rewritten["active_plan"], serde_json::Value::Null);
+    assert_eq!(rewritten["terminal_plans"], serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn session_state_round_trip_preserves_active_plan_snapshot() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = FileSessionStore::new(temp.path());
+    let mut session = SessionState::new(session_id());
+    let plan = persisted_test_plan();
+    let expected = plan.snapshot().clone();
+    session.set_active_plan(plan);
+
+    session.save_to(&store).await.expect("plan session saves");
+    let loaded = SessionState::load_from(&store, &session_id())
+        .await
+        .expect("plan session loads");
+
+    assert_eq!(
+        loaded.active_plan().expect("active plan").snapshot(),
+        &expected
+    );
+    assert!(loaded.terminal_plans().is_empty());
 }

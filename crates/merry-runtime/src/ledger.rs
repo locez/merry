@@ -19,7 +19,7 @@ use thiserror::Error;
 /// External callers should prefer [`crate::Runtime::ledger_projection`] for
 /// read access and avoid depending on direct append/record mutation as stable
 /// API.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct TaskLedger {
     entries: Vec<LedgerEntryRef>,
     updates: Vec<LedgerUpdate>,

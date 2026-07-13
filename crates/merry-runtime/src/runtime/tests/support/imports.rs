@@ -24,6 +24,7 @@
         MemoryEvidence, MemoryId, MemoryItem, MemoryItemSelection, MemoryScope,
     };
     use crate::model_config::RuntimeModelConfigs;
+    use crate::plan::PlanController;
     use crate::process::{
         AcceptedLocalWorkspaceProcessAdmission, PermissionedProcessRunnerFactory,
         ProcessActionIntent, ProcessEnvPolicy, ProcessExecutionEvidence, ProcessExitStatus,

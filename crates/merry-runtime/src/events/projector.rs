@@ -200,6 +200,61 @@ impl RuntimeEventProjector {
                 diagnostic,
                 source,
             })),
+            RuntimeJournalPayload::PlanUpdated { snapshot, summary } => {
+                Ok(Some(RuntimeEvent::PlanUpdated {
+                    snapshot,
+                    summary,
+                    source,
+                }))
+            }
+            RuntimeJournalPayload::PlanPhaseChanged { plan_id, phase } => {
+                Ok(Some(RuntimeEvent::PlanPhaseChanged {
+                    plan_id,
+                    phase,
+                    source,
+                }))
+            }
+            RuntimeJournalPayload::PlanNodeReady {
+                plan_id,
+                node_id,
+                node_revision,
+            } => Ok(Some(RuntimeEvent::PlanNodeReady {
+                plan_id,
+                node_id,
+                node_revision,
+                source,
+            })),
+            RuntimeJournalPayload::PlanLeaseStarted { lease } => {
+                Ok(Some(RuntimeEvent::PlanLeaseStarted { lease, source }))
+            }
+            RuntimeJournalPayload::PlanProgressUpdated { progress } => {
+                Ok(Some(RuntimeEvent::PlanProgressUpdated { progress, source }))
+            }
+            RuntimeJournalPayload::PlanProgressReviewRequested {
+                plan_id,
+                attempt_id,
+                reason,
+            } => Ok(Some(RuntimeEvent::PlanProgressReviewRequested {
+                plan_id,
+                attempt_id,
+                reason,
+                source,
+            })),
+            RuntimeJournalPayload::PlanAttemptProgressReported { progress } => {
+                Ok(Some(RuntimeEvent::PlanAttemptProgressReported {
+                    progress,
+                    source,
+                }))
+            }
+            RuntimeJournalPayload::PlanDirectiveUpdated { directive } => {
+                Ok(Some(RuntimeEvent::PlanDirectiveUpdated {
+                    directive,
+                    source,
+                }))
+            }
+            RuntimeJournalPayload::PlanAttemptFinished { attempt } => {
+                Ok(Some(RuntimeEvent::PlanAttemptFinished { attempt, source }))
+            }
             RuntimeJournalPayload::Cancelled { diagnostic } => {
                 Ok(Some(RuntimeEvent::RunCancelled { diagnostic, source }))
             }

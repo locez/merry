@@ -65,14 +65,27 @@
         configs
     }
 
+    fn runtime_session_and_plan_controller(
+        session_id: SessionId,
+        event_buffer_size: NonZeroUsize,
+    ) -> (Arc<Mutex<SessionState>>, PlanController) {
+        let session = Arc::new(Mutex::new(SessionState::new(session_id)));
+        let (plan_controller, _events) =
+            PlanController::start(Arc::clone(&session), None, event_buffer_size);
+        (session, plan_controller)
+    }
+
     fn runtime_inner() -> RuntimeInner {
         let session_id = SessionId::new("runtime-send-test").expect("valid session id");
+        let event_buffer_size = NonZeroUsize::new(1).expect("non-zero buffer");
+        let (session, plan_controller) =
+            runtime_session_and_plan_controller(session_id.clone(), event_buffer_size);
         RuntimeInner {
             session_id: session_id.clone(),
-            session: Mutex::new(SessionState::new(session_id)),
+            session,
             active_step: Arc::new(AtomicBool::new(false)),
             memory_projection_epoch: AtomicU64::new(0),
-            event_buffer_size: NonZeroUsize::new(1).expect("non-zero buffer"),
+            event_buffer_size,
             max_parallel_tool_calls: NonZeroUsize::new(4).expect("non-zero limit"),
             model_configs: RuntimeModelConfigs::default(),
             primary_model_override: tokio::sync::RwLock::new(None),
@@ -93,6 +106,7 @@
             permission_admission_source: None,
             permissioned_process_runner_factory: None,
             subagent_manager: None,
+            plan_controller,
             session_store: None,
         }
     }

@@ -1,7 +1,9 @@
 use crate::{
     CheckpointDecision, ContextBudget, ContextBudgetPolicy, ContextCompiler,
     DEFAULT_CONTEXT_WINDOW_FALLBACK_TOKENS, ProjectRules, ResolvedContextWindow, RuntimeError,
-    SessionContextSnapshot, SkillCatalog, TaskAnchor, decide_checkpoint, resolve_context_window,
+    SessionContextSnapshot, SkillCatalog, TaskAnchor, decide_checkpoint,
+    plan::projection::coordinator_plan_control_message,
+    resolve_context_window,
     session::{SessionState, TranscriptItemSnapshot},
     step::{StepInput, StepModelRequestParts, compile_step_model_request},
     token_estimate::estimate_model_input_tokens,
@@ -91,6 +93,7 @@ pub(super) struct StepRequestInputs {
     skill_catalog: Option<SkillCatalog>,
     project_rules: Option<ProjectRules>,
     task_anchor: Option<TaskAnchor>,
+    plan_control: Option<String>,
     pub(super) transcript: Vec<TranscriptItemSnapshot>,
 }
 
@@ -104,6 +107,9 @@ impl StepRequestInputs {
             skill_catalog: session.skill_catalog(),
             project_rules: session.project_rules(),
             task_anchor: session.task_anchor(),
+            plan_control: session
+                .active_plan()
+                .map(|plan| coordinator_plan_control_message(plan.snapshot())),
             transcript,
         }
     }
@@ -146,6 +152,7 @@ pub(super) fn compile_step_request_from_inputs(
         skill_catalog: inputs.skill_catalog.as_ref(),
         project_rules: inputs.project_rules.as_ref(),
         task_anchor: inputs.task_anchor.as_ref(),
+        plan_control: inputs.plan_control.as_deref(),
         context: &compiled_context,
         transcript: &inputs.transcript,
         tool_specs,
@@ -177,6 +184,7 @@ pub(super) fn estimate_compaction_fixed_dynamic_tokens(
         skill_catalog: inputs.skill_catalog.as_ref(),
         project_rules: inputs.project_rules.as_ref(),
         task_anchor: inputs.task_anchor.as_ref(),
+        plan_control: inputs.plan_control.as_deref(),
         context: &replacement_context,
         transcript: &[],
         tool_specs: tool_specs.clone(),
@@ -190,6 +198,7 @@ pub(super) fn estimate_compaction_fixed_dynamic_tokens(
         skill_catalog: inputs.skill_catalog.as_ref(),
         project_rules: inputs.project_rules.as_ref(),
         task_anchor: inputs.task_anchor.as_ref(),
+        plan_control: inputs.plan_control.as_deref(),
         context: &archive_only_context,
         transcript: &[],
         tool_specs,

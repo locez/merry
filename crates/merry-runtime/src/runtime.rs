@@ -18,6 +18,10 @@ use crate::{
     memory::MemoryActivationSource,
     model_config::{ModelProviderConfig, RuntimeModelConfigs},
     permission::{PermissionAdmissionSource, PermissionReviewMode, RuntimeTrustLevel},
+    plan::{
+        BeginPlanInput, BeginPlanOutput, PlanController, PlanControllerError,
+        PlanControllerEventReceiver, PlanUpdateOutput, UpdatePlanInput,
+    },
     process::PermissionedProcessRunnerFactory,
     session::SessionState,
     step::{StepContext, StepInput},
@@ -46,6 +50,7 @@ mod journal_emission;
 mod memory_activation;
 mod model_output;
 mod permission_execution;
+mod plan_tool_execution;
 mod process_execution;
 mod provider_request;
 mod provider_step;
@@ -227,6 +232,32 @@ impl Runtime {
             Some(manager) => Some(manager.snapshot().await),
             None => None,
         }
+    }
+
+    /// Returns the latest committed active plan snapshot.
+    pub async fn plan_snapshot(
+        &self,
+    ) -> Result<Option<merry_core::PlanSnapshot>, PlanControllerError> {
+        self.inner.plan_controller.snapshot().await
+    }
+
+    /// Activates Plan Mode through the same runtime transition used by the coordinator tool.
+    pub async fn begin_plan(
+        &self,
+        input: BeginPlanInput,
+    ) -> Result<BeginPlanOutput, PlanControllerError> {
+        self.inner.plan_controller.begin(input).await
+    }
+
+    pub(crate) async fn update_plan_from_coordinator(
+        &self,
+        input: UpdatePlanInput,
+    ) -> Result<PlanUpdateOutput, PlanControllerError> {
+        self.inner.plan_controller.update(input).await
+    }
+
+    pub(crate) fn subscribe_plan_events(&self) -> PlanControllerEventReceiver {
+        self.inner.plan_controller.subscribe()
     }
 
     /// Returns the low-level Merry-managed capabilities configured for this runtime.
@@ -497,7 +528,7 @@ async fn persist_resume_safe_savepoint_if_configured(inner: &RuntimeInner) {
 
 struct RuntimeInner {
     session_id: SessionId,
-    session: Mutex<SessionState>,
+    session: Arc<Mutex<SessionState>>,
     active_step: Arc<AtomicBool>,
     memory_projection_epoch: AtomicU64,
     event_buffer_size: NonZeroUsize,
@@ -519,6 +550,7 @@ struct RuntimeInner {
     permission_admission_source: Option<Arc<dyn PermissionAdmissionSource>>,
     permissioned_process_runner_factory: Option<Arc<dyn PermissionedProcessRunnerFactory>>,
     subagent_manager: Option<SubagentManager>,
+    plan_controller: PlanController,
     session_store: Option<FileSessionStore>,
 }
 
@@ -696,6 +728,7 @@ mod tests {
     mod memory_activation_flow;
     mod model_role_flow;
     mod permission_execution;
+    mod plan_tool_execution;
     mod process_cancellation;
     mod process_execution;
     mod process_shell_execution;
