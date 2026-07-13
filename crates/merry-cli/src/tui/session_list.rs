@@ -8,6 +8,8 @@ use std::{
 use thiserror::Error;
 
 const META_FILE: &str = "meta.json";
+const SESSION_STATE_FILE: &str = "state.json";
+const PLAN_STATE_FILE: &str = "plan-state.json";
 
 #[derive(Debug, Error)]
 pub(crate) enum TuiSessionListError {
@@ -101,7 +103,9 @@ impl TuiSessionStore {
 
         for entry in entries {
             let entry = entry.map_err(|source| io_error(self.sessions_dir.clone(), source))?;
-            if !entry.path().join("state.json").is_file() {
+            if !entry.path().join(SESSION_STATE_FILE).is_file()
+                && !entry.path().join(PLAN_STATE_FILE).is_file()
+            {
                 continue;
             }
             let meta_path = entry.path().join(META_FILE);
@@ -158,9 +162,19 @@ mod tests {
             .session_state_store()
             .sessions_dir()
             .join(session_id.as_str())
-            .join("state.json");
+            .join(SESSION_STATE_FILE);
         fs::create_dir_all(path.parent().expect("state parent")).expect("state parent exists");
         fs::write(path, "{}").expect("state placeholder writes");
+    }
+
+    fn write_plan_state_placeholder(store: &TuiSessionStore, session_id: &SessionId) {
+        let path = store
+            .session_state_store()
+            .sessions_dir()
+            .join(session_id.as_str())
+            .join(PLAN_STATE_FILE);
+        fs::create_dir_all(path.parent().expect("state parent")).expect("state parent exists");
+        fs::write(path, "{}").expect("plan state placeholder writes");
     }
 
     #[test]
@@ -201,7 +215,7 @@ mod tests {
     }
 
     #[test]
-    fn session_store_skips_metadata_without_state_json() {
+    fn session_store_skips_metadata_without_any_durable_state() {
         let temp = tempfile::tempdir().expect("tempdir");
         let store = TuiSessionStore::new(temp.path().to_path_buf());
         let workspace = PathBuf::from("/repo");
@@ -218,5 +232,28 @@ mod tests {
             .expect("sessions list");
 
         assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn session_store_lists_plan_only_savepoints() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = TuiSessionStore::new(temp.path().to_path_buf());
+        let workspace = PathBuf::from("/repo");
+        let session_id = session_id("plan-only-session");
+        write_plan_state_placeholder(&store, &session_id);
+        store
+            .write_metadata(&TuiSessionMetadata::new(
+                session_id.clone(),
+                workspace.clone(),
+                10,
+            ))
+            .expect("plan-only metadata writes");
+
+        let sessions = store
+            .sessions_for_workspace(&workspace)
+            .expect("sessions list");
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, session_id);
     }
 }

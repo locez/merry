@@ -299,6 +299,8 @@ pub struct PlanAttemptProgressSnapshot {
     pub provider_request_in_flight: bool,
     pub tool_call_in_flight: bool,
     pub artifacts_created: usize,
+    #[serde(default)]
+    pub artifact_refs: Vec<ArtifactRef>,
     pub changed_paths: Vec<String>,
     pub acceptance_evidence: Vec<EvidenceRef>,
     pub repeated_failure_fingerprint: Option<String>,

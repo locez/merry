@@ -1,10 +1,11 @@
 use crate::plan::{
     PlanChangeInput, PlanError, PlanExecutionIntent, PlanNodeInput, PlanNodeReferenceInput,
-    UpdatePlanInput, domain::PlanState,
+    ReportPlanAttemptInput, UpdatePlanInput, domain::PlanState, execution::PlanAttemptActor,
 };
 use merry_core::{
-    PlanActivationSource, PlanExecutorPolicy, PlanHarnessSnapshot, PlanId, PlanPhase,
-    PlanRecoveryPolicySnapshot, PlanResourcePolicySnapshot,
+    PlanActivationSource, PlanApprovalRequirementKind, PlanAttemptOutcome,
+    PlanCapabilityEnvelopeSnapshot, PlanExecutorPolicy, PlanHarnessSnapshot, PlanId,
+    PlanNodeResult, PlanPhase, PlanRecoveryPolicySnapshot, PlanResourcePolicySnapshot, SessionId,
 };
 
 fn leaf(client_key: &str, objective: &str) -> PlanNodeInput {
@@ -272,4 +273,166 @@ fn replace_subtree_requires_current_target_node_revision() {
         error,
         PlanError::StaleNodeRevision { node_id, .. } if node_id == target_id
     ));
+}
+
+#[test]
+fn execution_contract_fingerprint_ignores_runtime_node_state() {
+    let mut plan = empty_plan();
+    plan.update(UpdatePlanInput {
+        reason: "initial executable plan".to_owned(),
+        execution_intent: PlanExecutionIntent::ContinuePlanning,
+        coordinator_node_id: None,
+        max_concurrency_hint: None,
+        change: PlanChangeInput::DefinePlan {
+            expected_plan_revision: 0,
+            root: root(Vec::new()),
+        },
+    })
+    .expect("plan definition succeeds");
+    plan.enter_execution(Default::default(), vec!["test authorization".to_owned()])
+        .expect("execution authorization succeeds");
+    let fingerprint = plan.contract_fingerprint();
+    let root_id = plan.snapshot().root_node_id.clone().expect("root exists");
+    let actor = PlanAttemptActor {
+        executor_session_id: SessionId::new("contract-worker").expect("valid session id"),
+    };
+    let started = plan
+        .start_attempt(&root_id, actor.clone(), 1_000)
+        .expect("attempt starts");
+    plan.report_attempt(
+        &actor,
+        ReportPlanAttemptInput {
+            lease_id: started.lease.lease_id,
+            expected_node_revision: started.attempt.node_revision,
+            outcome: PlanAttemptOutcome::Completed,
+            result: Some(PlanNodeResult {
+                conclusion: "Root acceptance is satisfied".to_owned(),
+                evidence_refs: Vec::new(),
+                artifact_refs: Vec::new(),
+                changed_paths: Vec::new(),
+                verification: vec!["deterministic check passed".to_owned()],
+                open_questions: Vec::new(),
+            }),
+            diagnostic: None,
+            decomposition: None,
+            acknowledged_directive_ids: Vec::new(),
+            applied_directive_ids: Vec::new(),
+        },
+        2_000,
+    )
+    .expect("attempt completes");
+
+    assert_eq!(plan.contract_fingerprint(), fingerprint);
+}
+
+#[test]
+fn root_objective_change_requires_reapproval() {
+    let mut plan = empty_plan();
+    plan.update(UpdatePlanInput {
+        reason: "initial executable plan".to_owned(),
+        execution_intent: PlanExecutionIntent::ContinuePlanning,
+        coordinator_node_id: None,
+        max_concurrency_hint: None,
+        change: PlanChangeInput::DefinePlan {
+            expected_plan_revision: 0,
+            root: root(Vec::new()),
+        },
+    })
+    .expect("plan definition succeeds");
+    plan.enter_execution(Default::default(), vec!["test authorization".to_owned()])
+        .expect("execution authorization succeeds");
+    let root_id = plan.snapshot().root_node_id.clone().expect("root exists");
+    let root_revision = plan.node(&root_id).expect("root node").updated_revision;
+    let mut replacement = root(Vec::new());
+    replacement.id = Some(root_id.clone());
+    replacement.client_key = None;
+    replacement.objective = "Complete a materially different objective".to_owned();
+
+    let output = plan
+        .update(UpdatePlanInput {
+            reason: "root objective changed".to_owned(),
+            execution_intent: PlanExecutionIntent::ExecuteIfAuthorized,
+            coordinator_node_id: None,
+            max_concurrency_hint: None,
+            change: PlanChangeInput::ReplaceSubtree {
+                target_node_id: root_id,
+                expected_node_revision: root_revision,
+                subtree: replacement,
+            },
+        })
+        .expect("root change is committed for review");
+
+    assert_eq!(output.snapshot.phase, PlanPhase::AwaitingApproval);
+    assert!(
+        output
+            .snapshot
+            .approval_requirements
+            .iter()
+            .any(|requirement| {
+                matches!(
+                    requirement.kind,
+                    PlanApprovalRequirementKind::RootObjectiveChange
+                )
+            })
+    );
+}
+
+#[test]
+fn capability_expansion_is_committed_as_an_approval_boundary() {
+    let mut plan = empty_plan();
+    let mut initial_root = root(Vec::new());
+    initial_root.harness.write_scope = vec!["crates/runtime".to_owned()];
+    plan.update(UpdatePlanInput {
+        reason: "initial executable plan".to_owned(),
+        execution_intent: PlanExecutionIntent::ContinuePlanning,
+        coordinator_node_id: None,
+        max_concurrency_hint: None,
+        change: PlanChangeInput::DefinePlan {
+            expected_plan_revision: 0,
+            root: initial_root,
+        },
+    })
+    .expect("plan definition succeeds");
+    plan.enter_execution(
+        PlanCapabilityEnvelopeSnapshot {
+            write_scope: vec!["crates/runtime".to_owned()],
+            ..PlanCapabilityEnvelopeSnapshot::default()
+        },
+        vec!["test authorization".to_owned()],
+    )
+    .expect("execution authorization succeeds");
+    let root_id = plan.snapshot().root_node_id.clone().expect("root exists");
+    let root_revision = plan.node(&root_id).expect("root node").updated_revision;
+    let mut replacement = root(Vec::new());
+    replacement.id = Some(root_id.clone());
+    replacement.client_key = None;
+    replacement.harness.write_scope = vec!["crates/cli".to_owned()];
+
+    let output = plan
+        .update(UpdatePlanInput {
+            reason: "request broader write scope".to_owned(),
+            execution_intent: PlanExecutionIntent::ExecuteIfAuthorized,
+            coordinator_node_id: None,
+            max_concurrency_hint: None,
+            change: PlanChangeInput::ReplaceSubtree {
+                target_node_id: root_id,
+                expected_node_revision: root_revision,
+                subtree: replacement,
+            },
+        })
+        .expect("capability proposal is committed for review");
+
+    assert_eq!(output.snapshot.phase, PlanPhase::AwaitingApproval);
+    assert!(
+        output
+            .snapshot
+            .approval_requirements
+            .iter()
+            .any(|requirement| {
+                matches!(
+                    requirement.kind,
+                    PlanApprovalRequirementKind::CapabilityOrPermissionExpansion
+                )
+            })
+    );
 }

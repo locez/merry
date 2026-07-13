@@ -4,6 +4,7 @@ use super::{
         ControlPlanAttemptInput, PlanDecompositionInput, ReportPlanAttemptInput,
         ReportPlanProgressInput,
     },
+    recovery::retry_backoff_elapsed,
     validation,
 };
 use crate::context::stable_content_hash;
@@ -59,6 +60,10 @@ pub(crate) struct PlanAttemptReportOutput {
 
 impl PlanState {
     pub(crate) fn ready_node_ids(&self) -> Vec<PlanNodeId> {
+        self.ready_node_ids_at(u64::MAX)
+    }
+
+    pub(crate) fn ready_node_ids_at(&self, now_ms: u64) -> Vec<PlanNodeId> {
         if self.snapshot.phase != PlanPhase::Executing
             || self.snapshot.scheduler_status != PlanSchedulerStatus::Active
         {
@@ -91,6 +96,7 @@ impl PlanState {
             .filter(|node| !live_leases.contains(&node.id))
             .filter(|node| node.depends_on.iter().all(|id| completed.contains(id)))
             .filter(|node| self.node_execution_shape_is_ready(node))
+            .filter(|node| retry_backoff_elapsed(&self.snapshot, node, now_ms))
             .map(|node| node.id.clone())
             .collect::<Vec<_>>();
         ready.sort_by_key(|id| self.node_order_key(id));
@@ -111,7 +117,7 @@ impl PlanState {
             });
         }
         if candidate.snapshot.scheduler_status != PlanSchedulerStatus::Active
-            || !candidate.ready_node_ids().contains(node_id)
+            || !candidate.ready_node_ids_at(now_ms).contains(node_id)
         {
             return Err(PlanError::NodeNotReady {
                 node_id: node_id.clone(),
@@ -192,6 +198,7 @@ impl PlanState {
             provider_request_in_flight: false,
             tool_call_in_flight: false,
             artifacts_created: 0,
+            artifact_refs: Vec::new(),
             changed_paths: Vec::new(),
             acceptance_evidence: Vec::new(),
             repeated_failure_fingerprint: None,
@@ -383,6 +390,11 @@ impl PlanState {
         progress.artifacts_created = progress
             .artifacts_created
             .saturating_add(input.artifact_refs.len());
+        for artifact in input.artifact_refs {
+            if !progress.artifact_refs.contains(&artifact) {
+                progress.artifact_refs.push(artifact);
+            }
+        }
         for evidence in input.evidence_refs {
             if !progress.acceptance_evidence.contains(&evidence) {
                 progress.acceptance_evidence.push(evidence);
@@ -497,7 +509,7 @@ impl PlanState {
         all_directives.append(&mut expired_directives);
         candidate.refresh_parent_states(revision);
         candidate.refresh_terminal_phase();
-        let ready_node_ids = candidate.ready_node_ids();
+        let ready_node_ids = candidate.ready_node_ids_at(now_ms);
         let attempt = candidate.snapshot.attempts[attempt_index].clone();
         let snapshot = candidate.snapshot.clone();
         *self = candidate;
@@ -896,7 +908,8 @@ impl PlanState {
     pub(super) fn contract_fingerprint(&self) -> String {
         #[derive(serde::Serialize)]
         struct Contract<'a> {
-            root: Option<&'a merry_core::PlanNodeSnapshot>,
+            root_objective: Option<&'a str>,
+            root_acceptance: Option<&'a [String]>,
             envelope: Option<&'a PlanCapabilityEnvelopeSnapshot>,
         }
         let root = self
@@ -905,7 +918,8 @@ impl PlanState {
             .as_ref()
             .and_then(|root_id| self.snapshot.nodes.iter().find(|node| &node.id == root_id));
         let bytes = serde_json::to_vec(&Contract {
-            root,
+            root_objective: root.map(|root| root.objective.as_str()),
+            root_acceptance: root.map(|root| root.acceptance.as_slice()),
             envelope: self.snapshot.authorized_capability_envelope.as_ref(),
         })
         .expect("execution contract serializes");

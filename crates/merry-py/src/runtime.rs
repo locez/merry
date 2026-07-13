@@ -125,6 +125,8 @@ struct NativeInteractiveRun {
     driver_handle: thread::JoinHandle<()>,
 }
 
+// This is the hot cross-thread event path; boxing would allocate for every streamed event.
+#[allow(clippy::large_enum_variant)]
 enum StreamRunnerMessage {
     Event(RuntimeEvent),
     BridgeToolRequest(PendingToolCall),

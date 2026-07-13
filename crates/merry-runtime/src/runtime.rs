@@ -868,6 +868,7 @@ mod tests {
     mod memory_activation_flow;
     mod model_role_flow;
     mod permission_execution;
+    mod plan_lifecycle;
     mod plan_scheduler;
     mod plan_tool_execution;
     mod process_cancellation;

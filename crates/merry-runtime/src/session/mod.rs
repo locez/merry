@@ -23,6 +23,7 @@ mod judgments;
 mod messages;
 mod model_turns;
 mod persistence;
+mod plan_persistence;
 mod plan_tool_commit;
 mod recording;
 mod tool_calls;

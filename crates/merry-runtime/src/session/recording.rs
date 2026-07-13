@@ -4,12 +4,14 @@ use super::{
 };
 use crate::{
     RuntimeError,
-    artifact::{ArtifactContent, ArtifactError},
+    artifact::{ArtifactContent, ArtifactError, ArtifactRegistry},
     ledger::LedgerFactKind,
+    plan::{PlanArtifactPromotion, PlanError},
 };
 use merry_core::{
     ArtifactId, ArtifactKind, ArtifactRef, EvidenceRef, RuntimeJournalEvent, RuntimeJournalPayload,
 };
+use std::collections::BTreeSet;
 
 impl SessionState {
     pub(crate) fn record_artifact_state(
@@ -83,27 +85,104 @@ impl SessionState {
         &self,
         evidence_refs: &[EvidenceRef],
         artifact_refs: &[ArtifactRef],
-    ) -> Result<(), crate::plan::PlanError> {
-        for artifact in artifact_refs {
-            let stored = self.artifacts.read_ref(artifact.id()).map_err(|_| {
-                crate::plan::PlanError::MissingArtifactRef {
-                    artifact_id: artifact.id().clone(),
+    ) -> Result<(), PlanError> {
+        Self::validate_plan_refs_in(&self.artifacts, evidence_refs, artifact_refs)
+    }
+
+    pub(crate) fn collect_plan_artifact_records(
+        &self,
+        evidence_refs: &[EvidenceRef],
+        artifact_refs: &[ArtifactRef],
+    ) -> Result<Vec<(ArtifactRef, ArtifactContent)>, PlanError> {
+        self.validate_plan_refs(evidence_refs, artifact_refs)?;
+        let ids = artifact_refs
+            .iter()
+            .map(|artifact| artifact.id().clone())
+            .chain(
+                evidence_refs
+                    .iter()
+                    .map(|evidence| evidence.artifact_id.clone()),
+            )
+            .collect::<BTreeSet<_>>();
+        ids.into_iter()
+            .map(|id| {
+                let artifact = self
+                    .artifacts
+                    .read_ref(&id)
+                    .expect("validated plan artifact remains present")
+                    .clone();
+                let content = self
+                    .artifacts
+                    .read_content(&id)
+                    .expect("validated plan artifact content remains present")
+                    .clone();
+                Ok((artifact, content))
+            })
+            .collect()
+    }
+
+    pub(crate) fn artifacts_with_plan_promotions(
+        &self,
+        promotions: &[PlanArtifactPromotion],
+    ) -> Result<ArtifactRegistry, PlanError> {
+        let mut artifacts = self.artifacts.clone();
+        for promotion in promotions {
+            match artifacts.read_record(promotion.artifact.id()) {
+                Ok(existing)
+                    if existing.artifact() == &promotion.artifact
+                        && existing.content() == &promotion.content => {}
+                Ok(_) => {
+                    return Err(PlanError::ArtifactPromotionConflict {
+                        artifact_id: promotion.artifact.id().clone(),
+                    });
                 }
-            })?;
+                Err(ArtifactError::MissingArtifact { .. }) => {
+                    artifacts
+                        .record(promotion.artifact.clone(), promotion.content.clone())
+                        .map_err(|_| PlanError::ArtifactPromotionConflict {
+                            artifact_id: promotion.artifact.id().clone(),
+                        })?;
+                }
+                Err(_) => {
+                    return Err(PlanError::ArtifactPromotionConflict {
+                        artifact_id: promotion.artifact.id().clone(),
+                    });
+                }
+            }
+        }
+        Ok(artifacts)
+    }
+
+    pub(crate) fn validate_plan_refs_in(
+        artifacts: &ArtifactRegistry,
+        evidence_refs: &[EvidenceRef],
+        artifact_refs: &[ArtifactRef],
+    ) -> Result<(), PlanError> {
+        for artifact in artifact_refs {
+            let stored =
+                artifacts
+                    .read_ref(artifact.id())
+                    .map_err(|_| PlanError::MissingArtifactRef {
+                        artifact_id: artifact.id().clone(),
+                    })?;
             if stored != artifact {
-                return Err(crate::plan::PlanError::MissingArtifactRef {
+                return Err(PlanError::MissingArtifactRef {
                     artifact_id: artifact.id().clone(),
                 });
             }
         }
         for evidence in evidence_refs {
-            self.artifacts.validate_evidence(evidence).map_err(|_| {
-                crate::plan::PlanError::InvalidEvidenceRef {
+            artifacts
+                .validate_evidence(evidence)
+                .map_err(|_| PlanError::InvalidEvidenceRef {
                     artifact_id: evidence.artifact_id.clone(),
-                }
-            })?;
+                })?;
         }
         Ok(())
+    }
+
+    pub(crate) fn replace_artifacts_for_plan_commit(&mut self, artifacts: ArtifactRegistry) {
+        self.artifacts = artifacts;
     }
 
     pub(super) fn trace_artifact_record(

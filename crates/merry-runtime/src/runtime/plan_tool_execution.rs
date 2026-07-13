@@ -1,8 +1,9 @@
 use crate::{
     ArtifactContent, PlanControllerError, PlanError, RuntimeError,
     plan::{
-        BeginPlanInput, ControlPlanAttemptInput, PlanAttemptToolOutput, PlanProgressToolOutput,
-        ReadPlanInput, ReportPlanAttemptInput, ReportPlanProgressInput, UpdatePlanInput,
+        BeginPlanInput, ControlPlanAttemptInput, PlanArtifactPromotion, PlanAttemptToolOutput,
+        PlanProgressToolOutput, PlanWorkerControl, ReadPlanInput, ReportPlanAttemptInput,
+        ReportPlanProgressInput, UpdatePlanInput,
         execution::PlanAttemptActor,
         tools::{
             BEGIN_PLAN_TOOL_NAME, CONTROL_PLAN_ATTEMPT_TOOL_NAME, READ_PLAN_TOOL_NAME,
@@ -13,10 +14,11 @@ use crate::{
     tool::ToolExecutionContext,
 };
 use merry_core::{
-    ErrorInfo, PendingToolCall, PlanNodeId, PlanSnapshot, RuntimeJournalEvent, ToolCallResultStatus,
+    ArtifactId, ArtifactRef, ErrorInfo, PendingToolCall, PlanNodeId, PlanSnapshot,
+    RuntimeJournalEvent, ToolCallResultStatus,
 };
 use serde::{Serialize, de::DeserializeOwned};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::{RuntimeInner, persist_resume_safe_savepoint_if_configured};
 
@@ -82,7 +84,15 @@ pub(super) async fn execute_plan_tool_call(
         REPORT_PLAN_PROGRESS_TOOL_NAME => {
             let input = input_from_call::<ReportPlanProgressInput>(inner, pending)?;
             if let Some(control) = inner.worker_plan_control.as_ref() {
-                return match control.report_progress(input, unix_time_ms()).await {
+                let (input, promotions) =
+                    match prepare_worker_progress_report(inner, control, input).await {
+                        Ok(prepared) => prepared,
+                        Err(error) => return submit_controller_error(inner, pending, error).await,
+                    };
+                return match control
+                    .report_progress(input, promotions, unix_time_ms())
+                    .await
+                {
                     Ok(committed) => {
                         let output = PlanProgressToolOutput {
                             plan_id: committed.output.snapshot.plan_id.clone(),
@@ -113,7 +123,15 @@ pub(super) async fn execute_plan_tool_call(
         REPORT_PLAN_ATTEMPT_TOOL_NAME => {
             let input = input_from_call::<ReportPlanAttemptInput>(inner, pending)?;
             if let Some(control) = inner.worker_plan_control.as_ref() {
-                return match control.report_attempt(input, unix_time_ms()).await {
+                let (input, promotions) =
+                    match prepare_worker_attempt_report(inner, control, input).await {
+                        Ok(prepared) => prepared,
+                        Err(error) => return submit_controller_error(inner, pending, error).await,
+                    };
+                return match control
+                    .report_attempt(input, promotions, unix_time_ms())
+                    .await
+                {
                     Ok(committed) => {
                         let output = PlanAttemptToolOutput {
                             plan_id: committed.output.snapshot.plan_id.clone(),
@@ -151,6 +169,94 @@ pub(super) async fn execute_plan_tool_call(
                 pending.name()
             ),
         }),
+    }
+}
+
+async fn prepare_worker_progress_report(
+    inner: &RuntimeInner,
+    control: &PlanWorkerControl,
+    mut input: ReportPlanProgressInput,
+) -> Result<(ReportPlanProgressInput, Vec<PlanArtifactPromotion>), PlanControllerError> {
+    let records = {
+        let session = inner.session.lock().await;
+        session.collect_plan_artifact_records(&input.evidence_refs, &input.artifact_refs)?
+    };
+    let (mapping, promotions) = worker_artifact_promotions(control, records)?;
+    rewrite_plan_refs(&mapping, &mut input.evidence_refs, &mut input.artifact_refs);
+    Ok((input, promotions))
+}
+
+async fn prepare_worker_attempt_report(
+    inner: &RuntimeInner,
+    control: &PlanWorkerControl,
+    mut input: ReportPlanAttemptInput,
+) -> Result<(ReportPlanAttemptInput, Vec<PlanArtifactPromotion>), PlanControllerError> {
+    let Some(result) = input.result.as_mut() else {
+        return Ok((input, Vec::new()));
+    };
+    let records = {
+        let session = inner.session.lock().await;
+        session.collect_plan_artifact_records(&result.evidence_refs, &result.artifact_refs)?
+    };
+    let (mapping, promotions) = worker_artifact_promotions(control, records)?;
+    rewrite_plan_refs(
+        &mapping,
+        &mut result.evidence_refs,
+        &mut result.artifact_refs,
+    );
+    Ok((input, promotions))
+}
+
+fn worker_artifact_promotions(
+    control: &PlanWorkerControl,
+    records: Vec<(ArtifactRef, ArtifactContent)>,
+) -> Result<
+    (
+        BTreeMap<ArtifactId, ArtifactRef>,
+        Vec<PlanArtifactPromotion>,
+    ),
+    PlanControllerError,
+> {
+    let mut mapping = BTreeMap::new();
+    let mut targets = BTreeMap::<ArtifactId, ArtifactId>::new();
+    let mut promotions = Vec::with_capacity(records.len());
+    for (source, content) in records {
+        let promoted = control.promoted_artifact_ref(&source);
+        if let Some(existing_source) = targets.insert(promoted.id().clone(), source.id().clone())
+            && existing_source != *source.id()
+        {
+            return Err(PlanControllerError::Plan {
+                source: PlanError::ArtifactPromotionConflict {
+                    artifact_id: promoted.id().clone(),
+                },
+            });
+        }
+        mapping.insert(source.id().clone(), promoted.clone());
+        promotions.push(PlanArtifactPromotion {
+            artifact: promoted,
+            content,
+        });
+    }
+    Ok((mapping, promotions))
+}
+
+fn rewrite_plan_refs(
+    mapping: &BTreeMap<ArtifactId, ArtifactRef>,
+    evidence_refs: &mut [merry_core::EvidenceRef],
+    artifact_refs: &mut [ArtifactRef],
+) {
+    for evidence in evidence_refs {
+        evidence.artifact_id = mapping
+            .get(&evidence.artifact_id)
+            .expect("every validated worker evidence artifact was promoted")
+            .id()
+            .clone();
+    }
+    for artifact in artifact_refs {
+        *artifact = mapping
+            .get(artifact.id())
+            .expect("every validated worker artifact was promoted")
+            .clone();
     }
 }
 
@@ -522,5 +628,6 @@ fn plan_error_code(error: &PlanError) -> &'static str {
         PlanError::StaleDirectiveTarget => "plan_directive_target_stale",
         PlanError::MissingArtifactRef { .. } => "plan_artifact_ref_missing",
         PlanError::InvalidEvidenceRef { .. } => "plan_evidence_ref_invalid",
+        PlanError::ArtifactPromotionConflict { .. } => "plan_artifact_promotion_conflict",
     }
 }

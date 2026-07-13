@@ -22,6 +22,8 @@ use tokio_util::sync::CancellationToken;
 /// One atomic enqueue item in the internal journal channel.
 pub(crate) struct RuntimeJournalEventBatch(RuntimeJournalEventBatchKind);
 
+// The single-event path is hot; boxing it would add an allocation to every journal emission.
+#[allow(clippy::large_enum_variant)]
 enum RuntimeJournalEventBatchKind {
     Single(RuntimeJournalEvent),
     Multiple(Vec<RuntimeJournalEvent>),
@@ -60,6 +62,7 @@ impl From<RuntimeJournalEvent> for RuntimeJournalEventBatch {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 enum RuntimeJournalEventBatchIter {
     Single(Option<RuntimeJournalEvent>),
     Multiple(std::vec::IntoIter<RuntimeJournalEvent>),
