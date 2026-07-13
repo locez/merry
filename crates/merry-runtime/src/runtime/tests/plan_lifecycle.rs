@@ -11,7 +11,7 @@ use merry_core::{
 use std::time::Duration;
 
 #[tokio::test(flavor = "current_thread")]
-async fn local_ready_node_is_leased_to_the_root_coordinator_session() {
+async fn local_ready_node_runs_without_a_subagent_lease() {
     let root_session = session_id("runtime-plan-local-lane");
     let runtime = Runtime::builder(root_session.clone())
         .coordinator_plan_tools()
@@ -45,8 +45,10 @@ async fn local_ready_node_is_leased_to_the_root_coordinator_session() {
                 .await
                 .expect("snapshot read succeeds")
                 .expect("plan exists");
-            if snapshot.leases.iter().any(|lease| {
-                lease.node_id == root_id && lease.status == merry_core::PlanLeaseStatus::Live
+            if snapshot.attempts.iter().any(|attempt| {
+                attempt.node_id == root_id
+                    && attempt.executor_session_id == root_session
+                    && attempt.outcome.is_none()
             }) {
                 break snapshot;
             }
@@ -54,13 +56,11 @@ async fn local_ready_node_is_leased_to_the_root_coordinator_session() {
         }
     })
     .await
-    .expect("local lease should be reserved");
-    let lease = snapshot
-        .leases
-        .iter()
-        .find(|lease| lease.node_id == root_id)
-        .expect("root lease exists");
-    assert_eq!(lease.executor_session_id, root_session);
+    .expect("local attempt should be reserved");
+    assert!(
+        snapshot.leases.is_empty(),
+        "coordinator-owned local work must not create a subagent lease"
+    );
     assert_eq!(
         snapshot
             .nodes
@@ -70,6 +70,86 @@ async fn local_ready_node_is_leased_to_the_root_coordinator_session() {
             .status,
         PlanNodeStatus::InProgress
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn resume_requeues_a_persisted_local_attempt_without_creating_a_lease() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = crate::FileSessionStore::new(temp.path());
+    let session_id = session_id("runtime-plan-resume-local-attempt");
+    let runtime = Runtime::builder(session_id.clone())
+        .session_store(store.clone())
+        .coordinator_plan_tools()
+        .build()
+        .expect("runtime builds");
+    runtime
+        .begin_plan(BeginPlanInput {
+            reason: "prepare persisted local attempt".to_owned(),
+            governing_skill_id: None,
+        })
+        .await
+        .expect("plan begins");
+    let update = runtime
+        .update_plan(single_local_plan_input())
+        .await
+        .expect("plan definition succeeds");
+    let root_id = update.client_key_ids["root"].clone();
+    let mut events = runtime.subscribe_plan_events();
+    runtime
+        .authorize_plan_execution(
+            PlanCapabilityEnvelopeSnapshot::default(),
+            vec!["test authorization".to_owned()],
+        )
+        .await
+        .expect("plan is authorized");
+    let original_attempt_id = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let snapshot = runtime
+                .plan_snapshot()
+                .await
+                .expect("snapshot read succeeds")
+                .expect("plan exists");
+            if let Some(attempt) = snapshot
+                .attempts
+                .iter()
+                .find(|attempt| attempt.node_id == root_id && attempt.outcome.is_none())
+            {
+                break attempt.attempt_id.clone();
+            }
+            let _ = events.recv().await;
+        }
+    })
+    .await
+    .expect("local attempt starts");
+    runtime
+        .save_session_to(store.clone())
+        .await
+        .expect("session saves with local attempt");
+    drop(runtime);
+
+    let resumed = Runtime::builder(session_id)
+        .coordinator_plan_tools()
+        .resume_from_store(store)
+        .await
+        .expect("runtime resumes");
+    let recovered = resumed
+        .plan_snapshot()
+        .await
+        .expect("snapshot read succeeds")
+        .expect("plan exists");
+    assert!(recovered.attempts.iter().any(|attempt| {
+        attempt.attempt_id == original_attempt_id
+            && attempt.outcome == Some(PlanAttemptOutcome::Interrupted)
+    }));
+    assert!(recovered.attempts.iter().any(|attempt| {
+        attempt.attempt_id != original_attempt_id
+            && attempt.node_id == root_id
+            && attempt.outcome.is_none()
+            && attempt.lease_id.is_none()
+    }));
+
+    assert!(recovered.leases.is_empty());
+    assert_eq!(recovered.attempts.len(), 2);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -110,7 +190,7 @@ async fn resume_interrupts_stale_leases_without_replaying_completed_nodes() {
         .expect("plan authorization succeeds");
 
     let completed_actor = PlanAttemptActor {
-        executor_session_id: merry_core::SessionId::new("completed-worker").unwrap(),
+        executor_session_id: merry_core::SessionId::new("completed-subagent").unwrap(),
     };
     let completed = runtime
         .inner
@@ -139,7 +219,7 @@ async fn resume_interrupts_stale_leases_without_replaying_completed_nodes() {
         .expect("completed attempt commits");
 
     let stale_actor = PlanAttemptActor {
-        executor_session_id: merry_core::SessionId::new("stale-worker").unwrap(),
+        executor_session_id: merry_core::SessionId::new("stale-subagent").unwrap(),
     };
     let stale = runtime
         .inner
@@ -154,8 +234,6 @@ async fn resume_interrupts_stale_leases_without_replaying_completed_nodes() {
         .directive(
             ControlPlanAttemptInput {
                 attempt_id: stale.attempt.attempt_id.clone(),
-                expected_lease_id: stale.lease.lease_id.clone(),
-                expected_node_revision: stale.lease.node_revision,
                 kind: PlanDirectiveKind::Converge,
                 reason: "finish the current acceptance target".to_owned(),
                 instruction: Some("do not expand further".to_owned()),
@@ -178,26 +256,19 @@ async fn resume_interrupts_stale_leases_without_replaying_completed_nodes() {
         .resume_from_store(store.clone())
         .await
         .expect("runtime resumes");
-    let recovered = tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            let snapshot = resumed
-                .plan_snapshot()
-                .await
-                .expect("snapshot read succeeds")
-                .expect("plan exists");
-            if snapshot
-                .attempts
-                .iter()
-                .find(|attempt| attempt.attempt_id == stale.attempt.attempt_id)
-                .is_some_and(|attempt| attempt.outcome == Some(PlanAttemptOutcome::Interrupted))
-            {
-                break snapshot;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("stale lease is interrupted after resume");
+    let recovered = resumed
+        .plan_snapshot()
+        .await
+        .expect("snapshot read succeeds")
+        .expect("plan exists");
+    assert!(
+        recovered
+            .attempts
+            .iter()
+            .find(|attempt| attempt.attempt_id == stale.attempt.attempt_id)
+            .is_some_and(|attempt| attempt.outcome == Some(PlanAttemptOutcome::Interrupted)),
+        "resume must not return before stale attempt recovery commits"
+    );
 
     assert_eq!(
         recovered
@@ -262,13 +333,11 @@ async fn resume_interrupts_stale_leases_without_replaying_completed_nodes() {
 }
 
 fn completed_report(
-    lease_id: merry_core::PlanLeaseId,
-    node_revision: u64,
+    _lease_id: merry_core::PlanLeaseId,
+    _node_revision: u64,
     conclusion: &str,
 ) -> ReportPlanAttemptInput {
     ReportPlanAttemptInput {
-        lease_id,
-        expected_node_revision: node_revision,
         outcome: PlanAttemptOutcome::Completed,
         result: Some(PlanNodeResult {
             conclusion: conclusion.to_owned(),

@@ -48,7 +48,7 @@ cargo test --all
 - Bounded parallel-safe waves, exclusive barriers, ordered continuation
   results, bridge-call matching, and cancellation handling.
 - Durable recursive plans with runtime-owned revisions, approvals, attempts,
-  leases, directives, retry/recovery policy, scoped concurrent workers, lazy
+  leases, directives, retry/recovery policy, scoped concurrent subagents, lazy
   subtree expansion, exact result artifacts, and crash-safe resume.
 
 ### Providers

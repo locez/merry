@@ -16,7 +16,7 @@ The main coordinator, a governing skill, or the user can activate Plan Mode;
 the model can create a recursive durable task tree without changing the
 session's provider-visible tool contract, the user can inspect and revise that
 tree in the TUI, and the runtime can execute ready leaves concurrently through
-bounded workers while results, failures, revisions, and recovery remain durable
+bounded subagents while results, failures, revisions, and recovery remain durable
 and visible.
 ```
 
@@ -61,20 +61,22 @@ The following decisions were confirmed during the design discussion:
   tail. Unrelated sibling transcripts are not inherited.
 - The long-term scheduler is hybrid: the model declares node execution intent
   and harness constraints; the runtime decides when a ready leaf can safely
-  receive an execution lease.
-- A worker may directly decompose its leased subtree inside the authorized
+  receive an execution attempt. Delegated attempts additionally receive a
+  subagent lease.
+- A subagent may directly decompose its leased subtree inside the authorized
   envelope. Routine local expansion does not require main-coordinator review.
 - The main coordinator may send persisted attempt-scoped steering only for
   anomalies, user intervention, requested review, or global coordination; it
-  does not supervise routine worker reasoning.
+  does not supervise routine subagent reasoning.
 - One runtime-owned `PlanController` serializes every plan mutation and durable
-  commit from coordinator, workers, user controls, and scheduler logic.
+  commit from coordinator, subagents, user controls, and scheduler logic.
 - Plan authoring uses a stable hybrid update contract: full-tree `DefinePlan`
   while planning and node-revision-guarded `ReplaceSubtree` for mutable future
   work during execution.
-- One attempt spans multiple model turns and tool calls under one lease. Yield,
-  terminal outcome, lease loss, interruption, or decomposition ends it; retries
-  and child work receive new attempts.
+- One attempt spans multiple model turns and tool calls under one runtime-owned
+  execution binding. Yield, terminal outcome, delegated lease loss,
+  interruption, or decomposition ends it; retries and child work receive new
+  attempts.
 - Failure recovery is typed: transient failures may retry, semantic failures
   return to parent replanning, and boundary changes block for the user.
 - The TUI uses a hybrid layout: timeline plus persistent plan tree on suitable
@@ -94,8 +96,8 @@ waiting session
 -> runtime executes directly when existing authorization covers the plan,
    otherwise it enters awaiting approval with explicit reasons
 -> runtime derives dependency-ready leaves
--> bounded workers receive scoped execution leases and run concurrently
--> a worker may finish its leaf or lazily expand descendants under that leaf
+-> bounded subagents receive scoped execution leases and run concurrently
+-> a subagent may finish its leaf or lazily expand descendants under that leaf
 -> compact results and exact evidence fold into parent nodes
 -> typed failures retry, trigger replanning, or block at approval boundaries
 -> newly ready leaves continue until root acceptance completes or blocks
@@ -103,7 +105,7 @@ waiting session
 ```
 
 The scheduler reuses or refactors the existing child-runtime/subagent execution
-infrastructure. Workers remain bounded executors and do not own the global task
+infrastructure. Subagents remain bounded executors and do not own the global task
 tree.
 
 ## Acceptance Scenario
@@ -142,7 +144,7 @@ The primary deterministic acceptance test uses a fake provider and no network:
     persisted `converge` directive, runtime waits for the next safe provider
     boundary, and the child acknowledges and applies it without exposing its
     transcript.
-16. Two worker terminal reports arriving concurrently are serialized by
+16. Two subagent terminal reports arriving concurrently are serialized by
     `PlanController` without lost updates or scheduling before persistence.
 17. A dependent validation node starts only after prerequisite results are
     durably committed.
@@ -160,25 +162,25 @@ The primary deterministic acceptance test uses a fake provider and no network:
   recovery policies, progress, results, and revisions.
 - A single-writer `PlanController` with bounded typed command channels and
   resume-safe transaction ordering.
-- Stable coordinator/worker plan tools with optimistic revision and lease
+- Stable coordinator/subagent plan tools with optimistic revision and lease
   checking, full-tree `DefinePlan`, execution-time `ReplaceSubtree`, progress,
   terminal reporting, and attempt-scoped steering.
 - Durable session persistence and public runtime events for plan state.
-- Plan-aware context projection for the coordinator and workers.
+- Plan-aware context projection for the coordinator and subagents.
 - Autonomous or user-triggered plan activation, stable coordinator tool
   definitions, permission-independent plan state, direct execution inside
   existing authorization, and explicit TUI approval only at real boundaries.
 - Future-subtree revision with immutable completed/running node protection.
 - A central bounded scheduler that derives ready leaves, rejects capability or
   write-scope conflicts, and assigns execution leases.
-- Worker-scoped lazy decomposition: a worker may atomically report direct
+- Subagent-scoped lazy decomposition: a subagent may atomically report direct
   children below its leased node and release the current attempt.
 - Concurrent child execution, compact result folding, dependency release, and
   parent verification.
 - Typed bounded retry, coordinator replanning, boundary blocking, lease expiry,
   and crash/restart recovery.
 - Timeline plan-revision/steering entries, a responsive plan tree, and a
-  read-only node inspector with worker, attempt, progress, directive, and
+  read-only node inspector with subagent, attempt, progress, directive, and
   approval state.
 - Deterministic runtime, scheduler, persistence, context, event, and TUI tests.
 
@@ -186,12 +188,12 @@ The primary deterministic acceptance test uses a fake provider and no network:
 
 - Direct child-to-child spawning. Task recursion is intentionally owned by the
   central plan scheduler rather than by an agent process hierarchy.
-- Multi-host or distributed workers, work stealing, and unbounded concurrency.
+- Multi-host or distributed subagents, work stealing, and unbounded concurrency.
 - Runtime invention of semantic tasks or harnesses without a model-authored
   plan contract.
 - Cross-plan dependencies, arbitrary external workflow graphs, and intelligent
   merge/conflict resolution.
-- Deep Python callbacks from worker runtime internals.
+- Deep Python callbacks from subagent runtime internals.
 - A web or graphical plan UI.
 
 These are separate capabilities, not missing parts of the approved recursive
@@ -224,21 +226,21 @@ serialization boundary; do not rename the domain model or public runtime API.
 - Provider crates receive ordinary Merry tool schemas and normalized events;
   they do not receive provider-specific plan types.
 - Existing subagent/child-runtime infrastructure is refactored behind the plan
-  scheduler as bounded worker execution. It does not become the owner of the
+  scheduler as bounded subagent execution. It does not become the owner of the
   plan tree.
 
 ## Authority And Autonomy
 
 | Actor | Owns | Must Not Do |
 | --- | --- | --- |
-| User | Root intent, acceptance changes, permission/capability expansion, destructive external authority, explicit review requirements | Estimate runtime duration or supervise routine worker decisions |
+| User | Root intent, acceptance changes, permission/capability expansion, destructive external authority, explicit review requirements | Estimate runtime duration or supervise routine subagent decisions |
 | Main coordinator | Initial plan, execution intent, mutable future-subtree revision, global synthesis, anomaly steering, final acceptance judgment | Approve new user permissions, rewrite live/completed work, or review every routine child expansion |
-| Worker/local attempt | Execute one leased node, choose tools inside its harness, report progress/result, directly decompose its leased subtree inside the authorized envelope | Rewrite ancestors/siblings, create cross-plan work, expand permissions, or spawn an opaque child-agent hierarchy |
+| Subagent/local attempt | Execute one assigned node, choose tools inside its harness, report progress/result, directly decompose its assigned subtree inside the authorized envelope | Rewrite ancestors/siblings, create cross-plan work, expand permissions, or spawn an opaque child-agent hierarchy |
 | Scheduler | Derive ready work, conflicts, capacity, retry/requeue candidates, and deterministic follow-up commands | Invent semantic tasks or mutate plan state outside `PlanController` |
 | Runtime/PlanController | Validate hard invariants and actor authority, serialize/persist mutations, enforce scopes/permissions/directives, publish committed events | Decide whether a semantic investigation is valuable or cancel healthy work solely because time elapsed |
 
 The default rule is local autonomy inside an explicit envelope. Coordinator or
-user review occurs only when a worker requests it, adaptive progress review
+user review occurs only when a subagent requests it, adaptive progress review
 finds an anomaly, global synthesis/replanning is required, or a root/permission
 boundary would change.
 
@@ -335,8 +337,8 @@ enum PlanExecutorPolicy {
 Semantics:
 
 - `Local` reserves the node for the main coordinator runtime.
-- `Delegate` requires a bounded child worker.
-- `Auto` lets the scheduler choose local execution or a child worker under
+- `Delegate` requires a bounded child subagent.
+- `Auto` lets the scheduler choose local execution or a child subagent under
   capacity and policy constraints.
 
 Each node also carries a bounded harness contract:
@@ -375,8 +377,8 @@ retry loop; they return evidence to the coordinator for replanning.
 ```text
 PlanResourcePolicySnapshot:
   max_concurrency
-  worker_heartbeat_interval
-  worker_heartbeat_ttl
+  subagent_heartbeat_interval
+  subagent_heartbeat_ttl
   provider_request_timeout
   tool_timeout
   checkpoint_turn_interval
@@ -463,7 +465,7 @@ PlanNodeResult:
 ```
 
 Completing a node requires a non-empty conclusion. Coordinator-authored refs
-must exist in the root session. Worker-authored refs are promoted into the root
+must exist in the root session. Subagent-authored refs are promoted into the root
 session before the result commits. Exact payloads remain in artifact storage;
 plan results remain compact navigation and acceptance records.
 
@@ -476,7 +478,7 @@ PlanAttempt:
   attempt_id
   node_id
   node_revision
-  lease_id
+  lease_id?            # delegated subagent attempts only
   executor_session_id
   harness_fingerprint
   started_at
@@ -512,30 +514,35 @@ cancelled
 interrupted
 ```
 
-A `PlanAttempt` is one continuous execution episode for one node revision under
-one lease. It normally maps to one worker runtime execution and may contain many
-provider turns, tool calls, tool failures, model/provider transport retries,
-artifacts, and `checkpoint_and_continue` operations. Those internal actions do
-not create additional plan attempts.
+A `PlanAttempt` is one continuous execution episode for one node revision. A
+local attempt is owned directly by the coordinator session and has no lease. A
+delegated attempt maps to one subagent runtime execution and carries one lease.
+Either form may contain many provider turns, tool calls, tool failures,
+model/provider transport retries, artifacts, and `checkpoint_and_continue`
+operations. Those internal actions do not create additional plan attempts.
 
 An attempt becomes terminal only through a successful terminal report,
-decomposition, cooperative yield, cancellation, lease loss, process/runtime
-interruption, or a typed failure that returns the node to scheduling. A retry or
-requeue always allocates a new attempt and lease. `checkpoint_and_yield` ends
-the current attempt as `yielded`; its successor receives the durable checkpoint
-through fresh scoped context.
+decomposition, cooperative yield, cancellation, delegated lease loss,
+process/runtime interruption, or a typed failure that returns the node to
+scheduling. A retry or requeue always allocates a new attempt; it allocates a
+new lease only for delegated execution. `checkpoint_and_yield` ends the current
+attempt as `yielded`; its successor receives the durable checkpoint through
+fresh scoped context.
 
 A decomposed parent attempt ends before any child attempt starts. Every child
-receives its own attempt, lease, and fresh context. The runtime may immediately
-reuse the same physical worker slot for one ready child, but it must not reuse
-the parent attempt id or inherit the parent transcript as the child's working
-context.
+receives its own attempt and fresh context; delegated children additionally
+receive a lease. The runtime may immediately reuse the same physical subagent
+slot for one ready child, but it must not reuse the parent attempt id or inherit
+the parent transcript as the child's working context.
 
-At most one live lease may exist for a node revision. Cancellation tokens are
-runtime-only and are reconstructed as cancelled/expired state after resume.
-`lease_expires_at` is a renewable liveness deadline, not a task-duration
-budget. The worker runtime renews it while alive, including while a provider
-request or bounded tool call is in flight.
+At most one live delegated lease may exist for a node revision. Local attempts
+never receive leases. Cancellation tokens are runtime-only and are
+reconstructed as cancelled/expired state after resume. `lease_expires_at` is a
+renewable liveness deadline, not a task-duration budget. The subagent runtime
+renews it while alive, including while a provider request or bounded tool call
+is in flight. The default runtime heartbeat interval is 10 seconds and the
+default loss-of-liveness grace period is 5 minutes; a healthy subagent may run
+for hours because every runtime heartbeat renews that deadline.
 Public snapshots include bounded compact attempt views; exact diagnostics and
 large outputs remain in artifacts and journal-backed state. Older terminal
 attempts may be compacted out of the prompt/UI snapshot while remaining
@@ -625,22 +632,25 @@ An empty plan cannot enter `AwaitingApproval` or `Executing`.
 One runtime-owned `PlanController` is the sole writer for the active plan and
 its persisted attempt/lease/control state. It runs as a serialized command
 processor behind bounded Tokio channels rather than exposing a shared mutable
-plan to coordinator tools, worker runtimes, interactive controls, and scheduler
+plan to coordinator tools, subagent runtimes, interactive controls, and scheduler
 tasks.
 
 Typed command producers include:
 
 ```text
 coordinator plan-control tool adapter
-worker PlanWorkerControl handle
+subagent PlanSubagentControl handle
 interactive user control handle
 scheduler admission and recovery logic
 heartbeat/progress recorder
+generic tool/process effect recorder
 ```
 
-Each command carries its runtime-derived actor identity and the expected plan,
-node, attempt, lease, or directive revisions required by that operation. Model
-input cannot claim a coordinator or worker identity.
+Each command carries runtime-derived actor identity and any plan, node, attempt,
+lease, or directive revisions required by that operation. Model-authored
+progress and terminal reports carry semantic results only; runtime binds them
+to the current attempt and model input cannot claim a coordinator, subagent,
+lease, or node-revision identity.
 
 The controller applies one mutation transaction at a time:
 
@@ -655,7 +665,7 @@ receive command
 -> expose public events
 ```
 
-Worker terminal reports remain accepted while scheduling is paused or draining
+Subagent terminal reports remain accepted while scheduling is paused or draining
 so live attempts can settle. User pause/cancel commands take priority over new
 lease-admission commands, but they do not discard already queued terminal
 reports. The committed journal sequence is the authoritative ordering for
@@ -663,8 +673,24 @@ resume and replay diagnostics.
 
 Generic `ToolExecutor` implementations remain outcome-only and do not call
 runtime mutation APIs. Root coordinator plan tools are intrinsic runtime
-controls that submit `PlanController` commands; worker plan tools use a scoped
+controls that submit `PlanController` commands; subagent plan tools use a scoped
 handle to the root controller.
+
+A runtime carrying `PlanSubagentControl` must revalidate that its exact plan,
+attempt, lease, node, and executor-session binding is still live before every
+tool execution. Missing, replaced, terminal, expired, or ownership-mismatched
+bindings fail closed before proposal or execution; they never degrade into an
+unscoped ordinary runtime after `report_plan_attempt` succeeds.
+
+The runtime durably attributes admitted observable effects to the active
+attempt before invoking a mutating tool or process executor. Patch paths and
+admitted process effects update `PlanAttemptProgress`; if attribution fails,
+the executor is not invoked. Attribution may conservatively block retry when a
+later execution fails, which is preferable to repeating an untracked mutation.
+A model-authored progress report is not required for retry safety. A transient
+retry guarded by
+`retry_only_before_observable_side_effects` is therefore rejected after any
+runtime-observed effect even if the subagent never reported progress.
 
 ## Tree And Dependency Invariants
 
@@ -684,18 +710,18 @@ Every accepted non-empty plan update must prove:
   completed children do not automatically complete the parent;
 - every live lease references the exact current node revision it owns;
 - no node revision has more than one live lease;
-- parallel live leases have non-overlapping write scopes and no conflicting
+- parallel live attempts have non-overlapping write scopes and no conflicting
   exclusive capability;
 - descendant tool and workspace capability envelopes never exceed their
   parent's delegable envelope or the authorized execution-contract ceiling;
 - a decomposed attempt atomically adds at least one valid direct child below
   its leased node and transitions the node to `Expanded`;
-- the main coordinator may focus one coordination path while multiple worker
+- the main coordinator may focus one coordination path while multiple subagent
   nodes execute concurrently.
 
 ## Provider-Visible Plan Tools
 
-Register stable plan-control tools when constructing the coordinator and worker
+Register stable plan-control tools when constructing the coordinator and subagent
 runtimes. The coordinator tool set includes `begin_plan` from the first request;
 plan activation never adds it dynamically.
 
@@ -708,7 +734,7 @@ coordinator:
   report_plan_progress
   report_plan_attempt
 
-worker:
+subagent:
   report_plan_progress
   report_plan_attempt
 ```
@@ -745,7 +771,7 @@ historical plan data without expanding the default model context.
 
 `update_plan` uses one stable tagged-union schema. Planning defines the bounded
 complete live tree; execution may replace one mutable future subtree without
-resending or rewriting unrelated branches changed by workers.
+resending or rewriting unrelated branches changed by subagents.
 
 Conceptual input:
 
@@ -764,6 +790,9 @@ UpdatePlanInput:
       target_node_id
       expected_node_revision
       subtree: PlanNodeInput
+    }
+    UseCurrentPlan {
+      expected_plan_revision
     }
 
 PlanExecutionIntent:
@@ -792,12 +821,15 @@ Rules:
 - `DefinePlan` is valid during `Planning` and replaces the complete mutable live
   planning tree as one transaction.
 - `ReplaceSubtree` is valid during `Planning` or `Executing`. Its target must be
-  `Pending`, must match `expected_node_revision`, and must have no live lease or
-  terminal-result descendant inside the replaced region. Ancestors, active or
-  completed nodes, unrelated siblings, and unrelated worker expansions remain
-  untouched.
+  `Pending`, must match `expected_node_revision`, and must have no active attempt
+  or terminal-result descendant inside the replaced region. Ancestors, active
+  or completed nodes, unrelated siblings, and unrelated subagent expansions
+  remain untouched.
+- `UseCurrentPlan` preserves the exact authored tree and changes only lifecycle
+  intent, for example after the user approves an existing draft and says to
+  execute it. It must not create superseded copies of the current tree.
 - `ReplaceSubtree` uses node-revision compare-and-swap rather than requiring the
-  observed global plan revision to remain unchanged. Unrelated worker progress,
+  observed global plan revision to remain unchanged. Unrelated subagent progress,
   expansion, or result commits may advance the plan revision without rejecting
   the replacement when the target region and its external dependency contract
   remain unchanged;
@@ -824,6 +856,9 @@ Rules:
   execution-contract fingerprint before any lease can be admitted;
 - `request_user_review` always enters `AwaitingApproval`; `continue_planning`
   leaves the plan in `Planning`.
+- a non-empty `Planning` plan is an interactive idle boundary: ordinary model
+  continuation stops until the coordinator revises the tree or an explicit
+  execution transition is accepted;
 - `continue_planning` is invalid while the plan remains `Executing`.
   `ReplaceSubtree` during execution uses `execute_if_authorized` to remain
   executable or `request_user_review` to pause at an explicit boundary.
@@ -831,10 +866,10 @@ Rules:
   fingerprint cannot run until user approval resolves the boundary.
 - Node completion validates result references before any plan event is
   observable.
-- `update_plan` is coordinator-only. Workers never receive it.
+- `update_plan` is coordinator-only. Subagents never receive it.
 - During execution, `update_plan` cannot manufacture attempt outcomes or
   terminal node results. `InProgress`, `Expanded`, `Verifying`, `Completed`,
-  and attempt-failure transitions are owned by lease/report/scheduler logic.
+  and attempt-failure transitions are owned by attempt/report/scheduler logic.
 - The coordinator may change `max_concurrency_hint` within the runtime ceiling
   without user approval. Runtime/operator configuration remains authoritative.
 
@@ -846,13 +881,11 @@ the TUI/events and through explicit bounded `read_plan`; normal context
 projection supplies the model with the appropriate current view.
 
 `report_plan_progress` records a non-terminal compact checkpoint or semantic
-progress update without resolving the lease. It is valid for a worker lease or
-for the coordinator's currently active `Local` attempt lease:
+progress update without resolving the attempt. It is valid for the attempt
+currently bound to the calling coordinator or subagent runtime:
 
 ```text
 ReportPlanProgressInput:
-  lease_id
-  expected_node_revision
   summary
   evidence_refs[]
   artifact_refs[]
@@ -863,17 +896,15 @@ ReportPlanProgressInput:
   request_coordinator_review?
 ```
 
-The report must be bounded and may cite only worker-owned or already promoted
+The report must be bounded and may cite only subagent-owned or already promoted
 refs. It updates durable progress, directive acknowledgement, and checkpoint
 navigation. Heartbeats and provider/tool in-flight state remain runtime-recorded
 and do not require model tool calls.
 
-`report_plan_attempt` is the exactly-once local/worker completion boundary:
+`report_plan_attempt` is the exactly-once local/subagent completion boundary:
 
 ```text
 ReportPlanAttemptInput:
-  lease_id
-  expected_node_revision
   outcome
   result?
   diagnostic?
@@ -888,16 +919,18 @@ PlanDecompositionInput:
 
 Rules:
 
-- the lease must be live and owned by the reporting executor session;
+- runtime must resolve exactly one active attempt owned by the reporting
+  executor session; delegated attempts additionally require a live matching
+  lease;
 - `completed` requires a valid compact result and durable refs;
 - `yielded` requires a durable checkpoint ref and returns the node to pending
   scheduling without consuming a transient-failure retry;
 - `decomposed` requires a bounded decomposition with at least one direct child;
-  new child ids, attempt resolution, lease resolution, and the node transition
-  to `Expanded` commit atomically;
+  new child ids, attempt resolution, optional delegated lease resolution, and
+  the node transition to `Expanded` commit atomically;
 - decomposition children may reference one another by request-local client key
   but cannot contain nested children or rewrite ancestors, siblings, or other
-  branches; later workers expand those children lazily;
+  branches; later subagents expand those children lazily;
 - every decomposition child harness and workspace scope must stay within the
   authorized execution-contract capability ceiling and the leased node's
   delegable scope;
@@ -906,7 +939,7 @@ Rules:
   local expansion occurred;
 - a decomposition that changes ancestors, unrelated branches, the established
   root contract, or the permission/capability envelope is rejected without
-  resolving the attempt. The worker may revise the decomposition or report a
+  resolving the attempt. The subagent may revise the decomposition or report a
   boundary blocker that wakes the coordinator/user;
 - stale, duplicate, expired, or cross-session reports are rejected without
   changing the plan;
@@ -914,13 +947,13 @@ Rules:
   the result, updates node state, and wakes the scheduler.
 
 All plan tools are runtime-owned control adapters rather than generic executors
-that mutate session state through callbacks. A worker runtime carries a scoped
-`PlanWorkerControl` handle containing only its plan, node, attempt, lease,
+that mutate session state through callbacks. A subagent runtime carries a scoped
+`PlanSubagentControl` handle containing only its plan, node, attempt, lease,
 progress/directive mailbox, and root-session artifact-promotion authority.
 
-### Worker Evidence Promotion
+### Subagent Evidence Promotion
 
-Worker progress or terminal report input may cite child-local
+Subagent progress or terminal report input may cite child-local
 artifacts/evidence. Before committing the progress checkpoint or attempt,
 runtime:
 
@@ -939,16 +972,16 @@ The report output returns the child-to-root ref mapping. Promotion is bounded by
 artifact count and byte limits; oversized exact outputs must use approved
 shared-workspace output paths plus compact artifact metadata.
 
-If a worker model loop reaches an ordinary terminal state without a successful
+If a subagent model loop reaches an ordinary terminal state without a successful
 `report_plan_attempt`, the scheduler records a typed `missing_attempt_report`
 failure. It never infers completion from free-form final text. Runtime-enforced
 cancellation, lease expiry, or process loss instead records the corresponding
 typed `cancelled` or `interrupted` outcome without requiring a model report.
 
-## Coordinator-To-Worker Directives
+## Coordinator-To-Subagent Directives
 
 The main coordinator may steer an anomalous or user-selected live attempt
-without receiving the worker transcript or controlling routine local decisions.
+without receiving the subagent transcript or controlling routine local decisions.
 Routine progress and valid subtree decomposition do not require coordinator
 messages.
 
@@ -957,8 +990,6 @@ messages.
 ```text
 ControlPlanAttemptInput:
   attempt_id
-  expected_lease_id
-  expected_node_revision
   kind
   reason
   instruction?
@@ -999,16 +1030,17 @@ DirectiveConstraints:
   preserve_partial_result
 ```
 
-Runtime validates that the attempt and lease are still live, persists the
-directive as `queued`, and only then acknowledges the coordinator tool call.
+Runtime resolves the target attempt's current delegated lease, validates that
+both are live, persists the directive as `queued`, and only then acknowledges
+the coordinator tool call.
 Provider and bounded tool calls already in flight are not cancelled merely to
 deliver ordinary steering. Typed constraints apply to later runtime admissions
-and attempt reports once committed. Before the worker's next provider request,
+and attempt reports once committed. Before the subagent's next provider request,
 runtime projects all unresolved directives in sequence order as a high-priority
 structured control segment and marks them `delivered`.
 
 The runtime enforces only typed constraints it can prove, such as rejecting a
-later decomposition when `allow_decomposition = false`. The worker model
+later decomposition when `allow_decomposition = false`. The subagent model
 interprets `reason`, `instruction`, and `requested_output`. It reports
 `acknowledged_directive_ids` and `applied_directive_ids` through progress or
 terminal reports; runtime does not treat prompt projection alone as semantic
@@ -1062,15 +1094,20 @@ Mode does not deny it; if it was unauthorized, Plan Mode does not authorize it.
 A user instruction such as "plan only" is an explicit task or permission
 constraint rather than an implicit property of Plan Mode.
 
+The active node harness is enforced at execution time for both coordinator and
+subagent attempts. Workspace tools whose optional path defaults to the complete
+workspace, such as `workspace_search_text`, are admitted as path `.` when the
+argument is omitted; omission must not bypass a narrower `read_scope`.
+
 Plan-specific operations still validate actor, phase, plan revision, node
 revision, attempt, and lease at execution time. Invalid operations return typed
 tool outcomes; hiding a tool is not an authorization mechanism.
 
-Each worker runtime is a separate model execution surface constructed with its
-harness-approved general tools and scoped worker plan controls. That tool set
-and its ordering remain stable for the entire attempt. Workers do not receive
+Each subagent runtime is a separate model execution surface constructed with its
+harness-approved general tools and scoped subagent plan controls. That tool set
+and its ordering remain stable for the entire attempt. Subagents do not receive
 coordinator plan-authoring controls or direct subagent spawn/cancel tools.
-Recursive task expansion flows through the worker report/decomposition contract,
+Recursive task expansion flows through the subagent report/decomposition contract,
 central plan state, and scheduler.
 
 Request construction keeps static system instructions and stable tool
@@ -1082,7 +1119,7 @@ changes must not cause avoidable prompt/KV cache invalidation.
 
 Plan context is structured control-plane state. It is not appended as ordinary
 chat history and does not replace exact evidence. The same compiler produces
-coordinator and worker projections from persisted plan state.
+coordinator and subagent projections from persisted plan state.
 
 Request compilation keeps stable system instructions and tool definitions
 unchanged, then adds the dynamic plan segment after Task Anchor and before
@@ -1114,16 +1151,17 @@ blocked nodes and boundary reasons
 explicit evidence/artifact refs
 ```
 
-The coordinator does not inherit worker transcripts. It receives compact
+The coordinator does not inherit subagent transcripts. It receives compact
 attempt results and may read exact refs when needed.
 
-When the coordinator holds a `Local` attempt lease, the same projection also
-includes that node's full contract, local lease/attempt ids, relevant dependency
-results, and the scoped progress/terminal-report contract. The stable
-coordinator tool schema does not change; report tools are rejected when no
-matching local lease exists.
+When the coordinator holds a `Local` attempt, the same projection also includes
+that node's full contract, runtime-owned attempt state, relevant dependency
+results, and the scoped progress/terminal-report contract. Local attempts have
+no lease. The stable coordinator tool schema does not change; report tools are
+bound by runtime session identity and rejected when no matching active local
+attempt exists.
 
-### Executing Worker
+### Executing Subagent
 
 Project only:
 
@@ -1140,7 +1178,7 @@ unresolved coordinator directives in sequence order
 ```
 
 Unrelated sibling branches and their transcripts are omitted. The active
-worker's recent transcript/tool continuity remains governed by its child
+subagent's recent transcript/tool continuity remains governed by its child
 session and checkpoint rules.
 
 Plan projection must be deterministic from persisted `PlanState` and artifact
@@ -1162,8 +1200,8 @@ A node is schedulable when:
   `Verifying` expanded node whose children are all terminal;
 - every dependency is completed with a durable result;
 - no ancestor is blocked, failed, cancelled, or superseded;
-- no live lease exists for the same node revision;
-- its write scope and exclusive capabilities do not conflict with live leases;
+- no active attempt exists for the same node revision;
+- its write scope and exclusive capabilities do not conflict with live attempts;
 - runtime concurrency, provider quota, and operational admission have capacity.
 
 An unknown or local-workspace-effect `CommandExec` capability is plan-exclusive
@@ -1173,9 +1211,10 @@ Process tooling must not bypass declared workspace write scopes.
 The ready set is derived in stable tree/order/id order so identical persisted
 state produces identical admission decisions.
 
-### Lease Reservation
+### Attempt And Lease Reservation
 
-Reservation is transactional:
+Reservation is transactional. Local admission allocates only an attempt;
+delegated admission follows this lease path:
 
 ```text
 derive candidate ready leaf
@@ -1183,17 +1222,22 @@ derive candidate ready leaf
 -> validate current revision and capacity in controller order
 -> allocate attempt and lease ids
 -> persist reserved attempt/lease state
--> construct worker runtime from the exact harness snapshot
+-> register the attempt cancellation token
+-> construct subagent runtime from the exact harness snapshot
+-> recheck cancellation before interpreting the construction result
+-> only then interpret construction failure or start model execution
 -> emit PlanLeaseStarted
 ```
 
-If worker construction fails, the attempt becomes a typed infrastructure
-failure and follows recovery policy. A lease is never silently discarded.
+If subagent construction fails, the attempt becomes a typed infrastructure
+failure and follows recovery policy. If cancellation was committed while
+construction was blocked, cancellation wins even when construction later fails
+or panics. A lease is never silently discarded.
 
-### Worker Construction
+### Subagent Construction
 
 Refactor the existing `ChildRuntimeFactory` boundary so the scheduler can build
-a worker from:
+a subagent from:
 
 ```text
 session id
@@ -1207,25 +1251,25 @@ workspace scope
 cancellation/liveness heartbeat
 ```
 
-Worker construction preserves the existing conservative process boundary: a
-worker with scoped workspace writes does not receive an unrestricted local
+Subagent construction preserves the existing conservative process boundary: a
+subagent with scoped workspace writes does not receive an unrestricted local
 workspace-effect process lane. Read-only commands remain available when
 classified; broader process effects require an explicit exclusive harness and
 cannot overlap conflicting leases.
 
-All worker runtimes are depth-one executors relative to the root scheduler.
-Task descendants may reach depth 16 because a worker expands central plan state
-and releases its lease; the scheduler then starts new depth-one workers for the
+All subagent runtimes are depth-one executors relative to the root scheduler.
+Task descendants may reach depth 16 because a subagent expands central plan state
+and releases its lease; the scheduler then starts new depth-one subagents for the
 new leaves. This is intentional and avoids an opaque process hierarchy.
 
 ### Local, Delegate, And Auto
 
-- `Delegate` always uses a child worker when admitted.
+- `Delegate` always uses a child subagent when admitted.
 - `Local` queues the node for the main coordinator execution lane.
-- `Auto` prefers child execution when a worker slot is available and the
+- `Auto` prefers child execution when a subagent slot is available and the
   harness is child-safe; otherwise it may use the local lane.
 
-Only one local node may run at a time. Child workers may run concurrently up to
+Only one local node may run at a time. Child subagents may run concurrently up to
 the minimum of runtime `max_threads`, the coordinator's current concurrency
 hint, and currently available provider/runtime capacity.
 
@@ -1236,15 +1280,15 @@ The scheduler queues an internal coordinator continuation when:
 - a semantic failure needs replanning;
 - an expanded parent becomes ready for synthesis or verification;
 - all currently runnable work is blocked;
-- a worker requests a boundary change;
-- a worker explicitly requests coordinator review;
+- a subagent requests a boundary change;
+- a subagent explicitly requests coordinator review;
 - adaptive progress policy requests semantic review;
 - root completion or final acceptance must be decided.
 
-Coordinator wake-ups use compact attempt results and exact refs, never worker
+Coordinator wake-ups use compact attempt results and exact refs, never subagent
 transcripts. They serialize through the existing main interactive run boundary.
-User `next` input remains higher priority and may pause new lease admission when
-it changes the established execution boundary. Valid routine worker
+User `next` input remains higher priority and may pause new attempt admission when
+it changes the established execution boundary. Valid routine subagent
 decomposition does not wake the coordinator.
 
 ### Adaptive Progress Review
@@ -1257,7 +1301,7 @@ PlanAttemptProgress:
   elapsed
   model_turns
   reported_usage
-  last_worker_heartbeat
+  last_subagent_heartbeat
   last_runtime_activity
   last_durable_progress
   provider_request_in_flight
@@ -1270,7 +1314,7 @@ PlanAttemptProgress:
 
 Signals have different meanings:
 
-- worker heartbeats prove liveness, including while a slow provider request is
+- subagent heartbeats prove liveness, including while a slow provider request is
   in flight;
 - stream/tool activity proves activity but not semantic progress;
 - durable artifacts, results, plan revisions, and acceptance evidence prove
@@ -1342,7 +1386,7 @@ and lease after configured backoff.
 
 ### Semantic Failure
 
-A worker may report a semantic failure with evidence. The node becomes
+A subagent may report a semantic failure with evidence. The node becomes
 `Failed`, the result folds into coordinator context, and automatic scheduling
 of dependent nodes stops. The coordinator may revise only mutable future
 subtrees or block when the established boundary must change.
@@ -1360,9 +1404,9 @@ boundary.
 
 ### Cancellation, Expiry, And Resume
 
-- cancellation requests the worker token and prevents new side effects;
+- cancellation requests the subagent token and prevents new side effects;
 - an expired lease records an `interrupted` attempt before requeue decisions;
-- process restart treats persisted live leases as interrupted because their
+- process restart treats persisted unresolved attempts as interrupted because their
   executor tasks no longer exist;
 - attempt-scoped directives for an interrupted or terminal attempt become
   `expired` and are not projected into its successor;
@@ -1414,12 +1458,19 @@ corresponding state is durably committed.
 If staged persistence fails, the current in-memory plan and revision remain
 unchanged.
 
-For worker progress and terminal results, exact artifacts and evidence commit
+For subagent progress and terminal results, exact artifacts and evidence commit
 before progress/directive acknowledgement, attempt or node transition,
 dependency release, scheduler wake-up, and public event.
 
 Session persistence advances to a new format version with backward-compatible
 loading of the current version as `plan = None`.
+
+Resume recovery is part of the resume operation, not a later background race.
+Before a resumed runtime is returned, unresolved local attempts are interrupted
+and requeued, stale delegated leases are interrupted, and the deterministic
+ready set is reconciled exactly once. Scheduler shutdown cooperatively cancels
+live subagent tasks without inventing terminal reports after the owning runtime
+has been dropped; persisted unresolved attempts are handled by the next resume.
 
 ## Interactive Runtime Controls
 
@@ -1443,6 +1494,9 @@ Rules:
   control;
 - approval requires `AwaitingApproval`, a valid non-empty plan, and resolution
   of every typed approval requirement;
+- approval carries the exact reviewed plan id and revision. The UI refreshes
+  its pending approval material when either changes, and the runtime rejects
+  stale approval input rather than executing a tree the user did not review;
 - the user's approve action resolves review-only requirements. Permission,
   destructive-authority, and external-input requirements must already carry
   valid runtime-owned resolution refs and are revalidated before the phase
@@ -1452,10 +1506,13 @@ Rules:
 - revision from `AwaitingApproval` returns to `Planning`;
 - revision from `Executing` pauses plan execution and requires the main run to
   be idle first;
-- pause stops new lease admission but does not silently cancel live workers;
+- pause stops new attempt admission but does not silently cancel live subagents;
 - resume re-derives the deterministic ready set;
-- cancellation cancels live leases cooperatively, preserves the final plan and
+- cancellation cancels live attempts cooperatively, preserves the final plan and
   attempt snapshots, and changes phase to `Cancelled` after outcomes settle.
+- terminal delegated completion and exhausted retry transitions request one
+  coordinator continuation at the next safe boundary so the main agent can
+  synthesize the result or explain the block without another user message.
 
 ## TUI Design
 
@@ -1499,14 +1556,18 @@ only while the plan pane/overlay has focus.
 - The active path is automatically revealed, but runtime activity must not
   reset the user's selected node, manual folds, or scroll position.
 - The plan pane displays progress, phase, recursive nodes, status symbols, the
-  active selection, live worker count, queued-ready count, and blocked count.
+  active selection, live attempt count, queued-ready count, and blocked count.
+- Incremental progress, lease, and terminal-attempt events update the displayed
+  snapshot without waiting for an unrelated full refresh. The UI derives
+  `ready` using the same phase, dependency, active-attempt, verification, and
+  retry-backoff conditions as the runtime scheduler.
 - Timeline entries summarize plan creation, direct authorization, expansion,
   revision, required/received approval, steering, blocking, completion, and
   cancellation.
 - Enter on a selected node opens a read-only inspector with objective,
-  acceptance, dependencies, executor/harness contract, live lease, attempt
-  history, progress, queued/delivered directives, result, approval reasons, and
-  revision metadata.
+  acceptance, dependencies, executor/harness contract, optional delegated
+  lease, attempt history, progress, queued/delivered directives, result,
+  approval reasons, and revision metadata.
 - Long-running nodes show elapsed time, last durable progress, heartbeat, and
   in-flight provider/tool state. The UI does not present a default countdown
   implying that the node will be killed at a soft review point.
@@ -1552,7 +1613,7 @@ Add typed plan validation/runtime errors for:
 - unknown or duplicate node ids;
 - illegal status transition;
 - immutable active/completed node rewrite;
-- worker mutation outside its leased subtree;
+- subagent mutation outside its leased subtree;
 - duplicate, stale, expired, or cross-session attempt report;
 - invalid progress/checkpoint refs or directive acknowledgement;
 - directive targeting a terminal, interrupted, or different leased attempt;
@@ -1584,14 +1645,14 @@ plan_define_rejects_stale_plan_revision_without_mutation
 plan_define_replaces_complete_mutable_planning_tree
 plan_replace_subtree_rejects_stale_node_revision
 plan_replace_subtree_allows_unrelated_global_revision_advance
-plan_replace_subtree_preserves_unrelated_worker_expansion
+plan_replace_subtree_preserves_unrelated_subagent_expansion
 plan_replace_subtree_rejects_active_or_completed_target
 plan_completion_requires_existing_evidence_refs
 plan_execution_contract_change_requires_reapproval
 plan_context_projects_active_path_not_unrelated_siblings
-worker_decomposition_is_confined_to_leased_node
-worker_decomposition_cannot_expand_capability_scope
-valid_worker_decomposition_requires_no_coordinator_review
+subagent_decomposition_is_confined_to_leased_node
+subagent_decomposition_cannot_expand_capability_scope
+valid_subagent_decomposition_requires_no_coordinator_review
 plan_ready_set_is_deterministic
 parallel_ready_leaves_reject_overlapping_write_scopes
 plan_attempt_report_is_exactly_once
@@ -1599,9 +1660,9 @@ attempt_contains_multiple_model_turns_and_tool_calls
 checkpoint_and_continue_preserves_attempt_id
 yield_or_interruption_requires_new_attempt_id
 attempt_scoped_directive_expires_when_attempt_ends
-directive_lifecycle_requires_explicit_worker_acknowledgement
+directive_lifecycle_requires_explicit_subagent_acknowledgement
 directive_and_progress_payload_limits_are_enforced
-worker_report_promotes_exact_artifacts_to_root_session
+subagent_report_promotes_exact_artifacts_to_root_session
 ```
 
 ### Runtime Integration Tests
@@ -1612,7 +1673,7 @@ coordinator_tool_specs_and_order_stay_stable_across_plan_phases
 plan_activation_does_not_change_general_action_admission
 authorized_workspace_action_remains_admitted_during_planning
 unauthorized_workspace_action_remains_denied_during_planning
-worker_tool_specs_stay_stable_for_attempt
+subagent_tool_specs_stay_stable_for_attempt
 dynamic_plan_context_follows_stable_request_prefix
 update_plan_tool_result_is_compact_and_does_not_echo_full_tree
 authorized_plan_enters_execution_without_second_approval
@@ -1620,30 +1681,30 @@ explicit_review_request_enters_awaiting_approval
 capability_expansion_enters_awaiting_approval
 interactive_approval_resolves_typed_requirements
 execution_contract_keeps_same_ids_and_revision_history
-plan_controller_serializes_concurrent_worker_reports_without_lost_updates
+plan_controller_serializes_concurrent_subagent_reports_without_lost_updates
 user_pause_prevents_new_lease_after_commit_while_accepting_terminal_reports
 plan_events_follow_durable_state_commit
 plan_round_trips_through_session_store
 legacy_session_loads_without_plan
 plan_scheduler_starts_disjoint_ready_leaves_concurrently
-worker_can_expand_leased_node_without_spawning_child_agent
-valid_worker_expansion_does_not_wake_coordinator
+subagent_can_expand_leased_node_without_spawning_child_agent
+valid_subagent_expansion_does_not_wake_coordinator
 expanded_descendants_are_scheduled_by_root_scheduler
 completed_results_unlock_dependent_leaf
 transient_attempt_retries_with_new_attempt_id
 semantic_failure_wakes_coordinator_for_replan
 directive_waits_for_safe_boundary_during_inflight_provider_request
 converge_directive_can_forbid_current_attempt_decomposition
-worker_progress_acknowledges_and_applies_directive
+subagent_progress_acknowledges_and_applies_directive
 attempt_terminal_state_expires_unapplied_directives
-grace_review_wakes_coordinator_without_auto_cancelling_worker
-long_running_worker_heartbeats_renew_lease
+grace_review_wakes_coordinator_without_auto_cancelling_subagent
+long_running_subagent_heartbeats_renew_lease
 elapsed_time_alone_does_not_cancel_progressing_attempt
 slow_inflight_provider_request_defers_progress_review
 no_durable_progress_wakes_coordinator_without_user_budget_prompt
 resume_interrupts_stale_leases_without_replaying_completed_nodes
-cancelling_plan_stops_new_leases_and_cancels_live_workers
-worker_without_attempt_report_fails_instead_of_completing
+cancelling_plan_stops_new_leases_and_cancels_live_subagents
+subagent_without_attempt_report_fails_instead_of_completing
 ```
 
 ### TUI Tests
@@ -1655,7 +1716,7 @@ narrow_tui_renders_full_screen_plan_overlay
 plan_event_updates_tree_without_resetting_selection
 active_path_is_revealed_without_unfolding_unrelated_branches
 plan_node_inspector_renders_bounded_content
-plan_pane_renders_live_workers_ready_queue_and_blocked_counts
+plan_pane_renders_live_subagents_ready_queue_and_blocked_counts
 plan_inspector_renders_approval_requirements_and_directive_status
 pause_resume_scheduler_commands_follow_runtime_state
 long_running_node_renders_progress_without_fake_deadline
@@ -1680,16 +1741,16 @@ order:
 1. Core plan ids/snapshots/events and tree validation.
 2. Root session state, `PlanController` command serialization, transaction
    persistence, and resume migration.
-3. Stable coordinator/worker plan tools, tagged `DefinePlan`/`ReplaceSubtree`
+3. Stable coordinator/subagent plan tools, tagged `DefinePlan`/`ReplaceSubtree`
    updates, authorization transitions, and cache-aware request composition.
 4. Attempts, leases, progress checkpoints, coordinator directives, and
-   coordinator/worker context projection.
+   coordinator/subagent context projection.
 5. Central ready-leaf scheduler, child-runtime factory integration, autonomous
-   scoped worker decomposition, dependency release, parent verification, and
+   scoped subagent decomposition, dependency release, parent verification, and
    typed recovery.
 6. Interactive approval/pause/resume/cancel controls and direct execution under
    existing authorization.
-7. TUI projection, responsive tree, inspector, worker/directive state, approval
+7. TUI projection, responsive tree, inspector, subagent/directive state, approval
    requirements, and timeline events.
 8. End-to-end fake-provider acceptance covering concurrent grandchildren,
    direct authorization, steering, replanning, retry, cancellation, resume, and

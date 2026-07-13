@@ -1,6 +1,7 @@
 use crate::plan::{
     PlanApprovalInput, PlanChangeInput, PlanExecutionIntent, PlanNodeInput, UpdatePlanInput,
-    domain::PlanState, execution::PlanAttemptActor,
+    domain::{PlanError, PlanState},
+    execution::PlanAttemptActor,
 };
 use merry_core::{
     PlanActivationSource, PlanAttemptOutcome, PlanExecutorPolicy, PlanHarnessSnapshot, PlanId,
@@ -45,25 +46,96 @@ fn plan_with_recovery_limit(max_transient_attempts: u8) -> PlanState {
     plan
 }
 
-#[test]
-fn explicit_retry_of_interrupted_node_creates_a_fresh_attempt() {
-    let mut plan = plan_with_recovery_limit(1);
-    plan.approve(PlanApprovalInput {
+fn draft_plan() -> PlanState {
+    draft_plan_with_id("plan-draft-control")
+}
+
+fn draft_plan_with_id(plan_id: &str) -> PlanState {
+    let mut plan = PlanState::empty(
+        PlanId::new(plan_id).expect("valid plan id"),
+        PlanActivationSource::User,
+        PlanResourcePolicySnapshot::default(),
+    );
+    plan.update(UpdatePlanInput {
+        reason: "define a plan draft".to_owned(),
+        execution_intent: PlanExecutionIntent::ContinuePlanning,
+        coordinator_node_id: None,
+        max_concurrency_hint: Some(1),
+        change: PlanChangeInput::DefinePlan {
+            expected_plan_revision: 0,
+            root: PlanNodeInput {
+                id: None,
+                client_key: Some("root".to_owned()),
+                objective: "Execute the approved draft".to_owned(),
+                acceptance: vec!["the draft completes".to_owned()],
+                executor_policy: PlanExecutorPolicy::Local,
+                harness: PlanHarnessSnapshot::default(),
+                recovery_policy: PlanRecoveryPolicySnapshot::default(),
+                depends_on: Vec::new(),
+                children: Vec::new(),
+            },
+        },
+    })
+    .expect("draft definition succeeds");
+    plan
+}
+
+fn approval_input(plan: &PlanState, expected_plan_revision: u64) -> PlanApprovalInput {
+    PlanApprovalInput {
+        plan_id: plan.snapshot().plan_id.clone(),
+        expected_plan_revision,
         review_resolution_ref: "interactive-user-approval".to_owned(),
         capability_envelope: Some(Default::default()),
         authorization_refs: vec!["existing-runtime-authorization".to_owned()],
         requirement_resolution_refs: Default::default(),
-    })
-    .expect("review approval succeeds");
+    }
+}
+
+#[test]
+fn approving_a_non_empty_planning_draft_starts_execution() {
+    let mut plan = draft_plan();
+    let approval = approval_input(&plan, 1);
+
+    let output = plan
+        .approve(approval)
+        .expect("a planning draft can be approved directly");
+
+    assert_eq!(output.previous_phase, PlanPhase::Planning);
+    assert_eq!(output.snapshot.phase, PlanPhase::Executing);
+    assert_eq!(
+        output.snapshot.scheduler_status,
+        PlanSchedulerStatus::Active
+    );
+}
+
+#[test]
+fn approval_rejects_a_different_plan_with_the_same_revision() {
+    let first = draft_plan_with_id("plan-approval-first");
+    let stale_approval = approval_input(&first, 1);
+    let mut replacement = draft_plan_with_id("plan-approval-replacement");
+
+    let error = replacement
+        .approve(stale_approval)
+        .expect_err("approval must bind the exact plan identity");
+
+    assert!(matches!(error, PlanError::StalePlanIdentity { .. }));
+    assert_eq!(replacement.snapshot().phase, PlanPhase::Planning);
+}
+
+#[test]
+fn explicit_retry_of_interrupted_node_creates_a_fresh_attempt() {
+    let mut plan = plan_with_recovery_limit(1);
+    let approval = approval_input(&plan, 1);
+    plan.approve(approval).expect("review approval succeeds");
     let root_id = plan.snapshot().root_node_id.clone().expect("root exists");
     let first_actor = PlanAttemptActor {
-        executor_session_id: SessionId::new("interrupted-worker").expect("valid session id"),
+        executor_session_id: SessionId::new("interrupted-subagent").expect("valid session id"),
     };
     let first = plan
         .start_attempt(&root_id, first_actor, 1_000)
         .expect("first attempt starts");
     let interrupted = plan
-        .interrupt_live_leases_after_resume(2_000)
+        .interrupt_unresolved_attempts_after_resume(2_000)
         .expect("resume interruption commits");
     assert_eq!(interrupted.snapshot.phase, PlanPhase::Blocked);
 
@@ -81,7 +153,7 @@ fn explicit_retry_of_interrupted_node_creates_a_fresh_attempt() {
         .start_attempt(
             &root_id,
             PlanAttemptActor {
-                executor_session_id: SessionId::new("retry-worker").expect("valid session id"),
+                executor_session_id: SessionId::new("retry-subagent").expect("valid session id"),
             },
             3_000,
         )
@@ -94,14 +166,8 @@ fn explicit_retry_of_interrupted_node_creates_a_fresh_attempt() {
 #[test]
 fn review_only_approval_enters_execution_without_expanding_permissions() {
     let mut plan = plan_with_review_requirement();
-    let output = plan
-        .approve(PlanApprovalInput {
-            review_resolution_ref: "interactive-user-approval".to_owned(),
-            capability_envelope: Some(Default::default()),
-            authorization_refs: vec!["existing-runtime-authorization".to_owned()],
-            requirement_resolution_refs: Default::default(),
-        })
-        .expect("review approval succeeds");
+    let approval = approval_input(&plan, 1);
+    let output = plan.approve(approval).expect("review approval succeeds");
 
     assert_eq!(output.snapshot.phase, PlanPhase::Executing);
     assert_eq!(
@@ -116,13 +182,8 @@ fn review_only_approval_enters_execution_without_expanding_permissions() {
 #[test]
 fn pause_and_resume_only_change_new_lease_admission() {
     let mut plan = plan_with_review_requirement();
-    plan.approve(PlanApprovalInput {
-        review_resolution_ref: "interactive-user-approval".to_owned(),
-        capability_envelope: Some(Default::default()),
-        authorization_refs: vec!["existing-runtime-authorization".to_owned()],
-        requirement_resolution_refs: Default::default(),
-    })
-    .expect("review approval succeeds");
+    let approval = approval_input(&plan, 1);
+    plan.approve(approval).expect("review approval succeeds");
     assert_eq!(plan.ready_node_ids().len(), 1);
 
     let paused = plan
@@ -146,23 +207,18 @@ fn pause_and_resume_only_change_new_lease_admission() {
 #[test]
 fn cancellation_drains_live_attempts_then_finishes_the_plan() {
     let mut plan = plan_with_review_requirement();
-    plan.approve(PlanApprovalInput {
-        review_resolution_ref: "interactive-user-approval".to_owned(),
-        capability_envelope: Some(Default::default()),
-        authorization_refs: vec!["existing-runtime-authorization".to_owned()],
-        requirement_resolution_refs: Default::default(),
-    })
-    .expect("review approval succeeds");
+    let approval = approval_input(&plan, 1);
+    plan.approve(approval).expect("review approval succeeds");
     let root_id = plan.snapshot().root_node_id.clone().expect("root exists");
     let actor = PlanAttemptActor {
-        executor_session_id: SessionId::new("cancelled-worker").expect("valid session id"),
+        executor_session_id: SessionId::new("cancelled-subagent").expect("valid session id"),
     };
     let started = plan
         .start_attempt(&root_id, actor.clone(), 1_000)
         .expect("attempt starts");
 
     let draining = plan
-        .request_cancellation("user cancelled the plan")
+        .request_cancellation("user cancelled the plan", 1_500)
         .expect("cancellation request succeeds");
     assert_eq!(
         draining.snapshot.scheduler_status,
@@ -177,7 +233,7 @@ fn cancellation_drains_live_attempts_then_finishes_the_plan() {
             "user cancelled the plan",
             2_000,
         )
-        .expect("worker cancellation commits");
+        .expect("subagent cancellation commits");
     assert_eq!(cancelled.snapshot.phase, PlanPhase::Cancelled);
     assert_eq!(
         cancelled.attempt.outcome,
@@ -192,5 +248,88 @@ fn cancellation_drains_live_attempts_then_finishes_the_plan() {
             .expect("root remains")
             .status,
         PlanNodeStatus::Blocked
+    );
+}
+
+#[test]
+fn cancellation_closes_a_local_attempt_without_a_lease() {
+    let mut plan = draft_plan();
+    let approval = approval_input(&plan, 1);
+    plan.approve(approval).expect("draft approval succeeds");
+    let root_id = plan.snapshot().root_node_id.clone().expect("root exists");
+    let coordinator = PlanAttemptActor {
+        executor_session_id: SessionId::new("coordinator").expect("valid session id"),
+    };
+    let started = plan
+        .start_local_attempt(&root_id, coordinator, 1_000)
+        .expect("local attempt starts");
+
+    let cancelled = plan
+        .request_cancellation("user cancelled local work", 2_000)
+        .expect("local cancellation commits");
+
+    assert_eq!(cancelled.snapshot.phase, PlanPhase::Cancelled);
+    assert_eq!(cancelled.finished_attempts.len(), 1);
+    assert_eq!(
+        cancelled.finished_attempts[0].attempt_id,
+        started.attempt.attempt_id
+    );
+    assert_eq!(
+        cancelled.finished_attempts[0].outcome,
+        Some(PlanAttemptOutcome::Cancelled)
+    );
+    assert!(cancelled.snapshot.leases.is_empty());
+    assert!(
+        cancelled
+            .snapshot
+            .attempts
+            .iter()
+            .all(|attempt| attempt.outcome.is_some())
+    );
+}
+
+#[test]
+fn terminal_report_winning_the_cancel_race_still_settles_draining_plan() {
+    let mut plan = plan_with_review_requirement();
+    let approval = approval_input(&plan, 1);
+    plan.approve(approval).expect("review approval succeeds");
+    let root_id = plan.snapshot().root_node_id.clone().expect("root exists");
+    let actor = PlanAttemptActor {
+        executor_session_id: SessionId::new("racing-subagent").expect("valid session id"),
+    };
+    plan.start_attempt(&root_id, actor.clone(), 1_000)
+        .expect("attempt starts");
+    plan.request_cancellation("user cancelled while report was in flight", 1_500)
+        .expect("cancellation starts draining");
+
+    let reported = plan
+        .report_attempt(
+            &actor,
+            crate::plan::ReportPlanAttemptInput {
+                outcome: PlanAttemptOutcome::Completed,
+                result: Some(merry_core::PlanNodeResult {
+                    conclusion: "report won the cancellation race".to_owned(),
+                    evidence_refs: Vec::new(),
+                    artifact_refs: Vec::new(),
+                    changed_paths: Vec::new(),
+                    verification: Vec::new(),
+                    open_questions: Vec::new(),
+                }),
+                diagnostic: None,
+                decomposition: None,
+                acknowledged_directive_ids: Vec::new(),
+                applied_directive_ids: Vec::new(),
+            },
+            2_000,
+        )
+        .expect("terminal report remains valid while draining");
+
+    assert_eq!(reported.snapshot.phase, PlanPhase::Cancelled);
+    assert!(
+        reported
+            .snapshot
+            .attempts
+            .iter()
+            .all(|attempt| attempt.outcome.is_some())
     );
 }

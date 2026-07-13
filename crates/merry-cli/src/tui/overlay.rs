@@ -176,6 +176,7 @@ pub(crate) struct PlanPaletteContext {
     plan_open: bool,
     plan_focused: bool,
     phase: Option<PlanPhase>,
+    plan_ready: bool,
     scheduler_status: Option<PlanSchedulerStatus>,
     retry_selected: bool,
 }
@@ -208,6 +209,7 @@ impl PlanPaletteContext {
             plan_open,
             plan_focused,
             phase: snapshot.map(|snapshot| snapshot.phase),
+            plan_ready: snapshot.is_some_and(|snapshot| snapshot.root_node_id.is_some()),
             scheduler_status: snapshot.map(|snapshot| snapshot.scheduler_status),
             retry_selected,
         }
@@ -242,15 +244,20 @@ pub(crate) struct MessageDialogOverlay {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PlanApprovalOverlay {
     message: String,
+    input: merry_runtime::PlanApprovalInput,
 }
 
 impl PlanApprovalOverlay {
-    pub(crate) fn new(message: String) -> Self {
-        Self { message }
+    pub(crate) fn new(message: String, input: merry_runtime::PlanApprovalInput) -> Self {
+        Self { message, input }
     }
 
     pub(crate) fn message(&self) -> &str {
         &self.message
+    }
+
+    pub(crate) fn input(&self) -> &merry_runtime::PlanApprovalInput {
+        &self.input
     }
 }
 
@@ -548,8 +555,8 @@ impl Overlay {
         Self::Settings(SettingsOverlay::default())
     }
 
-    pub(crate) fn plan_approval(message: String) -> Self {
-        Self::PlanApproval(PlanApprovalOverlay::new(message))
+    pub(crate) fn plan_approval(message: String, input: merry_runtime::PlanApprovalInput) -> Self {
+        Self::PlanApproval(PlanApprovalOverlay::new(message, input))
     }
 
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> OverlayKeyResult {
@@ -633,11 +640,23 @@ fn fuzzy_matches(candidate: &str, query: &str) -> bool {
 
 fn plan_command_is_available(command: PaletteCommand, context: PlanPaletteContext) -> bool {
     match command {
-        PaletteCommand::EnterPlanMode => !context.has_plan,
-        PaletteCommand::ApprovePlan => context.phase == Some(PlanPhase::AwaitingApproval),
+        PaletteCommand::EnterPlanMode => {
+            !context.has_plan
+                || matches!(
+                    context.phase,
+                    Some(PlanPhase::Completed | PlanPhase::Blocked | PlanPhase::Cancelled)
+                )
+        }
+        PaletteCommand::ApprovePlan => {
+            context.plan_ready
+                && matches!(
+                    context.phase,
+                    Some(PlanPhase::Planning | PlanPhase::AwaitingApproval)
+                )
+        }
         PaletteCommand::RevisePlan => matches!(
             context.phase,
-            Some(PlanPhase::AwaitingApproval | PlanPhase::Executing | PlanPhase::Blocked)
+            Some(PlanPhase::AwaitingApproval | PlanPhase::Executing)
         ),
         PaletteCommand::OpenPlan => context.has_plan && !context.plan_open,
         PaletteCommand::FocusPlan => context.has_plan && context.plan_open && !context.plan_focused,
@@ -653,12 +672,7 @@ fn plan_command_is_available(command: PaletteCommand, context: PlanPaletteContex
         PaletteCommand::RetryPlanNode => context.retry_selected,
         PaletteCommand::CancelPlan => matches!(
             context.phase,
-            Some(
-                PlanPhase::Planning
-                    | PlanPhase::AwaitingApproval
-                    | PlanPhase::Executing
-                    | PlanPhase::Blocked
-            )
+            Some(PlanPhase::Planning | PlanPhase::AwaitingApproval | PlanPhase::Executing)
         ),
         _ => true,
     }

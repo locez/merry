@@ -7,7 +7,8 @@ use crate::{
         domain::PlanState,
         execution::{
             PlanAttemptActor, PlanAttemptReportOutput, PlanAttemptStartOutput,
-            PlanDirectiveDeliveryOutput, PlanDirectiveOutput, PlanProgressOutput,
+            PlanDirectiveDeliveryOutput, PlanDirectiveOutput, PlanLocalAttemptStartOutput,
+            PlanProgressOutput,
         },
         protocol::{
             BeginPlanInput, BeginPlanOutput, ControlPlanAttemptInput, PlanAttemptToolOutput,
@@ -28,7 +29,42 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, broadcast};
 
 mod control;
-pub(super) use control::{cancel_attempt, control_plan, recover_leases, review_progress};
+pub(super) use control::{cancel_attempt, control_plan, recover_attempts, review_progress};
+
+pub(super) async fn record_runtime_effect(
+    session: &Arc<Mutex<SessionState>>,
+    store: Option<&FileSessionStore>,
+    events: &broadcast::Sender<RuntimeJournalEvent>,
+    actor: PlanAttemptActor,
+    changed_paths: Vec<String>,
+    now_ms: u64,
+) -> Result<PlanCommandResult<PlanProgressOutput>, PlanControllerError> {
+    let (base, output, prepared) = {
+        let session = session.lock().await;
+        let mut candidate = session
+            .active_plan()
+            .ok_or(PlanControllerError::NoActivePlan)?
+            .clone();
+        let output = candidate.record_runtime_effect(&actor, changed_paths, now_ms)?;
+        let payloads = vec![RuntimeJournalPayload::PlanProgressUpdated {
+            progress: output.progress.clone(),
+        }];
+        let base = SessionBase::capture(&session);
+        let prepared = prepare_plan_commit(
+            &session,
+            candidate,
+            session.terminal_plans().to_vec(),
+            payloads,
+            None,
+        )?;
+        (base, output, prepared)
+    };
+    let committed_events = persist_and_install(session, store, events, base, prepared).await?;
+    Ok(PlanCommandResult {
+        output,
+        events: committed_events,
+    })
+}
 
 pub(super) async fn begin_plan(
     session: &Arc<Mutex<SessionState>>,
@@ -265,6 +301,44 @@ pub(super) async fn start_attempt(
     })
 }
 
+pub(super) async fn start_local_attempt(
+    session: &Arc<Mutex<SessionState>>,
+    store: Option<&FileSessionStore>,
+    events: &broadcast::Sender<RuntimeJournalEvent>,
+    node_id: PlanNodeId,
+    actor: PlanAttemptActor,
+    now_ms: u64,
+) -> Result<PlanCommandResult<PlanLocalAttemptStartOutput>, PlanControllerError> {
+    let (base, output, prepared) = {
+        let session = session.lock().await;
+        let mut candidate = session
+            .active_plan()
+            .ok_or(PlanControllerError::NoActivePlan)?
+            .clone();
+        let output = candidate.start_local_attempt(&node_id, actor, now_ms)?;
+        let payloads = vec![
+            plan_updated_payload(&output.snapshot),
+            RuntimeJournalPayload::PlanProgressUpdated {
+                progress: output.progress.clone(),
+            },
+        ];
+        let base = SessionBase::capture(&session);
+        let prepared = prepare_plan_commit(
+            &session,
+            candidate,
+            session.terminal_plans().to_vec(),
+            payloads,
+            None,
+        )?;
+        (base, output, prepared)
+    };
+    let committed_events = persist_and_install(session, store, events, base, prepared).await?;
+    Ok(PlanCommandResult {
+        output,
+        events: committed_events,
+    })
+}
+
 pub(super) async fn issue_directive(
     session: &Arc<Mutex<SessionState>>,
     store: Option<&FileSessionStore>,
@@ -356,7 +430,7 @@ pub(super) async fn report_progress(
             payloads.push(RuntimeJournalPayload::PlanProgressReviewRequested {
                 plan_id: output.snapshot.plan_id.clone(),
                 attempt_id: output.progress.attempt_id.clone(),
-                reason: "worker requested coordinator review".to_owned(),
+                reason: "subagent requested coordinator review".to_owned(),
             });
         }
         let tool_resolution = tool_call_id.map(|call_id| {

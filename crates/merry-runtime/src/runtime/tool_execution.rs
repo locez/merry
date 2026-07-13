@@ -12,22 +12,24 @@ use crate::{
     tool::{ActionProposalEvidence, ToolActionPreflight, ToolExecutionContext, ToolExecutionError},
 };
 use merry_core::{
-    CoreError, PendingToolCall, RuntimeJournalEvent, RuntimeJournalPayload, SessionId, ToolCallId,
-    ToolCallResultStatus,
+    CoreError, ErrorInfo, PendingToolCall, PlanHarnessSnapshot, RuntimeJournalEvent,
+    RuntimeJournalPayload, SessionId, ToolCallId, ToolCallResultStatus,
 };
-use std::sync::Arc;
+use std::{path::Path, sync::Arc};
 
 use super::checkpoint_ref_tool::{
     execute_merry_read_checkpoint_ref_tool_call, is_merry_read_checkpoint_ref_tool,
 };
 use super::permission_execution::execute_permission_request_tool_call;
 use super::plan_tool_execution::execute_plan_tool_call;
-use super::process_execution::execute_admitted_process_action;
+use super::process_execution::{ProcessExecutionAdmission, execute_admitted_process_action};
 use super::{
     DIAGNOSTIC_TOOL_ACTION_POLICY_DENIED, DIAGNOSTIC_TOOL_NOT_REGISTERED, RuntimeInner,
     TOOL_ACTION_POLICY_DENIED_MESSAGE, WORKSPACE_PATCH_TOOL_NAME, diagnostic_from_text,
     persist_resume_safe_savepoint_if_configured,
 };
+
+const WORKSPACE_SEARCH_TEXT_TOOL_NAME: &str = "workspace_search_text";
 
 pub(super) async fn execute_tool_call_with_active_permit(
     inner: &Arc<RuntimeInner>,
@@ -41,14 +43,37 @@ pub(super) async fn execute_tool_call_with_active_permit(
         });
     }
 
-    let pending = {
+    let (pending, coordinator_plan_harness) = {
         let session = inner.session.lock().await;
-        session
-            .pending_tool_call(call_id)
-            .ok_or_else(|| RuntimeError::UnknownToolCall {
-                session_id: inner.session_id.clone(),
-                call_id: call_id.clone(),
-            })?
+        let pending =
+            session
+                .pending_tool_call(call_id)
+                .ok_or_else(|| RuntimeError::UnknownToolCall {
+                    session_id: inner.session_id.clone(),
+                    call_id: call_id.clone(),
+                })?;
+        let harness = if inner.plan_subagent_control.is_none() {
+            session
+                .active_plan()
+                .and_then(|plan| inner.plan_harness_from_snapshot(plan.snapshot(), None))
+        } else {
+            None
+        };
+        (pending, harness)
+    };
+    let active_plan_harness = if inner.plan_subagent_control.is_some() {
+        Some(
+            inner
+                .active_subagent_plan_harness()
+                .await
+                .map_err(|error| RuntimeError::PlanSubagentAttemptInactive {
+                    session_id: inner.session_id.clone(),
+                    call_id: call_id.clone(),
+                    message: error.to_string(),
+                })?,
+        )
+    } else {
+        coordinator_plan_harness
     };
 
     let Some(registered_tool) = inner.tool_registry.registered_tool(pending.name()) else {
@@ -123,10 +148,25 @@ pub(super) async fn execute_tool_call_with_active_permit(
         return execute_plan_tool_call(inner, &pending, context).await;
     }
 
+    if let Some(diagnostic) = plan_harness_violation(
+        active_plan_harness.as_ref(),
+        &pending,
+        registered_tool.action_kind(),
+        None,
+    ) {
+        return resolve_plan_harness_denial(inner, &pending, diagnostic).await;
+    }
+
     if is_request_permissions_tool(pending.name())
         && registered_tool.action_kind() == crate::ToolActionKind::RuntimeControl
     {
-        return execute_permission_request_tool_call(inner, &pending, context).await;
+        return execute_permission_request_tool_call(
+            inner,
+            &pending,
+            context,
+            active_plan_harness.is_some(),
+        )
+        .await;
     }
 
     let mut policy_decision = DefaultActionPolicy.decide(registered_tool.action_kind());
@@ -222,6 +262,14 @@ pub(super) async fn execute_tool_call_with_active_permit(
         }
 
         if let Some(proposal) = proposal {
+            if let Some(diagnostic) = plan_harness_violation(
+                active_plan_harness.as_ref(),
+                &pending,
+                registered_tool.action_kind(),
+                Some(&proposal),
+            ) {
+                return resolve_plan_harness_denial(inner, &pending, diagnostic).await;
+            }
             if inner.allow_low_risk_workspace_patches
                 && pending.name().as_str() == WORKSPACE_PATCH_TOOL_NAME
                 && is_low_risk_workspace_patch_proposal(registered_tool.action_kind(), &proposal)
@@ -236,9 +284,12 @@ pub(super) async fn execute_tool_call_with_active_permit(
                     inner,
                     &pending,
                     proposal,
-                    policy_decision,
-                    ProcessPermissionProfileId::READ_ONLY_V1,
-                    runner,
+                    ProcessExecutionAdmission::new(
+                        policy_decision,
+                        ProcessPermissionProfileId::READ_ONLY_V1,
+                        runner,
+                        active_plan_harness.is_some(),
+                    ),
                     context,
                 )
                 .await;
@@ -253,9 +304,12 @@ pub(super) async fn execute_tool_call_with_active_permit(
                     inner,
                     &pending,
                     proposal,
-                    policy_decision,
-                    ProcessPermissionProfileId::SHELL_READ_ONLY_V1,
-                    runner,
+                    ProcessExecutionAdmission::new(
+                        policy_decision,
+                        ProcessPermissionProfileId::SHELL_READ_ONLY_V1,
+                        runner,
+                        active_plan_harness.is_some(),
+                    ),
                     context,
                 )
                 .await;
@@ -272,9 +326,12 @@ pub(super) async fn execute_tool_call_with_active_permit(
                     inner,
                     &pending,
                     proposal,
-                    policy_decision,
-                    accepted.admission.permission_profile_id(),
-                    accepted.runner,
+                    ProcessExecutionAdmission::new(
+                        policy_decision,
+                        accepted.admission.permission_profile_id(),
+                        accepted.runner,
+                        active_plan_harness.is_some(),
+                    ),
                     context,
                 )
                 .await;
@@ -365,6 +422,14 @@ pub(super) async fn execute_tool_call_with_active_permit(
             ActionAuditPolicy::from_decision(&policy_decision),
         )?;
         return Err(error);
+    }
+
+    if active_plan_harness.is_some() && registered_tool.action_kind().is_mutating() {
+        let changed_paths = allowed_proposal
+            .as_ref()
+            .map(changed_paths_from_proposal)
+            .unwrap_or_default();
+        attribute_plan_effect_before_execution(inner, &pending, changed_paths).await?;
     }
 
     let execution_context =
@@ -483,6 +548,150 @@ pub(super) async fn execute_tool_call_with_active_permit(
         )?
     };
     persist_tool_events(inner, events).await
+}
+
+fn plan_harness_violation(
+    harness: Option<&PlanHarnessSnapshot>,
+    pending: &PendingToolCall,
+    action_kind: crate::ToolActionKind,
+    proposal: Option<&ActionProposal>,
+) -> Option<ErrorInfo> {
+    let harness = harness?;
+    if !harness
+        .allowed_tools
+        .iter()
+        .any(|allowed| allowed == pending.name())
+    {
+        return Some(plan_harness_diagnostic(
+            "plan_harness_tool_denied",
+            format!(
+                "tool {} is outside the active plan node harness",
+                pending.name()
+            ),
+        ));
+    }
+
+    let explicit_path = pending
+        .arguments()
+        .as_object()
+        .get("path")
+        .and_then(serde_json::Value::as_str);
+    let effective_path = explicit_path
+        .or_else(|| (pending.name().as_str() == WORKSPACE_SEARCH_TEXT_TOOL_NAME).then_some("."));
+    if let Some(path) = effective_path {
+        let scopes = if action_kind == crate::ToolActionKind::WorkspaceWrite {
+            &harness.write_scope
+        } else {
+            &harness.read_scope
+        };
+        if !plan_harness_allows_path(harness, scopes, path) {
+            return Some(plan_harness_scope_diagnostic(path));
+        }
+    }
+
+    match proposal.map(ActionProposal::evidence) {
+        Some(ActionProposalEvidence::WorkspacePatch(patch)) => {
+            for change in patch.changes() {
+                if !plan_harness_allows_path(harness, &harness.write_scope, change.relative_path())
+                {
+                    return Some(plan_harness_scope_diagnostic(change.relative_path()));
+                }
+            }
+        }
+        Some(ActionProposalEvidence::ProcessAction(intent)) => {
+            let path = intent.cwd().unwrap_or(".");
+            let scopes = match crate::process::classify_process_intent(intent) {
+                crate::process::ProcessIntentClass::Informational => &harness.read_scope,
+                crate::process::ProcessIntentClass::LocalWorkspaceEffect
+                | crate::process::ProcessIntentClass::Unknown
+                | crate::process::ProcessIntentClass::Forbidden => &harness.write_scope,
+            };
+            if !plan_harness_allows_path(harness, scopes, path) {
+                return Some(plan_harness_scope_diagnostic(path));
+            }
+        }
+        None => {}
+    }
+    None
+}
+
+fn plan_harness_allows_path(harness: &PlanHarnessSnapshot, scopes: &[String], path: &str) -> bool {
+    let path = Path::new(path);
+    let in_scope = scopes
+        .iter()
+        .any(|scope| crate::workspace_scope::workspace_scope_contains(Path::new(scope), path));
+    let overlaps_forbidden = harness.forbidden_paths.iter().any(|forbidden| {
+        let forbidden = Path::new(forbidden);
+        crate::workspace_scope::workspace_scope_contains(forbidden, path)
+            || crate::workspace_scope::workspace_scope_contains(path, forbidden)
+    });
+    in_scope && !overlaps_forbidden
+}
+
+fn plan_harness_scope_diagnostic(path: &str) -> ErrorInfo {
+    plan_harness_diagnostic(
+        "plan_harness_scope_denied",
+        format!("workspace path {path} is outside the active plan node harness"),
+    )
+}
+
+fn plan_harness_diagnostic(code: &str, message: String) -> ErrorInfo {
+    ErrorInfo::new(code, &message).expect("runtime-owned plan harness diagnostic is valid")
+}
+
+async fn resolve_plan_harness_denial(
+    inner: &RuntimeInner,
+    pending: &PendingToolCall,
+    diagnostic: ErrorInfo,
+) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
+    let content = ArtifactContent::json(
+        serde_json::json!({
+            "ok": false,
+            "tool": pending.name().as_str(),
+            "error": {
+                "code": diagnostic.code(),
+                "message": diagnostic.message(),
+            }
+        })
+        .to_string(),
+    );
+    let events = {
+        let mut session = inner.session.lock().await;
+        session.submit_tool_execution_outcome(
+            pending.id(),
+            ToolCallResultStatus::Failed,
+            content,
+            Some(diagnostic),
+            None,
+        )?
+    };
+    persist_tool_events(inner, events).await
+}
+
+fn changed_paths_from_proposal(proposal: &ActionProposal) -> Vec<String> {
+    match proposal.evidence() {
+        ActionProposalEvidence::WorkspacePatch(patch) => patch
+            .changes()
+            .iter()
+            .map(|change| change.relative_path().to_owned())
+            .collect(),
+        ActionProposalEvidence::ProcessAction(_) => Vec::new(),
+    }
+}
+
+async fn attribute_plan_effect_before_execution(
+    inner: &RuntimeInner,
+    pending: &PendingToolCall,
+    changed_paths: Vec<String>,
+) -> Result<(), RuntimeError> {
+    inner
+        .record_plan_runtime_effect(changed_paths)
+        .await
+        .map_err(|error| RuntimeError::PlanEffectAttribution {
+            session_id: inner.session_id.clone(),
+            call_id: pending.id().clone(),
+            message: error.to_string(),
+        })
 }
 
 async fn persist_tool_events(

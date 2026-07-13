@@ -80,6 +80,10 @@
         record_approved_proposal: Arc<StdMutex<Vec<bool>>>,
         attach_execution_evidence: bool,
         preflight_outcome: Option<ToolExecutionOutcome>,
+        propose_started: Option<Arc<Notify>>,
+        release_propose: Option<Arc<Notify>>,
+        execute_started: Option<Arc<Notify>>,
+        release_execute: Option<Arc<Notify>>,
     }
 
     impl ProposingToolExecutor {
@@ -91,6 +95,40 @@
                 record_approved_proposal: Arc::new(StdMutex::new(Vec::new())),
                 attach_execution_evidence: true,
                 preflight_outcome: None,
+                propose_started: None,
+                release_propose: None,
+                execute_started: None,
+                release_execute: None,
+            }
+        }
+
+        fn blocking_proposal() -> Self {
+            Self {
+                execute_calls: Arc::new(AtomicUsize::new(0)),
+                propose_calls: Arc::new(AtomicUsize::new(0)),
+                wait_for_cancel: false,
+                record_approved_proposal: Arc::new(StdMutex::new(Vec::new())),
+                attach_execution_evidence: true,
+                preflight_outcome: None,
+                propose_started: Some(Arc::new(Notify::new())),
+                release_propose: Some(Arc::new(Notify::new())),
+                execute_started: None,
+                release_execute: None,
+            }
+        }
+
+        fn blocking() -> Self {
+            Self {
+                execute_calls: Arc::new(AtomicUsize::new(0)),
+                propose_calls: Arc::new(AtomicUsize::new(0)),
+                wait_for_cancel: false,
+                record_approved_proposal: Arc::new(StdMutex::new(Vec::new())),
+                attach_execution_evidence: true,
+                preflight_outcome: None,
+                propose_started: None,
+                release_propose: None,
+                execute_started: Some(Arc::new(Notify::new())),
+                release_execute: Some(Arc::new(Notify::new())),
             }
         }
 
@@ -102,6 +140,10 @@
                 record_approved_proposal: Arc::new(StdMutex::new(Vec::new())),
                 attach_execution_evidence: true,
                 preflight_outcome: None,
+                propose_started: None,
+                release_propose: None,
+                execute_started: None,
+                release_execute: None,
             }
         }
 
@@ -113,6 +155,10 @@
                 record_approved_proposal: Arc::new(StdMutex::new(Vec::new())),
                 attach_execution_evidence: false,
                 preflight_outcome: None,
+                propose_started: None,
+                release_propose: None,
+                execute_started: None,
+                release_execute: None,
             }
         }
 
@@ -124,6 +170,10 @@
                 record_approved_proposal: Arc::new(StdMutex::new(Vec::new())),
                 attach_execution_evidence: true,
                 preflight_outcome: Some(outcome),
+                propose_started: None,
+                release_propose: None,
+                execute_started: None,
+                release_execute: None,
             }
         }
 
@@ -141,6 +191,36 @@
                 .expect("approved proposal records mutex should not be poisoned")
                 .clone()
         }
+
+        async fn wait_for_propose_start(&self) {
+            self.propose_started
+                .as_ref()
+                .expect("blocking proposer has a start notification")
+                .notified()
+                .await;
+        }
+
+        fn release_propose(&self) {
+            self.release_propose
+                .as_ref()
+                .expect("blocking proposer has a release notification")
+                .notify_one();
+        }
+
+        async fn wait_for_execute_start(&self) {
+            self.execute_started
+                .as_ref()
+                .expect("blocking executor has a start notification")
+                .notified()
+                .await;
+        }
+
+        fn release_execute(&self) {
+            self.release_execute
+                .as_ref()
+                .expect("blocking executor has a release notification")
+                .notify_one();
+        }
     }
 
     impl ToolExecutor for ProposingToolExecutor {
@@ -154,6 +234,14 @@
                 if self.wait_for_cancel {
                     context.cancellation_token().cancelled().await;
                     return Err(ToolExecutionError::Cancelled);
+                }
+                if let Some(started) = self.propose_started.as_ref() {
+                    started.notify_one();
+                    self.release_propose
+                        .as_ref()
+                        .expect("blocking proposer has a release notification")
+                        .notified()
+                        .await;
                 }
                 if let Some(outcome) = self.preflight_outcome.clone() {
                     return Ok(ToolActionPreflight::Outcome(outcome));
@@ -194,6 +282,14 @@
                     .lock()
                     .expect("approved proposal records mutex should not be poisoned")
                     .push(context.approved_workspace_patch().is_some());
+                if let Some(started) = self.execute_started.as_ref() {
+                    started.notify_one();
+                    self.release_execute
+                        .as_ref()
+                        .expect("blocking executor has a release notification")
+                        .notified()
+                        .await;
+                }
                 if !self.attach_execution_evidence {
                     return Ok(ToolExecutionOutcome::succeeded_text(
                         "patched without evidence\n",

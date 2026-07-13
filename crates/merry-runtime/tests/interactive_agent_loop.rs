@@ -1,9 +1,9 @@
 use futures_util::{StreamExt, stream};
 use merry_core::{
     InteractiveRunState, ModelUsage, PendingToolCall, PlanActivationSource, PlanAttemptOutcome,
-    PlanExecutorPolicy, PlanHarnessSnapshot, PlanNodeResult, PlanNodeStatus, PlanPhase,
-    PlanRecoveryPolicySnapshot, ProviderName, QueuedInputLane, RuntimeEvent, SessionId,
-    ToolInputSchema, ToolName, ToolSpec,
+    PlanCapabilityEnvelopeSnapshot, PlanExecutorPolicy, PlanHarnessSnapshot, PlanNodeResult,
+    PlanNodeStatus, PlanPhase, PlanRecoveryPolicySnapshot, ProviderName, QueuedInputLane,
+    RuntimeEvent, SessionId, ToolInputSchema, ToolName, ToolSpec,
 };
 use merry_llm::{
     FinishReason, GenerationConfig, ModelCapabilities, ModelError, ModelEvent, ModelEventStream,
@@ -14,15 +14,16 @@ use merry_llm::{
 use merry_runtime::{
     AgentLoopConfig, AutomaticCompactionConfig, BeginPlanInput, ChildRuntimeFactory,
     ChildRuntimeInput, CitationCompactionPolicy, InteractiveError, InteractivePrimaryModel,
-    InteractiveSettingsUpdate, InteractiveSubagentSettings, InterruptReason, PlanChangeInput,
-    PlanExecutionIntent, PlanNodeInput, ReportPlanAttemptInput, Runtime, StepContext,
-    SubagentConfig, SubagentManager, ToolExecutionContext, ToolExecutionError,
+    InteractiveSettingsUpdate, InteractiveSubagentSettings, InterruptReason, PlanApprovalInput,
+    PlanChangeInput, PlanExecutionIntent, PlanNodeInput, ReportPlanAttemptInput, Runtime,
+    StepContext, SubagentConfig, SubagentManager, ToolExecutionContext, ToolExecutionError,
     ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture, UpdatePlanInput,
     subagent_registered_tools,
 };
 use schemars::Schema;
 use serde_json::json;
 use std::{
+    collections::BTreeMap,
     num::{NonZeroU64, NonZeroUsize},
     sync::{
         Arc, Mutex, OnceLock,
@@ -128,6 +129,99 @@ impl ChildRuntimeFactory for NoopChildFactory {
     }
 }
 
+struct PlanLifecycleChildFactory {
+    report_terminal_attempt: bool,
+    attempts_started: Arc<AtomicUsize>,
+}
+
+impl ChildRuntimeFactory for PlanLifecycleChildFactory {
+    fn build_child(
+        &self,
+        input: ChildRuntimeInput,
+    ) -> Result<Runtime, merry_runtime::RuntimeError> {
+        let control = input
+            .plan_subagent_control
+            .expect("plan subagent carries attempt control");
+        Runtime::builder(input.session_id)
+            .task_anchor(input.task_anchor)
+            .model_provider(
+                Arc::new(PlanLifecycleChildProvider {
+                    report_terminal_attempt: self.report_terminal_attempt,
+                    attempts_started: Arc::clone(&self.attempts_started),
+                    turns: AtomicUsize::new(0),
+                }),
+                model_name(),
+            )
+            .automatic_compaction(AutomaticCompactionConfig::disabled())
+            .plan_subagent_control(control)
+            .build()
+    }
+}
+
+struct PlanLifecycleChildProvider {
+    report_terminal_attempt: bool,
+    attempts_started: Arc<AtomicUsize>,
+    turns: AtomicUsize,
+}
+
+impl ModelProvider for PlanLifecycleChildProvider {
+    fn name(&self) -> &ProviderName {
+        static NAME: OnceLock<ProviderName> = OnceLock::new();
+        NAME.get_or_init(|| {
+            ProviderName::new("interactive-plan-subagent-lifecycle").expect("valid provider")
+        })
+    }
+
+    fn capabilities(&self) -> &ModelCapabilities {
+        static CAPABILITIES: OnceLock<ModelCapabilities> = OnceLock::new();
+        CAPABILITIES.get_or_init(|| {
+            ModelCapabilities::new(true, true, false, true, None, None).expect("valid capabilities")
+        })
+    }
+
+    fn stream_model<'a>(
+        &'a self,
+        _request: ModelRequest,
+        _context: ModelStreamContext,
+    ) -> ModelProviderFuture<'a, Result<ModelEventStream, ModelError>> {
+        Box::pin(async move {
+            let turn = self.turns.fetch_add(1, Ordering::AcqRel);
+            if turn == 0 {
+                self.attempts_started.fetch_add(1, Ordering::AcqRel);
+            }
+            let event = if self.report_terminal_attempt && turn == 0 {
+                let input = ReportPlanAttemptInput {
+                    outcome: PlanAttemptOutcome::Completed,
+                    result: Some(PlanNodeResult {
+                        conclusion: "delegated verification completed".to_owned(),
+                        evidence_refs: Vec::new(),
+                        artifact_refs: Vec::new(),
+                        changed_paths: Vec::new(),
+                        verification: vec!["delegated lifecycle fixture".to_owned()],
+                        open_questions: Vec::new(),
+                    }),
+                    diagnostic: None,
+                    decomposition: None,
+                    acknowledged_directive_ids: Vec::new(),
+                    applied_directive_ids: Vec::new(),
+                };
+                completed_tool_call_event(ModelToolCall::new(
+                    ModelToolCallId::new("delegated-plan-attempt").expect("valid call id"),
+                    ToolName::new("report_plan_attempt").expect("valid tool name"),
+                    ToolArguments::try_from(
+                        serde_json::to_value(input).expect("attempt report serializes"),
+                    )
+                    .expect("attempt report arguments are an object"),
+                ))
+            } else {
+                completed_text_event("delegated turn complete")
+            };
+            let event_stream: ModelEventStream = Box::pin(stream::iter(vec![Ok(event)]));
+            Ok(event_stream)
+        })
+    }
+}
+
 impl RecordingProvider {
     fn new() -> Self {
         Self::new_with_steps(vec![vec![Ok(completed_text_event("done"))]])
@@ -181,14 +275,7 @@ impl ModelProvider for RecordingProvider {
 
 #[derive(Clone, Default)]
 struct LocalPlanProvider {
-    target: Arc<Mutex<Option<(merry_core::PlanLeaseId, u64)>>>,
     calls: Arc<AtomicUsize>,
-}
-
-impl LocalPlanProvider {
-    fn set_target(&self, lease_id: merry_core::PlanLeaseId, node_revision: u64) {
-        *self.target.lock().expect("local plan target lock") = Some((lease_id, node_revision));
-    }
 }
 
 impl ModelProvider for LocalPlanProvider {
@@ -211,15 +298,7 @@ impl ModelProvider for LocalPlanProvider {
     ) -> ModelProviderFuture<'a, Result<ModelEventStream, ModelError>> {
         Box::pin(async move {
             let event = if self.calls.fetch_add(1, Ordering::AcqRel) == 0 {
-                let (lease_id, node_revision) = self
-                    .target
-                    .lock()
-                    .expect("local plan target lock")
-                    .clone()
-                    .expect("local plan target is configured before interactive execution");
                 let input = ReportPlanAttemptInput {
-                    lease_id: lease_id.clone(),
-                    expected_node_revision: node_revision,
                     outcome: PlanAttemptOutcome::Completed,
                     result: Some(PlanNodeResult {
                         conclusion: "local coordinator verification completed".to_owned(),
@@ -235,8 +314,7 @@ impl ModelProvider for LocalPlanProvider {
                     applied_directive_ids: Vec::new(),
                 };
                 completed_tool_call_event(ModelToolCall::new(
-                    ModelToolCallId::new(&format!("local-plan-{}", lease_id.as_str()))
-                        .expect("valid call id"),
+                    ModelToolCallId::new("local-plan-attempt").expect("valid call id"),
                     ToolName::new("report_plan_attempt").expect("valid tool name"),
                     ToolArguments::try_from(
                         serde_json::to_value(input).expect("attempt report serializes"),
@@ -247,6 +325,41 @@ impl ModelProvider for LocalPlanProvider {
                 completed_text_event("local plan complete")
             };
             let event_stream: ModelEventStream = Box::pin(stream::iter(vec![Ok(event)]));
+            Ok(event_stream)
+        })
+    }
+}
+
+#[derive(Clone, Default)]
+struct MissingLocalPlanReportProvider {
+    calls: Arc<AtomicUsize>,
+}
+
+impl ModelProvider for MissingLocalPlanReportProvider {
+    fn name(&self) -> &ProviderName {
+        static NAME: OnceLock<ProviderName> = OnceLock::new();
+        NAME.get_or_init(|| {
+            ProviderName::new("interactive-missing-local-plan-report").expect("valid provider")
+        })
+    }
+
+    fn capabilities(&self) -> &ModelCapabilities {
+        static CAPABILITIES: OnceLock<ModelCapabilities> = OnceLock::new();
+        CAPABILITIES.get_or_init(|| {
+            ModelCapabilities::new(true, true, false, true, None, None).expect("valid capabilities")
+        })
+    }
+
+    fn stream_model<'a>(
+        &'a self,
+        _request: ModelRequest,
+        _context: ModelStreamContext,
+    ) -> ModelProviderFuture<'a, Result<ModelEventStream, ModelError>> {
+        Box::pin(async move {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            let event_stream: ModelEventStream = Box::pin(stream::iter(vec![Ok(
+                completed_text_event("work finished without a structured attempt report"),
+            )]));
             Ok(event_stream)
         })
     }
@@ -519,7 +632,7 @@ async fn interactive_plan_controls_reject_while_the_main_model_phase_is_running(
 }
 
 #[tokio::test]
-async fn interactive_run_automatically_executes_a_leased_local_plan_node() {
+async fn interactive_run_automatically_executes_a_local_plan_node_without_a_lease() {
     let provider = LocalPlanProvider::default();
     let runtime = Runtime::builder(session_id("interactive-local-plan-lane"))
         .model_provider(Arc::new(provider.clone()), model_name())
@@ -542,26 +655,26 @@ async fn interactive_run_automatically_executes_a_leased_local_plan_node() {
         .authorize_plan_execution(Default::default(), vec!["test authorization".to_owned()])
         .await
         .expect("plan is authorized");
-    let lease = timeout(Duration::from_secs(2), async {
+    timeout(Duration::from_secs(2), async {
         loop {
             let snapshot = runtime
                 .plan_snapshot()
                 .await
                 .expect("snapshot read succeeds")
                 .expect("plan exists");
-            if let Some(lease) = snapshot
-                .leases
+            if snapshot
+                .attempts
                 .iter()
-                .find(|lease| lease.status == merry_core::PlanLeaseStatus::Live)
+                .any(|attempt| attempt.outcome.is_none() && attempt.lease_id.is_none())
             {
-                break lease.clone();
+                assert!(snapshot.leases.is_empty());
+                break;
             }
             tokio::task::yield_now().await;
         }
     })
     .await
-    .expect("local lease should be reserved");
-    provider.set_target(lease.lease_id, lease.node_revision);
+    .expect("local attempt should be reserved without a lease");
 
     let run = runtime
         .start_interactive_agent_run(
@@ -596,6 +709,723 @@ async fn interactive_run_automatically_executes_a_leased_local_plan_node() {
     assert_eq!(snapshot.nodes[0].status, PlanNodeStatus::Completed);
 }
 
+#[tokio::test]
+async fn interactive_run_recovers_a_missing_local_attempt_report_without_hanging() {
+    let provider = MissingLocalPlanReportProvider::default();
+    let runtime = Runtime::builder(session_id("interactive-missing-local-plan-report"))
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .coordinator_plan_tools()
+        .automatic_compaction(AutomaticCompactionConfig::disabled())
+        .build()
+        .expect("runtime builds");
+    runtime
+        .begin_plan(BeginPlanInput {
+            reason: "define local work with protocol recovery".to_owned(),
+            governing_skill_id: None,
+        })
+        .await
+        .expect("plan begins");
+    runtime
+        .update_plan(local_plan_input())
+        .await
+        .expect("plan definition succeeds");
+    runtime
+        .authorize_plan_execution(Default::default(), vec!["test authorization".to_owned()])
+        .await
+        .expect("plan is authorized");
+
+    let run = runtime
+        .start_interactive_agent_run(
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default(),
+        )
+        .expect("interactive run starts");
+    let (mut events, _input, _control) = run.split();
+    timeout(Duration::from_secs(2), async {
+        loop {
+            if runtime
+                .plan_snapshot()
+                .await
+                .expect("snapshot read succeeds")
+                .is_some_and(|snapshot| snapshot.phase == PlanPhase::Blocked)
+            {
+                break;
+            }
+            let _ = events.next().await;
+        }
+    })
+    .await
+    .expect("missing reports should exhaust bounded retries without hanging");
+
+    let snapshot = runtime
+        .plan_snapshot()
+        .await
+        .expect("snapshot read succeeds")
+        .expect("plan exists");
+    assert_eq!(snapshot.attempts.len(), 2, "{snapshot:#?}");
+    assert!(snapshot.leases.is_empty());
+    assert!(
+        snapshot.attempts.iter().all(|attempt| {
+            attempt.outcome == Some(PlanAttemptOutcome::TransientFailure)
+                && attempt
+                    .diagnostic
+                    .as_ref()
+                    .is_some_and(|diagnostic| diagnostic.code() == "missing_attempt_report")
+        }),
+        "{snapshot:#?}"
+    );
+    assert_eq!(
+        provider.calls.load(Ordering::Acquire),
+        3,
+        "two bounded attempts plus one coordinator explanation turn"
+    );
+}
+
+#[tokio::test]
+async fn delegated_plan_completion_wakes_the_idle_coordinator() {
+    let coordinator = RecordingProvider::new();
+    let attempts_started = Arc::new(AtomicUsize::new(0));
+    let child_factory: Arc<dyn ChildRuntimeFactory> = Arc::new(PlanLifecycleChildFactory {
+        report_terminal_attempt: true,
+        attempts_started: Arc::clone(&attempts_started),
+    });
+    let runtime = Runtime::builder(session_id("interactive-delegated-plan-completion"))
+        .model_provider(Arc::new(coordinator.clone()), model_name())
+        .coordinator_plan_tools()
+        .plan_subagent_factory(child_factory, 1)
+        .automatic_compaction(AutomaticCompactionConfig::disabled())
+        .build()
+        .expect("runtime builds");
+    runtime
+        .begin_plan(BeginPlanInput {
+            reason: "verify delegated completion wakeup".to_owned(),
+            governing_skill_id: None,
+        })
+        .await
+        .expect("plan begins");
+    runtime
+        .update_plan(delegated_plan_input())
+        .await
+        .expect("plan definition succeeds");
+    let run = runtime
+        .start_interactive_agent_run(
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default(),
+        )
+        .expect("interactive run starts");
+    let (mut events, _input, _control) = run.split();
+    let _ = events.next().await.expect("waiting state");
+
+    runtime
+        .authorize_plan_execution(Default::default(), vec!["test authorization".to_owned()])
+        .await
+        .expect("plan is authorized");
+    timeout(Duration::from_secs(3), async {
+        loop {
+            let completed = runtime
+                .plan_snapshot()
+                .await
+                .expect("snapshot read succeeds")
+                .is_some_and(|snapshot| snapshot.phase == PlanPhase::Completed);
+            if completed && !coordinator.recorded_requests().is_empty() {
+                break;
+            }
+            let _ = events.next().await;
+        }
+    })
+    .await
+    .expect("terminal delegated plan should wake the coordinator");
+
+    assert_eq!(attempts_started.load(Ordering::Acquire), 1);
+    assert_eq!(coordinator.recorded_requests().len(), 1);
+}
+
+#[tokio::test]
+async fn exhausted_delegated_attempts_wake_the_idle_coordinator() {
+    let coordinator = RecordingProvider::new();
+    let attempts_started = Arc::new(AtomicUsize::new(0));
+    let child_factory: Arc<dyn ChildRuntimeFactory> = Arc::new(PlanLifecycleChildFactory {
+        report_terminal_attempt: false,
+        attempts_started: Arc::clone(&attempts_started),
+    });
+    let runtime = Runtime::builder(session_id("interactive-delegated-plan-blocked"))
+        .model_provider(Arc::new(coordinator.clone()), model_name())
+        .coordinator_plan_tools()
+        .plan_subagent_factory(child_factory, 1)
+        .automatic_compaction(AutomaticCompactionConfig::disabled())
+        .build()
+        .expect("runtime builds");
+    runtime
+        .begin_plan(BeginPlanInput {
+            reason: "verify delegated retry exhaustion wakeup".to_owned(),
+            governing_skill_id: None,
+        })
+        .await
+        .expect("plan begins");
+    runtime
+        .update_plan(delegated_plan_input())
+        .await
+        .expect("plan definition succeeds");
+    let run = runtime
+        .start_interactive_agent_run(
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default(),
+        )
+        .expect("interactive run starts");
+    let (mut events, _input, _control) = run.split();
+    let _ = events.next().await.expect("waiting state");
+
+    runtime
+        .authorize_plan_execution(Default::default(), vec!["test authorization".to_owned()])
+        .await
+        .expect("plan is authorized");
+    timeout(Duration::from_secs(3), async {
+        loop {
+            let blocked = runtime
+                .plan_snapshot()
+                .await
+                .expect("snapshot read succeeds")
+                .is_some_and(|snapshot| snapshot.phase == PlanPhase::Blocked);
+            if blocked && !coordinator.recorded_requests().is_empty() {
+                break;
+            }
+            let _ = events.next().await;
+        }
+    })
+    .await
+    .expect("blocked delegated plan should wake the coordinator");
+
+    let snapshot = runtime
+        .plan_snapshot()
+        .await
+        .expect("snapshot read succeeds")
+        .expect("plan exists");
+    assert_eq!(attempts_started.load(Ordering::Acquire), 2);
+    assert_eq!(coordinator.recorded_requests().len(), 1);
+    assert!(snapshot.attempts.iter().all(|attempt| {
+        attempt.outcome == Some(PlanAttemptOutcome::TransientFailure)
+            && attempt
+                .diagnostic
+                .as_ref()
+                .is_some_and(|diagnostic| diagnostic.code() == "missing_attempt_report")
+    }));
+}
+
+#[tokio::test]
+async fn interactive_run_closes_failed_local_attempts_without_hanging() {
+    let provider = RecordingProvider::new_with_steps(vec![
+        vec![Err(ModelError::invalid_request(
+            "first local attempt failed",
+        ))],
+        vec![Err(ModelError::invalid_request(
+            "second local attempt failed",
+        ))],
+    ]);
+    let runtime = Runtime::builder(session_id("interactive-failed-local-plan-attempt"))
+        .model_provider(Arc::new(provider), model_name())
+        .coordinator_plan_tools()
+        .automatic_compaction(AutomaticCompactionConfig::disabled())
+        .build()
+        .expect("runtime builds");
+    runtime
+        .begin_plan(BeginPlanInput {
+            reason: "exercise failed local turns".to_owned(),
+            governing_skill_id: None,
+        })
+        .await
+        .expect("plan begins");
+    runtime
+        .update_plan(local_plan_input())
+        .await
+        .expect("plan definition succeeds");
+    runtime
+        .authorize_plan_execution(Default::default(), vec!["test authorization".to_owned()])
+        .await
+        .expect("plan is authorized");
+
+    let run = runtime
+        .start_interactive_agent_run(
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default(),
+        )
+        .expect("interactive run starts");
+    let (mut events, _input, _control) = run.split();
+    timeout(Duration::from_secs(2), async {
+        loop {
+            if runtime
+                .plan_snapshot()
+                .await
+                .expect("snapshot read succeeds")
+                .is_some_and(|snapshot| snapshot.phase == PlanPhase::Blocked)
+            {
+                break;
+            }
+            let _ = events.next().await;
+        }
+    })
+    .await
+    .expect("failed local turns should exhaust bounded retries");
+
+    let snapshot = runtime
+        .plan_snapshot()
+        .await
+        .expect("snapshot read succeeds")
+        .expect("plan exists");
+    assert_eq!(snapshot.attempts.len(), 2);
+    assert!(snapshot.attempts.iter().all(|attempt| {
+        attempt.outcome == Some(PlanAttemptOutcome::TransientFailure)
+            && attempt.diagnostic.is_some()
+    }));
+}
+
+#[tokio::test]
+async fn interactive_run_retries_a_local_stream_eof_without_hanging() {
+    let provider = RecordingProvider::new_with_steps(vec![Vec::new(), Vec::new()]);
+    let runtime = Runtime::builder(session_id("interactive-blocked-local-plan-attempt"))
+        .model_provider(Arc::new(provider), model_name())
+        .coordinator_plan_tools()
+        .automatic_compaction(AutomaticCompactionConfig::disabled())
+        .build()
+        .expect("runtime builds");
+    runtime
+        .begin_plan(BeginPlanInput {
+            reason: "exercise blocked local turns".to_owned(),
+            governing_skill_id: None,
+        })
+        .await
+        .expect("plan begins");
+    runtime
+        .update_plan(local_plan_input())
+        .await
+        .expect("plan definition succeeds");
+    runtime
+        .authorize_plan_execution(Default::default(), vec!["test authorization".to_owned()])
+        .await
+        .expect("plan is authorized");
+
+    let run = runtime
+        .start_interactive_agent_run(
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default(),
+        )
+        .expect("interactive run starts");
+    let (mut events, _input, _control) = run.split();
+    timeout(Duration::from_secs(2), async {
+        loop {
+            if runtime
+                .plan_snapshot()
+                .await
+                .expect("snapshot read succeeds")
+                .is_some_and(|snapshot| snapshot.phase == PlanPhase::Blocked)
+            {
+                break;
+            }
+            let _ = events.next().await;
+        }
+    })
+    .await
+    .expect("local stream EOF should become bounded transient retries");
+
+    let snapshot = runtime
+        .plan_snapshot()
+        .await
+        .expect("snapshot read succeeds")
+        .expect("plan exists");
+    assert!(
+        snapshot.attempts.iter().all(|attempt| {
+            attempt.outcome == Some(PlanAttemptOutcome::TransientFailure)
+                && attempt
+                    .diagnostic
+                    .as_ref()
+                    .is_some_and(|diagnostic| diagnostic.code() == "model_stream_eof")
+        }),
+        "{snapshot:#?}"
+    );
+}
+
+#[tokio::test]
+async fn interactive_run_closes_cancelled_local_attempts_without_hanging() {
+    let provider = RecordingProvider::new_with_steps(vec![
+        vec![Err(ModelError::Cancelled)],
+        vec![Err(ModelError::Cancelled)],
+    ]);
+    let runtime = Runtime::builder(session_id("interactive-cancelled-local-plan-attempt"))
+        .model_provider(Arc::new(provider), model_name())
+        .coordinator_plan_tools()
+        .automatic_compaction(AutomaticCompactionConfig::disabled())
+        .build()
+        .expect("runtime builds");
+    runtime
+        .begin_plan(BeginPlanInput {
+            reason: "exercise cancelled local turns".to_owned(),
+            governing_skill_id: None,
+        })
+        .await
+        .expect("plan begins");
+    runtime
+        .update_plan(local_plan_input())
+        .await
+        .expect("plan definition succeeds");
+    runtime
+        .authorize_plan_execution(Default::default(), vec!["test authorization".to_owned()])
+        .await
+        .expect("plan is authorized");
+
+    let run = runtime
+        .start_interactive_agent_run(
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default(),
+        )
+        .expect("interactive run starts");
+    let (mut events, _input, _control) = run.split();
+    timeout(Duration::from_secs(2), async {
+        loop {
+            if runtime
+                .plan_snapshot()
+                .await
+                .expect("snapshot read succeeds")
+                .is_some_and(|snapshot| snapshot.phase == PlanPhase::Blocked)
+            {
+                break;
+            }
+            let _ = events.next().await;
+        }
+    })
+    .await
+    .expect("cancelled local turns should settle instead of stranding attempts");
+}
+
+#[tokio::test]
+async fn plan_wakeup_received_during_a_user_turn_runs_at_the_next_safe_boundary() {
+    let (started_tx, started_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let provider = BlockingFirstProvider::new(started_tx, release_rx);
+    let runtime = Runtime::builder(session_id("interactive-plan-wakeup-safe-boundary"))
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .coordinator_plan_tools()
+        .automatic_compaction(AutomaticCompactionConfig::disabled())
+        .build()
+        .expect("runtime builds");
+    let run = runtime
+        .start_interactive_agent_run(
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default(),
+        )
+        .expect("interactive run starts");
+    let (mut events, input, _control) = run.split();
+    let _ = events.next().await.expect("waiting state");
+    input
+        .submit_next("Start an ordinary user turn")
+        .await
+        .expect("input queues");
+    started_rx.await.expect("provider request starts");
+
+    runtime
+        .begin_plan(BeginPlanInput {
+            reason: "activate plan while the user turn is in flight".to_owned(),
+            governing_skill_id: None,
+        })
+        .await
+        .expect("plan begins");
+    runtime
+        .update_plan(local_plan_input())
+        .await
+        .expect("plan definition succeeds");
+    runtime
+        .authorize_plan_execution(Default::default(), vec!["test authorization".to_owned()])
+        .await
+        .expect("plan is authorized");
+    release_tx.send(()).expect("release first provider turn");
+
+    timeout(Duration::from_secs(2), async {
+        loop {
+            if provider.recorded_requests().len() >= 2 {
+                break;
+            }
+            let _ = events.next().await;
+        }
+    })
+    .await
+    .expect("the consumed plan wakeup must trigger a continuation at the safe boundary");
+}
+
+#[tokio::test]
+async fn interactive_run_stops_before_another_model_turn_when_plan_awaits_approval() {
+    let mut review_plan = local_plan_input();
+    review_plan.execution_intent = PlanExecutionIntent::RequestUserReview;
+    let provider = RecordingProvider::new_with_steps(vec![
+        vec![Ok(completed_tool_call_event(ModelToolCall::new(
+            ModelToolCallId::new("call-plan-review").expect("valid call id"),
+            ToolName::new("update_plan").expect("valid tool name"),
+            ToolArguments::try_from(
+                serde_json::to_value(review_plan).expect("review plan serializes"),
+            )
+            .expect("review plan arguments are an object"),
+        )))],
+        vec![Ok(completed_text_event(
+            "this turn must not run before structured approval",
+        ))],
+    ]);
+    let runtime = Runtime::builder(session_id("interactive-plan-awaiting-approval-boundary"))
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .coordinator_plan_tools()
+        .automatic_compaction(AutomaticCompactionConfig::disabled())
+        .build()
+        .expect("runtime builds");
+    runtime
+        .begin_plan(BeginPlanInput {
+            reason: "prepare an explicitly reviewed plan".to_owned(),
+            governing_skill_id: None,
+        })
+        .await
+        .expect("plan begins");
+    let run = runtime
+        .start_interactive_agent_run(
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default(),
+        )
+        .expect("interactive run starts");
+    let (mut stream, input, _control) = run.split();
+    let _ = stream.next().await.expect("waiting state");
+
+    input
+        .submit_next("Create the plan, then wait for my approval")
+        .await
+        .expect("input queued");
+    wait_for_interactive_waiting(&mut stream).await;
+
+    assert_eq!(
+        provider.recorded_requests().len(),
+        1,
+        "the tool continuation must stop at the user approval boundary"
+    );
+    assert_eq!(
+        runtime
+            .plan_snapshot()
+            .await
+            .expect("plan snapshot read succeeds")
+            .expect("plan exists")
+            .phase,
+        PlanPhase::AwaitingApproval
+    );
+}
+
+#[tokio::test]
+async fn interactive_run_stops_before_another_model_turn_for_a_non_empty_planning_draft() {
+    let provider = RecordingProvider::new_with_steps(vec![
+        vec![Ok(completed_tool_call_event(ModelToolCall::new(
+            ModelToolCallId::new("call-planning-draft").expect("valid call id"),
+            ToolName::new("update_plan").expect("valid tool name"),
+            ToolArguments::try_from(
+                serde_json::to_value(local_plan_input()).expect("planning draft serializes"),
+            )
+            .expect("planning draft arguments are an object"),
+        )))],
+        vec![Ok(completed_text_event(
+            "this turn must wait for structured draft approval",
+        ))],
+    ]);
+    let runtime = Runtime::builder(session_id("interactive-planning-draft-boundary"))
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .coordinator_plan_tools()
+        .automatic_compaction(AutomaticCompactionConfig::disabled())
+        .build()
+        .expect("runtime builds");
+    runtime
+        .begin_plan(BeginPlanInput {
+            reason: "prepare a planning draft".to_owned(),
+            governing_skill_id: None,
+        })
+        .await
+        .expect("plan begins");
+    let run = runtime
+        .start_interactive_agent_run(
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default(),
+        )
+        .expect("interactive run starts");
+    let (mut stream, input, _control) = run.split();
+    let _ = stream.next().await.expect("waiting state");
+
+    input
+        .submit_next("Create a draft and let me approve it")
+        .await
+        .expect("input queued");
+    wait_for_interactive_waiting(&mut stream).await;
+
+    assert_eq!(provider.recorded_requests().len(), 1);
+    assert_eq!(
+        runtime
+            .plan_snapshot()
+            .await
+            .expect("plan snapshot read succeeds")
+            .expect("plan exists")
+            .phase,
+        PlanPhase::Planning
+    );
+}
+
+#[tokio::test]
+async fn structured_plan_approval_resumes_execution_without_chat_confirmation() {
+    let mut review_plan = local_plan_input();
+    review_plan.execution_intent = PlanExecutionIntent::RequestUserReview;
+    let provider = RecordingProvider::new_with_steps(vec![
+        vec![Ok(completed_tool_call_event(ModelToolCall::new(
+            ModelToolCallId::new("call-plan-approval-resume").expect("valid call id"),
+            ToolName::new("update_plan").expect("valid tool name"),
+            ToolArguments::try_from(
+                serde_json::to_value(review_plan).expect("review plan serializes"),
+            )
+            .expect("review plan arguments are an object"),
+        )))],
+        vec![Ok(completed_tool_call_event(ModelToolCall::new(
+            ModelToolCallId::new("call-approved-local-attempt").expect("valid call id"),
+            ToolName::new("report_plan_attempt").expect("valid tool name"),
+            ToolArguments::try_from(
+                serde_json::to_value(ReportPlanAttemptInput {
+                    outcome: PlanAttemptOutcome::Completed,
+                    result: Some(PlanNodeResult {
+                        conclusion: "Structured approval resumed the planned execution.".to_owned(),
+                        evidence_refs: Vec::new(),
+                        artifact_refs: Vec::new(),
+                        changed_paths: Vec::new(),
+                        verification: vec!["approved local attempt completed".to_owned()],
+                        open_questions: Vec::new(),
+                    }),
+                    diagnostic: None,
+                    decomposition: None,
+                    acknowledged_directive_ids: Vec::new(),
+                    applied_directive_ids: Vec::new(),
+                })
+                .expect("attempt report serializes"),
+            )
+            .expect("attempt report arguments are an object"),
+        )))],
+        vec![Ok(completed_text_event("The approved plan is complete."))],
+    ]);
+    let runtime = Runtime::builder(session_id("interactive-plan-structured-approval-resume"))
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .coordinator_plan_tools()
+        .automatic_compaction(AutomaticCompactionConfig::disabled())
+        .build()
+        .expect("runtime builds");
+    runtime
+        .begin_plan(BeginPlanInput {
+            reason: "prepare an explicitly reviewed plan".to_owned(),
+            governing_skill_id: None,
+        })
+        .await
+        .expect("plan begins");
+    let run = runtime
+        .start_interactive_agent_run(
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default(),
+        )
+        .expect("interactive run starts");
+    let (mut stream, input, control) = run.split();
+    let _ = stream.next().await.expect("waiting state");
+    input
+        .submit_next("Create the plan, then wait for structured approval")
+        .await
+        .expect("input queued");
+    wait_for_interactive_waiting(&mut stream).await;
+    assert_eq!(provider.recorded_requests().len(), 1);
+
+    control
+        .approve_plan(PlanApprovalInput {
+            plan_id: runtime
+                .plan_snapshot()
+                .await
+                .expect("plan snapshot read succeeds")
+                .expect("plan exists")
+                .plan_id,
+            expected_plan_revision: 1,
+            review_resolution_ref: "user approved through the Plan UI".to_owned(),
+            capability_envelope: Some(PlanCapabilityEnvelopeSnapshot::default()),
+            authorization_refs: vec!["interactive Plan approval".to_owned()],
+            requirement_resolution_refs: BTreeMap::new(),
+        })
+        .await
+        .expect("structured plan approval succeeds");
+    wait_for_interactive_waiting(&mut stream).await;
+
+    assert_eq!(provider.recorded_requests().len(), 3);
+    assert_eq!(
+        runtime
+            .plan_snapshot()
+            .await
+            .expect("plan snapshot read succeeds")
+            .expect("plan exists")
+            .phase,
+        PlanPhase::Completed
+    );
+}
+
+#[tokio::test]
+async fn interactive_run_continues_when_user_already_authorized_plan_execution() {
+    let mut executable_plan = local_plan_input();
+    executable_plan.execution_intent = PlanExecutionIntent::ExecuteIfAuthorized;
+    let PlanChangeInput::DefinePlan { root, .. } = &mut executable_plan.change else {
+        panic!("local plan fixture must define a plan");
+    };
+    root.executor_policy = PlanExecutorPolicy::Delegate;
+    let provider = RecordingProvider::new_with_steps(vec![
+        vec![Ok(completed_tool_call_event(ModelToolCall::new(
+            ModelToolCallId::new("call-plan-execute").expect("valid call id"),
+            ToolName::new("update_plan").expect("valid tool name"),
+            ToolArguments::try_from(
+                serde_json::to_value(executable_plan).expect("executable plan serializes"),
+            )
+            .expect("executable plan arguments are an object"),
+        )))],
+        vec![Ok(completed_text_event(
+            "The authorized plan has entered execution.",
+        ))],
+    ]);
+    let runtime = Runtime::builder(session_id("interactive-plan-preauthorized-execution"))
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .coordinator_plan_tools()
+        .automatic_compaction(AutomaticCompactionConfig::disabled())
+        .build()
+        .expect("runtime builds");
+    runtime
+        .begin_plan(BeginPlanInput {
+            reason: "the user asked to plan and execute".to_owned(),
+            governing_skill_id: None,
+        })
+        .await
+        .expect("plan begins");
+    let run = runtime
+        .start_interactive_agent_run(
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default(),
+        )
+        .expect("interactive run starts");
+    let (mut stream, input, _control) = run.split();
+    let _ = stream.next().await.expect("waiting state");
+
+    input
+        .submit_next("Use this plan and execute it")
+        .await
+        .expect("input queued");
+    wait_for_interactive_waiting(&mut stream).await;
+
+    assert_eq!(
+        provider.recorded_requests().len(),
+        2,
+        "pre-authorized execution must continue after update_plan"
+    );
+    assert_eq!(
+        runtime
+            .plan_snapshot()
+            .await
+            .expect("plan snapshot read succeeds")
+            .expect("plan exists")
+            .phase,
+        PlanPhase::Executing
+    );
+}
+
 fn local_plan_input() -> UpdatePlanInput {
     UpdatePlanInput {
         reason: "define local coordinator leaf".to_owned(),
@@ -610,6 +1440,29 @@ fn local_plan_input() -> UpdatePlanInput {
                 objective: "Complete local coordinator verification".to_owned(),
                 acceptance: vec!["local verification is durable".to_owned()],
                 executor_policy: PlanExecutorPolicy::Local,
+                harness: PlanHarnessSnapshot::default(),
+                recovery_policy: PlanRecoveryPolicySnapshot::default(),
+                depends_on: Vec::new(),
+                children: Vec::new(),
+            },
+        },
+    }
+}
+
+fn delegated_plan_input() -> UpdatePlanInput {
+    UpdatePlanInput {
+        reason: "define delegated plan leaf".to_owned(),
+        execution_intent: PlanExecutionIntent::ContinuePlanning,
+        coordinator_node_id: None,
+        max_concurrency_hint: Some(1),
+        change: PlanChangeInput::DefinePlan {
+            expected_plan_revision: 0,
+            root: PlanNodeInput {
+                id: None,
+                client_key: Some("root".to_owned()),
+                objective: "Complete delegated verification".to_owned(),
+                acceptance: vec!["delegated result is durable".to_owned()],
+                executor_policy: PlanExecutorPolicy::Delegate,
                 harness: PlanHarnessSnapshot::default(),
                 recovery_policy: PlanRecoveryPolicySnapshot::default(),
                 depends_on: Vec::new(),

@@ -2457,6 +2457,65 @@ fn projector_keeps_successful_non_patch_tool_compact_and_expands_patch_tool() {
 }
 
 #[test]
+fn projector_shows_the_specific_schema_violation_for_failed_tool_input() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    let mut projector = TuiProjector::default();
+    projector.apply(
+        RuntimeEvent::ToolCallStarted {
+            call: pending_call("call-read-plan", "read_plan"),
+            source: source(),
+        },
+        &mut state,
+    );
+    projector.apply(
+        RuntimeEvent::ToolCallFinished {
+            result: ToolCallResult::failed(
+                ToolCallId::new("call-read-plan").unwrap(),
+                text_artifact("read-plan-schema-error"),
+                ErrorInfo::new(
+                    "tool_input_schema_invalid",
+                    "tool arguments did not match the registered input schema",
+                )
+                .unwrap(),
+            ),
+            output: Some(ToolOutput::Json {
+                json: json!({
+                    "ok": false,
+                    "tool": "read_plan",
+                    "error": {
+                        "code": "tool_input_schema_invalid",
+                        "message": "tool arguments did not match the registered input schema",
+                        "violations": [{
+                            "path": "$",
+                            "schema_path": "/additionalProperties",
+                            "message": "Additional properties are not allowed ('include_leases' was unexpected)"
+                        }]
+                    },
+                    "retry": {
+                        "instruction": "Remove unsupported fields and call read_plan again."
+                    }
+                })
+                .to_string(),
+            }),
+            source: source(),
+        },
+        &mut state,
+    );
+
+    let TimelineItem::Diagnostic { body, .. } = state.timeline().last().expect("diagnostic exists")
+    else {
+        panic!("schema failure should render as a diagnostic");
+    };
+    assert!(body.contains("include_leases"));
+    assert!(body.contains("Remove unsupported fields"));
+}
+
+#[test]
 fn projector_describes_runtime_control_tools() {
     let mut state = TuiState::new(
         "/repo".into(),

@@ -80,11 +80,26 @@ fn plan_pane_derives_live_ready_and_blocked_counts() {
         attempt_id: merry_core::PlanAttemptId::new("attempt-active").unwrap(),
         node_id: node_id("active-leaf"),
         node_revision: 2,
-        executor_session_id: merry_core::SessionId::new("worker-active").unwrap(),
+        executor_session_id: merry_core::SessionId::new("subagent-active").unwrap(),
         started_at_ms: 10,
         last_heartbeat_at_ms: 20,
         lease_expires_at_ms: 30,
         status: merry_core::PlanLeaseStatus::Live,
+    });
+    snapshot.attempts.push(PlanAttemptSnapshot {
+        attempt_id: PlanAttemptId::new("attempt-active").unwrap(),
+        node_id: node_id("active-leaf"),
+        node_revision: 2,
+        lease_id: Some(PlanLeaseId::new("lease-active").unwrap()),
+        executor_session_id: merry_core::SessionId::new("subagent-active").unwrap(),
+        harness_fingerprint: "active-harness".to_owned(),
+        started_at_ms: 10,
+        finished_at_ms: None,
+        outcome: None,
+        result: None,
+        diagnostic: None,
+        latest_checkpoint_ref: None,
+        last_applied_directive_sequence: 0,
     });
     let mut state = PlanUiState::default();
     state.update_snapshot(snapshot);
@@ -97,6 +112,30 @@ fn plan_pane_derives_live_ready_and_blocked_counts() {
             blocked: 1,
         }
     );
+}
+
+#[test]
+fn plan_pane_counts_a_live_local_attempt_without_a_lease() {
+    let mut snapshot = snapshot(1, PlanNodeStatus::InProgress);
+    snapshot.attempts.push(PlanAttemptSnapshot {
+        attempt_id: PlanAttemptId::new("attempt-local").unwrap(),
+        node_id: node_id("active-leaf"),
+        node_revision: 2,
+        lease_id: None,
+        executor_session_id: merry_core::SessionId::new("coordinator").unwrap(),
+        harness_fingerprint: "local-harness".to_owned(),
+        started_at_ms: 10,
+        finished_at_ms: None,
+        outcome: None,
+        result: None,
+        diagnostic: None,
+        latest_checkpoint_ref: None,
+        last_applied_directive_sequence: 0,
+    });
+    let mut state = PlanUiState::default();
+    state.update_snapshot(snapshot);
+
+    assert_eq!(state.counts().live, 1);
 }
 
 #[test]
@@ -228,6 +267,12 @@ fn plan_palette_commands_follow_runtime_phase() {
         vec![PaletteCommand::EnterPlanMode]
     );
 
+    let mut planning = snapshot(1, PlanNodeStatus::Pending);
+    planning.phase = PlanPhase::Planning;
+    state.plan_mut().update_snapshot(planning);
+    let commands = plan_commands(&mut state);
+    assert!(commands.contains(&PaletteCommand::ApprovePlan));
+
     let mut awaiting = snapshot(2, PlanNodeStatus::Pending);
     awaiting.phase = PlanPhase::AwaitingApproval;
     state.plan_mut().update_snapshot(awaiting);
@@ -250,6 +295,24 @@ fn plan_palette_commands_follow_runtime_phase() {
     let commands = plan_commands(&mut state);
     assert!(commands.contains(&PaletteCommand::ResumePlan));
     assert!(!commands.contains(&PaletteCommand::PausePlan));
+
+    let mut blocked = snapshot(4, PlanNodeStatus::Blocked);
+    blocked.phase = PlanPhase::Blocked;
+    state.plan_mut().update_snapshot(blocked);
+    let commands = plan_commands(&mut state);
+    assert!(commands.contains(&PaletteCommand::EnterPlanMode));
+    assert!(!commands.contains(&PaletteCommand::RevisePlan));
+    assert!(!commands.contains(&PaletteCommand::CancelPlan));
+
+    let mut completed = snapshot(5, PlanNodeStatus::Completed);
+    completed.phase = PlanPhase::Completed;
+    state.plan_mut().update_snapshot(completed);
+    assert!(plan_commands(&mut state).contains(&PaletteCommand::EnterPlanMode));
+
+    let mut cancelled = snapshot(6, PlanNodeStatus::Blocked);
+    cancelled.phase = PlanPhase::Cancelled;
+    state.plan_mut().update_snapshot(cancelled);
+    assert!(plan_commands(&mut state).contains(&PaletteCommand::EnterPlanMode));
 }
 
 #[test]
@@ -284,10 +347,184 @@ fn approve_plan_command_previews_exact_capability_scope_before_dispatch() {
     assert!(rendered.contains("capability or permission expansion"));
 
     let confirmed = handle_key_event(key(KeyCode::Enter), &mut state);
-    assert_eq!(
+    assert!(matches!(
         confirmed,
-        crate::tui::controller::ControllerEffect::ApprovePlan
+        crate::tui::controller::ControllerEffect::ApprovePlan(_)
+    ));
+}
+
+#[test]
+fn approval_uses_root_forbidden_paths_not_stricter_child_only_paths() {
+    let mut state = tui_state();
+    let mut awaiting = snapshot(2, PlanNodeStatus::Pending);
+    awaiting.phase = PlanPhase::AwaitingApproval;
+    awaiting.nodes[0].harness.forbidden_paths = vec![".git".to_owned()];
+    awaiting.nodes[1].harness.forbidden_paths =
+        vec![".git".to_owned(), "private-child-cache".to_owned()];
+    state.plan_mut().update_snapshot(awaiting);
+
+    let input = state
+        .plan()
+        .approval_input()
+        .expect("valid recursive plan has approval material");
+    assert_eq!(
+        input
+            .capability_envelope
+            .expect("approval carries an envelope")
+            .forbidden_paths,
+        vec![".git"]
     );
+}
+
+#[test]
+fn projector_opens_plan_approval_when_runtime_enters_awaiting_approval() {
+    let mut state = tui_state();
+    let mut projector = TuiProjector::default();
+    let mut planning = snapshot(1, PlanNodeStatus::Pending);
+    planning.phase = PlanPhase::Planning;
+    planning.root_node_id = None;
+    planning.nodes.clear();
+    planning.approval_requirements.clear();
+    projector.apply(plan_event(planning), &mut state);
+    assert!(state.overlay().is_none());
+
+    let mut awaiting = snapshot(2, PlanNodeStatus::Pending);
+    awaiting.phase = PlanPhase::AwaitingApproval;
+    awaiting.approval_requirements = vec![PlanApprovalRequirementSnapshot {
+        requirement_id: PlanApprovalRequirementId::new("approval-user-review").unwrap(),
+        kind: PlanApprovalRequirementKind::UserReviewRequested,
+        status: PlanApprovalRequirementStatus::Pending,
+        created_revision: 2,
+        resolution_ref: None,
+    }];
+    projector.apply(plan_event(awaiting), &mut state);
+
+    assert!(matches!(state.overlay(), Some(Overlay::PlanApproval(_))));
+    let rendered = render_to_text(&state, 80, 24);
+    assert!(rendered.contains("Approve plan and execute?"));
+    assert!(rendered.contains("user review"));
+    assert!(matches!(
+        handle_key_event(key(KeyCode::Enter), &mut state),
+        crate::tui::controller::ControllerEffect::ApprovePlan(_)
+    ));
+}
+
+#[test]
+fn projector_opens_execution_review_for_a_non_empty_planning_draft() {
+    let mut state = tui_state();
+    let mut projector = TuiProjector::default();
+    let mut planning = snapshot(1, PlanNodeStatus::Pending);
+    planning.phase = PlanPhase::Planning;
+    planning.approval_requirements.clear();
+
+    projector.apply(plan_event(planning), &mut state);
+
+    assert!(matches!(state.overlay(), Some(Overlay::PlanApproval(_))));
+    let rendered = render_to_text(&state, 80, 24);
+    assert!(rendered.contains("Approve plan and execute?"));
+}
+
+#[test]
+fn projector_refreshes_an_open_approval_when_the_plan_revision_changes() {
+    let mut state = tui_state();
+    let mut projector = TuiProjector::default();
+    let mut first = snapshot(1, PlanNodeStatus::Pending);
+    first.phase = PlanPhase::Planning;
+    projector.apply(plan_event(first), &mut state);
+    assert!(render_to_text(&state, 80, 24).contains("Plan revision 1"));
+
+    let mut second = snapshot(2, PlanNodeStatus::Pending);
+    second.phase = PlanPhase::Planning;
+    second.nodes[0].harness.allowed_tools = vec![ToolName::new("run_process").unwrap()];
+    projector.apply(plan_event(second), &mut state);
+
+    let rendered = render_to_text(&state, 80, 24);
+    assert!(rendered.contains("Plan revision 2"));
+    assert!(rendered.contains("Tools: run_process"));
+    assert!(!rendered.contains("Plan revision 1"));
+}
+
+#[test]
+fn projector_applies_runtime_heartbeat_progress_to_the_live_plan_snapshot() {
+    let mut state = tui_state();
+    let mut projector = TuiProjector::default();
+    let mut plan = snapshot(4, PlanNodeStatus::InProgress);
+    add_live_attempt(&mut plan);
+    plan.attempt_progress[0].elapsed_ms = 0;
+    plan.attempt_progress[0].provider_request_in_flight = false;
+    plan.attempt_progress[0].last_subagent_heartbeat_at_ms = Some(1_000);
+    projector.apply(plan_event(plan), &mut state);
+
+    let mut heartbeat = state.plan().snapshot().unwrap().attempt_progress[0].clone();
+    heartbeat.elapsed_ms = 39_600_000;
+    heartbeat.provider_request_in_flight = true;
+    heartbeat.last_subagent_heartbeat_at_ms = Some(39_600_000);
+    projector.apply(
+        merry_core::RuntimeEvent::PlanProgressUpdated {
+            progress: heartbeat,
+            source: merry_core::RuntimeEventSource::new(
+                merry_core::SessionId::new("plan-ui-source").unwrap(),
+                2,
+            ),
+        },
+        &mut state,
+    );
+    state.plan_mut().open_and_focus();
+    state.plan_mut().select_node(node_id("active-leaf"));
+    state.plan_mut().open_inspector();
+    state.plan_mut().scroll_inspector_down_by(12);
+
+    let rendered = render_to_text(&state, 140, 40);
+    assert!(rendered.contains("elapsed 11h 00m"));
+    assert!(rendered.contains("provider request in flight"));
+    assert!(rendered.contains("heartbeat @ 39600000 ms"));
+}
+
+#[test]
+fn ready_counts_match_recursive_execution_shape() {
+    let mut state = PlanUiState::default();
+    let mut plan = snapshot(1, PlanNodeStatus::Pending);
+    plan.nodes[0].status = PlanNodeStatus::Pending;
+    plan.nodes[1].status = PlanNodeStatus::Pending;
+    plan.nodes[2].status = PlanNodeStatus::Pending;
+    plan.nodes[3].status = PlanNodeStatus::Superseded;
+    plan.nodes[4].status = PlanNodeStatus::Superseded;
+    state.update_snapshot(plan.clone());
+    assert_eq!(state.counts().ready, 1, "only the pending leaf is ready");
+
+    plan.nodes[0].status = PlanNodeStatus::Verifying;
+    plan.nodes[1].status = PlanNodeStatus::Completed;
+    plan.nodes[2].status = PlanNodeStatus::Completed;
+    state.update_snapshot(plan);
+    assert_eq!(
+        state.counts().ready,
+        1,
+        "the verifying parent becomes ready"
+    );
+}
+
+#[test]
+fn superseded_nodes_are_hidden_from_the_current_plan_tree() {
+    let mut state = tui_state();
+    let mut plan = snapshot(4, PlanNodeStatus::Pending);
+    plan.nodes.push(node(
+        "old-child",
+        Some("root"),
+        0,
+        PlanNodeStatus::Superseded,
+        Vec::new(),
+    ));
+
+    state.plan_mut().update_snapshot(plan);
+
+    assert!(
+        state
+            .plan()
+            .visible_rows()
+            .iter()
+            .all(|row| row.node_id != node_id("old-child"))
+    );
+    assert!(!render_to_text(&state, 140, 40).contains("Objective old-child"));
 }
 
 #[test]
@@ -344,8 +581,8 @@ fn add_live_attempt(snapshot: &mut PlanSnapshot) {
         attempt_id: attempt_id.clone(),
         node_id: node_id("active-leaf"),
         node_revision: 2,
-        lease_id: lease_id.clone(),
-        executor_session_id: merry_core::SessionId::new("worker-active").unwrap(),
+        lease_id: Some(lease_id.clone()),
+        executor_session_id: merry_core::SessionId::new("subagent-active").unwrap(),
         harness_fingerprint: "harness-active".to_owned(),
         started_at_ms: 1_000,
         finished_at_ms: None,
@@ -360,7 +597,7 @@ fn add_live_attempt(snapshot: &mut PlanSnapshot) {
         attempt_id: attempt_id.clone(),
         node_id: node_id("active-leaf"),
         node_revision: 2,
-        executor_session_id: merry_core::SessionId::new("worker-active").unwrap(),
+        executor_session_id: merry_core::SessionId::new("subagent-active").unwrap(),
         started_at_ms: 1_000,
         last_heartbeat_at_ms: 39_600_000,
         lease_expires_at_ms: 39_630_000,
@@ -372,11 +609,12 @@ fn add_live_attempt(snapshot: &mut PlanSnapshot) {
         elapsed_ms: 39_600_000,
         model_turns: 42,
         reported_usage: None,
-        last_worker_heartbeat_at_ms: 39_600_000,
+        last_subagent_heartbeat_at_ms: Some(39_600_000),
         last_runtime_activity_at_ms: 39_600_000,
         last_durable_progress_at_ms: Some(39_540_000),
         provider_request_in_flight: true,
         tool_call_in_flight: false,
+        observable_side_effects: 0,
         artifacts_created: 7,
         artifact_refs: Vec::new(),
         changed_paths: vec!["crates/merry-runtime/src/plan.rs".to_owned()],

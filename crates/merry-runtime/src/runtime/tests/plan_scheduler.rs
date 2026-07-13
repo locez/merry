@@ -4,24 +4,24 @@ use crate::plan::{
     PlanExecutionIntent, PlanNodeInput, ReportPlanAttemptInput, ReportPlanProgressInput,
     UpdatePlanInput,
 };
-use crate::{ChildRuntimeFactory, ChildRuntimeInput};
+use crate::{ChildRuntimeFactory, ChildRuntimeInput, FileSessionStore};
 use merry_core::{
     PlanAttemptOutcome, PlanCapabilityEnvelopeSnapshot, PlanDirectiveConstraints,
     PlanDirectiveKind, PlanDirectiveStatus, PlanExecutorPolicy, PlanHarnessSnapshot,
     PlanNodeResult, PlanNodeStatus, PlanPhase, PlanRecoveryPolicySnapshot, ProviderName,
 };
-use std::time::Duration;
+use std::{sync::Condvar, time::Duration};
 use tokio::sync::Notify;
 
 #[tokio::test(flavor = "current_thread")]
-async fn plan_scheduler_runs_disjoint_ready_leaves_concurrently_with_stable_worker_tools() {
-    let probe = Arc::new(WorkerConcurrencyProbe::default());
-    let factory: Arc<dyn ChildRuntimeFactory> = Arc::new(CompletingPlanWorkerFactory {
+async fn plan_scheduler_runs_disjoint_ready_leaves_concurrently_with_stable_subagent_tools() {
+    let probe = Arc::new(SubagentConcurrencyProbe::default());
+    let factory: Arc<dyn ChildRuntimeFactory> = Arc::new(CompletingPlanSubagentFactory {
         probe: Arc::clone(&probe),
     });
     let runtime = Runtime::builder(session_id("runtime-plan-scheduler-concurrency"))
         .coordinator_plan_tools()
-        .plan_worker_factory(factory, 2)
+        .plan_subagent_factory(factory, 2)
         .build()
         .expect("runtime builds");
     runtime
@@ -68,7 +68,7 @@ async fn plan_scheduler_runs_disjoint_ready_leaves_concurrently_with_stable_work
         }
     })
     .await
-    .expect("parallel workers should finish");
+    .expect("parallel subagents should finish");
 
     assert!(probe.max_active.load(Ordering::Acquire) >= 2);
     assert_eq!(
@@ -83,7 +83,10 @@ async fn plan_scheduler_runs_disjoint_ready_leaves_concurrently_with_stable_work
         .requests
         .lock()
         .expect("request probe mutex is not poisoned");
-    assert!(requests.len() >= 2, "each worker should issue one request");
+    assert!(
+        requests.len() >= 2,
+        "each subagent should issue one request"
+    );
     let expected_tools = ["report_plan_attempt", "report_plan_progress"];
     for request in requests.iter() {
         let names = request
@@ -97,19 +100,19 @@ async fn plan_scheduler_runs_disjoint_ready_leaves_concurrently_with_stable_work
         request
             .messages()
             .iter()
-            .any(|message| format!("{message:?}").contains("plan_worker_context"))
+            .any(|message| format!("{message:?}").contains("plan_subagent_context"))
     }));
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn worker_expansion_is_scheduled_recursively_by_the_root_scheduler() {
-    let probe = Arc::new(RecursiveWorkerProbe::default());
-    let factory: Arc<dyn ChildRuntimeFactory> = Arc::new(RecursivePlanWorkerFactory {
+async fn subagent_expansion_is_scheduled_recursively_by_the_root_scheduler() {
+    let probe = Arc::new(RecursiveSubagentProbe::default());
+    let factory: Arc<dyn ChildRuntimeFactory> = Arc::new(RecursivePlanSubagentFactory {
         probe: Arc::clone(&probe),
     });
     let runtime = Runtime::builder(session_id("runtime-plan-scheduler-recursive"))
         .coordinator_plan_tools()
-        .plan_worker_factory(factory, 2)
+        .plan_subagent_factory(factory, 2)
         .build()
         .expect("runtime builds");
     runtime
@@ -161,7 +164,7 @@ async fn worker_expansion_is_scheduled_recursively_by_the_root_scheduler() {
         }
     })
     .await
-    .expect("recursive workers should finish");
+    .expect("recursive subagents should finish");
 
     let parent_outcomes = final_snapshot
         .attempts
@@ -180,24 +183,24 @@ async fn worker_expansion_is_scheduled_recursively_by_the_root_scheduler() {
     assert_eq!(probe.parent_attempts.load(Ordering::Acquire), 2);
     assert!(
         probe
-            .worker_depths
+            .subagent_depths
             .lock()
-            .expect("worker depth mutex is not poisoned")
+            .expect("subagent depth mutex is not poisoned")
             .iter()
             .all(|depth| *depth == 1),
-        "every recursive task remains a depth-one worker under the root scheduler"
+        "every recursive task remains a depth-one subagent under the root scheduler"
     );
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn directive_waits_for_the_next_worker_provider_boundary_before_delivery() {
+async fn directive_waits_for_the_next_subagent_provider_boundary_before_delivery() {
     let probe = Arc::new(DirectiveDeliveryProbe::default());
-    let factory: Arc<dyn ChildRuntimeFactory> = Arc::new(DirectivePlanWorkerFactory {
+    let factory: Arc<dyn ChildRuntimeFactory> = Arc::new(DirectivePlanSubagentFactory {
         probe: Arc::clone(&probe),
     });
     let runtime = Runtime::builder(session_id("runtime-plan-directive-boundary"))
         .coordinator_plan_tools()
-        .plan_worker_factory(factory, 1)
+        .plan_subagent_factory(factory, 1)
         .build()
         .expect("runtime builds");
     runtime
@@ -208,10 +211,10 @@ async fn directive_waits_for_the_next_worker_provider_boundary_before_delivery()
         .await
         .expect("plan begins");
     let update = runtime
-        .update_plan(single_worker_plan_input())
+        .update_plan(single_subagent_plan_input())
         .await
         .expect("plan definition succeeds");
-    let worker_id = update.client_key_ids["worker"].clone();
+    let subagent_id = update.client_key_ids["subagent"].clone();
     let mut events = runtime.subscribe_plan_events();
     runtime
         .authorize_plan_execution(
@@ -233,9 +236,9 @@ async fn directive_waits_for_the_next_worker_provider_boundary_before_delivery()
     let attempt = live
         .attempts
         .iter()
-        .find(|attempt| attempt.node_id == worker_id && attempt.outcome.is_none())
-        .expect("worker has a live attempt");
-    let lease = live
+        .find(|attempt| attempt.node_id == subagent_id && attempt.outcome.is_none())
+        .expect("subagent has a live attempt");
+    let _lease = live
         .leases
         .iter()
         .find(|lease| lease.attempt_id == attempt.attempt_id)
@@ -246,8 +249,6 @@ async fn directive_waits_for_the_next_worker_provider_boundary_before_delivery()
         .directive(
             ControlPlanAttemptInput {
                 attempt_id: attempt.attempt_id.clone(),
-                expected_lease_id: lease.lease_id.clone(),
-                expected_node_revision: lease.node_revision,
                 kind: PlanDirectiveKind::Converge,
                 reason: "The current evidence is sufficient".to_owned(),
                 instruction: Some("Return a bounded result now".to_owned()),
@@ -275,7 +276,7 @@ async fn directive_waits_for_the_next_worker_provider_boundary_before_delivery()
             if snapshot
                 .nodes
                 .iter()
-                .find(|node| node.id == worker_id)
+                .find(|node| node.id == subagent_id)
                 .is_some_and(|node| node.status == PlanNodeStatus::Completed)
             {
                 break;
@@ -284,20 +285,20 @@ async fn directive_waits_for_the_next_worker_provider_boundary_before_delivery()
         }
     })
     .await
-    .expect("worker should finish after receiving the directive");
+    .expect("subagent should finish after receiving the directive");
 
     assert!(probe.second_request_saw_delivery.load(Ordering::Acquire));
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn cancelling_plan_stops_live_worker_and_commits_cancelled_attempt() {
+async fn cancelling_plan_stops_live_subagent_and_commits_cancelled_attempt() {
     let probe = Arc::new(CancellationProbe::default());
-    let factory: Arc<dyn ChildRuntimeFactory> = Arc::new(CancellablePlanWorkerFactory {
+    let factory: Arc<dyn ChildRuntimeFactory> = Arc::new(CancellablePlanSubagentFactory {
         probe: Arc::clone(&probe),
     });
     let runtime = Runtime::builder(session_id("runtime-plan-cancellation"))
         .coordinator_plan_tools()
-        .plan_worker_factory(factory, 1)
+        .plan_subagent_factory(factory, 1)
         .build()
         .expect("runtime builds");
     runtime
@@ -308,7 +309,7 @@ async fn cancelling_plan_stops_live_worker_and_commits_cancelled_attempt() {
         .await
         .expect("plan begins");
     runtime
-        .update_plan(single_worker_plan_input())
+        .update_plan(single_subagent_plan_input())
         .await
         .expect("plan definition succeeds");
     runtime
@@ -341,7 +342,7 @@ async fn cancelling_plan_stops_live_worker_and_commits_cancelled_attempt() {
         }
     })
     .await
-    .expect("cooperative worker cancellation should settle");
+    .expect("cooperative subagent cancellation should settle");
     assert_eq!(snapshot.attempts.len(), 1);
     assert_eq!(
         snapshot.attempts[0].outcome,
@@ -353,29 +354,300 @@ async fn cancelling_plan_stops_live_worker_and_commits_cancelled_attempt() {
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn cancellation_during_subagent_construction_prevents_child_execution() {
+    let probe = Arc::new(BuildCancellationProbe::default());
+    let factory: Arc<dyn ChildRuntimeFactory> = Arc::new(BlockingBuildPlanSubagentFactory {
+        probe: Arc::clone(&probe),
+        fail_after_release: false,
+    });
+    let runtime = Runtime::builder(session_id("runtime-plan-cancel-during-child-build"))
+        .coordinator_plan_tools()
+        .plan_subagent_factory(factory, 1)
+        .build()
+        .expect("runtime builds");
+    runtime
+        .begin_plan(BeginPlanInput {
+            reason: "cancel while the delegated child is being built".to_owned(),
+            governing_skill_id: None,
+        })
+        .await
+        .expect("plan begins");
+    runtime
+        .update_plan(single_subagent_plan_input())
+        .await
+        .expect("plan definition succeeds");
+    runtime
+        .authorize_plan_execution(
+            PlanCapabilityEnvelopeSnapshot {
+                write_scope: vec!["work".to_owned()],
+                ..PlanCapabilityEnvelopeSnapshot::default()
+            },
+            vec!["test authorization".to_owned()],
+        )
+        .await
+        .expect("plan is authorized");
+    probe.build_started.notified().await;
+
+    runtime
+        .cancel_plan("user cancelled during child construction")
+        .await
+        .expect("cancellation request commits");
+    probe.release_build();
+
+    let snapshot = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let snapshot = runtime
+                .plan_snapshot()
+                .await
+                .expect("snapshot read succeeds")
+                .expect("plan exists");
+            if snapshot.phase == PlanPhase::Cancelled {
+                break snapshot;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cancelled startup should settle");
+
+    assert_eq!(snapshot.attempts.len(), 1);
+    assert_eq!(
+        snapshot.attempts[0].outcome,
+        Some(PlanAttemptOutcome::Cancelled)
+    );
+    assert_eq!(probe.provider_calls.load(Ordering::Acquire), 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cancellation_during_failed_subagent_construction_remains_cancelled() {
+    let probe = Arc::new(BuildCancellationProbe::default());
+    let factory: Arc<dyn ChildRuntimeFactory> = Arc::new(BlockingBuildPlanSubagentFactory {
+        probe: Arc::clone(&probe),
+        fail_after_release: true,
+    });
+    let runtime = Runtime::builder(session_id("runtime-plan-cancel-during-failed-child-build"))
+        .coordinator_plan_tools()
+        .plan_subagent_factory(factory, 1)
+        .build()
+        .expect("runtime builds");
+    runtime
+        .begin_plan(BeginPlanInput {
+            reason: "cancel while a failing delegated child is being built".to_owned(),
+            governing_skill_id: None,
+        })
+        .await
+        .expect("plan begins");
+    runtime
+        .update_plan(single_subagent_plan_input())
+        .await
+        .expect("plan definition succeeds");
+    runtime
+        .authorize_plan_execution(
+            PlanCapabilityEnvelopeSnapshot {
+                write_scope: vec!["work".to_owned()],
+                ..PlanCapabilityEnvelopeSnapshot::default()
+            },
+            vec!["test authorization".to_owned()],
+        )
+        .await
+        .expect("plan is authorized");
+    probe.build_started.notified().await;
+
+    runtime
+        .cancel_plan("user cancelled during failed child construction")
+        .await
+        .expect("cancellation request commits");
+    probe.release_build();
+
+    let snapshot = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let snapshot = runtime
+                .plan_snapshot()
+                .await
+                .expect("snapshot read succeeds")
+                .expect("plan exists");
+            if snapshot.phase == PlanPhase::Cancelled {
+                break snapshot;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cancelled failed startup should settle");
+
+    assert_eq!(snapshot.attempts.len(), 1);
+    assert_eq!(
+        snapshot.attempts[0].outcome,
+        Some(PlanAttemptOutcome::Cancelled)
+    );
+    assert_eq!(probe.provider_calls.load(Ordering::Acquire), 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dropping_the_last_runtime_handle_stops_scheduler_without_post_drop_plan_writes() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = FileSessionStore::new(temp.path());
+    let probe = Arc::new(CancellationProbe::default());
+    let factory: Arc<dyn ChildRuntimeFactory> = Arc::new(CancellablePlanSubagentFactory {
+        probe: Arc::clone(&probe),
+    });
+    let session_id = session_id("runtime-plan-scheduler-drop");
+    let runtime = Runtime::builder(session_id.clone())
+        .coordinator_plan_tools()
+        .plan_subagent_factory(factory, 1)
+        .session_store(store.clone())
+        .build()
+        .expect("runtime builds");
+    runtime
+        .begin_plan(BeginPlanInput {
+            reason: "prove scheduler shutdown ownership".to_owned(),
+            governing_skill_id: None,
+        })
+        .await
+        .expect("plan begins");
+    runtime
+        .update_plan(single_subagent_plan_input())
+        .await
+        .expect("plan definition succeeds");
+    runtime
+        .authorize_plan_execution(
+            PlanCapabilityEnvelopeSnapshot {
+                write_scope: vec!["work".to_owned()],
+                ..PlanCapabilityEnvelopeSnapshot::default()
+            },
+            vec!["test authorization".to_owned()],
+        )
+        .await
+        .expect("plan is authorized");
+    probe.started.notified().await;
+    let attempt_id = runtime
+        .plan_snapshot()
+        .await
+        .expect("snapshot read succeeds")
+        .expect("plan exists")
+        .attempts[0]
+        .attempt_id
+        .clone();
+    assert_eq!(
+        Arc::strong_count(&runtime.inner),
+        1,
+        "scheduler tasks must not retain the parent RuntimeInner"
+    );
+
+    drop(runtime);
+    tokio::time::timeout(Duration::from_secs(2), probe.cancelled.notified())
+        .await
+        .expect("dropping the runtime cancels the live child");
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+
+    let loaded = Runtime::builder(session_id)
+        .load_session_from_store(store)
+        .await
+        .expect("persisted session loads")
+        .build()
+        .expect("loaded runtime builds without starting its scheduler");
+    let snapshot = loaded
+        .plan_snapshot()
+        .await
+        .expect("snapshot read succeeds")
+        .expect("plan exists");
+    let attempt = snapshot
+        .attempts
+        .iter()
+        .find(|attempt| attempt.attempt_id == attempt_id)
+        .expect("persisted attempt remains");
+    assert_eq!(attempt.outcome, None);
+    assert_eq!(snapshot.attempts.len(), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn missing_subagent_attempt_report_is_retried_without_hanging() {
+    let probe = Arc::new(AtomicUsize::new(0));
+    let factory: Arc<dyn ChildRuntimeFactory> = Arc::new(MissingReportPlanSubagentFactory {
+        calls: Arc::clone(&probe),
+    });
+    let runtime = Runtime::builder(session_id("runtime-plan-missing-subagent-report"))
+        .coordinator_plan_tools()
+        .plan_subagent_factory(factory, 1)
+        .build()
+        .expect("runtime builds");
+    runtime
+        .begin_plan(BeginPlanInput {
+            reason: "verify missing subagent report recovery".to_owned(),
+            governing_skill_id: None,
+        })
+        .await
+        .expect("plan begins");
+    runtime
+        .update_plan(single_subagent_plan_input())
+        .await
+        .expect("plan definition succeeds");
+    let mut events = runtime.subscribe_plan_events();
+    runtime
+        .authorize_plan_execution(
+            PlanCapabilityEnvelopeSnapshot {
+                write_scope: vec!["work".to_owned()],
+                ..PlanCapabilityEnvelopeSnapshot::default()
+            },
+            vec!["test authorization".to_owned()],
+        )
+        .await
+        .expect("plan is authorized");
+
+    let snapshot = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let snapshot = runtime
+                .plan_snapshot()
+                .await
+                .expect("snapshot read succeeds")
+                .expect("plan exists");
+            if snapshot.phase == PlanPhase::Blocked {
+                break snapshot;
+            }
+            let _ = events.recv().await;
+        }
+    })
+    .await
+    .expect("bounded missing-report retries should settle");
+
+    assert_eq!(snapshot.attempts.len(), 2);
+    assert_eq!(snapshot.leases.len(), 2);
+    assert!(snapshot.attempts.iter().all(|attempt| {
+        attempt.outcome == Some(PlanAttemptOutcome::TransientFailure)
+            && attempt
+                .diagnostic
+                .as_ref()
+                .is_some_and(|diagnostic| diagnostic.code() == "missing_attempt_report")
+    }));
+    assert_eq!(probe.load(Ordering::Acquire), 2);
+}
+
 #[derive(Default)]
-struct WorkerConcurrencyProbe {
+struct SubagentConcurrencyProbe {
     active: AtomicUsize,
     max_active: AtomicUsize,
     notify: Notify,
     requests: StdMutex<Vec<ModelRequest>>,
 }
 
-struct CompletingPlanWorkerFactory {
-    probe: Arc<WorkerConcurrencyProbe>,
+struct CompletingPlanSubagentFactory {
+    probe: Arc<SubagentConcurrencyProbe>,
 }
 
 #[derive(Default)]
-struct RecursiveWorkerProbe {
+struct RecursiveSubagentProbe {
     parent_attempts: AtomicUsize,
     active: AtomicUsize,
     max_active: AtomicUsize,
     notify: Notify,
-    worker_depths: StdMutex<Vec<u8>>,
+    subagent_depths: StdMutex<Vec<u8>>,
 }
 
-struct RecursivePlanWorkerFactory {
-    probe: Arc<RecursiveWorkerProbe>,
+struct RecursivePlanSubagentFactory {
+    probe: Arc<RecursiveSubagentProbe>,
 }
 
 #[derive(Default)]
@@ -385,46 +657,210 @@ struct DirectiveDeliveryProbe {
     second_request_saw_delivery: AtomicBool,
 }
 
-struct DirectivePlanWorkerFactory {
+struct DirectivePlanSubagentFactory {
     probe: Arc<DirectiveDeliveryProbe>,
 }
 
 #[derive(Default)]
 struct CancellationProbe {
     started: Notify,
+    cancelled: Notify,
 }
 
-struct CancellablePlanWorkerFactory {
+struct CancellablePlanSubagentFactory {
     probe: Arc<CancellationProbe>,
 }
 
-impl ChildRuntimeFactory for CancellablePlanWorkerFactory {
+#[derive(Default)]
+struct BuildCancellationProbe {
+    build_started: Notify,
+    build_released: StdMutex<bool>,
+    build_release: Condvar,
+    provider_calls: AtomicUsize,
+}
+
+impl BuildCancellationProbe {
+    fn wait_for_build_release(&self) {
+        let mut released = self
+            .build_released
+            .lock()
+            .expect("build release mutex is not poisoned");
+        while !*released {
+            released = self
+                .build_release
+                .wait(released)
+                .expect("build release mutex is not poisoned");
+        }
+    }
+
+    fn release_build(&self) {
+        *self
+            .build_released
+            .lock()
+            .expect("build release mutex is not poisoned") = true;
+        self.build_release.notify_all();
+    }
+}
+
+struct BlockingBuildPlanSubagentFactory {
+    probe: Arc<BuildCancellationProbe>,
+    fail_after_release: bool,
+}
+
+struct MissingReportPlanSubagentFactory {
+    calls: Arc<AtomicUsize>,
+}
+
+impl ChildRuntimeFactory for BlockingBuildPlanSubagentFactory {
     fn build_child(&self, input: ChildRuntimeInput) -> Result<Runtime, RuntimeError> {
+        self.probe.build_started.notify_one();
+        self.probe.wait_for_build_release();
+        if self.fail_after_release {
+            return Err(RuntimeError::InvalidStepInput {
+                reason: "test subagent construction failure",
+            });
+        }
         let control = input
-            .plan_worker_control
-            .expect("scheduler worker carries plan control");
+            .plan_subagent_control
+            .expect("scheduler subagent carries plan control");
         Runtime::builder(input.session_id)
             .task_anchor(input.task_anchor)
             .model_provider(
-                Arc::new(CancellableWorkerProvider {
+                Arc::new(CountingCompletedSubagentProvider {
+                    calls: Arc::clone(&self.probe),
+                }),
+                model_name(),
+            )
+            .automatic_compaction(AutomaticCompactionConfig::disabled())
+            .plan_subagent_control(control)
+            .build()
+    }
+}
+
+struct CountingCompletedSubagentProvider {
+    calls: Arc<BuildCancellationProbe>,
+}
+
+impl ModelProvider for CountingCompletedSubagentProvider {
+    fn name(&self) -> &ProviderName {
+        static NAME: OnceLock<ProviderName> = OnceLock::new();
+        NAME.get_or_init(|| {
+            ProviderName::new("cancelled-build-plan-subagent-test").expect("valid name")
+        })
+    }
+
+    fn capabilities(&self) -> &ModelCapabilities {
+        static CAPABILITIES: OnceLock<ModelCapabilities> = OnceLock::new();
+        CAPABILITIES.get_or_init(|| {
+            ModelCapabilities::new(true, true, false, true, Some(128_000), None)
+                .expect("valid capabilities")
+        })
+    }
+
+    fn stream_model<'a>(
+        &'a self,
+        _request: ModelRequest,
+        _context: ModelStreamContext,
+    ) -> ModelProviderFuture<'a, Result<ModelEventStream, ModelError>> {
+        Box::pin(async move {
+            self.calls.provider_calls.fetch_add(1, Ordering::AcqRel);
+            let stream: ModelEventStream =
+                Box::pin(tokio_stream::iter(vec![Ok(completed_event())]));
+            Ok(stream)
+        })
+    }
+}
+
+impl ChildRuntimeFactory for MissingReportPlanSubagentFactory {
+    fn build_child(&self, input: ChildRuntimeInput) -> Result<Runtime, RuntimeError> {
+        let control = input
+            .plan_subagent_control
+            .expect("scheduler subagent carries plan control");
+        Runtime::builder(input.session_id)
+            .task_anchor(input.task_anchor)
+            .model_provider(
+                Arc::new(MissingReportSubagentProvider {
+                    calls: Arc::clone(&self.calls),
+                }),
+                model_name(),
+            )
+            .automatic_compaction(AutomaticCompactionConfig::disabled())
+            .plan_subagent_control(control)
+            .build()
+    }
+}
+
+struct MissingReportSubagentProvider {
+    calls: Arc<AtomicUsize>,
+}
+
+impl ModelProvider for MissingReportSubagentProvider {
+    fn name(&self) -> &ProviderName {
+        static NAME: OnceLock<ProviderName> = OnceLock::new();
+        NAME.get_or_init(|| {
+            ProviderName::new("missing-report-plan-subagent-test").expect("valid name")
+        })
+    }
+
+    fn capabilities(&self) -> &ModelCapabilities {
+        static CAPABILITIES: OnceLock<ModelCapabilities> = OnceLock::new();
+        CAPABILITIES.get_or_init(|| {
+            ModelCapabilities::new(true, true, false, true, Some(128_000), None)
+                .expect("valid capabilities")
+        })
+    }
+
+    fn stream_model<'a>(
+        &'a self,
+        _request: ModelRequest,
+        _context: ModelStreamContext,
+    ) -> ModelProviderFuture<'a, Result<ModelEventStream, ModelError>> {
+        Box::pin(async move {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            let stream: ModelEventStream =
+                Box::pin(tokio_stream::iter(vec![Ok(completed_event())]));
+            Ok(stream)
+        })
+    }
+}
+
+impl ChildRuntimeFactory for CancellablePlanSubagentFactory {
+    fn build_child(&self, input: ChildRuntimeInput) -> Result<Runtime, RuntimeError> {
+        let control = input
+            .plan_subagent_control
+            .expect("scheduler subagent carries plan control");
+        Runtime::builder(input.session_id)
+            .task_anchor(input.task_anchor)
+            .model_provider(
+                Arc::new(CancellableSubagentProvider {
                     probe: Arc::clone(&self.probe),
                 }),
                 model_name(),
             )
             .automatic_compaction(AutomaticCompactionConfig::disabled())
-            .plan_worker_control(control)
+            .plan_subagent_control(control)
             .build()
     }
 }
 
-struct CancellableWorkerProvider {
+struct CancellableSubagentProvider {
     probe: Arc<CancellationProbe>,
 }
 
-impl ModelProvider for CancellableWorkerProvider {
+struct CancellationDropGuard(Arc<CancellationProbe>);
+
+impl Drop for CancellationDropGuard {
+    fn drop(&mut self) {
+        self.0.cancelled.notify_one();
+    }
+}
+
+impl ModelProvider for CancellableSubagentProvider {
     fn name(&self) -> &ProviderName {
         static NAME: OnceLock<ProviderName> = OnceLock::new();
-        NAME.get_or_init(|| ProviderName::new("cancellable-plan-worker-test").expect("valid name"))
+        NAME.get_or_init(|| {
+            ProviderName::new("cancellable-plan-subagent-test").expect("valid name")
+        })
     }
 
     fn capabilities(&self) -> &ModelCapabilities {
@@ -441,6 +877,7 @@ impl ModelProvider for CancellableWorkerProvider {
         context: ModelStreamContext,
     ) -> ModelProviderFuture<'a, Result<ModelEventStream, ModelError>> {
         Box::pin(async move {
+            let _drop_guard = CancellationDropGuard(Arc::clone(&self.probe));
             self.probe.started.notify_one();
             context.cancellation_token().cancelled().await;
             Err(ModelError::Cancelled)
@@ -448,38 +885,36 @@ impl ModelProvider for CancellableWorkerProvider {
     }
 }
 
-impl ChildRuntimeFactory for DirectivePlanWorkerFactory {
+impl ChildRuntimeFactory for DirectivePlanSubagentFactory {
     fn build_child(&self, input: ChildRuntimeInput) -> Result<Runtime, RuntimeError> {
         let control = input
-            .plan_worker_control
+            .plan_subagent_control
             .clone()
-            .expect("scheduler worker carries plan control");
-        let provider = DirectiveWorkerProvider {
+            .expect("scheduler subagent carries plan control");
+        let provider = DirectiveSubagentProvider {
             probe: Arc::clone(&self.probe),
             calls: AtomicUsize::new(0),
             lease_id: control.lease_id().clone(),
-            node_revision: control.node_revision(),
         };
         Runtime::builder(input.session_id)
             .task_anchor(input.task_anchor)
             .model_provider(Arc::new(provider), model_name())
             .automatic_compaction(AutomaticCompactionConfig::disabled())
-            .plan_worker_control(control)
+            .plan_subagent_control(control)
             .build()
     }
 }
 
-struct DirectiveWorkerProvider {
+struct DirectiveSubagentProvider {
     probe: Arc<DirectiveDeliveryProbe>,
     calls: AtomicUsize,
     lease_id: merry_core::PlanLeaseId,
-    node_revision: u64,
 }
 
-impl ModelProvider for DirectiveWorkerProvider {
+impl ModelProvider for DirectiveSubagentProvider {
     fn name(&self) -> &ProviderName {
         static NAME: OnceLock<ProviderName> = OnceLock::new();
-        NAME.get_or_init(|| ProviderName::new("directive-plan-worker-test").expect("valid name"))
+        NAME.get_or_init(|| ProviderName::new("directive-plan-subagent-test").expect("valid name"))
     }
 
     fn capabilities(&self) -> &ModelCapabilities {
@@ -504,7 +939,6 @@ impl ModelProvider for DirectiveWorkerProvider {
                     completed_event_with(
                         vec![ModelOutput::tool_call(report_progress_model_call(
                             &self.lease_id,
-                            self.node_revision,
                         ))],
                         FinishReason::ToolCalls,
                     )
@@ -519,7 +953,6 @@ impl ModelProvider for DirectiveWorkerProvider {
                     completed_event_with(
                         vec![ModelOutput::tool_call(report_attempt_model_call(
                             &self.lease_id,
-                            self.node_revision,
                             "directive applied at a safe provider boundary",
                         ))],
                         FinishReason::ToolCalls,
@@ -533,32 +966,31 @@ impl ModelProvider for DirectiveWorkerProvider {
     }
 }
 
-impl ChildRuntimeFactory for RecursivePlanWorkerFactory {
+impl ChildRuntimeFactory for RecursivePlanSubagentFactory {
     fn build_child(&self, input: ChildRuntimeInput) -> Result<Runtime, RuntimeError> {
         let control = input
-            .plan_worker_control
+            .plan_subagent_control
             .clone()
-            .expect("scheduler worker carries plan control");
+            .expect("scheduler subagent carries plan control");
         self.probe
-            .worker_depths
+            .subagent_depths
             .lock()
-            .expect("worker depth mutex is not poisoned")
+            .expect("subagent depth mutex is not poisoned")
             .push(input.depth);
         let task = input.task.task().to_owned();
         let action = if task.contains("Expand recursive branch") {
             if self.probe.parent_attempts.fetch_add(1, Ordering::AcqRel) == 0 {
-                RecursiveWorkerAction::Decompose
+                RecursiveSubagentAction::Decompose
             } else {
-                RecursiveWorkerAction::Complete
+                RecursiveSubagentAction::Complete
             }
         } else {
-            RecursiveWorkerAction::CompleteGrandchild
+            RecursiveSubagentAction::CompleteGrandchild
         };
-        let provider = RecursiveWorkerProvider {
+        let provider = RecursiveSubagentProvider {
             probe: Arc::clone(&self.probe),
             calls: AtomicUsize::new(0),
             lease_id: control.lease_id().clone(),
-            node_revision: control.node_revision(),
             conclusion: task,
             action,
         };
@@ -566,31 +998,30 @@ impl ChildRuntimeFactory for RecursivePlanWorkerFactory {
             .task_anchor(input.task_anchor)
             .model_provider(Arc::new(provider), model_name())
             .automatic_compaction(AutomaticCompactionConfig::disabled())
-            .plan_worker_control(control)
+            .plan_subagent_control(control)
             .build()
     }
 }
 
 #[derive(Clone, Copy)]
-enum RecursiveWorkerAction {
+enum RecursiveSubagentAction {
     Decompose,
     Complete,
     CompleteGrandchild,
 }
 
-struct RecursiveWorkerProvider {
-    probe: Arc<RecursiveWorkerProbe>,
+struct RecursiveSubagentProvider {
+    probe: Arc<RecursiveSubagentProbe>,
     calls: AtomicUsize,
     lease_id: merry_core::PlanLeaseId,
-    node_revision: u64,
     conclusion: String,
-    action: RecursiveWorkerAction,
+    action: RecursiveSubagentAction,
 }
 
-impl ModelProvider for RecursiveWorkerProvider {
+impl ModelProvider for RecursiveSubagentProvider {
     fn name(&self) -> &ProviderName {
         static NAME: OnceLock<ProviderName> = OnceLock::new();
-        NAME.get_or_init(|| ProviderName::new("recursive-plan-worker-test").expect("valid name"))
+        NAME.get_or_init(|| ProviderName::new("recursive-plan-subagent-test").expect("valid name"))
     }
 
     fn capabilities(&self) -> &ModelCapabilities {
@@ -609,7 +1040,7 @@ impl ModelProvider for RecursiveWorkerProvider {
         Box::pin(async move {
             let call_index = self.calls.fetch_add(1, Ordering::AcqRel);
             let event = if call_index == 0 {
-                if matches!(self.action, RecursiveWorkerAction::CompleteGrandchild) {
+                if matches!(self.action, RecursiveSubagentAction::CompleteGrandchild) {
                     let active = self.probe.active.fetch_add(1, Ordering::AcqRel) + 1;
                     self.probe.max_active.fetch_max(active, Ordering::AcqRel);
                     if active >= 2 {
@@ -621,15 +1052,10 @@ impl ModelProvider for RecursiveWorkerProvider {
                     self.probe.active.fetch_sub(1, Ordering::AcqRel);
                 }
                 let call = match self.action {
-                    RecursiveWorkerAction::Decompose => {
-                        decomposition_model_call(&self.lease_id, self.node_revision)
-                    }
-                    RecursiveWorkerAction::Complete | RecursiveWorkerAction::CompleteGrandchild => {
-                        report_attempt_model_call(
-                            &self.lease_id,
-                            self.node_revision,
-                            &self.conclusion,
-                        )
+                    RecursiveSubagentAction::Decompose => decomposition_model_call(&self.lease_id),
+                    RecursiveSubagentAction::Complete
+                    | RecursiveSubagentAction::CompleteGrandchild => {
+                        report_attempt_model_call(&self.lease_id, &self.conclusion)
                     }
                 };
                 completed_event_with(vec![ModelOutput::tool_call(call)], FinishReason::ToolCalls)
@@ -642,40 +1068,38 @@ impl ModelProvider for RecursiveWorkerProvider {
     }
 }
 
-impl ChildRuntimeFactory for CompletingPlanWorkerFactory {
+impl ChildRuntimeFactory for CompletingPlanSubagentFactory {
     fn build_child(&self, input: ChildRuntimeInput) -> Result<Runtime, RuntimeError> {
         let control = input
-            .plan_worker_control
+            .plan_subagent_control
             .clone()
-            .expect("scheduler worker carries plan control");
-        let provider = CompletingWorkerProvider {
+            .expect("scheduler subagent carries plan control");
+        let provider = CompletingSubagentProvider {
             probe: Arc::clone(&self.probe),
             calls: AtomicUsize::new(0),
             lease_id: control.lease_id().clone(),
-            node_revision: control.node_revision(),
             conclusion: input.task.task().to_owned(),
         };
         Runtime::builder(input.session_id)
             .task_anchor(input.task_anchor)
             .model_provider(Arc::new(provider), model_name())
             .automatic_compaction(AutomaticCompactionConfig::disabled())
-            .plan_worker_control(control)
+            .plan_subagent_control(control)
             .build()
     }
 }
 
-struct CompletingWorkerProvider {
-    probe: Arc<WorkerConcurrencyProbe>,
+struct CompletingSubagentProvider {
+    probe: Arc<SubagentConcurrencyProbe>,
     calls: AtomicUsize,
     lease_id: merry_core::PlanLeaseId,
-    node_revision: u64,
     conclusion: String,
 }
 
-impl ModelProvider for CompletingWorkerProvider {
+impl ModelProvider for CompletingSubagentProvider {
     fn name(&self) -> &ProviderName {
         static NAME: OnceLock<ProviderName> = OnceLock::new();
-        NAME.get_or_init(|| ProviderName::new("plan-worker-test").expect("valid provider name"))
+        NAME.get_or_init(|| ProviderName::new("plan-subagent-test").expect("valid provider name"))
     }
 
     fn capabilities(&self) -> &ModelCapabilities {
@@ -711,7 +1135,6 @@ impl ModelProvider for CompletingWorkerProvider {
                 completed_event_with(
                     vec![ModelOutput::tool_call(report_attempt_model_call(
                         &self.lease_id,
-                        self.node_revision,
                         &self.conclusion,
                     ))],
                     FinishReason::ToolCalls,
@@ -727,19 +1150,16 @@ impl ModelProvider for CompletingWorkerProvider {
 
 fn report_attempt_model_call(
     lease_id: &merry_core::PlanLeaseId,
-    node_revision: u64,
     conclusion: &str,
 ) -> ModelToolCall {
     let input = ReportPlanAttemptInput {
-        lease_id: lease_id.clone(),
-        expected_node_revision: node_revision,
         outcome: PlanAttemptOutcome::Completed,
         result: Some(PlanNodeResult {
             conclusion: conclusion.to_owned(),
             evidence_refs: Vec::new(),
             artifact_refs: Vec::new(),
             changed_paths: Vec::new(),
-            verification: vec!["offline worker verification".to_owned()],
+            verification: vec!["offline subagent verification".to_owned()],
             open_questions: Vec::new(),
         }),
         diagnostic: None,
@@ -755,21 +1175,16 @@ fn report_attempt_model_call(
     )
 }
 
-fn decomposition_model_call(
-    lease_id: &merry_core::PlanLeaseId,
-    node_revision: u64,
-) -> ModelToolCall {
+fn decomposition_model_call(lease_id: &merry_core::PlanLeaseId) -> ModelToolCall {
     let input = ReportPlanAttemptInput {
-        lease_id: lease_id.clone(),
-        expected_node_revision: node_revision,
         outcome: PlanAttemptOutcome::Decomposed,
         result: None,
         diagnostic: None,
         decomposition: Some(PlanDecompositionInput {
             reason: "split independent recursive work".to_owned(),
             children: vec![
-                worker_leaf("grand-left", "tree/left"),
-                worker_leaf("grand-right", "tree/right"),
+                subagent_leaf("grand-left", "tree/left"),
+                subagent_leaf("grand-right", "tree/right"),
             ],
         }),
         acknowledged_directive_ids: Vec::new(),
@@ -783,13 +1198,8 @@ fn decomposition_model_call(
     )
 }
 
-fn report_progress_model_call(
-    lease_id: &merry_core::PlanLeaseId,
-    node_revision: u64,
-) -> ModelToolCall {
+fn report_progress_model_call(lease_id: &merry_core::PlanLeaseId) -> ModelToolCall {
     let input = ReportPlanProgressInput {
-        lease_id: lease_id.clone(),
-        expected_node_revision: node_revision,
         summary: "Initial provider request completed".to_owned(),
         evidence_refs: Vec::new(),
         artifact_refs: Vec::new(),
@@ -828,7 +1238,10 @@ pub(super) fn parallel_plan_input() -> UpdatePlanInput {
                 harness: root_harness,
                 recovery_policy: PlanRecoveryPolicySnapshot::default(),
                 depends_on: Vec::new(),
-                children: vec![worker_leaf("left", "left"), worker_leaf("right", "right")],
+                children: vec![
+                    subagent_leaf("left", "left"),
+                    subagent_leaf("right", "right"),
+                ],
             },
         },
     }
@@ -875,13 +1288,13 @@ fn recursive_plan_input() -> UpdatePlanInput {
     }
 }
 
-fn single_worker_plan_input() -> UpdatePlanInput {
+fn single_subagent_plan_input() -> UpdatePlanInput {
     let root_harness = PlanHarnessSnapshot {
         write_scope: vec!["work".to_owned()],
         ..PlanHarnessSnapshot::default()
     };
     UpdatePlanInput {
-        reason: "define one steerable worker".to_owned(),
+        reason: "define one steerable subagent".to_owned(),
         execution_intent: PlanExecutionIntent::ContinuePlanning,
         coordinator_node_id: None,
         max_concurrency_hint: Some(1),
@@ -891,18 +1304,18 @@ fn single_worker_plan_input() -> UpdatePlanInput {
                 id: None,
                 client_key: Some("root".to_owned()),
                 objective: "Verify steerable work".to_owned(),
-                acceptance: vec!["worker result is verified".to_owned()],
+                acceptance: vec!["subagent result is verified".to_owned()],
                 executor_policy: PlanExecutorPolicy::Local,
                 harness: root_harness,
                 recovery_policy: PlanRecoveryPolicySnapshot::default(),
                 depends_on: Vec::new(),
-                children: vec![worker_leaf("worker", "work")],
+                children: vec![subagent_leaf("subagent", "work")],
             },
         },
     }
 }
 
-fn worker_leaf(client_key: &str, write_scope: &str) -> PlanNodeInput {
+fn subagent_leaf(client_key: &str, write_scope: &str) -> PlanNodeInput {
     let harness = PlanHarnessSnapshot {
         write_scope: vec![write_scope.to_owned()],
         ..PlanHarnessSnapshot::default()

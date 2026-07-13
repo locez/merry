@@ -7,6 +7,7 @@ use merry_core::{
     PlanCapabilityEnvelopeSnapshot, PlanExecutorPolicy, PlanHarnessSnapshot, PlanId,
     PlanNodeResult, PlanPhase, PlanRecoveryPolicySnapshot, PlanResourcePolicySnapshot, SessionId,
 };
+use serde_json::json;
 
 fn leaf(client_key: &str, objective: &str) -> PlanNodeInput {
     PlanNodeInput {
@@ -84,6 +85,162 @@ fn define_plan_resolves_client_key_dependencies_and_assigns_runtime_ids() {
             .depends_on,
         vec![first_id]
     );
+}
+
+#[test]
+fn initial_execute_if_authorized_enters_execution_without_redundant_review() {
+    let mut plan = empty_plan();
+    let mut executable_root = root(Vec::new());
+    executable_root.harness.allowed_tools =
+        vec![merry_core::ToolName::new("run_process").expect("valid tool name")];
+    executable_root.harness.read_scope = vec!["crates/merry-runtime".to_owned()];
+    executable_root.harness.write_scope = vec!["crates/merry-runtime".to_owned()];
+    executable_root.harness.forbidden_paths = vec![".git".to_owned()];
+
+    let output = plan
+        .update(UpdatePlanInput {
+            reason: "the user asked to use this plan and execute it".to_owned(),
+            execution_intent: PlanExecutionIntent::ExecuteIfAuthorized,
+            coordinator_node_id: None,
+            max_concurrency_hint: None,
+            change: PlanChangeInput::DefinePlan {
+                expected_plan_revision: 0,
+                root: executable_root,
+            },
+        })
+        .expect("pre-authorized plan should enter execution");
+
+    assert_eq!(output.snapshot.phase, PlanPhase::Executing);
+    assert!(output.snapshot.approval_requirements.is_empty());
+    assert!(output.snapshot.execution_contract_fingerprint.is_some());
+    assert_eq!(
+        output.snapshot.authorized_capability_envelope,
+        Some(PlanCapabilityEnvelopeSnapshot {
+            allowed_tools: vec![merry_core::ToolName::new("run_process").expect("valid tool name")],
+            read_scope: vec!["crates/merry-runtime".to_owned()],
+            write_scope: vec!["crates/merry-runtime".to_owned()],
+            forbidden_paths: vec![".git".to_owned()],
+            destructive_external_authority: false,
+        })
+    );
+}
+
+#[test]
+fn initial_request_user_review_still_waits_for_explicit_approval() {
+    let mut plan = empty_plan();
+
+    let output = plan
+        .update(UpdatePlanInput {
+            reason: "the user asked to review the plan before execution".to_owned(),
+            execution_intent: PlanExecutionIntent::RequestUserReview,
+            coordinator_node_id: None,
+            max_concurrency_hint: None,
+            change: PlanChangeInput::DefinePlan {
+                expected_plan_revision: 0,
+                root: root(Vec::new()),
+            },
+        })
+        .expect("review request should commit an approval boundary");
+
+    assert_eq!(output.snapshot.phase, PlanPhase::AwaitingApproval);
+    assert_eq!(
+        output
+            .snapshot
+            .approval_requirements
+            .iter()
+            .filter(|requirement| {
+                requirement.status == merry_core::PlanApprovalRequirementStatus::Pending
+            })
+            .map(|requirement| &requirement.kind)
+            .collect::<Vec<_>>(),
+        vec![&PlanApprovalRequirementKind::UserReviewRequested]
+    );
+}
+
+#[test]
+fn existing_plan_enters_execution_without_replacing_its_tree() {
+    let mut plan = empty_plan();
+    let initial = plan
+        .update(UpdatePlanInput {
+            reason: "define a plan for user review".to_owned(),
+            execution_intent: PlanExecutionIntent::ContinuePlanning,
+            coordinator_node_id: None,
+            max_concurrency_hint: Some(2),
+            change: PlanChangeInput::DefinePlan {
+                expected_plan_revision: 0,
+                root: root(vec![
+                    leaf("inspect", "Inspect the workspace"),
+                    leaf("verify", "Verify the result"),
+                ]),
+            },
+        })
+        .expect("initial plan is valid");
+    let current_node_ids = initial
+        .snapshot
+        .nodes
+        .iter()
+        .map(|node| node.id.clone())
+        .collect::<Vec<_>>();
+
+    let start_input = serde_json::from_value::<UpdatePlanInput>(json!({
+        "reason": "the user approved the existing plan",
+        "execution_intent": "execute_if_authorized",
+        "coordinator_node_id": null,
+        "max_concurrency_hint": 2,
+        "change": {
+            "type": "use_current_plan",
+            "expected_plan_revision": initial.snapshot.revision
+        }
+    }))
+    .expect("use_current_plan is a valid update_plan operation");
+    let started = plan
+        .update(start_input)
+        .expect("existing plan starts without tree replacement");
+
+    assert_eq!(started.snapshot.phase, PlanPhase::Executing);
+    assert_eq!(
+        started
+            .snapshot
+            .nodes
+            .iter()
+            .map(|node| node.id.clone())
+            .collect::<Vec<_>>(),
+        current_node_ids
+    );
+    assert!(
+        started
+            .snapshot
+            .nodes
+            .iter()
+            .all(|node| node.status != merry_core::PlanNodeStatus::Superseded)
+    );
+}
+
+#[test]
+fn workspace_root_scope_contains_concrete_child_scopes() {
+    let mut plan = empty_plan();
+    let mut plan_root = root(Vec::new());
+    plan_root.harness.read_scope = vec![".".to_owned()];
+    plan_root.harness.write_scope = vec![".".to_owned()];
+    let mut child = leaf("child", "Edit one crate");
+    child.harness.read_scope = vec!["crates/merry-runtime".to_owned()];
+    child.harness.write_scope = vec!["crates/merry-runtime".to_owned()];
+    plan_root.children.push(child);
+
+    let output = plan
+        .update(UpdatePlanInput {
+            reason: "use the whole workspace as the parent capability scope".to_owned(),
+            execution_intent: PlanExecutionIntent::ContinuePlanning,
+            coordinator_node_id: None,
+            max_concurrency_hint: None,
+            change: PlanChangeInput::DefinePlan {
+                expected_plan_revision: 0,
+                root: plan_root,
+            },
+        })
+        .expect("workspace root is a valid normalized scope");
+
+    assert_eq!(output.snapshot.nodes.len(), 2);
 }
 
 #[test]
@@ -276,6 +433,86 @@ fn replace_subtree_requires_current_target_node_revision() {
 }
 
 #[test]
+fn replace_subtree_can_revise_the_same_live_target_more_than_once() {
+    let mut plan = empty_plan();
+    let mut target = leaf("target", "Initial target");
+    target.children.push(leaf("initial-child", "Initial child"));
+    let initial = plan
+        .update(UpdatePlanInput {
+            reason: "initial recursive branch".to_owned(),
+            execution_intent: PlanExecutionIntent::ContinuePlanning,
+            coordinator_node_id: None,
+            max_concurrency_hint: None,
+            change: PlanChangeInput::DefinePlan {
+                expected_plan_revision: 0,
+                root: root(vec![target]),
+            },
+        })
+        .expect("initial plan succeeds");
+    let target_id = initial.client_key_ids["target"].clone();
+
+    let mut first_replacement = leaf("unused", "First replacement");
+    first_replacement.id = Some(target_id.clone());
+    first_replacement.client_key = None;
+    first_replacement
+        .children
+        .push(leaf("first-child", "First replacement child"));
+    plan.update(UpdatePlanInput {
+        reason: "first evidence-driven revision".to_owned(),
+        execution_intent: PlanExecutionIntent::ContinuePlanning,
+        coordinator_node_id: None,
+        max_concurrency_hint: None,
+        change: PlanChangeInput::ReplaceSubtree {
+            target_node_id: target_id.clone(),
+            expected_node_revision: plan
+                .node(&target_id)
+                .expect("target exists")
+                .updated_revision,
+            subtree: first_replacement,
+        },
+    })
+    .expect("first replacement succeeds");
+
+    let mut second_replacement = leaf("unused", "Second replacement");
+    second_replacement.id = Some(target_id.clone());
+    second_replacement.client_key = None;
+    second_replacement
+        .children
+        .push(leaf("second-child", "Second replacement child"));
+    let second = plan
+        .update(UpdatePlanInput {
+            reason: "second evidence-driven revision".to_owned(),
+            execution_intent: PlanExecutionIntent::ContinuePlanning,
+            coordinator_node_id: None,
+            max_concurrency_hint: None,
+            change: PlanChangeInput::ReplaceSubtree {
+                target_node_id: target_id.clone(),
+                expected_node_revision: plan
+                    .node(&target_id)
+                    .expect("target remains live")
+                    .updated_revision,
+                subtree: second_replacement,
+            },
+        })
+        .expect("superseded history must not block a second replacement");
+
+    assert_eq!(
+        second
+            .snapshot
+            .nodes
+            .iter()
+            .find(|node| node.id == target_id)
+            .expect("target remains present")
+            .objective,
+        "Second replacement"
+    );
+    assert!(second.snapshot.nodes.iter().any(|node| {
+        node.status == merry_core::PlanNodeStatus::Superseded
+            && node.objective == "First replacement child"
+    }));
+}
+
+#[test]
 fn execution_contract_fingerprint_ignores_runtime_node_state() {
     let mut plan = empty_plan();
     plan.update(UpdatePlanInput {
@@ -294,16 +531,14 @@ fn execution_contract_fingerprint_ignores_runtime_node_state() {
     let fingerprint = plan.contract_fingerprint();
     let root_id = plan.snapshot().root_node_id.clone().expect("root exists");
     let actor = PlanAttemptActor {
-        executor_session_id: SessionId::new("contract-worker").expect("valid session id"),
+        executor_session_id: SessionId::new("contract-subagent").expect("valid session id"),
     };
-    let started = plan
+    let _started = plan
         .start_attempt(&root_id, actor.clone(), 1_000)
         .expect("attempt starts");
     plan.report_attempt(
         &actor,
         ReportPlanAttemptInput {
-            lease_id: started.lease.lease_id,
-            expected_node_revision: started.attempt.node_revision,
             outcome: PlanAttemptOutcome::Completed,
             result: Some(PlanNodeResult {
                 conclusion: "Root acceptance is satisfied".to_owned(),
@@ -384,7 +619,7 @@ fn capability_expansion_is_committed_as_an_approval_boundary() {
     initial_root.harness.write_scope = vec!["crates/runtime".to_owned()];
     plan.update(UpdatePlanInput {
         reason: "initial executable plan".to_owned(),
-        execution_intent: PlanExecutionIntent::ContinuePlanning,
+        execution_intent: PlanExecutionIntent::ExecuteIfAuthorized,
         coordinator_node_id: None,
         max_concurrency_hint: None,
         change: PlanChangeInput::DefinePlan {
@@ -393,14 +628,7 @@ fn capability_expansion_is_committed_as_an_approval_boundary() {
         },
     })
     .expect("plan definition succeeds");
-    plan.enter_execution(
-        PlanCapabilityEnvelopeSnapshot {
-            write_scope: vec!["crates/runtime".to_owned()],
-            ..PlanCapabilityEnvelopeSnapshot::default()
-        },
-        vec!["test authorization".to_owned()],
-    )
-    .expect("execution authorization succeeds");
+    assert_eq!(plan.snapshot().phase, PlanPhase::Executing);
     let root_id = plan.snapshot().root_node_id.clone().expect("root exists");
     let root_revision = plan.node(&root_id).expect("root node").updated_revision;
     let mut replacement = root(Vec::new());

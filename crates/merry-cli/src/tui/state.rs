@@ -591,12 +591,23 @@ impl TuiState {
     }
 
     pub(crate) fn open_plan_approval(&mut self) {
-        match self.plan.approval_summary() {
-            Ok(message) => {
-                self.dialog_back = self.overlay.take().map(Box::new);
-                self.overlay = Some(Overlay::plan_approval(message));
+        match (self.plan.approval_summary(), self.plan.approval_input()) {
+            (Ok(message), Ok(input)) => {
+                if !matches!(self.overlay, Some(Overlay::PlanApproval(_))) {
+                    self.dialog_back = self.overlay.take().map(Box::new);
+                }
+                self.overlay = Some(Overlay::plan_approval(message, input));
             }
-            Err(error) => self.show_error_dialog("Plan approval unavailable", error),
+            (Err(error), _) | (_, Err(error)) => {
+                self.show_error_dialog("Plan approval unavailable", error)
+            }
+        }
+    }
+
+    pub(crate) fn plan_approval_input(&self) -> Option<merry_runtime::PlanApprovalInput> {
+        match self.overlay.as_ref() {
+            Some(Overlay::PlanApproval(approval)) => Some(approval.input().clone()),
+            _ => None,
         }
     }
 

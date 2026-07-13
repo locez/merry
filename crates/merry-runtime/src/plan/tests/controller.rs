@@ -173,10 +173,10 @@ async fn concurrent_attempt_reports_are_serialized_without_lost_updates() {
         .await
         .expect("execution authorization succeeds");
     let left_actor = PlanAttemptActor {
-        executor_session_id: SessionId::new("worker-left").unwrap(),
+        executor_session_id: SessionId::new("subagent-left").unwrap(),
     };
     let right_actor = PlanAttemptActor {
-        executor_session_id: SessionId::new("worker-right").unwrap(),
+        executor_session_id: SessionId::new("subagent-right").unwrap(),
     };
     let left = controller
         .start_attempt(
@@ -263,12 +263,10 @@ fn plan_root(children: Vec<PlanNodeInput>) -> PlanNodeInput {
 }
 
 fn completed_report(
-    lease: &merry_core::PlanLeaseSnapshot,
+    _lease: &merry_core::PlanLeaseSnapshot,
     conclusion: &str,
 ) -> ReportPlanAttemptInput {
     ReportPlanAttemptInput {
-        lease_id: lease.lease_id.clone(),
-        expected_node_revision: lease.node_revision,
         outcome: PlanAttemptOutcome::Completed,
         result: Some(PlanNodeResult {
             conclusion: conclusion.to_owned(),

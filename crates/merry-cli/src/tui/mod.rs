@@ -38,6 +38,7 @@ mod overlay_render;
 mod panels;
 mod plan;
 mod plan_controller;
+mod plan_projector;
 mod plan_render;
 mod preferences;
 mod projector;
@@ -51,6 +52,7 @@ mod state;
 mod status;
 mod terminal;
 pub(crate) mod theme;
+mod tool_error;
 
 #[cfg(test)]
 mod plan_tests;

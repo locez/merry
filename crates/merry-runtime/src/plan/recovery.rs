@@ -30,8 +30,8 @@ pub(crate) struct PlanAttemptCancellationOutput {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InterruptionSelection {
-    Expired,
-    AllLive,
+    ExpiredSubagentLeases,
+    AllUnresolvedAttempts,
 }
 
 pub(super) fn retry_backoff_elapsed(
@@ -107,14 +107,7 @@ impl PlanState {
         node.status = PlanNodeStatus::Blocked;
         node.updated_revision = revision;
         let updated_directives = candidate.expire_attempt_directives(&attempt_id);
-        if !candidate
-            .snapshot
-            .leases
-            .iter()
-            .any(|lease| lease.status == PlanLeaseStatus::Live)
-        {
-            candidate.snapshot.phase = PlanPhase::Cancelled;
-        }
+        candidate.settle_draining_phase();
         let attempt = candidate.snapshot.attempts[attempt_index].clone();
         let snapshot = candidate.snapshot.clone();
         *self = candidate;
@@ -187,34 +180,43 @@ impl PlanState {
         &mut self,
         now_ms: u64,
     ) -> Result<PlanRecoveryOutput, PlanError> {
-        self.interrupt_leases(now_ms, InterruptionSelection::Expired)
+        self.interrupt_attempts(now_ms, InterruptionSelection::ExpiredSubagentLeases)
     }
 
-    pub(crate) fn interrupt_live_leases_after_resume(
+    pub(crate) fn interrupt_unresolved_attempts_after_resume(
         &mut self,
         now_ms: u64,
     ) -> Result<PlanRecoveryOutput, PlanError> {
-        self.interrupt_leases(now_ms, InterruptionSelection::AllLive)
+        self.interrupt_attempts(now_ms, InterruptionSelection::AllUnresolvedAttempts)
     }
 
-    fn interrupt_leases(
+    fn interrupt_attempts(
         &mut self,
         now_ms: u64,
         selection: InterruptionSelection,
     ) -> Result<PlanRecoveryOutput, PlanError> {
         let mut candidate = self.clone();
         let previous_phase = candidate.snapshot.phase;
-        let lease_ids = candidate
+        let attempt_ids = candidate
             .snapshot
-            .leases
+            .attempts
             .iter()
-            .filter(|lease| lease.status == PlanLeaseStatus::Live)
-            .filter(|lease| {
-                selection == InterruptionSelection::AllLive || lease.lease_expires_at_ms <= now_ms
+            .filter(|attempt| attempt.outcome.is_none())
+            .filter(|attempt| {
+                if selection == InterruptionSelection::AllUnresolvedAttempts {
+                    return true;
+                }
+                attempt.lease_id.as_ref().is_some_and(|lease_id| {
+                    candidate.snapshot.leases.iter().any(|lease| {
+                        &lease.lease_id == lease_id
+                            && lease.status == PlanLeaseStatus::Live
+                            && lease.lease_expires_at_ms <= now_ms
+                    })
+                })
             })
-            .map(|lease| lease.lease_id.clone())
+            .map(|attempt| attempt.attempt_id.clone())
             .collect::<Vec<_>>();
-        if lease_ids.is_empty() {
+        if attempt_ids.is_empty() {
             return Ok(PlanRecoveryOutput {
                 snapshot: candidate.snapshot,
                 interrupted_attempts: Vec::new(),
@@ -225,43 +227,58 @@ impl PlanState {
         }
 
         let revision = candidate.advance_revision(match selection {
-            InterruptionSelection::Expired => "expired plan leases interrupted",
-            InterruptionSelection::AllLive => "persisted plan leases interrupted on resume",
+            InterruptionSelection::ExpiredSubagentLeases => {
+                "expired subagent plan leases interrupted"
+            }
+            InterruptionSelection::AllUnresolvedAttempts => {
+                "persisted plan attempts interrupted on resume"
+            }
         })?;
-        let mut interrupted_attempts = Vec::with_capacity(lease_ids.len());
+        let mut interrupted_attempts = Vec::with_capacity(attempt_ids.len());
         let mut updated_directives = Vec::new();
-        for lease_id in lease_ids {
-            let lease_index = candidate
-                .snapshot
-                .leases
-                .iter()
-                .position(|lease| lease.lease_id == lease_id)
-                .expect("selected lease remains present");
-            let attempt_id = candidate.snapshot.leases[lease_index].attempt_id.clone();
+        for attempt_id in attempt_ids {
             let attempt_index = candidate
                 .snapshot
                 .attempts
                 .iter()
                 .position(|attempt| attempt.attempt_id == attempt_id)
-                .expect("selected lease attempt remains present");
+                .expect("selected attempt remains present");
+            let lease_index = candidate.snapshot.attempts[attempt_index]
+                .lease_id
+                .as_ref()
+                .map(|lease_id| {
+                    candidate
+                        .snapshot
+                        .leases
+                        .iter()
+                        .position(|lease| &lease.lease_id == lease_id)
+                        .expect("subagent attempt lease remains present")
+                });
+            if selection == InterruptionSelection::ExpiredSubagentLeases {
+                debug_assert!(lease_index.is_some());
+            }
             let node_id = candidate.snapshot.attempts[attempt_index].node_id.clone();
             let node_status = if candidate.interrupted_attempt_can_retry(&node_id, &attempt_id) {
                 PlanNodeStatus::Pending
             } else {
                 PlanNodeStatus::Blocked
             };
-            let diagnostic = ErrorInfo::new(
-                "plan_lease_interrupted",
-                match selection {
-                    InterruptionSelection::Expired => {
-                        "worker lease expired without a terminal attempt report"
-                    }
-                    InterruptionSelection::AllLive => {
-                        "persisted worker lease had no live executor after resume"
-                    }
-                },
-            )
-            .expect("static interruption diagnostic is valid");
+            let diagnostic_message = match (selection, lease_index) {
+                (InterruptionSelection::ExpiredSubagentLeases, Some(_)) => {
+                    "subagent lease expired without a terminal attempt report"
+                }
+                (InterruptionSelection::AllUnresolvedAttempts, Some(_)) => {
+                    "persisted subagent attempt had no live executor after resume"
+                }
+                (InterruptionSelection::AllUnresolvedAttempts, None) => {
+                    "persisted local attempt had no live model turn after resume"
+                }
+                (InterruptionSelection::ExpiredSubagentLeases, None) => {
+                    unreachable!("local attempts never participate in lease expiry")
+                }
+            };
+            let diagnostic = ErrorInfo::new("plan_attempt_interrupted", diagnostic_message)
+                .expect("static interruption diagnostic is valid");
             {
                 let attempt = &mut candidate.snapshot.attempts[attempt_index];
                 attempt.finished_at_ms = Some(now_ms);
@@ -269,7 +286,9 @@ impl PlanState {
                 attempt.diagnostic = Some(diagnostic);
                 interrupted_attempts.push(attempt.clone());
             }
-            candidate.snapshot.leases[lease_index].status = PlanLeaseStatus::Expired;
+            if let Some(lease_index) = lease_index {
+                candidate.snapshot.leases[lease_index].status = PlanLeaseStatus::Expired;
+            }
             if let Some(progress) = candidate
                 .snapshot
                 .attempt_progress
@@ -294,6 +313,7 @@ impl PlanState {
         }
         candidate.refresh_parent_states(revision);
         candidate.refresh_terminal_phase();
+        candidate.settle_draining_phase();
         let ready_node_ids = candidate.ready_node_ids_at(now_ms);
         let snapshot = candidate.snapshot.clone();
         *self = candidate;
@@ -347,7 +367,9 @@ impl PlanState {
             .iter()
             .find(|progress| &progress.attempt_id == attempt_id)
             .is_none_or(|progress| {
-                progress.artifacts_created == 0 && progress.changed_paths.is_empty()
+                progress.observable_side_effects == 0
+                    && progress.artifacts_created == 0
+                    && progress.changed_paths.is_empty()
             })
     }
 }

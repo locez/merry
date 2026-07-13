@@ -67,5 +67,5 @@
             atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         },
     };
-    use tokio::sync::{Mutex, mpsc, oneshot};
+    use tokio::sync::{Mutex, Notify, mpsc, oneshot};
     use tokio_util::sync::CancellationToken;

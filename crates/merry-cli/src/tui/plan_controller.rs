@@ -131,15 +131,8 @@ pub(crate) async fn dispatch_effect(
                 state.show_error_dialog("Plan control failed", error.to_string());
             }
         }
-        ControllerEffect::ApprovePlan => {
-            let input = match state.plan().approval_input() {
-                Ok(input) => input,
-                Err(error) => {
-                    state.show_error_dialog("Plan approval unavailable", error);
-                    return Some(false);
-                }
-            };
-            if let Err(error) = session.control.approve_plan(input).await {
+        ControllerEffect::ApprovePlan(input) => {
+            if let Err(error) = session.control.approve_plan(input.clone()).await {
                 state.show_error_dialog("Plan approval failed", error.to_string());
             }
         }

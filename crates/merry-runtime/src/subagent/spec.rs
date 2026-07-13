@@ -2,7 +2,7 @@ use merry_core::ToolName;
 use merry_llm::ReasoningEffort;
 use std::{
     collections::BTreeSet,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
 };
 use thiserror::Error;
 
@@ -270,44 +270,7 @@ where
 
 pub(super) fn validate_scope_path(path: PathBuf) -> Result<PathBuf, SubagentError> {
     let path_label = path.display().to_string();
-    let Some(path_text) = path.to_str() else {
-        return Err(SubagentError::InvalidScopePath { path: path_label });
-    };
-
-    if path_text.is_empty()
-        || path.is_absolute()
-        || path_text.contains('\\')
-        || path_text.chars().any(char::is_control)
-    {
-        return Err(SubagentError::InvalidScopePath { path: path_label });
-    }
-
-    if path_text
-        .split('/')
-        .any(|segment| matches!(segment, "" | "." | ".."))
-    {
-        return Err(SubagentError::InvalidScopePath { path: path_label });
-    }
-
-    let mut saw_component = false;
-    for component in path.components() {
-        match component {
-            Component::Normal(value) => {
-                if value.to_str().is_none() {
-                    return Err(SubagentError::InvalidScopePath { path: path_label });
-                }
-                saw_component = true;
-            }
-            Component::CurDir
-            | Component::ParentDir
-            | Component::RootDir
-            | Component::Prefix(_) => {
-                return Err(SubagentError::InvalidScopePath { path: path_label });
-            }
-        }
-    }
-
-    if !saw_component {
+    if !crate::workspace_scope::is_valid_workspace_scope(&path) {
         return Err(SubagentError::InvalidScopePath { path: path_label });
     }
 
@@ -338,5 +301,5 @@ pub fn validate_no_write_scope_conflicts(tasks: &[SubagentTaskSpec]) -> Result<(
 /// Returns true when two relative paths name the same path or parent/child trees.
 #[must_use]
 fn paths_overlap(first: &Path, second: &Path) -> bool {
-    first == second || first.starts_with(second) || second.starts_with(first)
+    crate::workspace_scope::workspace_scopes_overlap(first, second)
 }

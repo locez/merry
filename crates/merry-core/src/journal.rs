@@ -188,7 +188,7 @@ pub enum RuntimeJournalPayload {
         attempt_id: PlanAttemptId,
         reason: String,
     },
-    /// A worker or local executor durably reported semantic progress.
+    /// A subagent or local executor durably reported semantic progress.
     PlanAttemptProgressReported {
         progress: PlanAttemptProgressSnapshot,
     },

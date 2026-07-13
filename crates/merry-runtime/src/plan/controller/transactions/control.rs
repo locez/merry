@@ -1,11 +1,11 @@
 use super::*;
 
-pub(crate) async fn recover_leases(
+pub(crate) async fn recover_attempts(
     session: &Arc<Mutex<SessionState>>,
     store: Option<&FileSessionStore>,
     events: &broadcast::Sender<RuntimeJournalEvent>,
     now_ms: u64,
-    all_live: bool,
+    after_resume: bool,
 ) -> Result<PlanCommandResult<PlanRecoveryOutput>, PlanControllerError> {
     let prepared = {
         let session = session.lock().await;
@@ -13,8 +13,8 @@ pub(crate) async fn recover_leases(
             .active_plan()
             .ok_or(PlanControllerError::NoActivePlan)?
             .clone();
-        let output = if all_live {
-            candidate.interrupt_live_leases_after_resume(now_ms)?
+        let output = if after_resume {
+            candidate.interrupt_unresolved_attempts_after_resume(now_ms)?
         } else {
             candidate.interrupt_expired_leases(now_ms)?
         };
@@ -148,9 +148,18 @@ pub(crate) async fn control_plan(
             PlanControlRequest::RetryInterrupted { node_id, reason } => {
                 candidate.retry_interrupted_node(&node_id, &reason)?
             }
-            PlanControlRequest::Cancel(reason) => candidate.request_cancellation(&reason)?,
+            PlanControlRequest::Cancel { reason, now_ms } => {
+                candidate.request_cancellation(&reason, now_ms)?
+            }
         };
         let mut payloads = vec![plan_updated_payload(&output.snapshot)];
+        payloads.extend(
+            output
+                .finished_attempts
+                .iter()
+                .cloned()
+                .map(|attempt| RuntimeJournalPayload::PlanAttemptFinished { attempt }),
+        );
         if output.previous_phase != output.snapshot.phase {
             payloads.push(RuntimeJournalPayload::PlanPhaseChanged {
                 plan_id: output.snapshot.plan_id.clone(),

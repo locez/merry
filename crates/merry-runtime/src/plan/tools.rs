@@ -30,7 +30,7 @@ pub(crate) fn coordinator_plan_registered_tools() -> Result<Vec<RegisteredTool>,
     let definitions = [
         plan_tool::<BeginPlanInput>(
             BEGIN_PLAN_TOOL_NAME,
-            "Activate durable Plan Mode for the current session without changing permissions.",
+            "Start durable Plan Mode before calling update_plan when no active plan exists. This creates an empty planning state, does not change permissions, and is idempotent for the current active plan.",
         )?,
         plan_tool::<ReadPlanInput>(
             READ_PLAN_TOOL_NAME,
@@ -38,7 +38,7 @@ pub(crate) fn coordinator_plan_registered_tools() -> Result<Vec<RegisteredTool>,
         )?,
         plan_tool::<UpdatePlanInput>(
             UPDATE_PLAN_TOOL_NAME,
-            "Define a complete planning tree or replace one mutable future subtree.",
+            "Requires an active plan created by begin_plan. Pass change as a tagged JSON object. New nodes use client_key without id; existing mutable nodes use id without client_key. Define the complete tree while planning or replace one future subtree while planning/executing. To start an already-authored plan after the user says to proceed, use change.type=use_current_plan with execute_if_authorized; do not replace or recreate the tree. Choose request_user_review only when the user wants to inspect or approve it first. Node status, attempts, progress, and results are runtime-owned and cannot be marked completed with update_plan.",
         )?,
         plan_tool::<ControlPlanAttemptInput>(
             CONTROL_PLAN_ATTEMPT_TOOL_NAME,
@@ -56,15 +56,15 @@ pub(crate) fn coordinator_plan_registered_tools() -> Result<Vec<RegisteredTool>,
     Ok(definitions.into_iter().collect())
 }
 
-pub(crate) fn worker_plan_registered_tools() -> Result<Vec<RegisteredTool>, CoreError> {
+pub(crate) fn subagent_plan_registered_tools() -> Result<Vec<RegisteredTool>, CoreError> {
     Ok(vec![
         plan_tool::<ReportPlanProgressInput>(
             REPORT_PLAN_PROGRESS_TOOL_NAME,
-            "Record bounded non-terminal semantic progress for the current local plan attempt.",
+            "Record bounded non-terminal semantic progress for the current delegated plan attempt.",
         )?,
         plan_tool::<ReportPlanAttemptInput>(
             REPORT_PLAN_ATTEMPT_TOOL_NAME,
-            "Resolve the current local plan attempt exactly once with a typed result or decomposition.",
+            "Resolve the current delegated plan attempt exactly once with a typed result or decomposition.",
         )?,
     ])
 }

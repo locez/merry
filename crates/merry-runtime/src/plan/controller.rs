@@ -3,7 +3,8 @@ use super::{
     control::PlanControlOutput,
     execution::{
         PlanAttemptActor, PlanAttemptReportOutput, PlanAttemptStartOutput,
-        PlanDirectiveDeliveryOutput, PlanDirectiveOutput, PlanProgressOutput,
+        PlanDirectiveDeliveryOutput, PlanDirectiveOutput, PlanLocalAttemptStartOutput,
+        PlanProgressOutput,
     },
     protocol::{
         BeginPlanInput, BeginPlanOutput, ControlPlanAttemptInput, PlanApprovalInput,
@@ -209,6 +210,28 @@ impl PlanController {
             .map_err(|_| PlanControllerError::CommandChannelClosed)?
     }
 
+    pub(crate) async fn start_local_attempt(
+        &self,
+        node_id: PlanNodeId,
+        actor: PlanAttemptActor,
+        now_ms: u64,
+    ) -> Result<PlanCommandResult<PlanLocalAttemptStartOutput>, PlanControllerError> {
+        self.ensure_started()?;
+        let (reply, response) = oneshot::channel();
+        self.sender
+            .send(PlanCommand::StartLocalAttempt {
+                node_id,
+                actor,
+                now_ms,
+                reply,
+            })
+            .await
+            .map_err(|_| PlanControllerError::CommandChannelClosed)?;
+        response
+            .await
+            .map_err(|_| PlanControllerError::CommandChannelClosed)?
+    }
+
     pub(crate) async fn directive_from_tool(
         &self,
         input: ControlPlanAttemptInput,
@@ -384,6 +407,28 @@ impl PlanController {
             .map_err(|_| PlanControllerError::CommandChannelClosed)?
     }
 
+    pub(crate) async fn record_runtime_effect(
+        &self,
+        actor: PlanAttemptActor,
+        changed_paths: Vec<String>,
+        now_ms: u64,
+    ) -> Result<PlanCommandResult<PlanProgressOutput>, PlanControllerError> {
+        self.ensure_started()?;
+        let (reply, response) = oneshot::channel();
+        self.sender
+            .send(PlanCommand::RecordRuntimeEffect {
+                actor,
+                changed_paths,
+                now_ms,
+                reply,
+            })
+            .await
+            .map_err(|_| PlanControllerError::CommandChannelClosed)?;
+        response
+            .await
+            .map_err(|_| PlanControllerError::CommandChannelClosed)?
+    }
+
     pub(crate) async fn deliver_directives(
         &self,
         actor: PlanAttemptActor,
@@ -410,27 +455,27 @@ impl PlanController {
         &self,
         now_ms: u64,
     ) -> Result<PlanCommandResult<PlanRecoveryOutput>, PlanControllerError> {
-        self.recover_leases(now_ms, false).await
+        self.recover_attempts(now_ms, false).await
     }
 
-    pub(crate) async fn recover_live_leases_after_resume(
+    pub(crate) async fn recover_unresolved_attempts_after_resume(
         &self,
         now_ms: u64,
     ) -> Result<PlanCommandResult<PlanRecoveryOutput>, PlanControllerError> {
-        self.recover_leases(now_ms, true).await
+        self.recover_attempts(now_ms, true).await
     }
 
-    async fn recover_leases(
+    async fn recover_attempts(
         &self,
         now_ms: u64,
-        all_live: bool,
+        after_resume: bool,
     ) -> Result<PlanCommandResult<PlanRecoveryOutput>, PlanControllerError> {
         self.ensure_started()?;
         let (reply, response) = oneshot::channel();
         self.sender
-            .send(PlanCommand::RecoverLeases {
+            .send(PlanCommand::RecoverAttempts {
                 now_ms,
-                all_live,
+                after_resume,
                 reply,
             })
             .await
@@ -503,7 +548,11 @@ impl PlanController {
         &self,
         reason: String,
     ) -> Result<PlanCommandResult<PlanControlOutput>, PlanControllerError> {
-        self.control(PlanControlRequest::Cancel(reason)).await
+        self.control(PlanControlRequest::Cancel {
+            reason,
+            now_ms: super::unix_time_ms(),
+        })
+        .await
     }
 
     async fn control(

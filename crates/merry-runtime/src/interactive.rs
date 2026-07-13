@@ -1,5 +1,6 @@
 mod commands;
 mod handles;
+mod plan;
 mod queue;
 mod settings;
 mod types;
@@ -16,8 +17,8 @@ use crate::{
 };
 use futures_util::StreamExt;
 use merry_core::{
-    InteractiveRunState, PendingToolCall, QueuedInputLane, RuntimeEvent, RuntimeJournalEvent,
-    RuntimeJournalPayload,
+    ErrorInfo, InteractiveRunState, PendingToolCall, PlanAttemptOutcome, QueuedInputLane,
+    RuntimeEvent, RuntimeJournalEvent, RuntimeJournalPayload,
 };
 use merry_llm::GenerationConfig;
 use std::collections::BTreeSet;
@@ -279,16 +280,6 @@ impl InteractiveProducer {
         }
     }
 
-    async fn refresh_coordinator_continuation_request(&mut self) {
-        let Ok(Some(snapshot)) = self.runtime.plan_snapshot().await else {
-            return;
-        };
-        self.coordinator_continuation_requested = snapshot.leases.iter().any(|lease| {
-            lease.status == merry_core::PlanLeaseStatus::Live
-                && lease.executor_session_id == *self.runtime.session_id()
-        });
-    }
-
     async fn run_model_phase(
         &mut self,
         input: StepInput,
@@ -332,11 +323,27 @@ impl InteractiveProducer {
             Err(error) => {
                 self.phase_token = None;
                 tracing::debug!(error = %error, "interactive step start failed");
+                let diagnostic = ErrorInfo::new(
+                    "interactive_step_start_failed",
+                    &format!("interactive step could not start: {error}"),
+                )
+                .expect("runtime error text produces a valid diagnostic");
+                self.finish_local_attempt(PlanAttemptOutcome::TransientFailure, diagnostic)
+                    .await;
                 return None;
             }
         };
         let events = self.forward_step_until_boundary(stream).await;
         self.phase_token = None;
+        if events.is_none() {
+            let diagnostic = ErrorInfo::new(
+                "interactive_step_interrupted",
+                "interactive step ended before a durable terminal boundary",
+            )
+            .expect("static interactive diagnostic is valid");
+            self.finish_local_attempt(PlanAttemptOutcome::TransientFailure, diagnostic)
+                .await;
+        }
         events
     }
 
@@ -381,7 +388,17 @@ impl InteractiveProducer {
     async fn handle_step_outcome(&mut self, step_events: &[RuntimeJournalEvent]) -> Option<bool> {
         match classify_step_events(step_events, self.config.final_output_contract()) {
             StepOutcome::Pending(PendingLoopToolCall::Runtime(call)) if !self.interrupted => {
-                self.run_runtime_tool(call).await
+                let continuation = self.run_runtime_tool(call).await;
+                if continuation.is_none() {
+                    let diagnostic = ErrorInfo::new(
+                        "interactive_tool_execution_failed",
+                        "runtime tool execution ended before a durable result",
+                    )
+                    .expect("static tool diagnostic is valid");
+                    self.finish_local_attempt(PlanAttemptOutcome::TransientFailure, diagnostic)
+                        .await;
+                }
+                continuation
             }
             StepOutcome::PendingBatch(calls)
                 if !self.interrupted
@@ -389,22 +406,54 @@ impl InteractiveProducer {
                         .iter()
                         .all(|call| matches!(call, PendingLoopToolCall::Runtime(_))) =>
             {
-                self.run_runtime_tool_batch(
-                    calls
-                        .into_iter()
-                        .map(|call| match call {
-                            PendingLoopToolCall::Runtime(call) => call,
-                            PendingLoopToolCall::Bridge(_)
-                            | PendingLoopToolCall::FinalOutput(_) => {
-                                unreachable!("guard accepts runtime tool calls only")
-                            }
-                        })
-                        .collect(),
-                )
-                .await
+                let continuation = self
+                    .run_runtime_tool_batch(
+                        calls
+                            .into_iter()
+                            .map(|call| match call {
+                                PendingLoopToolCall::Runtime(call) => call,
+                                PendingLoopToolCall::Bridge(_)
+                                | PendingLoopToolCall::FinalOutput(_) => {
+                                    unreachable!("guard accepts runtime tool calls only")
+                                }
+                            })
+                            .collect(),
+                    )
+                    .await;
+                if continuation.is_none() {
+                    let diagnostic = ErrorInfo::new(
+                        "interactive_tool_execution_failed",
+                        "runtime tool batch ended before durable results",
+                    )
+                    .expect("static tool diagnostic is valid");
+                    self.finish_local_attempt(PlanAttemptOutcome::TransientFailure, diagnostic)
+                        .await;
+                }
+                continuation
             }
             StepOutcome::ToolResultRecorded => Some(!self.interrupted),
-            _ => Some(false),
+            StepOutcome::Completed => {
+                self.fail_unreported_local_attempt().await;
+                Some(false)
+            }
+            StepOutcome::Failed(diagnostic) | StepOutcome::Cancelled(diagnostic) => {
+                self.finish_local_attempt(PlanAttemptOutcome::TransientFailure, diagnostic)
+                    .await;
+                Some(false)
+            }
+            StepOutcome::Blocked(reason) => {
+                let diagnostic = ErrorInfo::new(
+                    "missing_attempt_report",
+                    &format!(
+                        "local coordinator turn stopped without report_plan_attempt: {reason:?}"
+                    ),
+                )
+                .expect("blocked reason produces a valid diagnostic");
+                self.finish_local_attempt(PlanAttemptOutcome::TransientFailure, diagnostic)
+                    .await;
+                Some(false)
+            }
+            StepOutcome::Pending(_) | StepOutcome::PendingBatch(_) => Some(false),
         }
     }
 
@@ -456,7 +505,7 @@ impl InteractiveProducer {
                 if !self.send_runtime_events(events).await {
                     return None;
                 }
-                Some(!self.interrupted)
+                self.runtime_tool_continuation().await
             }
             Err(RuntimeError::ToolExecutionCancelled { call_id, .. }) => {
                 let runtime = self.runtime.clone();
@@ -534,7 +583,7 @@ impl InteractiveProducer {
         }
 
         match error {
-            None => Some(!self.interrupted),
+            None => self.runtime_tool_continuation().await,
             Some(RuntimeError::ToolExecutionCancelled { .. }) => {
                 let pending_ids = self
                     .runtime
@@ -601,50 +650,6 @@ impl InteractiveProducer {
         self.event_sender.send(event).await.is_ok()
     }
 
-    async fn forward_plan_event(
-        &mut self,
-        event: Result<RuntimeJournalEvent, tokio::sync::broadcast::error::RecvError>,
-    ) -> bool {
-        match event {
-            Ok(event) => {
-                self.observe_plan_wakeup(&event.payload);
-                let mut projector = RuntimeEventProjector::new();
-                self.project_and_send_runtime_event(&mut projector, event)
-                    .await
-            }
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                tracing::debug!(skipped, "interactive plan event receiver lagged");
-                true
-            }
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => true,
-        }
-    }
-
-    fn observe_plan_wakeup(&mut self, payload: &RuntimeJournalPayload) {
-        match payload {
-            RuntimeJournalPayload::PlanLeaseStarted { lease }
-                if lease.executor_session_id == *self.runtime.session_id() =>
-            {
-                self.coordinator_continuation_requested = true;
-            }
-            RuntimeJournalPayload::PlanProgressReviewRequested { .. } => {
-                self.coordinator_continuation_requested = true;
-            }
-            RuntimeJournalPayload::PlanAttemptFinished { attempt }
-                if matches!(
-                    attempt.outcome,
-                    Some(
-                        merry_core::PlanAttemptOutcome::SemanticFailure
-                            | merry_core::PlanAttemptOutcome::Blocked
-                    )
-                ) =>
-            {
-                self.coordinator_continuation_requested = true;
-            }
-            _ => {}
-        }
-    }
-
     async fn drain_ready_commands(&mut self) -> bool {
         while let Ok(command) = self.command_receiver.try_recv() {
             if self
@@ -691,6 +696,12 @@ impl InteractiveProducer {
         }
 
         if continuation_required {
+            self.coordinator_continuation_requested = false;
+            return BoundaryAction::Continuation;
+        }
+
+        if self.coordinator_continuation_requested {
+            self.coordinator_continuation_requested = false;
             return BoundaryAction::Continuation;
         }
 

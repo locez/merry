@@ -20,7 +20,7 @@ use crate::{
     permission::{PermissionAdmissionSource, PermissionReviewMode, RuntimeTrustLevel},
     plan::{
         BeginPlanInput, BeginPlanOutput, PlanController, PlanControllerError,
-        PlanControllerEventReceiver, PlanScheduler, PlanUpdateOutput, PlanWorkerControl,
+        PlanControllerEventReceiver, PlanScheduler, PlanSubagentControl, PlanUpdateOutput,
         UpdatePlanInput,
     },
     process::PermissionedProcessRunnerFactory,
@@ -29,7 +29,10 @@ use crate::{
     subagent::SubagentManager,
     tool::{ToolExecutionContext, ToolRegistry},
 };
-use merry_core::{PendingToolCall, RuntimeEvent, RuntimeJournalEvent, SessionId, ToolCallId};
+use merry_core::{
+    PendingToolCall, PlanAttemptId, PlanHarnessSnapshot, PlanSnapshot, RuntimeEvent,
+    RuntimeJournalEvent, SessionId, ToolCallId,
+};
 use merry_llm::{GenerationConfig, ModelName, ModelProvider, ModelRetryPolicy};
 use std::{
     num::{NonZeroU64, NonZeroUsize},
@@ -242,6 +245,25 @@ impl Runtime {
         self.inner.plan_controller.snapshot().await
     }
 
+    pub(crate) async fn report_current_local_plan_attempt(
+        &self,
+        input: crate::ReportPlanAttemptInput,
+    ) -> Result<(), PlanControllerError> {
+        let actor = crate::plan::execution::PlanAttemptActor {
+            executor_session_id: self.inner.session_id.clone(),
+        };
+        self.inner
+            .plan_controller
+            .attempt_report_with_artifact_promotions(
+                actor,
+                input,
+                Vec::new(),
+                crate::plan::unix_time_ms(),
+            )
+            .await?;
+        Ok(())
+    }
+
     /// Activates Plan Mode through the same runtime transition used by the coordinator tool.
     pub async fn begin_plan(
         &self,
@@ -276,7 +298,7 @@ impl Runtime {
         Ok(output)
     }
 
-    /// Persists an attempt-scoped coordinator directive for one live worker.
+    /// Persists an attempt-scoped coordinator directive for one live subagent.
     pub async fn control_plan_attempt(
         &self,
         input: crate::ControlPlanAttemptInput,
@@ -315,7 +337,7 @@ impl Runtime {
         Ok(committed.output.snapshot)
     }
 
-    /// Pauses admission of new plan leases without cancelling live workers.
+    /// Pauses admission of new plan attempts without cancelling live subagents.
     pub async fn pause_plan_scheduling(
         &self,
         reason: &str,
@@ -372,7 +394,7 @@ impl Runtime {
         Ok(committed.output.snapshot)
     }
 
-    /// Stops new lease admission and cooperatively cancels live plan workers.
+    /// Stops new attempt admission and cooperatively cancels live plan subagents.
     pub async fn cancel_plan(
         &self,
         reason: &str,
@@ -383,7 +405,7 @@ impl Runtime {
             .request_cancellation(reason.to_owned())
             .await?;
         if let Some(scheduler) = self.inner.plan_scheduler.as_ref() {
-            scheduler.cancel_running_workers().await;
+            scheduler.cancel_running_subagents().await;
         }
         Ok(committed.output.snapshot)
     }
@@ -683,7 +705,7 @@ struct RuntimeInner {
     permissioned_process_runner_factory: Option<Arc<dyn PermissionedProcessRunnerFactory>>,
     subagent_manager: Option<SubagentManager>,
     plan_controller: PlanController,
-    worker_plan_control: Option<PlanWorkerControl>,
+    plan_subagent_control: Option<PlanSubagentControl>,
     plan_scheduler: Option<PlanScheduler>,
     session_store: Option<FileSessionStore>,
 }
@@ -692,6 +714,71 @@ impl RuntimeInner {
     fn ensure_plan_scheduler_started(&self) {
         if let Some(scheduler) = self.plan_scheduler.as_ref() {
             scheduler.ensure_started();
+        }
+    }
+
+    async fn recover_plan_after_resume(&self) -> Result<(), PlanControllerError> {
+        if let Some(scheduler) = self.plan_scheduler.as_ref() {
+            scheduler.recover_after_resume().await?;
+            scheduler.ensure_started();
+        }
+        Ok(())
+    }
+
+    async fn active_subagent_plan_harness(
+        &self,
+    ) -> Result<PlanHarnessSnapshot, PlanControllerError> {
+        self.plan_subagent_control
+            .as_ref()
+            .expect("subagent harness is requested only for a bound runtime")
+            .active_harness()
+            .await
+    }
+
+    fn plan_harness_from_snapshot(
+        &self,
+        snapshot: &PlanSnapshot,
+        attempt_id: Option<&PlanAttemptId>,
+    ) -> Option<PlanHarnessSnapshot> {
+        let attempt = match attempt_id {
+            Some(attempt_id) => snapshot
+                .attempts
+                .iter()
+                .find(|attempt| &attempt.attempt_id == attempt_id && attempt.outcome.is_none()),
+            None => snapshot.attempts.iter().find(|attempt| {
+                attempt.outcome.is_none()
+                    && attempt.lease_id.is_none()
+                    && attempt.executor_session_id == self.session_id
+            }),
+        }?;
+        snapshot
+            .nodes
+            .iter()
+            .find(|node| node.id == attempt.node_id)
+            .map(|node| node.harness.clone())
+    }
+
+    async fn record_plan_runtime_effect(
+        &self,
+        changed_paths: Vec<String>,
+    ) -> Result<(), PlanControllerError> {
+        let now_ms = crate::plan::unix_time_ms();
+        if let Some(control) = self.plan_subagent_control.as_ref() {
+            control
+                .record_runtime_effect(changed_paths, now_ms)
+                .await
+                .map(|_| ())
+        } else {
+            self.plan_controller
+                .record_runtime_effect(
+                    crate::plan::execution::PlanAttemptActor {
+                        executor_session_id: self.session_id.clone(),
+                    },
+                    changed_paths,
+                    now_ms,
+                )
+                .await
+                .map(|_| ())
         }
     }
 
@@ -722,6 +809,14 @@ impl RuntimeInner {
             specs.retain(|spec| manager.is_tool_visible(spec.name()));
         }
         specs
+    }
+}
+
+impl Drop for RuntimeInner {
+    fn drop(&mut self) {
+        if let Some(scheduler) = self.plan_scheduler.as_ref() {
+            scheduler.shutdown();
+        }
     }
 }
 

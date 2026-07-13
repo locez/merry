@@ -161,7 +161,7 @@ pub(super) async fn run_provider_step(
         "runtime memories activated"
     );
 
-    let worker_plan_control = if let Some(control) = inner.worker_plan_control.as_ref() {
+    let plan_subagent_control = if let Some(control) = inner.plan_subagent_control.as_ref() {
         if let Err(error) = control.review_progress_at_boundary(unix_time_ms()).await {
             let diagnostic = diagnostic_from_text("plan_progress_review", error.to_string());
             trace_provider_step_failed(&diagnostic);
@@ -175,14 +175,14 @@ pub(super) async fn run_provider_step(
             return;
         }
         match control.snapshot().await {
-            Ok(snapshot) => crate::plan::projection::worker_plan_control_message(
+            Ok(snapshot) => crate::plan::projection::plan_subagent_control_message(
                 &snapshot,
                 control.node_id(),
                 control.attempt_id(),
                 control.lease_id(),
             ),
             Err(error) => {
-                let diagnostic = diagnostic_from_text("plan_worker_context", error.to_string());
+                let diagnostic = diagnostic_from_text("plan_subagent_context", error.to_string());
                 trace_provider_step_failed(&diagnostic);
                 let _ = send_failed_event(inner, sender, token, diagnostic).await;
                 return;
@@ -206,7 +206,7 @@ pub(super) async fn run_provider_step(
             .fetch_add(1, Ordering::AcqRel)
             .wrapping_add(1);
         let request_inputs =
-            match step_request_inputs_from_session(&session, worker_plan_control.clone()) {
+            match step_request_inputs_from_session(&session, plan_subagent_control.clone()) {
                 Ok(inputs) => inputs,
                 Err(error) => {
                     session.replace_activated_memories(Vec::new());
@@ -463,7 +463,7 @@ pub(super) async fn run_provider_step(
 
         let refreshed = {
             let session = inner.session.lock().await;
-            match step_request_inputs_from_session(&session, worker_plan_control.clone()) {
+            match step_request_inputs_from_session(&session, plan_subagent_control.clone()) {
                 Ok(inputs) => inputs,
                 Err(error) => {
                     clear_current_activated_memories(inner).await;

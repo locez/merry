@@ -5,7 +5,7 @@ use merry_core::{
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::{Component, Path},
+    path::Path,
 };
 
 pub(super) const MAX_PLAN_NODES: usize = 128;
@@ -310,25 +310,9 @@ fn validate_harness_paths(
 }
 
 fn validate_scope_path(value: &str) -> Result<(), ()> {
-    let path = Path::new(value);
-    if value.is_empty()
-        || value.contains('\\')
-        || value.chars().any(char::is_control)
-        || path.is_absolute()
-        || value
-            .split('/')
-            .any(|segment| matches!(segment, "" | "." | ".."))
-    {
-        return Err(());
-    }
-    if path
-        .components()
-        .all(|component| matches!(component, Component::Normal(_)))
-    {
-        Ok(())
-    } else {
-        Err(())
-    }
+    crate::workspace_scope::is_valid_workspace_scope(Path::new(value))
+        .then_some(())
+        .ok_or(())
 }
 
 fn scopes_are_within(child: &[String], parent: &[String]) -> bool {
@@ -336,7 +320,7 @@ fn scopes_are_within(child: &[String], parent: &[String]) -> bool {
         parent.iter().any(|parent_path| {
             let child = Path::new(child_path);
             let parent = Path::new(parent_path);
-            child == parent || child.starts_with(parent)
+            crate::workspace_scope::workspace_scope_contains(parent, child)
         })
     })
 }

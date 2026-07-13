@@ -1,6 +1,7 @@
 use merry_core::{
-    PlanApprovalRequirementKind, PlanApprovalRequirementStatus, PlanCapabilityEnvelopeSnapshot,
-    PlanExecutorPolicy, PlanLeaseStatus, PlanNodeId, PlanNodeSnapshot, PlanNodeStatus, PlanPhase,
+    PlanApprovalRequirementKind, PlanApprovalRequirementStatus, PlanAttemptProgressSnapshot,
+    PlanAttemptSnapshot, PlanCapabilityEnvelopeSnapshot, PlanExecutorPolicy, PlanLeaseSnapshot,
+    PlanLeaseStatus, PlanNodeId, PlanNodeSnapshot, PlanNodeStatus, PlanPhase, PlanSchedulerStatus,
     PlanSnapshot,
 };
 use merry_runtime::PlanApprovalInput;
@@ -47,6 +48,7 @@ impl PlanUiState {
         let known_ids = snapshot
             .nodes
             .iter()
+            .filter(|node| node.status != PlanNodeStatus::Superseded)
             .map(|node| node.id.clone())
             .collect::<BTreeSet<_>>();
         self.collapsed_node_ids
@@ -71,6 +73,61 @@ impl PlanUiState {
         self.clamp_scroll_offset();
     }
 
+    pub(crate) fn update_progress(&mut self, progress: PlanAttemptProgressSnapshot) {
+        let Some(snapshot) = self.snapshot.as_mut() else {
+            return;
+        };
+        if let Some(existing) = snapshot
+            .attempt_progress
+            .iter_mut()
+            .find(|existing| existing.attempt_id == progress.attempt_id)
+        {
+            *existing = progress.clone();
+        } else {
+            snapshot.attempt_progress.push(progress.clone());
+        }
+        if let Some(heartbeat_at_ms) = progress.last_subagent_heartbeat_at_ms
+            && let Some(lease) = snapshot
+                .leases
+                .iter_mut()
+                .find(|lease| lease.attempt_id == progress.attempt_id)
+        {
+            lease.last_heartbeat_at_ms = heartbeat_at_ms;
+            lease.lease_expires_at_ms = heartbeat_at_ms
+                .saturating_add(snapshot.resource_policy_snapshot.subagent_heartbeat_ttl_ms);
+        }
+    }
+
+    pub(crate) fn update_lease(&mut self, lease: PlanLeaseSnapshot) {
+        let Some(snapshot) = self.snapshot.as_mut() else {
+            return;
+        };
+        if let Some(existing) = snapshot
+            .leases
+            .iter_mut()
+            .find(|existing| existing.lease_id == lease.lease_id)
+        {
+            *existing = lease;
+        } else {
+            snapshot.leases.push(lease);
+        }
+    }
+
+    pub(crate) fn update_attempt(&mut self, attempt: PlanAttemptSnapshot) {
+        let Some(snapshot) = self.snapshot.as_mut() else {
+            return;
+        };
+        if let Some(existing) = snapshot
+            .attempts
+            .iter_mut()
+            .find(|existing| existing.attempt_id == attempt.attempt_id)
+        {
+            *existing = attempt;
+        } else {
+            snapshot.attempts.push(attempt);
+        }
+    }
+
     pub(crate) fn selected_node_id(&self) -> Option<&PlanNodeId> {
         self.selected_node_id.as_ref()
     }
@@ -81,15 +138,16 @@ impl PlanUiState {
             .as_ref()?
             .nodes
             .iter()
-            .find(|node| &node.id == selected)
+            .find(|node| &node.id == selected && node.status != PlanNodeStatus::Superseded)
     }
 
     pub(crate) fn select_node(&mut self, node_id: PlanNodeId) -> bool {
-        if !self
-            .snapshot
-            .as_ref()
-            .is_some_and(|snapshot| snapshot.nodes.iter().any(|node| node.id == node_id))
-        {
+        if !self.snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot
+                .nodes
+                .iter()
+                .any(|node| node.id == node_id && node.status != PlanNodeStatus::Superseded)
+        }) {
             return false;
         }
         self.selected_node_id = Some(node_id);
@@ -116,16 +174,10 @@ impl PlanUiState {
         let Some(snapshot) = self.snapshot.as_ref() else {
             return Vec::new();
         };
-        let completed = snapshot
-            .nodes
-            .iter()
-            .filter(|node| node.status == PlanNodeStatus::Completed)
-            .map(|node| node.id.clone())
-            .collect::<BTreeSet<_>>();
         let mut rows = Vec::with_capacity(snapshot.nodes.len());
         let roots = root_nodes(snapshot);
         for root in roots {
-            self.append_visible_rows(snapshot, root, 0, &completed, &mut rows);
+            self.append_visible_rows(snapshot, root, 0, &mut rows);
         }
         rows
     }
@@ -134,24 +186,16 @@ impl PlanUiState {
         let Some(snapshot) = self.snapshot.as_ref() else {
             return PlanCounts::default();
         };
-        let completed = snapshot
-            .nodes
-            .iter()
-            .filter(|node| node.status == PlanNodeStatus::Completed)
-            .map(|node| node.id.clone())
-            .collect::<BTreeSet<_>>();
         PlanCounts {
             live: snapshot
-                .leases
+                .attempts
                 .iter()
-                .filter(|lease| lease.status == PlanLeaseStatus::Live)
+                .filter(|attempt| attempt.outcome.is_none())
                 .count(),
             ready: snapshot
                 .nodes
                 .iter()
-                .filter(|node| {
-                    snapshot.phase == PlanPhase::Executing && node_is_ready(node, &completed)
-                })
+                .filter(|node| node_is_ready(snapshot, node, unix_time_ms()))
                 .count(),
             blocked: snapshot
                 .nodes
@@ -168,6 +212,8 @@ impl PlanUiState {
             .ok_or_else(|| "no active plan is available".to_owned())?;
         let material = approval_material(snapshot);
         Ok(PlanApprovalInput {
+            plan_id: snapshot.plan_id.clone(),
+            expected_plan_revision: snapshot.revision,
             review_resolution_ref: "tui:user-approval".to_owned(),
             capability_envelope: Some(material.envelope),
             authorization_refs: vec!["tui:user-approval".to_owned()],
@@ -350,7 +396,6 @@ impl PlanUiState {
         snapshot: &PlanSnapshot,
         node: &PlanNodeSnapshot,
         depth: usize,
-        completed: &BTreeSet<PlanNodeId>,
         rows: &mut Vec<PlanTreeRow>,
     ) {
         let children = children_of(snapshot, Some(&node.id));
@@ -360,7 +405,7 @@ impl PlanUiState {
             depth,
             has_children: !children.is_empty(),
             collapsed,
-            ready: snapshot.phase == PlanPhase::Executing && node_is_ready(node, completed),
+            ready: node_is_ready(snapshot, node, unix_time_ms()),
             status: node.status,
             executor_policy: node.executor_policy,
             objective: node.objective.clone(),
@@ -369,16 +414,16 @@ impl PlanUiState {
             return;
         }
         for child in children {
-            self.append_visible_rows(snapshot, child, depth + 1, completed, rows);
+            self.append_visible_rows(snapshot, child, depth + 1, rows);
         }
     }
 
     fn has_children(&self, node_id: &PlanNodeId) -> bool {
         self.snapshot.as_ref().is_some_and(|snapshot| {
-            snapshot
-                .nodes
-                .iter()
-                .any(|node| node.parent_id.as_ref() == Some(node_id))
+            snapshot.nodes.iter().any(|node| {
+                node.parent_id.as_ref() == Some(node_id)
+                    && node.status != PlanNodeStatus::Superseded
+            })
         })
     }
 
@@ -428,15 +473,16 @@ fn approval_material(snapshot: &PlanSnapshot) -> ApprovalMaterial {
         forbidden_paths.extend(existing.forbidden_paths.iter().cloned());
         destructive_external_authority = existing.destructive_external_authority;
     }
-    for node in snapshot
-        .nodes
-        .iter()
-        .filter(|node| node.status != PlanNodeStatus::Superseded)
-    {
-        tools.extend(node.harness.allowed_tools.iter().cloned());
-        read_scope.extend(node.harness.read_scope.iter().cloned());
-        write_scope.extend(node.harness.write_scope.iter().cloned());
-        forbidden_paths.extend(node.harness.forbidden_paths.iter().cloned());
+    if let Some(root) = snapshot.root_node_id.as_ref().and_then(|root_id| {
+        snapshot
+            .nodes
+            .iter()
+            .find(|node| &node.id == root_id && node.status != PlanNodeStatus::Superseded)
+    }) {
+        tools.extend(root.harness.allowed_tools.iter().cloned());
+        read_scope.extend(root.harness.read_scope.iter().cloned());
+        write_scope.extend(root.harness.write_scope.iter().cloned());
+        forbidden_paths.extend(root.harness.forbidden_paths.iter().cloned());
     }
     let requirement_resolution_refs = snapshot
         .approval_requirements
@@ -549,7 +595,9 @@ fn children_of<'a>(
     let mut children = snapshot
         .nodes
         .iter()
-        .filter(|node| node.parent_id.as_ref() == parent_id)
+        .filter(|node| {
+            node.parent_id.as_ref() == parent_id && node.status != PlanNodeStatus::Superseded
+        })
         .collect::<Vec<_>>();
     children.sort_by(|left, right| {
         left.sibling_order
@@ -559,10 +607,61 @@ fn children_of<'a>(
     children
 }
 
-fn node_is_ready(node: &PlanNodeSnapshot, completed: &BTreeSet<PlanNodeId>) -> bool {
-    node.status == PlanNodeStatus::Pending
-        && node
-            .depends_on
+fn node_is_ready(snapshot: &PlanSnapshot, node: &PlanNodeSnapshot, now_ms: u64) -> bool {
+    if snapshot.phase != PlanPhase::Executing
+        || snapshot.scheduler_status != PlanSchedulerStatus::Active
+        || snapshot
+            .attempts
             .iter()
-            .all(|dependency| completed.contains(dependency))
+            .any(|attempt| attempt.node_id == node.id && attempt.outcome.is_none())
+    {
+        return false;
+    }
+    let dependencies_completed = node.depends_on.iter().all(|dependency| {
+        snapshot.nodes.iter().any(|candidate| {
+            candidate.id == *dependency && candidate.status == PlanNodeStatus::Completed
+        })
+    });
+    if !dependencies_completed {
+        return false;
+    }
+    let children = snapshot
+        .nodes
+        .iter()
+        .filter(|candidate| {
+            candidate.parent_id.as_ref() == Some(&node.id)
+                && candidate.status != PlanNodeStatus::Superseded
+        })
+        .collect::<Vec<_>>();
+    let shape_ready = if children.is_empty() {
+        node.status == PlanNodeStatus::Pending
+    } else {
+        node.status == PlanNodeStatus::Verifying
+            && children
+                .iter()
+                .all(|child| child.status == PlanNodeStatus::Completed)
+    };
+    if !shape_ready {
+        return false;
+    }
+    snapshot
+        .attempts
+        .iter()
+        .rev()
+        .find(|attempt| {
+            attempt.node_id == node.id
+                && attempt.outcome == Some(merry_core::PlanAttemptOutcome::TransientFailure)
+        })
+        .and_then(|attempt| attempt.finished_at_ms)
+        .is_none_or(|finished_at_ms| {
+            finished_at_ms.saturating_add(node.recovery_policy.retry_backoff_ms) <= now_ms
+        })
+}
+
+fn unix_time_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
 }

@@ -1,10 +1,13 @@
-use super::state::{
-    PatchChangeView, PatchLineKind, PatchLineView, QueuePreview, TimelineItem, TuiState,
+use super::{
+    overlay::Overlay,
+    plan_projector::plan_timeline_item,
+    state::{PatchChangeView, PatchLineKind, PatchLineView, QueuePreview, TimelineItem, TuiState},
+    tool_error::compact_failed_tool_body,
 };
 use crate::tool_display::format_tool_call_detail;
 use merry_core::{
-    PlanAttemptOutcome, PlanDirectiveStatus, PlanNodeStatus, PlanPhase, PlanSnapshot, RuntimeEvent,
-    ToolCallId, ToolCallResultStatus, ToolName, ToolOutput,
+    PlanAttemptOutcome, PlanDirectiveStatus, PlanPhase, RuntimeEvent, ToolCallId,
+    ToolCallResultStatus, ToolName, ToolOutput,
 };
 use merry_runtime::SessionTranscriptItem;
 use merry_tool_workspace::WORKSPACE_PATCH_TOOL;
@@ -221,12 +224,38 @@ impl TuiProjector {
             RuntimeEvent::PlanUpdated {
                 snapshot, summary, ..
             } => {
+                let refresh_open_approval =
+                    matches!(state.overlay(), Some(Overlay::PlanApproval(_)))
+                        && state.plan().snapshot().is_some_and(|current| {
+                            current.plan_id != snapshot.plan_id
+                                || current.revision != snapshot.revision
+                        });
+                let entered_planning_review = snapshot.phase == PlanPhase::Planning
+                    && snapshot.root_node_id.is_some()
+                    && !state.plan().snapshot().is_some_and(|current| {
+                        current.phase == PlanPhase::Planning && current.root_node_id.is_some()
+                    });
+                let entered_awaiting_approval = snapshot.phase == PlanPhase::AwaitingApproval
+                    && !state
+                        .plan()
+                        .snapshot()
+                        .is_some_and(|current| current.phase == PlanPhase::AwaitingApproval);
                 let timeline_item =
                     plan_timeline_item(state.plan().snapshot(), &snapshot, summary.summary());
                 state.plan_mut().update_snapshot(snapshot);
                 if let Some(item) = timeline_item {
                     state.push_timeline_item(item);
                 }
+                if entered_planning_review || entered_awaiting_approval || refresh_open_approval {
+                    state.open_plan_approval();
+                }
+            }
+            RuntimeEvent::PlanLeaseStarted { lease, .. } => {
+                state.plan_mut().update_lease(lease);
+            }
+            RuntimeEvent::PlanProgressUpdated { progress, .. }
+            | RuntimeEvent::PlanAttemptProgressReported { progress, .. } => {
+                state.plan_mut().update_progress(progress);
             }
             RuntimeEvent::PlanProgressReviewRequested { reason, .. } => {
                 state.push_timeline_item(TimelineItem::Muted {
@@ -262,6 +291,7 @@ impl TuiProjector {
                     )
                 ) =>
             {
+                state.plan_mut().update_attempt(attempt.clone());
                 let outcome = attempt
                     .outcome
                     .map(|outcome| format!("{outcome:?}").to_ascii_lowercase())
@@ -347,123 +377,6 @@ impl TuiProjector {
                     .map(str::to_owned),
             },
         );
-    }
-}
-
-fn plan_timeline_item(
-    previous: Option<&PlanSnapshot>,
-    snapshot: &PlanSnapshot,
-    summary: &str,
-) -> Option<TimelineItem> {
-    let Some(previous) = previous else {
-        return Some(TimelineItem::Muted {
-            title: "Plan mode".to_owned(),
-            detail: format!(
-                "{} · revision {} · {} nodes",
-                plan_phase_label(snapshot.phase),
-                snapshot.revision,
-                snapshot.nodes.len()
-            ),
-        });
-    };
-
-    if previous.phase != snapshot.phase {
-        let title = match snapshot.phase {
-            PlanPhase::Planning => "Plan revision requested",
-            PlanPhase::AwaitingApproval => "Plan awaiting approval",
-            PlanPhase::Executing => "Plan execution started",
-            PlanPhase::Completed => "Plan completed",
-            PlanPhase::Blocked => "Plan blocked",
-            PlanPhase::Cancelled => "Plan cancelled",
-        };
-        return Some(TimelineItem::Muted {
-            title: title.to_owned(),
-            detail: summary.to_owned(),
-        });
-    }
-
-    if previous.scheduler_status != snapshot.scheduler_status {
-        return Some(TimelineItem::Muted {
-            title: format!("Plan scheduling {:?}", snapshot.scheduler_status).to_ascii_lowercase(),
-            detail: summary.to_owned(),
-        });
-    }
-
-    if previous.approval_requirements != snapshot.approval_requirements {
-        return Some(TimelineItem::Muted {
-            title: "Plan approval updated".to_owned(),
-            detail: summary.to_owned(),
-        });
-    }
-
-    if snapshot.nodes.len() > previous.nodes.len() {
-        return Some(TimelineItem::Muted {
-            title: "Plan expanded".to_owned(),
-            detail: format!("{} · {} nodes", summary, snapshot.nodes.len()),
-        });
-    }
-
-    if plan_definition_changed(previous, snapshot) {
-        return Some(TimelineItem::Muted {
-            title: "Plan revised".to_owned(),
-            detail: summary.to_owned(),
-        });
-    }
-
-    let newly_unhealthy = snapshot.nodes.iter().find(|node| {
-        matches!(
-            node.status,
-            PlanNodeStatus::Blocked | PlanNodeStatus::Failed
-        ) && previous
-            .nodes
-            .iter()
-            .find(|candidate| candidate.id == node.id)
-            .is_none_or(|candidate| candidate.status != node.status)
-    });
-    newly_unhealthy.map(|node| TimelineItem::Diagnostic {
-        title: format!("Plan node {}", plan_node_status_label(node.status)),
-        body: node.objective.clone(),
-    })
-}
-
-fn plan_definition_changed(previous: &PlanSnapshot, snapshot: &PlanSnapshot) -> bool {
-    previous.root_node_id != snapshot.root_node_id
-        || previous.coordinator_node_id != snapshot.coordinator_node_id
-        || previous.max_concurrency_hint != snapshot.max_concurrency_hint
-        || snapshot.nodes.iter().any(|node| {
-            previous
-                .nodes
-                .iter()
-                .find(|candidate| candidate.id == node.id)
-                .is_none_or(|candidate| {
-                    candidate.parent_id != node.parent_id
-                        || candidate.sibling_order != node.sibling_order
-                        || candidate.objective != node.objective
-                        || candidate.acceptance != node.acceptance
-                        || candidate.executor_policy != node.executor_policy
-                        || candidate.harness != node.harness
-                        || candidate.recovery_policy != node.recovery_policy
-                        || candidate.depends_on != node.depends_on
-                })
-        })
-}
-
-fn plan_phase_label(phase: PlanPhase) -> &'static str {
-    match phase {
-        PlanPhase::Planning => "planning",
-        PlanPhase::AwaitingApproval => "awaiting approval",
-        PlanPhase::Executing => "executing",
-        PlanPhase::Completed => "completed",
-        PlanPhase::Blocked => "blocked",
-        PlanPhase::Cancelled => "cancelled",
-    }
-}
-
-fn plan_node_status_label(status: PlanNodeStatus) -> &'static str {
-    match status {
-        PlanNodeStatus::Blocked => "blocked",
-        PlanNodeStatus::Failed => "failed",
-        _ => "updated",
     }
 }
 
@@ -767,26 +680,6 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
         return text.to_owned();
     }
     text.chars().take(max_chars - 3).collect::<String>() + "..."
-}
-
-fn compact_failed_tool_body(code: &str, message: &str, output: &str) -> String {
-    let mut lines = vec![format!("{code}: {message}")];
-    if let Some(guidance) = parse_guidance_message(output) {
-        lines.push(guidance);
-    }
-    lines.join("\n")
-}
-
-fn parse_guidance_message(output: &str) -> Option<String> {
-    serde_json::from_str::<Value>(output)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("guidance")?
-                .get("message")?
-                .as_str()
-                .map(str::to_owned)
-        })
 }
 
 fn compact_tool_output(output: &str) -> String {

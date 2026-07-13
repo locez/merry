@@ -13,15 +13,42 @@ use merry_core::{
 };
 use std::sync::Arc;
 
+pub(super) struct ProcessExecutionAdmission {
+    policy_decision: ActionPolicyDecision,
+    permission_profile_id: ProcessPermissionProfileId,
+    runner: Arc<dyn ProcessRunner>,
+    attribute_plan_effect: bool,
+}
+
+impl ProcessExecutionAdmission {
+    pub(super) fn new(
+        policy_decision: ActionPolicyDecision,
+        permission_profile_id: ProcessPermissionProfileId,
+        runner: Arc<dyn ProcessRunner>,
+        attribute_plan_effect: bool,
+    ) -> Self {
+        Self {
+            policy_decision,
+            permission_profile_id,
+            runner,
+            attribute_plan_effect,
+        }
+    }
+}
+
 pub(super) async fn execute_admitted_process_action(
     inner: &RuntimeInner,
     pending: &PendingToolCall,
     proposal: ActionProposal,
-    policy_decision: ActionPolicyDecision,
-    permission_profile_id: ProcessPermissionProfileId,
-    runner: Arc<dyn ProcessRunner>,
+    admission: ProcessExecutionAdmission,
     context: ToolExecutionContext,
 ) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
+    let ProcessExecutionAdmission {
+        policy_decision,
+        permission_profile_id,
+        runner,
+        attribute_plan_effect,
+    } = admission;
     let ActionProposalEvidence::ProcessAction(intent) = proposal.evidence().clone() else {
         return Err(RuntimeError::ToolExecutionFailed {
             session_id: inner.session_id.clone(),
@@ -54,6 +81,17 @@ pub(super) async fn execute_admitted_process_action(
             session_id: inner.session_id.clone(),
             call_id: pending.id().clone(),
         });
+    }
+
+    if attribute_plan_effect {
+        inner
+            .record_plan_runtime_effect(Vec::new())
+            .await
+            .map_err(|error| RuntimeError::PlanEffectAttribution {
+                session_id: inner.session_id.clone(),
+                call_id: pending.id().clone(),
+                message: error.to_string(),
+            })?;
     }
 
     let runner_context = ProcessRunnerContext::new(context.cancellation_token().clone());

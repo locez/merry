@@ -1,8 +1,9 @@
 use super::PlanControllerError;
 use super::transactions::{
     authorize_execution, begin_plan, begin_user_plan, cancel_attempt, control_plan,
-    deliver_directives, heartbeat, issue_directive, recover_leases, report_attempt,
-    report_progress, review_progress, start_attempt, update_plan,
+    deliver_directives, heartbeat, issue_directive, record_runtime_effect, recover_attempts,
+    report_attempt, report_progress, review_progress, start_attempt, start_local_attempt,
+    update_plan,
 };
 use crate::{
     FileSessionStore,
@@ -11,7 +12,8 @@ use crate::{
         control::PlanControlOutput,
         execution::{
             PlanAttemptActor, PlanAttemptReportOutput, PlanAttemptStartOutput,
-            PlanDirectiveDeliveryOutput, PlanDirectiveOutput, PlanProgressOutput,
+            PlanDirectiveDeliveryOutput, PlanDirectiveOutput, PlanLocalAttemptStartOutput,
+            PlanProgressOutput,
         },
         protocol::{
             BeginPlanInput, BeginPlanOutput, ControlPlanAttemptInput, PlanApprovalInput,
@@ -57,6 +59,14 @@ pub(super) enum PlanCommand {
         now_ms: u64,
         reply:
             oneshot::Sender<Result<PlanCommandResult<PlanAttemptStartOutput>, PlanControllerError>>,
+    },
+    StartLocalAttempt {
+        node_id: PlanNodeId,
+        actor: PlanAttemptActor,
+        now_ms: u64,
+        reply: oneshot::Sender<
+            Result<PlanCommandResult<PlanLocalAttemptStartOutput>, PlanControllerError>,
+        >,
     },
     DirectiveTool {
         input: ControlPlanAttemptInput,
@@ -107,6 +117,12 @@ pub(super) enum PlanCommand {
         tool_call_in_flight: bool,
         reply: oneshot::Sender<Result<PlanCommandResult<PlanProgressOutput>, PlanControllerError>>,
     },
+    RecordRuntimeEffect {
+        actor: PlanAttemptActor,
+        changed_paths: Vec<String>,
+        now_ms: u64,
+        reply: oneshot::Sender<Result<PlanCommandResult<PlanProgressOutput>, PlanControllerError>>,
+    },
     DeliverDirectives {
         actor: PlanAttemptActor,
         lease_id: PlanLeaseId,
@@ -115,9 +131,9 @@ pub(super) enum PlanCommand {
             Result<PlanCommandResult<PlanDirectiveDeliveryOutput>, PlanControllerError>,
         >,
     },
-    RecoverLeases {
+    RecoverAttempts {
         now_ms: u64,
-        all_live: bool,
+        after_resume: bool,
         reply: oneshot::Sender<Result<PlanCommandResult<PlanRecoveryOutput>, PlanControllerError>>,
     },
     ReviewProgress {
@@ -157,7 +173,7 @@ pub(super) enum PlanControlRequest {
     Resume(String),
     Revise(String),
     RetryInterrupted { node_id: PlanNodeId, reason: String },
-    Cancel(String),
+    Cancel { reason: String, now_ms: u64 },
 }
 
 pub(crate) struct PlanCommandResult<T> {
@@ -239,6 +255,17 @@ pub(super) async fn run_controller(
             } => {
                 let result =
                     start_attempt(&session, store.as_ref(), &events, node_id, actor, now_ms).await;
+                let _ = reply.send(result);
+            }
+            PlanCommand::StartLocalAttempt {
+                node_id,
+                actor,
+                now_ms,
+                reply,
+            } => {
+                let result =
+                    start_local_attempt(&session, store.as_ref(), &events, node_id, actor, now_ms)
+                        .await;
                 let _ = reply.send(result);
             }
             PlanCommand::DirectiveTool {
@@ -371,6 +398,23 @@ pub(super) async fn run_controller(
                 .await;
                 let _ = reply.send(result);
             }
+            PlanCommand::RecordRuntimeEffect {
+                actor,
+                changed_paths,
+                now_ms,
+                reply,
+            } => {
+                let result = record_runtime_effect(
+                    &session,
+                    store.as_ref(),
+                    &events,
+                    actor,
+                    changed_paths,
+                    now_ms,
+                )
+                .await;
+                let _ = reply.send(result);
+            }
             PlanCommand::DeliverDirectives {
                 actor,
                 lease_id,
@@ -382,13 +426,13 @@ pub(super) async fn run_controller(
                         .await;
                 let _ = reply.send(result);
             }
-            PlanCommand::RecoverLeases {
+            PlanCommand::RecoverAttempts {
                 now_ms,
-                all_live,
+                after_resume,
                 reply,
             } => {
                 let result =
-                    recover_leases(&session, store.as_ref(), &events, now_ms, all_live).await;
+                    recover_attempts(&session, store.as_ref(), &events, now_ms, after_resume).await;
                 let _ = reply.send(result);
             }
             PlanCommand::ReviewProgress {
