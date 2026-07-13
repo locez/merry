@@ -28,8 +28,12 @@ pub enum ArtifactContent {
     Json { content: String },
     /// Opaque binary bytes.
     Binary { bytes: Vec<u8> },
-    /// Image bytes.
-    Image { bytes: Vec<u8> },
+    /// Image bytes with optional normalized image metadata.
+    Image {
+        bytes: Arc<[u8]>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metadata: Option<Box<ImageArtifactMetadata>>,
+    },
     /// Provider-neutral bytes for artifact kinds not covered by stable variants.
     Other { bytes: Vec<u8> },
 }
@@ -60,9 +64,21 @@ impl ArtifactContent {
     }
 
     /// Creates image artifact content.
-    pub fn image(bytes: impl Into<Vec<u8>>) -> Self {
+    pub fn image(bytes: impl Into<Arc<[u8]>>) -> Self {
         Self::Image {
             bytes: bytes.into(),
+            metadata: None,
+        }
+    }
+
+    pub(crate) fn normalized_png(bytes: impl Into<Arc<[u8]>>, width: u32, height: u32) -> Self {
+        Self::Image {
+            bytes: bytes.into(),
+            metadata: Some(Box::new(ImageArtifactMetadata {
+                media_type: "image/png".to_owned(),
+                width,
+                height,
+            })),
         }
     }
 
@@ -102,8 +118,38 @@ impl ArtifactContent {
     pub fn as_bytes(&self) -> &[u8] {
         match self {
             Self::Text { content } | Self::Json { content } => content.as_bytes(),
-            Self::Binary { bytes } | Self::Image { bytes } | Self::Other { bytes } => bytes,
+            Self::Binary { bytes } | Self::Other { bytes } => bytes,
+            Self::Image { bytes, .. } => bytes,
         }
+    }
+}
+
+/// Optional metadata for image artifacts with a known decoded representation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImageArtifactMetadata {
+    media_type: String,
+    width: u32,
+    height: u32,
+}
+
+impl ImageArtifactMetadata {
+    /// Declared media type of the exact image bytes.
+    #[must_use]
+    pub fn media_type(&self) -> &str {
+        &self.media_type
+    }
+
+    /// Decoded image width in pixels.
+    #[must_use]
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Decoded image height in pixels.
+    #[must_use]
+    pub fn height(&self) -> u32 {
+        self.height
     }
 }
 
@@ -687,9 +733,9 @@ fn read_byte_range(
         ArtifactContent::Binary { bytes } => Ok(ArtifactContent::Binary {
             bytes: bytes[start..end].to_vec(),
         }),
-        ArtifactContent::Image { bytes } => Ok(ArtifactContent::Image {
-            bytes: bytes[start..end].to_vec(),
-        }),
+        ArtifactContent::Image { bytes, .. } => {
+            Ok(ArtifactContent::image(bytes[start..end].to_vec()))
+        }
         ArtifactContent::Other { bytes } => Ok(ArtifactContent::Other {
             bytes: bytes[start..end].to_vec(),
         }),

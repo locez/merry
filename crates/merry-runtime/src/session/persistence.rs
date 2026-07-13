@@ -7,7 +7,7 @@ use super::{
     },
 };
 use crate::{
-    FileSessionStore, RuntimeError, SessionStoreError,
+    FileSessionStore, RuntimeError, SessionStoreError, UserImageInput, UserMessageInput,
     action_audit::{ActionAuditRegistry, PersistedActionAuditRegistry},
     artifact::{ArtifactContent, ArtifactRegistry, PersistedArtifactRecord},
     checkpoint::{CheckpointRef, CheckpointRefId, CheckpointSequenceRange, CheckpointSourceKind},
@@ -26,7 +26,10 @@ use merry_core::{
     ArtifactId, ArtifactKind, ArtifactRef, EvidenceRef, SessionId, SessionUsage, ToolCallId,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 const LEGACY_SESSION_STATE_FORMAT_VERSION: u32 = 1;
 const SESSION_STATE_FORMAT_VERSION: u32 = 2;
@@ -502,11 +505,57 @@ impl SessionState {
             }
             Ok(())
         };
+        let validate_user_image_artifact =
+            |artifact_id: &ArtifactId| -> Result<UserImageInput, SessionStoreError> {
+                let artifact = self.artifacts.read_ref(artifact_id).map_err(|_| {
+                    invalid_document("stored user image transcript artifact is missing")
+                })?;
+                let content = self.artifacts.read_content(artifact_id).map_err(|_| {
+                    invalid_document("stored user image transcript artifact is missing")
+                })?;
+                if artifact.kind() != &ArtifactKind::Image {
+                    return Err(invalid_document(
+                        "stored user image transcript artifact is not an image",
+                    ));
+                }
+                let Some(label) = artifact.label() else {
+                    return Err(invalid_document(
+                        "stored user image transcript artifact has no label",
+                    ));
+                };
+                let ArtifactContent::Image { bytes, metadata } = content else {
+                    return Err(invalid_document(
+                        "stored user image transcript content is not an image",
+                    ));
+                };
+                let Some(metadata) = metadata else {
+                    return Err(invalid_document(
+                        "stored user image transcript artifact has no image metadata",
+                    ));
+                };
+                if metadata.media_type() != "image/png" {
+                    return Err(invalid_document(
+                        "stored user image transcript artifact is not normalized PNG",
+                    ));
+                }
+                UserImageInput::png(
+                    label,
+                    Arc::clone(bytes),
+                    metadata.width(),
+                    metadata.height(),
+                )
+                .map_err(|_| {
+                    invalid_document("stored user image transcript artifact metadata is invalid")
+                })
+            };
 
         for item in transcript.items() {
             match item {
                 TranscriptItem::UserMessage {
-                    id, artifact_id, ..
+                    id,
+                    artifact_id,
+                    image_artifact_ids,
+                    ..
                 } => {
                     if artifact_id != &super::artifacts::user_message_id(*id) {
                         return Err(invalid_document(
@@ -514,6 +563,29 @@ impl SessionState {
                         ));
                     }
                     validate_text_artifact(artifact_id)?;
+                    let text = self
+                        .artifacts
+                        .read_content(artifact_id)
+                        .expect("validated user text artifact remains readable")
+                        .as_text()
+                        .expect("validated user text artifact remains textual");
+                    let images = image_artifact_ids
+                        .iter()
+                        .enumerate()
+                        .map(|(offset, image_artifact_id)| {
+                            if image_artifact_id
+                                != &super::artifacts::user_message_image_id(*id, offset + 1)
+                            {
+                                return Err(invalid_document(
+                                    "stored user image transcript artifact identity is inconsistent",
+                                ));
+                            }
+                            validate_user_image_artifact(image_artifact_id)
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    UserMessageInput::new(text, images).map_err(|_| {
+                        invalid_document("stored user image transcript message is invalid")
+                    })?;
                 }
                 TranscriptItem::AssistantText { artifact_id, .. } => {
                     validate_text_artifact(artifact_id)?;

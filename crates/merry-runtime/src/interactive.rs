@@ -6,7 +6,7 @@ mod types;
 
 use self::{
     commands::{BoundaryAction, CommandDecision, CommandHandlingMode, InteractiveCommand},
-    queue::{InteractiveInputQueue, step_input_from_accepted},
+    queue::{AcceptedQueuedInput, InteractiveInputQueue, step_input_from_accepted},
     types::next_interactive_run_id,
 };
 use crate::{
@@ -16,8 +16,7 @@ use crate::{
 };
 use futures_util::StreamExt;
 use merry_core::{
-    InteractiveRunState, PendingToolCall, QueuedInputLane, QueuedInputView, RuntimeEvent,
-    RuntimeJournalEvent,
+    InteractiveRunState, PendingToolCall, QueuedInputLane, RuntimeEvent, RuntimeJournalEvent,
 };
 use merry_llm::GenerationConfig;
 use tokio::sync::mpsc;
@@ -168,7 +167,7 @@ impl InteractiveProducer {
 
     async fn run_accepted_steps(
         &mut self,
-        mut accepted: Vec<QueuedInputView>,
+        mut accepted: Vec<AcceptedQueuedInput>,
         mut lane: QueuedInputLane,
     ) -> bool {
         self.interrupted = false;
@@ -242,14 +241,14 @@ impl InteractiveProducer {
     async fn run_model_phase(
         &mut self,
         input: StepInput,
-        accepted: Option<(&[QueuedInputView], QueuedInputLane)>,
+        accepted: Option<(&[AcceptedQueuedInput], QueuedInputLane)>,
     ) -> Option<Vec<RuntimeJournalEvent>> {
         if let Some((accepted, lane)) = accepted {
             if self
                 .event_sender
                 .send(RuntimeEvent::QueuedInputAccepted {
                     lane,
-                    inputs: accepted.to_vec(),
+                    inputs: accepted.iter().map(|item| item.view().clone()).collect(),
                 })
                 .await
                 .is_err()
@@ -584,8 +583,11 @@ impl InteractiveProducer {
         mode: CommandHandlingMode,
     ) -> Option<CommandDecision> {
         match command {
-            InteractiveCommand::SubmitNext { text, ack_sender } => {
-                let receipt = self.queue.submit_next(&text);
+            InteractiveCommand::SubmitNext {
+                message,
+                ack_sender,
+            } => {
+                let receipt = self.queue.submit_next_message(message);
                 let should_run = mode == CommandHandlingMode::Waiting && receipt.is_ok();
                 let queue_changed = receipt.is_ok();
                 let _ = ack_sender.send(receipt);
@@ -597,8 +599,11 @@ impl InteractiveProducer {
                 }
                 Some(CommandDecision::Continue)
             }
-            InteractiveCommand::Enqueue { text, ack_sender } => {
-                let receipt = self.queue.enqueue(&text);
+            InteractiveCommand::Enqueue {
+                message,
+                ack_sender,
+            } => {
+                let receipt = self.queue.enqueue_message(message);
                 let should_run = mode == CommandHandlingMode::Waiting && receipt.is_ok();
                 let queue_changed = receipt.is_ok();
                 let _ = ack_sender.send(receipt);

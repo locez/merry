@@ -5,8 +5,11 @@ use std::{
     env,
     ffi::{OsStr, OsString},
     fmt, fs, io,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
+
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
 
 #[cfg(test)]
 mod tests;
@@ -42,6 +45,73 @@ pub(crate) const SANDBOX_MERRY_CONFIG_DIR: &str = "/home/merry/.config/merry";
 pub(crate) const SANDBOX_MERRY_MANAGED_CONFIG_DIR: &str = "/home/merry/.config/merry/managed";
 pub(crate) const SANDBOX_MERRY_STATE_DIR: &str = "/home/merry/.local/state/merry";
 pub(crate) const SANDBOX_MERRY_LOG_DIR: &str = "/home/merry/.local/state/merry/logs";
+pub(crate) const SANDBOX_WAYLAND_RUNTIME_DIR: &str = "/run/merry-wayland";
+pub(crate) const SANDBOX_WAYLAND_DISPLAY: &str = "wayland-0";
+pub(crate) const SANDBOX_WAYLAND_SOCKET: &str = "/run/merry-wayland/wayland-0";
+pub(crate) const SANDBOX_X11_AUTHORITY: &str = "/run/merry-x11/Xauthority";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClipboardAccess {
+    Disabled,
+    Tui,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct GraphicalEnvironment {
+    xdg_runtime_dir: Option<PathBuf>,
+    wayland_display: Option<OsString>,
+    display: Option<OsString>,
+    xauthority: Option<PathBuf>,
+    home: Option<PathBuf>,
+}
+
+impl GraphicalEnvironment {
+    fn from_env() -> Self {
+        Self {
+            xdg_runtime_dir: env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from),
+            wayland_display: env::var_os("WAYLAND_DISPLAY"),
+            display: env::var_os("DISPLAY"),
+            xauthority: env::var_os("XAUTHORITY").map(PathBuf::from),
+            home: env::var_os("HOME").map(PathBuf::from),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HostPathKind {
+    RegularFile,
+    UnixSocket,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HostPathMetadata {
+    kind: HostPathKind,
+    owner_uid: u32,
+}
+
+impl HostPathMetadata {
+    pub(crate) const fn new(kind: HostPathKind, owner_uid: u32) -> Self {
+        Self { kind, owner_uid }
+    }
+}
+
+pub(crate) trait HostPathProbe {
+    fn file_exists(&self, path: &Path) -> bool;
+    fn metadata(&self, path: &Path) -> Option<HostPathMetadata>;
+}
+
+struct FilesystemHostProbe;
+
+impl HostPathProbe for FilesystemHostProbe {
+    fn file_exists(&self, path: &Path) -> bool {
+        path.exists()
+    }
+
+    fn metadata(&self, path: &Path) -> Option<HostPathMetadata> {
+        filesystem_path_metadata(path)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum ChildHandoff {
@@ -73,6 +143,8 @@ pub(crate) struct Host {
     pub(crate) xdg_paths: XdgPaths,
     pub(crate) log_settings: Option<EffectiveLogSettings>,
     pub(crate) trusted_path_rules: Vec<PathAccessRule>,
+    pub(crate) graphical_environment: GraphicalEnvironment,
+    pub(crate) current_uid: u32,
 }
 
 impl Host {
@@ -103,6 +175,8 @@ impl Host {
             xdg_paths,
             log_settings,
             trusted_path_rules,
+            graphical_environment: GraphicalEnvironment::from_env(),
+            current_uid: current_process_uid()?,
         })
     }
 }
@@ -121,9 +195,13 @@ pub(crate) enum Bootstrap {
     Reexec(Plan),
 }
 
-pub(crate) fn maybe_reexec(with_sandbox: bool, args: Vec<OsString>) -> Result<(), Error> {
+pub(crate) fn maybe_reexec(
+    with_sandbox: bool,
+    clipboard_access: ClipboardAccess,
+    args: Vec<OsString>,
+) -> Result<(), Error> {
     let host = Host::from_env(args)?;
-    match plan_bootstrap(with_sandbox, &host)? {
+    match plan_bootstrap(with_sandbox, clipboard_access, &host)? {
         Bootstrap::Disabled | Bootstrap::AlreadyInside => Ok(()),
         Bootstrap::Reexec(plan) => {
             ensure_host_managed_provider_directories(&host)?;
@@ -149,14 +227,48 @@ pub(crate) fn ensure_bubblewrap_available() -> Result<(), Error> {
     }
 }
 
-pub(crate) fn plan_bootstrap(with_sandbox: bool, host: &Host) -> Result<Bootstrap, Error> {
-    plan_bootstrap_with_file_exists(with_sandbox, host, Path::exists)
+pub(crate) fn plan_bootstrap(
+    with_sandbox: bool,
+    clipboard_access: ClipboardAccess,
+    host: &Host,
+) -> Result<Bootstrap, Error> {
+    plan_bootstrap_with_probe(with_sandbox, clipboard_access, host, &FilesystemHostProbe)
 }
 
+#[cfg(test)]
 pub(crate) fn plan_bootstrap_with_file_exists(
     with_sandbox: bool,
     host: &Host,
     file_exists: impl Fn(&Path) -> bool,
+) -> Result<Bootstrap, Error> {
+    struct FileExistsProbe<F>(F);
+
+    impl<F> HostPathProbe for FileExistsProbe<F>
+    where
+        F: Fn(&Path) -> bool,
+    {
+        fn file_exists(&self, path: &Path) -> bool {
+            (self.0)(path)
+        }
+
+        fn metadata(&self, _path: &Path) -> Option<HostPathMetadata> {
+            None
+        }
+    }
+
+    plan_bootstrap_with_probe(
+        with_sandbox,
+        ClipboardAccess::Disabled,
+        host,
+        &FileExistsProbe(file_exists),
+    )
+}
+
+pub(crate) fn plan_bootstrap_with_probe(
+    with_sandbox: bool,
+    clipboard_access: ClipboardAccess,
+    host: &Host,
+    probe: &impl HostPathProbe,
 ) -> Result<Bootstrap, Error> {
     if !with_sandbox {
         return Ok(Bootstrap::Disabled);
@@ -167,10 +279,17 @@ pub(crate) fn plan_bootstrap_with_file_exists(
     }
 
     let path = sandbox_path(host);
-    let bwrap = find_bwrap_in_path(&path, file_exists).ok_or(Error::MissingBubblewrap)?;
+    let bwrap = find_bwrap_in_path(&path, |candidate| probe.file_exists(candidate))
+        .ok_or(Error::MissingBubblewrap)?;
     ensure_host_log_directory(host)?;
 
-    Ok(Bootstrap::Reexec(build_plan(host, path, bwrap)))
+    Ok(Bootstrap::Reexec(build_plan(
+        host,
+        path,
+        bwrap,
+        clipboard_access,
+        probe,
+    )))
 }
 
 fn ensure_host_log_directory(host: &Host) -> Result<(), Error> {
@@ -218,9 +337,155 @@ fn ensure_host_managed_provider_directories(host: &Host) -> Result<(), Error> {
     Ok(())
 }
 
-fn build_plan(host: &Host, path: OsString, bwrap: PathBuf) -> Plan {
+#[derive(Debug, Default)]
+struct GraphicalAccessPlan {
+    mounts: Vec<GraphicalMount>,
+    environment: Vec<(OsString, OsString)>,
+}
+
+#[derive(Debug)]
+struct GraphicalMount {
+    source: PathBuf,
+    destination: PathBuf,
+}
+
+fn graphical_access_plan(host: &Host, probe: &impl HostPathProbe) -> GraphicalAccessPlan {
+    let mut plan = GraphicalAccessPlan::default();
+
+    if let Some(socket) = wayland_socket_path(host, probe) {
+        plan.mounts.push(GraphicalMount {
+            source: socket,
+            destination: PathBuf::from(SANDBOX_WAYLAND_SOCKET),
+        });
+        plan.environment.extend([
+            (os("XDG_RUNTIME_DIR"), os(SANDBOX_WAYLAND_RUNTIME_DIR)),
+            (os("WAYLAND_DISPLAY"), os(SANDBOX_WAYLAND_DISPLAY)),
+        ]);
+    }
+
+    if let Some((display, socket, authority)) = x11_connection(host, probe) {
+        plan.mounts.push(GraphicalMount {
+            source: socket.clone(),
+            destination: socket,
+        });
+        plan.mounts.push(GraphicalMount {
+            source: authority,
+            destination: PathBuf::from(SANDBOX_X11_AUTHORITY),
+        });
+        plan.environment.extend([
+            (os("DISPLAY"), OsString::from(display)),
+            (os("XAUTHORITY"), os(SANDBOX_X11_AUTHORITY)),
+        ]);
+    }
+
+    plan
+}
+
+fn wayland_socket_path(host: &Host, probe: &impl HostPathProbe) -> Option<PathBuf> {
+    let runtime_dir = host.graphical_environment.xdg_runtime_dir.as_deref()?;
+    if !is_clean_absolute_path(runtime_dir) {
+        return None;
+    }
+    let display = Path::new(host.graphical_environment.wayland_display.as_deref()?);
+    let socket = if display.is_absolute() {
+        let relative = display.strip_prefix(runtime_dir).ok()?;
+        if relative.as_os_str().is_empty()
+            || !relative
+                .components()
+                .all(|component| matches!(component, Component::Normal(_)))
+        {
+            return None;
+        }
+        display.to_path_buf()
+    } else {
+        let mut components = display.components();
+        if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
+            return None;
+        }
+        runtime_dir.join(display)
+    };
+    let metadata = probe.metadata(&socket)?;
+    (metadata.kind == HostPathKind::UnixSocket && metadata.owner_uid == host.current_uid)
+        .then_some(socket)
+}
+
+fn x11_connection(host: &Host, probe: &impl HostPathProbe) -> Option<(String, PathBuf, PathBuf)> {
+    let display = parse_local_x11_display(host.graphical_environment.display.as_deref()?)?;
+    let socket = PathBuf::from(format!("/tmp/.X11-unix/X{}", display.number));
+    if probe.metadata(&socket)?.kind != HostPathKind::UnixSocket {
+        return None;
+    }
+
+    let authority = x11_authority_path(&host.graphical_environment)?;
+    let metadata = probe.metadata(&authority)?;
+    if metadata.kind != HostPathKind::RegularFile || metadata.owner_uid != host.current_uid {
+        return None;
+    }
+
+    Some((display.normalized, socket, authority))
+}
+
+fn x11_authority_path(environment: &GraphicalEnvironment) -> Option<PathBuf> {
+    let path = match environment.xauthority.as_ref() {
+        Some(path) => path.clone(),
+        None => environment.home.as_ref()?.join(".Xauthority"),
+    };
+    is_clean_absolute_path(&path).then_some(path)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LocalX11Display {
+    number: u32,
+    normalized: String,
+}
+
+fn parse_local_x11_display(value: &OsStr) -> Option<LocalX11Display> {
+    let value = value.to_str()?;
+    let value = value
+        .strip_prefix(':')
+        .or_else(|| value.strip_prefix("unix:"))?;
+    let (display, screen) = match value.split_once('.') {
+        Some((display, screen)) if !screen.contains('.') => (display, Some(screen)),
+        Some(_) => return None,
+        None => (value, None),
+    };
+    if display.is_empty()
+        || !display.bytes().all(|byte| byte.is_ascii_digit())
+        || screen.is_some_and(|screen| {
+            screen.is_empty() || !screen.bytes().all(|byte| byte.is_ascii_digit())
+        })
+    {
+        return None;
+    }
+    let number = display.parse::<u32>().ok()?;
+    let screen = screen.map(str::parse::<u32>).transpose().ok()?;
+    let normalized = screen.map_or_else(
+        || format!(":{number}"),
+        |screen| format!(":{number}.{screen}"),
+    );
+    Some(LocalX11Display { number, normalized })
+}
+
+fn is_clean_absolute_path(path: &Path) -> bool {
+    path.is_absolute()
+        && path
+            .components()
+            .all(|component| matches!(component, Component::RootDir | Component::Normal(_)))
+}
+
+fn build_plan(
+    host: &Host,
+    path: OsString,
+    bwrap: PathBuf,
+    clipboard_access: ClipboardAccess,
+    probe: &impl HostPathProbe,
+) -> Plan {
     let cwd = host.cwd.as_os_str().to_owned();
     let current_exe = host.current_exe.as_os_str().to_owned();
+    let graphical_plan = match clipboard_access {
+        ClipboardAccess::Disabled => GraphicalAccessPlan::default(),
+        ClipboardAccess::Tui => graphical_access_plan(host, probe),
+    };
 
     let mut args = vec![
         os("--unshare-user"),
@@ -300,6 +565,13 @@ fn build_plan(host: &Host, path: OsString, bwrap: PathBuf) -> Plan {
     for rule in &host.trusted_path_rules {
         append_path_rule_args(&mut args, rule);
     }
+    for mount in &graphical_plan.mounts {
+        append_bind_file_args(
+            &mut args,
+            mount.source.as_os_str(),
+            mount.destination.as_os_str(),
+        );
+    }
     args.extend([
         os("--clearenv"),
         os("--setenv"),
@@ -327,6 +599,9 @@ fn build_plan(host: &Host, path: OsString, bwrap: PathBuf) -> Plan {
         os(MERRY_SANDBOX_VERSION_ENV),
         os(MERRY_SANDBOX_VERSION),
     ]);
+    for (name, value) in graphical_plan.environment {
+        args.extend([os("--setenv"), name, value]);
+    }
     if host.openai_debug.as_deref() == Some(OsStr::new("1")) {
         args.extend([os("--setenv"), os(MERRY_OPENAI_DEBUG_ENV), os("1")]);
     }
@@ -539,10 +814,42 @@ struct MountInfoMount<'a> {
     fs_type: &'a str,
 }
 
+#[cfg(target_os = "linux")]
+fn filesystem_path_metadata(path: &Path) -> Option<HostPathMetadata> {
+    let metadata = fs::symlink_metadata(path).ok()?;
+    let file_type = metadata.file_type();
+    let kind = if file_type.is_socket() {
+        HostPathKind::UnixSocket
+    } else if file_type.is_file() {
+        HostPathKind::RegularFile
+    } else {
+        HostPathKind::Other
+    };
+    Some(HostPathMetadata::new(kind, metadata.uid()))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn filesystem_path_metadata(_path: &Path) -> Option<HostPathMetadata> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn current_process_uid() -> Result<u32, Error> {
+    fs::metadata("/proc/self")
+        .map(|metadata| metadata.uid())
+        .map_err(Error::CurrentUser)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn current_process_uid() -> Result<u32, Error> {
+    Ok(0)
+}
+
 #[derive(Debug)]
 pub(crate) enum Error {
     CurrentDir(io::Error),
     CurrentExe(io::Error),
+    CurrentUser(io::Error),
     Config(config::ConfigError),
     LogDirectory {
         path: PathBuf,
@@ -572,6 +879,10 @@ impl fmt::Display for Error {
             Error::CurrentExe(error) => write!(
                 formatter,
                 "failed to locate current executable before sandbox bootstrap: {error}"
+            ),
+            Error::CurrentUser(error) => write!(
+                formatter,
+                "failed to identify the current user before sandbox bootstrap: {error}"
             ),
             Error::Config(error) => write!(
                 formatter,

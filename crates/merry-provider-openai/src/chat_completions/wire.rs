@@ -33,6 +33,10 @@ pub(crate) enum ChatMessage<'a> {
         role: &'static str,
         content: &'a str,
     },
+    Multimodal {
+        role: &'static str,
+        content: Vec<ChatContentPart<'a>>,
+    },
     AssistantToolCalls {
         role: &'static str,
         content: Option<&'a str>,
@@ -43,6 +47,18 @@ pub(crate) enum ChatMessage<'a> {
         tool_call_id: &'a str,
         content: &'a str,
     },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum ChatContentPart<'a> {
+    Text { text: &'a str },
+    ImageUrl { image_url: ChatImageUrl },
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ChatImageUrl {
+    pub(crate) url: String,
 }
 
 #[derive(Debug, Serialize)]

@@ -1,6 +1,31 @@
 use super::*;
 use crate::session::transcript::{PersistedTranscript, ToolResultPromptProjection};
 use crate::session::{ModelTurnId, ModelTurnStatus, Transcript, TranscriptItem, UserInputOrigin};
+use crate::{UserImageInput, UserMessageInput};
+use std::sync::Arc;
+
+fn image_message() -> UserMessageInput {
+    UserMessageInput::new(
+        "inspect [Image #1] and [Image #2]",
+        vec![
+            UserImageInput::png(
+                "[Image #1]",
+                Arc::<[u8]>::from([137, 80, 78, 71, 13, 10, 26, 10, 1]),
+                2,
+                3,
+            )
+            .expect("valid first image"),
+            UserImageInput::png(
+                "[Image #2]",
+                Arc::<[u8]>::from([137, 80, 78, 71, 13, 10, 26, 10, 2]),
+                4,
+                5,
+            )
+            .expect("valid second image"),
+        ],
+    )
+    .expect("valid image message")
+}
 
 #[test]
 fn transcript_assigns_monotonic_model_turn_ids_starting_at_one() {
@@ -155,6 +180,97 @@ fn session_user_message_keeps_exact_text_only_in_stable_artifact() {
             .as_text(),
         Some(exact_text)
     );
+}
+
+#[test]
+fn session_user_message_records_ordered_normalized_image_artifacts() {
+    let mut session = SessionState::new(session_id());
+    let turn_id = session.begin_model_turn().expect("model turn should begin");
+    let message = image_message();
+
+    session
+        .record_user_message(turn_id, &message)
+        .expect("image message should record");
+
+    let [
+        TranscriptItem::UserMessage {
+            artifact_id,
+            image_artifact_ids,
+            ..
+        },
+    ] = session.transcript.items()
+    else {
+        panic!("transcript should contain one image-bearing user message");
+    };
+    assert_eq!(artifact_id.as_str(), "user-message-0");
+    assert_eq!(
+        image_artifact_ids
+            .iter()
+            .map(merry_core::ArtifactId::as_str)
+            .collect::<Vec<_>>(),
+        ["user-message-0-image-1", "user-message-0-image-2"]
+    );
+
+    for (index, expected) in message.images().iter().enumerate() {
+        let id = &image_artifact_ids[index];
+        let artifact = session
+            .artifacts
+            .read_ref(id)
+            .expect("image artifact metadata should be readable");
+        assert_eq!(artifact.kind(), &ArtifactKind::Image);
+        assert_eq!(artifact.label(), Some(expected.label()));
+        let ArtifactContent::Image { bytes, metadata } = session
+            .read_artifact_content(id)
+            .expect("image artifact content should be readable")
+        else {
+            panic!("user image artifact should use image content");
+        };
+        assert_eq!(bytes.as_ref(), expected.png_bytes());
+        let metadata = metadata.as_deref().expect("normalized PNG has metadata");
+        assert_eq!(metadata.media_type(), "image/png");
+        assert_eq!(metadata.width(), expected.width());
+        assert_eq!(metadata.height(), expected.height());
+    }
+
+    let snapshot = session
+        .provider_transcript_snapshot()
+        .expect("provider snapshot should compile");
+    let [crate::session::TranscriptItemSnapshot::UserMessage { text, images, .. }] =
+        snapshot.as_slice()
+    else {
+        panic!("provider snapshot should contain one user message");
+    };
+    assert_eq!(text, message.text());
+    assert_eq!(images.len(), 2);
+    assert_eq!(images[0].artifact().id().as_str(), "user-message-0-image-1");
+    assert_eq!(images[0].input(), &message.images()[0]);
+    assert_eq!(images[1].artifact().id().as_str(), "user-message-0-image-2");
+    assert_eq!(images[1].input(), &message.images()[1]);
+}
+
+#[test]
+fn user_image_artifact_collision_leaves_all_message_state_unchanged() {
+    let mut session = SessionState::new(session_id());
+    let turn_id = session.begin_model_turn().expect("model turn should begin");
+    let collision = ArtifactRef::new(artifact_id("user-message-0-image-2"), ArtifactKind::Image);
+    session
+        .record_artifact_state(collision, ArtifactContent::image(vec![9]))
+        .expect("collision fixture should record");
+    let transcript_before = session.transcript.persisted();
+    let artifacts_before = session.artifacts.persisted_records();
+
+    let error = session
+        .record_user_message(turn_id, &image_message())
+        .expect_err("second image collision should reject the whole message");
+
+    assert!(matches!(
+        error,
+        RuntimeError::Artifact {
+            source: ArtifactError::DuplicateId { .. }
+        }
+    ));
+    assert_eq!(session.transcript.persisted(), transcript_before);
+    assert_eq!(session.artifacts.persisted_records(), artifacts_before);
 }
 
 #[test]

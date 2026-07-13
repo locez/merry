@@ -539,6 +539,7 @@ pub(crate) struct TuiKeymapToml {
     pub(crate) submit_backlog: Option<String>,
     pub(crate) cancel_input_or_quit: Option<String>,
     pub(crate) insert_newline: Option<String>,
+    pub(crate) paste_image: Option<String>,
     pub(crate) interrupt: Option<String>,
     pub(crate) quit: Option<String>,
     pub(crate) scroll_up: Option<String>,
@@ -854,6 +855,7 @@ submit_next = "enter"
 submit_backlog = "ctrl+b"
 cancel_input_or_quit = "ctrl+c"
 insert_newline = "ctrl+j"
+paste_image = "ctrl+v"
 interrupt = "esc"
 quit = "ctrl+q"
 scroll_up = "pageup"
@@ -881,6 +883,7 @@ discard_suspended = "ctrl+d"
         assert_eq!(tui.keymap.submit_next.as_deref(), Some("enter"));
         assert_eq!(tui.keymap.cancel_input_or_quit.as_deref(), Some("ctrl+c"));
         assert_eq!(tui.keymap.insert_newline.as_deref(), Some("ctrl+j"));
+        assert_eq!(tui.keymap.paste_image.as_deref(), Some("ctrl+v"));
         assert_eq!(tui.keymap.scroll_up.as_deref(), Some("pageup"));
         assert_eq!(
             tui.keymap.review_previous_user_input.as_deref(),

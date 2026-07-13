@@ -1,12 +1,15 @@
 use crate::{
     AnthropicProviderConfig, AnthropicProviderError,
     wire::{
-        AnthropicContentBlock, AnthropicMessage, AnthropicOutputConfig, AnthropicOutputFormat,
-        AnthropicRequest, AnthropicTool, AnthropicToolChoice,
+        AnthropicContentBlock, AnthropicImageSource, AnthropicMessage, AnthropicOutputConfig,
+        AnthropicOutputFormat, AnthropicRequest, AnthropicTool, AnthropicToolChoice,
     },
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use merry_core::ToolCallResultStatus;
-use merry_llm::{ModelInputItem, ModelMessageRole, ModelRequest, ModelResponseFormat};
+use merry_llm::{
+    ModelContentPart, ModelInputItem, ModelMessageRole, ModelRequest, ModelResponseFormat,
+};
 use serde_json::Value;
 
 pub(crate) fn render_anthropic_request(
@@ -86,15 +89,34 @@ fn render_messages<'a>(request: &'a ModelRequest) -> Vec<AnthropicMessage<'a>> {
                 index += 1;
             }
             ModelInputItem::Message(message) => {
+                let content = if message.content().has_images() {
+                    message
+                        .content()
+                        .parts()
+                        .iter()
+                        .map(|part| match part {
+                            ModelContentPart::Text { text } => AnthropicContentBlock::Text { text },
+                            ModelContentPart::Image { image } => AnthropicContentBlock::Image {
+                                source: AnthropicImageSource {
+                                    kind: "base64",
+                                    media_type: "image/png",
+                                    data: STANDARD.encode(image.png_bytes()),
+                                },
+                            },
+                        })
+                        .collect()
+                } else {
+                    vec![AnthropicContentBlock::Text {
+                        text: message.content().as_text(),
+                    }]
+                };
                 messages.push(AnthropicMessage {
                     role: match message.role() {
                         ModelMessageRole::User => "user",
                         ModelMessageRole::Assistant => "assistant",
                         ModelMessageRole::System => unreachable!("system messages are filtered"),
                     },
-                    content: vec![AnthropicContentBlock::Text {
-                        text: message.content().as_text(),
-                    }],
+                    content,
                 });
                 index += 1;
             }
@@ -138,11 +160,12 @@ mod tests {
     use super::*;
     use merry_core::{ToolInputSchema, ToolName, ToolSpec};
     use merry_llm::{
-        GenerationConfig, ModelContent, ModelInputItem, ModelMessage, ModelName, ModelToolCall,
-        ModelToolCallId, ModelToolResult, ModelToolResultContent, ToolArguments,
+        GenerationConfig, ModelContent, ModelImage, ModelInputItem, ModelMessage, ModelName,
+        ModelToolCall, ModelToolCallId, ModelToolResult, ModelToolResultContent, ToolArguments,
     };
     use schemars::Schema;
     use serde_json::json;
+    use std::sync::Arc;
 
     #[test]
     fn renders_system_tool_batches_results_and_output_limit() {
@@ -181,6 +204,46 @@ mod tests {
             "call-2"
         );
         assert!(rendered.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn renders_user_png_as_ordered_anthropic_image_content() {
+        let content = ModelContent::user_with_images(
+            "inspect [Image #1]",
+            vec![
+                ModelImage::png(
+                    "[Image #1]",
+                    Arc::<[u8]>::from([137, 80, 78, 71, 13, 10, 26, 10, 42]),
+                    1,
+                    1,
+                )
+                .expect("valid image"),
+            ],
+        )
+        .expect("valid image content");
+        let request = ModelRequest::new(
+            ModelName::new("claude-image-test").expect("valid model"),
+            vec![ModelMessage::new(ModelMessageRole::User, content).expect("valid user message")],
+            Vec::new(),
+            GenerationConfig::default(),
+        )
+        .expect("valid request");
+
+        let rendered = render_anthropic_request(
+            &AnthropicProviderConfig::new("key").expect("valid config"),
+            &request,
+        )
+        .expect("request should render");
+
+        assert_eq!(
+            rendered["messages"][0]["content"],
+            json!([
+                {"type": "text", "text": "<image name=[Image #1]>"},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgoq"}},
+                {"type": "text", "text": "</image>"},
+                {"type": "text", "text": "inspect [Image #1]"}
+            ])
+        );
     }
 
     fn message(role: ModelMessageRole, text: &str) -> ModelInputItem {

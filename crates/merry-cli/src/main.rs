@@ -61,6 +61,7 @@ fn main() -> CliExit {
 
     if let Err(error) = sandbox::maybe_reexec(
         cli.should_bootstrap_sandbox(),
+        cli.clipboard_access(),
         argv.iter().skip(1).cloned().collect(),
     ) {
         return CliExit::Unexpected(error.to_string());

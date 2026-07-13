@@ -115,6 +115,7 @@ fn compaction_install_advances_prompt_boundary_without_deleting_full_transcript(
             .expect("provider projection builds"),
         vec![crate::session::TranscriptItemSnapshot::UserMessage {
             text: "retained user".to_owned(),
+            images: Vec::new(),
             origin: crate::session::UserInputOrigin::ExternalUser,
         }]
     );
@@ -181,6 +182,7 @@ fn compaction_install_advances_boundary_through_trailing_empty_aborted_turn() {
             .expect("provider projection builds"),
         vec![crate::session::TranscriptItemSnapshot::UserMessage {
             text: "retained after empty turn".to_owned(),
+            images: Vec::new(),
             origin: crate::session::UserInputOrigin::ExternalUser,
         }]
     );
@@ -441,6 +443,7 @@ fn compaction_structure_errors_map_to_stale_window() {
         id: TranscriptItemId::new(id),
         model_turn_id,
         artifact_id: artifact_id(artifact),
+        image_artifact_ids: Vec::new(),
         origin: crate::session::UserInputOrigin::ExternalUser,
     };
 
@@ -621,6 +624,7 @@ fn artifact_notice_is_provider_only_and_compaction_reads_exact_content() {
             .expect("provider projection rebuilds"),
         vec![crate::session::TranscriptItemSnapshot::UserMessage {
             text: "retained artifact notice tail".to_owned(),
+            images: Vec::new(),
             origin: crate::session::UserInputOrigin::ExternalUser,
         }]
     );
@@ -760,6 +764,7 @@ fn compaction_accepts_resolved_multi_tool_batches() {
             .expect("provider projection builds"),
         vec![crate::session::TranscriptItemSnapshot::UserMessage {
             text: "retained raw tail".to_owned(),
+            images: Vec::new(),
             origin: crate::session::UserInputOrigin::ExternalUser,
         }]
     );
@@ -983,6 +988,7 @@ async fn installing_compaction_preserves_hidden_final_output_in_full_and_stored_
             .expect("loaded prompt transcript remains readable"),
         vec![crate::session::TranscriptItemSnapshot::UserMessage {
             text: "retained visible tail".to_owned(),
+            images: Vec::new(),
             origin: crate::session::UserInputOrigin::ExternalUser,
         }]
     );
@@ -1244,6 +1250,7 @@ fn installing_valid_checkpoint_hides_only_covered_history_from_provider() {
             .expect("provider projection builds"),
         vec![crate::session::TranscriptItemSnapshot::UserMessage {
             text: "tail user".to_owned(),
+            images: Vec::new(),
             origin: crate::session::UserInputOrigin::ExternalUser,
         }]
     );

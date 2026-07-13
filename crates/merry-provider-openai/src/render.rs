@@ -2,13 +2,14 @@
 
 use crate::{
     OpenAiProviderError,
+    image::png_data_url,
     wire::{
-        ResponsesInputItem, ResponsesReasoning, ResponsesRequest, ResponsesText,
-        ResponsesTextFormat, ResponsesTool,
+        ResponsesInputContent, ResponsesInputItem, ResponsesReasoning, ResponsesRequest,
+        ResponsesText, ResponsesTextFormat, ResponsesTool,
     },
 };
 use merry_llm::{
-    ModelInputItem, ModelMessageRole, ModelRequest, ModelResponseFormat,
+    ModelContentPart, ModelInputItem, ModelMessageRole, ModelRequest, ModelResponseFormat,
     ModelStructuredOutputFormat, ModelToolCall,
 };
 use serde_json::{Map, Value};
@@ -132,6 +133,24 @@ fn render_input_items<'a>(
     input
         .iter()
         .map(|item| match item {
+            ModelInputItem::Message(message) if message.content().has_images() => {
+                Ok(ResponsesInputItem::message_content(
+                    render_role(message.role()),
+                    message
+                        .content()
+                        .parts()
+                        .iter()
+                        .map(|part| match part {
+                            ModelContentPart::Text { text } => {
+                                ResponsesInputContent::input_text(text)
+                            }
+                            ModelContentPart::Image { image } => {
+                                ResponsesInputContent::input_image(png_data_url(image.png_bytes()))
+                            }
+                        })
+                        .collect(),
+                ))
+            }
             ModelInputItem::Message(message) => Ok(ResponsesInputItem::message(
                 render_role(message.role()),
                 message.content().as_text(),
@@ -208,11 +227,12 @@ mod tests {
     use super::render_tool_continuation;
     use merry_core::{ErrorInfo, ToolCallResultStatus, ToolName};
     use merry_llm::{
-        GenerationConfig, ModelContent, ModelInputItem, ModelMessage, ModelMessageRole, ModelName,
-        ModelRequest, ModelToolCall, ModelToolCallId, ModelToolContinuation, ModelToolResult,
-        ModelToolResultContent, ToolArguments,
+        GenerationConfig, ModelContent, ModelImage, ModelInputItem, ModelMessage, ModelMessageRole,
+        ModelName, ModelRequest, ModelToolCall, ModelToolCallId, ModelToolContinuation,
+        ModelToolResult, ModelToolResultContent, ToolArguments,
     };
     use serde_json::json;
+    use std::sync::Arc;
 
     fn continuation_with_result_content(content: ModelToolResultContent) -> ModelToolContinuation {
         let call = ModelToolCall::new(
@@ -432,6 +452,42 @@ mod tests {
         assert_eq!(
             continuation.result_content,
             r#"{"stderr":"permission denied"}"#
+        );
+    }
+
+    #[test]
+    fn renders_user_png_as_ordered_responses_input_image_content() {
+        let content = ModelContent::user_with_images(
+            "inspect [Image #1]",
+            vec![
+                ModelImage::png(
+                    "[Image #1]",
+                    Arc::<[u8]>::from([137, 80, 78, 71, 13, 10, 26, 10, 42]),
+                    1,
+                    1,
+                )
+                .expect("valid image"),
+            ],
+        )
+        .expect("valid image content");
+        let request = ModelRequest::new(
+            ModelName::new("gpt-image-test").expect("valid model"),
+            vec![ModelMessage::new(ModelMessageRole::User, content).expect("valid user message")],
+            Vec::new(),
+            GenerationConfig::default(),
+        )
+        .expect("valid request");
+
+        let rendered = super::render_responses_request(&request).expect("request should render");
+
+        assert_eq!(
+            rendered["input"][0]["content"],
+            json!([
+                {"type": "input_text", "text": "<image name=[Image #1]>"},
+                {"type": "input_image", "image_url": "data:image/png;base64,iVBORw0KGgoq"},
+                {"type": "input_text", "text": "</image>"},
+                {"type": "input_text", "text": "inspect [Image #1]"}
+            ])
         );
     }
 }

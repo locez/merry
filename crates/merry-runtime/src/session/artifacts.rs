@@ -53,3 +53,11 @@ pub(super) fn user_message_id(item_id: TranscriptItemId) -> ArtifactId {
     ))
     .expect("user message artifact id uses a valid static prefix and transcript item id")
 }
+
+pub(super) fn user_message_image_id(item_id: TranscriptItemId, image_index: usize) -> ArtifactId {
+    ArtifactId::new(&format!(
+        "{USER_MESSAGE_ARTIFACT_PREFIX}{}-image-{image_index}",
+        item_id.as_u64()
+    ))
+    .expect("user image artifact id uses a valid static prefix, transcript id, and image index")
+}

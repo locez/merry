@@ -1,17 +1,19 @@
 use super::{
     InteractiveError, InteractiveSettingsUpdate, InterruptReason,
+    queue::AcceptedQueuedInput,
     types::{InputReceipt, InputRecords, QueuedInputId},
 };
-use merry_core::{QueuedInputLane, QueuedInputView};
+use crate::UserMessageInput;
+use merry_core::QueuedInputLane;
 use tokio::sync::oneshot;
 
 pub(super) enum InteractiveCommand {
     SubmitNext {
-        text: String,
+        message: UserMessageInput,
         ack_sender: oneshot::Sender<Result<InputReceipt, InteractiveError>>,
     },
     Enqueue {
-        text: String,
+        message: UserMessageInput,
         ack_sender: oneshot::Sender<Result<InputReceipt, InteractiveError>>,
     },
     Update {
@@ -67,7 +69,7 @@ pub(super) enum CommandDecision {
 
 pub(super) enum BoundaryAction {
     UserInput {
-        accepted: Vec<QueuedInputView>,
+        accepted: Vec<AcceptedQueuedInput>,
         lane: QueuedInputLane,
     },
     Continuation,

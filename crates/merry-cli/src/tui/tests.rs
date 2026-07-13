@@ -1,9 +1,9 @@
 use super::completion::{CompletionKind, CompletionSources};
 use super::controller::{
-    ControllerEffect, handle_key_action, handle_key_event, handle_mouse_scroll_down,
-    handle_mouse_scroll_up, handle_paste_event,
+    ControllerEffect, apply_clipboard_image_completion, handle_key_action, handle_key_event,
+    handle_mouse_scroll_down, handle_mouse_scroll_up, handle_paste_event,
 };
-use super::input::TextInput;
+use super::input::{DraftImage, TextInput, TuiSubmission};
 use super::keymap::{KeyAction, KeyBinding, Keymap};
 use super::overlay::Overlay;
 use super::preferences::CodeTheme;
@@ -30,6 +30,18 @@ use serde_json::json;
 use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
+
+fn text_submission(text: &str) -> TuiSubmission {
+    TuiSubmission {
+        text: text.to_owned(),
+        history_text: text.to_owned(),
+        images: Vec::new(),
+    }
+}
+
+fn draft_image(marker: u8) -> DraftImage {
+    DraftImage::new([137, 80, 78, 71, 13, 10, 26, 10, marker], 2, 3).expect("valid draft image")
+}
 
 fn source() -> RuntimeEventSource {
     RuntimeEventSource::new(SessionId::new("tui-test").unwrap(), 1)
@@ -432,7 +444,7 @@ fn controller_submit_next_takes_input_text() {
 
     let effect = handle_key_action(KeyAction::SubmitNext, &mut state);
 
-    assert_eq!(effect, ControllerEffect::SubmitNext("now".to_owned()));
+    assert_eq!(effect, ControllerEffect::SubmitNext(text_submission("now")));
     assert_eq!(state.input_text(), "");
 }
 
@@ -452,8 +464,41 @@ fn controller_submit_next_preserves_multiline_input_text() {
 
     assert_eq!(
         effect,
-        ControllerEffect::SubmitNext("1234\n换行测试".to_owned())
+        ControllerEffect::SubmitNext(text_submission("1234\n换行测试"))
     );
+}
+
+#[test]
+fn controller_submit_carries_images_and_records_text_only_history() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.insert_input_str("inspect ");
+    state
+        .input_mut()
+        .insert_image(draft_image(7))
+        .expect("image should insert");
+
+    let effect = handle_key_action(KeyAction::SubmitNext, &mut state);
+    let ControllerEffect::SubmitNext(submission) = effect else {
+        panic!("image submission should produce a next-lane effect");
+    };
+
+    assert_eq!(submission.text, "inspect [Image #1]");
+    assert_eq!(submission.history_text, "inspect ");
+    assert_eq!(submission.images.len(), 1);
+    assert_eq!(submission.images[0].label(), "[Image #1]");
+    assert_eq!(submission.images[0].png_bytes()[8], 7);
+    assert!(state.input_text().is_empty());
+
+    assert_eq!(
+        handle_key_action(KeyAction::HistoryPrevious, &mut state),
+        ControllerEffect::None
+    );
+    assert_eq!(state.input_text(), "inspect ");
 }
 
 #[test]
@@ -468,12 +513,12 @@ fn controller_submit_records_shell_like_input_history() {
     state.input_mut().insert_str("first");
     assert_eq!(
         handle_key_action(KeyAction::SubmitNext, &mut state),
-        ControllerEffect::SubmitNext("first".to_owned())
+        ControllerEffect::SubmitNext(text_submission("first"))
     );
     state.input_mut().insert_str("second");
     assert_eq!(
         handle_key_action(KeyAction::SubmitNext, &mut state),
-        ControllerEffect::SubmitNext("second".to_owned())
+        ControllerEffect::SubmitNext(text_submission("second"))
     );
 
     assert_eq!(
@@ -510,7 +555,7 @@ fn controller_history_restores_unsent_draft() {
     state.input_mut().insert_str("sent");
     assert_eq!(
         handle_key_action(KeyAction::SubmitNext, &mut state),
-        ControllerEffect::SubmitNext("sent".to_owned())
+        ControllerEffect::SubmitNext(text_submission("sent"))
     );
     state.input_mut().insert_str("draft");
 
@@ -657,7 +702,7 @@ fn controller_submit_exits_review_mode_before_submitting_input() {
 
     assert_eq!(
         handle_key_action(KeyAction::SubmitNext, &mut state),
-        ControllerEffect::SubmitNext("draft".to_owned())
+        ControllerEffect::SubmitNext(text_submission("draft"))
     );
 }
 
@@ -722,7 +767,7 @@ fn controller_artifact_review_steps_through_artifacts_and_submit_returns_to_late
 
     assert_eq!(
         handle_key_action(KeyAction::SubmitNext, &mut state),
-        ControllerEffect::SubmitNext("draft".to_owned())
+        ControllerEffect::SubmitNext(text_submission("draft"))
     );
 }
 
@@ -797,6 +842,10 @@ fn default_keymap_maps_core_navigation_and_control_keys() {
         Some(KeyAction::InsertNewline)
     );
     assert_eq!(
+        keymap.action_for(KeyBinding::new(KeyCode::Char('v'), KeyModifiers::CONTROL,)),
+        Some(KeyAction::PasteImage)
+    );
+    assert_eq!(
         keymap.action_for(KeyBinding::new(KeyCode::Esc, KeyModifiers::NONE)),
         Some(KeyAction::Interrupt)
     );
@@ -831,6 +880,96 @@ fn default_keymap_maps_core_navigation_and_control_keys() {
     assert_eq!(
         keymap.action_for(KeyBinding::new(KeyCode::Char('r'), KeyModifiers::CONTROL)),
         Some(KeyAction::FollowLatestArtifact)
+    );
+}
+
+#[test]
+fn configured_image_paste_binding_replaces_the_default() {
+    let keymap = Keymap::from_config(&crate::config::TuiKeymapToml {
+        paste_image: Some("ctrl+n".to_owned()),
+        ..crate::config::TuiKeymapToml::default()
+    })
+    .expect("configured keymap should validate");
+
+    assert_eq!(
+        keymap.action_for(KeyBinding::new(KeyCode::Char('n'), KeyModifiers::CONTROL)),
+        Some(KeyAction::PasteImage)
+    );
+    assert_eq!(
+        keymap.action_for(KeyBinding::new(KeyCode::Char('v'), KeyModifiers::CONTROL)),
+        None
+    );
+}
+
+#[test]
+fn controller_only_starts_image_paste_from_the_main_composer() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+
+    assert_eq!(
+        handle_key_event(
+            KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL),
+            &mut state,
+        ),
+        ControllerEffect::PasteImage
+    );
+
+    state.open_command_palette();
+    assert_eq!(
+        handle_key_event(
+            KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL),
+            &mut state,
+        ),
+        ControllerEffect::None
+    );
+}
+
+#[test]
+fn clipboard_image_completion_updates_the_draft_or_reports_a_nonfatal_diagnostic() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.insert_input_str("before ");
+
+    apply_clipboard_image_completion(Ok(draft_image(9)), &mut state);
+    assert_eq!(state.input_text(), "before [Image #1]");
+
+    apply_clipboard_image_completion(Err("clipboard has no image".to_owned()), &mut state);
+    assert_eq!(state.input_text(), "before [Image #1]");
+    assert!(matches!(
+        state.timeline().last(),
+        Some(TimelineItem::Diagnostic { title, body })
+            if title == "clipboard_image" && body == "clipboard has no image"
+    ));
+}
+
+#[test]
+fn renderer_highlights_complete_image_placeholders_in_the_composer() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.insert_input_str("inspect ");
+    state
+        .input_mut()
+        .insert_image(draft_image(1))
+        .expect("image should insert");
+    state.insert_input_str(" now");
+
+    let buffer = render_to_buffer(&state, 80, 16);
+
+    assert_eq!(
+        find_cell_color(&buffer, "[Image #1]"),
+        Some(Color::LightMagenta)
     );
 }
 
@@ -1800,7 +1939,7 @@ fn controller_ctrl_c_quit_confirmation_resets_after_new_input() {
 
     assert_eq!(
         handle_key_action(KeyAction::SubmitNext, &mut state),
-        ControllerEffect::SubmitNext("draft".to_owned())
+        ControllerEffect::SubmitNext(text_submission("draft"))
     );
     assert_eq!(state.input_text(), "");
 
@@ -1993,6 +2132,7 @@ fn projector_rebuilds_resume_transcript_history() {
     projector.apply_transcript_item(
         SessionTranscriptItem::UserMessage {
             text: "看看 hello_world.py".to_owned(),
+            images: Vec::new(),
         },
         &mut state,
     );

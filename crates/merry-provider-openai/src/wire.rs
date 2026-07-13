@@ -54,6 +54,13 @@ impl<'a> ResponsesInputItem<'a> {
         })
     }
 
+    pub(crate) fn message_content(
+        role: &'static str,
+        content: Vec<ResponsesInputContent<'a>>,
+    ) -> Self {
+        Self::Message(ResponsesMessageInputItem { role, content })
+    }
+
     pub(crate) fn function_call(call_id: &'a str, name: &'a str, arguments: String) -> Self {
         Self::FunctionCall(ResponsesFunctionCallInputItem {
             kind: "function_call",
@@ -87,18 +94,21 @@ pub(crate) struct ResponsesAssistantMessageInputItem<'a> {
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct ResponsesInputContent<'a> {
-    #[serde(rename = "type")]
-    pub(crate) kind: &'static str,
-    pub(crate) text: &'a str,
+#[serde(tag = "type")]
+pub(crate) enum ResponsesInputContent<'a> {
+    #[serde(rename = "input_text")]
+    InputText { text: &'a str },
+    #[serde(rename = "input_image")]
+    InputImage { image_url: String },
 }
 
 impl<'a> ResponsesInputContent<'a> {
-    fn input_text(text: &'a str) -> Self {
-        Self {
-            kind: "input_text",
-            text,
-        }
+    pub(crate) fn input_text(text: &'a str) -> Self {
+        Self::InputText { text }
+    }
+
+    pub(crate) fn input_image(image_url: String) -> Self {
+        Self::InputImage { image_url }
     }
 }
 

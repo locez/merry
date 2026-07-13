@@ -65,6 +65,15 @@ impl Cli {
         }
         self.with_sandbox || self.is_product_surface()
     }
+
+    pub(crate) fn clipboard_access(&self) -> crate::sandbox::ClipboardAccess {
+        match &self.command {
+            None | Some(CliCommand::Resume) => crate::sandbox::ClipboardAccess::Tui,
+            Some(CliCommand::Run(_) | CliCommand::Cmd(_) | CliCommand::Debug(_)) => {
+                crate::sandbox::ClipboardAccess::Disabled
+            }
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -196,7 +205,7 @@ mod tests {
         CodingLoopTaskSmokeTask, Command as DebugCommand, DEFAULT_INPUT, DEFAULT_SESSION_ID,
     };
     use crate::sandbox::{
-        ChildHandoff as SandboxChildHandoff, SANDBOX_CHILD_HANDOFF_ARG,
+        ChildHandoff as SandboxChildHandoff, ClipboardAccess, SANDBOX_CHILD_HANDOFF_ARG,
         SANDBOX_CHILD_HANDOFF_CLI_BWRAP_V1,
     };
     use clap::Parser;
@@ -207,6 +216,19 @@ mod tests {
 
         assert!(cli.command.is_none());
         assert!(cli.should_bootstrap_sandbox());
+    }
+
+    #[test]
+    fn only_tui_routes_request_clipboard_access() {
+        let root = Cli::try_parse_from(["merry"]).expect("root args should parse");
+        let resume = Cli::try_parse_from(["merry", "resume"]).expect("resume should parse");
+        let run = Cli::try_parse_from(["merry", "run", "task"]).expect("run should parse");
+        let debug = Cli::try_parse_from(["merry", "debug"]).expect("debug should parse");
+
+        assert_eq!(root.clipboard_access(), ClipboardAccess::Tui);
+        assert_eq!(resume.clipboard_access(), ClipboardAccess::Tui);
+        assert_eq!(run.clipboard_access(), ClipboardAccess::Disabled);
+        assert_eq!(debug.clipboard_access(), ClipboardAccess::Disabled);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use super::{
     completion::{CompletionMenu, CompletionSources},
-    input::{InputHistory, TextInput},
+    input::{DraftImage, InputHistory, TextInput, TuiSubmission},
     keymap::Keymap,
     overlay::{MessageDialogKind, MessageDialogOverlay, Overlay, SettingsOverlay, ShortcutsBack},
     preferences::{TuiPreferences, TuiSettingsDefaults},
@@ -294,12 +294,21 @@ impl TuiState {
             .min(max_rows.max(1))
     }
 
-    pub(crate) fn take_input_for_submit(&mut self) -> Option<String> {
+    pub(crate) fn take_input_for_submit(&mut self) -> Option<TuiSubmission> {
         self.completion_menu = None;
         self.pending_empty_input_quit = false;
-        let value = self.input.take_trimmed()?;
-        self.input_history.record(&value);
-        Some(value)
+        let submission = match self.input.take_submission() {
+            Ok(submission) => submission?,
+            Err(error) => {
+                self.push_timeline_item(TimelineItem::Diagnostic {
+                    title: "user_input".to_owned(),
+                    body: error.to_string(),
+                });
+                return None;
+            }
+        };
+        self.input_history.record(&submission.history_text);
+        Some(submission)
     }
 
     pub(crate) fn previous_input_history(&mut self) {
@@ -330,6 +339,16 @@ impl TuiState {
         self.pending_empty_input_quit = false;
         self.input.insert_paste(text);
         self.refresh_completion_menu();
+    }
+
+    pub(crate) fn insert_input_image(
+        &mut self,
+        image: DraftImage,
+    ) -> Result<(), merry_runtime::RuntimeError> {
+        self.pending_empty_input_quit = false;
+        self.input.insert_image(image)?;
+        self.refresh_completion_menu();
+        Ok(())
     }
 
     pub(crate) fn insert_input_newline(&mut self) {

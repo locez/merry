@@ -1,5 +1,5 @@
 use crate::{ArtifactContent, session::TranscriptItemSnapshot};
-use merry_core::{PendingToolCall, ToolCallId, ToolCallResult, ToolOutput};
+use merry_core::{ArtifactRef, PendingToolCall, ToolCallId, ToolCallResult, ToolOutput};
 
 /// Read-only public projection of persisted session transcript items.
 ///
@@ -9,6 +9,7 @@ use merry_core::{PendingToolCall, ToolCallId, ToolCallResult, ToolOutput};
 pub enum SessionTranscriptItem {
     UserMessage {
         text: String,
+        images: Vec<ArtifactRef>,
     },
     AssistantText {
         text: String,
@@ -26,7 +27,13 @@ pub enum SessionTranscriptItem {
 impl From<TranscriptItemSnapshot> for SessionTranscriptItem {
     fn from(value: TranscriptItemSnapshot) -> Self {
         match value {
-            TranscriptItemSnapshot::UserMessage { text, .. } => Self::UserMessage { text },
+            TranscriptItemSnapshot::UserMessage { text, images, .. } => Self::UserMessage {
+                text,
+                images: images
+                    .into_iter()
+                    .map(|image| image.artifact().clone())
+                    .collect(),
+            },
             TranscriptItemSnapshot::AssistantText { text } => Self::AssistantText { text },
             TranscriptItemSnapshot::ToolCall { call } => Self::ToolCall { call },
             TranscriptItemSnapshot::ToolResult {

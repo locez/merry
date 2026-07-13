@@ -3,6 +3,7 @@ use super::{
     InterruptReason,
     types::{InputReceipt, InputRecord, InputRecords},
 };
+use crate::UserMessageInput;
 use futures_core::Stream;
 use merry_core::{QueuedInputLane, RuntimeEvent};
 use std::{
@@ -135,10 +136,19 @@ impl AgentLoopInput {
     }
 
     pub async fn submit_next(&self, text: &str) -> Result<InteractiveInputItem, InteractiveError> {
+        let message = UserMessageInput::text_only(text)?;
+        self.submit_next_message(message).await
+    }
+
+    pub async fn submit_next_message(
+        &self,
+        message: UserMessageInput,
+    ) -> Result<InteractiveInputItem, InteractiveError> {
+        let text = message.text().to_owned();
         let (ack_sender, ack_receiver) = oneshot::channel();
         self.command_sender
             .send(InteractiveCommand::SubmitNext {
-                text: text.to_owned(),
+                message,
                 ack_sender,
             })
             .await
@@ -150,14 +160,23 @@ impl AgentLoopInput {
             .map_err(|_| InteractiveError::CommandChannelClosed {
                 run_id: self.run_id,
             })?
-            .map(|receipt| InteractiveInputItem::new(self.clone(), receipt, text.to_owned()))
+            .map(|receipt| InteractiveInputItem::new(self.clone(), receipt, text))
     }
 
     pub async fn enqueue(&self, text: &str) -> Result<InteractiveInputItem, InteractiveError> {
+        let message = UserMessageInput::text_only(text)?;
+        self.enqueue_message(message).await
+    }
+
+    pub async fn enqueue_message(
+        &self,
+        message: UserMessageInput,
+    ) -> Result<InteractiveInputItem, InteractiveError> {
+        let text = message.text().to_owned();
         let (ack_sender, ack_receiver) = oneshot::channel();
         self.command_sender
             .send(InteractiveCommand::Enqueue {
-                text: text.to_owned(),
+                message,
                 ack_sender,
             })
             .await
@@ -169,7 +188,7 @@ impl AgentLoopInput {
             .map_err(|_| InteractiveError::CommandChannelClosed {
                 run_id: self.run_id,
             })?
-            .map(|receipt| InteractiveInputItem::new(self.clone(), receipt, text.to_owned()))
+            .map(|receipt| InteractiveInputItem::new(self.clone(), receipt, text))
     }
 
     async fn update_receipt(

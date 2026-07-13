@@ -385,7 +385,8 @@ async fn complete_boundary_savepoint_text_output_step_completed_persists_resume_
             .expect("transcript resumes"),
         vec![
             SessionTranscriptItem::UserMessage {
-                text: "write text".to_owned()
+                text: "write text".to_owned(),
+                images: Vec::new(),
             },
             SessionTranscriptItem::AssistantText {
                 text: "persist me".to_owned()

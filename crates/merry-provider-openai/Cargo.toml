@@ -11,6 +11,7 @@ live-tests = []
 workspace = true
 
 [dependencies]
+base64.workspace = true
 futures-util.workspace = true
 merry-core = { path = "../merry-core" }
 merry-llm = { path = "../merry-llm" }

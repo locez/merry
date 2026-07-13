@@ -1,9 +1,11 @@
 use super::wire::{
-    ChatJsonSchema, ChatMessage, ChatRequest, ChatResponseFormat, ChatStreamOptions, ChatTool,
-    ChatToolCall, ChatToolCallFunction, ChatToolFunction,
+    ChatContentPart, ChatImageUrl, ChatJsonSchema, ChatMessage, ChatRequest, ChatResponseFormat,
+    ChatStreamOptions, ChatTool, ChatToolCall, ChatToolCallFunction, ChatToolFunction,
 };
-use crate::OpenAiProviderError;
-use merry_llm::{ModelInputItem, ModelMessageRole, ModelRequest, ModelResponseFormat};
+use crate::{OpenAiProviderError, image::png_data_url};
+use merry_llm::{
+    ModelContentPart, ModelInputItem, ModelMessageRole, ModelRequest, ModelResponseFormat,
+};
 use serde_json::Value;
 
 pub(crate) fn render_chat_request(request: &ModelRequest) -> Result<Value, OpenAiProviderError> {
@@ -73,10 +75,29 @@ fn render_messages<'a>(
     while index < request.input().len() {
         match &request.input()[index] {
             ModelInputItem::Message(message) => {
-                messages.push(ChatMessage::Text {
-                    role: render_role(message.role()),
-                    content: message.content().as_text(),
-                });
+                if message.content().has_images() {
+                    messages.push(ChatMessage::Multimodal {
+                        role: render_role(message.role()),
+                        content: message
+                            .content()
+                            .parts()
+                            .iter()
+                            .map(|part| match part {
+                                ModelContentPart::Text { text } => ChatContentPart::Text { text },
+                                ModelContentPart::Image { image } => ChatContentPart::ImageUrl {
+                                    image_url: ChatImageUrl {
+                                        url: png_data_url(image.png_bytes()),
+                                    },
+                                },
+                            })
+                            .collect(),
+                    });
+                } else {
+                    messages.push(ChatMessage::Text {
+                        role: render_role(message.role()),
+                        content: message.content().as_text(),
+                    });
+                }
                 index += 1;
             }
             ModelInputItem::ToolCall(_) => {
@@ -129,11 +150,12 @@ mod tests {
     use super::*;
     use merry_core::{ToolCallResultStatus, ToolInputSchema, ToolName, ToolSpec};
     use merry_llm::{
-        GenerationConfig, ModelContent, ModelInputItem, ModelMessage, ModelName, ModelToolCall,
-        ModelToolCallId, ModelToolResult, ModelToolResultContent, ToolArguments,
+        GenerationConfig, ModelContent, ModelImage, ModelInputItem, ModelMessage, ModelName,
+        ModelToolCall, ModelToolCallId, ModelToolResult, ModelToolResultContent, ToolArguments,
     };
     use schemars::Schema;
     use serde_json::json;
+    use std::sync::Arc;
 
     #[test]
     fn renders_grouped_tool_history_and_parallel_controls() {
@@ -191,6 +213,42 @@ mod tests {
         assert_eq!(rendered["messages"][3]["tool_call_id"], "call-2");
         assert_eq!(rendered["messages"][4]["tool_call_id"], "call-1");
         assert_eq!(rendered["tools"][0]["function"]["strict"], true);
+    }
+
+    #[test]
+    fn renders_user_png_as_ordered_chat_image_url_content() {
+        let content = ModelContent::user_with_images(
+            "inspect [Image #1]",
+            vec![
+                ModelImage::png(
+                    "[Image #1]",
+                    Arc::<[u8]>::from([137, 80, 78, 71, 13, 10, 26, 10, 42]),
+                    1,
+                    1,
+                )
+                .expect("valid image"),
+            ],
+        )
+        .expect("valid image content");
+        let request = ModelRequest::new(
+            ModelName::new("gpt-chat-image-test").expect("valid model"),
+            vec![ModelMessage::new(ModelMessageRole::User, content).expect("valid user message")],
+            Vec::new(),
+            GenerationConfig::default(),
+        )
+        .expect("valid request");
+
+        let rendered = render_chat_request(&request).expect("request should render");
+
+        assert_eq!(
+            rendered["messages"][0]["content"],
+            json!([
+                {"type": "text", "text": "<image name=[Image #1]>"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgoq"}},
+                {"type": "text", "text": "</image>"},
+                {"type": "text", "text": "inspect [Image #1]"}
+            ])
+        );
     }
 
     fn call(id: &str, query: &str) -> ModelToolCall {

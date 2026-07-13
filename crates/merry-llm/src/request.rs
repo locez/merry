@@ -1,16 +1,18 @@
 //! Provider-neutral model requests.
 
+pub use crate::content::{ModelContent, ModelContentPart, ModelImage};
 use crate::{
     ModelCapabilities, ModelError,
+    content::validate_text,
     tool::{
         ModelToolBatchContinuation, ModelToolCall, ModelToolCallBatch, ModelToolContinuation,
         ModelToolResult, validate_provider_identifier,
     },
 };
 use merry_core::ToolSpec;
-use schemars::{JsonSchema, Schema, SchemaGenerator};
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
-use std::{borrow::Cow, fmt, str::FromStr};
+use schemars::{JsonSchema, Schema};
+use serde::{Deserialize, Deserializer, Serialize, de};
+use std::{fmt, str::FromStr};
 
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x100000001b3;
@@ -117,77 +119,6 @@ pub enum ModelMessageRole {
     Assistant,
 }
 
-/// Provider-neutral model input content.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ModelContent {
-    text: String,
-}
-
-impl ModelContent {
-    /// Creates validated text content.
-    pub fn text(text: &str) -> Result<Self, ModelError> {
-        validate_text("ModelContent text", text)?;
-        Ok(Self {
-            text: text.to_owned(),
-        })
-    }
-
-    /// Returns the text if this content is text.
-    #[must_use]
-    pub fn as_text(&self) -> &str {
-        &self.text
-    }
-}
-
-#[derive(Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum ModelContentRef<'a> {
-    Text { text: &'a str },
-}
-
-impl Serialize for ModelContent {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        ModelContentRef::Text {
-            text: self.as_text(),
-        }
-        .serialize(serializer)
-    }
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-enum ModelContentWire {
-    Text { text: String },
-}
-
-impl<'de> Deserialize<'de> for ModelContent {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        match ModelContentWire::deserialize(deserializer)? {
-            ModelContentWire::Text { text } => Self::text(&text).map_err(de::Error::custom),
-        }
-    }
-}
-
-impl JsonSchema for ModelContent {
-    fn schema_name() -> Cow<'static, str> {
-        "ModelContent".into()
-    }
-
-    fn schema_id() -> Cow<'static, str> {
-        concat!(module_path!(), "::ModelContent").into()
-    }
-
-    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
-        ModelContentWire::json_schema(generator)
-    }
-}
-
 /// Provider-neutral message in a compiled model input snapshot.
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -200,6 +131,11 @@ impl ModelMessage {
     /// Creates a validated model message.
     pub fn new(role: ModelMessageRole, content: ModelContent) -> Result<Self, ModelError> {
         validate_text("ModelMessage content", content.as_text())?;
+        if role != ModelMessageRole::User && content.has_images() {
+            return Err(ModelError::invalid_request(
+                "ModelMessage image content is allowed only for the user role",
+            ));
+        }
         Ok(Self { role, content })
     }
 
@@ -1119,14 +1055,4 @@ fn request_content_hash(chunks: Vec<String>) -> RequestContentHash {
     }
 
     RequestContentHash(format!("fnv1a64:{hash:016x}"))
-}
-
-fn validate_text(kind: &'static str, value: &str) -> Result<(), ModelError> {
-    if value.trim().is_empty() {
-        return Err(ModelError::invalid_request(format!(
-            "{kind} must not be blank"
-        )));
-    }
-
-    Ok(())
 }
