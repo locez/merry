@@ -3,7 +3,7 @@ use super::{
     queue::AcceptedQueuedInput,
     types::{InputReceipt, InputRecords, QueuedInputId},
 };
-use crate::UserMessageInput;
+use crate::{PlanApprovalInput, UserMessageInput};
 use merry_core::QueuedInputLane;
 use tokio::sync::oneshot;
 
@@ -45,6 +45,30 @@ pub(super) enum InteractiveCommand {
     },
     Interrupt {
         reason: InterruptReason,
+        ack_sender: oneshot::Sender<Result<(), InteractiveError>>,
+    },
+    EnterPlanMode {
+        reason: String,
+        ack_sender: oneshot::Sender<Result<(), InteractiveError>>,
+    },
+    ApprovePlan {
+        input: PlanApprovalInput,
+        ack_sender: oneshot::Sender<Result<(), InteractiveError>>,
+    },
+    RevisePlan {
+        reason: String,
+        ack_sender: oneshot::Sender<Result<(), InteractiveError>>,
+    },
+    PausePlanScheduling {
+        reason: String,
+        ack_sender: oneshot::Sender<Result<(), InteractiveError>>,
+    },
+    ResumePlanScheduling {
+        reason: String,
+        ack_sender: oneshot::Sender<Result<(), InteractiveError>>,
+    },
+    CancelPlan {
+        reason: String,
         ack_sender: oneshot::Sender<Result<(), InteractiveError>>,
     },
     Close {

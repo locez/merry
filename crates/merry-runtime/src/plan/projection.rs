@@ -55,3 +55,80 @@ pub(crate) fn coordinator_plan_control_message(snapshot: &PlanSnapshot) -> Strin
         serde_json::to_string(&projection).expect("validated plan projection serializes")
     )
 }
+
+#[derive(Serialize)]
+struct WorkerPlanProjection<'a> {
+    plan_id: &'a merry_core::PlanId,
+    revision: u64,
+    phase: PlanPhase,
+    node: &'a merry_core::PlanNodeSnapshot,
+    ancestor_path: Vec<&'a merry_core::PlanNodeSnapshot>,
+    dependency_results: Vec<&'a merry_core::PlanNodeSnapshot>,
+    attempt: &'a merry_core::PlanAttemptSnapshot,
+    lease: &'a merry_core::PlanLeaseSnapshot,
+    progress: Option<&'a merry_core::PlanAttemptProgressSnapshot>,
+    unresolved_directives: Vec<&'a merry_core::CoordinatorDirectiveSnapshot>,
+}
+
+pub(crate) fn worker_plan_control_message(
+    snapshot: &PlanSnapshot,
+    node_id: &merry_core::PlanNodeId,
+    attempt_id: &merry_core::PlanAttemptId,
+    lease_id: &merry_core::PlanLeaseId,
+) -> Option<String> {
+    let node = snapshot.nodes.iter().find(|node| &node.id == node_id)?;
+    let attempt = snapshot
+        .attempts
+        .iter()
+        .find(|attempt| &attempt.attempt_id == attempt_id)?;
+    let lease = snapshot
+        .leases
+        .iter()
+        .find(|lease| &lease.lease_id == lease_id)?;
+    let mut ancestor_path = Vec::new();
+    let mut parent_id = node.parent_id.as_ref();
+    while let Some(id) = parent_id {
+        let parent = snapshot.nodes.iter().find(|node| &node.id == id)?;
+        ancestor_path.push(parent);
+        parent_id = parent.parent_id.as_ref();
+    }
+    ancestor_path.reverse();
+    let dependency_results = node
+        .depends_on
+        .iter()
+        .filter_map(|id| snapshot.nodes.iter().find(|node| &node.id == id))
+        .collect();
+    let progress = snapshot
+        .attempt_progress
+        .iter()
+        .find(|progress| &progress.attempt_id == attempt_id);
+    let unresolved_directives = snapshot
+        .directives
+        .iter()
+        .filter(|directive| {
+            &directive.attempt_id == attempt_id
+                && !matches!(
+                    directive.status,
+                    merry_core::PlanDirectiveStatus::Applied
+                        | merry_core::PlanDirectiveStatus::Superseded
+                        | merry_core::PlanDirectiveStatus::Expired
+                )
+        })
+        .collect();
+    let projection = WorkerPlanProjection {
+        plan_id: &snapshot.plan_id,
+        revision: snapshot.revision,
+        phase: snapshot.phase,
+        node,
+        ancestor_path,
+        dependency_results,
+        attempt,
+        lease,
+        progress,
+        unresolved_directives,
+    };
+    Some(format!(
+        "<plan_worker_context>\n{}\n</plan_worker_context>",
+        serde_json::to_string(&projection).expect("validated worker plan projection serializes")
+    ))
+}

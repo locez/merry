@@ -112,9 +112,10 @@ pub use permission::{
     RequestedPathCapability, RuntimeTrustLevel, request_permissions_tool,
 };
 pub use plan::{
-    BeginPlanInput, BeginPlanOutput, ControlPlanAttemptInput, PlanChangeInput, PlanControllerError,
-    PlanDecompositionInput, PlanError, PlanExecutionIntent, PlanNodeInput, PlanNodeReferenceInput,
-    ReadPlanInput, ReportPlanAttemptInput, ReportPlanProgressInput, UpdatePlanInput,
+    BeginPlanInput, BeginPlanOutput, ControlPlanAttemptInput, PlanApprovalInput, PlanChangeInput,
+    PlanControllerError, PlanDecompositionInput, PlanError, PlanExecutionIntent, PlanNodeInput,
+    PlanNodeReferenceInput, PlanUpdateOutput, PlanWorkerControl, ReadPlanInput,
+    ReportPlanAttemptInput, ReportPlanProgressInput, UpdatePlanInput,
 };
 pub use process::{
     AcceptedLocalWorkspaceProcessAdmission, LocalWorkspaceProcessSandboxProfile,

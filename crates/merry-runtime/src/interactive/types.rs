@@ -1,4 +1,4 @@
-use crate::RuntimeError;
+use crate::{PlanControllerError, RuntimeError};
 use merry_core::QueuedInputLane;
 use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
@@ -90,4 +90,11 @@ pub enum InteractiveError {
         #[from]
         source: RuntimeError,
     },
+    #[error("plan control failed: {source}")]
+    Plan {
+        #[from]
+        source: PlanControllerError,
+    },
+    #[error("plan controls require an idle interactive boundary")]
+    PlanControlRequiresIdle,
 }

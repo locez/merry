@@ -1,7 +1,7 @@
 use futures_util::{StreamExt, stream};
 use merry_core::{
-    InteractiveRunState, ModelUsage, PendingToolCall, ProviderName, QueuedInputLane, RuntimeEvent,
-    SessionId, ToolInputSchema, ToolName, ToolSpec,
+    InteractiveRunState, ModelUsage, PendingToolCall, PlanActivationSource, ProviderName,
+    QueuedInputLane, RuntimeEvent, SessionId, ToolInputSchema, ToolName, ToolSpec,
 };
 use merry_llm::{
     FinishReason, GenerationConfig, ModelCapabilities, ModelError, ModelEvent, ModelEventStream,
@@ -11,7 +11,7 @@ use merry_llm::{
 };
 use merry_runtime::{
     AgentLoopConfig, AutomaticCompactionConfig, ChildRuntimeFactory, ChildRuntimeInput,
-    CitationCompactionPolicy, InteractivePrimaryModel, InteractiveSettingsUpdate,
+    CitationCompactionPolicy, InteractiveError, InteractivePrimaryModel, InteractiveSettingsUpdate,
     InteractiveSubagentSettings, InterruptReason, Runtime, StepContext, SubagentConfig,
     SubagentManager, ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome, ToolExecutor,
     ToolExecutorFuture, subagent_registered_tools,
@@ -355,6 +355,79 @@ async fn interactive_run_starts_waiting_for_input() {
         }
     ));
     assert!(provider.recorded_requests().is_empty());
+}
+
+#[tokio::test]
+async fn interactive_plan_mode_control_commits_and_streams_the_plan_snapshot() {
+    let runtime = Runtime::builder(session_id("interactive-enter-plan"))
+        .build()
+        .expect("runtime builds");
+    let run = runtime
+        .start_interactive_agent_run(
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default(),
+        )
+        .expect("interactive run starts");
+    let (mut stream, _input, control) = run.split();
+    let _ = stream.next().await.expect("waiting state");
+
+    control
+        .enter_plan_mode("user requested explicit planning")
+        .await
+        .expect("plan mode control succeeds");
+    let plan_event = timeout(Duration::from_secs(1), async {
+        loop {
+            let event = stream.next().await.expect("interactive event");
+            if matches!(event, RuntimeEvent::PlanUpdated { .. }) {
+                break event;
+            }
+        }
+    })
+    .await
+    .expect("plan event should be streamed");
+    let RuntimeEvent::PlanUpdated { snapshot, .. } = plan_event else {
+        unreachable!("matched plan event")
+    };
+    assert_eq!(snapshot.activation_source, PlanActivationSource::User);
+    assert_eq!(
+        runtime
+            .plan_snapshot()
+            .await
+            .expect("snapshot read succeeds")
+            .expect("plan exists"),
+        snapshot
+    );
+}
+
+#[tokio::test]
+async fn interactive_plan_controls_reject_while_the_main_model_phase_is_running() {
+    let (started_tx, started_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let provider = BlockingFirstProvider::new(started_tx, release_rx);
+    let runtime = Runtime::builder(session_id("interactive-plan-control-running"))
+        .model_provider(Arc::new(provider), model_name())
+        .build()
+        .expect("runtime builds");
+    let run = runtime
+        .start_interactive_agent_run(
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default(),
+        )
+        .expect("interactive run starts");
+    let (mut stream, input, control) = run.split();
+    let _ = stream.next().await.expect("waiting state");
+    input
+        .submit_next("start blocking work")
+        .await
+        .expect("queued");
+    started_rx.await.expect("provider request starts");
+
+    let error = control
+        .enter_plan_mode("must wait for the safe boundary")
+        .await
+        .expect_err("running model phase rejects plan control");
+    assert!(matches!(error, InteractiveError::PlanControlRequiresIdle));
+    release_tx.send(()).expect("provider release succeeds");
 }
 
 #[tokio::test]

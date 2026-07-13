@@ -1,20 +1,35 @@
+pub(crate) mod control;
 mod controller;
 mod domain;
+pub(crate) mod execution;
 pub(crate) mod projection;
 mod protocol;
+pub(crate) mod recovery;
+mod scheduler;
 pub(crate) mod tools;
 mod validation;
+mod worker;
 
 pub use controller::PlanControllerError;
 pub(crate) use controller::{PlanController, PlanControllerEventReceiver};
 pub use domain::PlanError;
 pub(crate) use domain::{PersistedPlanState, PlanState};
-pub(crate) use protocol::PlanUpdateOutput;
+pub use protocol::PlanUpdateOutput;
 pub use protocol::{
-    BeginPlanInput, BeginPlanOutput, ControlPlanAttemptInput, PlanChangeInput,
+    BeginPlanInput, BeginPlanOutput, ControlPlanAttemptInput, PlanApprovalInput, PlanChangeInput,
     PlanDecompositionInput, PlanExecutionIntent, PlanNodeInput, PlanNodeReferenceInput,
     ReadPlanInput, ReportPlanAttemptInput, ReportPlanProgressInput, UpdatePlanInput,
 };
+pub(crate) use protocol::{PlanAttemptToolOutput, PlanProgressToolOutput};
+pub(crate) use scheduler::PlanScheduler;
+pub use worker::PlanWorkerControl;
+
+pub(crate) fn unix_time_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or_default()
+}
 
 #[cfg(test)]
 mod tests;

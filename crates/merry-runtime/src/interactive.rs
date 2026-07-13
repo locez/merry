@@ -17,8 +17,10 @@ use crate::{
 use futures_util::StreamExt;
 use merry_core::{
     InteractiveRunState, PendingToolCall, QueuedInputLane, RuntimeEvent, RuntimeJournalEvent,
+    RuntimeJournalPayload,
 };
 use merry_llm::GenerationConfig;
+use std::collections::BTreeSet;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
@@ -45,10 +47,12 @@ impl Runtime {
         let run_id = next_interactive_run_id();
         let (event_sender, event_receiver) = mpsc::channel(16);
         let (command_sender, command_receiver) = mpsc::channel(16);
+        let plan_event_receiver = self.subscribe_plan_events();
         let producer = InteractiveProducer {
             runtime: self.clone(),
             queue: InteractiveInputQueue::default(),
             command_receiver,
+            plan_event_receiver,
             event_sender,
             loop_token: producer_token,
             generation_config,
@@ -57,6 +61,7 @@ impl Runtime {
             suspended_resume_requested: false,
             phase_token: None,
             interrupted: false,
+            seen_plan_sequences: BTreeSet::new(),
         };
         let producer_handle = tokio::spawn(async move {
             producer.run().await;
@@ -78,6 +83,7 @@ struct InteractiveProducer {
     runtime: Runtime,
     queue: InteractiveInputQueue,
     command_receiver: mpsc::Receiver<InteractiveCommand>,
+    plan_event_receiver: crate::plan::PlanControllerEventReceiver,
     event_sender: mpsc::Sender<RuntimeEvent>,
     loop_token: CancellationToken,
     generation_config: GenerationConfig,
@@ -86,6 +92,7 @@ struct InteractiveProducer {
     suspended_resume_requested: bool,
     phase_token: Option<CancellationToken>,
     interrupted: bool,
+    seen_plan_sequences: BTreeSet<u64>,
 }
 
 impl InteractiveProducer {
@@ -95,7 +102,16 @@ impl InteractiveProducer {
         }
 
         while !self.loop_token.is_cancelled() {
-            let Some(command) = self.command_receiver.recv().await else {
+            let command = tokio::select! {
+                command = self.command_receiver.recv() => command,
+                plan_event = self.plan_event_receiver.recv() => {
+                    if !self.forward_plan_event(plan_event).await {
+                        return;
+                    }
+                    continue;
+                }
+            };
+            let Some(command) = command else {
                 break;
             };
 
@@ -318,6 +334,11 @@ impl InteractiveProducer {
                         .handle_command(command, CommandHandlingMode::Running)
                         .await?;
                 }
+                plan_event = self.plan_event_receiver.recv() => {
+                    if !self.forward_plan_event(plan_event).await {
+                        return None;
+                    }
+                }
             }
         }
     }
@@ -385,6 +406,11 @@ impl InteractiveProducer {
                         continue;
                     };
                     self.handle_command(command, CommandHandlingMode::Running).await?;
+                }
+                plan_event = self.plan_event_receiver.recv() => {
+                    if !self.forward_plan_event(plan_event).await {
+                        return None;
+                    }
                 }
             }
         };
@@ -458,6 +484,11 @@ impl InteractiveProducer {
                     };
                     self.handle_command(command, CommandHandlingMode::Running).await?;
                 }
+                plan_event = self.plan_event_receiver.recv() => {
+                    if !self.forward_plan_event(plan_event).await {
+                        return None;
+                    }
+                }
             }
         };
         self.phase_token = None;
@@ -500,7 +531,7 @@ impl InteractiveProducer {
         }
     }
 
-    async fn send_runtime_events(&self, events: Vec<RuntimeJournalEvent>) -> bool {
+    async fn send_runtime_events(&mut self, events: Vec<RuntimeJournalEvent>) -> bool {
         let mut projector = RuntimeEventProjector::new();
         for event in events {
             if !self
@@ -514,15 +545,43 @@ impl InteractiveProducer {
     }
 
     async fn project_and_send_runtime_event(
-        &self,
+        &mut self,
         projector: &mut RuntimeEventProjector,
         event: RuntimeJournalEvent,
     ) -> bool {
+        if is_plan_payload(&event.payload) {
+            if !self.seen_plan_sequences.insert(event.sequence) {
+                return true;
+            }
+            if self.seen_plan_sequences.len() > 256
+                && let Some(oldest) = self.seen_plan_sequences.first().copied()
+            {
+                self.seen_plan_sequences.remove(&oldest);
+            }
+        }
         let projected = projector.project(event, &self.runtime).await;
         let Ok(Some(event)) = projected else {
             return true;
         };
         self.event_sender.send(event).await.is_ok()
+    }
+
+    async fn forward_plan_event(
+        &mut self,
+        event: Result<RuntimeJournalEvent, tokio::sync::broadcast::error::RecvError>,
+    ) -> bool {
+        match event {
+            Ok(event) => {
+                let mut projector = RuntimeEventProjector::new();
+                self.project_and_send_runtime_event(&mut projector, event)
+                    .await
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                tracing::debug!(skipped, "interactive plan event receiver lagged");
+                true
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => true,
+        }
     }
 
     async fn drain_ready_commands(&mut self) -> bool {
@@ -714,6 +773,72 @@ impl InteractiveProducer {
                     Some(CommandDecision::Continue)
                 }
             }
+            InteractiveCommand::EnterPlanMode { reason, ack_sender } => {
+                let result = if mode == CommandHandlingMode::Waiting {
+                    self.runtime.enter_plan_mode(&reason).await.map(|_| ())
+                } else {
+                    let _ = ack_sender.send(Err(InteractiveError::PlanControlRequiresIdle));
+                    return Some(CommandDecision::Continue);
+                };
+                let _ = ack_sender.send(result.map_err(InteractiveError::from));
+                Some(CommandDecision::Continue)
+            }
+            InteractiveCommand::ApprovePlan { input, ack_sender } => {
+                let result = if mode == CommandHandlingMode::Waiting {
+                    self.runtime.approve_plan(input).await.map(|_| ())
+                } else {
+                    let _ = ack_sender.send(Err(InteractiveError::PlanControlRequiresIdle));
+                    return Some(CommandDecision::Continue);
+                };
+                let _ = ack_sender.send(result.map_err(InteractiveError::from));
+                Some(CommandDecision::Continue)
+            }
+            InteractiveCommand::RevisePlan { reason, ack_sender } => {
+                let result = if mode == CommandHandlingMode::Waiting {
+                    self.runtime.revise_plan(&reason).await.map(|_| ())
+                } else {
+                    let _ = ack_sender.send(Err(InteractiveError::PlanControlRequiresIdle));
+                    return Some(CommandDecision::Continue);
+                };
+                let _ = ack_sender.send(result.map_err(InteractiveError::from));
+                Some(CommandDecision::Continue)
+            }
+            InteractiveCommand::PausePlanScheduling { reason, ack_sender } => {
+                let result = if mode == CommandHandlingMode::Waiting {
+                    self.runtime
+                        .pause_plan_scheduling(&reason)
+                        .await
+                        .map(|_| ())
+                } else {
+                    let _ = ack_sender.send(Err(InteractiveError::PlanControlRequiresIdle));
+                    return Some(CommandDecision::Continue);
+                };
+                let _ = ack_sender.send(result.map_err(InteractiveError::from));
+                Some(CommandDecision::Continue)
+            }
+            InteractiveCommand::ResumePlanScheduling { reason, ack_sender } => {
+                let result = if mode == CommandHandlingMode::Waiting {
+                    self.runtime
+                        .resume_plan_scheduling(&reason)
+                        .await
+                        .map(|_| ())
+                } else {
+                    let _ = ack_sender.send(Err(InteractiveError::PlanControlRequiresIdle));
+                    return Some(CommandDecision::Continue);
+                };
+                let _ = ack_sender.send(result.map_err(InteractiveError::from));
+                Some(CommandDecision::Continue)
+            }
+            InteractiveCommand::CancelPlan { reason, ack_sender } => {
+                let result = if mode == CommandHandlingMode::Waiting {
+                    self.runtime.cancel_plan(&reason).await.map(|_| ())
+                } else {
+                    let _ = ack_sender.send(Err(InteractiveError::PlanControlRequiresIdle));
+                    return Some(CommandDecision::Continue);
+                };
+                let _ = ack_sender.send(result.map_err(InteractiveError::from));
+                Some(CommandDecision::Continue)
+            }
             InteractiveCommand::Close { ack_sender } => {
                 let _ = ack_sender.send(Ok(()));
                 if mode == CommandHandlingMode::Running {
@@ -762,4 +887,19 @@ impl InteractiveProducer {
             .await
             .is_ok()
     }
+}
+
+fn is_plan_payload(payload: &RuntimeJournalPayload) -> bool {
+    matches!(
+        payload,
+        RuntimeJournalPayload::PlanUpdated { .. }
+            | RuntimeJournalPayload::PlanPhaseChanged { .. }
+            | RuntimeJournalPayload::PlanNodeReady { .. }
+            | RuntimeJournalPayload::PlanLeaseStarted { .. }
+            | RuntimeJournalPayload::PlanProgressUpdated { .. }
+            | RuntimeJournalPayload::PlanProgressReviewRequested { .. }
+            | RuntimeJournalPayload::PlanAttemptProgressReported { .. }
+            | RuntimeJournalPayload::PlanDirectiveUpdated { .. }
+            | RuntimeJournalPayload::PlanAttemptFinished { .. }
+    )
 }

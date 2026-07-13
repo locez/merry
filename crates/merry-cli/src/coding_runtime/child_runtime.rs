@@ -76,6 +76,9 @@ impl ChildRuntimeFactory for CodingLoopChildRuntimeFactory {
         let mut builder = Runtime::builder(input.session_id)
             .task_anchor(input.task_anchor)
             .model_provider(Arc::clone(&self.provider), self.model.clone());
+        if let Some(control) = input.plan_worker_control {
+            builder = builder.plan_worker_control(control);
+        }
         if let Some(project_rules) = self.project_rules.clone() {
             builder = builder.project_rules(project_rules);
         }

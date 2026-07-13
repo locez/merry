@@ -1,13 +1,18 @@
 use crate::{
     FileSessionStore,
     plan::{
-        BeginPlanInput, PlanController, PlanControllerError,
-        controller::PlanControllerEventReceiver,
+        BeginPlanInput, PlanChangeInput, PlanController, PlanControllerError, PlanExecutionIntent,
+        PlanNodeInput, ReportPlanAttemptInput, UpdatePlanInput,
+        controller::PlanControllerEventReceiver, execution::PlanAttemptActor,
     },
     session::SessionState,
     session_store::SessionStoreCommitPause,
 };
-use merry_core::{PlanPhase, RuntimeJournalPayload, SessionId};
+use merry_core::{
+    PlanAttemptOutcome, PlanCapabilityEnvelopeSnapshot, PlanExecutorPolicy, PlanHarnessSnapshot,
+    PlanNodeResult, PlanNodeStatus, PlanPhase, PlanRecoveryPolicySnapshot, RuntimeJournalPayload,
+    SessionId,
+};
 use std::{num::NonZeroUsize, sync::Arc};
 use tokio::sync::Mutex;
 
@@ -96,4 +101,144 @@ async fn plan_event_waits_for_directory_durability() {
         events.recv().await.expect("durable plan event").payload,
         RuntimeJournalPayload::PlanUpdated { .. }
     ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn concurrent_attempt_reports_are_serialized_without_lost_updates() {
+    let (controller, _events) = controller(None);
+    controller
+        .begin(input("concurrent execution"))
+        .await
+        .expect("begin succeeds");
+    let update = controller
+        .update(UpdatePlanInput {
+            reason: "define parallel leaves".to_owned(),
+            execution_intent: PlanExecutionIntent::ContinuePlanning,
+            coordinator_node_id: None,
+            max_concurrency_hint: Some(2),
+            change: PlanChangeInput::DefinePlan {
+                expected_plan_revision: 0,
+                root: plan_root(vec![plan_leaf("left"), plan_leaf("right")]),
+            },
+        })
+        .await
+        .expect("plan update succeeds");
+    controller
+        .authorize_execution(
+            PlanCapabilityEnvelopeSnapshot::default(),
+            vec!["test authorization".to_owned()],
+        )
+        .await
+        .expect("execution authorization succeeds");
+    let left_actor = PlanAttemptActor {
+        executor_session_id: SessionId::new("worker-left").unwrap(),
+    };
+    let right_actor = PlanAttemptActor {
+        executor_session_id: SessionId::new("worker-right").unwrap(),
+    };
+    let left = controller
+        .start_attempt(
+            update.client_key_ids["left"].clone(),
+            left_actor.clone(),
+            10,
+        )
+        .await
+        .expect("left starts")
+        .output;
+    let right = controller
+        .start_attempt(
+            update.client_key_ids["right"].clone(),
+            right_actor.clone(),
+            10,
+        )
+        .await
+        .expect("right starts")
+        .output;
+
+    let (left_report, right_report) = tokio::join!(
+        controller.attempt_report(
+            left_actor,
+            completed_report(&left.lease, "left complete"),
+            20,
+        ),
+        controller.attempt_report(
+            right_actor,
+            completed_report(&right.lease, "right complete"),
+            20,
+        ),
+    );
+    left_report.expect("left report commits");
+    right_report.expect("right report commits");
+
+    let snapshot = controller.snapshot().await.unwrap().unwrap();
+    for key in ["left", "right"] {
+        assert_eq!(
+            snapshot
+                .nodes
+                .iter()
+                .find(|node| node.id == update.client_key_ids[key])
+                .expect("parallel node exists")
+                .status,
+            PlanNodeStatus::Completed
+        );
+    }
+    assert_eq!(
+        snapshot
+            .attempts
+            .iter()
+            .filter(|attempt| attempt.outcome.is_some())
+            .count(),
+        2
+    );
+}
+
+fn plan_leaf(client_key: &str) -> PlanNodeInput {
+    PlanNodeInput {
+        id: None,
+        client_key: Some(client_key.to_owned()),
+        objective: format!("Complete {client_key}"),
+        acceptance: vec![format!("{client_key} verified")],
+        executor_policy: PlanExecutorPolicy::Delegate,
+        harness: PlanHarnessSnapshot::default(),
+        recovery_policy: PlanRecoveryPolicySnapshot::default(),
+        depends_on: Vec::new(),
+        children: Vec::new(),
+    }
+}
+
+fn plan_root(children: Vec<PlanNodeInput>) -> PlanNodeInput {
+    PlanNodeInput {
+        id: None,
+        client_key: Some("root".to_owned()),
+        objective: "Complete all work".to_owned(),
+        acceptance: vec!["all leaves verified".to_owned()],
+        executor_policy: PlanExecutorPolicy::Local,
+        harness: PlanHarnessSnapshot::default(),
+        recovery_policy: PlanRecoveryPolicySnapshot::default(),
+        depends_on: Vec::new(),
+        children,
+    }
+}
+
+fn completed_report(
+    lease: &merry_core::PlanLeaseSnapshot,
+    conclusion: &str,
+) -> ReportPlanAttemptInput {
+    ReportPlanAttemptInput {
+        lease_id: lease.lease_id.clone(),
+        expected_node_revision: lease.node_revision,
+        outcome: PlanAttemptOutcome::Completed,
+        result: Some(PlanNodeResult {
+            conclusion: conclusion.to_owned(),
+            evidence_refs: Vec::new(),
+            artifact_refs: Vec::new(),
+            changed_paths: Vec::new(),
+            verification: vec!["test verification".to_owned()],
+            open_questions: Vec::new(),
+        }),
+        diagnostic: None,
+        decomposition: None,
+        acknowledged_directive_ids: Vec::new(),
+        applied_directive_ids: Vec::new(),
+    }
 }

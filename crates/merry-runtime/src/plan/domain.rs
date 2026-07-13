@@ -108,13 +108,70 @@ pub enum PlanError {
     InvalidConcurrencyHint { maximum: usize },
     #[error("persisted plan id counters must be non-zero")]
     InvalidPersistedCounters,
+    #[error("plan has no root node")]
+    EmptyPlan,
+    #[error("plan approval requirement {requirement_id} has no valid runtime resolution")]
+    UnresolvedApprovalRequirement {
+        requirement_id: merry_core::PlanApprovalRequirementId,
+    },
+    #[error("live plan leases prevent {operation}")]
+    LiveLeasesPreventControl { operation: &'static str },
+    #[error("node {node_id} is not ready for execution")]
+    NodeNotReady { node_id: PlanNodeId },
+    #[error("node {node_id} already has a live lease")]
+    LiveLeaseExists { node_id: PlanNodeId },
+    #[error("plan lease {lease_id} was not found")]
+    UnknownLease { lease_id: merry_core::PlanLeaseId },
+    #[error("plan lease {lease_id} is not live")]
+    LeaseNotLive { lease_id: merry_core::PlanLeaseId },
+    #[error("plan attempt {attempt_id} was not found")]
+    UnknownAttempt {
+        attempt_id: merry_core::PlanAttemptId,
+    },
+    #[error("plan attempt {attempt_id} belongs to another executor session")]
+    AttemptOwnershipMismatch {
+        attempt_id: merry_core::PlanAttemptId,
+    },
+    #[error("plan attempt {attempt_id} is already resolved")]
+    AttemptAlreadyResolved {
+        attempt_id: merry_core::PlanAttemptId,
+    },
+    #[error("attempt lease node revision is stale: expected {expected}, actual {actual}")]
+    AttemptNodeRevisionMismatch { expected: u64, actual: u64 },
+    #[error("attempt outcome {outcome:?} has an invalid result/decomposition contract")]
+    InvalidAttemptOutcome {
+        outcome: merry_core::PlanAttemptOutcome,
+    },
+    #[error("attempt decomposition must contain at least one direct child")]
+    EmptyDecomposition,
+    #[error("attempt decomposition children must be direct leaves")]
+    NestedDecomposition,
+    #[error("directive {directive_id} was not found for the current attempt")]
+    UnknownDirective {
+        directive_id: merry_core::PlanDirectiveId,
+    },
+    #[error("directive {directive_id} cannot transition from {status:?} to {target}")]
+    InvalidDirectiveTransition {
+        directive_id: merry_core::PlanDirectiveId,
+        status: merry_core::PlanDirectiveStatus,
+        target: &'static str,
+    },
+    #[error("directive target attempt or lease is stale")]
+    StaleDirectiveTarget,
+    #[error("plan result references missing artifact {artifact_id}")]
+    MissingArtifactRef { artifact_id: merry_core::ArtifactId },
+    #[error("plan result references invalid evidence in artifact {artifact_id}")]
+    InvalidEvidenceRef { artifact_id: merry_core::ArtifactId },
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct PlanState {
-    snapshot: PlanSnapshot,
-    next_node_sequence: u64,
-    next_approval_sequence: u64,
+    pub(super) snapshot: PlanSnapshot,
+    pub(super) next_node_sequence: u64,
+    pub(super) next_approval_sequence: u64,
+    pub(super) next_attempt_sequence: u64,
+    pub(super) next_lease_sequence: u64,
+    pub(super) next_directive_sequence: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,6 +180,16 @@ pub(crate) struct PersistedPlanState {
     snapshot: PlanSnapshot,
     next_node_sequence: u64,
     next_approval_sequence: u64,
+    #[serde(default = "one")]
+    next_attempt_sequence: u64,
+    #[serde(default = "one")]
+    next_lease_sequence: u64,
+    #[serde(default = "one")]
+    next_directive_sequence: u64,
+}
+
+const fn one() -> u64 {
+    1
 }
 
 impl PlanState {
@@ -155,6 +222,9 @@ impl PlanState {
             },
             next_node_sequence: 1,
             next_approval_sequence: 1,
+            next_attempt_sequence: 1,
+            next_lease_sequence: 1,
+            next_directive_sequence: 1,
         }
     }
 
@@ -166,16 +236,101 @@ impl PlanState {
         self.snapshot.nodes.iter().find(|node| &node.id == node_id)
     }
 
+    pub(super) fn add_decomposition_children(
+        &mut self,
+        parent_id: &PlanNodeId,
+        children: Vec<PlanNodeInput>,
+        revision: u64,
+    ) -> Result<BTreeMap<String, PlanNodeId>, PlanError> {
+        if children.is_empty() {
+            return Err(PlanError::EmptyDecomposition);
+        }
+        if children.len() > validation::MAX_DIRECT_CHILDREN {
+            return Err(PlanError::TooManyChildren {
+                node_id: parent_id.clone(),
+                actual: children.len(),
+                maximum: validation::MAX_DIRECT_CHILDREN,
+            });
+        }
+        let existing = self
+            .snapshot
+            .nodes
+            .iter()
+            .map(|node| (node.id.clone(), node.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let parent = existing
+            .get(parent_id)
+            .ok_or_else(|| PlanError::UnknownNode {
+                node_id: parent_id.clone(),
+            })?;
+        if parent.status != PlanNodeStatus::InProgress {
+            return Err(PlanError::NodeNotMutable {
+                node_id: parent_id.clone(),
+                status: parent.status,
+            });
+        }
+        let existing_child_count = existing
+            .values()
+            .filter(|node| {
+                node.parent_id.as_ref() == Some(parent_id)
+                    && node.status != PlanNodeStatus::Superseded
+            })
+            .count();
+        let mut builder = TreeBuilder::new(self.next_node_sequence, revision, &existing);
+        for (offset, child) in children.into_iter().enumerate() {
+            if !child.children.is_empty() {
+                return Err(PlanError::NestedDecomposition);
+            }
+            builder.flatten(
+                child,
+                Some(parent_id.clone()),
+                (existing_child_count + offset) as u16,
+                depth_of(&existing, parent_id) + 1,
+            )?;
+        }
+        let (new_nodes, client_key_ids, next_node_sequence, unresolved) = builder.finish();
+        let mut combined = existing;
+        combined.extend(new_nodes);
+        let live_ids = combined
+            .values()
+            .filter(|node| node.status != PlanNodeStatus::Superseded)
+            .map(|node| node.id.clone())
+            .collect::<BTreeSet<_>>();
+        resolve_all_dependencies(&mut combined, unresolved, &client_key_ids, &live_ids)?;
+        let root_id = self
+            .snapshot
+            .root_node_id
+            .as_ref()
+            .ok_or(PlanError::RootMissing)?;
+        validation::validate_graph(&combined, root_id)?;
+        validation::validate_authorized_envelope(
+            &combined,
+            root_id,
+            self.snapshot.authorized_capability_envelope.as_ref(),
+        )?;
+        self.snapshot.nodes = ordered_nodes(combined);
+        self.next_node_sequence = next_node_sequence;
+        Ok(client_key_ids)
+    }
+
     pub(crate) fn persisted(&self) -> PersistedPlanState {
         PersistedPlanState {
             snapshot: self.snapshot.clone(),
             next_node_sequence: self.next_node_sequence,
             next_approval_sequence: self.next_approval_sequence,
+            next_attempt_sequence: self.next_attempt_sequence,
+            next_lease_sequence: self.next_lease_sequence,
+            next_directive_sequence: self.next_directive_sequence,
         }
     }
 
     pub(crate) fn from_persisted(persisted: PersistedPlanState) -> Result<Self, PlanError> {
-        if persisted.next_node_sequence == 0 || persisted.next_approval_sequence == 0 {
+        if persisted.next_node_sequence == 0
+            || persisted.next_approval_sequence == 0
+            || persisted.next_attempt_sequence == 0
+            || persisted.next_lease_sequence == 0
+            || persisted.next_directive_sequence == 0
+        {
             return Err(PlanError::InvalidPersistedCounters);
         }
         match persisted.snapshot.root_node_id.as_ref() {
@@ -201,6 +356,9 @@ impl PlanState {
             snapshot: persisted.snapshot,
             next_node_sequence: persisted.next_node_sequence,
             next_approval_sequence: persisted.next_approval_sequence,
+            next_attempt_sequence: persisted.next_attempt_sequence,
+            next_lease_sequence: persisted.next_lease_sequence,
+            next_directive_sequence: persisted.next_directive_sequence,
         })
     }
 
