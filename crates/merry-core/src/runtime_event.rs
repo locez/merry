@@ -1,7 +1,9 @@
 //! Public runtime event contract for SDK/UI consumers.
 
 use crate::{
-    ArtifactRef, ErrorInfo, EvidenceRef, PendingToolCall, PendingToolCallBatch, SessionId,
+    ArtifactRef, CoordinatorDirectiveSnapshot, ErrorInfo, EvidenceRef, PendingToolCall,
+    PendingToolCallBatch, PlanAttemptId, PlanAttemptProgressSnapshot, PlanAttemptSnapshot, PlanId,
+    PlanLeaseSnapshot, PlanNodeId, PlanPhase, PlanRevisionSummary, PlanSnapshot, SessionId,
     SessionUsage, SubagentId, SubagentTaskId, ToolCallId, ToolCallResult,
 };
 use schemars::JsonSchema;
@@ -143,6 +145,57 @@ pub enum RuntimeEvent {
         agent_id: SubagentId,
         task_id: SubagentTaskId,
         diagnostic: ErrorInfo,
+        source: RuntimeEventSource,
+    },
+    /// A complete bounded plan snapshot was durably committed.
+    PlanUpdated {
+        snapshot: PlanSnapshot,
+        summary: PlanRevisionSummary,
+        source: RuntimeEventSource,
+    },
+    /// The active plan changed lifecycle phase.
+    PlanPhaseChanged {
+        plan_id: PlanId,
+        phase: PlanPhase,
+        source: RuntimeEventSource,
+    },
+    /// A plan node became dependency- and policy-ready.
+    PlanNodeReady {
+        plan_id: PlanId,
+        node_id: PlanNodeId,
+        node_revision: u64,
+        source: RuntimeEventSource,
+    },
+    /// The scheduler durably reserved an execution lease.
+    PlanLeaseStarted {
+        lease: PlanLeaseSnapshot,
+        source: RuntimeEventSource,
+    },
+    /// Runtime-recorded liveness or activity progress changed.
+    PlanProgressUpdated {
+        progress: PlanAttemptProgressSnapshot,
+        source: RuntimeEventSource,
+    },
+    /// Runtime policy requested semantic coordinator review of progress.
+    PlanProgressReviewRequested {
+        plan_id: PlanId,
+        attempt_id: PlanAttemptId,
+        reason: String,
+        source: RuntimeEventSource,
+    },
+    /// A worker or local executor durably reported semantic progress.
+    PlanAttemptProgressReported {
+        progress: PlanAttemptProgressSnapshot,
+        source: RuntimeEventSource,
+    },
+    /// A coordinator directive changed persisted lifecycle state.
+    PlanDirectiveUpdated {
+        directive: CoordinatorDirectiveSnapshot,
+        source: RuntimeEventSource,
+    },
+    /// One plan attempt reached a typed terminal outcome.
+    PlanAttemptFinished {
+        attempt: PlanAttemptSnapshot,
         source: RuntimeEventSource,
     },
     /// The runtime failed.
