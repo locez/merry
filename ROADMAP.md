@@ -1,6 +1,6 @@
 # Merry Roadmap
 
-**Updated:** 2026-07-10
+**Updated:** 2026-07-13
 
 ## Product Goal
 
@@ -29,7 +29,7 @@ Acceptance is offline by default and must include:
 cargo fmt --all --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all
-uv run --with pytest python -m pytest tests -q
+(cd sdks/python && uv run --with pytest python -m pytest tests -q)
 ```
 
 ## Delivered
@@ -47,6 +47,9 @@ uv run --with pytest python -m pytest tests -q
 - Explicit `ParallelSafe` and `Exclusive` tool execution contracts.
 - Bounded parallel-safe waves, exclusive barriers, ordered continuation
   results, bridge-call matching, and cancellation handling.
+- Durable recursive plans with runtime-owned revisions, approvals, attempts,
+  leases, directives, retry/recovery policy, scoped concurrent workers, lazy
+  subtree expansion, exact result artifacts, and crash-safe resume.
 
 ### Providers
 
@@ -68,6 +71,9 @@ uv run --with pytest python -m pytest tests -q
   inner bubblewrap process runner.
 - One chronological TUI timeline, real streaming deltas, compact tool rows,
   on-demand detail, responsive layouts, queues, completion, and resume picker.
+- A responsive Plan cockpit with recursive navigation, node inspection,
+  approval preview, steering and scheduler controls, and preserved selection
+  across live updates at 50x20, 80x24, and 140x40.
 - Magenta identity balanced with cyan tool information, green success, yellow
   warning/permission, red failure, white primary text, and gray metadata.
 - Rust facade builders for OpenAI-compatible and Anthropic providers.

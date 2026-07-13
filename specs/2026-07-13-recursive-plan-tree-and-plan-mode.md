@@ -1669,7 +1669,7 @@ Render-buffer acceptance must cover at least 50x20, 80x24, and 140x40.
 cargo fmt --all --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all
-uv run --with pytest python -m pytest tests -q
+(cd sdks/python && uv run --with pytest python -m pytest tests -q)
 ```
 
 ## Implementation Order Constraint
