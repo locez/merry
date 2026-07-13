@@ -1,5 +1,6 @@
 use super::{
-    ModelTurnId, ModelTurnStatus, PreparedCompactionInstall, PromptHistoryProjection, SessionState,
+    ModelTurnId, ModelTurnStatus, PreparedCompactionInstall, PreparedPlanToolCommit,
+    PromptHistoryProjection, SessionState,
     checkpoint_window::ArchivedRefManifest,
     transcript::{
         PersistedTranscript, PersistedTranscriptV1, ToolCallPromptProjection,
@@ -18,12 +19,14 @@ use crate::{
     judgment::{JudgmentRegistry, PersistedJudgmentRegistry},
     ledger::{PersistedLedgerEntry, TaskLedger},
     memory::MemoryStore,
+    plan::{PersistedPlanState, PlanState},
     summary_draft_promotion::{
         PersistedSummaryDraftPromotionRegistry, SummaryDraftPromotionRegistry,
     },
 };
 use merry_core::{
-    ArtifactId, ArtifactKind, ArtifactRef, EvidenceRef, SessionId, SessionUsage, ToolCallId,
+    ArtifactId, ArtifactKind, ArtifactRef, EvidenceRef, PendingToolCall, PlanSnapshot, SessionId,
+    SessionUsage, ToolCallId,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -32,7 +35,8 @@ use std::{
 };
 
 const LEGACY_SESSION_STATE_FORMAT_VERSION: u32 = 1;
-const SESSION_STATE_FORMAT_VERSION: u32 = 2;
+const PRE_PLAN_SESSION_STATE_FORMAT_VERSION: u32 = 2;
+const SESSION_STATE_FORMAT_VERSION: u32 = 3;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct StoredSessionDocumentHeader {
@@ -60,10 +64,15 @@ struct StoredSessionDocument<T> {
     usage: Option<SessionUsage>,
     task_anchor: Option<StoredTaskAnchor>,
     registries: StoredRegistries,
+    #[serde(default)]
+    active_plan: Option<PersistedPlanState>,
+    #[serde(default)]
+    terminal_plans: Vec<PlanSnapshot>,
 }
 
 type StoredSessionDocumentV1 = StoredSessionDocument<PersistedTranscriptV1>;
 type StoredSessionDocumentV2 = StoredSessionDocument<PersistedTranscript>;
+type StoredSessionDocumentV3 = StoredSessionDocument<PersistedTranscript>;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -119,6 +128,21 @@ pub(crate) struct PersistableSessionBundle {
     pub(crate) document_bytes: Vec<u8>,
 }
 
+struct PersistableSessionView<'a> {
+    transcript: &'a Transcript,
+    prompt_history_projection: PromptHistoryProjection,
+    compacted_checkpoint: Option<&'a CompactedCheckpoint>,
+    archived_ref_manifest: &'a ArchivedRefManifest,
+    next_sequence: u64,
+    session_started: bool,
+    ledger: &'a TaskLedger,
+    artifacts: &'a ArtifactRegistry,
+    pending_tool_calls: &'a [PendingToolCall],
+    resolved_tool_calls: &'a BTreeSet<ToolCallId>,
+    active_plan: Option<&'a PlanState>,
+    terminal_plans: &'a [PlanSnapshot],
+}
+
 impl SessionState {
     #[allow(dead_code)]
     pub(crate) async fn save_to(&self, store: &FileSessionStore) -> Result<(), SessionStoreError> {
@@ -134,7 +158,9 @@ impl SessionState {
         let header: StoredSessionDocumentHeader = serde_json::from_slice(&bytes)?;
         if !matches!(
             header.format_version,
-            LEGACY_SESSION_STATE_FORMAT_VERSION | SESSION_STATE_FORMAT_VERSION
+            LEGACY_SESSION_STATE_FORMAT_VERSION
+                | PRE_PLAN_SESSION_STATE_FORMAT_VERSION
+                | SESSION_STATE_FORMAT_VERSION
         ) {
             return Err(SessionStoreError::UnsupportedFormatVersion {
                 actual: header.format_version,
@@ -152,63 +178,124 @@ impl SessionState {
                 let document: StoredSessionDocumentV1 = serde_json::from_slice(&bytes)?;
                 Self::from_stored_document_v1(document)
             }
-            SESSION_STATE_FORMAT_VERSION => {
+            PRE_PLAN_SESSION_STATE_FORMAT_VERSION => {
                 let document: StoredSessionDocumentV2 = serde_json::from_slice(&bytes)?;
-                Self::from_stored_document(document)
+                Self::from_stored_document(document, PRE_PLAN_SESSION_STATE_FORMAT_VERSION)
+            }
+            SESSION_STATE_FORMAT_VERSION => {
+                let document: StoredSessionDocumentV3 = serde_json::from_slice(&bytes)?;
+                Self::from_stored_document(document, SESSION_STATE_FORMAT_VERSION)
             }
             _ => unreachable!("supported session format version checked before body decode"),
         }
     }
 
     pub(crate) fn persistable_bundle(&self) -> Result<PersistableSessionBundle, SessionStoreError> {
-        self.persistable_bundle_for(
-            &self.transcript,
-            self.prompt_history_projection,
-            self.compacted_checkpoint.as_ref(),
-            &self.archived_ref_manifest,
-        )
+        self.persistable_bundle_for(PersistableSessionView {
+            transcript: &self.transcript,
+            prompt_history_projection: self.prompt_history_projection,
+            compacted_checkpoint: self.compacted_checkpoint.as_ref(),
+            archived_ref_manifest: &self.archived_ref_manifest,
+            next_sequence: self.next_sequence,
+            session_started: self.session_started,
+            ledger: &self.ledger,
+            artifacts: &self.artifacts,
+            pending_tool_calls: &self.pending_tool_calls,
+            resolved_tool_calls: &self.resolved_tool_calls,
+            active_plan: self.active_plan.as_ref(),
+            terminal_plans: &self.terminal_plans,
+        })
     }
 
     pub(crate) fn persistable_bundle_with_compaction(
         &self,
         prepared: &PreparedCompactionInstall,
     ) -> Result<PersistableSessionBundle, SessionStoreError> {
-        self.persistable_bundle_for(
-            prepared.transcript(),
-            prepared.prompt_history_projection(),
-            prepared.compacted_checkpoint(),
-            prepared.archived_ref_manifest(),
-        )
+        self.persistable_bundle_for(PersistableSessionView {
+            transcript: prepared.transcript(),
+            prompt_history_projection: prepared.prompt_history_projection(),
+            compacted_checkpoint: prepared.compacted_checkpoint(),
+            archived_ref_manifest: prepared.archived_ref_manifest(),
+            next_sequence: self.next_sequence,
+            session_started: self.session_started,
+            ledger: &self.ledger,
+            artifacts: &self.artifacts,
+            pending_tool_calls: &self.pending_tool_calls,
+            resolved_tool_calls: &self.resolved_tool_calls,
+            active_plan: self.active_plan.as_ref(),
+            terminal_plans: &self.terminal_plans,
+        })
+    }
+
+    pub(crate) fn persistable_bundle_with_plan_candidate(
+        &self,
+        active_plan: Option<&PlanState>,
+        terminal_plans: &[PlanSnapshot],
+        next_sequence: u64,
+    ) -> Result<PersistableSessionBundle, SessionStoreError> {
+        self.persistable_bundle_for(PersistableSessionView {
+            transcript: &self.transcript,
+            prompt_history_projection: self.prompt_history_projection,
+            compacted_checkpoint: self.compacted_checkpoint.as_ref(),
+            archived_ref_manifest: &self.archived_ref_manifest,
+            next_sequence,
+            session_started: self.session_started,
+            ledger: &self.ledger,
+            artifacts: &self.artifacts,
+            pending_tool_calls: &self.pending_tool_calls,
+            resolved_tool_calls: &self.resolved_tool_calls,
+            active_plan,
+            terminal_plans,
+        })
+    }
+
+    pub(crate) fn persistable_bundle_with_plan_tool_commit(
+        &self,
+        prepared: &PreparedPlanToolCommit,
+    ) -> Result<PersistableSessionBundle, SessionStoreError> {
+        self.persistable_bundle_for(PersistableSessionView {
+            transcript: prepared.transcript(),
+            prompt_history_projection: self.prompt_history_projection,
+            compacted_checkpoint: self.compacted_checkpoint.as_ref(),
+            archived_ref_manifest: &self.archived_ref_manifest,
+            next_sequence: prepared.next_sequence(),
+            session_started: prepared.session_started(),
+            ledger: prepared.ledger(),
+            artifacts: prepared.artifacts(),
+            pending_tool_calls: prepared.pending_tool_calls(),
+            resolved_tool_calls: prepared.resolved_tool_calls(),
+            active_plan: Some(prepared.active_plan()),
+            terminal_plans: prepared.terminal_plans(),
+        })
     }
 
     fn persistable_bundle_for(
         &self,
-        transcript: &Transcript,
-        prompt_history_projection: PromptHistoryProjection,
-        compacted_checkpoint: Option<&CompactedCheckpoint>,
-        archived_ref_manifest: &ArchivedRefManifest,
+        view: PersistableSessionView<'_>,
     ) -> Result<PersistableSessionBundle, SessionStoreError> {
-        if !self.pending_tool_calls.is_empty() {
+        if !view.pending_tool_calls.is_empty() {
             return Err(SessionStoreError::UnsafePendingToolCalls {
                 session_id: self.session_id.clone(),
-                pending_count: self.pending_tool_calls.len(),
+                pending_count: view.pending_tool_calls.len(),
             });
         }
         self.validate_persisted_transcript_for(
-            transcript,
-            prompt_history_projection,
-            compacted_checkpoint,
+            view.transcript,
+            view.prompt_history_projection,
+            view.compacted_checkpoint,
+            view.artifacts,
+            view.resolved_tool_calls,
         )?;
-        self.validate_persisted_context_entries_with_checkpoint(compacted_checkpoint)?;
-        self.validate_persisted_checkpoint_evidence_for(compacted_checkpoint)?;
+        self.validate_persisted_context_entries_with_checkpoint(view.compacted_checkpoint)?;
+        self.validate_persisted_checkpoint_evidence_for(view.compacted_checkpoint)?;
         self.validate_archived_ref_manifest_for(
-            transcript,
-            prompt_history_projection,
-            archived_ref_manifest,
+            view.transcript,
+            view.prompt_history_projection,
+            view.archived_ref_manifest,
         )
         .map_err(runtime_error_to_invalid_document)?;
 
-        let artifacts = self
+        let artifacts = view
             .artifacts
             .persisted_records()
             .into_iter()
@@ -218,24 +305,27 @@ impl SessionState {
         let document = StoredSessionDocument {
             format_version: SESSION_STATE_FORMAT_VERSION,
             session_id: self.session_id.clone(),
-            next_sequence: self.next_sequence,
-            session_started: self.session_started,
-            ledger: self.ledger.persisted_entries(),
+            next_sequence: view.next_sequence,
+            session_started: view.session_started,
+            ledger: view.ledger.persisted_entries(),
             artifacts,
-            compacted_checkpoint: compacted_checkpoint.map(CompactedCheckpoint::persisted),
-            archived_ref_manifest: archived_ref_manifest
+            compacted_checkpoint: view
+                .compacted_checkpoint
+                .map(CompactedCheckpoint::persisted),
+            archived_ref_manifest: view
+                .archived_ref_manifest
                 .refs()
                 .iter()
                 .map(StoredArchivedRef::from)
                 .collect(),
-            prompt_history_projection: Some(prompt_history_projection),
+            prompt_history_projection: Some(view.prompt_history_projection),
             context_entries: self
                 .context_entries
                 .iter()
                 .map(StoredContextEntry::from)
                 .collect(),
-            transcript: transcript.persisted(),
-            resolved_tool_calls: self.resolved_tool_calls.iter().cloned().collect(),
+            transcript: view.transcript.persisted(),
+            resolved_tool_calls: view.resolved_tool_calls.iter().cloned().collect(),
             usage: self.usage.clone(),
             task_anchor: self.task_anchor.as_ref().map(|anchor| StoredTaskAnchor {
                 objective: anchor.objective().to_owned(),
@@ -245,6 +335,8 @@ impl SessionState {
                 summary_draft_promotions: self.summary_draft_promotions.persisted(),
                 action_audits: self.action_audits.persisted(),
             },
+            active_plan: view.active_plan.map(PlanState::persisted),
+            terminal_plans: view.terminal_plans.to_vec(),
         };
         let document_bytes = serde_json::to_vec_pretty(&document)?;
         Ok(PersistableSessionBundle {
@@ -263,8 +355,11 @@ impl SessionState {
         }
     }
 
-    fn from_stored_document(document: StoredSessionDocumentV2) -> Result<Self, SessionStoreError> {
-        if document.format_version != SESSION_STATE_FORMAT_VERSION {
+    fn from_stored_document(
+        document: StoredSessionDocumentV3,
+        expected_format_version: u32,
+    ) -> Result<Self, SessionStoreError> {
+        if document.format_version != expected_format_version {
             return Err(SessionStoreError::UnsupportedFormatVersion {
                 actual: document.format_version,
             });
@@ -302,6 +397,11 @@ impl SessionState {
         )
         .map_err(|_| invalid_document("stored archived ref manifest is invalid"))?;
 
+        let active_plan = document
+            .active_plan
+            .map(PlanState::from_persisted)
+            .transpose()
+            .map_err(|_| invalid_document("stored active plan is invalid"))?;
         let artifacts = document
             .artifacts
             .into_iter()
@@ -335,6 +435,8 @@ impl SessionState {
             )
             .map_err(|_| invalid_document("stored summary draft promotion registry is invalid"))?,
             action_audits: ActionAuditRegistry::from_persisted(document.registries.action_audits),
+            active_plan,
+            terminal_plans: document.terminal_plans,
             transcript: Transcript::from_persisted(document.transcript)
                 .map_err(runtime_error_to_invalid_document)?,
             pending_tool_calls: Vec::new(),
@@ -356,6 +458,8 @@ impl SessionState {
             &session.transcript,
             session.prompt_history_projection,
             session.compacted_checkpoint.as_ref(),
+            &session.artifacts,
+            &session.resolved_tool_calls,
         )?;
         session.validate_persisted_context_entries_with_checkpoint(
             session.compacted_checkpoint.as_ref(),
@@ -398,6 +502,8 @@ impl SessionState {
             usage,
             task_anchor,
             registries,
+            active_plan: _,
+            terminal_plans: _,
         } = document;
 
         let artifacts = artifacts
@@ -423,27 +529,32 @@ impl SessionState {
                 }
             })?;
 
-        Self::from_stored_document(StoredSessionDocument {
-            format_version: SESSION_STATE_FORMAT_VERSION,
-            session_id,
-            next_sequence,
-            session_started,
-            ledger,
-            artifacts: artifacts
-                .persisted_records()
-                .into_iter()
-                .map(StoredArtifact::from)
-                .collect(),
-            compacted_checkpoint: None,
-            archived_ref_manifest: Vec::new(),
-            prompt_history_projection: Some(PromptHistoryProjection::default()),
-            context_entries,
-            transcript: transcript.persisted(),
-            resolved_tool_calls,
-            usage,
-            task_anchor,
-            registries,
-        })
+        Self::from_stored_document(
+            StoredSessionDocument {
+                format_version: SESSION_STATE_FORMAT_VERSION,
+                session_id,
+                next_sequence,
+                session_started,
+                ledger,
+                artifacts: artifacts
+                    .persisted_records()
+                    .into_iter()
+                    .map(StoredArtifact::from)
+                    .collect(),
+                compacted_checkpoint: None,
+                archived_ref_manifest: Vec::new(),
+                prompt_history_projection: Some(PromptHistoryProjection::default()),
+                context_entries,
+                transcript: transcript.persisted(),
+                resolved_tool_calls,
+                usage,
+                task_anchor,
+                registries,
+                active_plan: None,
+                terminal_plans: Vec::new(),
+            },
+            SESSION_STATE_FORMAT_VERSION,
+        )
     }
 
     fn validate_persisted_context_entries_with_checkpoint(
@@ -478,6 +589,8 @@ impl SessionState {
         transcript: &Transcript,
         prompt_history_projection: PromptHistoryProjection,
         compacted_checkpoint: Option<&CompactedCheckpoint>,
+        artifacts: &ArtifactRegistry,
+        resolved_tool_calls: &BTreeSet<ToolCallId>,
     ) -> Result<(), SessionStoreError> {
         transcript
             .model_turns()
@@ -490,12 +603,10 @@ impl SessionState {
         let mut results_by_turn =
             BTreeMap::<ModelTurnId, BTreeMap<ToolCallId, ToolResultPromptProjection>>::new();
         let validate_text_artifact = |artifact_id: &ArtifactId| -> Result<(), SessionStoreError> {
-            let artifact = self
-                .artifacts
+            let artifact = artifacts
                 .read_ref(artifact_id)
                 .map_err(|_| invalid_document("stored transcript artifact is missing"))?;
-            let content = self
-                .artifacts
+            let content = artifacts
                 .read_content(artifact_id)
                 .map_err(|_| invalid_document("stored transcript artifact is missing"))?;
             if artifact.kind() != &ArtifactKind::Text || content.as_text().is_none() {
@@ -507,10 +618,10 @@ impl SessionState {
         };
         let validate_user_image_artifact =
             |artifact_id: &ArtifactId| -> Result<UserImageInput, SessionStoreError> {
-                let artifact = self.artifacts.read_ref(artifact_id).map_err(|_| {
+                let artifact = artifacts.read_ref(artifact_id).map_err(|_| {
                     invalid_document("stored user image transcript artifact is missing")
                 })?;
-                let content = self.artifacts.read_content(artifact_id).map_err(|_| {
+                let content = artifacts.read_content(artifact_id).map_err(|_| {
                     invalid_document("stored user image transcript artifact is missing")
                 })?;
                 if artifact.kind() != &ArtifactKind::Image {
@@ -563,8 +674,7 @@ impl SessionState {
                         ));
                     }
                     validate_text_artifact(artifact_id)?;
-                    let text = self
-                        .artifacts
+                    let text = artifacts
                         .read_content(artifact_id)
                         .expect("validated user text artifact remains readable")
                         .as_text()
@@ -614,10 +724,10 @@ impl SessionState {
                             "stored transcript tool result identity is inconsistent",
                         ));
                     }
-                    let artifact = self.artifacts.read_ref(artifact_id).map_err(|_| {
+                    let artifact = artifacts.read_ref(artifact_id).map_err(|_| {
                         invalid_document("stored transcript tool result artifact is missing")
                     })?;
-                    let content = self.artifacts.read_content(artifact_id).map_err(|_| {
+                    let content = artifacts.read_content(artifact_id).map_err(|_| {
                         invalid_document("stored transcript tool result artifact is missing")
                     })?;
                     if artifact != result.artifact()
@@ -628,7 +738,7 @@ impl SessionState {
                             "stored transcript tool result artifact is inconsistent",
                         ));
                     }
-                    if !self.resolved_tool_calls.contains(call_id) {
+                    if !resolved_tool_calls.contains(call_id) {
                         return Err(invalid_document(
                             "stored transcript tool result is not marked resolved",
                         ));

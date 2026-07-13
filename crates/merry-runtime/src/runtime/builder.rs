@@ -9,6 +9,7 @@ use crate::{
     memory::{MemoryActivationSource, StoredMemoryActivationSource},
     model_config::RuntimeModelConfigs,
     permission::{PermissionAdmissionSource, PermissionReviewMode, RuntimeTrustLevel},
+    plan::{PlanController, tools::coordinator_plan_registered_tools},
     process::{PermissionedProcessRunnerFactory, StaticPermissionedProcessRunnerFactory},
     session::SessionState,
     subagent::SubagentManager,
@@ -94,6 +95,7 @@ pub struct RuntimeBuilder {
     capabilities: RuntimeCapabilities,
     progress_commentary: bool,
     registered_tools: Vec<RegisteredTool>,
+    coordinator_plan_tools: bool,
     initial_context_summaries: BTreeMap<String, String>,
     skill_catalog: Option<SkillCatalog>,
     project_rules: Option<ProjectRules>,
@@ -129,6 +131,7 @@ impl RuntimeBuilder {
             capabilities: RuntimeCapabilities::default(),
             progress_commentary: false,
             registered_tools: Vec::new(),
+            coordinator_plan_tools: false,
             initial_context_summaries: BTreeMap::new(),
             skill_catalog: None,
             project_rules: None,
@@ -251,6 +254,13 @@ impl RuntimeBuilder {
     #[must_use]
     pub fn register_tool(mut self, tool: RegisteredTool) -> Self {
         self.registered_tools.push(tool);
+        self
+    }
+
+    /// Installs the complete stable coordinator plan-control tool surface.
+    #[must_use]
+    pub fn coordinator_plan_tools(mut self) -> Self {
+        self.coordinator_plan_tools = true;
         self
     }
 
@@ -556,6 +566,10 @@ impl RuntimeBuilder {
     /// Duplicate tool names are rejected before the runtime is constructed.
     pub fn build(self) -> Result<Runtime, RuntimeError> {
         let mut registered_tools = self.registered_tools;
+        if self.coordinator_plan_tools {
+            registered_tools
+                .extend(coordinator_plan_registered_tools().map_err(RuntimeError::from)?);
+        }
         if self.automatic_compaction.is_enabled() {
             registered_tools.push(merry_read_checkpoint_ref_tool().map_err(RuntimeError::from)?);
         }
@@ -630,10 +644,17 @@ impl RuntimeBuilder {
             session.set_task_anchor(task_anchor);
         }
 
+        let session = Arc::new(Mutex::new(session));
+        let (plan_controller, _plan_events) = PlanController::start(
+            Arc::clone(&session),
+            self.session_store.clone(),
+            self.event_buffer_size,
+        );
+
         Ok(Runtime {
             inner: Arc::new(RuntimeInner {
                 session_id: self.session_id.clone(),
-                session: Mutex::new(session),
+                session,
                 active_step: Arc::new(AtomicBool::new(false)),
                 memory_projection_epoch: AtomicU64::new(0),
                 event_buffer_size: self.event_buffer_size,
@@ -656,6 +677,7 @@ impl RuntimeBuilder {
                 permission_admission_source: self.permission_admission_source,
                 permissioned_process_runner_factory: self.permissioned_process_runner_factory,
                 subagent_manager: self.subagent_manager,
+                plan_controller,
                 session_store: self.session_store,
             }),
         })

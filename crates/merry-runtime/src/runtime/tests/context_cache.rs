@@ -241,3 +241,44 @@ async fn primary_and_compaction_streams_use_the_runtime_session_as_prompt_cache_
         "runtime-primary-compaction-cache-key"
     );
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn coordinator_tool_specs_and_stable_prefix_stay_fixed_across_plan_activation() {
+    let provider = RecordingModelProvider::new();
+    let runtime = Runtime::builder(session_id("runtime-plan-tool-cache-stability"))
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .coordinator_plan_tools()
+        .build()
+        .expect("runtime should build");
+
+    collect_step(&runtime, "request before planning", StepContext::default()).await;
+    runtime
+        .begin_plan(crate::BeginPlanInput {
+            reason: "coordinate a recursive task".to_owned(),
+            governing_skill_id: None,
+        })
+        .await
+        .expect("plan activation succeeds");
+    collect_step(&runtime, "request during planning", StepContext::default()).await;
+
+    let requests = provider.recorded_requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].tools(), requests[1].tools());
+    assert_eq!(
+        requests[0].stable_prefix_hash(),
+        requests[1].stable_prefix_hash()
+    );
+    assert_ne!(
+        requests[0].dynamic_context_hash(),
+        requests[1].dynamic_context_hash()
+    );
+    for name in crate::plan::tools::COORDINATOR_PLAN_TOOL_NAMES {
+        assert!(
+            requests[0]
+                .tools()
+                .iter()
+                .any(|tool| tool.name().as_str() == name),
+            "missing stable plan tool {name}"
+        );
+    }
+}

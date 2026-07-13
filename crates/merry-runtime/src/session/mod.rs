@@ -7,10 +7,11 @@ use crate::{
     judgment::JudgmentRegistry,
     ledger::TaskLedger,
     memory::{ActivatedMemory, MemoryStore},
+    plan::PlanState,
     skill::SkillCatalog,
     summary_draft_promotion::SummaryDraftPromotionRegistry,
 };
-use merry_core::{PendingToolCall, SessionId, ToolCallId};
+use merry_core::{PendingToolCall, PlanSnapshot, SessionId, ToolCallId};
 use std::collections::BTreeSet;
 
 mod artifacts;
@@ -22,6 +23,7 @@ mod judgments;
 mod messages;
 mod model_turns;
 mod persistence;
+mod plan_tool_commit;
 mod recording;
 mod tool_calls;
 mod tool_result;
@@ -32,6 +34,8 @@ pub(crate) use self::checkpoint_window::PreparedCompactionInstall;
 pub(crate) use self::{
     artifacts::is_runtime_reserved_artifact_id,
     model_turns::{ModelTurn, ModelTurnId, ModelTurnStatus, PromptHistoryProjection},
+    persistence::PersistableSessionBundle,
+    plan_tool_commit::PreparedPlanToolCommit,
     tool_result::{ProposedToolExecutionOutcome, ToolResultLedgerObservation},
     transcript::{Transcript, TranscriptItemSnapshot, UserInputOrigin},
 };
@@ -60,6 +64,8 @@ pub(crate) struct SessionState {
     judgments: JudgmentRegistry,
     summary_draft_promotions: SummaryDraftPromotionRegistry,
     action_audits: ActionAuditRegistry,
+    active_plan: Option<PlanState>,
+    terminal_plans: Vec<PlanSnapshot>,
     transcript: Transcript,
     pending_tool_calls: Vec<PendingToolCall>,
     resolved_tool_calls: BTreeSet<ToolCallId>,
@@ -86,6 +92,8 @@ impl SessionState {
             judgments: JudgmentRegistry::default(),
             summary_draft_promotions: SummaryDraftPromotionRegistry::default(),
             action_audits: ActionAuditRegistry::default(),
+            active_plan: None,
+            terminal_plans: Vec::new(),
             transcript: Transcript::new(),
             pending_tool_calls: Vec::new(),
             resolved_tool_calls: BTreeSet::new(),
@@ -95,6 +103,30 @@ impl SessionState {
 
     pub(crate) fn ledger_projection(&self) -> crate::ledger::LedgerProjectionSnapshot {
         self.ledger.project()
+    }
+
+    pub(crate) fn active_plan(&self) -> Option<&PlanState> {
+        self.active_plan.as_ref()
+    }
+
+    pub(crate) fn set_active_plan(&mut self, plan: PlanState) {
+        self.active_plan = Some(plan);
+    }
+
+    pub(crate) fn take_active_plan(&mut self) -> Option<PlanState> {
+        self.active_plan.take()
+    }
+
+    pub(crate) fn terminal_plans(&self) -> &[PlanSnapshot] {
+        &self.terminal_plans
+    }
+
+    pub(crate) fn push_terminal_plan(&mut self, snapshot: PlanSnapshot) {
+        const MAX_TERMINAL_PLANS: usize = 8;
+        if self.terminal_plans.len() == MAX_TERMINAL_PLANS {
+            self.terminal_plans.remove(0);
+        }
+        self.terminal_plans.push(snapshot);
     }
 
     #[cfg(test)]

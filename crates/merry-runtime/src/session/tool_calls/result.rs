@@ -195,7 +195,7 @@ impl SessionState {
         super::super::artifacts::tool_result_id(self.next_sequence())
     }
 
-    pub(super) fn tool_result_artifact_kind(
+    pub(crate) fn tool_result_artifact_kind(
         &self,
         content: &ArtifactContent,
     ) -> Result<ArtifactKind, RuntimeError> {
