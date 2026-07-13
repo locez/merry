@@ -1,7 +1,7 @@
 use super::{
     input::{DraftImage, TuiSubmission},
     keymap::KeyAction,
-    layout::{BottomPaneHeights, timeline_layout},
+    layout::{BottomPaneHeights, cockpit_layout},
     overlay::{OverlayKeyResult, PaletteCommand},
     preferences::{TuiPreferences, TuiPreferencesStore, TuiSettingsDefaults},
     projector::TuiProjector,
@@ -32,6 +32,7 @@ use tokio_util::sync::CancellationToken;
 
 const TIMELINE_SCROLL_STEP: usize = 5;
 const FOCUS_SCROLL_STEP: usize = 5;
+const PLAN_SCROLL_STEP: usize = 5;
 
 struct ModelDiscoveryCompletion {
     generation: u64,
@@ -83,6 +84,13 @@ pub(crate) enum ControllerEffect {
         model: String,
     },
     SelectProviderFormModel(String),
+    EnterPlanMode,
+    ApprovePlan,
+    RevisePlan,
+    PausePlan,
+    ResumePlan,
+    RetryPlanNode(merry_core::PlanNodeId),
+    CancelPlan,
     Quit,
 }
 
@@ -240,6 +248,10 @@ pub(crate) fn handle_key_event(key: KeyEvent, state: &mut TuiState) -> Controlle
                 state.open_shortcuts();
                 ControllerEffect::None
             }
+            OverlayKeyResult::ConfirmPlanApproval => {
+                state.close_overlay();
+                ControllerEffect::ApprovePlan
+            }
             OverlayKeyResult::Provider(action) => provider_overlay_effect(action),
         };
     }
@@ -264,6 +276,21 @@ pub(crate) fn handle_key_event(key: KeyEvent, state: &mut TuiState) -> Controlle
             }
             _ => {}
         }
+    }
+
+    if state.plan().is_focused() {
+        if super::plan_controller::handle_navigation_key(key, state) {
+            return ControllerEffect::None;
+        }
+        if let Some(action) = state.keymap().action_for(key.into())
+            && matches!(
+                action,
+                KeyAction::OpenCommandPanel | KeyAction::Interrupt | KeyAction::Quit
+            )
+        {
+            return handle_key_action(action, state);
+        }
+        return ControllerEffect::None;
     }
 
     if let Some(action) = state.keymap().action_for(key.into()) {
@@ -332,6 +359,9 @@ pub(crate) fn handle_paste_event(text: &str, state: &mut TuiState) {
 }
 
 fn run_palette_command(command: PaletteCommand, state: &mut TuiState) -> ControllerEffect {
+    if let Some(effect) = super::plan_controller::palette_effect(command, state) {
+        return effect;
+    }
     match command {
         PaletteCommand::OpenSettings => {
             state.close_overlay();
@@ -371,6 +401,16 @@ fn run_palette_command(command: PaletteCommand, state: &mut TuiState) -> Control
             state.close_overlay();
             handle_key_action(KeyAction::DiscardSuspended, state)
         }
+        PaletteCommand::EnterPlanMode
+        | PaletteCommand::ApprovePlan
+        | PaletteCommand::RevisePlan
+        | PaletteCommand::OpenPlan
+        | PaletteCommand::FocusPlan
+        | PaletteCommand::ClosePlan
+        | PaletteCommand::PausePlan
+        | PaletteCommand::ResumePlan
+        | PaletteCommand::RetryPlanNode
+        | PaletteCommand::CancelPlan => unreachable!("plan command handled above"),
         PaletteCommand::Quit => {
             state.close_overlay();
             ControllerEffect::Quit
@@ -386,7 +426,13 @@ pub(crate) fn handle_mouse_scroll_up(
     if state.overlay().is_some() {
         return;
     }
-    if position_in_focus_pane(position, terminal_size, state) {
+    if position_in_plan_pane(position, terminal_size, state) {
+        if state.plan().is_inspector_open() {
+            state.plan_mut().scroll_inspector_up_by(PLAN_SCROLL_STEP);
+        } else {
+            state.plan_mut().scroll_up_by(PLAN_SCROLL_STEP);
+        }
+    } else if position_in_focus_pane(position, terminal_size, state) {
         state.scroll_focus_up_by(FOCUS_SCROLL_STEP);
     } else {
         state.scroll_timeline_up_by(TIMELINE_SCROLL_STEP);
@@ -401,7 +447,13 @@ pub(crate) fn handle_mouse_scroll_down(
     if state.overlay().is_some() {
         return;
     }
-    if position_in_focus_pane(position, terminal_size, state) {
+    if position_in_plan_pane(position, terminal_size, state) {
+        if state.plan().is_inspector_open() {
+            state.plan_mut().scroll_inspector_down_by(PLAN_SCROLL_STEP);
+        } else {
+            state.plan_mut().scroll_down_by(PLAN_SCROLL_STEP);
+        }
+    } else if position_in_focus_pane(position, terminal_size, state) {
         state.scroll_focus_down_by(FOCUS_SCROLL_STEP);
     } else {
         state.scroll_timeline_down_by(TIMELINE_SCROLL_STEP);
@@ -409,9 +461,21 @@ pub(crate) fn handle_mouse_scroll_down(
 }
 
 fn position_in_focus_pane(position: Position, terminal_size: Size, state: &TuiState) -> bool {
+    cockpit_rects(terminal_size, state)
+        .detail
+        .is_some_and(|detail| detail.contains(position))
+}
+
+fn position_in_plan_pane(position: Position, terminal_size: Size, state: &TuiState) -> bool {
+    cockpit_rects(terminal_size, state)
+        .plan
+        .is_some_and(|plan| plan.contains(position))
+}
+
+fn cockpit_rects(terminal_size: Size, state: &TuiState) -> super::layout::TimelineRects {
     let area = Rect::new(0, 0, terminal_size.width, terminal_size.height);
     let pane_heights = render::pane_heights_for_area(state, area);
-    let rects = timeline_layout(
+    cockpit_layout(
         area,
         BottomPaneHeights {
             queue: pane_heights.queue,
@@ -420,8 +484,9 @@ fn position_in_focus_pane(position: Position, terminal_size: Size, state: &TuiSt
             status: render::STATUS_HEIGHT,
         },
         state.is_artifact_reviewing(),
-    );
-    rects.detail.is_some_and(|detail| detail.contains(position))
+        state.plan().is_open(),
+        state.plan().is_focused(),
+    )
 }
 
 pub(crate) async fn run_controller(
@@ -529,6 +594,11 @@ async fn dispatch_effect(
     providers: &mut ProviderController<'_>,
     clipboard_image_tx: &mpsc::Sender<ClipboardImageCompletion>,
 ) -> Result<bool, CliError> {
+    if let Some(should_quit) =
+        super::plan_controller::dispatch_effect(&effect, session, state).await
+    {
+        return Ok(should_quit);
+    }
     match effect {
         ControllerEffect::None => Ok(false),
         ControllerEffect::SubmitNext(submission) => {
@@ -938,6 +1008,13 @@ async fn dispatch_effect(
             }
             Ok(false)
         }
+        ControllerEffect::EnterPlanMode
+        | ControllerEffect::ApprovePlan
+        | ControllerEffect::RevisePlan
+        | ControllerEffect::PausePlan
+        | ControllerEffect::ResumePlan
+        | ControllerEffect::RetryPlanNode(_)
+        | ControllerEffect::CancelPlan => unreachable!("plan effect handled above"),
         ControllerEffect::Quit => {
             session.set_title(state.latest_user_input_title());
             session.control.close().await.map_err(unexpected)?;

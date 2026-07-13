@@ -506,6 +506,7 @@ fn plan_error_code(error: &PlanError) -> &'static str {
         PlanError::LiveLeasesPreventControl { .. } => "plan_live_leases_prevent_control",
         PlanError::NodeNotReady { .. } => "plan_node_not_ready",
         PlanError::LiveLeaseExists { .. } => "plan_live_lease_exists",
+        PlanError::InterruptedRetryUnavailable { .. } => "plan_interrupted_retry_unavailable",
         PlanError::UnknownLease { .. } => "plan_lease_not_found",
         PlanError::LeaseNotLive { .. } => "plan_lease_not_live",
         PlanError::UnknownAttempt { .. } => "plan_attempt_not_found",

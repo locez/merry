@@ -890,6 +890,23 @@ impl InteractiveProducer {
                 let _ = ack_sender.send(result.map_err(InteractiveError::from));
                 Some(CommandDecision::Continue)
             }
+            InteractiveCommand::RetryInterruptedPlanNode {
+                node_id,
+                reason,
+                ack_sender,
+            } => {
+                let result = if mode == CommandHandlingMode::Waiting {
+                    self.runtime
+                        .retry_interrupted_plan_node(node_id, &reason)
+                        .await
+                        .map(|_| ())
+                } else {
+                    let _ = ack_sender.send(Err(InteractiveError::PlanControlRequiresIdle));
+                    return Some(CommandDecision::Continue);
+                };
+                let _ = ack_sender.send(result.map_err(InteractiveError::from));
+                Some(CommandDecision::Continue)
+            }
             InteractiveCommand::CancelPlan { reason, ack_sender } => {
                 let result = if mode == CommandHandlingMode::Waiting {
                     self.runtime.cancel_plan(&reason).await.map(|_| ())

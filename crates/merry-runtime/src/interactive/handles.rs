@@ -5,7 +5,7 @@ use super::{
 };
 use crate::{PlanApprovalInput, UserMessageInput};
 use futures_core::Stream;
-use merry_core::{QueuedInputLane, RuntimeEvent};
+use merry_core::{PlanNodeId, QueuedInputLane, RuntimeEvent};
 use std::{
     pin::Pin,
     task::{Context, Poll},
@@ -523,6 +523,29 @@ impl AgentLoopControl {
         let (ack_sender, ack_receiver) = oneshot::channel();
         self.command_sender
             .send(InteractiveCommand::CancelPlan {
+                reason: reason.to_owned(),
+                ack_sender,
+            })
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?;
+        ack_receiver
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?
+    }
+
+    pub async fn retry_interrupted_plan_node(
+        &self,
+        node_id: PlanNodeId,
+        reason: &str,
+    ) -> Result<(), InteractiveError> {
+        let (ack_sender, ack_receiver) = oneshot::channel();
+        self.command_sender
+            .send(InteractiveCommand::RetryInterruptedPlanNode {
+                node_id,
                 reason: reason.to_owned(),
                 ack_sender,
             })

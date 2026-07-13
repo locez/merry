@@ -4,7 +4,7 @@ use super::{
     types::{InputReceipt, InputRecords, QueuedInputId},
 };
 use crate::{PlanApprovalInput, UserMessageInput};
-use merry_core::QueuedInputLane;
+use merry_core::{PlanNodeId, QueuedInputLane};
 use tokio::sync::oneshot;
 
 pub(super) enum InteractiveCommand {
@@ -64,6 +64,11 @@ pub(super) enum InteractiveCommand {
         ack_sender: oneshot::Sender<Result<(), InteractiveError>>,
     },
     ResumePlanScheduling {
+        reason: String,
+        ack_sender: oneshot::Sender<Result<(), InteractiveError>>,
+    },
+    RetryInterruptedPlanNode {
+        node_id: PlanNodeId,
         reason: String,
         ack_sender: oneshot::Sender<Result<(), InteractiveError>>,
     },

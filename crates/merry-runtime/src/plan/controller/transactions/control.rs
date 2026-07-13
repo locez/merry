@@ -145,6 +145,9 @@ pub(crate) async fn control_plan(
             PlanControlRequest::Pause(reason) => candidate.pause_scheduling(&reason)?,
             PlanControlRequest::Resume(reason) => candidate.resume_scheduling(&reason)?,
             PlanControlRequest::Revise(reason) => candidate.revise(&reason)?,
+            PlanControlRequest::RetryInterrupted { node_id, reason } => {
+                candidate.retry_interrupted_node(&node_id, &reason)?
+            }
             PlanControlRequest::Cancel(reason) => candidate.request_cancellation(&reason)?,
         };
         let mut payloads = vec![plan_updated_payload(&output.snapshot)];

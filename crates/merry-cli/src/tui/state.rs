@@ -2,7 +2,11 @@ use super::{
     completion::{CompletionMenu, CompletionSources},
     input::{DraftImage, InputHistory, TextInput, TuiSubmission},
     keymap::Keymap,
-    overlay::{MessageDialogKind, MessageDialogOverlay, Overlay, SettingsOverlay, ShortcutsBack},
+    overlay::{
+        MessageDialogKind, MessageDialogOverlay, Overlay, PlanPaletteContext, SettingsOverlay,
+        ShortcutsBack,
+    },
+    plan::PlanUiState,
     preferences::{TuiPreferences, TuiSettingsDefaults},
     provider_overlay::{
         ModelListItem, ModelPickerOverlay, ProviderFormOverlay, ProviderFormSeed,
@@ -207,6 +211,7 @@ pub(crate) struct TuiState {
     provider_form_back: Option<ProviderFormOverlay>,
     preferences: TuiPreferences,
     settings_defaults: TuiSettingsDefaults,
+    plan: PlanUiState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -257,7 +262,16 @@ impl TuiState {
             provider_form_back: None,
             preferences: TuiPreferences::default(),
             settings_defaults: TuiSettingsDefaults::default(),
+            plan: PlanUiState::default(),
         }
+    }
+
+    pub(crate) fn plan(&self) -> &PlanUiState {
+        &self.plan
+    }
+
+    pub(crate) fn plan_mut(&mut self) -> &mut PlanUiState {
+        &mut self.plan
     }
 
     pub(crate) fn input_mut(&mut self) -> &mut TextInput {
@@ -431,7 +445,7 @@ impl TuiState {
         self.completion_menu = None;
         self.dialog_back = None;
         self.provider_overlay_back = None;
-        self.overlay = Some(Overlay::command_palette());
+        self.overlay = Some(self.command_palette_overlay());
     }
 
     pub(crate) fn open_settings(&mut self) {
@@ -452,7 +466,7 @@ impl TuiState {
             Some(
                 Overlay::ProviderManager(_) | Overlay::ProviderForm(_) | Overlay::ModelPicker(_),
             ) => {}
-            Some(Overlay::Dialog(_) | Overlay::Shortcuts(_)) | None => {
+            Some(Overlay::PlanApproval(_) | Overlay::Dialog(_) | Overlay::Shortcuts(_)) | None => {
                 self.provider_overlay_back
                     .get_or_insert(ProviderOverlayBack::CommandPalette);
             }
@@ -576,6 +590,16 @@ impl TuiState {
         self.show_dialog(MessageDialogKind::Info, title, message);
     }
 
+    pub(crate) fn open_plan_approval(&mut self) {
+        match self.plan.approval_summary() {
+            Ok(message) => {
+                self.dialog_back = self.overlay.take().map(Box::new);
+                self.overlay = Some(Overlay::plan_approval(message));
+            }
+            Err(error) => self.show_error_dialog("Plan approval unavailable", error),
+        }
+    }
+
     pub(crate) fn show_error_dialog(&mut self, title: &str, message: String) {
         self.show_dialog(MessageDialogKind::Error, title, message);
     }
@@ -620,24 +644,34 @@ impl TuiState {
     }
 
     pub(crate) fn back_overlay(&mut self) {
+        let command_palette = self.command_palette_overlay();
         self.overlay = match self.overlay.take() {
             Some(Overlay::Shortcuts(ShortcutsBack::Settings(settings))) => {
                 Some(Overlay::Settings(settings))
             }
             Some(Overlay::Shortcuts(ShortcutsBack::CommandPalette))
-            | Some(Overlay::Settings(_)) => Some(Overlay::command_palette()),
+            | Some(Overlay::Settings(_)) => Some(command_palette.clone()),
             Some(Overlay::ProviderManager(_)) => match self.provider_overlay_back.take() {
                 Some(ProviderOverlayBack::Settings(settings)) => Some(Overlay::Settings(settings)),
-                Some(ProviderOverlayBack::CommandPalette) | None => {
-                    Some(Overlay::command_palette())
-                }
+                Some(ProviderOverlayBack::CommandPalette) | None => Some(command_palette),
             },
-            Some(Overlay::Dialog(_)) => self.dialog_back.take().map(|overlay| *overlay),
+            Some(Overlay::PlanApproval(_) | Overlay::Dialog(_)) => {
+                self.dialog_back.take().map(|overlay| *overlay)
+            }
             Some(Overlay::ModelPicker(_)) => {
                 self.provider_form_back.take().map(Overlay::ProviderForm)
             }
             _ => None,
         };
+    }
+
+    fn command_palette_overlay(&self) -> Overlay {
+        Overlay::command_palette_for_plan(PlanPaletteContext::from_snapshot(
+            self.plan.snapshot(),
+            self.plan.selected_node_id(),
+            self.plan.is_open(),
+            self.plan.is_focused(),
+        ))
     }
 
     pub(crate) fn timeline(&self) -> &[TimelineItem] {

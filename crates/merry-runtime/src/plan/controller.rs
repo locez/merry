@@ -475,6 +475,15 @@ impl PlanController {
         self.control(PlanControlRequest::Revise(reason)).await
     }
 
+    pub(crate) async fn retry_interrupted_node(
+        &self,
+        node_id: PlanNodeId,
+        reason: String,
+    ) -> Result<PlanCommandResult<PlanControlOutput>, PlanControllerError> {
+        self.control(PlanControlRequest::RetryInterrupted { node_id, reason })
+            .await
+    }
+
     pub(crate) async fn request_cancellation(
         &self,
         reason: String,

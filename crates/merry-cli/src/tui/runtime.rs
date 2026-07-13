@@ -243,6 +243,10 @@ impl TuiRuntimeSession {
     pub(crate) async fn session_transcript(&self) -> Result<Vec<SessionTranscriptItem>, CliError> {
         self.runtime.session_transcript().await.map_err(unexpected)
     }
+
+    pub(crate) async fn plan_snapshot(&self) -> Result<Option<merry_core::PlanSnapshot>, CliError> {
+        self.runtime.plan_snapshot().await.map_err(unexpected)
+    }
 }
 
 fn preference_model_override<'a>(

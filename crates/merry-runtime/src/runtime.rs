@@ -357,6 +357,21 @@ impl Runtime {
             .snapshot)
     }
 
+    /// Reopens one blocked node whose latest terminal attempt was interrupted.
+    pub async fn retry_interrupted_plan_node(
+        &self,
+        node_id: merry_core::PlanNodeId,
+        reason: &str,
+    ) -> Result<merry_core::PlanSnapshot, PlanControllerError> {
+        let committed = self
+            .inner
+            .plan_controller
+            .retry_interrupted_node(node_id, reason.to_owned())
+            .await?;
+        self.inner.ensure_plan_scheduler_started();
+        Ok(committed.output.snapshot)
+    }
+
     /// Stops new lease admission and cooperatively cancels live plan workers.
     pub async fn cancel_plan(
         &self,

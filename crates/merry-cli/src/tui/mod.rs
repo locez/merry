@@ -36,6 +36,9 @@ mod markdown;
 mod overlay;
 mod overlay_render;
 mod panels;
+mod plan;
+mod plan_controller;
+mod plan_render;
 mod preferences;
 mod projector;
 mod provider_overlay;
@@ -49,6 +52,8 @@ mod status;
 mod terminal;
 pub(crate) mod theme;
 
+#[cfg(test)]
+mod plan_tests;
 #[cfg(test)]
 mod tests;
 
@@ -142,6 +147,9 @@ pub(crate) async fn run(
     state.set_reasoning_effort_label(session.reasoning_effort_label.clone());
     state.set_completion_skills(session.skills.clone());
     state.configure_preferences(preferences, settings_defaults);
+    if let Some(snapshot) = session.plan_snapshot().await? {
+        state.plan_mut().update_snapshot(snapshot);
+    }
     if session.resumed {
         let transcript = session.session_transcript().await?;
         if transcript.is_empty() {
