@@ -290,68 +290,6 @@ async fn directive_waits_for_the_next_worker_provider_boundary_before_delivery()
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn local_ready_node_is_leased_to_the_root_coordinator_session() {
-    let root_session = session_id("runtime-plan-local-lane");
-    let runtime = Runtime::builder(root_session.clone())
-        .coordinator_plan_tools()
-        .build()
-        .expect("runtime builds");
-    runtime
-        .begin_plan(BeginPlanInput {
-            reason: "execute local plan node".to_owned(),
-            governing_skill_id: None,
-        })
-        .await
-        .expect("plan begins");
-    let update = runtime
-        .update_plan(single_local_plan_input())
-        .await
-        .expect("local plan definition succeeds");
-    let root_id = update.client_key_ids["root"].clone();
-    let mut events = runtime.subscribe_plan_events();
-    runtime
-        .authorize_plan_execution(
-            PlanCapabilityEnvelopeSnapshot::default(),
-            vec!["test authorization".to_owned()],
-        )
-        .await
-        .expect("plan is authorized");
-
-    let snapshot = tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            let snapshot = runtime
-                .plan_snapshot()
-                .await
-                .expect("snapshot read succeeds")
-                .expect("plan exists");
-            if snapshot.leases.iter().any(|lease| {
-                lease.node_id == root_id && lease.status == merry_core::PlanLeaseStatus::Live
-            }) {
-                break snapshot;
-            }
-            let _ = events.recv().await;
-        }
-    })
-    .await
-    .expect("local lease should be reserved");
-    let lease = snapshot
-        .leases
-        .iter()
-        .find(|lease| lease.node_id == root_id)
-        .expect("root lease exists");
-    assert_eq!(lease.executor_session_id, root_session);
-    assert_eq!(
-        snapshot
-            .nodes
-            .iter()
-            .find(|node| node.id == root_id)
-            .expect("root exists")
-            .status,
-        PlanNodeStatus::InProgress
-    );
-}
-
-#[tokio::test(flavor = "current_thread")]
 async fn cancelling_plan_stops_live_worker_and_commits_cancelled_attempt() {
     let probe = Arc::new(CancellationProbe::default());
     let factory: Arc<dyn ChildRuntimeFactory> = Arc::new(CancellablePlanWorkerFactory {
@@ -869,9 +807,11 @@ fn report_progress_model_call(
     )
 }
 
-fn parallel_plan_input() -> UpdatePlanInput {
-    let mut root_harness = PlanHarnessSnapshot::default();
-    root_harness.write_scope = vec!["left".to_owned(), "right".to_owned()];
+pub(super) fn parallel_plan_input() -> UpdatePlanInput {
+    let root_harness = PlanHarnessSnapshot {
+        write_scope: vec!["left".to_owned(), "right".to_owned()],
+        ..PlanHarnessSnapshot::default()
+    };
     UpdatePlanInput {
         reason: "define disjoint parallel work".to_owned(),
         execution_intent: PlanExecutionIntent::ContinuePlanning,
@@ -895,10 +835,14 @@ fn parallel_plan_input() -> UpdatePlanInput {
 }
 
 fn recursive_plan_input() -> UpdatePlanInput {
-    let mut root_harness = PlanHarnessSnapshot::default();
-    root_harness.write_scope = vec!["tree".to_owned()];
-    let mut expandable_harness = PlanHarnessSnapshot::default();
-    expandable_harness.write_scope = vec!["tree".to_owned()];
+    let root_harness = PlanHarnessSnapshot {
+        write_scope: vec!["tree".to_owned()],
+        ..PlanHarnessSnapshot::default()
+    };
+    let expandable_harness = PlanHarnessSnapshot {
+        write_scope: vec!["tree".to_owned()],
+        ..PlanHarnessSnapshot::default()
+    };
     UpdatePlanInput {
         reason: "define lazily expandable work".to_owned(),
         execution_intent: PlanExecutionIntent::ContinuePlanning,
@@ -932,8 +876,10 @@ fn recursive_plan_input() -> UpdatePlanInput {
 }
 
 fn single_worker_plan_input() -> UpdatePlanInput {
-    let mut root_harness = PlanHarnessSnapshot::default();
-    root_harness.write_scope = vec!["work".to_owned()];
+    let root_harness = PlanHarnessSnapshot {
+        write_scope: vec!["work".to_owned()],
+        ..PlanHarnessSnapshot::default()
+    };
     UpdatePlanInput {
         reason: "define one steerable worker".to_owned(),
         execution_intent: PlanExecutionIntent::ContinuePlanning,
@@ -956,32 +902,11 @@ fn single_worker_plan_input() -> UpdatePlanInput {
     }
 }
 
-fn single_local_plan_input() -> UpdatePlanInput {
-    UpdatePlanInput {
-        reason: "define one local coordinator node".to_owned(),
-        execution_intent: PlanExecutionIntent::ContinuePlanning,
-        coordinator_node_id: None,
-        max_concurrency_hint: Some(1),
-        change: PlanChangeInput::DefinePlan {
-            expected_plan_revision: 0,
-            root: PlanNodeInput {
-                id: None,
-                client_key: Some("root".to_owned()),
-                objective: "Complete local coordinator work".to_owned(),
-                acceptance: vec!["local result is verified".to_owned()],
-                executor_policy: PlanExecutorPolicy::Local,
-                harness: PlanHarnessSnapshot::default(),
-                recovery_policy: PlanRecoveryPolicySnapshot::default(),
-                depends_on: Vec::new(),
-                children: Vec::new(),
-            },
-        },
-    }
-}
-
 fn worker_leaf(client_key: &str, write_scope: &str) -> PlanNodeInput {
-    let mut harness = PlanHarnessSnapshot::default();
-    harness.write_scope = vec![write_scope.to_owned()];
+    let harness = PlanHarnessSnapshot {
+        write_scope: vec![write_scope.to_owned()],
+        ..PlanHarnessSnapshot::default()
+    };
     PlanNodeInput {
         id: None,
         client_key: Some(client_key.to_owned()),

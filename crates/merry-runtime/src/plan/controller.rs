@@ -1,5 +1,5 @@
 use super::{
-    PlanError,
+    PlanArtifactPromotion, PlanError,
     control::PlanControlOutput,
     execution::{
         PlanAttemptActor, PlanAttemptReportOutput, PlanAttemptStartOutput,
@@ -275,10 +275,11 @@ impl PlanController {
             .map_err(|_| PlanControllerError::CommandChannelClosed)?
     }
 
-    pub(crate) async fn progress(
+    pub(crate) async fn progress_with_artifact_promotions(
         &self,
         actor: PlanAttemptActor,
         input: ReportPlanProgressInput,
+        artifact_promotions: Vec<PlanArtifactPromotion>,
         now_ms: u64,
     ) -> Result<PlanCommandResult<PlanProgressOutput>, PlanControllerError> {
         self.ensure_started()?;
@@ -287,6 +288,7 @@ impl PlanController {
             .send(PlanCommand::Progress {
                 actor,
                 input,
+                artifact_promotions,
                 now_ms,
                 reply,
             })
@@ -321,10 +323,22 @@ impl PlanController {
             .map_err(|_| PlanControllerError::CommandChannelClosed)?
     }
 
+    #[cfg(test)]
     pub(crate) async fn attempt_report(
         &self,
         actor: PlanAttemptActor,
         input: ReportPlanAttemptInput,
+        now_ms: u64,
+    ) -> Result<PlanCommandResult<PlanAttemptReportOutput>, PlanControllerError> {
+        self.attempt_report_with_artifact_promotions(actor, input, Vec::new(), now_ms)
+            .await
+    }
+
+    pub(crate) async fn attempt_report_with_artifact_promotions(
+        &self,
+        actor: PlanAttemptActor,
+        input: ReportPlanAttemptInput,
+        artifact_promotions: Vec<PlanArtifactPromotion>,
         now_ms: u64,
     ) -> Result<PlanCommandResult<PlanAttemptReportOutput>, PlanControllerError> {
         self.ensure_started()?;
@@ -333,6 +347,7 @@ impl PlanController {
             .send(PlanCommand::AttemptReport {
                 actor,
                 input,
+                artifact_promotions,
                 now_ms,
                 reply,
             })

@@ -34,6 +34,28 @@ enum InterruptionSelection {
     AllLive,
 }
 
+pub(super) fn retry_backoff_elapsed(
+    snapshot: &PlanSnapshot,
+    node: &merry_core::PlanNodeSnapshot,
+    now_ms: u64,
+) -> bool {
+    if node.recovery_policy.retry_backoff_ms == 0 {
+        return true;
+    }
+    snapshot
+        .attempts
+        .iter()
+        .rev()
+        .find(|attempt| {
+            attempt.node_id == node.id
+                && attempt.outcome == Some(PlanAttemptOutcome::TransientFailure)
+        })
+        .and_then(|attempt| attempt.finished_at_ms)
+        .is_none_or(|finished_at_ms| {
+            finished_at_ms.saturating_add(node.recovery_policy.retry_backoff_ms) <= now_ms
+        })
+}
+
 impl PlanState {
     pub(crate) fn cancel_attempt(
         &mut self,
@@ -272,7 +294,7 @@ impl PlanState {
         }
         candidate.refresh_parent_states(revision);
         candidate.refresh_terminal_phase();
-        let ready_node_ids = candidate.ready_node_ids();
+        let ready_node_ids = candidate.ready_node_ids_at(now_ms);
         let snapshot = candidate.snapshot.clone();
         *self = candidate;
         Ok(PlanRecoveryOutput {

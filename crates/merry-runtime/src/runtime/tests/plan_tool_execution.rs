@@ -1,17 +1,22 @@
 use super::*;
-use crate::plan::{
-    BeginPlanInput, ControlPlanAttemptInput, PlanChangeInput, PlanExecutionIntent, PlanNodeInput,
-    ReadPlanInput, ReportPlanAttemptInput, ReportPlanProgressInput, UpdatePlanInput,
-    execution::PlanAttemptActor,
-    tools::{
-        BEGIN_PLAN_TOOL_NAME, CONTROL_PLAN_ATTEMPT_TOOL_NAME, READ_PLAN_TOOL_NAME,
-        REPORT_PLAN_ATTEMPT_TOOL_NAME, REPORT_PLAN_PROGRESS_TOOL_NAME, UPDATE_PLAN_TOOL_NAME,
+use crate::{
+    FileSessionStore,
+    plan::{
+        BeginPlanInput, ControlPlanAttemptInput, PlanChangeInput, PlanExecutionIntent,
+        PlanNodeInput, PlanWorkerControl, ReadPlanInput, ReportPlanAttemptInput,
+        ReportPlanProgressInput, UpdatePlanInput,
+        execution::PlanAttemptActor,
+        tools::{
+            BEGIN_PLAN_TOOL_NAME, CONTROL_PLAN_ATTEMPT_TOOL_NAME, READ_PLAN_TOOL_NAME,
+            REPORT_PLAN_ATTEMPT_TOOL_NAME, REPORT_PLAN_PROGRESS_TOOL_NAME, UPDATE_PLAN_TOOL_NAME,
+        },
     },
 };
 use merry_core::{
-    PlanAttemptOutcome, PlanCapabilityEnvelopeSnapshot, PlanDirectiveConstraints,
-    PlanDirectiveKind, PlanExecutorPolicy, PlanHarnessSnapshot, PlanNodeResult,
-    PlanRecoveryPolicySnapshot, ToolCallArguments,
+    ArtifactId, ArtifactKind, ArtifactRef, EvidenceLocator, PlanAttemptOutcome,
+    PlanCapabilityEnvelopeSnapshot, PlanDirectiveConstraints, PlanDirectiveKind,
+    PlanExecutorPolicy, PlanHarnessSnapshot, PlanNodeResult, PlanRecoveryPolicySnapshot,
+    ToolCallArguments,
 };
 use serde::Serialize;
 
@@ -332,6 +337,185 @@ async fn local_attempt_control_progress_and_terminal_tools_commit_through_contro
             .expect("plan exists")
             .phase,
         merry_core::PlanPhase::Completed
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn worker_report_promotes_exact_artifacts_through_pending_root_and_resume() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = FileSessionStore::new(temp.path());
+    let root_session_id = session_id("runtime-plan-worker-artifact-root");
+    let root = Runtime::builder(root_session_id.clone())
+        .coordinator_plan_tools()
+        .session_store(store.clone())
+        .build()
+        .expect("root runtime builds");
+    root.begin_plan(BeginPlanInput {
+        reason: "coordinate exact worker evidence".to_owned(),
+        governing_skill_id: None,
+    })
+    .await
+    .expect("plan begins");
+    let mut worker_node = node("root", "Produce exact worker evidence");
+    worker_node.executor_policy = PlanExecutorPolicy::Delegate;
+    let update = root
+        .update_plan(UpdatePlanInput {
+            reason: "define delegated worker proof".to_owned(),
+            execution_intent: PlanExecutionIntent::ContinuePlanning,
+            coordinator_node_id: None,
+            max_concurrency_hint: None,
+            change: PlanChangeInput::DefinePlan {
+                expected_plan_revision: 0,
+                root: worker_node,
+            },
+        })
+        .await
+        .expect("plan definition succeeds");
+    root.inner
+        .plan_controller
+        .authorize_execution(
+            PlanCapabilityEnvelopeSnapshot::default(),
+            vec!["existing user authorization".to_owned()],
+        )
+        .await
+        .expect("execution authorization succeeds");
+
+    let worker_session_id = session_id("runtime-plan-worker-artifact-child");
+    let actor = PlanAttemptActor {
+        executor_session_id: worker_session_id.clone(),
+    };
+    let started = root
+        .inner
+        .plan_controller
+        .start_attempt(update.client_key_ids["root"].clone(), actor, 1_000)
+        .await
+        .expect("worker attempt starts")
+        .output;
+    let plan_id = root
+        .plan_snapshot()
+        .await
+        .expect("snapshot reads")
+        .expect("plan exists")
+        .plan_id;
+    let control = PlanWorkerControl::new(
+        root.inner.plan_controller.clone(),
+        plan_id,
+        update.client_key_ids["root"].clone(),
+        started.lease.node_revision,
+        started.attempt.attempt_id.clone(),
+        started.lease.lease_id.clone(),
+        worker_session_id.clone(),
+    );
+    let worker = Runtime::builder(worker_session_id)
+        .plan_worker_control(control)
+        .build()
+        .expect("worker runtime builds");
+
+    let source_artifact = ArtifactRef::new(
+        ArtifactId::new("worker-exact-proof").expect("valid artifact id"),
+        ArtifactKind::Text,
+    );
+    let source_artifact_id = source_artifact.id().clone();
+    worker
+        .record_artifact(
+            source_artifact.clone(),
+            ArtifactContent::text("acceptance proved exactly\n"),
+        )
+        .await
+        .expect("worker artifact records");
+    let source_evidence = worker
+        .evidence_ref(source_artifact.id(), EvidenceLocator::whole_artifact())
+        .await
+        .expect("worker evidence validates");
+
+    let unrelated_pending = pending_plan_tool(
+        "call-root-still-in-flight",
+        READ_PLAN_TOOL_NAME,
+        &ReadPlanInput {
+            plan_id: None,
+            node_id: None,
+            max_depth: None,
+            include_attempts: None,
+            include_progress: None,
+            include_directives: None,
+            cursor: None,
+        },
+    );
+    record_pending(&root, unrelated_pending).await;
+
+    let terminal = pending_plan_tool(
+        "call-worker-report-with-artifact",
+        REPORT_PLAN_ATTEMPT_TOOL_NAME,
+        &ReportPlanAttemptInput {
+            lease_id: started.lease.lease_id,
+            expected_node_revision: started.lease.node_revision,
+            outcome: PlanAttemptOutcome::Completed,
+            result: Some(PlanNodeResult {
+                conclusion: "Worker evidence is exact and durable".to_owned(),
+                evidence_refs: vec![source_evidence],
+                artifact_refs: vec![source_artifact],
+                changed_paths: Vec::new(),
+                verification: vec!["exact artifact content checked".to_owned()],
+                open_questions: Vec::new(),
+            }),
+            diagnostic: None,
+            decomposition: None,
+            acknowledged_directive_ids: Vec::new(),
+            applied_directive_ids: Vec::new(),
+        },
+    );
+    record_pending(&worker, terminal.clone()).await;
+    let terminal_events = worker
+        .execute_tool_call(terminal.id(), ToolExecutionContext::default())
+        .await
+        .expect("worker report tool executes");
+    assert_eq!(
+        resolved_tool_result(&terminal_events).status(),
+        ToolCallResultStatus::Succeeded
+    );
+
+    let snapshot = root
+        .plan_snapshot()
+        .await
+        .expect("root snapshot reads")
+        .expect("root plan exists");
+    let result = snapshot.nodes[0]
+        .result
+        .as_ref()
+        .expect("root node completed with result");
+    let promoted = result.artifact_refs[0].clone();
+    assert_ne!(promoted.id(), &source_artifact_id);
+    assert_eq!(result.evidence_refs[0].artifact_id, *promoted.id());
+    assert_eq!(
+        root.read_artifact_content(promoted.id())
+            .await
+            .expect("promoted root artifact is readable")
+            .as_text(),
+        Some("acceptance proved exactly\n")
+    );
+
+    let resumed = Runtime::builder(root_session_id)
+        .coordinator_plan_tools()
+        .resume_from_store(store)
+        .await
+        .expect("root runtime resumes from plan overlay");
+    let resumed_snapshot = resumed
+        .plan_snapshot()
+        .await
+        .expect("resumed snapshot reads")
+        .expect("resumed plan exists");
+    let resumed_result = resumed_snapshot.nodes[0]
+        .result
+        .as_ref()
+        .expect("resumed result exists");
+    assert_eq!(resumed_result.artifact_refs[0], promoted);
+    assert_eq!(
+        resumed
+            .read_artifact_content(promoted.id())
+            .await
+            .expect("resumed promoted artifact is readable")
+            .as_text(),
+        Some("acceptance proved exactly\n")
     );
 }
 

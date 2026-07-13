@@ -533,6 +533,37 @@ fn transient_retry_uses_a_new_attempt_and_blocks_at_policy_limit() {
     );
 }
 
+#[test]
+fn transient_retry_backoff_delays_the_next_attempt_without_changing_attempt_identity() {
+    let mut work = leaf("work", "Backed off work");
+    work.recovery_policy.max_transient_attempts = 2;
+    work.recovery_policy.retry_backoff_ms = 100;
+    let (mut plan, ids) = executing_plan(root(vec![work]));
+    let first_worker = actor("worker-backoff-one");
+    let first = plan
+        .start_attempt(&ids["work"], first_worker.clone(), 10)
+        .expect("first attempt starts");
+    plan.report_attempt(
+        &first_worker,
+        transient_failure(first.lease.lease_id, first.lease.node_revision),
+        20,
+    )
+    .expect("transient failure commits");
+
+    assert!(!plan.ready_node_ids_at(119).contains(&ids["work"]));
+    assert!(matches!(
+        plan.start_attempt(&ids["work"], actor("worker-too-early"), 119),
+        Err(crate::plan::PlanError::NodeNotReady { .. })
+    ));
+    assert!(plan.ready_node_ids_at(120).contains(&ids["work"]));
+    let second = plan
+        .start_attempt(&ids["work"], actor("worker-backoff-two"), 120)
+        .expect("retry starts when backoff elapses");
+
+    assert_ne!(first.attempt.attempt_id, second.attempt.attempt_id);
+    assert_eq!(plan.snapshot().attempts.len(), 2);
+}
+
 fn transient_failure(
     lease_id: merry_core::PlanLeaseId,
     node_revision: u64,

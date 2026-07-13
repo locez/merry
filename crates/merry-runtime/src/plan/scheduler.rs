@@ -163,7 +163,8 @@ impl PlanScheduler {
         let mut local_selected = local_is_live;
         let mut child_selected = 0usize;
         let mut selected = Vec::new();
-        for node_id in ready_node_ids(&snapshot) {
+        let now_ms = unix_time_ms();
+        for node_id in ready_node_ids(&snapshot, now_ms) {
             let Some(node) = snapshot.nodes.iter().find(|node| node.id == node_id) else {
                 continue;
             };
@@ -498,6 +499,7 @@ impl PlanScheduler {
                     acknowledged_directive_ids: Vec::new(),
                     applied_directive_ids: Vec::new(),
                 },
+                Vec::new(),
                 unix_time_ms(),
             )
             .await;
@@ -562,7 +564,7 @@ fn worker_initial_prompt(snapshot: &PlanSnapshot, node_id: &PlanNodeId) -> Strin
         .unwrap_or_else(|| "Read the leased plan context and report a typed blocker.".to_owned())
 }
 
-fn ready_node_ids(snapshot: &PlanSnapshot) -> Vec<PlanNodeId> {
+fn ready_node_ids(snapshot: &PlanSnapshot, now_ms: u64) -> Vec<PlanNodeId> {
     let completed = snapshot
         .nodes
         .iter()
@@ -587,10 +589,29 @@ fn ready_node_ids(snapshot: &PlanSnapshot) -> Vec<PlanNodeId> {
         .filter(|node| !live_leases.contains(&node.id))
         .filter(|node| node.depends_on.iter().all(|id| completed.contains(id)))
         .filter(|node| node_shape_is_ready(snapshot, node))
+        .filter(|node| retry_backoff_elapsed(snapshot, node, now_ms))
         .map(|node| node.id.clone())
         .collect::<Vec<_>>();
     ready.sort_by_key(|id| node_order_key(snapshot, id));
     ready
+}
+
+fn retry_backoff_elapsed(snapshot: &PlanSnapshot, node: &PlanNodeSnapshot, now_ms: u64) -> bool {
+    if node.recovery_policy.retry_backoff_ms == 0 {
+        return true;
+    }
+    snapshot
+        .attempts
+        .iter()
+        .rev()
+        .find(|attempt| {
+            attempt.node_id == node.id
+                && attempt.outcome == Some(PlanAttemptOutcome::TransientFailure)
+        })
+        .and_then(|attempt| attempt.finished_at_ms)
+        .is_none_or(|finished_at_ms| {
+            finished_at_ms.saturating_add(node.recovery_policy.retry_backoff_ms) <= now_ms
+        })
 }
 
 fn node_shape_is_ready(snapshot: &PlanSnapshot, node: &PlanNodeSnapshot) -> bool {

@@ -5,6 +5,7 @@ const ASSISTANT_OUTPUT_ARTIFACT_PREFIX: &str = "assistant-output-";
 pub(crate) const CONTEXT_SEED_ARTIFACT_PREFIX: &str = "context-seed-";
 const FINAL_OUTPUT_ARTIFACT_PREFIX: &str = "final-output-";
 const PROCESS_INPUT_ARTIFACT_PREFIX: &str = "process-input-";
+const PLAN_WORKER_ARTIFACT_PREFIX: &str = "plan-worker-artifact-";
 const TOOL_RESULT_ARTIFACT_PREFIX: &str = "tool-result-";
 const USER_MESSAGE_ARTIFACT_PREFIX: &str = "user-message-";
 
@@ -18,6 +19,9 @@ pub(crate) fn is_runtime_reserved_artifact_id(artifact_id: &ArtifactId) -> bool 
         || artifact_id
             .as_str()
             .starts_with(PROCESS_INPUT_ARTIFACT_PREFIX)
+        || artifact_id
+            .as_str()
+            .starts_with(PLAN_WORKER_ARTIFACT_PREFIX)
         || artifact_id
             .as_str()
             .starts_with(TOOL_RESULT_ARTIFACT_PREFIX)

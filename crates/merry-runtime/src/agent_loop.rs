@@ -302,6 +302,8 @@ impl Drop for AgentLoopEventStream {
 }
 
 /// Internal agent-loop stream driver message.
+// Keep the public event inline to preserve the stable stream API and avoid per-event allocation.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AgentLoopStreamMessage {

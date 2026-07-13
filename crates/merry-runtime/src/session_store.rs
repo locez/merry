@@ -11,6 +11,8 @@ use tokio::io::AsyncWriteExt;
 
 const TEMP_FILE_CREATE_ATTEMPTS: u32 = 1_024;
 const TEMP_FILE_PREFIX: &str = ".state.json.tmp-";
+const PLAN_OVERLAY_TEMP_FILE_PREFIX: &str = ".plan-state.json.tmp-";
+const PLAN_OVERLAY_FILE_NAME: &str = "plan-state.json";
 
 #[cfg(test)]
 use std::sync::{
@@ -282,6 +284,10 @@ impl FileSessionStore {
         self.session_dir(session_id).join("state.json")
     }
 
+    pub(crate) fn plan_overlay_path(&self, session_id: &SessionId) -> PathBuf {
+        self.session_dir(session_id).join(PLAN_OVERLAY_FILE_NAME)
+    }
+
     #[cfg(test)]
     pub(crate) fn artifacts_dir(&self, session_id: &SessionId) -> PathBuf {
         self.session_dir(session_id).join("artifacts")
@@ -305,13 +311,38 @@ impl FileSessionStore {
         session_id: &SessionId,
         bytes: &[u8],
     ) -> Result<StagedSessionBundle, SessionStoreError> {
+        self.stage_named_bytes(session_id, bytes, "state.json", TEMP_FILE_PREFIX)
+            .await
+    }
+
+    pub(crate) async fn stage_plan_overlay_bytes(
+        &self,
+        session_id: &SessionId,
+        bytes: &[u8],
+    ) -> Result<StagedSessionBundle, SessionStoreError> {
+        self.stage_named_bytes(
+            session_id,
+            bytes,
+            PLAN_OVERLAY_FILE_NAME,
+            PLAN_OVERLAY_TEMP_FILE_PREFIX,
+        )
+        .await
+    }
+
+    async fn stage_named_bytes(
+        &self,
+        session_id: &SessionId,
+        bytes: &[u8],
+        file_name: &str,
+        temp_file_prefix: &str,
+    ) -> Result<StagedSessionBundle, SessionStoreError> {
         let session_dir = self.session_dir(session_id);
         tokio::fs::create_dir_all(&session_dir)
             .await
             .map_err(|source| io_error(session_dir.clone(), source))?;
 
-        let temp_path = write_temp_file(&session_dir, bytes).await?;
-        let final_path = session_dir.join("state.json");
+        let temp_path = write_temp_file(&session_dir, bytes, temp_file_prefix).await?;
+        let final_path = session_dir.join(file_name);
 
         #[cfg(test)]
         if let Some(pause) = &self.stage_pause {
@@ -338,6 +369,18 @@ impl FileSessionStore {
         tokio::fs::read(&path)
             .await
             .map_err(|source| io_error(path, source))
+    }
+
+    pub(crate) async fn read_plan_overlay_bytes(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<Vec<u8>>, SessionStoreError> {
+        let path = self.plan_overlay_path(session_id);
+        match tokio::fs::read(&path).await {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(source) => Err(io_error(path, source)),
+        }
     }
 
     #[cfg(test)]
@@ -419,14 +462,18 @@ async fn sync_parent_directory(path: &Path) -> Result<(), SessionStoreError> {
         .map_err(|source| io_error(parent.to_path_buf(), source))
 }
 
-async fn write_temp_file(session_dir: &Path, bytes: &[u8]) -> Result<PathBuf, SessionStoreError> {
+async fn write_temp_file(
+    session_dir: &Path,
+    bytes: &[u8],
+    temp_file_prefix: &str,
+) -> Result<PathBuf, SessionStoreError> {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
     for attempt in 0..TEMP_FILE_CREATE_ATTEMPTS {
         let path = session_dir.join(format!(
-            "{TEMP_FILE_PREFIX}{}-{nonce}-{attempt}",
+            "{temp_file_prefix}{}-{nonce}-{attempt}",
             std::process::id()
         ));
         let mut file = match OpenOptions::new()

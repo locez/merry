@@ -6,7 +6,7 @@ use crate::{
         controller::PlanControllerEventReceiver, execution::PlanAttemptActor,
     },
     session::SessionState,
-    session_store::SessionStoreCommitPause,
+    session_store::{SessionStoreCommitPause, SessionStoreStagePause},
 };
 use merry_core::{
     PlanAttemptOutcome, PlanCapabilityEnvelopeSnapshot, PlanExecutorPolicy, PlanHarnessSnapshot,
@@ -101,6 +101,48 @@ async fn plan_event_waits_for_directory_durability() {
         events.recv().await.expect("durable plan event").payload,
         RuntimeJournalPayload::PlanUpdated { .. }
     ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn plan_commit_rebases_its_sequence_frontier_when_session_activity_arrives_during_staging() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let pause = SessionStoreStagePause::new();
+    let store = FileSessionStore::new(temp.path()).with_stage_pause_for_tests(pause.clone());
+    let session = Arc::new(Mutex::new(SessionState::new(session_id())));
+    let (controller, mut events) = PlanController::start(
+        Arc::clone(&session),
+        Some(store.clone()),
+        NonZeroUsize::new(16).expect("non-zero buffer"),
+    );
+    let task = tokio::spawn({
+        let controller = controller.clone();
+        async move {
+            controller
+                .begin(input("rebase concurrent session activity"))
+                .await
+        }
+    });
+
+    pause.wait_until_staged().await;
+    let unrelated =
+        session
+            .lock()
+            .await
+            .record_transient_event(RuntimeJournalPayload::AssistantOutputDelta {
+                delta: "root model is still producing output".to_owned(),
+            });
+    pause.resume();
+    task.await
+        .expect("begin task joins")
+        .expect("plan commit retries with the new sequence frontier");
+
+    let plan_event = events.recv().await.expect("committed plan event");
+    assert_ne!(plan_event.sequence, unrelated.sequence);
+    let loaded = SessionState::load_from(&store, &session_id())
+        .await
+        .expect("plan sidecar resumes");
+    assert!(loaded.active_plan().is_some());
+    assert_eq!(loaded.next_sequence(), session.lock().await.next_sequence());
 }
 
 #[tokio::test(flavor = "current_thread")]

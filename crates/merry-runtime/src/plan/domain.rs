@@ -164,6 +164,8 @@ pub enum PlanError {
     MissingArtifactRef { artifact_id: merry_core::ArtifactId },
     #[error("plan result references invalid evidence in artifact {artifact_id}")]
     InvalidEvidenceRef { artifact_id: merry_core::ArtifactId },
+    #[error("promoted plan artifact {artifact_id} conflicts with existing root-session content")]
+    ArtifactPromotionConflict { artifact_id: merry_core::ArtifactId },
 }
 
 #[derive(Debug, Clone)]
@@ -174,6 +176,12 @@ pub(crate) struct PlanState {
     pub(super) next_attempt_sequence: u64,
     pub(super) next_lease_sequence: u64,
     pub(super) next_directive_sequence: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RootContract {
+    objective: String,
+    acceptance: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -290,7 +298,12 @@ impl PlanState {
                 depth_of(&existing, parent_id) + 1,
             )?;
         }
-        let (new_nodes, client_key_ids, next_node_sequence, unresolved) = builder.finish();
+        let TreeBuilderOutput {
+            nodes: new_nodes,
+            client_key_ids,
+            next_node_sequence,
+            unresolved,
+        } = builder.finish();
         let mut combined = existing;
         combined.extend(new_nodes);
         let live_ids = combined
@@ -344,11 +357,19 @@ impl PlanState {
                     .map(|node| (node.id.clone(), node.clone()))
                     .collect::<BTreeMap<_, _>>();
                 validation::validate_graph(&nodes, root_id)?;
-                validation::validate_authorized_envelope(
-                    &nodes,
-                    root_id,
-                    persisted.snapshot.authorized_capability_envelope.as_ref(),
-                )?;
+                if matches!(
+                    persisted.snapshot.phase,
+                    PlanPhase::Executing
+                        | PlanPhase::Completed
+                        | PlanPhase::Blocked
+                        | PlanPhase::Cancelled
+                ) {
+                    validation::validate_authorized_envelope(
+                        &nodes,
+                        root_id,
+                        persisted.snapshot.authorized_capability_envelope.as_ref(),
+                    )?;
+                }
             }
             None if persisted.snapshot.phase == PlanPhase::Planning
                 && persisted.snapshot.nodes.is_empty() => {}
@@ -373,6 +394,11 @@ impl PlanState {
         {
             return Err(PlanError::InvalidConcurrencyHint { maximum });
         }
+        let established_root_contract = self
+            .snapshot
+            .execution_contract_fingerprint
+            .as_ref()
+            .and_then(|_| self.root_contract());
         let mut candidate = self.clone();
         let client_key_ids = match input.change {
             PlanChangeInput::DefinePlan {
@@ -387,6 +413,7 @@ impl PlanState {
         };
         candidate.snapshot.coordinator_node_id = input.coordinator_node_id;
         candidate.snapshot.max_concurrency_hint = input.max_concurrency_hint;
+        candidate.record_root_contract_changes(established_root_contract.as_ref());
         candidate.apply_execution_intent(input.execution_intent)?;
         candidate.snapshot.revision_summaries.push(
             PlanRevisionSummary::new(candidate.snapshot.revision, &input.reason).map_err(|_| {
@@ -432,7 +459,12 @@ impl PlanState {
             .collect::<BTreeMap<_, _>>();
         let mut builder = TreeBuilder::new(self.next_node_sequence, revision, &existing);
         let root_id = builder.flatten(root, None, 0, 1)?;
-        let (mut nodes, client_key_ids, next_node_sequence, unresolved) = builder.finish();
+        let TreeBuilderOutput {
+            mut nodes,
+            client_key_ids,
+            next_node_sequence,
+            unresolved,
+        } = builder.finish();
         let live_ids = nodes.keys().cloned().collect::<BTreeSet<_>>();
         resolve_all_dependencies(&mut nodes, unresolved, &client_key_ids, &live_ids)?;
         for old in existing.values() {
@@ -519,7 +551,12 @@ impl PlanState {
             depth_of(&existing, target_node_id),
         )?;
         debug_assert_eq!(&replacement_root, target_node_id);
-        let (replacement, client_key_ids, next_node_sequence, unresolved) = builder.finish();
+        let TreeBuilderOutput {
+            nodes: replacement,
+            client_key_ids,
+            next_node_sequence,
+            unresolved,
+        } = builder.finish();
         let replacement_ids = replacement.keys().cloned().collect::<BTreeSet<_>>();
         let omitted = old_region
             .difference(&replacement_ids)
@@ -562,11 +599,6 @@ impl PlanState {
             .clone()
             .ok_or(PlanError::RootMissing)?;
         validation::validate_graph(&combined, &root_id)?;
-        validation::validate_authorized_envelope(
-            &combined,
-            &root_id,
-            self.snapshot.authorized_capability_envelope.as_ref(),
-        )?;
         self.snapshot.revision = revision;
         self.snapshot.nodes = ordered_nodes(combined);
         self.next_node_sequence = next_node_sequence;
@@ -585,18 +617,25 @@ impl PlanState {
                 self.snapshot.phase = PlanPhase::Planning;
             }
             PlanExecutionIntent::ExecuteIfAuthorized => {
-                if self.snapshot.authorized_capability_envelope.is_some() {
-                    self.snapshot.phase = PlanPhase::Executing;
-                    self.snapshot.execution_contract_fingerprint =
-                        Some(format!("plan-contract-{}", self.snapshot.revision));
-                } else {
+                if !self.authorized_envelope_covers_plan()? {
                     self.add_review_requirement(
                         PlanApprovalRequirementKind::CapabilityOrPermissionExpansion,
                     );
+                }
+                if self.has_pending_approval_requirements() {
                     self.snapshot.phase = PlanPhase::AwaitingApproval;
+                } else {
+                    self.snapshot.phase = PlanPhase::Executing;
+                    self.snapshot.execution_contract_fingerprint =
+                        Some(self.contract_fingerprint());
                 }
             }
             PlanExecutionIntent::RequestUserReview => {
+                if !self.authorized_envelope_covers_plan()? {
+                    self.add_review_requirement(
+                        PlanApprovalRequirementKind::CapabilityOrPermissionExpansion,
+                    );
+                }
                 self.add_review_requirement(PlanApprovalRequirementKind::UserReviewRequested);
                 self.snapshot.phase = PlanPhase::AwaitingApproval;
             }
@@ -605,6 +644,17 @@ impl PlanState {
     }
 
     fn add_review_requirement(&mut self, kind: PlanApprovalRequirementKind) {
+        if self
+            .snapshot
+            .approval_requirements
+            .iter()
+            .any(|requirement| {
+                requirement.status == PlanApprovalRequirementStatus::Pending
+                    && requirement.kind == kind
+            })
+        {
+            return;
+        }
         let id =
             PlanApprovalRequirementId::new(&format!("approval-{}", self.next_approval_sequence))
                 .expect("runtime-generated approval id is valid");
@@ -620,6 +670,61 @@ impl PlanState {
             });
     }
 
+    fn root_contract(&self) -> Option<RootContract> {
+        let root_id = self.snapshot.root_node_id.as_ref()?;
+        let root = self
+            .snapshot
+            .nodes
+            .iter()
+            .find(|node| &node.id == root_id)?;
+        Some(RootContract {
+            objective: root.objective.clone(),
+            acceptance: root.acceptance.clone(),
+        })
+    }
+
+    fn record_root_contract_changes(&mut self, established: Option<&RootContract>) {
+        let Some(established) = established else {
+            return;
+        };
+        let Some(current) = self.root_contract() else {
+            return;
+        };
+        if current.objective != established.objective {
+            self.add_review_requirement(PlanApprovalRequirementKind::RootObjectiveChange);
+        }
+        if current.acceptance != established.acceptance {
+            self.add_review_requirement(PlanApprovalRequirementKind::RootAcceptanceChange);
+        }
+    }
+
+    fn authorized_envelope_covers_plan(&self) -> Result<bool, PlanError> {
+        let Some(root_id) = self.snapshot.root_node_id.as_ref() else {
+            return Err(PlanError::RootMissing);
+        };
+        let Some(envelope) = self.snapshot.authorized_capability_envelope.as_ref() else {
+            return Ok(false);
+        };
+        let nodes = self
+            .snapshot
+            .nodes
+            .iter()
+            .map(|node| (node.id.clone(), node.clone()))
+            .collect::<BTreeMap<_, _>>();
+        match validation::validate_authorized_envelope(&nodes, root_id, Some(envelope)) {
+            Ok(()) => Ok(true),
+            Err(PlanError::CapabilityEnvelopeExceeded { .. }) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn has_pending_approval_requirements(&self) -> bool {
+        self.snapshot
+            .approval_requirements
+            .iter()
+            .any(|requirement| requirement.status == PlanApprovalRequirementStatus::Pending)
+    }
+
     #[cfg(test)]
     pub(crate) fn advance_unrelated_revision_for_test(&mut self) {
         self.snapshot.revision += 1;
@@ -632,6 +737,13 @@ struct TreeBuilder<'a> {
     existing: &'a BTreeMap<PlanNodeId, PlanNodeSnapshot>,
     nodes: BTreeMap<PlanNodeId, PlanNodeSnapshot>,
     client_key_ids: BTreeMap<String, PlanNodeId>,
+    unresolved: BTreeMap<PlanNodeId, Vec<super::protocol::PlanNodeReferenceInput>>,
+}
+
+struct TreeBuilderOutput {
+    nodes: BTreeMap<PlanNodeId, PlanNodeSnapshot>,
+    client_key_ids: BTreeMap<String, PlanNodeId>,
+    next_node_sequence: u64,
     unresolved: BTreeMap<PlanNodeId, Vec<super::protocol::PlanNodeReferenceInput>>,
 }
 
@@ -728,20 +840,13 @@ impl<'a> TreeBuilder<'a> {
         Ok(id)
     }
 
-    fn finish(
-        self,
-    ) -> (
-        BTreeMap<PlanNodeId, PlanNodeSnapshot>,
-        BTreeMap<String, PlanNodeId>,
-        u64,
-        BTreeMap<PlanNodeId, Vec<super::protocol::PlanNodeReferenceInput>>,
-    ) {
-        (
-            self.nodes,
-            self.client_key_ids,
-            self.next_node_sequence,
-            self.unresolved,
-        )
+    fn finish(self) -> TreeBuilderOutput {
+        TreeBuilderOutput {
+            nodes: self.nodes,
+            client_key_ids: self.client_key_ids,
+            next_node_sequence: self.next_node_sequence,
+            unresolved: self.unresolved,
+        }
     }
 }
 

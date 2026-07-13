@@ -378,6 +378,7 @@ fn add_live_attempt(snapshot: &mut PlanSnapshot) {
         provider_request_in_flight: true,
         tool_call_in_flight: false,
         artifacts_created: 7,
+        artifact_refs: Vec::new(),
         changed_paths: vec!["crates/merry-runtime/src/plan.rs".to_owned()],
         acceptance_evidence: Vec::new(),
         repeated_failure_fingerprint: None,

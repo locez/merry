@@ -7,7 +7,17 @@ use super::{
     protocol::{ReportPlanAttemptInput, ReportPlanProgressInput},
     recovery::PlanProgressReviewOutput,
 };
-use merry_core::{PlanAttemptId, PlanId, PlanLeaseId, PlanNodeId, PlanSnapshot, SessionId};
+use crate::{ArtifactContent, context::stable_content_hash};
+use merry_core::{
+    ArtifactId, ArtifactRef, PlanAttemptId, PlanId, PlanLeaseId, PlanNodeId, PlanSnapshot,
+    SessionId,
+};
+
+#[derive(Debug, Clone)]
+pub(crate) struct PlanArtifactPromotion {
+    pub(crate) artifact: ArtifactRef,
+    pub(crate) content: ArtifactContent,
+}
 
 /// Scoped root-plan control carried by one depth-one worker runtime.
 #[derive(Clone)]
@@ -46,21 +56,54 @@ impl PlanWorkerControl {
     pub(crate) async fn report_progress(
         &self,
         input: ReportPlanProgressInput,
+        artifact_promotions: Vec<PlanArtifactPromotion>,
         now_ms: u64,
     ) -> Result<PlanCommandResult<PlanProgressOutput>, PlanControllerError> {
         self.validate_lease(input.lease_id.clone(), input.expected_node_revision)?;
-        self.controller.progress(self.actor(), input, now_ms).await
+        self.controller
+            .progress_with_artifact_promotions(self.actor(), input, artifact_promotions, now_ms)
+            .await
     }
 
     pub(crate) async fn report_attempt(
         &self,
         input: ReportPlanAttemptInput,
+        artifact_promotions: Vec<PlanArtifactPromotion>,
         now_ms: u64,
     ) -> Result<PlanCommandResult<PlanAttemptReportOutput>, PlanControllerError> {
         self.validate_lease(input.lease_id.clone(), input.expected_node_revision)?;
         self.controller
-            .attempt_report(self.actor(), input, now_ms)
+            .attempt_report_with_artifact_promotions(
+                self.actor(),
+                input,
+                artifact_promotions,
+                now_ms,
+            )
             .await
+    }
+
+    pub(crate) fn promoted_artifact_ref(&self, source: &ArtifactRef) -> ArtifactRef {
+        let material = format!(
+            "{}\0{}\0{}\0{}",
+            self.plan_id,
+            self.attempt_id,
+            self.executor_session_id,
+            source.id()
+        );
+        let fingerprint = stable_content_hash(material.as_bytes());
+        let hash = fingerprint
+            .rsplit_once(':')
+            .map(|(_, hash)| hash)
+            .expect("stable content hashes include an algorithm prefix");
+        let id = ArtifactId::new(&format!("plan-worker-artifact-{hash}"))
+            .expect("runtime-generated promoted artifact id is valid");
+        let promoted = ArtifactRef::new(id, source.kind().clone());
+        match source.label() {
+            Some(label) => promoted
+                .with_label(label)
+                .expect("source artifact labels were already validated"),
+            None => promoted,
+        }
     }
 
     pub(crate) async fn heartbeat(

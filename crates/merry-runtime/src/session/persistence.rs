@@ -2,6 +2,7 @@ use super::{
     ModelTurnId, ModelTurnStatus, PreparedCompactionInstall, PreparedPlanToolCommit,
     PromptHistoryProjection, SessionState,
     checkpoint_window::ArchivedRefManifest,
+    plan_persistence::validate_plan_snapshot_refs,
     transcript::{
         PersistedTranscript, PersistedTranscriptV1, ToolCallPromptProjection,
         ToolResultPromptProjection, Transcript, TranscriptItem, TranscriptV1MigrationError,
@@ -154,7 +155,22 @@ impl SessionState {
         store: &FileSessionStore,
         session_id: &SessionId,
     ) -> Result<Self, SessionStoreError> {
-        let bytes = store.read_state_bytes(session_id).await?;
+        let overlay_bytes = store.read_plan_overlay_bytes(session_id).await?;
+        let bytes = match store.read_state_bytes(session_id).await {
+            Ok(bytes) => bytes,
+            Err(SessionStoreError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                let overlay_bytes = overlay_bytes.ok_or_else(|| SessionStoreError::Io {
+                    path: store.state_path(session_id),
+                    source,
+                })?;
+                let mut session = Self::new(session_id.clone());
+                session.apply_plan_overlay(&overlay_bytes, true)?;
+                return Ok(session);
+            }
+            Err(error) => return Err(error),
+        };
         let header: StoredSessionDocumentHeader = serde_json::from_slice(&bytes)?;
         if !matches!(
             header.format_version,
@@ -173,7 +189,7 @@ impl SessionState {
             });
         }
 
-        match header.format_version {
+        let mut session = match header.format_version {
             LEGACY_SESSION_STATE_FORMAT_VERSION => {
                 let document: StoredSessionDocumentV1 = serde_json::from_slice(&bytes)?;
                 Self::from_stored_document_v1(document)
@@ -187,7 +203,11 @@ impl SessionState {
                 Self::from_stored_document(document, SESSION_STATE_FORMAT_VERSION)
             }
             _ => unreachable!("supported session format version checked before body decode"),
+        }?;
+        if let Some(overlay_bytes) = overlay_bytes {
+            session.apply_plan_overlay(&overlay_bytes, false)?;
         }
+        Ok(session)
     }
 
     pub(crate) fn persistable_bundle(&self) -> Result<PersistableSessionBundle, SessionStoreError> {
@@ -224,28 +244,6 @@ impl SessionState {
             resolved_tool_calls: &self.resolved_tool_calls,
             active_plan: self.active_plan.as_ref(),
             terminal_plans: &self.terminal_plans,
-        })
-    }
-
-    pub(crate) fn persistable_bundle_with_plan_candidate(
-        &self,
-        active_plan: Option<&PlanState>,
-        terminal_plans: &[PlanSnapshot],
-        next_sequence: u64,
-    ) -> Result<PersistableSessionBundle, SessionStoreError> {
-        self.persistable_bundle_for(PersistableSessionView {
-            transcript: &self.transcript,
-            prompt_history_projection: self.prompt_history_projection,
-            compacted_checkpoint: self.compacted_checkpoint.as_ref(),
-            archived_ref_manifest: &self.archived_ref_manifest,
-            next_sequence,
-            session_started: self.session_started,
-            ledger: &self.ledger,
-            artifacts: &self.artifacts,
-            pending_tool_calls: &self.pending_tool_calls,
-            resolved_tool_calls: &self.resolved_tool_calls,
-            active_plan,
-            terminal_plans,
         })
     }
 
@@ -294,6 +292,12 @@ impl SessionState {
             view.archived_ref_manifest,
         )
         .map_err(runtime_error_to_invalid_document)?;
+        if let Some(active_plan) = view.active_plan {
+            validate_plan_snapshot_refs(view.artifacts, active_plan.snapshot())?;
+        }
+        for terminal in view.terminal_plans {
+            validate_plan_snapshot_refs(view.artifacts, terminal)?;
+        }
 
         let artifacts = view
             .artifacts
@@ -469,6 +473,12 @@ impl SessionState {
         session
             .validate_archived_ref_manifest()
             .map_err(runtime_error_to_invalid_document)?;
+        if let Some(active_plan) = session.active_plan.as_ref() {
+            validate_plan_snapshot_refs(&session.artifacts, active_plan.snapshot())?;
+        }
+        for terminal in &session.terminal_plans {
+            validate_plan_snapshot_refs(&session.artifacts, terminal)?;
+        }
         Ok(session)
     }
 
