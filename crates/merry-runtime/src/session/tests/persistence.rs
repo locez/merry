@@ -1,11 +1,115 @@
 use super::*;
 use crate::{
     ContextCompiler, ContextEntry, ContextEvidence, ContextSummary, FileSessionStore, ProjectRules,
-    SkillCatalog, TaskAnchor, artifact::ArtifactContent, session::PromptHistoryProjection,
+    SkillCatalog, TaskAnchor, UserImageInput, UserMessageInput, artifact::ArtifactContent,
+    session::PromptHistoryProjection,
 };
 use merry_core::{
     ArtifactKind, ArtifactRef, EvidenceLocator, EvidenceRef, ToolCallResult, ToolCallResultStatus,
 };
+use std::sync::Arc;
+
+fn persisted_image_message() -> UserMessageInput {
+    UserMessageInput::new(
+        "resume [Image #1] and [Image #2]",
+        vec![
+            UserImageInput::png(
+                "[Image #1]",
+                Arc::<[u8]>::from([137, 80, 78, 71, 13, 10, 26, 10, 11]),
+                6,
+                7,
+            )
+            .expect("valid first image"),
+            UserImageInput::png(
+                "[Image #2]",
+                Arc::<[u8]>::from([137, 80, 78, 71, 13, 10, 26, 10, 22]),
+                8,
+                9,
+            )
+            .expect("valid second image"),
+        ],
+    )
+    .expect("valid image message")
+}
+
+#[tokio::test]
+async fn session_state_round_trip_preserves_user_images_for_provider_history() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = FileSessionStore::new(temp.path());
+    let mut session = SessionState::new(session_id());
+    let turn_id = session.begin_model_turn().expect("turn should begin");
+    let message = persisted_image_message();
+    session
+        .record_user_message(turn_id, &message)
+        .expect("image message should record");
+    session
+        .close_model_response(turn_id, false)
+        .expect("turn should close");
+    session.save_to(&store).await.expect("session should save");
+
+    let loaded = SessionState::load_from(&store, &session_id())
+        .await
+        .expect("image session should load");
+    let snapshot = loaded
+        .provider_transcript_snapshot()
+        .expect("provider history should compile");
+    let [crate::session::TranscriptItemSnapshot::UserMessage { text, images, .. }] =
+        snapshot.as_slice()
+    else {
+        panic!("provider history should contain one image message");
+    };
+    assert_eq!(text, message.text());
+    assert_eq!(images.len(), message.images().len());
+    for (actual, expected) in images.iter().zip(message.images()) {
+        assert_eq!(actual.input(), expected);
+    }
+}
+
+#[tokio::test]
+async fn session_state_v2_user_message_without_image_ids_defaults_to_text_only() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = FileSessionStore::new(temp.path());
+    let mut session = SessionState::new(session_id());
+    let turn_id = session.begin_model_turn().expect("turn should begin");
+    session
+        .record_user_message_body(turn_id, "legacy v2 text")
+        .expect("text message should record");
+    session
+        .close_model_response(turn_id, false)
+        .expect("turn should close");
+    session.save_to(&store).await.expect("session should save");
+
+    let mut document: serde_json::Value = serde_json::from_slice(
+        &store
+            .read_state_bytes(&session_id())
+            .await
+            .expect("state should read"),
+    )
+    .expect("state should be JSON");
+    document["transcript"]["items"][0]
+        .as_object_mut()
+        .expect("transcript item should be an object")
+        .remove("image_artifact_ids");
+    store
+        .write_state_bytes(
+            &session_id(),
+            &serde_json::to_vec_pretty(&document).expect("state should serialize"),
+        )
+        .await
+        .expect("compatibility fixture should write");
+
+    let loaded = SessionState::load_from(&store, &session_id())
+        .await
+        .expect("old v2 user message should load");
+    let snapshot = loaded
+        .full_transcript_snapshot()
+        .expect("transcript should compile");
+    let [crate::session::TranscriptItemSnapshot::UserMessage { images, .. }] = snapshot.as_slice()
+    else {
+        panic!("transcript should contain one user message");
+    };
+    assert!(images.is_empty());
+}
 
 #[tokio::test]
 async fn session_state_v2_round_trip_preserves_turns_user_artifact_and_projections() {

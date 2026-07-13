@@ -548,9 +548,9 @@ pub(super) async fn run_provider_step(
             return;
         }
         input
-            .user_texts_for_history()
+            .user_messages_for_history()
             .iter()
-            .try_for_each(|text| session.record_user_message_body(turn_id, text))
+            .try_for_each(|message| session.record_user_message(turn_id, message))
     };
     if let Err(error) = user_record_result {
         let diagnostic = diagnostic_from_text("transcript_record", error.to_string());

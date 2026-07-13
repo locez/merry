@@ -3,6 +3,7 @@
 mod chat_completions;
 mod config;
 mod error;
+mod image;
 mod models;
 mod parse;
 mod provider;

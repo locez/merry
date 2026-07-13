@@ -34,6 +34,13 @@ pub enum RuntimeError {
         reason: &'static str,
     },
 
+    /// A user image or image-bearing message failed runtime validation.
+    #[error("invalid user image input: {reason}")]
+    InvalidUserImageInput {
+        /// Actionable image validation detail.
+        reason: String,
+    },
+
     /// External artifact recording tried to use a runtime-owned artifact id prefix.
     #[error("artifact id {artifact_id} uses a runtime-reserved prefix")]
     ReservedArtifactId {

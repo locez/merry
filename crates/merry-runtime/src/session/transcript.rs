@@ -3,7 +3,7 @@ use super::{
     model_turns::{ModelTurnId, ModelTurnStatus, invalid_turn_transition},
 };
 use crate::{
-    RuntimeError,
+    RuntimeError, UserImageInput,
     artifact::{ArtifactContent, ArtifactError, ArtifactRegistry},
     compaction::CompactionError,
 };
@@ -80,6 +80,7 @@ pub(crate) enum TranscriptItem {
         id: TranscriptItemId,
         model_turn_id: ModelTurnId,
         artifact_id: ArtifactId,
+        image_artifact_ids: Vec<ArtifactId>,
         origin: UserInputOrigin,
     },
     AssistantText {
@@ -119,6 +120,8 @@ pub(crate) enum PersistedTranscriptItem {
         id: u64,
         model_turn_id: ModelTurnId,
         artifact_id: ArtifactId,
+        #[serde(default)]
+        image_artifact_ids: Vec<ArtifactId>,
         origin: PersistedUserInputOrigin,
     },
     AssistantText {
@@ -224,6 +227,7 @@ impl TranscriptItem {
 pub(crate) enum TranscriptItemSnapshot {
     UserMessage {
         text: String,
+        images: Vec<TranscriptImageSnapshot>,
         origin: UserInputOrigin,
     },
     AssistantText {
@@ -237,6 +241,24 @@ pub(crate) enum TranscriptItemSnapshot {
         result: ToolCallResult,
         content: ArtifactContent,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TranscriptImageSnapshot {
+    artifact: ArtifactRef,
+    input: UserImageInput,
+}
+
+impl TranscriptImageSnapshot {
+    #[must_use]
+    pub(crate) fn artifact(&self) -> &ArtifactRef {
+        &self.artifact
+    }
+
+    #[must_use]
+    pub(crate) fn input(&self) -> &UserImageInput {
+        &self.input
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -280,10 +302,21 @@ impl Transcript {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn push_user_message(
         &mut self,
         model_turn_id: ModelTurnId,
         artifact_id: ArtifactId,
+        origin: UserInputOrigin,
+    ) -> Result<TranscriptItemId, RuntimeError> {
+        self.push_user_message_with_images(model_turn_id, artifact_id, Vec::new(), origin)
+    }
+
+    pub(crate) fn push_user_message_with_images(
+        &mut self,
+        model_turn_id: ModelTurnId,
+        artifact_id: ArtifactId,
+        image_artifact_ids: Vec<ArtifactId>,
         origin: UserInputOrigin,
     ) -> Result<TranscriptItemId, RuntimeError> {
         self.ensure_model_turn_in_progress(model_turn_id)?;
@@ -292,6 +325,7 @@ impl Transcript {
             id,
             model_turn_id,
             artifact_id,
+            image_artifact_ids,
             origin,
         });
         Ok(id)
@@ -482,6 +516,7 @@ impl Transcript {
                         id,
                         model_turn_id: legacy_turn_id,
                         artifact_id,
+                        image_artifact_ids: Vec::new(),
                         origin,
                     }
                 }
@@ -558,11 +593,13 @@ impl From<&TranscriptItem> for PersistedTranscriptItem {
                 id,
                 model_turn_id,
                 artifact_id,
+                image_artifact_ids,
                 origin,
             } => Self::UserMessage {
                 id: id.as_u64(),
                 model_turn_id: *model_turn_id,
                 artifact_id: artifact_id.clone(),
+                image_artifact_ids: image_artifact_ids.clone(),
                 origin: (*origin).into(),
             },
             TranscriptItem::AssistantText {
@@ -613,11 +650,13 @@ impl TryFrom<PersistedTranscriptItem> for TranscriptItem {
                 id,
                 model_turn_id,
                 artifact_id,
+                image_artifact_ids,
                 origin,
             } => Self::UserMessage {
                 id: TranscriptItemId::new(id),
                 model_turn_id,
                 artifact_id,
+                image_artifact_ids,
                 origin: origin.into(),
             },
             PersistedTranscriptItem::AssistantText {
@@ -695,6 +734,7 @@ impl SessionState {
                 match item {
                     TranscriptItem::UserMessage {
                         artifact_id,
+                        image_artifact_ids,
                         origin,
                         ..
                     } => {
@@ -707,6 +747,10 @@ impl SessionState {
                         })?;
                         TranscriptItemSnapshot::UserMessage {
                             text: text.to_owned(),
+                            images: image_artifact_ids
+                                .iter()
+                                .map(|artifact_id| self.transcript_image_snapshot(artifact_id))
+                                .collect::<Result<Vec<_>, _>>()?,
                             origin: *origin,
                         }
                     }
@@ -772,5 +816,56 @@ impl SessionState {
             snapshot.push(item);
         }
         Ok(snapshot)
+    }
+
+    fn transcript_image_snapshot(
+        &self,
+        artifact_id: &ArtifactId,
+    ) -> Result<TranscriptImageSnapshot, ArtifactError> {
+        let artifact = self.artifacts.read_ref(artifact_id)?.clone();
+        if artifact.kind() != &ArtifactKind::Image {
+            return Err(invalid_user_image_artifact(
+                artifact_id,
+                "user image transcript artifact is not an image",
+            ));
+        }
+        let label = artifact.label().ok_or_else(|| {
+            invalid_user_image_artifact(artifact_id, "user image transcript artifact has no label")
+        })?;
+        let content = self.read_artifact_content(artifact_id)?;
+        let ArtifactContent::Image { bytes, metadata } = content else {
+            return Err(invalid_user_image_artifact(
+                artifact_id,
+                "user image transcript artifact content is not an image",
+            ));
+        };
+        let Some(metadata) = metadata else {
+            return Err(invalid_user_image_artifact(
+                artifact_id,
+                "user image transcript artifact has no image metadata",
+            ));
+        };
+        if metadata.media_type() != "image/png" {
+            return Err(invalid_user_image_artifact(
+                artifact_id,
+                "user image transcript artifact is not normalized PNG",
+            ));
+        }
+        let input = UserImageInput::png(label, bytes, metadata.width(), metadata.height())
+            .map_err(|_| {
+                invalid_user_image_artifact(
+                    artifact_id,
+                    "user image transcript artifact metadata is invalid",
+                )
+            })?;
+
+        Ok(TranscriptImageSnapshot { artifact, input })
+    }
+}
+
+fn invalid_user_image_artifact(artifact_id: &ArtifactId, reason: &'static str) -> ArtifactError {
+    ArtifactError::InvalidEvidenceLocator {
+        id: artifact_id.clone(),
+        reason,
     }
 }

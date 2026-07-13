@@ -59,6 +59,7 @@ mod summary_draft_promotion;
 mod token_estimate;
 mod tool;
 mod tool_input_validation;
+mod user_input;
 
 pub use agent_loop::{
     AgentLoopBlockedReason, AgentLoopConfig, AgentLoopConfigError, AgentLoopError,
@@ -67,7 +68,7 @@ pub use agent_loop::{
 };
 pub use artifact::{
     ArtifactContent, ArtifactContentKind, ArtifactError, ArtifactRecord, ArtifactRegistry,
-    TextEvidencePage,
+    ImageArtifactMetadata, TextEvidencePage,
 };
 pub use checkpoint::{
     CheckpointEntry, CheckpointEntryId, CheckpointError, CheckpointHandoff,
@@ -131,7 +132,7 @@ pub use runtime::{AutomaticCompactionConfig, Runtime, RuntimeBuilder};
 pub use session_projection::SessionTranscriptItem;
 pub use session_store::{FileSessionStore, SessionStoreError};
 pub use skill::{SkillCatalog, SkillError, SkillLoadWarning, SkillMetadata};
-pub use step::{StepContext, StepInput};
+pub use step::StepContext;
 pub use subagent::{
     CancelSubagentsInput, ChildRuntimeFactory, ChildRuntimeInput, ChildWorkspaceScope,
     DEFAULT_MAX_MODEL_TURNS, RejectedSubagentView, SpawnSubagentTaskInput, SpawnSubagentsInput,
@@ -146,4 +147,9 @@ pub use tool::{
     ToolActionProposalResult, ToolConcurrency, ToolExecutionContext, ToolExecutionError,
     ToolExecutionOutcome, ToolExecutionResult, ToolExecutor, ToolExecutorFuture, ToolRunner,
     WorkspacePatchChangeEvidence, WorkspacePatchExecutionEvidence, WorkspacePatchProposal,
+};
+pub use user_input::{
+    MAX_USER_IMAGE_DIMENSION, MAX_USER_IMAGE_PIXELS, MAX_USER_IMAGE_PNG_BYTES,
+    MAX_USER_IMAGE_TOTAL_PNG_BYTES, MAX_USER_IMAGES, StepInput, UserImageInput, UserMessageInput,
+    user_image_label,
 };

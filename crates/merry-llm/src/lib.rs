@@ -1,6 +1,7 @@
 //! Provider-facing traits and normalized model events for Merry.
 
 pub mod capability;
+pub mod content;
 pub mod error;
 pub mod event;
 pub mod model_catalog;
@@ -14,6 +15,7 @@ pub mod tool;
 pub mod usage;
 
 pub use capability::ModelCapabilities;
+pub use content::{ModelContent, ModelContentPart, ModelImage};
 pub use error::{ModelError, ProviderErrorKind};
 pub use event::ModelEvent;
 pub use model_catalog::{
@@ -22,9 +24,9 @@ pub use model_catalog::{
 };
 pub use provider::{ModelEventStream, ModelProvider, ModelProviderFuture, ModelStreamContext};
 pub use request::{
-    GenerationConfig, ModelContent, ModelInputItem, ModelMessage, ModelMessageRole, ModelName,
-    ModelRequest, ModelResponseFormat, ModelStructuredOutputFormat, ParallelToolCalls,
-    ReasoningEffort, RequestContentHash, ToolProfileHash,
+    GenerationConfig, ModelInputItem, ModelMessage, ModelMessageRole, ModelName, ModelRequest,
+    ModelResponseFormat, ModelStructuredOutputFormat, ParallelToolCalls, ReasoningEffort,
+    RequestContentHash, ToolProfileHash,
 };
 pub use response::{FinishReason, ModelOutput, ModelResponse};
 pub use retry::{

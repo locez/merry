@@ -30,6 +30,9 @@ pub(crate) enum AnthropicContentBlock<'a> {
     Text {
         text: &'a str,
     },
+    Image {
+        source: AnthropicImageSource,
+    },
     ToolUse {
         id: &'a str,
         name: &'a str,
@@ -40,6 +43,14 @@ pub(crate) enum AnthropicContentBlock<'a> {
         content: &'a str,
         is_error: bool,
     },
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AnthropicImageSource {
+    #[serde(rename = "type")]
+    pub(crate) kind: &'static str,
+    pub(crate) media_type: &'static str,
+    pub(crate) data: String,
 }
 
 #[derive(Debug, Serialize)]

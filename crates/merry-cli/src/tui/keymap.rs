@@ -7,6 +7,7 @@ pub(crate) enum KeyAction {
     SubmitBacklog,
     CancelInputOrQuit,
     InsertNewline,
+    PasteImage,
     Interrupt,
     OpenCommandPanel,
     OpenDetails,
@@ -74,6 +75,10 @@ impl Default for Keymap {
                     KeyAction::InsertNewline,
                 ),
                 (
+                    KeyBinding::new(KeyCode::Char('v'), KeyModifiers::CONTROL),
+                    KeyAction::PasteImage,
+                ),
+                (
                     KeyBinding::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
                     KeyAction::OpenCommandPanel,
                 ),
@@ -139,6 +144,9 @@ impl Keymap {
         }
         if let Some(binding) = config.insert_newline.as_deref() {
             keymap.set_binding(parse_binding(binding)?, KeyAction::InsertNewline);
+        }
+        if let Some(binding) = config.paste_image.as_deref() {
+            keymap.set_binding(parse_binding(binding)?, KeyAction::PasteImage);
         }
         if let Some(binding) = config.interrupt.as_deref() {
             keymap.set_binding(parse_binding(binding)?, KeyAction::Interrupt);
@@ -251,6 +259,7 @@ fn parse_binding(value: &str) -> Result<KeyBinding, crate::config::ConfigError> 
         "ctrl+q" => Ok(KeyBinding::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
         "ctrl+r" => Ok(KeyBinding::new(KeyCode::Char('r'), KeyModifiers::CONTROL)),
         "ctrl+u" => Ok(KeyBinding::new(KeyCode::Char('u'), KeyModifiers::CONTROL)),
+        "ctrl+v" => Ok(KeyBinding::new(KeyCode::Char('v'), KeyModifiers::CONTROL)),
         other => Err(crate::config::ConfigError::Invalid(format!(
             "unsupported TUI key binding {other:?}"
         ))),

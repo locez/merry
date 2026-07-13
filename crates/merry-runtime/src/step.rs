@@ -4,8 +4,9 @@
 //! glue from structured runtime state into `merry-llm` model requests; provider
 //! crates render those normalized requests into wire formats.
 
+pub use crate::user_input::StepInput;
 use crate::{
-    CompiledContext, FinalOutputContract, ProjectRules, RuntimeError, SkillCatalog, TaskAnchor,
+    CompiledContext, FinalOutputContract, ProjectRules, SkillCatalog, TaskAnchor, UserMessageInput,
     artifact::ArtifactContent, session::TranscriptItemSnapshot,
 };
 use merry_core::{PendingToolCall, ToolCallResult, ToolCallResultStatus, ToolSpec};
@@ -44,110 +45,6 @@ Verify claims in proportion to risk. Run the most relevant available checks afte
 Finish with the outcome that matters to the user: the answer or change, the evidence or verification supporting it, and any genuine remaining blocker. Keep the response concise relative to the task, but do not omit material risks or unfinished work."#;
 
 pub(crate) const PROGRESS_COMMENTARY_INSTRUCTIONS: &str = r#"Prefer efficient tool execution. Do not add a progress note before routine or consecutive tool calls; call the tools directly. Emit a short progress update only when a turn begins a non-obvious plan, changes direction, waits on something slow, requests elevated capability, or is about to produce the final summary. Keep any progress updates concise and use the user's current input language. Do not include progress notes in final structured output."#;
-
-/// Input snapshot for a runtime step.
-///
-/// The MVP step input is user text only. Runtime state such as context,
-/// artifacts, tool continuations, and ledger facts is read from the owning
-/// session rather than passed as raw chat history.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StepInput {
-    user_texts: Vec<String>,
-    history: StepInputHistory,
-}
-
-impl StepInput {
-    /// Creates a user-text step input.
-    ///
-    /// Text must be non-blank and may contain newlines and tabs, but not other
-    /// control characters.
-    pub fn user_text(text: &str) -> Result<Self, RuntimeError> {
-        Self::user_texts([text])
-    }
-
-    /// Creates a step input with multiple consecutive user messages.
-    ///
-    /// Each text item must be non-blank and may contain newlines and tabs, but
-    /// not other control characters.
-    pub fn user_texts<I, S>(texts: I) -> Result<Self, RuntimeError>
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<str>,
-    {
-        let user_texts = texts
-            .into_iter()
-            .map(|text| {
-                let text = text.as_ref();
-                validate_user_text(text)?;
-                Ok(text.to_owned())
-            })
-            .collect::<Result<Vec<_>, RuntimeError>>()?;
-
-        if user_texts.is_empty() {
-            return Err(RuntimeError::InvalidStepInput {
-                reason: "user text burst must contain at least one message",
-            });
-        }
-
-        Ok(Self {
-            user_texts,
-            history: StepInputHistory::RecordUser,
-        })
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn loop_control_text(text: &str) -> Result<Self, RuntimeError> {
-        validate_user_text(text)?;
-        Ok(Self {
-            user_texts: vec![text.to_owned()],
-            history: StepInputHistory::ControlOnly,
-        })
-    }
-
-    pub(crate) fn no_new_user_input() -> Self {
-        Self {
-            user_texts: Vec::new(),
-            history: StepInputHistory::ControlOnly,
-        }
-    }
-
-    /// Borrows the user text for this step.
-    #[must_use]
-    pub fn text(&self) -> &str {
-        self.user_texts
-            .first()
-            .map(String::as_str)
-            .expect("StepInput::text is available only for user text inputs")
-    }
-
-    /// Borrows the user texts for this step.
-    #[must_use]
-    pub fn texts(&self) -> &[String] {
-        &self.user_texts
-    }
-
-    pub(crate) fn user_texts_for_request(&self) -> &[String] {
-        &self.user_texts
-    }
-
-    pub(crate) fn user_texts_for_history(&self) -> &[String] {
-        if self.history == StepInputHistory::RecordUser {
-            &self.user_texts
-        } else {
-            &[]
-        }
-    }
-
-    pub(crate) fn memory_activation_query(&self) -> Option<String> {
-        (!self.user_texts.is_empty()).then(|| self.user_texts.join("\n\n"))
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StepInputHistory {
-    RecordUser,
-    ControlOnly,
-}
 
 /// Context shared with runtime step producers.
 ///
@@ -228,25 +125,6 @@ impl Default for StepContext {
     }
 }
 
-fn validate_user_text(text: &str) -> Result<(), RuntimeError> {
-    if text.trim().is_empty() {
-        return Err(RuntimeError::InvalidStepInput {
-            reason: "user text must not be blank",
-        });
-    }
-
-    if text
-        .chars()
-        .any(|character| character.is_control() && character != '\n' && character != '\t')
-    {
-        return Err(RuntimeError::InvalidStepInput {
-            reason: "user text must not contain control characters other than newline or tab",
-        });
-    }
-
-    Ok(())
-}
-
 pub(crate) struct StepModelRequestParts<'a> {
     pub(crate) input: &'a StepInput,
     pub(crate) model: &'a ModelName,
@@ -289,7 +167,7 @@ pub(crate) fn compile_step_model_request(
             + usize::from(task_anchor.is_some())
             + usize::from(!context_body_snapshot.is_empty())
             + transcript.len()
-            + input.user_texts_for_request().len(),
+            + input.user_messages_for_request().len(),
     );
 
     // Keep provider prompt projection allowlisted and ordered:
@@ -347,10 +225,10 @@ pub(crate) fn compile_step_model_request(
         messages.push(model_input_from_transcript_snapshot(item)?);
     }
 
-    for text in input.user_texts_for_request() {
+    for message in input.user_messages_for_request() {
         messages.push(ModelInputItem::Message(ModelMessage::new(
             ModelMessageRole::User,
-            ModelContent::text(text)?,
+            message.model_content()?,
         )?));
     }
 
@@ -367,9 +245,17 @@ fn model_input_from_transcript_snapshot(
     snapshot: &TranscriptItemSnapshot,
 ) -> Result<ModelInputItem, merry_llm::ModelError> {
     match snapshot {
-        TranscriptItemSnapshot::UserMessage { text, .. } => Ok(ModelInputItem::Message(
-            ModelMessage::new(ModelMessageRole::User, ModelContent::text(text)?)?,
-        )),
+        TranscriptItemSnapshot::UserMessage { text, images, .. } => {
+            let message = UserMessageInput::new(
+                text,
+                images.iter().map(|image| image.input().clone()).collect(),
+            )
+            .map_err(|error| merry_llm::ModelError::invalid_request(error.to_string()))?;
+            Ok(ModelInputItem::Message(ModelMessage::new(
+                ModelMessageRole::User,
+                message.model_content()?,
+            )?))
+        }
         TranscriptItemSnapshot::AssistantText { text } => Ok(ModelInputItem::Message(
             ModelMessage::new(ModelMessageRole::Assistant, ModelContent::text(text)?)?,
         )),
@@ -439,8 +325,9 @@ fn model_tool_result_content(
 #[cfg(test)]
 mod tests {
     use super::{DEFAULT_RUNTIME_BASE_INSTRUCTIONS, StepContext, StepInput};
-    use crate::RuntimeError;
-    use merry_llm::GenerationConfig;
+    use crate::{RuntimeError, UserImageInput, UserMessageInput};
+    use merry_llm::{GenerationConfig, ModelContentPart};
+    use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
 
     #[test]
@@ -529,6 +416,42 @@ mod tests {
         let input = StepInput::no_new_user_input();
 
         assert!(input.texts().is_empty());
+    }
+
+    #[test]
+    fn user_message_input_compiles_images_before_the_full_labeled_text() {
+        let message = UserMessageInput::new(
+            "inspect [Image #1]",
+            vec![
+                UserImageInput::png(
+                    "[Image #1]",
+                    Arc::<[u8]>::from([137, 80, 78, 71, 13, 10, 26, 10]),
+                    2,
+                    3,
+                )
+                .expect("valid image"),
+            ],
+        )
+        .expect("valid message");
+
+        let content = message.model_content().expect("content should compile");
+        assert_eq!(content.parts().len(), 4);
+        assert!(matches!(
+            &content.parts()[0],
+            ModelContentPart::Text { text } if text == "<image name=[Image #1]>"
+        ));
+        assert!(matches!(
+            &content.parts()[1],
+            ModelContentPart::Image { image } if image.label() == "[Image #1]"
+        ));
+        assert!(matches!(
+            &content.parts()[2],
+            ModelContentPart::Text { text } if text == "</image>"
+        ));
+        assert!(matches!(
+            &content.parts()[3],
+            ModelContentPart::Text { text } if text == "inspect [Image #1]"
+        ));
     }
 
     #[test]

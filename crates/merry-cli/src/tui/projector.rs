@@ -40,7 +40,7 @@ impl TuiProjector {
         state: &mut TuiState,
     ) {
         match item {
-            SessionTranscriptItem::UserMessage { text } => {
+            SessionTranscriptItem::UserMessage { text, .. } => {
                 state.confirm_or_push_user_input(text, merry_core::QueuedInputLane::Next);
             }
             SessionTranscriptItem::AssistantText { text } => {

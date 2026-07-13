@@ -636,6 +636,35 @@ mod tests {
     }
 
     #[test]
+    fn bwrap_process_plan_does_not_expose_outer_graphical_endpoints() {
+        let runner = BwrapProcessRunner::new_at_workspace_root("/workspace/merry")
+            .with_bwrap_program("/custom/bin/bwrap");
+        let plan = bwrap_process_plan(
+            &intent(None),
+            &runner.cwd_root,
+            runner.network_allowed,
+            &runner.path_rules,
+            &runner.bwrap_program,
+        );
+        let args = os_args(&plan.args);
+
+        for forbidden in [
+            "DISPLAY",
+            "WAYLAND_DISPLAY",
+            "XDG_RUNTIME_DIR",
+            "XAUTHORITY",
+            "/tmp/.X11-unix",
+            "/run/merry-wayland",
+            "/run/merry-x11",
+        ] {
+            assert!(
+                !args.iter().any(|arg| arg.contains(forbidden)),
+                "inner action sandbox leaked {forbidden}: {args:?}"
+            );
+        }
+    }
+
+    #[test]
     fn bwrap_process_plan_allows_network_when_configured() {
         let runner = BwrapProcessRunner::new_at_workspace_root("/workspace/merry").allow_network();
         let plan = bwrap_process_plan(

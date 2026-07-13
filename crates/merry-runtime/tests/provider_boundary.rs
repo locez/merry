@@ -2474,12 +2474,14 @@ async fn installed_checkpoint_replaces_old_body_but_keeps_raw_tail_in_next_reque
         vec![
             SessionTranscriptItem::UserMessage {
                 text: "old user".to_owned(),
+                images: Vec::new(),
             },
             SessionTranscriptItem::AssistantText {
                 text: "old assistant".to_owned(),
             },
             SessionTranscriptItem::UserMessage {
                 text: "tail user".to_owned(),
+                images: Vec::new(),
             },
             SessionTranscriptItem::AssistantText {
                 text: "model result".to_owned(),

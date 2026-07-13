@@ -1410,6 +1410,7 @@ fn runtime_error_code(error: &RuntimeError) -> &'static str {
     match error {
         RuntimeError::StepAlreadyActive { .. } => "step_already_active",
         RuntimeError::InvalidStepInput { .. } => "invalid_step_input",
+        RuntimeError::InvalidUserImageInput { .. } => "invalid_user_image_input",
         RuntimeError::ReservedArtifactId { .. } => "reserved_artifact_id",
         RuntimeError::UnknownToolCall { .. } => "unknown_tool_call",
         RuntimeError::ToolCallAlreadyResolved { .. } => "tool_call_already_resolved",

@@ -24,6 +24,8 @@ use theme::TuiTheme;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+#[cfg(target_os = "linux")]
+mod clipboard_image;
 mod completion;
 mod controller;
 mod highlight;

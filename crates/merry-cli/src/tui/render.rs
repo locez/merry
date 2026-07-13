@@ -197,9 +197,14 @@ fn render_input(frame: &mut Frame<'_>, state: &TuiState, region: Rect, input_hei
     let input_inner = bordered_inner(region);
     let max_input_rows = usize::from(input_height.saturating_sub(2)).max(1);
     let input_viewport = state.input_viewport_rows(usize::from(input_inner.width), max_input_rows);
+    let input_lines = styled_input_lines(
+        state,
+        &input_viewport.text,
+        &input_viewport.image_placeholders,
+    );
 
     frame.render_widget(
-        Paragraph::new(input_viewport.text)
+        Paragraph::new(input_lines)
             .style(semantic_style(state, SemanticColor::Assistant))
             .block(
                 Block::default()
@@ -219,6 +224,49 @@ fn render_input(frame: &mut Frame<'_>, state: &TuiState, region: Rect, input_hei
         input_viewport.cursor_column,
         input_viewport.cursor_row,
     );
+}
+
+fn styled_input_lines(
+    state: &TuiState,
+    text: &str,
+    image_placeholders: &[String],
+) -> Vec<Line<'static>> {
+    text.split('\n')
+        .map(|line| styled_input_line(state, line, image_placeholders))
+        .collect()
+}
+
+fn styled_input_line(state: &TuiState, line: &str, image_placeholders: &[String]) -> Line<'static> {
+    let normal = semantic_style(state, SemanticColor::Assistant);
+    let image = semantic_style(state, SemanticColor::Status).add_modifier(Modifier::BOLD);
+    let mut spans = Vec::new();
+    let mut cursor = 0;
+
+    while cursor < line.len() {
+        let Some((start, placeholder)) = image_placeholders
+            .iter()
+            .filter_map(|placeholder| {
+                line[cursor..]
+                    .find(placeholder)
+                    .map(|offset| (cursor + offset, placeholder.as_str()))
+            })
+            .min_by_key(|(start, _)| *start)
+        else {
+            spans.push(Span::styled(line[cursor..].to_owned(), normal));
+            break;
+        };
+
+        if start > cursor {
+            spans.push(Span::styled(line[cursor..start].to_owned(), normal));
+        }
+        spans.push(Span::styled(placeholder.to_owned(), image));
+        cursor = start + placeholder.len();
+    }
+
+    if spans.is_empty() {
+        spans.push(Span::styled(String::new(), normal));
+    }
+    Line::from(spans)
 }
 
 fn render_focus_pane(frame: &mut Frame<'_>, state: &TuiState, region: Rect, view: &FocusPanelView) {

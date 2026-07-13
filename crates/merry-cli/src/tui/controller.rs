@@ -1,4 +1,5 @@
 use super::{
+    input::{DraftImage, TuiSubmission},
     keymap::KeyAction,
     layout::{BottomPaneHeights, timeline_layout},
     overlay::{OverlayKeyResult, PaletteCommand},
@@ -38,6 +39,10 @@ struct ModelDiscoveryCompletion {
     result: Result<Vec<ModelListItem>, String>,
 }
 
+struct ClipboardImageCompletion {
+    result: Result<DraftImage, String>,
+}
+
 struct ProviderController<'a> {
     management: &'a mut ProviderManagementService,
     discovery_tx: &'a mpsc::Sender<ModelDiscoveryCompletion>,
@@ -48,8 +53,9 @@ struct ProviderController<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ControllerEffect {
     None,
-    SubmitNext(String),
-    SubmitBacklog(String),
+    SubmitNext(TuiSubmission),
+    SubmitBacklog(TuiSubmission),
+    PasteImage,
     Interrupt,
     ResumeSuspended,
     DiscardSuspended,
@@ -109,6 +115,7 @@ pub(crate) fn handle_key_action(action: KeyAction, state: &mut TuiState) -> Cont
             state.insert_input_newline();
             ControllerEffect::None
         }
+        KeyAction::PasteImage => ControllerEffect::PasteImage,
         KeyAction::OpenCommandPanel => {
             state.open_command_palette();
             ControllerEffect::None
@@ -426,6 +433,7 @@ pub(crate) async fn run_controller(
 ) -> Result<(), CliError> {
     let mut projector = TuiProjector::default();
     let (model_discovery_tx, mut model_discovery_rx) = mpsc::channel(4);
+    let (clipboard_image_tx, mut clipboard_image_rx) = mpsc::channel(4);
     let mut model_discovery_generation = 0_u64;
     let mut model_discovery_token: Option<CancellationToken> = None;
     render_once(&mut terminal, &state)?;
@@ -457,6 +465,7 @@ pub(crate) async fn run_controller(
                             &mut state,
                             &preferences_store,
                             &mut providers,
+                            &clipboard_image_tx,
                         )
                         .await?;
                         if should_quit {
@@ -499,6 +508,13 @@ pub(crate) async fn run_controller(
                     render_once(&mut terminal, &state)?;
                 }
             }
+            completion = clipboard_image_rx.recv() => {
+                let Some(completion) = completion else {
+                    continue;
+                };
+                apply_clipboard_image_completion(completion.result, &mut state);
+                render_once(&mut terminal, &state)?;
+            }
         }
     }
 
@@ -511,15 +527,30 @@ async fn dispatch_effect(
     state: &mut TuiState,
     preferences_store: &TuiPreferencesStore,
     providers: &mut ProviderController<'_>,
+    clipboard_image_tx: &mpsc::Sender<ClipboardImageCompletion>,
 ) -> Result<bool, CliError> {
     match effect {
         ControllerEffect::None => Ok(false),
-        ControllerEffect::SubmitNext(text) => {
-            session.input.submit_next(&text).await.map_err(unexpected)?;
+        ControllerEffect::SubmitNext(submission) => {
+            let message = submission.into_user_message().map_err(unexpected)?;
+            session
+                .input
+                .submit_next_message(message)
+                .await
+                .map_err(unexpected)?;
             Ok(false)
         }
-        ControllerEffect::SubmitBacklog(text) => {
-            session.input.enqueue(&text).await.map_err(unexpected)?;
+        ControllerEffect::SubmitBacklog(submission) => {
+            let message = submission.into_user_message().map_err(unexpected)?;
+            session
+                .input
+                .enqueue_message(message)
+                .await
+                .map_err(unexpected)?;
+            Ok(false)
+        }
+        ControllerEffect::PasteImage => {
+            start_clipboard_image_read(clipboard_image_tx.clone());
             Ok(false)
         }
         ControllerEffect::Interrupt => {
@@ -1068,11 +1099,11 @@ fn model_list_items(catalog: merry_llm::ModelCatalog) -> Vec<ModelListItem> {
 
 fn project_local_effect(effect: &ControllerEffect, state: &mut TuiState) {
     match effect {
-        ControllerEffect::SubmitNext(text) => {
-            state.push_local_user_echo(text.clone(), QueuedInputLane::Next);
+        ControllerEffect::SubmitNext(submission) => {
+            state.push_local_user_echo(submission.text.clone(), QueuedInputLane::Next);
         }
-        ControllerEffect::SubmitBacklog(text) => {
-            state.push_local_user_echo(text.clone(), QueuedInputLane::Backlog);
+        ControllerEffect::SubmitBacklog(submission) => {
+            state.push_local_user_echo(submission.text.clone(), QueuedInputLane::Backlog);
         }
         ControllerEffect::PersistPreferences(_)
         | ControllerEffect::ApplyRuntimePreferences(_)
@@ -1086,6 +1117,51 @@ fn project_local_effect(effect: &ControllerEffect, state: &mut TuiState) {
         | ControllerEffect::DeleteProvider(_)
         | ControllerEffect::SelectProviderModel { .. } => {}
         _ => {}
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn start_clipboard_image_read(sender: mpsc::Sender<ClipboardImageCompletion>) {
+    tokio::spawn(async move {
+        let result = tokio::task::spawn_blocking(|| {
+            super::clipboard_image::read_clipboard_image()
+                .map_err(|error| error.to_string())
+                .and_then(|image| image.into_draft_image().map_err(|error| error.to_string()))
+        })
+        .await
+        .unwrap_or_else(|error| Err(format!("clipboard image task failed: {error}")));
+        let _ = sender.send(ClipboardImageCompletion { result }).await;
+    });
+}
+
+#[cfg(not(target_os = "linux"))]
+fn start_clipboard_image_read(sender: mpsc::Sender<ClipboardImageCompletion>) {
+    tokio::spawn(async move {
+        let _ =
+            sender
+                .send(ClipboardImageCompletion {
+                    result: Err(
+                        "clipboard image paste is currently supported only on Linux".to_owned()
+                    ),
+                })
+                .await;
+    });
+}
+
+pub(crate) fn apply_clipboard_image_completion(
+    result: Result<DraftImage, String>,
+    state: &mut TuiState,
+) {
+    let result = result.and_then(|image| {
+        state
+            .insert_input_image(image)
+            .map_err(|error| error.to_string())
+    });
+    if let Err(error) = result {
+        state.push_timeline_item(super::state::TimelineItem::Diagnostic {
+            title: "clipboard_image".to_owned(),
+            body: error,
+        });
     }
 }
 
