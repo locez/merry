@@ -688,11 +688,12 @@ impl RuntimeBuilder {
             self.session_store.clone(),
             self.event_buffer_size,
         );
-        let plan_scheduler = self.plan_worker_factory.map(|factory| {
+        let plan_scheduler = self.worker_plan_control.is_none().then(|| {
             PlanScheduler::new(
                 plan_controller.clone(),
-                factory,
+                self.plan_worker_factory,
                 self.plan_worker_max_threads,
+                self.session_id.clone(),
             )
         });
 

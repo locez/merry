@@ -62,6 +62,7 @@ impl Runtime {
             phase_token: None,
             interrupted: false,
             seen_plan_sequences: BTreeSet::new(),
+            coordinator_continuation_requested: false,
         };
         let producer_handle = tokio::spawn(async move {
             producer.run().await;
@@ -93,11 +94,16 @@ struct InteractiveProducer {
     phase_token: Option<CancellationToken>,
     interrupted: bool,
     seen_plan_sequences: BTreeSet<u64>,
+    coordinator_continuation_requested: bool,
 }
 
 impl InteractiveProducer {
     async fn run(mut self) {
         if !self.send_state(InteractiveRunState::WaitingForInput).await {
+            return;
+        }
+        self.refresh_coordinator_continuation_request().await;
+        if self.coordinator_continuation_requested && !self.run_coordinator_continuation().await {
             return;
         }
 
@@ -106,6 +112,11 @@ impl InteractiveProducer {
                 command = self.command_receiver.recv() => command,
                 plan_event = self.plan_event_receiver.recv() => {
                     if !self.forward_plan_event(plan_event).await {
+                        return;
+                    }
+                    if self.coordinator_continuation_requested
+                        && !self.run_coordinator_continuation().await
+                    {
                         return;
                     }
                     continue;
@@ -252,6 +263,30 @@ impl InteractiveProducer {
             }
             return Some(boundary);
         }
+    }
+
+    async fn run_coordinator_continuation(&mut self) -> bool {
+        self.coordinator_continuation_requested = false;
+        let Some(boundary) = self.run_continuation_steps().await else {
+            return false;
+        };
+        match boundary {
+            BoundaryAction::UserInput { accepted, lane } => {
+                self.run_accepted_steps(accepted, lane).await
+            }
+            BoundaryAction::Wait => self.send_state(InteractiveRunState::WaitingForInput).await,
+            BoundaryAction::Continuation => true,
+        }
+    }
+
+    async fn refresh_coordinator_continuation_request(&mut self) {
+        let Ok(Some(snapshot)) = self.runtime.plan_snapshot().await else {
+            return;
+        };
+        self.coordinator_continuation_requested = snapshot.leases.iter().any(|lease| {
+            lease.status == merry_core::PlanLeaseStatus::Live
+                && lease.executor_session_id == *self.runtime.session_id()
+        });
     }
 
     async fn run_model_phase(
@@ -572,6 +607,7 @@ impl InteractiveProducer {
     ) -> bool {
         match event {
             Ok(event) => {
+                self.observe_plan_wakeup(&event.payload);
                 let mut projector = RuntimeEventProjector::new();
                 self.project_and_send_runtime_event(&mut projector, event)
                     .await
@@ -581,6 +617,31 @@ impl InteractiveProducer {
                 true
             }
             Err(tokio::sync::broadcast::error::RecvError::Closed) => true,
+        }
+    }
+
+    fn observe_plan_wakeup(&mut self, payload: &RuntimeJournalPayload) {
+        match payload {
+            RuntimeJournalPayload::PlanLeaseStarted { lease }
+                if lease.executor_session_id == *self.runtime.session_id() =>
+            {
+                self.coordinator_continuation_requested = true;
+            }
+            RuntimeJournalPayload::PlanProgressReviewRequested { .. } => {
+                self.coordinator_continuation_requested = true;
+            }
+            RuntimeJournalPayload::PlanAttemptFinished { attempt }
+                if matches!(
+                    attempt.outcome,
+                    Some(
+                        merry_core::PlanAttemptOutcome::SemanticFailure
+                            | merry_core::PlanAttemptOutcome::Blocked
+                    )
+                ) =>
+            {
+                self.coordinator_continuation_requested = true;
+            }
+            _ => {}
         }
     }
 

@@ -9,6 +9,10 @@ struct CoordinatorPlanProjection<'a> {
     root_node_id: Option<&'a merry_core::PlanNodeId>,
     scheduler_status: merry_core::PlanSchedulerStatus,
     nodes: Vec<CoordinatorNodeProjection<'a>>,
+    live_attempts: Vec<&'a merry_core::PlanAttemptSnapshot>,
+    live_leases: Vec<&'a merry_core::PlanLeaseSnapshot>,
+    live_progress: Vec<&'a merry_core::PlanAttemptProgressSnapshot>,
+    unresolved_directives: Vec<&'a merry_core::CoordinatorDirectiveSnapshot>,
     approval_requirements: &'a [merry_core::PlanApprovalRequirementSnapshot],
 }
 
@@ -46,6 +50,37 @@ pub(crate) fn coordinator_plan_control_message(snapshot: &PlanSnapshot) -> Strin
                 executor_policy: node.executor_policy,
                 depends_on: &node.depends_on,
                 updated_revision: node.updated_revision,
+            })
+            .collect(),
+        live_attempts: snapshot
+            .attempts
+            .iter()
+            .filter(|attempt| attempt.outcome.is_none())
+            .collect(),
+        live_leases: snapshot
+            .leases
+            .iter()
+            .filter(|lease| lease.status == merry_core::PlanLeaseStatus::Live)
+            .collect(),
+        live_progress: snapshot
+            .attempt_progress
+            .iter()
+            .filter(|progress| {
+                snapshot.attempts.iter().any(|attempt| {
+                    attempt.attempt_id == progress.attempt_id && attempt.outcome.is_none()
+                })
+            })
+            .collect(),
+        unresolved_directives: snapshot
+            .directives
+            .iter()
+            .filter(|directive| {
+                !matches!(
+                    directive.status,
+                    merry_core::PlanDirectiveStatus::Applied
+                        | merry_core::PlanDirectiveStatus::Superseded
+                        | merry_core::PlanDirectiveStatus::Expired
+                )
             })
             .collect(),
         approval_requirements: &snapshot.approval_requirements,

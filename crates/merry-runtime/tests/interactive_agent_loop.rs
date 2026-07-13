@@ -1,7 +1,9 @@
 use futures_util::{StreamExt, stream};
 use merry_core::{
-    InteractiveRunState, ModelUsage, PendingToolCall, PlanActivationSource, ProviderName,
-    QueuedInputLane, RuntimeEvent, SessionId, ToolInputSchema, ToolName, ToolSpec,
+    InteractiveRunState, ModelUsage, PendingToolCall, PlanActivationSource, PlanAttemptOutcome,
+    PlanExecutorPolicy, PlanHarnessSnapshot, PlanNodeResult, PlanNodeStatus, PlanPhase,
+    PlanRecoveryPolicySnapshot, ProviderName, QueuedInputLane, RuntimeEvent, SessionId,
+    ToolInputSchema, ToolName, ToolSpec,
 };
 use merry_llm::{
     FinishReason, GenerationConfig, ModelCapabilities, ModelError, ModelEvent, ModelEventStream,
@@ -10,17 +12,22 @@ use merry_llm::{
     ReasoningEffort, ToolArguments,
 };
 use merry_runtime::{
-    AgentLoopConfig, AutomaticCompactionConfig, ChildRuntimeFactory, ChildRuntimeInput,
-    CitationCompactionPolicy, InteractiveError, InteractivePrimaryModel, InteractiveSettingsUpdate,
-    InteractiveSubagentSettings, InterruptReason, Runtime, StepContext, SubagentConfig,
-    SubagentManager, ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome, ToolExecutor,
-    ToolExecutorFuture, subagent_registered_tools,
+    AgentLoopConfig, AutomaticCompactionConfig, BeginPlanInput, ChildRuntimeFactory,
+    ChildRuntimeInput, CitationCompactionPolicy, InteractiveError, InteractivePrimaryModel,
+    InteractiveSettingsUpdate, InteractiveSubagentSettings, InterruptReason, PlanChangeInput,
+    PlanExecutionIntent, PlanNodeInput, ReportPlanAttemptInput, Runtime, StepContext,
+    SubagentConfig, SubagentManager, ToolExecutionContext, ToolExecutionError,
+    ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture, UpdatePlanInput,
+    subagent_registered_tools,
 };
 use schemars::Schema;
 use serde_json::json;
 use std::{
     num::{NonZeroU64, NonZeroUsize},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 use tokio::{
     sync::{Barrier, Mutex as AsyncMutex, oneshot},
@@ -167,6 +174,79 @@ impl ModelProvider for RecordingProvider {
         Box::pin(async move {
             self.requests.lock().expect("requests lock").push(request);
             let event_stream: ModelEventStream = Box::pin(stream::iter(self.next_step()));
+            Ok(event_stream)
+        })
+    }
+}
+
+#[derive(Clone, Default)]
+struct LocalPlanProvider {
+    target: Arc<Mutex<Option<(merry_core::PlanLeaseId, u64)>>>,
+    calls: Arc<AtomicUsize>,
+}
+
+impl LocalPlanProvider {
+    fn set_target(&self, lease_id: merry_core::PlanLeaseId, node_revision: u64) {
+        *self.target.lock().expect("local plan target lock") = Some((lease_id, node_revision));
+    }
+}
+
+impl ModelProvider for LocalPlanProvider {
+    fn name(&self) -> &ProviderName {
+        static NAME: OnceLock<ProviderName> = OnceLock::new();
+        NAME.get_or_init(|| ProviderName::new("interactive-local-plan").expect("valid provider"))
+    }
+
+    fn capabilities(&self) -> &ModelCapabilities {
+        static CAPABILITIES: OnceLock<ModelCapabilities> = OnceLock::new();
+        CAPABILITIES.get_or_init(|| {
+            ModelCapabilities::new(true, true, false, true, None, None).expect("valid capabilities")
+        })
+    }
+
+    fn stream_model<'a>(
+        &'a self,
+        _request: ModelRequest,
+        _context: ModelStreamContext,
+    ) -> ModelProviderFuture<'a, Result<ModelEventStream, ModelError>> {
+        Box::pin(async move {
+            let event = if self.calls.fetch_add(1, Ordering::AcqRel) == 0 {
+                let (lease_id, node_revision) = self
+                    .target
+                    .lock()
+                    .expect("local plan target lock")
+                    .clone()
+                    .expect("local plan target is configured before interactive execution");
+                let input = ReportPlanAttemptInput {
+                    lease_id: lease_id.clone(),
+                    expected_node_revision: node_revision,
+                    outcome: PlanAttemptOutcome::Completed,
+                    result: Some(PlanNodeResult {
+                        conclusion: "local coordinator verification completed".to_owned(),
+                        evidence_refs: Vec::new(),
+                        artifact_refs: Vec::new(),
+                        changed_paths: Vec::new(),
+                        verification: vec!["deterministic local verification".to_owned()],
+                        open_questions: Vec::new(),
+                    }),
+                    diagnostic: None,
+                    decomposition: None,
+                    acknowledged_directive_ids: Vec::new(),
+                    applied_directive_ids: Vec::new(),
+                };
+                completed_tool_call_event(ModelToolCall::new(
+                    ModelToolCallId::new(&format!("local-plan-{}", lease_id.as_str()))
+                        .expect("valid call id"),
+                    ToolName::new("report_plan_attempt").expect("valid tool name"),
+                    ToolArguments::try_from(
+                        serde_json::to_value(input).expect("attempt report serializes"),
+                    )
+                    .expect("attempt report arguments are an object"),
+                ))
+            } else {
+                completed_text_event("local plan complete")
+            };
+            let event_stream: ModelEventStream = Box::pin(stream::iter(vec![Ok(event)]));
             Ok(event_stream)
         })
     }
@@ -428,6 +508,107 @@ async fn interactive_plan_controls_reject_while_the_main_model_phase_is_running(
         .expect_err("running model phase rejects plan control");
     assert!(matches!(error, InteractiveError::PlanControlRequiresIdle));
     release_tx.send(()).expect("provider release succeeds");
+}
+
+#[tokio::test]
+async fn interactive_run_automatically_executes_a_leased_local_plan_node() {
+    let provider = LocalPlanProvider::default();
+    let runtime = Runtime::builder(session_id("interactive-local-plan-lane"))
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .coordinator_plan_tools()
+        .automatic_compaction(AutomaticCompactionConfig::disabled())
+        .build()
+        .expect("runtime builds");
+    runtime
+        .begin_plan(BeginPlanInput {
+            reason: "define local coordinator work".to_owned(),
+            governing_skill_id: None,
+        })
+        .await
+        .expect("plan begins");
+    runtime
+        .update_plan(local_plan_input())
+        .await
+        .expect("plan definition succeeds");
+    runtime
+        .authorize_plan_execution(Default::default(), vec!["test authorization".to_owned()])
+        .await
+        .expect("plan is authorized");
+    let lease = timeout(Duration::from_secs(2), async {
+        loop {
+            let snapshot = runtime
+                .plan_snapshot()
+                .await
+                .expect("snapshot read succeeds")
+                .expect("plan exists");
+            if let Some(lease) = snapshot
+                .leases
+                .iter()
+                .find(|lease| lease.status == merry_core::PlanLeaseStatus::Live)
+            {
+                break lease.clone();
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("local lease should be reserved");
+    provider.set_target(lease.lease_id, lease.node_revision);
+
+    let run = runtime
+        .start_interactive_agent_run(
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default(),
+        )
+        .expect("interactive run starts");
+    let (mut events, _input, _control) = run.split();
+    let _ = events.next().await.expect("waiting state");
+    timeout(Duration::from_secs(2), async {
+        loop {
+            if runtime
+                .plan_snapshot()
+                .await
+                .expect("snapshot read succeeds")
+                .is_some_and(|snapshot| snapshot.phase == PlanPhase::Completed)
+            {
+                break;
+            }
+            let _ = events.next().await;
+        }
+    })
+    .await
+    .expect("local plan should complete automatically");
+    assert!(provider.calls.load(Ordering::Acquire) >= 2);
+    let snapshot = runtime
+        .plan_snapshot()
+        .await
+        .expect("snapshot read succeeds")
+        .expect("plan exists");
+    assert_eq!(snapshot.phase, PlanPhase::Completed);
+    assert_eq!(snapshot.nodes[0].status, PlanNodeStatus::Completed);
+}
+
+fn local_plan_input() -> UpdatePlanInput {
+    UpdatePlanInput {
+        reason: "define local coordinator leaf".to_owned(),
+        execution_intent: PlanExecutionIntent::ContinuePlanning,
+        coordinator_node_id: None,
+        max_concurrency_hint: Some(1),
+        change: PlanChangeInput::DefinePlan {
+            expected_plan_revision: 0,
+            root: PlanNodeInput {
+                id: None,
+                client_key: Some("root".to_owned()),
+                objective: "Complete local coordinator verification".to_owned(),
+                acceptance: vec!["local verification is durable".to_owned()],
+                executor_policy: PlanExecutorPolicy::Local,
+                harness: PlanHarnessSnapshot::default(),
+                recovery_policy: PlanRecoveryPolicySnapshot::default(),
+                depends_on: Vec::new(),
+                children: Vec::new(),
+            },
+        },
+    }
 }
 
 #[tokio::test]

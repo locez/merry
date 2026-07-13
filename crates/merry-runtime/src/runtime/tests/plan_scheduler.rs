@@ -8,7 +8,7 @@ use crate::{ChildRuntimeFactory, ChildRuntimeInput};
 use merry_core::{
     PlanAttemptOutcome, PlanCapabilityEnvelopeSnapshot, PlanDirectiveConstraints,
     PlanDirectiveKind, PlanDirectiveStatus, PlanExecutorPolicy, PlanHarnessSnapshot,
-    PlanNodeResult, PlanNodeStatus, PlanRecoveryPolicySnapshot, ProviderName,
+    PlanNodeResult, PlanNodeStatus, PlanPhase, PlanRecoveryPolicySnapshot, ProviderName,
 };
 use std::time::Duration;
 use tokio::sync::Notify;
@@ -289,6 +289,132 @@ async fn directive_waits_for_the_next_worker_provider_boundary_before_delivery()
     assert!(probe.second_request_saw_delivery.load(Ordering::Acquire));
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn local_ready_node_is_leased_to_the_root_coordinator_session() {
+    let root_session = session_id("runtime-plan-local-lane");
+    let runtime = Runtime::builder(root_session.clone())
+        .coordinator_plan_tools()
+        .build()
+        .expect("runtime builds");
+    runtime
+        .begin_plan(BeginPlanInput {
+            reason: "execute local plan node".to_owned(),
+            governing_skill_id: None,
+        })
+        .await
+        .expect("plan begins");
+    let update = runtime
+        .update_plan(single_local_plan_input())
+        .await
+        .expect("local plan definition succeeds");
+    let root_id = update.client_key_ids["root"].clone();
+    let mut events = runtime.subscribe_plan_events();
+    runtime
+        .authorize_plan_execution(
+            PlanCapabilityEnvelopeSnapshot::default(),
+            vec!["test authorization".to_owned()],
+        )
+        .await
+        .expect("plan is authorized");
+
+    let snapshot = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let snapshot = runtime
+                .plan_snapshot()
+                .await
+                .expect("snapshot read succeeds")
+                .expect("plan exists");
+            if snapshot.leases.iter().any(|lease| {
+                lease.node_id == root_id && lease.status == merry_core::PlanLeaseStatus::Live
+            }) {
+                break snapshot;
+            }
+            let _ = events.recv().await;
+        }
+    })
+    .await
+    .expect("local lease should be reserved");
+    let lease = snapshot
+        .leases
+        .iter()
+        .find(|lease| lease.node_id == root_id)
+        .expect("root lease exists");
+    assert_eq!(lease.executor_session_id, root_session);
+    assert_eq!(
+        snapshot
+            .nodes
+            .iter()
+            .find(|node| node.id == root_id)
+            .expect("root exists")
+            .status,
+        PlanNodeStatus::InProgress
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cancelling_plan_stops_live_worker_and_commits_cancelled_attempt() {
+    let probe = Arc::new(CancellationProbe::default());
+    let factory: Arc<dyn ChildRuntimeFactory> = Arc::new(CancellablePlanWorkerFactory {
+        probe: Arc::clone(&probe),
+    });
+    let runtime = Runtime::builder(session_id("runtime-plan-cancellation"))
+        .coordinator_plan_tools()
+        .plan_worker_factory(factory, 1)
+        .build()
+        .expect("runtime builds");
+    runtime
+        .begin_plan(BeginPlanInput {
+            reason: "cancel live plan work".to_owned(),
+            governing_skill_id: None,
+        })
+        .await
+        .expect("plan begins");
+    runtime
+        .update_plan(single_worker_plan_input())
+        .await
+        .expect("plan definition succeeds");
+    runtime
+        .authorize_plan_execution(
+            PlanCapabilityEnvelopeSnapshot {
+                write_scope: vec!["work".to_owned()],
+                ..PlanCapabilityEnvelopeSnapshot::default()
+            },
+            vec!["test authorization".to_owned()],
+        )
+        .await
+        .expect("plan is authorized");
+    probe.started.notified().await;
+
+    runtime
+        .cancel_plan("user cancelled live work")
+        .await
+        .expect("cancellation request commits");
+    let snapshot = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let snapshot = runtime
+                .plan_snapshot()
+                .await
+                .expect("snapshot read succeeds")
+                .expect("plan exists");
+            if snapshot.phase == PlanPhase::Cancelled {
+                break snapshot;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cooperative worker cancellation should settle");
+    assert_eq!(snapshot.attempts.len(), 1);
+    assert_eq!(
+        snapshot.attempts[0].outcome,
+        Some(PlanAttemptOutcome::Cancelled)
+    );
+    assert_eq!(
+        snapshot.leases[0].status,
+        merry_core::PlanLeaseStatus::Cancelled
+    );
+}
+
 #[derive(Default)]
 struct WorkerConcurrencyProbe {
     active: AtomicUsize,
@@ -323,6 +449,65 @@ struct DirectiveDeliveryProbe {
 
 struct DirectivePlanWorkerFactory {
     probe: Arc<DirectiveDeliveryProbe>,
+}
+
+#[derive(Default)]
+struct CancellationProbe {
+    started: Notify,
+}
+
+struct CancellablePlanWorkerFactory {
+    probe: Arc<CancellationProbe>,
+}
+
+impl ChildRuntimeFactory for CancellablePlanWorkerFactory {
+    fn build_child(&self, input: ChildRuntimeInput) -> Result<Runtime, RuntimeError> {
+        let control = input
+            .plan_worker_control
+            .expect("scheduler worker carries plan control");
+        Runtime::builder(input.session_id)
+            .task_anchor(input.task_anchor)
+            .model_provider(
+                Arc::new(CancellableWorkerProvider {
+                    probe: Arc::clone(&self.probe),
+                }),
+                model_name(),
+            )
+            .automatic_compaction(AutomaticCompactionConfig::disabled())
+            .plan_worker_control(control)
+            .build()
+    }
+}
+
+struct CancellableWorkerProvider {
+    probe: Arc<CancellationProbe>,
+}
+
+impl ModelProvider for CancellableWorkerProvider {
+    fn name(&self) -> &ProviderName {
+        static NAME: OnceLock<ProviderName> = OnceLock::new();
+        NAME.get_or_init(|| ProviderName::new("cancellable-plan-worker-test").expect("valid name"))
+    }
+
+    fn capabilities(&self) -> &ModelCapabilities {
+        static CAPABILITIES: OnceLock<ModelCapabilities> = OnceLock::new();
+        CAPABILITIES.get_or_init(|| {
+            ModelCapabilities::new(true, true, false, true, Some(128_000), None)
+                .expect("valid capabilities")
+        })
+    }
+
+    fn stream_model<'a>(
+        &'a self,
+        _request: ModelRequest,
+        context: ModelStreamContext,
+    ) -> ModelProviderFuture<'a, Result<ModelEventStream, ModelError>> {
+        Box::pin(async move {
+            self.probe.started.notify_one();
+            context.cancellation_token().cancelled().await;
+            Err(ModelError::Cancelled)
+        })
+    }
 }
 
 impl ChildRuntimeFactory for DirectivePlanWorkerFactory {
@@ -766,6 +951,29 @@ fn single_worker_plan_input() -> UpdatePlanInput {
                 recovery_policy: PlanRecoveryPolicySnapshot::default(),
                 depends_on: Vec::new(),
                 children: vec![worker_leaf("worker", "work")],
+            },
+        },
+    }
+}
+
+fn single_local_plan_input() -> UpdatePlanInput {
+    UpdatePlanInput {
+        reason: "define one local coordinator node".to_owned(),
+        execution_intent: PlanExecutionIntent::ContinuePlanning,
+        coordinator_node_id: None,
+        max_concurrency_hint: Some(1),
+        change: PlanChangeInput::DefinePlan {
+            expected_plan_revision: 0,
+            root: PlanNodeInput {
+                id: None,
+                client_key: Some("root".to_owned()),
+                objective: "Complete local coordinator work".to_owned(),
+                acceptance: vec!["local result is verified".to_owned()],
+                executor_policy: PlanExecutorPolicy::Local,
+                harness: PlanHarnessSnapshot::default(),
+                recovery_policy: PlanRecoveryPolicySnapshot::default(),
+                depends_on: Vec::new(),
+                children: Vec::new(),
             },
         },
     }
