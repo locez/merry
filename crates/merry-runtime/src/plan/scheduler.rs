@@ -26,7 +26,8 @@ pub(crate) struct PlanScheduler {
 
 struct PlanSchedulerInner {
     controller: PlanController,
-    factory: Arc<dyn ChildRuntimeFactory>,
+    factory: Option<Arc<dyn ChildRuntimeFactory>>,
+    coordinator_session_id: SessionId,
     max_worker_threads: usize,
     started: AtomicBool,
     start_guard: StdMutex<()>,
@@ -37,20 +38,21 @@ struct PlanSchedulerInner {
 }
 
 struct RunningWorker {
-    write_scope: Vec<String>,
     cancellation: CancellationToken,
 }
 
 impl PlanScheduler {
     pub(crate) fn new(
         controller: PlanController,
-        factory: Arc<dyn ChildRuntimeFactory>,
+        factory: Option<Arc<dyn ChildRuntimeFactory>>,
         max_worker_threads: usize,
+        coordinator_session_id: SessionId,
     ) -> Self {
         Self {
             inner: Arc::new(PlanSchedulerInner {
                 controller,
                 factory,
+                coordinator_session_id,
                 max_worker_threads: max_worker_threads.max(1),
                 started: AtomicBool::new(false),
                 start_guard: StdMutex::new(()),
@@ -140,52 +142,86 @@ impl PlanScheduler {
             });
         }
         let capacity = self.effective_capacity(&snapshot);
-        let running_scopes = {
-            let running = self.inner.running.lock().await;
-            if running.len() >= capacity {
-                return;
-            }
-            running
-                .values()
-                .map(|worker| worker.write_scope.clone())
-                .collect::<Vec<_>>()
-        };
-        let mut selected_scopes = running_scopes;
-        let available = capacity.saturating_sub(selected_scopes.len());
+        let running_count = self.inner.running.lock().await.len();
+        let child_capacity = capacity.saturating_sub(running_count);
+        let mut selected_scopes = snapshot
+            .leases
+            .iter()
+            .filter(|lease| lease.status == PlanLeaseStatus::Live)
+            .filter_map(|lease| {
+                snapshot
+                    .nodes
+                    .iter()
+                    .find(|node| node.id == lease.node_id)
+                    .map(|node| node.harness.write_scope.clone())
+            })
+            .collect::<Vec<_>>();
+        let local_is_live = snapshot.leases.iter().any(|lease| {
+            lease.status == PlanLeaseStatus::Live
+                && lease.executor_session_id == self.inner.coordinator_session_id
+        });
+        let mut local_selected = local_is_live;
+        let mut child_selected = 0usize;
         let mut selected = Vec::new();
         for node_id in ready_node_ids(&snapshot) {
-            if selected.len() == available {
-                break;
-            }
             let Some(node) = snapshot.nodes.iter().find(|node| node.id == node_id) else {
                 continue;
             };
-            if node.executor_policy == merry_core::PlanExecutorPolicy::Local {
-                continue;
-            }
             if selected_scopes
                 .iter()
                 .any(|scope| write_scopes_overlap(scope, &node.harness.write_scope))
             {
                 continue;
             }
+            let use_local_lane = match node.executor_policy {
+                merry_core::PlanExecutorPolicy::Local => true,
+                merry_core::PlanExecutorPolicy::Delegate => false,
+                merry_core::PlanExecutorPolicy::Auto => {
+                    self.inner.factory.is_none() || child_selected == child_capacity
+                }
+            };
+            if use_local_lane {
+                if local_selected {
+                    continue;
+                }
+                local_selected = true;
+            } else {
+                if self.inner.factory.is_none() || child_selected == child_capacity {
+                    continue;
+                }
+                child_selected += 1;
+            }
             selected_scopes.push(node.harness.write_scope.clone());
-            selected.push(node.clone());
+            selected.push((node.clone(), use_local_lane));
         }
-        for node in selected {
-            self.start_worker(snapshot.plan_id.clone(), node).await;
+        for (node, use_local_lane) in selected {
+            if use_local_lane {
+                self.start_local_attempt(node).await;
+            } else {
+                self.start_worker(snapshot.plan_id.clone(), node).await;
+            }
         }
     }
 
-    pub(crate) async fn cancel_running_workers(&self) {
-        let tokens = self
+    async fn start_local_attempt(&self, node: PlanNodeSnapshot) {
+        let actor = PlanAttemptActor {
+            executor_session_id: self.inner.coordinator_session_id.clone(),
+        };
+        let _ = self
             .inner
-            .running
-            .lock()
-            .await
-            .values()
-            .map(|worker| worker.cancellation.clone())
-            .collect::<Vec<_>>();
+            .controller
+            .start_attempt(node.id, actor, unix_time_ms())
+            .await;
+    }
+
+    pub(crate) async fn cancel_running_workers(&self) {
+        let tokens = {
+            let running = self.inner.running.lock().await;
+            running
+                .values()
+                .map(|worker| worker.cancellation.clone())
+                .collect::<Vec<_>>()
+        };
         for token in tokens {
             token.cancel();
         }
@@ -204,6 +240,9 @@ impl PlanScheduler {
     }
 
     async fn start_worker(&self, plan_id: merry_core::PlanId, node: PlanNodeSnapshot) {
+        let Some(factory) = self.inner.factory.as_ref() else {
+            return;
+        };
         let child_session_id = SessionId::random();
         let actor = PlanAttemptActor {
             executor_session_id: child_session_id.clone(),
@@ -252,7 +291,7 @@ impl PlanScheduler {
                 return;
             }
         };
-        let runtime = match self.inner.factory.build_child(ChildRuntimeInput {
+        let runtime = match factory.build_child(ChildRuntimeInput {
             session_id: child_session_id,
             task_anchor,
             allowed_tools: task.allowed_tools().to_vec(),
@@ -278,7 +317,6 @@ impl PlanScheduler {
         self.inner.running.lock().await.insert(
             started.attempt.attempt_id.clone(),
             RunningWorker {
-                write_scope: node.harness.write_scope,
                 cancellation: cancellation.clone(),
             },
         );
