@@ -8,7 +8,7 @@ use super::project_rules::load_root_project_rules;
 use super::roles::RuntimeRoleProviderConfig;
 use merry_llm::{ModelName, ModelProvider, ModelRetryPolicy};
 use merry_runtime::{
-    AcceptedLocalWorkspaceProcessAdmission, AutomaticCompactionConfig,
+    AcceptedLocalWorkspaceProcessAdmission, AutomaticCompactionConfig, ChildRuntimeFactory,
     DEFAULT_CODING_AGENT_MAX_MODEL_TURNS, FileSessionStore, PermissionedProcessRunnerFactory,
     ProcessRunner, RegisteredTool, Runtime, RuntimeBuilder, SubagentConfig, SubagentManager,
     subagent_registered_tools,
@@ -221,24 +221,26 @@ fn configure_coding_loop_runtime_builder(
         builder = builder.skill_catalog(catalog);
     }
 
+    let child_factory: Arc<dyn ChildRuntimeFactory> = Arc::new(CodingLoopChildRuntimeFactory::new(
+        root,
+        admission,
+        Arc::clone(&provider),
+        model.clone(),
+        ActionProcessBackend::from_parts(Arc::clone(&runner), Arc::clone(&permissioned_factory)),
+        project_rules.clone(),
+        options.skill_roots.clone(),
+        options.allow_hidden_workspace_paths,
+    ));
+    builder = builder.plan_worker_factory(
+        Arc::clone(&child_factory),
+        options.subagents.limits().max_threads(),
+    );
+
     if options.subagents.is_installed() {
-        let factory = CodingLoopChildRuntimeFactory::new(
-            root,
-            admission,
-            Arc::clone(&provider),
-            model.clone(),
-            ActionProcessBackend::from_parts(
-                Arc::clone(&runner),
-                Arc::clone(&permissioned_factory),
-            ),
-            project_rules.clone(),
-            options.skill_roots.clone(),
-            options.allow_hidden_workspace_paths,
-        );
         let manager = SubagentManager::runtime_controlled(
             parent_session_id.clone(),
             options.subagents.limits(),
-            Arc::new(factory),
+            child_factory,
             options.subagents.is_enabled(),
         );
         let [spawn_tool, wait_tool, cancel_tool] = subagent_registered_tools(manager.clone())?;

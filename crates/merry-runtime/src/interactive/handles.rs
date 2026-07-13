@@ -3,7 +3,7 @@ use super::{
     InterruptReason,
     types::{InputReceipt, InputRecord, InputRecords},
 };
-use crate::UserMessageInput;
+use crate::{PlanApprovalInput, UserMessageInput};
 use futures_core::Stream;
 use merry_core::{QueuedInputLane, RuntimeEvent};
 use std::{
@@ -421,6 +421,111 @@ impl AgentLoopControl {
         let (ack_sender, ack_receiver) = oneshot::channel();
         self.command_sender
             .send(InteractiveCommand::Interrupt { reason, ack_sender })
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?;
+        ack_receiver
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?
+    }
+
+    pub async fn enter_plan_mode(&self, reason: &str) -> Result<(), InteractiveError> {
+        let (ack_sender, ack_receiver) = oneshot::channel();
+        self.command_sender
+            .send(InteractiveCommand::EnterPlanMode {
+                reason: reason.to_owned(),
+                ack_sender,
+            })
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?;
+        ack_receiver
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?
+    }
+
+    pub async fn approve_plan(&self, input: PlanApprovalInput) -> Result<(), InteractiveError> {
+        let (ack_sender, ack_receiver) = oneshot::channel();
+        self.command_sender
+            .send(InteractiveCommand::ApprovePlan { input, ack_sender })
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?;
+        ack_receiver
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?
+    }
+
+    pub async fn revise_plan(&self, reason: &str) -> Result<(), InteractiveError> {
+        let (ack_sender, ack_receiver) = oneshot::channel();
+        self.command_sender
+            .send(InteractiveCommand::RevisePlan {
+                reason: reason.to_owned(),
+                ack_sender,
+            })
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?;
+        ack_receiver
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?
+    }
+
+    pub async fn pause_plan_scheduling(&self, reason: &str) -> Result<(), InteractiveError> {
+        let (ack_sender, ack_receiver) = oneshot::channel();
+        self.command_sender
+            .send(InteractiveCommand::PausePlanScheduling {
+                reason: reason.to_owned(),
+                ack_sender,
+            })
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?;
+        ack_receiver
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?
+    }
+
+    pub async fn resume_plan_scheduling(&self, reason: &str) -> Result<(), InteractiveError> {
+        let (ack_sender, ack_receiver) = oneshot::channel();
+        self.command_sender
+            .send(InteractiveCommand::ResumePlanScheduling {
+                reason: reason.to_owned(),
+                ack_sender,
+            })
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?;
+        ack_receiver
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?
+    }
+
+    pub async fn cancel_plan(&self, reason: &str) -> Result<(), InteractiveError> {
+        let (ack_sender, ack_receiver) = oneshot::channel();
+        self.command_sender
+            .send(InteractiveCommand::CancelPlan {
+                reason: reason.to_owned(),
+                ack_sender,
+            })
             .await
             .map_err(|_| InteractiveError::CommandChannelClosed {
                 run_id: self.run_id,

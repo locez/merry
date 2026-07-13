@@ -31,6 +31,7 @@ use crate::{
     events::{ActiveStepPermit, RuntimeJournalEventBatch},
     memory::MemoryActivationContext,
     model_config::ModelProviderConfig,
+    plan::unix_time_ms,
     session::{ModelTurnId, ModelTurnStatus},
     step::StepInput,
 };
@@ -160,6 +161,37 @@ pub(super) async fn run_provider_step(
         "runtime memories activated"
     );
 
+    let worker_plan_control = if let Some(control) = inner.worker_plan_control.as_ref() {
+        if let Err(error) = control.review_progress_at_boundary(unix_time_ms()).await {
+            let diagnostic = diagnostic_from_text("plan_progress_review", error.to_string());
+            trace_provider_step_failed(&diagnostic);
+            let _ = send_failed_event(inner, sender, token, diagnostic).await;
+            return;
+        }
+        if let Err(error) = control.deliver_directives(unix_time_ms()).await {
+            let diagnostic = diagnostic_from_text("plan_directive_delivery", error.to_string());
+            trace_provider_step_failed(&diagnostic);
+            let _ = send_failed_event(inner, sender, token, diagnostic).await;
+            return;
+        }
+        match control.snapshot().await {
+            Ok(snapshot) => crate::plan::projection::worker_plan_control_message(
+                &snapshot,
+                control.node_id(),
+                control.attempt_id(),
+                control.lease_id(),
+            ),
+            Err(error) => {
+                let diagnostic = diagnostic_from_text("plan_worker_context", error.to_string());
+                trace_provider_step_failed(&diagnostic);
+                let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                return;
+            }
+        }
+    } else {
+        None
+    };
+
     let (mut request_inputs, activation_epoch) = {
         let mut session = inner.session.lock().await;
         if token.is_cancelled() {
@@ -173,21 +205,22 @@ pub(super) async fn run_provider_step(
             .memory_projection_epoch
             .fetch_add(1, Ordering::AcqRel)
             .wrapping_add(1);
-        let request_inputs = match step_request_inputs_from_session(&session) {
-            Ok(inputs) => inputs,
-            Err(error) => {
-                session.replace_activated_memories(Vec::new());
-                inner.memory_projection_epoch.fetch_add(1, Ordering::AcqRel);
-                let diagnostic = diagnostic_from_text(
-                    "transcript_artifact",
-                    format!("transcript artifact could not be read: {error}"),
-                );
-                drop(session);
-                trace_provider_step_failed(&diagnostic);
-                let _ = send_failed_event(inner, sender, token, diagnostic).await;
-                return;
-            }
-        };
+        let request_inputs =
+            match step_request_inputs_from_session(&session, worker_plan_control.clone()) {
+                Ok(inputs) => inputs,
+                Err(error) => {
+                    session.replace_activated_memories(Vec::new());
+                    inner.memory_projection_epoch.fetch_add(1, Ordering::AcqRel);
+                    let diagnostic = diagnostic_from_text(
+                        "transcript_artifact",
+                        format!("transcript artifact could not be read: {error}"),
+                    );
+                    drop(session);
+                    trace_provider_step_failed(&diagnostic);
+                    let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                    return;
+                }
+            };
         (request_inputs, activation_epoch)
     };
     let mut projection_guard =
@@ -430,7 +463,7 @@ pub(super) async fn run_provider_step(
 
         let refreshed = {
             let session = inner.session.lock().await;
-            match step_request_inputs_from_session(&session) {
+            match step_request_inputs_from_session(&session, worker_plan_control.clone()) {
                 Ok(inputs) => inputs,
                 Err(error) => {
                     clear_current_activated_memories(inner).await;

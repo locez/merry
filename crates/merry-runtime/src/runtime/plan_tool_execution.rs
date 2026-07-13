@@ -1,8 +1,14 @@
 use crate::{
     ArtifactContent, PlanControllerError, PlanError, RuntimeError,
     plan::{
-        BeginPlanInput, ReadPlanInput, UpdatePlanInput,
-        tools::{BEGIN_PLAN_TOOL_NAME, READ_PLAN_TOOL_NAME, UPDATE_PLAN_TOOL_NAME},
+        BeginPlanInput, ControlPlanAttemptInput, PlanAttemptToolOutput, PlanProgressToolOutput,
+        ReadPlanInput, ReportPlanAttemptInput, ReportPlanProgressInput, UpdatePlanInput,
+        execution::PlanAttemptActor,
+        tools::{
+            BEGIN_PLAN_TOOL_NAME, CONTROL_PLAN_ATTEMPT_TOOL_NAME, READ_PLAN_TOOL_NAME,
+            REPORT_PLAN_ATTEMPT_TOOL_NAME, REPORT_PLAN_PROGRESS_TOOL_NAME, UPDATE_PLAN_TOOL_NAME,
+        },
+        unix_time_ms,
     },
     tool::ToolExecutionContext,
 };
@@ -31,7 +37,10 @@ pub(super) async fn execute_plan_tool_call(
                 .begin_from_tool(input, pending.id().clone())
                 .await
             {
-                Ok(events) => Ok(events),
+                Ok(events) => {
+                    inner.ensure_plan_scheduler_started();
+                    Ok(events)
+                }
                 Err(error) => submit_controller_error(inner, pending, error).await,
             }
         }
@@ -49,7 +58,88 @@ pub(super) async fn execute_plan_tool_call(
                 .update_from_tool(input, pending.id().clone())
                 .await
             {
-                Ok(events) => Ok(events),
+                Ok(events) => {
+                    inner.ensure_plan_scheduler_started();
+                    Ok(events)
+                }
+                Err(error) => submit_controller_error(inner, pending, error).await,
+            }
+        }
+        CONTROL_PLAN_ATTEMPT_TOOL_NAME => {
+            let input = input_from_call::<ControlPlanAttemptInput>(inner, pending)?;
+            match inner
+                .plan_controller
+                .directive_from_tool(input, pending.id().clone(), unix_time_ms())
+                .await
+            {
+                Ok(events) => {
+                    inner.ensure_plan_scheduler_started();
+                    Ok(events)
+                }
+                Err(error) => submit_controller_error(inner, pending, error).await,
+            }
+        }
+        REPORT_PLAN_PROGRESS_TOOL_NAME => {
+            let input = input_from_call::<ReportPlanProgressInput>(inner, pending)?;
+            if let Some(control) = inner.worker_plan_control.as_ref() {
+                return match control.report_progress(input, unix_time_ms()).await {
+                    Ok(committed) => {
+                        let output = PlanProgressToolOutput {
+                            plan_id: committed.output.snapshot.plan_id.clone(),
+                            revision: committed.output.snapshot.revision,
+                            progress: committed.output.progress,
+                            updated_directives: committed.output.updated_directives,
+                        };
+                        submit_succeeded(inner, pending, output, Vec::new()).await
+                    }
+                    Err(error) => submit_controller_error(inner, pending, error).await,
+                };
+            }
+            let actor = PlanAttemptActor {
+                executor_session_id: inner.session_id.clone(),
+            };
+            match inner
+                .plan_controller
+                .progress_from_tool(actor, input, pending.id().clone(), unix_time_ms())
+                .await
+            {
+                Ok(events) => {
+                    inner.ensure_plan_scheduler_started();
+                    Ok(events)
+                }
+                Err(error) => submit_controller_error(inner, pending, error).await,
+            }
+        }
+        REPORT_PLAN_ATTEMPT_TOOL_NAME => {
+            let input = input_from_call::<ReportPlanAttemptInput>(inner, pending)?;
+            if let Some(control) = inner.worker_plan_control.as_ref() {
+                return match control.report_attempt(input, unix_time_ms()).await {
+                    Ok(committed) => {
+                        let output = PlanAttemptToolOutput {
+                            plan_id: committed.output.snapshot.plan_id.clone(),
+                            revision: committed.output.snapshot.revision,
+                            phase: committed.output.snapshot.phase,
+                            attempt: committed.output.attempt,
+                            ready_node_ids: committed.output.ready_node_ids,
+                            client_key_ids: committed.output.client_key_ids,
+                        };
+                        submit_succeeded(inner, pending, output, Vec::new()).await
+                    }
+                    Err(error) => submit_controller_error(inner, pending, error).await,
+                };
+            }
+            let actor = PlanAttemptActor {
+                executor_session_id: inner.session_id.clone(),
+            };
+            match inner
+                .plan_controller
+                .attempt_report_from_tool(actor, input, pending.id().clone(), unix_time_ms())
+                .await
+            {
+                Ok(events) => {
+                    inner.ensure_plan_scheduler_started();
+                    Ok(events)
+                }
                 Err(error) => submit_controller_error(inner, pending, error).await,
             }
         }
@@ -411,5 +501,25 @@ fn plan_error_code(error: &PlanError) -> &'static str {
         PlanError::ReplacementRootIdentity { .. } => "plan_invalid_replacement_root",
         PlanError::InvalidConcurrencyHint { .. } => "plan_invalid_concurrency_hint",
         PlanError::InvalidPersistedCounters => "plan_persisted_state_invalid",
+        PlanError::EmptyPlan => "plan_empty",
+        PlanError::UnresolvedApprovalRequirement { .. } => "plan_approval_requirement_unresolved",
+        PlanError::LiveLeasesPreventControl { .. } => "plan_live_leases_prevent_control",
+        PlanError::NodeNotReady { .. } => "plan_node_not_ready",
+        PlanError::LiveLeaseExists { .. } => "plan_live_lease_exists",
+        PlanError::UnknownLease { .. } => "plan_lease_not_found",
+        PlanError::LeaseNotLive { .. } => "plan_lease_not_live",
+        PlanError::UnknownAttempt { .. } => "plan_attempt_not_found",
+        PlanError::AttemptOwnershipMismatch { .. } => "plan_attempt_owner_mismatch",
+        PlanError::AttemptAlreadyResolved { .. } => "plan_attempt_already_resolved",
+        PlanError::AttemptNodeRevisionMismatch { .. } => "plan_attempt_node_revision_stale",
+        PlanError::InvalidAttemptOutcome { .. } => "plan_attempt_outcome_invalid",
+        PlanError::EmptyDecomposition | PlanError::NestedDecomposition => {
+            "plan_decomposition_invalid"
+        }
+        PlanError::UnknownDirective { .. } => "plan_directive_not_found",
+        PlanError::InvalidDirectiveTransition { .. } => "plan_directive_transition_invalid",
+        PlanError::StaleDirectiveTarget => "plan_directive_target_stale",
+        PlanError::MissingArtifactRef { .. } => "plan_artifact_ref_missing",
+        PlanError::InvalidEvidenceRef { .. } => "plan_evidence_ref_invalid",
     }
 }

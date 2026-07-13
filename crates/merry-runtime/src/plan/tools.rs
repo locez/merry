@@ -56,6 +56,19 @@ pub(crate) fn coordinator_plan_registered_tools() -> Result<Vec<RegisteredTool>,
     Ok(definitions.into_iter().collect())
 }
 
+pub(crate) fn worker_plan_registered_tools() -> Result<Vec<RegisteredTool>, CoreError> {
+    Ok(vec![
+        plan_tool::<ReportPlanProgressInput>(
+            REPORT_PLAN_PROGRESS_TOOL_NAME,
+            "Record bounded non-terminal semantic progress for the current local plan attempt.",
+        )?,
+        plan_tool::<ReportPlanAttemptInput>(
+            REPORT_PLAN_ATTEMPT_TOOL_NAME,
+            "Resolve the current local plan attempt exactly once with a typed result or decomposition.",
+        )?,
+    ])
+}
+
 pub(crate) fn is_plan_tool(name: &ToolName) -> bool {
     COORDINATOR_PLAN_TOOL_NAMES.contains(&name.as_str())
 }

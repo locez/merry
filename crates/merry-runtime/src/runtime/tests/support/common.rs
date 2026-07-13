@@ -107,6 +107,8 @@
             permissioned_process_runner_factory: None,
             subagent_manager: None,
             plan_controller,
+            worker_plan_control: None,
+            plan_scheduler: None,
             session_store: None,
         }
     }

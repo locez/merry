@@ -8,7 +8,7 @@ use crate::{
     ledger::LedgerFactKind,
 };
 use merry_core::{
-    ArtifactId, ArtifactKind, ArtifactRef, RuntimeJournalEvent, RuntimeJournalPayload,
+    ArtifactId, ArtifactKind, ArtifactRef, EvidenceRef, RuntimeJournalEvent, RuntimeJournalPayload,
 };
 
 impl SessionState {
@@ -77,6 +77,33 @@ impl SessionState {
         artifact_id: &ArtifactId,
     ) -> Result<ArtifactContent, ArtifactError> {
         self.artifacts.read_content(artifact_id).cloned()
+    }
+
+    pub(crate) fn validate_plan_refs(
+        &self,
+        evidence_refs: &[EvidenceRef],
+        artifact_refs: &[ArtifactRef],
+    ) -> Result<(), crate::plan::PlanError> {
+        for artifact in artifact_refs {
+            let stored = self.artifacts.read_ref(artifact.id()).map_err(|_| {
+                crate::plan::PlanError::MissingArtifactRef {
+                    artifact_id: artifact.id().clone(),
+                }
+            })?;
+            if stored != artifact {
+                return Err(crate::plan::PlanError::MissingArtifactRef {
+                    artifact_id: artifact.id().clone(),
+                });
+            }
+        }
+        for evidence in evidence_refs {
+            self.artifacts.validate_evidence(evidence).map_err(|_| {
+                crate::plan::PlanError::InvalidEvidenceRef {
+                    artifact_id: evidence.artifact_id.clone(),
+                }
+            })?;
+        }
+        Ok(())
     }
 
     pub(super) fn trace_artifact_record(

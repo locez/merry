@@ -20,7 +20,8 @@ use crate::{
     permission::{PermissionAdmissionSource, PermissionReviewMode, RuntimeTrustLevel},
     plan::{
         BeginPlanInput, BeginPlanOutput, PlanController, PlanControllerError,
-        PlanControllerEventReceiver, PlanUpdateOutput, UpdatePlanInput,
+        PlanControllerEventReceiver, PlanScheduler, PlanUpdateOutput, PlanWorkerControl,
+        UpdatePlanInput,
     },
     process::PermissionedProcessRunnerFactory,
     session::SessionState,
@@ -246,14 +247,130 @@ impl Runtime {
         &self,
         input: BeginPlanInput,
     ) -> Result<BeginPlanOutput, PlanControllerError> {
-        self.inner.plan_controller.begin(input).await
+        let output = self.inner.plan_controller.begin(input).await?;
+        self.inner.ensure_plan_scheduler_started();
+        Ok(output)
     }
 
-    pub(crate) async fn update_plan_from_coordinator(
+    /// Activates Plan Mode from an explicit user control without changing permissions.
+    pub async fn enter_plan_mode(
+        &self,
+        reason: &str,
+    ) -> Result<BeginPlanOutput, PlanControllerError> {
+        let committed = self
+            .inner
+            .plan_controller
+            .begin_from_user(reason.to_owned())
+            .await?;
+        self.inner.ensure_plan_scheduler_started();
+        Ok(committed.output)
+    }
+
+    /// Replaces the complete planning tree or one mutable future subtree.
+    pub async fn update_plan(
         &self,
         input: UpdatePlanInput,
     ) -> Result<PlanUpdateOutput, PlanControllerError> {
-        self.inner.plan_controller.update(input).await
+        let output = self.inner.plan_controller.update(input).await?;
+        self.inner.ensure_plan_scheduler_started();
+        Ok(output)
+    }
+
+    /// Persists an attempt-scoped coordinator directive for one live worker.
+    pub async fn control_plan_attempt(
+        &self,
+        input: crate::ControlPlanAttemptInput,
+    ) -> Result<merry_core::CoordinatorDirectiveSnapshot, PlanControllerError> {
+        Ok(self
+            .inner
+            .plan_controller
+            .directive(input, crate::plan::unix_time_ms())
+            .await?
+            .output
+            .directive)
+    }
+
+    /// Authorizes the current non-empty plan under an explicit capability envelope.
+    pub async fn authorize_plan_execution(
+        &self,
+        envelope: merry_core::PlanCapabilityEnvelopeSnapshot,
+        authorization_refs: Vec<String>,
+    ) -> Result<merry_core::PlanSnapshot, PlanControllerError> {
+        let committed = self
+            .inner
+            .plan_controller
+            .authorize_execution(envelope, authorization_refs)
+            .await?;
+        self.inner.ensure_plan_scheduler_started();
+        Ok(committed.output)
+    }
+
+    /// Resolves the current plan's typed approval requirements and starts execution.
+    pub async fn approve_plan(
+        &self,
+        input: crate::PlanApprovalInput,
+    ) -> Result<merry_core::PlanSnapshot, PlanControllerError> {
+        let committed = self.inner.plan_controller.approve(input).await?;
+        self.inner.ensure_plan_scheduler_started();
+        Ok(committed.output.snapshot)
+    }
+
+    /// Pauses admission of new plan leases without cancelling live workers.
+    pub async fn pause_plan_scheduling(
+        &self,
+        reason: &str,
+    ) -> Result<merry_core::PlanSnapshot, PlanControllerError> {
+        Ok(self
+            .inner
+            .plan_controller
+            .pause_scheduling(reason.to_owned())
+            .await?
+            .output
+            .snapshot)
+    }
+
+    /// Re-enables deterministic admission of ready plan nodes.
+    pub async fn resume_plan_scheduling(
+        &self,
+        reason: &str,
+    ) -> Result<merry_core::PlanSnapshot, PlanControllerError> {
+        let committed = self
+            .inner
+            .plan_controller
+            .resume_scheduling(reason.to_owned())
+            .await?;
+        self.inner.ensure_plan_scheduler_started();
+        Ok(committed.output.snapshot)
+    }
+
+    /// Returns an idle approved or executing plan to planning for revision.
+    pub async fn revise_plan(
+        &self,
+        reason: &str,
+    ) -> Result<merry_core::PlanSnapshot, PlanControllerError> {
+        Ok(self
+            .inner
+            .plan_controller
+            .revise(reason.to_owned())
+            .await?
+            .output
+            .snapshot)
+    }
+
+    /// Stops new lease admission and cooperatively cancels live plan workers.
+    pub async fn cancel_plan(
+        &self,
+        reason: &str,
+    ) -> Result<merry_core::PlanSnapshot, PlanControllerError> {
+        let committed = self
+            .inner
+            .plan_controller
+            .request_cancellation(reason.to_owned())
+            .await?;
+        if let Some(scheduler) = self.inner.plan_scheduler.as_ref() {
+            scheduler.cancel_running_workers().await;
+        }
+        Ok(committed.output.snapshot)
     }
 
     pub(crate) fn subscribe_plan_events(&self) -> PlanControllerEventReceiver {
@@ -551,10 +668,18 @@ struct RuntimeInner {
     permissioned_process_runner_factory: Option<Arc<dyn PermissionedProcessRunnerFactory>>,
     subagent_manager: Option<SubagentManager>,
     plan_controller: PlanController,
+    worker_plan_control: Option<PlanWorkerControl>,
+    plan_scheduler: Option<PlanScheduler>,
     session_store: Option<FileSessionStore>,
 }
 
 impl RuntimeInner {
+    fn ensure_plan_scheduler_started(&self) {
+        if let Some(scheduler) = self.plan_scheduler.as_ref() {
+            scheduler.ensure_started();
+        }
+    }
+
     async fn model_config(&self, role: RuntimeModelRole) -> Option<ModelProviderConfig> {
         if role == RuntimeModelRole::Primary
             && let Some(config) = self.primary_model_override.read().await.as_ref()
@@ -728,6 +853,7 @@ mod tests {
     mod memory_activation_flow;
     mod model_role_flow;
     mod permission_execution;
+    mod plan_scheduler;
     mod plan_tool_execution;
     mod process_cancellation;
     mod process_execution;

@@ -101,15 +101,18 @@ impl StepRequestInputs {
     pub(super) fn from_session(
         session: &SessionState,
         transcript: Vec<TranscriptItemSnapshot>,
+        plan_control_override: Option<String>,
     ) -> Self {
         Self {
             snapshot: session.context_snapshot(),
             skill_catalog: session.skill_catalog(),
             project_rules: session.project_rules(),
             task_anchor: session.task_anchor(),
-            plan_control: session
-                .active_plan()
-                .map(|plan| coordinator_plan_control_message(plan.snapshot())),
+            plan_control: plan_control_override.or_else(|| {
+                session
+                    .active_plan()
+                    .map(|plan| coordinator_plan_control_message(plan.snapshot()))
+            }),
             transcript,
         }
     }
@@ -132,9 +135,14 @@ pub(super) enum StepRequestCompileError {
 
 pub(super) fn step_request_inputs_from_session(
     session: &SessionState,
+    plan_control_override: Option<String>,
 ) -> Result<StepRequestInputs, RuntimeError> {
     let transcript = session.provider_transcript_snapshot()?;
-    Ok(StepRequestInputs::from_session(session, transcript))
+    Ok(StepRequestInputs::from_session(
+        session,
+        transcript,
+        plan_control_override,
+    ))
 }
 
 pub(super) fn compile_step_request_from_inputs(
@@ -336,7 +344,7 @@ mod tests {
         let input = StepInput::user_text("current input").expect("valid step input");
         let model = ModelName::new("test/model").expect("valid model name");
 
-        let without_checkpoint = StepRequestInputs::from_session(&session, Vec::new());
+        let without_checkpoint = StepRequestInputs::from_session(&session, Vec::new(), None);
         let baseline = estimate_compaction_fixed_dynamic_tokens(
             &input,
             &model,
@@ -351,7 +359,7 @@ mod tests {
         session.set_compacted_checkpoint(
             CompactedCheckpoint::new("checkpoint body ".repeat(200)).expect("valid checkpoint"),
         );
-        let with_checkpoint = StepRequestInputs::from_session(&session, Vec::new());
+        let with_checkpoint = StepRequestInputs::from_session(&session, Vec::new(), None);
         let checkpoint_estimates = estimate_compaction_fixed_dynamic_tokens(
             &input,
             &model,
@@ -376,6 +384,7 @@ mod tests {
             session
                 .provider_transcript_snapshot()
                 .expect("provider transcript builds"),
+            None,
         );
         let history_estimates = estimate_compaction_fixed_dynamic_tokens(
             &input,

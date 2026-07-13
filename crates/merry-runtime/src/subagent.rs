@@ -1,8 +1,8 @@
 //! Runtime-owned parallel subagent tool contracts.
 
 use crate::{
-    AgentLoopConfig, AgentLoopResult, AgentLoopStatus, ArtifactContent, Runtime, RuntimeError,
-    StepContext, StepInput, TaskAnchor,
+    AgentLoopConfig, AgentLoopResult, AgentLoopStatus, ArtifactContent, PlanWorkerControl, Runtime,
+    RuntimeError, StepContext, StepInput, TaskAnchor,
 };
 use merry_core::{
     ErrorInfo, RuntimeJournalEvent, RuntimeJournalPayload, SubagentId, SubagentTaskId,
@@ -64,6 +64,8 @@ pub struct ChildRuntimeInput {
     pub depth: u8,
     /// Child-scoped model generation controls selected by the parent agent.
     pub generation_config: GenerationConfig,
+    /// Optional root-plan control when this child is a scheduler-owned worker.
+    pub plan_worker_control: Option<PlanWorkerControl>,
 }
 
 /// Parent-authored workspace scope carried into child runtime construction.
@@ -459,6 +461,7 @@ impl SubagentManager {
             workspace_scope: ChildWorkspaceScope::from_task(&task),
             depth: 1,
             generation_config: generation_config.clone(),
+            plan_worker_control: None,
         }) {
             Ok(runtime) => runtime,
             Err(error) => {
@@ -693,6 +696,7 @@ fn spawn_reserved_child(
         workspace_scope: ChildWorkspaceScope::from_task(&start.task),
         depth: 1,
         generation_config: generation_config.clone(),
+        plan_worker_control: None,
     })?;
 
     spawn_child_loop(

@@ -1,6 +1,7 @@
 use merry_core::{
-    ArtifactRef, ErrorInfo, EvidenceRef, PlanApprovalRequirementSnapshot, PlanAttemptId,
-    PlanAttemptOutcome, PlanDirectiveConstraints, PlanDirectiveId, PlanDirectiveKind,
+    ArtifactRef, ErrorInfo, EvidenceRef, PlanApprovalRequirementId,
+    PlanApprovalRequirementSnapshot, PlanAttemptId, PlanAttemptOutcome,
+    PlanCapabilityEnvelopeSnapshot, PlanDirectiveConstraints, PlanDirectiveId, PlanDirectiveKind,
     PlanExecutorPolicy, PlanHarnessSnapshot, PlanId, PlanLeaseId, PlanNodeId, PlanNodeResult,
     PlanPhase, PlanRecoveryPolicySnapshot, PlanSchedulerStatus, PlanSnapshot, SkillId,
 };
@@ -23,6 +24,16 @@ pub struct BeginPlanOutput {
     pub plan_id: merry_core::PlanId,
     pub phase: PlanPhase,
     pub revision: u64,
+}
+
+/// Runtime-owned approval material supplied at an interactive boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PlanApprovalInput {
+    pub review_resolution_ref: String,
+    pub capability_envelope: Option<PlanCapabilityEnvelopeSnapshot>,
+    pub authorization_refs: Vec<String>,
+    pub requirement_resolution_refs: BTreeMap<PlanApprovalRequirementId, String>,
 }
 
 /// Bounded exact-read selector for the active plan.
@@ -149,9 +160,9 @@ pub struct UpdatePlanInput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct PlanUpdateOutput {
-    pub(crate) snapshot: PlanSnapshot,
-    pub(crate) client_key_ids: BTreeMap<String, PlanNodeId>,
+pub struct PlanUpdateOutput {
+    pub snapshot: PlanSnapshot,
+    pub client_key_ids: BTreeMap<String, PlanNodeId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -175,4 +186,29 @@ impl From<&PlanUpdateOutput> for PlanUpdateToolOutput {
             approval_requirements: output.snapshot.approval_requirements.clone(),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct PlanDirectiveToolOutput {
+    pub(crate) plan_id: PlanId,
+    pub(crate) revision: u64,
+    pub(crate) directive: merry_core::CoordinatorDirectiveSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct PlanProgressToolOutput {
+    pub(crate) plan_id: PlanId,
+    pub(crate) revision: u64,
+    pub(crate) progress: merry_core::PlanAttemptProgressSnapshot,
+    pub(crate) updated_directives: Vec<merry_core::CoordinatorDirectiveSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct PlanAttemptToolOutput {
+    pub(crate) plan_id: PlanId,
+    pub(crate) revision: u64,
+    pub(crate) phase: PlanPhase,
+    pub(crate) attempt: merry_core::PlanAttemptSnapshot,
+    pub(crate) ready_node_ids: Vec<PlanNodeId>,
+    pub(crate) client_key_ids: BTreeMap<String, PlanNodeId>,
 }

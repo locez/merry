@@ -1,11 +1,17 @@
 use super::*;
 use crate::plan::{
-    BeginPlanInput, PlanChangeInput, PlanExecutionIntent, PlanNodeInput, ReadPlanInput,
-    UpdatePlanInput,
-    tools::{BEGIN_PLAN_TOOL_NAME, READ_PLAN_TOOL_NAME, UPDATE_PLAN_TOOL_NAME},
+    BeginPlanInput, ControlPlanAttemptInput, PlanChangeInput, PlanExecutionIntent, PlanNodeInput,
+    ReadPlanInput, ReportPlanAttemptInput, ReportPlanProgressInput, UpdatePlanInput,
+    execution::PlanAttemptActor,
+    tools::{
+        BEGIN_PLAN_TOOL_NAME, CONTROL_PLAN_ATTEMPT_TOOL_NAME, READ_PLAN_TOOL_NAME,
+        REPORT_PLAN_ATTEMPT_TOOL_NAME, REPORT_PLAN_PROGRESS_TOOL_NAME, UPDATE_PLAN_TOOL_NAME,
+    },
 };
 use merry_core::{
-    PlanExecutorPolicy, PlanHarnessSnapshot, PlanRecoveryPolicySnapshot, ToolCallArguments,
+    PlanAttemptOutcome, PlanCapabilityEnvelopeSnapshot, PlanDirectiveConstraints,
+    PlanDirectiveKind, PlanExecutorPolicy, PlanHarnessSnapshot, PlanNodeResult,
+    PlanRecoveryPolicySnapshot, ToolCallArguments,
 };
 use serde::Serialize;
 
@@ -208,6 +214,124 @@ async fn read_plan_tool_selects_an_exact_bounded_subtree() {
             .as_array()
             .unwrap()
             .is_empty()
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn local_attempt_control_progress_and_terminal_tools_commit_through_controller() {
+    let runtime = runtime_with_empty_plan("runtime-plan-attempt-tools").await;
+    let update = runtime
+        .update_plan(update_input(0, "root", "Complete local work"))
+        .await
+        .expect("plan definition succeeds");
+    runtime
+        .inner
+        .plan_controller
+        .authorize_execution(
+            PlanCapabilityEnvelopeSnapshot::default(),
+            vec!["existing user authorization".to_owned()],
+        )
+        .await
+        .expect("execution authorization succeeds");
+    let actor = PlanAttemptActor {
+        executor_session_id: runtime.inner.session_id.clone(),
+    };
+    let started = runtime
+        .inner
+        .plan_controller
+        .start_attempt(update.client_key_ids["root"].clone(), actor, 1_000)
+        .await
+        .expect("local attempt starts")
+        .output;
+
+    let control = pending_plan_tool(
+        "call-control-plan-attempt",
+        CONTROL_PLAN_ATTEMPT_TOOL_NAME,
+        &ControlPlanAttemptInput {
+            attempt_id: started.attempt.attempt_id.clone(),
+            expected_lease_id: started.lease.lease_id.clone(),
+            expected_node_revision: started.lease.node_revision,
+            kind: PlanDirectiveKind::Converge,
+            reason: "The acceptance evidence is sufficient".to_owned(),
+            instruction: Some("Finish the current verification".to_owned()),
+            constraints: Some(PlanDirectiveConstraints::default()),
+            requested_output: vec!["concise terminal result".to_owned()],
+        },
+    );
+    record_pending(&runtime, control.clone()).await;
+    let control_events = runtime
+        .execute_tool_call(control.id(), ToolExecutionContext::default())
+        .await
+        .expect("control tool succeeds");
+    let control_output = resolved_json(&runtime, &control_events).await;
+    let directive_id: merry_core::PlanDirectiveId =
+        serde_json::from_value(control_output["directive"]["directive_id"].clone())
+            .expect("directive id decodes");
+
+    let progress = pending_plan_tool(
+        "call-report-plan-progress",
+        REPORT_PLAN_PROGRESS_TOOL_NAME,
+        &ReportPlanProgressInput {
+            lease_id: started.lease.lease_id.clone(),
+            expected_node_revision: started.lease.node_revision,
+            summary: "Verification completed".to_owned(),
+            evidence_refs: Vec::new(),
+            artifact_refs: Vec::new(),
+            next_action: Some("Return the terminal result".to_owned()),
+            checkpoint_ref: Some("checkpoint-local".to_owned()),
+            acknowledged_directive_ids: vec![directive_id.clone()],
+            applied_directive_ids: vec![directive_id],
+            request_coordinator_review: Some(false),
+        },
+    );
+    record_pending(&runtime, progress.clone()).await;
+    let progress_events = runtime
+        .execute_tool_call(progress.id(), ToolExecutionContext::default())
+        .await
+        .expect("progress tool succeeds");
+    assert!(progress_events.iter().any(|event| matches!(
+        event.payload,
+        RuntimeJournalPayload::PlanAttemptProgressReported { .. }
+    )));
+
+    let terminal = pending_plan_tool(
+        "call-report-plan-attempt",
+        REPORT_PLAN_ATTEMPT_TOOL_NAME,
+        &ReportPlanAttemptInput {
+            lease_id: started.lease.lease_id,
+            expected_node_revision: started.lease.node_revision,
+            outcome: PlanAttemptOutcome::Completed,
+            result: Some(PlanNodeResult {
+                conclusion: "Local work completed".to_owned(),
+                evidence_refs: Vec::new(),
+                artifact_refs: Vec::new(),
+                changed_paths: Vec::new(),
+                verification: vec!["local deterministic verification".to_owned()],
+                open_questions: Vec::new(),
+            }),
+            diagnostic: None,
+            decomposition: None,
+            acknowledged_directive_ids: Vec::new(),
+            applied_directive_ids: Vec::new(),
+        },
+    );
+    record_pending(&runtime, terminal.clone()).await;
+    let terminal_events = runtime
+        .execute_tool_call(terminal.id(), ToolExecutionContext::default())
+        .await
+        .expect("terminal tool succeeds");
+    assert!(terminal_events.iter().any(|event| matches!(
+        event.payload,
+        RuntimeJournalPayload::PlanAttemptFinished { .. }
+    )));
+    assert_eq!(
+        runtime
+            .plan_snapshot()
+            .await
+            .unwrap()
+            .expect("plan exists")
+            .phase,
+        merry_core::PlanPhase::Completed
     );
 }
 
