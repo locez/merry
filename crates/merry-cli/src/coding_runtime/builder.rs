@@ -107,10 +107,8 @@ pub(crate) async fn resume_headless_coding_runtime(
     store: FileSessionStore,
 ) -> Result<Runtime, CodingRuntimeError> {
     build_coding_loop_runtime_from_headless_input(input)?
-        .load_session_from_store(store)
+        .resume_from_store_without_automatic_savepoints(store)
         .await
-        .map_err(|source| CodingRuntimeError::RuntimeBuild { source })?
-        .build()
         .map_err(|source| CodingRuntimeError::RuntimeBuild { source })
 }
 
@@ -231,7 +229,7 @@ fn configure_coding_loop_runtime_builder(
         options.skill_roots.clone(),
         options.allow_hidden_workspace_paths,
     ));
-    builder = builder.plan_worker_factory(
+    builder = builder.plan_subagent_factory(
         Arc::clone(&child_factory),
         options.subagents.limits().max_threads(),
     );

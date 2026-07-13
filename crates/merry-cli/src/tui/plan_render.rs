@@ -132,7 +132,7 @@ fn tree_line(state: &TuiState, row: &PlanTreeRow) -> Line<'static> {
     let status_color = status_color(row.status, row.ready);
     let executor = match row.executor_policy {
         PlanExecutorPolicy::Local => "local",
-        PlanExecutorPolicy::Delegate => "worker",
+        PlanExecutorPolicy::Delegate => "subagent",
         PlanExecutorPolicy::Auto => "auto",
     };
     let mut spans = vec![
@@ -370,7 +370,7 @@ fn lease_lines(lines: &mut Vec<Line<'static>>, state: &TuiState, lease: &PlanLea
         lines,
         state,
         &format!(
-            "- {:?}  {}  worker {}",
+            "- {:?}  {}  subagent {}",
             lease.status,
             lease.lease_id.as_str(),
             lease.executor_session_id.as_str()
@@ -638,7 +638,7 @@ fn node_status_label(status: PlanNodeStatus) -> &'static str {
 fn executor_label(executor: PlanExecutorPolicy) -> &'static str {
     match executor {
         PlanExecutorPolicy::Local => "local",
-        PlanExecutorPolicy::Delegate => "worker",
+        PlanExecutorPolicy::Delegate => "subagent",
         PlanExecutorPolicy::Auto => "auto",
     }
 }

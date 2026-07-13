@@ -10,8 +10,8 @@ use crate::{
     model_config::RuntimeModelConfigs,
     permission::{PermissionAdmissionSource, PermissionReviewMode, RuntimeTrustLevel},
     plan::{
-        PlanController, PlanScheduler, PlanWorkerControl,
-        tools::{coordinator_plan_registered_tools, worker_plan_registered_tools},
+        PlanController, PlanScheduler, PlanSubagentControl,
+        tools::{coordinator_plan_registered_tools, subagent_plan_registered_tools},
     },
     process::{PermissionedProcessRunnerFactory, StaticPermissionedProcessRunnerFactory},
     session::SessionState,
@@ -21,7 +21,7 @@ use crate::{
 use merry_core::{ArtifactRef, SessionId};
 use merry_llm::{ModelName, ModelProvider, ModelRetryPolicy};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     num::NonZeroUsize,
     sync::{
         Arc,
@@ -98,8 +98,9 @@ pub struct RuntimeBuilder {
     capabilities: RuntimeCapabilities,
     progress_commentary: bool,
     registered_tools: Vec<RegisteredTool>,
+    registered_tool_allowlist: Option<BTreeSet<merry_core::ToolName>>,
     coordinator_plan_tools: bool,
-    worker_plan_control: Option<PlanWorkerControl>,
+    plan_subagent_control: Option<PlanSubagentControl>,
     initial_context_summaries: BTreeMap<String, String>,
     skill_catalog: Option<SkillCatalog>,
     project_rules: Option<ProjectRules>,
@@ -117,8 +118,8 @@ pub struct RuntimeBuilder {
     permission_admission_source: Option<Arc<dyn PermissionAdmissionSource>>,
     permissioned_process_runner_factory: Option<Arc<dyn PermissionedProcessRunnerFactory>>,
     subagent_manager: Option<SubagentManager>,
-    plan_worker_factory: Option<Arc<dyn ChildRuntimeFactory>>,
-    plan_worker_max_threads: usize,
+    plan_subagent_factory: Option<Arc<dyn ChildRuntimeFactory>>,
+    plan_subagent_max_concurrency: usize,
     session_store: Option<FileSessionStore>,
     loaded_session: Option<SessionState>,
 }
@@ -137,8 +138,9 @@ impl RuntimeBuilder {
             capabilities: RuntimeCapabilities::default(),
             progress_commentary: false,
             registered_tools: Vec::new(),
+            registered_tool_allowlist: None,
             coordinator_plan_tools: false,
-            worker_plan_control: None,
+            plan_subagent_control: None,
             initial_context_summaries: BTreeMap::new(),
             skill_catalog: None,
             project_rules: None,
@@ -156,8 +158,8 @@ impl RuntimeBuilder {
             permission_admission_source: None,
             permissioned_process_runner_factory: None,
             subagent_manager: None,
-            plan_worker_factory: None,
-            plan_worker_max_threads: 1,
+            plan_subagent_factory: None,
+            plan_subagent_max_concurrency: 1,
             session_store: None,
             loaded_session: None,
         }
@@ -266,6 +268,18 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Restricts configured/profile tools to an exact provider-visible allowlist.
+    ///
+    /// Runtime protocol tools, including Plan attempt reporting, are appended after this filter.
+    #[must_use]
+    pub fn registered_tool_allowlist<I>(mut self, tools: I) -> Self
+    where
+        I: IntoIterator<Item = merry_core::ToolName>,
+    {
+        self.registered_tool_allowlist = Some(tools.into_iter().collect());
+        self
+    }
+
     /// Installs the complete stable coordinator plan-control tool surface.
     #[must_use]
     pub fn coordinator_plan_tools(mut self) -> Self {
@@ -273,22 +287,22 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Installs the stable worker-scoped plan reporting surface.
+    /// Installs the stable subagent-scoped plan reporting surface.
     #[must_use]
-    pub fn plan_worker_control(mut self, control: PlanWorkerControl) -> Self {
-        self.worker_plan_control = Some(control);
+    pub fn plan_subagent_control(mut self, control: PlanSubagentControl) -> Self {
+        self.plan_subagent_control = Some(control);
         self
     }
 
     /// Installs the depth-one child factory used by the central plan scheduler.
     #[must_use]
-    pub fn plan_worker_factory(
+    pub fn plan_subagent_factory(
         mut self,
         factory: Arc<dyn ChildRuntimeFactory>,
-        max_worker_threads: usize,
+        max_subagent_concurrency: usize,
     ) -> Self {
-        self.plan_worker_factory = Some(factory);
-        self.plan_worker_max_threads = max_worker_threads.max(1);
+        self.plan_subagent_factory = Some(factory);
+        self.plan_subagent_max_concurrency = max_subagent_concurrency.max(1);
         self
     }
 
@@ -578,7 +592,30 @@ impl RuntimeBuilder {
         self.session_store = Some(store);
         self.loaded_session = Some(session);
         let runtime = self.build()?;
-        runtime.inner.ensure_plan_scheduler_started();
+        runtime
+            .inner
+            .recover_plan_after_resume()
+            .await
+            .map_err(|error| RuntimeError::PlanRecovery {
+                message: error.to_string(),
+            })?;
+        Ok(runtime)
+    }
+
+    /// Loads persisted state, recovers Plan execution, and keeps automatic savepoints disabled.
+    pub async fn resume_from_store_without_automatic_savepoints(
+        mut self,
+        store: FileSessionStore,
+    ) -> Result<Runtime, RuntimeError> {
+        self.loaded_session = Some(SessionState::load_from(&store, &self.session_id).await?);
+        let runtime = self.build()?;
+        runtime
+            .inner
+            .recover_plan_after_resume()
+            .await
+            .map_err(|error| RuntimeError::PlanRecovery {
+                message: error.to_string(),
+            })?;
         Ok(runtime)
     }
 
@@ -596,17 +633,20 @@ impl RuntimeBuilder {
     /// Duplicate tool names are rejected before the runtime is constructed.
     pub fn build(self) -> Result<Runtime, RuntimeError> {
         let mut registered_tools = self.registered_tools;
-        if self.coordinator_plan_tools && self.worker_plan_control.is_some() {
+        if let Some(allowlist) = self.registered_tool_allowlist.as_ref() {
+            registered_tools.retain(|tool| allowlist.contains(tool.spec().name()));
+        }
+        if self.coordinator_plan_tools && self.plan_subagent_control.is_some() {
             return Err(RuntimeError::InvalidStepInput {
-                reason: "a runtime cannot be both a plan coordinator and a plan worker",
+                reason: "a runtime cannot be both a plan coordinator and a plan subagent",
             });
         }
         if self.coordinator_plan_tools {
             registered_tools
                 .extend(coordinator_plan_registered_tools().map_err(RuntimeError::from)?);
         }
-        if self.worker_plan_control.is_some() {
-            registered_tools.extend(worker_plan_registered_tools().map_err(RuntimeError::from)?);
+        if self.plan_subagent_control.is_some() {
+            registered_tools.extend(subagent_plan_registered_tools().map_err(RuntimeError::from)?);
         }
         if self.automatic_compaction.is_enabled() {
             registered_tools.push(merry_read_checkpoint_ref_tool().map_err(RuntimeError::from)?);
@@ -626,6 +666,7 @@ impl RuntimeBuilder {
             return Err(RuntimeError::BridgeToolsNotAllowed { name: name.clone() });
         }
 
+        let plan_resume_recovered = self.loaded_session.is_none();
         let mut session = match self.loaded_session {
             Some(session) => session,
             None => {
@@ -688,12 +729,13 @@ impl RuntimeBuilder {
             self.session_store.clone(),
             self.event_buffer_size,
         );
-        let plan_scheduler = self.worker_plan_control.is_none().then(|| {
+        let plan_scheduler = self.plan_subagent_control.is_none().then(|| {
             PlanScheduler::new(
                 plan_controller.clone(),
-                self.plan_worker_factory,
-                self.plan_worker_max_threads,
+                self.plan_subagent_factory,
+                self.plan_subagent_max_concurrency,
                 self.session_id.clone(),
+                plan_resume_recovered,
             )
         });
 
@@ -724,7 +766,7 @@ impl RuntimeBuilder {
                 permissioned_process_runner_factory: self.permissioned_process_runner_factory,
                 subagent_manager: self.subagent_manager,
                 plan_controller,
-                worker_plan_control: self.worker_plan_control,
+                plan_subagent_control: self.plan_subagent_control,
                 plan_scheduler,
                 session_store: self.session_store,
             }),

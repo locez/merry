@@ -183,7 +183,7 @@ pub enum RuntimeEvent {
         reason: String,
         source: RuntimeEventSource,
     },
-    /// A worker or local executor durably reported semantic progress.
+    /// A subagent or local executor durably reported semantic progress.
     PlanAttemptProgressReported {
         progress: PlanAttemptProgressSnapshot,
         source: RuntimeEventSource,

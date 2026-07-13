@@ -34,6 +34,39 @@ pub enum RuntimeError {
         reason: &'static str,
     },
 
+    /// Persisted Plan state could not be recovered before the runtime became observable.
+    #[error("plan recovery failed: {message}")]
+    PlanRecovery {
+        /// Actionable controller or persistence detail.
+        message: String,
+    },
+
+    /// A mutating Plan tool could not durably record its effect before execution.
+    #[error(
+        "plan effect attribution failed for tool call {call_id} in session {session_id}: {message}"
+    )]
+    PlanEffectAttribution {
+        /// Session executing the Plan tool.
+        session_id: SessionId,
+        /// Tool call that was not executed.
+        call_id: ToolCallId,
+        /// Actionable controller or persistence detail.
+        message: String,
+    },
+
+    /// A runtime bound to one Plan subagent no longer owns a live attempt.
+    #[error(
+        "plan subagent attempt is not live for tool call {call_id} in session {session_id}: {message}"
+    )]
+    PlanSubagentAttemptInactive {
+        /// Session whose bound attempt is no longer admissible.
+        session_id: SessionId,
+        /// Tool call that was not executed.
+        call_id: ToolCallId,
+        /// Actionable controller or persisted-state detail.
+        message: String,
+    },
+
     /// A user image or image-bearing message failed runtime validation.
     #[error("invalid user image input: {reason}")]
     InvalidUserImageInput {

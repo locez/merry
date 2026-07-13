@@ -61,6 +61,7 @@ mod token_estimate;
 mod tool;
 mod tool_input_validation;
 mod user_input;
+mod workspace_scope;
 
 pub use agent_loop::{
     AgentLoopBlockedReason, AgentLoopConfig, AgentLoopConfigError, AgentLoopError,
@@ -114,7 +115,7 @@ pub use permission::{
 pub use plan::{
     BeginPlanInput, BeginPlanOutput, ControlPlanAttemptInput, PlanApprovalInput, PlanChangeInput,
     PlanControllerError, PlanDecompositionInput, PlanError, PlanExecutionIntent, PlanNodeInput,
-    PlanNodeReferenceInput, PlanUpdateOutput, PlanWorkerControl, ReadPlanInput,
+    PlanNodeReferenceInput, PlanSubagentControl, PlanUpdateOutput, ReadPlanInput,
     ReportPlanAttemptInput, ReportPlanProgressInput, UpdatePlanInput,
 };
 pub use process::{

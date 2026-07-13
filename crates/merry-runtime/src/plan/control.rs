@@ -1,13 +1,15 @@
 use super::{PlanError, PlanState, protocol::PlanApprovalInput, validation};
 use merry_core::{
-    PlanApprovalRequirementKind, PlanApprovalRequirementStatus, PlanAttemptOutcome,
-    PlanLeaseStatus, PlanNodeId, PlanNodeStatus, PlanPhase, PlanSchedulerStatus, PlanSnapshot,
+    ErrorInfo, PlanApprovalRequirementKind, PlanApprovalRequirementStatus, PlanAttemptOutcome,
+    PlanAttemptSnapshot, PlanLeaseStatus, PlanNodeId, PlanNodeStatus, PlanPhase,
+    PlanSchedulerStatus, PlanSnapshot,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PlanControlOutput {
     pub(crate) snapshot: PlanSnapshot,
     pub(crate) previous_phase: PlanPhase,
+    pub(crate) finished_attempts: Vec<PlanAttemptSnapshot>,
 }
 
 impl PlanState {
@@ -15,7 +17,10 @@ impl PlanState {
         &mut self,
         input: PlanApprovalInput,
     ) -> Result<PlanControlOutput, PlanError> {
-        if self.snapshot.phase != PlanPhase::AwaitingApproval {
+        if !matches!(
+            self.snapshot.phase,
+            PlanPhase::Planning | PlanPhase::AwaitingApproval
+        ) {
             return Err(PlanError::WrongPhase {
                 actual: self.snapshot.phase,
                 operation: "approve plan",
@@ -23,6 +28,18 @@ impl PlanState {
         }
         if self.snapshot.root_node_id.is_none() {
             return Err(PlanError::EmptyPlan);
+        }
+        if input.plan_id != self.snapshot.plan_id {
+            return Err(PlanError::StalePlanIdentity {
+                expected: input.plan_id,
+                actual: self.snapshot.plan_id.clone(),
+            });
+        }
+        if input.expected_plan_revision != self.snapshot.revision {
+            return Err(PlanError::StalePlanRevision {
+                expected: input.expected_plan_revision,
+                actual: self.snapshot.revision,
+            });
         }
         validation::validate_reason(&input.review_resolution_ref)?;
         for reference in &input.authorization_refs {
@@ -92,6 +109,7 @@ impl PlanState {
         Ok(PlanControlOutput {
             snapshot,
             previous_phase,
+            finished_attempts: Vec::new(),
         })
     }
 
@@ -132,11 +150,11 @@ impl PlanState {
         }
         if self
             .snapshot
-            .leases
+            .attempts
             .iter()
-            .any(|lease| lease.status == PlanLeaseStatus::Live)
+            .any(|attempt| attempt.outcome.is_none())
         {
-            return Err(PlanError::LiveLeasesPreventControl {
+            return Err(PlanError::ActiveAttemptsPreventControl {
                 operation: "plan revision",
             });
         }
@@ -156,12 +174,14 @@ impl PlanState {
         Ok(PlanControlOutput {
             snapshot,
             previous_phase,
+            finished_attempts: Vec::new(),
         })
     }
 
     pub(crate) fn request_cancellation(
         &mut self,
         reason: &str,
+        now_ms: u64,
     ) -> Result<PlanControlOutput, PlanError> {
         validation::validate_reason(reason)?;
         if matches!(
@@ -175,21 +195,62 @@ impl PlanState {
         }
         let mut candidate = self.clone();
         let previous_phase = candidate.snapshot.phase;
-        let has_live_leases = candidate
+        let local_attempt_ids = candidate
             .snapshot
-            .leases
+            .attempts
             .iter()
-            .any(|lease| lease.status == PlanLeaseStatus::Live);
+            .filter(|attempt| attempt.outcome.is_none() && attempt.lease_id.is_none())
+            .map(|attempt| attempt.attempt_id.clone())
+            .collect::<Vec<_>>();
         candidate.snapshot.scheduler_status = PlanSchedulerStatus::Draining;
-        if !has_live_leases {
-            candidate.snapshot.phase = PlanPhase::Cancelled;
+        let revision = candidate.advance_revision("plan cancellation requested")?;
+        let diagnostic = ErrorInfo::new("plan_attempt_cancelled", reason)
+            .expect("validated cancellation reason produces a valid diagnostic");
+        let mut finished_attempts = Vec::with_capacity(local_attempt_ids.len());
+        for attempt_id in local_attempt_ids {
+            let attempt_index = candidate
+                .snapshot
+                .attempts
+                .iter()
+                .position(|attempt| attempt.attempt_id == attempt_id)
+                .expect("selected local attempt remains present");
+            let node_id = candidate.snapshot.attempts[attempt_index].node_id.clone();
+            let started_at_ms = candidate.snapshot.attempts[attempt_index].started_at_ms;
+            {
+                let attempt = &mut candidate.snapshot.attempts[attempt_index];
+                attempt.finished_at_ms = Some(now_ms);
+                attempt.outcome = Some(PlanAttemptOutcome::Cancelled);
+                attempt.diagnostic = Some(diagnostic.clone());
+            }
+            if let Some(progress) = candidate
+                .snapshot
+                .attempt_progress
+                .iter_mut()
+                .find(|progress| progress.attempt_id == attempt_id)
+            {
+                progress.elapsed_ms = now_ms.saturating_sub(started_at_ms);
+                progress.last_runtime_activity_at_ms = now_ms;
+                progress.provider_request_in_flight = false;
+                progress.tool_call_in_flight = false;
+            }
+            let node = candidate
+                .snapshot
+                .nodes
+                .iter_mut()
+                .find(|node| node.id == node_id)
+                .expect("cancelled local attempt node remains present");
+            node.status = PlanNodeStatus::Blocked;
+            node.updated_revision = revision;
+            finished_attempts.push(candidate.snapshot.attempts[attempt_index].clone());
         }
-        candidate.advance_revision("plan cancellation requested")?;
+        candidate.refresh_parent_states(revision);
+        candidate.settle_draining_phase();
         let snapshot = candidate.snapshot.clone();
         *self = candidate;
         Ok(PlanControlOutput {
             snapshot,
             previous_phase,
+            finished_attempts,
         })
     }
 
@@ -271,6 +332,7 @@ impl PlanState {
         Ok(PlanControlOutput {
             snapshot,
             previous_phase,
+            finished_attempts: Vec::new(),
         })
     }
 
@@ -298,6 +360,7 @@ impl PlanState {
         Ok(PlanControlOutput {
             snapshot,
             previous_phase,
+            finished_attempts: Vec::new(),
         })
     }
 }

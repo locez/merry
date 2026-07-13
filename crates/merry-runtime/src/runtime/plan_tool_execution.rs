@@ -2,7 +2,7 @@ use crate::{
     ArtifactContent, PlanControllerError, PlanError, RuntimeError,
     plan::{
         BeginPlanInput, ControlPlanAttemptInput, PlanArtifactPromotion, PlanAttemptToolOutput,
-        PlanProgressToolOutput, PlanWorkerControl, ReadPlanInput, ReportPlanAttemptInput,
+        PlanProgressToolOutput, PlanSubagentControl, ReadPlanInput, ReportPlanAttemptInput,
         ReportPlanProgressInput, UpdatePlanInput,
         execution::PlanAttemptActor,
         tools::{
@@ -14,7 +14,7 @@ use crate::{
     tool::ToolExecutionContext,
 };
 use merry_core::{
-    ArtifactId, ArtifactRef, ErrorInfo, PendingToolCall, PlanNodeId, PlanSnapshot,
+    ArtifactId, ArtifactRef, ErrorInfo, PendingToolCall, PlanNodeId, PlanPhase, PlanSnapshot,
     RuntimeJournalEvent, ToolCallResultStatus,
 };
 use serde::{Serialize, de::DeserializeOwned};
@@ -83,9 +83,9 @@ pub(super) async fn execute_plan_tool_call(
         }
         REPORT_PLAN_PROGRESS_TOOL_NAME => {
             let input = input_from_call::<ReportPlanProgressInput>(inner, pending)?;
-            if let Some(control) = inner.worker_plan_control.as_ref() {
+            if let Some(control) = inner.plan_subagent_control.as_ref() {
                 let (input, promotions) =
-                    match prepare_worker_progress_report(inner, control, input).await {
+                    match prepare_subagent_progress_report(inner, control, input).await {
                         Ok(prepared) => prepared,
                         Err(error) => return submit_controller_error(inner, pending, error).await,
                     };
@@ -122,9 +122,9 @@ pub(super) async fn execute_plan_tool_call(
         }
         REPORT_PLAN_ATTEMPT_TOOL_NAME => {
             let input = input_from_call::<ReportPlanAttemptInput>(inner, pending)?;
-            if let Some(control) = inner.worker_plan_control.as_ref() {
+            if let Some(control) = inner.plan_subagent_control.as_ref() {
                 let (input, promotions) =
-                    match prepare_worker_attempt_report(inner, control, input).await {
+                    match prepare_subagent_attempt_report(inner, control, input).await {
                         Ok(prepared) => prepared,
                         Err(error) => return submit_controller_error(inner, pending, error).await,
                     };
@@ -172,23 +172,23 @@ pub(super) async fn execute_plan_tool_call(
     }
 }
 
-async fn prepare_worker_progress_report(
+async fn prepare_subagent_progress_report(
     inner: &RuntimeInner,
-    control: &PlanWorkerControl,
+    control: &PlanSubagentControl,
     mut input: ReportPlanProgressInput,
 ) -> Result<(ReportPlanProgressInput, Vec<PlanArtifactPromotion>), PlanControllerError> {
     let records = {
         let session = inner.session.lock().await;
         session.collect_plan_artifact_records(&input.evidence_refs, &input.artifact_refs)?
     };
-    let (mapping, promotions) = worker_artifact_promotions(control, records)?;
+    let (mapping, promotions) = subagent_artifact_promotions(control, records)?;
     rewrite_plan_refs(&mapping, &mut input.evidence_refs, &mut input.artifact_refs);
     Ok((input, promotions))
 }
 
-async fn prepare_worker_attempt_report(
+async fn prepare_subagent_attempt_report(
     inner: &RuntimeInner,
-    control: &PlanWorkerControl,
+    control: &PlanSubagentControl,
     mut input: ReportPlanAttemptInput,
 ) -> Result<(ReportPlanAttemptInput, Vec<PlanArtifactPromotion>), PlanControllerError> {
     let Some(result) = input.result.as_mut() else {
@@ -198,7 +198,7 @@ async fn prepare_worker_attempt_report(
         let session = inner.session.lock().await;
         session.collect_plan_artifact_records(&result.evidence_refs, &result.artifact_refs)?
     };
-    let (mapping, promotions) = worker_artifact_promotions(control, records)?;
+    let (mapping, promotions) = subagent_artifact_promotions(control, records)?;
     rewrite_plan_refs(
         &mapping,
         &mut result.evidence_refs,
@@ -207,8 +207,8 @@ async fn prepare_worker_attempt_report(
     Ok((input, promotions))
 }
 
-fn worker_artifact_promotions(
-    control: &PlanWorkerControl,
+fn subagent_artifact_promotions(
+    control: &PlanSubagentControl,
     records: Vec<(ArtifactRef, ArtifactContent)>,
 ) -> Result<
     (
@@ -248,14 +248,14 @@ fn rewrite_plan_refs(
     for evidence in evidence_refs {
         evidence.artifact_id = mapping
             .get(&evidence.artifact_id)
-            .expect("every validated worker evidence artifact was promoted")
+            .expect("every validated subagent evidence artifact was promoted")
             .id()
             .clone();
     }
     for artifact in artifact_refs {
         *artifact = mapping
             .get(artifact.id())
-            .expect("every validated worker artifact was promoted")
+            .expect("every validated subagent artifact was promoted")
             .clone();
     }
 }
@@ -294,7 +294,7 @@ async fn read_plan(
             None => session
                 .active_plan()
                 .map(|plan| plan.snapshot().clone())
-                .ok_or_else(|| PlanToolRejection::new("no_active_plan", "no active plan exists"))?,
+                .ok_or_else(no_active_plan_rejection)?,
         }
     };
 
@@ -320,7 +320,15 @@ async fn read_plan(
         selected_ids.unwrap_or_else(|| snapshot.nodes.iter().map(|node| node.id.clone()).collect());
     let attempt_offset = parse_attempt_cursor(input.cursor.as_deref())?;
     let mut next_cursor = None;
-    if input.include_attempts.unwrap_or(false) {
+    let include_attempts = input.include_attempts.unwrap_or(false);
+    let include_leases = input.include_leases.unwrap_or(include_attempts);
+    if include_leases && !include_attempts {
+        return Err(PlanToolRejection::new(
+            "plan_read_leases_require_attempts",
+            "include_leases=true requires include_attempts=true",
+        ));
+    }
+    if include_attempts {
         snapshot
             .attempts
             .retain(|attempt| history_node_ids.contains(&attempt.node_id));
@@ -345,9 +353,13 @@ async fn read_plan(
             .map(|attempt| attempt.attempt_id.clone())
             .collect::<BTreeSet<_>>();
         snapshot.attempts = page;
-        snapshot
-            .leases
-            .retain(|lease| page_attempt_ids.contains(&lease.attempt_id));
+        if include_leases {
+            snapshot
+                .leases
+                .retain(|lease| page_attempt_ids.contains(&lease.attempt_id));
+        } else {
+            snapshot.leases.clear();
+        }
         if end < attempt_count {
             next_cursor = Some(format!("attempts:{end}"));
         }
@@ -508,20 +520,10 @@ async fn submit_controller_error(
             message: error.to_string(),
         }),
         PlanControllerError::Plan { source } => {
-            submit_rejection(
-                inner,
-                pending,
-                PlanToolRejection::new(plan_error_code(&source), source.to_string()),
-            )
-            .await
+            submit_rejection(inner, pending, plan_error_rejection(&source)).await
         }
         PlanControllerError::NoActivePlan => {
-            submit_rejection(
-                inner,
-                pending,
-                PlanToolRejection::new("no_active_plan", error.to_string()),
-            )
-            .await
+            submit_rejection(inner, pending, no_active_plan_rejection()).await
         }
     }
 }
@@ -531,18 +533,20 @@ async fn submit_rejection(
     pending: &PendingToolCall,
     rejection: PlanToolRejection,
 ) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
-    let diagnostic =
-        ErrorInfo::new(rejection.code, &rejection.message).map_err(RuntimeError::from)?;
+    let PlanToolRejection {
+        code,
+        message,
+        recovery,
+    } = rejection;
+    let diagnostic = ErrorInfo::new(code, &message).map_err(RuntimeError::from)?;
     let content = serde_json::json!({
         "ok": false,
         "tool": pending.name().as_str(),
         "error": {
-            "code": rejection.code,
-            "message": rejection.message,
+            "code": code,
+            "message": message,
         },
-        "recovery": {
-            "read_plan": "Read the latest exact plan state before retrying a revision-sensitive operation."
-        }
+        "recovery": recovery,
     });
     let events = {
         let mut session = inner.session.lock().await;
@@ -561,6 +565,7 @@ async fn submit_rejection(
 struct PlanToolRejection {
     code: &'static str,
     message: String,
+    recovery: serde_json::Value,
 }
 
 impl PlanToolRejection {
@@ -568,14 +573,77 @@ impl PlanToolRejection {
         Self {
             code,
             message: message.into(),
+            recovery: read_plan_recovery(),
         }
     }
+
+    fn with_recovery(mut self, recovery: serde_json::Value) -> Self {
+        self.recovery = recovery;
+        self
+    }
+}
+
+fn no_active_plan_rejection() -> PlanToolRejection {
+    PlanToolRejection::new("no_active_plan", "no active plan exists").with_recovery(
+        serde_json::json!({
+            "next_tool": "begin_plan",
+            "instruction": "Call begin_plan to create the empty planning state before retrying update_plan or read_plan.",
+            "example": {
+                "reason": "Coordinate the requested multi-step work",
+                "governing_skill_id": null
+            }
+        }),
+    )
+}
+
+fn plan_error_rejection(error: &PlanError) -> PlanToolRejection {
+    let recovery = match error {
+        PlanError::WrongPhase {
+            actual: PlanPhase::AwaitingApproval,
+            ..
+        } => serde_json::json!({
+            "actor": "user",
+            "next_action": "approve_or_request_revision_in_plan_ui",
+            "instruction": "Wait for the user to approve the plan or request revision through the Plan UI. Do not call update_plan, request_permissions, or execute plan work while approval is pending."
+        }),
+        PlanError::InvalidNewNodeIdentity | PlanError::InvalidExistingNodeIdentity => {
+            serde_json::json!({
+                "next_tool": "update_plan",
+                "instruction": "For every new node omit id and provide one unique client_key. For an existing mutable node provide its runtime id and omit client_key.",
+                "new_node_identity_example": { "client_key": "implementation" },
+                "existing_node_identity_example": { "id": "plan-node-1" }
+            })
+        }
+        PlanError::InvalidScopePath { .. } => serde_json::json!({
+            "next_tool": "update_plan",
+            "instruction": "Use '.' for the workspace root or a concrete normalized workspace-relative path. Do not use '..', absolute paths, embedded '.' segments, empty segments, or backslashes.",
+            "valid_examples": [".", "crates/merry-runtime", "examples/config.toml"]
+        }),
+        PlanError::CapabilityEnvelopeExceeded { .. } => serde_json::json!({
+            "actor": "coordinator_or_user",
+            "next_action": "narrow_plan_or_request_plan_approval",
+            "instruction": "Narrow the node harness to the authorized envelope, or wait for the user to approve the exact expanded capability through the Plan UI."
+        }),
+        PlanError::StalePlanRevision { .. } | PlanError::StaleNodeRevision { .. } => {
+            read_plan_recovery()
+        }
+        _ => read_plan_recovery(),
+    };
+    PlanToolRejection::new(plan_error_code(error), error.to_string()).with_recovery(recovery)
+}
+
+fn read_plan_recovery() -> serde_json::Value {
+    serde_json::json!({
+        "next_tool": "read_plan",
+        "instruction": "Read the latest exact plan state before retrying a revision-sensitive operation."
+    })
 }
 
 fn plan_error_code(error: &PlanError) -> &'static str {
     match error {
         PlanError::InvalidText { .. } => "plan_invalid_text",
         PlanError::WrongPhase { .. } => "plan_wrong_phase",
+        PlanError::StalePlanIdentity { .. } => "plan_stale_identity",
         PlanError::StalePlanRevision { .. } => "plan_stale_revision",
         PlanError::StaleNodeRevision { .. } => "plan_stale_node_revision",
         PlanError::RootMissing | PlanError::RootHasParent => "plan_invalid_root",
@@ -600,22 +668,23 @@ fn plan_error_code(error: &PlanError) -> &'static str {
         | PlanError::TooManyDependencies { .. }
         | PlanError::TooManyAcceptanceItems { .. } => "plan_limit_exceeded",
         PlanError::DuplicateSiblingOrder { .. } => "plan_duplicate_sibling_order",
-        PlanError::InvalidScopePath { .. } | PlanError::CapabilityEnvelopeExceeded { .. } => {
-            "plan_capability_envelope_exceeded"
-        }
+        PlanError::InvalidScopePath { .. } => "plan_invalid_scope_path",
+        PlanError::CapabilityEnvelopeExceeded { .. } => "plan_capability_envelope_exceeded",
         PlanError::NodeNotMutable { .. } => "plan_node_not_mutable",
         PlanError::ReplacementRootIdentity { .. } => "plan_invalid_replacement_root",
         PlanError::InvalidConcurrencyHint { .. } => "plan_invalid_concurrency_hint",
         PlanError::InvalidPersistedCounters => "plan_persisted_state_invalid",
         PlanError::EmptyPlan => "plan_empty",
         PlanError::UnresolvedApprovalRequirement { .. } => "plan_approval_requirement_unresolved",
-        PlanError::LiveLeasesPreventControl { .. } => "plan_live_leases_prevent_control",
+        PlanError::ActiveAttemptsPreventControl { .. } => "plan_active_attempts_prevent_control",
         PlanError::NodeNotReady { .. } => "plan_node_not_ready",
         PlanError::LiveLeaseExists { .. } => "plan_live_lease_exists",
         PlanError::InterruptedRetryUnavailable { .. } => "plan_interrupted_retry_unavailable",
         PlanError::UnknownLease { .. } => "plan_lease_not_found",
         PlanError::LeaseNotLive { .. } => "plan_lease_not_live",
         PlanError::UnknownAttempt { .. } => "plan_attempt_not_found",
+        PlanError::NoActiveAttemptForExecutor { .. } => "plan_active_attempt_not_found",
+        PlanError::MultipleActiveAttemptsForExecutor { .. } => "plan_active_attempt_ambiguous",
         PlanError::AttemptOwnershipMismatch { .. } => "plan_attempt_owner_mismatch",
         PlanError::AttemptAlreadyResolved { .. } => "plan_attempt_already_resolved",
         PlanError::AttemptNodeRevisionMismatch { .. } => "plan_attempt_node_revision_stale",

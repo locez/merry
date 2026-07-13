@@ -1,4 +1,4 @@
-use super::process_execution::execute_admitted_process_action;
+use super::process_execution::{ProcessExecutionAdmission, execute_admitted_process_action};
 use super::{RuntimeInner, persist_resume_safe_savepoint_if_configured};
 use crate::{
     ActionProposal, ProcessPermissionProfileId, RuntimeError, RuntimeModelRole,
@@ -19,6 +19,7 @@ pub(super) async fn execute_permission_request_tool_call(
     inner: &Arc<RuntimeInner>,
     pending: &PendingToolCall,
     context: ToolExecutionContext,
+    attribute_plan_effect: bool,
 ) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
     if context.cancellation_token().is_cancelled() {
         return Err(RuntimeError::ToolExecutionCancelled {
@@ -139,9 +140,12 @@ pub(super) async fn execute_permission_request_tool_call(
         inner,
         pending,
         proposal,
-        ActionPolicyDecision::allow_permissioned_process_action(),
-        ProcessPermissionProfileId::APPROVED_PERMISSION_REQUEST_V1,
-        runner,
+        ProcessExecutionAdmission::new(
+            ActionPolicyDecision::allow_permissioned_process_action(),
+            ProcessPermissionProfileId::APPROVED_PERMISSION_REQUEST_V1,
+            runner,
+            attribute_plan_effect,
+        ),
         context,
     )
     .await

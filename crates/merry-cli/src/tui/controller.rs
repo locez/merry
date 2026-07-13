@@ -85,7 +85,7 @@ pub(crate) enum ControllerEffect {
     },
     SelectProviderFormModel(String),
     EnterPlanMode,
-    ApprovePlan,
+    ApprovePlan(merry_runtime::PlanApprovalInput),
     RevisePlan,
     PausePlan,
     ResumePlan,
@@ -249,8 +249,12 @@ pub(crate) fn handle_key_event(key: KeyEvent, state: &mut TuiState) -> Controlle
                 ControllerEffect::None
             }
             OverlayKeyResult::ConfirmPlanApproval => {
+                let Some(input) = state.plan_approval_input() else {
+                    state.close_overlay();
+                    return ControllerEffect::None;
+                };
                 state.close_overlay();
-                ControllerEffect::ApprovePlan
+                ControllerEffect::ApprovePlan(input)
             }
             OverlayKeyResult::Provider(action) => provider_overlay_effect(action),
         };
@@ -1009,7 +1013,7 @@ async fn dispatch_effect(
             Ok(false)
         }
         ControllerEffect::EnterPlanMode
-        | ControllerEffect::ApprovePlan
+        | ControllerEffect::ApprovePlan(_)
         | ControllerEffect::RevisePlan
         | ControllerEffect::PausePlan
         | ControllerEffect::ResumePlan

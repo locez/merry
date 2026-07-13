@@ -1,9 +1,8 @@
+mod report_validation;
+
 use super::{
     PlanError, PlanState,
-    protocol::{
-        ControlPlanAttemptInput, PlanDecompositionInput, ReportPlanAttemptInput,
-        ReportPlanProgressInput,
-    },
+    protocol::{ControlPlanAttemptInput, ReportPlanAttemptInput, ReportPlanProgressInput},
     recovery::retry_backoff_elapsed,
     validation,
 };
@@ -14,6 +13,7 @@ use merry_core::{
     PlanLeaseId, PlanLeaseSnapshot, PlanLeaseStatus, PlanNodeId, PlanNodeStatus, PlanPhase,
     PlanRevisionSummary, PlanSchedulerStatus, PlanSnapshot, SessionId,
 };
+use report_validation::validate_attempt_report_contract;
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,6 +27,20 @@ pub(crate) struct PlanAttemptStartOutput {
     pub(crate) attempt: PlanAttemptSnapshot,
     pub(crate) lease: PlanLeaseSnapshot,
     pub(crate) progress: PlanAttemptProgressSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PlanLocalAttemptStartOutput {
+    pub(crate) snapshot: PlanSnapshot,
+    pub(crate) attempt: PlanAttemptSnapshot,
+    pub(crate) progress: PlanAttemptProgressSnapshot,
+}
+
+struct PlanAttemptStartRecords {
+    snapshot: PlanSnapshot,
+    attempt: PlanAttemptSnapshot,
+    lease: Option<PlanLeaseSnapshot>,
+    progress: PlanAttemptProgressSnapshot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,6 +123,39 @@ impl PlanState {
         actor: PlanAttemptActor,
         now_ms: u64,
     ) -> Result<PlanAttemptStartOutput, PlanError> {
+        let records = self.start_attempt_records(node_id, actor, now_ms, true)?;
+        Ok(PlanAttemptStartOutput {
+            snapshot: records.snapshot,
+            attempt: records.attempt,
+            lease: records
+                .lease
+                .expect("subagent attempt creation always returns a lease"),
+            progress: records.progress,
+        })
+    }
+
+    pub(crate) fn start_local_attempt(
+        &mut self,
+        node_id: &PlanNodeId,
+        actor: PlanAttemptActor,
+        now_ms: u64,
+    ) -> Result<PlanLocalAttemptStartOutput, PlanError> {
+        let records = self.start_attempt_records(node_id, actor, now_ms, false)?;
+        debug_assert!(records.lease.is_none());
+        Ok(PlanLocalAttemptStartOutput {
+            snapshot: records.snapshot,
+            attempt: records.attempt,
+            progress: records.progress,
+        })
+    }
+
+    fn start_attempt_records(
+        &mut self,
+        node_id: &PlanNodeId,
+        actor: PlanAttemptActor,
+        now_ms: u64,
+        create_subagent_lease: bool,
+    ) -> Result<PlanAttemptStartRecords, PlanError> {
         let mut candidate = self.clone();
         if candidate.snapshot.phase != PlanPhase::Executing {
             return Err(PlanError::WrongPhase {
@@ -151,15 +198,13 @@ impl PlanState {
             PlanAttemptId::new(&format!("plan-attempt-{}", candidate.next_attempt_sequence))
                 .expect("runtime-generated attempt id is valid");
         candidate.next_attempt_sequence += 1;
-        let lease_id = PlanLeaseId::new(&format!("plan-lease-{}", candidate.next_lease_sequence))
-            .expect("runtime-generated lease id is valid");
-        candidate.next_lease_sequence += 1;
-        let expires_at_ms = now_ms.saturating_add(
-            candidate
-                .snapshot
-                .resource_policy_snapshot
-                .worker_heartbeat_ttl_ms,
-        );
+        let lease_id = create_subagent_lease.then(|| {
+            let lease_id =
+                PlanLeaseId::new(&format!("plan-lease-{}", candidate.next_lease_sequence))
+                    .expect("runtime-generated lease id is valid");
+            candidate.next_lease_sequence += 1;
+            lease_id
+        });
         let attempt = PlanAttemptSnapshot {
             attempt_id: attempt_id.clone(),
             node_id: node_id.clone(),
@@ -175,7 +220,7 @@ impl PlanState {
             latest_checkpoint_ref: None,
             last_applied_directive_sequence: 0,
         };
-        let lease = PlanLeaseSnapshot {
+        let lease = lease_id.map(|lease_id| PlanLeaseSnapshot {
             lease_id,
             attempt_id: attempt_id.clone(),
             node_id: node_id.clone(),
@@ -183,20 +228,26 @@ impl PlanState {
             executor_session_id: actor.executor_session_id,
             started_at_ms: now_ms,
             last_heartbeat_at_ms: now_ms,
-            lease_expires_at_ms: expires_at_ms,
+            lease_expires_at_ms: now_ms.saturating_add(
+                candidate
+                    .snapshot
+                    .resource_policy_snapshot
+                    .subagent_heartbeat_ttl_ms,
+            ),
             status: PlanLeaseStatus::Live,
-        };
+        });
         let progress = PlanAttemptProgressSnapshot {
             attempt_id,
             node_id: node_id.clone(),
             elapsed_ms: 0,
             model_turns: 0,
             reported_usage: None,
-            last_worker_heartbeat_at_ms: now_ms,
+            last_subagent_heartbeat_at_ms: lease.as_ref().map(|_| now_ms),
             last_runtime_activity_at_ms: now_ms,
             last_durable_progress_at_ms: None,
             provider_request_in_flight: false,
             tool_call_in_flight: false,
+            observable_side_effects: 0,
             artifacts_created: 0,
             artifact_refs: Vec::new(),
             changed_paths: Vec::new(),
@@ -207,11 +258,13 @@ impl PlanState {
             request_coordinator_review: false,
         };
         candidate.snapshot.attempts.push(attempt.clone());
-        candidate.snapshot.leases.push(lease.clone());
+        if let Some(lease) = lease.as_ref() {
+            candidate.snapshot.leases.push(lease.clone());
+        }
         candidate.snapshot.attempt_progress.push(progress.clone());
         let snapshot = candidate.snapshot.clone();
         *self = candidate;
-        Ok(PlanAttemptStartOutput {
+        Ok(PlanAttemptStartRecords {
             snapshot,
             attempt,
             lease,
@@ -252,15 +305,19 @@ impl PlanState {
                 attempt_id: input.attempt_id,
             });
         }
+        let expected_lease_id = attempt
+            .lease_id
+            .as_ref()
+            .ok_or(PlanError::StaleDirectiveTarget)?;
         let lease = candidate
             .snapshot
             .leases
             .iter()
-            .find(|lease| lease.lease_id == input.expected_lease_id)
+            .find(|lease| &lease.lease_id == expected_lease_id)
             .ok_or(PlanError::StaleDirectiveTarget)?;
         if lease.status != PlanLeaseStatus::Live
             || lease.attempt_id != attempt.attempt_id
-            || lease.node_revision != input.expected_node_revision
+            || lease.node_revision != attempt.node_revision
         {
             return Err(PlanError::StaleDirectiveTarget);
         }
@@ -363,8 +420,7 @@ impl PlanState {
             validation::validate_reason(checkpoint_ref)?;
         }
         let mut candidate = self.clone();
-        let (attempt_index, lease_index) =
-            candidate.validate_live_lease(actor, &input.lease_id, input.expected_node_revision)?;
+        let (attempt_index, _) = candidate.validate_current_attempt(actor)?;
         let attempt_id = candidate.snapshot.attempts[attempt_index]
             .attempt_id
             .clone();
@@ -377,7 +433,7 @@ impl PlanState {
         if let Some(checkpoint_ref) = input.checkpoint_ref.clone() {
             candidate.snapshot.attempts[attempt_index].latest_checkpoint_ref = Some(checkpoint_ref);
         }
-        let started_at_ms = candidate.snapshot.leases[lease_index].started_at_ms;
+        let started_at_ms = candidate.snapshot.attempts[attempt_index].started_at_ms;
         let progress = candidate
             .snapshot
             .attempt_progress
@@ -414,6 +470,63 @@ impl PlanState {
         })
     }
 
+    pub(crate) fn record_runtime_effect(
+        &mut self,
+        actor: &PlanAttemptActor,
+        changed_paths: Vec<String>,
+        now_ms: u64,
+    ) -> Result<PlanProgressOutput, PlanError> {
+        for path in &changed_paths {
+            if !crate::workspace_scope::is_valid_workspace_scope(std::path::Path::new(path)) {
+                return Err(PlanError::InvalidScopePath {
+                    node_id: self
+                        .snapshot
+                        .attempts
+                        .iter()
+                        .find(|attempt| {
+                            attempt.outcome.is_none()
+                                && attempt.executor_session_id == actor.executor_session_id
+                        })
+                        .map(|attempt| attempt.node_id.clone())
+                        .unwrap_or_else(|| {
+                            PlanNodeId::new("unknown-plan-node")
+                                .expect("static fallback node id is valid")
+                        }),
+                    path: path.clone(),
+                });
+            }
+        }
+        let mut candidate = self.clone();
+        let (attempt_index, _) = candidate.validate_current_attempt(actor)?;
+        let attempt_id = candidate.snapshot.attempts[attempt_index]
+            .attempt_id
+            .clone();
+        let started_at_ms = candidate.snapshot.attempts[attempt_index].started_at_ms;
+        let progress = candidate
+            .snapshot
+            .attempt_progress
+            .iter_mut()
+            .find(|progress| progress.attempt_id == attempt_id)
+            .expect("live attempt has progress state");
+        progress.elapsed_ms = now_ms.saturating_sub(started_at_ms);
+        progress.last_runtime_activity_at_ms = now_ms;
+        progress.observable_side_effects = progress.observable_side_effects.saturating_add(1);
+        for path in changed_paths {
+            if !progress.changed_paths.contains(&path) {
+                progress.changed_paths.push(path);
+            }
+        }
+        let progress = progress.clone();
+        candidate.advance_revision("runtime-observed attempt effect recorded")?;
+        let snapshot = candidate.snapshot.clone();
+        *self = candidate;
+        Ok(PlanProgressOutput {
+            snapshot,
+            progress,
+            updated_directives: Vec::new(),
+        })
+    }
+
     pub(crate) fn report_attempt(
         &mut self,
         actor: &PlanAttemptActor,
@@ -423,8 +536,7 @@ impl PlanState {
         validate_attempt_report_contract(&input)?;
         let mut candidate = self.clone();
         let previous_phase = candidate.snapshot.phase;
-        let (attempt_index, lease_index) =
-            candidate.validate_live_lease(actor, &input.lease_id, input.expected_node_revision)?;
+        let (attempt_index, lease_index) = candidate.validate_current_attempt(actor)?;
         let attempt_id = candidate.snapshot.attempts[attempt_index]
             .attempt_id
             .clone();
@@ -493,7 +605,9 @@ impl PlanState {
             attempt.result = result;
             attempt.diagnostic = diagnostic;
         }
-        candidate.snapshot.leases[lease_index].status = PlanLeaseStatus::Resolved;
+        if let Some(lease_index) = lease_index {
+            candidate.snapshot.leases[lease_index].status = PlanLeaseStatus::Resolved;
+        }
         if let Some(progress) = candidate
             .snapshot
             .attempt_progress
@@ -509,6 +623,7 @@ impl PlanState {
         all_directives.append(&mut expired_directives);
         candidate.refresh_parent_states(revision);
         candidate.refresh_terminal_phase();
+        candidate.settle_draining_phase();
         let ready_node_ids = candidate.ready_node_ids_at(now_ms);
         let attempt = candidate.snapshot.attempts[attempt_index].clone();
         let snapshot = candidate.snapshot.clone();
@@ -548,7 +663,7 @@ impl PlanState {
         let ttl = candidate
             .snapshot
             .resource_policy_snapshot
-            .worker_heartbeat_ttl_ms;
+            .subagent_heartbeat_ttl_ms;
         let lease = &mut candidate.snapshot.leases[lease_index];
         lease.last_heartbeat_at_ms = now_ms;
         lease.lease_expires_at_ms = now_ms.saturating_add(ttl);
@@ -562,7 +677,7 @@ impl PlanState {
             .find(|progress| progress.attempt_id == attempt_id)
             .expect("live attempt has progress");
         progress.elapsed_ms = now_ms.saturating_sub(lease.started_at_ms);
-        progress.last_worker_heartbeat_at_ms = now_ms;
+        progress.last_subagent_heartbeat_at_ms = Some(now_ms);
         progress.last_runtime_activity_at_ms = now_ms;
         progress.provider_request_in_flight = provider_request_in_flight;
         progress.tool_call_in_flight = tool_call_in_flight;
@@ -610,123 +725,6 @@ impl PlanState {
         let snapshot = candidate.snapshot.clone();
         *self = candidate;
         Ok(snapshot)
-    }
-
-    pub(super) fn validate_live_lease(
-        &self,
-        actor: &PlanAttemptActor,
-        lease_id: &PlanLeaseId,
-        expected_node_revision: u64,
-    ) -> Result<(usize, usize), PlanError> {
-        let lease_index = self
-            .snapshot
-            .leases
-            .iter()
-            .position(|lease| &lease.lease_id == lease_id)
-            .ok_or_else(|| PlanError::UnknownLease {
-                lease_id: lease_id.clone(),
-            })?;
-        let lease = &self.snapshot.leases[lease_index];
-        if lease.status != PlanLeaseStatus::Live {
-            return Err(PlanError::LeaseNotLive {
-                lease_id: lease_id.clone(),
-            });
-        }
-        let attempt_index = self
-            .snapshot
-            .attempts
-            .iter()
-            .position(|attempt| attempt.attempt_id == lease.attempt_id)
-            .ok_or_else(|| PlanError::UnknownAttempt {
-                attempt_id: lease.attempt_id.clone(),
-            })?;
-        let attempt = &self.snapshot.attempts[attempt_index];
-        if attempt.outcome.is_some() {
-            return Err(PlanError::AttemptAlreadyResolved {
-                attempt_id: attempt.attempt_id.clone(),
-            });
-        }
-        if attempt.executor_session_id != actor.executor_session_id
-            || lease.executor_session_id != actor.executor_session_id
-        {
-            return Err(PlanError::AttemptOwnershipMismatch {
-                attempt_id: attempt.attempt_id.clone(),
-            });
-        }
-        if lease.node_revision != expected_node_revision {
-            return Err(PlanError::AttemptNodeRevisionMismatch {
-                expected: expected_node_revision,
-                actual: lease.node_revision,
-            });
-        }
-        Ok((attempt_index, lease_index))
-    }
-
-    fn apply_directive_reports(
-        &mut self,
-        attempt_id: &PlanAttemptId,
-        acknowledged: &[PlanDirectiveId],
-        applied: &[PlanDirectiveId],
-        now_ms: u64,
-    ) -> Result<Vec<CoordinatorDirectiveSnapshot>, PlanError> {
-        let acknowledged = acknowledged.iter().cloned().collect::<BTreeSet<_>>();
-        let applied = applied.iter().cloned().collect::<BTreeSet<_>>();
-        let mut updated = Vec::new();
-        for directive_id in acknowledged.union(&applied) {
-            let directive = self
-                .snapshot
-                .directives
-                .iter_mut()
-                .find(|directive| {
-                    &directive.directive_id == directive_id && &directive.attempt_id == attempt_id
-                })
-                .ok_or_else(|| PlanError::UnknownDirective {
-                    directive_id: directive_id.clone(),
-                })?;
-            if acknowledged.contains(directive_id)
-                && matches!(
-                    directive.status,
-                    PlanDirectiveStatus::Queued | PlanDirectiveStatus::Delivered
-                )
-            {
-                directive.status = PlanDirectiveStatus::Acknowledged;
-                directive.acknowledged_at_ms = Some(now_ms);
-            }
-            if applied.contains(directive_id) {
-                if directive.status == PlanDirectiveStatus::Applied {
-                    continue;
-                }
-                if directive.status != PlanDirectiveStatus::Acknowledged {
-                    return Err(PlanError::InvalidDirectiveTransition {
-                        directive_id: directive_id.clone(),
-                        status: directive.status,
-                        target: "applied",
-                    });
-                }
-                directive.status = PlanDirectiveStatus::Applied;
-                directive.applied_at_ms = Some(now_ms);
-            }
-            updated.push(directive.clone());
-        }
-        if let Some(max_sequence) = self
-            .snapshot
-            .directives
-            .iter()
-            .filter(|directive| {
-                &directive.attempt_id == attempt_id
-                    && directive.status == PlanDirectiveStatus::Applied
-            })
-            .map(|directive| directive.sequence)
-            .max()
-            && let Some(attempt) = self
-                .snapshot
-                .attempts
-                .iter_mut()
-                .find(|attempt| &attempt.attempt_id == attempt_id)
-        {
-            attempt.last_applied_directive_sequence = max_sequence;
-        }
-        Ok(updated)
     }
 
     pub(super) fn expire_attempt_directives(
@@ -800,6 +798,32 @@ impl PlanState {
             PlanAttemptOutcome::Blocked => PlanNodeStatus::Blocked,
             PlanAttemptOutcome::SemanticFailure => PlanNodeStatus::Failed,
             PlanAttemptOutcome::TransientFailure => {
+                let retry_is_safe =
+                    self.snapshot
+                        .nodes
+                        .iter()
+                        .find(|node| &node.id == node_id)
+                        .is_some_and(|node| {
+                            !node
+                                .recovery_policy
+                                .retry_only_before_observable_side_effects
+                                || self
+                                    .snapshot
+                                    .attempts
+                                    .iter()
+                                    .find(|attempt| {
+                                        &attempt.node_id == node_id && attempt.outcome.is_none()
+                                    })
+                                    .and_then(|attempt| {
+                                        self.snapshot.attempt_progress.iter().find(|progress| {
+                                            progress.attempt_id == attempt.attempt_id
+                                        })
+                                    })
+                                    .is_none_or(|progress| progress.observable_side_effects == 0)
+                        });
+                if !retry_is_safe {
+                    return PlanNodeStatus::Blocked;
+                }
                 let failures = self
                     .snapshot
                     .attempts
@@ -905,6 +929,18 @@ impl PlanState {
         };
     }
 
+    pub(super) fn settle_draining_phase(&mut self) {
+        if self.snapshot.scheduler_status == PlanSchedulerStatus::Draining
+            && self
+                .snapshot
+                .attempts
+                .iter()
+                .all(|attempt| attempt.outcome.is_some())
+        {
+            self.snapshot.phase = PlanPhase::Cancelled;
+        }
+    }
+
     pub(super) fn contract_fingerprint(&self) -> String {
         #[derive(serde::Serialize)]
         struct Contract<'a> {
@@ -946,54 +982,4 @@ impl PlanState {
         }
         Ok(())
     }
-}
-
-fn validate_attempt_report_contract(input: &ReportPlanAttemptInput) -> Result<(), PlanError> {
-    match input.outcome {
-        PlanAttemptOutcome::Completed
-            if input.result.is_some()
-                && input.diagnostic.is_none()
-                && input.decomposition.is_none() => {}
-        PlanAttemptOutcome::Decomposed
-            if input.result.is_none()
-                && input.diagnostic.is_none()
-                && input.decomposition.is_some() =>
-        {
-            validate_decomposition(input.decomposition.as_ref().expect("matched some"))?;
-        }
-        PlanAttemptOutcome::Blocked | PlanAttemptOutcome::SemanticFailure
-            if input.decomposition.is_none()
-                && (input.result.is_some() || input.diagnostic.is_some()) => {}
-        PlanAttemptOutcome::TransientFailure
-            if input.result.is_none()
-                && input.diagnostic.is_some()
-                && input.decomposition.is_none() => {}
-        PlanAttemptOutcome::Yielded if input.result.is_none() && input.decomposition.is_none() => {}
-        PlanAttemptOutcome::Cancelled | PlanAttemptOutcome::Interrupted => {
-            return Err(PlanError::InvalidAttemptOutcome {
-                outcome: input.outcome,
-            });
-        }
-        _ => {
-            return Err(PlanError::InvalidAttemptOutcome {
-                outcome: input.outcome,
-            });
-        }
-    }
-    Ok(())
-}
-
-fn validate_decomposition(input: &PlanDecompositionInput) -> Result<(), PlanError> {
-    validation::validate_reason(&input.reason)?;
-    if input.children.is_empty() {
-        return Err(PlanError::EmptyDecomposition);
-    }
-    if input
-        .children
-        .iter()
-        .any(|child| !child.children.is_empty())
-    {
-        return Err(PlanError::NestedDecomposition);
-    }
-    Ok(())
 }

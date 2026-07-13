@@ -6,9 +6,9 @@ use super::{
 };
 use merry_core::{
     PlanActivationSource, PlanApprovalRequirementId, PlanApprovalRequirementKind,
-    PlanApprovalRequirementSnapshot, PlanApprovalRequirementStatus, PlanId, PlanNodeId,
-    PlanNodeSnapshot, PlanNodeStatus, PlanPhase, PlanResourcePolicySnapshot, PlanRevisionSummary,
-    PlanSchedulerStatus, PlanSnapshot,
+    PlanApprovalRequirementSnapshot, PlanApprovalRequirementStatus, PlanCapabilityEnvelopeSnapshot,
+    PlanId, PlanNodeId, PlanNodeSnapshot, PlanNodeStatus, PlanPhase, PlanResourcePolicySnapshot,
+    PlanRevisionSummary, PlanSchedulerStatus, PlanSnapshot,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -28,6 +28,8 @@ pub enum PlanError {
     },
     #[error("plan revision is stale: expected {expected}, actual {actual}")]
     StalePlanRevision { expected: u64, actual: u64 },
+    #[error("plan identity is stale: expected {expected}, actual {actual}")]
+    StalePlanIdentity { expected: PlanId, actual: PlanId },
     #[error("node {node_id} revision is stale: expected {expected}, actual {actual}")]
     StaleNodeRevision {
         node_id: PlanNodeId,
@@ -114,8 +116,8 @@ pub enum PlanError {
     UnresolvedApprovalRequirement {
         requirement_id: merry_core::PlanApprovalRequirementId,
     },
-    #[error("live plan leases prevent {operation}")]
-    LiveLeasesPreventControl { operation: &'static str },
+    #[error("active plan attempts prevent {operation}")]
+    ActiveAttemptsPreventControl { operation: &'static str },
     #[error("node {node_id} is not ready for execution")]
     NodeNotReady { node_id: PlanNodeId },
     #[error("node {node_id} already has a live lease")]
@@ -129,6 +131,14 @@ pub enum PlanError {
     #[error("plan attempt {attempt_id} was not found")]
     UnknownAttempt {
         attempt_id: merry_core::PlanAttemptId,
+    },
+    #[error("executor session {executor_session_id} has no active plan attempt")]
+    NoActiveAttemptForExecutor {
+        executor_session_id: merry_core::SessionId,
+    },
+    #[error("executor session {executor_session_id} has multiple active plan attempts")]
+    MultipleActiveAttemptsForExecutor {
+        executor_session_id: merry_core::SessionId,
     },
     #[error("plan attempt {attempt_id} belongs to another executor session")]
     AttemptOwnershipMismatch {
@@ -410,6 +420,9 @@ impl PlanState {
                 expected_node_revision,
                 subtree,
             } => candidate.replace_subtree(&target_node_id, expected_node_revision, subtree)?,
+            PlanChangeInput::UseCurrentPlan {
+                expected_plan_revision,
+            } => candidate.use_current_plan(expected_plan_revision)?,
         };
         candidate.snapshot.coordinator_node_id = input.coordinator_node_id;
         candidate.snapshot.max_concurrency_hint = input.max_concurrency_hint;
@@ -531,7 +544,7 @@ impl PlanState {
             .iter()
             .map(|node| (node.id.clone(), node.clone()))
             .collect::<BTreeMap<_, _>>();
-        let old_region = subtree_ids(&existing, target_node_id);
+        let old_region = live_subtree_ids(&existing, target_node_id);
         for id in &old_region {
             let node = existing.get(id).expect("subtree id came from existing map");
             ensure_mutable(node)?;
@@ -605,6 +618,29 @@ impl PlanState {
         Ok(client_key_ids)
     }
 
+    fn use_current_plan(
+        &mut self,
+        expected_revision: u64,
+    ) -> Result<BTreeMap<String, PlanNodeId>, PlanError> {
+        if self.snapshot.phase != PlanPhase::Planning {
+            return Err(PlanError::WrongPhase {
+                actual: self.snapshot.phase,
+                operation: "use current plan",
+            });
+        }
+        if self.snapshot.root_node_id.is_none() {
+            return Err(PlanError::EmptyPlan);
+        }
+        if expected_revision != self.snapshot.revision {
+            return Err(PlanError::StalePlanRevision {
+                expected: expected_revision,
+                actual: self.snapshot.revision,
+            });
+        }
+        self.snapshot.revision = self.snapshot.revision.saturating_add(1);
+        Ok(BTreeMap::new())
+    }
+
     fn apply_execution_intent(&mut self, intent: PlanExecutionIntent) -> Result<(), PlanError> {
         match intent {
             PlanExecutionIntent::ContinuePlanning => {
@@ -617,7 +653,10 @@ impl PlanState {
                 self.snapshot.phase = PlanPhase::Planning;
             }
             PlanExecutionIntent::ExecuteIfAuthorized => {
-                if !self.authorized_envelope_covers_plan()? {
+                if self.snapshot.authorized_capability_envelope.is_none() {
+                    self.snapshot.authorized_capability_envelope =
+                        Some(self.current_plan_capability_envelope()?);
+                } else if !self.authorized_envelope_covers_plan()? {
                     self.add_review_requirement(
                         PlanApprovalRequirementKind::CapabilityOrPermissionExpansion,
                     );
@@ -631,7 +670,9 @@ impl PlanState {
                 }
             }
             PlanExecutionIntent::RequestUserReview => {
-                if !self.authorized_envelope_covers_plan()? {
+                if self.snapshot.authorized_capability_envelope.is_some()
+                    && !self.authorized_envelope_covers_plan()?
+                {
                     self.add_review_requirement(
                         PlanApprovalRequirementKind::CapabilityOrPermissionExpansion,
                     );
@@ -641,6 +682,24 @@ impl PlanState {
             }
         }
         Ok(())
+    }
+
+    fn current_plan_capability_envelope(
+        &self,
+    ) -> Result<PlanCapabilityEnvelopeSnapshot, PlanError> {
+        let root_id = self
+            .snapshot
+            .root_node_id
+            .as_ref()
+            .ok_or(PlanError::RootMissing)?;
+        let root = self.node(root_id).ok_or(PlanError::RootMissing)?;
+        Ok(PlanCapabilityEnvelopeSnapshot {
+            allowed_tools: root.harness.allowed_tools.clone(),
+            read_scope: root.harness.read_scope.clone(),
+            write_scope: root.harness.write_scope.clone(),
+            forbidden_paths: root.harness.forbidden_paths.clone(),
+            destructive_external_authority: false,
+        })
     }
 
     fn add_review_requirement(&mut self, kind: PlanApprovalRequirementKind) {
@@ -889,7 +948,7 @@ fn ordered_nodes(nodes: BTreeMap<PlanNodeId, PlanNodeSnapshot>) -> Vec<PlanNodeS
     nodes
 }
 
-fn subtree_ids(
+fn live_subtree_ids(
     nodes: &BTreeMap<PlanNodeId, PlanNodeSnapshot>,
     target: &PlanNodeId,
 ) -> BTreeSet<PlanNodeId> {
@@ -897,10 +956,11 @@ fn subtree_ids(
     loop {
         let before = ids.len();
         for node in nodes.values() {
-            if node
-                .parent_id
-                .as_ref()
-                .is_some_and(|parent| ids.contains(parent))
+            if node.status != PlanNodeStatus::Superseded
+                && node
+                    .parent_id
+                    .as_ref()
+                    .is_some_and(|parent| ids.contains(parent))
             {
                 ids.insert(node.id.clone());
             }

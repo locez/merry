@@ -9,8 +9,8 @@ use super::{
 };
 use crate::{ArtifactContent, context::stable_content_hash};
 use merry_core::{
-    ArtifactId, ArtifactRef, PlanAttemptId, PlanId, PlanLeaseId, PlanNodeId, PlanSnapshot,
-    SessionId,
+    ArtifactId, ArtifactRef, PlanAttemptId, PlanHarnessSnapshot, PlanId, PlanLeaseId,
+    PlanLeaseStatus, PlanNodeId, PlanSnapshot, SessionId,
 };
 
 #[derive(Debug, Clone)]
@@ -19,25 +19,23 @@ pub(crate) struct PlanArtifactPromotion {
     pub(crate) content: ArtifactContent,
 }
 
-/// Scoped root-plan control carried by one depth-one worker runtime.
+/// Scoped root-plan control carried by one depth-one subagent runtime.
 #[derive(Clone)]
-pub struct PlanWorkerControl {
+pub struct PlanSubagentControl {
     controller: PlanController,
     plan_id: PlanId,
     node_id: PlanNodeId,
-    node_revision: u64,
     attempt_id: PlanAttemptId,
     lease_id: PlanLeaseId,
     executor_session_id: SessionId,
 }
 
-impl PlanWorkerControl {
+impl PlanSubagentControl {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         controller: PlanController,
         plan_id: PlanId,
         node_id: PlanNodeId,
-        node_revision: u64,
         attempt_id: PlanAttemptId,
         lease_id: PlanLeaseId,
         executor_session_id: SessionId,
@@ -46,7 +44,6 @@ impl PlanWorkerControl {
             controller,
             plan_id,
             node_id,
-            node_revision,
             attempt_id,
             lease_id,
             executor_session_id,
@@ -59,7 +56,6 @@ impl PlanWorkerControl {
         artifact_promotions: Vec<PlanArtifactPromotion>,
         now_ms: u64,
     ) -> Result<PlanCommandResult<PlanProgressOutput>, PlanControllerError> {
-        self.validate_lease(input.lease_id.clone(), input.expected_node_revision)?;
         self.controller
             .progress_with_artifact_promotions(self.actor(), input, artifact_promotions, now_ms)
             .await
@@ -71,7 +67,6 @@ impl PlanWorkerControl {
         artifact_promotions: Vec<PlanArtifactPromotion>,
         now_ms: u64,
     ) -> Result<PlanCommandResult<PlanAttemptReportOutput>, PlanControllerError> {
-        self.validate_lease(input.lease_id.clone(), input.expected_node_revision)?;
         self.controller
             .attempt_report_with_artifact_promotions(
                 self.actor(),
@@ -95,7 +90,7 @@ impl PlanWorkerControl {
             .rsplit_once(':')
             .map(|(_, hash)| hash)
             .expect("stable content hashes include an algorithm prefix");
-        let id = ArtifactId::new(&format!("plan-worker-artifact-{hash}"))
+        let id = ArtifactId::new(&format!("plan-subagent-artifact-{hash}"))
             .expect("runtime-generated promoted artifact id is valid");
         let promoted = ArtifactRef::new(id, source.kind().clone());
         match source.label() {
@@ -120,6 +115,16 @@ impl PlanWorkerControl {
                 provider_request_in_flight,
                 tool_call_in_flight,
             )
+            .await
+    }
+
+    pub(crate) async fn record_runtime_effect(
+        &self,
+        changed_paths: Vec<String>,
+        now_ms: u64,
+    ) -> Result<PlanCommandResult<PlanProgressOutput>, PlanControllerError> {
+        self.controller
+            .record_runtime_effect(self.actor(), changed_paths, now_ms)
             .await
     }
 
@@ -175,6 +180,80 @@ impl PlanWorkerControl {
         Ok(snapshot)
     }
 
+    pub(crate) async fn active_harness(&self) -> Result<PlanHarnessSnapshot, PlanControllerError> {
+        let snapshot = self.snapshot().await?;
+        let attempt = snapshot
+            .attempts
+            .iter()
+            .find(|attempt| attempt.attempt_id == self.attempt_id)
+            .ok_or_else(|| PlanControllerError::Plan {
+                source: PlanError::UnknownAttempt {
+                    attempt_id: self.attempt_id.clone(),
+                },
+            })?;
+        if attempt.outcome.is_some() {
+            return Err(PlanControllerError::Plan {
+                source: PlanError::AttemptAlreadyResolved {
+                    attempt_id: self.attempt_id.clone(),
+                },
+            });
+        }
+        if attempt.node_id != self.node_id
+            || attempt.lease_id.as_ref() != Some(&self.lease_id)
+            || attempt.executor_session_id != self.executor_session_id
+        {
+            return Err(PlanControllerError::Plan {
+                source: PlanError::AttemptOwnershipMismatch {
+                    attempt_id: self.attempt_id.clone(),
+                },
+            });
+        }
+        let lease = snapshot
+            .leases
+            .iter()
+            .find(|lease| lease.lease_id == self.lease_id)
+            .ok_or_else(|| PlanControllerError::Plan {
+                source: PlanError::UnknownLease {
+                    lease_id: self.lease_id.clone(),
+                },
+            })?;
+        if lease.status != PlanLeaseStatus::Live {
+            return Err(PlanControllerError::Plan {
+                source: PlanError::LeaseNotLive {
+                    lease_id: self.lease_id.clone(),
+                },
+            });
+        }
+        if lease.attempt_id != self.attempt_id
+            || lease.node_id != self.node_id
+            || lease.executor_session_id != self.executor_session_id
+        {
+            return Err(PlanControllerError::Plan {
+                source: PlanError::AttemptOwnershipMismatch {
+                    attempt_id: self.attempt_id.clone(),
+                },
+            });
+        }
+        if lease.node_revision != attempt.node_revision {
+            return Err(PlanControllerError::Plan {
+                source: PlanError::AttemptNodeRevisionMismatch {
+                    expected: attempt.node_revision,
+                    actual: lease.node_revision,
+                },
+            });
+        }
+        snapshot
+            .nodes
+            .iter()
+            .find(|node| node.id == self.node_id)
+            .map(|node| node.harness.clone())
+            .ok_or_else(|| PlanControllerError::Plan {
+                source: PlanError::UnknownNode {
+                    node_id: self.node_id.clone(),
+                },
+            })
+    }
+
     pub(crate) fn node_id(&self) -> &PlanNodeId {
         &self.node_id
     }
@@ -187,40 +266,19 @@ impl PlanWorkerControl {
         &self.lease_id
     }
 
-    pub(crate) fn node_revision(&self) -> u64 {
-        self.node_revision
-    }
-
     fn actor(&self) -> PlanAttemptActor {
         PlanAttemptActor {
             executor_session_id: self.executor_session_id.clone(),
         }
     }
-
-    fn validate_lease(
-        &self,
-        lease_id: PlanLeaseId,
-        node_revision: u64,
-    ) -> Result<(), PlanControllerError> {
-        if lease_id != self.lease_id || node_revision != self.node_revision {
-            return Err(PlanControllerError::Plan {
-                source: PlanError::AttemptNodeRevisionMismatch {
-                    expected: node_revision,
-                    actual: self.node_revision,
-                },
-            });
-        }
-        Ok(())
-    }
 }
 
-impl std::fmt::Debug for PlanWorkerControl {
+impl std::fmt::Debug for PlanSubagentControl {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("PlanWorkerControl")
+            .debug_struct("PlanSubagentControl")
             .field("plan_id", &self.plan_id)
             .field("node_id", &self.node_id)
-            .field("node_revision", &self.node_revision)
             .field("attempt_id", &self.attempt_id)
             .field("lease_id", &self.lease_id)
             .field("executor_session_id", &self.executor_session_id)

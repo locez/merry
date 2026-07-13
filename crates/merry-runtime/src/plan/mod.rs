@@ -1,3 +1,4 @@
+mod attempt_binding;
 pub(crate) mod control;
 mod controller;
 mod domain;
@@ -6,9 +7,9 @@ pub(crate) mod projection;
 mod protocol;
 pub(crate) mod recovery;
 mod scheduler;
+mod subagent;
 pub(crate) mod tools;
 mod validation;
-mod worker;
 
 pub use controller::PlanControllerError;
 pub(crate) use controller::{PlanController, PlanControllerEventReceiver};
@@ -22,8 +23,8 @@ pub use protocol::{
 };
 pub(crate) use protocol::{PlanAttemptToolOutput, PlanProgressToolOutput};
 pub(crate) use scheduler::PlanScheduler;
-pub(crate) use worker::PlanArtifactPromotion;
-pub use worker::PlanWorkerControl;
+pub(crate) use subagent::PlanArtifactPromotion;
+pub use subagent::PlanSubagentControl;
 
 pub(crate) fn unix_time_ms() -> u64 {
     std::time::SystemTime::now()

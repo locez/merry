@@ -149,15 +149,51 @@ pub struct PlanApprovalRequirementSnapshot {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PlanHarnessSnapshot {
+    /// Optional configured model role for this node.
     pub model_role: Option<String>,
+    /// Optional provider-supported reasoning effort for this node.
     pub reasoning_effort: Option<String>,
+    /// Optional model-turn interval between durable checkpoints.
     pub checkpoint_turn_interval: Option<u32>,
+    /// Optional timeout for one provider request; this is not a task-duration budget.
     pub provider_request_timeout_ms: Option<u64>,
+    /// Optional timeout for one bounded tool call; this is not a task-duration budget.
     pub tool_timeout_ms: Option<u64>,
+    /// Exact registered tool names available to this node.
     pub allowed_tools: Vec<ToolName>,
+    /// Normalized workspace-relative paths this node may read. Use `.` for the
+    /// workspace root or a concrete path such as `crates/merry-runtime`.
+    #[schemars(schema_with = "plan_scope_paths_schema")]
     pub read_scope: Vec<String>,
+    /// Normalized workspace-relative paths this node may write. Use `.` for the
+    /// workspace root or a concrete path such as `crates/merry-runtime`.
+    #[schemars(schema_with = "plan_scope_paths_schema")]
     pub write_scope: Vec<String>,
+    /// Normalized workspace-relative paths this node must not access. Use concrete
+    /// paths such as `.git`; `.` denotes the complete workspace.
+    #[schemars(schema_with = "plan_scope_paths_schema")]
     pub forbidden_paths: Vec<String>,
+}
+
+fn plan_scope_paths_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::Schema::try_from(serde_json::json!({
+        "type": "array",
+        "items": {
+            "type": "string",
+            "minLength": 1,
+            "description": "A normalized workspace scope. Use `.` for the workspace root or a concrete relative path such as `crates/merry-runtime`. Do not use `..`, absolute paths, embedded `.` segments, empty segments, or backslashes.",
+            "examples": [".", "crates/merry-runtime", "examples/config.toml"],
+            "anyOf": [
+                { "const": "." },
+                { "allOf": [
+                    { "not": { "pattern": "(^|/)\\.\\.?(/|$)" } },
+                    { "not": { "pattern": "(^/|//|\\\\)" } },
+                    { "not": { "pattern": "[\\u0000-\\u001F\\u007F]" } }
+                ] }
+            ]
+        }
+    }))
+    .expect("static plan scope schema is valid")
 }
 
 /// Retry policy captured on one node revision.
@@ -184,8 +220,12 @@ impl Default for PlanRecoveryPolicySnapshot {
 #[serde(deny_unknown_fields)]
 pub struct PlanResourcePolicySnapshot {
     pub max_concurrency: usize,
-    pub worker_heartbeat_interval_ms: u64,
-    pub worker_heartbeat_ttl_ms: u64,
+    // Aliases are read-only compatibility for plan snapshots written before
+    // delegated execution terminology was unified on "subagent".
+    #[serde(alias = "worker_heartbeat_interval_ms")]
+    pub subagent_heartbeat_interval_ms: u64,
+    #[serde(alias = "worker_heartbeat_ttl_ms")]
+    pub subagent_heartbeat_ttl_ms: u64,
     pub provider_request_timeout_ms: Option<u64>,
     pub tool_timeout_ms: Option<u64>,
     pub checkpoint_turn_interval: u32,
@@ -197,8 +237,8 @@ impl Default for PlanResourcePolicySnapshot {
     fn default() -> Self {
         Self {
             max_concurrency: 6,
-            worker_heartbeat_interval_ms: 10_000,
-            worker_heartbeat_ttl_ms: 30_000,
+            subagent_heartbeat_interval_ms: 10_000,
+            subagent_heartbeat_ttl_ms: 300_000,
             provider_request_timeout_ms: None,
             tool_timeout_ms: None,
             checkpoint_turn_interval: 8,
@@ -208,7 +248,10 @@ impl Default for PlanResourcePolicySnapshot {
     }
 }
 
-/// Authorized provider-invisible capability ceiling for one executing plan.
+/// Provider-invisible capability ceiling for one executing plan.
+///
+/// This bounds plan delegation and detects later expansion. It does not replace
+/// the runtime's per-tool permission admission or authorize an external action.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PlanCapabilityEnvelopeSnapshot {
@@ -257,7 +300,8 @@ pub struct PlanAttemptSnapshot {
     pub attempt_id: PlanAttemptId,
     pub node_id: PlanNodeId,
     pub node_revision: u64,
-    pub lease_id: PlanLeaseId,
+    /// Present only when a delegated subagent owns this attempt.
+    pub lease_id: Option<PlanLeaseId>,
     pub executor_session_id: SessionId,
     pub harness_fingerprint: String,
     pub started_at_ms: u64,
@@ -269,7 +313,7 @@ pub struct PlanAttemptSnapshot {
     pub last_applied_directive_sequence: u64,
 }
 
-/// Compact persisted view of one scheduler lease.
+/// Compact persisted view of one delegated subagent lease.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PlanLeaseSnapshot {
@@ -293,11 +337,16 @@ pub struct PlanAttemptProgressSnapshot {
     pub elapsed_ms: u64,
     pub model_turns: u32,
     pub reported_usage: Option<SessionUsage>,
-    pub last_worker_heartbeat_at_ms: u64,
+    // Read-only compatibility for persisted snapshots using the former field.
+    #[serde(alias = "last_worker_heartbeat_at_ms")]
+    pub last_subagent_heartbeat_at_ms: Option<u64>,
     pub last_runtime_activity_at_ms: u64,
     pub last_durable_progress_at_ms: Option<u64>,
     pub provider_request_in_flight: bool,
     pub tool_call_in_flight: bool,
+    /// Count of successful runtime-observed actions that may have external effects.
+    #[serde(default)]
+    pub observable_side_effects: usize,
     pub artifacts_created: usize,
     #[serde(default)]
     pub artifact_refs: Vec<ArtifactRef>,

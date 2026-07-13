@@ -1,4 +1,4 @@
-use super::{PlanController, PlanWorkerControl, execution::PlanAttemptActor, unix_time_ms};
+use super::{PlanController, PlanSubagentControl, execution::PlanAttemptActor, unix_time_ms};
 use crate::{
     AgentLoopConfig, AgentLoopStatus, ChildRuntimeFactory, ChildRuntimeInput, ChildWorkspaceScope,
     Runtime, StepContext, StepInput, SubagentTaskSpec, TaskAnchor,
@@ -28,16 +28,18 @@ struct PlanSchedulerInner {
     controller: PlanController,
     factory: Option<Arc<dyn ChildRuntimeFactory>>,
     coordinator_session_id: SessionId,
-    max_worker_threads: usize,
+    max_subagent_concurrency: usize,
     started: AtomicBool,
+    resume_recovered: AtomicBool,
     start_guard: StdMutex<()>,
+    resume_recovery_guard: Mutex<()>,
     reconcile_guard: Mutex<()>,
-    running: Mutex<BTreeMap<PlanAttemptId, RunningWorker>>,
+    running: Mutex<BTreeMap<PlanAttemptId, RunningSubagent>>,
     notify: Notify,
     cancellation: CancellationToken,
 }
 
-struct RunningWorker {
+struct RunningSubagent {
     cancellation: CancellationToken,
 }
 
@@ -45,17 +47,20 @@ impl PlanScheduler {
     pub(crate) fn new(
         controller: PlanController,
         factory: Option<Arc<dyn ChildRuntimeFactory>>,
-        max_worker_threads: usize,
+        max_subagent_concurrency: usize,
         coordinator_session_id: SessionId,
+        resume_recovered: bool,
     ) -> Self {
         Self {
             inner: Arc::new(PlanSchedulerInner {
                 controller,
                 factory,
                 coordinator_session_id,
-                max_worker_threads: max_worker_threads.max(1),
+                max_subagent_concurrency: max_subagent_concurrency.max(1),
                 started: AtomicBool::new(false),
+                resume_recovered: AtomicBool::new(resume_recovered),
                 start_guard: StdMutex::new(()),
+                resume_recovery_guard: Mutex::new(()),
                 reconcile_guard: Mutex::new(()),
                 running: Mutex::new(BTreeMap::new()),
                 notify: Notify::new(),
@@ -79,12 +84,7 @@ impl PlanScheduler {
         let scheduler = self.clone();
         let mut events = self.inner.controller.subscribe();
         tokio::spawn(async move {
-            let _ = scheduler
-                .inner
-                .controller
-                .recover_live_leases_after_resume(unix_time_ms())
-                .await;
-            scheduler.reconcile().await;
+            let _ = scheduler.recover_after_resume().await;
             let mut recovery_interval = tokio::time::interval(std::time::Duration::from_secs(1));
             recovery_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             recovery_interval.tick().await;
@@ -112,7 +112,31 @@ impl PlanScheduler {
                     }
                 }
             }
+            scheduler.cancel_running_subagents().await;
         });
+    }
+
+    pub(crate) fn shutdown(&self) {
+        self.inner.cancellation.cancel();
+    }
+
+    pub(crate) async fn recover_after_resume(&self) -> Result<(), super::PlanControllerError> {
+        if self.inner.resume_recovered.load(Ordering::Acquire) {
+            self.reconcile().await;
+            return Ok(());
+        }
+        let _guard = self.inner.resume_recovery_guard.lock().await;
+        if !self.inner.resume_recovered.load(Ordering::Acquire) {
+            if self.inner.controller.snapshot().await?.is_some() {
+                self.inner
+                    .controller
+                    .recover_unresolved_attempts_after_resume(unix_time_ms())
+                    .await?;
+            }
+            self.inner.resume_recovered.store(true, Ordering::Release);
+        }
+        self.reconcile().await;
+        Ok(())
     }
 
     pub(crate) async fn reconcile(&self) {
@@ -133,10 +157,10 @@ impl PlanScheduler {
             .collect::<BTreeSet<_>>();
         {
             let mut running = self.inner.running.lock().await;
-            running.retain(|attempt_id, worker| {
+            running.retain(|attempt_id, subagent| {
                 let keep = live_attempts.contains(attempt_id);
                 if !keep {
-                    worker.cancellation.cancel();
+                    subagent.cancellation.cancel();
                 }
                 keep
             });
@@ -145,20 +169,21 @@ impl PlanScheduler {
         let running_count = self.inner.running.lock().await.len();
         let child_capacity = capacity.saturating_sub(running_count);
         let mut selected_scopes = snapshot
-            .leases
+            .attempts
             .iter()
-            .filter(|lease| lease.status == PlanLeaseStatus::Live)
-            .filter_map(|lease| {
+            .filter(|attempt| attempt.outcome.is_none())
+            .filter_map(|attempt| {
                 snapshot
                     .nodes
                     .iter()
-                    .find(|node| node.id == lease.node_id)
+                    .find(|node| node.id == attempt.node_id)
                     .map(|node| node.harness.write_scope.clone())
             })
             .collect::<Vec<_>>();
-        let local_is_live = snapshot.leases.iter().any(|lease| {
-            lease.status == PlanLeaseStatus::Live
-                && lease.executor_session_id == self.inner.coordinator_session_id
+        let local_is_live = snapshot.attempts.iter().any(|attempt| {
+            attempt.outcome.is_none()
+                && attempt.lease_id.is_none()
+                && attempt.executor_session_id == self.inner.coordinator_session_id
         });
         let mut local_selected = local_is_live;
         let mut child_selected = 0usize;
@@ -199,7 +224,7 @@ impl PlanScheduler {
             if use_local_lane {
                 self.start_local_attempt(node).await;
             } else {
-                self.start_worker(snapshot.plan_id.clone(), node).await;
+                self.start_subagent(snapshot.plan_id.clone(), node).await;
             }
         }
     }
@@ -211,16 +236,16 @@ impl PlanScheduler {
         let _ = self
             .inner
             .controller
-            .start_attempt(node.id, actor, unix_time_ms())
+            .start_local_attempt(node.id, actor, unix_time_ms())
             .await;
     }
 
-    pub(crate) async fn cancel_running_workers(&self) {
+    pub(crate) async fn cancel_running_subagents(&self) {
         let tokens = {
             let running = self.inner.running.lock().await;
             running
                 .values()
-                .map(|worker| worker.cancellation.clone())
+                .map(|subagent| subagent.cancellation.clone())
                 .collect::<Vec<_>>()
         };
         for token in tokens {
@@ -228,9 +253,33 @@ impl PlanScheduler {
         }
     }
 
+    async fn stop_registered_subagent_if_cancelled(
+        &self,
+        control: &PlanSubagentControl,
+        cancellation: &CancellationToken,
+    ) -> bool {
+        if self.inner.cancellation.is_cancelled() {
+            self.subagent_finished(control.attempt_id()).await;
+            return true;
+        }
+        let plan_is_draining = control.snapshot().await.is_ok_and(|snapshot| {
+            snapshot.scheduler_status == PlanSchedulerStatus::Draining
+                || snapshot.phase == PlanPhase::Cancelled
+        });
+        if !cancellation.is_cancelled() && !plan_is_draining {
+            return false;
+        }
+        cancellation.cancel();
+        let _ = control
+            .cancel_attempt("plan cancellation reached subagent startup", unix_time_ms())
+            .await;
+        self.subagent_finished(control.attempt_id()).await;
+        true
+    }
+
     fn effective_capacity(&self, snapshot: &PlanSnapshot) -> usize {
         self.inner
-            .max_worker_threads
+            .max_subagent_concurrency
             .min(snapshot.resource_policy_snapshot.max_concurrency)
             .min(
                 snapshot
@@ -240,8 +289,8 @@ impl PlanScheduler {
             .max(1)
     }
 
-    async fn start_worker(&self, plan_id: merry_core::PlanId, node: PlanNodeSnapshot) {
-        let Some(factory) = self.inner.factory.as_ref() else {
+    async fn start_subagent(&self, plan_id: merry_core::PlanId, node: PlanNodeSnapshot) {
+        let Some(factory) = self.inner.factory.clone() else {
             return;
         };
         let child_session_id = SessionId::random();
@@ -257,25 +306,38 @@ impl PlanScheduler {
             Ok(committed) => committed.output,
             Err(_) => return,
         };
-        let control = PlanWorkerControl::new(
+        let control = PlanSubagentControl::new(
             self.inner.controller.clone(),
             plan_id,
             node.id.clone(),
-            started.lease.node_revision,
             started.attempt.attempt_id.clone(),
             started.lease.lease_id.clone(),
             child_session_id.clone(),
         );
-        let (task, generation_config) = match worker_task(&node) {
+        let cancellation = self.inner.cancellation.child_token();
+        self.inner.running.lock().await.insert(
+            started.attempt.attempt_id.clone(),
+            RunningSubagent {
+                cancellation: cancellation.clone(),
+            },
+        );
+        if self
+            .stop_registered_subagent_if_cancelled(&control, &cancellation)
+            .await
+        {
+            return;
+        }
+        let (task, generation_config) = match subagent_task(&node) {
             Ok(parts) => parts,
             Err(message) => {
                 self.fail_started_attempt(
                     &control,
-                    "plan_worker_contract_invalid",
+                    "plan_subagent_contract_invalid",
                     message,
                     PlanAttemptOutcome::SemanticFailure,
                 )
                 .await;
+                self.subagent_finished(control.attempt_id()).await;
                 return;
             }
         };
@@ -284,15 +346,16 @@ impl PlanScheduler {
             Err(error) => {
                 self.fail_started_attempt(
                     &control,
-                    "plan_worker_anchor_invalid",
+                    "plan_subagent_anchor_invalid",
                     error.to_string(),
                     PlanAttemptOutcome::SemanticFailure,
                 )
                 .await;
+                self.subagent_finished(control.attempt_id()).await;
                 return;
             }
         };
-        let runtime = match factory.build_child(ChildRuntimeInput {
+        let child_input = ChildRuntimeInput {
             session_id: child_session_id,
             task_anchor,
             allowed_tools: task.allowed_tools().to_vec(),
@@ -300,53 +363,67 @@ impl PlanScheduler {
             task,
             depth: 1,
             generation_config: generation_config.clone(),
-            plan_worker_control: Some(control.clone()),
-        }) {
-            Ok(runtime) => runtime,
-            Err(error) => {
+            plan_subagent_control: Some(control.clone()),
+        };
+        let build_result =
+            tokio::task::spawn_blocking(move || factory.build_child(child_input)).await;
+        if self
+            .stop_registered_subagent_if_cancelled(&control, &cancellation)
+            .await
+        {
+            return;
+        }
+        let runtime = match build_result {
+            Ok(Ok(runtime)) => runtime,
+            Ok(Err(error)) => {
                 self.fail_started_attempt(
                     &control,
-                    "plan_worker_factory_failed",
+                    "plan_subagent_factory_failed",
                     error.to_string(),
                     PlanAttemptOutcome::TransientFailure,
                 )
                 .await;
+                self.subagent_finished(control.attempt_id()).await;
+                return;
+            }
+            Err(error) => {
+                self.fail_started_attempt(
+                    &control,
+                    "plan_subagent_factory_failed",
+                    format!("subagent factory task failed: {error}"),
+                    PlanAttemptOutcome::TransientFailure,
+                )
+                .await;
+                self.subagent_finished(control.attempt_id()).await;
                 return;
             }
         };
-        let cancellation = self.inner.cancellation.child_token();
-        self.inner.running.lock().await.insert(
-            started.attempt.attempt_id.clone(),
-            RunningWorker {
-                cancellation: cancellation.clone(),
-            },
-        );
         let scheduler = self.clone();
         tokio::spawn(async move {
             scheduler
-                .run_worker(runtime, control, generation_config, cancellation)
+                .run_subagent(runtime, control, generation_config, cancellation)
                 .await;
         });
     }
 
-    async fn run_worker(
+    async fn run_subagent(
         &self,
         runtime: Runtime,
-        control: PlanWorkerControl,
+        control: PlanSubagentControl,
         generation_config: GenerationConfig,
         cancellation: CancellationToken,
     ) {
         let input_text = match control.snapshot().await {
-            Ok(snapshot) => worker_initial_prompt(&snapshot, control.node_id()),
+            Ok(snapshot) => subagent_initial_prompt(&snapshot, control.node_id()),
             Err(error) => {
                 self.fail_started_attempt(
                     &control,
-                    "plan_worker_snapshot_failed",
+                    "plan_subagent_snapshot_failed",
                     error.to_string(),
                     PlanAttemptOutcome::TransientFailure,
                 )
                 .await;
-                self.worker_finished(control.attempt_id()).await;
+                self.subagent_finished(control.attempt_id()).await;
                 return;
             }
         };
@@ -355,17 +432,17 @@ impl PlanScheduler {
             Err(error) => {
                 self.fail_started_attempt(
                     &control,
-                    "plan_worker_input_invalid",
+                    "plan_subagent_input_invalid",
                     error.to_string(),
                     PlanAttemptOutcome::SemanticFailure,
                 )
                 .await;
-                self.worker_finished(control.attempt_id()).await;
+                self.subagent_finished(control.attempt_id()).await;
                 return;
             }
         };
         let config = AgentLoopConfig::new(usize::MAX)
-            .expect("effectively unbounded worker loop has a non-zero turn limit");
+            .expect("effectively unbounded subagent loop has a non-zero turn limit");
         let mut loop_future = Box::pin(runtime.run_agent_loop(
             input,
             StepContext::new(cancellation.clone()).with_generation_config(generation_config),
@@ -377,7 +454,7 @@ impl PlanScheduler {
             .map(|snapshot| {
                 snapshot
                     .resource_policy_snapshot
-                    .worker_heartbeat_interval_ms
+                    .subagent_heartbeat_interval_ms
             })
             .unwrap_or(10_000)
             .max(1);
@@ -386,11 +463,20 @@ impl PlanScheduler {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let loop_result = loop {
             tokio::select! {
-                result = &mut loop_future => break result,
+                biased;
+                _ = self.inner.cancellation.cancelled() => {
+                    cancellation.cancel();
+                    break None;
+                }
+                result = &mut loop_future => break Some(result),
                 _ = interval.tick() => {
                     let _ = control.heartbeat(unix_time_ms(), true, false).await;
                 }
             }
+        };
+        let Some(loop_result) = loop_result else {
+            self.subagent_finished(control.attempt_id()).await;
+            return;
         };
         let attempt_is_terminal = control
             .snapshot()
@@ -411,8 +497,8 @@ impl PlanScheduler {
                         self.fail_started_attempt(
                             &control,
                             "missing_attempt_report",
-                            "worker completed without report_plan_attempt",
-                            PlanAttemptOutcome::SemanticFailure,
+                            "subagent completed without report_plan_attempt",
+                            PlanAttemptOutcome::TransientFailure,
                         )
                         .await;
                     }
@@ -446,9 +532,9 @@ impl PlanScheduler {
                     AgentLoopStatus::Blocked { reason } => {
                         self.fail_started_attempt(
                             &control,
-                            "plan_worker_loop_blocked",
-                            format!("{reason:?}"),
-                            PlanAttemptOutcome::SemanticFailure,
+                            "missing_attempt_report",
+                            format!("subagent stopped without report_plan_attempt: {reason:?}"),
+                            PlanAttemptOutcome::TransientFailure,
                         )
                         .await;
                     }
@@ -456,7 +542,7 @@ impl PlanScheduler {
                 Err(error) => {
                     self.fail_started_attempt(
                         &control,
-                        "plan_worker_runtime_error",
+                        "plan_subagent_runtime_error",
                         error.to_string(),
                         PlanAttemptOutcome::TransientFailure,
                     )
@@ -464,12 +550,12 @@ impl PlanScheduler {
                 }
             }
         }
-        self.worker_finished(control.attempt_id()).await;
+        self.subagent_finished(control.attempt_id()).await;
     }
 
     async fn fail_started_attempt(
         &self,
-        control: &PlanWorkerControl,
+        control: &PlanSubagentControl,
         code: &str,
         message: impl Into<String>,
         outcome: PlanAttemptOutcome,
@@ -481,8 +567,6 @@ impl PlanScheduler {
         let _ = control
             .report_attempt(
                 super::ReportPlanAttemptInput {
-                    lease_id: control.lease_id().clone(),
-                    expected_node_revision: control.node_revision(),
                     outcome,
                     result: (outcome == PlanAttemptOutcome::SemanticFailure).then(|| {
                         PlanNodeResult {
@@ -505,14 +589,14 @@ impl PlanScheduler {
             .await;
     }
 
-    async fn worker_finished(&self, attempt_id: &PlanAttemptId) {
+    async fn subagent_finished(&self, attempt_id: &PlanAttemptId) {
         self.inner.running.lock().await.remove(attempt_id);
         self.inner.notify.notify_one();
     }
 }
 
-fn worker_task(node: &PlanNodeSnapshot) -> Result<(SubagentTaskSpec, GenerationConfig), String> {
-    let mut task = SubagentTaskSpec::new(worker_contract_text(node), u32::MAX)
+fn subagent_task(node: &PlanNodeSnapshot) -> Result<(SubagentTaskSpec, GenerationConfig), String> {
+    let mut task = SubagentTaskSpec::new(subagent_contract_text(node), u32::MAX)
         .map_err(|error| error.to_string())?
         .with_display_name(Some(node.objective.clone()))
         .with_allowed_tools(node.harness.allowed_tools.clone())
@@ -543,7 +627,7 @@ fn worker_task(node: &PlanNodeSnapshot) -> Result<(SubagentTaskSpec, GenerationC
     ))
 }
 
-fn worker_contract_text(node: &PlanNodeSnapshot) -> String {
+fn subagent_contract_text(node: &PlanNodeSnapshot) -> String {
     format!(
         "Execute only the leased plan node. Objective: {}\nAcceptance:\n{}\nUse report_plan_progress for durable semantic checkpoints. Finish exactly once with report_plan_attempt. Decompose only into direct children when the node genuinely requires it.",
         node.objective,
@@ -555,12 +639,12 @@ fn worker_contract_text(node: &PlanNodeSnapshot) -> String {
     )
 }
 
-fn worker_initial_prompt(snapshot: &PlanSnapshot, node_id: &PlanNodeId) -> String {
+fn subagent_initial_prompt(snapshot: &PlanSnapshot, node_id: &PlanNodeId) -> String {
     snapshot
         .nodes
         .iter()
         .find(|node| &node.id == node_id)
-        .map(worker_contract_text)
+        .map(subagent_contract_text)
         .unwrap_or_else(|| "Read the leased plan context and report a typed blocker.".to_owned())
 }
 
@@ -655,5 +739,5 @@ fn write_scopes_overlap(left: &[String], right: &[String]) -> bool {
 }
 
 fn paths_overlap(left: &Path, right: &Path) -> bool {
-    left == right || left.starts_with(right) || right.starts_with(left)
+    crate::workspace_scope::workspace_scopes_overlap(left, right)
 }

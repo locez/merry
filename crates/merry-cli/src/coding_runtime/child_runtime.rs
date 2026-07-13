@@ -63,21 +63,20 @@ impl ChildRuntimeFactory for CodingLoopChildRuntimeFactory {
         &self,
         input: ChildRuntimeInput,
     ) -> Result<Runtime, merry_runtime::RuntimeError> {
-        let allow_patch = input.allowed_tools.is_empty()
-            || input
-                .allowed_tools
-                .iter()
-                .any(|tool| tool.as_str() == WORKSPACE_PATCH_TOOL);
-        let allow_local_workspace_process = input.allowed_tools.is_empty()
-            || input
-                .allowed_tools
-                .iter()
-                .any(|tool| tool.as_str() == CODING_LOOP_PROCESS_TOOL);
+        let allow_patch = input
+            .allowed_tools
+            .iter()
+            .any(|tool| tool.as_str() == WORKSPACE_PATCH_TOOL);
+        let allow_local_workspace_process = input
+            .allowed_tools
+            .iter()
+            .any(|tool| tool.as_str() == CODING_LOOP_PROCESS_TOOL);
         let mut builder = Runtime::builder(input.session_id)
             .task_anchor(input.task_anchor)
-            .model_provider(Arc::clone(&self.provider), self.model.clone());
-        if let Some(control) = input.plan_worker_control {
-            builder = builder.plan_worker_control(control);
+            .model_provider(Arc::clone(&self.provider), self.model.clone())
+            .registered_tool_allowlist(input.allowed_tools.clone());
+        if let Some(control) = input.plan_subagent_control {
+            builder = builder.plan_subagent_control(control);
         }
         if let Some(project_rules) = self.project_rules.clone() {
             builder = builder.project_rules(project_rules);

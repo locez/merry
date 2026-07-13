@@ -1,8 +1,8 @@
 //! Runtime-owned parallel subagent tool contracts.
 
 use crate::{
-    AgentLoopConfig, AgentLoopResult, AgentLoopStatus, ArtifactContent, PlanWorkerControl, Runtime,
-    RuntimeError, StepContext, StepInput, TaskAnchor,
+    AgentLoopConfig, AgentLoopResult, AgentLoopStatus, ArtifactContent, PlanSubagentControl,
+    Runtime, RuntimeError, StepContext, StepInput, TaskAnchor,
 };
 use merry_core::{
     ErrorInfo, RuntimeJournalEvent, RuntimeJournalPayload, SubagentId, SubagentTaskId,
@@ -64,8 +64,8 @@ pub struct ChildRuntimeInput {
     pub depth: u8,
     /// Child-scoped model generation controls selected by the parent agent.
     pub generation_config: GenerationConfig,
-    /// Optional root-plan control when this child is a scheduler-owned worker.
-    pub plan_worker_control: Option<PlanWorkerControl>,
+    /// Optional root-plan control when this child is a scheduler-owned subagent.
+    pub plan_subagent_control: Option<PlanSubagentControl>,
 }
 
 /// Parent-authored workspace scope carried into child runtime construction.
@@ -461,7 +461,7 @@ impl SubagentManager {
             workspace_scope: ChildWorkspaceScope::from_task(&task),
             depth: 1,
             generation_config: generation_config.clone(),
-            plan_worker_control: None,
+            plan_subagent_control: None,
         }) {
             Ok(runtime) => runtime,
             Err(error) => {
@@ -696,7 +696,7 @@ fn spawn_reserved_child(
         workspace_scope: ChildWorkspaceScope::from_task(&start.task),
         depth: 1,
         generation_config: generation_config.clone(),
-        plan_worker_control: None,
+        plan_subagent_control: None,
     })?;
 
     spawn_child_loop(
@@ -1008,9 +1008,12 @@ mod tests {
 
     #[test]
     fn scope_paths_must_be_relative_and_normalized() {
+        SubagentTaskSpec::new("Read the whole workspace.", 4)
+            .expect("valid task")
+            .with_read_scope(["."])
+            .expect("workspace root is a valid scope");
         for invalid in [
             "",
-            ".",
             "..",
             "src/../lib.rs",
             "/tmp/file",
