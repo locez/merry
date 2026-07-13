@@ -1,7 +1,10 @@
 use merry_core::{
     ArtifactId, ArtifactKind, ArtifactRef, CompactionUsageWindow, ContextWindowSource, CoreError,
     ErrorInfo, EvidenceLocator, EvidenceRef, MerryErrorDomain, MerryErrorInfo, MerryRetryability,
-    ModelUsage, PendingToolCall, PendingToolCallBatch, ProviderName, QueuedInputLane,
+    ModelUsage, PendingToolCall, PendingToolCallBatch, PlanActivationSource, PlanAttemptId,
+    PlanDirectiveId, PlanExecutorPolicy, PlanId, PlanLeaseId, PlanNodeId, PlanNodeSnapshot,
+    PlanNodeStatus, PlanPhase, PlanRecoveryPolicySnapshot, PlanResourcePolicySnapshot,
+    PlanRevisionSummary, PlanSchedulerStatus, PlanSnapshot, ProviderName, QueuedInputLane,
     QueuedInputView, QueuedInputsView, RuntimeEvent, RuntimeEventSource, RuntimeJournalEvent,
     RuntimeJournalPayload, SessionId, SessionUsage, SkillId, SubagentId, SubagentStatus,
     SubagentTaskId, ToolCallArguments, ToolCallBatchId, ToolCallId, ToolCallResult,
@@ -149,6 +152,130 @@ fn subagent_ids_validate_and_round_trip_as_json_strings() {
     let overlong = "a".repeat(129);
     assert!(SubagentId::new(&overlong).is_err());
     assert!(serde_json::from_value::<SubagentTaskId>(json!(overlong)).is_err());
+}
+
+#[test]
+fn plan_identifiers_validate_and_round_trip_as_json_strings() {
+    let plan = PlanId::new("plan-1").expect("valid plan id");
+    let node = PlanNodeId::new("node-1").expect("valid plan node id");
+    let attempt = PlanAttemptId::new("attempt-1").expect("valid plan attempt id");
+    let lease = PlanLeaseId::new("lease-1").expect("valid plan lease id");
+    let directive = PlanDirectiveId::new("directive-1").expect("valid plan directive id");
+
+    assert_eq!(plan.as_str(), "plan-1");
+    assert_eq!(node.as_str(), "node-1");
+    assert_eq!(attempt.as_str(), "attempt-1");
+    assert_eq!(lease.as_str(), "lease-1");
+    assert_eq!(directive.as_str(), "directive-1");
+
+    assert_json_round_trip(&plan);
+    assert_json_round_trip(&node);
+    assert_json_round_trip(&attempt);
+    assert_json_round_trip(&lease);
+    assert_json_round_trip(&directive);
+
+    for invalid in ["", "   ", " leading", "trailing ", "has\nnewline"] {
+        assert!(PlanId::new(invalid).is_err());
+        assert!(PlanNodeId::new(invalid).is_err());
+        assert!(PlanAttemptId::new(invalid).is_err());
+        assert!(PlanLeaseId::new(invalid).is_err());
+        assert!(PlanDirectiveId::new(invalid).is_err());
+    }
+}
+
+#[test]
+fn plan_phase_and_status_use_stable_snake_case_json() {
+    assert_eq!(
+        serde_json::to_value(PlanPhase::AwaitingApproval).expect("phase serializes"),
+        json!("awaiting_approval")
+    );
+    assert_eq!(
+        serde_json::to_value(PlanNodeStatus::InProgress).expect("status serializes"),
+        json!("in_progress")
+    );
+    assert_eq!(
+        serde_json::to_value(PlanExecutorPolicy::Delegate).expect("executor serializes"),
+        json!("delegate")
+    );
+    assert_eq!(
+        serde_json::to_value(PlanSchedulerStatus::Draining).expect("scheduler serializes"),
+        json!("draining")
+    );
+}
+
+fn sample_plan_snapshot() -> PlanSnapshot {
+    let plan_id = PlanId::new("plan-1").expect("valid plan id");
+    let root_node_id = PlanNodeId::new("node-root").expect("valid root id");
+    PlanSnapshot {
+        plan_id,
+        revision: 2,
+        phase: PlanPhase::Executing,
+        activation_source: PlanActivationSource::Coordinator {
+            reason: "coordinate independent work".to_owned(),
+            governing_skill_id: None,
+        },
+        root_node_id: Some(root_node_id.clone()),
+        coordinator_node_id: None,
+        execution_contract_fingerprint: Some("contract-sha256".to_owned()),
+        execution_authorization_refs: vec!["user-task-authority".to_owned()],
+        authorized_capability_envelope: None,
+        approval_requirements: Vec::new(),
+        nodes: vec![PlanNodeSnapshot {
+            id: root_node_id,
+            parent_id: None,
+            sibling_order: 0,
+            objective: "Complete the recursive plan acceptance".to_owned(),
+            acceptance: vec!["all deterministic checks pass".to_owned()],
+            status: PlanNodeStatus::InProgress,
+            executor_policy: PlanExecutorPolicy::Local,
+            harness: Default::default(),
+            recovery_policy: PlanRecoveryPolicySnapshot {
+                max_transient_attempts: 2,
+                retry_backoff_ms: 0,
+                retry_only_before_observable_side_effects: true,
+            },
+            depends_on: Vec::new(),
+            result: None,
+            created_revision: 1,
+            updated_revision: 2,
+        }],
+        attempts: Vec::new(),
+        leases: Vec::new(),
+        attempt_progress: Vec::new(),
+        directives: Vec::new(),
+        resource_policy_snapshot: PlanResourcePolicySnapshot::default(),
+        max_concurrency_hint: Some(2),
+        scheduler_status: PlanSchedulerStatus::Active,
+        revision_summaries: vec![
+            PlanRevisionSummary::new(2, "root execution started").expect("valid revision summary"),
+        ],
+    }
+}
+
+#[test]
+fn plan_updated_event_round_trips_with_bounded_snapshot() {
+    let snapshot = sample_plan_snapshot();
+    let summary =
+        PlanRevisionSummary::new(2, "root execution started").expect("valid revision summary");
+    let event = RuntimeEvent::PlanUpdated {
+        snapshot: snapshot.clone(),
+        summary: summary.clone(),
+        source: RuntimeEventSource::new(SessionId::new("session-1").expect("valid session id"), 7),
+    };
+
+    let json = serde_json::to_value(&event).expect("plan event serializes");
+    assert_eq!(json["type"], "plan_updated");
+    assert_eq!(json["snapshot"]["plan_id"], "plan-1");
+    assert_eq!(json["snapshot"]["nodes"][0]["id"], "node-root");
+    assert_eq!(json["summary"]["revision"], 2);
+    assert_json_round_trip(&event);
+
+    let journal = RuntimeJournalEvent::new(
+        SessionId::new("session-1").expect("valid session id"),
+        7,
+        RuntimeJournalPayload::PlanUpdated { snapshot, summary },
+    );
+    assert_json_round_trip(&journal);
 }
 
 #[test]

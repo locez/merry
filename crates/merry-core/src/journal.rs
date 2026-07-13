@@ -1,7 +1,9 @@
 //! Internal ordered runtime journal contract.
 
 use crate::{
-    ArtifactRef, ErrorInfo, EvidenceRef, PendingToolCall, PendingToolCallBatch, SessionId,
+    ArtifactRef, CoordinatorDirectiveSnapshot, ErrorInfo, EvidenceRef, PendingToolCall,
+    PendingToolCallBatch, PlanAttemptId, PlanAttemptProgressSnapshot, PlanAttemptSnapshot, PlanId,
+    PlanLeaseSnapshot, PlanNodeId, PlanPhase, PlanRevisionSummary, PlanSnapshot, SessionId,
     SessionUsage, SubagentId, SubagentTaskId, ToolCallId, ToolCallResult,
 };
 use schemars::JsonSchema;
@@ -161,6 +163,41 @@ pub enum RuntimeJournalPayload {
         task_id: SubagentTaskId,
         diagnostic: ErrorInfo,
     },
+    /// A complete bounded plan snapshot was durably committed.
+    PlanUpdated {
+        snapshot: PlanSnapshot,
+        summary: PlanRevisionSummary,
+    },
+    /// The active plan changed lifecycle phase.
+    PlanPhaseChanged { plan_id: PlanId, phase: PlanPhase },
+    /// A plan node became dependency- and policy-ready.
+    PlanNodeReady {
+        plan_id: PlanId,
+        node_id: PlanNodeId,
+        node_revision: u64,
+    },
+    /// The scheduler durably reserved an execution lease.
+    PlanLeaseStarted { lease: PlanLeaseSnapshot },
+    /// Runtime-recorded liveness or activity progress changed.
+    PlanProgressUpdated {
+        progress: PlanAttemptProgressSnapshot,
+    },
+    /// Runtime policy requested semantic coordinator review of progress.
+    PlanProgressReviewRequested {
+        plan_id: PlanId,
+        attempt_id: PlanAttemptId,
+        reason: String,
+    },
+    /// A worker or local executor durably reported semantic progress.
+    PlanAttemptProgressReported {
+        progress: PlanAttemptProgressSnapshot,
+    },
+    /// A coordinator directive changed persisted lifecycle state.
+    PlanDirectiveUpdated {
+        directive: CoordinatorDirectiveSnapshot,
+    },
+    /// One plan attempt reached a typed terminal outcome.
+    PlanAttemptFinished { attempt: PlanAttemptSnapshot },
     /// The runtime was cancelled.
     Cancelled { diagnostic: ErrorInfo },
     /// The runtime failed.

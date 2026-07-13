@@ -6,6 +6,7 @@ pub mod event;
 pub mod evidence;
 pub mod id;
 pub mod journal;
+pub mod plan;
 pub mod runtime_event;
 pub mod schema;
 pub mod tool;
@@ -16,10 +17,20 @@ pub use error::CoreError;
 pub use event::{ErrorInfo, MerryErrorDomain, MerryErrorInfo, MerryRetryability};
 pub use evidence::{EvidenceLocator, EvidenceRef};
 pub use id::{
-    ArtifactId, ProviderName, SessionId, SkillId, SubagentId, SubagentTaskId, ToolCallBatchId,
+    ArtifactId, PlanApprovalRequirementId, PlanAttemptId, PlanDirectiveId, PlanId, PlanLeaseId,
+    PlanNodeId, ProviderName, SessionId, SkillId, SubagentId, SubagentTaskId, ToolCallBatchId,
     ToolCallId, ToolName,
 };
 pub use journal::{RuntimeJournalEvent, RuntimeJournalPayload};
+pub use plan::{
+    CoordinatorDirectiveSnapshot, PlanActivationSource, PlanApprovalRequirementKind,
+    PlanApprovalRequirementSnapshot, PlanApprovalRequirementStatus, PlanAttemptOutcome,
+    PlanAttemptProgressSnapshot, PlanAttemptSnapshot, PlanCapabilityEnvelopeSnapshot,
+    PlanDirectiveConstraints, PlanDirectiveKind, PlanDirectiveStatus, PlanExecutorPolicy,
+    PlanHarnessSnapshot, PlanLeaseSnapshot, PlanLeaseStatus, PlanNodeResult, PlanNodeSnapshot,
+    PlanNodeStatus, PlanPhase, PlanRecoveryPolicySnapshot, PlanResourcePolicySnapshot,
+    PlanRevisionSummary, PlanSchedulerStatus, PlanSnapshot,
+};
 pub use runtime_event::{
     InteractiveRunState, QueuedInputLane, QueuedInputView, QueuedInputsView, RuntimeEvent,
     RuntimeEventSource, SubagentStatus, ToolOutput,
