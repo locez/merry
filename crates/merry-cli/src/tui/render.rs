@@ -1,12 +1,13 @@
 use super::{
     highlight::highlight_code_to_lines,
-    layout::{BottomPaneHeights, timeline_layout},
+    layout::{BottomPaneHeights, cockpit_layout},
     markdown::markdown_lines,
     overlay_render,
     panels::{
         DirectoryEntryKind, DirectoryEntryView, FocusPanelBody, FocusPanelTone, FocusPanelView,
         focus_panel_view,
     },
+    plan_render,
     state::{PatchChangeView, PatchLineView, TimelineItem, TuiState},
     theme::{SemanticColor, dim_color},
 };
@@ -31,7 +32,7 @@ const MIN_INPUT_HEIGHT: u16 = 3;
 #[allow(dead_code)]
 pub(crate) fn render(frame: &mut Frame<'_>, state: &TuiState) {
     let pane_heights = pane_heights(state, frame.area().height);
-    let rects = timeline_layout(
+    let rects = cockpit_layout(
         frame.area(),
         BottomPaneHeights {
             queue: pane_heights.queue,
@@ -40,6 +41,8 @@ pub(crate) fn render(frame: &mut Frame<'_>, state: &TuiState) {
             status: STATUS_HEIGHT,
         },
         state.is_artifact_reviewing(),
+        state.plan().is_open(),
+        state.plan().is_focused(),
     );
 
     render_header(frame, state, rects.header);
@@ -49,6 +52,9 @@ pub(crate) fn render(frame: &mut Frame<'_>, state: &TuiState) {
     if let Some(region) = rects.detail {
         let view = focus_panel_view(state);
         render_focus_pane(frame, state, region, &view);
+    }
+    if let Some(region) = rects.plan {
+        plan_render::render_plan(frame, state, region);
     }
 
     if let Some(queue_region) = rects.queue {

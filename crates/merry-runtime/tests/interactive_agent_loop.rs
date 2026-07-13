@@ -507,6 +507,14 @@ async fn interactive_plan_controls_reject_while_the_main_model_phase_is_running(
         .await
         .expect_err("running model phase rejects plan control");
     assert!(matches!(error, InteractiveError::PlanControlRequiresIdle));
+    let error = control
+        .retry_interrupted_plan_node(
+            merry_core::PlanNodeId::new("interrupted-node").expect("valid node id"),
+            "must also wait for the safe boundary",
+        )
+        .await
+        .expect_err("running model phase rejects retry control");
+    assert!(matches!(error, InteractiveError::PlanControlRequiresIdle));
     release_tx.send(()).expect("provider release succeeds");
 }
 

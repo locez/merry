@@ -9,6 +9,10 @@ use merry_core::{
 };
 
 fn plan_with_review_requirement() -> PlanState {
+    plan_with_recovery_limit(PlanRecoveryPolicySnapshot::default().max_transient_attempts)
+}
+
+fn plan_with_recovery_limit(max_transient_attempts: u8) -> PlanState {
     let mut plan = PlanState::empty(
         PlanId::new("plan-control").expect("valid plan id"),
         PlanActivationSource::User,
@@ -28,7 +32,10 @@ fn plan_with_review_requirement() -> PlanState {
                 acceptance: vec!["work is verified".to_owned()],
                 executor_policy: PlanExecutorPolicy::Delegate,
                 harness: PlanHarnessSnapshot::default(),
-                recovery_policy: PlanRecoveryPolicySnapshot::default(),
+                recovery_policy: PlanRecoveryPolicySnapshot {
+                    max_transient_attempts,
+                    ..PlanRecoveryPolicySnapshot::default()
+                },
                 depends_on: Vec::new(),
                 children: Vec::new(),
             },
@@ -36,6 +43,52 @@ fn plan_with_review_requirement() -> PlanState {
     })
     .expect("plan definition succeeds");
     plan
+}
+
+#[test]
+fn explicit_retry_of_interrupted_node_creates_a_fresh_attempt() {
+    let mut plan = plan_with_recovery_limit(1);
+    plan.approve(PlanApprovalInput {
+        review_resolution_ref: "interactive-user-approval".to_owned(),
+        capability_envelope: Some(Default::default()),
+        authorization_refs: vec!["existing-runtime-authorization".to_owned()],
+        requirement_resolution_refs: Default::default(),
+    })
+    .expect("review approval succeeds");
+    let root_id = plan.snapshot().root_node_id.clone().expect("root exists");
+    let first_actor = PlanAttemptActor {
+        executor_session_id: SessionId::new("interrupted-worker").expect("valid session id"),
+    };
+    let first = plan
+        .start_attempt(&root_id, first_actor, 1_000)
+        .expect("first attempt starts");
+    let interrupted = plan
+        .interrupt_live_leases_after_resume(2_000)
+        .expect("resume interruption commits");
+    assert_eq!(interrupted.snapshot.phase, PlanPhase::Blocked);
+
+    let retried = plan
+        .retry_interrupted_node(&root_id, "user explicitly retried interrupted work")
+        .expect("explicit retry reopens the node");
+    assert_eq!(retried.snapshot.phase, PlanPhase::Executing);
+    assert_eq!(
+        retried.snapshot.scheduler_status,
+        PlanSchedulerStatus::Active
+    );
+    assert_eq!(plan.ready_node_ids(), vec![root_id.clone()]);
+
+    let second = plan
+        .start_attempt(
+            &root_id,
+            PlanAttemptActor {
+                executor_session_id: SessionId::new("retry-worker").expect("valid session id"),
+            },
+            3_000,
+        )
+        .expect("fresh attempt starts");
+    assert_ne!(second.attempt.attempt_id, first.attempt.attempt_id);
+    assert_ne!(second.lease.lease_id, first.lease.lease_id);
+    assert_eq!(plan.snapshot().attempts.len(), 2);
 }
 
 #[test]

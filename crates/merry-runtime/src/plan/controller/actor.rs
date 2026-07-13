@@ -153,6 +153,7 @@ pub(super) enum PlanControlRequest {
     Pause(String),
     Resume(String),
     Revise(String),
+    RetryInterrupted { node_id: PlanNodeId, reason: String },
     Cancel(String),
 }
 

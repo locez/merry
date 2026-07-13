@@ -1,7 +1,7 @@
 use super::{PlanError, PlanState, protocol::PlanApprovalInput, validation};
 use merry_core::{
-    PlanApprovalRequirementKind, PlanApprovalRequirementStatus, PlanLeaseStatus, PlanPhase,
-    PlanSchedulerStatus, PlanSnapshot,
+    PlanApprovalRequirementKind, PlanApprovalRequirementStatus, PlanAttemptOutcome,
+    PlanLeaseStatus, PlanNodeId, PlanNodeStatus, PlanPhase, PlanSchedulerStatus, PlanSnapshot,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -185,6 +185,87 @@ impl PlanState {
             candidate.snapshot.phase = PlanPhase::Cancelled;
         }
         candidate.advance_revision("plan cancellation requested")?;
+        let snapshot = candidate.snapshot.clone();
+        *self = candidate;
+        Ok(PlanControlOutput {
+            snapshot,
+            previous_phase,
+        })
+    }
+
+    pub(crate) fn retry_interrupted_node(
+        &mut self,
+        node_id: &PlanNodeId,
+        reason: &str,
+    ) -> Result<PlanControlOutput, PlanError> {
+        super::validation::validate_reason(reason)?;
+        if !matches!(
+            self.snapshot.phase,
+            PlanPhase::Executing | PlanPhase::Blocked
+        ) || self.snapshot.scheduler_status == PlanSchedulerStatus::Draining
+        {
+            return Err(PlanError::WrongPhase {
+                actual: self.snapshot.phase,
+                operation: "retry interrupted plan node",
+            });
+        }
+        let node = self
+            .snapshot
+            .nodes
+            .iter()
+            .find(|node| &node.id == node_id)
+            .ok_or_else(|| PlanError::UnknownNode {
+                node_id: node_id.clone(),
+            })?;
+        let latest_attempt = self
+            .snapshot
+            .attempts
+            .iter()
+            .rev()
+            .find(|attempt| &attempt.node_id == node_id);
+        if node.status != PlanNodeStatus::Blocked
+            || latest_attempt.and_then(|attempt| attempt.outcome)
+                != Some(PlanAttemptOutcome::Interrupted)
+        {
+            return Err(PlanError::InterruptedRetryUnavailable {
+                node_id: node_id.clone(),
+            });
+        }
+        if self
+            .snapshot
+            .leases
+            .iter()
+            .any(|lease| &lease.node_id == node_id && lease.status == PlanLeaseStatus::Live)
+        {
+            return Err(PlanError::LiveLeaseExists {
+                node_id: node_id.clone(),
+            });
+        }
+
+        let mut candidate = self.clone();
+        let previous_phase = candidate.snapshot.phase;
+        let revision = candidate.advance_revision("interrupted plan node explicitly retried")?;
+        let mut cursor = Some(node_id.clone());
+        while let Some(current_id) = cursor {
+            let current = candidate
+                .snapshot
+                .nodes
+                .iter_mut()
+                .find(|node| node.id == current_id)
+                .expect("validated retry path remains present");
+            cursor = current.parent_id.clone();
+            current.status = if current.id == *node_id {
+                PlanNodeStatus::Pending
+            } else if current.status == PlanNodeStatus::Blocked {
+                PlanNodeStatus::Expanded
+            } else {
+                current.status
+            };
+            current.updated_revision = revision;
+        }
+        candidate.refresh_parent_states(revision);
+        candidate.snapshot.phase = PlanPhase::Executing;
+        candidate.snapshot.scheduler_status = PlanSchedulerStatus::Active;
         let snapshot = candidate.snapshot.clone();
         *self = candidate;
         Ok(PlanControlOutput {

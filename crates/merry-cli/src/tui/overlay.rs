@@ -6,6 +6,7 @@ use super::{
     },
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use merry_core::{PlanAttemptOutcome, PlanNodeId, PlanPhase, PlanSchedulerStatus, PlanSnapshot};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PaletteCommand {
@@ -20,6 +21,16 @@ pub(crate) enum PaletteCommand {
     ResumeSuspended,
     DiscardSuspended,
     Quit,
+    EnterPlanMode,
+    ApprovePlan,
+    RevisePlan,
+    OpenPlan,
+    FocusPlan,
+    ClosePlan,
+    PausePlan,
+    ResumePlan,
+    RetryPlanNode,
+    CancelPlan,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,7 +41,7 @@ pub(crate) struct CommandSpec {
     pub(crate) key_action: Option<KeyAction>,
 }
 
-const COMMANDS: [CommandSpec; 11] = [
+const COMMANDS: [CommandSpec; 21] = [
     CommandSpec {
         command: PaletteCommand::OpenSettings,
         category: "Merry",
@@ -97,7 +108,111 @@ const COMMANDS: [CommandSpec; 11] = [
         label: "Quit Merry",
         key_action: Some(KeyAction::Quit),
     },
+    CommandSpec {
+        command: PaletteCommand::EnterPlanMode,
+        category: "Plan",
+        label: "Enter Plan Mode",
+        key_action: None,
+    },
+    CommandSpec {
+        command: PaletteCommand::ApprovePlan,
+        category: "Plan",
+        label: "Approve plan and execute",
+        key_action: None,
+    },
+    CommandSpec {
+        command: PaletteCommand::RevisePlan,
+        category: "Plan",
+        label: "Revise plan",
+        key_action: None,
+    },
+    CommandSpec {
+        command: PaletteCommand::OpenPlan,
+        category: "Plan",
+        label: "Open plan",
+        key_action: None,
+    },
+    CommandSpec {
+        command: PaletteCommand::FocusPlan,
+        category: "Plan",
+        label: "Focus plan tree",
+        key_action: None,
+    },
+    CommandSpec {
+        command: PaletteCommand::ClosePlan,
+        category: "Plan",
+        label: "Close plan",
+        key_action: None,
+    },
+    CommandSpec {
+        command: PaletteCommand::PausePlan,
+        category: "Plan",
+        label: "Pause plan scheduling",
+        key_action: None,
+    },
+    CommandSpec {
+        command: PaletteCommand::ResumePlan,
+        category: "Plan",
+        label: "Resume plan scheduling",
+        key_action: None,
+    },
+    CommandSpec {
+        command: PaletteCommand::RetryPlanNode,
+        category: "Plan",
+        label: "Retry selected interrupted node",
+        key_action: None,
+    },
+    CommandSpec {
+        command: PaletteCommand::CancelPlan,
+        category: "Plan",
+        label: "Cancel plan",
+        key_action: None,
+    },
 ];
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct PlanPaletteContext {
+    has_plan: bool,
+    plan_open: bool,
+    plan_focused: bool,
+    phase: Option<PlanPhase>,
+    scheduler_status: Option<PlanSchedulerStatus>,
+    retry_selected: bool,
+}
+
+impl PlanPaletteContext {
+    pub(crate) fn from_snapshot(
+        snapshot: Option<&PlanSnapshot>,
+        selected_node_id: Option<&PlanNodeId>,
+        plan_open: bool,
+        plan_focused: bool,
+    ) -> Self {
+        let retry_selected = snapshot.is_some_and(|snapshot| {
+            let selected_is_blocked = selected_node_id.is_some_and(|selected| {
+                snapshot.nodes.iter().any(|node| {
+                    &node.id == selected && node.status == merry_core::PlanNodeStatus::Blocked
+                })
+            });
+            let latest_outcome = selected_node_id.and_then(|selected| {
+                snapshot
+                    .attempts
+                    .iter()
+                    .rev()
+                    .find(|attempt| &attempt.node_id == selected)
+                    .and_then(|attempt| attempt.outcome)
+            });
+            selected_is_blocked && latest_outcome == Some(PlanAttemptOutcome::Interrupted)
+        });
+        Self {
+            has_plan: snapshot.is_some(),
+            plan_open,
+            plan_focused,
+            phase: snapshot.map(|snapshot| snapshot.phase),
+            scheduler_status: snapshot.map(|snapshot| snapshot.scheduler_status),
+            retry_selected,
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Overlay {
@@ -106,6 +221,7 @@ pub(crate) enum Overlay {
     ProviderManager(ProviderManagerOverlay),
     ProviderForm(ProviderFormOverlay),
     ModelPicker(ModelPickerOverlay),
+    PlanApproval(PlanApprovalOverlay),
     Dialog(MessageDialogOverlay),
     Shortcuts(ShortcutsBack),
 }
@@ -121,6 +237,21 @@ pub(crate) struct MessageDialogOverlay {
     title: String,
     message: String,
     kind: MessageDialogKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PlanApprovalOverlay {
+    message: String,
+}
+
+impl PlanApprovalOverlay {
+    pub(crate) fn new(message: String) -> Self {
+        Self { message }
+    }
+
+    pub(crate) fn message(&self) -> &str {
+        &self.message
+    }
 }
 
 impl MessageDialogOverlay {
@@ -198,6 +329,7 @@ pub(crate) struct SettingsOverlay {
 pub(crate) struct CommandPalette {
     query: TextInput,
     selected: usize,
+    plan: PlanPaletteContext,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -213,6 +345,7 @@ pub(crate) enum OverlayKeyResult {
     BeginContextWindowEdit,
     CommitContextWindow(String),
     OpenShortcuts,
+    ConfirmPlanApproval,
     Provider(ProviderOverlayAction),
 }
 
@@ -233,6 +366,7 @@ impl CommandPalette {
         let query = self.query.text().trim().to_ascii_lowercase();
         COMMANDS
             .iter()
+            .filter(|command| plan_command_is_available(command.command, self.plan))
             .filter(|command| {
                 query.is_empty()
                     || fuzzy_matches(command.label, &query)
@@ -403,12 +537,19 @@ impl SettingsOverlay {
 }
 
 impl Overlay {
-    pub(crate) fn command_palette() -> Self {
-        Self::CommandPalette(CommandPalette::default())
+    pub(crate) fn command_palette_for_plan(plan: PlanPaletteContext) -> Self {
+        Self::CommandPalette(CommandPalette {
+            plan,
+            ..CommandPalette::default()
+        })
     }
 
     pub(crate) fn settings() -> Self {
         Self::Settings(SettingsOverlay::default())
+    }
+
+    pub(crate) fn plan_approval(message: String) -> Self {
+        Self::PlanApproval(PlanApprovalOverlay::new(message))
     }
 
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> OverlayKeyResult {
@@ -441,6 +582,11 @@ impl Overlay {
                 }
                 action => OverlayKeyResult::Provider(action),
             },
+            Self::PlanApproval(_) => match key.code {
+                KeyCode::Enter => OverlayKeyResult::ConfirmPlanApproval,
+                KeyCode::Esc => OverlayKeyResult::Back,
+                _ => OverlayKeyResult::Consumed,
+            },
             Self::Dialog(_) => match key.code {
                 KeyCode::Esc | KeyCode::Enter => OverlayKeyResult::Back,
                 _ => OverlayKeyResult::Consumed,
@@ -457,7 +603,10 @@ impl Overlay {
             Self::CommandPalette(palette) => palette.insert_paste(text),
             Self::Settings(settings) => settings.insert_paste(text),
             Self::ProviderForm(form) => form.insert_paste(text),
-            Self::ProviderManager(_) | Self::ModelPicker(_) | Self::Dialog(_) => {}
+            Self::ProviderManager(_)
+            | Self::ModelPicker(_)
+            | Self::PlanApproval(_)
+            | Self::Dialog(_) => {}
             Self::Shortcuts(_) => {}
         }
     }
@@ -480,4 +629,37 @@ fn fuzzy_matches(candidate: &str, query: &str) -> bool {
         }
     }
     next.is_none()
+}
+
+fn plan_command_is_available(command: PaletteCommand, context: PlanPaletteContext) -> bool {
+    match command {
+        PaletteCommand::EnterPlanMode => !context.has_plan,
+        PaletteCommand::ApprovePlan => context.phase == Some(PlanPhase::AwaitingApproval),
+        PaletteCommand::RevisePlan => matches!(
+            context.phase,
+            Some(PlanPhase::AwaitingApproval | PlanPhase::Executing | PlanPhase::Blocked)
+        ),
+        PaletteCommand::OpenPlan => context.has_plan && !context.plan_open,
+        PaletteCommand::FocusPlan => context.has_plan && context.plan_open && !context.plan_focused,
+        PaletteCommand::ClosePlan => context.has_plan && context.plan_open,
+        PaletteCommand::PausePlan => {
+            context.phase == Some(PlanPhase::Executing)
+                && context.scheduler_status == Some(PlanSchedulerStatus::Active)
+        }
+        PaletteCommand::ResumePlan => {
+            context.phase == Some(PlanPhase::Executing)
+                && context.scheduler_status == Some(PlanSchedulerStatus::Paused)
+        }
+        PaletteCommand::RetryPlanNode => context.retry_selected,
+        PaletteCommand::CancelPlan => matches!(
+            context.phase,
+            Some(
+                PlanPhase::Planning
+                    | PlanPhase::AwaitingApproval
+                    | PlanPhase::Executing
+                    | PlanPhase::Blocked
+            )
+        ),
+        _ => true,
+    }
 }

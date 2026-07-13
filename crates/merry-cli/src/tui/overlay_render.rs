@@ -1,7 +1,7 @@
 use super::{
     keymap::KeyAction,
     overlay::SettingItem,
-    overlay::{CommandSpec, MessageDialogKind, MessageDialogOverlay, Overlay},
+    overlay::{CommandSpec, MessageDialogKind, MessageDialogOverlay, Overlay, PlanApprovalOverlay},
     state::TuiState,
     theme::{SemanticColor, dim_color},
 };
@@ -103,9 +103,54 @@ pub(crate) fn render_overlay(frame: &mut Frame<'_>, state: &TuiState) {
         Overlay::ModelPicker(picker) => {
             super::provider_render::render_model_picker(frame, state, picker)
         }
+        Overlay::PlanApproval(approval) => render_plan_approval(frame, state, approval),
         Overlay::Dialog(dialog) => render_message_dialog(frame, state, dialog),
         Overlay::Shortcuts(_) => render_shortcuts(frame, state),
     }
+}
+
+fn render_plan_approval(frame: &mut Frame<'_>, state: &TuiState, approval: &PlanApprovalOverlay) {
+    let desired_width = frame.area().width.saturating_sub(4).min(MAX_OVERLAY_WIDTH);
+    let content_width = usize::from(desired_width.saturating_sub(4)).max(1);
+    let body_lines = estimated_wrapped_lines(approval.message(), content_width);
+    let desired_height = u16::try_from(body_lines.saturating_add(6))
+        .unwrap_or(24)
+        .clamp(10, frame.area().height.saturating_sub(2).min(24));
+    let region = centered_rect(frame.area(), desired_width, desired_height);
+    frame.render_widget(Clear, region);
+    frame.render_widget(
+        Block::default()
+            .title(" M  Approve plan and execute? ")
+            .borders(Borders::ALL)
+            .border_type(BorderType::Plain)
+            .border_style(
+                semantic_style(state, SemanticColor::Warning).add_modifier(Modifier::BOLD),
+            )
+            .style(code_surface_style(state)),
+        region,
+    );
+    let inner = inset(region, 2, 1);
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(inner);
+    frame.render_widget(
+        Paragraph::new(approval.message().to_owned())
+            .style(semantic_style(state, SemanticColor::Assistant))
+            .wrap(Wrap { trim: false }),
+        rows[0],
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                "Enter",
+                semantic_style(state, SemanticColor::Warning).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  Approve", semantic_style(state, SemanticColor::Assistant)),
+            Span::styled("    Esc  Back", semantic_style(state, SemanticColor::Muted)),
+        ])),
+        rows[1],
+    );
 }
 
 fn render_settings(frame: &mut Frame<'_>, state: &TuiState) {

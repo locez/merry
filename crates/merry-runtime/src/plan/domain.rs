@@ -120,6 +120,8 @@ pub enum PlanError {
     NodeNotReady { node_id: PlanNodeId },
     #[error("node {node_id} already has a live lease")]
     LiveLeaseExists { node_id: PlanNodeId },
+    #[error("node {node_id} has no blocked interrupted attempt eligible for explicit retry")]
+    InterruptedRetryUnavailable { node_id: PlanNodeId },
     #[error("plan lease {lease_id} was not found")]
     UnknownLease { lease_id: merry_core::PlanLeaseId },
     #[error("plan lease {lease_id} is not live")]
