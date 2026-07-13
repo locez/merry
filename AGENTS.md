@@ -97,6 +97,26 @@ Do not leak provider-specific response formats into runtime, memory, artifact, s
 - Memory activation must record why memory entered context.
 - Context compilation should be deterministic and reproducible from stored runtime state.
 
+## Model Request And Prompt Cache Discipline
+
+- Any change to provider-visible model request composition must explicitly
+  assess prompt/KV cache reuse. This includes system or developer text, ordered
+  context segments, tool additions or removals, tool names, descriptions, input
+  schemas, tool ordering, output schemas, and phase-dependent availability.
+- Prefer a stable request prefix throughout a session. Keep provider-visible
+  tool definitions and their order stable when runtime admission or typed
+  execution validation can enforce the behavior without changing the request.
+- Do not dynamically add, remove, rename, rewrite, or reorder tools merely to
+  represent runtime phase, role, permission, or UI state. Treat permissions and
+  execution admission as runtime policy unless a genuinely different model
+  contract requires a separate runtime or request surface.
+- Place dynamic state after stable instructions and tool definitions when the
+  context contract permits it. Cache reuse is an optimization and must never be
+  required for correctness.
+- When a cache-breaking request change is necessary, state its expected scope
+  and reason in the implementation or review report, and add deterministic
+  request/schema/order coverage where accidental churn would be costly.
+
 ## Configuration Example Contract
 
 - Keep the tracked user-facing example config at `examples/config.toml`.
@@ -297,6 +317,9 @@ Use this checklist before reporting a Rust change as complete:
 - Is `unsafe` absent, or isolated with a clear `SAFETY:` invariant?
 - Are public APIs smaller and more stable than internal implementation details?
 - Does the change preserve runtime/provider/context boundaries?
+- If provider-visible model request composition changed, was the prompt/KV cache
+  impact assessed and were stable prefix, tool schema, and ordering invariants
+  preserved or intentionally documented?
 - Can the behavior be tested without a live provider or network call?
 - Did `cargo fmt`, `cargo clippy`, and `cargo test` run for the touched area?
 
