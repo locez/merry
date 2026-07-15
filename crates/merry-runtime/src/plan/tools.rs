@@ -1,4 +1,4 @@
-use super::{ReadPlanInput, UpdatePlanInput};
+use super::{ReadPlanInput, SubagentPlanUpdateInput, UpdatePlanInput};
 use crate::{
     RegisteredTool, ToolActionKind, ToolExecutionContext, ToolExecutionError, ToolExecutor,
     ToolExecutorFuture,
@@ -28,6 +28,24 @@ pub(crate) fn coordinator_plan_registered_tools() -> Result<Vec<RegisteredTool>,
 }
 
 pub(crate) fn subagent_plan_registered_tools() -> Result<Vec<RegisteredTool>, CoreError> {
+    unbound_child_plan_registered_tools()
+}
+
+pub(crate) fn scoped_child_plan_registered_tools() -> Result<Vec<RegisteredTool>, CoreError> {
+    let definitions = [
+        plan_tool::<ReadPlanInput>(
+            READ_PLAN_TOOL_NAME,
+            "Read a bounded exact snapshot or subtree below the linked task in the active Plan. This linked subtree scope excludes the coordinator and sibling tasks; historical attempt, lease, heartbeat, and model-report records are not part of this child interface.",
+        )?,
+        plan_tool::<SubagentPlanUpdateInput>(
+            UPDATE_PLAN_TOOL_NAME,
+            "Update authored children or replace a mutable subtree below the linked task in the active Plan. This linked subtree scope excludes the coordinator and sibling tasks; runtime-owned execution state and child binding identity remain controlled by the runtime.",
+        )?,
+    ];
+    Ok(definitions.into_iter().collect())
+}
+
+pub(crate) fn unbound_child_plan_registered_tools() -> Result<Vec<RegisteredTool>, CoreError> {
     Ok(Vec::new())
 }
 

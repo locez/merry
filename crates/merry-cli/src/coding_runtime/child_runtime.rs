@@ -105,6 +105,9 @@ impl ChildRuntimeFactory for CodingLoopChildRuntimeFactory {
         if let Some(control) = input.plan_subagent_control {
             builder = builder.plan_subagent_control(control);
         }
+        if let Some(scope) = input.plan_subagent_scope {
+            builder = builder.plan_subagent_scope(scope);
+        }
         if let Some(project_rules) = self.project_rules.clone() {
             builder = builder.project_rules(project_rules);
         }

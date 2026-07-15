@@ -25,7 +25,7 @@ use crate::{
     process::PermissionedProcessRunnerFactory,
     session::SessionState,
     step::{StepContext, StepInput},
-    subagent::SubagentManager,
+    subagent::{PlanSubagentScope, SubagentManager},
     tool::{ToolExecutionContext, ToolRegistry},
 };
 use merry_core::{
@@ -676,6 +676,7 @@ struct RuntimeInner {
     coordinator_plan_tools: bool,
     plan_controller: PlanController,
     plan_subagent_control: Option<PlanSubagentControl>,
+    plan_subagent_scope: Option<PlanSubagentScope>,
     session_store: Option<FileSessionStore>,
 }
 

@@ -1,6 +1,9 @@
 use crate::plan::{
     PlanChangeInput, PlanExecutionIntent, PlanNodeInput, UpdatePlanInput,
-    tools::{READ_PLAN_TOOL_NAME, UPDATE_PLAN_TOOL_NAME, coordinator_plan_registered_tools},
+    tools::{
+        READ_PLAN_TOOL_NAME, UPDATE_PLAN_TOOL_NAME, coordinator_plan_registered_tools,
+        scoped_child_plan_registered_tools, unbound_child_plan_registered_tools,
+    },
 };
 use merry_core::{PlanExecutorPolicy, PlanHarnessSnapshot, PlanRecoveryPolicySnapshot, ToolSpec};
 use serde_json::{Value, json};
@@ -17,6 +20,47 @@ fn coordinator_plan_tools_have_stable_names_schemas_and_runtime_control_policy()
         tool.action_kind() == crate::ToolActionKind::RuntimeControl
             && tool.spec().input_schema().as_schema().as_object().is_some()
     }));
+}
+
+#[test]
+fn linked_child_plan_tools_are_scoped_and_unbound_children_have_none() {
+    let tools = scoped_child_plan_registered_tools().expect("scoped child plan tools build");
+    let names = tools
+        .iter()
+        .map(|tool| tool.spec().name().as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, [READ_PLAN_TOOL_NAME, UPDATE_PLAN_TOOL_NAME]);
+    assert!(
+        tools
+            .iter()
+            .all(|tool| tool.action_kind() == crate::ToolActionKind::RuntimeControl)
+    );
+    assert!(
+        tools[0]
+            .spec()
+            .description()
+            .contains("subtree below the linked task")
+    );
+    assert!(
+        tools[1]
+            .spec()
+            .description()
+            .contains("subtree below the linked task")
+    );
+
+    let read_schema = serde_json::to_string(tools[0].spec().input_schema())
+        .expect("scoped read schema serializes");
+    let update_schema = serde_json::to_string(tools[1].spec().input_schema())
+        .expect("scoped update schema serializes");
+    assert!(update_schema.contains("define_children"));
+    assert!(!update_schema.contains("execution_intent"));
+    assert!(read_schema.contains("max_depth"));
+
+    assert!(
+        unbound_child_plan_registered_tools()
+            .expect("unbound child plan tools build")
+            .is_empty()
+    );
 }
 
 #[test]
