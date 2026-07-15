@@ -20,7 +20,7 @@ use crate::{
     session::SessionState,
     subagent::{
         ChildRuntimeFactory, ChildWorkspaceScope, PlanLinkRuntime, PlanSubagentScope,
-        SubagentManager, plan_link_runtime_for_controller,
+        SubagentActivityHub, SubagentManager, plan_link_runtime_for_controller,
     },
     tool::{RegisteredTool, ToolRegistry, ToolRegistryError},
 };
@@ -127,6 +127,7 @@ pub struct RuntimeBuilder {
     subagent_manager: Option<SubagentManager>,
     subagent_parent_scope: Option<ChildWorkspaceScope>,
     subagent_parent_plan_link_runtime: Option<Arc<dyn PlanLinkRuntime>>,
+    activity_hub: Arc<SubagentActivityHub>,
     session_store: Option<FileSessionStore>,
     loaded_session: Option<SessionState>,
 }
@@ -168,6 +169,7 @@ impl RuntimeBuilder {
             subagent_manager: None,
             subagent_parent_scope: None,
             subagent_parent_plan_link_runtime: None,
+            activity_hub: Arc::new(SubagentActivityHub::new()),
             session_store: None,
             loaded_session: None,
         }
@@ -593,6 +595,13 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Reuses a runtime-owned activity hub for this runtime and its children.
+    #[must_use]
+    pub fn subagent_activity_hub(mut self, hub: Arc<SubagentActivityHub>) -> Self {
+        self.activity_hub = hub;
+        self
+    }
+
     /// Sets the effective workspace scope inherited by nested subagent tasks.
     #[must_use]
     pub fn subagent_parent_scope(mut self, scope: ChildWorkspaceScope) -> Self {
@@ -764,6 +773,7 @@ impl RuntimeBuilder {
             self.session_store.clone(),
             self.event_buffer_size,
         );
+        let activity_hub = self.activity_hub;
         let subagent_manager = self.subagent_manager;
         if let Some(manager) = subagent_manager.as_ref() {
             let plan_link_runtime = self
@@ -780,6 +790,7 @@ impl RuntimeBuilder {
                 self.subagent_parent_scope
                     .unwrap_or_else(ChildWorkspaceScope::workspace_root),
             );
+            manager.attach_activity_hub(Arc::clone(&activity_hub));
         }
         // Plan is an advisory projection. Execution is started only by an
         // explicit subagent spawn and optional `plan_task` binding.
@@ -814,6 +825,7 @@ impl RuntimeBuilder {
                 plan_subagent_control: self.plan_subagent_control,
                 plan_subagent_scope: self.plan_subagent_scope,
                 session_store: self.session_store,
+                activity_hub,
             }),
         })
     }

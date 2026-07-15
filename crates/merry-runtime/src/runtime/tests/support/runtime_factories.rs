@@ -42,6 +42,7 @@
                 plan_subagent_control: None,
                 plan_subagent_scope: None,
                 session_store: None,
+                activity_hub: Arc::new(crate::SubagentActivityHub::new()),
             }),
         }
     }
@@ -82,6 +83,7 @@
                 plan_subagent_control: None,
                 plan_subagent_scope: None,
                 session_store: None,
+                activity_hub: Arc::new(crate::SubagentActivityHub::new()),
             }),
         }
     }
@@ -126,6 +128,7 @@
                 plan_subagent_control: None,
                 plan_subagent_scope: None,
                 session_store: None,
+                activity_hub: Arc::new(crate::SubagentActivityHub::new()),
             }),
         }
     }
