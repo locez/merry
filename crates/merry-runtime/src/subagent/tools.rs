@@ -20,11 +20,11 @@ pub fn subagent_tool_specs() -> Result<[ToolSpec; 3], merry_core::CoreError> {
     Ok([
         tool_spec::<SpawnSubagentsInput>(
             SPAWN_SUBAGENTS_TOOL_NAME,
-            "Spawn bounded child agents for parallel delegated tasks. In tasks[].allowed_tools, copy exact registered Merry tool names without provider namespace prefixes: use run_process, never functions.run_process.",
+            "Spawn bounded child agents for parallel delegated tasks. When plan_task binds a child, it works only within the linked node and its subtree, and the child owns decomposition below that binding. In tasks[].allowed_tools, copy exact registered Merry tool names without provider namespace prefixes: use run_process, never functions.run_process.",
         )?,
         tool_spec::<WaitSubagentsInput>(
             WAIT_SUBAGENTS_TOOL_NAME,
-            "Inspect or wait for child agent statuses and compact results. timeout_ms is an observation deadline, not a task budget; prefer 30000 or omit it. A timed_out=true result is only a status snapshot, never completion. Claim completion only when terminal=true and the relevant statuses are terminal.",
+            "Inspect or wait for child agent statuses and compact results at semantic or terminal checkpoints. Do not poll for high-frequency progress; live progress belongs to the separate UI activity stream. timeout_ms is an observation deadline, not a task budget; prefer 30000 or omit it. A timed_out=true result is only a status snapshot, never completion. Claim completion only when terminal=true and the relevant statuses are terminal.",
         )?,
         tool_spec::<CancelSubagentsInput>(
             CANCEL_SUBAGENTS_TOOL_NAME,
@@ -422,6 +422,32 @@ mod tests {
         assert!(schema.contains("minimum"));
         assert!(schema.contains("5000"));
         assert!(specs[1].description().contains("observation deadline"));
+        assert!(specs[1].description().contains("Do not poll"));
+        assert!(
+            specs[1]
+                .description()
+                .contains("separate UI activity stream")
+        );
+    }
+
+    #[test]
+    fn subagent_tool_descriptions_explain_linked_child_and_checkpoint_contract() {
+        let specs = subagent_tool_specs().expect("subagent tools build");
+        assert!(
+            specs[0]
+                .description()
+                .contains("linked node and its subtree")
+        );
+        assert!(
+            specs[0]
+                .description()
+                .contains("child owns decomposition below that binding")
+        );
+        assert!(
+            specs[1]
+                .description()
+                .contains("semantic or terminal checkpoints")
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

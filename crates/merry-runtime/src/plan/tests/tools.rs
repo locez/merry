@@ -183,6 +183,42 @@ fn update_plan_contract_explains_lifecycle_and_runtime_owned_state() {
     assert!(schema.contains("request_user_review"));
 }
 
+#[test]
+fn plan_tool_descriptions_explain_one_level_coordinator_and_child_contract() {
+    let coordinator_tools = coordinator_plan_registered_tools().expect("coordinator tools build");
+    let coordinator_read = coordinator_tools[0].spec().description();
+    let coordinator_update = coordinator_tools[1].spec().description();
+    for description in [coordinator_read, coordinator_update] {
+        for phrase in [
+            "root and direct work items",
+            "do not pre-create descendants under a delegated linked node",
+            "child owns decomposition below that binding",
+        ] {
+            assert!(
+                description.contains(phrase),
+                "coordinator tool description must contain {phrase:?}"
+            );
+        }
+    }
+    assert!(coordinator_read.contains("linked child summaries via read_plan"));
+    assert!(coordinator_read.contains("does not mirror the child subtree"));
+
+    let child_tools = scoped_child_plan_registered_tools().expect("child tools build");
+    for tool in child_tools {
+        let description = tool.spec().description();
+        for phrase in [
+            "only within the linked node and its subtree",
+            "authored children below the linked binding",
+            "Runtime owns execution statuses and summaries",
+        ] {
+            assert!(
+                description.contains(phrase),
+                "child tool description must contain {phrase:?}"
+            );
+        }
+    }
+}
+
 fn update_plan_tool() -> ToolSpec {
     plan_tool(UPDATE_PLAN_TOOL_NAME)
 }

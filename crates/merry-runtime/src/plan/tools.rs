@@ -17,11 +17,11 @@ pub(crate) fn coordinator_plan_registered_tools() -> Result<Vec<RegisteredTool>,
     let definitions = [
         plan_tool::<ReadPlanInput>(
             READ_PLAN_TOOL_NAME,
-            "Read a bounded exact snapshot or subtree of the current durable plan, including runtime-owned linked subagent summaries. Historical attempt, lease, heartbeat, and model-report records are not part of this coordinator interface.",
+            "Read a bounded exact snapshot or subtree of the current durable plan, including runtime-owned linked subagent summaries. The coordinator authors the root and direct work items for the request; do not pre-create descendants under a delegated linked node. Once a node is linked, its child owns decomposition below that binding. The coordinator observes linked child summaries via read_plan and does not mirror the child subtree. Historical attempt, lease, heartbeat, and model-report records are not part of this coordinator interface.",
         )?,
         plan_tool::<UpdatePlanInput>(
             UPDATE_PLAN_TOOL_NAME,
-            "Create or update the durable Plan with a tagged JSON change object. The first valid update creates the Plan. New nodes use client_key without id; existing mutable nodes use id without client_key. Define or revise authored intent, dependencies, and acceptance; runtime-owned execution state is derived from actual activity. Use execute_if_authorized only when the user already authorized execution, and request_user_review only when an explicit review boundary is wanted. When the Plan is already executing, do not call use_current_plan again; continue ordinary work or revise only a genuinely changed future subtree.",
+            "Create or update the durable Plan with a tagged JSON change object. The first valid update creates the Plan. The coordinator authors the root and direct work items for the request; do not pre-create descendants under a delegated linked node. Once a node is linked, its child owns decomposition below that binding. New nodes use client_key without id; existing mutable nodes use id without client_key. Define or revise authored intent, dependencies, and acceptance; runtime-owned execution state is derived from actual activity. Use execute_if_authorized only when the user already authorized execution, and request_user_review only when an explicit review boundary is wanted. When the Plan is already executing, do not call use_current_plan again; continue ordinary work or revise only a genuinely changed future subtree.",
         )?,
     ];
     Ok(definitions.into_iter().collect())
@@ -35,11 +35,11 @@ pub(crate) fn scoped_child_plan_registered_tools() -> Result<Vec<RegisteredTool>
     let definitions = [
         plan_tool::<ReadPlanInput>(
             READ_PLAN_TOOL_NAME,
-            "Read a bounded exact snapshot or subtree below the linked task in the active Plan. This linked subtree scope excludes the coordinator and sibling tasks; historical attempt, lease, heartbeat, and model-report records are not part of this child interface.",
+            "Read a bounded exact snapshot or subtree below the linked task in the active Plan. Work only within the linked node and its subtree; scoped update_plan automatically attaches authored children below the linked binding. This linked subtree scope excludes the coordinator and sibling tasks. Runtime owns execution statuses and summaries; historical attempt, lease, heartbeat, and model-report records are not part of this child interface.",
         )?,
         plan_tool::<SubagentPlanUpdateInput>(
             UPDATE_PLAN_TOOL_NAME,
-            "Update authored children or replace a mutable subtree below the linked task in the active Plan. This linked subtree scope excludes the coordinator and sibling tasks; runtime-owned execution state and child binding identity remain controlled by the runtime.",
+            "Update authored children or replace a mutable subtree below the linked task in the active Plan. Work only within the linked node and its subtree; scoped update_plan automatically attaches authored children below the linked binding. This linked subtree scope excludes the coordinator and sibling tasks; Runtime owns execution statuses and summaries, and child binding identity remains controlled by the runtime.",
         )?,
     ];
     Ok(definitions.into_iter().collect())
