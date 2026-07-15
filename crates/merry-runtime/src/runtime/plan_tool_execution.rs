@@ -1,9 +1,10 @@
 use crate::{
     ArtifactContent, PlanControllerError, PlanError, RuntimeError,
     plan::{
-        PLAN_READ_MAX_DEPTH, ReadPlanInput, UpdatePlanInput,
+        PLAN_READ_MAX_DEPTH, ReadPlanInput, SubagentPlanUpdateInput, UpdatePlanInput,
         tools::{READ_PLAN_TOOL_NAME, UPDATE_PLAN_TOOL_NAME},
     },
+    subagent::PlanSubagentScope,
     tool::ToolExecutionContext,
 };
 use merry_core::{
@@ -22,6 +23,12 @@ pub(super) async fn execute_plan_tool_call(
     pending: &PendingToolCall,
     _context: ToolExecutionContext,
 ) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
+    if let Some(scope) = inner.plan_subagent_scope.as_ref() {
+        return execute_scoped_plan_tool_call(inner, pending, scope).await;
+    }
+    if !inner.coordinator_plan_tools {
+        return Err(plan_tool_role_error(inner, pending));
+    }
     match pending.name().as_str() {
         READ_PLAN_TOOL_NAME => {
             let input = input_from_call::<ReadPlanInput>(inner, pending)?;
@@ -49,6 +56,59 @@ pub(super) async fn execute_plan_tool_call(
                 pending.name()
             ),
         }),
+    }
+}
+
+async fn execute_scoped_plan_tool_call(
+    inner: &RuntimeInner,
+    pending: &PendingToolCall,
+    scope: &PlanSubagentScope,
+) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
+    match pending.name().as_str() {
+        READ_PLAN_TOOL_NAME => {
+            let input = input_from_call::<ReadPlanInput>(inner, pending)?;
+            let snapshot = match scope.read().await {
+                Ok(snapshot) => snapshot,
+                Err(error) => return submit_controller_error(inner, pending, error).await,
+            };
+            if input
+                .plan_id
+                .as_ref()
+                .is_some_and(|plan_id| plan_id != &snapshot.plan_id)
+            {
+                return submit_rejection(
+                    inner,
+                    pending,
+                    plan_error_rejection(&PlanError::SubagentScopeViolation {
+                        reason: "scoped read cannot select another plan",
+                    }),
+                )
+                .await;
+            }
+            match read_plan_snapshot(snapshot, input) {
+                Ok(output) => submit_succeeded(inner, pending, output, Vec::new()).await,
+                Err(error) => submit_rejection(inner, pending, error).await,
+            }
+        }
+        UPDATE_PLAN_TOOL_NAME => {
+            let input = input_from_call::<SubagentPlanUpdateInput>(inner, pending)?;
+            match scope.update_plan(input).await {
+                Ok(output) => submit_succeeded(inner, pending, output, Vec::new()).await,
+                Err(error) => submit_controller_error(inner, pending, error).await,
+            }
+        }
+        _ => Err(plan_tool_role_error(inner, pending)),
+    }
+}
+
+fn plan_tool_role_error(inner: &RuntimeInner, pending: &PendingToolCall) -> RuntimeError {
+    RuntimeError::ToolExecutionFailed {
+        session_id: inner.session_id.clone(),
+        call_id: pending.id().clone(),
+        message: format!(
+            "plan tool {} is not implemented for this runtime role",
+            pending.name()
+        ),
     }
 }
 
@@ -142,7 +202,7 @@ async fn read_plan(
     inner: &RuntimeInner,
     input: ReadPlanInput,
 ) -> Result<ReadPlanOutput, PlanToolRejection> {
-    let mut snapshot = {
+    let snapshot = {
         let session = inner.session.lock().await;
         match input.plan_id.as_ref() {
             Some(plan_id) => session
@@ -168,7 +228,13 @@ async fn read_plan(
                 .ok_or_else(no_active_plan_rejection)?,
         }
     };
+    read_plan_snapshot(snapshot, input)
+}
 
+fn read_plan_snapshot(
+    mut snapshot: PlanSnapshot,
+    input: ReadPlanInput,
+) -> Result<ReadPlanOutput, PlanToolRejection> {
     let max_depth = input.max_depth.unwrap_or(PLAN_READ_MAX_DEPTH);
     if max_depth > PLAN_READ_MAX_DEPTH {
         return Err(PlanToolRejection::new(
@@ -423,6 +489,10 @@ fn plan_error_rejection(error: &PlanError) -> PlanToolRejection {
         PlanError::StalePlanRevision { .. } | PlanError::StaleNodeRevision { .. } => {
             read_plan_recovery()
         }
+        PlanError::SubagentScopeViolation { .. } => serde_json::json!({
+            "next_action": "use_bound_subagent_scope",
+            "instruction": "The child scope cannot perform this operation outside its active binding. Use the binding's subtree for scoped reads and updates, and do not target nodes or links outside that subtree.",
+        }),
         _ => read_plan_recovery(),
     };
     PlanToolRejection::new(plan_error_code(error), error.to_string()).with_recovery(recovery)
@@ -494,6 +564,8 @@ fn plan_error_code(error: &PlanError) -> &'static str {
         PlanError::MissingArtifactRef { .. } => "plan_artifact_ref_missing",
         PlanError::InvalidEvidenceRef { .. } => "plan_evidence_ref_invalid",
         PlanError::ArtifactPromotionConflict { .. } => "plan_artifact_promotion_conflict",
+        PlanError::InvalidAuthoredNodeStatus { .. } => "plan_invalid_authored_status",
+        PlanError::SubagentScopeViolation { .. } => "plan_subagent_scope_violation",
     }
 }
 
@@ -515,5 +587,22 @@ mod tests {
                 .expect("recovery instruction should be text")
                 .contains("Do not use update_plan with use_current_plan")
         );
+    }
+
+    #[test]
+    fn subagent_scope_violation_recovery_requires_the_bound_subtree() {
+        let rejection = plan_error_rejection(&PlanError::SubagentScopeViolation {
+            reason: "scope root is not owned by the linked binding",
+        });
+        assert_eq!(rejection.code, "plan_subagent_scope_violation");
+        assert_eq!(
+            rejection.recovery["next_action"],
+            "use_bound_subagent_scope"
+        );
+        let instruction = rejection.recovery["instruction"]
+            .as_str()
+            .expect("recovery instruction should be text");
+        assert!(instruction.contains("active binding"));
+        assert!(instruction.contains("binding's subtree"));
     }
 }
