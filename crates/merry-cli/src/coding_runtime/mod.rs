@@ -7,10 +7,13 @@ mod project_rules;
 mod roles;
 mod sandbox;
 
+#[cfg(test)]
+pub(crate) use builder::resume_headless_coding_runtime;
 pub(crate) use builder::{
     CodingLoopRuntimeOptions, CodingSubagentsConfig, HeadlessCodingRuntimeInput,
-    build_coding_loop_runtime, build_headless_coding_runtime, coding_agent_loop_config,
-    resume_headless_coding_runtime,
+    build_coding_loop_runtime, build_headless_coding_runtime,
+    build_headless_coding_runtime_with_permission_source, coding_agent_loop_config,
+    resume_headless_coding_runtime_with_permission_source,
 };
 pub(crate) use error::CodingRuntimeError;
 pub(crate) use process::{

@@ -9,9 +9,9 @@ use super::roles::RuntimeRoleProviderConfig;
 use merry_llm::{ModelName, ModelProvider, ModelRetryPolicy};
 use merry_runtime::{
     AcceptedLocalWorkspaceProcessAdmission, AutomaticCompactionConfig, ChildRuntimeFactory,
-    DEFAULT_CODING_AGENT_MAX_MODEL_TURNS, FileSessionStore, PermissionedProcessRunnerFactory,
-    ProcessRunner, RegisteredTool, Runtime, RuntimeBuilder, SubagentConfig, SubagentManager,
-    subagent_registered_tools,
+    DEFAULT_CODING_AGENT_MAX_MODEL_TURNS, FileSessionStore, PermissionAdmissionSource,
+    PermissionReviewMode, PermissionedProcessRunnerFactory, ProcessRunner, RegisteredTool, Runtime,
+    RuntimeBuilder, SubagentConfig, SubagentManager, subagent_registered_tools,
 };
 use merry_tool_workspace::WorkspaceCodingLoopProfile;
 use std::{
@@ -97,16 +97,39 @@ pub(crate) struct HeadlessCodingRuntimeInput<'a> {
 pub(crate) fn build_headless_coding_runtime(
     input: HeadlessCodingRuntimeInput<'_>,
 ) -> Result<Runtime, CodingRuntimeError> {
-    build_coding_loop_runtime_from_headless_input(input)?
+    build_coding_loop_runtime_from_headless_input(input, None)?
         .build()
         .map_err(|source| CodingRuntimeError::RuntimeBuild { source })
 }
 
+pub(crate) fn build_headless_coding_runtime_with_permission_source(
+    input: HeadlessCodingRuntimeInput<'_>,
+    source: Arc<dyn PermissionAdmissionSource>,
+    mode: PermissionReviewMode,
+) -> Result<Runtime, CodingRuntimeError> {
+    build_coding_loop_runtime_from_headless_input(input, Some((source, mode)))?
+        .build()
+        .map_err(|source| CodingRuntimeError::RuntimeBuild { source })
+}
+
+#[allow(dead_code)]
 pub(crate) async fn resume_headless_coding_runtime(
     input: HeadlessCodingRuntimeInput<'_>,
     store: FileSessionStore,
 ) -> Result<Runtime, CodingRuntimeError> {
-    build_coding_loop_runtime_from_headless_input(input)?
+    build_coding_loop_runtime_from_headless_input(input, None)?
+        .resume_from_store_without_automatic_savepoints(store)
+        .await
+        .map_err(|source| CodingRuntimeError::RuntimeBuild { source })
+}
+
+pub(crate) async fn resume_headless_coding_runtime_with_permission_source(
+    input: HeadlessCodingRuntimeInput<'_>,
+    store: FileSessionStore,
+    source: Arc<dyn PermissionAdmissionSource>,
+    mode: PermissionReviewMode,
+) -> Result<Runtime, CodingRuntimeError> {
+    build_coding_loop_runtime_from_headless_input(input, Some((source, mode)))?
         .resume_from_store_without_automatic_savepoints(store)
         .await
         .map_err(|source| CodingRuntimeError::RuntimeBuild { source })
@@ -114,8 +137,9 @@ pub(crate) async fn resume_headless_coding_runtime(
 
 fn build_coding_loop_runtime_from_headless_input(
     input: HeadlessCodingRuntimeInput<'_>,
+    permission_source: Option<(Arc<dyn PermissionAdmissionSource>, PermissionReviewMode)>,
 ) -> Result<RuntimeBuilder, CodingRuntimeError> {
-    configure_coding_loop_runtime_builder(
+    let mut builder = configure_coding_loop_runtime_builder(
         input.session_id,
         input.root,
         input.admission,
@@ -134,7 +158,13 @@ fn build_coding_loop_runtime_from_headless_input(
             subagents: input.subagents,
             workspace_tool_limits: None,
         },
-    )
+    )?;
+    if let Some((source, mode)) = permission_source {
+        builder = builder
+            .permission_review_mode(mode)
+            .permission_admission_source(source);
+    }
+    Ok(builder)
 }
 
 pub(crate) fn build_coding_loop_runtime(

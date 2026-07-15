@@ -86,6 +86,8 @@ pub(crate) enum ControllerEffect {
     SelectProviderFormModel(String),
     EnterPlanMode,
     ApprovePlan(merry_runtime::PlanApprovalInput),
+    ApprovePermission(String),
+    DenyPermission(String),
     RevisePlan,
     RetryPlanNode(merry_core::PlanNodeId),
     CancelPlan,
@@ -253,6 +255,14 @@ pub(crate) fn handle_key_event(key: KeyEvent, state: &mut TuiState) -> Controlle
                 };
                 state.close_overlay();
                 ControllerEffect::ApprovePlan(input)
+            }
+            OverlayKeyResult::ApprovePermission(approval_id) => {
+                state.close_overlay();
+                ControllerEffect::ApprovePermission(approval_id)
+            }
+            OverlayKeyResult::DenyPermission(approval_id) => {
+                state.close_overlay();
+                ControllerEffect::DenyPermission(approval_id)
             }
             OverlayKeyResult::Provider(action) => provider_overlay_effect(action),
         };
@@ -506,6 +516,12 @@ pub(crate) async fn run_controller(
     loop {
         tokio::select! {
             _ = time::sleep(Duration::from_millis(100)), if state.is_active_run() => {
+                if let Some(next) = session.prune_cancelled_permission_reviews() {
+                    match next {
+                        Some((approval_id, body)) => state.open_permission_review(approval_id, body),
+                        None => state.close_overlay(),
+                    }
+                }
                 render_once(&mut terminal, &state)?;
             }
             event = terminal.next_event() => {
@@ -562,6 +578,15 @@ pub(crate) async fn run_controller(
                     break;
                 };
                 projector.apply(event, &mut state);
+                render_once(&mut terminal, &state)?;
+            }
+            request = session.permission_requests.recv() => {
+                let Some(request) = request else {
+                    continue;
+                };
+                if let Some((approval_id, body)) = session.enqueue_permission_review(request) {
+                    state.open_permission_review(approval_id, body);
+                }
                 render_once(&mut terminal, &state)?;
             }
             completion = model_discovery_rx.recv() => {
@@ -621,6 +646,18 @@ async fn dispatch_effect(
         }
         ControllerEffect::PasteImage => {
             start_clipboard_image_read(clipboard_image_tx.clone());
+            Ok(false)
+        }
+        ControllerEffect::ApprovePermission(approval_id) => {
+            if let Some(next) = session.resolve_permission_review(&approval_id, true)? {
+                state.open_permission_review(next.0, next.1);
+            }
+            Ok(false)
+        }
+        ControllerEffect::DenyPermission(approval_id) => {
+            if let Some(next) = session.resolve_permission_review(&approval_id, false)? {
+                state.open_permission_review(next.0, next.1);
+            }
             Ok(false)
         }
         ControllerEffect::Interrupt => {

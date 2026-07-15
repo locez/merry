@@ -114,6 +114,10 @@ impl ActionPolicyDecision {
         matches!(self.disposition, ActionPolicyDisposition::Allow)
     }
 
+    pub(crate) fn is_noninteractive_trusted(&self) -> bool {
+        self.reason == "registered tool action is allowed by explicit non-interactive trusted mode"
+    }
+
     /// Returns the same policy disposition with a proposal-aware risk tier.
     #[must_use]
     pub(crate) const fn with_risk_tier(&self, risk_tier: ActionRiskTier) -> Self {
@@ -177,6 +181,21 @@ impl ActionPolicyDecision {
             ActionRiskTier::ProcessPermissioned,
             ActionPolicyDisposition::Allow,
             "permissioned process actions are allowed only after explicit permission admission review",
+        )
+    }
+
+    /// Allows a registered tool in explicit non-interactive trusted mode.
+    pub(crate) fn allow_noninteractive_trusted_action(action_kind: ToolActionKind) -> Self {
+        let risk_tier = if action_kind == ToolActionKind::Network {
+            ActionRiskTier::Network
+        } else {
+            classify_tool_action_risk(action_kind, None)
+        };
+        Self::new(
+            action_kind,
+            risk_tier,
+            ActionPolicyDisposition::Allow,
+            "registered tool action is allowed by explicit non-interactive trusted mode",
         )
     }
 }

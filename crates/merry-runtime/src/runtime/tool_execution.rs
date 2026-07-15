@@ -165,9 +165,23 @@ pub(super) async fn execute_tool_call_with_active_permit(
         .await;
     }
 
+    let noninteractive_trusted = matches!(
+        inner.permission_review_mode,
+        crate::PermissionReviewMode::NonInteractiveTrusted
+    );
     let mut policy_decision = DefaultActionPolicy.decide(registered_tool.action_kind());
+    if noninteractive_trusted {
+        policy_decision = ActionPolicyDecision::allow_noninteractive_trusted_action(
+            registered_tool.action_kind(),
+        );
+    }
     let mut allowed_proposal = None;
-    if !policy_decision.is_allowed() {
+    if !policy_decision.is_allowed()
+        || (noninteractive_trusted
+            && registered_tool.action_kind().is_mutating()
+            && registered_tool.action_kind() != crate::ToolActionKind::Network
+            && registered_tool.proposals_enabled())
+    {
         let proposal = if registered_tool.action_kind().is_mutating()
             && registered_tool.proposals_enabled()
         {
@@ -333,6 +347,15 @@ pub(super) async fn execute_tool_call_with_active_permit(
                     context,
                 )
                 .await;
+            } else if noninteractive_trusted {
+                policy_decision = ActionPolicyDecision::allow_noninteractive_trusted_action(
+                    registered_tool.action_kind(),
+                )
+                .with_risk_tier(classify_tool_action_risk(
+                    registered_tool.action_kind(),
+                    Some(&proposal),
+                ));
+                allowed_proposal = Some(proposal);
             } else {
                 let outcome = denied_tool_action_outcome(&pending);
                 let (status, content, diagnostic, execution_evidence) = outcome.into_parts();
@@ -365,6 +388,9 @@ pub(super) async fn execute_tool_call_with_active_permit(
                 trace_denied_tool_execution(inner.session_id.as_str(), &pending, &events);
                 return persist_tool_events(inner, events).await;
             }
+        } else if noninteractive_trusted {
+            // Explicit trusted mode authorizes configured mutating tools even
+            // when their executor does not expose proposal evidence.
         } else {
             let outcome = denied_tool_action_outcome(&pending);
             let (status, content, diagnostic, execution_evidence) = outcome.into_parts();
@@ -798,6 +824,10 @@ pub(super) fn admit_action_to_generic_executor(
     session_id: &SessionId,
 ) -> Result<(), RuntimeError> {
     if !action_kind.is_mutating() {
+        return Ok(());
+    }
+
+    if decision.is_noninteractive_trusted() {
         return Ok(());
     }
 
