@@ -11,6 +11,30 @@ This repository is a Rust-first agent runtime project. Treat this file as the wo
 - Do not move private notes into tracked files.
 - Prefer small, reviewable changes over broad rewrites.
 - If the worktree contains changes you did not make, preserve them and adapt around them.
+- Treat `Cargo.toml`, the current source and tests, and `ROADMAP.md` as the
+  source of truth when this file points to a path, crate, or capability that
+  may have changed. Verify stale-looking instructions before relying on them,
+  and report the mismatch instead of silently broadening the task.
+
+## Agent Operating Loop
+
+Use this loop for every substantial task, whether it is executed directly or
+delegated to another agent:
+
+1. **Orient.** Read this file, the relevant roadmap section, and the owning
+   module/tests. Run `git status --short --branch` and
+   `git worktree list --porcelain` before editing.
+2. **State the contract.** Name the active gap, observable acceptance target,
+   base commit, allowed write paths, and expected integration method.
+3. **Inspect before changing.** Search for sibling paths, existing tests, and
+   user changes. Treat a dirty worktree as input, not cleanup work.
+4. **Implement the smallest slice.** Keep one owner per file and preserve the
+   runtime, provider, and facade boundaries below.
+5. **Verify.** Run deterministic checks for the touched area first, then the
+   required repository checks. Record blocked or skipped checks with the exact
+   cause.
+6. **Hand off clearly.** Report changed files, commits, verification, known
+   limits, integration notes, and whether the active gap advanced.
 
 ## Delivery Focus Discipline
 
@@ -71,20 +95,14 @@ Merry is runtime-first. Keep these ownership boundaries clear:
 
 Do not leak provider-specific response formats into runtime, memory, artifact, skill, or compiler code.
 
-## Initial Workspace Decisions
+## Workspace And Crate Boundaries
 
-- Use a Cargo virtual workspace.
-- Start with these implementation crates:
-  - `merry-core`
-  - `merry-llm`
-  - `merry-runtime`
-  - `merry-provider-openai`
-  - `merry-cli`
-- Defer these crates until the event protocol and runtime builder are stable:
-  - `merry-macros`
-  - `merry-py`
-  - a Rust facade crate named `merry`
-- Use Rust 2024 edition and workspace resolver 3 unless a concrete toolchain issue forces a revision.
+- Use the Cargo virtual workspace, Rust 2024 edition, and resolver 3 already
+  declared in `Cargo.toml`.
+- Treat the workspace members in `Cargo.toml` as authoritative. The current
+  implementation includes `merry-core`, `merry-llm`, `merry-runtime`,
+  `merry-tool-workspace`, `merry-mcp`, both provider crates, `merry`,
+  `merry-cli`, and `merry-py`; do not assume this list is permanent.
 - Keep features additive. Do not use mutually exclusive feature sets unless there is no practical alternative.
 - Provider integrations belong in provider crates, not runtime feature flags.
 - Forbid unsafe at the workspace lint level.
@@ -155,20 +173,129 @@ Active product priorities must come from the current roadmap or user
 instruction. `AGENTS.md` may define how agents avoid drift, but it must not
 choose one temporary capability as the permanent project direction.
 
-## Subagent And Parallel Work Rules
+## Worktree And Parallel Agent Protocol
 
-Subagents are bounded workers, not chat participants.
+Parallel work consists of isolated worktrees plus one coordinator. The
+coordinator owns task decomposition and integration; each worker owns its
+assigned branch and files. Subagents are bounded workers, not chat
+participants.
 
-When multiple agents work in this repository:
+### Coordinator Task Contract
 
-- Assign each worker a clear file/module ownership scope.
-- Workers must not edit files outside their assigned scope unless the parent explicitly expands it.
-- Workers must not revert or overwrite changes made by others.
-- Read-only exploration workers should return evidence references and findings, not patches.
-- Review workers should inspect concrete diffs, evidence, and tests.
-- Implementation workers should list changed files and verification commands in their final report.
+Before dispatching a worker, provide all of the following:
 
-Future subagent support should use explicit task contracts, artifact references, allowed tools, budgets, and merge policies.
+- **Objective:** the active delivery gap and the smallest result that advances
+  it.
+- **Base:** the commit the worker must start from, normally the coordinator's
+  current `HEAD`.
+- **Isolation:** the exact worktree path and unique branch name, or an explicit
+  instruction to remain in an already linked worktree.
+- **Ownership:** allowed write paths and important read-only paths. One active
+  worker owns a file at a time; shared files require an explicit serialized
+  handoff.
+- **Dependencies:** interfaces, commits, artifacts, or other workers that must
+  exist first. State the integration order when it matters.
+- **Evidence:** source paths, fixtures, artifacts, or prior findings the worker
+  should use or produce.
+- **Limits:** allowed tools and commands, network or live-provider access, and
+  a time or token budget when those constraints matter.
+- **Acceptance:** at least one command, test, event, artifact, or other
+  observable behavior that proves the task is useful.
+- **Verification:** targeted checks and any broader repository checks expected
+  before handoff.
+- **Handoff:** whether the worker must commit, which merge policy applies, and
+  the report fields required below.
+
+Do not dispatch research or review work without stating which implementation
+decision or acceptance check its evidence will unblock.
+
+### Worktree Lifecycle
+
+- Check isolation before creating anything:
+  `git rev-parse --git-dir`, `git rev-parse --git-common-dir`,
+  `git branch --show-current`, and `git worktree list --porcelain`.
+- If `git-dir` differs from `git-common-dir` and the checkout is not a
+  submodule, the agent is already in a linked worktree. Do not create a nested
+  worktree or switch branches.
+- When starting from the ordinary checkout, prefer the host's native worktree
+  mechanism when one is available. Otherwise use the ignored `.worktrees/`
+  directory and verify it from the primary checkout before creation:
+
+  ```bash
+  git check-ignore -q .worktrees
+  git worktree add .worktrees/<task-slug> -b <type>/<task-slug>
+  ```
+
+- Make the branch and path unique. Inspect `git worktree list` first and never
+  reuse another active worker's worktree or branch without coordinator approval.
+- After entering the worktree, confirm `git status --short --branch` and the
+  base commit before editing. If creation is blocked by permissions or a
+  branch collision, report it and wait for the coordinator; do not silently
+  edit `main`.
+- The coordinator removes a worktree only after its changes are integrated or
+  explicitly abandoned and the worktree is clean. Workers must not remove
+  another worker's worktree.
+
+### Worker Rules
+
+- Run the requested baseline checks before implementation. If the baseline is
+  already failing, record the exact command and failure and do not repair
+  unrelated failures as part of the task.
+- Edit only owned paths. Do not modify another worktree through an absolute
+  path, copy files between worktrees, or change shared files opportunistically.
+- If progress requires a shared file or an interface owned by another worker,
+  stop at the boundary and request a serialized handoff or coordinator change
+  to ownership.
+- Preserve user and other-agent changes. Never use `git reset --hard`,
+  `git checkout --`, `git restore`, `git clean`, or broad deletion to make a
+  worktree look clean. Do not rebase or merge moving branches unless the
+  coordinator explicitly requests it.
+- Read-only explorers return evidence references and findings, not patches.
+  Review workers inspect concrete diffs, evidence, and tests without editing
+  the implementation under review.
+- Keep commits focused and leave generated output, credentials, and ignored
+  private notes out of the commit.
+
+### Worker Handoff
+
+Before reporting completion, run `git diff --check`, inspect
+`git diff --name-only <base>...HEAD`, and confirm `git status --short`. Use this
+report shape so the coordinator can integrate without reconstructing context:
+
+```text
+Worktree:
+Branch:
+Base:
+Commits:
+Objective and acceptance:
+Owned paths:
+Changed paths:
+Verification:
+Baseline or blocked checks:
+Known limitations:
+Integration notes:
+Delivery focus advanced: yes/no, with evidence
+```
+
+Do not claim a check passed when it was skipped, unavailable, or only run on a
+different commit. Distinguish baseline failures from regressions introduced by
+the worker.
+
+### Coordinator Integration
+
+- Inspect the worker's commit and path scope before integrating:
+  `git diff --stat <base>...<branch>`, `git diff --check <base>...<branch>`,
+  and the handoff report.
+- Integrate through Git history, normally `git cherry-pick` or a reviewed
+  merge. Do not copy files or manually recreate a worker's patch in another
+  worktree.
+- Resolve conflicts in the coordinator worktree, preserving the ownership
+  contract and recording any changed integration decision. If a conflict
+  reveals overlapping ownership, stop and reassign or serialize the work.
+- Re-run the acceptance checks after integration, then the relevant repository
+  checks before reporting the combined result.
+- Only after successful integration may the coordinator remove the worker's
+  worktree and delete its branch when no further review or rollback is needed.
 
 ## Rust Engineering Standards
 
@@ -350,6 +477,11 @@ Use this checklist before reporting a Rust change as complete:
 ## Testing And Verification
 
 Before claiming completion, run the relevant checks for the touched area.
+
+For every change, also run `git diff --check` and inspect
+`git status --short`. Treat a check that could not run as unverified and state
+the command, failure, and remaining risk. Separate failures present at the
+worker baseline from failures introduced by the change.
 
 For Rust code, expected checks are:
 
