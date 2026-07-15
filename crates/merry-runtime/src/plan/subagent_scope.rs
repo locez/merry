@@ -97,7 +97,7 @@ fn project_snapshot(
         link.plan_id == snapshot.plan_id
             && link.node_id == *root_node_id
             && link.binding_id == *binding_id
-            && link.status != PlanLinkStatus::Superseded
+            && link.status == PlanLinkStatus::Active
             && link.superseded_by.is_none()
     }) {
         return Err(scope_error("scope root is not owned by the linked binding"));
@@ -122,6 +122,7 @@ fn project_snapshot(
             node.depends_on
                 .retain(|dependency| scoped_ids.contains(dependency));
         }
+        node.links.retain(|link| link.binding_id == *binding_id);
     }
     snapshot.root_node_id = Some(root_node_id.clone());
     snapshot.coordinator_node_id = None;
@@ -317,6 +318,112 @@ mod tests {
             .expect("snapshot succeeds")
             .expect("active plan");
         assert!(full.nodes.iter().any(|node| node.id == sibling_id));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn scoped_read_and_update_require_an_active_binding() {
+        for status in [
+            PlanLinkStatus::Completed,
+            PlanLinkStatus::Failed,
+            PlanLinkStatus::Cancelled,
+        ] {
+            let (controller, mut events) = controller(None);
+            let (scope, _owned_id, _sibling_id) = linked_scope(&controller).await;
+            while events.try_recv().is_ok() {}
+
+            let terminal = controller
+                .update_subagent_link(scope.binding_id.clone(), status, 10)
+                .await
+                .expect("terminal link update succeeds");
+            while events.try_recv().is_ok() {}
+
+            let read_error = scope
+                .read()
+                .await
+                .expect_err("terminal binding read must be rejected");
+            assert!(matches!(
+                read_error,
+                super::super::PlanControllerError::Plan {
+                    source: PlanError::SubagentScopeViolation { .. }
+                }
+            ));
+
+            let update_error = scope
+                .update(SubagentPlanUpdateInput {
+                    reason: "reject update after linked work ended".to_owned(),
+                    change: SubagentPlanChangeInput::DefineChildren {
+                        expected_plan_revision: terminal.revision,
+                        children: vec![node("terminal-child", "Must not be installed")],
+                    },
+                })
+                .await
+                .expect_err("terminal binding update must be rejected");
+            assert!(matches!(
+                update_error,
+                super::super::PlanControllerError::Plan {
+                    source: PlanError::SubagentScopeViolation { .. }
+                }
+            ));
+
+            let after = controller
+                .snapshot()
+                .await
+                .expect("snapshot succeeds")
+                .expect("active plan remains available");
+            assert_eq!(after.revision, terminal.revision);
+            assert!(
+                events.try_recv().is_err(),
+                "rejected operations emit no event"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn scoped_projection_filters_links_to_the_current_binding() {
+        let (controller, _events) = controller(None);
+        let (scope, _owned_id, _sibling_id) = linked_scope(&controller).await;
+        let defined = scope
+            .update(SubagentPlanUpdateInput {
+                reason: "define a linked descendant".to_owned(),
+                change: SubagentPlanChangeInput::DefineChildren {
+                    expected_plan_revision: 2,
+                    children: vec![node("descendant", "Descendant work")],
+                },
+            })
+            .await
+            .expect("descendant definition succeeds");
+        let descendant_id = defined.client_key_ids["descendant"].clone();
+        let other_link = controller
+            .bind_subagent(
+                "descendant".to_owned(),
+                SubagentId::new("other-agent").expect("valid agent id"),
+                SubagentTaskId::new("other-task").expect("valid task id"),
+                11,
+            )
+            .await
+            .expect("other binding succeeds");
+
+        let projected = scope.read().await.expect("scoped read succeeds");
+        let root = projected
+            .nodes
+            .iter()
+            .find(|node| node.id == scope.root_node_id)
+            .expect("scope root remains visible");
+        assert!(root.links.iter().any(|link| {
+            link.binding_id == scope.binding_id && link.status == PlanLinkStatus::Active
+        }));
+        let descendant = projected
+            .nodes
+            .iter()
+            .find(|node| node.id == descendant_id)
+            .expect("descendant remains visible");
+        assert!(
+            descendant
+                .links
+                .iter()
+                .all(|link| link.binding_id != other_link.binding_id),
+            "projection must hide links owned by another binding"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
