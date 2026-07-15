@@ -19,6 +19,19 @@ struct CoordinatorPlanGuidance {
     rules: &'static [&'static str],
 }
 
+const COORDINATOR_RULES: &[&str] = &[
+    "Coordinator authors the root and direct work items for the request; do not pre-create descendants under a delegated linked node.",
+    "Once a node is linked, its child owns decomposition below that binding.",
+    "Observe linked child summaries via read_plan; do not mirror the child subtree in coordinator-authored plan nodes.",
+    "Activity is a separate UI latest-value projection; it is not plan state and does not belong in provider prompts.",
+    "Use wait_subagents for semantic or terminal checkpoints, not high-frequency progress polling; live progress belongs to the separate UI activity stream.",
+    "update_plan authors objectives, acceptance, dependencies, and future structure. Linked execution summaries and statuses are runtime-owned.",
+    "Plan is an auxiliary projection: it does not grant or restrict ordinary tools and it is not the execution result.",
+    "When delegating work, bind the child explicitly with plan_task; omitted plan_task keeps the child unbound.",
+    "After a successful read_plan, use the returned snapshot; do not repeat read_plan unless runtime state has changed.",
+    "Use ordinary run_process for a read-only check that fits the active process profile; request_permissions is only for an exact action rejected for a missing capability.",
+];
+
 #[derive(Serialize)]
 struct CoordinatorNodeProjection<'a> {
     id: &'a merry_core::PlanNodeId,
@@ -77,51 +90,41 @@ pub(crate) fn coordinator_plan_inactive_control_message() -> String {
             "root_node_id": null,
             "nodes": [],
             "approval_requirements": [],
-            "coordinator_guidance": {
-                "phase_action": "choose_whether_to_plan",
-                "instruction": "No active Plan exists. Do not call read_plan again. If the task benefits from a durable plan, call update_plan directly; otherwise continue with ordinary registered tools.",
-                "rules": [
-                    "Plan is an auxiliary projection: it does not grant or restrict ordinary tools and it is not the execution result.",
-                    "When delegating work, bind the child explicitly with plan_task; omitted plan_task keeps the child unbound."
-                ]
+            "coordinator_guidance": CoordinatorPlanGuidance {
+                phase_action: "choose_whether_to_plan",
+                instruction: "No active Plan exists. Do not call read_plan again. If the task benefits from a durable plan, call update_plan directly; otherwise continue with ordinary registered tools.",
+                rules: COORDINATOR_RULES,
             }
         })
     )
 }
 
 fn coordinator_guidance(phase: PlanPhase) -> CoordinatorPlanGuidance {
-    const RULES: &[&str] = &[
-        "update_plan authors objectives, acceptance, dependencies, and future structure. Linked execution summaries and statuses are runtime-owned.",
-        "Plan is an auxiliary projection: it does not grant or restrict ordinary tools and it is not the execution result.",
-        "When delegating work, bind the child explicitly with plan_task; omitted plan_task keeps the child unbound.",
-        "After a successful read_plan, use the returned snapshot; do not repeat read_plan unless runtime state has changed.",
-        "Use ordinary run_process for a read-only check that fits the active process profile; request_permissions is only for an exact action rejected for a missing capability.",
-    ];
     match phase {
         PlanPhase::Planning => CoordinatorPlanGuidance {
             phase_action: "define_or_refine_plan",
             instruction: "Use read_plan for exact current state and update_plan to define or refine authored intent. The first valid update creates the plan; ordinary work remains available throughout.",
-            rules: RULES,
+            rules: COORDINATOR_RULES,
         },
         PlanPhase::AwaitingApproval => CoordinatorPlanGuidance {
             phase_action: "wait_for_user_approval",
             instruction: "Explain the pending approval requirement and wait for user resolution when one exists. This phase does not disable ordinary tools; update_plan remains available for an explicit revision.",
-            rules: RULES,
+            rules: COORDINATOR_RULES,
         },
         PlanPhase::Executing => CoordinatorPlanGuidance {
             phase_action: "coordinate_active_execution",
             instruction: "Inspect linked child lifecycle with read_plan, revise future authored structure with update_plan, and use spawn_subagents for actual delegated work. Runtime derives completion from child lifecycle; no model report is required.",
-            rules: RULES,
+            rules: COORDINATOR_RULES,
         },
         PlanPhase::Blocked => CoordinatorPlanGuidance {
             phase_action: "explain_blocker_or_request_revision",
             instruction: "Inspect the linked execution summary with read_plan and explain the blocker. Revise authored future work with update_plan or delegate a replacement child explicitly.",
-            rules: RULES,
+            rules: COORDINATOR_RULES,
         },
         PlanPhase::Completed | PlanPhase::Cancelled => CoordinatorPlanGuidance {
             phase_action: "summarize_terminal_plan",
             instruction: "The plan projection is terminal. Read exact state if needed; a later update can define new authored work without replaying old attempts.",
-            rules: RULES,
+            rules: COORDINATOR_RULES,
         },
     }
 }
@@ -138,6 +141,26 @@ struct SubagentPlanProjection<'a> {
     lease: &'a merry_core::PlanLeaseSnapshot,
     progress: Option<&'a merry_core::PlanAttemptProgressSnapshot>,
     unresolved_directives: Vec<&'a merry_core::CoordinatorDirectiveSnapshot>,
+    child_guidance: SubagentPlanGuidance,
+}
+
+#[derive(Serialize)]
+struct SubagentPlanGuidance {
+    instruction: &'static str,
+    rules: &'static [&'static str],
+}
+
+const CHILD_GUIDANCE_RULES: &[&str] = &[
+    "Scoped update_plan automatically attaches authored children below the linked binding; do not create a separate root or parent binding.",
+    "Runtime owns execution statuses and summaries, including attempts, leases, and progress; do not author or mirror those fields.",
+    "Plan updates are semantic checkpoints, not heartbeats; do not emit high-frequency progress updates.",
+];
+
+fn child_guidance() -> SubagentPlanGuidance {
+    SubagentPlanGuidance {
+        instruction: "Work only within your linked plan node and subtree; do not author or inspect the coordinator or sibling work.",
+        rules: CHILD_GUIDANCE_RULES,
+    }
 }
 
 pub(crate) fn plan_subagent_control_message(
@@ -196,6 +219,7 @@ pub(crate) fn plan_subagent_control_message(
         lease,
         progress,
         unresolved_directives,
+        child_guidance: child_guidance(),
     };
     Some(format!(
         "<plan_subagent_context>\n{}\n</plan_subagent_context>",

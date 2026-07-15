@@ -5,7 +5,7 @@ use crate::plan::{
 };
 use merry_core::{
     PlanActivationSource, PlanCapabilityEnvelopeSnapshot, PlanExecutorPolicy, PlanHarnessSnapshot,
-    PlanId, PlanRecoveryPolicySnapshot, PlanResourcePolicySnapshot, SessionId,
+    PlanId, PlanPhase, PlanRecoveryPolicySnapshot, PlanResourcePolicySnapshot, SessionId,
 };
 
 #[test]
@@ -77,6 +77,45 @@ fn subagent_context_projects_ancestor_path_without_unrelated_siblings() {
     assert_eq!(projection["ancestor_path"][0]["objective"], "Root contract");
     assert_eq!(projection["ancestor_path"].as_array().unwrap().len(), 1);
     assert!(!message.contains("Unrelated sibling secret"));
+
+    let child_guidance = &projection["child_guidance"];
+    assert!(
+        child_guidance["instruction"].as_str().is_some_and(
+            |instruction| instruction.contains("only within your linked plan node and subtree")
+        )
+    );
+    let rules = child_guidance["rules"]
+        .as_array()
+        .expect("child guidance rules are an array");
+    for phrase in [
+        "Scoped update_plan automatically attaches authored children below the linked binding",
+        "Runtime owns execution statuses and summaries",
+        "Plan updates are semantic checkpoints, not heartbeats",
+    ] {
+        assert!(
+            rules
+                .iter()
+                .any(|rule| rule.as_str().is_some_and(|rule| rule.contains(phrase))),
+            "child guidance must contain {phrase:?}"
+        );
+    }
+
+    let mut changed_snapshot = plan.snapshot().clone();
+    changed_snapshot.revision += 1;
+    changed_snapshot.phase = PlanPhase::Completed;
+    let changed_projection = subagent_projection(
+        plan_subagent_control_message(
+            &changed_snapshot,
+            &update.client_key_ids["target"],
+            &started.attempt.attempt_id,
+            &started.lease.lease_id,
+        )
+        .expect("changed subagent projection exists"),
+    );
+    assert_eq!(
+        projection["child_guidance"], changed_projection["child_guidance"],
+        "child guidance must be static across plan revisions and phases"
+    );
 }
 
 #[test]
@@ -120,6 +159,33 @@ fn coordinator_context_explains_planning_actions_and_runtime_owned_completion() 
         rule.as_str()
             .is_some_and(|rule| rule.contains("auxiliary projection"))
     }));
+    assert_coordinator_rules(&projection);
+}
+
+#[test]
+fn inactive_coordinator_context_explains_the_same_static_delegation_contract() {
+    let projection = coordinator_projection_from_message(
+        crate::plan::projection::coordinator_plan_inactive_control_message(),
+    );
+
+    assert_eq!(projection["phase"], "inactive");
+    assert_coordinator_rules(&projection);
+}
+
+#[test]
+fn coordinator_guidance_rules_are_static_across_plan_phases_and_revisions() {
+    let plan = empty_plan("plan-coordinator-static-guidance");
+    let planning = coordinator_projection(&plan);
+    let mut changed_snapshot = plan.snapshot().clone();
+    changed_snapshot.revision = 41;
+    changed_snapshot.phase = PlanPhase::Executing;
+    let changed =
+        coordinator_projection_from_message(coordinator_plan_control_message(&changed_snapshot));
+
+    assert_eq!(
+        planning["coordinator_guidance"]["rules"], changed["coordinator_guidance"]["rules"],
+        "coordinator guidance rules must not vary with plan revision or phase"
+    );
 }
 
 #[test]
@@ -164,12 +230,44 @@ fn empty_plan(id: &str) -> PlanState {
 }
 
 fn coordinator_projection(plan: &PlanState) -> serde_json::Value {
-    let message = coordinator_plan_control_message(plan.snapshot());
+    coordinator_projection_from_message(coordinator_plan_control_message(plan.snapshot()))
+}
+
+fn coordinator_projection_from_message(message: String) -> serde_json::Value {
     let json = message
         .strip_prefix("<plan_context>\n")
         .and_then(|value| value.strip_suffix("\n</plan_context>"))
         .expect("projection has stable wrapper");
     serde_json::from_str(json).expect("projection is JSON")
+}
+
+fn subagent_projection(message: String) -> serde_json::Value {
+    let json = message
+        .strip_prefix("<plan_subagent_context>\n")
+        .and_then(|value| value.strip_suffix("\n</plan_subagent_context>"))
+        .expect("projection has stable wrapper");
+    serde_json::from_str(json).expect("projection is JSON")
+}
+
+fn assert_coordinator_rules(projection: &serde_json::Value) {
+    let rules = projection["coordinator_guidance"]["rules"]
+        .as_array()
+        .expect("coordinator guidance rules are an array");
+    for phrase in [
+        "Coordinator authors the root and direct work items for the request",
+        "do not pre-create descendants under a delegated linked node",
+        "Once a node is linked, its child owns decomposition below that binding",
+        "Observe linked child summaries via read_plan; do not mirror the child subtree",
+        "Activity is a separate UI latest-value projection",
+        "wait_subagents for semantic or terminal checkpoints, not high-frequency progress polling",
+    ] {
+        assert!(
+            rules
+                .iter()
+                .any(|rule| rule.as_str().is_some_and(|rule| rule.contains(phrase))),
+            "coordinator guidance must contain {phrase:?}"
+        );
+    }
 }
 
 fn node(
