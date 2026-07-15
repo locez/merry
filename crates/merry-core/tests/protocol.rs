@@ -6,9 +6,10 @@ use merry_core::{
     PlanNodeStatus, PlanPhase, PlanRecoveryPolicySnapshot, PlanResourcePolicySnapshot,
     PlanRevisionSummary, PlanSchedulerStatus, PlanSnapshot, ProviderName, QueuedInputLane,
     QueuedInputView, QueuedInputsView, RuntimeEvent, RuntimeEventSource, RuntimeJournalEvent,
-    RuntimeJournalPayload, SessionId, SessionUsage, SkillId, SubagentId, SubagentStatus,
-    SubagentTaskId, ToolCallArguments, ToolCallBatchId, ToolCallId, ToolCallResult,
-    ToolCallResultStatus, ToolInputSchema, ToolName, ToolOutput, ToolSpec, UsageContextWindow,
+    RuntimeJournalPayload, SessionId, SessionUsage, SkillId, SubagentActivityPhase,
+    SubagentActivitySnapshot, SubagentId, SubagentStatus, SubagentTaskId, ToolCallArguments,
+    ToolCallBatchId, ToolCallId, ToolCallResult, ToolCallResultStatus, ToolInputSchema, ToolName,
+    ToolOutput, ToolSpec, UsageContextWindow,
 };
 use schemars::{JsonSchema, Schema};
 use serde::{Serialize, de::DeserializeOwned};
@@ -152,6 +153,63 @@ fn subagent_ids_validate_and_round_trip_as_json_strings() {
     let overlong = "a".repeat(129);
     assert!(SubagentId::new(&overlong).is_err());
     assert!(serde_json::from_value::<SubagentTaskId>(json!(overlong)).is_err());
+}
+
+#[test]
+fn subagent_activity_phases_use_stable_snake_case_json() {
+    let phases = [
+        (SubagentActivityPhase::Starting, "starting"),
+        (SubagentActivityPhase::Running, "running"),
+        (SubagentActivityPhase::Waiting, "waiting"),
+        (SubagentActivityPhase::Completed, "completed"),
+        (SubagentActivityPhase::Failed, "failed"),
+        (SubagentActivityPhase::Cancelled, "cancelled"),
+    ];
+
+    for (phase, expected) in phases {
+        assert_eq!(
+            serde_json::to_value(phase).expect("activity phase serializes"),
+            json!(expected)
+        );
+    }
+}
+
+#[test]
+fn subagent_activity_snapshot_round_trips_as_json() {
+    let snapshot = SubagentActivitySnapshot {
+        subagent_id: SubagentId::new("subagent-1").expect("valid subagent id"),
+        task_id: SubagentTaskId::new("task-1").expect("valid task id"),
+        phase: SubagentActivityPhase::Running,
+        summary: "Reading protocol tests".to_owned(),
+        updated_at_ms: 1_725_000_000_000,
+    };
+
+    assert_eq!(
+        serde_json::to_value(&snapshot).expect("activity snapshot serializes"),
+        json!({
+            "subagent_id": "subagent-1",
+            "task_id": "task-1",
+            "phase": "running",
+            "summary": "Reading protocol tests",
+            "updated_at_ms": 1_725_000_000_000_u64
+        })
+    );
+    assert_json_round_trip(&snapshot);
+}
+
+#[test]
+fn subagent_activity_snapshot_rejects_unknown_fields() {
+    assert!(
+        serde_json::from_value::<SubagentActivitySnapshot>(json!({
+            "subagent_id": "subagent-1",
+            "task_id": "task-1",
+            "phase": "waiting",
+            "summary": "Waiting for input",
+            "updated_at_ms": 1_725_000_000_000_u64,
+            "provider_status": "queued"
+        }))
+        .is_err()
+    );
 }
 
 #[test]
@@ -1518,4 +1576,6 @@ fn schemars_generation_compiles_for_public_protocol_types() {
     assert_schema_compiles::<UsageContextWindow>();
     assert_schema_compiles::<CompactionUsageWindow>();
     assert_schema_compiles::<ContextWindowSource>();
+    assert_schema_compiles::<SubagentActivityPhase>();
+    assert_schema_compiles::<SubagentActivitySnapshot>();
 }

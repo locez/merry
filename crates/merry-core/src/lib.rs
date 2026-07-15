@@ -9,6 +9,7 @@ pub mod journal;
 pub mod plan;
 pub mod runtime_event;
 pub mod schema;
+pub mod subagent_activity;
 pub mod tool;
 pub mod usage;
 
@@ -37,6 +38,7 @@ pub use runtime_event::{
     RuntimeEventSource, SubagentStatus, ToolOutput,
 };
 pub use schema::ToolInputSchema;
+pub use subagent_activity::{SubagentActivityPhase, SubagentActivitySnapshot};
 pub use tool::{
     PendingToolCall, PendingToolCallBatch, ToolCallArguments, ToolCallResult, ToolCallResultStatus,
     ToolSpec,
