@@ -13,7 +13,8 @@ use crate::{
         protocol::{
             BeginPlanInput, BeginPlanOutput, ControlPlanAttemptInput, PlanAttemptToolOutput,
             PlanDirectiveToolOutput, PlanProgressToolOutput, PlanUpdateOutput,
-            PlanUpdateToolOutput, ReportPlanAttemptInput, ReportPlanProgressInput, UpdatePlanInput,
+            PlanUpdateToolOutput, ReportPlanAttemptInput, ReportPlanProgressInput,
+            SubagentPlanUpdateInput, UpdatePlanInput,
         },
         recovery::{PlanAttemptCancellationOutput, PlanProgressReviewOutput, PlanRecoveryOutput},
         validation,
@@ -271,6 +272,40 @@ pub(super) async fn update_plan(
         (base, output, prepared)
     };
 
+    let committed_events = persist_and_install(session, store, events, base, prepared).await?;
+    Ok(PlanCommandResult {
+        output,
+        events: committed_events,
+    })
+}
+
+pub(super) async fn update_subagent(
+    session: &Arc<Mutex<SessionState>>,
+    store: Option<&FileSessionStore>,
+    events: &broadcast::Sender<RuntimeJournalEvent>,
+    plan_id: PlanId,
+    root_node_id: PlanNodeId,
+    binding_id: PlanBindingId,
+    input: SubagentPlanUpdateInput,
+) -> Result<PlanCommandResult<PlanUpdateOutput>, PlanControllerError> {
+    let (base, output, prepared) = {
+        let session = session.lock().await;
+        let mut candidate = session
+            .active_plan()
+            .ok_or(PlanControllerError::NoActivePlan)?
+            .clone();
+        let output = candidate.update_subagent(plan_id, root_node_id, binding_id, input)?;
+        let payloads = vec![plan_updated_payload(&output.snapshot)];
+        let base = SessionBase::capture(&session);
+        let prepared = prepare_plan_commit(
+            &session,
+            candidate,
+            session.terminal_plans().to_vec(),
+            payloads,
+            None,
+        )?;
+        (base, output, prepared)
+    };
     let committed_events = persist_and_install(session, store, events, base, prepared).await?;
     Ok(PlanCommandResult {
         output,

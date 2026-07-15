@@ -3,7 +3,7 @@ use super::transactions::{
     authorize_execution, begin_plan, begin_user_plan, bind_subagent, cancel_attempt, control_plan,
     deliver_directives, heartbeat, issue_directive, record_runtime_effect, recover_attempts,
     report_attempt, report_progress, review_progress, start_attempt, start_local_attempt,
-    update_plan, update_subagent_link,
+    update_plan, update_subagent, update_subagent_link,
 };
 use crate::{
     FileSessionStore,
@@ -17,15 +17,17 @@ use crate::{
         },
         protocol::{
             BeginPlanInput, BeginPlanOutput, ControlPlanAttemptInput, PlanApprovalInput,
-            PlanUpdateOutput, ReportPlanAttemptInput, ReportPlanProgressInput, UpdatePlanInput,
+            PlanUpdateOutput, ReportPlanAttemptInput, ReportPlanProgressInput,
+            SubagentPlanUpdateInput, UpdatePlanInput,
         },
         recovery::{PlanAttemptCancellationOutput, PlanProgressReviewOutput, PlanRecoveryOutput},
     },
     session::SessionState,
 };
 use merry_core::{
-    PlanBindingId, PlanCapabilityEnvelopeSnapshot, PlanLeaseId, PlanLinkSnapshot, PlanLinkStatus,
-    PlanNodeId, PlanSnapshot, RuntimeJournalEvent, SubagentId, SubagentTaskId, ToolCallId,
+    PlanBindingId, PlanCapabilityEnvelopeSnapshot, PlanId, PlanLeaseId, PlanLinkSnapshot,
+    PlanLinkStatus, PlanNodeId, PlanSnapshot, RuntimeJournalEvent, SubagentId, SubagentTaskId,
+    ToolCallId,
 };
 use std::sync::Arc;
 use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
@@ -47,6 +49,13 @@ pub(super) enum PlanCommand {
     },
     Update {
         input: UpdatePlanInput,
+        reply: oneshot::Sender<Result<PlanCommandResult<PlanUpdateOutput>, PlanControllerError>>,
+    },
+    UpdateSubagent {
+        plan_id: PlanId,
+        root_node_id: PlanNodeId,
+        binding_id: PlanBindingId,
+        input: SubagentPlanUpdateInput,
         reply: oneshot::Sender<Result<PlanCommandResult<PlanUpdateOutput>, PlanControllerError>>,
     },
     UpdateTool {
@@ -249,6 +258,25 @@ pub(super) async fn run_controller(
             PlanCommand::Update { input, reply } => {
                 let result =
                     update_plan(&session, store.as_ref(), &events, input, None, None).await;
+                let _ = reply.send(result);
+            }
+            PlanCommand::UpdateSubagent {
+                plan_id,
+                root_node_id,
+                binding_id,
+                input,
+                reply,
+            } => {
+                let result = update_subagent(
+                    &session,
+                    store.as_ref(),
+                    &events,
+                    plan_id,
+                    root_node_id,
+                    binding_id,
+                    input,
+                )
+                .await;
                 let _ = reply.send(result);
             }
             PlanCommand::UpdateTool {

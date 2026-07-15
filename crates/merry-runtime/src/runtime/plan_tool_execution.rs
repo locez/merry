@@ -496,6 +496,8 @@ fn plan_error_code(error: &PlanError) -> &'static str {
         PlanError::MissingArtifactRef { .. } => "plan_artifact_ref_missing",
         PlanError::InvalidEvidenceRef { .. } => "plan_evidence_ref_invalid",
         PlanError::ArtifactPromotionConflict { .. } => "plan_artifact_promotion_conflict",
+        PlanError::InvalidAuthoredNodeStatus { .. } => "plan_invalid_authored_status",
+        PlanError::SubagentScopeViolation { .. } => "plan_subagent_scope_violation",
     }
 }
 

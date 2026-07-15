@@ -166,6 +166,7 @@ fn valid_update_arguments() -> Value {
                 client_key: Some("root".to_owned()),
                 objective: "Implement the requested change".to_owned(),
                 acceptance: vec!["Focused tests pass".to_owned()],
+                status: None,
                 executor_policy: PlanExecutorPolicy::Auto,
                 harness: PlanHarnessSnapshot::default(),
                 recovery_policy: PlanRecoveryPolicySnapshot::default(),
