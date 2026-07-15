@@ -185,7 +185,10 @@ pub trait PlanLinkRuntime: Send + Sync {
     ) -> BoxFuture<'a, Result<(), String>>;
 
     /// Creates a scoped Plan capability only for an active, non-superseded link.
-    fn scope_for_link(&self, link: &PlanLinkSnapshot) -> Option<PlanSubagentScope>;
+    fn scope_for_link<'a>(
+        &'a self,
+        link: &'a PlanLinkSnapshot,
+    ) -> BoxFuture<'a, Option<PlanSubagentScope>>;
 }
 
 struct PlanControllerLinkRuntime(PlanController);
@@ -221,15 +224,37 @@ impl PlanLinkRuntime for PlanControllerLinkRuntime {
         })
     }
 
-    fn scope_for_link(&self, link: &PlanLinkSnapshot) -> Option<PlanSubagentScope> {
-        if link.status != PlanLinkStatus::Active || link.superseded_by.is_some() {
-            return None;
-        }
-        Some(PlanSubagentScope::from_internal(self.0.subagent_scope(
-            link.plan_id.clone(),
-            link.node_id.clone(),
-            link.binding_id.clone(),
-        )))
+    fn scope_for_link<'a>(
+        &'a self,
+        link: &'a PlanLinkSnapshot,
+    ) -> BoxFuture<'a, Option<PlanSubagentScope>> {
+        Box::pin(async move {
+            if link.status != PlanLinkStatus::Active || link.superseded_by.is_some() {
+                return None;
+            }
+            let snapshot = self.0.snapshot().await.ok().flatten()?;
+            let current_link =
+                snapshot
+                    .nodes
+                    .iter()
+                    .flat_map(|node| &node.links)
+                    .find(|current| {
+                        current.plan_id == link.plan_id
+                            && current.node_id == link.node_id
+                            && current.binding_id == link.binding_id
+                            && current.subagent_id == link.subagent_id
+                            && current.task_id == link.task_id
+                    })?;
+            if current_link.status != PlanLinkStatus::Active || current_link.superseded_by.is_some()
+            {
+                return None;
+            }
+            Some(PlanSubagentScope::from_internal(self.0.subagent_scope(
+                current_link.plan_id.clone(),
+                current_link.node_id.clone(),
+                current_link.binding_id.clone(),
+            )))
+        })
     }
 }
 
@@ -768,9 +793,10 @@ impl SubagentManager {
         let child_session_id = child_session_id();
         let generation_config = generation_config_for_child_task(&task);
         let plan_link_runtime = self.attached_plan_link_runtime();
-        let plan_subagent_scope = plan_link
-            .as_ref()
-            .and_then(|link| plan_link_runtime.as_ref()?.scope_for_link(link));
+        let plan_subagent_scope = match (plan_link.as_ref(), plan_link_runtime.as_ref()) {
+            (Some(link), Some(runtime)) => runtime.scope_for_link(link).await,
+            _ => None,
+        };
         let runtime = match self.factory.build_child(ChildRuntimeInput {
             session_id: child_session_id,
             task_anchor,
@@ -1013,7 +1039,7 @@ async fn start_reserved_children_iteratively(
 ) {
     let mut pending = VecDeque::from(starts);
     while let Some(start) = pending.pop_front() {
-        match spawn_reserved_child(scheduler.clone(), &start) {
+        match spawn_reserved_child(scheduler.clone(), &start).await {
             Ok(()) => {}
             Err(error) => {
                 let mut state_guard = scheduler.state.lock().await;
@@ -1040,7 +1066,7 @@ async fn start_reserved_children_iteratively(
     }
 }
 
-fn spawn_reserved_child(
+async fn spawn_reserved_child(
     scheduler: ChildScheduler,
     start: &ReservedChildStart,
 ) -> Result<(), RuntimeError> {
@@ -1051,10 +1077,10 @@ fn spawn_reserved_child(
         .lock()
         .expect("subagent plan link runtime mutex is not poisoned")
         .clone();
-    let plan_subagent_scope = start
-        .plan_link
-        .as_ref()
-        .and_then(|link| plan_link_runtime.as_ref()?.scope_for_link(link));
+    let plan_subagent_scope = match (start.plan_link.as_ref(), plan_link_runtime.as_ref()) {
+        (Some(link), Some(runtime)) => runtime.scope_for_link(link).await,
+        _ => None,
+    };
     let runtime = scheduler.factory.build_child(ChildRuntimeInput {
         session_id: child_session_id,
         task_anchor: start.task_anchor.clone(),
@@ -2016,6 +2042,115 @@ mod manager_tests {
                     ModelName::new("fake/recording-child").expect("valid model name"),
                 )
                 .build()
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn plan_link_scope_requires_current_exact_active_binding() {
+        let session_id = SessionId::new("scope-exact-binding").expect("valid session id");
+        let session = Arc::new(tokio::sync::Mutex::new(crate::session::SessionState::new(
+            session_id,
+        )));
+        let (controller, _events) = PlanController::start(
+            Arc::clone(&session),
+            None,
+            std::num::NonZeroUsize::new(16).expect("non-zero event buffer"),
+        );
+        controller
+            .begin(crate::plan::BeginPlanInput {
+                reason: "validate exact linked scope".to_owned(),
+                governing_skill_id: None,
+            })
+            .await
+            .expect("plan activation succeeds");
+        controller
+            .update(crate::plan::UpdatePlanInput {
+                reason: "define linked scope task".to_owned(),
+                execution_intent: crate::plan::PlanExecutionIntent::ContinuePlanning,
+                coordinator_node_id: None,
+                max_concurrency_hint: None,
+                change: crate::plan::PlanChangeInput::DefinePlan {
+                    expected_plan_revision: 0,
+                    root: crate::plan::PlanNodeInput {
+                        id: None,
+                        client_key: Some("owned".to_owned()),
+                        objective: "Complete the owned task".to_owned(),
+                        acceptance: vec!["owned task completes".to_owned()],
+                        status: None,
+                        executor_policy: merry_core::PlanExecutorPolicy::Delegate,
+                        harness: merry_core::PlanHarnessSnapshot::default(),
+                        recovery_policy: merry_core::PlanRecoveryPolicySnapshot::default(),
+                        depends_on: Vec::new(),
+                        children: Vec::new(),
+                    },
+                },
+            })
+            .await
+            .expect("plan definition succeeds");
+        let link = controller
+            .bind_subagent(
+                "owned".to_owned(),
+                merry_core::SubagentId::new("scope-agent").expect("valid agent id"),
+                merry_core::SubagentTaskId::new("scope-task").expect("valid task id"),
+                1,
+            )
+            .await
+            .expect("link binds");
+        let runtime = plan_link_runtime_for_controller(controller.clone());
+
+        assert!(runtime.scope_for_link(&link).await.is_some());
+
+        for status in [
+            merry_core::PlanLinkStatus::Completed,
+            merry_core::PlanLinkStatus::Failed,
+            merry_core::PlanLinkStatus::Cancelled,
+            merry_core::PlanLinkStatus::Superseded,
+        ] {
+            let mut terminal = link.clone();
+            terminal.status = status;
+            assert!(
+                runtime.scope_for_link(&terminal).await.is_none(),
+                "terminal input status {status:?} must not create a scope"
+            );
+        }
+
+        let mut foreign_plan = link.clone();
+        foreign_plan.plan_id = merry_core::PlanId::new("foreign-plan").expect("valid plan id");
+        assert!(runtime.scope_for_link(&foreign_plan).await.is_none());
+
+        let mut foreign_node = link.clone();
+        foreign_node.node_id = merry_core::PlanNodeId::new("foreign-node").expect("valid node id");
+        assert!(runtime.scope_for_link(&foreign_node).await.is_none());
+
+        let mut foreign_binding = link.clone();
+        foreign_binding.binding_id =
+            merry_core::PlanBindingId::new("foreign-binding").expect("valid binding id");
+        assert!(runtime.scope_for_link(&foreign_binding).await.is_none());
+
+        let mut foreign_subagent = link.clone();
+        foreign_subagent.subagent_id =
+            merry_core::SubagentId::new("foreign-agent").expect("valid agent id");
+        assert!(runtime.scope_for_link(&foreign_subagent).await.is_none());
+
+        let mut foreign_task = link.clone();
+        foreign_task.task_id =
+            merry_core::SubagentTaskId::new("foreign-task").expect("valid task id");
+        assert!(runtime.scope_for_link(&foreign_task).await.is_none());
+
+        for (now_ms, status) in [
+            (2, merry_core::PlanLinkStatus::Completed),
+            (3, merry_core::PlanLinkStatus::Failed),
+            (4, merry_core::PlanLinkStatus::Cancelled),
+            (5, merry_core::PlanLinkStatus::Superseded),
+        ] {
+            controller
+                .update_subagent_link(link.binding_id.clone(), status, now_ms)
+                .await
+                .expect("link status transition commits");
+            assert!(
+                runtime.scope_for_link(&link).await.is_none(),
+                "a stale active link must not retain scope after {status:?} controller transition"
+            );
         }
     }
 
