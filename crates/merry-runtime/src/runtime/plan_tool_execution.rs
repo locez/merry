@@ -425,6 +425,10 @@ fn plan_error_rejection(error: &PlanError) -> PlanToolRejection {
         PlanError::StalePlanRevision { .. } | PlanError::StaleNodeRevision { .. } => {
             read_plan_recovery()
         }
+        PlanError::SubagentScopeViolation { .. } => serde_json::json!({
+            "next_action": "use_bound_subagent_scope",
+            "instruction": "The child scope cannot perform this operation outside its active binding. Use the binding's subtree for scoped reads and updates, and do not target nodes or links outside that subtree.",
+        }),
         _ => read_plan_recovery(),
     };
     PlanToolRejection::new(plan_error_code(error), error.to_string()).with_recovery(recovery)
@@ -519,5 +523,22 @@ mod tests {
                 .expect("recovery instruction should be text")
                 .contains("Do not use update_plan with use_current_plan")
         );
+    }
+
+    #[test]
+    fn subagent_scope_violation_recovery_requires_the_bound_subtree() {
+        let rejection = plan_error_rejection(&PlanError::SubagentScopeViolation {
+            reason: "scope root is not owned by the linked binding",
+        });
+        assert_eq!(rejection.code, "plan_subagent_scope_violation");
+        assert_eq!(
+            rejection.recovery["next_action"],
+            "use_bound_subagent_scope"
+        );
+        let instruction = rejection.recovery["instruction"]
+            .as_str()
+            .expect("recovery instruction should be text");
+        assert!(instruction.contains("active binding"));
+        assert!(instruction.contains("binding's subtree"));
     }
 }

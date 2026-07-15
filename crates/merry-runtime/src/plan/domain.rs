@@ -768,7 +768,7 @@ impl PlanState {
             link.plan_id == self.snapshot.plan_id
                 && link.node_id == *root_node_id
                 && link.binding_id == *binding_id
-                && link.status != PlanLinkStatus::Superseded
+                && link.status == PlanLinkStatus::Active
                 && link.superseded_by.is_none()
         }) {
             return Err(PlanError::SubagentScopeViolation {
