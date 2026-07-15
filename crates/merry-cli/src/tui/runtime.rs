@@ -23,7 +23,7 @@ use merry_llm::GenerationConfig;
 use merry_runtime::{
     AgentLoopControl, AgentLoopInput, AutomaticCompactionConfig, InteractivePrimaryModel,
     InteractiveRunEventStream, InteractiveSettingsUpdate, InteractiveSubagentSettings, Runtime,
-    SessionTranscriptItem, SkillMetadata, StepContext,
+    SessionTranscriptItem, SkillMetadata, StepContext, SubagentActivityReceiver,
 };
 use std::{env, num::NonZeroU64, path::PathBuf};
 
@@ -36,6 +36,7 @@ pub(crate) struct TuiRuntimeSession {
     runtime: Runtime,
     session_store: TuiSessionStore,
     pub(crate) stream: InteractiveRunEventStream,
+    pub(crate) subagent_activity: SubagentActivityReceiver,
     pub(crate) input: AgentLoopInput,
     pub(crate) control: AgentLoopControl,
     pub(crate) skills: Vec<SkillMetadata>,
@@ -135,6 +136,7 @@ pub(crate) async fn start_tui_runtime_session(
             loop_config,
         )
         .map_err(unexpected)?;
+    let subagent_activity = runtime.subscribe_subagent_activity();
     let (stream, input, control) = interactive.split();
     if preferences.context_window_tokens.is_some() {
         control
@@ -156,6 +158,7 @@ pub(crate) async fn start_tui_runtime_session(
         runtime,
         session_store,
         stream,
+        subagent_activity,
         input,
         control,
         skills,

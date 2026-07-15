@@ -6,7 +6,8 @@ use merry_core::{
     PlanDirectiveKind, PlanDirectiveStatus, PlanExecutorPolicy, PlanHarnessSnapshot, PlanId,
     PlanLeaseId, PlanLeaseSnapshot, PlanLeaseStatus, PlanNodeId, PlanNodeSnapshot, PlanNodeStatus,
     PlanPhase, PlanRecoveryPolicySnapshot, PlanResourcePolicySnapshot, PlanSchedulerStatus,
-    PlanSnapshot, ToolName,
+    PlanSnapshot, SubagentActivityPhase, SubagentActivitySnapshot, SubagentId, SubagentTaskId,
+    ToolName,
 };
 use std::path::PathBuf;
 
@@ -147,6 +148,142 @@ fn plan_pane_counts_a_live_local_attempt_without_a_lease() {
         0,
         "unbound attempts are not Plan links"
     );
+}
+
+#[test]
+fn subagent_activity_attaches_only_to_its_linked_plan_node() {
+    let mut plan = snapshot(1, PlanNodeStatus::InProgress);
+    add_live_attempt(&mut plan);
+    let mut state = PlanUiState::default();
+    state.update_subagent_activity(vec![
+        activity(
+            "subagent-active",
+            SubagentActivityPhase::Running,
+            "editing the linked file",
+            10,
+        ),
+        activity(
+            "unrelated-agent",
+            SubagentActivityPhase::Running,
+            "should stay hidden",
+            20,
+        ),
+    ]);
+    state.update_snapshot(plan);
+
+    let rows = state.visible_rows();
+    let active = rows
+        .iter()
+        .find(|row| row.node_id == node_id("active-leaf"))
+        .expect("linked node should be visible");
+    let unrelated = rows
+        .iter()
+        .find(|row| row.node_id == node_id("unrelated"))
+        .expect("unrelated node should be visible");
+    assert_eq!(
+        active
+            .activity
+            .as_ref()
+            .map(|snapshot| snapshot.summary.as_str()),
+        Some("editing the linked file")
+    );
+    assert!(unrelated.activity.is_none());
+}
+
+#[test]
+fn latest_subagent_activity_replaces_the_prior_summary() {
+    let mut plan = snapshot(1, PlanNodeStatus::InProgress);
+    add_live_attempt(&mut plan);
+    let mut state = PlanUiState::default();
+    state.update_snapshot(plan);
+    state.update_subagent_activity(vec![activity(
+        "subagent-active",
+        SubagentActivityPhase::Running,
+        "old summary",
+        10,
+    )]);
+    state.update_subagent_activity(vec![activity(
+        "subagent-active",
+        SubagentActivityPhase::Waiting,
+        "new summary",
+        20,
+    )]);
+
+    let row = state
+        .visible_rows()
+        .into_iter()
+        .find(|row| row.node_id == node_id("active-leaf"))
+        .expect("linked node should be visible");
+    assert_eq!(
+        row.activity
+            .as_ref()
+            .map(|activity| activity.summary.as_str()),
+        Some("new summary")
+    );
+    assert_eq!(
+        row.activity.as_ref().map(|activity| activity.phase),
+        Some(SubagentActivityPhase::Waiting)
+    );
+}
+
+#[test]
+fn terminal_subagent_activity_is_rendered_on_the_plan_node() {
+    let mut state = tui_state();
+    let mut plan = snapshot(1, PlanNodeStatus::InProgress);
+    add_live_attempt(&mut plan);
+    state.plan_mut().update_snapshot(plan);
+    state.plan_mut().update_subagent_activity(vec![activity(
+        "subagent-active",
+        SubagentActivityPhase::Completed,
+        "finished the linked task",
+        30,
+    )]);
+
+    let rendered = render_to_text(&state, 140, 40);
+
+    assert!(rendered.contains("completed  finished the linked task"));
+
+    state.plan_mut().open_and_focus();
+    state.plan_mut().select_node(node_id("active-leaf"));
+    state.plan_mut().open_inspector();
+    assert!(
+        render_to_text(&state, 140, 40).contains("latest: completed  finished the linked task")
+    );
+}
+
+#[test]
+fn no_subagent_activity_preserves_existing_plan_tree_rendering() {
+    let mut state = tui_state();
+    let mut plan = snapshot(1, PlanNodeStatus::InProgress);
+    add_live_attempt(&mut plan);
+    state.plan_mut().update_snapshot(plan);
+    let before = render_to_text(&state, 140, 40);
+
+    state.plan_mut().update_subagent_activity(Vec::new());
+
+    assert_eq!(render_to_text(&state, 140, 40), before);
+}
+
+#[test]
+fn long_subagent_summary_does_not_change_tree_geometry_or_bottom_panes() {
+    let mut state = tui_state();
+    let mut plan = snapshot(1, PlanNodeStatus::InProgress);
+    add_live_attempt(&mut plan);
+    state.plan_mut().update_snapshot(plan);
+    let node_count = state.plan().visible_rows().len();
+    state.plan_mut().update_subagent_activity(vec![activity(
+        "subagent-active",
+        SubagentActivityPhase::Running,
+        &"a very long bounded summary ".repeat(40),
+        40,
+    )]);
+
+    let rendered = render_to_text(&state, 80, 24);
+
+    assert_eq!(state.plan().visible_rows().len(), node_count);
+    assert_eq!(rendered.lines().count(), 24);
+    assert!(rendered.contains("Ready"));
+    assert!(!rendered.contains(&"a very long bounded summary ".repeat(10)));
 }
 
 #[test]
@@ -797,4 +934,19 @@ fn node(
 
 fn node_id(value: &str) -> PlanNodeId {
     PlanNodeId::new(value).unwrap()
+}
+
+fn activity(
+    subagent_id: &str,
+    phase: SubagentActivityPhase,
+    summary: &str,
+    updated_at_ms: u64,
+) -> SubagentActivitySnapshot {
+    SubagentActivitySnapshot {
+        subagent_id: SubagentId::new(subagent_id).unwrap(),
+        task_id: SubagentTaskId::new("task-activity").unwrap(),
+        phase,
+        summary: summary.to_owned(),
+        updated_at_ms,
+    }
 }

@@ -2,6 +2,7 @@ use merry_core::{
     PlanApprovalRequirementKind, PlanApprovalRequirementStatus, PlanAttemptProgressSnapshot,
     PlanAttemptSnapshot, PlanCapabilityEnvelopeSnapshot, PlanExecutorPolicy, PlanLeaseSnapshot,
     PlanLinkStatus, PlanNodeId, PlanNodeSnapshot, PlanNodeStatus, PlanSnapshot,
+    SubagentActivitySnapshot, SubagentId,
 };
 use merry_runtime::PlanApprovalInput;
 use std::collections::{BTreeMap, BTreeSet};
@@ -23,6 +24,7 @@ pub(crate) struct PlanTreeRow {
     pub(crate) status: PlanNodeStatus,
     pub(crate) executor_policy: PlanExecutorPolicy,
     pub(crate) objective: String,
+    pub(crate) activity: Option<SubagentActivitySnapshot>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -32,6 +34,7 @@ pub(crate) struct PlanUiState {
     collapsed_node_ids: BTreeSet<PlanNodeId>,
     scroll_offset: usize,
     inspector_scroll_offset: usize,
+    subagent_activity: BTreeMap<SubagentId, SubagentActivitySnapshot>,
     open: bool,
     focused: bool,
     inspector_open: bool,
@@ -70,6 +73,22 @@ impl PlanUiState {
             self.open = true;
         }
         self.clamp_scroll_offset();
+    }
+
+    pub(crate) fn update_subagent_activity(&mut self, snapshots: Vec<SubagentActivitySnapshot>) {
+        self.subagent_activity =
+            snapshots
+                .into_iter()
+                .fold(BTreeMap::new(), |mut activity, snapshot| {
+                    let subagent_id = snapshot.subagent_id.clone();
+                    if activity
+                        .get(&subagent_id)
+                        .is_none_or(|existing| existing.updated_at_ms <= snapshot.updated_at_ms)
+                    {
+                        activity.insert(subagent_id, snapshot);
+                    }
+                    activity
+                });
     }
 
     pub(crate) fn update_progress(&mut self, progress: PlanAttemptProgressSnapshot) {
@@ -138,6 +157,19 @@ impl PlanUiState {
             .nodes
             .iter()
             .find(|node| &node.id == selected && node.status != PlanNodeStatus::Superseded)
+    }
+
+    pub(crate) fn activity_for_node(
+        &self,
+        node: &PlanNodeSnapshot,
+    ) -> Option<&SubagentActivitySnapshot> {
+        node.links
+            .iter()
+            .filter(|link| {
+                link.status != PlanLinkStatus::Superseded && link.superseded_by.is_none()
+            })
+            .filter_map(|link| self.subagent_activity.get(&link.subagent_id))
+            .max_by_key(|activity| activity.updated_at_ms)
     }
 
     pub(crate) fn select_node(&mut self, node_id: PlanNodeId) -> bool {
@@ -408,6 +440,7 @@ impl PlanUiState {
             status: node.status,
             executor_policy: node.executor_policy,
             objective: node.objective.clone(),
+            activity: self.activity_for_node(node).cloned(),
         });
         if collapsed {
             return;
