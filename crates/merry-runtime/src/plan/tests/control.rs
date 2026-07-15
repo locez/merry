@@ -31,6 +31,7 @@ fn plan_with_recovery_limit(max_transient_attempts: u8) -> PlanState {
                 client_key: Some("root".to_owned()),
                 objective: "Complete reviewed work".to_owned(),
                 acceptance: vec!["work is verified".to_owned()],
+                status: None,
                 executor_policy: PlanExecutorPolicy::Delegate,
                 harness: PlanHarnessSnapshot::default(),
                 recovery_policy: PlanRecoveryPolicySnapshot {
@@ -68,6 +69,7 @@ fn draft_plan_with_id(plan_id: &str) -> PlanState {
                 client_key: Some("root".to_owned()),
                 objective: "Execute the approved draft".to_owned(),
                 acceptance: vec!["the draft completes".to_owned()],
+                status: None,
                 executor_policy: PlanExecutorPolicy::Local,
                 harness: PlanHarnessSnapshot::default(),
                 recovery_policy: PlanRecoveryPolicySnapshot::default(),

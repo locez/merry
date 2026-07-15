@@ -2,8 +2,8 @@ use merry_core::{
     ArtifactRef, ErrorInfo, EvidenceRef, PlanApprovalRequirementId,
     PlanApprovalRequirementSnapshot, PlanAttemptId, PlanAttemptOutcome,
     PlanCapabilityEnvelopeSnapshot, PlanDirectiveConstraints, PlanDirectiveId, PlanDirectiveKind,
-    PlanExecutorPolicy, PlanHarnessSnapshot, PlanId, PlanNodeId, PlanNodeResult, PlanPhase,
-    PlanRecoveryPolicySnapshot, PlanSnapshot, SkillId,
+    PlanExecutorPolicy, PlanHarnessSnapshot, PlanId, PlanNodeId, PlanNodeResult, PlanNodeStatus,
+    PlanPhase, PlanRecoveryPolicySnapshot, PlanSnapshot, SkillId,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -81,6 +81,30 @@ pub struct PlanDecompositionInput {
     pub children: Vec<PlanNodeInput>,
 }
 
+/// Child-owned update to the subtree below one linked Plan node.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SubagentPlanUpdateInput {
+    pub reason: String,
+    pub change: SubagentPlanChangeInput,
+}
+
+/// Scoped tree changes accepted from a linked child runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+#[allow(clippy::large_enum_variant)]
+pub enum SubagentPlanChangeInput {
+    DefineChildren {
+        expected_plan_revision: u64,
+        children: Vec<PlanNodeInput>,
+    },
+    ReplaceSubtree {
+        target_node_id: PlanNodeId,
+        expected_node_revision: u64,
+        subtree: PlanNodeInput,
+    },
+}
+
 /// Exactly-once semantic terminal report for the attempt bound to this runtime.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -117,11 +141,12 @@ pub enum PlanNodeReferenceInput {
     ClientKey { client_key: String },
 }
 
-/// Provider-visible authored node input. Runtime-owned state is intentionally absent.
+/// Provider-visible authored node input. Effective runtime state is separate;
+/// an optional declared status can be supplied for the authored projection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[schemars(
-    description = "One authored plan node. New nodes use client_key and omit id. Existing mutable nodes use id and omit client_key. Node status, attempts, leases, progress, results, parent ids, and sibling order are runtime-owned and cannot be authored here.",
+    description = "One authored plan node. New nodes use client_key and omit id. Existing mutable nodes use id and omit client_key. Effective status, attempts, leases, progress, results, parent ids, and sibling order are runtime-owned. The optional declared status accepts pending, in_progress, completed, or failed.",
     extend("oneOf" = [
         {
             "title": "New node",
@@ -152,6 +177,11 @@ pub struct PlanNodeInput {
     pub objective: String,
     /// Observable checks that determine whether this node is complete.
     pub acceptance: Vec<String>,
+    /// Optional authored declaration. When omitted for an existing node, the
+    /// current declared status is retained.
+    #[serde(default)]
+    #[schemars(schema_with = "authored_status_schema")]
+    pub status: Option<PlanNodeStatus>,
     /// Runtime-owned execution preference retained for internal snapshots. It
     /// is not provider-authored and is omitted from the generated schema.
     #[serde(default, skip_serializing)]
@@ -170,6 +200,19 @@ pub struct PlanNodeInput {
     pub depends_on: Vec<PlanNodeReferenceInput>,
     /// Recursive direct children authored as part of the Plan tree.
     pub children: Vec<PlanNodeInput>,
+}
+
+fn authored_status_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::Schema::try_from(serde_json::json!({
+        "anyOf": [
+            {
+                "type": "string",
+                "enum": ["pending", "in_progress", "completed", "failed"]
+            },
+            { "type": "null" }
+        ]
+    }))
+    .expect("static authored status schema is valid")
 }
 
 /// Stable tagged change shape for complete planning and execution-time revision.

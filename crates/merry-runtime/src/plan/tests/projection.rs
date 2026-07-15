@@ -183,6 +183,7 @@ fn node(
         client_key: Some(client_key.to_owned()),
         objective: objective.to_owned(),
         acceptance: vec![format!("{objective} is verified")],
+        status: None,
         executor_policy,
         harness: PlanHarnessSnapshot::default(),
         recovery_policy: PlanRecoveryPolicySnapshot::default(),

@@ -1,5 +1,5 @@
 use super::{
-    PlanArtifactPromotion, PlanError,
+    PlanArtifactPromotion, PlanError, PlanSubagentScope,
     control::PlanControlOutput,
     execution::{
         PlanAttemptActor, PlanAttemptReportOutput, PlanAttemptStartOutput,
@@ -8,7 +8,8 @@ use super::{
     },
     protocol::{
         BeginPlanInput, BeginPlanOutput, ControlPlanAttemptInput, PlanApprovalInput,
-        PlanUpdateOutput, ReportPlanAttemptInput, ReportPlanProgressInput, UpdatePlanInput,
+        PlanUpdateOutput, ReportPlanAttemptInput, ReportPlanProgressInput, SubagentPlanUpdateInput,
+        UpdatePlanInput,
     },
     recovery::{PlanAttemptCancellationOutput, PlanProgressReviewOutput, PlanRecoveryOutput},
 };
@@ -167,6 +168,40 @@ impl PlanController {
             .await
             .map_err(|_| PlanControllerError::CommandChannelClosed)??;
         Ok(committed.output)
+    }
+
+    pub(crate) fn subagent_scope(
+        &self,
+        plan_id: merry_core::PlanId,
+        root_node_id: PlanNodeId,
+        binding_id: PlanBindingId,
+    ) -> PlanSubagentScope {
+        PlanSubagentScope::new(plan_id, root_node_id, binding_id, self.clone())
+    }
+
+    pub(crate) async fn update_subagent(
+        &self,
+        plan_id: merry_core::PlanId,
+        root_node_id: PlanNodeId,
+        binding_id: PlanBindingId,
+        input: SubagentPlanUpdateInput,
+    ) -> Result<PlanUpdateOutput, PlanControllerError> {
+        self.ensure_started()?;
+        let (reply, response) = oneshot::channel();
+        self.sender
+            .send(PlanCommand::UpdateSubagent {
+                plan_id,
+                root_node_id,
+                binding_id,
+                input,
+                reply,
+            })
+            .await
+            .map_err(|_| PlanControllerError::CommandChannelClosed)?;
+        Ok(response
+            .await
+            .map_err(|_| PlanControllerError::CommandChannelClosed)??
+            .output)
     }
 
     pub(crate) async fn update_from_tool(

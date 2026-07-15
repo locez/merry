@@ -1179,6 +1179,7 @@ fn persisted_test_plan() -> PlanState {
                 client_key: Some("root".to_owned()),
                 objective: "Persist and resume the plan".to_owned(),
                 acceptance: vec!["same ids and revisions after load".to_owned()],
+                status: None,
                 executor_policy: PlanExecutorPolicy::Local,
                 harness: PlanHarnessSnapshot::default(),
                 recovery_policy: PlanRecoveryPolicySnapshot::default(),
