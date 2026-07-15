@@ -326,6 +326,7 @@ mod tests {
             PlanLinkStatus::Completed,
             PlanLinkStatus::Failed,
             PlanLinkStatus::Cancelled,
+            PlanLinkStatus::Superseded,
         ] {
             let (controller, mut events) = controller(None);
             let (scope, _owned_id, _sibling_id) = linked_scope(&controller).await;
@@ -764,7 +765,24 @@ mod tests {
             .nodes
             .iter()
             .find(|node| node.id == target_id)
-            .expect("target remains present");
+            .expect("target remains projected");
+        assert_eq!(target.result, Some(runtime_result.clone()));
+        assert_eq!(target.execution_summary, runtime_summary);
+        assert!(
+            target.links.is_empty(),
+            "scoped view must hide links owned by another binding"
+        );
+
+        let full = controller
+            .snapshot()
+            .await
+            .expect("full snapshot succeeds")
+            .expect("active plan remains present");
+        let target = full
+            .nodes
+            .iter()
+            .find(|node| node.id == target_id)
+            .expect("target remains in full snapshot");
         assert_eq!(target.result, Some(runtime_result));
         assert_eq!(target.execution_summary, runtime_summary);
         assert_eq!(target.links, vec![runtime_link]);
