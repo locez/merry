@@ -430,6 +430,36 @@ fn focused_plan_navigation_does_not_edit_chat_input() {
 }
 
 #[test]
+fn ctrl_o_toggles_plan_visibility_and_focus() {
+    let mut state = tui_state();
+    state
+        .plan_mut()
+        .update_snapshot(snapshot(1, PlanNodeStatus::InProgress));
+    assert!(state.plan().is_open());
+    assert!(!state.plan().is_focused());
+
+    handle_key_event(key_ctrl('o'), &mut state);
+    assert!(!state.plan().is_open());
+
+    handle_key_event(key_ctrl('o'), &mut state);
+    assert!(state.plan().is_open());
+    assert!(state.plan().is_focused());
+
+    handle_key_event(key_ctrl('o'), &mut state);
+    assert!(!state.plan().is_open());
+}
+
+#[test]
+fn plan_header_shows_toggle_shortcut() {
+    let mut state = tui_state();
+    state
+        .plan_mut()
+        .update_snapshot(snapshot(1, PlanNodeStatus::InProgress));
+
+    assert!(render_to_text(&state, 140, 40).contains("Ctrl+O"));
+}
+
+#[test]
 fn plan_palette_commands_follow_runtime_phase() {
     let mut state = tui_state();
     assert_eq!(
@@ -845,6 +875,10 @@ fn plan_commands(state: &mut TuiState) -> Vec<PaletteCommand> {
 
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
+}
+
+fn key_ctrl(code: char) -> KeyEvent {
+    KeyEvent::new(code.into(), KeyModifiers::CONTROL)
 }
 
 fn tui_state() -> TuiState {

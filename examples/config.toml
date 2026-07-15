@@ -70,6 +70,8 @@ retained_model_turns = 5
 enabled = false
 max_threads = 6
 max_depth = 1
+# Default model-turn budget for a child task when spawn_subagents omits it.
+max_model_turns = 1024
 
 # User-configured MCP servers are trusted external tools. HTTP MCP endpoints
 # are allowed to use the network because registering them in global config is
@@ -103,6 +105,7 @@ submit_backlog = "ctrl+b"
 cancel_input_or_quit = "ctrl+c"
 insert_newline = "ctrl+j"
 paste_image = "ctrl+v"
+toggle_plan = "ctrl+o"
 interrupt = "esc"
 quit = "ctrl+q"
 scroll_up = "pageup"

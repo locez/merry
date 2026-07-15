@@ -887,6 +887,10 @@ fn default_keymap_maps_core_navigation_and_control_keys() {
         Some(KeyAction::PasteImage)
     );
     assert_eq!(
+        keymap.action_for(KeyBinding::new(KeyCode::Char('o'), KeyModifiers::CONTROL,)),
+        Some(KeyAction::TogglePlan)
+    );
+    assert_eq!(
         keymap.action_for(KeyBinding::new(KeyCode::Esc, KeyModifiers::NONE)),
         Some(KeyAction::Interrupt)
     );

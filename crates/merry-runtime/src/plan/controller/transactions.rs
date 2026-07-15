@@ -24,8 +24,8 @@ use crate::{
 use merry_core::{
     PlanActivationSource, PlanBindingId, PlanCapabilityEnvelopeSnapshot, PlanId, PlanLeaseId,
     PlanLinkSnapshot, PlanLinkStatus, PlanNodeId, PlanNodeStatus, PlanPhase, PlanRevisionSummary,
-    PlanSnapshot, RuntimeJournalEvent, RuntimeJournalPayload, SubagentId, SubagentTaskId,
-    ToolCallId, ToolCallResultStatus,
+    PlanSchedulerStatus, PlanSnapshot, RuntimeJournalEvent, RuntimeJournalPayload, SubagentId,
+    SubagentTaskId, ToolCallId, ToolCallResultStatus,
 };
 use std::sync::Arc;
 use tokio::sync::{Mutex, broadcast};
@@ -330,14 +330,37 @@ pub(super) async fn bind_subagent(
             .clone();
         let revision = candidate.advance_revision("runtime linked a subagent to this Plan task")?;
         let plan_id = candidate.snapshot.plan_id.clone();
+        let node_id = candidate
+            .snapshot
+            .nodes
+            .iter()
+            .find(|node| node.client_key.as_deref() == Some(client_key.as_str()))
+            .map(|node| node.id.clone())
+            .ok_or(PlanControllerError::Plan {
+                source: PlanError::UnknownClientKey { client_key },
+            })?;
+        let mut ancestor_ids = Vec::new();
+        let mut ancestor_id = candidate
+            .snapshot
+            .nodes
+            .iter()
+            .find(|node| node.id == node_id)
+            .and_then(|node| node.parent_id.clone());
+        while let Some(current_id) = ancestor_id {
+            ancestor_id = candidate
+                .snapshot
+                .nodes
+                .iter()
+                .find(|candidate| candidate.id == current_id)
+                .and_then(|candidate| candidate.parent_id.clone());
+            ancestor_ids.push(current_id);
+        }
         let node = candidate
             .snapshot
             .nodes
             .iter_mut()
-            .find(|node| node.client_key.as_deref() == Some(client_key.as_str()))
-            .ok_or(PlanControllerError::Plan {
-                source: PlanError::UnknownClientKey { client_key },
-            })?;
+            .find(|node| node.id == node_id)
+            .expect("plan node remains present");
         // The plan revision is monotonic across the whole plan, unlike the
         // per-node link count. Use it to keep binding identities unique when
         // several nodes each receive their first delegated child.
@@ -345,8 +368,8 @@ pub(super) async fn bind_subagent(
             .expect("runtime-generated plan binding id is valid");
         let link = PlanLinkSnapshot {
             plan_id,
-            node_id: node.id.clone(),
-            binding_id,
+            node_id: node_id.clone(),
+            binding_id: binding_id.clone(),
             subagent_id: agent_id,
             task_id,
             status: PlanLinkStatus::Active,
@@ -354,9 +377,43 @@ pub(super) async fn bind_subagent(
             terminal_at_ms: None,
             superseded_by: None,
         };
+        // A new binding after a terminal link is a retry/replacement for this
+        // Plan node. Keep the old lifecycle record for auditability, but stop
+        // it from contributing a stale failure to the live projection.
+        for existing in &mut node.links {
+            if existing.superseded_by.is_none()
+                && matches!(
+                    existing.status,
+                    PlanLinkStatus::Completed | PlanLinkStatus::Failed | PlanLinkStatus::Cancelled
+                )
+            {
+                existing.status = PlanLinkStatus::Superseded;
+                existing.superseded_by = Some(binding_id.clone());
+            }
+        }
         node.links.push(link.clone());
         node.updated_revision = revision;
         recompute_link_projection(node);
+        for ancestor_id in ancestor_ids {
+            let ancestor = candidate
+                .snapshot
+                .nodes
+                .iter_mut()
+                .find(|candidate| candidate.id == ancestor_id)
+                .expect("plan ancestor remains present");
+            if matches!(
+                ancestor.status,
+                PlanNodeStatus::Blocked | PlanNodeStatus::Failed
+            ) {
+                ancestor.status = PlanNodeStatus::Expanded;
+                ancestor.updated_revision = revision;
+            }
+        }
+        if candidate.snapshot.phase == PlanPhase::Blocked {
+            candidate.snapshot.phase = PlanPhase::Executing;
+            candidate.snapshot.scheduler_status = PlanSchedulerStatus::Active;
+        }
+        candidate.refresh_parent_states(revision);
         let summary =
             PlanRevisionSummary::new(revision, "runtime linked a subagent to this Plan task")
                 .map_err(|_| PlanControllerError::Plan {

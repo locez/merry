@@ -540,6 +540,7 @@ pub(crate) struct TuiKeymapToml {
     pub(crate) cancel_input_or_quit: Option<String>,
     pub(crate) insert_newline: Option<String>,
     pub(crate) paste_image: Option<String>,
+    pub(crate) toggle_plan: Option<String>,
     pub(crate) interrupt: Option<String>,
     pub(crate) quit: Option<String>,
     pub(crate) scroll_up: Option<String>,

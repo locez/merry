@@ -39,7 +39,7 @@ use std::{
         atomic::{AtomicBool, AtomicU64},
     },
 };
-use tokio::sync::{Mutex, RwLock, mpsc};
+use tokio::sync::{Mutex, Notify, RwLock, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -239,6 +239,29 @@ impl Runtime {
         match &self.inner.subagent_manager {
             Some(manager) => Some(manager.snapshot().await),
             None => None,
+        }
+    }
+
+    pub(crate) fn subagent_completion_notify(&self) -> Option<Arc<Notify>> {
+        self.inner
+            .subagent_manager
+            .as_ref()
+            .map(SubagentManager::completion_notify)
+    }
+
+    pub(crate) async fn take_subagent_completion_notifications(
+        &self,
+    ) -> Vec<crate::SubagentStatusView> {
+        match &self.inner.subagent_manager {
+            Some(manager) => manager.take_completion_notifications().await,
+            None => Vec::new(),
+        }
+    }
+
+    pub(crate) async fn has_subagent_completion_notifications(&self) -> bool {
+        match &self.inner.subagent_manager {
+            Some(manager) => manager.has_completion_notifications().await,
+            None => false,
         }
     }
 
