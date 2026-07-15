@@ -46,6 +46,8 @@ pub enum PathAccessRuleSource {
     /// This is intentionally higher trust than project-local configuration,
     /// because normal coding-agent runs may edit files inside the project.
     TrustedGlobalConfig,
+    /// Rule materialized from the current permission admission result.
+    PermissionReview,
 }
 
 /// One platform-neutral path access rule consumed by sandbox backends.

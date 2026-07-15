@@ -18,10 +18,11 @@ use merry_llm::{
     ModelStreamContext, ProviderErrorKind,
 };
 use schemars::Schema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{collections::BTreeMap, future::Future, path::Path, pin::Pin, sync::Arc};
 use thiserror::Error;
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 const REQUEST_PERMISSIONS_TOOL_NAME: &str = "request_permissions";
@@ -47,6 +48,12 @@ pub enum PermissionReviewMode {
     Required,
     /// Allow an injected non-model admission source to decide without model review.
     HostDecisionOnly,
+    /// Try AI review first, then wait on an injected host source only when the
+    /// AI review cannot produce a decision.
+    ModelThenHostFallback,
+    /// Explicit SDK/host mode that admits configured registered tools without
+    /// an AI or human approval round.
+    NonInteractiveTrusted,
 }
 
 impl PermissionReviewMode {
@@ -55,6 +62,8 @@ impl PermissionReviewMode {
             Self::DefaultForTrust => trust_level == RuntimeTrustLevel::Agent,
             Self::Required => true,
             Self::HostDecisionOnly => false,
+            Self::ModelThenHostFallback => true,
+            Self::NonInteractiveTrusted => false,
         }
     }
 }
@@ -77,7 +86,7 @@ pub struct RequestedPathCapability {
 
 impl RequestedPathCapability {
     pub fn new(path: String, access: PathAccess) -> Result<Self, PermissionAdmissionError> {
-        validate_non_blank("requested path", &path)?;
+        let path = normalize_requested_path(&path)?;
         Ok(Self { path, access })
     }
 
@@ -144,6 +153,8 @@ impl PermissionRequest {
             validate_optional_reason(reason)?;
         }
 
+        let requested = normalize_requested_capabilities(requested)?;
+
         Ok(Self {
             tool_call_id: call.id().clone(),
             tool_name: call.name().clone(),
@@ -190,6 +201,22 @@ impl PermissionRequest {
     #[must_use]
     pub(crate) fn review_context(&self) -> &[PermissionReviewContextEntry] {
         &self.review_context
+    }
+
+    /// Returns the stable fingerprint for the exact action and capability set.
+    #[must_use]
+    pub fn fingerprint(&self) -> String {
+        crate::process::stable_process_input_fingerprint(
+            permission_request_fingerprint_json(self)
+                .to_string()
+                .as_bytes(),
+        )
+    }
+
+    /// Returns the stable identifier used to correlate a host response.
+    #[must_use]
+    pub fn approval_id(&self) -> String {
+        format!("{}:{}", self.tool_call_id(), self.fingerprint())
     }
 }
 
@@ -282,16 +309,46 @@ impl PermissionAdmissionReview {
     pub fn rationale(&self) -> &str {
         &self.rationale
     }
+
+    /// Returns the source that produced this review metadata.
+    #[must_use]
+    pub const fn source(&self) -> PermissionAdmissionReviewSource {
+        self.source
+    }
+
+    /// Returns the reviewer's risk assessment.
+    #[must_use]
+    pub const fn risk(&self) -> PermissionReviewRisk {
+        self.risk
+    }
+
+    /// Returns the reviewer's user-authorization assessment.
+    #[must_use]
+    pub const fn user_authorization(&self) -> PermissionUserAuthorization {
+        self.user_authorization
+    }
+
+    fn can_auto_approve(&self) -> bool {
+        matches!(
+            self.risk,
+            PermissionReviewRisk::Low | PermissionReviewRisk::Medium
+        ) && matches!(
+            self.user_authorization,
+            PermissionUserAuthorization::Medium | PermissionUserAuthorization::High
+        )
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PermissionAdmissionReviewSource {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionAdmissionReviewSource {
     Host,
     Model,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PermissionReviewRisk {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionReviewRisk {
     Low,
     Medium,
     High,
@@ -313,7 +370,8 @@ impl PermissionReviewRisk {
         }
     }
 
-    fn as_str(self) -> &'static str {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Low => "low",
             Self::Medium => "medium",
@@ -324,8 +382,9 @@ impl PermissionReviewRisk {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PermissionUserAuthorization {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionUserAuthorization {
     Unknown,
     Low,
     Medium,
@@ -347,7 +406,8 @@ impl PermissionUserAuthorization {
         }
     }
 
-    fn as_str(self) -> &'static str {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Unknown => "unknown",
             Self::Low => "low",
@@ -377,17 +437,262 @@ pub trait PermissionAdmissionSource: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct PermissionAdmissionContext {
     cancellation_token: CancellationToken,
+    review_failure: Option<String>,
+}
+
+/// A pending host-facing permission review request.
+pub struct PermissionReviewRequest {
+    request: PermissionRequest,
+    review_failure: Option<String>,
+    cancellation_token: CancellationToken,
+    response_sender: Option<oneshot::Sender<PermissionReviewResponse>>,
+}
+
+impl std::fmt::Debug for PermissionReviewRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PermissionReviewRequest")
+            .field("approval_id", &self.approval_id())
+            .field("fingerprint", &self.fingerprint())
+            .field("request", &self.request)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PermissionReviewRequest {
+    /// Returns the request that must be shown to the host.
+    #[must_use]
+    pub fn request(&self) -> &PermissionRequest {
+        &self.request
+    }
+
+    /// Returns the stable response correlation id.
+    #[must_use]
+    pub fn approval_id(&self) -> String {
+        self.request.approval_id()
+    }
+
+    /// Returns the exact request fingerprint required in a response.
+    #[must_use]
+    pub fn fingerprint(&self) -> String {
+        self.request.fingerprint()
+    }
+
+    /// Returns the AI review failure that caused the host fallback.
+    #[must_use]
+    pub fn review_failure(&self) -> Option<&str> {
+        self.review_failure.as_deref()
+    }
+
+    /// Returns whether the runtime cancelled this pending review.
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.cancellation_token.is_cancelled()
+    }
+
+    /// Resolves this request as an approval.
+    pub fn approve(
+        self,
+        rationale: impl Into<String>,
+    ) -> Result<(), PermissionReviewResponseError> {
+        let approval_id = self.approval_id();
+        let fingerprint = self.fingerprint();
+        self.respond(PermissionReviewResponse::allow(
+            approval_id,
+            fingerprint,
+            rationale,
+        ))
+    }
+
+    /// Resolves this request as a denial.
+    pub fn deny(self, rationale: impl Into<String>) -> Result<(), PermissionReviewResponseError> {
+        let approval_id = self.approval_id();
+        let fingerprint = self.fingerprint();
+        self.respond(PermissionReviewResponse::deny(
+            approval_id,
+            fingerprint,
+            rationale,
+        ))
+    }
+
+    /// Sends a response, including its caller-supplied correlation fields.
+    ///
+    /// The runtime validates both fields before it can grant the request, so a
+    /// stale UI response cannot authorize a later call.
+    pub fn respond(
+        mut self,
+        response: PermissionReviewResponse,
+    ) -> Result<(), PermissionReviewResponseError> {
+        let Some(sender) = self.response_sender.take() else {
+            return Err(PermissionReviewResponseError::AlreadyResolved);
+        };
+        sender
+            .send(response)
+            .map_err(|_| PermissionReviewResponseError::Closed)
+    }
+}
+
+/// Host response for one pending permission review request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionReviewResponse {
+    approval_id: String,
+    fingerprint: String,
+    decision: PermissionReviewResponseDecision,
+    rationale: String,
+}
+
+impl PermissionReviewResponse {
+    /// Creates an approval response for an exact request.
+    #[must_use]
+    pub fn allow(
+        approval_id: impl Into<String>,
+        fingerprint: impl Into<String>,
+        rationale: impl Into<String>,
+    ) -> Self {
+        Self {
+            approval_id: approval_id.into(),
+            fingerprint: fingerprint.into(),
+            decision: PermissionReviewResponseDecision::Allow,
+            rationale: rationale.into(),
+        }
+    }
+
+    /// Creates a denial response for an exact request.
+    #[must_use]
+    pub fn deny(
+        approval_id: impl Into<String>,
+        fingerprint: impl Into<String>,
+        rationale: impl Into<String>,
+    ) -> Self {
+        Self {
+            approval_id: approval_id.into(),
+            fingerprint: fingerprint.into(),
+            decision: PermissionReviewResponseDecision::Deny,
+            rationale: rationale.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PermissionReviewResponseDecision {
+    Allow,
+    Deny,
+}
+
+/// Channel-backed human fallback source.
+#[derive(Debug, Clone)]
+pub struct ChannelPermissionAdmissionSource {
+    sender: mpsc::Sender<PermissionReviewRequest>,
+}
+
+impl ChannelPermissionAdmissionSource {
+    /// Creates a source and its host-facing pending-review receiver.
+    pub fn channel(capacity: usize) -> (Self, mpsc::Receiver<PermissionReviewRequest>) {
+        let (sender, receiver) = mpsc::channel(capacity.max(1));
+        (Self { sender }, receiver)
+    }
+}
+
+impl PermissionAdmissionSource for ChannelPermissionAdmissionSource {
+    fn review<'a>(
+        &'a self,
+        request: PermissionRequest,
+        context: PermissionAdmissionContext,
+    ) -> PermissionAdmissionFuture<'a> {
+        Box::pin(async move {
+            let approval_id = request.approval_id();
+            let fingerprint = request.fingerprint();
+            let (response_sender, response_receiver) = oneshot::channel();
+            let pending = PermissionReviewRequest {
+                request: request.clone(),
+                review_failure: context.review_failure().map(str::to_owned),
+                cancellation_token: context.cancellation_token().clone(),
+                response_sender: Some(response_sender),
+            };
+            tokio::select! {
+                biased;
+                () = context.cancellation_token().cancelled() => {
+                    Err(PermissionAdmissionError::Cancelled)
+                }
+                result = self.sender.send(pending) => {
+                    result.map_err(|_| PermissionAdmissionError::HumanReviewUnavailable {
+                        message: "human permission review channel is closed".to_owned(),
+                    })?;
+                    let response = tokio::select! {
+                        biased;
+                        () = context.cancellation_token().cancelled() => {
+                            return Err(PermissionAdmissionError::Cancelled);
+                        }
+                        response = response_receiver => response.map_err(|_| {
+                            PermissionAdmissionError::HumanReviewUnavailable {
+                                message: "human permission review response was closed".to_owned(),
+                            }
+                        })?,
+                    };
+                    if response.approval_id != approval_id {
+                        return Err(PermissionAdmissionError::StaleReviewResponse {
+                            expected: approval_id,
+                            actual: response.approval_id,
+                        });
+                    }
+                    if response.fingerprint != fingerprint {
+                        return Err(PermissionAdmissionError::StaleReviewResponse {
+                            expected: fingerprint,
+                            actual: response.fingerprint,
+                        });
+                    }
+                    validate_optional_reason(&response.rationale)?;
+                    let decision = match response.decision {
+                        PermissionReviewResponseDecision::Allow => {
+                            PermissionAdmissionDecision::approved(response.rationale)
+                        }
+                        PermissionReviewResponseDecision::Deny => {
+                            PermissionAdmissionDecision::denied(response.rationale)
+                        }
+                    };
+                    Ok(decision)
+                }
+            }
+        })
+    }
+}
+
+/// Error returned when a host responds to a pending review request.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum PermissionReviewResponseError {
+    /// The pending runtime request was already resolved or cancelled.
+    #[error("permission review request is already resolved")]
+    AlreadyResolved,
+    /// The runtime no longer accepts a response for this request.
+    #[error("permission review response channel is closed")]
+    Closed,
 }
 
 impl PermissionAdmissionContext {
     #[must_use]
     pub fn new(cancellation_token: CancellationToken) -> Self {
-        Self { cancellation_token }
+        Self {
+            cancellation_token,
+            review_failure: None,
+        }
     }
 
     #[must_use]
     pub fn cancellation_token(&self) -> &CancellationToken {
         &self.cancellation_token
+    }
+
+    /// Adds the structured reason that caused an optional host fallback.
+    #[must_use]
+    pub fn with_review_failure(mut self, failure: impl Into<String>) -> Self {
+        self.review_failure = Some(failure.into());
+        self
+    }
+
+    /// Returns the AI review failure that preceded this fallback, if any.
+    #[must_use]
+    pub fn review_failure(&self) -> Option<&str> {
+        self.review_failure.as_deref()
     }
 }
 
@@ -406,6 +711,12 @@ pub enum PermissionAdmissionError {
     /// Model-backed review returned unsupported output.
     #[error("permission review output is invalid: {message}")]
     InvalidReviewOutput { message: String },
+    /// The optional human fallback could not accept or await a response.
+    #[error("human permission review is unavailable: {message}")]
+    HumanReviewUnavailable { message: String },
+    /// A response did not match the currently pending request identity.
+    #[error("stale permission review response: expected {expected}, got {actual}")]
+    StaleReviewResponse { expected: String, actual: String },
     /// Permission admission observed cooperative cancellation.
     #[error("permission admission cancelled")]
     Cancelled,
@@ -541,12 +852,14 @@ pub(crate) fn permission_request_from_call(
 
 pub(crate) fn permission_denied_outcome(
     pending: &PendingToolCall,
+    request: &PermissionRequest,
     review: Option<&PermissionAdmissionReview>,
 ) -> ToolExecutionOutcome {
     let payload = permission_resolution_payload(
         false,
         "denied",
         pending,
+        Some(request),
         review,
         Some(permission_denied_guidance()),
     );
@@ -563,8 +876,9 @@ pub(crate) fn permission_denied_outcome(
 pub(crate) fn permission_blocked_outcome(
     pending: &PendingToolCall,
     message: &str,
+    request: Option<&PermissionRequest>,
 ) -> ToolExecutionOutcome {
-    let payload = json!({
+    let mut payload = json!({
         "ok": false,
         "kind": "permission_request",
         "status": "blocked",
@@ -578,6 +892,9 @@ pub(crate) fn permission_blocked_outcome(
             "message": "Do not repeat the same permission request in this runtime. Permissioned execution is unavailable here, so report the blocked capability or choose an already-authorized approach.",
         }
     });
+    if let Some(request) = request {
+        payload["request"] = permission_request_summary(request);
+    }
     ToolExecutionOutcome::failed_json(
         payload.to_string(),
         ErrorInfo::new("permission_request_blocked", message).expect("static diagnostic is valid"),
@@ -586,6 +903,7 @@ pub(crate) fn permission_blocked_outcome(
 
 pub(crate) fn permission_review_error_outcome(
     pending: &PendingToolCall,
+    request: &PermissionRequest,
     error: &PermissionAdmissionError,
 ) -> ToolExecutionOutcome {
     let message = error.to_string();
@@ -598,9 +916,20 @@ pub(crate) fn permission_review_error_outcome(
             "code": "permission_review_failed",
             "message": message,
         },
+        "request": permission_request_summary(request),
+        "review": {
+            "source": "model",
+            "risk": "unknown",
+            "user_authorization": "unknown",
+            "rationale": message,
+        },
         "guidance": {
             "kind": "permission_review_failed",
             "message": "Do not assume the requested capability was granted. If the action is still necessary, make one narrower permission request with the exact action and minimum capabilities; otherwise report the blocker.",
+        },
+        "retry": {
+            "allowed": true,
+            "message": "The approval review did not produce a decision. Try another plan or a narrower exact capability request; this request was not executed."
         }
     });
     ToolExecutionOutcome::failed_json(
@@ -619,7 +948,8 @@ pub(crate) fn permission_request_review_summary(review: &PermissionAdmissionRevi
 }
 
 impl PermissionAdmissionReviewSource {
-    fn as_str(self) -> &'static str {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Host => "host",
             Self::Model => "model",
@@ -631,6 +961,7 @@ fn permission_resolution_payload(
     ok: bool,
     status: &str,
     pending: &PendingToolCall,
+    request: Option<&PermissionRequest>,
     review: Option<&PermissionAdmissionReview>,
     guidance: Option<Value>,
 ) -> Value {
@@ -643,6 +974,9 @@ fn permission_resolution_payload(
     if let Some(review) = review {
         payload["review"] = permission_request_review_summary(review);
     }
+    if let Some(request) = request {
+        payload["request"] = permission_request_summary(request);
+    }
     if let Some(guidance) = guidance {
         payload["guidance"] = guidance;
     }
@@ -653,6 +987,18 @@ fn permission_denied_guidance() -> Value {
     json!({
         "kind": "permission_request_denied",
         "message": "Do not repeat the same permission request. Either continue with an already-authorized method, ask for a narrower exact capability only if it is genuinely required, or report that the requested action is blocked by policy. The current Plan remains in its existing phase; if it is executing, do not call update_plan with use_current_plan after this denial.",
+    })
+}
+
+fn permission_request_summary(request: &PermissionRequest) -> Value {
+    json!({
+        "fingerprint": request.fingerprint(),
+        "approval_id": request.approval_id(),
+        "tool_call_id": request.tool_call_id().as_str(),
+        "tool_name": request.tool_name().as_str(),
+        "reason": request.reason(),
+        "requested": requested_capabilities_json(request.requested()),
+        "action": permissioned_action_json(request.action()),
     })
 }
 
@@ -974,6 +1320,86 @@ fn validate_non_blank(field: &'static str, value: &str) -> Result<(), Permission
     Ok(())
 }
 
+fn normalize_requested_capabilities(
+    requested: Vec<RequestedCapability>,
+) -> Result<Vec<RequestedCapability>, PermissionAdmissionError> {
+    let mut network = false;
+    let mut paths = BTreeMap::new();
+    for capability in requested {
+        match capability {
+            RequestedCapability::Network => network = true,
+            RequestedCapability::Path(path) => {
+                if let Some(previous) = paths.insert(path.path.clone(), path.access)
+                    && previous != path.access
+                {
+                    return Err(PermissionAdmissionError::InvalidArguments {
+                        message: format!(
+                            "requested paths contain conflicting access for normalized path {:?}",
+                            path.path
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
+    let mut normalized = Vec::with_capacity(paths.len() + usize::from(network));
+    if network {
+        normalized.push(RequestedCapability::Network);
+    }
+    normalized.extend(
+        paths.into_iter().map(|(path, access)| {
+            RequestedCapability::Path(RequestedPathCapability { path, access })
+        }),
+    );
+    Ok(normalized)
+}
+
+fn normalize_requested_path(value: &str) -> Result<String, PermissionAdmissionError> {
+    validate_non_blank("requested path", value)?;
+    if value.chars().any(char::is_control) {
+        return Err(PermissionAdmissionError::InvalidArguments {
+            message: "requested path must not contain control characters".to_owned(),
+        });
+    }
+
+    let path = Path::new(value);
+    let absolute = path.is_absolute();
+    let mut normalized = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            std::path::Component::RootDir => normalized.push(component.as_os_str()),
+            std::path::Component::CurDir => {}
+            std::path::Component::Normal(part) => normalized.push(part),
+            std::path::Component::ParentDir => {
+                if !normalized.pop() || (absolute && normalized.as_os_str().is_empty()) {
+                    return Err(PermissionAdmissionError::InvalidArguments {
+                        message: format!(
+                            "requested path {value:?} would escape the workspace root"
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
+    if normalized.as_os_str().is_empty() {
+        normalized.push(".");
+    }
+    Ok(normalized.to_string_lossy().into_owned())
+}
+
+fn permission_request_fingerprint_json(request: &PermissionRequest) -> Value {
+    json!({
+        "tool_call_id": request.tool_call_id().as_str(),
+        "tool_name": request.tool_name().as_str(),
+        "reason": request.reason(),
+        "requested": requested_capabilities_json(request.requested()),
+        "action": permissioned_action_json(request.action()),
+    })
+}
+
 fn compile_permission_review_model_request(
     request: &PermissionRequest,
     model: &ModelName,
@@ -1128,7 +1554,18 @@ fn parse_permission_review_model_output(
         output.rationale,
     );
     match output.decision.as_str() {
-        "approve" => Ok(PermissionAdmissionDecision::Approved(review)),
+        "approve" if review.can_auto_approve() => Ok(PermissionAdmissionDecision::Approved(review)),
+        "approve" => Ok(PermissionAdmissionDecision::Denied(
+            PermissionAdmissionReview::new(
+                PermissionAdmissionReviewSource::Model,
+                risk,
+                user_authorization,
+                format!(
+                    "Model approval was not internally consistent with its risk/authorization assessment. Original rationale: {}",
+                    review.rationale()
+                ),
+            ),
+        )),
         "deny" => Ok(PermissionAdmissionDecision::Denied(review)),
         actual => Err(PermissionAdmissionError::InvalidReviewOutput {
             message: format!("decision must be approve|deny, got {actual:?}"),
@@ -1289,6 +1726,57 @@ mod tests {
     }
 
     #[test]
+    fn requested_paths_are_normalized_and_identical_duplicates_are_collapsed() {
+        let request = permission_request_from_call(
+            &call(json!({
+                "requested": {
+                    "paths": [
+                        { "path": "./cache/../deps", "access": "ro" },
+                        { "path": "deps/./", "access": "ro" }
+                    ]
+                },
+                "for_action": { "kind": "process", "argv": ["cargo", "metadata"] }
+            })),
+            Vec::new(),
+        )
+        .expect("equivalent path requests should be accepted");
+
+        assert_eq!(request.requested().len(), 1);
+        let RequestedCapability::Path(path) = &request.requested()[0] else {
+            panic!("expected normalized path capability");
+        };
+        assert_eq!(path.path(), "deps");
+    }
+
+    #[test]
+    fn requested_paths_reject_traversal_and_conflicting_duplicates() {
+        let traversal = permission_request_from_call(
+            &call(json!({
+                "requested": { "paths": [{ "path": "../secrets", "access": "ro" }] },
+                "for_action": { "kind": "process", "argv": ["cat", "secrets"] }
+            })),
+            Vec::new(),
+        )
+        .expect_err("relative traversal must be rejected");
+        assert!(traversal.to_string().contains("escape the workspace root"));
+
+        let conflict = permission_request_from_call(
+            &call(json!({
+                "requested": {
+                    "paths": [
+                        { "path": "deps", "access": "ro" },
+                        { "path": "./deps", "access": "rw" }
+                    ]
+                },
+                "for_action": { "kind": "process", "argv": ["cargo", "metadata"] }
+            })),
+            Vec::new(),
+        )
+        .expect_err("conflicting normalized paths must be rejected");
+        assert!(conflict.to_string().contains("conflicting access"));
+    }
+
+    #[test]
     fn model_review_parser_maps_approve_and_deny() {
         let approved = parse_permission_review_model_output(
             r#"{"schema_version":"permission_review.v1","decision":"approve","risk":"low","user_authorization":"high","rationale":"Task explicitly asks for it."}"#,
@@ -1301,5 +1789,152 @@ mod tests {
         )
         .expect("deny parses");
         assert!(!denied.is_approved());
+    }
+
+    #[test]
+    fn model_review_does_not_auto_approve_inconsistent_risk_or_authorization() {
+        let decision = parse_permission_review_model_output(
+            r#"{"schema_version":"permission_review.v1","decision":"approve","risk":"high","user_authorization":"unknown","rationale":"The command may be useful."}"#,
+        )
+        .expect("inconsistent approval should become a structured denial");
+
+        assert!(!decision.is_approved());
+        assert!(
+            decision
+                .review()
+                .rationale()
+                .contains("not internally consistent")
+        );
+    }
+
+    #[tokio::test]
+    async fn channel_human_review_waits_for_a_correlated_typed_response() {
+        let (source, mut requests) = ChannelPermissionAdmissionSource::channel(1);
+        let source = Arc::new(source);
+        let request = permission_request_from_call(
+            &call(json!({
+                "requested": { "network": true },
+                "for_action": { "kind": "process", "argv": ["cargo", "test"] }
+            })),
+            Vec::new(),
+        )
+        .expect("request should parse");
+        let approval_id = request.approval_id();
+        let fingerprint = request.fingerprint();
+        let token = CancellationToken::new();
+        let source_for_task = Arc::clone(&source);
+        let task = tokio::spawn(async move {
+            source_for_task
+                .review(
+                    request,
+                    PermissionAdmissionContext::new(token)
+                        .with_review_failure("approval provider was unavailable"),
+                )
+                .await
+        });
+
+        let pending = requests
+            .recv()
+            .await
+            .expect("host should receive review request");
+        assert_eq!(pending.approval_id(), approval_id);
+        assert_eq!(pending.fingerprint(), fingerprint);
+        assert_eq!(
+            pending.review_failure(),
+            Some("approval provider was unavailable")
+        );
+        pending
+            .respond(PermissionReviewResponse::allow(
+                approval_id,
+                fingerprint,
+                "Host confirmed the exact command.",
+            ))
+            .expect("typed response should be delivered");
+
+        let decision = task
+            .await
+            .expect("review task should join")
+            .expect("review should resolve");
+        assert!(decision.is_approved());
+        assert_eq!(
+            decision.review().rationale(),
+            "Host confirmed the exact command."
+        );
+    }
+
+    #[tokio::test]
+    async fn channel_human_review_rejects_stale_response_identity() {
+        let (source, mut requests) = ChannelPermissionAdmissionSource::channel(1);
+        let source = Arc::new(source);
+        let request = permission_request_from_call(
+            &call(json!({
+                "requested": { "network": true },
+                "for_action": { "kind": "process", "argv": ["cargo", "test"] }
+            })),
+            Vec::new(),
+        )
+        .expect("request should parse");
+        let token = CancellationToken::new();
+        let source_for_task = Arc::clone(&source);
+        let task = tokio::spawn(async move {
+            source_for_task
+                .review(request, PermissionAdmissionContext::new(token))
+                .await
+        });
+        let pending = requests
+            .recv()
+            .await
+            .expect("host should receive review request");
+        pending
+            .respond(PermissionReviewResponse::allow(
+                "stale-approval",
+                "stale-fingerprint",
+                "This must not grant the request.",
+            ))
+            .expect("stale response should still reach runtime validation");
+
+        let error = task
+            .await
+            .expect("review task should join")
+            .expect_err("stale response must be rejected");
+        assert!(matches!(
+            error,
+            PermissionAdmissionError::StaleReviewResponse { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn channel_human_review_marks_queued_request_cancelled() {
+        let (source, mut requests) = ChannelPermissionAdmissionSource::channel(1);
+        let source = Arc::new(source);
+        let request = permission_request_from_call(
+            &call(json!({
+                "requested": { "network": true },
+                "for_action": { "kind": "process", "argv": ["cargo", "test"] }
+            })),
+            Vec::new(),
+        )
+        .expect("request should parse");
+        let token = CancellationToken::new();
+        let task_token = token.clone();
+        let source_for_task = Arc::clone(&source);
+        let task = tokio::spawn(async move {
+            source_for_task
+                .review(request, PermissionAdmissionContext::new(task_token))
+                .await
+        });
+        let pending = requests
+            .recv()
+            .await
+            .expect("host should receive review request");
+        assert!(!pending.is_cancelled());
+        token.cancel();
+        assert!(pending.is_cancelled());
+
+        let error = task
+            .await
+            .expect("review task should join")
+            .expect_err("cancelled review must not remain pending");
+        assert!(matches!(error, PermissionAdmissionError::Cancelled));
     }
 }

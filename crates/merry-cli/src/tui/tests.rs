@@ -71,6 +71,47 @@ fn pending_call_with_args(
     )
 }
 
+#[test]
+fn permission_review_overlay_exposes_allow_and_reject_actions_with_exact_id() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.open_permission_review(
+        "approval-1".to_owned(),
+        "action: cargo test\nAI review fallback: provider unavailable".to_owned(),
+    );
+
+    let allow = handle_key_event(
+        KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+        &mut state,
+    );
+    assert_eq!(
+        allow,
+        ControllerEffect::ApprovePermission("approval-1".to_owned())
+    );
+
+    state.open_permission_review("approval-2".to_owned(), "action: cargo test".to_owned());
+    let reject = handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut state);
+    assert_eq!(
+        reject,
+        ControllerEffect::DenyPermission("approval-2".to_owned())
+    );
+
+    state.open_permission_review("approval-3".to_owned(), "action: cargo test".to_owned());
+    assert_eq!(
+        handle_key_event(
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+            &mut state,
+        ),
+        ControllerEffect::None
+    );
+    let rendered = render_to_text(&state, 80, 10);
+    assert!(rendered.contains("Permission review"));
+}
+
 fn pending_batch(id: &str, calls: Vec<PendingToolCall>) -> PendingToolCallBatch {
     PendingToolCallBatch::new(ToolCallBatchId::new(id).unwrap(), calls).unwrap()
 }
@@ -3037,6 +3078,55 @@ fn projector_renders_failed_process_calls_as_ran_with_error_preview() {
 }
 
 #[test]
+fn projector_shows_permission_allow_rationale_on_success() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    let mut projector = TuiProjector::default();
+
+    projector.apply(
+        RuntimeEvent::ToolCallStarted {
+            call: pending_call_with_args(
+                "call-permission-success",
+                "request_permissions",
+                json!({
+                    "requested": { "network": true },
+                    "for_action": { "kind": "process", "argv": ["cargo", "test"] }
+                }),
+            ),
+            source: source(),
+        },
+        &mut state,
+    );
+    projector.apply(
+        RuntimeEvent::ToolCallFinished {
+            result: ToolCallResult::succeeded(
+                ToolCallId::new("call-permission-success").unwrap(),
+                text_artifact("permission-success-output"),
+            ),
+            output: Some(ToolOutput::Json {
+                json: r#"{"ok":true,"kind":"process_action","permission_profile_id":"process.permission_request.approved.v1","permission_review":{"source":"model","risk":"low","user_authorization":"high","rationale":"The exact command is grounded in the user's task."}}"#.to_owned(),
+            }),
+            source: source(),
+        },
+        &mut state,
+    );
+
+    let TimelineItem::ExpandedDetail {
+        body, focus_body, ..
+    } = &state.timeline()[0]
+    else {
+        panic!("successful permission call should show an expanded admission result");
+    };
+    assert!(body.contains("allowed: The exact command is grounded in the user's task."));
+    assert!(body.contains("profile: process.permission_request.approved.v1"));
+    assert_eq!(body, focus_body);
+}
+
+#[test]
 fn projector_truncates_process_preview_lines() {
     let mut state = TuiState::new(
         "/repo".into(),
@@ -3287,7 +3377,7 @@ fn projector_compacts_failed_tool_result_without_raw_artifact_json() {
                 .unwrap(),
             ),
             output: Some(ToolOutput::Json {
-                json: r#"{"error":{"code":"permission_review_failed","message":"permission review failed: provider stream Protocol: stream line must start with data:"},"guidance":{"kind":"permission_review_failed","message":"Do not assume the requested capability was granted."},"status":"review_failed","tool_call_id":"call-permission"}"#.to_owned(),
+                json: r#"{"error":{"code":"permission_review_failed","message":"permission review failed: provider stream Protocol: stream line must start with data:"},"review":{"source":"model","risk":"unknown","user_authorization":"unknown","rationale":"The approval reviewer could not establish a trustworthy decision."},"guidance":{"kind":"permission_review_failed","message":"Do not assume the requested capability was granted."},"status":"review_failed","tool_call_id":"call-permission"}"#.to_owned(),
             }),
             source: source(),
         },
@@ -3300,6 +3390,7 @@ fn projector_compacts_failed_tool_result_without_raw_artifact_json() {
     };
     assert_eq!(title, "tool failed: request_permissions");
     assert!(body.contains("permission_review_failed"));
+    assert!(body.contains("The approval reviewer could not establish a trustworthy decision."));
     assert!(body.contains("Do not assume the requested capability was granted."));
     assert!(!body.contains("\"tool_call_id\""));
     assert!(!body.contains("call-permission"));

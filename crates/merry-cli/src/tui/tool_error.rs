@@ -18,6 +18,9 @@ pub(super) fn compact_failed_tool_body(code: &str, message: &str, output: &str) 
     if let Some(guidance) = value.pointer("/guidance/message").and_then(Value::as_str) {
         lines.push(guidance.to_owned());
     }
+    if let Some(rationale) = value.pointer("/review/rationale").and_then(Value::as_str) {
+        lines.push(format!("review: {rationale}"));
+    }
     if let Some(instruction) = value
         .pointer("/retry/instruction")
         .or_else(|| value.pointer("/recovery/instruction"))
