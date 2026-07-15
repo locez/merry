@@ -34,6 +34,13 @@ pub enum RuntimeError {
         reason: &'static str,
     },
 
+    /// A subagent status operation did not select any child agents.
+    #[error("{operation} requires at least one agent id")]
+    InvalidSubagentSelection {
+        /// Provider-visible operation that received the empty selection.
+        operation: &'static str,
+    },
+
     /// A mutating Plan tool could not durably record its effect before execution.
     #[error(
         "plan effect attribution failed for tool call {call_id} in session {session_id}: {message}"

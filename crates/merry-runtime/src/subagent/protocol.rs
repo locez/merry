@@ -1,14 +1,22 @@
 use merry_core::{ErrorInfo, SubagentId, SubagentTaskId, ToolName};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
+
+use super::spec::MAX_TASK_BYTES;
 
 /// Provider-visible input for `spawn_subagents`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SpawnSubagentsInput {
-    /// Child tasks to spawn.
+    #[schemars(
+        description = "Child tasks to spawn. Each task is validated against the current child runtime limits."
+    )]
     pub tasks: Vec<SpawnSubagentTaskInput>,
-    /// Optional caller-specified concurrency cap for this batch.
+    #[schemars(
+        description = "Optional concurrency cap for this batch. Omit it to use the runtime scheduler default; zero queues all tasks until capacity is available.",
+        range(min = 0)
+    )]
     pub max_concurrency: Option<usize>,
 }
 
@@ -16,11 +24,17 @@ pub struct SpawnSubagentsInput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SpawnSubagentTaskInput {
-    /// Delegated task prompt.
+    #[schemars(
+        description = "Non-blank delegated task prompt. Keep it within the runtime byte limit.",
+        length(min = 1, max = MAX_TASK_BYTES)
+    )]
     pub task: String,
-    /// Optional compact display name.
+    #[schemars(description = "Optional short display name for this child task.")]
     pub display_name: Option<String>,
-    /// Optional maximum child model turns.
+    #[schemars(
+        description = "Optional positive maximum number of model turns for this child. Omit it to use the runtime default.",
+        range(min = 1)
+    )]
     pub max_model_turns: Option<u32>,
     /// Exact registered Merry tool names the child may use. Names are copied
     /// verbatim from the current tool list without provider namespace prefixes;
@@ -29,17 +43,33 @@ pub struct SpawnSubagentTaskInput {
         description = "Exact registered Merry tool names copied verbatim from the current tool list. Do not add provider namespace prefixes: use `run_process`, never `functions.run_process`."
     )]
     pub allowed_tools: Option<Vec<ToolName>>,
-    /// Optional workspace-relative read scope.
+    #[schemars(
+        schema_with = "optional_scope_paths_schema",
+        description = "Optional normalized workspace-relative paths the child may read. Use `.` for the workspace root; do not use parent traversal, absolute paths, dot segments, empty segments, or backslashes."
+    )]
+    #[serde(default)]
     pub read_scope: Option<Vec<String>>,
-    /// Optional workspace-relative write scope.
+    #[schemars(
+        schema_with = "optional_scope_paths_schema",
+        description = "Optional normalized workspace-relative paths the child may write. Use `.` for the workspace root; do not use parent traversal, absolute paths, dot segments, empty segments, or backslashes."
+    )]
+    #[serde(default)]
     pub write_scope: Option<Vec<String>>,
-    /// Optional workspace-relative paths the child must not access.
+    #[schemars(
+        schema_with = "optional_scope_paths_schema",
+        description = "Optional normalized workspace-relative paths the child must not access. Use `.` for the workspace root; do not use parent traversal, absolute paths, dot segments, empty segments, or backslashes."
+    )]
+    #[serde(default)]
     pub forbidden_paths: Option<Vec<String>>,
-    /// Optional expected output instruction.
+    #[schemars(description = "Optional instruction describing the expected child result.")]
     pub expected_output: Option<String>,
-    /// Optional child model reasoning-effort override.
+    #[schemars(
+        description = "Optional child model reasoning-effort override supported by the configured provider."
+    )]
     pub reasoning_effort: Option<String>,
-    /// Optional Plan node client key to bind this child execution to.
+    #[schemars(
+        description = "Optional Plan node client key that binds this child execution to an authored plan node."
+    )]
     pub plan_task: Option<String>,
 }
 
@@ -107,15 +137,20 @@ pub enum WaitMode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WaitSubagentsInput {
-    /// Child agent ids to inspect or wait on.
+    #[schemars(
+        description = "Child agent ids to inspect or wait on. Provide at least one id; the result contains only these selected agents.",
+        length(min = 1)
+    )]
     pub agent_ids: Vec<SubagentId>,
-    /// Optional wait completion mode.
+    #[schemars(
+        description = "Optional completion mode. Use any for the first terminal child or all for every selected child; omit it for all."
+    )]
     pub mode: Option<WaitMode>,
     /// Optional observation deadline in milliseconds. This is not a task
     /// budget and a timeout never means that the child completed.
     #[schemars(
-        description = "Observation deadline in milliseconds, not a task budget. Prefer 30000 or omit it. A timed-out result is only a status snapshot and must not be reported as completion.",
-        range(min = 5000)
+        description = "Observation deadline in milliseconds, not a task budget. Zero returns an immediate status snapshot; omit it to wait until the selected completion condition. A timed-out result is only a status snapshot and must not be reported as completion.",
+        range(min = 0)
     )]
     pub timeout_ms: Option<u64>,
 }
@@ -124,8 +159,38 @@ pub struct WaitSubagentsInput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CancelSubagentsInput {
-    /// Child agent ids to cancel.
+    #[schemars(
+        description = "Child agent ids to cancel. Provide at least one id; the result contains only these selected agents.",
+        length(min = 1)
+    )]
     pub agent_ids: Vec<SubagentId>,
+}
+
+fn optional_scope_paths_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::Schema::try_from(json!({
+        "description": "Optional normalized workspace-relative scope paths. Use `.` for the workspace root or a concrete relative path such as `crates/merry-runtime`.",
+        "anyOf": [
+            { "type": "null" },
+            {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Normalized workspace-relative path. Do not use `..`, absolute paths, embedded `.` segments, empty segments, or backslashes.",
+                    "examples": [".", "crates/merry-runtime", "tmp/output"],
+                    "anyOf": [
+                        { "const": "." },
+                        { "allOf": [
+                            { "not": { "pattern": "(^|/)\\.\\.?(/|$)" } },
+                            { "not": { "pattern": "(^/|//|\\\\)" } },
+                            { "not": { "pattern": "[\\u0000-\\u001F\\u007F]" } }
+                        ] }
+                    ]
+                }
+            }
+        ]
+    }))
+    .expect("static optional subagent scope schema is valid")
 }
 
 /// Provider-visible compact status output for `wait_subagents`.

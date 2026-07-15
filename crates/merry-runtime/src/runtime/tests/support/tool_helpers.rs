@@ -67,7 +67,12 @@
             ToolCallId::new(id).expect("valid tool call id"),
             ToolName::new("request_permissions").expect("valid tool name"),
             ToolCallArguments::try_from(serde_json::json!({
-                "requested": {},
+                "requested": {
+                    "paths": [
+                        { "path": "/tmp/cache", "access": "ro" },
+                        { "path": "/tmp/cache", "access": "rw" }
+                    ]
+                },
                 "for_action": {
                     "kind": "process",
                     "argv": ["cargo", "test"],

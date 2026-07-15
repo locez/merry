@@ -7,7 +7,10 @@ use crate::{
     list::ListDirExecutor,
     patch::WorkspacePatchExecutor,
     read::ReadFileExecutor,
-    schema::{list_dir_spec, read_file_spec, search_text_spec, workspace_patch_spec},
+    schema::{
+        list_dir_spec, read_file_spec, search_text_spec_with_limits,
+        workspace_patch_spec_with_limits,
+    },
     search::SearchTextExecutor,
     state::WorkspaceToolState,
 };
@@ -46,7 +49,7 @@ impl ReadOnlyWorkspaceTools {
             )
             .with_parallel_safe_execution(),
             RegisteredTool::read_only(
-                search_text_spec(),
+                search_text_spec_with_limits(&self.state.limits),
                 Arc::new(SearchTextExecutor { state: self.state }),
             )
             .with_parallel_safe_execution(),
@@ -63,7 +66,7 @@ impl ReadOnlyWorkspaceTools {
         let mut tools = self.into_registered_tools();
         tools.push(
             RegisteredTool::new(
-                workspace_patch_spec(),
+                workspace_patch_spec_with_limits(&patch_state.limits),
                 Arc::new(WorkspacePatchExecutor { state: patch_state }),
                 ToolActionKind::WorkspaceWrite,
             )

@@ -6,9 +6,10 @@
 //! first process consumer, executes the exact action after approval.
 
 use crate::{
-    PathAccess, ProcessActionIntent, ProcessEnvPolicy, RegisteredTool, ToolActionKind,
-    ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome, ToolExecutor,
-    ToolExecutorFuture, model_config::ModelProviderConfig,
+    MAX_PROCESS_ARG_BYTES, MAX_PROCESS_ARGV_ITEMS, MAX_PROCESS_CWD_BYTES, PathAccess,
+    ProcessActionIntent, ProcessEnvPolicy, RegisteredTool, ToolActionKind, ToolExecutionContext,
+    ToolExecutionError, ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture,
+    model_config::ModelProviderConfig,
 };
 use futures_util::StreamExt;
 use merry_core::{CoreError, ErrorInfo, PendingToolCall, ToolInputSchema, ToolName, ToolSpec};
@@ -26,6 +27,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 const REQUEST_PERMISSIONS_TOOL_NAME: &str = "request_permissions";
+const MAX_PERMISSION_REASON_BYTES: usize = 2048;
 const DEFAULT_PERMISSION_STDOUT_LIMIT_BYTES: usize = 64 * 1024;
 const DEFAULT_PERMISSION_STDERR_LIMIT_BYTES: usize = 64 * 1024;
 const PERMISSION_REVIEW_MAX_OUTPUT_TOKENS: u64 = 512;
@@ -1031,8 +1033,15 @@ fn request_permissions_input_schema() -> Result<ToolInputSchema, PermissionAdmis
         "additionalProperties": false,
         "properties": {
             "reason": {
-                "type": "string",
-                "description": "Short explanation of why the current task needs the requested capability."
+                "description": "Optional short explanation of why the current task needs the requested capability. Null is treated as omitted; a provided string must be non-blank and within the byte limit.",
+                "anyOf": [
+                    { "type": "null" },
+                    {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": MAX_PERMISSION_REASON_BYTES
+                    }
+                ]
             },
             "requested": {
                 "type": "object",
@@ -1052,6 +1061,7 @@ fn request_permissions_input_schema() -> Result<ToolInputSchema, PermissionAdmis
                             "properties": {
                                 "path": {
                                     "type": "string",
+                                    "minLength": 1,
                                     "description": "Path requested for additional filesystem access."
                                 },
                                 "access": {
@@ -1063,7 +1073,27 @@ fn request_permissions_input_schema() -> Result<ToolInputSchema, PermissionAdmis
                             "required": ["path", "access"]
                         }
                     }
-                }
+                },
+                "anyOf": [
+                    {
+                        "required": ["network"],
+                        "properties": {
+                            "network": {
+                                "const": true,
+                                "description": "Set true when requesting network capability; this branch makes requested non-empty."
+                            }
+                        }
+                    },
+                    {
+                        "required": ["paths"],
+                        "properties": {
+                            "paths": {
+                                "minItems": 1,
+                                "description": "Provide at least one filesystem path when network capability is not requested."
+                            }
+                        }
+                    }
+                ]
             },
             "for_action": {
                 "type": "object",
@@ -1077,14 +1107,26 @@ fn request_permissions_input_schema() -> Result<ToolInputSchema, PermissionAdmis
                     },
                     "argv": {
                         "type": "array",
-                        "items": { "type": "string" },
+                        "items": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": MAX_PROCESS_ARG_BYTES,
+                            "description": "One non-empty executable or argument string. Newline and tab are allowed; other control characters are rejected."
+                        },
                         "minItems": 1,
+                        "maxItems": MAX_PROCESS_ARGV_ITEMS,
                         "description": "Exact argv to run if approved."
                     },
                     "cwd": {
-                        "type": "string",
-                        "minLength": 1,
-                        "description": "Optional workspace-relative working directory for process actions. For the workspace root, omit cwd or use \".\"; never pass an empty string."
+                        "description": "Optional workspace-relative working directory for process actions. For the workspace root, omit cwd or use \".\"; null is also treated as omitted, and an empty string is rejected by the provider contract.",
+                        "anyOf": [
+                            { "type": "null" },
+                            {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": MAX_PROCESS_CWD_BYTES
+                            }
+                        ]
                     }
                 },
                 "required": ["kind", "argv"]
@@ -1297,7 +1339,7 @@ fn optional_string(
 
 fn validate_optional_reason(reason: &str) -> Result<(), PermissionAdmissionError> {
     validate_non_blank("reason", reason)?;
-    if reason.len() > 2048 {
+    if reason.len() > MAX_PERMISSION_REASON_BYTES {
         return Err(PermissionAdmissionError::InvalidArguments {
             message: "reason exceeds the byte limit".to_owned(),
         });
@@ -1685,21 +1727,26 @@ mod tests {
         let schema = serde_json::to_value(tool.spec().input_schema().as_schema())
             .expect("schema should serialize");
 
-        assert_eq!(
-            schema["properties"]["for_action"]["properties"]["cwd"]["minLength"],
-            1
-        );
         assert!(
             schema["properties"]["for_action"]["properties"]["cwd"]["description"]
                 .as_str()
                 .expect("cwd description should be text")
-                .contains("never pass an empty string")
+                .contains("null is also treated as omitted")
         );
+        let cwd_string_schema = schema["properties"]["for_action"]["properties"]["cwd"]["anyOf"]
+            .as_array()
+            .expect("permission cwd should have nullable branches")
+            .iter()
+            .find(|branch| branch["type"] == "string")
+            .expect("permission cwd should have a string branch");
+        assert_eq!(cwd_string_schema["minLength"], 1);
+        assert_eq!(cwd_string_schema["maxLength"], MAX_PROCESS_CWD_BYTES);
     }
 
     #[test]
     fn request_permissions_schema_describes_nested_request_objects() {
         let tool = request_permissions_tool().expect("permission tool should build");
+        crate::schema_contract::assert_provider_input_schema_fields_have_descriptions(tool.spec());
         let schema = serde_json::to_value(tool.spec().input_schema().as_schema())
             .expect("schema should serialize");
         for path in [
@@ -1731,6 +1778,49 @@ mod tests {
                 "missing description at {path:?}"
             );
         }
+    }
+
+    #[test]
+    fn request_permissions_schema_matches_runtime_bounds() {
+        let tool = request_permissions_tool().expect("permission tool should build");
+        let schema = tool.spec().input_schema().as_schema().as_value();
+        let validator = jsonschema::validator_for(schema).expect("schema should compile");
+        let valid = json!({
+            "reason": "Need dependency metadata",
+            "requested": { "paths": [{ "path": "/tmp/cache", "access": "ro" }] },
+            "for_action": {
+                "kind": "process",
+                "argv": ["cargo", "metadata"],
+                "cwd": "."
+            }
+        });
+        assert!(validator.is_valid(&valid));
+
+        let mut nullable_optional_fields = valid.clone();
+        nullable_optional_fields["reason"] = Value::Null;
+        nullable_optional_fields["for_action"]["cwd"] = Value::Null;
+        assert!(validator.is_valid(&nullable_optional_fields));
+
+        let mut empty_requested = valid.clone();
+        empty_requested["requested"] = json!({});
+        assert!(!validator.is_valid(&empty_requested));
+
+        let mut oversized_reason = valid.clone();
+        oversized_reason["reason"] = json!("x".repeat(MAX_PERMISSION_REASON_BYTES + 1));
+        assert!(!validator.is_valid(&oversized_reason));
+
+        let mut oversized_argv = valid.clone();
+        oversized_argv["for_action"]["argv"] = json!(
+            (0..=crate::MAX_PROCESS_ARGV_ITEMS)
+                .map(|_| "x")
+                .collect::<Vec<_>>()
+        );
+        assert!(!validator.is_valid(&oversized_argv));
+
+        let mut oversized_argument = valid.clone();
+        oversized_argument["for_action"]["argv"] =
+            json!(["x".repeat(crate::MAX_PROCESS_ARG_BYTES + 1)]);
+        assert!(!validator.is_valid(&oversized_argument));
     }
 
     #[test]

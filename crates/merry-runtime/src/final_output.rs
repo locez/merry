@@ -7,6 +7,7 @@ use merry_core::{
     ArtifactRef, CoreError, PendingToolCall, ToolCallId, ToolInputSchema, ToolName, ToolSpec,
 };
 use serde_json::Value;
+use std::collections::BTreeSet;
 use thiserror::Error;
 
 /// Reserved provider-visible tool name used for structured terminal output.
@@ -115,7 +116,7 @@ pub enum FinalOutputContractError {
     /// Schema compilation failed.
     #[error("final output schema could not be compiled: {message}")]
     SchemaCompilation { message: String },
-    /// A top-level object field is missing a useful description.
+    /// An object field is missing a useful provider-facing description.
     #[error("final output schema field {field} must include a description")]
     MissingFieldDescription { field: String },
 }
@@ -129,23 +130,78 @@ impl From<ToolInputValidatorError> for FinalOutputContractError {
 }
 
 fn validate_schema_field_descriptions(value: &Value) -> Result<(), FinalOutputContractError> {
-    let Some(properties) = value.get("properties").and_then(Value::as_object) else {
-        return Ok(());
-    };
-
-    for (field, schema) in properties {
-        let has_description = schema
-            .get("description")
-            .and_then(Value::as_str)
-            .is_some_and(|description| !description.trim().is_empty());
-        if !has_description {
-            return Err(FinalOutputContractError::MissingFieldDescription {
-                field: field.clone(),
-            });
+    fn walk(
+        root: &Value,
+        schema: &Value,
+        path: &str,
+        visited_refs: &mut BTreeSet<String>,
+    ) -> Result<(), FinalOutputContractError> {
+        if let Some(reference) = schema.get("$ref").and_then(Value::as_str)
+            && visited_refs.insert(reference.to_owned())
+        {
+            let target = reference
+                .strip_prefix('#')
+                .and_then(|pointer| root.pointer(pointer))
+                .ok_or_else(|| FinalOutputContractError::MissingFieldDescription {
+                    field: format!("{path} ({reference})"),
+                })?;
+            walk(root, target, path, visited_refs)?;
         }
+
+        if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
+            for (field, field_schema) in properties {
+                if field == "type" {
+                    continue;
+                }
+                let field_path = format!("{path}.{field}");
+                let has_description = field_schema
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .is_some_and(|description| !description.trim().is_empty());
+                if !has_description {
+                    return Err(FinalOutputContractError::MissingFieldDescription {
+                        field: field_path
+                            .strip_prefix("$.")
+                            .unwrap_or(&field_path)
+                            .to_owned(),
+                    });
+                }
+                walk(root, field_schema, &field_path, visited_refs)?;
+            }
+        }
+
+        if let Some(items) = schema.get("items") {
+            walk(root, items, &format!("{path}[]"), visited_refs)?;
+        }
+
+        for keyword in ["oneOf", "anyOf", "allOf"] {
+            if let Some(branches) = schema.get(keyword).and_then(Value::as_array) {
+                for (index, branch) in branches.iter().enumerate() {
+                    walk(
+                        root,
+                        branch,
+                        &format!("{path}.{keyword}[{index}]"),
+                        visited_refs,
+                    )?;
+                }
+            }
+        }
+
+        if let Some(definitions) = schema.get("$defs").and_then(Value::as_object) {
+            for (name, definition) in definitions {
+                walk(
+                    root,
+                    definition,
+                    &format!("{path}.$defs.{name}"),
+                    visited_refs,
+                )?;
+            }
+        }
+
+        Ok(())
     }
 
-    Ok(())
+    walk(value, value, "$", &mut BTreeSet::new())
 }
 
 #[cfg(test)]
@@ -200,6 +256,30 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "final output schema field summary must include a description"
+        );
+    }
+
+    #[test]
+    fn final_output_contract_rejects_nested_field_without_description() {
+        let error = FinalOutputContract::new(schema(json!({
+            "type": "object",
+            "properties": {
+                "summary": {
+                    "type": "object",
+                    "description": "Structured final summary.",
+                    "properties": {
+                        "status": { "type": "string" }
+                    }
+                }
+            },
+            "required": ["summary"],
+            "additionalProperties": false
+        })))
+        .expect_err("nested schema field descriptions are required");
+
+        assert_eq!(
+            error.to_string(),
+            "final output schema field summary.status must include a description"
         );
     }
 }

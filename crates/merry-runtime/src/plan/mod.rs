@@ -10,6 +10,8 @@ mod subagent;
 pub(crate) mod tools;
 mod validation;
 
+pub(crate) const PLAN_READ_MAX_DEPTH: u8 = 16;
+
 pub use controller::PlanControllerError;
 pub(crate) use controller::{PlanController, PlanControllerEventReceiver};
 pub use domain::PlanError;

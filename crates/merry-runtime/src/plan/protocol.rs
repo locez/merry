@@ -3,11 +3,19 @@ use merry_core::{
     PlanApprovalRequirementSnapshot, PlanAttemptId, PlanAttemptOutcome,
     PlanCapabilityEnvelopeSnapshot, PlanDirectiveConstraints, PlanDirectiveId, PlanDirectiveKind,
     PlanExecutorPolicy, PlanHarnessSnapshot, PlanId, PlanNodeId, PlanNodeResult, PlanPhase,
-    PlanRecoveryPolicySnapshot, PlanSnapshot, SkillId,
+    PlanRecoveryPolicySnapshot, PlanResourcePolicySnapshot, PlanSnapshot, SkillId,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+
+use super::{
+    PLAN_READ_MAX_DEPTH,
+    validation::{
+        MAX_ACCEPTANCE_BYTES, MAX_ACCEPTANCE_ITEMS, MAX_CLIENT_KEY_BYTES, MAX_DEPENDENCIES,
+        MAX_DIRECT_CHILDREN, MAX_OBJECTIVE_BYTES, MAX_REASON_BYTES,
+    },
+};
 
 /// Coordinator request to activate Plan Mode without changing general permissions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -42,8 +50,16 @@ pub struct PlanApprovalInput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReadPlanInput {
+    #[schemars(description = "Optional durable plan id to read. Omit it to read the active plan.")]
     pub plan_id: Option<merry_core::PlanId>,
+    #[schemars(
+        description = "Optional node id whose direct subtree should be returned. Omit it to read from the plan root."
+    )]
     pub node_id: Option<PlanNodeId>,
+    #[schemars(
+        description = "Maximum child depth to include in the returned subtree. Zero returns only the selected node; omit it to use the runtime maximum.",
+        range(min = 0, max = PLAN_READ_MAX_DEPTH)
+    )]
     pub max_depth: Option<u8>,
 }
 
@@ -113,8 +129,19 @@ pub enum PlanExecutionIntent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PlanNodeReferenceInput {
-    Id { id: PlanNodeId },
-    ClientKey { client_key: String },
+    Id {
+        #[schemars(
+            description = "Runtime-owned plan node id returned by an earlier plan operation."
+        )]
+        id: PlanNodeId,
+    },
+    ClientKey {
+        #[schemars(
+            description = "Request-local client key declared by another new node in the same update.",
+            length(min = 1, max = MAX_CLIENT_KEY_BYTES)
+        )]
+        client_key: String,
+    },
 }
 
 /// Provider-visible authored node input. Runtime-owned state is intentionally absent.
@@ -127,16 +154,30 @@ pub enum PlanNodeReferenceInput {
             "title": "New node",
             "required": ["client_key"],
             "properties": {
-                "id": { "type": "null" },
-                "client_key": { "type": "string", "minLength": 1, "maxLength": 128 }
+                "id": {
+                    "type": "null",
+                    "description": "Runtime-owned node id to retain when replacing an existing mutable node. Omit it for a new node."
+                },
+                "client_key": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": MAX_CLIENT_KEY_BYTES,
+                    "description": "Unique request-local key for a new node. Provide it when id is omitted; omit it when retaining an existing node."
+                }
             }
         },
         {
             "title": "Existing mutable node",
             "required": ["id"],
             "properties": {
-                "id": { "type": "string" },
-                "client_key": { "type": "null" }
+                "id": {
+                    "type": "string",
+                    "description": "Runtime-owned node id to retain when replacing an existing mutable node. Omit it for a new node."
+                },
+                "client_key": {
+                    "type": "null",
+                    "description": "Unique request-local key for a new node. Provide it when id is omitted; omit it when retaining an existing node."
+                }
             }
         }
     ])
@@ -144,13 +185,29 @@ pub enum PlanNodeReferenceInput {
 pub struct PlanNodeInput {
     /// Runtime-owned id from a prior plan result or read. Set this only when
     /// retaining an existing mutable node; otherwise omit it or use null.
+    #[schemars(
+        description = "Runtime-owned node id to retain when replacing an existing mutable node. Omit it for a new node."
+    )]
     pub id: Option<PlanNodeId>,
     /// Unique request-local key for a new node. Set this for every new node and
     /// omit `id`; the update result maps this key to its runtime-owned id.
+    #[schemars(
+        description = "Unique request-local key for a new node. Provide it when id is omitted; omit it when retaining an existing node.",
+        length(min = 1, max = MAX_CLIENT_KEY_BYTES)
+    )]
     pub client_key: Option<String>,
     /// Concrete task objective for this node.
+    #[schemars(
+        description = "Concrete objective for this node. It must be non-blank and at most 2048 UTF-8 bytes.",
+        length(min = 1, max = MAX_OBJECTIVE_BYTES)
+    )]
     pub objective: String,
     /// Observable checks that determine whether this node is complete.
+    #[schemars(
+        description = "Observable completion checks for this node. Provide at most 16 checks; each must be non-blank and at most 1024 UTF-8 bytes.",
+        length(max = MAX_ACCEPTANCE_ITEMS),
+        inner(length(min = 1, max = MAX_ACCEPTANCE_BYTES))
+    )]
     pub acceptance: Vec<String>,
     /// Runtime-owned execution preference retained for internal snapshots. It
     /// is not provider-authored and is omitted from the generated schema.
@@ -167,8 +224,16 @@ pub struct PlanNodeInput {
     pub recovery_policy: PlanRecoveryPolicySnapshot,
     /// Dependencies expressed as existing runtime ids or client keys declared in
     /// the same update request.
+    #[schemars(
+        description = "Dependencies expressed as runtime node ids or client keys declared in this update. Provide at most 16 dependencies.",
+        length(max = MAX_DEPENDENCIES)
+    )]
     pub depends_on: Vec<PlanNodeReferenceInput>,
     /// Recursive direct children authored as part of the Plan tree.
+    #[schemars(
+        description = "Direct child nodes in the plan tree. Provide at most 16 children per node.",
+        length(max = MAX_DIRECT_CHILDREN)
+    )]
     pub children: Vec<PlanNodeInput>,
 }
 
@@ -177,17 +242,33 @@ pub struct PlanNodeInput {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PlanChangeInput {
     DefinePlan {
+        #[schemars(
+            description = "Expected current plan revision. Use 0 when defining the first plan."
+        )]
         expected_plan_revision: u64,
+        #[schemars(description = "Root node of the complete authored plan tree.")]
         root: PlanNodeInput,
     },
     ReplaceSubtree {
+        #[schemars(
+            description = "Runtime-owned id of the mutable node whose subtree should be replaced."
+        )]
         target_node_id: PlanNodeId,
+        #[schemars(
+            description = "Expected revision of target_node_id before applying the replacement."
+        )]
         expected_node_revision: u64,
+        #[schemars(description = "Replacement subtree. Its root must retain target_node_id.")]
         subtree: PlanNodeInput,
     },
     /// Preserve the exact current tree while changing lifecycle intent, such as
     /// starting execution after the user approves an already-authored plan.
-    UseCurrentPlan { expected_plan_revision: u64 },
+    UseCurrentPlan {
+        #[schemars(
+            description = "Expected current plan revision before changing lifecycle intent."
+        )]
+        expected_plan_revision: u64,
+    },
 }
 
 /// Coordinator-authored plan update.
@@ -199,18 +280,35 @@ pub enum PlanChangeInput {
 )]
 pub struct UpdatePlanInput {
     /// Short explanation recorded in the durable plan revision history.
+    #[schemars(
+        description = "Short non-blank explanation recorded in durable plan revision history. Maximum 2048 UTF-8 bytes.",
+        length(min = 1, max = MAX_REASON_BYTES)
+    )]
     pub reason: String,
     /// Lifecycle choice. Use `execute_if_authorized` when the user already asked
     /// to carry out the plan; use `request_user_review` only when another review
     /// is actually wanted or required.
+    #[schemars(
+        description = "Lifecycle choice for this update. Use continue_planning for more authoring, execute_if_authorized when execution is already authorized, or request_user_review for an explicit review boundary."
+    )]
     pub execution_intent: PlanExecutionIntent,
     /// Optional node currently receiving the coordinator's attention.
+    #[schemars(
+        description = "Optional runtime node id currently receiving coordinator attention."
+    )]
     pub coordinator_node_id: Option<PlanNodeId>,
     /// Optional hint for how much linked delegation the coordinator expects.
     /// Runtime admission remains owned by the subagent manager.
+    #[schemars(
+        description = "Optional concurrency hint for linked delegated work. The runtime accepts values from 1 through the default maximum of 6.",
+        range(min = 1, max = PlanResourcePolicySnapshot::DEFAULT_MAX_CONCURRENCY)
+    )]
     pub max_concurrency_hint: Option<usize>,
     /// Tagged JSON object with `type: define_plan`, `type: replace_subtree`, or
     /// `type: use_current_plan`. Never pass this field as a string.
+    #[schemars(
+        description = "Tagged change object with type define_plan, replace_subtree, or use_current_plan."
+    )]
     pub change: PlanChangeInput,
 }
 

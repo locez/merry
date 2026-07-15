@@ -24,7 +24,7 @@ pub fn subagent_tool_specs() -> Result<[ToolSpec; 3], merry_core::CoreError> {
         )?,
         tool_spec::<WaitSubagentsInput>(
             WAIT_SUBAGENTS_TOOL_NAME,
-            "Inspect or wait for child agent statuses and compact results. timeout_ms is an observation deadline, not a task budget; prefer 30000 or omit it. A timed_out=true result is only a status snapshot, never completion. Claim completion only when terminal=true and the relevant statuses are terminal.",
+            "Inspect or wait for child agent statuses and compact results. timeout_ms is an observation deadline, not a task budget; zero returns an immediate status snapshot, while omission waits for the selected completion condition. A timed_out=true result is only a status snapshot, never completion. Claim completion only when terminal=true and the relevant statuses are terminal.",
         )?,
         tool_spec::<CancelSubagentsInput>(
             CANCEL_SUBAGENTS_TOOL_NAME,
@@ -145,6 +145,14 @@ impl ToolExecutor for WaitSubagentsExecutor {
                     ));
                 }
             };
+            if input.agent_ids.is_empty() {
+                return Ok(invalid_subagent_arguments_outcome(
+                    call.name().as_str(),
+                    InvalidSubagentToolArguments::new(
+                        "agent_ids must contain at least one child agent id",
+                    ),
+                ));
+            }
             let timeout = input.timeout_ms.map(Duration::from_millis);
             let wait = self.manager.wait(
                 &input.agent_ids,
@@ -194,6 +202,14 @@ impl ToolExecutor for CancelSubagentsExecutor {
                     ));
                 }
             };
+            if input.agent_ids.is_empty() {
+                return Ok(invalid_subagent_arguments_outcome(
+                    call.name().as_str(),
+                    InvalidSubagentToolArguments::new(
+                        "agent_ids must contain at least one child agent id",
+                    ),
+                ));
+            }
             let output = self
                 .manager
                 .cancel(&input.agent_ids)
@@ -345,6 +361,7 @@ mod tests {
     use crate::{
         ArtifactContent, ChildRuntimeFactory, ChildRuntimeInput, Runtime, SubagentConfig,
         SubagentStatusLabel, ToolExecutionContext, ToolExecutor,
+        schema_contract::assert_provider_input_schema_fields_have_descriptions,
     };
     use merry_core::{
         PendingToolCall, SessionId, ToolCallArguments, ToolCallId, ToolCallResultStatus,
@@ -415,13 +432,60 @@ mod tests {
     }
 
     #[test]
-    fn wait_schema_rejects_model_polling_deadlines_shorter_than_five_seconds() {
+    fn wait_schema_accepts_zero_deadline_as_status_snapshot() {
         let specs = subagent_tool_specs().expect("subagent tools build");
-        let schema =
-            serde_json::to_string(specs[1].input_schema()).expect("wait schema serializes");
-        assert!(schema.contains("minimum"));
-        assert!(schema.contains("5000"));
+        let schema = serde_json::to_value(specs[1].input_schema()).expect("wait schema serializes");
+        assert!(schema.to_string().contains("minimum"));
+        assert!(schema.to_string().contains("\"minimum\":0"));
         assert!(specs[1].description().contains("observation deadline"));
+
+        let validator = jsonschema::validator_for(specs[1].input_schema().as_schema().as_value())
+            .expect("wait schema compiles");
+        assert!(validator.is_valid(&json!({
+            "agent_ids": ["agent-1"],
+            "timeout_ms": 0
+        })));
+    }
+
+    #[test]
+    fn provider_visible_subagent_schemas_describe_fields_and_match_runtime_bounds() {
+        let specs = subagent_tool_specs().expect("subagent tools build");
+        for spec in &specs {
+            assert_provider_input_schema_fields_have_descriptions(spec);
+        }
+
+        let spawn_schema = specs[0].input_schema().as_schema().as_value();
+        let spawn_validator =
+            jsonschema::validator_for(spawn_schema).expect("spawn schema compiles");
+        let valid_task = json!({
+            "tasks": [{
+                "task": "Review the runtime.",
+                "max_model_turns": 1,
+                "read_scope": ["crates/merry-runtime"],
+                "write_scope": ["tmp/output"]
+            }]
+        });
+        if let Err(error) = spawn_validator.validate(&valid_task) {
+            panic!("valid task rejected by schema: {error}");
+        }
+
+        let mut zero_turns = valid_task.clone();
+        zero_turns["tasks"][0]["max_model_turns"] = json!(0);
+        assert!(!spawn_validator.is_valid(&zero_turns));
+
+        let mut oversized_task = valid_task.clone();
+        oversized_task["tasks"][0]["task"] = json!("x".repeat(16 * 1024 + 1));
+        assert!(!spawn_validator.is_valid(&oversized_task));
+
+        let mut invalid_scope = valid_task;
+        invalid_scope["tasks"][0]["read_scope"] = json!(["../outside"]);
+        assert!(!spawn_validator.is_valid(&invalid_scope));
+
+        for spec in &specs[1..] {
+            let validator = jsonschema::validator_for(spec.input_schema().as_schema().as_value())
+                .expect("status operation schema compiles");
+            assert!(!validator.is_valid(&json!({ "agent_ids": [] })));
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

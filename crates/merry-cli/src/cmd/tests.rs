@@ -79,6 +79,23 @@ fn command_plan_final_output_contract_has_described_fields() {
 }
 
 #[test]
+fn command_check_schema_describes_program_items() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let tool = cmd_check_command_tool(CommandGenerationEnvironment::detect(temp.path()))
+        .expect("command check tool should build");
+    let schema = serde_json::to_value(tool.spec().input_schema().as_schema())
+        .expect("schema should serialize");
+    assert_eq!(schema["properties"]["programs"]["minItems"], 1);
+    assert_eq!(schema["properties"]["programs"]["items"]["minLength"], 1);
+    assert!(
+        !schema["properties"]["programs"]["items"]["description"]
+            .as_str()
+            .unwrap_or_default()
+            .is_empty()
+    );
+}
+
+#[test]
 fn command_generation_prompt_treats_file_search_as_recursive_by_default() {
     let temp = tempfile::tempdir().expect("tempdir");
     let environment = CommandGenerationEnvironment::detect(temp.path());
