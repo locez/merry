@@ -16,6 +16,7 @@ pub type SubagentActivityReceiver = watch::Receiver<Vec<SubagentActivitySnapshot
 pub struct SubagentActivityHub {
     sender: watch::Sender<Vec<SubagentActivitySnapshot>>,
     state: Arc<std::sync::Mutex<ActivityHubState>>,
+    publication_lock: Arc<std::sync::Mutex<()>>,
 }
 
 struct ActivityHubState {
@@ -38,6 +39,7 @@ impl SubagentActivityHub {
                 #[cfg(test)]
                 published_phases: Vec::new(),
             })),
+            publication_lock: Arc::new(std::sync::Mutex::new(())),
         }
     }
 
@@ -48,36 +50,46 @@ impl SubagentActivityHub {
     }
 
     pub(crate) fn publish(&self, snapshot: SubagentActivitySnapshot) {
+        // Serialize the state snapshot and watch publication without holding the
+        // state mutex across Tokio's internal watch write lock.
+        let _publication_guard = self
+            .publication_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let is_terminal = is_terminal_phase(snapshot.phase);
         let subagent_id = snapshot.subagent_id.clone();
         let updated_at_ms = snapshot.updated_at_ms;
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (values, should_publish) = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-        if state
-            .snapshots
-            .get(&snapshot.subagent_id)
-            .is_some_and(|previous| is_terminal_phase(previous.phase) && !is_terminal)
-        {
-            return;
-        }
+            if state
+                .snapshots
+                .get(&snapshot.subagent_id)
+                .is_some_and(|previous| is_terminal_phase(previous.phase) && !is_terminal)
+            {
+                return;
+            }
 
-        let should_publish = is_terminal
-            || state
-                .last_published_ms
-                .get(&subagent_id)
-                .is_none_or(|last_published_ms| {
-                    updated_at_ms >= last_published_ms.saturating_add(NON_TERMINAL_COALESCE_MS)
-                });
-        #[cfg(test)]
-        state.published_phases.push(snapshot.phase);
-        state.snapshots.insert(subagent_id.clone(), snapshot);
-        if should_publish {
-            state.last_published_ms.insert(subagent_id, updated_at_ms);
-        }
-        let values = state.snapshots.values().cloned().collect::<Vec<_>>();
+            let should_publish = is_terminal
+                || state
+                    .last_published_ms
+                    .get(&subagent_id)
+                    .is_none_or(|last_published_ms| {
+                        updated_at_ms >= last_published_ms.saturating_add(NON_TERMINAL_COALESCE_MS)
+                    });
+            #[cfg(test)]
+            state.published_phases.push(snapshot.phase);
+            state.snapshots.insert(subagent_id.clone(), snapshot);
+            if should_publish {
+                state.last_published_ms.insert(subagent_id, updated_at_ms);
+            }
+            let values = state.snapshots.values().cloned().collect::<Vec<_>>();
+            (values, should_publish)
+        };
+
         let _ = self.sender.send_if_modified(|current| {
             *current = values;
             should_publish
@@ -471,6 +483,15 @@ mod tests {
             panic!("poison activity state for the test");
         }));
         assert!(panic_result.is_err());
+
+        let publication_lock = Arc::clone(&hub.publication_lock);
+        let publication_panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = publication_lock
+                .lock()
+                .expect("publication lock should initially be healthy");
+            panic!("poison activity publication lock for the test");
+        }));
+        assert!(publication_panic.is_err());
 
         hub.publish(snapshot("agent-1", SubagentActivityPhase::Failed, 1));
         let receiver = hub.subscribe();
