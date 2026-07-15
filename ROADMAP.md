@@ -1,29 +1,64 @@
 # Merry Roadmap
 
-**Updated:** 2026-07-13
+**Updated:** 2026-07-15
 
 ## Product Goal
 
-Merry is a practical Rust-first agent runtime: provider-neutral, stream-first,
-tool-capable, durable at stable boundaries, and usable from a terminal, Rust,
-or Python without rebuilding runtime control flow in each frontend.
+Merry should become a coding assistant that its maintainer is willing to use
+for daily coding work. The runtime remains Rust-first and provider-neutral, but
+the product goal is now measured by the quality of one continuous coding loop:
+
+```text
+open or resume a session
+-> enter a task with low-friction controls
+-> understand the current workspace and runtime state
+-> inspect, plan, request permission, and use tools
+-> review meaningful tool output and changes
+-> run checks and continue the task
+-> recover from interruption without losing trusted progress
+```
+
+The project is not complete when the individual runtime capabilities exist.
+They must be discoverable, understandable, recoverable, and comfortable enough
+to replace the maintainer's usual coding workflow.
+
+## Priority Reset
+
+On 2026-07-15, the user explicitly reset the active product priority after
+evaluating the current project as a usable toy that is not yet preferred for
+coding. This supersedes the previous ordering that led with provider
+conformance, configuration hardening, and public API release polish.
+
+Those tracks remain useful supporting work, but they must not displace the
+daily-coding acceptance target unless they directly unblock it.
 
 ## Current Release Target
 
-Stabilize the first multi-provider runtime release around this observable
-workflow:
+Make one real multi-turn coding workflow trustworthy in the TUI, Rust API, and
+Python SDK:
 
 ```text
 user input
--> live model deltas
--> zero or more ordered tool calls
--> bounded safe execution and durable artifacts
--> ordered tool results
--> continued model stream
--> final output or typed terminal failure
+-> current-state-aware model request
+-> meaningful tool and permission feedback
+-> bounded workspace changes
+-> test and review loop
+-> continued or interrupted session
+-> durable recovery at a known boundary
 ```
 
-Acceptance is offline by default and must include:
+Acceptance is offline by default and must include both product scenarios and
+repository checks:
+
+```text
+1. Start a new TUI session and complete a multi-turn coding task.
+2. Use input history, slash commands, tool feedback, and permission controls
+   without memorizing internal runtime details.
+3. Interrupt or terminate the session at a stable boundary and resume it with
+   the completed work intact.
+4. Run the same deterministic coding scenarios through Rust and Python
+   surfaces and compare their normalized outcomes.
+```
 
 ```bash
 cargo fmt --all --check
@@ -82,51 +117,115 @@ cargo test --all
 
 ## Next Active
 
-### 1. Provider Conformance
+### 1. TUI Daily Coding Flow
 
-Add deterministic local HTTP fixtures for the new protocols, covering request
-headers, endpoint joining, SSE chunk boundaries, disconnects, cancellation,
-rate-limit metadata, and secret redaction. Add explicit opt-in live Anthropic
-and Chat Completions smoke commands after fixture coverage is complete.
+Make the TUI comfortable for repeated coding sessions rather than merely
+feature-complete:
 
-Observable result: both providers pass the same conformance harness without
-network access; live smokes remain excluded from default tests.
+- Add shared text-only input history across sessions, including resumed and
+  newly created sessions. Do not persist image attachments in this history.
+- Add slash commands with one command registry shared by slash completion and
+  the existing command palette.
+- Make common tools render meaningful summaries: operation, target, status,
+  result, and failure reason. Generic fallback rendering must not reduce useful
+  information to output such as `args=3`.
+- Keep plan, permission, save, interrupt, resume, retry, and discard states
+  visible and actionable from the same control surface.
 
-### 2. Configuration Hardening
+Observable result: a user can open a new or resumed session, recall previous
+text input, invoke `/help`, `/status`, `/save`, `/stop`, and related commands,
+and understand a tool operation without opening raw argument details.
 
-Reject provider-specific keys on the wrong provider type, validate numeric
-limits during config loading, improve alias diagnostics, and add a redacted
-configuration inspection command.
+### 2. Coding Harness, Prompt, And Runtime Context
 
-Observable result: invalid TOML fails before runtime construction and the
-tracked example remains a deterministic schema test.
+Build a deterministic coding harness around the prompt and tool contract, not
+only around provider response parsing:
 
-### 3. Session And Batch Durability Audit
+- Audit every coding tool description for purpose, preconditions, side effects,
+  input meaning, failure behavior, and when to choose a different tool.
+- Define the initial context contract for workspace identity, current task,
+  relevant runtime state, available tools, plan/permission state, and resume
+  state. Inject dynamic state after stable instructions and tool definitions
+  where the context contract allows it.
+- Make the current state explicit enough that the model does not have to infer
+  initialization state or hidden runtime state from empty history.
+- Add deterministic coding scenarios that capture request context, tool calls,
+  permission decisions, artifacts, workspace changes, failures, and final
+  state. Reuse those scenarios across the Rust and Python surfaces where
+  practical.
 
-Verify savepoints after completed model turns and fully resolved batches,
-interrupted batch cleanup, receiver closure, resume projection, and corrupted
-session isolation.
+Observable result: representative coding scenarios select the intended tools,
+respect the current workspace and runtime state, and produce inspectable,
+replayable traces without a live provider.
 
-Observable result: crash/restart tests prove no persisted session resumes with
-a half-accepted or half-resolved tool batch.
+### 3. Incremental Session Resume
 
-### 4. TUI Interaction Cleanup
+Replace exit-only full snapshot persistence with a local incremental store:
 
-Replace the remaining artifact-specific navigation state with one explicit
-input/review/detail mode, add paused-time redraw tests, and split the oversized
-renderer/test modules along real ownership boundaries.
+- SQLite append-only durable events for stable runtime boundaries;
+- periodic materialized snapshots and event-tail replay;
+- artifact metadata and references without repeating large contents in every
+  snapshot;
+- automatic save at completed turns, resolved tool boundaries, plan changes,
+  and permission decisions, without persisting every streaming delta;
+- visible save state, failure feedback, and an explicit recovery choice for
+  interrupted model or tool work;
+- import and compatibility for existing file-backed sessions.
 
-Observable result: keyboard and mouse transitions have one tested state table;
-50x20, 80x24, and 140x40 buffers remain overlap-free.
+Observable result: completed coding work survives a process crash, an
+interrupted operation resumes as an explicit interrupted state, and the user
+can tell which state is durably saved. The store design must preserve tool
+side-effect boundaries and must not silently repeat an uncertain external
+operation.
 
-### 5. Public API Stabilization
+### 4. Python SDK Product Surface
 
-Reduce oversized protocol/provider modules, finish rustdoc examples, define
-compatibility guarantees for serialized events/config, and prepare crate and
-Python package release metadata.
+Make the Python SDK feel like a coherent public SDK rather than a thin binding
+probe:
 
-Observable result: a versioned public surface can be consumed without importing
-internal crates or provider wire types.
+- provide a small first-run API for run, stream, interactive control, tools,
+  cancellation, and errors;
+- improve event types and typing so callers do not need to branch on untyped
+  `dict[str, Any]` payloads for normal flows;
+- keep Rust as the runtime owner while making bridge tools, backpressure,
+  stream closure, and error recovery predictable in asyncio;
+- align Python event and control semantics with the Rust and TUI scenarios;
+- document the supported lifecycle, persistence expectations, and production
+  packaging path.
+
+Observable result: a new Python user can build a streaming coding assistant
+from the public package, handle tool and error events without inspecting native
+details, and use the same deterministic scenarios as the Rust facade.
+
+### 5. Small, Stable Rust Agent API
+
+Extract a pleasant high-level Rust facade above the capable but low-level
+`RuntimeBuilder` surface:
+
+- provide a simple agent/coding-agent construction path for provider, profile,
+  tools, and session setup;
+- make common `run`, `stream`, interactive control, final output, and error
+  flows obvious from rustdoc examples;
+- keep advanced runtime, journal, plan, permission, and artifact APIs available
+  for power users without making them mandatory for the common path;
+- preserve provider-neutral types and avoid leaking provider wire formats.
+
+Observable result: the README's Rust example and a focused public API test can
+construct and run a coding agent without importing internal crates or manually
+assembling unrelated runtime components.
+
+## Supporting Work
+
+The following work remains valid, but is subordinate to the daily coding goal:
+
+- provider conformance fixtures and opt-in live smokes;
+- configuration validation and redacted diagnostics;
+- source/test module splitting and public API compatibility metadata;
+- provider-specific improvements that directly remove a failure in the coding
+  scenarios.
+
+Supporting work should be pulled into `Next Active` only when it unblocks a
+named coding workflow or acceptance test.
 
 ## Deferred
 
@@ -143,9 +242,15 @@ internal crates or provider wire types.
 - The production CLI sandbox currently targets Linux `bubblewrap`.
 - Live provider behavior depends on vendor compatibility and is intentionally
   outside the default deterministic suite.
-- Anthropic and Chat Completions have parser/renderer coverage but still need
-  the shared local HTTP conformance harness.
-- TUI detail navigation still uses the existing artifact review controls while
-  the unified interaction-mode cleanup remains next active work.
+- TUI session persistence is still primarily exit-time full snapshot saving;
+  incremental SQLite durability is not implemented.
+- TUI has no slash-command control plane, shared cross-session text input
+  history, or consistently useful generic tool rendering yet.
+- Coding-tool descriptions and initial runtime context still need a deliberate
+  harness-driven audit.
+- Python sessions are ephemeral by default and Python event surfaces still need
+  a more stable typed contract.
+- The Rust public facade remains more powerful than ergonomic for common coding
+  application setup.
 - Several mature source/test files exceed the preferred 1000-line guideline
-  and should be split during public API stabilization, not mechanically.
+  and should be split when doing the active product work, not mechanically.
