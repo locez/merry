@@ -501,6 +501,10 @@ pub(crate) async fn run_controller(
     let (clipboard_image_tx, mut clipboard_image_rx) = mpsc::channel(4);
     let mut model_discovery_generation = 0_u64;
     let mut model_discovery_token: Option<CancellationToken> = None;
+    let mut subagent_activity_open = true;
+    state
+        .plan_mut()
+        .update_subagent_activity(session.subagent_activity.borrow().clone());
     render_once(&mut terminal, &state)?;
 
     loop {
@@ -563,6 +567,19 @@ pub(crate) async fn run_controller(
                 };
                 projector.apply(event, &mut state);
                 render_once(&mut terminal, &state)?;
+            }
+            activity = session.subagent_activity.changed(), if subagent_activity_open => {
+                match activity {
+                    Ok(()) => {
+                        state.plan_mut().update_subagent_activity(
+                            session.subagent_activity.borrow().clone(),
+                        );
+                        render_once(&mut terminal, &state)?;
+                    }
+                    Err(_) => {
+                        subagent_activity_open = false;
+                    }
+                }
             }
             completion = model_discovery_rx.recv() => {
                 let Some(completion) = completion else {

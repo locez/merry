@@ -42,12 +42,17 @@ fn render_tree(frame: &mut Frame<'_>, state: &TuiState, region: Rect) {
     if inner_height > 0 {
         lines.push(summary_line(state, state.plan().counts()));
     }
-    lines.extend(
-        rows.iter()
-            .skip(start)
-            .take(row_capacity)
-            .map(|row| tree_line(state, row)),
-    );
+    for row in rows.iter().skip(start) {
+        if lines.len() >= inner_height {
+            break;
+        }
+        lines.push(tree_line(state, row));
+        if let Some(activity) = row.activity.as_ref()
+            && lines.len() < inner_height
+        {
+            lines.push(activity_line(state, row, activity));
+        }
+    }
 
     frame.render_widget(
         Paragraph::new(lines).block(plan_block(state, snapshot, "Plan")),
@@ -156,6 +161,25 @@ fn tree_line(state: &TuiState, row: &PlanTreeRow) -> Line<'static> {
     Line::from(spans)
 }
 
+fn activity_line(
+    state: &TuiState,
+    row: &PlanTreeRow,
+    activity: &merry_core::SubagentActivitySnapshot,
+) -> Line<'static> {
+    let indent = "  ".repeat(row.depth + 1);
+    Line::from(vec![
+        Span::styled(format!("{indent}↳ "), style(state, SemanticColor::Muted)),
+        Span::styled(
+            format!("{}  ", activity_phase_label(activity.phase)),
+            activity_phase_style(state, activity.phase),
+        ),
+        Span::styled(
+            bounded_activity_summary(&activity.summary),
+            style(state, SemanticColor::Muted),
+        ),
+    ])
+}
+
 fn inspector_lines(
     state: &TuiState,
     snapshot: &PlanSnapshot,
@@ -256,6 +280,9 @@ fn inspector_lines(
     } else {
         for link in &node.links {
             linked_subagent_lines(&mut lines, state, link);
+        }
+        if let Some(activity) = state.plan().activity_for_node(node) {
+            linked_activity_line(&mut lines, state, activity);
         }
         key_value(
             &mut lines,
@@ -414,6 +441,24 @@ fn linked_subagent_lines(
     );
 }
 
+fn linked_activity_line(
+    lines: &mut Vec<Line<'static>>,
+    state: &TuiState,
+    activity: &merry_core::SubagentActivitySnapshot,
+) {
+    lines.push(Line::from(vec![
+        Span::styled("  latest: ".to_owned(), style(state, SemanticColor::Muted)),
+        Span::styled(
+            format!("{}  ", activity_phase_label(activity.phase)),
+            activity_phase_style(state, activity.phase),
+        ),
+        Span::styled(
+            bounded_activity_summary(&activity.summary),
+            style(state, SemanticColor::Assistant),
+        ),
+    ]));
+}
+
 fn format_execution_summary(summary: &merry_core::PlanExecutionSummary) -> String {
     format!(
         "active {}  completed {}  failed {}  cancelled {}",
@@ -527,18 +572,38 @@ fn visible_start(
     if capacity == 0 || rows.is_empty() {
         return 0;
     }
-    let max_start = rows.len().saturating_sub(capacity);
+    let total_height = rows.iter().map(physical_row_height).sum::<usize>();
+    let max_start = (0..rows.len())
+        .rev()
+        .find(|&index| total_height.saturating_sub(physical_offset(rows, index)) >= capacity)
+        .unwrap_or(0);
     let mut start = requested.min(max_start);
     if let Some(selected) = selected
         && let Some(index) = rows.iter().position(|row| &row.node_id == selected)
     {
-        if index < start {
+        let selected_offset = physical_offset(rows, index);
+        let start_offset = physical_offset(rows, start);
+        if selected_offset < start_offset {
             start = index;
-        } else if index >= start + capacity {
-            start = index + 1 - capacity;
+        } else if selected_offset >= start_offset + capacity {
+            while start < index {
+                let next_offset = physical_offset(rows, start + 1);
+                start += 1;
+                if selected_offset < next_offset + capacity {
+                    break;
+                }
+            }
         }
     }
-    start.min(max_start)
+    start
+}
+
+fn physical_row_height(row: &PlanTreeRow) -> usize {
+    1 + usize::from(row.activity.is_some())
+}
+
+fn physical_offset(rows: &[PlanTreeRow], index: usize) -> usize {
+    rows.iter().take(index).map(physical_row_height).sum()
 }
 
 fn section(lines: &mut Vec<Line<'static>>, state: &TuiState, label: &str) {
@@ -653,6 +718,43 @@ fn status_color(status: PlanNodeStatus, ready: bool) -> SemanticColor {
         PlanNodeStatus::Completed => SemanticColor::Success,
         PlanNodeStatus::Blocked => SemanticColor::Warning,
         PlanNodeStatus::Failed => SemanticColor::Error,
+    }
+}
+
+fn activity_phase_style(state: &TuiState, phase: merry_core::SubagentActivityPhase) -> Style {
+    let color = match phase {
+        merry_core::SubagentActivityPhase::Starting
+        | merry_core::SubagentActivityPhase::Waiting => SemanticColor::Warning,
+        merry_core::SubagentActivityPhase::Running => SemanticColor::Focus,
+        merry_core::SubagentActivityPhase::Completed => SemanticColor::Success,
+        merry_core::SubagentActivityPhase::Failed => SemanticColor::Error,
+        merry_core::SubagentActivityPhase::Cancelled => SemanticColor::Muted,
+    };
+    style(state, color)
+}
+
+fn activity_phase_label(phase: merry_core::SubagentActivityPhase) -> &'static str {
+    match phase {
+        merry_core::SubagentActivityPhase::Starting => "starting",
+        merry_core::SubagentActivityPhase::Running => "running",
+        merry_core::SubagentActivityPhase::Waiting => "waiting",
+        merry_core::SubagentActivityPhase::Completed => "completed",
+        merry_core::SubagentActivityPhase::Failed => "failed",
+        merry_core::SubagentActivityPhase::Cancelled => "cancelled",
+    }
+}
+
+fn bounded_activity_summary(summary: &str) -> String {
+    const MAX_ACTIVITY_SUMMARY_CHARS: usize = 120;
+    let mut chars = summary.chars();
+    let bounded = chars
+        .by_ref()
+        .take(MAX_ACTIVITY_SUMMARY_CHARS)
+        .collect::<String>();
+    if chars.next().is_some() {
+        format!("{bounded}...")
+    } else {
+        bounded
     }
 }
 
