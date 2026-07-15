@@ -66,7 +66,8 @@ fn process_command_tool_input_schema() -> Result<ToolInputSchema, ProcessCommand
             "argv": {
                 "type": "array",
                 "items": { "type": "string" },
-                "minItems": 1
+                "minItems": 1,
+                "description": "Exact executable and argument strings to run in order. Do not pass a shell command string unless the first argv item is an explicitly requested shell."
             },
             "cwd": {
                 "type": "string",
@@ -295,6 +296,12 @@ mod tests {
                 .as_str()
                 .expect("cwd description should be text")
                 .contains("never pass an empty string")
+        );
+        assert!(
+            !schema["properties"]["argv"]["description"]
+                .as_str()
+                .unwrap_or_default()
+                .is_empty()
         );
     }
 

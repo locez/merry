@@ -10,28 +10,46 @@ use crate::{
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ReadFileArgs {
+    #[schemars(
+        description = "Workspace-relative UTF-8 file path to read. Do not use host-absolute paths or parent traversal."
+    )]
     pub(crate) path: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ListDirArgs {
+    #[schemars(
+        description = "Workspace-relative directory path to list. Use \".\" for the workspace root; do not use host-absolute paths or parent traversal."
+    )]
     pub(crate) path: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SearchTextArgs {
+    #[schemars(
+        description = "Case-sensitive Rust regular expression to search for in bounded UTF-8 workspace files."
+    )]
     pub(crate) query: String,
     #[serde(default)]
+    #[schemars(
+        description = "Optional workspace-relative directory or file path to search. Omit it to search the configured workspace roots."
+    )]
     pub(crate) path: Option<String>,
     #[serde(default)]
+    #[schemars(
+        description = "Optional maximum number of matching lines to return. Omit it to use the configured tool limit."
+    )]
     pub(crate) max_matches: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct WorkspacePatchArgs {
+    #[schemars(
+        description = "Patch envelope containing one or more workspace-relative file update sections."
+    )]
     pub(crate) patch: String,
 }
 

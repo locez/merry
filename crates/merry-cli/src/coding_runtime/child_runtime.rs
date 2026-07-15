@@ -5,9 +5,8 @@ use super::profile::{
 };
 use merry_llm::{ModelName, ModelProvider};
 use merry_runtime::{
-    AcceptedLocalWorkspaceProcessAdmission, ChildRuntimeFactory, ChildRuntimeInput,
-    PermissionedProcessRunnerFactory, ProcessRunner, ProjectRules, Runtime, SubagentConfig,
-    SubagentManager, subagent_registered_tools,
+    AcceptedLocalWorkspaceProcessAdmission, ChildRuntimeFactory, ChildRuntimeInput, ProjectRules,
+    Runtime, SubagentConfig, SubagentManager, subagent_registered_tools,
 };
 use merry_tool_workspace::{
     CODING_LOOP_PROCESS_TOOL, WORKSPACE_PATCH_TOOL, WorkspaceCodingLoopProfile,
@@ -23,8 +22,7 @@ pub(crate) struct CodingLoopChildRuntimeFactory {
     admission: AcceptedLocalWorkspaceProcessAdmission,
     provider: Arc<dyn ModelProvider>,
     model: ModelName,
-    runner: Arc<dyn ProcessRunner>,
-    permissioned_factory: Arc<dyn PermissionedProcessRunnerFactory>,
+    process_backend: ActionProcessBackend,
     project_rules: Option<ProjectRules>,
     skill_roots: Vec<PathBuf>,
     allow_hidden_workspace_paths: bool,
@@ -52,8 +50,7 @@ impl CodingLoopChildRuntimeFactory {
             admission,
             provider,
             model,
-            runner: process_backend.runner(),
-            permissioned_factory: process_backend.permissioned_factory(),
+            process_backend,
             project_rules,
             skill_roots,
             allow_hidden_workspace_paths,
@@ -67,6 +64,9 @@ impl ChildRuntimeFactory for CodingLoopChildRuntimeFactory {
         &self,
         input: ChildRuntimeInput,
     ) -> Result<Runtime, merry_runtime::RuntimeError> {
+        let process_backend = self.process_backend.new_session();
+        let runner = process_backend.runner();
+        let permissioned_factory = process_backend.permissioned_factory();
         let allow_patch = input
             .allowed_tools
             .iter()
@@ -135,11 +135,11 @@ impl ChildRuntimeFactory for CodingLoopChildRuntimeFactory {
         profile = if allow_local_workspace_process && !has_child_workspace_boundary {
             profile.with_cli_bwrap_permissioned_process_runner(
                 self.admission,
-                Arc::clone(&self.runner),
-                Arc::clone(&self.permissioned_factory),
+                runner,
+                permissioned_factory,
             )
         } else {
-            profile.with_read_only_process_runner(Arc::clone(&self.runner))
+            profile.with_read_only_process_runner(runner)
         };
         with_workspace_coding_loop_profile_for_child(builder, profile)?.build()
     }

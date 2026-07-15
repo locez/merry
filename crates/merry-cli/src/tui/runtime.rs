@@ -109,6 +109,7 @@ pub(crate) async fn start_tui_runtime_session(
         provider,
         model,
         runner: backend.runner(),
+        process_backend: Some(backend.clone()),
         permissioned_process_runner_factory: backend.permissioned_factory(),
         extra_tools,
         allow_hidden_workspace_paths: false,

@@ -1,9 +1,8 @@
 use crate::cli_error::{CliError, unexpected};
-use crate::coding_runtime::ActionProcessBackend;
+use crate::coding_runtime::{ActionProcessBackend, ActionProcessBackendOptions};
 use crate::config::MerryConfig;
-use merry_runtime::{BwrapPermissionedProcessRunnerFactory, BwrapProcessRunner};
 use merry_tool_workspace::CODING_LOOP_PROCESS_TOOL;
-use std::{path::Path, sync::Arc};
+use std::path::Path;
 
 use super::PERMISSION_NETWORK_SMOKE_ARGV;
 
@@ -16,14 +15,12 @@ pub(crate) fn permission_network_smoke_process_runner(
         .transpose()
         .map_err(unexpected)?
         .unwrap_or_default();
-    let runner = BwrapProcessRunner::new_at_workspace_root(workspace_root)
-        .with_path_rules(path_rules.clone());
-    let permissioned_factory =
-        BwrapPermissionedProcessRunnerFactory::new_at_workspace_root(workspace_root)
-            .with_path_rules(path_rules);
-    Ok(ActionProcessBackend::from_parts(
-        Arc::new(runner),
-        Arc::new(permissioned_factory),
+    Ok(ActionProcessBackend::from_bwrap_options(
+        workspace_root.to_path_buf(),
+        ActionProcessBackendOptions {
+            path_rules,
+            network_allowed: false,
+        },
     ))
 }
 

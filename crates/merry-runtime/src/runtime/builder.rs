@@ -560,7 +560,8 @@ impl RuntimeBuilder {
     ///
     /// The runner should represent the backend/profile used for approved
     /// permission requests. Runtime admission approves only the exact planned
-    /// action; it does not grant a reusable id back to the model.
+    /// action, while a concrete backend may retain the approved capabilities
+    /// for later actions in the same runtime session.
     #[must_use]
     pub fn allow_permissioned_process_actions(mut self, runner: Arc<dyn ProcessRunner>) -> Self {
         self.permissioned_process_runner_factory = Some(Arc::new(
@@ -572,8 +573,8 @@ impl RuntimeBuilder {
     /// Opts in to constructing a process runner per approved permission request.
     ///
     /// This is the preferred path for sandbox backends such as bubblewrap where
-    /// approved capabilities, currently network, should be materialized only
-    /// for the exact action being executed.
+    /// approved capabilities must be materialized into each new action
+    /// sandbox while remaining active for the current runtime session.
     #[must_use]
     pub fn permissioned_process_runner_factory(
         mut self,

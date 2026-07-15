@@ -817,7 +817,7 @@ impl PermissionAdmissionSource for ModelBackedPermissionAdmissionSource {
 pub fn request_permissions_tool() -> Result<RegisteredTool, PermissionAdmissionError> {
     let spec = ToolSpec::new(
         ToolName::new(REQUEST_PERMISSIONS_TOOL_NAME).expect("static tool name is valid"),
-        "Request additional filesystem or network capability for one exact planned action.",
+        "Request additional filesystem or network capability for one exact planned action. The configured session-aware process backend materializes approved capabilities for later actions in the current runtime session; request a new path separately when needed.",
         request_permissions_input_schema()?,
     )?;
     Ok(RegisteredTool::new(
@@ -1037,6 +1037,7 @@ fn request_permissions_input_schema() -> Result<ToolInputSchema, PermissionAdmis
             "requested": {
                 "type": "object",
                 "additionalProperties": false,
+                "description": "Capabilities to add after this exact action is approved. Use network for network access or paths for one or more filesystem paths; a session-aware process backend keeps approved capabilities active for later actions in this runtime session.",
                 "properties": {
                     "network": {
                         "type": "boolean",
@@ -1044,6 +1045,7 @@ fn request_permissions_input_schema() -> Result<ToolInputSchema, PermissionAdmis
                     },
                     "paths": {
                         "type": "array",
+                        "description": "Filesystem paths for a session-aware process backend to keep available in later process actions. Each item must specify one path and ro, rw, or deny access.",
                         "items": {
                             "type": "object",
                             "additionalProperties": false,
@@ -1066,6 +1068,7 @@ fn request_permissions_input_schema() -> Result<ToolInputSchema, PermissionAdmis
             "for_action": {
                 "type": "object",
                 "additionalProperties": false,
+                "description": "The exact process action that will run after admission. It does not grant access to paths that are not listed in requested.",
                 "properties": {
                     "kind": {
                         "type": "string",
@@ -1692,6 +1695,42 @@ mod tests {
                 .expect("cwd description should be text")
                 .contains("never pass an empty string")
         );
+    }
+
+    #[test]
+    fn request_permissions_schema_describes_nested_request_objects() {
+        let tool = request_permissions_tool().expect("permission tool should build");
+        let schema = serde_json::to_value(tool.spec().input_schema().as_schema())
+            .expect("schema should serialize");
+        for path in [
+            ["properties", "requested", "description"].as_slice(),
+            [
+                "properties",
+                "requested",
+                "properties",
+                "paths",
+                "description",
+            ]
+            .as_slice(),
+            ["properties", "for_action", "description"].as_slice(),
+            [
+                "properties",
+                "for_action",
+                "properties",
+                "argv",
+                "description",
+            ]
+            .as_slice(),
+        ] {
+            let mut value = &schema;
+            for key in path {
+                value = &value[*key];
+            }
+            assert!(
+                !value.as_str().unwrap_or_default().is_empty(),
+                "missing description at {path:?}"
+            );
+        }
     }
 
     #[test]
