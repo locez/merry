@@ -10,6 +10,7 @@ pub(crate) enum KeyAction {
     PasteImage,
     Interrupt,
     OpenCommandPanel,
+    TogglePlan,
     OpenDetails,
     CloseOverlay,
     Quit,
@@ -83,6 +84,10 @@ impl Default for Keymap {
                     KeyAction::OpenCommandPanel,
                 ),
                 (
+                    KeyBinding::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
+                    KeyAction::TogglePlan,
+                ),
+                (
                     KeyBinding::new(KeyCode::Esc, KeyModifiers::NONE),
                     KeyAction::Interrupt,
                 ),
@@ -147,6 +152,9 @@ impl Keymap {
         }
         if let Some(binding) = config.paste_image.as_deref() {
             keymap.set_binding(parse_binding(binding)?, KeyAction::PasteImage);
+        }
+        if let Some(binding) = config.toggle_plan.as_deref() {
+            keymap.set_binding(parse_binding(binding)?, KeyAction::TogglePlan);
         }
         if let Some(binding) = config.interrupt.as_deref() {
             keymap.set_binding(parse_binding(binding)?, KeyAction::Interrupt);
@@ -255,6 +263,7 @@ fn parse_binding(value: &str) -> Result<KeyBinding, crate::config::ConfigError> 
         "ctrl+g" => Ok(KeyBinding::new(KeyCode::Char('g'), KeyModifiers::CONTROL)),
         "ctrl+j" => Ok(KeyBinding::new(KeyCode::Char('j'), KeyModifiers::CONTROL)),
         "ctrl+n" => Ok(KeyBinding::new(KeyCode::Char('n'), KeyModifiers::CONTROL)),
+        "ctrl+o" => Ok(KeyBinding::new(KeyCode::Char('o'), KeyModifiers::CONTROL)),
         "ctrl+p" => Ok(KeyBinding::new(KeyCode::Char('p'), KeyModifiers::CONTROL)),
         "ctrl+q" => Ok(KeyBinding::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
         "ctrl+r" => Ok(KeyBinding::new(KeyCode::Char('r'), KeyModifiers::CONTROL)),

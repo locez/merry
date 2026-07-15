@@ -21,8 +21,8 @@ use merry_core::{
     RuntimeJournalPayload,
 };
 use merry_llm::GenerationConfig;
-use std::collections::BTreeSet;
-use tokio::sync::mpsc;
+use std::{collections::BTreeSet, sync::Arc};
+use tokio::sync::{Notify, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 
@@ -45,6 +45,7 @@ impl Runtime {
         let (parent_token, generation_config, _final_output_contract) = context.into_parts();
         let loop_token = parent_token.child_token();
         let producer_token = loop_token.clone();
+        let subagent_completion_notify = self.subagent_completion_notify();
         let run_id = next_interactive_run_id();
         let (event_sender, event_receiver) = mpsc::channel(16);
         let (command_sender, command_receiver) = mpsc::channel(16);
@@ -54,6 +55,7 @@ impl Runtime {
             queue: InteractiveInputQueue::default(),
             command_receiver,
             plan_event_receiver,
+            subagent_completion_notify,
             event_sender,
             loop_token: producer_token,
             generation_config,
@@ -65,6 +67,7 @@ impl Runtime {
             seen_plan_sequences: BTreeSet::new(),
             coordinator_continuation_requested: false,
             coordinator_continuation_note: None,
+            subagent_continuation_requested: false,
         };
         let producer_handle = tokio::spawn(async move {
             producer.run().await;
@@ -87,6 +90,7 @@ struct InteractiveProducer {
     queue: InteractiveInputQueue,
     command_receiver: mpsc::Receiver<InteractiveCommand>,
     plan_event_receiver: crate::plan::PlanControllerEventReceiver,
+    subagent_completion_notify: Option<Arc<Notify>>,
     event_sender: mpsc::Sender<RuntimeEvent>,
     loop_token: CancellationToken,
     generation_config: GenerationConfig,
@@ -98,6 +102,7 @@ struct InteractiveProducer {
     seen_plan_sequences: BTreeSet<u64>,
     coordinator_continuation_requested: bool,
     coordinator_continuation_note: Option<String>,
+    subagent_continuation_requested: bool,
 }
 
 impl InteractiveProducer {
@@ -106,6 +111,13 @@ impl InteractiveProducer {
             return;
         }
         while !self.loop_token.is_cancelled() {
+            let subagent_completion_notify = self.subagent_completion_notify.clone();
+            let wait_for_subagent_completion = async move {
+                match subagent_completion_notify {
+                    Some(notify) => notify.notified().await,
+                    None => std::future::pending::<()>().await,
+                }
+            };
             let command = tokio::select! {
                 command = self.command_receiver.recv() => command,
                 plan_event = self.plan_event_receiver.recv() => {
@@ -115,6 +127,12 @@ impl InteractiveProducer {
                     if self.coordinator_continuation_requested
                         && !self.run_coordinator_continuation().await
                     {
+                        return;
+                    }
+                    continue;
+                }
+                _ = wait_for_subagent_completion => {
+                    if !self.run_coordinator_continuation().await {
                         return;
                     }
                     continue;
@@ -218,6 +236,7 @@ impl InteractiveProducer {
                 return false;
             }
 
+            self.refresh_subagent_continuation_request().await;
             match self.boundary_action(continuation_required) {
                 BoundaryAction::UserInput {
                     accepted: next_accepted,
@@ -254,7 +273,10 @@ impl InteractiveProducer {
     async fn run_continuation_steps(&mut self) -> Option<BoundaryAction> {
         let mut first_step = true;
         loop {
-            let input = if first_step {
+            let notification_input = self.take_subagent_notification_input().await;
+            let input = if let Some(input) = notification_input {
+                input
+            } else if first_step {
                 first_step = false;
                 self.coordinator_continuation_note
                     .take()
@@ -270,11 +292,27 @@ impl InteractiveProducer {
             if !self.drain_ready_commands().await {
                 return None;
             }
+            self.refresh_subagent_continuation_request().await;
             let boundary = self.boundary_action(continuation_required);
             if matches!(boundary, BoundaryAction::Continuation) {
                 continue;
             }
             return Some(boundary);
+        }
+    }
+
+    async fn take_subagent_notification_input(&self) -> Option<StepInput> {
+        let statuses = self.runtime.take_subagent_completion_notifications().await;
+        if statuses.is_empty() {
+            return None;
+        }
+        let text = crate::subagent::completion_notification_text(&statuses);
+        match StepInput::loop_control_text(&text) {
+            Ok(input) => Some(input),
+            Err(error) => {
+                tracing::warn!(%error, "discarding invalid subagent completion notification");
+                None
+            }
         }
     }
 
@@ -407,7 +445,11 @@ impl InteractiveProducer {
                 .await
             }
             StepOutcome::ToolResultRecorded => Some(!self.interrupted),
-            StepOutcome::Completed => Some(false),
+            StepOutcome::Completed => {
+                self.subagent_continuation_requested =
+                    self.runtime.has_subagent_completion_notifications().await;
+                Some(false)
+            }
             StepOutcome::Failed(_) | StepOutcome::Cancelled(_) | StepOutcome::Blocked(_) => {
                 Some(false)
             }
@@ -656,17 +698,28 @@ impl InteractiveProducer {
         true
     }
 
+    async fn refresh_subagent_continuation_request(&mut self) {
+        if self.runtime.has_subagent_completion_notifications().await {
+            self.subagent_continuation_requested = true;
+        }
+    }
+
     fn boundary_action(&mut self, continuation_required: bool) -> BoundaryAction {
+        if self.interrupted {
+            return BoundaryAction::Wait;
+        }
+
+        if self.subagent_continuation_requested {
+            self.subagent_continuation_requested = false;
+            return BoundaryAction::Continuation;
+        }
+
         if self.queue.has_next() {
             self.interrupted = false;
             return BoundaryAction::UserInput {
                 accepted: self.queue.accept_next_burst(),
                 lane: QueuedInputLane::Next,
             };
-        }
-
-        if self.interrupted {
-            return BoundaryAction::Wait;
         }
 
         if self.suspended_resume_requested {

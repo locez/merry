@@ -128,6 +128,10 @@ pub(crate) fn handle_key_action(action: KeyAction, state: &mut TuiState) -> Cont
             state.open_command_palette();
             ControllerEffect::None
         }
+        KeyAction::TogglePlan => {
+            state.plan_mut().toggle();
+            ControllerEffect::None
+        }
         KeyAction::Interrupt => {
             if state.is_active_run() {
                 ControllerEffect::Interrupt
@@ -297,7 +301,10 @@ pub(crate) fn handle_key_event(key: KeyEvent, state: &mut TuiState) -> Controlle
         if let Some(action) = state.keymap().action_for(key.into())
             && matches!(
                 action,
-                KeyAction::OpenCommandPanel | KeyAction::Interrupt | KeyAction::Quit
+                KeyAction::OpenCommandPanel
+                    | KeyAction::TogglePlan
+                    | KeyAction::Interrupt
+                    | KeyAction::Quit
             )
         {
             return handle_key_action(action, state);

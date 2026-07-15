@@ -184,6 +184,7 @@ struct SubagentsToml {
     enabled: bool,
     max_threads: Option<usize>,
     max_depth: Option<u8>,
+    max_model_turns: Option<u32>,
 }
 
 impl SubagentsToml {
@@ -193,6 +194,8 @@ impl SubagentsToml {
             self.max_threads.unwrap_or(defaults.max_threads()),
             self.max_depth.unwrap_or(defaults.max_depth()),
         )
+        .map_err(|error| ConfigError::Invalid(error.to_string()))?
+        .with_max_model_turns(self.max_model_turns.unwrap_or(defaults.max_model_turns()))
         .map_err(|error| ConfigError::Invalid(error.to_string()))?;
         Ok(SubagentsConfig {
             enabled: self.enabled,
@@ -227,6 +230,8 @@ impl SubagentsConfig {
             max_threads.unwrap_or_else(|| self.limits.max_threads()),
             self.limits.max_depth(),
         )
+        .map_err(|error| ConfigError::Invalid(error.to_string()))?
+        .with_max_model_turns(self.limits.max_model_turns())
         .map_err(|error| ConfigError::Invalid(error.to_string()))?;
         Ok(Self {
             enabled: enabled.unwrap_or(self.enabled),
@@ -393,6 +398,7 @@ retained_raw_tail_items = 10
 enabled = true
 max_threads = 3
 max_depth = 1
+max_model_turns = 96
 "#,
             ),
             &paths,
@@ -404,7 +410,10 @@ max_depth = 1
         assert!(enabled.is_enabled());
         assert_eq!(
             enabled.limits(),
-            merry_runtime::SubagentConfig::new(3, 1).expect("valid subagent config")
+            merry_runtime::SubagentConfig::new(3, 1)
+                .expect("valid subagent config")
+                .with_max_model_turns(96)
+                .expect("valid child model-turn limit")
         );
 
         let invalid = MerryConfig::load_optional_from_text(

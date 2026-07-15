@@ -32,8 +32,8 @@ pub struct SpawnSubagentTaskInput {
     #[schemars(description = "Optional short display name for this child task.")]
     pub display_name: Option<String>,
     #[schemars(
-        description = "Optional positive maximum number of model turns for this child. Omit it to use the runtime default.",
-        range(min = 1)
+        schema_with = "max_model_turns_schema",
+        description = "Optional positive maximum number of model turns for this child. Omit it to use the configured runtime default (1024 unless changed in runtime.subagents.max_model_turns)."
     )]
     pub max_model_turns: Option<u32>,
     /// Exact registered Merry tool names the child may use. Names are copied
@@ -191,6 +191,16 @@ fn optional_scope_paths_schema(_: &mut schemars::SchemaGenerator) -> schemars::S
         ]
     }))
     .expect("static optional subagent scope schema is valid")
+}
+
+fn max_model_turns_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::Schema::try_from(json!({
+        "type": "integer",
+        "minimum": 1,
+        "default": super::spec::DEFAULT_MAX_MODEL_TURNS,
+        "description": "Positive child model-turn budget. Omit it to use the configured runtime default."
+    }))
+    .expect("static child model-turn schema is valid")
 }
 
 /// Provider-visible compact status output for `wait_subagents`.

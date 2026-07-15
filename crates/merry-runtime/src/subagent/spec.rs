@@ -9,7 +9,12 @@ use thiserror::Error;
 /// Maximum UTF-8 task text size accepted for one child task.
 pub(crate) const MAX_TASK_BYTES: usize = 16 * 1024;
 /// Default bounded child loop model-turn count.
-pub const DEFAULT_MAX_MODEL_TURNS: u32 = 8;
+///
+/// A small single-digit budget is too restrictive for a child that needs to
+/// inspect files, use tools, verify the result, and report a conclusion. The
+/// limit remains bounded, but is intentionally generous and configurable at
+/// the runtime level.
+pub const DEFAULT_MAX_MODEL_TURNS: u32 = 1024;
 /// Default maximum number of concurrent child agents.
 pub(crate) const DEFAULT_MAX_THREADS: usize = 6;
 /// Default child delegation depth.
@@ -64,6 +69,7 @@ pub enum SubagentError {
 pub struct SubagentConfig {
     max_threads: usize,
     max_depth: u8,
+    max_model_turns: u32,
 }
 
 impl SubagentConfig {
@@ -78,7 +84,18 @@ impl SubagentConfig {
         Ok(Self {
             max_threads,
             max_depth,
+            max_model_turns: DEFAULT_MAX_MODEL_TURNS,
         })
+    }
+
+    /// Replaces the default model-turn budget inherited by child tasks that
+    /// omit an explicit `max_model_turns` value.
+    pub fn with_max_model_turns(mut self, max_model_turns: u32) -> Result<Self, SubagentError> {
+        if max_model_turns == 0 {
+            return Err(SubagentError::ZeroMaxModelTurns);
+        }
+        self.max_model_turns = max_model_turns;
+        Ok(self)
     }
 
     /// Returns the maximum number of child agents allowed to run concurrently.
@@ -92,6 +109,12 @@ impl SubagentConfig {
     pub fn max_depth(self) -> u8 {
         self.max_depth
     }
+
+    /// Returns the default maximum number of model turns for one child task.
+    #[must_use]
+    pub fn max_model_turns(self) -> u32 {
+        self.max_model_turns
+    }
 }
 
 impl Default for SubagentConfig {
@@ -99,6 +122,7 @@ impl Default for SubagentConfig {
         Self {
             max_threads: DEFAULT_MAX_THREADS,
             max_depth: DEFAULT_MAX_DEPTH,
+            max_model_turns: DEFAULT_MAX_MODEL_TURNS,
         }
     }
 }

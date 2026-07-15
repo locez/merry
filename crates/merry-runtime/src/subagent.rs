@@ -18,7 +18,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex as StdMutex,
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -44,6 +44,32 @@ pub use spec::{
     validate_no_write_scope_conflicts,
 };
 pub use tools::{subagent_registered_tools, subagent_tool_specs};
+
+/// Formats terminal child statuses as a model-visible runtime continuation.
+pub(crate) fn completion_notification_text(statuses: &[SubagentStatusView]) -> String {
+    let mut text = String::from(
+        "Runtime update: child agents reached terminal states. Review these results and incorporate any required follow-up before claiming the parent task is complete:\n",
+    );
+    for status in statuses {
+        text.push_str("- ");
+        text.push_str(status.agent_id.as_str());
+        text.push_str(" [");
+        text.push_str(status.status.as_str());
+        text.push_str("] ");
+        text.extend(status.summary.chars().map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        }));
+        text.push('\n');
+    }
+    text.push_str(
+        "Call wait_subagents with the listed agent ids when the compact result, diagnostics, or changed paths are needed.",
+    );
+    text
+}
 
 /// Opaque child capability for reading and updating the subtree below one
 /// active Plan link.
@@ -284,10 +310,13 @@ pub(crate) fn plan_link_runtime_for_controller(
 pub struct SubagentManager {
     enabled: Arc<AtomicBool>,
     max_threads: Arc<AtomicUsize>,
+    max_model_turns: Arc<AtomicU32>,
     has_agents: Arc<AtomicBool>,
     factory: Arc<dyn ChildRuntimeFactory>,
     state: Arc<Mutex<SubagentManagerState>>,
     notify: Arc<Notify>,
+    completion_notifications: Arc<Mutex<VecDeque<SubagentStatusView>>>,
+    completion_notify: Arc<Notify>,
     next_id: Arc<AtomicU64>,
     next_batch_id: Arc<AtomicU64>,
     depth: u8,
@@ -323,6 +352,8 @@ struct ChildScheduler {
     factory: Arc<dyn ChildRuntimeFactory>,
     state: Arc<Mutex<SubagentManagerState>>,
     notify: Arc<Notify>,
+    completion_notifications: Arc<Mutex<VecDeque<SubagentStatusView>>>,
+    completion_notify: Arc<Notify>,
     enabled: Arc<AtomicBool>,
     max_threads: Arc<AtomicUsize>,
     depth: u8,
@@ -344,6 +375,11 @@ impl ChildScheduler {
             .lock()
             .expect("subagent activity hub mutex is not poisoned")
             .clone()
+    }
+
+    async fn enqueue_completion_notification(&self, status: SubagentStatusView) {
+        self.completion_notifications.lock().await.push_back(status);
+        self.completion_notify.notify_one();
     }
 }
 
@@ -440,10 +476,13 @@ impl SubagentManager {
         Self {
             enabled: Arc::new(AtomicBool::new(enabled)),
             max_threads: Arc::new(AtomicUsize::new(config.max_threads())),
+            max_model_turns: Arc::new(AtomicU32::new(config.max_model_turns())),
             has_agents: Arc::new(AtomicBool::new(false)),
             factory,
             state: Arc::new(Mutex::new(SubagentManagerState::default())),
             notify: Arc::new(Notify::new()),
+            completion_notifications: Arc::new(Mutex::new(VecDeque::new())),
+            completion_notify: Arc::new(Notify::new()),
             next_id: Arc::new(AtomicU64::new(1)),
             next_batch_id: Arc::new(AtomicU64::new(1)),
             depth,
@@ -574,6 +613,8 @@ impl SubagentManager {
     ) -> Result<(), RuntimeError> {
         self.max_threads
             .store(config.max_threads(), Ordering::Release);
+        self.max_model_turns
+            .store(config.max_model_turns(), Ordering::Release);
         self.enabled.store(enabled, Ordering::Release);
         if enabled {
             let mut state = self.state.lock().await;
@@ -600,6 +641,38 @@ impl SubagentManager {
             .values()
             .map(ManagedSubagent::status_view)
             .collect()
+    }
+
+    /// Returns the configured default model-turn budget for omitted child task
+    /// inputs.
+    pub(crate) fn max_model_turns(&self) -> u32 {
+        self.max_model_turns.load(Ordering::Acquire)
+    }
+
+    /// Returns the notification primitive used to wake a parent continuation
+    /// when a child reaches a terminal state.
+    pub(crate) fn completion_notify(&self) -> Arc<Notify> {
+        Arc::clone(&self.completion_notify)
+    }
+
+    /// Drains terminal child notifications for delivery to the parent model.
+    pub(crate) async fn take_completion_notifications(&self) -> Vec<SubagentStatusView> {
+        let mut notifications = self.completion_notifications.lock().await;
+        notifications.drain(..).collect()
+    }
+
+    pub(crate) async fn has_completion_notifications(&self) -> bool {
+        !self.completion_notifications.lock().await.is_empty()
+    }
+
+    async fn enqueue_completion_notification(&self, status: SubagentStatusView) {
+        self.completion_notifications.lock().await.push_back(status);
+        self.completion_notify.notify_one();
+    }
+
+    async fn discard_completion_notifications(&self, agent_ids: &[SubagentId]) {
+        let mut notifications = self.completion_notifications.lock().await;
+        notifications.retain(|status| !agent_ids.contains(&status.agent_id));
     }
 
     /// Accepts a batch of child tasks, starting only the initial bounded slice.
@@ -806,12 +879,14 @@ impl SubagentManager {
             let agents = self.status_for(agent_ids).await;
             let ready = wait_mode_satisfied(mode, &agents);
             if ready {
+                self.acknowledge_waited_statuses(&agents).await;
                 return Ok(WaitSubagentsOutput::with_wait_state(agents, true, false));
             }
 
             match deadline {
                 Some(deadline) => {
                     if tokio::time::Instant::now() >= deadline {
+                        self.acknowledge_waited_statuses(&agents).await;
                         return Ok(WaitSubagentsOutput::with_wait_state(agents, false, true));
                     }
                     if tokio::time::timeout_at(deadline, notified.as_mut())
@@ -819,6 +894,7 @@ impl SubagentManager {
                         .is_err()
                     {
                         let agents = self.status_for(agent_ids).await;
+                        self.acknowledge_waited_statuses(&agents).await;
                         return Ok(WaitSubagentsOutput::with_wait_state(agents, false, true));
                     }
                 }
@@ -975,6 +1051,7 @@ impl SubagentManager {
         let mut state = self.state.lock().await;
         let mut link = None;
         let mut terminal_activity = None;
+        let mut terminal_notification = None;
         if let Some(agent) = state.agents.get_mut(agent_id) {
             if agent.status.is_terminal() {
                 return;
@@ -984,6 +1061,7 @@ impl SubagentManager {
             agent.diagnostics = Some(diagnostics);
             link = agent.plan_link.clone();
             terminal_activity = terminal_activity_for_agent(agent);
+            terminal_notification = Some(agent.status_view());
         }
         let to_start = self.reserve_queued_starts_locked(&mut state);
         drop(state);
@@ -998,6 +1076,9 @@ impl SubagentManager {
                 &summary,
             );
         }
+        if let Some(status) = terminal_notification {
+            self.enqueue_completion_notification(status).await;
+        }
         self.notify.notify_waiters();
         let _ = self.start_reserved_children(to_start).await;
     }
@@ -1006,6 +1087,7 @@ impl SubagentManager {
         let mut state = self.state.lock().await;
         let mut link = None;
         let mut terminal_activity = None;
+        let mut terminal_notification = None;
         if let Some(agent) = state.agents.get_mut(agent_id)
             && !agent.status.is_terminal()
         {
@@ -1017,6 +1099,7 @@ impl SubagentManager {
             ));
             link = agent.plan_link.clone();
             terminal_activity = terminal_activity_for_agent(agent);
+            terminal_notification = Some(agent.status_view());
         }
         let to_start = self.reserve_queued_starts_locked(&mut state);
         drop(state);
@@ -1030,6 +1113,9 @@ impl SubagentManager {
                 phase,
                 &summary,
             );
+        }
+        if let Some(status) = terminal_notification {
+            self.enqueue_completion_notification(status).await;
         }
         self.notify.notify_waiters();
         let _ = self.start_reserved_children(to_start).await;
@@ -1047,6 +1133,8 @@ impl SubagentManager {
             factory: Arc::clone(&self.factory),
             state: Arc::clone(&self.state),
             notify: Arc::clone(&self.notify),
+            completion_notifications: Arc::clone(&self.completion_notifications),
+            completion_notify: Arc::clone(&self.completion_notify),
             enabled: Arc::clone(&self.enabled),
             max_threads: Arc::clone(&self.max_threads),
             depth: self.depth,
@@ -1066,6 +1154,15 @@ impl SubagentManager {
     async fn status_for(&self, agent_ids: &[SubagentId]) -> Vec<SubagentStatusView> {
         let state = self.state.lock().await;
         selected_statuses(&state, agent_ids)
+    }
+
+    async fn acknowledge_waited_statuses(&self, agents: &[SubagentStatusView]) {
+        let agent_ids = agents
+            .iter()
+            .filter(|agent| agent.is_terminal())
+            .map(|agent| agent.agent_id.clone())
+            .collect::<Vec<_>>();
+        self.discard_completion_notifications(&agent_ids).await;
     }
 
     async fn update_plan_links(&self, links: Vec<PlanLinkSnapshot>, status: PlanLinkStatus) {
@@ -1288,6 +1385,7 @@ async fn finish_reserved_child_start(
     let mut state_guard = scheduler.state.lock().await;
     let mut link = None;
     let mut terminal_activity = None;
+    let mut terminal_notification = None;
     if let Some(agent) = state_guard.agents.get_mut(&start.agent_id)
         && !agent.status.is_terminal()
     {
@@ -1296,6 +1394,7 @@ async fn finish_reserved_child_start(
         agent.diagnostics = Some(diagnostics);
         link = agent.plan_link.clone();
         terminal_activity = terminal_activity_for_agent(agent);
+        terminal_notification = Some(agent.status_view());
     }
     pending.extend(reserve_queued_starts_locked(
         &mut state_guard,
@@ -1311,6 +1410,9 @@ async fn finish_reserved_child_start(
             phase,
             &summary,
         );
+    }
+    if let Some(status) = terminal_notification {
+        scheduler.enqueue_completion_notification(status).await;
     }
     scheduler.notify.notify_waiters();
 }
@@ -1577,17 +1679,19 @@ fn spawn_child_loop(scheduler: ChildScheduler, launch: ChildLoopLaunch) {
                 }
             }
         }
-        let (terminal_link, terminal_status, terminal_activity) = state_guard
-            .agents
-            .get(&launch.agent_id)
-            .map(|agent| {
-                (
-                    agent.plan_link.clone(),
-                    plan_link_status_for_agent(agent),
-                    terminal_activity_for_agent(agent),
-                )
-            })
-            .unwrap_or((None, PlanLinkStatus::Failed, None));
+        let (terminal_link, terminal_status, terminal_activity, terminal_notification) =
+            state_guard
+                .agents
+                .get(&launch.agent_id)
+                .map(|agent| {
+                    (
+                        agent.plan_link.clone(),
+                        plan_link_status_for_agent(agent),
+                        terminal_activity_for_agent(agent),
+                        agent.status.is_terminal().then(|| agent.status_view()),
+                    )
+                })
+                .unwrap_or((None, PlanLinkStatus::Failed, None, None));
         let to_start =
             reserve_queued_starts_locked(&mut state_guard, scheduler.effective_max_threads());
         drop(state_guard);
@@ -1599,6 +1703,9 @@ fn spawn_child_loop(scheduler: ChildScheduler, launch: ChildLoopLaunch) {
                 phase,
                 &summary,
             );
+        }
+        if let Some(status) = terminal_notification {
+            scheduler.enqueue_completion_notification(status).await;
         }
         scheduler.notify.notify_waiters();
         start_reserved_children_iteratively(scheduler, to_start).await;
@@ -1644,7 +1751,7 @@ async fn settle_child_terminal(
     activity_hub: Option<Arc<SubagentActivityHub>>,
     to_start: Vec<ReservedChildStart>,
 ) {
-    let (link, link_status, terminal_activity) = scheduler
+    let (link, link_status, terminal_activity, terminal_notification) = scheduler
         .state
         .lock()
         .await
@@ -1655,12 +1762,16 @@ async fn settle_child_terminal(
                 agent.plan_link.clone(),
                 plan_link_status_for_agent(agent),
                 terminal_activity_for_agent(agent),
+                agent.status.is_terminal().then(|| agent.status_view()),
             )
         })
-        .unwrap_or((None, PlanLinkStatus::Failed, None));
+        .unwrap_or((None, PlanLinkStatus::Failed, None, None));
     update_plan_link_with_scheduler(&scheduler, link, link_status).await;
     if let Some((_task_id, phase, summary)) = terminal_activity {
         publish_terminal_activity(activity_hub.as_deref(), reducer, phase, &summary);
+    }
+    if let Some(status) = terminal_notification {
+        scheduler.enqueue_completion_notification(status).await;
     }
     scheduler.notify.notify_waiters();
     start_reserved_children_iteratively(scheduler, to_start).await;
@@ -2086,6 +2197,12 @@ mod tests {
     }
 
     #[test]
+    fn subagent_config_uses_a_reasonable_child_model_turn_default() {
+        assert_eq!(SubagentConfig::default().max_model_turns(), 1024);
+        assert_eq!(DEFAULT_MAX_MODEL_TURNS, 1024);
+    }
+
+    #[test]
     fn subagent_tool_specs_are_stable_and_schema_backed() {
         let specs = subagent_tool_specs().expect("tool specs should build");
         let names = specs
@@ -2112,6 +2229,7 @@ mod tests {
             serde_json::to_string(specs[0].input_schema()).expect("spawn schema should serialize");
         assert!(spawn_schema.contains("Exact registered Merry tool names"));
         assert!(spawn_schema.contains("functions.run_process"));
+        assert!(spawn_schema.contains("\"default\":1024"));
     }
 
     #[test]
@@ -3049,6 +3167,42 @@ mod manager_tests {
                 .phase,
             merry_core::SubagentActivityPhase::Completed
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn child_completion_enqueues_a_parent_runtime_notification() {
+        let manager = SubagentManager::new(
+            SessionId::new("completion-notification").expect("valid session id"),
+            SubagentConfig::default(),
+            Arc::new(RecordingModelChildFactory::new()),
+        );
+        let notified = manager.completion_notify.notified();
+        let output = manager
+            .spawn(
+                vec![
+                    SubagentTaskSpec::new("Complete and notify the parent.", 2)
+                        .expect("valid task"),
+                ],
+                None,
+                CancellationToken::new(),
+            )
+            .await
+            .expect("child spawn succeeds");
+        let agent_id = output.spawned[0].agent_id.clone();
+
+        tokio::time::timeout(Duration::from_secs(1), notified)
+            .await
+            .expect("child completion should wake the parent notification");
+        let notifications = manager.take_completion_notifications().await;
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(notifications[0].agent_id, agent_id);
+        assert_eq!(notifications[0].status, SubagentStatusLabel::Completed);
+
+        let wait = manager
+            .wait(std::slice::from_ref(&agent_id), WaitMode::All, None)
+            .await
+            .expect("child wait succeeds");
+        assert!(wait.terminal);
     }
 
     #[tokio::test(flavor = "current_thread")]

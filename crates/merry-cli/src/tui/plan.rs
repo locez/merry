@@ -336,6 +336,15 @@ impl PlanUiState {
         true
     }
 
+    pub(crate) fn toggle(&mut self) -> bool {
+        if self.is_open() {
+            self.close();
+            false
+        } else {
+            self.open_and_focus()
+        }
+    }
+
     pub(crate) fn close(&mut self) {
         self.open = false;
         self.focused = false;

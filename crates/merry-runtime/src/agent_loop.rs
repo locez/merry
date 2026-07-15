@@ -8,6 +8,7 @@ use crate::{
     FinalOutput, FinalOutputContract, Runtime, RuntimeError, RuntimeJournalEventStream,
     StepContext, StepInput, ToolExecutionContext,
     events::{ActiveStepPermit, RuntimeEventProjector},
+    subagent::completion_notification_text,
 };
 use futures_core::Stream;
 use futures_util::StreamExt;
@@ -446,6 +447,7 @@ impl Runtime {
         let loop_token = context.cancellation_token().clone();
         let generation_config = context.generation_config().clone();
         let mut next_input = Some(input);
+        let mut deferred_user_input = None;
         let mut events = Vec::new();
         let mut model_turns_run = 0;
 
@@ -457,6 +459,17 @@ impl Runtime {
         );
 
         loop {
+            if let Some(notification_input) = take_subagent_notification_input(self).await {
+                if next_input
+                    .as_ref()
+                    .is_some_and(|input| !input.user_messages().is_empty())
+                {
+                    deferred_user_input = next_input.take();
+                } else {
+                    let _ = next_input.take();
+                }
+                next_input = Some(notification_input);
+            }
             let input = next_input
                 .take()
                 .expect("agent loop always installs the next step input before continuing");
@@ -489,6 +502,34 @@ impl Runtime {
 
             match outcome {
                 StepOutcome::Completed => {
+                    if let Some(notification_input) = take_subagent_notification_input(self).await {
+                        if model_turns_run >= config.max_model_turns() {
+                            trace_loop_finish(
+                                self.session_id().as_str(),
+                                "blocked",
+                                model_turns_run,
+                                Some("max_model_turns_reached"),
+                            );
+                            let session_usage = self.usage().await;
+                            return Ok(AgentLoopResult::new(
+                                AgentLoopStatus::Blocked {
+                                    reason: AgentLoopBlockedReason::MaxModelTurnsReached {
+                                        max_model_turns: config.max_model_turns(),
+                                    },
+                                },
+                                events,
+                                model_turns_run,
+                                None,
+                                session_usage,
+                            ));
+                        }
+                        next_input = Some(notification_input);
+                        continue;
+                    }
+                    if let Some(deferred_user_input) = deferred_user_input.take() {
+                        next_input = Some(deferred_user_input);
+                        continue;
+                    }
                     trace_loop_finish(
                         self.session_id().as_str(),
                         "completed",
@@ -598,6 +639,51 @@ impl Runtime {
                     next_input = Some(continuation_step_input());
                 }
                 StepOutcome::Pending(PendingLoopToolCall::FinalOutput(call)) => {
+                    if let Some((notification_input, notification_text)) =
+                        take_subagent_notification(self).await
+                    {
+                        let mut failure_events = match self
+                            .submit_tool_execution_failure_with_active_permit(
+                                call.id(),
+                                &notification_text,
+                                &loop_permit,
+                            )
+                            .await
+                        {
+                            Ok(events) => events,
+                            Err(source) => {
+                                trace_loop_error(
+                                    self.session_id().as_str(),
+                                    model_turns_run,
+                                    &source,
+                                );
+                                return Err(AgentLoopError::new(events, source));
+                            }
+                        };
+                        events.append(&mut failure_events);
+                        if model_turns_run >= config.max_model_turns() {
+                            trace_loop_finish(
+                                self.session_id().as_str(),
+                                "blocked",
+                                model_turns_run,
+                                Some("max_model_turns_reached"),
+                            );
+                            let session_usage = self.usage().await;
+                            return Ok(AgentLoopResult::new(
+                                AgentLoopStatus::Blocked {
+                                    reason: AgentLoopBlockedReason::MaxModelTurnsReached {
+                                        max_model_turns: config.max_model_turns(),
+                                    },
+                                },
+                                events,
+                                model_turns_run,
+                                None,
+                                session_usage,
+                            ));
+                        }
+                        next_input = Some(notification_input);
+                        continue;
+                    }
                     if let Some(Err(error)) = config
                         .final_output_contract()
                         .map(|contract| contract.validate_call(&call))
@@ -922,11 +1008,26 @@ async fn run_agent_loop_stream_producer(
         mut bridge_receiver,
     } = producer;
     let mut next_input = Some(input);
+    let mut deferred_user_input = None;
     let mut events = Vec::new();
     let mut projector = RuntimeEventProjector::new();
     let mut model_turns_run = 0;
 
-    while let Some(input) = next_input.take() {
+    loop {
+        if let Some(notification_input) = take_subagent_notification_input(&runtime).await {
+            if next_input
+                .as_ref()
+                .is_some_and(|input| !input.user_messages().is_empty())
+            {
+                deferred_user_input = next_input.take();
+            } else {
+                let _ = next_input.take();
+            }
+            next_input = Some(notification_input);
+        }
+        let Some(input) = next_input.take() else {
+            break;
+        };
         if loop_token.is_cancelled() {
             return None;
         }
@@ -954,6 +1055,28 @@ async fn run_agent_loop_stream_producer(
         let step_final_output = final_assistant_output_from_step(&runtime, &step_events).await;
         match classify_step_events(&step_events, config.final_output_contract()) {
             StepOutcome::Completed => {
+                if let Some(notification_input) = take_subagent_notification_input(&runtime).await {
+                    if model_turns_run >= config.max_model_turns() {
+                        let session_usage = runtime.usage().await;
+                        return Some(AgentLoopResult::new(
+                            AgentLoopStatus::Blocked {
+                                reason: AgentLoopBlockedReason::MaxModelTurnsReached {
+                                    max_model_turns: config.max_model_turns(),
+                                },
+                            },
+                            events,
+                            model_turns_run,
+                            None,
+                            session_usage,
+                        ));
+                    }
+                    next_input = Some(notification_input);
+                    continue;
+                }
+                if let Some(deferred_user_input) = deferred_user_input.take() {
+                    next_input = Some(deferred_user_input);
+                    continue;
+                }
                 let session_usage = runtime.usage().await;
                 return Some(AgentLoopResult::new(
                     AgentLoopStatus::Completed,
@@ -1108,6 +1231,47 @@ async fn run_agent_loop_stream_producer(
             }
             StepOutcome::Pending(call) => match call {
                 PendingLoopToolCall::FinalOutput(call) => {
+                    if let Some((notification_input, notification_text)) =
+                        take_subagent_notification(&runtime).await
+                    {
+                        let failure_events = runtime
+                            .submit_tool_execution_failure_with_active_permit(
+                                call.id(),
+                                &notification_text,
+                                &loop_permit,
+                            )
+                            .await
+                            .ok()?;
+                        for event in failure_events {
+                            if !publish_journal_event(
+                                &runtime,
+                                &mut projector,
+                                &sender,
+                                &mut events,
+                                event,
+                            )
+                            .await
+                            {
+                                return None;
+                            }
+                        }
+                        if model_turns_run >= config.max_model_turns() {
+                            let session_usage = runtime.usage().await;
+                            return Some(AgentLoopResult::new(
+                                AgentLoopStatus::Blocked {
+                                    reason: AgentLoopBlockedReason::MaxModelTurnsReached {
+                                        max_model_turns: config.max_model_turns(),
+                                    },
+                                },
+                                events,
+                                model_turns_run,
+                                None,
+                                session_usage,
+                            ));
+                        }
+                        next_input = Some(notification_input);
+                        continue;
+                    }
                     if let Some(Err(error)) = config
                         .final_output_contract()
                         .map(|contract| contract.validate_call(&call))
@@ -1383,6 +1547,28 @@ async fn publish_journal_event(
 
 fn continuation_step_input() -> StepInput {
     StepInput::no_new_user_input()
+}
+
+async fn take_subagent_notification(runtime: &Runtime) -> Option<(StepInput, String)> {
+    let statuses = runtime.take_subagent_completion_notifications().await;
+    if statuses.is_empty() {
+        return None;
+    }
+    let text = completion_notification_text(&statuses);
+    let input = match StepInput::loop_control_text(&text) {
+        Ok(input) => input,
+        Err(error) => {
+            tracing::warn!(%error, "discarding invalid subagent completion notification");
+            return None;
+        }
+    };
+    Some((input, text))
+}
+
+async fn take_subagent_notification_input(runtime: &Runtime) -> Option<StepInput> {
+    take_subagent_notification(runtime)
+        .await
+        .map(|(input, _)| input)
 }
 
 fn tool_execution_cancelled_diagnostic(call_id: &merry_core::ToolCallId) -> ErrorInfo {

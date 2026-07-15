@@ -1,4 +1,5 @@
 use super::{
+    keymap::KeyAction,
     plan::{PlanCounts, PlanTreeRow},
     state::TuiState,
     theme::SemanticColor,
@@ -96,6 +97,16 @@ fn plan_block<'a>(state: &TuiState, snapshot: &PlanSnapshot, title: &'a str) -> 
             Span::styled(
                 format!("{} r{} ", phase_label(snapshot.phase), snapshot.revision),
                 phase_style(state, snapshot.phase).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(
+                    "[{} toggle] ",
+                    state
+                        .keymap()
+                        .binding_label_for(KeyAction::TogglePlan)
+                        .unwrap_or_else(|| "Ctrl+O".to_owned())
+                ),
+                style(state, SemanticColor::Muted),
             ),
         ]))
         .border_style(style(state, border_color))
