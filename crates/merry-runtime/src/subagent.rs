@@ -357,6 +357,11 @@ struct ChildLoopLaunch {
     activity_hub: Option<Arc<SubagentActivityHub>>,
 }
 
+struct ChildErrorTransition {
+    claimed: bool,
+    to_start: Vec<ReservedChildStart>,
+}
+
 enum PlanScopeLookupError {
     Cancelled,
     Lookup(String),
@@ -1598,7 +1603,7 @@ async fn finish_child_with_status(
     summary: &str,
     diagnostics: ErrorInfo,
 ) {
-    let to_start = update_child_after_error(
+    let transition = update_child_after_error(
         &scheduler.state,
         &launch.agent_id,
         status,
@@ -1607,14 +1612,19 @@ async fn finish_child_with_status(
         scheduler.effective_max_threads(),
     )
     .await;
-    settle_child_terminal(
-        scheduler,
-        &launch.agent_id,
-        reducer,
-        launch.activity_hub.clone(),
-        to_start,
-    )
-    .await;
+    if transition.claimed {
+        settle_child_terminal(
+            scheduler,
+            &launch.agent_id,
+            reducer,
+            launch.activity_hub.clone(),
+            transition.to_start,
+        )
+        .await;
+    } else {
+        scheduler.notify.notify_waiters();
+        start_reserved_children_iteratively(scheduler, transition.to_start).await;
+    }
 }
 
 async fn settle_child_terminal(
@@ -1894,16 +1904,21 @@ async fn update_child_after_error(
     summary: &str,
     diagnostics: ErrorInfo,
     max_threads: usize,
-) -> Vec<ReservedChildStart> {
+) -> ChildErrorTransition {
     let mut state = state.lock().await;
+    let mut claimed = false;
     if let Some(agent) = state.agents.get_mut(agent_id)
         && !agent.status.is_terminal()
     {
         agent.status = status;
         agent.summary = summary.to_owned();
         agent.diagnostics = Some(diagnostics);
+        claimed = true;
     }
-    reserve_queued_starts_locked(&mut state, max_threads)
+    ChildErrorTransition {
+        claimed,
+        to_start: reserve_queued_starts_locked(&mut state, max_threads),
+    }
 }
 
 fn error_info(code: &'static str, message: impl ToString) -> ErrorInfo {
@@ -4584,6 +4599,99 @@ mod manager_tests {
                 .iter()
                 .find(|agent| agent.agent_id == agent_id)
                 .expect("child remains in snapshot")
+                .status,
+            SubagentStatusLabel::Cancelled
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn startup_error_after_terminal_claim_does_not_republish_terminal_activity() {
+        let hub = Arc::new(SubagentActivityHub::new());
+        let manager = SubagentManager::new(
+            SessionId::new("startup-error-terminal-race").expect("valid session id"),
+            SubagentConfig::default(),
+            Arc::new(FakeChildFactory::new()),
+        );
+        manager.attach_activity_hub(Arc::clone(&hub));
+
+        let task = SubagentTaskSpec::new("Fail after parent cancellation.", 1).expect("valid task");
+        let task_anchor = TaskAnchor::new(task.task()).expect("valid task anchor");
+        let agent_id = SubagentId::new("agent-terminal-race").expect("valid agent id");
+        let task_id = SubagentTaskId::new("task-terminal-race").expect("valid task id");
+        let cancellation_token = CancellationToken::new();
+        {
+            let mut state = manager.state.lock().await;
+            state
+                .batches
+                .insert(1, SubagentBatch { max_concurrency: 1 });
+            state.agents.insert(
+                agent_id.clone(),
+                ManagedSubagent {
+                    batch_id: 1,
+                    agent_id: agent_id.clone(),
+                    task_id: task_id.clone(),
+                    task: task.clone(),
+                    task_anchor: task_anchor.clone(),
+                    status: SubagentStatusLabel::Running,
+                    summary: "child running".to_owned(),
+                    result: None,
+                    output_paths: Vec::new(),
+                    changed_paths: Vec::new(),
+                    diagnostics: None,
+                    cancellation_token: cancellation_token.clone(),
+                    plan_link: None,
+                },
+            );
+        }
+
+        manager
+            .cancel(std::slice::from_ref(&agent_id))
+            .await
+            .expect("parent cancellation should succeed");
+        assert_eq!(
+            hub.published_phases(),
+            vec![merry_core::SubagentActivityPhase::Cancelled]
+        );
+
+        let runtime = Runtime::builder(
+            SessionId::new("startup-error-terminal-child").expect("valid child session id"),
+        )
+        .task_anchor(task_anchor.clone())
+        .build()
+        .expect("child runtime should build");
+        let generation_config = generation_config_for_child_task(&task);
+        let launch = ChildLoopLaunch {
+            agent_id: agent_id.clone(),
+            task_id: task_id.clone(),
+            task,
+            token: cancellation_token,
+            runtime,
+            generation_config,
+            activity_hub: Some(Arc::clone(&hub)),
+        };
+        let mut reducer = SubagentActivityReducer::new(agent_id.clone(), task_id);
+
+        finish_child_with_status(
+            manager.child_scheduler(),
+            &launch,
+            &mut reducer,
+            SubagentStatusLabel::Failed,
+            "child startup failed",
+            error_info("subagent_start_error", "synthetic startup failure"),
+        )
+        .await;
+
+        assert_eq!(
+            hub.published_phases(),
+            vec![merry_core::SubagentActivityPhase::Cancelled]
+        );
+        assert_eq!(
+            manager
+                .snapshot()
+                .await
+                .into_iter()
+                .find(|agent| agent.agent_id == agent_id)
+                .expect("terminal child remains tracked")
                 .status,
             SubagentStatusLabel::Cancelled
         );
