@@ -10,8 +10,8 @@ use crate::{
 };
 use merry_core::{
     PlanAttemptOutcome, PlanCapabilityEnvelopeSnapshot, PlanExecutorPolicy, PlanHarnessSnapshot,
-    PlanNodeResult, PlanNodeStatus, PlanPhase, PlanRecoveryPolicySnapshot, RuntimeJournalPayload,
-    SessionId,
+    PlanLinkStatus, PlanNodeResult, PlanNodeStatus, PlanPhase, PlanRecoveryPolicySnapshot,
+    RuntimeJournalPayload, SessionId, SubagentId, SubagentTaskId,
 };
 use std::{num::NonZeroUsize, sync::Arc};
 use tokio::sync::Mutex;
@@ -61,6 +61,164 @@ async fn concurrent_begin_requests_share_one_active_plan() {
         events.try_recv().is_err(),
         "idempotent begin emits no second update"
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn linked_subagent_lifecycle_updates_plan_execution_summary() {
+    let (controller, _events) = controller(None);
+    controller
+        .begin(input("bind real subagent work"))
+        .await
+        .expect("begin succeeds");
+    controller
+        .update(UpdatePlanInput {
+            reason: "define linked task".to_owned(),
+            execution_intent: PlanExecutionIntent::ContinuePlanning,
+            coordinator_node_id: None,
+            max_concurrency_hint: None,
+            change: PlanChangeInput::DefinePlan {
+                expected_plan_revision: 0,
+                root: plan_leaf("root"),
+            },
+        })
+        .await
+        .expect("plan update succeeds");
+
+    let link = controller
+        .bind_subagent(
+            "root".to_owned(),
+            SubagentId::new("agent-1").expect("valid agent id"),
+            SubagentTaskId::new("task-1").expect("valid task id"),
+            10,
+        )
+        .await
+        .expect("link binds");
+    let active = controller
+        .snapshot()
+        .await
+        .expect("snapshot reads")
+        .unwrap();
+    let node = active
+        .nodes
+        .iter()
+        .find(|node| node.client_key.as_deref() == Some("root"));
+    assert_eq!(node.unwrap().execution_summary.active, 1);
+
+    let binding_id = link.binding_id.clone();
+    controller
+        .update_subagent_link(binding_id.clone(), PlanLinkStatus::Completed, 20)
+        .await
+        .expect("link completion commits");
+    let completed = controller
+        .snapshot()
+        .await
+        .expect("snapshot reads")
+        .unwrap();
+    assert_eq!(completed.phase, PlanPhase::Completed);
+    let node = completed
+        .nodes
+        .iter()
+        .find(|node| node.client_key.as_deref() == Some("root"));
+    assert_eq!(node.unwrap().execution_summary.completed, 1);
+    assert_eq!(node.unwrap().execution_summary.active, 0);
+    assert!(
+        node.unwrap().links.iter().any(|link| {
+            link.binding_id == binding_id && link.status == PlanLinkStatus::Completed
+        })
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn linked_subagent_bindings_are_unique_across_plan_nodes() {
+    let (controller, _events) = controller(None);
+    controller
+        .begin(input("bind multiple subagents"))
+        .await
+        .expect("begin succeeds");
+    controller
+        .update(UpdatePlanInput {
+            reason: "define multiple linked tasks".to_owned(),
+            execution_intent: PlanExecutionIntent::ContinuePlanning,
+            coordinator_node_id: None,
+            max_concurrency_hint: None,
+            change: PlanChangeInput::DefinePlan {
+                expected_plan_revision: 0,
+                root: plan_root(vec![plan_leaf("left"), plan_leaf("right")]),
+            },
+        })
+        .await
+        .expect("plan update succeeds");
+
+    let left = controller
+        .bind_subagent(
+            "left".to_owned(),
+            SubagentId::new("agent-left").expect("valid agent id"),
+            SubagentTaskId::new("task-left").expect("valid task id"),
+            10,
+        )
+        .await
+        .expect("left link binds");
+    let right = controller
+        .bind_subagent(
+            "right".to_owned(),
+            SubagentId::new("agent-right").expect("valid agent id"),
+            SubagentTaskId::new("task-right").expect("valid task id"),
+            11,
+        )
+        .await
+        .expect("right link binds");
+
+    assert_ne!(
+        left.binding_id, right.binding_id,
+        "binding ids must identify links across the whole plan"
+    );
+
+    controller
+        .update_subagent_link(left.binding_id, PlanLinkStatus::Completed, 20)
+        .await
+        .expect("left link completion commits");
+    controller
+        .update_subagent_link(right.binding_id, PlanLinkStatus::Completed, 21)
+        .await
+        .expect("right link completion commits");
+
+    let snapshot = controller
+        .snapshot()
+        .await
+        .expect("snapshot reads")
+        .expect("active plan exists");
+    for client_key in ["left", "right"] {
+        let node = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.client_key.as_deref() == Some(client_key))
+            .expect("linked node exists");
+        assert_eq!(
+            node.execution_summary.active, 0,
+            "{client_key} remains active"
+        );
+        assert_eq!(
+            node.execution_summary.completed, 1,
+            "{client_key} did not complete"
+        );
+        assert_eq!(node.links[0].status, PlanLinkStatus::Completed);
+        assert!(node.links[0].terminal_at_ms.is_some());
+    }
+
+    let revision = snapshot.revision;
+    let updated = controller
+        .update(UpdatePlanInput {
+            reason: "continue after linked children completed".to_owned(),
+            execution_intent: PlanExecutionIntent::ContinuePlanning,
+            coordinator_node_id: None,
+            max_concurrency_hint: None,
+            change: PlanChangeInput::UseCurrentPlan {
+                expected_plan_revision: revision,
+            },
+        })
+        .await
+        .expect("follow-up plan update succeeds after linked children complete");
+    assert_eq!(updated.snapshot.revision, revision + 1);
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -86,14 +86,6 @@ pub(crate) fn palette_effect(
             state.plan_mut().close();
             ControllerEffect::None
         }
-        PaletteCommand::PausePlan => {
-            state.close_overlay();
-            ControllerEffect::PausePlan
-        }
-        PaletteCommand::ResumePlan => {
-            state.close_overlay();
-            ControllerEffect::ResumePlan
-        }
         PaletteCommand::RetryPlanNode => {
             state.close_overlay();
             state.plan().selected_node_id().cloned().map_or_else(
@@ -143,24 +135,6 @@ pub(crate) async fn dispatch_effect(
                 .await
             {
                 state.show_error_dialog("Plan revision failed", error.to_string());
-            }
-        }
-        ControllerEffect::PausePlan => {
-            if let Err(error) = session
-                .control
-                .pause_plan_scheduling("user paused plan scheduling from the TUI")
-                .await
-            {
-                state.show_error_dialog("Plan pause failed", error.to_string());
-            }
-        }
-        ControllerEffect::ResumePlan => {
-            if let Err(error) = session
-                .control
-                .resume_plan_scheduling("user resumed plan scheduling from the TUI")
-                .await
-            {
-                state.show_error_dialog("Plan resume failed", error.to_string());
             }
         }
         ControllerEffect::RetryPlanNode(node_id) => {

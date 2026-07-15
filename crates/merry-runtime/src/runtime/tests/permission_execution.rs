@@ -177,6 +177,12 @@ async fn request_permissions_denied_by_review_does_not_execute_process() {
     );
     let payload = denied_action_content(&runtime, &events).await;
     assert_eq!(payload["guidance"]["kind"], "permission_request_denied");
+    assert!(
+        payload["guidance"]["message"]
+            .as_str()
+            .expect("denial guidance should be text")
+            .contains("use_current_plan")
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

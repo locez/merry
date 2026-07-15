@@ -13,6 +13,7 @@ use merry_core::{
 };
 use std::collections::BTreeSet;
 
+#[allow(dead_code)]
 impl SessionState {
     pub(crate) fn record_artifact_state(
         &mut self,

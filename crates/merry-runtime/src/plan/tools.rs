@@ -1,7 +1,4 @@
-use super::{
-    BeginPlanInput, ControlPlanAttemptInput, ReadPlanInput, ReportPlanAttemptInput,
-    ReportPlanProgressInput, UpdatePlanInput,
-};
+use super::{ReadPlanInput, UpdatePlanInput};
 use crate::{
     RegisteredTool, ToolActionKind, ToolExecutionContext, ToolExecutionError, ToolExecutor,
     ToolExecutorFuture,
@@ -10,63 +7,28 @@ use merry_core::{CoreError, ToolInputSchema, ToolName, ToolSpec};
 use schemars::JsonSchema;
 use std::sync::Arc;
 
-pub(crate) const BEGIN_PLAN_TOOL_NAME: &str = "begin_plan";
 pub(crate) const READ_PLAN_TOOL_NAME: &str = "read_plan";
 pub(crate) const UPDATE_PLAN_TOOL_NAME: &str = "update_plan";
-pub(crate) const CONTROL_PLAN_ATTEMPT_TOOL_NAME: &str = "control_plan_attempt";
-pub(crate) const REPORT_PLAN_PROGRESS_TOOL_NAME: &str = "report_plan_progress";
-pub(crate) const REPORT_PLAN_ATTEMPT_TOOL_NAME: &str = "report_plan_attempt";
 
-pub(crate) const COORDINATOR_PLAN_TOOL_NAMES: [&str; 6] = [
-    BEGIN_PLAN_TOOL_NAME,
-    READ_PLAN_TOOL_NAME,
-    UPDATE_PLAN_TOOL_NAME,
-    CONTROL_PLAN_ATTEMPT_TOOL_NAME,
-    REPORT_PLAN_PROGRESS_TOOL_NAME,
-    REPORT_PLAN_ATTEMPT_TOOL_NAME,
-];
+pub(crate) const COORDINATOR_PLAN_TOOL_NAMES: [&str; 2] =
+    [READ_PLAN_TOOL_NAME, UPDATE_PLAN_TOOL_NAME];
 
 pub(crate) fn coordinator_plan_registered_tools() -> Result<Vec<RegisteredTool>, CoreError> {
     let definitions = [
-        plan_tool::<BeginPlanInput>(
-            BEGIN_PLAN_TOOL_NAME,
-            "Start durable Plan Mode before calling update_plan when no active plan exists. This creates an empty planning state, does not change permissions, and is idempotent for the current active plan.",
-        )?,
         plan_tool::<ReadPlanInput>(
             READ_PLAN_TOOL_NAME,
-            "Read a bounded exact snapshot or subtree of the current durable plan.",
+            "Read a bounded exact snapshot or subtree of the current durable plan, including runtime-owned linked subagent summaries. Historical attempt, lease, heartbeat, and model-report records are not part of this coordinator interface.",
         )?,
         plan_tool::<UpdatePlanInput>(
             UPDATE_PLAN_TOOL_NAME,
-            "Requires an active plan created by begin_plan. Pass change as a tagged JSON object. New nodes use client_key without id; existing mutable nodes use id without client_key. Define the complete tree while planning or replace one future subtree while planning/executing. To start an already-authored plan after the user says to proceed, use change.type=use_current_plan with execute_if_authorized; do not replace or recreate the tree. Choose request_user_review only when the user wants to inspect or approve it first. Node status, attempts, progress, and results are runtime-owned and cannot be marked completed with update_plan.",
-        )?,
-        plan_tool::<ControlPlanAttemptInput>(
-            CONTROL_PLAN_ATTEMPT_TOOL_NAME,
-            "Persist attempt-scoped status, steering, convergence, checkpoint, yield, or safe-cancel guidance.",
-        )?,
-        plan_tool::<ReportPlanProgressInput>(
-            REPORT_PLAN_PROGRESS_TOOL_NAME,
-            "Record bounded non-terminal semantic progress for the current local plan attempt.",
-        )?,
-        plan_tool::<ReportPlanAttemptInput>(
-            REPORT_PLAN_ATTEMPT_TOOL_NAME,
-            "Resolve the current local plan attempt exactly once with a typed result or decomposition.",
+            "Create or update the durable Plan with a tagged JSON change object. The first valid update creates the Plan. New nodes use client_key without id; existing mutable nodes use id without client_key. Define or revise authored intent, dependencies, and acceptance; runtime-owned execution state is derived from actual activity. Use execute_if_authorized only when the user already authorized execution, and request_user_review only when an explicit review boundary is wanted. When the Plan is already executing, do not call use_current_plan again; continue ordinary work or revise only a genuinely changed future subtree.",
         )?,
     ];
     Ok(definitions.into_iter().collect())
 }
 
 pub(crate) fn subagent_plan_registered_tools() -> Result<Vec<RegisteredTool>, CoreError> {
-    Ok(vec![
-        plan_tool::<ReportPlanProgressInput>(
-            REPORT_PLAN_PROGRESS_TOOL_NAME,
-            "Record bounded non-terminal semantic progress for the current delegated plan attempt.",
-        )?,
-        plan_tool::<ReportPlanAttemptInput>(
-            REPORT_PLAN_ATTEMPT_TOOL_NAME,
-            "Resolve the current delegated plan attempt exactly once with a typed result or decomposition.",
-        )?,
-    ])
+    Ok(Vec::new())
 }
 
 pub(crate) fn is_plan_tool(name: &ToolName) -> bool {

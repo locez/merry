@@ -8,24 +8,22 @@ use crate::debug::coding_loop::coding_loop_workspace_call;
 use crate::runtime_events::{collect_runtime_step_events, first_pending_tool_call};
 use crate::testing::{FakeProcessRunner, ScriptedProvider, model_name};
 use merry_core::{
-    PlanAttemptOutcome, PlanCapabilityEnvelopeSnapshot, PlanExecutorPolicy, PlanHarnessSnapshot,
-    PlanRecoveryPolicySnapshot, RuntimeJournalEvent, SessionId, ToolCallResult,
-    ToolCallResultStatus, ToolInputSchema, ToolName, ToolSpec,
+    RuntimeJournalEvent, SessionId, ToolCallResult, ToolCallResultStatus, ToolInputSchema,
+    ToolName, ToolSpec,
 };
 use merry_llm::{
     FinishReason, ModelEvent, ModelOutput, ModelProvider, ModelResponse, ModelToolCall,
     ModelToolCallId, ToolArguments,
 };
 use merry_runtime::{
-    AcceptedLocalWorkspaceProcessAdmission, AgentLoopConfig, AgentLoopStatus, BeginPlanInput,
-    FileSessionStore, PermissionedProcessRunnerFactory, PlanChangeInput, PlanExecutionIntent,
-    PlanNodeInput, ProcessRunner, ProjectRules, RegisteredTool, Runtime, StepContext, StepInput,
-    SubagentConfig, ToolExecutionContext, ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture,
-    UpdatePlanInput,
+    AcceptedLocalWorkspaceProcessAdmission, AgentLoopConfig, AgentLoopStatus, FileSessionStore,
+    PermissionedProcessRunnerFactory, ProcessRunner, ProjectRules, RegisteredTool, Runtime,
+    StepContext, StepInput, SubagentConfig, ToolExecutionContext, ToolExecutionOutcome,
+    ToolExecutor, ToolExecutorFuture,
 };
 use merry_tool_workspace::{CODING_LOOP_PROCESS_TOOL, WORKSPACE_READ_FILE_TOOL};
 use serde_json::{Map, Value};
-use std::{path::Path, sync::Arc, time::Duration};
+use std::{path::Path, sync::Arc};
 
 #[tokio::test(flavor = "current_thread")]
 async fn no_outer_sandbox_still_admits_the_inner_bwrap_process_profile() {
@@ -277,119 +275,6 @@ async fn resumed_coding_runtime_reloads_current_root_agents() {
         resumed_request.stable_prefix_hash(),
         &first_stable_prefix_hash
     );
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn resumed_coding_runtime_recovers_plan_attempt_before_returning() {
-    const SESSION_ID: &str = "headless-resume-recovers-plan-attempt";
-
-    let temp = tempfile::tempdir().expect("tempdir");
-    let workspace = temp.path().join("workspace");
-    std::fs::create_dir_all(&workspace).expect("mkdir workspace");
-    let store = FileSessionStore::new(temp.path().join("sessions"));
-    let runner: Arc<dyn ProcessRunner> = Arc::new(FakeProcessRunner::succeeding(""));
-    let permissioned_factory: Arc<dyn PermissionedProcessRunnerFactory> = Arc::new(
-        merry_runtime::StaticPermissionedProcessRunnerFactory::new(Arc::clone(&runner)),
-    );
-    let runtime = build_headless_coding_runtime(headless_input(
-        SESSION_ID,
-        &workspace,
-        Arc::new(ScriptedProvider::new(Vec::new())),
-        Arc::clone(&runner),
-        Arc::clone(&permissioned_factory),
-    ))
-    .expect("runtime should build");
-    runtime
-        .begin_plan(BeginPlanInput {
-            reason: "prepare persisted local plan attempt".to_owned(),
-            governing_skill_id: None,
-        })
-        .await
-        .expect("plan begins");
-    runtime
-        .update_plan(UpdatePlanInput {
-            reason: "define one local node".to_owned(),
-            execution_intent: PlanExecutionIntent::ContinuePlanning,
-            coordinator_node_id: None,
-            max_concurrency_hint: Some(1),
-            change: PlanChangeInput::DefinePlan {
-                expected_plan_revision: 0,
-                root: PlanNodeInput {
-                    id: None,
-                    client_key: Some("root".to_owned()),
-                    objective: "Recover this local node after resume".to_owned(),
-                    acceptance: vec!["a replacement attempt is ready".to_owned()],
-                    executor_policy: PlanExecutorPolicy::Local,
-                    harness: PlanHarnessSnapshot::default(),
-                    recovery_policy: PlanRecoveryPolicySnapshot::default(),
-                    depends_on: Vec::new(),
-                    children: Vec::new(),
-                },
-            },
-        })
-        .await
-        .expect("plan definition succeeds");
-    runtime
-        .authorize_plan_execution(
-            PlanCapabilityEnvelopeSnapshot::default(),
-            vec!["test authorization".to_owned()],
-        )
-        .await
-        .expect("plan is authorized");
-    let original_attempt_id = tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            let snapshot = runtime
-                .plan_snapshot()
-                .await
-                .expect("snapshot read succeeds")
-                .expect("plan exists");
-            if let Some(attempt) = snapshot
-                .attempts
-                .iter()
-                .find(|attempt| attempt.outcome.is_none())
-            {
-                break attempt.attempt_id.clone();
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("local attempt starts");
-    runtime
-        .save_session_to(store.clone())
-        .await
-        .expect("runtime saves");
-    drop(runtime);
-
-    let resumed = resume_headless_coding_runtime(
-        headless_input(
-            SESSION_ID,
-            &workspace,
-            Arc::new(ScriptedProvider::new(Vec::new())),
-            runner,
-            permissioned_factory,
-        ),
-        store,
-    )
-    .await
-    .expect("runtime should resume");
-    let snapshot = resumed
-        .plan_snapshot()
-        .await
-        .expect("snapshot read succeeds")
-        .expect("plan exists");
-
-    assert!(snapshot.attempts.iter().any(|attempt| {
-        attempt.attempt_id == original_attempt_id
-            && attempt.outcome == Some(PlanAttemptOutcome::Interrupted)
-    }));
-    assert!(snapshot.attempts.iter().any(|attempt| {
-        attempt.attempt_id != original_attempt_id
-            && attempt.outcome.is_none()
-            && attempt.lease_id.is_none()
-    }));
-    assert_eq!(snapshot.attempts.len(), 2);
-    assert!(snapshot.leases.is_empty());
 }
 
 #[tokio::test(flavor = "current_thread")]

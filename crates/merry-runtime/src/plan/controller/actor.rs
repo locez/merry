@@ -1,9 +1,9 @@
 use super::PlanControllerError;
 use super::transactions::{
-    authorize_execution, begin_plan, begin_user_plan, cancel_attempt, control_plan,
+    authorize_execution, begin_plan, begin_user_plan, bind_subagent, cancel_attempt, control_plan,
     deliver_directives, heartbeat, issue_directive, record_runtime_effect, recover_attempts,
     report_attempt, report_progress, review_progress, start_attempt, start_local_attempt,
-    update_plan,
+    update_plan, update_subagent_link,
 };
 use crate::{
     FileSessionStore,
@@ -24,12 +24,13 @@ use crate::{
     session::SessionState,
 };
 use merry_core::{
-    PlanCapabilityEnvelopeSnapshot, PlanLeaseId, PlanNodeId, PlanSnapshot, RuntimeJournalEvent,
-    ToolCallId,
+    PlanBindingId, PlanCapabilityEnvelopeSnapshot, PlanLeaseId, PlanLinkSnapshot, PlanLinkStatus,
+    PlanNodeId, PlanSnapshot, RuntimeJournalEvent, SubagentId, SubagentTaskId, ToolCallId,
 };
 use std::sync::Arc;
 use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
 
+#[allow(dead_code)]
 pub(super) enum PlanCommand {
     Begin {
         input: BeginPlanInput,
@@ -52,6 +53,19 @@ pub(super) enum PlanCommand {
         input: UpdatePlanInput,
         call_id: ToolCallId,
         reply: oneshot::Sender<Result<Vec<RuntimeJournalEvent>, PlanControllerError>>,
+    },
+    BindSubagent {
+        client_key: String,
+        agent_id: SubagentId,
+        task_id: SubagentTaskId,
+        now_ms: u64,
+        reply: oneshot::Sender<Result<PlanCommandResult<PlanLinkSnapshot>, PlanControllerError>>,
+    },
+    UpdateSubagentLink {
+        binding_id: PlanBindingId,
+        status: PlanLinkStatus,
+        now_ms: u64,
+        reply: oneshot::Sender<Result<PlanCommandResult<PlanSnapshot>, PlanControllerError>>,
     },
     StartAttempt {
         node_id: PlanNodeId,
@@ -133,7 +147,6 @@ pub(super) enum PlanCommand {
     },
     RecoverAttempts {
         now_ms: u64,
-        after_resume: bool,
         reply: oneshot::Sender<Result<PlanCommandResult<PlanRecoveryOutput>, PlanControllerError>>,
     },
     ReviewProgress {
@@ -234,7 +247,8 @@ pub(super) async fn run_controller(
                 let _ = reply.send(result);
             }
             PlanCommand::Update { input, reply } => {
-                let result = update_plan(&session, store.as_ref(), &events, input, None).await;
+                let result =
+                    update_plan(&session, store.as_ref(), &events, input, None, None).await;
                 let _ = reply.send(result);
             }
             PlanCommand::UpdateTool {
@@ -242,9 +256,52 @@ pub(super) async fn run_controller(
                 call_id,
                 reply,
             } => {
-                let result = update_plan(&session, store.as_ref(), &events, input, Some(call_id))
-                    .await
-                    .map(|committed| committed.events);
+                let result = update_plan(
+                    &session,
+                    store.as_ref(),
+                    &events,
+                    input,
+                    Some(call_id),
+                    Some(&mut next_plan_sequence),
+                )
+                .await
+                .map(|committed| committed.events);
+                let _ = reply.send(result);
+            }
+            PlanCommand::BindSubagent {
+                client_key,
+                agent_id,
+                task_id,
+                now_ms,
+                reply,
+            } => {
+                let result = bind_subagent(
+                    &session,
+                    store.as_ref(),
+                    &events,
+                    client_key,
+                    agent_id,
+                    task_id,
+                    now_ms,
+                )
+                .await;
+                let _ = reply.send(result);
+            }
+            PlanCommand::UpdateSubagentLink {
+                binding_id,
+                status,
+                now_ms,
+                reply,
+            } => {
+                let result = update_subagent_link(
+                    &session,
+                    store.as_ref(),
+                    &events,
+                    binding_id,
+                    status,
+                    now_ms,
+                )
+                .await;
                 let _ = reply.send(result);
             }
             PlanCommand::StartAttempt {
@@ -426,13 +483,8 @@ pub(super) async fn run_controller(
                         .await;
                 let _ = reply.send(result);
             }
-            PlanCommand::RecoverAttempts {
-                now_ms,
-                after_resume,
-                reply,
-            } => {
-                let result =
-                    recover_attempts(&session, store.as_ref(), &events, now_ms, after_resume).await;
+            PlanCommand::RecoverAttempts { now_ms, reply } => {
+                let result = recover_attempts(&session, store.as_ref(), &events, now_ms).await;
                 let _ = reply.send(result);
             }
             PlanCommand::ReviewProgress {

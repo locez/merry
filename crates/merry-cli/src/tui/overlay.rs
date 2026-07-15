@@ -6,7 +6,7 @@ use super::{
     },
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use merry_core::{PlanAttemptOutcome, PlanNodeId, PlanPhase, PlanSchedulerStatus, PlanSnapshot};
+use merry_core::{PlanAttemptOutcome, PlanNodeId, PlanPhase, PlanSnapshot};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PaletteCommand {
@@ -27,8 +27,6 @@ pub(crate) enum PaletteCommand {
     OpenPlan,
     FocusPlan,
     ClosePlan,
-    PausePlan,
-    ResumePlan,
     RetryPlanNode,
     CancelPlan,
 }
@@ -41,7 +39,7 @@ pub(crate) struct CommandSpec {
     pub(crate) key_action: Option<KeyAction>,
 }
 
-const COMMANDS: [CommandSpec; 21] = [
+const COMMANDS: [CommandSpec; 19] = [
     CommandSpec {
         command: PaletteCommand::OpenSettings,
         category: "Merry",
@@ -145,18 +143,6 @@ const COMMANDS: [CommandSpec; 21] = [
         key_action: None,
     },
     CommandSpec {
-        command: PaletteCommand::PausePlan,
-        category: "Plan",
-        label: "Pause plan scheduling",
-        key_action: None,
-    },
-    CommandSpec {
-        command: PaletteCommand::ResumePlan,
-        category: "Plan",
-        label: "Resume plan scheduling",
-        key_action: None,
-    },
-    CommandSpec {
         command: PaletteCommand::RetryPlanNode,
         category: "Plan",
         label: "Retry selected interrupted node",
@@ -177,7 +163,6 @@ pub(crate) struct PlanPaletteContext {
     plan_focused: bool,
     phase: Option<PlanPhase>,
     plan_ready: bool,
-    scheduler_status: Option<PlanSchedulerStatus>,
     retry_selected: bool,
 }
 
@@ -210,7 +195,6 @@ impl PlanPaletteContext {
             plan_focused,
             phase: snapshot.map(|snapshot| snapshot.phase),
             plan_ready: snapshot.is_some_and(|snapshot| snapshot.root_node_id.is_some()),
-            scheduler_status: snapshot.map(|snapshot| snapshot.scheduler_status),
             retry_selected,
         }
     }
@@ -661,14 +645,8 @@ fn plan_command_is_available(command: PaletteCommand, context: PlanPaletteContex
         PaletteCommand::OpenPlan => context.has_plan && !context.plan_open,
         PaletteCommand::FocusPlan => context.has_plan && context.plan_open && !context.plan_focused,
         PaletteCommand::ClosePlan => context.has_plan && context.plan_open,
-        PaletteCommand::PausePlan => {
-            context.phase == Some(PlanPhase::Executing)
-                && context.scheduler_status == Some(PlanSchedulerStatus::Active)
-        }
-        PaletteCommand::ResumePlan => {
-            context.phase == Some(PlanPhase::Executing)
-                && context.scheduler_status == Some(PlanSchedulerStatus::Paused)
-        }
+        // Plan no longer owns an automatic scheduler. Child lifecycle is
+        // runtime-owned, so pause/resume are intentionally absent from the UI.
         PaletteCommand::RetryPlanNode => context.retry_selected,
         PaletteCommand::CancelPlan => matches!(
             context.phase,

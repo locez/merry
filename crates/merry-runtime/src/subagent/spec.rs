@@ -43,6 +43,14 @@ pub enum SubagentError {
         /// Conflicting write path from the first task.
         path: String,
     },
+    /// A child task requested a capability outside the parent's effective envelope.
+    #[error("child task capability expansion is not allowed for {field}: {value}")]
+    CapabilityExpansion {
+        /// Capability category that attempted to expand.
+        field: &'static str,
+        /// Requested capability value.
+        value: String,
+    },
     /// The subagent runtime was configured with no possible concurrency.
     #[error("subagent max_threads must be greater than zero")]
     ZeroMaxThreads,
@@ -102,11 +110,16 @@ pub struct SubagentTaskSpec {
     task: String,
     max_model_turns: u32,
     allowed_tools: Vec<ToolName>,
+    allowed_tools_explicit: bool,
     read_scope: Vec<PathBuf>,
+    read_scope_explicit: bool,
     write_scope: Vec<PathBuf>,
+    write_scope_explicit: bool,
     forbidden_paths: Vec<PathBuf>,
+    forbidden_paths_explicit: bool,
     expected_output: Option<String>,
     reasoning_effort: Option<ReasoningEffort>,
+    plan_task: Option<String>,
 }
 
 impl SubagentTaskSpec {
@@ -122,11 +135,16 @@ impl SubagentTaskSpec {
             task,
             max_model_turns,
             allowed_tools: Vec::new(),
+            allowed_tools_explicit: false,
             read_scope: Vec::new(),
+            read_scope_explicit: false,
             write_scope: Vec::new(),
+            write_scope_explicit: false,
             forbidden_paths: Vec::new(),
+            forbidden_paths_explicit: false,
             expected_output: None,
             reasoning_effort: None,
+            plan_task: None,
         })
     }
 
@@ -146,6 +164,22 @@ impl SubagentTaskSpec {
     #[must_use]
     pub fn allowed_tools(&self) -> &[ToolName] {
         &self.allowed_tools
+    }
+
+    pub(crate) fn allowed_tools_are_explicit(&self) -> bool {
+        self.allowed_tools_explicit
+    }
+
+    pub(crate) fn read_scope_is_explicit(&self) -> bool {
+        self.read_scope_explicit
+    }
+
+    pub(crate) fn write_scope_is_explicit(&self) -> bool {
+        self.write_scope_explicit
+    }
+
+    pub(crate) fn forbidden_paths_are_explicit(&self) -> bool {
+        self.forbidden_paths_explicit
     }
 
     /// Returns the optional compact display name.
@@ -184,6 +218,12 @@ impl SubagentTaskSpec {
         self.reasoning_effort.as_ref()
     }
 
+    /// Returns the optional authored Plan node client key.
+    #[must_use]
+    pub fn plan_task(&self) -> Option<&str> {
+        self.plan_task.as_deref()
+    }
+
     /// Replaces the child's allowed tool list.
     #[must_use]
     pub fn with_allowed_tools<I>(mut self, tools: I) -> Self
@@ -191,6 +231,7 @@ impl SubagentTaskSpec {
         I: IntoIterator<Item = ToolName>,
     {
         self.allowed_tools = tools.into_iter().collect();
+        self.allowed_tools_explicit = true;
         self
     }
 
@@ -208,6 +249,7 @@ impl SubagentTaskSpec {
         P: Into<PathBuf>,
     {
         self.read_scope = validate_scope_paths(paths)?;
+        self.read_scope_explicit = true;
         Ok(self)
     }
 
@@ -218,6 +260,7 @@ impl SubagentTaskSpec {
         P: Into<PathBuf>,
     {
         self.write_scope = validate_scope_paths(paths)?;
+        self.write_scope_explicit = true;
         Ok(self)
     }
 
@@ -228,6 +271,7 @@ impl SubagentTaskSpec {
         P: Into<PathBuf>,
     {
         self.forbidden_paths = validate_scope_paths(paths)?;
+        self.forbidden_paths_explicit = true;
         Ok(self)
     }
 
@@ -242,6 +286,13 @@ impl SubagentTaskSpec {
     #[must_use]
     pub fn with_reasoning_effort(mut self, reasoning_effort: Option<ReasoningEffort>) -> Self {
         self.reasoning_effort = reasoning_effort;
+        self
+    }
+
+    /// Associates the child with an authored Plan node client key.
+    #[must_use]
+    pub fn with_plan_task(mut self, plan_task: Option<String>) -> Self {
+        self.plan_task = plan_task.filter(|value| !value.trim().is_empty());
         self
     }
 }

@@ -1,8 +1,7 @@
 use merry_core::{
     PlanApprovalRequirementKind, PlanApprovalRequirementStatus, PlanAttemptProgressSnapshot,
     PlanAttemptSnapshot, PlanCapabilityEnvelopeSnapshot, PlanExecutorPolicy, PlanLeaseSnapshot,
-    PlanLeaseStatus, PlanNodeId, PlanNodeSnapshot, PlanNodeStatus, PlanPhase, PlanSchedulerStatus,
-    PlanSnapshot,
+    PlanLinkStatus, PlanNodeId, PlanNodeSnapshot, PlanNodeStatus, PlanSnapshot,
 };
 use merry_runtime::PlanApprovalInput;
 use std::collections::{BTreeMap, BTreeSet};
@@ -188,14 +187,14 @@ impl PlanUiState {
         };
         PlanCounts {
             live: snapshot
-                .attempts
+                .nodes
                 .iter()
-                .filter(|attempt| attempt.outcome.is_none())
-                .count(),
+                .map(|node| node.execution_summary.active as usize)
+                .sum(),
             ready: snapshot
                 .nodes
                 .iter()
-                .filter(|node| node_is_ready(snapshot, node, unix_time_ms()))
+                .filter(|node| node_is_ready(snapshot, node))
                 .count(),
             blocked: snapshot
                 .nodes
@@ -405,7 +404,7 @@ impl PlanUiState {
             depth,
             has_children: !children.is_empty(),
             collapsed,
-            ready: node_is_ready(snapshot, node, unix_time_ms()),
+            ready: node_is_ready(snapshot, node),
             status: node.status,
             executor_policy: node.executor_policy,
             objective: node.objective.clone(),
@@ -558,8 +557,21 @@ fn reveal_active_paths(snapshot: &PlanSnapshot, collapsed: &mut BTreeSet<PlanNod
         snapshot
             .leases
             .iter()
-            .filter(|lease| lease.status == PlanLeaseStatus::Live)
+            .filter(|lease| lease.status == merry_core::PlanLeaseStatus::Live)
             .map(|lease| lease.node_id.clone()),
+    );
+    active.extend(
+        snapshot
+            .nodes
+            .iter()
+            .filter(|node| {
+                node.execution_summary.active > 0
+                    || node
+                        .links
+                        .iter()
+                        .any(|link| link.status == PlanLinkStatus::Active)
+            })
+            .map(|node| node.id.clone()),
     );
     for node_id in active {
         let mut parent = node(snapshot, &node_id).and_then(|node| node.parent_id.as_ref());
@@ -607,14 +619,8 @@ fn children_of<'a>(
     children
 }
 
-fn node_is_ready(snapshot: &PlanSnapshot, node: &PlanNodeSnapshot, now_ms: u64) -> bool {
-    if snapshot.phase != PlanPhase::Executing
-        || snapshot.scheduler_status != PlanSchedulerStatus::Active
-        || snapshot
-            .attempts
-            .iter()
-            .any(|attempt| attempt.node_id == node.id && attempt.outcome.is_none())
-    {
+fn node_is_ready(snapshot: &PlanSnapshot, node: &PlanNodeSnapshot) -> bool {
+    if node.status == PlanNodeStatus::Superseded || node.execution_summary.active > 0 {
         return false;
     }
     let dependencies_completed = node.depends_on.iter().all(|dependency| {
@@ -644,24 +650,5 @@ fn node_is_ready(snapshot: &PlanSnapshot, node: &PlanNodeSnapshot, now_ms: u64) 
     if !shape_ready {
         return false;
     }
-    snapshot
-        .attempts
-        .iter()
-        .rev()
-        .find(|attempt| {
-            attempt.node_id == node.id
-                && attempt.outcome == Some(merry_core::PlanAttemptOutcome::TransientFailure)
-        })
-        .and_then(|attempt| attempt.finished_at_ms)
-        .is_none_or(|finished_at_ms| {
-            finished_at_ms.saturating_add(node.recovery_policy.retry_backoff_ms) <= now_ms
-        })
-}
-
-fn unix_time_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .min(u128::from(u64::MAX)) as u64
+    true
 }

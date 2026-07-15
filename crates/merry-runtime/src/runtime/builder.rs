@@ -10,15 +10,18 @@ use crate::{
     model_config::RuntimeModelConfigs,
     permission::{PermissionAdmissionSource, PermissionReviewMode, RuntimeTrustLevel},
     plan::{
-        PlanController, PlanScheduler, PlanSubagentControl,
+        PlanController, PlanSubagentControl,
         tools::{coordinator_plan_registered_tools, subagent_plan_registered_tools},
     },
     process::{PermissionedProcessRunnerFactory, StaticPermissionedProcessRunnerFactory},
     session::SessionState,
-    subagent::{ChildRuntimeFactory, SubagentManager},
+    subagent::{
+        ChildRuntimeFactory, ChildWorkspaceScope, PlanLinkRuntime, SubagentManager,
+        plan_link_runtime_for_controller,
+    },
     tool::{RegisteredTool, ToolRegistry, ToolRegistryError},
 };
-use merry_core::{ArtifactRef, SessionId};
+use merry_core::{ArtifactRef, SessionId, ToolName};
 use merry_llm::{ModelName, ModelProvider, ModelRetryPolicy};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -118,8 +121,8 @@ pub struct RuntimeBuilder {
     permission_admission_source: Option<Arc<dyn PermissionAdmissionSource>>,
     permissioned_process_runner_factory: Option<Arc<dyn PermissionedProcessRunnerFactory>>,
     subagent_manager: Option<SubagentManager>,
-    plan_subagent_factory: Option<Arc<dyn ChildRuntimeFactory>>,
-    plan_subagent_max_concurrency: usize,
+    subagent_parent_scope: Option<ChildWorkspaceScope>,
+    subagent_parent_plan_link_runtime: Option<Arc<dyn PlanLinkRuntime>>,
     session_store: Option<FileSessionStore>,
     loaded_session: Option<SessionState>,
 }
@@ -158,8 +161,8 @@ impl RuntimeBuilder {
             permission_admission_source: None,
             permissioned_process_runner_factory: None,
             subagent_manager: None,
-            plan_subagent_factory: None,
-            plan_subagent_max_concurrency: 1,
+            subagent_parent_scope: None,
+            subagent_parent_plan_link_runtime: None,
             session_store: None,
             loaded_session: None,
         }
@@ -270,7 +273,8 @@ impl RuntimeBuilder {
 
     /// Restricts configured/profile tools to an exact provider-visible allowlist.
     ///
-    /// Runtime protocol tools, including Plan attempt reporting, are appended after this filter.
+    /// Runtime protocol tools, including the stable Plan read/update pair,
+    /// are appended after this filter.
     #[must_use]
     pub fn registered_tool_allowlist<I>(mut self, tools: I) -> Self
     where
@@ -294,15 +298,16 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Installs the depth-one child factory used by the central plan scheduler.
+    /// Retained as a source-compatible no-op for callers that used the removed
+    /// automatic Plan scheduler. Plan execution now starts only through the
+    /// normal subagent manager and optional `plan_task` binding.
     #[must_use]
     pub fn plan_subagent_factory(
-        mut self,
+        self,
         factory: Arc<dyn ChildRuntimeFactory>,
         max_subagent_concurrency: usize,
     ) -> Self {
-        self.plan_subagent_factory = Some(factory);
-        self.plan_subagent_max_concurrency = max_subagent_concurrency.max(1);
+        let _ = (factory, max_subagent_concurrency);
         self
     }
 
@@ -576,6 +581,23 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Sets the effective workspace scope inherited by nested subagent tasks.
+    #[must_use]
+    pub fn subagent_parent_scope(mut self, scope: ChildWorkspaceScope) -> Self {
+        self.subagent_parent_scope = Some(scope);
+        self
+    }
+
+    /// Keeps nested subagent Plan links attached to the parent runtime's Plan.
+    ///
+    /// The adapter is runtime-owned; child models never receive the controller
+    /// or persistence details behind it.
+    #[must_use]
+    pub fn subagent_parent_plan_link_runtime(mut self, runtime: Arc<dyn PlanLinkRuntime>) -> Self {
+        self.subagent_parent_plan_link_runtime = Some(runtime);
+        self
+    }
+
     /// Installs the filesystem store used by explicit and automatic session savepoints.
     #[must_use]
     pub fn session_store(mut self, store: FileSessionStore) -> Self {
@@ -592,30 +614,16 @@ impl RuntimeBuilder {
         self.session_store = Some(store);
         self.loaded_session = Some(session);
         let runtime = self.build()?;
-        runtime
-            .inner
-            .recover_plan_after_resume()
-            .await
-            .map_err(|error| RuntimeError::PlanRecovery {
-                message: error.to_string(),
-            })?;
         Ok(runtime)
     }
 
-    /// Loads persisted state, recovers Plan execution, and keeps automatic savepoints disabled.
+    /// Loads persisted state without replaying or restarting Plan execution.
     pub async fn resume_from_store_without_automatic_savepoints(
         mut self,
         store: FileSessionStore,
     ) -> Result<Runtime, RuntimeError> {
         self.loaded_session = Some(SessionState::load_from(&store, &self.session_id).await?);
         let runtime = self.build()?;
-        runtime
-            .inner
-            .recover_plan_after_resume()
-            .await
-            .map_err(|error| RuntimeError::PlanRecovery {
-                message: error.to_string(),
-            })?;
         Ok(runtime)
     }
 
@@ -666,7 +674,7 @@ impl RuntimeBuilder {
             return Err(RuntimeError::BridgeToolsNotAllowed { name: name.clone() });
         }
 
-        let plan_resume_recovered = self.loaded_session.is_none();
+        let loaded_from_store = self.loaded_session.is_some();
         let mut session = match self.loaded_session {
             Some(session) => session,
             None => {
@@ -702,6 +710,15 @@ impl RuntimeBuilder {
                 session
             }
         };
+        if loaded_from_store
+            && let Some(plan) = session.active_plan_mut()
+            && plan.abandon_unresumed_execution(crate::plan::unix_time_ms())
+        {
+            tracing::info!(
+                session_id = %self.session_id,
+                "closed persisted Plan execution state without replaying it"
+            );
+        }
         if session.session_id() != &self.session_id {
             return Err(RuntimeError::SessionStore {
                 source: crate::SessionStoreError::SessionIdMismatch {
@@ -729,16 +746,25 @@ impl RuntimeBuilder {
             self.session_store.clone(),
             self.event_buffer_size,
         );
-        let plan_scheduler = self.plan_subagent_control.is_none().then(|| {
-            PlanScheduler::new(
-                plan_controller.clone(),
-                self.plan_subagent_factory,
-                self.plan_subagent_max_concurrency,
-                self.session_id.clone(),
-                plan_resume_recovered,
-            )
-        });
-
+        let subagent_manager = self.subagent_manager;
+        if let Some(manager) = subagent_manager.as_ref() {
+            let plan_link_runtime = self
+                .subagent_parent_plan_link_runtime
+                .unwrap_or_else(|| plan_link_runtime_for_controller(plan_controller.clone()));
+            manager.attach_plan_link_runtime(plan_link_runtime);
+            let allowed_tools = tool_registry
+                .tool_specs()
+                .into_iter()
+                .map(|spec| spec.name().clone())
+                .collect::<Vec<ToolName>>();
+            manager.attach_parent_capabilities(
+                allowed_tools,
+                self.subagent_parent_scope
+                    .unwrap_or_else(ChildWorkspaceScope::workspace_root),
+            );
+        }
+        // Plan is an advisory projection. Execution is started only by an
+        // explicit subagent spawn and optional `plan_task` binding.
         Ok(Runtime {
             inner: Arc::new(RuntimeInner {
                 session_id: self.session_id.clone(),
@@ -764,10 +790,10 @@ impl RuntimeBuilder {
                 permission_review_mode: self.permission_review_mode,
                 permission_admission_source: self.permission_admission_source,
                 permissioned_process_runner_factory: self.permissioned_process_runner_factory,
-                subagent_manager: self.subagent_manager,
+                subagent_manager,
+                coordinator_plan_tools: self.coordinator_plan_tools,
                 plan_controller,
                 plan_subagent_control: self.plan_subagent_control,
-                plan_scheduler,
                 session_store: self.session_store,
             }),
         })

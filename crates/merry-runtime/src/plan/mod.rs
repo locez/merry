@@ -6,7 +6,6 @@ pub(crate) mod execution;
 pub(crate) mod projection;
 mod protocol;
 pub(crate) mod recovery;
-mod scheduler;
 mod subagent;
 pub(crate) mod tools;
 mod validation;
@@ -21,8 +20,6 @@ pub use protocol::{
     PlanDecompositionInput, PlanExecutionIntent, PlanNodeInput, PlanNodeReferenceInput,
     ReadPlanInput, ReportPlanAttemptInput, ReportPlanProgressInput, UpdatePlanInput,
 };
-pub(crate) use protocol::{PlanAttemptToolOutput, PlanProgressToolOutput};
-pub(crate) use scheduler::PlanScheduler;
 pub(crate) use subagent::PlanArtifactPromotion;
 pub use subagent::PlanSubagentControl;
 

@@ -14,8 +14,8 @@ use super::{
 };
 use crate::{FileSessionStore, RuntimeError, SessionStoreError, session::SessionState};
 use merry_core::{
-    PlanCapabilityEnvelopeSnapshot, PlanLeaseId, PlanNodeId, PlanSnapshot, RuntimeJournalEvent,
-    ToolCallId,
+    PlanBindingId, PlanCapabilityEnvelopeSnapshot, PlanLeaseId, PlanLinkSnapshot, PlanLinkStatus,
+    PlanNodeId, PlanSnapshot, RuntimeJournalEvent, SubagentId, SubagentTaskId, ToolCallId,
 };
 use std::{
     num::NonZeroUsize,
@@ -70,6 +70,7 @@ struct PlanControllerBootstrap {
     events: broadcast::Sender<RuntimeJournalEvent>,
 }
 
+#[allow(dead_code)]
 impl PlanController {
     pub(crate) fn start(
         session: Arc<Mutex<SessionState>>,
@@ -186,6 +187,54 @@ impl PlanController {
         response
             .await
             .map_err(|_| PlanControllerError::CommandChannelClosed)?
+    }
+
+    pub(crate) async fn bind_subagent(
+        &self,
+        client_key: String,
+        agent_id: SubagentId,
+        task_id: SubagentTaskId,
+        now_ms: u64,
+    ) -> Result<PlanLinkSnapshot, PlanControllerError> {
+        self.ensure_started()?;
+        let (reply, response) = oneshot::channel();
+        self.sender
+            .send(PlanCommand::BindSubagent {
+                client_key,
+                agent_id,
+                task_id,
+                now_ms,
+                reply,
+            })
+            .await
+            .map_err(|_| PlanControllerError::CommandChannelClosed)?;
+        Ok(response
+            .await
+            .map_err(|_| PlanControllerError::CommandChannelClosed)??
+            .output)
+    }
+
+    pub(crate) async fn update_subagent_link(
+        &self,
+        binding_id: PlanBindingId,
+        status: PlanLinkStatus,
+        now_ms: u64,
+    ) -> Result<PlanSnapshot, PlanControllerError> {
+        self.ensure_started()?;
+        let (reply, response) = oneshot::channel();
+        self.sender
+            .send(PlanCommand::UpdateSubagentLink {
+                binding_id,
+                status,
+                now_ms,
+                reply,
+            })
+            .await
+            .map_err(|_| PlanControllerError::CommandChannelClosed)?;
+        Ok(response
+            .await
+            .map_err(|_| PlanControllerError::CommandChannelClosed)??
+            .output)
     }
 
     pub(crate) async fn start_attempt(
@@ -455,29 +504,10 @@ impl PlanController {
         &self,
         now_ms: u64,
     ) -> Result<PlanCommandResult<PlanRecoveryOutput>, PlanControllerError> {
-        self.recover_attempts(now_ms, false).await
-    }
-
-    pub(crate) async fn recover_unresolved_attempts_after_resume(
-        &self,
-        now_ms: u64,
-    ) -> Result<PlanCommandResult<PlanRecoveryOutput>, PlanControllerError> {
-        self.recover_attempts(now_ms, true).await
-    }
-
-    async fn recover_attempts(
-        &self,
-        now_ms: u64,
-        after_resume: bool,
-    ) -> Result<PlanCommandResult<PlanRecoveryOutput>, PlanControllerError> {
         self.ensure_started()?;
         let (reply, response) = oneshot::channel();
         self.sender
-            .send(PlanCommand::RecoverAttempts {
-                now_ms,
-                after_resume,
-                reply,
-            })
+            .send(PlanCommand::RecoverAttempts { now_ms, reply })
             .await
             .map_err(|_| PlanControllerError::CommandChannelClosed)?;
         response

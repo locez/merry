@@ -17,17 +17,18 @@ pub use error::CoreError;
 pub use event::{ErrorInfo, MerryErrorDomain, MerryErrorInfo, MerryRetryability};
 pub use evidence::{EvidenceLocator, EvidenceRef};
 pub use id::{
-    ArtifactId, PlanApprovalRequirementId, PlanAttemptId, PlanDirectiveId, PlanId, PlanLeaseId,
-    PlanNodeId, ProviderName, SessionId, SkillId, SubagentId, SubagentTaskId, ToolCallBatchId,
-    ToolCallId, ToolName,
+    ArtifactId, PlanApprovalRequirementId, PlanAttemptId, PlanBindingId, PlanDirectiveId, PlanId,
+    PlanLeaseId, PlanNodeId, ProviderName, SessionId, SkillId, SubagentId, SubagentTaskId,
+    ToolCallBatchId, ToolCallId, ToolName,
 };
 pub use journal::{RuntimeJournalEvent, RuntimeJournalPayload};
 pub use plan::{
     CoordinatorDirectiveSnapshot, PlanActivationSource, PlanApprovalRequirementKind,
     PlanApprovalRequirementSnapshot, PlanApprovalRequirementStatus, PlanAttemptOutcome,
     PlanAttemptProgressSnapshot, PlanAttemptSnapshot, PlanCapabilityEnvelopeSnapshot,
-    PlanDirectiveConstraints, PlanDirectiveKind, PlanDirectiveStatus, PlanExecutorPolicy,
-    PlanHarnessSnapshot, PlanLeaseSnapshot, PlanLeaseStatus, PlanNodeResult, PlanNodeSnapshot,
+    PlanDirectiveConstraints, PlanDirectiveKind, PlanDirectiveStatus, PlanEffectiveNodeStatus,
+    PlanExecutionSummary, PlanExecutorPolicy, PlanHarnessSnapshot, PlanLeaseSnapshot,
+    PlanLeaseStatus, PlanLinkSnapshot, PlanLinkStatus, PlanNodeResult, PlanNodeSnapshot,
     PlanNodeStatus, PlanPhase, PlanRecoveryPolicySnapshot, PlanResourcePolicySnapshot,
     PlanRevisionSummary, PlanSchedulerStatus, PlanSnapshot,
 };

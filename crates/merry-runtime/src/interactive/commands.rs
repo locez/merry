@@ -90,6 +90,7 @@ pub(super) enum CommandHandlingMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CommandDecision {
     Continue,
+    RunContinuation,
     RunNext,
     RunSuspended,
     RunBacklog,

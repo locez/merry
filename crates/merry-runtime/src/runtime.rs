@@ -20,8 +20,7 @@ use crate::{
     permission::{PermissionAdmissionSource, PermissionReviewMode, RuntimeTrustLevel},
     plan::{
         BeginPlanInput, BeginPlanOutput, PlanController, PlanControllerError,
-        PlanControllerEventReceiver, PlanScheduler, PlanSubagentControl, PlanUpdateOutput,
-        UpdatePlanInput,
+        PlanControllerEventReceiver, PlanSubagentControl, PlanUpdateOutput, UpdatePlanInput,
     },
     process::PermissionedProcessRunnerFactory,
     session::SessionState,
@@ -30,8 +29,7 @@ use crate::{
     tool::{ToolExecutionContext, ToolRegistry},
 };
 use merry_core::{
-    PendingToolCall, PlanAttemptId, PlanHarnessSnapshot, PlanSnapshot, RuntimeEvent,
-    RuntimeJournalEvent, SessionId, ToolCallId,
+    PendingToolCall, PlanHarnessSnapshot, RuntimeEvent, RuntimeJournalEvent, SessionId, ToolCallId,
 };
 use merry_llm::{GenerationConfig, ModelName, ModelProvider, ModelRetryPolicy};
 use std::{
@@ -245,32 +243,12 @@ impl Runtime {
         self.inner.plan_controller.snapshot().await
     }
 
-    pub(crate) async fn report_current_local_plan_attempt(
-        &self,
-        input: crate::ReportPlanAttemptInput,
-    ) -> Result<(), PlanControllerError> {
-        let actor = crate::plan::execution::PlanAttemptActor {
-            executor_session_id: self.inner.session_id.clone(),
-        };
-        self.inner
-            .plan_controller
-            .attempt_report_with_artifact_promotions(
-                actor,
-                input,
-                Vec::new(),
-                crate::plan::unix_time_ms(),
-            )
-            .await?;
-        Ok(())
-    }
-
     /// Activates Plan Mode through the same runtime transition used by the coordinator tool.
     pub async fn begin_plan(
         &self,
         input: BeginPlanInput,
     ) -> Result<BeginPlanOutput, PlanControllerError> {
         let output = self.inner.plan_controller.begin(input).await?;
-        self.inner.ensure_plan_scheduler_started();
         Ok(output)
     }
 
@@ -284,7 +262,6 @@ impl Runtime {
             .plan_controller
             .begin_from_user(reason.to_owned())
             .await?;
-        self.inner.ensure_plan_scheduler_started();
         Ok(committed.output)
     }
 
@@ -294,7 +271,6 @@ impl Runtime {
         input: UpdatePlanInput,
     ) -> Result<PlanUpdateOutput, PlanControllerError> {
         let output = self.inner.plan_controller.update(input).await?;
-        self.inner.ensure_plan_scheduler_started();
         Ok(output)
     }
 
@@ -323,7 +299,6 @@ impl Runtime {
             .plan_controller
             .authorize_execution(envelope, authorization_refs)
             .await?;
-        self.inner.ensure_plan_scheduler_started();
         Ok(committed.output)
     }
 
@@ -333,7 +308,6 @@ impl Runtime {
         input: crate::PlanApprovalInput,
     ) -> Result<merry_core::PlanSnapshot, PlanControllerError> {
         let committed = self.inner.plan_controller.approve(input).await?;
-        self.inner.ensure_plan_scheduler_started();
         Ok(committed.output.snapshot)
     }
 
@@ -361,7 +335,6 @@ impl Runtime {
             .plan_controller
             .resume_scheduling(reason.to_owned())
             .await?;
-        self.inner.ensure_plan_scheduler_started();
         Ok(committed.output.snapshot)
     }
 
@@ -390,7 +363,6 @@ impl Runtime {
             .plan_controller
             .retry_interrupted_node(node_id, reason.to_owned())
             .await?;
-        self.inner.ensure_plan_scheduler_started();
         Ok(committed.output.snapshot)
     }
 
@@ -404,9 +376,6 @@ impl Runtime {
             .plan_controller
             .request_cancellation(reason.to_owned())
             .await?;
-        if let Some(scheduler) = self.inner.plan_scheduler.as_ref() {
-            scheduler.cancel_running_subagents().await;
-        }
         Ok(committed.output.snapshot)
     }
 
@@ -704,27 +673,13 @@ struct RuntimeInner {
     permission_admission_source: Option<Arc<dyn PermissionAdmissionSource>>,
     permissioned_process_runner_factory: Option<Arc<dyn PermissionedProcessRunnerFactory>>,
     subagent_manager: Option<SubagentManager>,
+    coordinator_plan_tools: bool,
     plan_controller: PlanController,
     plan_subagent_control: Option<PlanSubagentControl>,
-    plan_scheduler: Option<PlanScheduler>,
     session_store: Option<FileSessionStore>,
 }
 
 impl RuntimeInner {
-    fn ensure_plan_scheduler_started(&self) {
-        if let Some(scheduler) = self.plan_scheduler.as_ref() {
-            scheduler.ensure_started();
-        }
-    }
-
-    async fn recover_plan_after_resume(&self) -> Result<(), PlanControllerError> {
-        if let Some(scheduler) = self.plan_scheduler.as_ref() {
-            scheduler.recover_after_resume().await?;
-            scheduler.ensure_started();
-        }
-        Ok(())
-    }
-
     async fn active_subagent_plan_harness(
         &self,
     ) -> Result<PlanHarnessSnapshot, PlanControllerError> {
@@ -733,29 +688,6 @@ impl RuntimeInner {
             .expect("subagent harness is requested only for a bound runtime")
             .active_harness()
             .await
-    }
-
-    fn plan_harness_from_snapshot(
-        &self,
-        snapshot: &PlanSnapshot,
-        attempt_id: Option<&PlanAttemptId>,
-    ) -> Option<PlanHarnessSnapshot> {
-        let attempt = match attempt_id {
-            Some(attempt_id) => snapshot
-                .attempts
-                .iter()
-                .find(|attempt| &attempt.attempt_id == attempt_id && attempt.outcome.is_none()),
-            None => snapshot.attempts.iter().find(|attempt| {
-                attempt.outcome.is_none()
-                    && attempt.lease_id.is_none()
-                    && attempt.executor_session_id == self.session_id
-            }),
-        }?;
-        snapshot
-            .nodes
-            .iter()
-            .find(|node| node.id == attempt.node_id)
-            .map(|node| node.harness.clone())
     }
 
     async fn record_plan_runtime_effect(
@@ -809,14 +741,6 @@ impl RuntimeInner {
             specs.retain(|spec| manager.is_tool_visible(spec.name()));
         }
         specs
-    }
-}
-
-impl Drop for RuntimeInner {
-    fn drop(&mut self) {
-        if let Some(scheduler) = self.plan_scheduler.as_ref() {
-            scheduler.shutdown();
-        }
     }
 }
 
@@ -963,9 +887,7 @@ mod tests {
     mod memory_activation_flow;
     mod model_role_flow;
     mod permission_execution;
-    mod plan_lifecycle;
-    mod plan_scheduler;
-    mod plan_tool_execution;
+    mod plan_surface;
     mod process_cancellation;
     mod process_execution;
     mod process_shell_execution;

@@ -196,6 +196,7 @@ define_id!(PlanId, "PlanId");
 define_id!(PlanNodeId, "PlanNodeId");
 define_id!(PlanAttemptId, "PlanAttemptId");
 define_id!(PlanLeaseId, "PlanLeaseId");
+define_id!(PlanBindingId, "PlanBindingId");
 define_id!(PlanDirectiveId, "PlanDirectiveId");
 define_id!(PlanApprovalRequirementId, "PlanApprovalRequirementId");
 define_id!(ProviderName, "ProviderName");

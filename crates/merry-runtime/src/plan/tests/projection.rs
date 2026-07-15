@@ -107,19 +107,19 @@ fn coordinator_context_explains_planning_actions_and_runtime_owned_completion() 
     let instruction = projection["coordinator_guidance"]["instruction"]
         .as_str()
         .expect("planning instruction is text");
-    assert!(instruction.contains("execute_if_authorized"));
-    assert!(instruction.contains("use_current_plan"));
-    assert!(instruction.contains("do not replace or recreate the tree"));
-    assert!(instruction.contains("request_user_review"));
-    assert!(
-        projection["coordinator_guidance"]["rules"]
-            .as_array()
-            .expect("rules are an array")
-            .iter()
-            .any(|rule| rule.as_str().is_some_and(|rule| {
-                rule.contains("runtime-owned") && rule.contains("report_plan_attempt")
-            }))
-    );
+    assert!(instruction.contains("first valid update creates the plan"));
+    assert!(instruction.contains("ordinary work remains available"));
+    let rules = projection["coordinator_guidance"]["rules"]
+        .as_array()
+        .expect("rules are an array");
+    assert!(rules.iter().any(|rule| {
+        rule.as_str()
+            .is_some_and(|rule| rule.contains("runtime-owned"))
+    }));
+    assert!(rules.iter().any(|rule| {
+        rule.as_str()
+            .is_some_and(|rule| rule.contains("auxiliary projection"))
+    }));
 }
 
 #[test]
@@ -148,15 +148,11 @@ fn coordinator_context_tells_model_to_wait_at_user_approval_boundary() {
         projection["coordinator_guidance"]["phase_action"],
         "wait_for_user_approval"
     );
-    assert_eq!(
-        projection["coordinator_guidance"]["allowed_plan_tools"],
-        serde_json::json!(["read_plan"])
-    );
     let instruction = projection["coordinator_guidance"]["instruction"]
         .as_str()
         .expect("approval instruction is text");
-    assert!(instruction.contains("Plan approval UI"));
-    assert!(instruction.contains("Do not execute plan work"));
+    assert!(instruction.contains("pending approval requirement"));
+    assert!(instruction.contains("ordinary tools"));
 }
 
 fn empty_plan(id: &str) -> PlanState {

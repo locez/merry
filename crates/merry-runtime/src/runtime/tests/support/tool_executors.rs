@@ -86,6 +86,7 @@
         release_execute: Option<Arc<Notify>>,
     }
 
+    #[allow(dead_code)]
     impl ProposingToolExecutor {
         fn immediate() -> Self {
             Self {

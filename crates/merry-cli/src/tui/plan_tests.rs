@@ -61,6 +61,13 @@ fn active_path_is_revealed_without_unfolding_unrelated_branches() {
 #[test]
 fn plan_pane_derives_live_ready_and_blocked_counts() {
     let mut snapshot = snapshot(1, PlanNodeStatus::InProgress);
+    snapshot
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == node_id("active-leaf"))
+        .expect("active leaf exists")
+        .execution_summary
+        .active = 1;
     snapshot.nodes.push(node(
         "ready",
         Some("root"),
@@ -135,7 +142,11 @@ fn plan_pane_counts_a_live_local_attempt_without_a_lease() {
     let mut state = PlanUiState::default();
     state.update_snapshot(snapshot);
 
-    assert_eq!(state.counts().live, 1);
+    assert_eq!(
+        state.counts().live,
+        0,
+        "unbound attempts are not Plan links"
+    );
 }
 
 #[test]
@@ -283,18 +294,10 @@ fn plan_palette_commands_follow_runtime_phase() {
     assert!(commands.contains(&PaletteCommand::ClosePlan));
     assert!(!commands.contains(&PaletteCommand::EnterPlanMode));
 
-    let mut executing = snapshot(3, PlanNodeStatus::InProgress);
-    executing.scheduler_status = PlanSchedulerStatus::Active;
+    let executing = snapshot(3, PlanNodeStatus::InProgress);
     state.plan_mut().update_snapshot(executing.clone());
     let commands = plan_commands(&mut state);
-    assert!(commands.contains(&PaletteCommand::PausePlan));
-    assert!(!commands.contains(&PaletteCommand::ResumePlan));
-
-    executing.scheduler_status = PlanSchedulerStatus::Paused;
-    state.plan_mut().update_snapshot(executing);
-    let commands = plan_commands(&mut state);
-    assert!(commands.contains(&PaletteCommand::ResumePlan));
-    assert!(!commands.contains(&PaletteCommand::PausePlan));
+    assert!(!commands.contains(&PaletteCommand::RetryPlanNode));
 
     let mut blocked = snapshot(4, PlanNodeStatus::Blocked);
     blocked.phase = PlanPhase::Blocked;
@@ -624,6 +627,25 @@ fn add_live_attempt(snapshot: &mut PlanSnapshot) {
         next_action: Some("finish the final deterministic fixture".to_owned()),
         request_coordinator_review: true,
     });
+    let plan_id = snapshot.plan_id.clone();
+    if let Some(node) = snapshot
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == node_id("active-leaf"))
+    {
+        node.execution_summary.active = 1;
+        node.links.push(merry_core::PlanLinkSnapshot {
+            plan_id,
+            node_id: node.id.clone(),
+            binding_id: merry_core::PlanBindingId::new("binding-active").unwrap(),
+            subagent_id: merry_core::SubagentId::new("subagent-active").unwrap(),
+            task_id: merry_core::SubagentTaskId::new("task-active").unwrap(),
+            status: merry_core::PlanLinkStatus::Active,
+            linked_at_ms: 1_000,
+            terminal_at_ms: None,
+            superseded_by: None,
+        });
+    }
     snapshot
         .directives
         .push(merry_core::CoordinatorDirectiveSnapshot {
@@ -754,6 +776,7 @@ fn node(
 ) -> PlanNodeSnapshot {
     PlanNodeSnapshot {
         id: node_id(id),
+        client_key: None,
         parent_id: parent_id.map(node_id),
         sibling_order,
         objective: format!("Objective {id}"),
@@ -766,6 +789,9 @@ fn node(
         result: None,
         created_revision: 1,
         updated_revision: 1,
+        declared_status: status,
+        execution_summary: Default::default(),
+        links: Vec::new(),
     }
 }
 

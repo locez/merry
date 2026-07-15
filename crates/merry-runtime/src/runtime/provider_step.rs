@@ -205,22 +205,25 @@ pub(super) async fn run_provider_step(
             .memory_projection_epoch
             .fetch_add(1, Ordering::AcqRel)
             .wrapping_add(1);
-        let request_inputs =
-            match step_request_inputs_from_session(&session, plan_subagent_control.clone()) {
-                Ok(inputs) => inputs,
-                Err(error) => {
-                    session.replace_activated_memories(Vec::new());
-                    inner.memory_projection_epoch.fetch_add(1, Ordering::AcqRel);
-                    let diagnostic = diagnostic_from_text(
-                        "transcript_artifact",
-                        format!("transcript artifact could not be read: {error}"),
-                    );
-                    drop(session);
-                    trace_provider_step_failed(&diagnostic);
-                    let _ = send_failed_event(inner, sender, token, diagnostic).await;
-                    return;
-                }
-            };
+        let request_inputs = match step_request_inputs_from_session(
+            &session,
+            plan_subagent_control.clone(),
+            inner.coordinator_plan_tools,
+        ) {
+            Ok(inputs) => inputs,
+            Err(error) => {
+                session.replace_activated_memories(Vec::new());
+                inner.memory_projection_epoch.fetch_add(1, Ordering::AcqRel);
+                let diagnostic = diagnostic_from_text(
+                    "transcript_artifact",
+                    format!("transcript artifact could not be read: {error}"),
+                );
+                drop(session);
+                trace_provider_step_failed(&diagnostic);
+                let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                return;
+            }
+        };
         (request_inputs, activation_epoch)
     };
     let mut projection_guard =
@@ -463,7 +466,11 @@ pub(super) async fn run_provider_step(
 
         let refreshed = {
             let session = inner.session.lock().await;
-            match step_request_inputs_from_session(&session, plan_subagent_control.clone()) {
+            match step_request_inputs_from_session(
+                &session,
+                plan_subagent_control.clone(),
+                inner.coordinator_plan_tools,
+            ) {
                 Ok(inputs) => inputs,
                 Err(error) => {
                     clear_current_activated_memories(inner).await;

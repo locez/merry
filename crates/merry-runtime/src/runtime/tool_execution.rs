@@ -43,24 +43,22 @@ pub(super) async fn execute_tool_call_with_active_permit(
         });
     }
 
-    let (pending, coordinator_plan_harness) = {
+    let pending = {
         let session = inner.session.lock().await;
-        let pending =
-            session
-                .pending_tool_call(call_id)
-                .ok_or_else(|| RuntimeError::UnknownToolCall {
-                    session_id: inner.session_id.clone(),
-                    call_id: call_id.clone(),
-                })?;
-        let harness = if inner.plan_subagent_control.is_none() {
-            session
-                .active_plan()
-                .and_then(|plan| inner.plan_harness_from_snapshot(plan.snapshot(), None))
-        } else {
-            None
-        };
-        (pending, harness)
+        session
+            .pending_tool_call(call_id)
+            .ok_or_else(|| RuntimeError::UnknownToolCall {
+                session_id: inner.session_id.clone(),
+                call_id: call_id.clone(),
+            })?
     };
+
+    // Plan control calls remain executable; only the current read/update pair
+    // is advertised in provider requests.
+    if is_plan_tool(pending.name()) {
+        return execute_plan_tool_call(inner, &pending, context).await;
+    }
+
     let active_plan_harness = if inner.plan_subagent_control.is_some() {
         Some(
             inner
@@ -73,7 +71,7 @@ pub(super) async fn execute_tool_call_with_active_permit(
                 })?,
         )
     } else {
-        coordinator_plan_harness
+        None
     };
 
     let Some(registered_tool) = inner.tool_registry.registered_tool(pending.name()) else {
@@ -144,16 +142,14 @@ pub(super) async fn execute_tool_call_with_active_permit(
         return execute_merry_read_checkpoint_ref_tool_call(inner, &pending, context).await;
     }
 
-    if is_plan_tool(pending.name()) {
-        return execute_plan_tool_call(inner, &pending, context).await;
-    }
-
-    if let Some(diagnostic) = plan_harness_violation(
-        active_plan_harness.as_ref(),
-        &pending,
-        registered_tool.action_kind(),
-        None,
-    ) {
+    if inner.plan_subagent_control.is_some()
+        && let Some(diagnostic) = plan_harness_violation(
+            active_plan_harness.as_ref(),
+            &pending,
+            registered_tool.action_kind(),
+            None,
+        )
+    {
         return resolve_plan_harness_denial(inner, &pending, diagnostic).await;
     }
 
@@ -262,12 +258,14 @@ pub(super) async fn execute_tool_call_with_active_permit(
         }
 
         if let Some(proposal) = proposal {
-            if let Some(diagnostic) = plan_harness_violation(
-                active_plan_harness.as_ref(),
-                &pending,
-                registered_tool.action_kind(),
-                Some(&proposal),
-            ) {
+            if inner.plan_subagent_control.is_some()
+                && let Some(diagnostic) = plan_harness_violation(
+                    active_plan_harness.as_ref(),
+                    &pending,
+                    registered_tool.action_kind(),
+                    Some(&proposal),
+                )
+            {
                 return resolve_plan_harness_denial(inner, &pending, diagnostic).await;
             }
             if inner.allow_low_risk_workspace_patches

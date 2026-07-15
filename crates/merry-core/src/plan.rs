@@ -1,8 +1,9 @@
 //! Public recursive plan snapshots and lifecycle vocabulary.
 
 use crate::{
-    ArtifactRef, ErrorInfo, EvidenceRef, PlanApprovalRequirementId, PlanAttemptId, PlanDirectiveId,
-    PlanId, PlanLeaseId, PlanNodeId, SessionId, SessionUsage, SkillId, ToolName,
+    ArtifactRef, ErrorInfo, EvidenceRef, PlanApprovalRequirementId, PlanAttemptId, PlanBindingId,
+    PlanDirectiveId, PlanId, PlanLeaseId, PlanNodeId, SessionId, SessionUsage, SkillId, SubagentId,
+    SubagentTaskId, ToolName,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, de};
@@ -22,9 +23,10 @@ pub enum PlanPhase {
 }
 
 /// Semantic state persisted for one plan node.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PlanNodeStatus {
+    #[default]
     Pending,
     InProgress,
     Expanded,
@@ -35,16 +37,65 @@ pub enum PlanNodeStatus {
     Superseded,
 }
 
-/// Model-authored execution preference for a node.
+/// Effective status projected from authored intent and linked executions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanEffectiveNodeStatus {
+    Pending,
+    InProgress,
+    Completed,
+    Attention,
+}
+
+/// Runtime-derived aggregate for subagents linked to one Plan node.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PlanExecutionSummary {
+    pub active: u32,
+    pub completed: u32,
+    pub failed: u32,
+    pub cancelled: u32,
+}
+
+/// Lifecycle state of one runtime-owned Plan/subagent association.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanLinkStatus {
+    Active,
+    Completed,
+    Failed,
+    Cancelled,
+    Superseded,
+}
+
+/// Runtime-owned association between a Plan task and one subagent execution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PlanLinkSnapshot {
+    pub plan_id: PlanId,
+    pub node_id: PlanNodeId,
+    pub binding_id: PlanBindingId,
+    pub subagent_id: SubagentId,
+    pub task_id: SubagentTaskId,
+    pub status: PlanLinkStatus,
+    pub linked_at_ms: u64,
+    pub terminal_at_ms: Option<u64>,
+    pub superseded_by: Option<PlanBindingId>,
+}
+
+/// Model-authored execution preference for a node.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PlanExecutorPolicy {
     Local,
     Delegate,
+    #[default]
     Auto,
 }
 
-/// Runtime-owned scheduler admission state.
+/// Runtime-owned admission state retained for legacy attempt-domain records.
+/// Coordinator Plan tools do not expose or mutate this field; subagent
+/// lifecycle links are the authoritative execution projection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PlanSchedulerStatus {
@@ -215,16 +266,12 @@ impl Default for PlanRecoveryPolicySnapshot {
     }
 }
 
-/// Runtime/operator policy snapshot for scheduling and progress diagnostics.
+/// Runtime/operator policy snapshot for bounded execution diagnostics.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PlanResourcePolicySnapshot {
     pub max_concurrency: usize,
-    // Aliases are read-only compatibility for plan snapshots written before
-    // delegated execution terminology was unified on "subagent".
-    #[serde(alias = "worker_heartbeat_interval_ms")]
     pub subagent_heartbeat_interval_ms: u64,
-    #[serde(alias = "worker_heartbeat_ttl_ms")]
     pub subagent_heartbeat_ttl_ms: u64,
     pub provider_request_timeout_ms: Option<u64>,
     pub tool_timeout_ms: Option<u64>,
@@ -279,6 +326,8 @@ pub struct PlanNodeResult {
 #[serde(deny_unknown_fields)]
 pub struct PlanNodeSnapshot {
     pub id: PlanNodeId,
+    #[serde(default)]
+    pub client_key: Option<String>,
     pub parent_id: Option<PlanNodeId>,
     pub sibling_order: u16,
     pub objective: String,
@@ -291,6 +340,12 @@ pub struct PlanNodeSnapshot {
     pub result: Option<PlanNodeResult>,
     pub created_revision: u64,
     pub updated_revision: u64,
+    #[serde(default)]
+    pub declared_status: PlanNodeStatus,
+    #[serde(default)]
+    pub execution_summary: PlanExecutionSummary,
+    #[serde(default)]
+    pub links: Vec<PlanLinkSnapshot>,
 }
 
 /// Compact persisted view of one execution attempt.
@@ -337,8 +392,6 @@ pub struct PlanAttemptProgressSnapshot {
     pub elapsed_ms: u64,
     pub model_turns: u32,
     pub reported_usage: Option<SessionUsage>,
-    // Read-only compatibility for persisted snapshots using the former field.
-    #[serde(alias = "last_worker_heartbeat_at_ms")]
     pub last_subagent_heartbeat_at_ms: Option<u64>,
     pub last_runtime_activity_at_ms: u64,
     pub last_durable_progress_at_ms: Option<u64>,

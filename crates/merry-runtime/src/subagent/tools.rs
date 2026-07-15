@@ -24,7 +24,7 @@ pub fn subagent_tool_specs() -> Result<[ToolSpec; 3], merry_core::CoreError> {
         )?,
         tool_spec::<WaitSubagentsInput>(
             WAIT_SUBAGENTS_TOOL_NAME,
-            "Inspect or wait for child agent statuses and compact results.",
+            "Inspect or wait for child agent statuses and compact results. timeout_ms is an observation deadline, not a task budget; prefer 30000 or omit it. A timed_out=true result is only a status snapshot, never completion. Claim completion only when terminal=true and the relevant statuses are terminal.",
         )?,
         tool_spec::<CancelSubagentsInput>(
             CANCEL_SUBAGENTS_TOOL_NAME,
@@ -239,26 +239,38 @@ fn task_spec_from_input(
         forbidden_paths,
         expected_output,
         reasoning_effort,
+        plan_task,
     } = input;
     let reasoning_effort = reasoning_effort
         .map(|value| merry_llm::ReasoningEffort::new(&value))
         .transpose()
         .map_err(|error| InvalidSubagentToolArguments::new(error.to_string()))?;
 
-    SubagentTaskSpec::new(task, max_model_turns.unwrap_or(DEFAULT_MAX_MODEL_TURNS))
+    let mut task = SubagentTaskSpec::new(task, max_model_turns.unwrap_or(DEFAULT_MAX_MODEL_TURNS))
         .map_err(InvalidSubagentToolArguments::from)?
-        .with_display_name(display_name)
-        .with_allowed_tools(allowed_tools.unwrap_or_default())
-        .with_read_scope(read_scope.unwrap_or_default())
-        .map_err(InvalidSubagentToolArguments::from)?
-        .with_write_scope(write_scope.unwrap_or_default())
-        .map_err(InvalidSubagentToolArguments::from)?
-        .with_forbidden_paths(forbidden_paths.unwrap_or_default())
-        .map_err(InvalidSubagentToolArguments::from)
-        .map(|task| {
-            task.with_expected_output(expected_output)
-                .with_reasoning_effort(reasoning_effort)
-        })
+        .with_display_name(display_name);
+    if let Some(allowed_tools) = allowed_tools {
+        task = task.with_allowed_tools(allowed_tools);
+    }
+    if let Some(read_scope) = read_scope {
+        task = task
+            .with_read_scope(read_scope)
+            .map_err(InvalidSubagentToolArguments::from)?;
+    }
+    if let Some(write_scope) = write_scope {
+        task = task
+            .with_write_scope(write_scope)
+            .map_err(InvalidSubagentToolArguments::from)?;
+    }
+    if let Some(forbidden_paths) = forbidden_paths {
+        task = task
+            .with_forbidden_paths(forbidden_paths)
+            .map_err(InvalidSubagentToolArguments::from)?;
+    }
+    Ok(task
+        .with_expected_output(expected_output)
+        .with_reasoning_effort(reasoning_effort)
+        .with_plan_task(plan_task))
 }
 
 fn succeeded_json_output<T>(tool_name: &str, output: &T) -> ToolExecutionResult
@@ -392,6 +404,24 @@ mod tests {
             panic!("expected JSON tool outcome");
         };
         serde_json::from_str(content).expect("outcome contains valid JSON")
+    }
+
+    #[test]
+    fn spawn_schema_accepts_an_optional_plan_task_reference() {
+        let specs = subagent_tool_specs().expect("subagent tools build");
+        let schema =
+            serde_json::to_value(specs[0].input_schema()).expect("spawn schema serializes");
+        assert!(schema.to_string().contains("plan_task"));
+    }
+
+    #[test]
+    fn wait_schema_rejects_model_polling_deadlines_shorter_than_five_seconds() {
+        let specs = subagent_tool_specs().expect("subagent tools build");
+        let schema =
+            serde_json::to_string(specs[1].input_schema()).expect("wait schema serializes");
+        assert!(schema.contains("minimum"));
+        assert!(schema.contains("5000"));
+        assert!(specs[1].description().contains("observation deadline"));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -570,6 +600,13 @@ mod tests {
         assert_eq!(output.agents.len(), 1);
         assert_eq!(output.agents[0].status, SubagentStatusLabel::Queued);
         assert_eq!(output.agents[0].summary, "child queued");
+        let payload = outcome_json(&outcome);
+        assert_eq!(payload["timed_out"], true);
+        assert_eq!(payload["terminal"], false);
+        assert_eq!(
+            payload["pending_agent_ids"].as_array().map(Vec::len),
+            Some(1)
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

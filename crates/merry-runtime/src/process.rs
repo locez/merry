@@ -746,6 +746,9 @@ fn is_read_only_direct_process_argv(argv: &[String]) -> bool {
         [executable, args @ ..] if executable_token_is(executable, "tail") => {
             is_read_only_head_or_tail_args(args)
         }
+        [executable, args @ ..] if executable_token_is(executable, "cargo") => {
+            is_read_only_cargo_fmt_check_args(args)
+        }
         [executable] if executable_token_is(executable, "ls") => true,
         [executable, file] if executable_token_is(executable, "ls") => {
             is_workspace_relative_file_argument(file)
@@ -755,6 +758,23 @@ fn is_read_only_direct_process_argv(argv: &[String]) -> bool {
         }
         _ => false,
     }
+}
+
+fn is_read_only_cargo_fmt_check_args(args: &[String]) -> bool {
+    let mut saw_fmt = false;
+    let mut saw_check = false;
+    for argument in args {
+        match argument.as_str() {
+            "fmt" if !saw_fmt => saw_fmt = true,
+            "--all" | "--check" if !saw_check || argument == "--all" => {
+                if argument == "--check" {
+                    saw_check = true;
+                }
+            }
+            _ => return false,
+        }
+    }
+    saw_fmt && saw_check
 }
 
 fn is_read_only_plain_shell_process_argv(argv: &[String]) -> bool {
@@ -1028,7 +1048,18 @@ fn is_workspace_relative_file_argument(argument: &str) -> bool {
 
 fn is_read_only_git_command(subcommand: &str, args: &[String]) -> bool {
     match subcommand {
-        "status" => args.is_empty() || matches!(args, [arg] if arg.as_str() == "--short"),
+        "status" => {
+            let mut short = false;
+            let mut branch = false;
+            for argument in args {
+                match argument.as_str() {
+                    "--short" if !short => short = true,
+                    "--branch" if !branch => branch = true,
+                    _ => return false,
+                }
+            }
+            true
+        }
         "branch" => matches!(args, [arg] if arg.as_str() == "--show-current"),
         "log" => args
             .iter()
@@ -1853,8 +1884,11 @@ mod tests {
             vec!["rg", "--version"],
             vec!["rg", "--files"],
             vec!["rg", "ProcessRunner"],
+            vec!["cargo", "fmt", "--all", "--check"],
             vec!["sed", "-n", "1,80p", "crates/merry-runtime/src/process.rs"],
             vec!["git", "status", "--short"],
+            vec!["git", "status", "--short", "--branch"],
+            vec!["git", "status", "--branch", "--short"],
             vec!["git", "log", "--oneline", "-5"],
             vec!["git", "diff", "--", "crates/merry-runtime/src/process.rs"],
             vec!["git", "show", "--stat", "HEAD"],

@@ -30,6 +30,7 @@ pub struct PlanSubagentControl {
     executor_session_id: SessionId,
 }
 
+#[allow(dead_code)]
 impl PlanSubagentControl {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(

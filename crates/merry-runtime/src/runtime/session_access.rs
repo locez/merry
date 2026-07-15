@@ -1,4 +1,6 @@
-use super::{Runtime, RuntimeError, persist_resume_safe_savepoint_if_configured};
+use super::{
+    Runtime, RuntimeError, diagnostic_from_text, persist_resume_safe_savepoint_if_configured,
+};
 use crate::{
     ArtifactContent, ContextEntry, ContextSummary, LedgerProjectionSnapshot,
     SessionContextSnapshot, SessionTranscriptItem, events::ActiveStepPermit,
@@ -145,6 +147,30 @@ impl Runtime {
                 call_id,
                 ToolCallResultStatus::Failed,
                 ArtifactContent::text("Tool execution was cancelled by user interrupt."),
+                Some(diagnostic),
+                None,
+            )?
+        };
+        persist_resume_safe_savepoint_if_configured(&self.inner).await;
+        Ok(events)
+    }
+
+    /// Converts an executor infrastructure failure into a durable failed
+    /// result for an interactive continuation. Direct executor callers keep
+    /// the lower-level contract of leaving infrastructure failures pending.
+    pub(crate) async fn submit_tool_execution_failure_with_active_permit(
+        &self,
+        call_id: &ToolCallId,
+        message: &str,
+        _active_permit: &ActiveStepPermit,
+    ) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
+        let diagnostic = diagnostic_from_text("tool_execution_failed", message);
+        let events = {
+            let mut session = self.inner.session.lock().await;
+            session.submit_tool_execution_outcome(
+                call_id,
+                ToolCallResultStatus::Failed,
+                ArtifactContent::text(format!("Tool execution failed: {message}")),
                 Some(diagnostic),
                 None,
             )?

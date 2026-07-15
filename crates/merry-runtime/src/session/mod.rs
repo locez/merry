@@ -110,6 +110,10 @@ impl SessionState {
         self.active_plan.as_ref()
     }
 
+    pub(crate) fn active_plan_mut(&mut self) -> Option<&mut PlanState> {
+        self.active_plan.as_mut()
+    }
+
     pub(crate) fn set_active_plan(&mut self, plan: PlanState) {
         self.active_plan = Some(plan);
     }

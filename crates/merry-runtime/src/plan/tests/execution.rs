@@ -335,41 +335,6 @@ fn expired_lease_scan_does_not_interrupt_a_local_attempt() {
 }
 
 #[test]
-fn resume_interrupts_and_requeues_a_persisted_local_attempt() {
-    let (mut plan, ids) = executing_plan(root(vec![leaf("work", "Resumable local work")]));
-    let coordinator = actor("coordinator-resume");
-    let started = plan
-        .start_local_attempt(&ids["work"], coordinator, 1_000)
-        .expect("local attempt starts");
-
-    let recovered = plan
-        .interrupt_unresolved_attempts_after_resume(2_000)
-        .expect("resume recovery succeeds");
-
-    assert_eq!(recovered.interrupted_attempts.len(), 1);
-    assert_eq!(
-        recovered.interrupted_attempts[0].attempt_id,
-        started.attempt.attempt_id
-    );
-    assert_eq!(
-        recovered.interrupted_attempts[0].outcome,
-        Some(PlanAttemptOutcome::Interrupted)
-    );
-    assert!(recovered.snapshot.leases.is_empty());
-    assert_eq!(
-        recovered
-            .snapshot
-            .nodes
-            .iter()
-            .find(|node| node.id == ids["work"])
-            .expect("local node remains")
-            .status,
-        PlanNodeStatus::Pending
-    );
-    assert_eq!(recovered.ready_node_ids, [ids["work"].clone()]);
-}
-
-#[test]
 fn elapsed_time_requests_review_at_a_safe_boundary_without_cancelling_the_attempt() {
     let (mut plan, ids) = executing_plan(root(vec![leaf("work", "Slow valid work")]));
     let subagent = actor("subagent-review");

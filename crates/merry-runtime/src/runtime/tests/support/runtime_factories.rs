@@ -37,9 +37,9 @@
                 permission_admission_source: None,
                 permissioned_process_runner_factory: None,
                 subagent_manager: None,
+                coordinator_plan_tools: false,
                 plan_controller,
                 plan_subagent_control: None,
-                plan_scheduler: None,
                 session_store: None,
             }),
         }
@@ -76,9 +76,9 @@
                 permission_admission_source: None,
                 permissioned_process_runner_factory: None,
                 subagent_manager: None,
+                coordinator_plan_tools: false,
                 plan_controller,
                 plan_subagent_control: None,
-                plan_scheduler: None,
                 session_store: None,
             }),
         }
@@ -119,9 +119,9 @@
                 permission_admission_source: None,
                 permissioned_process_runner_factory: None,
                 subagent_manager: None,
+                coordinator_plan_tools: false,
                 plan_controller,
                 plan_subagent_control: None,
-                plan_scheduler: None,
                 session_store: None,
             }),
         }

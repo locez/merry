@@ -1,59 +1,8 @@
 use super::InteractiveProducer;
-use crate::{events::RuntimeEventProjector, plan::ReportPlanAttemptInput};
-use merry_core::{
-    ErrorInfo, PlanAttemptOutcome, PlanPhase, RuntimeJournalEvent, RuntimeJournalPayload,
-};
+use crate::events::RuntimeEventProjector;
+use merry_core::{PlanAttemptOutcome, PlanPhase, RuntimeJournalEvent, RuntimeJournalPayload};
 
 impl InteractiveProducer {
-    pub(super) async fn refresh_coordinator_continuation_request(&mut self) {
-        let Ok(Some(snapshot)) = self.runtime.plan_snapshot().await else {
-            return;
-        };
-        self.coordinator_continuation_requested = snapshot.attempts.iter().any(|attempt| {
-            attempt.outcome.is_none()
-                && attempt.lease_id.is_none()
-                && attempt.executor_session_id == *self.runtime.session_id()
-        });
-    }
-
-    pub(super) async fn fail_unreported_local_attempt(&self) {
-        let diagnostic = ErrorInfo::new(
-            "missing_attempt_report",
-            "local coordinator turn completed without report_plan_attempt",
-        )
-        .expect("static missing-report diagnostic is valid");
-        self.finish_local_attempt(PlanAttemptOutcome::TransientFailure, diagnostic)
-            .await;
-    }
-
-    pub(super) async fn finish_local_attempt(
-        &self,
-        outcome: PlanAttemptOutcome,
-        diagnostic: ErrorInfo,
-    ) {
-        let Ok(Some(snapshot)) = self.runtime.plan_snapshot().await else {
-            return;
-        };
-        if !snapshot.attempts.iter().any(|attempt| {
-            attempt.outcome.is_none()
-                && attempt.lease_id.is_none()
-                && attempt.executor_session_id == *self.runtime.session_id()
-        }) {
-            return;
-        }
-        let input = ReportPlanAttemptInput {
-            outcome,
-            result: None,
-            diagnostic: Some(diagnostic),
-            decomposition: None,
-            acknowledged_directive_ids: Vec::new(),
-            applied_directive_ids: Vec::new(),
-        };
-        if let Err(error) = self.runtime.report_current_local_plan_attempt(input).await {
-            tracing::debug!(error = %error, "failed to close local plan attempt at runtime boundary");
-        }
-    }
-
     pub(super) async fn runtime_tool_continuation(&self) -> Option<bool> {
         if self.interrupted {
             return Some(false);
@@ -89,9 +38,6 @@ impl InteractiveProducer {
                     return true;
                 }
                 self.observe_plan_wakeup(&event.payload);
-                if !self.coordinator_continuation_requested {
-                    self.refresh_coordinator_continuation_request().await;
-                }
                 let mut projector = RuntimeEventProjector::new();
                 self.project_and_send_runtime_event(&mut projector, event)
                     .await
