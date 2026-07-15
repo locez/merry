@@ -1,12 +1,12 @@
 //! Runtime-owned parallel subagent tool contracts.
 
 use crate::{
-    AgentLoopConfig, AgentLoopResult, AgentLoopStatus, ArtifactContent, PlanSubagentControl,
-    Runtime, RuntimeError, StepContext, StepInput, TaskAnchor,
+    AgentLoopConfig, AgentLoopResult, AgentLoopStatus, AgentLoopStreamMessage, ArtifactContent,
+    PlanSubagentControl, Runtime, RuntimeError, StepContext, StepInput, TaskAnchor,
     plan::{PlanController, SubagentPlanUpdateInput},
 };
 use activity::SubagentActivityReducer;
-use futures_util::{StreamExt, future::BoxFuture};
+use futures_util::future::BoxFuture;
 use merry_core::{
     ErrorInfo, PlanBindingId, PlanLinkSnapshot, PlanLinkStatus, RuntimeJournalEvent,
     RuntimeJournalPayload, SubagentActivityPhase, SubagentId, SubagentTaskId, ToolCallResultStatus,
@@ -1476,14 +1476,35 @@ fn spawn_child_loop(scheduler: ChildScheduler, launch: ChildLoopLaunch) {
             }
         };
 
-        while let Some(event) = stream.next().await {
-            if let Some(hub) = launch.activity_hub.as_deref()
-                && let Some(snapshot) = activity_reducer.reduce(&event, crate::plan::unix_time_ms())
-            {
-                hub.publish(snapshot);
+        let mut bridge_request = None;
+        while let Some(message) = stream.next_driver_message().await {
+            match message {
+                AgentLoopStreamMessage::Event(event) => {
+                    if let Some(hub) = launch.activity_hub.as_deref()
+                        && let Some(snapshot) =
+                            activity_reducer.reduce(&event, crate::plan::unix_time_ms())
+                    {
+                        hub.publish(snapshot);
+                    }
+                }
+                AgentLoopStreamMessage::BridgeToolRequest { call } => {
+                    bridge_request = Some(call);
+                    break;
+                }
             }
         }
-        let loop_result = stream.result().await;
+        let loop_result = if let Some(call) = bridge_request.as_ref() {
+            tracing::warn!(
+                subagent_id = %launch.agent_id,
+                task_id = %launch.task_id,
+                tool_name = %call.name(),
+                "child runtime has no bridge host for requested tool"
+            );
+            drop(stream);
+            None
+        } else {
+            stream.result().await
+        };
         let child_projection = match loop_result.as_ref() {
             Some(result) => ChildLoopProjection::from_result(&launch.runtime, result).await,
             None => ChildLoopProjection::default(),
@@ -1512,6 +1533,22 @@ fn spawn_child_loop(scheduler: ChildScheduler, launch: ChildLoopLaunch) {
                     agent.diagnostics = Some(error_info(
                         "subagent_cancelled",
                         "child stream ended after cancellation without a result",
+                    ));
+                }
+                None if bridge_request.is_some() => {
+                    let call = bridge_request
+                        .as_ref()
+                        .expect("bridge request guard ensures a call is present");
+                    agent.status = SubagentStatusLabel::Failed;
+                    agent.summary =
+                        format!("child bridge tool {} has no host", call.name().as_str());
+                    agent.result = None;
+                    agent.diagnostics = Some(error_info(
+                        "subagent_bridge_unavailable",
+                        format!(
+                            "child bridge tool {} requested without a bridge host",
+                            call.name().as_str()
+                        ),
                     ));
                 }
                 None => {
@@ -2181,7 +2218,7 @@ mod manager_tests {
     use std::{
         sync::{
             Arc, Mutex as StdMutex,
-            atomic::{AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
         },
         time::Duration,
     };
@@ -2466,6 +2503,32 @@ mod manager_tests {
         }
     }
 
+    struct GatedRecordingModelChildFactory {
+        release: CancellationToken,
+    }
+
+    impl ChildRuntimeFactory for GatedRecordingModelChildFactory {
+        fn build_child(&self, input: ChildRuntimeInput) -> Result<Runtime, crate::RuntimeError> {
+            let provider = ScriptedStepProvider::with_release(
+                vec![vec![Ok(ModelEvent::Completed {
+                    response: ModelResponse::new(
+                        vec![ModelOutput::text("gated child done")],
+                        FinishReason::Stop,
+                        None,
+                    ),
+                })]],
+                self.release.clone(),
+            );
+            Runtime::builder(input.session_id)
+                .task_anchor(input.task_anchor)
+                .model_provider(
+                    Arc::new(provider),
+                    ModelName::new("fake/gated-recording-child").expect("valid model name"),
+                )
+                .build()
+        }
+    }
+
     impl ChildRuntimeFactory for RecordingModelChildFactory {
         fn build_child(&self, input: ChildRuntimeInput) -> Result<Runtime, crate::RuntimeError> {
             Runtime::builder(input.session_id)
@@ -2474,6 +2537,35 @@ mod manager_tests {
                     Arc::new(self.provider.clone()),
                     ModelName::new("fake/recording-child").expect("valid model name"),
                 )
+                .build()
+        }
+    }
+
+    struct BridgeRequestChildFactory;
+
+    impl ChildRuntimeFactory for BridgeRequestChildFactory {
+        fn build_child(&self, input: ChildRuntimeInput) -> Result<Runtime, crate::RuntimeError> {
+            let provider = ScriptedStepProvider::new(vec![vec![Ok(ModelEvent::Completed {
+                response: ModelResponse::new(
+                    vec![ModelOutput::tool_call(ModelToolCall::new(
+                        ModelToolCallId::new("call-child-bridge").expect("valid call id"),
+                        ToolName::new("child_bridge").expect("valid tool name"),
+                        ToolArguments::new(Map::new()),
+                    ))],
+                    FinishReason::ToolCalls,
+                    None,
+                ),
+            })]]);
+
+            Runtime::builder(input.session_id)
+                .task_anchor(input.task_anchor)
+                .model_provider(
+                    Arc::new(provider),
+                    ModelName::new("fake/bridge-child").expect("valid model name"),
+                )
+                .registered_tool_allowlist(input.allowed_tools)
+                .allow_bridge_tools()
+                .register_tool(RegisteredTool::bridge(bridge_tool_spec()))
                 .build()
         }
     }
@@ -2590,6 +2682,11 @@ mod manager_tests {
     struct OrderingPlanLinkRuntime {
         hub: Arc<SubagentActivityHub>,
         terminal_seen_during_update: Arc<StdMutex<Vec<bool>>>,
+        phases_during_update: Arc<StdMutex<Vec<Option<merry_core::SubagentActivityPhase>>>>,
+        update_started: Arc<Notify>,
+        release: CancellationToken,
+        update_completed: Arc<AtomicBool>,
+        update_completed_notify: Arc<Notify>,
     }
 
     impl PlanLinkRuntime for OrderingPlanLinkRuntime {
@@ -2614,8 +2711,14 @@ mod manager_tests {
         ) -> BoxFuture<'a, Result<(), String>> {
             let hub = Arc::clone(&self.hub);
             let observations = Arc::clone(&self.terminal_seen_during_update);
+            let phases = Arc::clone(&self.phases_during_update);
+            let update_started = Arc::clone(&self.update_started);
+            let release = self.release.clone();
+            let update_completed = Arc::clone(&self.update_completed);
+            let update_completed_notify = Arc::clone(&self.update_completed_notify);
             Box::pin(async move {
-                let terminal_seen = hub.current().iter().any(|snapshot| {
+                let activity = hub.current();
+                let terminal_seen = activity.iter().any(|snapshot| {
                     matches!(
                         snapshot.phase,
                         merry_core::SubagentActivityPhase::Completed
@@ -2623,10 +2726,18 @@ mod manager_tests {
                             | merry_core::SubagentActivityPhase::Cancelled
                     )
                 });
+                phases
+                    .lock()
+                    .expect("ordering phases mutex is not poisoned")
+                    .push(activity.first().map(|snapshot| snapshot.phase));
                 observations
                     .lock()
                     .expect("ordering observations mutex is not poisoned")
                     .push(terminal_seen);
+                update_started.notify_one();
+                release.cancelled().await;
+                update_completed.store(true, Ordering::SeqCst);
+                update_completed_notify.notify_one();
                 Ok(())
             })
         }
@@ -2711,17 +2822,31 @@ mod manager_tests {
     #[tokio::test(flavor = "current_thread")]
     async fn child_activity_terminal_publishes_after_plan_link_update() {
         let hub = Arc::new(SubagentActivityHub::new());
+        let model_release = CancellationToken::new();
         let terminal_seen_during_update = Arc::new(StdMutex::new(Vec::new()));
+        let phases_during_update = Arc::new(StdMutex::new(Vec::new()));
+        let update_started = Arc::new(Notify::new());
+        let release = CancellationToken::new();
+        let update_completed = Arc::new(AtomicBool::new(false));
+        let update_completed_notify = Arc::new(Notify::new());
         let manager = SubagentManager::new(
             SessionId::new("subagent-activity-ordering").expect("valid session id"),
             SubagentConfig::new(1, 1).expect("valid subagent config"),
-            Arc::new(RecordingModelChildFactory::new()),
+            Arc::new(GatedRecordingModelChildFactory {
+                release: model_release.clone(),
+            }),
         );
         manager.attach_activity_hub(Arc::clone(&hub));
         manager.attach_plan_link_runtime(Arc::new(OrderingPlanLinkRuntime {
             hub: Arc::clone(&hub),
             terminal_seen_during_update: Arc::clone(&terminal_seen_during_update),
+            phases_during_update: Arc::clone(&phases_during_update),
+            update_started: Arc::clone(&update_started),
+            release: release.clone(),
+            update_completed: Arc::clone(&update_completed),
+            update_completed_notify: Arc::clone(&update_completed_notify),
         }));
+        let mut activity_receiver = hub.subscribe();
 
         let output = manager
             .spawn(
@@ -2736,6 +2861,29 @@ mod manager_tests {
             .await
             .expect("linked spawn succeeds");
         let agent_id = output.spawned[0].agent_id.clone();
+
+        model_release.cancel();
+        update_started.notified().await;
+        let during_link_update = hub
+            .current()
+            .into_iter()
+            .find(|snapshot| snapshot.subagent_id == agent_id)
+            .expect("structured activity should precede link update");
+        assert_eq!(
+            during_link_update.phase,
+            merry_core::SubagentActivityPhase::Running
+        );
+        assert!(!update_completed.load(Ordering::SeqCst));
+        assert_eq!(
+            phases_during_update
+                .lock()
+                .expect("ordering phases mutex is not poisoned")
+                .as_slice(),
+            &[Some(merry_core::SubagentActivityPhase::Running)]
+        );
+
+        release.cancel();
+        update_completed_notify.notified().await;
 
         let wait = manager
             .wait(
@@ -2756,6 +2904,7 @@ mod manager_tests {
                 .as_slice(),
             &[false]
         );
+        assert!(update_completed.load(Ordering::SeqCst));
         let activity = hub
             .current()
             .into_iter()
@@ -2763,6 +2912,83 @@ mod manager_tests {
             .expect("completed child activity is published");
         assert_eq!(activity.phase, merry_core::SubagentActivityPhase::Completed);
         assert_eq!(activity.task_id, output.spawned[0].task_id);
+        assert_eq!(
+            hub.published_phases(),
+            vec![
+                merry_core::SubagentActivityPhase::Starting,
+                merry_core::SubagentActivityPhase::Running,
+                merry_core::SubagentActivityPhase::Completed,
+            ]
+        );
+
+        loop {
+            activity_receiver
+                .changed()
+                .await
+                .expect("terminal activity should be published");
+            let snapshot = activity_receiver.borrow_and_update()[0].clone();
+            if matches!(
+                snapshot.phase,
+                merry_core::SubagentActivityPhase::Completed
+                    | merry_core::SubagentActivityPhase::Failed
+                    | merry_core::SubagentActivityPhase::Cancelled
+            ) {
+                assert_eq!(snapshot.phase, merry_core::SubagentActivityPhase::Completed);
+                break;
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn child_bridge_request_fails_without_claiming_completed() {
+        let hub = Arc::new(SubagentActivityHub::new());
+        let manager = SubagentManager::new(
+            SessionId::new("subagent-bridge-driver").expect("valid session id"),
+            SubagentConfig::new(1, 1).expect("valid subagent config"),
+            Arc::new(BridgeRequestChildFactory),
+        );
+        manager.attach_activity_hub(Arc::clone(&hub));
+
+        let output = manager
+            .spawn(
+                vec![
+                    SubagentTaskSpec::new("Use the child bridge.", 2)
+                        .expect("valid task")
+                        .with_allowed_tools([
+                            ToolName::new("child_bridge").expect("valid bridge tool name")
+                        ]),
+                ],
+                None,
+                CancellationToken::new(),
+            )
+            .await
+            .expect("bridge child spawn succeeds");
+        let agent_id = output.spawned[0].agent_id.clone();
+
+        let wait = tokio::time::timeout(
+            Duration::from_secs(1),
+            manager.wait(std::slice::from_ref(&agent_id), WaitMode::All, None),
+        )
+        .await
+        .expect("bridge request must not strand the child")
+        .expect("bridge child wait succeeds");
+
+        assert!(wait.terminal);
+        assert_eq!(wait.agents[0].status, SubagentStatusLabel::Failed);
+        assert!(wait.agents[0].result.is_none());
+        assert!(
+            wait.agents[0].summary.contains("bridge"),
+            "unexpected bridge child summary: {}",
+            wait.agents[0].summary
+        );
+        assert_eq!(
+            hub.current()
+                .into_iter()
+                .find(|snapshot| snapshot.subagent_id == agent_id)
+                .expect("bridge failure activity exists")
+                .phase,
+            merry_core::SubagentActivityPhase::Failed
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -3549,6 +3775,7 @@ mod manager_tests {
         name: merry_core::ProviderName,
         capabilities: ModelCapabilities,
         responses: Arc<StdMutex<ScriptedStepResponses>>,
+        release: Option<CancellationToken>,
     }
 
     impl ScriptedStepProvider {
@@ -3559,6 +3786,14 @@ mod manager_tests {
                 capabilities: ModelCapabilities::new(true, true, false, true, None, None)
                     .expect("valid capabilities"),
                 responses: Arc::new(StdMutex::new(responses.into_iter().rev().collect())),
+                release: None,
+            }
+        }
+
+        fn with_release(responses: ScriptedStepResponses, release: CancellationToken) -> Self {
+            Self {
+                release: Some(release),
+                ..Self::new(responses)
             }
         }
     }
@@ -3577,7 +3812,11 @@ mod manager_tests {
             request: ModelRequest,
             _context: ModelStreamContext,
         ) -> ModelProviderFuture<'a, Result<ModelEventStream, ModelError>> {
+            let release = self.release.clone();
             Box::pin(async move {
+                if let Some(release) = release {
+                    release.cancelled().await;
+                }
                 let _ = request;
                 let events = self
                     .responses
@@ -3620,6 +3859,17 @@ mod manager_tests {
         ToolSpec::new(
             ToolName::new("workspace_patch").expect("valid tool name"),
             "Apply a workspace patch.",
+            ToolInputSchema::new(schema).expect("valid schema"),
+        )
+        .expect("valid tool spec")
+    }
+
+    fn bridge_tool_spec() -> ToolSpec {
+        let schema = Schema::try_from(json!({ "type": "object" }))
+            .expect("test schema should be a JSON schema");
+        ToolSpec::new(
+            ToolName::new("child_bridge").expect("valid tool name"),
+            "Request a host bridge operation.",
             ToolInputSchema::new(schema).expect("valid schema"),
         )
         .expect("valid tool spec")
