@@ -187,8 +187,10 @@ pub trait PlanLinkRuntime: Send + Sync {
     /// Creates a scoped Plan capability only for an active, non-superseded link.
     fn scope_for_link<'a>(
         &'a self,
-        link: &'a PlanLinkSnapshot,
-    ) -> BoxFuture<'a, Option<PlanSubagentScope>>;
+        _link: &'a PlanLinkSnapshot,
+    ) -> BoxFuture<'a, Result<Option<PlanSubagentScope>, String>> {
+        Box::pin(async { Ok(None) })
+    }
 }
 
 struct PlanControllerLinkRuntime(PlanController);
@@ -227,13 +229,15 @@ impl PlanLinkRuntime for PlanControllerLinkRuntime {
     fn scope_for_link<'a>(
         &'a self,
         link: &'a PlanLinkSnapshot,
-    ) -> BoxFuture<'a, Option<PlanSubagentScope>> {
+    ) -> BoxFuture<'a, Result<Option<PlanSubagentScope>, String>> {
         Box::pin(async move {
             if link.status != PlanLinkStatus::Active || link.superseded_by.is_some() {
-                return None;
+                return Ok(None);
             }
-            let snapshot = self.0.snapshot().await.ok().flatten()?;
-            let current_link =
+            let Some(snapshot) = self.0.snapshot().await.map_err(|error| error.to_string())? else {
+                return Ok(None);
+            };
+            let Some(current_link) =
                 snapshot
                     .nodes
                     .iter()
@@ -244,15 +248,20 @@ impl PlanLinkRuntime for PlanControllerLinkRuntime {
                             && current.binding_id == link.binding_id
                             && current.subagent_id == link.subagent_id
                             && current.task_id == link.task_id
-                    })?;
+                    })
+            else {
+                return Ok(None);
+            };
             if current_link.status != PlanLinkStatus::Active || current_link.superseded_by.is_some()
             {
-                return None;
+                return Ok(None);
             }
-            Some(PlanSubagentScope::from_internal(self.0.subagent_scope(
-                current_link.plan_id.clone(),
-                current_link.node_id.clone(),
-                current_link.binding_id.clone(),
+            Ok(Some(PlanSubagentScope::from_internal(
+                self.0.subagent_scope(
+                    current_link.plan_id.clone(),
+                    current_link.node_id.clone(),
+                    current_link.binding_id.clone(),
+                ),
             )))
         })
     }
@@ -328,6 +337,33 @@ struct ChildLoopLaunch {
     token: CancellationToken,
     runtime: Runtime,
     generation_config: GenerationConfig,
+}
+
+enum PlanScopeLookupError {
+    Cancelled,
+    Lookup(String),
+}
+
+async fn lookup_plan_subagent_scope(
+    plan_link: Option<&PlanLinkSnapshot>,
+    plan_link_runtime: Option<&Arc<dyn PlanLinkRuntime>>,
+    token: &CancellationToken,
+) -> Result<Option<PlanSubagentScope>, PlanScopeLookupError> {
+    if token.is_cancelled() {
+        return Err(PlanScopeLookupError::Cancelled);
+    }
+    let Some((link, runtime)) = plan_link.zip(plan_link_runtime) else {
+        return Ok(None);
+    };
+    let lookup = runtime.scope_for_link(link);
+    let result = tokio::select! {
+        _ = token.cancelled() => return Err(PlanScopeLookupError::Cancelled),
+        result = lookup => result,
+    };
+    if token.is_cancelled() {
+        return Err(PlanScopeLookupError::Cancelled);
+    }
+    result.map_err(PlanScopeLookupError::Lookup)
 }
 
 #[derive(Debug, Clone)]
@@ -793,9 +829,31 @@ impl SubagentManager {
         let child_session_id = child_session_id();
         let generation_config = generation_config_for_child_task(&task);
         let plan_link_runtime = self.attached_plan_link_runtime();
-        let plan_subagent_scope = match (plan_link.as_ref(), plan_link_runtime.as_ref()) {
-            (Some(link), Some(runtime)) => runtime.scope_for_link(link).await,
-            _ => None,
+        let plan_subagent_scope = match lookup_plan_subagent_scope(
+            plan_link.as_ref(),
+            plan_link_runtime.as_ref(),
+            &token,
+        )
+        .await
+        {
+            Ok(scope) => scope,
+            Err(PlanScopeLookupError::Cancelled) => {
+                self.mark_cancelled_and_schedule(&agent_id).await;
+                return;
+            }
+            Err(PlanScopeLookupError::Lookup(error)) => {
+                self.mark_failed_and_schedule(
+                    &agent_id,
+                    "child Plan scope lookup failed",
+                    error_info("subagent_plan_scope_error", error),
+                )
+                .await;
+                return;
+            }
+        };
+        if token.is_cancelled() {
+            self.mark_cancelled_and_schedule(&agent_id).await;
+            return;
         };
         let runtime = match self.factory.build_child(ChildRuntimeInput {
             session_id: child_session_id,
@@ -821,6 +879,10 @@ impl SubagentManager {
                 return;
             }
         };
+        if token.is_cancelled() {
+            self.mark_cancelled_and_schedule(&agent_id).await;
+            return;
+        }
 
         spawn_child_loop(
             self.child_scheduler(),
@@ -854,6 +916,28 @@ impl SubagentManager {
         let to_start = self.reserve_queued_starts_locked(&mut state);
         drop(state);
         self.update_plan_links(link.into_iter().collect(), PlanLinkStatus::Failed)
+            .await;
+        self.notify.notify_waiters();
+        let _ = self.start_reserved_children(to_start).await;
+    }
+
+    async fn mark_cancelled_and_schedule(&self, agent_id: &SubagentId) {
+        let mut state = self.state.lock().await;
+        let mut link = None;
+        if let Some(agent) = state.agents.get_mut(agent_id)
+            && !agent.status.is_terminal()
+        {
+            agent.status = SubagentStatusLabel::Cancelled;
+            agent.summary = "child cancelled before runtime start".to_owned();
+            agent.diagnostics = Some(error_info(
+                "subagent_cancelled",
+                "child cancellation requested before runtime start",
+            ));
+            link = agent.plan_link.clone();
+        }
+        let to_start = self.reserve_queued_starts_locked(&mut state);
+        drop(state);
+        self.update_plan_links(link.into_iter().collect(), PlanLinkStatus::Cancelled)
             .await;
         self.notify.notify_waiters();
         let _ = self.start_reserved_children(to_start).await;
@@ -1040,60 +1124,140 @@ async fn start_reserved_children_iteratively(
     let mut pending = VecDeque::from(starts);
     while let Some(start) = pending.pop_front() {
         match spawn_reserved_child(scheduler.clone(), &start).await {
-            Ok(()) => {}
+            Ok(ReservedChildStartOutcome::Started) => {}
+            Ok(ReservedChildStartOutcome::Cancelled) => {
+                finish_reserved_child_start(
+                    &scheduler,
+                    &start,
+                    &mut pending,
+                    SubagentStatusLabel::Cancelled,
+                    "child cancelled before runtime start",
+                    error_info(
+                        "subagent_cancelled",
+                        "child cancellation requested before runtime start",
+                    ),
+                    PlanLinkStatus::Cancelled,
+                )
+                .await;
+            }
             Err(error) => {
-                let mut state_guard = scheduler.state.lock().await;
-                if let Some(agent) = state_guard.agents.get_mut(&start.agent_id)
-                    && !agent.status.is_terminal()
-                {
-                    agent.status = SubagentStatusLabel::Failed;
-                    agent.summary = "child runtime start failed".to_owned();
-                    agent.diagnostics = Some(error_info("subagent_start_error", error.to_string()));
-                }
-                let link = state_guard
-                    .agents
-                    .get(&start.agent_id)
-                    .and_then(|agent| agent.plan_link.clone());
-                pending.extend(reserve_queued_starts_locked(
-                    &mut state_guard,
-                    scheduler.effective_max_threads(),
-                ));
-                drop(state_guard);
-                update_plan_link_with_scheduler(&scheduler, link, PlanLinkStatus::Failed).await;
-                scheduler.notify.notify_waiters();
+                let (summary, diagnostics) = error.failure_details();
+                finish_reserved_child_start(
+                    &scheduler,
+                    &start,
+                    &mut pending,
+                    SubagentStatusLabel::Failed,
+                    summary,
+                    diagnostics,
+                    PlanLinkStatus::Failed,
+                )
+                .await;
             }
         }
     }
 }
 
+enum ReservedChildStartOutcome {
+    Started,
+    Cancelled,
+}
+
+enum ReservedChildStartError {
+    PlanScope(String),
+    Factory(RuntimeError),
+}
+
+impl ReservedChildStartError {
+    fn failure_details(&self) -> (&'static str, ErrorInfo) {
+        match self {
+            Self::PlanScope(error) => (
+                "child Plan scope lookup failed",
+                error_info("subagent_plan_scope_error", error),
+            ),
+            Self::Factory(error) => (
+                "child runtime start failed",
+                error_info("subagent_start_error", error.to_string()),
+            ),
+        }
+    }
+}
+
+async fn finish_reserved_child_start(
+    scheduler: &ChildScheduler,
+    start: &ReservedChildStart,
+    pending: &mut VecDeque<ReservedChildStart>,
+    status: SubagentStatusLabel,
+    summary: &'static str,
+    diagnostics: ErrorInfo,
+    link_status: PlanLinkStatus,
+) {
+    let mut state_guard = scheduler.state.lock().await;
+    let mut link = None;
+    if let Some(agent) = state_guard.agents.get_mut(&start.agent_id)
+        && !agent.status.is_terminal()
+    {
+        agent.status = status;
+        agent.summary = summary.to_owned();
+        agent.diagnostics = Some(diagnostics);
+        link = agent.plan_link.clone();
+    }
+    pending.extend(reserve_queued_starts_locked(
+        &mut state_guard,
+        scheduler.effective_max_threads(),
+    ));
+    drop(state_guard);
+    update_plan_link_with_scheduler(scheduler, link, link_status).await;
+    scheduler.notify.notify_waiters();
+}
+
 async fn spawn_reserved_child(
     scheduler: ChildScheduler,
     start: &ReservedChildStart,
-) -> Result<(), RuntimeError> {
-    let child_session_id = child_session_id();
-    let generation_config = generation_config_for_child_task(&start.task);
+) -> Result<ReservedChildStartOutcome, ReservedChildStartError> {
     let plan_link_runtime = scheduler
         .plan_link_runtime
         .lock()
         .expect("subagent plan link runtime mutex is not poisoned")
         .clone();
-    let plan_subagent_scope = match (start.plan_link.as_ref(), plan_link_runtime.as_ref()) {
-        (Some(link), Some(runtime)) => runtime.scope_for_link(link).await,
-        _ => None,
+    let plan_subagent_scope = match lookup_plan_subagent_scope(
+        start.plan_link.as_ref(),
+        plan_link_runtime.as_ref(),
+        &start.cancellation_token,
+    )
+    .await
+    {
+        Ok(scope) => scope,
+        Err(PlanScopeLookupError::Cancelled) => {
+            return Ok(ReservedChildStartOutcome::Cancelled);
+        }
+        Err(PlanScopeLookupError::Lookup(error)) => {
+            return Err(ReservedChildStartError::PlanScope(error));
+        }
     };
-    let runtime = scheduler.factory.build_child(ChildRuntimeInput {
-        session_id: child_session_id,
-        task_anchor: start.task_anchor.clone(),
-        task: start.task.clone(),
-        allowed_tools: start.task.allowed_tools().to_vec(),
-        workspace_scope: ChildWorkspaceScope::from_task(&start.task),
-        depth: scheduler.depth.saturating_add(1),
-        generation_config: generation_config.clone(),
-        plan_subagent_control: None,
-        plan_subagent_scope,
-        plan_link: start.plan_link.clone(),
-        plan_link_runtime,
-    })?;
+    if start.cancellation_token.is_cancelled() {
+        return Ok(ReservedChildStartOutcome::Cancelled);
+    }
+    let child_session_id = child_session_id();
+    let generation_config = generation_config_for_child_task(&start.task);
+    let runtime = scheduler
+        .factory
+        .build_child(ChildRuntimeInput {
+            session_id: child_session_id,
+            task_anchor: start.task_anchor.clone(),
+            task: start.task.clone(),
+            allowed_tools: start.task.allowed_tools().to_vec(),
+            workspace_scope: ChildWorkspaceScope::from_task(&start.task),
+            depth: scheduler.depth.saturating_add(1),
+            generation_config: generation_config.clone(),
+            plan_subagent_control: None,
+            plan_subagent_scope,
+            plan_link: start.plan_link.clone(),
+            plan_link_runtime,
+        })
+        .map_err(ReservedChildStartError::Factory)?;
+    if start.cancellation_token.is_cancelled() {
+        return Ok(ReservedChildStartOutcome::Cancelled);
+    }
 
     spawn_child_loop(
         scheduler,
@@ -1106,7 +1270,7 @@ async fn spawn_reserved_child(
         },
     );
 
-    Ok(())
+    Ok(ReservedChildStartOutcome::Started)
 }
 
 fn spawn_child_loop(scheduler: ChildScheduler, launch: ChildLoopLaunch) {
@@ -2045,6 +2209,297 @@ mod manager_tests {
         }
     }
 
+    struct DefaultScopePlanLinkRuntime;
+
+    impl PlanLinkRuntime for DefaultScopePlanLinkRuntime {
+        fn bind_subagent<'a>(
+            &'a self,
+            _client_key: String,
+            _agent_id: SubagentId,
+            _task_id: SubagentTaskId,
+            _now_ms: u64,
+        ) -> BoxFuture<'a, Result<PlanLinkSnapshot, String>> {
+            Box::pin(async { Err("unused test binding".to_owned()) })
+        }
+
+        fn update_subagent_link<'a>(
+            &'a self,
+            _binding_id: PlanBindingId,
+            _status: PlanLinkStatus,
+            _now_ms: u64,
+        ) -> BoxFuture<'a, Result<(), String>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn plan_link_runtime_default_scope_lookup_is_unbound() {
+        let link = PlanLinkSnapshot {
+            plan_id: merry_core::PlanId::new("default-plan").expect("valid plan id"),
+            node_id: merry_core::PlanNodeId::new("default-node").expect("valid node id"),
+            binding_id: PlanBindingId::new("default-binding").expect("valid binding id"),
+            subagent_id: SubagentId::new("default-agent").expect("valid agent id"),
+            task_id: SubagentTaskId::new("default-task").expect("valid task id"),
+            status: PlanLinkStatus::Active,
+            linked_at_ms: 1,
+            terminal_at_ms: None,
+            superseded_by: None,
+        };
+        assert!(
+            DefaultScopePlanLinkRuntime
+                .scope_for_link(&link)
+                .await
+                .expect("default scope lookup succeeds")
+                .is_none()
+        );
+    }
+
+    fn synthetic_plan_link(
+        agent_id: SubagentId,
+        task_id: SubagentTaskId,
+        binding_id: PlanBindingId,
+    ) -> PlanLinkSnapshot {
+        PlanLinkSnapshot {
+            plan_id: merry_core::PlanId::new("synthetic-plan").expect("valid plan id"),
+            node_id: merry_core::PlanNodeId::new("synthetic-node").expect("valid node id"),
+            binding_id,
+            subagent_id: agent_id,
+            task_id,
+            status: PlanLinkStatus::Active,
+            linked_at_ms: 1,
+            terminal_at_ms: None,
+            superseded_by: None,
+        }
+    }
+
+    struct FailingScopePlanLinkRuntime {
+        updates: Arc<StdMutex<Vec<PlanLinkStatus>>>,
+    }
+
+    impl PlanLinkRuntime for FailingScopePlanLinkRuntime {
+        fn bind_subagent<'a>(
+            &'a self,
+            _client_key: String,
+            agent_id: SubagentId,
+            task_id: SubagentTaskId,
+            _now_ms: u64,
+        ) -> BoxFuture<'a, Result<PlanLinkSnapshot, String>> {
+            Box::pin(async move {
+                Ok(synthetic_plan_link(
+                    agent_id,
+                    task_id,
+                    PlanBindingId::new("synthetic-binding").expect("valid binding id"),
+                ))
+            })
+        }
+
+        fn update_subagent_link<'a>(
+            &'a self,
+            _binding_id: PlanBindingId,
+            status: PlanLinkStatus,
+            _now_ms: u64,
+        ) -> BoxFuture<'a, Result<(), String>> {
+            let updates = Arc::clone(&self.updates);
+            Box::pin(async move {
+                updates
+                    .lock()
+                    .expect("link updates mutex is not poisoned")
+                    .push(status);
+                Ok(())
+            })
+        }
+
+        fn scope_for_link<'a>(
+            &'a self,
+            _link: &'a PlanLinkSnapshot,
+        ) -> BoxFuture<'a, Result<Option<PlanSubagentScope>, String>> {
+            Box::pin(async { Err("synthetic scope lookup failed".to_owned()) })
+        }
+    }
+
+    #[derive(Clone)]
+    struct BlockingScopePlanLinkRuntime {
+        scope_calls: Arc<AtomicUsize>,
+        lookup_started: Arc<Notify>,
+        lookup_dropped: Arc<Notify>,
+        release: CancellationToken,
+        updates: Arc<StdMutex<Vec<PlanLinkStatus>>>,
+    }
+
+    struct LookupDropGuard(Arc<Notify>);
+
+    impl Drop for LookupDropGuard {
+        fn drop(&mut self) {
+            self.0.notify_one();
+        }
+    }
+
+    impl PlanLinkRuntime for BlockingScopePlanLinkRuntime {
+        fn bind_subagent<'a>(
+            &'a self,
+            _client_key: String,
+            agent_id: SubagentId,
+            task_id: SubagentTaskId,
+            _now_ms: u64,
+        ) -> BoxFuture<'a, Result<PlanLinkSnapshot, String>> {
+            Box::pin(async move {
+                let binding_id =
+                    PlanBindingId::new(&format!("synthetic-binding-{}", task_id.as_str()))
+                        .expect("valid binding id");
+                Ok(synthetic_plan_link(agent_id, task_id, binding_id))
+            })
+        }
+
+        fn update_subagent_link<'a>(
+            &'a self,
+            _binding_id: PlanBindingId,
+            status: PlanLinkStatus,
+            _now_ms: u64,
+        ) -> BoxFuture<'a, Result<(), String>> {
+            let updates = Arc::clone(&self.updates);
+            Box::pin(async move {
+                updates
+                    .lock()
+                    .expect("link updates mutex is not poisoned")
+                    .push(status);
+                Ok(())
+            })
+        }
+
+        fn scope_for_link<'a>(
+            &'a self,
+            _link: &'a PlanLinkSnapshot,
+        ) -> BoxFuture<'a, Result<Option<PlanSubagentScope>, String>> {
+            let call = self.scope_calls.fetch_add(1, Ordering::SeqCst);
+            if call == 0 {
+                return Box::pin(async { Ok(None) });
+            }
+            let lookup_started = Arc::clone(&self.lookup_started);
+            let lookup_dropped = Arc::clone(&self.lookup_dropped);
+            let release = self.release.clone();
+            Box::pin(async move {
+                let _guard = LookupDropGuard(lookup_dropped);
+                lookup_started.notify_one();
+                release.cancelled().await;
+                Ok(None)
+            })
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn plan_scope_lookup_error_fails_child_and_plan_link() {
+        let factory = Arc::new(FakeChildFactory::new());
+        let updates = Arc::new(StdMutex::new(Vec::new()));
+        let manager = SubagentManager::new(
+            SessionId::new("scope-lookup-error").expect("valid session id"),
+            SubagentConfig::new(1, 1).expect("valid config"),
+            factory.clone(),
+        );
+        manager.attach_plan_link_runtime(Arc::new(FailingScopePlanLinkRuntime {
+            updates: Arc::clone(&updates),
+        }));
+
+        let output = manager
+            .spawn(
+                vec![
+                    SubagentTaskSpec::new("Fail during scope lookup.", 1)
+                        .expect("valid task")
+                        .with_plan_task(Some("synthetic".to_owned())),
+                ],
+                Some(1),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("spawn returns structured output");
+        let agent_id = output.spawned[0].agent_id.clone();
+        let snapshot = manager.snapshot().await;
+        let agent = snapshot
+            .iter()
+            .find(|agent| agent.agent_id == agent_id)
+            .expect("failed child remains tracked");
+        assert_eq!(agent.status, SubagentStatusLabel::Failed);
+        assert_eq!(factory.started.load(Ordering::SeqCst), 0);
+        assert!(
+            updates
+                .lock()
+                .expect("link updates mutex is not poisoned")
+                .contains(&PlanLinkStatus::Failed)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn queued_child_cancellation_during_scope_lookup_skips_factory() {
+        let factory = Arc::new(FailsFirstChildFactory::new());
+        let runtime = Arc::new(BlockingScopePlanLinkRuntime {
+            scope_calls: Arc::new(AtomicUsize::new(0)),
+            lookup_started: Arc::new(Notify::new()),
+            lookup_dropped: Arc::new(Notify::new()),
+            release: CancellationToken::new(),
+            updates: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let manager = SubagentManager::new(
+            SessionId::new("queued-scope-cancel").expect("valid session id"),
+            SubagentConfig::new(1, 1).expect("valid config"),
+            factory.clone(),
+        );
+        manager.attach_plan_link_runtime(runtime.clone());
+
+        let spawn_manager = manager.clone();
+        let spawn_handle = tokio::spawn(async move {
+            spawn_manager
+                .spawn(
+                    vec![
+                        SubagentTaskSpec::new("Fail first start.", 1)
+                            .expect("valid task")
+                            .with_plan_task(Some("synthetic".to_owned())),
+                        SubagentTaskSpec::new("Cancel during lookup.", 1)
+                            .expect("valid task")
+                            .with_plan_task(Some("synthetic".to_owned())),
+                    ],
+                    Some(1),
+                    CancellationToken::new(),
+                )
+                .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), runtime.lookup_started.notified())
+            .await
+            .expect("queued child should enter scope lookup");
+        let snapshot = manager.snapshot().await;
+        let queued_agent = snapshot
+            .iter()
+            .find(|agent| agent.status == SubagentStatusLabel::Running)
+            .expect("queued child remains reserved");
+        let queued_id = queued_agent.agent_id.clone();
+
+        manager
+            .cancel(std::slice::from_ref(&queued_id))
+            .await
+            .expect("cancel should succeed");
+        tokio::time::timeout(Duration::from_secs(1), runtime.lookup_dropped.notified())
+            .await
+            .expect("cancelled lookup should be dropped");
+        let _output = spawn_handle
+            .await
+            .expect("spawn task should join")
+            .expect("spawn succeeds");
+
+        let snapshot = manager.snapshot().await;
+        let cancelled = snapshot
+            .iter()
+            .find(|agent| agent.agent_id == queued_id)
+            .expect("cancelled child remains tracked");
+        assert_eq!(cancelled.status, SubagentStatusLabel::Cancelled);
+        assert_eq!(factory.calls(), 1);
+        assert!(
+            runtime
+                .updates
+                .lock()
+                .expect("link updates mutex is not poisoned")
+                .contains(&PlanLinkStatus::Cancelled)
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn plan_link_scope_requires_current_exact_active_binding() {
         let session_id = SessionId::new("scope-exact-binding").expect("valid session id");
@@ -2098,7 +2553,13 @@ mod manager_tests {
             .expect("link binds");
         let runtime = plan_link_runtime_for_controller(controller.clone());
 
-        assert!(runtime.scope_for_link(&link).await.is_some());
+        assert!(
+            runtime
+                .scope_for_link(&link)
+                .await
+                .expect("matching scope lookup succeeds")
+                .is_some()
+        );
 
         for status in [
             merry_core::PlanLinkStatus::Completed,
@@ -2109,33 +2570,67 @@ mod manager_tests {
             let mut terminal = link.clone();
             terminal.status = status;
             assert!(
-                runtime.scope_for_link(&terminal).await.is_none(),
+                runtime
+                    .scope_for_link(&terminal)
+                    .await
+                    .expect("terminal scope lookup succeeds")
+                    .is_none(),
                 "terminal input status {status:?} must not create a scope"
             );
         }
 
         let mut foreign_plan = link.clone();
         foreign_plan.plan_id = merry_core::PlanId::new("foreign-plan").expect("valid plan id");
-        assert!(runtime.scope_for_link(&foreign_plan).await.is_none());
+        assert!(
+            runtime
+                .scope_for_link(&foreign_plan)
+                .await
+                .expect("foreign plan scope lookup succeeds")
+                .is_none()
+        );
 
         let mut foreign_node = link.clone();
         foreign_node.node_id = merry_core::PlanNodeId::new("foreign-node").expect("valid node id");
-        assert!(runtime.scope_for_link(&foreign_node).await.is_none());
+        assert!(
+            runtime
+                .scope_for_link(&foreign_node)
+                .await
+                .expect("foreign node scope lookup succeeds")
+                .is_none()
+        );
 
         let mut foreign_binding = link.clone();
         foreign_binding.binding_id =
             merry_core::PlanBindingId::new("foreign-binding").expect("valid binding id");
-        assert!(runtime.scope_for_link(&foreign_binding).await.is_none());
+        assert!(
+            runtime
+                .scope_for_link(&foreign_binding)
+                .await
+                .expect("foreign binding scope lookup succeeds")
+                .is_none()
+        );
 
         let mut foreign_subagent = link.clone();
         foreign_subagent.subagent_id =
             merry_core::SubagentId::new("foreign-agent").expect("valid agent id");
-        assert!(runtime.scope_for_link(&foreign_subagent).await.is_none());
+        assert!(
+            runtime
+                .scope_for_link(&foreign_subagent)
+                .await
+                .expect("foreign subagent scope lookup succeeds")
+                .is_none()
+        );
 
         let mut foreign_task = link.clone();
         foreign_task.task_id =
             merry_core::SubagentTaskId::new("foreign-task").expect("valid task id");
-        assert!(runtime.scope_for_link(&foreign_task).await.is_none());
+        assert!(
+            runtime
+                .scope_for_link(&foreign_task)
+                .await
+                .expect("foreign task scope lookup succeeds")
+                .is_none()
+        );
 
         for (now_ms, status) in [
             (2, merry_core::PlanLinkStatus::Completed),
@@ -2148,7 +2643,11 @@ mod manager_tests {
                 .await
                 .expect("link status transition commits");
             assert!(
-                runtime.scope_for_link(&link).await.is_none(),
+                runtime
+                    .scope_for_link(&link)
+                    .await
+                    .expect("terminal controller lookup succeeds")
+                    .is_none(),
                 "a stale active link must not retain scope after {status:?} controller transition"
             );
         }
