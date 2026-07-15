@@ -2218,7 +2218,7 @@ fn projector_rebuilds_resume_transcript_history() {
     assert!(matches!(
         &state.timeline()[2],
         TimelineItem::ExpandedDetail { title, body, focus_body }
-            if title == "Read hello_world.py"
+            if title == "Read workspace_read_file path=hello_world.py"
                 && body.contains("print('hi')")
                 && focus_body.contains("print('hi')")
     ));
@@ -2497,7 +2497,7 @@ fn projector_keeps_successful_non_patch_tool_compact_and_expands_patch_tool() {
     );
 
     assert_eq!(state.timeline().len(), 2);
-    assert!(matches!(state.timeline()[0], TimelineItem::Muted { .. }));
+    assert!(!matches!(state.timeline()[0], TimelineItem::Muted { .. }));
     assert!(matches!(state.timeline()[1], TimelineItem::Expanded { .. }));
 }
 
@@ -2626,19 +2626,19 @@ fn projector_describes_runtime_control_tools() {
         [
             TimelineItem::Muted {
                 title: "Delegated".to_owned(),
-                detail: "tasks=2 max=2".to_owned(),
+                detail: "spawn_subagents max_concurrency=2 tasks=[{\"task\":\"inspect runtime\"},{\"task\":\"inspect TUI\"}]".to_owned(),
             },
             TimelineItem::Muted {
                 title: "Retrieved".to_owned(),
-                detail: "ref=prior-c1".to_owned(),
+                detail: "merry_read_checkpoint_ref ref=prior-c1".to_owned(),
             },
             TimelineItem::Muted {
                 title: "Waited".to_owned(),
-                detail: "agents=2 mode=all timeout=30s".to_owned(),
+                detail: "wait_subagents agent_ids=[\"a1\",\"a2\"] mode=all timeout_ms=30000".to_owned(),
             },
             TimelineItem::Muted {
                 title: "Cancelled".to_owned(),
-                detail: "agents=2".to_owned(),
+                detail: "cancel_subagents agent_ids=[\"a1\",\"a2\"]".to_owned(),
             }
         ]
     );
@@ -2670,9 +2670,53 @@ fn projector_keeps_the_real_name_for_unknown_tools() {
         state.timeline(),
         [TimelineItem::Muted {
             title: "Tool".to_owned(),
-            detail: "custom_lookup args=2".to_owned(),
+            detail: "custom_lookup limit=2 source=docs".to_owned(),
         }]
     );
+}
+
+#[test]
+fn projector_renders_generic_tool_arguments_and_completed_result() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    let mut projector = TuiProjector::default();
+
+    projector.apply(
+        RuntimeEvent::ToolCallStarted {
+            call: pending_call_with_args(
+                "call-custom",
+                "custom_lookup",
+                json!({"source": "docs", "limit": 2}),
+            ),
+            source: source(),
+        },
+        &mut state,
+    );
+    projector.apply(
+        RuntimeEvent::ToolCallFinished {
+            result: ToolCallResult::succeeded(
+                ToolCallId::new("call-custom").unwrap(),
+                text_artifact("custom-output"),
+            ),
+            output: Some(ToolOutput::Text {
+                text: "2 matching documents".to_owned(),
+            }),
+            source: source(),
+        },
+        &mut state,
+    );
+
+    let TimelineItem::Expanded { title, body } = &state.timeline()[0] else {
+        panic!("generic tool result should replace its pending row");
+    };
+    assert!(title.contains("custom_lookup"));
+    assert!(title.contains("source=docs"));
+    assert!(title.contains("limit=2"));
+    assert!(body.contains("2 matching documents"));
 }
 
 #[test]
@@ -2712,11 +2756,11 @@ fn projector_expands_tool_batches_in_model_order() {
         [
             TimelineItem::Muted {
                 title: "Read".to_owned(),
-                detail: "first.rs".to_owned(),
+                detail: "workspace_read_file path=first.rs".to_owned(),
             },
             TimelineItem::Muted {
                 title: "Listed".to_owned(),
-                detail: "src".to_owned(),
+                detail: "workspace_list_dir path=src".to_owned(),
             },
         ]
     );
@@ -2762,7 +2806,7 @@ fn projector_keeps_non_patch_tool_results_compact_without_raw_json() {
     else {
         panic!("read tool result should expand to a compact preview");
     };
-    assert_eq!(title, "Read .");
+    assert_eq!(title, "Read workspace_read_file");
     assert!(!body.contains("AGENTS.md:1"));
     assert!(body.contains("large raw content"));
     assert!(focus_body.contains("large raw content"));
@@ -2813,11 +2857,51 @@ fn projector_shows_tool_call_arguments_without_completed_noise() {
     else {
         panic!("read tool call should expand to a compact preview");
     };
-    assert_eq!(title, "Read AGENTS.md");
+    assert_eq!(title, "Read workspace_read_file path=AGENTS.md");
     assert!(!body.contains("AGENTS.md:1"));
     assert!(body.contains("large raw content"));
     assert!(focus_body.contains("large raw content"));
     assert!(!body.contains("completed"));
+}
+
+#[test]
+fn renderer_shows_tool_result_preview_below_tool_call() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.push_timeline_item(TimelineItem::Expanded {
+        title: "Tool custom_lookup source=docs limit=2 -> succeeded".to_owned(),
+        body: "2 matching documents".to_owned(),
+    });
+
+    let rendered = render_to_text(&state, 120, 24);
+
+    assert!(rendered.contains("custom_lookup"));
+    assert!(rendered.contains("source=docs"));
+    assert!(rendered.contains("2 matching documents"));
+}
+
+#[test]
+fn renderer_limits_tool_result_preview_to_two_lines() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.push_timeline_item(TimelineItem::Expanded {
+        title: "Tool custom_lookup source=docs -> succeeded".to_owned(),
+        body: "first result\nsecond result\nthird result".to_owned(),
+    });
+
+    let rendered = render_to_text(&state, 120, 24);
+
+    assert!(rendered.contains("first result"));
+    assert!(rendered.contains("second result"));
+    assert!(!rendered.contains("third result"));
 }
 
 #[test]
@@ -2864,7 +2948,7 @@ fn projector_expands_read_file_output_for_focus_review() {
     else {
         panic!("read_file result should expand so Focus can show content");
     };
-    assert_eq!(title, "Read hello_world.py");
+    assert_eq!(title, "Read workspace_read_file path=hello_world.py");
     assert!(!body.contains("hello_world.py:1"));
     assert!(body.contains("print(\"Hello, Merry!\")"));
     assert!(focus_body.contains("print(\"Hello, Merry!\")"));
@@ -2910,7 +2994,7 @@ fn projector_expands_list_dir_output_for_focus_review() {
     else {
         panic!("list_dir result should expand so Focus can show entries");
     };
-    assert_eq!(title, "Listed .");
+    assert_eq!(title, "Listed workspace_list_dir path=.");
     assert!(body.contains("Cargo.toml"));
     assert!(body.contains("crates/"));
     assert!(focus_body.contains("Cargo.toml"));
@@ -2972,7 +3056,7 @@ fn projector_renders_list_dir_as_listed_path_without_field_label() {
         panic!("list tool call should render as a compact muted line");
     };
     assert_eq!(title, "Listed");
-    assert_eq!(detail, ".");
+    assert_eq!(detail, "workspace_list_dir path=.");
 }
 
 #[test]
@@ -3019,7 +3103,10 @@ fn projector_renders_process_calls_as_ran_with_preview() {
     else {
         panic!("process call should expand with output preview");
     };
-    assert_eq!(title, "Ran python3 hello_world.py (cwd: .)");
+    assert_eq!(
+        title,
+        "Ran run_process argv=[\"python3\",\"hello_world.py\"] cwd=."
+    );
     assert!(!body.contains("python3 hello_world.py (cwd: .)"));
     assert!(body.contains("  stdout: hello world"));
     assert!(focus_body.contains("  stdout: hello world"));
@@ -3071,7 +3158,10 @@ fn projector_renders_failed_process_calls_as_ran_with_error_preview() {
     else {
         panic!("failed process call should expand with output preview");
     };
-    assert_eq!(title, "Ran cargo test -p merry-cli (cwd: .)");
+    assert_eq!(
+        title,
+        "Ran run_process argv=[\"cargo\",\"test\",\"-p\",\"merry-cli\"] cwd=."
+    );
     assert!(!body.contains("cargo test -p merry-cli (cwd: .)"));
     assert!(body.contains("  exit 101"));
     assert!(body.contains("  stderr: error: test failed"));
@@ -3501,7 +3591,7 @@ fn projector_keeps_diff_like_non_patch_output_muted() {
     );
 
     assert_eq!(state.timeline().len(), 1);
-    assert!(matches!(state.timeline()[0], TimelineItem::Muted { .. }));
+    assert!(matches!(state.timeline()[0], TimelineItem::Expanded { .. }));
 }
 
 #[test]
@@ -4065,7 +4155,7 @@ fn renderer_keeps_bottom_queue_on_narrow_terminal() {
 }
 
 #[test]
-fn narrow_chat_keeps_read_artifacts_collapsed() {
+fn narrow_chat_shows_read_result_preview() {
     let mut state = TuiState::new(
         "/repo/merry".into(),
         "gpt-test".to_owned(),
@@ -4080,7 +4170,7 @@ fn narrow_chat_keeps_read_artifacts_collapsed() {
     let text = render_to_text(&state, 79, 24);
 
     assert!(text.contains("Read hello_world.py"));
-    assert!(!text.contains("print(\"Hello, Merry!\")"));
+    assert!(text.contains("print(\"Hello, Merry!\")"));
 }
 
 #[test]
@@ -4801,7 +4891,7 @@ fn renderer_draws_assistant_separator_across_timeline_width() {
 }
 
 #[test]
-fn renderer_colors_ran_title_and_indents_process_preview() {
+fn renderer_colors_ran_title_and_shows_process_preview() {
     let mut state = TuiState::new(
         "/repo".into(),
         "gpt-test".to_owned(),
@@ -4815,7 +4905,7 @@ fn renderer_colors_ran_title_and_indents_process_preview() {
 
     let text = render_to_text(&state, 79, 16);
     assert!(text.contains("Ran python3 hello_world.py (cwd: .)"));
-    assert!(!text.contains("  stdout: hello world"));
+    assert!(text.contains("  stdout: hello world"));
 
     let buffer = render_to_buffer(&state, 79, 16);
     assert_eq!(find_cell_color(&buffer, "Ran"), Some(Color::LightCyan));

@@ -647,7 +647,7 @@ mod tests {
         let text = String::from_utf8(output).expect("output should be utf-8");
         assert_eq!(
             text,
-            "我先解析 baidu.com 的 DNS。\n\ntool: run_process getent hosts baidu.com\n\nbaidu.com resolves to 110.242.74.102\n"
+            "我先解析 baidu.com 的 DNS。\n\ntool: run_process argv=[\"getent\",\"hosts\",\"baidu.com\"]\n\nbaidu.com resolves to 110.242.74.102\n"
         );
         assert!(!text.contains("\"type\":\"tool_call_pending\""));
         assert!(!text.contains("\"type\":\"agent_loop_result\""));
