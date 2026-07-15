@@ -25,7 +25,7 @@ use crate::{
     process::PermissionedProcessRunnerFactory,
     session::SessionState,
     step::{StepContext, StepInput},
-    subagent::{PlanSubagentScope, SubagentManager},
+    subagent::{PlanSubagentScope, SubagentActivityHub, SubagentActivityReceiver, SubagentManager},
     tool::{ToolExecutionContext, ToolRegistry},
 };
 use merry_core::{
@@ -101,6 +101,12 @@ impl Runtime {
     #[must_use]
     pub fn builder(session_id: SessionId) -> RuntimeBuilder {
         RuntimeBuilder::new(session_id)
+    }
+
+    /// Subscribes to the latest UI-only activity snapshots for managed subagents.
+    #[must_use]
+    pub fn subscribe_subagent_activity(&self) -> SubagentActivityReceiver {
+        self.inner.activity_hub.subscribe()
     }
 
     /// Resumes a session from the default XDG state store.
@@ -678,6 +684,7 @@ struct RuntimeInner {
     plan_subagent_control: Option<PlanSubagentControl>,
     plan_subagent_scope: Option<PlanSubagentScope>,
     session_store: Option<FileSessionStore>,
+    activity_hub: Arc<SubagentActivityHub>,
 }
 
 impl RuntimeInner {
