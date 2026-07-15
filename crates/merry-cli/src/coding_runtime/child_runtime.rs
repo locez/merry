@@ -79,6 +79,9 @@ impl ChildRuntimeFactory for CodingLoopChildRuntimeFactory {
             .task_anchor(input.task_anchor)
             .model_provider(Arc::clone(&self.provider), self.model.clone())
             .registered_tool_allowlist(input.allowed_tools.clone());
+        if let Some(activity_hub) = input.activity_hub.clone() {
+            builder = builder.subagent_activity_hub(activity_hub);
+        }
         let parent_plan_link_runtime = input.plan_link_runtime.clone();
         let child_factory: Arc<dyn ChildRuntimeFactory> = Arc::new(self.clone());
         let child_manager = SubagentManager::runtime_controlled_at_depth(
@@ -104,6 +107,9 @@ impl ChildRuntimeFactory for CodingLoopChildRuntimeFactory {
         }
         if let Some(control) = input.plan_subagent_control {
             builder = builder.plan_subagent_control(control);
+        }
+        if let Some(scope) = input.plan_subagent_scope {
+            builder = builder.plan_subagent_scope(scope);
         }
         if let Some(project_rules) = self.project_rules.clone() {
             builder = builder.project_rules(project_rules);

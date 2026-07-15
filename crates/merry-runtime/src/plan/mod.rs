@@ -7,6 +7,8 @@ pub(crate) mod projection;
 mod protocol;
 pub(crate) mod recovery;
 mod subagent;
+#[allow(dead_code)]
+mod subagent_scope;
 pub(crate) mod tools;
 mod validation;
 
@@ -17,13 +19,16 @@ pub(crate) use controller::{PlanController, PlanControllerEventReceiver};
 pub use domain::PlanError;
 pub(crate) use domain::{PersistedPlanState, PlanState};
 pub use protocol::PlanUpdateOutput;
+#[allow(unused_imports)]
 pub use protocol::{
     BeginPlanInput, BeginPlanOutput, ControlPlanAttemptInput, PlanApprovalInput, PlanChangeInput,
     PlanDecompositionInput, PlanExecutionIntent, PlanNodeInput, PlanNodeReferenceInput,
-    ReadPlanInput, ReportPlanAttemptInput, ReportPlanProgressInput, UpdatePlanInput,
+    ReadPlanInput, ReportPlanAttemptInput, ReportPlanProgressInput, SubagentPlanChangeInput,
+    SubagentPlanUpdateInput, UpdatePlanInput,
 };
 pub(crate) use subagent::PlanArtifactPromotion;
 pub use subagent::PlanSubagentControl;
+pub(crate) use subagent_scope::PlanSubagentScope;
 
 pub(crate) fn unix_time_ms() -> u64 {
     std::time::SystemTime::now()

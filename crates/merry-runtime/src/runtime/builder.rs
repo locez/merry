@@ -11,13 +11,16 @@ use crate::{
     permission::{PermissionAdmissionSource, PermissionReviewMode, RuntimeTrustLevel},
     plan::{
         PlanController, PlanSubagentControl,
-        tools::{coordinator_plan_registered_tools, subagent_plan_registered_tools},
+        tools::{
+            coordinator_plan_registered_tools, scoped_child_plan_registered_tools,
+            subagent_plan_registered_tools,
+        },
     },
     process::{PermissionedProcessRunnerFactory, StaticPermissionedProcessRunnerFactory},
     session::SessionState,
     subagent::{
-        ChildRuntimeFactory, ChildWorkspaceScope, PlanLinkRuntime, SubagentManager,
-        plan_link_runtime_for_controller,
+        ChildRuntimeFactory, ChildWorkspaceScope, PlanLinkRuntime, PlanSubagentScope,
+        SubagentActivityHub, SubagentManager, plan_link_runtime_for_controller,
     },
     tool::{RegisteredTool, ToolRegistry, ToolRegistryError},
 };
@@ -104,6 +107,7 @@ pub struct RuntimeBuilder {
     registered_tool_allowlist: Option<BTreeSet<merry_core::ToolName>>,
     coordinator_plan_tools: bool,
     plan_subagent_control: Option<PlanSubagentControl>,
+    plan_subagent_scope: Option<PlanSubagentScope>,
     initial_context_summaries: BTreeMap<String, String>,
     skill_catalog: Option<SkillCatalog>,
     project_rules: Option<ProjectRules>,
@@ -123,6 +127,7 @@ pub struct RuntimeBuilder {
     subagent_manager: Option<SubagentManager>,
     subagent_parent_scope: Option<ChildWorkspaceScope>,
     subagent_parent_plan_link_runtime: Option<Arc<dyn PlanLinkRuntime>>,
+    activity_hub: Arc<SubagentActivityHub>,
     session_store: Option<FileSessionStore>,
     loaded_session: Option<SessionState>,
 }
@@ -144,6 +149,7 @@ impl RuntimeBuilder {
             registered_tool_allowlist: None,
             coordinator_plan_tools: false,
             plan_subagent_control: None,
+            plan_subagent_scope: None,
             initial_context_summaries: BTreeMap::new(),
             skill_catalog: None,
             project_rules: None,
@@ -163,6 +169,7 @@ impl RuntimeBuilder {
             subagent_manager: None,
             subagent_parent_scope: None,
             subagent_parent_plan_link_runtime: None,
+            activity_hub: Arc::new(SubagentActivityHub::new()),
             session_store: None,
             loaded_session: None,
         }
@@ -295,6 +302,13 @@ impl RuntimeBuilder {
     #[must_use]
     pub fn plan_subagent_control(mut self, control: PlanSubagentControl) -> Self {
         self.plan_subagent_control = Some(control);
+        self
+    }
+
+    /// Installs the opaque Plan subtree capability for a linked child runtime.
+    #[must_use]
+    pub fn plan_subagent_scope(mut self, scope: PlanSubagentScope) -> Self {
+        self.plan_subagent_scope = Some(scope);
         self
     }
 
@@ -591,6 +605,13 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Reuses a runtime-owned activity hub for this runtime and its children.
+    #[must_use]
+    pub fn subagent_activity_hub(mut self, hub: Arc<SubagentActivityHub>) -> Self {
+        self.activity_hub = hub;
+        self
+    }
+
     /// Sets the effective workspace scope inherited by nested subagent tasks.
     #[must_use]
     pub fn subagent_parent_scope(mut self, scope: ChildWorkspaceScope) -> Self {
@@ -654,7 +675,9 @@ impl RuntimeBuilder {
         if let Some(allowlist) = self.registered_tool_allowlist.as_ref() {
             registered_tools.retain(|tool| allowlist.contains(tool.spec().name()));
         }
-        if self.coordinator_plan_tools && self.plan_subagent_control.is_some() {
+        if self.coordinator_plan_tools
+            && (self.plan_subagent_control.is_some() || self.plan_subagent_scope.is_some())
+        {
             return Err(RuntimeError::InvalidStepInput {
                 reason: "a runtime cannot be both a plan coordinator and a plan subagent",
             });
@@ -665,6 +688,10 @@ impl RuntimeBuilder {
         }
         if self.plan_subagent_control.is_some() {
             registered_tools.extend(subagent_plan_registered_tools().map_err(RuntimeError::from)?);
+        }
+        if self.plan_subagent_scope.is_some() {
+            registered_tools
+                .extend(scoped_child_plan_registered_tools().map_err(RuntimeError::from)?);
         }
         if self.automatic_compaction.is_enabled() {
             registered_tools.push(merry_read_checkpoint_ref_tool().map_err(RuntimeError::from)?);
@@ -756,6 +783,7 @@ impl RuntimeBuilder {
             self.session_store.clone(),
             self.event_buffer_size,
         );
+        let activity_hub = self.activity_hub;
         let subagent_manager = self.subagent_manager;
         if let Some(manager) = subagent_manager.as_ref() {
             let plan_link_runtime = self
@@ -772,6 +800,7 @@ impl RuntimeBuilder {
                 self.subagent_parent_scope
                     .unwrap_or_else(ChildWorkspaceScope::workspace_root),
             );
+            manager.attach_activity_hub(Arc::clone(&activity_hub));
         }
         // Plan is an advisory projection. Execution is started only by an
         // explicit subagent spawn and optional `plan_task` binding.
@@ -804,7 +833,9 @@ impl RuntimeBuilder {
                 coordinator_plan_tools: self.coordinator_plan_tools,
                 plan_controller,
                 plan_subagent_control: self.plan_subagent_control,
+                plan_subagent_scope: self.plan_subagent_scope,
                 session_store: self.session_store,
+                activity_hub,
             }),
         })
     }

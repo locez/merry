@@ -1,13 +1,16 @@
 //! Runtime-owned parallel subagent tool contracts.
 
 use crate::{
-    AgentLoopConfig, AgentLoopResult, AgentLoopStatus, ArtifactContent, PlanSubagentControl,
-    Runtime, RuntimeError, StepContext, StepInput, TaskAnchor, plan::PlanController,
+    AgentLoopConfig, AgentLoopResult, AgentLoopStatus, AgentLoopStreamMessage, ArtifactContent,
+    PlanSubagentControl, Runtime, RuntimeError, StepContext, StepInput, TaskAnchor,
+    plan::{PlanController, SubagentPlanUpdateInput},
 };
+use activity::SubagentActivityReducer;
 use futures_util::future::BoxFuture;
 use merry_core::{
     ErrorInfo, PlanBindingId, PlanLinkSnapshot, PlanLinkStatus, RuntimeJournalEvent,
-    RuntimeJournalPayload, SubagentId, SubagentTaskId, ToolCallResultStatus, ToolName,
+    RuntimeJournalPayload, SubagentActivityPhase, SubagentId, SubagentTaskId, ToolCallResultStatus,
+    ToolName,
 };
 use merry_llm::GenerationConfig;
 use std::{
@@ -22,10 +25,12 @@ use std::{
 use tokio::sync::{Mutex, Notify};
 use tokio_util::sync::CancellationToken;
 
+mod activity;
 mod protocol;
 mod spec;
 mod tools;
 
+pub use activity::{SubagentActivityHub, SubagentActivityReceiver};
 pub use protocol::{
     CancelSubagentsInput, RejectedSubagentView, SpawnSubagentTaskInput, SpawnSubagentsInput,
     SpawnSubagentsOutput, SpawnedSubagentStatusLabel, SpawnedSubagentView, SubagentResultView,
@@ -39,6 +44,34 @@ pub use spec::{
     validate_no_write_scope_conflicts,
 };
 pub use tools::{subagent_registered_tools, subagent_tool_specs};
+
+/// Opaque child capability for reading and updating the subtree below one
+/// active Plan link.
+///
+/// The capability carries no public controller or identity fields. Runtime
+/// construction receives it from the parent link adapter, and scoped tool
+/// execution is the only consumer-facing behavior.
+#[derive(Clone)]
+pub struct PlanSubagentScope(crate::plan::PlanSubagentScope);
+
+impl PlanSubagentScope {
+    pub(crate) fn from_internal(scope: crate::plan::PlanSubagentScope) -> Self {
+        Self(scope)
+    }
+
+    pub(crate) async fn read(
+        &self,
+    ) -> Result<merry_core::PlanSnapshot, crate::PlanControllerError> {
+        self.0.read().await
+    }
+
+    pub(crate) async fn update_plan(
+        &self,
+        input: SubagentPlanUpdateInput,
+    ) -> Result<crate::PlanUpdateOutput, crate::PlanControllerError> {
+        self.0.update_plan(input).await
+    }
+}
 
 /// Provider-visible tool name for spawning bounded child agents.
 pub(crate) const SPAWN_SUBAGENTS_TOOL_NAME: &str = "spawn_subagents";
@@ -67,10 +100,14 @@ pub struct ChildRuntimeInput {
     pub generation_config: GenerationConfig,
     /// Optional compatibility control for an explicitly Plan-bound child.
     pub plan_subagent_control: Option<PlanSubagentControl>,
+    /// Optional opaque capability for the subtree below the active Plan link.
+    pub plan_subagent_scope: Option<PlanSubagentScope>,
     /// Optional runtime-owned Plan link for this child execution.
     pub plan_link: Option<PlanLinkSnapshot>,
     /// Runtime-owned link adapter used when this child delegates further.
     pub plan_link_runtime: Option<Arc<dyn PlanLinkRuntime>>,
+    /// Optional shared runtime-owned activity hub for this child and descendants.
+    pub activity_hub: Option<Arc<SubagentActivityHub>>,
 }
 
 /// Parent-authored workspace scope carried into child runtime construction.
@@ -152,6 +189,14 @@ pub trait PlanLinkRuntime: Send + Sync {
         status: PlanLinkStatus,
         now_ms: u64,
     ) -> BoxFuture<'a, Result<(), String>>;
+
+    /// Creates a scoped Plan capability only for an active, non-superseded link.
+    fn scope_for_link<'a>(
+        &'a self,
+        _link: &'a PlanLinkSnapshot,
+    ) -> BoxFuture<'a, Result<Option<PlanSubagentScope>, String>> {
+        Box::pin(async { Ok(None) })
+    }
 }
 
 struct PlanControllerLinkRuntime(PlanController);
@@ -186,6 +231,46 @@ impl PlanLinkRuntime for PlanControllerLinkRuntime {
                 .map_err(|error| error.to_string())
         })
     }
+
+    fn scope_for_link<'a>(
+        &'a self,
+        link: &'a PlanLinkSnapshot,
+    ) -> BoxFuture<'a, Result<Option<PlanSubagentScope>, String>> {
+        Box::pin(async move {
+            if link.status != PlanLinkStatus::Active || link.superseded_by.is_some() {
+                return Ok(None);
+            }
+            let Some(snapshot) = self.0.snapshot().await.map_err(|error| error.to_string())? else {
+                return Ok(None);
+            };
+            let Some(current_link) =
+                snapshot
+                    .nodes
+                    .iter()
+                    .flat_map(|node| &node.links)
+                    .find(|current| {
+                        current.plan_id == link.plan_id
+                            && current.node_id == link.node_id
+                            && current.binding_id == link.binding_id
+                            && current.subagent_id == link.subagent_id
+                            && current.task_id == link.task_id
+                    })
+            else {
+                return Ok(None);
+            };
+            if current_link.status != PlanLinkStatus::Active || current_link.superseded_by.is_some()
+            {
+                return Ok(None);
+            }
+            Ok(Some(PlanSubagentScope::from_internal(
+                self.0.subagent_scope(
+                    current_link.plan_id.clone(),
+                    current_link.node_id.clone(),
+                    current_link.binding_id.clone(),
+                ),
+            )))
+        })
+    }
 }
 
 pub(crate) fn plan_link_runtime_for_controller(
@@ -209,6 +294,7 @@ pub struct SubagentManager {
     max_depth: u8,
     plan_link_runtime: Arc<StdMutex<Option<Arc<dyn PlanLinkRuntime>>>>,
     parent_capabilities: Arc<StdMutex<Option<ParentCapabilities>>>,
+    activity_hub: Arc<StdMutex<Option<Arc<SubagentActivityHub>>>>,
 }
 
 #[derive(Debug, Default)]
@@ -225,6 +311,7 @@ struct SubagentBatch {
 #[derive(Debug)]
 struct ReservedChildStart {
     agent_id: SubagentId,
+    task_id: SubagentTaskId,
     task: SubagentTaskSpec,
     task_anchor: TaskAnchor,
     cancellation_token: CancellationToken,
@@ -240,6 +327,7 @@ struct ChildScheduler {
     max_threads: Arc<AtomicUsize>,
     depth: u8,
     plan_link_runtime: Arc<StdMutex<Option<Arc<dyn PlanLinkRuntime>>>>,
+    activity_hub: Arc<StdMutex<Option<Arc<SubagentActivityHub>>>>,
 }
 
 impl ChildScheduler {
@@ -250,14 +338,55 @@ impl ChildScheduler {
             0
         }
     }
+
+    fn attached_activity_hub(&self) -> Option<Arc<SubagentActivityHub>> {
+        self.activity_hub
+            .lock()
+            .expect("subagent activity hub mutex is not poisoned")
+            .clone()
+    }
 }
 
 struct ChildLoopLaunch {
     agent_id: SubagentId,
+    task_id: SubagentTaskId,
     task: SubagentTaskSpec,
     token: CancellationToken,
     runtime: Runtime,
     generation_config: GenerationConfig,
+    activity_hub: Option<Arc<SubagentActivityHub>>,
+}
+
+struct ChildErrorTransition {
+    claimed: bool,
+    to_start: Vec<ReservedChildStart>,
+}
+
+enum PlanScopeLookupError {
+    Cancelled,
+    Lookup(String),
+}
+
+async fn lookup_plan_subagent_scope(
+    plan_link: Option<&PlanLinkSnapshot>,
+    plan_link_runtime: Option<&Arc<dyn PlanLinkRuntime>>,
+    token: &CancellationToken,
+) -> Result<Option<PlanSubagentScope>, PlanScopeLookupError> {
+    if token.is_cancelled() {
+        return Err(PlanScopeLookupError::Cancelled);
+    }
+    let Some((link, runtime)) = plan_link.zip(plan_link_runtime) else {
+        return Ok(None);
+    };
+    let lookup = runtime.scope_for_link(link);
+    let result = tokio::select! {
+        _ = token.cancelled() => return Err(PlanScopeLookupError::Cancelled),
+        result = lookup => result,
+    };
+    if token.is_cancelled() {
+        return Err(PlanScopeLookupError::Cancelled);
+    }
+    result.map_err(PlanScopeLookupError::Lookup)
 }
 
 #[derive(Debug, Clone)]
@@ -321,6 +450,7 @@ impl SubagentManager {
             max_depth: config.max_depth(),
             plan_link_runtime: Arc::new(StdMutex::new(None)),
             parent_capabilities: Arc::new(StdMutex::new(None)),
+            activity_hub: Arc::new(StdMutex::new(None)),
         }
     }
 
@@ -350,6 +480,20 @@ impl SubagentManager {
         self.plan_link_runtime
             .lock()
             .expect("subagent plan link runtime mutex is not poisoned")
+            .clone()
+    }
+
+    pub(crate) fn attach_activity_hub(&self, hub: Arc<SubagentActivityHub>) {
+        *self
+            .activity_hub
+            .lock()
+            .expect("subagent activity hub mutex is not poisoned") = Some(hub);
+    }
+
+    fn attached_activity_hub(&self) -> Option<Arc<SubagentActivityHub>> {
+        self.activity_hub
+            .lock()
+            .expect("subagent activity hub mutex is not poisoned")
             .clone()
     }
 
@@ -626,13 +770,13 @@ impl SubagentManager {
             });
 
             if starts_now {
-                to_start.push((agent_id, task, task_anchor, child_token, plan_link));
+                to_start.push((agent_id, task_id, task, task_anchor, child_token, plan_link));
             }
         }
         drop(state);
 
-        for (agent_id, task, task_anchor, child_token, plan_link) in to_start {
-            self.start_child(agent_id, task, task_anchor, child_token, plan_link)
+        for (agent_id, task_id, task, task_anchor, child_token, plan_link) in to_start {
+            self.start_child(agent_id, task_id, task, task_anchor, child_token, plan_link)
                 .await;
         }
 
@@ -695,6 +839,7 @@ impl SubagentManager {
         }
         let mut state = self.state.lock().await;
         let mut links_to_update = Vec::new();
+        let mut terminal_activities = Vec::new();
         for agent_id in agent_ids {
             if let Some(agent) = state.agents.get_mut(agent_id) {
                 if agent.status.is_terminal() {
@@ -710,6 +855,12 @@ impl SubagentManager {
                 if let Some(link) = agent.plan_link.clone() {
                     links_to_update.push(link);
                 }
+                terminal_activities.push((
+                    agent.agent_id.clone(),
+                    agent.task_id.clone(),
+                    SubagentActivityPhase::Cancelled,
+                    agent.summary.clone(),
+                ));
             }
         }
         let agents = selected_statuses(&state, agent_ids);
@@ -717,6 +868,16 @@ impl SubagentManager {
         drop(state);
         self.update_plan_links(links_to_update, PlanLinkStatus::Cancelled)
             .await;
+        let activity_hub = self.attached_activity_hub();
+        for (agent_id, task_id, phase, summary) in terminal_activities {
+            publish_terminal_activity_snapshot(
+                activity_hub.clone(),
+                agent_id,
+                task_id,
+                phase,
+                &summary,
+            );
+        }
         self.notify.notify_waiters();
         self.start_reserved_children(to_start).await?;
         Ok(WaitSubagentsOutput::new(agents))
@@ -725,6 +886,7 @@ impl SubagentManager {
     async fn start_child(
         &self,
         agent_id: SubagentId,
+        task_id: SubagentTaskId,
         task: SubagentTaskSpec,
         task_anchor: TaskAnchor,
         token: CancellationToken,
@@ -732,6 +894,34 @@ impl SubagentManager {
     ) {
         let child_session_id = child_session_id();
         let generation_config = generation_config_for_child_task(&task);
+        let plan_link_runtime = self.attached_plan_link_runtime();
+        let activity_hub = self.attached_activity_hub();
+        let plan_subagent_scope = match lookup_plan_subagent_scope(
+            plan_link.as_ref(),
+            plan_link_runtime.as_ref(),
+            &token,
+        )
+        .await
+        {
+            Ok(scope) => scope,
+            Err(PlanScopeLookupError::Cancelled) => {
+                self.mark_cancelled_and_schedule(&agent_id).await;
+                return;
+            }
+            Err(PlanScopeLookupError::Lookup(error)) => {
+                self.mark_failed_and_schedule(
+                    &agent_id,
+                    "child Plan scope lookup failed",
+                    error_info("subagent_plan_scope_error", error),
+                )
+                .await;
+                return;
+            }
+        };
+        if token.is_cancelled() {
+            self.mark_cancelled_and_schedule(&agent_id).await;
+            return;
+        };
         let runtime = match self.factory.build_child(ChildRuntimeInput {
             session_id: child_session_id,
             task_anchor,
@@ -741,8 +931,10 @@ impl SubagentManager {
             depth: self.depth.saturating_add(1),
             generation_config: generation_config.clone(),
             plan_subagent_control: None,
+            plan_subagent_scope,
             plan_link: plan_link.clone(),
-            plan_link_runtime: self.attached_plan_link_runtime(),
+            plan_link_runtime,
+            activity_hub: activity_hub.clone(),
         }) {
             Ok(runtime) => runtime,
             Err(error) => {
@@ -755,15 +947,21 @@ impl SubagentManager {
                 return;
             }
         };
+        if token.is_cancelled() {
+            self.mark_cancelled_and_schedule(&agent_id).await;
+            return;
+        }
 
         spawn_child_loop(
             self.child_scheduler(),
             ChildLoopLaunch {
                 agent_id,
+                task_id,
                 task,
                 token,
                 runtime,
                 generation_config,
+                activity_hub,
             },
         );
     }
@@ -776,6 +974,7 @@ impl SubagentManager {
     ) {
         let mut state = self.state.lock().await;
         let mut link = None;
+        let mut terminal_activity = None;
         if let Some(agent) = state.agents.get_mut(agent_id) {
             if agent.status.is_terminal() {
                 return;
@@ -784,11 +983,54 @@ impl SubagentManager {
             agent.summary = summary.to_owned();
             agent.diagnostics = Some(diagnostics);
             link = agent.plan_link.clone();
+            terminal_activity = terminal_activity_for_agent(agent);
         }
         let to_start = self.reserve_queued_starts_locked(&mut state);
         drop(state);
         self.update_plan_links(link.into_iter().collect(), PlanLinkStatus::Failed)
             .await;
+        if let Some((task_id, phase, summary)) = terminal_activity {
+            publish_terminal_activity_snapshot(
+                self.attached_activity_hub(),
+                agent_id.clone(),
+                task_id,
+                phase,
+                &summary,
+            );
+        }
+        self.notify.notify_waiters();
+        let _ = self.start_reserved_children(to_start).await;
+    }
+
+    async fn mark_cancelled_and_schedule(&self, agent_id: &SubagentId) {
+        let mut state = self.state.lock().await;
+        let mut link = None;
+        let mut terminal_activity = None;
+        if let Some(agent) = state.agents.get_mut(agent_id)
+            && !agent.status.is_terminal()
+        {
+            agent.status = SubagentStatusLabel::Cancelled;
+            agent.summary = "child cancelled before runtime start".to_owned();
+            agent.diagnostics = Some(error_info(
+                "subagent_cancelled",
+                "child cancellation requested before runtime start",
+            ));
+            link = agent.plan_link.clone();
+            terminal_activity = terminal_activity_for_agent(agent);
+        }
+        let to_start = self.reserve_queued_starts_locked(&mut state);
+        drop(state);
+        self.update_plan_links(link.into_iter().collect(), PlanLinkStatus::Cancelled)
+            .await;
+        if let Some((task_id, phase, summary)) = terminal_activity {
+            publish_terminal_activity_snapshot(
+                self.attached_activity_hub(),
+                agent_id.clone(),
+                task_id,
+                phase,
+                &summary,
+            );
+        }
         self.notify.notify_waiters();
         let _ = self.start_reserved_children(to_start).await;
     }
@@ -809,6 +1051,7 @@ impl SubagentManager {
             max_threads: Arc::clone(&self.max_threads),
             depth: self.depth,
             plan_link_runtime: Arc::clone(&self.plan_link_runtime),
+            activity_hub: Arc::clone(&self.activity_hub),
         }
     }
 
@@ -940,6 +1183,7 @@ fn reserve_queued_starts_locked(
         agent.summary = initial_summary(SubagentStatusLabel::Running);
         starts.push(ReservedChildStart {
             agent_id: agent.agent_id.clone(),
+            task_id: agent.task_id.clone(),
             task: agent.task.clone(),
             task_anchor: agent.task_anchor.clone(),
             cancellation_token: agent.cancellation_token.clone(),
@@ -973,182 +1217,499 @@ async fn start_reserved_children_iteratively(
 ) {
     let mut pending = VecDeque::from(starts);
     while let Some(start) = pending.pop_front() {
-        match spawn_reserved_child(scheduler.clone(), &start) {
-            Ok(()) => {}
+        match spawn_reserved_child(scheduler.clone(), &start).await {
+            Ok(ReservedChildStartOutcome::Started) => {}
+            Ok(ReservedChildStartOutcome::Cancelled) => {
+                finish_reserved_child_start(
+                    &scheduler,
+                    &start,
+                    &mut pending,
+                    SubagentStatusLabel::Cancelled,
+                    "child cancelled before runtime start",
+                    error_info(
+                        "subagent_cancelled",
+                        "child cancellation requested before runtime start",
+                    ),
+                    PlanLinkStatus::Cancelled,
+                )
+                .await;
+            }
             Err(error) => {
-                let mut state_guard = scheduler.state.lock().await;
-                if let Some(agent) = state_guard.agents.get_mut(&start.agent_id)
-                    && !agent.status.is_terminal()
-                {
-                    agent.status = SubagentStatusLabel::Failed;
-                    agent.summary = "child runtime start failed".to_owned();
-                    agent.diagnostics = Some(error_info("subagent_start_error", error.to_string()));
-                }
-                let link = state_guard
-                    .agents
-                    .get(&start.agent_id)
-                    .and_then(|agent| agent.plan_link.clone());
-                pending.extend(reserve_queued_starts_locked(
-                    &mut state_guard,
-                    scheduler.effective_max_threads(),
-                ));
-                drop(state_guard);
-                update_plan_link_with_scheduler(&scheduler, link, PlanLinkStatus::Failed).await;
-                scheduler.notify.notify_waiters();
+                let (summary, diagnostics) = error.failure_details();
+                finish_reserved_child_start(
+                    &scheduler,
+                    &start,
+                    &mut pending,
+                    SubagentStatusLabel::Failed,
+                    summary,
+                    diagnostics,
+                    PlanLinkStatus::Failed,
+                )
+                .await;
             }
         }
     }
 }
 
-fn spawn_reserved_child(
+enum ReservedChildStartOutcome {
+    Started,
+    Cancelled,
+}
+
+enum ReservedChildStartError {
+    PlanScope(String),
+    Factory(RuntimeError),
+}
+
+impl ReservedChildStartError {
+    fn failure_details(&self) -> (&'static str, ErrorInfo) {
+        match self {
+            Self::PlanScope(error) => (
+                "child Plan scope lookup failed",
+                error_info("subagent_plan_scope_error", error),
+            ),
+            Self::Factory(error) => (
+                "child runtime start failed",
+                error_info("subagent_start_error", error.to_string()),
+            ),
+        }
+    }
+}
+
+async fn finish_reserved_child_start(
+    scheduler: &ChildScheduler,
+    start: &ReservedChildStart,
+    pending: &mut VecDeque<ReservedChildStart>,
+    status: SubagentStatusLabel,
+    summary: &'static str,
+    diagnostics: ErrorInfo,
+    link_status: PlanLinkStatus,
+) {
+    let mut state_guard = scheduler.state.lock().await;
+    let mut link = None;
+    let mut terminal_activity = None;
+    if let Some(agent) = state_guard.agents.get_mut(&start.agent_id)
+        && !agent.status.is_terminal()
+    {
+        agent.status = status;
+        agent.summary = summary.to_owned();
+        agent.diagnostics = Some(diagnostics);
+        link = agent.plan_link.clone();
+        terminal_activity = terminal_activity_for_agent(agent);
+    }
+    pending.extend(reserve_queued_starts_locked(
+        &mut state_guard,
+        scheduler.effective_max_threads(),
+    ));
+    drop(state_guard);
+    update_plan_link_with_scheduler(scheduler, link, link_status).await;
+    if let Some((task_id, phase, summary)) = terminal_activity {
+        publish_terminal_activity_snapshot(
+            scheduler.attached_activity_hub(),
+            start.agent_id.clone(),
+            task_id,
+            phase,
+            &summary,
+        );
+    }
+    scheduler.notify.notify_waiters();
+}
+
+async fn spawn_reserved_child(
     scheduler: ChildScheduler,
     start: &ReservedChildStart,
-) -> Result<(), RuntimeError> {
+) -> Result<ReservedChildStartOutcome, ReservedChildStartError> {
+    let plan_link_runtime = scheduler
+        .plan_link_runtime
+        .lock()
+        .expect("subagent plan link runtime mutex is not poisoned")
+        .clone();
+    let plan_subagent_scope = match lookup_plan_subagent_scope(
+        start.plan_link.as_ref(),
+        plan_link_runtime.as_ref(),
+        &start.cancellation_token,
+    )
+    .await
+    {
+        Ok(scope) => scope,
+        Err(PlanScopeLookupError::Cancelled) => {
+            return Ok(ReservedChildStartOutcome::Cancelled);
+        }
+        Err(PlanScopeLookupError::Lookup(error)) => {
+            return Err(ReservedChildStartError::PlanScope(error));
+        }
+    };
+    if start.cancellation_token.is_cancelled() {
+        return Ok(ReservedChildStartOutcome::Cancelled);
+    }
     let child_session_id = child_session_id();
     let generation_config = generation_config_for_child_task(&start.task);
-    let runtime = scheduler.factory.build_child(ChildRuntimeInput {
-        session_id: child_session_id,
-        task_anchor: start.task_anchor.clone(),
-        task: start.task.clone(),
-        allowed_tools: start.task.allowed_tools().to_vec(),
-        workspace_scope: ChildWorkspaceScope::from_task(&start.task),
-        depth: scheduler.depth.saturating_add(1),
-        generation_config: generation_config.clone(),
-        plan_subagent_control: None,
-        plan_link: start.plan_link.clone(),
-        plan_link_runtime: scheduler
-            .plan_link_runtime
-            .lock()
-            .expect("subagent plan link runtime mutex is not poisoned")
-            .clone(),
-    })?;
+    let runtime = scheduler
+        .factory
+        .build_child(ChildRuntimeInput {
+            session_id: child_session_id,
+            task_anchor: start.task_anchor.clone(),
+            task: start.task.clone(),
+            allowed_tools: start.task.allowed_tools().to_vec(),
+            workspace_scope: ChildWorkspaceScope::from_task(&start.task),
+            depth: scheduler.depth.saturating_add(1),
+            generation_config: generation_config.clone(),
+            plan_subagent_control: None,
+            plan_subagent_scope,
+            plan_link: start.plan_link.clone(),
+            plan_link_runtime,
+            activity_hub: scheduler.attached_activity_hub(),
+        })
+        .map_err(ReservedChildStartError::Factory)?;
+    if start.cancellation_token.is_cancelled() {
+        return Ok(ReservedChildStartOutcome::Cancelled);
+    }
 
+    let activity_hub = scheduler.attached_activity_hub();
     spawn_child_loop(
         scheduler,
         ChildLoopLaunch {
             agent_id: start.agent_id.clone(),
+            task_id: start.task_id.clone(),
             task: start.task.clone(),
             token: start.cancellation_token.clone(),
             runtime,
             generation_config,
+            activity_hub,
         },
     );
 
-    Ok(())
+    Ok(ReservedChildStartOutcome::Started)
 }
 
 fn spawn_child_loop(scheduler: ChildScheduler, launch: ChildLoopLaunch) {
     tokio::spawn(async move {
+        let mut activity_reducer =
+            SubagentActivityReducer::new(launch.agent_id.clone(), launch.task_id.clone());
+        if let Some(hub) = launch.activity_hub.as_deref() {
+            hub.publish(activity_reducer.starting(crate::plan::unix_time_ms()));
+        }
+
         let input = match StepInput::user_text(launch.task.task()) {
             Ok(input) => input,
             Err(error) => {
-                let to_start = update_child_after_error(
-                    &scheduler.state,
-                    &launch.agent_id,
-                    "child task input was rejected",
-                    error_info("subagent_input_error", error.to_string()),
-                    scheduler.effective_max_threads(),
+                let cancelled = launch.token.is_cancelled();
+                finish_child_with_status(
+                    scheduler,
+                    &launch,
+                    &mut activity_reducer,
+                    if cancelled {
+                        SubagentStatusLabel::Cancelled
+                    } else {
+                        SubagentStatusLabel::Failed
+                    },
+                    if cancelled {
+                        "child cancelled before runtime stream"
+                    } else {
+                        "child task input was rejected"
+                    },
+                    if cancelled {
+                        error_info(
+                            "subagent_cancelled",
+                            "child cancellation requested before runtime stream",
+                        )
+                    } else {
+                        error_info("subagent_input_error", error.to_string())
+                    },
                 )
                 .await;
-                let link = plan_link_for_agent(&scheduler.state, &launch.agent_id).await;
-                update_plan_link_with_scheduler(&scheduler, link, PlanLinkStatus::Failed).await;
-                scheduler.notify.notify_waiters();
-                start_reserved_children_iteratively(scheduler, to_start).await;
                 return;
             }
         };
         let config = match AgentLoopConfig::new(launch.task.max_model_turns() as usize) {
             Ok(config) => config,
             Err(error) => {
-                let to_start = update_child_after_error(
-                    &scheduler.state,
-                    &launch.agent_id,
-                    "child loop configuration was rejected",
-                    error_info("subagent_config_error", error.to_string()),
-                    scheduler.effective_max_threads(),
+                let cancelled = launch.token.is_cancelled();
+                finish_child_with_status(
+                    scheduler,
+                    &launch,
+                    &mut activity_reducer,
+                    if cancelled {
+                        SubagentStatusLabel::Cancelled
+                    } else {
+                        SubagentStatusLabel::Failed
+                    },
+                    if cancelled {
+                        "child cancelled before runtime stream"
+                    } else {
+                        "child loop configuration was rejected"
+                    },
+                    if cancelled {
+                        error_info(
+                            "subagent_cancelled",
+                            "child cancellation requested before runtime stream",
+                        )
+                    } else {
+                        error_info("subagent_config_error", error.to_string())
+                    },
                 )
                 .await;
-                let link = plan_link_for_agent(&scheduler.state, &launch.agent_id).await;
-                update_plan_link_with_scheduler(&scheduler, link, PlanLinkStatus::Failed).await;
-                scheduler.notify.notify_waiters();
-                start_reserved_children_iteratively(scheduler, to_start).await;
                 return;
             }
         };
 
-        let loop_result = launch
-            .runtime
-            .run_agent_loop(
-                input,
-                StepContext::new(launch.token).with_generation_config(launch.generation_config),
-                config,
-            )
-            .await;
-        let child_projection = match &loop_result {
-            Ok(result) => ChildLoopProjection::from_result(&launch.runtime, result).await,
-            Err(_) => ChildLoopProjection::default(),
-        };
-
-        let mut state_guard = scheduler.state.lock().await;
-        if let Some(agent) = state_guard.agents.get_mut(&launch.agent_id) {
-            if agent.status == SubagentStatusLabel::Cancelled {
-                let to_start = reserve_queued_starts_locked(
-                    &mut state_guard,
-                    scheduler.effective_max_threads(),
-                );
-                drop(state_guard);
-                scheduler.notify.notify_waiters();
-                start_reserved_children_iteratively(scheduler, to_start).await;
+        let loop_token = launch.token.clone();
+        let mut stream = match launch.runtime.run_agent_loop_stream(
+            input,
+            StepContext::new(loop_token.clone())
+                .with_generation_config(launch.generation_config.clone()),
+            config,
+        ) {
+            Ok(stream) => stream,
+            Err(error) => {
+                let cancelled = loop_token.is_cancelled();
+                finish_child_with_status(
+                    scheduler,
+                    &launch,
+                    &mut activity_reducer,
+                    if cancelled {
+                        SubagentStatusLabel::Cancelled
+                    } else {
+                        SubagentStatusLabel::Failed
+                    },
+                    if cancelled {
+                        "child cancelled before runtime stream"
+                    } else {
+                        "child runtime stream failed to start"
+                    },
+                    if cancelled {
+                        error_info(
+                            "subagent_cancelled",
+                            "child cancellation requested before runtime stream",
+                        )
+                    } else {
+                        error_info("subagent_stream_start_error", error.to_string())
+                    },
+                )
+                .await;
                 return;
             }
-            match loop_result {
-                Ok(result) => apply_loop_result(agent, &result, child_projection),
-                Err(error) => {
-                    agent.status = SubagentStatusLabel::Failed;
-                    agent.summary = "child runtime error".to_owned();
-                    agent.result = None;
-                    agent.diagnostics =
-                        Some(error_info("subagent_runtime_error", error.to_string()));
+        };
+
+        let mut bridge_request = None;
+        while let Some(message) = stream.next_driver_message().await {
+            match message {
+                AgentLoopStreamMessage::Event(event) => {
+                    if let Some(hub) = launch.activity_hub.as_deref()
+                        && let Some(snapshot) =
+                            activity_reducer.reduce(&event, crate::plan::unix_time_ms())
+                    {
+                        hub.publish(snapshot);
+                    }
+                }
+                AgentLoopStreamMessage::BridgeToolRequest { call } => {
+                    bridge_request = Some(call);
+                    break;
                 }
             }
         }
-        let terminal_link = state_guard
+        let loop_result = if let Some(call) = bridge_request.as_ref() {
+            tracing::warn!(
+                subagent_id = %launch.agent_id,
+                task_id = %launch.task_id,
+                tool_name = %call.name(),
+                "child runtime has no bridge host for requested tool"
+            );
+            drop(stream);
+            None
+        } else {
+            stream.result().await
+        };
+        let child_projection = match loop_result.as_ref() {
+            Some(result) => ChildLoopProjection::from_result(&launch.runtime, result).await,
+            None => ChildLoopProjection::default(),
+        };
+
+        let mut state_guard = scheduler.state.lock().await;
+        if state_guard
             .agents
             .get(&launch.agent_id)
-            .and_then(|agent| agent.plan_link.clone());
-        let terminal_status =
-            state_guard
-                .agents
-                .get(&launch.agent_id)
-                .map(|agent| match agent.status {
-                    SubagentStatusLabel::Completed => PlanLinkStatus::Completed,
-                    SubagentStatusLabel::Cancelled => PlanLinkStatus::Cancelled,
-                    SubagentStatusLabel::Failed => PlanLinkStatus::Failed,
-                    SubagentStatusLabel::Queued | SubagentStatusLabel::Running => {
-                        PlanLinkStatus::Failed
-                    }
-                });
+            .is_some_and(|agent| agent.status == SubagentStatusLabel::Cancelled)
+        {
+            let to_start =
+                reserve_queued_starts_locked(&mut state_guard, scheduler.effective_max_threads());
+            drop(state_guard);
+            scheduler.notify.notify_waiters();
+            start_reserved_children_iteratively(scheduler, to_start).await;
+            return;
+        }
+        if let Some(agent) = state_guard.agents.get_mut(&launch.agent_id) {
+            match loop_result {
+                Some(result) => apply_loop_result(agent, &result, child_projection),
+                None if loop_token.is_cancelled() => {
+                    agent.status = SubagentStatusLabel::Cancelled;
+                    agent.summary = "child cancelled before stream result".to_owned();
+                    agent.result = None;
+                    agent.diagnostics = Some(error_info(
+                        "subagent_cancelled",
+                        "child stream ended after cancellation without a result",
+                    ));
+                }
+                None if bridge_request.is_some() => {
+                    let call = bridge_request
+                        .as_ref()
+                        .expect("bridge request guard ensures a call is present");
+                    agent.status = SubagentStatusLabel::Failed;
+                    agent.summary =
+                        format!("child bridge tool {} has no host", call.name().as_str());
+                    agent.result = None;
+                    agent.diagnostics = Some(error_info(
+                        "subagent_bridge_unavailable",
+                        format!(
+                            "child bridge tool {} requested without a bridge host",
+                            call.name().as_str()
+                        ),
+                    ));
+                }
+                None => {
+                    agent.status = SubagentStatusLabel::Failed;
+                    agent.summary = "child runtime stream ended without result".to_owned();
+                    agent.result = None;
+                    agent.diagnostics = Some(error_info(
+                        "subagent_stream_result_missing",
+                        "child runtime stream ended without a durable result",
+                    ));
+                }
+            }
+        }
+        let (terminal_link, terminal_status, terminal_activity) = state_guard
+            .agents
+            .get(&launch.agent_id)
+            .map(|agent| {
+                (
+                    agent.plan_link.clone(),
+                    plan_link_status_for_agent(agent),
+                    terminal_activity_for_agent(agent),
+                )
+            })
+            .unwrap_or((None, PlanLinkStatus::Failed, None));
         let to_start =
             reserve_queued_starts_locked(&mut state_guard, scheduler.effective_max_threads());
         drop(state_guard);
-        if let (Some(link), Some(status)) = (terminal_link, terminal_status) {
-            update_plan_link_with_scheduler(&scheduler, Some(link), status).await;
+        update_plan_link_with_scheduler(&scheduler, terminal_link, terminal_status).await;
+        if let Some((_task_id, phase, summary)) = terminal_activity {
+            publish_terminal_activity(
+                launch.activity_hub.as_deref(),
+                &mut activity_reducer,
+                phase,
+                &summary,
+            );
         }
         scheduler.notify.notify_waiters();
         start_reserved_children_iteratively(scheduler, to_start).await;
     });
 }
 
-async fn plan_link_for_agent(
-    state: &Mutex<SubagentManagerState>,
+async fn finish_child_with_status(
+    scheduler: ChildScheduler,
+    launch: &ChildLoopLaunch,
+    reducer: &mut SubagentActivityReducer,
+    status: SubagentStatusLabel,
+    summary: &str,
+    diagnostics: ErrorInfo,
+) {
+    let transition = update_child_after_error(
+        &scheduler.state,
+        &launch.agent_id,
+        status,
+        summary,
+        diagnostics,
+        scheduler.effective_max_threads(),
+    )
+    .await;
+    if transition.claimed {
+        settle_child_terminal(
+            scheduler,
+            &launch.agent_id,
+            reducer,
+            launch.activity_hub.clone(),
+            transition.to_start,
+        )
+        .await;
+    } else {
+        scheduler.notify.notify_waiters();
+        start_reserved_children_iteratively(scheduler, transition.to_start).await;
+    }
+}
+
+async fn settle_child_terminal(
+    scheduler: ChildScheduler,
     agent_id: &SubagentId,
-) -> Option<PlanLinkSnapshot> {
-    state
+    reducer: &mut SubagentActivityReducer,
+    activity_hub: Option<Arc<SubagentActivityHub>>,
+    to_start: Vec<ReservedChildStart>,
+) {
+    let (link, link_status, terminal_activity) = scheduler
+        .state
         .lock()
         .await
         .agents
         .get(agent_id)
-        .and_then(|agent| agent.plan_link.clone())
+        .map(|agent| {
+            (
+                agent.plan_link.clone(),
+                plan_link_status_for_agent(agent),
+                terminal_activity_for_agent(agent),
+            )
+        })
+        .unwrap_or((None, PlanLinkStatus::Failed, None));
+    update_plan_link_with_scheduler(&scheduler, link, link_status).await;
+    if let Some((_task_id, phase, summary)) = terminal_activity {
+        publish_terminal_activity(activity_hub.as_deref(), reducer, phase, &summary);
+    }
+    scheduler.notify.notify_waiters();
+    start_reserved_children_iteratively(scheduler, to_start).await;
+}
+
+fn publish_terminal_activity(
+    hub: Option<&SubagentActivityHub>,
+    reducer: &mut SubagentActivityReducer,
+    phase: SubagentActivityPhase,
+    summary: &str,
+) {
+    if let Some(hub) = hub {
+        hub.publish(reducer.terminal(phase, summary, crate::plan::unix_time_ms()));
+    }
+}
+
+fn publish_terminal_activity_snapshot(
+    hub: Option<Arc<SubagentActivityHub>>,
+    agent_id: SubagentId,
+    task_id: SubagentTaskId,
+    phase: SubagentActivityPhase,
+    summary: &str,
+) {
+    let Some(hub) = hub else {
+        return;
+    };
+    let mut reducer = SubagentActivityReducer::new(agent_id, task_id);
+    publish_terminal_activity(Some(&hub), &mut reducer, phase, summary);
+}
+
+fn plan_link_status_for_agent(agent: &ManagedSubagent) -> PlanLinkStatus {
+    match agent.status {
+        SubagentStatusLabel::Completed => PlanLinkStatus::Completed,
+        SubagentStatusLabel::Cancelled => PlanLinkStatus::Cancelled,
+        SubagentStatusLabel::Failed => PlanLinkStatus::Failed,
+        SubagentStatusLabel::Queued | SubagentStatusLabel::Running => PlanLinkStatus::Failed,
+    }
+}
+
+fn terminal_activity_for_agent(
+    agent: &ManagedSubagent,
+) -> Option<(SubagentTaskId, SubagentActivityPhase, String)> {
+    let phase = match agent.status {
+        SubagentStatusLabel::Completed => SubagentActivityPhase::Completed,
+        SubagentStatusLabel::Failed => SubagentActivityPhase::Failed,
+        SubagentStatusLabel::Cancelled => SubagentActivityPhase::Cancelled,
+        SubagentStatusLabel::Queued | SubagentStatusLabel::Running => return None,
+    };
+    Some((agent.task_id.clone(), phase, agent.summary.clone()))
 }
 
 async fn update_plan_link_with_scheduler(
@@ -1349,19 +1910,25 @@ fn collect_workspace_patch_changed_paths(content: &ArtifactContent, paths: &mut 
 async fn update_child_after_error(
     state: &Mutex<SubagentManagerState>,
     agent_id: &SubagentId,
+    status: SubagentStatusLabel,
     summary: &str,
     diagnostics: ErrorInfo,
     max_threads: usize,
-) -> Vec<ReservedChildStart> {
+) -> ChildErrorTransition {
     let mut state = state.lock().await;
+    let mut claimed = false;
     if let Some(agent) = state.agents.get_mut(agent_id)
         && !agent.status.is_terminal()
     {
-        agent.status = SubagentStatusLabel::Failed;
+        agent.status = status;
         agent.summary = summary.to_owned();
         agent.diagnostics = Some(diagnostics);
+        claimed = true;
     }
-    reserve_queued_starts_locked(&mut state, max_threads)
+    ChildErrorTransition {
+        claimed,
+        to_start: reserve_queued_starts_locked(&mut state, max_threads),
+    }
 }
 
 fn error_info(code: &'static str, message: impl ToString) -> ErrorInfo {
@@ -1676,7 +2243,7 @@ mod manager_tests {
     use std::{
         sync::{
             Arc, Mutex as StdMutex,
-            atomic::{AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
         },
         time::Duration,
     };
@@ -1961,6 +2528,32 @@ mod manager_tests {
         }
     }
 
+    struct GatedRecordingModelChildFactory {
+        release: CancellationToken,
+    }
+
+    impl ChildRuntimeFactory for GatedRecordingModelChildFactory {
+        fn build_child(&self, input: ChildRuntimeInput) -> Result<Runtime, crate::RuntimeError> {
+            let provider = ScriptedStepProvider::with_release(
+                vec![vec![Ok(ModelEvent::Completed {
+                    response: ModelResponse::new(
+                        vec![ModelOutput::text("gated child done")],
+                        FinishReason::Stop,
+                        None,
+                    ),
+                })]],
+                self.release.clone(),
+            );
+            Runtime::builder(input.session_id)
+                .task_anchor(input.task_anchor)
+                .model_provider(
+                    Arc::new(provider),
+                    ModelName::new("fake/gated-recording-child").expect("valid model name"),
+                )
+                .build()
+        }
+    }
+
     impl ChildRuntimeFactory for RecordingModelChildFactory {
         fn build_child(&self, input: ChildRuntimeInput) -> Result<Runtime, crate::RuntimeError> {
             Runtime::builder(input.session_id)
@@ -1970,6 +2563,811 @@ mod manager_tests {
                     ModelName::new("fake/recording-child").expect("valid model name"),
                 )
                 .build()
+        }
+    }
+
+    struct BridgeRequestChildFactory;
+
+    impl ChildRuntimeFactory for BridgeRequestChildFactory {
+        fn build_child(&self, input: ChildRuntimeInput) -> Result<Runtime, crate::RuntimeError> {
+            let provider = ScriptedStepProvider::new(vec![vec![Ok(ModelEvent::Completed {
+                response: ModelResponse::new(
+                    vec![ModelOutput::tool_call(ModelToolCall::new(
+                        ModelToolCallId::new("call-child-bridge").expect("valid call id"),
+                        ToolName::new("child_bridge").expect("valid tool name"),
+                        ToolArguments::new(Map::new()),
+                    ))],
+                    FinishReason::ToolCalls,
+                    None,
+                ),
+            })]]);
+
+            Runtime::builder(input.session_id)
+                .task_anchor(input.task_anchor)
+                .model_provider(
+                    Arc::new(provider),
+                    ModelName::new("fake/bridge-child").expect("valid model name"),
+                )
+                .registered_tool_allowlist(input.allowed_tools)
+                .allow_bridge_tools()
+                .register_tool(RegisteredTool::bridge(bridge_tool_spec()))
+                .build()
+        }
+    }
+
+    struct DefaultScopePlanLinkRuntime;
+
+    impl PlanLinkRuntime for DefaultScopePlanLinkRuntime {
+        fn bind_subagent<'a>(
+            &'a self,
+            _client_key: String,
+            _agent_id: SubagentId,
+            _task_id: SubagentTaskId,
+            _now_ms: u64,
+        ) -> BoxFuture<'a, Result<PlanLinkSnapshot, String>> {
+            Box::pin(async { Err("unused test binding".to_owned()) })
+        }
+
+        fn update_subagent_link<'a>(
+            &'a self,
+            _binding_id: PlanBindingId,
+            _status: PlanLinkStatus,
+            _now_ms: u64,
+        ) -> BoxFuture<'a, Result<(), String>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn plan_link_runtime_default_scope_lookup_is_unbound() {
+        let link = PlanLinkSnapshot {
+            plan_id: merry_core::PlanId::new("default-plan").expect("valid plan id"),
+            node_id: merry_core::PlanNodeId::new("default-node").expect("valid node id"),
+            binding_id: PlanBindingId::new("default-binding").expect("valid binding id"),
+            subagent_id: SubagentId::new("default-agent").expect("valid agent id"),
+            task_id: SubagentTaskId::new("default-task").expect("valid task id"),
+            status: PlanLinkStatus::Active,
+            linked_at_ms: 1,
+            terminal_at_ms: None,
+            superseded_by: None,
+        };
+        assert!(
+            DefaultScopePlanLinkRuntime
+                .scope_for_link(&link)
+                .await
+                .expect("default scope lookup succeeds")
+                .is_none()
+        );
+    }
+
+    fn synthetic_plan_link(
+        agent_id: SubagentId,
+        task_id: SubagentTaskId,
+        binding_id: PlanBindingId,
+    ) -> PlanLinkSnapshot {
+        PlanLinkSnapshot {
+            plan_id: merry_core::PlanId::new("synthetic-plan").expect("valid plan id"),
+            node_id: merry_core::PlanNodeId::new("synthetic-node").expect("valid node id"),
+            binding_id,
+            subagent_id: agent_id,
+            task_id,
+            status: PlanLinkStatus::Active,
+            linked_at_ms: 1,
+            terminal_at_ms: None,
+            superseded_by: None,
+        }
+    }
+
+    struct FailingScopePlanLinkRuntime {
+        updates: Arc<StdMutex<Vec<PlanLinkStatus>>>,
+    }
+
+    impl PlanLinkRuntime for FailingScopePlanLinkRuntime {
+        fn bind_subagent<'a>(
+            &'a self,
+            _client_key: String,
+            agent_id: SubagentId,
+            task_id: SubagentTaskId,
+            _now_ms: u64,
+        ) -> BoxFuture<'a, Result<PlanLinkSnapshot, String>> {
+            Box::pin(async move {
+                Ok(synthetic_plan_link(
+                    agent_id,
+                    task_id,
+                    PlanBindingId::new("synthetic-binding").expect("valid binding id"),
+                ))
+            })
+        }
+
+        fn update_subagent_link<'a>(
+            &'a self,
+            _binding_id: PlanBindingId,
+            status: PlanLinkStatus,
+            _now_ms: u64,
+        ) -> BoxFuture<'a, Result<(), String>> {
+            let updates = Arc::clone(&self.updates);
+            Box::pin(async move {
+                updates
+                    .lock()
+                    .expect("link updates mutex is not poisoned")
+                    .push(status);
+                Ok(())
+            })
+        }
+
+        fn scope_for_link<'a>(
+            &'a self,
+            _link: &'a PlanLinkSnapshot,
+        ) -> BoxFuture<'a, Result<Option<PlanSubagentScope>, String>> {
+            Box::pin(async { Err("synthetic scope lookup failed".to_owned()) })
+        }
+    }
+
+    #[derive(Clone)]
+    struct OrderingPlanLinkRuntime {
+        hub: Arc<SubagentActivityHub>,
+        terminal_seen_during_update: Arc<StdMutex<Vec<bool>>>,
+        phases_during_update: Arc<StdMutex<Vec<Option<merry_core::SubagentActivityPhase>>>>,
+        update_started: Arc<Notify>,
+        release: CancellationToken,
+        update_completed: Arc<AtomicBool>,
+        update_completed_notify: Arc<Notify>,
+    }
+
+    impl PlanLinkRuntime for OrderingPlanLinkRuntime {
+        fn bind_subagent<'a>(
+            &'a self,
+            _client_key: String,
+            agent_id: SubagentId,
+            task_id: SubagentTaskId,
+            _now_ms: u64,
+        ) -> BoxFuture<'a, Result<PlanLinkSnapshot, String>> {
+            Box::pin(async move {
+                let binding_id = PlanBindingId::new("ordering-binding").expect("valid binding id");
+                Ok(synthetic_plan_link(agent_id, task_id, binding_id))
+            })
+        }
+
+        fn update_subagent_link<'a>(
+            &'a self,
+            _binding_id: PlanBindingId,
+            _status: PlanLinkStatus,
+            _now_ms: u64,
+        ) -> BoxFuture<'a, Result<(), String>> {
+            let hub = Arc::clone(&self.hub);
+            let observations = Arc::clone(&self.terminal_seen_during_update);
+            let phases = Arc::clone(&self.phases_during_update);
+            let update_started = Arc::clone(&self.update_started);
+            let release = self.release.clone();
+            let update_completed = Arc::clone(&self.update_completed);
+            let update_completed_notify = Arc::clone(&self.update_completed_notify);
+            Box::pin(async move {
+                let activity = hub.current();
+                let terminal_seen = activity.iter().any(|snapshot| {
+                    matches!(
+                        snapshot.phase,
+                        merry_core::SubagentActivityPhase::Completed
+                            | merry_core::SubagentActivityPhase::Failed
+                            | merry_core::SubagentActivityPhase::Cancelled
+                    )
+                });
+                phases
+                    .lock()
+                    .expect("ordering phases mutex is not poisoned")
+                    .push(activity.first().map(|snapshot| snapshot.phase));
+                observations
+                    .lock()
+                    .expect("ordering observations mutex is not poisoned")
+                    .push(terminal_seen);
+                update_started.notify_one();
+                release.cancelled().await;
+                update_completed.store(true, Ordering::SeqCst);
+                update_completed_notify.notify_one();
+                Ok(())
+            })
+        }
+
+        fn scope_for_link<'a>(
+            &'a self,
+            _link: &'a PlanLinkSnapshot,
+        ) -> BoxFuture<'a, Result<Option<PlanSubagentScope>, String>> {
+            Box::pin(async { Ok(None) })
+        }
+    }
+
+    #[derive(Clone)]
+    struct BlockingScopePlanLinkRuntime {
+        scope_calls: Arc<AtomicUsize>,
+        lookup_started: Arc<Notify>,
+        lookup_dropped: Arc<Notify>,
+        release: CancellationToken,
+        updates: Arc<StdMutex<Vec<PlanLinkStatus>>>,
+    }
+
+    struct LookupDropGuard(Arc<Notify>);
+
+    impl Drop for LookupDropGuard {
+        fn drop(&mut self) {
+            self.0.notify_one();
+        }
+    }
+
+    impl PlanLinkRuntime for BlockingScopePlanLinkRuntime {
+        fn bind_subagent<'a>(
+            &'a self,
+            _client_key: String,
+            agent_id: SubagentId,
+            task_id: SubagentTaskId,
+            _now_ms: u64,
+        ) -> BoxFuture<'a, Result<PlanLinkSnapshot, String>> {
+            Box::pin(async move {
+                let binding_id =
+                    PlanBindingId::new(&format!("synthetic-binding-{}", task_id.as_str()))
+                        .expect("valid binding id");
+                Ok(synthetic_plan_link(agent_id, task_id, binding_id))
+            })
+        }
+
+        fn update_subagent_link<'a>(
+            &'a self,
+            _binding_id: PlanBindingId,
+            status: PlanLinkStatus,
+            _now_ms: u64,
+        ) -> BoxFuture<'a, Result<(), String>> {
+            let updates = Arc::clone(&self.updates);
+            Box::pin(async move {
+                updates
+                    .lock()
+                    .expect("link updates mutex is not poisoned")
+                    .push(status);
+                Ok(())
+            })
+        }
+
+        fn scope_for_link<'a>(
+            &'a self,
+            _link: &'a PlanLinkSnapshot,
+        ) -> BoxFuture<'a, Result<Option<PlanSubagentScope>, String>> {
+            let call = self.scope_calls.fetch_add(1, Ordering::SeqCst);
+            if call == 0 {
+                return Box::pin(async { Ok(None) });
+            }
+            let lookup_started = Arc::clone(&self.lookup_started);
+            let lookup_dropped = Arc::clone(&self.lookup_dropped);
+            let release = self.release.clone();
+            Box::pin(async move {
+                let _guard = LookupDropGuard(lookup_dropped);
+                lookup_started.notify_one();
+                release.cancelled().await;
+                Ok(None)
+            })
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn child_activity_terminal_publishes_after_plan_link_update() {
+        let hub = Arc::new(SubagentActivityHub::new());
+        let model_release = CancellationToken::new();
+        let terminal_seen_during_update = Arc::new(StdMutex::new(Vec::new()));
+        let phases_during_update = Arc::new(StdMutex::new(Vec::new()));
+        let update_started = Arc::new(Notify::new());
+        let release = CancellationToken::new();
+        let update_completed = Arc::new(AtomicBool::new(false));
+        let update_completed_notify = Arc::new(Notify::new());
+        let manager = SubagentManager::new(
+            SessionId::new("subagent-activity-ordering").expect("valid session id"),
+            SubagentConfig::new(1, 1).expect("valid subagent config"),
+            Arc::new(GatedRecordingModelChildFactory {
+                release: model_release.clone(),
+            }),
+        );
+        manager.attach_activity_hub(Arc::clone(&hub));
+        manager.attach_plan_link_runtime(Arc::new(OrderingPlanLinkRuntime {
+            hub: Arc::clone(&hub),
+            terminal_seen_during_update: Arc::clone(&terminal_seen_during_update),
+            phases_during_update: Arc::clone(&phases_during_update),
+            update_started: Arc::clone(&update_started),
+            release: release.clone(),
+            update_completed: Arc::clone(&update_completed),
+            update_completed_notify: Arc::clone(&update_completed_notify),
+        }));
+        let mut activity_receiver = hub.subscribe();
+
+        let output = manager
+            .spawn(
+                vec![
+                    SubagentTaskSpec::new("Complete the ordered child task.", 1)
+                        .expect("valid task")
+                        .with_plan_task(Some("synthetic".to_owned())),
+                ],
+                None,
+                CancellationToken::new(),
+            )
+            .await
+            .expect("linked spawn succeeds");
+        let agent_id = output.spawned[0].agent_id.clone();
+
+        model_release.cancel();
+        update_started.notified().await;
+        let during_link_update = hub
+            .current()
+            .into_iter()
+            .find(|snapshot| snapshot.subagent_id == agent_id)
+            .expect("structured activity should precede link update");
+        assert_eq!(
+            during_link_update.phase,
+            merry_core::SubagentActivityPhase::Running
+        );
+        assert!(!update_completed.load(Ordering::SeqCst));
+        assert_eq!(
+            phases_during_update
+                .lock()
+                .expect("ordering phases mutex is not poisoned")
+                .as_slice(),
+            &[Some(merry_core::SubagentActivityPhase::Running)]
+        );
+
+        release.cancel();
+        update_completed_notify.notified().await;
+
+        let wait = manager
+            .wait(
+                std::slice::from_ref(&agent_id),
+                WaitMode::All,
+                Some(Duration::from_secs(2)),
+            )
+            .await
+            .expect("child wait succeeds");
+        assert!(wait.terminal);
+        assert_eq!(wait.agents[0].status, SubagentStatusLabel::Completed);
+        assert_eq!(wait.agents[0].summary, "child completed");
+
+        assert_eq!(
+            terminal_seen_during_update
+                .lock()
+                .expect("ordering observations mutex is not poisoned")
+                .as_slice(),
+            &[false]
+        );
+        assert!(update_completed.load(Ordering::SeqCst));
+        let activity = hub
+            .current()
+            .into_iter()
+            .find(|snapshot| snapshot.subagent_id == agent_id)
+            .expect("completed child activity is published");
+        assert_eq!(activity.phase, merry_core::SubagentActivityPhase::Completed);
+        assert_eq!(activity.task_id, output.spawned[0].task_id);
+        assert_eq!(
+            hub.published_phases(),
+            vec![
+                merry_core::SubagentActivityPhase::Starting,
+                merry_core::SubagentActivityPhase::Running,
+                merry_core::SubagentActivityPhase::Completed,
+            ]
+        );
+
+        loop {
+            activity_receiver
+                .changed()
+                .await
+                .expect("terminal activity should be published");
+            let snapshot = activity_receiver.borrow_and_update()[0].clone();
+            if matches!(
+                snapshot.phase,
+                merry_core::SubagentActivityPhase::Completed
+                    | merry_core::SubagentActivityPhase::Failed
+                    | merry_core::SubagentActivityPhase::Cancelled
+            ) {
+                assert_eq!(snapshot.phase, merry_core::SubagentActivityPhase::Completed);
+                break;
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn child_bridge_request_fails_without_claiming_completed() {
+        let hub = Arc::new(SubagentActivityHub::new());
+        let manager = SubagentManager::new(
+            SessionId::new("subagent-bridge-driver").expect("valid session id"),
+            SubagentConfig::new(1, 1).expect("valid subagent config"),
+            Arc::new(BridgeRequestChildFactory),
+        );
+        manager.attach_activity_hub(Arc::clone(&hub));
+
+        let output = manager
+            .spawn(
+                vec![
+                    SubagentTaskSpec::new("Use the child bridge.", 2)
+                        .expect("valid task")
+                        .with_allowed_tools([
+                            ToolName::new("child_bridge").expect("valid bridge tool name")
+                        ]),
+                ],
+                None,
+                CancellationToken::new(),
+            )
+            .await
+            .expect("bridge child spawn succeeds");
+        let agent_id = output.spawned[0].agent_id.clone();
+
+        let wait = tokio::time::timeout(
+            Duration::from_secs(1),
+            manager.wait(std::slice::from_ref(&agent_id), WaitMode::All, None),
+        )
+        .await
+        .expect("bridge request must not strand the child")
+        .expect("bridge child wait succeeds");
+
+        assert!(wait.terminal);
+        assert_eq!(wait.agents[0].status, SubagentStatusLabel::Failed);
+        assert!(wait.agents[0].result.is_none());
+        assert!(
+            wait.agents[0].summary.contains("bridge"),
+            "unexpected bridge child summary: {}",
+            wait.agents[0].summary
+        );
+        assert_eq!(
+            hub.current()
+                .into_iter()
+                .find(|snapshot| snapshot.subagent_id == agent_id)
+                .expect("bridge failure activity exists")
+                .phase,
+            merry_core::SubagentActivityPhase::Failed
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unbound_child_activity_reaches_completed_without_a_plan_link() {
+        let hub = Arc::new(SubagentActivityHub::new());
+        let manager = SubagentManager::new(
+            SessionId::new("subagent-activity-unbound").expect("valid session id"),
+            SubagentConfig::new(1, 1).expect("valid subagent config"),
+            Arc::new(RecordingModelChildFactory::new()),
+        );
+        manager.attach_activity_hub(Arc::clone(&hub));
+
+        let output = manager
+            .spawn(
+                vec![SubagentTaskSpec::new("Complete an unbound child.", 1).expect("valid task")],
+                None,
+                CancellationToken::new(),
+            )
+            .await
+            .expect("unbound spawn succeeds");
+        let agent_id = output.spawned[0].agent_id.clone();
+        let wait = manager
+            .wait(std::slice::from_ref(&agent_id), WaitMode::All, None)
+            .await
+            .expect("child wait succeeds");
+        assert!(wait.terminal);
+        assert_eq!(wait.agents[0].status, SubagentStatusLabel::Completed);
+        assert_eq!(
+            hub.current()
+                .into_iter()
+                .find(|snapshot| snapshot.subagent_id == agent_id)
+                .expect("unbound child activity exists")
+                .phase,
+            merry_core::SubagentActivityPhase::Completed
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn missing_stream_result_follows_cancellation_without_claiming_completed() {
+        let hub = Arc::new(SubagentActivityHub::new());
+        let manager = SubagentManager::new(
+            SessionId::new("subagent-activity-missing-result").expect("valid session id"),
+            SubagentConfig::new(1, 1).expect("valid subagent config"),
+            Arc::new(AlwaysPendingChildFactory::new()),
+        );
+        manager.attach_activity_hub(Arc::clone(&hub));
+        let parent_token = CancellationToken::new();
+        let output = manager
+            .spawn(
+                vec![
+                    SubagentTaskSpec::new("Cancel before a stream result.", 1).expect("valid task"),
+                ],
+                None,
+                parent_token.clone(),
+            )
+            .await
+            .expect("pending child spawn succeeds");
+        parent_token.cancel();
+
+        let wait = manager
+            .wait(
+                std::slice::from_ref(&output.spawned[0].agent_id),
+                WaitMode::All,
+                None,
+            )
+            .await
+            .expect("cancelled child wait succeeds");
+        assert!(wait.terminal);
+        assert_eq!(wait.agents[0].status, SubagentStatusLabel::Cancelled);
+        assert_ne!(
+            hub.current()
+                .into_iter()
+                .find(|snapshot| snapshot.subagent_id == output.spawned[0].agent_id)
+                .expect("cancelled activity exists")
+                .phase,
+            merry_core::SubagentActivityPhase::Completed
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn plan_scope_lookup_error_fails_child_and_plan_link() {
+        let factory = Arc::new(FakeChildFactory::new());
+        let activity_hub = Arc::new(SubagentActivityHub::new());
+        let updates = Arc::new(StdMutex::new(Vec::new()));
+        let manager = SubagentManager::new(
+            SessionId::new("scope-lookup-error").expect("valid session id"),
+            SubagentConfig::new(1, 1).expect("valid config"),
+            factory.clone(),
+        );
+        manager.attach_activity_hub(Arc::clone(&activity_hub));
+        manager.attach_plan_link_runtime(Arc::new(FailingScopePlanLinkRuntime {
+            updates: Arc::clone(&updates),
+        }));
+
+        let output = manager
+            .spawn(
+                vec![
+                    SubagentTaskSpec::new("Fail during scope lookup.", 1)
+                        .expect("valid task")
+                        .with_plan_task(Some("synthetic".to_owned())),
+                ],
+                Some(1),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("spawn returns structured output");
+        let agent_id = output.spawned[0].agent_id.clone();
+        let snapshot = manager.snapshot().await;
+        let agent = snapshot
+            .iter()
+            .find(|agent| agent.agent_id == agent_id)
+            .expect("failed child remains tracked");
+        assert_eq!(agent.status, SubagentStatusLabel::Failed);
+        assert_eq!(
+            activity_hub
+                .current()
+                .into_iter()
+                .find(|snapshot| snapshot.subagent_id == agent_id)
+                .expect("failed child activity exists")
+                .phase,
+            merry_core::SubagentActivityPhase::Failed
+        );
+        assert_eq!(factory.started.load(Ordering::SeqCst), 0);
+        assert!(
+            updates
+                .lock()
+                .expect("link updates mutex is not poisoned")
+                .contains(&PlanLinkStatus::Failed)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn queued_child_cancellation_during_scope_lookup_skips_factory() {
+        let factory = Arc::new(FailsFirstChildFactory::new());
+        let runtime = Arc::new(BlockingScopePlanLinkRuntime {
+            scope_calls: Arc::new(AtomicUsize::new(0)),
+            lookup_started: Arc::new(Notify::new()),
+            lookup_dropped: Arc::new(Notify::new()),
+            release: CancellationToken::new(),
+            updates: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let manager = SubagentManager::new(
+            SessionId::new("queued-scope-cancel").expect("valid session id"),
+            SubagentConfig::new(1, 1).expect("valid config"),
+            factory.clone(),
+        );
+        manager.attach_plan_link_runtime(runtime.clone());
+
+        let spawn_manager = manager.clone();
+        let spawn_handle = tokio::spawn(async move {
+            spawn_manager
+                .spawn(
+                    vec![
+                        SubagentTaskSpec::new("Fail first start.", 1)
+                            .expect("valid task")
+                            .with_plan_task(Some("synthetic".to_owned())),
+                        SubagentTaskSpec::new("Cancel during lookup.", 1)
+                            .expect("valid task")
+                            .with_plan_task(Some("synthetic".to_owned())),
+                    ],
+                    Some(1),
+                    CancellationToken::new(),
+                )
+                .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), runtime.lookup_started.notified())
+            .await
+            .expect("queued child should enter scope lookup");
+        let snapshot = manager.snapshot().await;
+        let queued_agent = snapshot
+            .iter()
+            .find(|agent| agent.status == SubagentStatusLabel::Running)
+            .expect("queued child remains reserved");
+        let queued_id = queued_agent.agent_id.clone();
+
+        manager
+            .cancel(std::slice::from_ref(&queued_id))
+            .await
+            .expect("cancel should succeed");
+        tokio::time::timeout(Duration::from_secs(1), runtime.lookup_dropped.notified())
+            .await
+            .expect("cancelled lookup should be dropped");
+        let _output = spawn_handle
+            .await
+            .expect("spawn task should join")
+            .expect("spawn succeeds");
+
+        let snapshot = manager.snapshot().await;
+        let cancelled = snapshot
+            .iter()
+            .find(|agent| agent.agent_id == queued_id)
+            .expect("cancelled child remains tracked");
+        assert_eq!(cancelled.status, SubagentStatusLabel::Cancelled);
+        assert_eq!(factory.calls(), 1);
+        assert!(
+            runtime
+                .updates
+                .lock()
+                .expect("link updates mutex is not poisoned")
+                .contains(&PlanLinkStatus::Cancelled)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn plan_link_scope_requires_current_exact_active_binding() {
+        let session_id = SessionId::new("scope-exact-binding").expect("valid session id");
+        let session = Arc::new(tokio::sync::Mutex::new(crate::session::SessionState::new(
+            session_id,
+        )));
+        let (controller, _events) = PlanController::start(
+            Arc::clone(&session),
+            None,
+            std::num::NonZeroUsize::new(16).expect("non-zero event buffer"),
+        );
+        controller
+            .begin(crate::plan::BeginPlanInput {
+                reason: "validate exact linked scope".to_owned(),
+                governing_skill_id: None,
+            })
+            .await
+            .expect("plan activation succeeds");
+        controller
+            .update(crate::plan::UpdatePlanInput {
+                reason: "define linked scope task".to_owned(),
+                execution_intent: crate::plan::PlanExecutionIntent::ContinuePlanning,
+                coordinator_node_id: None,
+                max_concurrency_hint: None,
+                change: crate::plan::PlanChangeInput::DefinePlan {
+                    expected_plan_revision: 0,
+                    root: crate::plan::PlanNodeInput {
+                        id: None,
+                        client_key: Some("owned".to_owned()),
+                        objective: "Complete the owned task".to_owned(),
+                        acceptance: vec!["owned task completes".to_owned()],
+                        status: None,
+                        executor_policy: merry_core::PlanExecutorPolicy::Delegate,
+                        harness: merry_core::PlanHarnessSnapshot::default(),
+                        recovery_policy: merry_core::PlanRecoveryPolicySnapshot::default(),
+                        depends_on: Vec::new(),
+                        children: Vec::new(),
+                    },
+                },
+            })
+            .await
+            .expect("plan definition succeeds");
+        let link = controller
+            .bind_subagent(
+                "owned".to_owned(),
+                merry_core::SubagentId::new("scope-agent").expect("valid agent id"),
+                merry_core::SubagentTaskId::new("scope-task").expect("valid task id"),
+                1,
+            )
+            .await
+            .expect("link binds");
+        let runtime = plan_link_runtime_for_controller(controller.clone());
+
+        assert!(
+            runtime
+                .scope_for_link(&link)
+                .await
+                .expect("matching scope lookup succeeds")
+                .is_some()
+        );
+
+        for status in [
+            merry_core::PlanLinkStatus::Completed,
+            merry_core::PlanLinkStatus::Failed,
+            merry_core::PlanLinkStatus::Cancelled,
+            merry_core::PlanLinkStatus::Superseded,
+        ] {
+            let mut terminal = link.clone();
+            terminal.status = status;
+            assert!(
+                runtime
+                    .scope_for_link(&terminal)
+                    .await
+                    .expect("terminal scope lookup succeeds")
+                    .is_none(),
+                "terminal input status {status:?} must not create a scope"
+            );
+        }
+
+        let mut foreign_plan = link.clone();
+        foreign_plan.plan_id = merry_core::PlanId::new("foreign-plan").expect("valid plan id");
+        assert!(
+            runtime
+                .scope_for_link(&foreign_plan)
+                .await
+                .expect("foreign plan scope lookup succeeds")
+                .is_none()
+        );
+
+        let mut foreign_node = link.clone();
+        foreign_node.node_id = merry_core::PlanNodeId::new("foreign-node").expect("valid node id");
+        assert!(
+            runtime
+                .scope_for_link(&foreign_node)
+                .await
+                .expect("foreign node scope lookup succeeds")
+                .is_none()
+        );
+
+        let mut foreign_binding = link.clone();
+        foreign_binding.binding_id =
+            merry_core::PlanBindingId::new("foreign-binding").expect("valid binding id");
+        assert!(
+            runtime
+                .scope_for_link(&foreign_binding)
+                .await
+                .expect("foreign binding scope lookup succeeds")
+                .is_none()
+        );
+
+        let mut foreign_subagent = link.clone();
+        foreign_subagent.subagent_id =
+            merry_core::SubagentId::new("foreign-agent").expect("valid agent id");
+        assert!(
+            runtime
+                .scope_for_link(&foreign_subagent)
+                .await
+                .expect("foreign subagent scope lookup succeeds")
+                .is_none()
+        );
+
+        let mut foreign_task = link.clone();
+        foreign_task.task_id =
+            merry_core::SubagentTaskId::new("foreign-task").expect("valid task id");
+        assert!(
+            runtime
+                .scope_for_link(&foreign_task)
+                .await
+                .expect("foreign task scope lookup succeeds")
+                .is_none()
+        );
+
+        for (now_ms, status) in [
+            (2, merry_core::PlanLinkStatus::Completed),
+            (3, merry_core::PlanLinkStatus::Failed),
+            (4, merry_core::PlanLinkStatus::Cancelled),
+            (5, merry_core::PlanLinkStatus::Superseded),
+        ] {
+            controller
+                .update_subagent_link(link.binding_id.clone(), status, now_ms)
+                .await
+                .expect("link status transition commits");
+            assert!(
+                runtime
+                    .scope_for_link(&link)
+                    .await
+                    .expect("terminal controller lookup succeeds")
+                    .is_none(),
+                "a stale active link must not retain scope after {status:?} controller transition"
+            );
         }
     }
 
@@ -2004,6 +3402,7 @@ mod manager_tests {
                         client_key: Some("root".to_owned()),
                         objective: "Complete the linked task".to_owned(),
                         acceptance: vec!["child completes".to_owned()],
+                        status: None,
                         executor_policy: merry_core::PlanExecutorPolicy::Delegate,
                         harness: merry_core::PlanHarnessSnapshot::default(),
                         recovery_policy: merry_core::PlanRecoveryPolicySnapshot::default(),
@@ -2090,6 +3489,7 @@ mod manager_tests {
                         client_key: Some("root".to_owned()),
                         objective: "Complete both linked tasks".to_owned(),
                         acceptance: vec!["both children complete".to_owned()],
+                        status: None,
                         executor_policy: merry_core::PlanExecutorPolicy::Local,
                         harness: merry_core::PlanHarnessSnapshot::default(),
                         recovery_policy: merry_core::PlanRecoveryPolicySnapshot::default(),
@@ -2100,6 +3500,7 @@ mod manager_tests {
                                 client_key: Some("left".to_owned()),
                                 objective: "Complete the left task".to_owned(),
                                 acceptance: vec!["left child completes".to_owned()],
+                                status: None,
                                 executor_policy: merry_core::PlanExecutorPolicy::Delegate,
                                 harness: merry_core::PlanHarnessSnapshot::default(),
                                 recovery_policy: merry_core::PlanRecoveryPolicySnapshot::default(),
@@ -2111,6 +3512,7 @@ mod manager_tests {
                                 client_key: Some("right".to_owned()),
                                 objective: "Complete the right task".to_owned(),
                                 acceptance: vec!["right child completes".to_owned()],
+                                status: None,
                                 executor_policy: merry_core::PlanExecutorPolicy::Delegate,
                                 harness: merry_core::PlanHarnessSnapshot::default(),
                                 recovery_policy: merry_core::PlanRecoveryPolicySnapshot::default(),
@@ -2225,6 +3627,7 @@ mod manager_tests {
                         client_key: Some("root".to_owned()),
                         objective: "Complete nested linked work".to_owned(),
                         acceptance: vec!["nested child completes".to_owned()],
+                        status: None,
                         executor_policy: merry_core::PlanExecutorPolicy::Delegate,
                         harness: merry_core::PlanHarnessSnapshot::default(),
                         recovery_policy: merry_core::PlanRecoveryPolicySnapshot::default(),
@@ -2247,13 +3650,16 @@ mod manager_tests {
                     .input
                     .lock()
                     .expect("child input mutex is not poisoned") = Some(input.clone());
-                Runtime::builder(input.session_id)
-                    .task_anchor(input.task_anchor)
-                    .build()
+                let mut builder = Runtime::builder(input.session_id).task_anchor(input.task_anchor);
+                if let Some(hub) = input.activity_hub {
+                    builder = builder.subagent_activity_hub(hub);
+                }
+                builder.build()
             }
         }
 
         let captured = Arc::new(StdMutex::new(None));
+        let activity_hub = Arc::new(SubagentActivityHub::new());
         let root_manager = SubagentManager::runtime_controlled(
             session_id.clone(),
             SubagentConfig::new(1, 2).expect("valid root config"),
@@ -2262,6 +3668,7 @@ mod manager_tests {
             }),
             true,
         );
+        root_manager.attach_activity_hub(Arc::clone(&activity_hub));
         root_manager.attach_plan_link_runtime(plan_link_runtime_for_controller(controller.clone()));
         let root = root_manager
             .spawn(
@@ -2283,15 +3690,33 @@ mod manager_tests {
             .as_ref()
             .and_then(|input| input.plan_link_runtime.clone())
             .expect("child receives the parent Plan link runtime");
+        let forwarded_activity_hub = captured
+            .lock()
+            .expect("child input mutex is not poisoned")
+            .as_ref()
+            .and_then(|input| input.activity_hub.clone())
+            .expect("child receives the parent activity hub");
+        assert!(Arc::ptr_eq(&forwarded_activity_hub, &activity_hub));
+        assert!(
+            captured
+                .lock()
+                .expect("child input mutex is not poisoned")
+                .as_ref()
+                .and_then(|input| input.plan_subagent_scope.as_ref())
+                .is_some(),
+            "linked child receives the opaque Plan subtree scope"
+        );
+        let nested_captured = Arc::new(StdMutex::new(None));
         let nested_manager = SubagentManager::runtime_controlled_at_depth(
             SessionId::new("nested-parent").expect("valid nested session id"),
             SubagentConfig::new(1, 2).expect("valid nested config"),
             Arc::new(CapturingFactory {
-                input: Arc::new(StdMutex::new(None)),
+                input: Arc::clone(&nested_captured),
             }),
             true,
             1,
         );
+        nested_manager.attach_activity_hub(Arc::clone(&forwarded_activity_hub));
         nested_manager.attach_plan_link_runtime(nested_link_runtime);
         let nested = nested_manager
             .spawn(
@@ -2306,6 +3731,13 @@ mod manager_tests {
             .await
             .expect("nested spawn succeeds");
         assert_eq!(nested.spawned.len(), 1);
+        let nested_activity_hub = nested_captured
+            .lock()
+            .expect("nested child input mutex is not poisoned")
+            .as_ref()
+            .and_then(|input| input.activity_hub.clone())
+            .expect("nested child receives the shared activity hub");
+        assert!(Arc::ptr_eq(&nested_activity_hub, &activity_hub));
 
         let snapshot = controller
             .snapshot()
@@ -2368,6 +3800,7 @@ mod manager_tests {
         name: merry_core::ProviderName,
         capabilities: ModelCapabilities,
         responses: Arc<StdMutex<ScriptedStepResponses>>,
+        release: Option<CancellationToken>,
     }
 
     impl ScriptedStepProvider {
@@ -2378,6 +3811,14 @@ mod manager_tests {
                 capabilities: ModelCapabilities::new(true, true, false, true, None, None)
                     .expect("valid capabilities"),
                 responses: Arc::new(StdMutex::new(responses.into_iter().rev().collect())),
+                release: None,
+            }
+        }
+
+        fn with_release(responses: ScriptedStepResponses, release: CancellationToken) -> Self {
+            Self {
+                release: Some(release),
+                ..Self::new(responses)
             }
         }
     }
@@ -2396,7 +3837,11 @@ mod manager_tests {
             request: ModelRequest,
             _context: ModelStreamContext,
         ) -> ModelProviderFuture<'a, Result<ModelEventStream, ModelError>> {
+            let release = self.release.clone();
             Box::pin(async move {
+                if let Some(release) = release {
+                    release.cancelled().await;
+                }
                 let _ = request;
                 let events = self
                     .responses
@@ -2439,6 +3884,17 @@ mod manager_tests {
         ToolSpec::new(
             ToolName::new("workspace_patch").expect("valid tool name"),
             "Apply a workspace patch.",
+            ToolInputSchema::new(schema).expect("valid schema"),
+        )
+        .expect("valid tool spec")
+    }
+
+    fn bridge_tool_spec() -> ToolSpec {
+        let schema = Schema::try_from(json!({ "type": "object" }))
+            .expect("test schema should be a JSON schema");
+        ToolSpec::new(
+            ToolName::new("child_bridge").expect("valid tool name"),
+            "Request a host bridge operation.",
             ToolInputSchema::new(schema).expect("valid schema"),
         )
         .expect("valid tool spec")
@@ -2894,11 +4350,13 @@ mod manager_tests {
     #[tokio::test(flavor = "current_thread")]
     async fn child_model_request_uses_task_reasoning_effort() {
         let factory = Arc::new(RecordingModelChildFactory::new());
+        let activity_hub = Arc::new(SubagentActivityHub::new());
         let manager = SubagentManager::new(
             SessionId::new("parent").expect("valid id"),
             SubagentConfig::default(),
             factory.clone(),
         );
+        manager.attach_activity_hub(activity_hub);
         let task = SubagentTaskSpec::new("Run a cheap child task.", 1)
             .expect("valid task")
             .with_reasoning_effort(Some(
@@ -3151,6 +4609,99 @@ mod manager_tests {
                 .iter()
                 .find(|agent| agent.agent_id == agent_id)
                 .expect("child remains in snapshot")
+                .status,
+            SubagentStatusLabel::Cancelled
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn startup_error_after_terminal_claim_does_not_republish_terminal_activity() {
+        let hub = Arc::new(SubagentActivityHub::new());
+        let manager = SubagentManager::new(
+            SessionId::new("startup-error-terminal-race").expect("valid session id"),
+            SubagentConfig::default(),
+            Arc::new(FakeChildFactory::new()),
+        );
+        manager.attach_activity_hub(Arc::clone(&hub));
+
+        let task = SubagentTaskSpec::new("Fail after parent cancellation.", 1).expect("valid task");
+        let task_anchor = TaskAnchor::new(task.task()).expect("valid task anchor");
+        let agent_id = SubagentId::new("agent-terminal-race").expect("valid agent id");
+        let task_id = SubagentTaskId::new("task-terminal-race").expect("valid task id");
+        let cancellation_token = CancellationToken::new();
+        {
+            let mut state = manager.state.lock().await;
+            state
+                .batches
+                .insert(1, SubagentBatch { max_concurrency: 1 });
+            state.agents.insert(
+                agent_id.clone(),
+                ManagedSubagent {
+                    batch_id: 1,
+                    agent_id: agent_id.clone(),
+                    task_id: task_id.clone(),
+                    task: task.clone(),
+                    task_anchor: task_anchor.clone(),
+                    status: SubagentStatusLabel::Running,
+                    summary: "child running".to_owned(),
+                    result: None,
+                    output_paths: Vec::new(),
+                    changed_paths: Vec::new(),
+                    diagnostics: None,
+                    cancellation_token: cancellation_token.clone(),
+                    plan_link: None,
+                },
+            );
+        }
+
+        manager
+            .cancel(std::slice::from_ref(&agent_id))
+            .await
+            .expect("parent cancellation should succeed");
+        assert_eq!(
+            hub.published_phases(),
+            vec![merry_core::SubagentActivityPhase::Cancelled]
+        );
+
+        let runtime = Runtime::builder(
+            SessionId::new("startup-error-terminal-child").expect("valid child session id"),
+        )
+        .task_anchor(task_anchor.clone())
+        .build()
+        .expect("child runtime should build");
+        let generation_config = generation_config_for_child_task(&task);
+        let launch = ChildLoopLaunch {
+            agent_id: agent_id.clone(),
+            task_id: task_id.clone(),
+            task,
+            token: cancellation_token,
+            runtime,
+            generation_config,
+            activity_hub: Some(Arc::clone(&hub)),
+        };
+        let mut reducer = SubagentActivityReducer::new(agent_id.clone(), task_id);
+
+        finish_child_with_status(
+            manager.child_scheduler(),
+            &launch,
+            &mut reducer,
+            SubagentStatusLabel::Failed,
+            "child startup failed",
+            error_info("subagent_start_error", "synthetic startup failure"),
+        )
+        .await;
+
+        assert_eq!(
+            hub.published_phases(),
+            vec![merry_core::SubagentActivityPhase::Cancelled]
+        );
+        assert_eq!(
+            manager
+                .snapshot()
+                .await
+                .into_iter()
+                .find(|agent| agent.agent_id == agent_id)
+                .expect("terminal child remains tracked")
                 .status,
             SubagentStatusLabel::Cancelled
         );

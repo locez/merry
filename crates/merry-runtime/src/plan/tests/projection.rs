@@ -1,3 +1,9 @@
+use crate::plan::projection::{
+    CHILD_LINKED_SCOPE_GUIDANCE, CHILD_SCOPED_UPDATE_GUIDANCE,
+    COORDINATOR_LINKED_SUMMARIES_GUIDANCE, COORDINATOR_ROOT_SCOPE_GUIDANCE,
+    LINKED_CHILD_DECOMPOSITION_GUIDANCE, PLAN_SEMANTIC_CHECKPOINT_GUIDANCE,
+    RUNTIME_OWNED_EXECUTION_GUIDANCE,
+};
 use crate::plan::{
     PlanChangeInput, PlanExecutionIntent, PlanNodeInput, PlanState, UpdatePlanInput,
     execution::PlanAttemptActor,
@@ -5,7 +11,7 @@ use crate::plan::{
 };
 use merry_core::{
     PlanActivationSource, PlanCapabilityEnvelopeSnapshot, PlanExecutorPolicy, PlanHarnessSnapshot,
-    PlanId, PlanRecoveryPolicySnapshot, PlanResourcePolicySnapshot, SessionId,
+    PlanId, PlanPhase, PlanRecoveryPolicySnapshot, PlanResourcePolicySnapshot, SessionId,
 };
 
 #[test]
@@ -77,6 +83,44 @@ fn subagent_context_projects_ancestor_path_without_unrelated_siblings() {
     assert_eq!(projection["ancestor_path"][0]["objective"], "Root contract");
     assert_eq!(projection["ancestor_path"].as_array().unwrap().len(), 1);
     assert!(!message.contains("Unrelated sibling secret"));
+
+    let child_guidance = &projection["child_guidance"];
+    assert_eq!(
+        child_guidance["instruction"], CHILD_LINKED_SCOPE_GUIDANCE,
+        "child scope guidance must use the shared contract"
+    );
+    let rules = child_guidance["rules"]
+        .as_array()
+        .expect("child guidance rules are an array");
+    for rule in [
+        CHILD_SCOPED_UPDATE_GUIDANCE,
+        RUNTIME_OWNED_EXECUTION_GUIDANCE,
+        PLAN_SEMANTIC_CHECKPOINT_GUIDANCE,
+    ] {
+        assert!(
+            rules
+                .iter()
+                .any(|candidate| candidate.as_str() == Some(rule)),
+            "child guidance must contain the shared rule {rule:?}"
+        );
+    }
+
+    let mut changed_snapshot = plan.snapshot().clone();
+    changed_snapshot.revision += 1;
+    changed_snapshot.phase = PlanPhase::Completed;
+    let changed_projection = subagent_projection(
+        plan_subagent_control_message(
+            &changed_snapshot,
+            &update.client_key_ids["target"],
+            &started.attempt.attempt_id,
+            &started.lease.lease_id,
+        )
+        .expect("changed subagent projection exists"),
+    );
+    assert_eq!(
+        projection["child_guidance"], changed_projection["child_guidance"],
+        "child guidance must be static across plan revisions and phases"
+    );
 }
 
 #[test]
@@ -120,6 +164,67 @@ fn coordinator_context_explains_planning_actions_and_runtime_owned_completion() 
         rule.as_str()
             .is_some_and(|rule| rule.contains("auxiliary projection"))
     }));
+    assert_coordinator_rules(&projection);
+}
+
+#[test]
+fn coordinator_context_excludes_activity_and_wait_transport_guidance() {
+    let mut plan = empty_plan("plan-coordinator-transport-boundary");
+    plan.update(UpdatePlanInput {
+        reason: "define transport-neutral coordinator guidance".to_owned(),
+        execution_intent: PlanExecutionIntent::ContinuePlanning,
+        coordinator_node_id: None,
+        max_concurrency_hint: None,
+        change: PlanChangeInput::DefinePlan {
+            expected_plan_revision: 0,
+            root: node(
+                "root",
+                "Transport-neutral root contract",
+                PlanExecutorPolicy::Local,
+                Vec::new(),
+            ),
+        },
+    })
+    .expect("plan definition succeeds");
+
+    let messages = [
+        coordinator_plan_control_message(plan.snapshot()),
+        crate::plan::projection::coordinator_plan_inactive_control_message(),
+    ];
+    for message in messages {
+        for forbidden in ["activity", "Activity", "wait_subagents", "polling", "UI"] {
+            assert!(
+                !message.contains(forbidden),
+                "coordinator projection must not contain {forbidden:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn inactive_coordinator_context_explains_the_same_static_delegation_contract() {
+    let projection = coordinator_projection_from_message(
+        crate::plan::projection::coordinator_plan_inactive_control_message(),
+    );
+
+    assert_eq!(projection["phase"], "inactive");
+    assert_coordinator_rules(&projection);
+}
+
+#[test]
+fn coordinator_guidance_rules_are_static_across_plan_phases_and_revisions() {
+    let plan = empty_plan("plan-coordinator-static-guidance");
+    let planning = coordinator_projection(&plan);
+    let mut changed_snapshot = plan.snapshot().clone();
+    changed_snapshot.revision = 41;
+    changed_snapshot.phase = PlanPhase::Executing;
+    let changed =
+        coordinator_projection_from_message(coordinator_plan_control_message(&changed_snapshot));
+
+    assert_eq!(
+        planning["coordinator_guidance"]["rules"], changed["coordinator_guidance"]["rules"],
+        "coordinator guidance rules must not vary with plan revision or phase"
+    );
 }
 
 #[test]
@@ -164,12 +269,38 @@ fn empty_plan(id: &str) -> PlanState {
 }
 
 fn coordinator_projection(plan: &PlanState) -> serde_json::Value {
-    let message = coordinator_plan_control_message(plan.snapshot());
+    coordinator_projection_from_message(coordinator_plan_control_message(plan.snapshot()))
+}
+
+fn coordinator_projection_from_message(message: String) -> serde_json::Value {
     let json = message
         .strip_prefix("<plan_context>\n")
         .and_then(|value| value.strip_suffix("\n</plan_context>"))
         .expect("projection has stable wrapper");
     serde_json::from_str(json).expect("projection is JSON")
+}
+
+fn subagent_projection(message: String) -> serde_json::Value {
+    let json = message
+        .strip_prefix("<plan_subagent_context>\n")
+        .and_then(|value| value.strip_suffix("\n</plan_subagent_context>"))
+        .expect("projection has stable wrapper");
+    serde_json::from_str(json).expect("projection is JSON")
+}
+
+fn assert_coordinator_rules(projection: &serde_json::Value) {
+    let rendered = projection.to_string();
+    for fragment in [
+        COORDINATOR_ROOT_SCOPE_GUIDANCE,
+        LINKED_CHILD_DECOMPOSITION_GUIDANCE,
+        COORDINATOR_LINKED_SUMMARIES_GUIDANCE,
+        RUNTIME_OWNED_EXECUTION_GUIDANCE,
+    ] {
+        assert!(
+            rendered.contains(fragment),
+            "coordinator guidance must contain the shared fragment {fragment:?}"
+        );
+    }
 }
 
 fn node(
@@ -183,6 +314,7 @@ fn node(
         client_key: Some(client_key.to_owned()),
         objective: objective.to_owned(),
         acceptance: vec![format!("{objective} is verified")],
+        status: None,
         executor_policy,
         harness: PlanHarnessSnapshot::default(),
         recovery_policy: PlanRecoveryPolicySnapshot::default(),
