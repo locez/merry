@@ -174,9 +174,10 @@ mod tests {
     };
     use crate::{FileSessionStore, session::SessionState};
     use merry_core::{
-        PlanActivationSource, PlanExecutorPolicy, PlanHarnessSnapshot, PlanId, PlanNodeId,
-        PlanNodeStatus, PlanRecoveryPolicySnapshot, PlanResourcePolicySnapshot,
-        RuntimeJournalPayload, SessionId, SubagentId, SubagentTaskId,
+        PlanActivationSource, PlanExecutionSummary, PlanExecutorPolicy, PlanHarnessSnapshot,
+        PlanId, PlanLinkSnapshot, PlanLinkStatus, PlanNodeId, PlanNodeResult, PlanNodeStatus,
+        PlanRecoveryPolicySnapshot, PlanResourcePolicySnapshot, RuntimeJournalPayload, SessionId,
+        SubagentId, SubagentTaskId,
     };
     use std::{num::NonZeroUsize, sync::Arc};
     use tokio::sync::Mutex;
@@ -191,11 +192,24 @@ mod tests {
         PlanController,
         super::super::controller::PlanControllerEventReceiver,
     ) {
-        PlanController::start(
-            Arc::new(Mutex::new(SessionState::new(session_id()))),
+        let (controller, events, _session) = controller_with_session(store);
+        (controller, events)
+    }
+
+    fn controller_with_session(
+        store: Option<FileSessionStore>,
+    ) -> (
+        PlanController,
+        super::super::controller::PlanControllerEventReceiver,
+        Arc<Mutex<SessionState>>,
+    ) {
+        let session = Arc::new(Mutex::new(SessionState::new(session_id())));
+        let (controller, events) = PlanController::start(
+            Arc::clone(&session),
             store,
             NonZeroUsize::new(16).expect("non-zero buffer"),
-        )
+        );
+        (controller, events, session)
     }
 
     fn node(client_key: &str, objective: &str) -> PlanNodeInput {
@@ -303,6 +317,87 @@ mod tests {
             .expect("snapshot succeeds")
             .expect("active plan");
         assert!(full.nodes.iter().any(|node| node.id == sibling_id));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn scoped_updates_reject_stale_plan_and_node_revisions() {
+        let (controller, mut events) = controller(None);
+        let (scope, _owned_id, _sibling_id) = linked_scope(&controller).await;
+        while events.try_recv().is_ok() {}
+        let before = controller
+            .snapshot()
+            .await
+            .expect("snapshot succeeds")
+            .expect("active plan");
+
+        let stale_plan_error = scope
+            .update(SubagentPlanUpdateInput {
+                reason: "reject stale scoped plan revision".to_owned(),
+                change: SubagentPlanChangeInput::DefineChildren {
+                    expected_plan_revision: before.revision.saturating_sub(1),
+                    children: vec![node("stale-plan-child", "Stale plan child")],
+                },
+            })
+            .await
+            .expect_err("stale plan revision must reject");
+        assert!(matches!(
+            stale_plan_error,
+            super::super::PlanControllerError::Plan {
+                source: PlanError::StalePlanRevision { .. }
+            }
+        ));
+        assert_eq!(
+            controller
+                .snapshot()
+                .await
+                .expect("snapshot succeeds")
+                .expect("active plan")
+                .revision,
+            before.revision
+        );
+
+        let defined = scope
+            .update(SubagentPlanUpdateInput {
+                reason: "define a stale revision target".to_owned(),
+                change: SubagentPlanChangeInput::DefineChildren {
+                    expected_plan_revision: before.revision,
+                    children: vec![node("stale-node-target", "Stale node target")],
+                },
+            })
+            .await
+            .expect("target definition succeeds");
+        while events.try_recv().is_ok() {}
+        let target_id = defined.client_key_ids["stale-node-target"].clone();
+        let target = defined
+            .snapshot
+            .nodes
+            .iter()
+            .find(|node| node.id == target_id)
+            .expect("target exists");
+        let stale_node_error = scope
+            .update(SubagentPlanUpdateInput {
+                reason: "reject stale scoped node revision".to_owned(),
+                change: SubagentPlanChangeInput::ReplaceSubtree {
+                    target_node_id: target_id,
+                    expected_node_revision: target.updated_revision.saturating_sub(1),
+                    subtree: replacement_for(target, "Stale node replacement"),
+                },
+            })
+            .await
+            .expect_err("stale node revision must reject");
+        assert!(matches!(
+            stale_node_error,
+            super::super::PlanControllerError::Plan {
+                source: PlanError::StaleNodeRevision { .. }
+            }
+        ));
+        let after = controller
+            .snapshot()
+            .await
+            .expect("snapshot succeeds")
+            .expect("active plan");
+        assert_eq!(after.revision, defined.snapshot.revision);
+        assert!(events.try_recv().is_err(), "stale update emits no event");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -482,6 +577,92 @@ mod tests {
         assert!(second.snapshot.revision > first_output.snapshot.revision);
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn scoped_replace_preserves_existing_descendant_runtime_state() {
+        let (controller, _events, session) = controller_with_session(None);
+        let (scope, _owned_id, _sibling_id) = linked_scope(&controller).await;
+        let defined = scope
+            .update(SubagentPlanUpdateInput {
+                reason: "define a runtime-tracked descendant".to_owned(),
+                change: SubagentPlanChangeInput::DefineChildren {
+                    expected_plan_revision: 2,
+                    children: vec![node("runtime-target", "Runtime tracked target")],
+                },
+            })
+            .await
+            .expect("child definition succeeds");
+        let target_id = defined.client_key_ids["runtime-target"].clone();
+        let runtime_result = PlanNodeResult {
+            conclusion: "The previous runtime result remains authoritative".to_owned(),
+            evidence_refs: Vec::new(),
+            artifact_refs: Vec::new(),
+            changed_paths: vec!["src/runtime.rs".to_owned()],
+            verification: vec!["runtime check".to_owned()],
+            open_questions: Vec::new(),
+        };
+        let runtime_summary = PlanExecutionSummary {
+            active: 1,
+            completed: 2,
+            failed: 3,
+            cancelled: 4,
+        };
+        let runtime_link = PlanLinkSnapshot {
+            plan_id: defined.snapshot.plan_id.clone(),
+            node_id: target_id.clone(),
+            binding_id: merry_core::PlanBindingId::new("historical-binding")
+                .expect("valid binding id"),
+            subagent_id: SubagentId::new("historical-agent").expect("valid subagent id"),
+            task_id: SubagentTaskId::new("historical-task").expect("valid task id"),
+            status: PlanLinkStatus::Completed,
+            linked_at_ms: 10,
+            terminal_at_ms: Some(20),
+            superseded_by: None,
+        };
+        {
+            let mut session = session.lock().await;
+            let plan = session.active_plan_mut().expect("active plan exists");
+            let target = plan
+                .snapshot
+                .nodes
+                .iter_mut()
+                .find(|node| node.id == target_id)
+                .expect("target exists");
+            target.result = Some(runtime_result.clone());
+            target.execution_summary = runtime_summary.clone();
+            target.links = vec![runtime_link.clone()];
+        }
+        let current = controller
+            .snapshot()
+            .await
+            .expect("snapshot succeeds")
+            .expect("active plan")
+            .nodes
+            .into_iter()
+            .find(|node| node.id == target_id)
+            .expect("target remains present");
+
+        let output = scope
+            .update(SubagentPlanUpdateInput {
+                reason: "revise without replacing runtime state".to_owned(),
+                change: SubagentPlanChangeInput::ReplaceSubtree {
+                    target_node_id: target_id.clone(),
+                    expected_node_revision: current.updated_revision,
+                    subtree: replacement_for(&current, "Revised runtime tracked target"),
+                },
+            })
+            .await
+            .expect("scoped replacement succeeds");
+        let target = output
+            .snapshot
+            .nodes
+            .iter()
+            .find(|node| node.id == target_id)
+            .expect("target remains present");
+        assert_eq!(target.result, Some(runtime_result));
+        assert_eq!(target.execution_summary, runtime_summary);
+        assert_eq!(target.links, vec![runtime_link]);
+    }
+
     fn replacement_for(node: &merry_core::PlanNodeSnapshot, objective: &str) -> PlanNodeInput {
         PlanNodeInput {
             id: Some(node.id.clone()),
@@ -563,47 +744,77 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn omitted_status_does_not_replace_existing_declared_status() {
-        let mut plan = super::super::domain::PlanState::empty(
-            PlanId::new("status-preserve-plan").expect("valid plan id"),
-            PlanActivationSource::Coordinator {
-                reason: "status test".to_owned(),
+    #[tokio::test(flavor = "current_thread")]
+    async fn omitted_status_deserializes_and_preserves_existing_declared_status() {
+        let parsed: PlanNodeInput = serde_json::from_str(
+            r#"{
+                "client_key": "json-root",
+                "objective": "JSON root",
+                "acceptance": ["JSON root is verified"],
+                "depends_on": [],
+                "children": []
+            }"#,
+        )
+        .expect("status omission is valid JSON input");
+        assert_eq!(parsed.status, None);
+
+        let (controller, _events) = controller(None);
+        controller
+            .begin(BeginPlanInput {
+                reason: "preserve a declared status through scoped update".to_owned(),
                 governing_skill_id: None,
-            },
-            PlanResourcePolicySnapshot::default(),
-        );
-        let initial = node("root", "Initial status");
-        let first = plan
+            })
+            .await
+            .expect("begin succeeds");
+        let mut root = node("root", "Initial status");
+        root.status = Some(PlanNodeStatus::Completed);
+        let initial = controller
             .update(UpdatePlanInput {
-                reason: "declare in progress".to_owned(),
+                reason: "declare completed root".to_owned(),
                 execution_intent: PlanExecutionIntent::ContinuePlanning,
                 coordinator_node_id: None,
                 max_concurrency_hint: None,
                 change: PlanChangeInput::DefinePlan {
                     expected_plan_revision: 0,
-                    root: initial,
+                    root,
                 },
             })
+            .await
             .expect("initial status update succeeds");
-        let root_id = first.snapshot.root_node_id.expect("root id");
-        let root_revision = plan.node(&root_id).expect("root").updated_revision;
-        let mut replacement = node("ignored", "Revised status text");
-        replacement.id = Some(root_id.clone());
-        replacement.client_key = None;
-        replacement.status = None;
-        let output = plan
-            .update(UpdatePlanInput {
+        let root_id = initial.snapshot.root_node_id.clone().expect("root id");
+        let link = controller
+            .bind_subagent(
+                "root".to_owned(),
+                SubagentId::new("status-agent").expect("valid subagent id"),
+                SubagentTaskId::new("status-task").expect("valid task id"),
+                1,
+            )
+            .await
+            .expect("binding succeeds");
+        let scope = controller.subagent_scope(
+            initial.snapshot.plan_id.clone(),
+            root_id.clone(),
+            link.binding_id,
+        );
+        let current = controller
+            .snapshot()
+            .await
+            .expect("snapshot succeeds")
+            .expect("active plan")
+            .nodes
+            .into_iter()
+            .find(|node| node.id == root_id)
+            .expect("root remains present");
+        let output = scope
+            .update(SubagentPlanUpdateInput {
                 reason: "status omission must preserve declaration".to_owned(),
-                execution_intent: PlanExecutionIntent::ContinuePlanning,
-                coordinator_node_id: None,
-                max_concurrency_hint: None,
-                change: PlanChangeInput::ReplaceSubtree {
+                change: SubagentPlanChangeInput::ReplaceSubtree {
                     target_node_id: root_id.clone(),
-                    expected_node_revision: root_revision,
-                    subtree: replacement,
+                    expected_node_revision: current.updated_revision,
+                    subtree: replacement_for(&current, current.objective.as_str()),
                 },
             })
+            .await
             .expect("omitted status keeps the current declaration");
         let root = output
             .snapshot
@@ -611,7 +822,8 @@ mod tests {
             .iter()
             .find(|node| node.id == root_id)
             .expect("root remains present");
-        assert_eq!(root.declared_status, PlanNodeStatus::Pending);
+        assert_eq!(root.declared_status, PlanNodeStatus::Completed);
+        assert_eq!(root.status, PlanNodeStatus::InProgress);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -654,6 +866,72 @@ mod tests {
                 .nodes
                 .iter()
                 .any(|node| node.client_key.as_deref() == Some("persisted-child"))
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn scoped_update_persistence_failure_keeps_memory_disk_and_events_unchanged() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = FileSessionStore::new(temp.path());
+        let (controller, mut setup_events, session) = controller_with_session(Some(store.clone()));
+        let (scope, _owned_id, _sibling_id) = linked_scope(&controller).await;
+        while setup_events.try_recv().is_ok() {}
+        let before = controller
+            .snapshot()
+            .await
+            .expect("snapshot succeeds")
+            .expect("active plan");
+        let failing_store = store.clone().with_commit_failure_for_tests();
+        let (failing_controller, mut events) = PlanController::start(
+            Arc::clone(&session),
+            Some(failing_store),
+            NonZeroUsize::new(16).expect("non-zero buffer"),
+        );
+        let failing_scope = failing_controller.subagent_scope(
+            scope.plan_id.clone(),
+            scope.root_node_id.clone(),
+            scope.binding_id.clone(),
+        );
+
+        let error = failing_scope
+            .update(SubagentPlanUpdateInput {
+                reason: "force scoped persistence failure".to_owned(),
+                change: SubagentPlanChangeInput::DefineChildren {
+                    expected_plan_revision: before.revision,
+                    children: vec![node("not-persisted", "Must not be installed")],
+                },
+            })
+            .await
+            .expect_err("failed scoped commit must reject");
+        assert!(matches!(
+            error,
+            super::super::PlanControllerError::SessionStore { .. }
+        ));
+        let in_memory = failing_controller
+            .snapshot()
+            .await
+            .expect("snapshot succeeds")
+            .expect("active plan remains installed");
+        assert_eq!(in_memory.revision, before.revision);
+        assert!(
+            !in_memory
+                .nodes
+                .iter()
+                .any(|node| node.client_key.as_deref() == Some("not-persisted"))
+        );
+        assert!(events.try_recv().is_err(), "failed update emits no event");
+
+        let persisted = SessionState::load_from(&store, &session_id())
+            .await
+            .expect("persisted session loads");
+        let persisted_plan = persisted.active_plan().expect("persisted active plan");
+        assert_eq!(persisted_plan.snapshot().revision, before.revision);
+        assert!(
+            !persisted_plan
+                .snapshot()
+                .nodes
+                .iter()
+                .any(|node| node.client_key.as_deref() == Some("not-persisted"))
         );
     }
 }
