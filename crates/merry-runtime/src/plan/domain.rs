@@ -647,12 +647,6 @@ impl PlanState {
             if id != scope_root_id {
                 ensure_mutable(node)?;
             }
-            if id != scope_root_id && node.result.is_some() {
-                return Err(PlanError::NodeNotMutable {
-                    node_id: node.id.clone(),
-                    status: node.status,
-                });
-            }
         }
 
         let revision = self.snapshot.revision + 1;
@@ -674,6 +668,13 @@ impl PlanState {
             unresolved,
         } = builder.finish();
 
+        for (id, replacement_node) in &mut replacement {
+            if id != scope_root_id
+                && let Some(current) = existing.get(id)
+            {
+                preserve_scoped_runtime_state(current, replacement_node, revision);
+            }
+        }
         if target_node_id == scope_root_id {
             let current_root = existing
                 .get(scope_root_id)
@@ -1516,6 +1517,18 @@ fn preserve_scoped_root(
     replacement.updated_revision = revision;
     replacement.status = current.status;
     replacement.declared_status = current.declared_status;
+    replacement.execution_summary = current.execution_summary.clone();
+    replacement.links = current.links.clone();
+}
+
+fn preserve_scoped_runtime_state(
+    current: &PlanNodeSnapshot,
+    replacement: &mut PlanNodeSnapshot,
+    revision: u64,
+) {
+    replacement.result = current.result.clone();
+    replacement.updated_revision = revision;
+    replacement.status = current.status;
     replacement.execution_summary = current.execution_summary.clone();
     replacement.links = current.links.clone();
 }
