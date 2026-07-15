@@ -5,7 +5,7 @@
 //! classifiers for process argv and shell-wrapper command text, but those
 //! classifiers are not a shell interpreter.
 
-use crate::PermissionRequest;
+use crate::{PermissionRequest, RequestedCapability};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::{
     fmt,
@@ -222,6 +222,17 @@ pub trait ProcessRunner: Send + Sync {
 /// process backend/profile for that exact action. They must not grant reusable
 /// authority back to the model.
 pub trait PermissionedProcessRunnerFactory: Send + Sync {
+    /// Validates the request against the backend's hard capability policy.
+    ///
+    /// Backends that do not have additional policy constraints may keep the
+    /// default only when they can enforce every capability in the request
+    /// through their existing runner. A backend that cannot materialize a
+    /// requested path or network grant must reject it. A validation failure
+    /// must happen before any reviewer or process side effect is started.
+    fn validate_request(&self, _request: &PermissionRequest) -> Result<(), ProcessRunnerError> {
+        Ok(())
+    }
+
     /// Creates the process runner for one approved permission request.
     fn runner_for(&self, request: &PermissionRequest) -> Arc<dyn ProcessRunner>;
 }
@@ -241,6 +252,19 @@ impl StaticPermissionedProcessRunnerFactory {
 }
 
 impl PermissionedProcessRunnerFactory for StaticPermissionedProcessRunnerFactory {
+    fn validate_request(&self, request: &PermissionRequest) -> Result<(), ProcessRunnerError> {
+        if request
+            .requested()
+            .iter()
+            .any(|capability| matches!(capability, RequestedCapability::Path(_)))
+        {
+            return Err(ProcessRunnerError::infrastructure(
+                "static permissioned process runner cannot enforce requested path capabilities",
+            ));
+        }
+        Ok(())
+    }
+
     fn runner_for(&self, _request: &PermissionRequest) -> Arc<dyn ProcessRunner> {
         Arc::clone(&self.runner)
     }

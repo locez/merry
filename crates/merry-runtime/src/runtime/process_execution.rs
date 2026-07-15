@@ -3,7 +3,8 @@ use crate::{
     ActionExecutionEvidence, ActionProposal, ArtifactContent, ProcessActionIntent,
     ProcessExitStatus, ProcessPermissionProfileId, ProcessRunner, ProcessRunnerContext,
     ProcessRunnerError, ProcessRunnerOutput, RuntimeError, action_audit::ActionAuditPolicy,
-    action_policy::ActionPolicyDecision, process::ShellProcessInput, process::shell_process_input,
+    action_policy::ActionPolicyDecision, permission::PermissionAdmissionReview,
+    process::ShellProcessInput, process::shell_process_input,
     session::ProposedToolExecutionOutcome, session::ToolResultLedgerObservation,
     tool::ActionProposalEvidence, tool::ToolExecutionContext,
 };
@@ -18,6 +19,7 @@ pub(super) struct ProcessExecutionAdmission {
     permission_profile_id: ProcessPermissionProfileId,
     runner: Arc<dyn ProcessRunner>,
     attribute_plan_effect: bool,
+    permission_review: Option<PermissionAdmissionReview>,
 }
 
 impl ProcessExecutionAdmission {
@@ -32,7 +34,13 @@ impl ProcessExecutionAdmission {
             permission_profile_id,
             runner,
             attribute_plan_effect,
+            permission_review: None,
         }
+    }
+
+    pub(super) fn with_permission_review(mut self, review: PermissionAdmissionReview) -> Self {
+        self.permission_review = Some(review);
+        self
     }
 }
 
@@ -48,6 +56,7 @@ pub(super) async fn execute_admitted_process_action(
         permission_profile_id,
         runner,
         attribute_plan_effect,
+        permission_review,
     } = admission;
     let ActionProposalEvidence::ProcessAction(intent) = proposal.evidence().clone() else {
         return Err(RuntimeError::ToolExecutionFailed {
@@ -153,6 +162,7 @@ pub(super) async fn execute_admitted_process_action(
         &output,
         permission_profile_id,
         shell_input_artifact_ref,
+        permission_review.as_ref(),
     );
     let status = if output.ok() {
         ToolCallResultStatus::Succeeded
@@ -318,6 +328,7 @@ fn process_output_artifact_content(
     output: &ProcessRunnerOutput,
     permission_profile_id: ProcessPermissionProfileId,
     input_artifact: Option<&ArtifactRef>,
+    permission_review: Option<&PermissionAdmissionReview>,
 ) -> ArtifactContent {
     let shell_input = shell_process_input(intent);
     let intent_payload = if shell_input.is_some() {
@@ -350,6 +361,15 @@ fn process_output_artifact_content(
             "truncated": output.stderr_truncated(),
         }
     });
+
+    if let Some(review) = permission_review {
+        payload["permission_review"] = serde_json::json!({
+            "source": review.source().as_str(),
+            "risk": review.risk().as_str(),
+            "user_authorization": review.user_authorization().as_str(),
+            "rationale": review.rationale(),
+        });
+    }
 
     if output.stdout_truncated() || output.stderr_truncated() {
         payload["guidance"] = serde_json::json!({

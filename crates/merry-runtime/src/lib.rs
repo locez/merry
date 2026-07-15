@@ -107,10 +107,13 @@ pub use ledger::{
 pub use merry_core::ContextWindowSource;
 pub use model_config::RuntimeModelRole;
 pub use permission::{
-    PermissionAdmissionContext, PermissionAdmissionDecision, PermissionAdmissionError,
-    PermissionAdmissionFuture, PermissionAdmissionReview, PermissionAdmissionSource,
-    PermissionRequest, PermissionReviewMode, PermissionedAction, RequestedCapability,
-    RequestedPathCapability, RuntimeTrustLevel, request_permissions_tool,
+    ChannelPermissionAdmissionSource, PermissionAdmissionContext, PermissionAdmissionDecision,
+    PermissionAdmissionError, PermissionAdmissionFuture, PermissionAdmissionReview,
+    PermissionAdmissionReviewSource, PermissionAdmissionSource, PermissionRequest,
+    PermissionReviewMode, PermissionReviewRequest, PermissionReviewResponse,
+    PermissionReviewResponseError, PermissionReviewRisk, PermissionUserAuthorization,
+    PermissionedAction, RequestedCapability, RequestedPathCapability, RuntimeTrustLevel,
+    request_permissions_tool,
 };
 pub use plan::{
     BeginPlanInput, BeginPlanOutput, ControlPlanAttemptInput, PlanApprovalInput, PlanChangeInput,

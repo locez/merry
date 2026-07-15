@@ -1,7 +1,10 @@
 use super::{
     keymap::KeyAction,
     overlay::SettingItem,
-    overlay::{CommandSpec, MessageDialogKind, MessageDialogOverlay, Overlay, PlanApprovalOverlay},
+    overlay::{
+        CommandSpec, MessageDialogKind, MessageDialogOverlay, Overlay, PermissionReviewOverlay,
+        PlanApprovalOverlay,
+    },
     state::TuiState,
     theme::{SemanticColor, dim_color},
 };
@@ -104,6 +107,7 @@ pub(crate) fn render_overlay(frame: &mut Frame<'_>, state: &TuiState) {
             super::provider_render::render_model_picker(frame, state, picker)
         }
         Overlay::PlanApproval(approval) => render_plan_approval(frame, state, approval),
+        Overlay::PermissionReview(review) => render_permission_review(frame, state, review),
         Overlay::Dialog(dialog) => render_message_dialog(frame, state, dialog),
         Overlay::Shortcuts(_) => render_shortcuts(frame, state),
     }
@@ -148,6 +152,63 @@ fn render_plan_approval(frame: &mut Frame<'_>, state: &TuiState, approval: &Plan
             ),
             Span::styled("  Approve", semantic_style(state, SemanticColor::Assistant)),
             Span::styled("    Esc  Back", semantic_style(state, SemanticColor::Muted)),
+        ])),
+        rows[1],
+    );
+}
+
+fn render_permission_review(
+    frame: &mut Frame<'_>,
+    state: &TuiState,
+    review: &PermissionReviewOverlay,
+) {
+    let desired_width = frame.area().width.saturating_sub(4).min(MAX_OVERLAY_WIDTH);
+    let content_width = usize::from(desired_width.saturating_sub(4)).max(1);
+    let body_lines = estimated_wrapped_lines(review.body(), content_width);
+    let available_height = frame.area().height.saturating_sub(2);
+    let max_height = if available_height < 12 {
+        12
+    } else {
+        available_height.min(28)
+    };
+    let desired_height = u16::try_from(body_lines.saturating_add(7))
+        .unwrap_or(26)
+        .clamp(12, max_height);
+    let region = centered_rect(frame.area(), desired_width, desired_height);
+    frame.render_widget(Clear, region);
+    frame.render_widget(
+        Block::default()
+            .title(" M  Permission review ")
+            .borders(Borders::ALL)
+            .border_type(BorderType::Plain)
+            .border_style(
+                semantic_style(state, SemanticColor::Warning).add_modifier(Modifier::BOLD),
+            )
+            .style(code_surface_style(state)),
+        region,
+    );
+    let inner = inset(region, 2, 1);
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(2)])
+        .split(inner);
+    frame.render_widget(
+        Paragraph::new(review.body().to_owned())
+            .style(semantic_style(state, SemanticColor::Assistant))
+            .wrap(Wrap { trim: false }),
+        rows[0],
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                "Enter/Y",
+                semantic_style(state, SemanticColor::Success).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  Allow", semantic_style(state, SemanticColor::Assistant)),
+            Span::styled(
+                "    Esc/N  Reject",
+                semantic_style(state, SemanticColor::Warning),
+            ),
         ])),
         rows[1],
     );

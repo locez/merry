@@ -281,6 +281,17 @@ fn generic_executor_admission_allows_read_only_and_rejects_mutating_actions() {
             ..
         }
     ));
+
+    let trusted_decision =
+        ActionPolicyDecision::allow_noninteractive_trusted_action(ToolActionKind::CommandExec);
+    admit_action_to_generic_executor(
+        &pending,
+        ToolActionKind::CommandExec,
+        &trusted_decision,
+        None,
+        &session_id,
+    )
+    .expect("explicit trusted mode may enter the generic executor without a proposal");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -308,6 +319,49 @@ async fn trusted_external_tools_are_allowed_without_commit_lifecycle() {
     let result = resolved_tool_result(&events);
     assert_eq!(result.status(), merry_core::ToolCallResultStatus::Succeeded);
     assert!(runtime.pending_tool_calls().await.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn noninteractive_trusted_mode_executes_configured_mutating_tools_without_proposals() {
+    for (index, action_kind) in [
+        ToolActionKind::WorkspaceWrite,
+        ToolActionKind::CommandExec,
+        ToolActionKind::Network,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let tool_name = format!("trusted_mutating_{index}");
+        let executor = SuccessfulToolExecutor::new();
+        let tool = RegisteredTool::new(
+            policy_tool_spec(&tool_name),
+            Arc::new(executor.clone()),
+            action_kind,
+        );
+        let (runtime, pending) = register_policy_pending_registered_tool_with_builder(
+            &format!("runtime-policy-trusted-mutating-{index}"),
+            &tool_name,
+            &format!("call-trusted-mutating-{index}"),
+            tool,
+            |builder| {
+                builder
+                    .permission_review_mode(PermissionReviewMode::NonInteractiveTrusted)
+                    .build()
+            },
+        )
+        .await;
+
+        let events = runtime
+            .execute_tool_call(pending.id(), ToolExecutionContext::default())
+            .await
+            .expect("explicit trusted mode should execute configured tools");
+
+        assert_eq!(executor.call_count(), 1);
+        assert_eq!(
+            resolved_tool_result(&events).status(),
+            ToolCallResultStatus::Succeeded
+        );
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]

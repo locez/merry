@@ -516,10 +516,30 @@ fn parse_mcp_tool_name(name: &str) -> Option<(&str, &str)> {
 fn success_tool_bodies(name: &str, output: &str) -> Option<(String, String)> {
     match name {
         "run_process" => process_output_bodies(output),
+        "request_permissions" => permission_output_bodies(output),
         "workspace_read_file" => read_file_output_bodies(output),
         "workspace_list_dir" => list_dir_output_bodies(output),
         _ => None,
     }
+}
+
+fn permission_output_bodies(output: &str) -> Option<(String, String)> {
+    let value = serde_json::from_str::<Value>(output).ok()?;
+    if value.get("ok").and_then(Value::as_bool) != Some(true)
+        || value.get("kind").and_then(Value::as_str) != Some("process_action")
+    {
+        return None;
+    }
+    let rationale = value
+        .pointer("/permission_review/rationale")
+        .and_then(Value::as_str)
+        .unwrap_or("permission request was admitted");
+    let profile = value
+        .get("permission_profile_id")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let body = format!("allowed: {rationale}\nprofile: {profile}");
+    Some((body.clone(), body))
 }
 
 fn read_file_output_bodies(output: &str) -> Option<(String, String)> {
