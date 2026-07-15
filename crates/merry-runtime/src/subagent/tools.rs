@@ -6,6 +6,7 @@ use super::{
     },
     sanitize_diagnostic_message,
 };
+use crate::plan::projection::{CHILD_LINKED_SCOPE_GUIDANCE, LINKED_CHILD_DECOMPOSITION_GUIDANCE};
 use crate::{
     RegisteredTool, ToolActionKind, ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome,
     ToolExecutionResult, ToolExecutor, ToolExecutorFuture,
@@ -15,16 +16,22 @@ use schemars::JsonSchema;
 use serde::{Serialize, de::DeserializeOwned};
 use std::{sync::Arc, time::Duration};
 
+const WAIT_SEMANTIC_CHECKPOINT_GUIDANCE: &str = "Observe child statuses at semantic or terminal checkpoints; do not poll for high-frequency progress.";
+
 /// Returns provider-visible subagent tool specs.
 pub fn subagent_tool_specs() -> Result<[ToolSpec; 3], merry_core::CoreError> {
     Ok([
         tool_spec::<SpawnSubagentsInput>(
             SPAWN_SUBAGENTS_TOOL_NAME,
-            "Spawn bounded child agents for parallel delegated tasks. When plan_task binds a child, it works only within the linked node and its subtree, and the child owns decomposition below that binding. In tasks[].allowed_tools, copy exact registered Merry tool names without provider namespace prefixes: use run_process, never functions.run_process.",
+            format!(
+                "Spawn bounded child agents for parallel delegated tasks. When plan_task binds a child: {CHILD_LINKED_SCOPE_GUIDANCE} {LINKED_CHILD_DECOMPOSITION_GUIDANCE} In tasks[].allowed_tools, copy exact registered Merry tool names without provider namespace prefixes: use run_process, never functions.run_process."
+            ),
         )?,
         tool_spec::<WaitSubagentsInput>(
             WAIT_SUBAGENTS_TOOL_NAME,
-            "Inspect or wait for child agent statuses and compact results at semantic or terminal checkpoints. Do not poll for high-frequency progress; live progress belongs to the separate UI activity stream. timeout_ms is an observation deadline, not a task budget; prefer 30000 or omit it. A timed_out=true result is only a status snapshot, never completion. Claim completion only when terminal=true and the relevant statuses are terminal.",
+            format!(
+                "Inspect or wait for child agent statuses and compact results. {WAIT_SEMANTIC_CHECKPOINT_GUIDANCE} timeout_ms is an observation deadline, not a task budget; prefer 30000 or omit it. A timed_out=true result is only a status snapshot, never completion. Claim completion only when terminal=true and the relevant statuses are terminal."
+            ),
         )?,
         tool_spec::<CancelSubagentsInput>(
             CANCEL_SUBAGENTS_TOOL_NAME,
@@ -205,13 +212,17 @@ impl ToolExecutor for CancelSubagentsExecutor {
     }
 }
 
-fn tool_spec<T>(name: &str, description: &str) -> Result<ToolSpec, merry_core::CoreError>
+fn tool_spec<T>(
+    name: &str,
+    description: impl Into<String>,
+) -> Result<ToolSpec, merry_core::CoreError>
 where
     T: JsonSchema,
 {
+    let description = description.into();
     ToolSpec::new(
         ToolName::new(name)?,
-        description,
+        &description,
         ToolInputSchema::new(schemars::schema_for!(T))?,
     )
 }
@@ -422,9 +433,13 @@ mod tests {
         assert!(schema.contains("minimum"));
         assert!(schema.contains("5000"));
         assert!(specs[1].description().contains("observation deadline"));
-        assert!(specs[1].description().contains("Do not poll"));
         assert!(
             specs[1]
+                .description()
+                .contains(super::WAIT_SEMANTIC_CHECKPOINT_GUIDANCE)
+        );
+        assert!(
+            !specs[1]
                 .description()
                 .contains("separate UI activity stream")
         );
@@ -433,15 +448,11 @@ mod tests {
     #[test]
     fn subagent_tool_descriptions_explain_linked_child_and_checkpoint_contract() {
         let specs = subagent_tool_specs().expect("subagent tools build");
+        assert!(specs[0].description().contains(CHILD_LINKED_SCOPE_GUIDANCE));
         assert!(
             specs[0]
                 .description()
-                .contains("linked node and its subtree")
-        );
-        assert!(
-            specs[0]
-                .description()
-                .contains("child owns decomposition below that binding")
+                .contains(LINKED_CHILD_DECOMPOSITION_GUIDANCE)
         );
         assert!(
             specs[1]
