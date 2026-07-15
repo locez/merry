@@ -23,6 +23,7 @@ pub(crate) const COORDINATOR_ROOT_SCOPE_GUIDANCE: &str = "The coordinator author
 pub(crate) const LINKED_CHILD_DECOMPOSITION_GUIDANCE: &str =
     "Once a node is linked, its child owns decomposition below that binding.";
 pub(crate) const COORDINATOR_LINKED_SUMMARIES_GUIDANCE: &str = "The coordinator observes linked child summaries via read_plan and does not mirror the child subtree.";
+pub(crate) const COORDINATOR_ACTIVE_LINK_MUTATION_GUIDANCE: &str = "A node with an active linked child, or any subtree containing one, is read-only to the coordinator. Continue unrelated work or wait for a terminal result; if the assignment must stop, cancel it through the runtime and create a new assignment instead of rewriting this node.";
 pub(crate) const CHILD_LINKED_SCOPE_GUIDANCE: &str = "Work only within the linked node and its subtree; do not author or inspect the coordinator or sibling work.";
 pub(crate) const CHILD_SCOPED_UPDATE_GUIDANCE: &str = "Scoped update_plan automatically attaches authored children below the linked binding; do not create a separate root or parent binding.";
 pub(crate) const RUNTIME_OWNED_EXECUTION_GUIDANCE: &str = "Runtime owns execution statuses and summaries, including attempts, leases, and progress; do not author or mirror those fields.";
@@ -31,6 +32,7 @@ const COORDINATOR_RULES: &[&str] = &[
     COORDINATOR_ROOT_SCOPE_GUIDANCE,
     LINKED_CHILD_DECOMPOSITION_GUIDANCE,
     COORDINATOR_LINKED_SUMMARIES_GUIDANCE,
+    COORDINATOR_ACTIVE_LINK_MUTATION_GUIDANCE,
     RUNTIME_OWNED_EXECUTION_GUIDANCE,
     "update_plan authors objectives, acceptance, dependencies, and future structure. Linked execution summaries and statuses are runtime-owned.",
     "Plan is an auxiliary projection: it does not grant or restrict ordinary tools and it is not the execution result.",

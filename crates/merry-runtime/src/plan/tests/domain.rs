@@ -90,6 +90,29 @@ fn define_plan_resolves_client_key_dependencies_and_assigns_runtime_ids() {
 }
 
 #[test]
+fn authored_plan_rejects_nested_children_and_keeps_the_input_shallow() {
+    let mut plan = empty_plan();
+    let mut delegated = leaf("delegated", "Delegated work");
+    delegated.children.push(leaf("nested", "Nested work"));
+
+    let error = plan
+        .update(UpdatePlanInput {
+            reason: "reject coordinator-owned recursive input".to_owned(),
+            execution_intent: PlanExecutionIntent::ContinuePlanning,
+            coordinator_node_id: None,
+            max_concurrency_hint: None,
+            change: PlanChangeInput::DefinePlan {
+                expected_plan_revision: 0,
+                root: root(vec![delegated]),
+            },
+        })
+        .expect_err("recursive coordinator input must reject");
+
+    assert!(matches!(error, PlanError::NestedPlanInput));
+    assert_eq!(plan.snapshot().revision, 0);
+}
+
+#[test]
 fn initial_execute_if_authorized_enters_execution_without_redundant_review() {
     let mut plan = empty_plan();
     let mut executable_root = root(Vec::new());
@@ -320,10 +343,8 @@ fn replace_subtree_allows_unrelated_global_revision_advance() {
 #[test]
 fn replacement_rejects_dangling_incoming_dependency() {
     let mut plan = empty_plan();
-    let target = PlanNodeInput {
-        children: vec![leaf("endpoint", "Dependency endpoint")],
-        ..leaf("target", "Replaceable branch")
-    };
+    let target = leaf("target", "Replaceable branch");
+    let endpoint = leaf("endpoint", "Dependency endpoint");
     let mut outside = leaf("outside", "Outside consumer");
     outside.depends_on = vec![PlanNodeReferenceInput::ClientKey {
         client_key: "endpoint".to_owned(),
@@ -336,11 +357,33 @@ fn replacement_rejects_dangling_incoming_dependency() {
             max_concurrency_hint: None,
             change: PlanChangeInput::DefinePlan {
                 expected_plan_revision: 0,
-                root: root(vec![target, outside]),
+                root: root(vec![target, endpoint, outside]),
             },
         })
         .expect("valid initial plan");
     let target_id = initial.client_key_ids["target"].clone();
+    let endpoint_id = initial.client_key_ids["endpoint"].clone();
+    let revision = plan.node(&target_id).expect("target").updated_revision;
+    let mut target_with_endpoint = leaf("unused", "Replaceable branch");
+    target_with_endpoint.id = Some(target_id.clone());
+    target_with_endpoint.client_key = None;
+    target_with_endpoint.children = vec![PlanNodeInput {
+        id: Some(endpoint_id),
+        client_key: None,
+        ..leaf("unused-endpoint", "Dependency endpoint")
+    }];
+    plan.update(UpdatePlanInput {
+        reason: "attach the existing endpoint below the target".to_owned(),
+        execution_intent: PlanExecutionIntent::ContinuePlanning,
+        coordinator_node_id: None,
+        max_concurrency_hint: None,
+        change: PlanChangeInput::ReplaceSubtree {
+            target_node_id: target_id.clone(),
+            expected_node_revision: revision,
+            subtree: target_with_endpoint,
+        },
+    })
+    .expect("target can acquire a direct endpoint child");
     let revision = plan.node(&target_id).expect("target").updated_revision;
     let mut replacement = leaf("replacement", "Replacement without endpoint");
     replacement.id = Some(target_id.clone());
@@ -388,10 +431,7 @@ fn child_harness_cannot_expand_parent_write_scope() {
         })
         .expect_err("child scope expansion must reject");
 
-    assert!(matches!(
-        error,
-        PlanError::CapabilityEnvelopeExceeded { .. }
-    ));
+    assert!(matches!(error, PlanError::NestedPlanInput));
 }
 
 #[test]
@@ -437,11 +477,10 @@ fn replace_subtree_requires_current_target_node_revision() {
 #[test]
 fn replace_subtree_can_revise_the_same_live_target_more_than_once() {
     let mut plan = empty_plan();
-    let mut target = leaf("target", "Initial target");
-    target.children.push(leaf("initial-child", "Initial child"));
+    let target = leaf("target", "Initial target");
     let initial = plan
         .update(UpdatePlanInput {
-            reason: "initial recursive branch".to_owned(),
+            reason: "initial shallow branch".to_owned(),
             execution_intent: PlanExecutionIntent::ContinuePlanning,
             coordinator_node_id: None,
             max_concurrency_hint: None,

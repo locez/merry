@@ -19,6 +19,7 @@ pub(crate) use controller::{PlanController, PlanControllerEventReceiver};
 pub use domain::PlanError;
 pub(crate) use domain::{PersistedPlanState, PlanState};
 pub use protocol::PlanUpdateOutput;
+pub(crate) use protocol::update_plan_define_example;
 #[allow(unused_imports)]
 pub use protocol::{
     BeginPlanInput, BeginPlanOutput, ControlPlanAttemptInput, PlanApprovalInput, PlanChangeInput,

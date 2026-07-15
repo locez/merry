@@ -1,8 +1,9 @@
 use super::{ReadPlanInput, SubagentPlanUpdateInput, UpdatePlanInput};
 use crate::plan::projection::{
     CHILD_LINKED_SCOPE_GUIDANCE, CHILD_SCOPED_UPDATE_GUIDANCE,
-    COORDINATOR_LINKED_SUMMARIES_GUIDANCE, COORDINATOR_ROOT_SCOPE_GUIDANCE,
-    LINKED_CHILD_DECOMPOSITION_GUIDANCE, RUNTIME_OWNED_EXECUTION_GUIDANCE,
+    COORDINATOR_ACTIVE_LINK_MUTATION_GUIDANCE, COORDINATOR_LINKED_SUMMARIES_GUIDANCE,
+    COORDINATOR_ROOT_SCOPE_GUIDANCE, LINKED_CHILD_DECOMPOSITION_GUIDANCE,
+    RUNTIME_OWNED_EXECUTION_GUIDANCE,
 };
 use crate::{
     RegisteredTool, ToolActionKind, ToolExecutionContext, ToolExecutionError, ToolExecutor,
@@ -23,13 +24,13 @@ pub(crate) fn coordinator_plan_registered_tools() -> Result<Vec<RegisteredTool>,
         plan_tool::<ReadPlanInput>(
             READ_PLAN_TOOL_NAME,
             format!(
-                "Read a bounded exact snapshot or subtree of the current durable plan, including runtime-owned linked subagent summaries. {COORDINATOR_ROOT_SCOPE_GUIDANCE} {LINKED_CHILD_DECOMPOSITION_GUIDANCE} {COORDINATOR_LINKED_SUMMARIES_GUIDANCE} Historical attempt, lease, heartbeat, and model-report records are not part of this coordinator interface."
+                "Read a bounded exact snapshot or subtree of the current durable plan, including runtime-owned linked subagent summaries. {COORDINATOR_ROOT_SCOPE_GUIDANCE} {LINKED_CHILD_DECOMPOSITION_GUIDANCE} {COORDINATOR_LINKED_SUMMARIES_GUIDANCE} {COORDINATOR_ACTIVE_LINK_MUTATION_GUIDANCE} Historical attempt, lease, heartbeat, and model-report records are not part of this coordinator interface."
             ),
         )?,
         plan_tool::<UpdatePlanInput>(
             UPDATE_PLAN_TOOL_NAME,
             format!(
-                "Create or update the durable Plan with a tagged JSON change object. The first valid update creates the Plan. {COORDINATOR_ROOT_SCOPE_GUIDANCE} {LINKED_CHILD_DECOMPOSITION_GUIDANCE} {COORDINATOR_LINKED_SUMMARIES_GUIDANCE} New nodes use client_key without id; existing mutable nodes use id without client_key. Define or revise authored intent, dependencies, and acceptance; runtime-owned execution state is derived from actual activity. Use execute_if_authorized only when the user already authorized execution, and request_user_review only when an explicit review boundary is wanted. When the Plan is already executing, do not call use_current_plan again; continue ordinary work or revise only a genuinely changed future subtree."
+                "Create or update the durable Plan with a tagged JSON change object. The change argument must contain a nested string field change.type; valid coordinator values are define_plan, replace_subtree, and use_current_plan. Do not put type on the outer update object. The first valid update creates the Plan. {COORDINATOR_ROOT_SCOPE_GUIDANCE} {LINKED_CHILD_DECOMPOSITION_GUIDANCE} {COORDINATOR_LINKED_SUMMARIES_GUIDANCE} {COORDINATOR_ACTIVE_LINK_MUTATION_GUIDANCE} New nodes use client_key without id; existing mutable nodes use id without client_key. The root and each node's direct children may be authored in one request; omit children and depends_on when they are empty. Do not nest a child's implementation subtree in coordinator input. Define or revise authored intent, dependencies, and acceptance; runtime-owned execution state is derived from actual activity. Use execute_if_authorized only when the user already authorized execution, and request_user_review only when an explicit review boundary is wanted. When the Plan is already executing, do not call use_current_plan again; continue ordinary work or revise only a genuinely changed future subtree."
             ),
         )?,
     ];
@@ -51,7 +52,7 @@ pub(crate) fn scoped_child_plan_registered_tools() -> Result<Vec<RegisteredTool>
         plan_tool::<SubagentPlanUpdateInput>(
             UPDATE_PLAN_TOOL_NAME,
             format!(
-                "Update authored children or replace a mutable subtree below the linked task in the active Plan. {CHILD_LINKED_SCOPE_GUIDANCE} {CHILD_SCOPED_UPDATE_GUIDANCE} This linked subtree scope excludes the coordinator and sibling tasks; {RUNTIME_OWNED_EXECUTION_GUIDANCE} Child binding identity remains controlled by the runtime."
+                "Update authored children or replace a mutable subtree below the linked task in the active Plan. The change argument must contain a nested string field change.type; valid child values are define_children and replace_subtree. Do not put type on the outer update object. {CHILD_LINKED_SCOPE_GUIDANCE} {CHILD_SCOPED_UPDATE_GUIDANCE} This linked subtree scope excludes the coordinator and sibling tasks; {RUNTIME_OWNED_EXECUTION_GUIDANCE} Child binding identity remains controlled by the runtime."
             ),
         )?,
     ];
