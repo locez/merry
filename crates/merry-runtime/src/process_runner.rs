@@ -77,6 +77,7 @@ pub struct BwrapProcessRunner {
     network_allowed: bool,
     path_rules: Vec<PathAccessRule>,
     bwrap_program: PathBuf,
+    configuration_error: Option<String>,
 }
 
 impl BwrapProcessRunner {
@@ -88,6 +89,7 @@ impl BwrapProcessRunner {
             network_allowed: false,
             path_rules: Vec::new(),
             bwrap_program: PathBuf::from(BWRAP_PROGRAM),
+            configuration_error: None,
         }
     }
 
@@ -158,21 +160,127 @@ impl BwrapPermissionedProcessRunnerFactory {
         self
     }
 
+    fn path_rules_for_request(
+        &self,
+        request: &PermissionRequest,
+    ) -> Result<Vec<PathAccessRule>, ProcessRunnerError> {
+        let mut rules = self.path_rules.clone();
+        for capability in request.requested() {
+            let crate::RequestedCapability::Path(requested) = capability else {
+                continue;
+            };
+            let path = materialize_requested_path(&self.cwd_root, requested.path());
+            let effective_access =
+                effective_requested_path_access(&path, requested.access(), &self.path_rules)?;
+            rules.push(PathAccessRule::new(
+                path,
+                effective_access,
+                crate::PathAccessRuleSource::PermissionReview,
+            ));
+        }
+        Ok(normalize_path_rules(rules))
+    }
+
     fn build_runner(&self, request: &PermissionRequest) -> BwrapProcessRunner {
+        let (path_rules, configuration_error) = match self.path_rules_for_request(request) {
+            Ok(path_rules) => (path_rules, None),
+            Err(error) => (self.path_rules.clone(), Some(error.to_string())),
+        };
         let mut runner = BwrapProcessRunner::new_at_workspace_root(self.cwd_root.clone())
-            .with_path_rules(self.path_rules.clone());
+            .with_path_rules(path_rules);
         if self.base_network_allowed || request.requests_network() {
             runner = runner.allow_network();
         }
         runner.bwrap_program = self.bwrap_program.clone();
+        runner.configuration_error = configuration_error;
         runner
     }
 }
 
 impl PermissionedProcessRunnerFactory for BwrapPermissionedProcessRunnerFactory {
+    fn validate_request(&self, request: &PermissionRequest) -> Result<(), ProcessRunnerError> {
+        self.path_rules_for_request(request).map(|_| ())
+    }
+
     fn runner_for(&self, request: &PermissionRequest) -> Arc<dyn ProcessRunner> {
         Arc::new(self.build_runner(request))
     }
+}
+
+fn materialize_requested_path(root: &Path, requested: &str) -> PathBuf {
+    let path = Path::new(requested);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    }
+}
+
+fn effective_requested_path_access(
+    requested_path: &Path,
+    requested_access: PathAccess,
+    configured_rules: &[PathAccessRule],
+) -> Result<PathAccess, ProcessRunnerError> {
+    let mut nearest = None;
+    for rule in configured_rules {
+        if requested_path.starts_with(rule.path())
+            && nearest.is_none_or(|current: &PathAccessRule| {
+                path_depth(rule.path()) > path_depth(current.path())
+            })
+        {
+            nearest = Some(rule);
+        }
+    }
+
+    if let Some(rule) = nearest {
+        if rule.access() == PathAccess::Deny {
+            return Err(ProcessRunnerError::infrastructure(format!(
+                "requested path `{}` is denied by configured path policy `{}`",
+                requested_path.display(),
+                rule.path().display()
+            )));
+        }
+        if rule.access() == PathAccess::ReadOnly {
+            return Ok(PathAccess::ReadOnly);
+        }
+    }
+    Ok(requested_access)
+}
+
+fn normalize_path_rules(rules: Vec<PathAccessRule>) -> Vec<PathAccessRule> {
+    let mut merged =
+        std::collections::BTreeMap::<PathBuf, (PathAccess, crate::PathAccessRuleSource)>::new();
+    for rule in rules {
+        let entry = merged
+            .entry(rule.path().to_path_buf())
+            .or_insert((rule.access(), rule.source()));
+        entry.0 = restrictive_path_access(entry.0, rule.access());
+        if rule.access() == entry.0 {
+            entry.1 = rule.source();
+        }
+    }
+    let mut rules = merged
+        .into_iter()
+        .map(|(path, (access, source))| PathAccessRule::new(path, access, source))
+        .collect::<Vec<_>>();
+    rules.sort_by(|left, right| {
+        path_depth(left.path())
+            .cmp(&path_depth(right.path()))
+            .then_with(|| left.path().cmp(right.path()))
+    });
+    rules
+}
+
+fn restrictive_path_access(left: PathAccess, right: PathAccess) -> PathAccess {
+    match (left, right) {
+        (PathAccess::Deny, _) | (_, PathAccess::Deny) => PathAccess::Deny,
+        (PathAccess::ReadOnly, _) | (_, PathAccess::ReadOnly) => PathAccess::ReadOnly,
+        (PathAccess::ReadWrite, PathAccess::ReadWrite) => PathAccess::ReadWrite,
+    }
+}
+
+fn path_depth(path: &Path) -> usize {
+    path.components().count()
 }
 
 impl ProcessRunner for BwrapProcessRunner {
@@ -181,6 +289,9 @@ impl ProcessRunner for BwrapProcessRunner {
         intent: ProcessActionIntent,
         context: ProcessRunnerContext,
     ) -> ProcessRunnerFuture<'a> {
+        if let Some(message) = self.configuration_error.clone() {
+            return Box::pin(async move { Err(ProcessRunnerError::infrastructure(message)) });
+        }
         let plan = bwrap_process_plan(
             &intent,
             &self.cwd_root,
@@ -542,13 +653,14 @@ mod tests {
     use super::{BwrapProcessRunner, TokioProcessRunner, bwrap_process_plan, process_current_dir};
     use crate::{
         PathAccess, PathAccessRule, PathAccessRuleSource, PermissionRequest, PermissionedAction,
-        ProcessActionIntent, ProcessEnvPolicy, ProcessExitStatus, ProcessRunner,
-        ProcessRunnerContext,
+        PermissionedProcessRunnerFactory, ProcessActionIntent, ProcessEnvPolicy, ProcessExitStatus,
+        ProcessRunner, ProcessRunnerContext, StaticPermissionedProcessRunnerFactory,
     };
     use merry_core::{PendingToolCall, ToolCallArguments, ToolCallId, ToolName};
     use serde_json::json;
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
 
     fn intent(cwd: Option<&str>) -> ProcessActionIntent {
@@ -784,6 +896,164 @@ mod tests {
             &args,
             &["--ro-bind-try", "/var/log", "/var/log"]
         ));
+    }
+
+    #[test]
+    fn bwrap_permissioned_factory_materializes_requested_path_rules() {
+        let factory =
+            super::BwrapPermissionedProcessRunnerFactory::new_at_workspace_root("/workspace/merry")
+                .with_bwrap_program("/custom/bin/bwrap");
+        let request = permission_request(json!({
+            "requested": {
+                "paths": [{ "path": "deps/cache", "access": "rw" }]
+            },
+            "for_action": { "kind": "process", "argv": ["cargo", "test"], "cwd": "." }
+        }));
+
+        let runner = factory.build_runner(&request);
+        let plan = bwrap_process_plan(
+            request_process_intent(&request),
+            &runner.cwd_root,
+            runner.network_allowed,
+            &runner.path_rules,
+            &runner.bwrap_program,
+        );
+        let args = os_args(&plan.args);
+
+        assert!(contains_sequence(
+            &args,
+            &[
+                "--bind-try",
+                "/workspace/merry/deps/cache",
+                "/workspace/merry/deps/cache"
+            ]
+        ));
+    }
+
+    #[test]
+    fn bwrap_permissioned_factory_caps_requested_write_to_trusted_read_only_rule() {
+        let factory =
+            super::BwrapPermissionedProcessRunnerFactory::new_at_workspace_root("/workspace/merry")
+                .with_path_rules([PathAccessRule::new(
+                    PathBuf::from("/workspace/merry/deps"),
+                    PathAccess::ReadOnly,
+                    PathAccessRuleSource::TrustedGlobalConfig,
+                )]);
+        let request = permission_request(json!({
+            "requested": {
+                "paths": [{ "path": "deps", "access": "rw" }]
+            },
+            "for_action": { "kind": "process", "argv": ["cargo", "test"], "cwd": "." }
+        }));
+
+        factory
+            .validate_request(&request)
+            .expect("read-only policy should cap rather than reject a write request");
+        let runner = factory.build_runner(&request);
+        let plan = bwrap_process_plan(
+            request_process_intent(&request),
+            &runner.cwd_root,
+            runner.network_allowed,
+            &runner.path_rules,
+            &runner.bwrap_program,
+        );
+        let args = os_args(&plan.args);
+
+        assert!(contains_sequence(
+            &args,
+            &[
+                "--ro-bind-try",
+                "/workspace/merry/deps",
+                "/workspace/merry/deps"
+            ]
+        ));
+        assert!(!contains_sequence(
+            &args,
+            &[
+                "--bind-try",
+                "/workspace/merry/deps",
+                "/workspace/merry/deps"
+            ]
+        ));
+    }
+
+    #[test]
+    fn bwrap_permissioned_factory_rejects_requested_path_under_configured_deny() {
+        let factory =
+            super::BwrapPermissionedProcessRunnerFactory::new_at_workspace_root("/workspace/merry")
+                .with_path_rules([PathAccessRule::new(
+                    PathBuf::from("/workspace/merry/secrets"),
+                    PathAccess::Deny,
+                    PathAccessRuleSource::TrustedGlobalConfig,
+                )]);
+        let request = permission_request(json!({
+            "requested": {
+                "paths": [{ "path": "secrets/token", "access": "ro" }]
+            },
+            "for_action": { "kind": "process", "argv": ["cat", "secrets/token"] }
+        }));
+
+        let error = factory
+            .validate_request(&request)
+            .expect_err("configured deny must be a hard policy boundary");
+        assert!(
+            error
+                .to_string()
+                .contains("denied by configured path policy")
+        );
+    }
+
+    #[test]
+    fn static_permissioned_factory_rejects_requested_path_capabilities() {
+        let factory = StaticPermissionedProcessRunnerFactory::new(Arc::new(
+            BwrapProcessRunner::new_at_workspace_root("/workspace/merry"),
+        ));
+        let request = permission_request(json!({
+            "requested": {
+                "paths": [{ "path": "deps/cache", "access": "rw" }]
+            },
+            "for_action": { "kind": "process", "argv": ["cargo", "test"] }
+        }));
+
+        let error = factory
+            .validate_request(&request)
+            .expect_err("static runner must not silently ignore path capabilities");
+        assert!(
+            error
+                .to_string()
+                .contains("cannot enforce requested path capabilities")
+        );
+    }
+
+    #[tokio::test]
+    async fn bwrap_permissioned_factory_runner_for_invalid_request_fails_closed() {
+        let factory =
+            super::BwrapPermissionedProcessRunnerFactory::new_at_workspace_root("/workspace/merry")
+                .with_path_rules([PathAccessRule::new(
+                    PathBuf::from("/workspace/merry/secrets"),
+                    PathAccess::Deny,
+                    PathAccessRuleSource::TrustedGlobalConfig,
+                )]);
+        let request = permission_request(json!({
+            "requested": {
+                "paths": [{ "path": "secrets/token", "access": "ro" }]
+            },
+            "for_action": { "kind": "process", "argv": ["cat", "secrets/token"] }
+        }));
+
+        let runner = factory.runner_for(&request);
+        let error = runner
+            .run(
+                request_process_intent(&request).clone(),
+                ProcessRunnerContext::new(CancellationToken::new()),
+            )
+            .await
+            .expect_err("invalid path request must not reach the process backend");
+        assert!(
+            error
+                .to_string()
+                .contains("denied by configured path policy")
+        );
     }
 
     #[tokio::test]

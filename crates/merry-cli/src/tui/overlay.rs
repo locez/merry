@@ -208,6 +208,7 @@ pub(crate) enum Overlay {
     ProviderForm(ProviderFormOverlay),
     ModelPicker(ModelPickerOverlay),
     PlanApproval(PlanApprovalOverlay),
+    PermissionReview(PermissionReviewOverlay),
     Dialog(MessageDialogOverlay),
     Shortcuts(ShortcutsBack),
 }
@@ -229,6 +230,26 @@ pub(crate) struct MessageDialogOverlay {
 pub(crate) struct PlanApprovalOverlay {
     message: String,
     input: merry_runtime::PlanApprovalInput,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PermissionReviewOverlay {
+    approval_id: String,
+    body: String,
+}
+
+impl PermissionReviewOverlay {
+    pub(crate) fn new(approval_id: String, body: String) -> Self {
+        Self { approval_id, body }
+    }
+
+    pub(crate) fn approval_id(&self) -> &str {
+        &self.approval_id
+    }
+
+    pub(crate) fn body(&self) -> &str {
+        &self.body
+    }
 }
 
 impl PlanApprovalOverlay {
@@ -337,6 +358,8 @@ pub(crate) enum OverlayKeyResult {
     CommitContextWindow(String),
     OpenShortcuts,
     ConfirmPlanApproval,
+    ApprovePermission(String),
+    DenyPermission(String),
     Provider(ProviderOverlayAction),
 }
 
@@ -543,8 +566,15 @@ impl Overlay {
         Self::PlanApproval(PlanApprovalOverlay::new(message, input))
     }
 
+    pub(crate) fn permission_review(approval_id: String, body: String) -> Self {
+        Self::PermissionReview(PermissionReviewOverlay::new(approval_id, body))
+    }
+
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> OverlayKeyResult {
-        if key.code == KeyCode::Char('p') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        if key.code == KeyCode::Char('p')
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && !matches!(self, Self::PermissionReview(_))
+        {
             return OverlayKeyResult::Close;
         }
 
@@ -578,6 +608,15 @@ impl Overlay {
                 KeyCode::Esc => OverlayKeyResult::Back,
                 _ => OverlayKeyResult::Consumed,
             },
+            Self::PermissionReview(review) => match key.code {
+                KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    OverlayKeyResult::ApprovePermission(review.approval_id().to_owned())
+                }
+                KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                    OverlayKeyResult::DenyPermission(review.approval_id().to_owned())
+                }
+                _ => OverlayKeyResult::Consumed,
+            },
             Self::Dialog(_) => match key.code {
                 KeyCode::Esc | KeyCode::Enter => OverlayKeyResult::Back,
                 _ => OverlayKeyResult::Consumed,
@@ -597,6 +636,7 @@ impl Overlay {
             Self::ProviderManager(_)
             | Self::ModelPicker(_)
             | Self::PlanApproval(_)
+            | Self::PermissionReview(_)
             | Self::Dialog(_) => {}
             Self::Shortcuts(_) => {}
         }

@@ -466,7 +466,13 @@ impl TuiState {
             Some(
                 Overlay::ProviderManager(_) | Overlay::ProviderForm(_) | Overlay::ModelPicker(_),
             ) => {}
-            Some(Overlay::PlanApproval(_) | Overlay::Dialog(_) | Overlay::Shortcuts(_)) | None => {
+            Some(
+                Overlay::PlanApproval(_)
+                | Overlay::PermissionReview(_)
+                | Overlay::Dialog(_)
+                | Overlay::Shortcuts(_),
+            )
+            | None => {
                 self.provider_overlay_back
                     .get_or_insert(ProviderOverlayBack::CommandPalette);
             }
@@ -604,6 +610,13 @@ impl TuiState {
         }
     }
 
+    pub(crate) fn open_permission_review(&mut self, approval_id: String, body: String) {
+        self.completion_menu = None;
+        self.dialog_back = None;
+        self.provider_overlay_back = None;
+        self.overlay = Some(Overlay::permission_review(approval_id, body));
+    }
+
     pub(crate) fn plan_approval_input(&self) -> Option<merry_runtime::PlanApprovalInput> {
         match self.overlay.as_ref() {
             Some(Overlay::PlanApproval(approval)) => Some(approval.input().clone()),
@@ -666,7 +679,7 @@ impl TuiState {
                 Some(ProviderOverlayBack::Settings(settings)) => Some(Overlay::Settings(settings)),
                 Some(ProviderOverlayBack::CommandPalette) | None => Some(command_palette),
             },
-            Some(Overlay::PlanApproval(_) | Overlay::Dialog(_)) => {
+            Some(Overlay::PlanApproval(_) | Overlay::PermissionReview(_) | Overlay::Dialog(_)) => {
                 self.dialog_back.take().map(|overlay| *overlay)
             }
             Some(Overlay::ModelPicker(_)) => {

@@ -1,7 +1,8 @@
 use crate::cli_error::{CliError, debug_openai_usage_error, unexpected};
 use crate::coding_runtime::{
-    HeadlessCodingRuntimeInput, action_process_runner, build_headless_coding_runtime,
-    coding_agent_loop_config, coding_agent_process_admission, resume_headless_coding_runtime,
+    HeadlessCodingRuntimeInput, action_process_runner,
+    build_headless_coding_runtime_with_permission_source, coding_agent_loop_config,
+    coding_agent_process_admission, resume_headless_coding_runtime_with_permission_source,
 };
 use crate::config::MerryConfig;
 use crate::mcp_tools::discover_configured_mcp_tools;
@@ -21,11 +22,13 @@ use crate::tui::session_picker::SessionPickerSelection;
 use merry_core::SessionId;
 use merry_llm::GenerationConfig;
 use merry_runtime::{
-    AgentLoopControl, AgentLoopInput, AutomaticCompactionConfig, InteractivePrimaryModel,
-    InteractiveRunEventStream, InteractiveSettingsUpdate, InteractiveSubagentSettings, Runtime,
+    AgentLoopControl, AgentLoopInput, AutomaticCompactionConfig, ChannelPermissionAdmissionSource,
+    InteractivePrimaryModel, InteractiveRunEventStream, InteractiveSettingsUpdate,
+    InteractiveSubagentSettings, PermissionReviewMode, PermissionReviewRequest, Runtime,
     SessionTranscriptItem, SkillMetadata, StepContext,
 };
-use std::{env, num::NonZeroU64, path::PathBuf};
+use std::{collections::VecDeque, env, num::NonZeroU64, path::PathBuf, sync::Arc};
+use tokio::sync::mpsc;
 
 pub(crate) struct TuiRuntimeSession {
     pub(crate) workspace_root: PathBuf,
@@ -40,6 +43,8 @@ pub(crate) struct TuiRuntimeSession {
     pub(crate) control: AgentLoopControl,
     pub(crate) skills: Vec<SkillMetadata>,
     merry_config: MerryConfig,
+    pub(crate) permission_requests: mpsc::Receiver<PermissionReviewRequest>,
+    pending_permission_reviews: VecDeque<PermissionReviewRequest>,
 }
 
 pub(crate) async fn start_tui_runtime_session(
@@ -87,6 +92,8 @@ pub(crate) async fn start_tui_runtime_session(
         &workspace_root,
         action_process_backend_options(merry_config).map_err(unexpected)?,
     )?;
+    let (permission_source, permission_requests) = ChannelPermissionAdmissionSource::channel(8);
+    let permission_source = Arc::new(permission_source);
     let extra_tools = discover_configured_mcp_tools(merry_config).await?;
     let subagents = subagents_config(merry_config)
         .map_err(unexpected)?
@@ -123,9 +130,19 @@ pub(crate) async fn start_tui_runtime_session(
         ),
     };
     let runtime = if should_resume {
-        resume_headless_coding_runtime(runtime_input, session_store.session_state_store()).await?
+        resume_headless_coding_runtime_with_permission_source(
+            runtime_input,
+            session_store.session_state_store(),
+            permission_source,
+            PermissionReviewMode::ModelThenHostFallback,
+        )
+        .await?
     } else {
-        build_headless_coding_runtime(runtime_input)?
+        build_headless_coding_runtime_with_permission_source(
+            runtime_input,
+            permission_source,
+            PermissionReviewMode::ModelThenHostFallback,
+        )?
     };
     let loop_config = coding_agent_loop_config()?;
     let skills = runtime.skills().await;
@@ -160,10 +177,70 @@ pub(crate) async fn start_tui_runtime_session(
         control,
         skills,
         merry_config: owned_config,
+        permission_requests,
+        pending_permission_reviews: VecDeque::new(),
     })
 }
 
 impl TuiRuntimeSession {
+    pub(crate) fn enqueue_permission_review(
+        &mut self,
+        request: PermissionReviewRequest,
+    ) -> Option<(String, String)> {
+        if request.is_cancelled() {
+            return None;
+        }
+        let view = permission_review_view(&request);
+        let should_open = self.pending_permission_reviews.is_empty();
+        self.pending_permission_reviews.push_back(request);
+        should_open.then_some(view)
+    }
+
+    pub(crate) fn prune_cancelled_permission_reviews(
+        &mut self,
+    ) -> Option<Option<(String, String)>> {
+        let mut pruned = false;
+        while self
+            .pending_permission_reviews
+            .front()
+            .is_some_and(PermissionReviewRequest::is_cancelled)
+        {
+            self.pending_permission_reviews.pop_front();
+            pruned = true;
+        }
+        pruned.then(|| {
+            self.pending_permission_reviews
+                .front()
+                .map(permission_review_view)
+        })
+    }
+
+    pub(crate) fn resolve_permission_review(
+        &mut self,
+        approval_id: &str,
+        approved: bool,
+    ) -> Result<Option<(String, String)>, CliError> {
+        let Some(request) = self.pending_permission_reviews.pop_front() else {
+            return Ok(None);
+        };
+        if request.approval_id() != approval_id {
+            self.pending_permission_reviews.push_front(request);
+            return Err(unexpected(
+                "permission review overlay did not match pending request",
+            ));
+        }
+        let result = if approved {
+            request.approve("Approved by the Merry permission review UI.")
+        } else {
+            request.deny("Rejected by the Merry permission review UI.")
+        };
+        result.map_err(unexpected)?;
+        Ok(self
+            .pending_permission_reviews
+            .front()
+            .map(permission_review_view))
+    }
+
     pub(crate) fn replace_config(&mut self, config: MerryConfig) {
         self.merry_config = config;
     }
@@ -247,6 +324,34 @@ impl TuiRuntimeSession {
     pub(crate) async fn plan_snapshot(&self) -> Result<Option<merry_core::PlanSnapshot>, CliError> {
         self.runtime.plan_snapshot().await.map_err(unexpected)
     }
+}
+
+fn permission_review_view(request: &PermissionReviewRequest) -> (String, String) {
+    let permission_request = request.request();
+    let mut lines = vec![format!("approval_id: {}", request.approval_id())];
+    if let Some(failure) = request.review_failure() {
+        lines.push(format!("AI review fallback: {failure}"));
+    }
+    if let Some(reason) = permission_request.reason() {
+        lines.push(format!("reason: {reason}"));
+    }
+    lines.push(format!("action: {}", permission_request.action().summary()));
+    lines.push("requested capabilities:".to_owned());
+    for capability in permission_request.requested() {
+        match capability {
+            merry_runtime::RequestedCapability::Network => {
+                lines.push("  - network".to_owned());
+            }
+            merry_runtime::RequestedCapability::Path(path) => {
+                lines.push(format!(
+                    "  - path {} ({})",
+                    path.path(),
+                    path.access().as_str()
+                ));
+            }
+        }
+    }
+    (request.approval_id(), lines.join("\n"))
 }
 
 fn preference_model_override<'a>(

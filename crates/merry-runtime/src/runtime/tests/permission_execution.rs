@@ -129,6 +129,10 @@ async fn request_permissions_approved_by_review_executes_exact_process_action() 
         payload["permission_profile_id"],
         ProcessPermissionProfileId::APPROVED_PERMISSION_REQUEST_V1.as_str()
     );
+    assert_eq!(
+        payload["permission_review"]["rationale"],
+        "The user asked to run this command."
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -382,5 +386,104 @@ async fn request_permissions_trusted_sdk_host_decision_can_skip_model_review() {
     assert_eq!(
         resolved_tool_result(&events).status(),
         ToolCallResultStatus::Succeeded
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn request_permissions_noninteractive_trusted_mode_skips_review_sources() {
+    let admission = StaticPermissionAdmissionSource::approving();
+    let runner = FakeProcessRunner::succeeding();
+    let (runtime, pending) = register_permission_pending_tool_with_builder(
+        "runtime-permission-noninteractive-trusted",
+        "call-permission-noninteractive-trusted",
+        |builder| {
+            builder
+                .permission_review_mode(PermissionReviewMode::NonInteractiveTrusted)
+                .permission_admission_source(Arc::new(admission.clone()))
+                .allow_permissioned_process_actions(Arc::new(runner.clone()))
+                .build()
+        },
+    )
+    .await;
+
+    let events = runtime
+        .execute_tool_call(pending.id(), ToolExecutionContext::default())
+        .await
+        .expect("trusted non-interactive permission request should execute");
+
+    assert_eq!(admission.call_count(), 0);
+    assert_eq!(runner.call_count(), 1);
+    assert_eq!(
+        resolved_tool_result(&events).status(),
+        ToolCallResultStatus::Succeeded
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn request_permissions_model_failure_uses_opt_in_host_fallback() {
+    let admission = StaticPermissionAdmissionSource::approving();
+    let runner = FakeProcessRunner::succeeding();
+    let (runtime, pending) = register_permission_pending_tool_with_builder(
+        "runtime-permission-human-fallback",
+        "call-permission-human-fallback",
+        |builder| {
+            builder
+                .permission_review_mode(PermissionReviewMode::ModelThenHostFallback)
+                .permission_admission_source(Arc::new(admission.clone()))
+                .allow_permissioned_process_actions(Arc::new(runner.clone()))
+                .build()
+        },
+    )
+    .await;
+
+    let events = runtime
+        .execute_tool_call(pending.id(), ToolExecutionContext::default())
+        .await
+        .expect("configured fallback should resolve missing model review");
+
+    assert_eq!(admission.call_count(), 1);
+    assert_eq!(runner.call_count(), 1);
+    assert_eq!(
+        resolved_tool_result(&events).status(),
+        ToolCallResultStatus::Succeeded
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn request_permissions_model_denial_does_not_escalate_to_host_fallback() {
+    let review_provider =
+        RecordingModelProvider::with_script(vec![ScriptedModelProviderResponse::Stream(vec![Ok(
+            permission_review_completed_event("deny", "The action is not grounded in the task."),
+        )])]);
+    let admission = StaticPermissionAdmissionSource::approving();
+    let runner = FakeProcessRunner::succeeding();
+    let (runtime, pending) = register_permission_pending_tool_with_builder(
+        "runtime-permission-denial-no-human",
+        "call-permission-denial-no-human",
+        |builder| {
+            builder
+                .permission_review_mode(PermissionReviewMode::ModelThenHostFallback)
+                .permission_admission_source(Arc::new(admission.clone()))
+                .model_provider_for_role(
+                    RuntimeModelRole::ApprovalReview,
+                    Arc::new(review_provider),
+                    named_model("fake/approval-review"),
+                )
+                .allow_permissioned_process_actions(Arc::new(runner.clone()))
+                .build()
+        },
+    )
+    .await;
+
+    let events = runtime
+        .execute_tool_call(pending.id(), ToolExecutionContext::default())
+        .await
+        .expect("model denial should resolve without host escalation");
+
+    assert_eq!(admission.call_count(), 0);
+    assert_eq!(runner.call_count(), 0);
+    assert_eq!(
+        resolved_tool_result(&events).status(),
+        ToolCallResultStatus::Failed
     );
 }
