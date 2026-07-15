@@ -31,14 +31,20 @@ pub(super) async fn execute_plan_tool_call(
     }
     match pending.name().as_str() {
         READ_PLAN_TOOL_NAME => {
-            let input = input_from_call::<ReadPlanInput>(inner, pending)?;
+            let input = match input_from_call::<ReadPlanInput>(pending) {
+                Ok(input) => input,
+                Err(error) => return submit_input_decode_error(inner, pending, error).await,
+            };
             match read_plan(inner, input).await {
                 Ok(output) => submit_succeeded(inner, pending, output, Vec::new()).await,
                 Err(error) => submit_rejection(inner, pending, error).await,
             }
         }
         UPDATE_PLAN_TOOL_NAME => {
-            let input = input_from_call::<UpdatePlanInput>(inner, pending)?;
+            let input = match input_from_call::<UpdatePlanInput>(pending) {
+                Ok(input) => input,
+                Err(error) => return submit_input_decode_error(inner, pending, error).await,
+            };
             match inner
                 .plan_controller
                 .update_from_tool(input, pending.id().clone())
@@ -66,7 +72,10 @@ async fn execute_scoped_plan_tool_call(
 ) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
     match pending.name().as_str() {
         READ_PLAN_TOOL_NAME => {
-            let input = input_from_call::<ReadPlanInput>(inner, pending)?;
+            let input = match input_from_call::<ReadPlanInput>(pending) {
+                Ok(input) => input,
+                Err(error) => return submit_input_decode_error(inner, pending, error).await,
+            };
             let snapshot = match scope.read().await {
                 Ok(snapshot) => snapshot,
                 Err(error) => return submit_controller_error(inner, pending, error).await,
@@ -91,7 +100,10 @@ async fn execute_scoped_plan_tool_call(
             }
         }
         UPDATE_PLAN_TOOL_NAME => {
-            let input = input_from_call::<SubagentPlanUpdateInput>(inner, pending)?;
+            let input = match input_from_call::<SubagentPlanUpdateInput>(pending) {
+                Ok(input) => input,
+                Err(error) => return submit_input_decode_error(inner, pending, error).await,
+            };
             match scope.update_plan(input).await {
                 Ok(output) => submit_succeeded(inner, pending, output, Vec::new()).await,
                 Err(error) => submit_controller_error(inner, pending, error).await,
@@ -305,18 +317,101 @@ fn subtree_ids(
     Ok(selected_ids)
 }
 
-fn input_from_call<T>(inner: &RuntimeInner, pending: &PendingToolCall) -> Result<T, RuntimeError>
+struct PlanInputDecodeError {
+    path: String,
+    message: String,
+}
+
+fn input_from_call<T>(pending: &PendingToolCall) -> Result<T, PlanInputDecodeError>
 where
     T: DeserializeOwned,
 {
     serde_json::from_value(serde_json::Value::Object(
         pending.arguments().as_object().clone(),
     ))
-    .map_err(|error| RuntimeError::ToolExecutionFailed {
-        session_id: inner.session_id.clone(),
-        call_id: pending.id().clone(),
-        message: format!("validated plan tool input could not be decoded: {error}"),
+    .map_err(|error| PlanInputDecodeError {
+        path: input_decode_path(pending),
+        message: error.to_string(),
     })
+}
+
+async fn submit_input_decode_error(
+    inner: &RuntimeInner,
+    pending: &PendingToolCall,
+    error: PlanInputDecodeError,
+) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
+    submit_rejection(
+        inner,
+        pending,
+        input_decode_rejection(inner, pending, error),
+    )
+    .await
+}
+
+fn input_decode_rejection(
+    inner: &RuntimeInner,
+    pending: &PendingToolCall,
+    error: PlanInputDecodeError,
+) -> PlanToolRejection {
+    let PlanInputDecodeError {
+        path,
+        message: detail,
+    } = error;
+    let mut message = format!(
+        "could not decode {} input at `{path}`: {detail}",
+        pending.name(),
+    );
+    let recovery = if pending.name().as_str() == UPDATE_PLAN_TOOL_NAME {
+        let scoped = inner.plan_subagent_scope.is_some();
+        if path == "change.type" {
+            if scoped {
+                message.push_str(
+                    ". `change.type` is required inside the change object; valid values are define_children and replace_subtree",
+                );
+            } else {
+                message.push_str(
+                    ". `change.type` is required inside the change object; valid values are define_plan, replace_subtree, and use_current_plan",
+                );
+            }
+        }
+        if scoped {
+            serde_json::json!({
+                "next_tool": UPDATE_PLAN_TOOL_NAME,
+                "instruction": "Retry with valid JSON. The change field must be an object whose nested type is one of define_children or replace_subtree; do not put type on the outer update object.",
+                "required_field": "change.type",
+                "valid_types": ["define_children", "replace_subtree"],
+            })
+        } else {
+            serde_json::json!({
+                "next_tool": UPDATE_PLAN_TOOL_NAME,
+                "instruction": "Retry with valid JSON. The change field must be an object whose nested type is one of define_plan, replace_subtree, or use_current_plan; do not put type on the outer update object.",
+                "required_field": "change.type",
+                "example": crate::plan::update_plan_define_example(),
+            })
+        }
+    } else {
+        serde_json::json!({
+            "next_tool": pending.name().as_str(),
+            "instruction": "Retry this tool with corrected JSON arguments using the exact field names and types from its schema.",
+        })
+    };
+
+    PlanToolRejection::new("plan_input_invalid", message).with_recovery(recovery)
+}
+
+fn input_decode_path(pending: &PendingToolCall) -> String {
+    if pending.name().as_str() == UPDATE_PLAN_TOOL_NAME
+        && pending
+            .arguments()
+            .as_object()
+            .get("change")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|change| !change.contains_key("type"))
+    {
+        return "change.type".to_owned();
+    }
+
+    "input".to_owned()
 }
 
 async fn submit_succeeded<T>(
@@ -489,6 +584,15 @@ fn plan_error_rejection(error: &PlanError) -> PlanToolRejection {
         PlanError::StalePlanRevision { .. } | PlanError::StaleNodeRevision { .. } => {
             read_plan_recovery()
         }
+        PlanError::ActiveSubagentOwnsSubtree { .. } => serde_json::json!({
+            "actor": "coordinator",
+            "next_action": "wait_or_cancel_and_create_new_assignment",
+            "instruction": "This node or subtree is owned by an active linked child. Do not retry the replacement. Continue unrelated work, wait for the child to reach a terminal result, or cancel the child and create a new assignment; do not rewrite this node after cancellation because terminal link history is preserved.",
+        }),
+        PlanError::NestedPlanInput => serde_json::json!({
+            "next_tool": "update_plan",
+            "instruction": "Keep coordinator-authored plan input shallow: provide the root and direct children only. Do not nest children under a child node; a linked child owns deeper decomposition in its scoped Plan.",
+        }),
         PlanError::SubagentScopeViolation { .. } => serde_json::json!({
             "next_action": "use_bound_subagent_scope",
             "instruction": "The child scope cannot perform this operation outside its active binding. Use the binding's subtree for scoped reads and updates, and do not target nodes or links outside that subtree.",
@@ -537,6 +641,7 @@ fn plan_error_code(error: &PlanError) -> &'static str {
         PlanError::InvalidScopePath { .. } => "plan_invalid_scope_path",
         PlanError::CapabilityEnvelopeExceeded { .. } => "plan_capability_envelope_exceeded",
         PlanError::NodeNotMutable { .. } => "plan_node_not_mutable",
+        PlanError::ActiveSubagentOwnsSubtree { .. } => "plan_active_subagent_owns_subtree",
         PlanError::ReplacementRootIdentity { .. } => "plan_invalid_replacement_root",
         PlanError::InvalidConcurrencyHint { .. } => "plan_invalid_concurrency_hint",
         PlanError::InvalidPersistedCounters => "plan_persisted_state_invalid",
@@ -558,6 +663,7 @@ fn plan_error_code(error: &PlanError) -> &'static str {
         PlanError::EmptyDecomposition | PlanError::NestedDecomposition => {
             "plan_decomposition_invalid"
         }
+        PlanError::NestedPlanInput => "plan_nested_input",
         PlanError::UnknownDirective { .. } => "plan_directive_not_found",
         PlanError::InvalidDirectiveTransition { .. } => "plan_directive_transition_invalid",
         PlanError::StaleDirectiveTarget => "plan_directive_target_stale",
@@ -604,5 +710,24 @@ mod tests {
             .expect("recovery instruction should be text");
         assert!(instruction.contains("active binding"));
         assert!(instruction.contains("binding's subtree"));
+    }
+
+    #[test]
+    fn active_linked_subtree_recovery_tells_coordinator_to_wait_or_create_new_assignment() {
+        let node_id = merry_core::PlanNodeId::new("plan-node-active").expect("valid node id");
+        let rejection = plan_error_rejection(&PlanError::ActiveSubagentOwnsSubtree { node_id });
+
+        assert_eq!(rejection.code, "plan_active_subagent_owns_subtree");
+        assert_eq!(
+            rejection.recovery["next_action"],
+            "wait_or_cancel_and_create_new_assignment"
+        );
+        let instruction = rejection.recovery["instruction"]
+            .as_str()
+            .expect("recovery instruction should be text");
+        assert!(instruction.contains("active linked child"));
+        assert!(instruction.contains("wait"));
+        assert!(instruction.contains("cancel"));
+        assert!(instruction.contains("new assignment"));
     }
 }

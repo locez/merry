@@ -5,8 +5,9 @@ use merry_core::{
     PlanExecutorPolicy, PlanHarnessSnapshot, PlanId, PlanNodeId, PlanNodeResult, PlanNodeStatus,
     PlanPhase, PlanRecoveryPolicySnapshot, PlanResourcePolicySnapshot, PlanSnapshot, SkillId,
 };
-use schemars::JsonSchema;
+use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use super::{
@@ -93,7 +94,9 @@ pub struct ReportPlanProgressInput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PlanDecompositionInput {
+    #[schemars(description = "Short non-blank reason for adding direct child work.")]
     pub reason: String,
+    #[schemars(schema_with = "direct_child_nodes_schema")]
     pub children: Vec<PlanNodeInput>,
 }
 
@@ -101,7 +104,11 @@ pub struct PlanDecompositionInput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SubagentPlanUpdateInput {
+    #[schemars(description = "Short non-blank reason for this scoped authored update.")]
     pub reason: String,
+    #[schemars(
+        description = "Scoped tagged change. Define direct children or replace one mutable scoped node with its direct children."
+    )]
     pub change: SubagentPlanChangeInput,
 }
 
@@ -111,12 +118,23 @@ pub struct SubagentPlanUpdateInput {
 #[allow(clippy::large_enum_variant)]
 pub enum SubagentPlanChangeInput {
     DefineChildren {
+        #[schemars(
+            description = "Expected current active Plan revision. Use the exact revision returned by read_plan."
+        )]
         expected_plan_revision: u64,
+        #[schemars(schema_with = "direct_child_nodes_schema")]
         children: Vec<PlanNodeInput>,
     },
     ReplaceSubtree {
+        #[schemars(description = "Runtime-owned id of the mutable scoped node to replace.")]
         target_node_id: PlanNodeId,
+        #[schemars(
+            description = "Expected revision of target_node_id before applying the replacement."
+        )]
         expected_node_revision: u64,
+        #[schemars(
+            description = "Replacement node with direct children only; deeper work is authored by a later scoped update."
+        )]
         subtree: PlanNodeInput,
     },
 }
@@ -170,101 +188,148 @@ pub enum PlanNodeReferenceInput {
 
 /// Provider-visible authored node input. Effective runtime state is separate;
 /// an optional declared status can be supplied for the authored projection.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-#[schemars(
-    description = "One authored plan node. New nodes use client_key and omit id. Existing mutable nodes use id and omit client_key. Effective status, attempts, leases, progress, results, parent ids, and sibling order are runtime-owned. The optional declared status accepts pending, in_progress, completed, or failed.",
-    extend("oneOf" = [
-        {
-            "title": "New node",
-            "required": ["client_key"],
-            "properties": {
-                "id": {
-                    "type": "null",
-                    "description": "Runtime-owned node id to retain when replacing an existing mutable node. Omit it for a new node."
-                },
-                "client_key": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": MAX_CLIENT_KEY_BYTES,
-                    "description": "Unique request-local key for a new node. Provide it when id is omitted; omit it when retaining an existing node."
-                }
-            }
-        },
-        {
-            "title": "Existing mutable node",
-            "required": ["id"],
-            "properties": {
-                "id": {
-                    "type": "string",
-                    "description": "Runtime-owned node id to retain when replacing an existing mutable node. Omit it for a new node."
-                },
-                "client_key": {
-                    "type": "null",
-                    "description": "Unique request-local key for a new node. Provide it when id is omitted; omit it when retaining an existing node."
-                }
-            }
-        }
-    ])
-)]
+/// Provider input remains intentionally permissive about identity. Runtime
+/// validation enforces exactly one of `id` and `client_key`, while the schema
+/// explains the two forms without forcing the model through an identity
+/// `oneOf` branch.
 pub struct PlanNodeInput {
     /// Runtime-owned id from a prior plan result or read. Set this only when
     /// retaining an existing mutable node; otherwise omit it or use null.
-    #[schemars(
-        description = "Runtime-owned node id to retain when replacing an existing mutable node. Omit it for a new node."
-    )]
     pub id: Option<PlanNodeId>,
     /// Unique request-local key for a new node. Set this for every new node and
     /// omit `id`; the update result maps this key to its runtime-owned id.
-    #[schemars(
-        description = "Unique request-local key for a new node. Provide it when id is omitted; omit it when retaining an existing node.",
-        length(min = 1, max = MAX_CLIENT_KEY_BYTES)
-    )]
     pub client_key: Option<String>,
     /// Concrete task objective for this node.
+    pub objective: String,
+    /// Observable checks that determine whether this node is complete.
+    pub acceptance: Vec<String>,
+    /// Optional authored declaration. When omitted for an existing node, the
+    /// current declared status is retained.
+    #[serde(default)]
+    pub status: Option<PlanNodeStatus>,
+    /// Runtime-owned execution preference retained for internal snapshots. It
+    /// is not provider-authored and is omitted from the generated schema.
+    #[serde(default, skip_serializing)]
+    pub executor_policy: PlanExecutorPolicy,
+    /// Runtime-owned capability data retained for internal snapshots.
+    #[serde(default, skip_serializing)]
+    pub harness: PlanHarnessSnapshot,
+    /// Runtime-owned retry policy retained for internal snapshots.
+    #[serde(default, skip_serializing)]
+    pub recovery_policy: PlanRecoveryPolicySnapshot,
+    /// Dependencies expressed as existing runtime ids or client keys declared in
+    /// the same update request.
+    #[serde(default)]
+    pub depends_on: Vec<PlanNodeReferenceInput>,
+    /// Direct children authored as part of the Plan tree. Provider-visible
+    /// schemas expose only one level; runtime-owned child scopes author deeper
+    /// work after an explicit binding.
+    #[serde(default)]
+    pub children: Vec<PlanNodeInput>,
+}
+
+#[allow(dead_code)]
+#[derive(JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(
+    description = "One authored plan node with at most one level of direct children. Provide exactly one identity field: client_key for a new node or id for an existing mutable node. Runtime validates this choice; effective status, execution state, links, attempts, leases, progress, results, parent ids, and sibling order are runtime-owned."
+)]
+struct PlanNodeInputSchema {
+    #[schemars(
+        description = "Runtime-owned node id for retaining an existing mutable node. Omit it for a new node; provide exactly one of id or client_key."
+    )]
+    id: Option<PlanNodeId>,
+    #[schemars(
+        description = "Stable request-local key for a new node. Omit it when retaining an existing node by id; provide exactly one of id or client_key.",
+        length(min = 1, max = MAX_CLIENT_KEY_BYTES)
+    )]
+    client_key: Option<String>,
     #[schemars(
         description = "Concrete objective for this node. It must be non-blank and at most 2048 UTF-8 bytes.",
         length(min = 1, max = MAX_OBJECTIVE_BYTES)
     )]
-    pub objective: String,
-    /// Observable checks that determine whether this node is complete.
+    objective: String,
     #[schemars(
         description = "Observable completion checks for this node. Provide at most 16 checks; each must be non-blank and at most 1024 UTF-8 bytes.",
         length(max = MAX_ACCEPTANCE_ITEMS),
         inner(length(min = 1, max = MAX_ACCEPTANCE_BYTES))
     )]
-    pub acceptance: Vec<String>,
-    /// Optional authored declaration. When omitted for an existing node, the
-    /// current declared status is retained.
-    #[serde(default)]
-    #[schemars(schema_with = "authored_status_schema")]
-    pub status: Option<PlanNodeStatus>,
-    /// Runtime-owned execution preference retained for internal snapshots. It
-    /// is not provider-authored and is omitted from the generated schema.
-    #[serde(default, skip_serializing)]
-    #[schemars(skip)]
-    pub executor_policy: PlanExecutorPolicy,
-    /// Runtime-owned capability data retained for internal snapshots.
-    #[serde(default, skip_serializing)]
-    #[schemars(skip)]
-    pub harness: PlanHarnessSnapshot,
-    /// Runtime-owned retry policy retained for internal snapshots.
-    #[serde(default, skip_serializing)]
-    #[schemars(skip)]
-    pub recovery_policy: PlanRecoveryPolicySnapshot,
-    /// Dependencies expressed as existing runtime ids or client keys declared in
-    /// the same update request.
+    acceptance: Vec<String>,
     #[schemars(
-        description = "Dependencies expressed as runtime node ids or client keys declared in this update. Provide at most 16 dependencies.",
+        description = "Optional authored status for local or unbound work. Runtime-owned linked execution status is derived separately.",
+        schema_with = "authored_status_schema"
+    )]
+    #[serde(default)]
+    status: Option<PlanNodeStatus>,
+    #[schemars(
+        description = "Dependencies expressed as existing runtime ids or client keys declared in this update. Provide at most 16 dependencies.",
         length(max = MAX_DEPENDENCIES)
     )]
-    pub depends_on: Vec<PlanNodeReferenceInput>,
-    /// Recursive direct children authored as part of the Plan tree.
+    #[serde(default)]
+    depends_on: Vec<PlanNodeReferenceInput>,
     #[schemars(
-        description = "Direct child nodes in the plan tree. Provide at most 16 children per node.",
+        description = "Direct child nodes only. Each child is a leaf in this request and must not contain its own children.",
         length(max = MAX_DIRECT_CHILDREN)
     )]
-    pub children: Vec<PlanNodeInput>,
+    #[serde(default)]
+    children: Vec<PlanNodeShallowSchema>,
+}
+
+#[allow(dead_code)]
+#[derive(JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(
+    description = "A direct child authored below one plan node. It cannot contain nested children; a linked child scope owns any deeper decomposition."
+)]
+struct PlanNodeShallowSchema {
+    #[schemars(
+        description = "Runtime-owned node id for retaining an existing mutable node. Omit it for a new node; provide exactly one of id or client_key."
+    )]
+    id: Option<PlanNodeId>,
+    #[schemars(
+        description = "Stable request-local key for a new node. Omit it when retaining an existing node by id; provide exactly one of id or client_key.",
+        length(min = 1, max = MAX_CLIENT_KEY_BYTES)
+    )]
+    client_key: Option<String>,
+    #[schemars(
+        description = "Concrete objective for this node. It must be non-blank and at most 2048 UTF-8 bytes.",
+        length(min = 1, max = MAX_OBJECTIVE_BYTES)
+    )]
+    objective: String,
+    #[schemars(
+        description = "Observable completion checks for this node. Provide at most 16 checks; each must be non-blank and at most 1024 UTF-8 bytes.",
+        length(max = MAX_ACCEPTANCE_ITEMS),
+        inner(length(min = 1, max = MAX_ACCEPTANCE_BYTES))
+    )]
+    acceptance: Vec<String>,
+    #[schemars(
+        description = "Optional authored status for local or unbound work. Runtime-owned linked execution status is derived separately.",
+        schema_with = "authored_status_schema"
+    )]
+    #[serde(default)]
+    status: Option<PlanNodeStatus>,
+    #[schemars(
+        description = "Dependencies expressed as existing runtime ids or client keys declared in this update. Provide at most 16 dependencies.",
+        length(max = MAX_DEPENDENCIES)
+    )]
+    #[serde(default)]
+    depends_on: Vec<PlanNodeReferenceInput>,
+}
+
+impl JsonSchema for PlanNodeInput {
+    fn schema_name() -> Cow<'static, str> {
+        "PlanNodeInput".into()
+    }
+
+    fn schema_id() -> Cow<'static, str> {
+        concat!(module_path!(), "::PlanNodeInput").into()
+    }
+
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        PlanNodeInputSchema::json_schema(generator)
+    }
 }
 
 fn authored_status_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
@@ -280,16 +345,30 @@ fn authored_status_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema
     .expect("static authored status schema is valid")
 }
 
+fn direct_child_nodes_schema(generator: &mut SchemaGenerator) -> Schema {
+    let mut schema = <Vec<PlanNodeShallowSchema>>::json_schema(generator);
+    schema.insert(
+        "description".into(),
+        "Direct child nodes only. Each node must be a leaf in this request; deeper decomposition belongs to an explicitly linked child scope.".into(),
+    );
+    schema
+}
+
 /// Stable tagged change shape for complete planning and execution-time revision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+#[schemars(
+    description = "Tagged change object. The required nested string discriminator is type; valid coordinator values are define_plan, replace_subtree, and use_current_plan."
+)]
 pub enum PlanChangeInput {
     DefinePlan {
         #[schemars(
             description = "Expected current plan revision. Use 0 when defining the first plan."
         )]
         expected_plan_revision: u64,
-        #[schemars(description = "Root node of the complete authored plan tree.")]
+        #[schemars(
+            description = "Root authored node. Its direct children are the coordinator's work items; do not nest implementation descendants under delegated nodes."
+        )]
         root: PlanNodeInput,
     },
     ReplaceSubtree {
@@ -301,7 +380,9 @@ pub enum PlanChangeInput {
             description = "Expected revision of target_node_id before applying the replacement."
         )]
         expected_node_revision: u64,
-        #[schemars(description = "Replacement subtree. Its root must retain target_node_id.")]
+        #[schemars(
+            description = "Replacement root retaining target_node_id, with direct children only. Deeper work belongs to the linked child scope."
+        )]
         subtree: PlanNodeInput,
     },
     /// Preserve the exact current tree while changing lifecycle intent, such as
@@ -318,7 +399,7 @@ pub enum PlanChangeInput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[schemars(
-    description = "Create or update the authored Plan tree. The first valid update creates the Plan. New nodes use client_key and omit id; existing nodes use id and omit client_key. Runtime-owned execution state, capabilities, attempts, leases, progress, and results are not authored here.",
+    description = "Create or update the authored Plan tree. The first valid update creates the Plan. New nodes use client_key and omit id; existing nodes use id and omit client_key. Runtime-owned execution state, capabilities, attempts, leases, progress, and results are not authored here. The nested change.type discriminator is required.",
     example = update_plan_define_example()
 )]
 pub struct UpdatePlanInput {
@@ -350,27 +431,32 @@ pub struct UpdatePlanInput {
     /// Tagged JSON object with `type: define_plan`, `type: replace_subtree`, or
     /// `type: use_current_plan`. Never pass this field as a string.
     #[schemars(
-        description = "Tagged change object with type define_plan, replace_subtree, or use_current_plan."
+        description = "Required tagged change object. It must contain a nested string field type inside the change object; the field example shows a complete valid define_plan object. Valid values are define_plan, replace_subtree, and use_current_plan; do not omit type, put it on the outer update object, or pass change as a string.",
+        example = update_plan_define_change_example()
     )]
     pub change: PlanChangeInput,
 }
 
-fn update_plan_define_example() -> serde_json::Value {
+pub(crate) fn update_plan_define_example() -> serde_json::Value {
     serde_json::json!({
         "reason": "The user asked to implement the change using this plan",
         "execution_intent": "execute_if_authorized",
         "coordinator_node_id": null,
         "max_concurrency_hint": 2,
-        "change": {
-            "type": "define_plan",
-            "expected_plan_revision": 0,
-            "root": {
-                "client_key": "root",
-                "objective": "Implement the requested change",
-                "acceptance": ["Focused tests pass"],
-                "depends_on": [],
-                "children": []
-            }
+        "change": update_plan_define_change_example()
+    })
+}
+
+fn update_plan_define_change_example() -> serde_json::Value {
+    serde_json::json!({
+        "type": "define_plan",
+        "expected_plan_revision": 0,
+        "root": {
+            "client_key": "root",
+            "objective": "Implement the requested change",
+            "acceptance": ["Focused tests pass"],
+            "depends_on": [],
+            "children": []
         }
     })
 }

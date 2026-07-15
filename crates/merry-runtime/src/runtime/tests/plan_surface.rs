@@ -288,6 +288,75 @@ async fn unbound_plan_call_keeps_the_runtime_role_error() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn invalid_plan_input_is_recorded_with_nested_decode_guidance() {
+    let runtime = Runtime::builder(session_id("plan-invalid-input-guidance"))
+        .coordinator_plan_tools()
+        .build()
+        .expect("runtime builds");
+    let call = pending_call(
+        "call-invalid-plan-input",
+        "update_plan",
+        json!({
+            "reason": "define the requested work",
+            "execution_intent": "continue_planning",
+            "coordinator_node_id": null,
+            "max_concurrency_hint": null,
+            "change": {
+                "expected_plan_revision": 0,
+                "root": {
+                    "client_key": "root",
+                    "objective": "Complete the requested work",
+                    "acceptance": ["the work is verified"],
+                    "depends_on": [],
+                    "children": []
+                }
+            }
+        }),
+    );
+    record_pending(&runtime, call.clone()).await;
+
+    let events = runtime
+        .execute_tool_call(call.id(), ToolExecutionContext::default())
+        .await
+        .expect("invalid plan input should resolve as a failed tool result");
+    let result = events
+        .iter()
+        .find_map(|event| match &event.payload {
+            RuntimeJournalPayload::ToolCallResolved { result } => Some(result),
+            _ => None,
+        })
+        .expect("invalid plan input should record a tool result");
+    assert_eq!(result.status(), ToolCallResultStatus::Failed);
+    assert_eq!(
+        result
+            .diagnostic()
+            .expect("invalid plan input should include a diagnostic")
+            .code(),
+        "plan_input_invalid"
+    );
+
+    let content = runtime
+        .read_artifact_content(result.artifact().id())
+        .await
+        .expect("invalid plan input artifact should be readable");
+    let payload: serde_json::Value = serde_json::from_str(
+        content
+            .as_text()
+            .expect("invalid plan input result should be textual JSON"),
+    )
+    .expect("invalid plan input result should parse as JSON");
+    let message = payload["error"]["message"]
+        .as_str()
+        .expect("invalid plan input should include an error message");
+    assert!(message.contains("change.type"));
+    assert!(message.contains("inside the change object"));
+    assert_eq!(
+        payload["recovery"]["example"]["change"]["type"],
+        "define_plan"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn active_plan_does_not_restrict_main_registered_tools() {
     let runtime = Runtime::builder(session_id("plan-main-tool-admission"))
         .coordinator_plan_tools()

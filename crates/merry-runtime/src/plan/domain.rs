@@ -108,6 +108,10 @@ pub enum PlanError {
         node_id: PlanNodeId,
         status: PlanNodeStatus,
     },
+    #[error(
+        "plan node {node_id} or its subtree is owned by an active linked subagent; wait for a terminal result or cancel it and create a new assignment"
+    )]
+    ActiveSubagentOwnsSubtree { node_id: PlanNodeId },
     #[error("replacement root must retain target node id {target_node_id}")]
     ReplacementRootIdentity { target_node_id: PlanNodeId },
     #[error("subtree replacement would leave incoming dependency on superseded node {node_id}")]
@@ -164,6 +168,10 @@ pub enum PlanError {
     EmptyDecomposition,
     #[error("attempt decomposition children must be direct leaves")]
     NestedDecomposition,
+    #[error(
+        "authored plan input may contain only one root and its direct children; deeper work belongs to the linked child scope"
+    )]
+    NestedPlanInput,
     #[error("directive {directive_id} was not found for the current attempt")]
     UnknownDirective {
         directive_id: merry_core::PlanDirectiveId,
@@ -1185,6 +1193,13 @@ impl<'a> TreeBuilder<'a> {
                 maximum: validation::MAX_DIRECT_CHILDREN,
             });
         }
+        if input
+            .children
+            .iter()
+            .any(|child| !child.children.is_empty())
+        {
+            return Err(PlanError::NestedPlanInput);
+        }
         if let Some(status) = input.status {
             validate_authored_status(status)?;
         }
@@ -1301,6 +1316,9 @@ fn validate_scoped_inputs(
     replacement_target: Option<&PlanNodeId>,
     scope_root_id: &PlanNodeId,
 ) -> Result<(), PlanError> {
+    if replacement_target.is_none() && inputs.iter().any(|input| !input.children.is_empty()) {
+        return Err(PlanError::NestedPlanInput);
+    }
     let mut local_client_keys = BTreeSet::new();
     collect_scoped_client_keys(inputs, &mut local_client_keys)?;
     let existing_client_keys = existing_client_keys(existing);
@@ -1550,6 +1568,15 @@ fn resolve_all_dependencies(
 }
 
 fn ensure_mutable(node: &PlanNodeSnapshot) -> Result<(), PlanError> {
+    if node
+        .links
+        .iter()
+        .any(|link| link.status == PlanLinkStatus::Active && link.superseded_by.is_none())
+    {
+        return Err(PlanError::ActiveSubagentOwnsSubtree {
+            node_id: node.id.clone(),
+        });
+    }
     if node.status != PlanNodeStatus::Pending {
         return Err(PlanError::NodeNotMutable {
             node_id: node.id.clone(),

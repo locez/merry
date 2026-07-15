@@ -285,10 +285,7 @@ mod tests {
         let (controller, _events) = controller(None);
         let (scope, owned_id, sibling_id) = linked_scope(&controller).await;
 
-        let mut child = node("child", "Child-owned work");
-        child
-            .children
-            .push(node("grandchild", "Nested child-owned work"));
+        let child = node("child", "Child-owned work");
         let output = scope
             .update(SubagentPlanUpdateInput {
                 reason: "decompose the bound work item".to_owned(),

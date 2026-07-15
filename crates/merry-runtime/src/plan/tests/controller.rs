@@ -1,8 +1,8 @@
 use crate::{
     FileSessionStore,
     plan::{
-        BeginPlanInput, PlanChangeInput, PlanController, PlanControllerError, PlanExecutionIntent,
-        PlanNodeInput, ReportPlanAttemptInput, UpdatePlanInput,
+        BeginPlanInput, PlanChangeInput, PlanController, PlanControllerError, PlanError,
+        PlanExecutionIntent, PlanNodeInput, ReportPlanAttemptInput, UpdatePlanInput,
         controller::PlanControllerEventReceiver, execution::PlanAttemptActor,
     },
     session::SessionState,
@@ -125,6 +125,170 @@ async fn linked_subagent_lifecycle_updates_plan_execution_summary() {
         node.unwrap().links.iter().any(|link| {
             link.binding_id == binding_id && link.status == PlanLinkStatus::Completed
         })
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn coordinator_cannot_replace_an_active_linked_node_or_its_ancestor() {
+    let (controller, _events) = controller(None);
+    controller
+        .begin(input("protect active linked ownership"))
+        .await
+        .expect("begin succeeds");
+    let initial = controller
+        .update(UpdatePlanInput {
+            reason: "define a delegated branch and a local sibling".to_owned(),
+            execution_intent: PlanExecutionIntent::ContinuePlanning,
+            coordinator_node_id: None,
+            max_concurrency_hint: None,
+            change: PlanChangeInput::DefinePlan {
+                expected_plan_revision: 0,
+                root: plan_root(vec![plan_leaf("delegated"), plan_leaf("local")]),
+            },
+        })
+        .await
+        .expect("initial plan succeeds");
+    let delegated_id = initial.client_key_ids["delegated"].clone();
+    let root_id = initial.snapshot.root_node_id.clone().expect("root id");
+    let binding_id = controller
+        .bind_subagent(
+            "delegated".to_owned(),
+            SubagentId::new("agent-guard").expect("valid agent id"),
+            SubagentTaskId::new("task-guard").expect("valid task id"),
+            10,
+        )
+        .await
+        .expect("binding succeeds")
+        .binding_id;
+
+    let delegated = initial
+        .snapshot
+        .nodes
+        .iter()
+        .find(|node| node.id == delegated_id)
+        .expect("delegated node exists");
+    let error = controller
+        .update(UpdatePlanInput {
+            reason: "attempt to rewrite active delegated work".to_owned(),
+            execution_intent: PlanExecutionIntent::ContinuePlanning,
+            coordinator_node_id: None,
+            max_concurrency_hint: None,
+            change: PlanChangeInput::ReplaceSubtree {
+                target_node_id: delegated_id.clone(),
+                expected_node_revision: delegated.updated_revision,
+                subtree: replacement_for(delegated, "Rewritten delegated work"),
+            },
+        })
+        .await
+        .expect_err("active linked node must be protected");
+    assert!(matches!(
+        error,
+        PlanControllerError::Plan {
+            source: PlanError::ActiveSubagentOwnsSubtree { node_id }
+        } if node_id == delegated_id
+    ));
+
+    let root = initial
+        .snapshot
+        .nodes
+        .iter()
+        .find(|node| node.id == root_id)
+        .expect("root exists");
+    let error = controller
+        .update(UpdatePlanInput {
+            reason: "attempt to replace the whole tree while child is active".to_owned(),
+            execution_intent: PlanExecutionIntent::ContinuePlanning,
+            coordinator_node_id: None,
+            max_concurrency_hint: None,
+            change: PlanChangeInput::ReplaceSubtree {
+                target_node_id: root_id,
+                expected_node_revision: root.updated_revision,
+                subtree: replacement_for(root, "Rewritten whole plan"),
+            },
+        })
+        .await
+        .expect_err("ancestor replacement must be protected");
+    assert!(matches!(
+        error,
+        PlanControllerError::Plan {
+            source: PlanError::ActiveSubagentOwnsSubtree { .. }
+        }
+    ));
+
+    let linked = controller
+        .snapshot()
+        .await
+        .expect("snapshot reads")
+        .expect("active plan exists")
+        .nodes
+        .into_iter()
+        .find(|node| node.id == delegated_id)
+        .expect("linked node remains");
+    assert!(linked.links.iter().any(|snapshot| {
+        snapshot.binding_id == binding_id && snapshot.status == PlanLinkStatus::Active
+    }));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn coordinator_can_revise_an_unrelated_sibling_while_linked_child_is_active() {
+    let (controller, _events) = controller(None);
+    controller
+        .begin(input("allow unrelated work during delegation"))
+        .await
+        .expect("begin succeeds");
+    let initial = controller
+        .update(UpdatePlanInput {
+            reason: "define delegated and local work".to_owned(),
+            execution_intent: PlanExecutionIntent::ContinuePlanning,
+            coordinator_node_id: None,
+            max_concurrency_hint: None,
+            change: PlanChangeInput::DefinePlan {
+                expected_plan_revision: 0,
+                root: plan_root(vec![plan_leaf("delegated"), plan_leaf("local")]),
+            },
+        })
+        .await
+        .expect("initial plan succeeds");
+    controller
+        .bind_subagent(
+            "delegated".to_owned(),
+            SubagentId::new("agent-sibling").expect("valid agent id"),
+            SubagentTaskId::new("task-sibling").expect("valid task id"),
+            10,
+        )
+        .await
+        .expect("binding succeeds");
+
+    let local_id = initial.client_key_ids["local"].clone();
+    let local = initial
+        .snapshot
+        .nodes
+        .iter()
+        .find(|node| node.id == local_id)
+        .expect("local node exists");
+    let output = controller
+        .update(UpdatePlanInput {
+            reason: "revise only local work".to_owned(),
+            execution_intent: PlanExecutionIntent::ContinuePlanning,
+            coordinator_node_id: None,
+            max_concurrency_hint: None,
+            change: PlanChangeInput::ReplaceSubtree {
+                target_node_id: local_id.clone(),
+                expected_node_revision: local.updated_revision,
+                subtree: replacement_for(local, "Revised local work"),
+            },
+        })
+        .await
+        .expect("unrelated local branch remains mutable");
+    assert_eq!(
+        output
+            .snapshot
+            .nodes
+            .iter()
+            .find(|node| node.id == local_id)
+            .expect("revised local node remains")
+            .objective,
+        "Revised local work"
     );
 }
 
@@ -419,6 +583,26 @@ fn plan_root(children: Vec<PlanNodeInput>) -> PlanNodeInput {
         recovery_policy: PlanRecoveryPolicySnapshot::default(),
         depends_on: Vec::new(),
         children,
+    }
+}
+
+fn replacement_for(node: &merry_core::PlanNodeSnapshot, objective: &str) -> PlanNodeInput {
+    PlanNodeInput {
+        id: Some(node.id.clone()),
+        client_key: None,
+        objective: objective.to_owned(),
+        acceptance: node.acceptance.clone(),
+        status: None,
+        executor_policy: node.executor_policy,
+        harness: node.harness.clone(),
+        recovery_policy: node.recovery_policy.clone(),
+        depends_on: node
+            .depends_on
+            .iter()
+            .cloned()
+            .map(|id| crate::plan::PlanNodeReferenceInput::Id { id })
+            .collect(),
+        children: Vec::new(),
     }
 }
 

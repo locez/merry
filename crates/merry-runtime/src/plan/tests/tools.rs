@@ -2,8 +2,9 @@ use crate::plan::{
     PlanChangeInput, PlanExecutionIntent, PlanNodeInput, UpdatePlanInput,
     projection::{
         CHILD_LINKED_SCOPE_GUIDANCE, CHILD_SCOPED_UPDATE_GUIDANCE,
-        COORDINATOR_LINKED_SUMMARIES_GUIDANCE, COORDINATOR_ROOT_SCOPE_GUIDANCE,
-        LINKED_CHILD_DECOMPOSITION_GUIDANCE, RUNTIME_OWNED_EXECUTION_GUIDANCE,
+        COORDINATOR_ACTIVE_LINK_MUTATION_GUIDANCE, COORDINATOR_LINKED_SUMMARIES_GUIDANCE,
+        COORDINATOR_ROOT_SCOPE_GUIDANCE, LINKED_CHILD_DECOMPOSITION_GUIDANCE,
+        RUNTIME_OWNED_EXECUTION_GUIDANCE,
     },
     tools::{
         READ_PLAN_TOOL_NAME, UPDATE_PLAN_TOOL_NAME, coordinator_plan_registered_tools,
@@ -70,7 +71,43 @@ fn linked_child_plan_tools_are_scoped_and_unbound_children_have_none() {
 }
 
 #[test]
-fn update_plan_schema_rejects_missing_or_conflicting_node_identity() {
+fn scoped_child_schema_accepts_direct_children_but_rejects_nested_input() {
+    let tool = scoped_child_plan_registered_tools()
+        .expect("scoped child tools build")
+        .into_iter()
+        .find(|tool| tool.spec().name().as_str() == UPDATE_PLAN_TOOL_NAME)
+        .expect("scoped update tool is registered");
+    let validator = jsonschema::validator_for(tool.spec().input_schema().as_schema().as_value())
+        .expect("scoped update schema compiles");
+    let direct = json!({
+        "reason": "decompose the linked task",
+        "change": {
+            "type": "define_children",
+            "expected_plan_revision": 1,
+            "children": [{
+                "client_key": "child",
+                "objective": "Complete one part",
+                "acceptance": []
+            }]
+        }
+    });
+    assert!(
+        validator.is_valid(&direct),
+        "direct child input should validate: {:?}",
+        validator.iter_errors(&direct).collect::<Vec<_>>()
+    );
+
+    let mut nested = direct.clone();
+    nested["change"]["children"][0]["children"] = json!([{
+        "client_key": "grandchild",
+        "objective": "Complete a deeper part",
+        "acceptance": []
+    }]);
+    assert!(!validator.is_valid(&nested));
+}
+
+#[test]
+fn update_plan_schema_documents_identity_rules_for_runtime_validation() {
     let tool = update_plan_tool();
     let validator = jsonschema::validator_for(tool.input_schema().as_schema().as_value())
         .expect("update_plan schema compiles");
@@ -82,16 +119,40 @@ fn update_plan_schema_rejects_missing_or_conflicting_node_identity() {
         .and_then(Value::as_object_mut)
         .expect("root is an object")
         .remove("client_key");
-    assert!(
-        !validator.is_valid(&missing),
-        "a new node without client_key must be rejected by the provider-visible schema"
-    );
+    assert!(validator.is_valid(&missing));
 
     let mut conflicting = valid_update_arguments();
     conflicting["change"]["root"]["id"] = json!("plan-node-1");
+    assert!(validator.is_valid(&conflicting));
+
+    let schema = serde_json::to_string(tool.input_schema()).expect("schema serializes");
+    assert!(schema.contains("exactly one identity field"));
+    assert!(schema.contains("Runtime validates"));
+    assert!(!schema.contains("oneOf constraint only enforces"));
+}
+
+#[test]
+fn update_plan_schema_is_shallow_for_authored_node_children() {
+    let schema = serde_json::to_value(update_plan_tool().input_schema())
+        .expect("update_plan schema serializes");
+    let node_schema = find_schema_with_description(
+        &schema,
+        "One authored plan node with at most one level of direct children",
+    )
+    .expect("authored node schema is present");
+
     assert!(
-        !validator.is_valid(&conflicting),
-        "a node with both id and client_key must be rejected by the provider-visible schema"
+        node_schema["oneOf"].is_null(),
+        "node identity must not use oneOf"
+    );
+    let child_schema = node_schema
+        .pointer("/properties/children/items")
+        .expect("authored node exposes direct children")
+        .clone();
+    let child_schema = resolve_schema_ref(&schema, &child_schema);
+    assert!(
+        child_schema.pointer("/properties/children").is_none(),
+        "direct child schema must be shallow"
     );
 }
 
@@ -179,6 +240,8 @@ fn update_plan_contract_explains_lifecycle_and_runtime_owned_state() {
     assert!(description.contains("actual activity"));
     assert!(description.contains("already executing"));
     assert!(description.contains("use_current_plan"));
+    assert!(description.contains("nested string field change.type"));
+    assert!(description.contains("Do not put type on the outer update object"));
 
     let schema = serde_json::to_string(tool.input_schema()).expect("schema serializes");
     assert!(schema.contains("first valid update creates the Plan"));
@@ -187,6 +250,44 @@ fn update_plan_contract_explains_lifecycle_and_runtime_owned_state() {
     assert!(schema.contains("already requested execution"));
     assert!(schema.contains("execute_if_authorized"));
     assert!(schema.contains("request_user_review"));
+}
+
+#[test]
+fn update_plan_schema_teaches_the_nested_change_discriminator() {
+    let tool = update_plan_tool();
+    let validator = jsonschema::validator_for(tool.input_schema().as_schema().as_value())
+        .expect("update_plan schema compiles");
+    assert!(validator.is_valid(&valid_update_arguments()));
+
+    let mut missing_type = valid_update_arguments();
+    missing_type["change"]
+        .as_object_mut()
+        .expect("change is an object")
+        .remove("type");
+    assert!(!validator.is_valid(&missing_type));
+
+    let mut outer_type = valid_update_arguments();
+    outer_type["type"] = json!("define_plan");
+    outer_type["change"]
+        .as_object_mut()
+        .expect("change is an object")
+        .remove("type");
+    assert!(!validator.is_valid(&outer_type));
+
+    let schema = serde_json::to_value(update_plan_tool().input_schema())
+        .expect("update_plan schema serializes");
+    let change_schema = &schema["properties"]["change"];
+    let description = change_schema["description"]
+        .as_str()
+        .expect("change schema has a description");
+
+    assert!(description.contains("inside the change object"));
+    assert_eq!(change_schema["examples"][0]["type"], "define_plan");
+    assert!(
+        schema
+            .to_string()
+            .contains("One authored plan node with at most one level of direct children")
+    );
 }
 
 #[test]
@@ -222,6 +323,7 @@ fn plan_tool_descriptions_explain_one_level_coordinator_and_child_contract() {
     let coordinator_update = coordinator_tools[1].spec().description();
     for description in [coordinator_read, coordinator_update] {
         for fragment in [
+            COORDINATOR_ACTIVE_LINK_MUTATION_GUIDANCE,
             COORDINATOR_ROOT_SCOPE_GUIDANCE,
             LINKED_CHILD_DECOMPOSITION_GUIDANCE,
             COORDINATOR_LINKED_SUMMARIES_GUIDANCE,
@@ -245,6 +347,9 @@ fn plan_tool_descriptions_explain_one_level_coordinator_and_child_contract() {
                 "child tool description must contain the shared fragment {fragment:?}"
             );
         }
+        if description.contains("Update authored children") {
+            assert!(description.contains("nested string field change.type"));
+        }
     }
 }
 
@@ -264,7 +369,7 @@ fn plan_tool(name: &str) -> ToolSpec {
 
 fn valid_update_arguments() -> Value {
     serde_json::to_value(UpdatePlanInput {
-        reason: "define a recursive plan".to_owned(),
+        reason: "define a shallow plan".to_owned(),
         execution_intent: PlanExecutionIntent::ContinuePlanning,
         coordinator_node_id: None,
         max_concurrency_hint: Some(2),
@@ -285,4 +390,32 @@ fn valid_update_arguments() -> Value {
         },
     })
     .expect("valid update input serializes")
+}
+
+fn find_schema_with_description<'a>(value: &'a Value, needle: &str) -> Option<&'a Value> {
+    if value
+        .get("description")
+        .and_then(Value::as_str)
+        .is_some_and(|description| description.contains(needle))
+    {
+        return Some(value);
+    }
+    match value {
+        Value::Array(values) => values
+            .iter()
+            .find_map(|value| find_schema_with_description(value, needle)),
+        Value::Object(values) => values
+            .values()
+            .find_map(|value| find_schema_with_description(value, needle)),
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => None,
+    }
+}
+
+fn resolve_schema_ref<'a>(root: &'a Value, schema: &'a Value) -> &'a Value {
+    let reference = schema
+        .get("$ref")
+        .and_then(Value::as_str)
+        .expect("schema reference is a JSON pointer");
+    root.pointer(reference.strip_prefix('#').expect("local schema reference"))
+        .expect("schema reference resolves")
 }
