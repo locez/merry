@@ -91,6 +91,7 @@ async fn coding_loop_task_smoke_patches_fixture_and_verifies_with_fake_runner() 
         AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
         Arc::new(runner.clone()),
         None,
+        None,
         fixture,
         merry_runtime::AutomaticCompactionConfig::default(),
     )
@@ -279,6 +280,7 @@ async fn coding_loop_smoke_respects_configured_log_path_and_keeps_payloads_out_o
         Arc::new(FakeProcessRunner::succeeding(
             "sensitive process stdout must not leak\n",
         )),
+        None,
         None,
         merry_runtime::AutomaticCompactionConfig::default(),
     )

@@ -51,6 +51,7 @@ pub(crate) async fn run_smoke(
         None,
         admission,
         backend.runner(),
+        Some(backend.clone()),
         Some(backend.permissioned_factory()),
         automatic_compaction_config(merry_config).map_err(unexpected)?,
     )?;
@@ -148,6 +149,7 @@ pub(crate) async fn run_live_smoke(
         admission,
         config,
         backend.runner(),
+        Some(backend.clone()),
         Some(backend.permissioned_factory()),
         CodingLoopLiveRuntimeOptions {
             automatic_compaction: automatic_compaction_config(merry_config).map_err(unexpected)?,
@@ -203,6 +205,7 @@ pub(crate) async fn run_task_smoke(
         None,
         admission,
         backend.runner(),
+        Some(backend.clone()),
         Some(backend.permissioned_factory()),
         fixture,
         automatic_compaction_config(merry_config).map_err(unexpected)?,
@@ -260,6 +263,7 @@ pub(crate) async fn run_task_live_smoke(
         admission,
         config,
         backend.runner(),
+        Some(backend.clone()),
         Some(backend.permissioned_factory()),
         CodingLoopLiveRuntimeOptions {
             automatic_compaction,
@@ -331,6 +335,7 @@ pub(crate) async fn run_subagent_live_smoke(
         admission,
         config,
         backend.runner(),
+        Some(backend.clone()),
         Some(backend.permissioned_factory()),
         CodingLoopLiveRuntimeOptions {
             automatic_compaction,

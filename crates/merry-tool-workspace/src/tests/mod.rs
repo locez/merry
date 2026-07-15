@@ -13,14 +13,19 @@ use crate::{
     },
     path::{open_file_for_read, validate_relative_path},
     read::{ReadFileExecutor, read_file_blocking},
-    schema::{SearchTextArgs, WorkspacePatchArgs},
+    schema::{
+        SearchTextArgs, WorkspacePatchArgs, list_dir_spec, read_file_spec, search_text_spec,
+        workspace_patch_spec,
+    },
     search::{SearchTextExecutor, search_text_blocking},
     trace::{
         TRACE_PATH_MAX_CHARS, bounded_trace_text, install_patch_test_after_write_hook,
         install_trace_start_test_hook,
     },
 };
-use merry_core::{PendingToolCall, ToolCallArguments, ToolCallId, ToolCallResultStatus, ToolName};
+use merry_core::{
+    PendingToolCall, ToolCallArguments, ToolCallId, ToolCallResultStatus, ToolName, ToolSpec,
+};
 use merry_runtime::{
     ActionExecutionEvidence, ArtifactContentKind, ToolConcurrency, ToolExecutionError,
 };
@@ -154,6 +159,28 @@ impl Drop for TempWorkspace {
 fn tools_for(root: &Path) -> ReadOnlyWorkspaceTools {
     ReadOnlyWorkspaceTools::new(WorkspaceToolsConfig::new(vec![root.to_path_buf()]))
         .expect("workspace tools should construct")
+}
+
+#[test]
+fn workspace_tool_schemas_describe_all_argument_fields() {
+    fn assert_fields(spec: ToolSpec, fields: &[&str]) {
+        let value = serde_json::to_value(spec.input_schema().as_schema())
+            .expect("workspace schema should serialize");
+        for field in fields {
+            assert!(
+                !value["properties"][*field]["description"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .is_empty(),
+                "missing workspace field description for {field}"
+            );
+        }
+    }
+
+    assert_fields(read_file_spec(), &["path"]);
+    assert_fields(list_dir_spec(), &["path"]);
+    assert_fields(search_text_spec(), &["query", "path", "max_matches"]);
+    assert_fields(workspace_patch_spec(), &["patch"]);
 }
 
 fn read_outcome(tools: &ReadOnlyWorkspaceTools, path: &str) -> ToolExecutionOutcome {

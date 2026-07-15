@@ -31,6 +31,7 @@ pub(crate) struct CodingLoopRuntimeOptions {
     pub(crate) automatic_compaction: AutomaticCompactionConfig,
     pub(crate) retry_policy: Option<ModelRetryPolicy>,
     pub(crate) context_compaction: Option<RuntimeRoleProviderConfig>,
+    pub(crate) process_backend: Option<ActionProcessBackend>,
     pub(crate) permissioned_process_runner_factory:
         Option<Arc<dyn PermissionedProcessRunnerFactory>>,
     pub(crate) extra_tools: Vec<RegisteredTool>,
@@ -83,6 +84,7 @@ pub(crate) struct HeadlessCodingRuntimeInput<'a> {
     pub(crate) provider: Arc<dyn ModelProvider>,
     pub(crate) model: ModelName,
     pub(crate) runner: Arc<dyn ProcessRunner>,
+    pub(crate) process_backend: Option<ActionProcessBackend>,
     pub(crate) permissioned_process_runner_factory: Arc<dyn PermissionedProcessRunnerFactory>,
     pub(crate) extra_tools: Vec<RegisteredTool>,
     pub(crate) allow_hidden_workspace_paths: bool,
@@ -152,6 +154,7 @@ fn build_coding_loop_runtime_from_headless_input(
             automatic_compaction: input.automatic_compaction,
             retry_policy: input.retry_policy,
             context_compaction: input.context_compaction,
+            process_backend: input.process_backend,
             permissioned_process_runner_factory: Some(input.permissioned_process_runner_factory),
             extra_tools: input.extra_tools,
             skill_roots: input.skill_roots,
@@ -194,13 +197,19 @@ fn configure_coding_loop_runtime_builder(
 ) -> Result<RuntimeBuilder, CodingRuntimeError> {
     let parent_session_id = merry_core::SessionId::new(session_id)?;
     let project_rules = load_root_project_rules(root)?;
-    let permissioned_factory = options
-        .permissioned_process_runner_factory
-        .unwrap_or_else(|| {
-            Arc::new(merry_runtime::StaticPermissionedProcessRunnerFactory::new(
-                Arc::clone(&runner),
-            ))
-        });
+    let process_backend = options.process_backend.unwrap_or_else(|| {
+        let permissioned_factory =
+            options
+                .permissioned_process_runner_factory
+                .unwrap_or_else(|| {
+                    Arc::new(merry_runtime::StaticPermissionedProcessRunnerFactory::new(
+                        Arc::clone(&runner),
+                    ))
+                });
+        ActionProcessBackend::from_parts(Arc::clone(&runner), permissioned_factory)
+    });
+    let runner = process_backend.runner();
+    let permissioned_factory = process_backend.permissioned_factory();
     let mut builder = Runtime::builder(parent_session_id.clone())
         .automatic_compaction(options.automatic_compaction)
         .coordinator_plan_tools()
@@ -254,7 +263,7 @@ fn configure_coding_loop_runtime_builder(
         admission,
         Arc::clone(&provider),
         model.clone(),
-        ActionProcessBackend::from_parts(Arc::clone(&runner), Arc::clone(&permissioned_factory)),
+        process_backend,
         project_rules.clone(),
         options.skill_roots.clone(),
         options.allow_hidden_workspace_paths,

@@ -14,7 +14,7 @@ use std::{
     io,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::Arc,
+    sync::{Arc, RwLock},
 };
 use tokio::io::{AsyncRead, AsyncReadExt};
 
@@ -76,6 +76,7 @@ pub struct BwrapProcessRunner {
     cwd_root: PathBuf,
     network_allowed: bool,
     path_rules: Vec<PathAccessRule>,
+    session_permissions: Option<BwrapSessionPermissions>,
     bwrap_program: PathBuf,
     configuration_error: Option<String>,
 }
@@ -88,6 +89,7 @@ impl BwrapProcessRunner {
             cwd_root: root.into(),
             network_allowed: false,
             path_rules: Vec::new(),
+            session_permissions: None,
             bwrap_program: PathBuf::from(BWRAP_PROGRAM),
             configuration_error: None,
         }
@@ -107,24 +109,120 @@ impl BwrapProcessRunner {
         self
     }
 
+    /// Shares session-scoped approved capabilities with the permissioned runner factory.
+    #[must_use]
+    pub fn with_session_permissions(mut self, permissions: BwrapSessionPermissions) -> Self {
+        self.session_permissions = Some(permissions);
+        self
+    }
+
     #[cfg(test)]
     fn with_bwrap_program(mut self, program: impl Into<PathBuf>) -> Self {
         self.bwrap_program = program.into();
         self
     }
+
+    fn plan_for(
+        &self,
+        intent: &ProcessActionIntent,
+    ) -> Result<BwrapProcessPlan, ProcessRunnerError> {
+        if let Some(message) = self.configuration_error.clone() {
+            return Err(ProcessRunnerError::infrastructure(message));
+        }
+        let session_snapshot = self
+            .session_permissions
+            .as_ref()
+            .map(BwrapSessionPermissions::snapshot)
+            .transpose()?;
+        let mut path_rules = self.path_rules.clone();
+        let mut network_allowed = self.network_allowed;
+        if let Some(snapshot) = session_snapshot {
+            path_rules.extend(snapshot.path_rules);
+            network_allowed |= snapshot.network_allowed;
+        }
+        path_rules = normalize_path_rules(path_rules);
+        Ok(bwrap_process_plan(
+            intent,
+            &self.cwd_root,
+            network_allowed,
+            &path_rules,
+            &self.bwrap_program,
+        ))
+    }
 }
 
-/// Builds a per-action bubblewrap runner from an approved permission request.
+/// Capabilities approved for the lifetime of one runtime session.
+///
+/// Each process action still starts a fresh bubblewrap instance, but every
+/// instance receives a snapshot of these approved capabilities. The store is
+/// deliberately constructed and shared by one runtime backend; it is not
+/// global and must not be reused across sessions.
+#[derive(Debug, Clone, Default)]
+pub struct BwrapSessionPermissions {
+    state: Arc<RwLock<BwrapSessionPermissionState>>,
+}
+
+#[derive(Debug, Default)]
+struct BwrapSessionPermissionState {
+    network_allowed: bool,
+    path_rules: Vec<PathAccessRule>,
+}
+
+#[derive(Debug, Clone)]
+struct BwrapSessionPermissionSnapshot {
+    network_allowed: bool,
+    path_rules: Vec<PathAccessRule>,
+}
+
+impl BwrapSessionPermissions {
+    /// Creates an empty session capability store.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn snapshot(&self) -> Result<BwrapSessionPermissionSnapshot, ProcessRunnerError> {
+        let state = self.state.read().map_err(|_| {
+            ProcessRunnerError::infrastructure(
+                "session permission state lock was poisoned while building a process sandbox",
+            )
+        })?;
+        Ok(BwrapSessionPermissionSnapshot {
+            network_allowed: state.network_allowed,
+            path_rules: state.path_rules.clone(),
+        })
+    }
+
+    fn grant(
+        &self,
+        path_rules: Vec<PathAccessRule>,
+        network_allowed: bool,
+    ) -> Result<(), ProcessRunnerError> {
+        let mut state = self.state.write().map_err(|_| {
+            ProcessRunnerError::infrastructure(
+                "session permission state lock was poisoned while recording an approved capability",
+            )
+        })?;
+        let mut combined = state.path_rules.clone();
+        combined.extend(path_rules);
+        state.path_rules = normalize_session_path_rules(combined);
+        state.network_allowed |= network_allowed;
+        Ok(())
+    }
+}
+
+/// Builds a bubblewrap runner from an approved permission request.
 ///
 /// Filesystem access stays governed by the configured workspace/root path
-/// rules. The first materialized permission capability is network: approved
-/// `network=true` requests run without `--unshare-net`; other requests remain
-/// network-isolated.
+/// rules and the session-scoped capabilities already approved by the runtime.
+/// Approved `network=true` requests also remain active for later actions in
+/// the same session; other sessions receive a fresh empty capability store.
 #[derive(Debug, Clone)]
 pub struct BwrapPermissionedProcessRunnerFactory {
     cwd_root: PathBuf,
     base_network_allowed: bool,
     path_rules: Vec<PathAccessRule>,
+    session_permissions: Option<BwrapSessionPermissions>,
     bwrap_program: PathBuf,
 }
 
@@ -136,6 +234,7 @@ impl BwrapPermissionedProcessRunnerFactory {
             cwd_root: root.into(),
             base_network_allowed: false,
             path_rules: Vec::new(),
+            session_permissions: None,
             bwrap_program: PathBuf::from(BWRAP_PROGRAM),
         }
     }
@@ -154,6 +253,13 @@ impl BwrapPermissionedProcessRunnerFactory {
         self
     }
 
+    /// Shares session-scoped approved capabilities with the ordinary process runner.
+    #[must_use]
+    pub fn with_session_permissions(mut self, permissions: BwrapSessionPermissions) -> Self {
+        self.session_permissions = Some(permissions);
+        self
+    }
+
     #[cfg(test)]
     fn with_bwrap_program(mut self, program: impl Into<PathBuf>) -> Self {
         self.bwrap_program = program.into();
@@ -165,20 +271,50 @@ impl BwrapPermissionedProcessRunnerFactory {
         request: &PermissionRequest,
     ) -> Result<Vec<PathAccessRule>, ProcessRunnerError> {
         let mut rules = self.path_rules.clone();
-        for capability in request.requested() {
-            let crate::RequestedCapability::Path(requested) = capability else {
-                continue;
-            };
-            let path = materialize_requested_path(&self.cwd_root, requested.path());
-            let effective_access =
-                effective_requested_path_access(&path, requested.access(), &self.path_rules)?;
-            rules.push(PathAccessRule::new(
-                path,
-                effective_access,
-                crate::PathAccessRuleSource::PermissionReview,
-            ));
+        if let Some(permissions) = &self.session_permissions {
+            rules.extend(permissions.snapshot()?.path_rules);
         }
+        rules.extend(self.requested_path_rules_for_request(request)?);
         Ok(normalize_path_rules(rules))
+    }
+
+    fn requested_path_rules_for_request(
+        &self,
+        request: &PermissionRequest,
+    ) -> Result<Vec<PathAccessRule>, ProcessRunnerError> {
+        request
+            .requested()
+            .iter()
+            .filter_map(|capability| {
+                let crate::RequestedCapability::Path(requested) = capability else {
+                    return None;
+                };
+                let path = materialize_requested_path(&self.cwd_root, requested.path());
+                Some(
+                    effective_requested_path_access(&path, requested.access(), &self.path_rules)
+                        .map(|effective_access| {
+                            PathAccessRule::new(
+                                path,
+                                effective_access,
+                                crate::PathAccessRuleSource::PermissionReview,
+                            )
+                        }),
+                )
+            })
+            .collect()
+    }
+
+    fn grant_approved_request(
+        &self,
+        request: &PermissionRequest,
+    ) -> Result<(), ProcessRunnerError> {
+        let Some(permissions) = &self.session_permissions else {
+            return Ok(());
+        };
+        permissions.grant(
+            self.requested_path_rules_for_request(request)?,
+            request.requests_network(),
+        )
     }
 
     fn build_runner(&self, request: &PermissionRequest) -> BwrapProcessRunner {
@@ -188,8 +324,16 @@ impl BwrapPermissionedProcessRunnerFactory {
         };
         let mut runner = BwrapProcessRunner::new_at_workspace_root(self.cwd_root.clone())
             .with_path_rules(path_rules);
-        if self.base_network_allowed || request.requests_network() {
+        let session_network_allowed = self
+            .session_permissions
+            .as_ref()
+            .and_then(|permissions| permissions.snapshot().ok())
+            .is_some_and(|snapshot| snapshot.network_allowed);
+        if self.base_network_allowed || request.requests_network() || session_network_allowed {
             runner = runner.allow_network();
+        }
+        if let Some(permissions) = &self.session_permissions {
+            runner = runner.with_session_permissions(permissions.clone());
         }
         runner.bwrap_program = self.bwrap_program.clone();
         runner.configuration_error = configuration_error;
@@ -203,7 +347,12 @@ impl PermissionedProcessRunnerFactory for BwrapPermissionedProcessRunnerFactory 
     }
 
     fn runner_for(&self, request: &PermissionRequest) -> Arc<dyn ProcessRunner> {
-        Arc::new(self.build_runner(request))
+        let grant_error = self.grant_approved_request(request).err();
+        let mut runner = self.build_runner(request);
+        if let Some(error) = grant_error {
+            runner.configuration_error = Some(error.to_string());
+        }
+        Arc::new(runner)
     }
 }
 
@@ -271,6 +420,54 @@ fn normalize_path_rules(rules: Vec<PathAccessRule>) -> Vec<PathAccessRule> {
     rules
 }
 
+fn normalize_session_path_rules(rules: Vec<PathAccessRule>) -> Vec<PathAccessRule> {
+    let mut merged =
+        std::collections::BTreeMap::<PathBuf, (PathAccess, crate::PathAccessRuleSource)>::new();
+    for rule in rules {
+        let entry = merged
+            .entry(rule.path().to_path_buf())
+            .or_insert((rule.access(), rule.source()));
+        entry.0 = session_path_access(entry.0, rule.access());
+        if rule.access() == entry.0 {
+            entry.1 = rule.source();
+        }
+    }
+    let mut rules = merged
+        .into_iter()
+        .map(|(path, (access, source))| PathAccessRule::new(path, access, source))
+        .collect::<Vec<_>>();
+    rules.sort_by(|left, right| {
+        path_depth(left.path())
+            .cmp(&path_depth(right.path()))
+            .then_with(|| left.path().cmp(right.path()))
+    });
+
+    let mut retained = Vec::with_capacity(rules.len());
+    for rule in rules {
+        let covered_by_ancestor = retained.iter().any(|ancestor: &PathAccessRule| {
+            rule.path() != ancestor.path()
+                && rule.path().starts_with(ancestor.path())
+                && match ancestor.access() {
+                    PathAccess::Deny => true,
+                    PathAccess::ReadOnly => rule.access() == PathAccess::ReadOnly,
+                    PathAccess::ReadWrite => rule.access() != PathAccess::Deny,
+                }
+        });
+        if !covered_by_ancestor {
+            retained.push(rule);
+        }
+    }
+    retained
+}
+
+fn session_path_access(left: PathAccess, right: PathAccess) -> PathAccess {
+    match (left, right) {
+        (PathAccess::Deny, _) | (_, PathAccess::Deny) => PathAccess::Deny,
+        (PathAccess::ReadWrite, _) | (_, PathAccess::ReadWrite) => PathAccess::ReadWrite,
+        (PathAccess::ReadOnly, PathAccess::ReadOnly) => PathAccess::ReadOnly,
+    }
+}
+
 fn restrictive_path_access(left: PathAccess, right: PathAccess) -> PathAccess {
     match (left, right) {
         (PathAccess::Deny, _) | (_, PathAccess::Deny) => PathAccess::Deny,
@@ -289,16 +486,10 @@ impl ProcessRunner for BwrapProcessRunner {
         intent: ProcessActionIntent,
         context: ProcessRunnerContext,
     ) -> ProcessRunnerFuture<'a> {
-        if let Some(message) = self.configuration_error.clone() {
-            return Box::pin(async move { Err(ProcessRunnerError::infrastructure(message)) });
-        }
-        let plan = bwrap_process_plan(
-            &intent,
-            &self.cwd_root,
-            self.network_allowed,
-            &self.path_rules,
-            &self.bwrap_program,
-        );
+        let plan = match self.plan_for(&intent) {
+            Ok(plan) => plan,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
         Box::pin(async move { run_process_plan(plan, intent, context).await })
     }
 }
@@ -927,6 +1118,62 @@ mod tests {
                 "/workspace/merry/deps/cache",
                 "/workspace/merry/deps/cache"
             ]
+        ));
+    }
+
+    #[test]
+    fn bwrap_permissioned_factory_keeps_approved_paths_for_later_actions() {
+        let session_permissions = super::BwrapSessionPermissions::new();
+        let factory =
+            super::BwrapPermissionedProcessRunnerFactory::new_at_workspace_root("/workspace/merry")
+                .with_bwrap_program("/custom/bin/bwrap")
+                .with_session_permissions(session_permissions.clone());
+        let base_runner = BwrapProcessRunner::new_at_workspace_root("/workspace/merry")
+            .with_bwrap_program("/custom/bin/bwrap")
+            .with_session_permissions(session_permissions);
+        let first_request = permission_request(json!({
+            "requested": {
+                "paths": [
+                    { "path": "/tmp", "access": "rw" },
+                    { "path": "/var/lib/merry-demo.txt", "access": "ro" }
+                ]
+            },
+            "for_action": { "kind": "process", "argv": ["touch", "/var/lib/merry-demo.txt"] }
+        }));
+        let later_request = permission_request(json!({
+            "requested": { "network": true },
+            "for_action": { "kind": "process", "argv": ["cat", "/var/lib/merry-demo.txt"] }
+        }));
+        let narrower_request = permission_request(json!({
+            "requested": {
+                "paths": [{ "path": "/tmp", "access": "ro" }]
+            },
+            "for_action": { "kind": "process", "argv": ["ls", "/tmp"] }
+        }));
+
+        let _ = factory.runner_for(&first_request);
+        let _ = factory.runner_for(&narrower_request);
+        let plan = base_runner
+            .plan_for(request_process_intent(&later_request))
+            .expect("later ordinary process plan should build");
+        let args = os_args(&plan.args);
+
+        assert!(contains_sequence(&args, &["--bind-try", "/tmp", "/tmp"]));
+        assert!(!contains_sequence(
+            &args,
+            &["--ro-bind-try", "/tmp", "/tmp"]
+        ));
+        assert!(contains_sequence(
+            &args,
+            &[
+                "--ro-bind-try",
+                "/var/lib/merry-demo.txt",
+                "/var/lib/merry-demo.txt"
+            ]
+        ));
+        assert!(!contains_sequence(
+            &args,
+            &["--bind-try", "/var/tmp", "/var/tmp"]
         ));
     }
 

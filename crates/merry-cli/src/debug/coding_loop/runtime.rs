@@ -1,7 +1,7 @@
 use crate::cli_error::{CliError, unexpected};
 use crate::coding_runtime::{
-    CodingLoopRuntimeOptions, build_coding_loop_runtime, coding_loop_workspace_roots,
-    with_workspace_coding_loop_profile, workspace_tools_config,
+    ActionProcessBackend, CodingLoopRuntimeOptions, build_coding_loop_runtime,
+    coding_loop_workspace_roots, with_workspace_coding_loop_profile, workspace_tools_config,
 };
 use crate::provider_config::{
     OpenAiProviderConfigBundle, RuntimePrimaryProviderConfig, RuntimeProviderBundle,
@@ -34,6 +34,7 @@ pub(crate) fn build_coding_loop_smoke_runtime(
     relative_cwd: Option<&str>,
     admission: AcceptedLocalWorkspaceProcessAdmission,
     runner: Arc<dyn ProcessRunner>,
+    process_backend: Option<ActionProcessBackend>,
     permissioned_process_runner_factory: Option<Arc<dyn PermissionedProcessRunnerFactory>>,
     automatic_compaction: AutomaticCompactionConfig,
 ) -> Result<Runtime, CliError> {
@@ -51,6 +52,7 @@ pub(crate) fn build_coding_loop_smoke_runtime(
             automatic_compaction,
             retry_policy: None,
             context_compaction: None,
+            process_backend,
             permissioned_process_runner_factory,
             extra_tools: Vec::new(),
             skill_roots: Vec::new(),
@@ -65,6 +67,7 @@ pub(crate) fn build_coding_loop_live_smoke_runtime(
     admission: AcceptedLocalWorkspaceProcessAdmission,
     config: OpenAiProviderConfigBundle,
     runner: Arc<dyn ProcessRunner>,
+    process_backend: Option<ActionProcessBackend>,
     permissioned_process_runner_factory: Option<Arc<dyn PermissionedProcessRunnerFactory>>,
     options: CodingLoopLiveRuntimeOptions,
 ) -> Result<Runtime, CliError> {
@@ -82,6 +85,7 @@ pub(crate) fn build_coding_loop_live_smoke_runtime(
             automatic_compaction: options.automatic_compaction,
             retry_policy: providers.retry_policy,
             context_compaction: providers.context_compaction,
+            process_backend,
             permissioned_process_runner_factory,
             extra_tools: Vec::new(),
             skill_roots: options.skill_roots,
@@ -91,11 +95,16 @@ pub(crate) fn build_coding_loop_live_smoke_runtime(
     )?)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "task smoke construction keeps its explicit runtime inputs at one boundary"
+)]
 pub(crate) fn build_coding_loop_task_smoke_runtime(
     root: &Path,
     relative_cwd: Option<&str>,
     admission: AcceptedLocalWorkspaceProcessAdmission,
     runner: Arc<dyn ProcessRunner>,
+    process_backend: Option<ActionProcessBackend>,
     permissioned_process_runner_factory: Option<Arc<dyn PermissionedProcessRunnerFactory>>,
     fixture: CodingLoopTaskSmokeFixture,
     automatic_compaction: AutomaticCompactionConfig,
@@ -114,6 +123,7 @@ pub(crate) fn build_coding_loop_task_smoke_runtime(
             automatic_compaction,
             retry_policy: None,
             context_compaction: None,
+            process_backend,
             permissioned_process_runner_factory,
             extra_tools: Vec::new(),
             skill_roots: Vec::new(),
@@ -128,6 +138,7 @@ pub(crate) fn build_coding_loop_task_live_smoke_runtime(
     admission: AcceptedLocalWorkspaceProcessAdmission,
     config: OpenAiProviderConfigBundle,
     runner: Arc<dyn ProcessRunner>,
+    process_backend: Option<ActionProcessBackend>,
     permissioned_process_runner_factory: Option<Arc<dyn PermissionedProcessRunnerFactory>>,
     options: CodingLoopLiveRuntimeOptions,
 ) -> Result<Runtime, CliError> {
@@ -145,6 +156,7 @@ pub(crate) fn build_coding_loop_task_live_smoke_runtime(
             automatic_compaction: options.automatic_compaction,
             retry_policy: providers.retry_policy,
             context_compaction: providers.context_compaction,
+            process_backend,
             permissioned_process_runner_factory,
             extra_tools: Vec::new(),
             skill_roots: options.skill_roots,
@@ -159,6 +171,7 @@ pub(crate) fn build_coding_loop_subagent_live_smoke_runtime(
     admission: AcceptedLocalWorkspaceProcessAdmission,
     config: OpenAiProviderConfigBundle,
     runner: Arc<dyn ProcessRunner>,
+    process_backend: Option<ActionProcessBackend>,
     permissioned_process_runner_factory: Option<Arc<dyn PermissionedProcessRunnerFactory>>,
     options: CodingLoopLiveRuntimeOptions,
 ) -> Result<Runtime, CliError> {
@@ -176,6 +189,7 @@ pub(crate) fn build_coding_loop_subagent_live_smoke_runtime(
             automatic_compaction: options.automatic_compaction,
             retry_policy: providers.retry_policy,
             context_compaction: providers.context_compaction,
+            process_backend,
             permissioned_process_runner_factory,
             extra_tools: Vec::new(),
             skill_roots: options.skill_roots,
