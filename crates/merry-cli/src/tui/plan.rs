@@ -2,7 +2,7 @@ use merry_core::{
     PlanApprovalRequirementKind, PlanApprovalRequirementStatus, PlanAttemptProgressSnapshot,
     PlanAttemptSnapshot, PlanCapabilityEnvelopeSnapshot, PlanExecutorPolicy, PlanLeaseSnapshot,
     PlanLinkStatus, PlanNodeId, PlanNodeSnapshot, PlanNodeStatus, PlanSnapshot,
-    SubagentActivitySnapshot, SubagentId,
+    SubagentActivitySnapshot, SubagentId, SubagentTaskId,
 };
 use merry_runtime::PlanApprovalInput;
 use std::collections::{BTreeMap, BTreeSet};
@@ -34,7 +34,7 @@ pub(crate) struct PlanUiState {
     collapsed_node_ids: BTreeSet<PlanNodeId>,
     scroll_offset: usize,
     inspector_scroll_offset: usize,
-    subagent_activity: BTreeMap<SubagentId, SubagentActivitySnapshot>,
+    subagent_activity: BTreeMap<SubagentId, BTreeMap<SubagentTaskId, SubagentActivitySnapshot>>,
     open: bool,
     focused: bool,
     inspector_open: bool,
@@ -81,11 +81,13 @@ impl PlanUiState {
                 .into_iter()
                 .fold(BTreeMap::new(), |mut activity, snapshot| {
                     let subagent_id = snapshot.subagent_id.clone();
-                    if activity
-                        .get(&subagent_id)
+                    let task_id = snapshot.task_id.clone();
+                    let tasks = activity.entry(subagent_id).or_default();
+                    if tasks
+                        .get(&task_id)
                         .is_none_or(|existing| existing.updated_at_ms <= snapshot.updated_at_ms)
                     {
-                        activity.insert(subagent_id, snapshot);
+                        tasks.insert(task_id, snapshot);
                     }
                     activity
                 });
@@ -168,7 +170,11 @@ impl PlanUiState {
             .filter(|link| {
                 link.status != PlanLinkStatus::Superseded && link.superseded_by.is_none()
             })
-            .filter_map(|link| self.subagent_activity.get(&link.subagent_id))
+            .filter_map(|link| {
+                self.subagent_activity
+                    .get(&link.subagent_id)
+                    .and_then(|tasks| tasks.get(&link.task_id))
+            })
             .max_by_key(|activity| activity.updated_at_ms)
     }
 

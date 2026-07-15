@@ -191,6 +191,28 @@ fn subagent_activity_attaches_only_to_its_linked_plan_node() {
 }
 
 #[test]
+fn same_subagent_activity_for_a_different_task_is_not_attached() {
+    let mut plan = snapshot(1, PlanNodeStatus::InProgress);
+    add_live_attempt(&mut plan);
+    let mut state = PlanUiState::default();
+    state.update_subagent_activity(vec![activity_for_task(
+        "subagent-active",
+        "task-other",
+        SubagentActivityPhase::Running,
+        "stale task activity",
+        20,
+    )]);
+    state.update_snapshot(plan);
+
+    let row = state
+        .visible_rows()
+        .into_iter()
+        .find(|row| row.node_id == node_id("active-leaf"))
+        .expect("linked node should be visible");
+    assert!(row.activity.is_none());
+}
+
+#[test]
 fn latest_subagent_activity_replaces_the_prior_summary() {
     let mut plan = snapshot(1, PlanNodeStatus::InProgress);
     add_live_attempt(&mut plan);
@@ -942,9 +964,19 @@ fn activity(
     summary: &str,
     updated_at_ms: u64,
 ) -> SubagentActivitySnapshot {
+    activity_for_task(subagent_id, "task-active", phase, summary, updated_at_ms)
+}
+
+fn activity_for_task(
+    subagent_id: &str,
+    task_id: &str,
+    phase: SubagentActivityPhase,
+    summary: &str,
+    updated_at_ms: u64,
+) -> SubagentActivitySnapshot {
     SubagentActivitySnapshot {
         subagent_id: SubagentId::new(subagent_id).unwrap(),
-        task_id: SubagentTaskId::new("task-activity").unwrap(),
+        task_id: SubagentTaskId::new(task_id).unwrap(),
         phase,
         summary: summary.to_owned(),
         updated_at_ms,
