@@ -1,15 +1,20 @@
 use super::*;
 use crate::{
     RegisteredTool, ToolExecutionContext, ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture,
-    plan::{PlanChangeInput, PlanExecutionIntent, PlanNodeInput, UpdatePlanInput},
+    plan::{
+        PlanChangeInput, PlanExecutionIntent, PlanNodeInput, SubagentPlanChangeInput,
+        SubagentPlanUpdateInput, UpdatePlanInput,
+    },
 };
 use merry_core::{
-    PendingToolCall, PlanExecutorPolicy, PlanHarnessSnapshot, PlanRecoveryPolicySnapshot,
-    ToolCallArguments, ToolCallId, ToolCallResultStatus, ToolInputSchema, ToolName, ToolSpec,
+    PendingToolCall, PlanExecutorPolicy, PlanHarnessSnapshot, PlanId, PlanNodeId,
+    PlanRecoveryPolicySnapshot, SessionId, SubagentId, SubagentTaskId, ToolCallArguments,
+    ToolCallId, ToolCallResultStatus, ToolInputSchema, ToolName, ToolSpec,
 };
 use schemars::Schema;
 use serde_json::json;
 use std::sync::Arc;
+use tokio::time::{Duration, timeout};
 
 struct NoopTool;
 
@@ -48,6 +53,170 @@ async fn record_pending(runtime: &Runtime, call: PendingToolCall) {
     session
         .record_test_tool_call_pending(call)
         .expect("pending tool call is valid");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn linked_child_plan_surface_is_scoped_and_coordinator_scope_is_rejected() {
+    let (_coordinator, scope, _plan_id, _owned_id, _sibling_id) =
+        linked_plan_scope("plan-child-surface").await;
+    let child = Runtime::builder(session_id("plan-linked-child"))
+        .plan_subagent_scope(scope.clone())
+        .build()
+        .expect("linked child runtime builds");
+    let plan_names = child
+        .inner
+        .tool_registry
+        .tool_specs()
+        .into_iter()
+        .filter_map(|spec| match spec.name().as_str() {
+            "read_plan" | "update_plan" => Some(spec.name().as_str().to_owned()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(plan_names, ["read_plan", "update_plan"]);
+
+    let unbound = Runtime::builder(session_id("plan-unbound-child"))
+        .build()
+        .expect("unbound child runtime builds");
+    assert!(
+        unbound
+            .inner
+            .tool_registry
+            .tool_specs()
+            .into_iter()
+            .all(|spec| !matches!(spec.name().as_str(), "read_plan" | "update_plan"))
+    );
+
+    let rejected = Runtime::builder(session_id("plan-coordinator-scope"))
+        .coordinator_plan_tools()
+        .plan_subagent_scope(scope)
+        .build();
+    assert!(matches!(
+        rejected,
+        Err(crate::RuntimeError::InvalidStepInput { .. })
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn scoped_plan_tools_reject_outside_reads_and_emit_durable_updates() {
+    let (coordinator, scope, plan_id, owned_id, sibling_id) =
+        linked_plan_scope("plan-scoped-execution").await;
+    let child = Runtime::builder(session_id("plan-scoped-child"))
+        .plan_subagent_scope(scope)
+        .build()
+        .expect("linked child runtime builds");
+
+    let other_plan_call = pending_call(
+        "call-scoped-other-plan",
+        "read_plan",
+        json!({
+            "plan_id": "plan-other",
+            "node_id": owned_id,
+            "max_depth": 4
+        }),
+    );
+    record_pending(&child, other_plan_call.clone()).await;
+    let other_plan_result = child
+        .execute_tool_call(other_plan_call.id(), ToolExecutionContext::default())
+        .await
+        .expect("out-of-plan read resolves as a tool rejection")
+        .into_iter()
+        .find_map(|event| match event.payload {
+            RuntimeJournalPayload::ToolCallResolved { result } => Some(result),
+            _ => None,
+        })
+        .expect("other-plan read records a result");
+    assert_eq!(other_plan_result.status(), ToolCallResultStatus::Failed);
+
+    let sibling_call = pending_call(
+        "call-scoped-sibling",
+        "read_plan",
+        json!({
+            "plan_id": plan_id,
+            "node_id": sibling_id,
+            "max_depth": 4
+        }),
+    );
+    record_pending(&child, sibling_call.clone()).await;
+    let sibling_result = child
+        .execute_tool_call(sibling_call.id(), ToolExecutionContext::default())
+        .await
+        .expect("sibling read resolves as a tool rejection")
+        .into_iter()
+        .find_map(|event| match event.payload {
+            RuntimeJournalPayload::ToolCallResolved { result } => Some(result),
+            _ => None,
+        })
+        .expect("sibling read records a result");
+    assert_eq!(sibling_result.status(), ToolCallResultStatus::Failed);
+
+    let mut plan_events = coordinator.subscribe_plan_events();
+    let before = coordinator
+        .plan_snapshot()
+        .await
+        .expect("coordinator plan snapshot reads")
+        .expect("coordinator plan exists");
+    let update = SubagentPlanUpdateInput {
+        reason: "define work below the linked child task".to_owned(),
+        change: SubagentPlanChangeInput::DefineChildren {
+            expected_plan_revision: before.revision,
+            children: vec![plan_node("nested", "Nested child-owned work")],
+        },
+    };
+    let update_call = pending_call(
+        "call-scoped-update",
+        "update_plan",
+        serde_json::to_value(update).expect("scoped update serializes"),
+    );
+    record_pending(&child, update_call.clone()).await;
+    let update_events = child
+        .execute_tool_call(update_call.id(), ToolExecutionContext::default())
+        .await
+        .expect("scoped update resolves");
+    let update_result = update_events
+        .iter()
+        .find_map(|event| match &event.payload {
+            RuntimeJournalPayload::ToolCallResolved { result } => Some(result),
+            _ => None,
+        })
+        .expect("scoped update records a result");
+    assert_eq!(update_result.status(), ToolCallResultStatus::Succeeded);
+
+    let plan_event = timeout(Duration::from_secs(1), plan_events.recv())
+        .await
+        .expect("scoped update emits a plan event")
+        .expect("plan event receiver remains open");
+    assert!(matches!(
+        plan_event.payload,
+        RuntimeJournalPayload::PlanUpdated { .. }
+    ));
+    let updated = coordinator
+        .plan_snapshot()
+        .await
+        .expect("updated plan snapshot reads")
+        .expect("updated plan exists");
+    assert!(
+        updated
+            .nodes
+            .iter()
+            .any(|node| node.client_key.as_deref() == Some("nested"))
+    );
+    assert!(updated.nodes.iter().any(|node| node.id == sibling_id));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn unbound_plan_call_keeps_the_runtime_role_error() {
+    let runtime = Runtime::builder(session_id("plan-unbound-call"))
+        .build()
+        .expect("unbound runtime builds");
+    let call = pending_call("call-unbound-plan", "read_plan", json!({"max_depth": 2}));
+    record_pending(&runtime, call.clone()).await;
+    assert!(matches!(
+        runtime
+            .execute_tool_call(call.id(), ToolExecutionContext::default())
+            .await,
+        Err(crate::RuntimeError::ToolExecutionFailed { .. })
+    ));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -350,4 +519,85 @@ async fn resuming_a_plan_does_not_replay_an_inflight_legacy_attempt() {
         merry_core::PlanLeaseStatus::Expired
     );
     assert_eq!(snapshot.phase, merry_core::PlanPhase::Blocked);
+}
+
+fn session_id(value: &str) -> SessionId {
+    SessionId::new(value).expect("valid test session id")
+}
+
+fn plan_node(client_key: &str, objective: &str) -> PlanNodeInput {
+    PlanNodeInput {
+        id: None,
+        client_key: Some(client_key.to_owned()),
+        objective: objective.to_owned(),
+        acceptance: vec![format!("{objective} is verified")],
+        status: None,
+        executor_policy: PlanExecutorPolicy::default(),
+        harness: PlanHarnessSnapshot::default(),
+        recovery_policy: PlanRecoveryPolicySnapshot::default(),
+        depends_on: Vec::new(),
+        children: Vec::new(),
+    }
+}
+
+async fn linked_plan_scope(
+    session: &str,
+) -> (
+    Runtime,
+    crate::PlanSubagentScope,
+    PlanId,
+    PlanNodeId,
+    PlanNodeId,
+) {
+    let coordinator = Runtime::builder(session_id(session))
+        .coordinator_plan_tools()
+        .build()
+        .expect("coordinator runtime builds");
+    coordinator
+        .begin_plan(crate::plan::BeginPlanInput {
+            reason: "activate linked child plan fixture".to_owned(),
+            governing_skill_id: None,
+        })
+        .await
+        .expect("coordinator plan activates");
+    let output = coordinator
+        .update_plan(UpdatePlanInput {
+            reason: "define linked child plan work".to_owned(),
+            execution_intent: PlanExecutionIntent::ContinuePlanning,
+            coordinator_node_id: None,
+            max_concurrency_hint: None,
+            change: PlanChangeInput::DefinePlan {
+                expected_plan_revision: 0,
+                root: PlanNodeInput {
+                    children: vec![
+                        plan_node("owned", "Owned child task"),
+                        plan_node("sibling", "Sibling coordinator task"),
+                    ],
+                    ..plan_node("root", "Complete all linked child work")
+                },
+            },
+        })
+        .await
+        .expect("coordinator plan definition succeeds");
+    let owned_id = output.client_key_ids["owned"].clone();
+    let sibling_id = output.client_key_ids["sibling"].clone();
+    let link = coordinator
+        .inner
+        .plan_controller
+        .bind_subagent(
+            "owned".to_owned(),
+            SubagentId::new("agent-scoped-test").expect("valid subagent id"),
+            SubagentTaskId::new("task-scoped-test").expect("valid task id"),
+            1,
+        )
+        .await
+        .expect("linked child binding succeeds");
+    let plan_id = output.snapshot.plan_id.clone();
+    let scope =
+        crate::PlanSubagentScope::from_internal(coordinator.inner.plan_controller.subagent_scope(
+            plan_id.clone(),
+            owned_id.clone(),
+            link.binding_id,
+        ));
+    (coordinator, scope, plan_id, owned_id, sibling_id)
 }

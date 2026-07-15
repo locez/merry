@@ -40,6 +40,7 @@
                 coordinator_plan_tools: false,
                 plan_controller,
                 plan_subagent_control: None,
+                plan_subagent_scope: None,
                 session_store: None,
             }),
         }
@@ -79,6 +80,7 @@
                 coordinator_plan_tools: false,
                 plan_controller,
                 plan_subagent_control: None,
+                plan_subagent_scope: None,
                 session_store: None,
             }),
         }
@@ -122,6 +124,7 @@
                 coordinator_plan_tools: false,
                 plan_controller,
                 plan_subagent_control: None,
+                plan_subagent_scope: None,
                 session_store: None,
             }),
         }

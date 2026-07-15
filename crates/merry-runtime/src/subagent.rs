@@ -2,7 +2,8 @@
 
 use crate::{
     AgentLoopConfig, AgentLoopResult, AgentLoopStatus, ArtifactContent, PlanSubagentControl,
-    Runtime, RuntimeError, StepContext, StepInput, TaskAnchor, plan::PlanController,
+    Runtime, RuntimeError, StepContext, StepInput, TaskAnchor,
+    plan::{PlanController, SubagentPlanUpdateInput},
 };
 use futures_util::future::BoxFuture;
 use merry_core::{
@@ -40,6 +41,34 @@ pub use spec::{
 };
 pub use tools::{subagent_registered_tools, subagent_tool_specs};
 
+/// Opaque child capability for reading and updating the subtree below one
+/// active Plan link.
+///
+/// The capability carries no public controller or identity fields. Runtime
+/// construction receives it from the parent link adapter, and scoped tool
+/// execution is the only consumer-facing behavior.
+#[derive(Clone)]
+pub struct PlanSubagentScope(crate::plan::PlanSubagentScope);
+
+impl PlanSubagentScope {
+    pub(crate) fn from_internal(scope: crate::plan::PlanSubagentScope) -> Self {
+        Self(scope)
+    }
+
+    pub(crate) async fn read(
+        &self,
+    ) -> Result<merry_core::PlanSnapshot, crate::PlanControllerError> {
+        self.0.read().await
+    }
+
+    pub(crate) async fn update_plan(
+        &self,
+        input: SubagentPlanUpdateInput,
+    ) -> Result<crate::PlanUpdateOutput, crate::PlanControllerError> {
+        self.0.update_plan(input).await
+    }
+}
+
 /// Provider-visible tool name for spawning bounded child agents.
 pub(crate) const SPAWN_SUBAGENTS_TOOL_NAME: &str = "spawn_subagents";
 /// Provider-visible tool name for waiting on child agent statuses/results.
@@ -67,6 +96,8 @@ pub struct ChildRuntimeInput {
     pub generation_config: GenerationConfig,
     /// Optional compatibility control for an explicitly Plan-bound child.
     pub plan_subagent_control: Option<PlanSubagentControl>,
+    /// Optional opaque capability for the subtree below the active Plan link.
+    pub plan_subagent_scope: Option<PlanSubagentScope>,
     /// Optional runtime-owned Plan link for this child execution.
     pub plan_link: Option<PlanLinkSnapshot>,
     /// Runtime-owned link adapter used when this child delegates further.
@@ -152,6 +183,9 @@ pub trait PlanLinkRuntime: Send + Sync {
         status: PlanLinkStatus,
         now_ms: u64,
     ) -> BoxFuture<'a, Result<(), String>>;
+
+    /// Creates a scoped Plan capability only for an active, non-superseded link.
+    fn scope_for_link(&self, link: &PlanLinkSnapshot) -> Option<PlanSubagentScope>;
 }
 
 struct PlanControllerLinkRuntime(PlanController);
@@ -185,6 +219,17 @@ impl PlanLinkRuntime for PlanControllerLinkRuntime {
                 .map(|_| ())
                 .map_err(|error| error.to_string())
         })
+    }
+
+    fn scope_for_link(&self, link: &PlanLinkSnapshot) -> Option<PlanSubagentScope> {
+        if link.status != PlanLinkStatus::Active || link.superseded_by.is_some() {
+            return None;
+        }
+        Some(PlanSubagentScope::from_internal(self.0.subagent_scope(
+            link.plan_id.clone(),
+            link.node_id.clone(),
+            link.binding_id.clone(),
+        )))
     }
 }
 
@@ -722,6 +767,10 @@ impl SubagentManager {
     ) {
         let child_session_id = child_session_id();
         let generation_config = generation_config_for_child_task(&task);
+        let plan_link_runtime = self.attached_plan_link_runtime();
+        let plan_subagent_scope = plan_link
+            .as_ref()
+            .and_then(|link| plan_link_runtime.as_ref()?.scope_for_link(link));
         let runtime = match self.factory.build_child(ChildRuntimeInput {
             session_id: child_session_id,
             task_anchor,
@@ -731,8 +780,9 @@ impl SubagentManager {
             depth: self.depth.saturating_add(1),
             generation_config: generation_config.clone(),
             plan_subagent_control: None,
+            plan_subagent_scope,
             plan_link: plan_link.clone(),
-            plan_link_runtime: self.attached_plan_link_runtime(),
+            plan_link_runtime,
         }) {
             Ok(runtime) => runtime,
             Err(error) => {
@@ -996,6 +1046,15 @@ fn spawn_reserved_child(
 ) -> Result<(), RuntimeError> {
     let child_session_id = child_session_id();
     let generation_config = generation_config_for_child_task(&start.task);
+    let plan_link_runtime = scheduler
+        .plan_link_runtime
+        .lock()
+        .expect("subagent plan link runtime mutex is not poisoned")
+        .clone();
+    let plan_subagent_scope = start
+        .plan_link
+        .as_ref()
+        .and_then(|link| plan_link_runtime.as_ref()?.scope_for_link(link));
     let runtime = scheduler.factory.build_child(ChildRuntimeInput {
         session_id: child_session_id,
         task_anchor: start.task_anchor.clone(),
@@ -1005,12 +1064,9 @@ fn spawn_reserved_child(
         depth: scheduler.depth.saturating_add(1),
         generation_config: generation_config.clone(),
         plan_subagent_control: None,
+        plan_subagent_scope,
         plan_link: start.plan_link.clone(),
-        plan_link_runtime: scheduler
-            .plan_link_runtime
-            .lock()
-            .expect("subagent plan link runtime mutex is not poisoned")
-            .clone(),
+        plan_link_runtime,
     })?;
 
     spawn_child_loop(
@@ -2278,6 +2334,15 @@ mod manager_tests {
             .as_ref()
             .and_then(|input| input.plan_link_runtime.clone())
             .expect("child receives the parent Plan link runtime");
+        assert!(
+            captured
+                .lock()
+                .expect("child input mutex is not poisoned")
+                .as_ref()
+                .and_then(|input| input.plan_subagent_scope.as_ref())
+                .is_some(),
+            "linked child receives the opaque Plan subtree scope"
+        );
         let nested_manager = SubagentManager::runtime_controlled_at_depth(
             SessionId::new("nested-parent").expect("valid nested session id"),
             SubagentConfig::new(1, 2).expect("valid nested config"),
