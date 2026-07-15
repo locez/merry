@@ -21,6 +21,8 @@ pub struct SubagentActivityHub {
 struct ActivityHubState {
     snapshots: BTreeMap<SubagentId, SubagentActivitySnapshot>,
     last_published_ms: BTreeMap<SubagentId, u64>,
+    #[cfg(test)]
+    published_phases: Vec<SubagentActivityPhase>,
 }
 
 impl SubagentActivityHub {
@@ -33,6 +35,8 @@ impl SubagentActivityHub {
             state: Arc::new(std::sync::Mutex::new(ActivityHubState {
                 snapshots: BTreeMap::new(),
                 last_published_ms: BTreeMap::new(),
+                #[cfg(test)]
+                published_phases: Vec::new(),
             })),
         }
     }
@@ -47,42 +51,37 @@ impl SubagentActivityHub {
         let is_terminal = is_terminal_phase(snapshot.phase);
         let subagent_id = snapshot.subagent_id.clone();
         let updated_at_ms = snapshot.updated_at_ms;
-        let values_to_update = {
-            let mut state = self
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-            if state
-                .snapshots
-                .get(&snapshot.subagent_id)
-                .is_some_and(|previous| is_terminal_phase(previous.phase) && !is_terminal)
-            {
-                return;
-            }
-
-            let should_publish = is_terminal
-                || state
-                    .last_published_ms
-                    .get(&subagent_id)
-                    .is_none_or(|last_published_ms| {
-                        updated_at_ms >= last_published_ms.saturating_add(NON_TERMINAL_COALESCE_MS)
-                    });
-            state.snapshots.insert(subagent_id.clone(), snapshot);
-            let values = state.snapshots.values().cloned().collect::<Vec<_>>();
-
-            if should_publish {
-                state.last_published_ms.insert(subagent_id, updated_at_ms);
-            }
-            Some((values, should_publish))
-        };
-
-        if let Some((values, should_publish)) = values_to_update {
-            let _ = self.sender.send_if_modified(|current| {
-                *current = values;
-                should_publish
-            });
+        if state
+            .snapshots
+            .get(&snapshot.subagent_id)
+            .is_some_and(|previous| is_terminal_phase(previous.phase) && !is_terminal)
+        {
+            return;
         }
+
+        let should_publish = is_terminal
+            || state
+                .last_published_ms
+                .get(&subagent_id)
+                .is_none_or(|last_published_ms| {
+                    updated_at_ms >= last_published_ms.saturating_add(NON_TERMINAL_COALESCE_MS)
+                });
+        #[cfg(test)]
+        state.published_phases.push(snapshot.phase);
+        state.snapshots.insert(subagent_id.clone(), snapshot);
+        if should_publish {
+            state.last_published_ms.insert(subagent_id, updated_at_ms);
+        }
+        let values = state.snapshots.values().cloned().collect::<Vec<_>>();
+        let _ = self.sender.send_if_modified(|current| {
+            *current = values;
+            should_publish
+        });
     }
 
     #[allow(dead_code)]
@@ -94,6 +93,15 @@ impl SubagentActivityHub {
             .values()
             .cloned()
             .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn published_phases(&self) -> Vec<SubagentActivityPhase> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .published_phases
+            .clone()
     }
 }
 
@@ -249,6 +257,7 @@ mod tests {
         PendingToolCall, RuntimeEventSource, ToolCallArguments, ToolCallId, ToolName,
     };
     use serde_json::Map;
+    use std::sync::{Arc, Barrier};
 
     fn agent_id(value: &str) -> SubagentId {
         SubagentId::new(value).expect("valid subagent id")
@@ -415,5 +424,59 @@ mod tests {
 
         hub.publish(snapshot("agent-1", SubagentActivityPhase::Running, 1));
         assert_eq!(hub.current().len(), 1);
+    }
+
+    #[test]
+    fn concurrent_publish_keeps_watch_value_equal_to_final_sorted_state() {
+        let hub = Arc::new(SubagentActivityHub::new());
+        let receiver = hub.subscribe();
+        let barrier = Arc::new(Barrier::new(3));
+
+        let first_hub = Arc::clone(&hub);
+        let first_barrier = Arc::clone(&barrier);
+        let first = std::thread::spawn(move || {
+            first_barrier.wait();
+            first_hub.publish(snapshot("agent-a", SubagentActivityPhase::Running, 1));
+        });
+        let second_hub = Arc::clone(&hub);
+        let second_barrier = Arc::clone(&barrier);
+        let second = std::thread::spawn(move || {
+            second_barrier.wait();
+            second_hub.publish(snapshot("agent-b", SubagentActivityPhase::Running, 1));
+        });
+
+        barrier.wait();
+        first.join().expect("first publisher should finish");
+        second.join().expect("second publisher should finish");
+
+        let current = hub.current();
+        assert_eq!(&*receiver.borrow(), &current);
+        assert_eq!(
+            current
+                .iter()
+                .map(|snapshot| snapshot.subagent_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["agent-a", "agent-b"]
+        );
+    }
+
+    #[test]
+    fn publish_tolerates_poisoned_state_and_closed_receiver() {
+        let hub = SubagentActivityHub::new();
+        let state = Arc::clone(&hub.state);
+        let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = state
+                .lock()
+                .expect("state lock should initially be healthy");
+            panic!("poison activity state for the test");
+        }));
+        assert!(panic_result.is_err());
+
+        hub.publish(snapshot("agent-1", SubagentActivityPhase::Failed, 1));
+        let receiver = hub.subscribe();
+        drop(receiver);
+        hub.publish(snapshot("agent-1", SubagentActivityPhase::Completed, 2));
+
+        assert_eq!(hub.current()[0].phase, SubagentActivityPhase::Completed);
     }
 }
