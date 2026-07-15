@@ -283,7 +283,7 @@ pub struct PlanResourcePolicySnapshot {
 impl Default for PlanResourcePolicySnapshot {
     fn default() -> Self {
         Self {
-            max_concurrency: 6,
+            max_concurrency: Self::DEFAULT_MAX_CONCURRENCY,
             subagent_heartbeat_interval_ms: 10_000,
             subagent_heartbeat_ttl_ms: 300_000,
             provider_request_timeout_ms: None,
@@ -293,6 +293,11 @@ impl Default for PlanResourcePolicySnapshot {
             repeated_failure_limit: 3,
         }
     }
+}
+
+impl PlanResourcePolicySnapshot {
+    /// Default maximum concurrent delegated tasks accepted by a plan.
+    pub const DEFAULT_MAX_CONCURRENCY: usize = 6;
 }
 
 /// Provider-invisible capability ceiling for one executing plan.

@@ -649,6 +649,11 @@ impl SubagentManager {
         mode: WaitMode,
         timeout: Option<Duration>,
     ) -> Result<WaitSubagentsOutput, RuntimeError> {
+        if agent_ids.is_empty() {
+            return Err(RuntimeError::InvalidSubagentSelection {
+                operation: "wait_subagents",
+            });
+        }
         let deadline = timeout.map(|duration| tokio::time::Instant::now() + duration);
         loop {
             let notified = self.notify.notified();
@@ -683,6 +688,11 @@ impl SubagentManager {
         &self,
         agent_ids: &[SubagentId],
     ) -> Result<WaitSubagentsOutput, RuntimeError> {
+        if agent_ids.is_empty() {
+            return Err(RuntimeError::InvalidSubagentSelection {
+                operation: "cancel_subagents",
+            });
+        }
         let mut state = self.state.lock().await;
         let mut links_to_update = Vec::new();
         for agent_id in agent_ids {

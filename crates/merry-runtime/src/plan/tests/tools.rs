@@ -2,6 +2,7 @@ use crate::plan::{
     PlanChangeInput, PlanExecutionIntent, PlanNodeInput, UpdatePlanInput,
     tools::{READ_PLAN_TOOL_NAME, UPDATE_PLAN_TOOL_NAME, coordinator_plan_registered_tools},
 };
+use crate::schema_contract::assert_provider_input_schema_fields_have_descriptions;
 use merry_core::{PlanExecutorPolicy, PlanHarnessSnapshot, PlanRecoveryPolicySnapshot, ToolSpec};
 use serde_json::{Value, json};
 
@@ -137,6 +138,32 @@ fn update_plan_contract_explains_lifecycle_and_runtime_owned_state() {
     assert!(schema.contains("already requested execution"));
     assert!(schema.contains("execute_if_authorized"));
     assert!(schema.contains("request_user_review"));
+}
+
+#[test]
+fn provider_visible_plan_schemas_describe_every_field_and_match_runtime_bounds() {
+    for tool in coordinator_plan_registered_tools()
+        .expect("plan tools build")
+        .into_iter()
+    {
+        assert_provider_input_schema_fields_have_descriptions(tool.spec());
+    }
+
+    let read_schema = serde_json::to_value(plan_tool(READ_PLAN_TOOL_NAME).input_schema())
+        .expect("read_plan schema serializes");
+    assert_eq!(read_schema["properties"]["max_depth"]["minimum"], 0);
+    assert_eq!(read_schema["properties"]["max_depth"]["maximum"], 16);
+
+    let update_schema = serde_json::to_value(update_plan_tool().input_schema())
+        .expect("update_plan schema serializes");
+    assert_eq!(
+        update_schema["properties"]["max_concurrency_hint"]["minimum"],
+        1
+    );
+    assert_eq!(
+        update_schema["properties"]["max_concurrency_hint"]["maximum"],
+        6
+    );
 }
 
 fn update_plan_tool() -> ToolSpec {

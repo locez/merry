@@ -451,7 +451,8 @@ fn cmd_check_command_tool(
                 "type": "array",
                 "items": {
                     "type": "string",
-                    "minLength": 1
+                    "minLength": 1,
+                    "description": "Executable name or shell builtin to check. Use a name such as `cargo`, not a full command or path."
                 },
                 "minItems": 1,
                 "description": "Program names to check in PATH before suggesting optional system commands."

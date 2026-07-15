@@ -8,14 +8,15 @@ use std::{
     path::Path,
 };
 
-pub(super) const MAX_PLAN_NODES: usize = 128;
-pub(super) const MAX_DIRECT_CHILDREN: usize = 16;
-pub(super) const MAX_DEPENDENCIES: usize = 16;
-pub(super) const MAX_ACCEPTANCE_ITEMS: usize = 16;
-pub(super) const MAX_PLAN_DEPTH: usize = 16;
-pub(super) const MAX_OBJECTIVE_BYTES: usize = 2 * 1024;
-pub(super) const MAX_ACCEPTANCE_BYTES: usize = 1024;
-pub(super) const MAX_REASON_BYTES: usize = 2 * 1024;
+pub(crate) const MAX_PLAN_NODES: usize = 128;
+pub(crate) const MAX_DIRECT_CHILDREN: usize = 16;
+pub(crate) const MAX_DEPENDENCIES: usize = 16;
+pub(crate) const MAX_ACCEPTANCE_ITEMS: usize = 16;
+pub(crate) const MAX_PLAN_DEPTH: usize = 16;
+pub(crate) const MAX_OBJECTIVE_BYTES: usize = 2 * 1024;
+pub(crate) const MAX_ACCEPTANCE_BYTES: usize = 1024;
+pub(crate) const MAX_REASON_BYTES: usize = 2 * 1024;
+pub(crate) const MAX_CLIENT_KEY_BYTES: usize = 128;
 
 pub(super) fn validate_reason(reason: &str) -> Result<(), PlanError> {
     validate_text("reason", reason, MAX_REASON_BYTES)
@@ -36,7 +37,7 @@ pub(super) fn validate_node_text(objective: &str, acceptance: &[String]) -> Resu
 }
 
 pub(super) fn validate_client_key(client_key: &str) -> Result<(), PlanError> {
-    validate_text("client_key", client_key, 128)
+    validate_text("client_key", client_key, MAX_CLIENT_KEY_BYTES)
 }
 
 pub(super) fn resolve_dependencies(

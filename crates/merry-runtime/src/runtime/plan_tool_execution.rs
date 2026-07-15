@@ -1,7 +1,7 @@
 use crate::{
     ArtifactContent, PlanControllerError, PlanError, RuntimeError,
     plan::{
-        ReadPlanInput, UpdatePlanInput,
+        PLAN_READ_MAX_DEPTH, ReadPlanInput, UpdatePlanInput,
         tools::{READ_PLAN_TOOL_NAME, UPDATE_PLAN_TOOL_NAME},
     },
     tool::ToolExecutionContext,
@@ -16,8 +16,6 @@ use serde::{Serialize, de::DeserializeOwned};
 use std::collections::BTreeSet;
 
 use super::{RuntimeInner, persist_resume_safe_savepoint_if_configured};
-
-const PLAN_READ_MAX_DEPTH: u8 = 16;
 
 pub(super) async fn execute_plan_tool_call(
     inner: &RuntimeInner,

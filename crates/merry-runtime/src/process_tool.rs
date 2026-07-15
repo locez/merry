@@ -6,9 +6,10 @@
 //! policy and injected [`crate::ProcessRunner`] lanes.
 
 use crate::{
-    ActionProposal, ActionProposalEvidence, ProcessActionIntent, ProcessEnvPolicy, RegisteredTool,
-    ToolActionKind, ToolActionPreflight, ToolActionProposalFuture, ToolExecutionContext,
-    ToolExecutionError, ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture,
+    ActionProposal, ActionProposalEvidence, MAX_PROCESS_ARG_BYTES, MAX_PROCESS_ARGV_ITEMS,
+    MAX_PROCESS_CWD_BYTES, ProcessActionIntent, ProcessEnvPolicy, RegisteredTool, ToolActionKind,
+    ToolActionPreflight, ToolActionProposalFuture, ToolExecutionContext, ToolExecutionError,
+    ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture,
 };
 use merry_core::{CoreError, ErrorInfo, PendingToolCall, ToolInputSchema, ToolName, ToolSpec};
 use serde_json::{Value, json};
@@ -65,14 +66,26 @@ fn process_command_tool_input_schema() -> Result<ToolInputSchema, ProcessCommand
         "properties": {
             "argv": {
                 "type": "array",
-                "items": { "type": "string" },
+                "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": MAX_PROCESS_ARG_BYTES,
+                    "description": "One non-empty executable or argument string. Newline and tab are allowed; other control characters are rejected."
+                },
                 "minItems": 1,
+                "maxItems": MAX_PROCESS_ARGV_ITEMS,
                 "description": "Exact executable and argument strings to run in order. Do not pass a shell command string unless the first argv item is an explicitly requested shell."
             },
             "cwd": {
-                "type": "string",
-                "minLength": 1,
-                "description": "Optional workspace-relative working directory. For the workspace root, omit cwd or use \".\"; never pass an empty string."
+                "description": "Optional workspace-relative working directory. For the workspace root, omit cwd or use \".\"; null is also treated as omitted, and an empty string is rejected by the provider contract.",
+                "anyOf": [
+                    { "type": "null" },
+                    {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": MAX_PROCESS_CWD_BYTES
+                    }
+                ]
             }
         },
         "required": ["argv"]
@@ -289,19 +302,37 @@ mod tests {
         .expect("process command tool should build");
         let schema = serde_json::to_value(tool.spec().input_schema().as_schema())
             .expect("schema should serialize");
+        crate::schema_contract::assert_provider_input_schema_fields_have_descriptions(tool.spec());
 
-        assert_eq!(schema["properties"]["cwd"]["minLength"], 1);
         assert!(
             schema["properties"]["cwd"]["description"]
                 .as_str()
                 .expect("cwd description should be text")
-                .contains("never pass an empty string")
+                .contains("null is also treated as omitted")
         );
+        let cwd_string_schema = schema["properties"]["cwd"]["anyOf"]
+            .as_array()
+            .expect("cwd should have nullable branches")
+            .iter()
+            .find(|branch| branch["type"] == "string")
+            .expect("cwd should have a string branch");
+        assert_eq!(cwd_string_schema["minLength"], 1);
+        assert_eq!(cwd_string_schema["maxLength"], crate::MAX_PROCESS_CWD_BYTES);
         assert!(
             !schema["properties"]["argv"]["description"]
                 .as_str()
                 .unwrap_or_default()
                 .is_empty()
+        );
+        assert_eq!(schema["properties"]["argv"]["minItems"], 1);
+        assert_eq!(
+            schema["properties"]["argv"]["maxItems"],
+            crate::MAX_PROCESS_ARGV_ITEMS
+        );
+        assert_eq!(schema["properties"]["argv"]["items"]["minLength"], 1);
+        assert_eq!(
+            schema["properties"]["argv"]["items"]["maxLength"],
+            crate::MAX_PROCESS_ARG_BYTES
         );
     }
 

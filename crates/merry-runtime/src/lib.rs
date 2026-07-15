@@ -50,6 +50,8 @@ mod process_runner;
 mod process_tool;
 mod profile;
 mod runtime;
+#[cfg(test)]
+mod schema_contract;
 mod session;
 mod session_projection;
 mod session_store;

@@ -1412,6 +1412,7 @@ fn runtime_error_code(error: &RuntimeError) -> &'static str {
     match error {
         RuntimeError::StepAlreadyActive { .. } => "step_already_active",
         RuntimeError::InvalidStepInput { .. } => "invalid_step_input",
+        RuntimeError::InvalidSubagentSelection { .. } => "invalid_subagent_selection",
         RuntimeError::PlanEffectAttribution { .. } => "plan_effect_attribution_failed",
         RuntimeError::PlanSubagentAttemptInactive { .. } => "plan_subagent_attempt_inactive",
         RuntimeError::InvalidUserImageInput { .. } => "invalid_user_image_input",

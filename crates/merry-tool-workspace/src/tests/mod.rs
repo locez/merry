@@ -181,6 +181,79 @@ fn workspace_tool_schemas_describe_all_argument_fields() {
     assert_fields(list_dir_spec(), &["path"]);
     assert_fields(search_text_spec(), &["query", "path", "max_matches"]);
     assert_fields(workspace_patch_spec(), &["patch"]);
+
+    let read_schema = serde_json::to_value(read_file_spec().input_schema().as_schema())
+        .expect("read schema should serialize");
+    let list_schema = serde_json::to_value(list_dir_spec().input_schema().as_schema())
+        .expect("list schema should serialize");
+    let search_schema = serde_json::to_value(search_text_spec().input_schema().as_schema())
+        .expect("search schema should serialize");
+    let patch_schema = serde_json::to_value(workspace_patch_spec().input_schema().as_schema())
+        .expect("patch schema should serialize");
+    assert_eq!(read_schema["properties"]["path"]["minLength"], 1);
+    assert_eq!(list_schema["properties"]["path"]["minLength"], 1);
+    assert_eq!(search_schema["properties"]["query"]["minLength"], 1);
+    assert_eq!(patch_schema["properties"]["patch"]["minLength"], 1);
+}
+
+#[test]
+fn workspace_schemas_project_session_limits() {
+    let temp = TempWorkspace::new("schema-limits");
+    let limits = WorkspaceToolLimits {
+        max_search_query_bytes: 17,
+        max_search_matches: 3,
+        max_patch_bytes: 29,
+        ..WorkspaceToolLimits::default()
+    };
+    let tools = ReadOnlyWorkspaceTools::new(
+        WorkspaceToolsConfig::new(vec![temp.path().to_path_buf()]).with_limits(limits),
+    )
+    .expect("workspace tools should construct");
+    let registered = tools.into_registered_tools_with_patch();
+    let search = registered
+        .iter()
+        .find(|tool| tool.spec().name().as_str() == WORKSPACE_SEARCH_TEXT_TOOL)
+        .expect("search tool should be registered");
+    let patch = registered
+        .iter()
+        .find(|tool| tool.spec().name().as_str() == WORKSPACE_PATCH_TOOL)
+        .expect("patch tool should be registered");
+    let search_schema = search.spec().input_schema().as_schema().as_value();
+    let patch_schema = patch.spec().input_schema().as_schema().as_value();
+
+    fn has_constraint(schema: &Value, keyword: &str, expected: &Value) -> bool {
+        if schema.get(keyword) == Some(expected) {
+            return true;
+        }
+        ["anyOf", "oneOf", "allOf"].iter().any(|branch_keyword| {
+            schema
+                .get(*branch_keyword)
+                .and_then(Value::as_array)
+                .is_some_and(|branches| {
+                    branches
+                        .iter()
+                        .any(|branch| has_constraint(branch, keyword, expected))
+                })
+        })
+    }
+
+    assert_eq!(search_schema["properties"]["query"]["maxLength"], 17);
+    assert_eq!(patch_schema["properties"]["patch"]["maxLength"], 29);
+    assert!(has_constraint(
+        &search_schema["properties"]["max_matches"],
+        "minimum",
+        &json!(1)
+    ));
+    assert!(has_constraint(
+        &search_schema["properties"]["max_matches"],
+        "maximum",
+        &json!(3)
+    ));
+    assert!(has_constraint(
+        &search_schema["properties"]["path"],
+        "minLength",
+        &json!(1)
+    ));
 }
 
 fn read_outcome(tools: &ReadOnlyWorkspaceTools, path: &str) -> ToolExecutionOutcome {

@@ -17,6 +17,7 @@ const CHECKPOINT_REF_NOT_FOUND: &str = "checkpoint_ref_not_found";
 const CHECKPOINT_REF_READ_FAILED: &str = "checkpoint_ref_read_failed";
 const CHECKPOINT_REF_ARGUMENTS_INVALID: &str = "checkpoint_ref_arguments_invalid";
 const DEFAULT_CHECKPOINT_REF_PAGE_BYTES: usize = 4096;
+const MAX_CHECKPOINT_REF_PAGE_BYTES: usize = 16_384;
 
 pub(super) fn merry_read_checkpoint_ref_tool_name() -> ToolName {
     ToolName::new(MERRY_READ_CHECKPOINT_REF_TOOL_NAME).expect("static tool name is valid")
@@ -52,12 +53,14 @@ fn merry_read_checkpoint_ref_input_schema() -> Result<ToolInputSchema, CoreError
             },
             "offset": {
                 "type": "integer",
-                "minimum": 0
+                "minimum": 0,
+                "description": "Zero-based byte offset within the referenced artifact. Omit it to start at the beginning."
             },
             "max_bytes": {
                 "type": "integer",
                 "minimum": 1,
-                "maximum": 16384
+                "maximum": MAX_CHECKPOINT_REF_PAGE_BYTES,
+                "description": "Maximum number of artifact bytes to return in this page. Omit it to use the 4096-byte default."
             }
         }
     }))
@@ -200,7 +203,7 @@ fn checkpoint_ref_arguments(
     let offset = optional_page_argument(arguments, "offset", 0)?;
     let max_bytes =
         optional_page_argument(arguments, "max_bytes", DEFAULT_CHECKPOINT_REF_PAGE_BYTES)?;
-    if max_bytes == 0 || max_bytes > 16_384 {
+    if max_bytes == 0 || max_bytes > MAX_CHECKPOINT_REF_PAGE_BYTES {
         return Err("max_bytes must be between 1 and 16384");
     }
 
@@ -258,5 +261,18 @@ mod argument_tests {
 
         assert_eq!(arguments.offset, 0);
         assert_eq!(arguments.max_bytes, DEFAULT_CHECKPOINT_REF_PAGE_BYTES);
+    }
+
+    #[test]
+    fn checkpoint_ref_schema_describes_fields_and_matches_runtime_bounds() {
+        let tool = merry_read_checkpoint_ref_tool().expect("checkpoint ref tool should build");
+        crate::schema_contract::assert_provider_input_schema_fields_have_descriptions(tool.spec());
+        let schema = serde_json::to_value(tool.spec().input_schema().as_schema())
+            .expect("checkpoint ref schema should serialize");
+        assert_eq!(schema["properties"]["offset"]["minimum"], 0);
+        assert_eq!(
+            schema["properties"]["max_bytes"]["maximum"],
+            MAX_CHECKPOINT_REF_PAGE_BYTES
+        );
     }
 }
