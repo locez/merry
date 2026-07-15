@@ -846,31 +846,46 @@ impl<'a> TreeBuilder<'a> {
                 maximum: validation::MAX_DIRECT_CHILDREN,
             });
         }
-        let (id, created_revision) = match (input.id, input.client_key) {
-            (None, Some(client_key)) => {
-                validation::validate_client_key(&client_key)?;
-                if self.client_key_ids.contains_key(&client_key) {
-                    return Err(PlanError::DuplicateClientKey { client_key });
+        let (id, created_revision, client_key, executor_policy, harness, recovery_policy) =
+            match (input.id, input.client_key) {
+                (None, Some(client_key)) => {
+                    validation::validate_client_key(&client_key)?;
+                    if self.client_key_ids.contains_key(&client_key) {
+                        return Err(PlanError::DuplicateClientKey { client_key });
+                    }
+                    let id = PlanNodeId::new(&format!("plan-node-{}", self.next_node_sequence))
+                        .expect("runtime-generated node id is valid");
+                    self.next_node_sequence += 1;
+                    self.client_key_ids.insert(client_key.clone(), id.clone());
+                    (
+                        id,
+                        self.revision,
+                        Some(client_key),
+                        input.executor_policy,
+                        input.harness,
+                        input.recovery_policy,
+                    )
                 }
-                let id = PlanNodeId::new(&format!("plan-node-{}", self.next_node_sequence))
-                    .expect("runtime-generated node id is valid");
-                self.next_node_sequence += 1;
-                self.client_key_ids.insert(client_key, id.clone());
-                (id, self.revision)
-            }
-            (Some(id), None) => {
-                let existing = self
-                    .existing
-                    .get(&id)
-                    .ok_or_else(|| PlanError::UnknownNode {
-                        node_id: id.clone(),
-                    })?;
-                ensure_mutable(existing)?;
-                (id, existing.created_revision)
-            }
-            (None, None) => return Err(PlanError::InvalidNewNodeIdentity),
-            (Some(_), Some(_)) => return Err(PlanError::InvalidExistingNodeIdentity),
-        };
+                (Some(id), None) => {
+                    let existing =
+                        self.existing
+                            .get(&id)
+                            .ok_or_else(|| PlanError::UnknownNode {
+                                node_id: id.clone(),
+                            })?;
+                    ensure_mutable(existing)?;
+                    (
+                        id,
+                        existing.created_revision,
+                        existing.client_key.clone(),
+                        existing.executor_policy,
+                        existing.harness.clone(),
+                        existing.recovery_policy.clone(),
+                    )
+                }
+                (None, None) => return Err(PlanError::InvalidNewNodeIdentity),
+                (Some(_), Some(_)) => return Err(PlanError::InvalidExistingNodeIdentity),
+            };
         if self.nodes.contains_key(&id) {
             return Err(PlanError::DuplicateNodeId { node_id: id });
         }
@@ -878,18 +893,22 @@ impl<'a> TreeBuilder<'a> {
         let children = input.children;
         let node = PlanNodeSnapshot {
             id: id.clone(),
+            client_key,
             parent_id,
             sibling_order,
             objective: input.objective,
             acceptance: input.acceptance,
             status: PlanNodeStatus::Pending,
-            executor_policy: input.executor_policy,
-            harness: input.harness,
-            recovery_policy: input.recovery_policy,
+            executor_policy,
+            harness,
+            recovery_policy,
             depends_on: Vec::new(),
             result: None,
             created_revision,
             updated_revision: self.revision,
+            declared_status: PlanNodeStatus::Pending,
+            execution_summary: Default::default(),
+            links: Vec::new(),
         };
         self.nodes.insert(id.clone(), node);
         self.unresolved.insert(id.clone(), dependencies);

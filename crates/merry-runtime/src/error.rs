@@ -34,13 +34,6 @@ pub enum RuntimeError {
         reason: &'static str,
     },
 
-    /// Persisted Plan state could not be recovered before the runtime became observable.
-    #[error("plan recovery failed: {message}")]
-    PlanRecovery {
-        /// Actionable controller or persistence detail.
-        message: String,
-    },
-
     /// A mutating Plan tool could not durably record its effect before execution.
     #[error(
         "plan effect attribution failed for tool call {call_id} in session {session_id}: {message}"

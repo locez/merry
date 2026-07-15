@@ -39,6 +39,8 @@ pub struct SpawnSubagentTaskInput {
     pub expected_output: Option<String>,
     /// Optional child model reasoning-effort override.
     pub reasoning_effort: Option<String>,
+    /// Optional Plan node client key to bind this child execution to.
+    pub plan_task: Option<String>,
 }
 
 /// Provider-visible output for `spawn_subagents`.
@@ -109,7 +111,12 @@ pub struct WaitSubagentsInput {
     pub agent_ids: Vec<SubagentId>,
     /// Optional wait completion mode.
     pub mode: Option<WaitMode>,
-    /// Optional wait timeout in milliseconds.
+    /// Optional observation deadline in milliseconds. This is not a task
+    /// budget and a timeout never means that the child completed.
+    #[schemars(
+        description = "Observation deadline in milliseconds, not a task budget. Prefer 30000 or omit it. A timed-out result is only a status snapshot and must not be reported as completion.",
+        range(min = 5000)
+    )]
     pub timeout_ms: Option<u64>,
 }
 
@@ -127,13 +134,40 @@ pub struct CancelSubagentsInput {
 pub struct WaitSubagentsOutput {
     /// Compact status views for selected child agents.
     pub agents: Vec<SubagentStatusView>,
+    /// True when the observation deadline elapsed before the requested mode
+    /// became terminal.
+    pub timed_out: bool,
+    /// True when the requested wait mode is satisfied by the returned status
+    /// snapshot. Only terminal=true permits a completion claim.
+    pub terminal: bool,
+    /// Selected child ids that are still non-terminal in this snapshot.
+    pub pending_agent_ids: Vec<SubagentId>,
 }
 
 impl WaitSubagentsOutput {
     /// Creates wait output from compact child status views.
     #[must_use]
     pub fn new(agents: Vec<SubagentStatusView>) -> Self {
-        Self { agents }
+        let terminal = agents.iter().all(SubagentStatusView::is_terminal);
+        Self::with_wait_state(agents, terminal, false)
+    }
+
+    pub(crate) fn with_wait_state(
+        agents: Vec<SubagentStatusView>,
+        terminal: bool,
+        timed_out: bool,
+    ) -> Self {
+        let pending_agent_ids = agents
+            .iter()
+            .filter(|agent| !agent.is_terminal())
+            .map(|agent| agent.agent_id.clone())
+            .collect();
+        Self {
+            agents,
+            timed_out,
+            terminal,
+            pending_agent_ids,
+        }
     }
 }
 

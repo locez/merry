@@ -590,7 +590,7 @@ fn root_objective_change_requires_reapproval() {
             coordinator_node_id: None,
             max_concurrency_hint: None,
             change: PlanChangeInput::ReplaceSubtree {
-                target_node_id: root_id,
+                target_node_id: root_id.clone(),
                 expected_node_revision: root_revision,
                 subtree: replacement,
             },
@@ -613,7 +613,7 @@ fn root_objective_change_requires_reapproval() {
 }
 
 #[test]
-fn capability_expansion_is_committed_as_an_approval_boundary() {
+fn runtime_owned_harness_fields_do_not_change_through_plan_revision() {
     let mut plan = empty_plan();
     let mut initial_root = root(Vec::new());
     initial_root.harness.write_scope = vec!["crates/runtime".to_owned()];
@@ -643,24 +643,19 @@ fn capability_expansion_is_committed_as_an_approval_boundary() {
             coordinator_node_id: None,
             max_concurrency_hint: None,
             change: PlanChangeInput::ReplaceSubtree {
-                target_node_id: root_id,
+                target_node_id: root_id.clone(),
                 expected_node_revision: root_revision,
                 subtree: replacement,
             },
         })
         .expect("capability proposal is committed for review");
 
-    assert_eq!(output.snapshot.phase, PlanPhase::AwaitingApproval);
-    assert!(
-        output
-            .snapshot
-            .approval_requirements
-            .iter()
-            .any(|requirement| {
-                matches!(
-                    requirement.kind,
-                    PlanApprovalRequirementKind::CapabilityOrPermissionExpansion
-                )
-            })
-    );
+    assert_eq!(output.snapshot.phase, PlanPhase::Executing);
+    let node = output
+        .snapshot
+        .nodes
+        .iter()
+        .find(|node| node.id == root_id)
+        .expect("root remains present");
+    assert_eq!(node.harness.write_scope, vec!["crates/runtime"]);
 }

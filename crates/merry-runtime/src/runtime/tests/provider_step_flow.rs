@@ -36,6 +36,38 @@ async fn provider_stream_context_uses_runtime_session_as_prompt_cache_key() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn coordinator_request_explains_when_no_plan_is_active() {
+    let provider = RecordingModelProvider::new();
+    let runtime = Runtime::builder(session_id("runtime-plan-inactive-context"))
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .coordinator_plan_tools()
+        .build()
+        .expect("runtime should build");
+
+    collect_step(
+        &runtime,
+        "Inspect the repository and decide what to do.",
+        crate::StepContext::default(),
+    )
+    .await;
+
+    let request = provider
+        .recorded_requests()
+        .into_iter()
+        .next()
+        .expect("provider request should be recorded");
+    let request_text = request
+        .messages()
+        .iter()
+        .map(|message| message.content().as_text())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(request_text.contains("<plan_context>"));
+    assert!(request_text.contains("inactive"));
+    assert!(request_text.contains("Do not call read_plan"));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn user_text_burst_records_every_item_in_one_model_turn() {
     let runtime = Runtime::builder(session_id("runtime-user-burst-one-turn"))
         .model_provider(Arc::new(RecordingModelProvider::new()), model_name())

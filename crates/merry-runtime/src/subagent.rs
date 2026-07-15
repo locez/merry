@@ -2,18 +2,19 @@
 
 use crate::{
     AgentLoopConfig, AgentLoopResult, AgentLoopStatus, ArtifactContent, PlanSubagentControl,
-    Runtime, RuntimeError, StepContext, StepInput, TaskAnchor,
+    Runtime, RuntimeError, StepContext, StepInput, TaskAnchor, plan::PlanController,
 };
+use futures_util::future::BoxFuture;
 use merry_core::{
-    ErrorInfo, RuntimeJournalEvent, RuntimeJournalPayload, SubagentId, SubagentTaskId,
-    ToolCallResultStatus, ToolName,
+    ErrorInfo, PlanBindingId, PlanLinkSnapshot, PlanLinkStatus, RuntimeJournalEvent,
+    RuntimeJournalPayload, SubagentId, SubagentTaskId, ToolCallResultStatus, ToolName,
 };
 use merry_llm::GenerationConfig;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Mutex as StdMutex,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::Duration,
@@ -48,7 +49,7 @@ pub(crate) const CANCEL_SUBAGENTS_TOOL_NAME: &str = "cancel_subagents";
 const WORKSPACE_PATCH_TOOL_NAME: &str = "workspace_patch";
 
 /// Runtime construction input for one bounded child agent.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ChildRuntimeInput {
     /// Session id owned by the child runtime.
     pub session_id: merry_core::SessionId,
@@ -64,8 +65,12 @@ pub struct ChildRuntimeInput {
     pub depth: u8,
     /// Child-scoped model generation controls selected by the parent agent.
     pub generation_config: GenerationConfig,
-    /// Optional root-plan control when this child is a scheduler-owned subagent.
+    /// Optional compatibility control for an explicitly Plan-bound child.
     pub plan_subagent_control: Option<PlanSubagentControl>,
+    /// Optional runtime-owned Plan link for this child execution.
+    pub plan_link: Option<PlanLinkSnapshot>,
+    /// Runtime-owned link adapter used when this child delegates further.
+    pub plan_link_runtime: Option<Arc<dyn PlanLinkRuntime>>,
 }
 
 /// Parent-authored workspace scope carried into child runtime construction.
@@ -77,6 +82,16 @@ pub struct ChildWorkspaceScope {
 }
 
 impl ChildWorkspaceScope {
+    /// Returns the unrestricted workspace scope inherited by a root agent.
+    #[must_use]
+    pub fn workspace_root() -> Self {
+        Self {
+            read_scope: vec![PathBuf::from(".")],
+            write_scope: vec![PathBuf::from(".")],
+            forbidden_paths: Vec::new(),
+        }
+    }
+
     /// Creates a workspace scope snapshot from a validated subagent task spec.
     #[must_use]
     pub fn from_task(task: &SubagentTaskSpec) -> Self {
@@ -106,10 +121,77 @@ impl ChildWorkspaceScope {
     }
 }
 
+#[derive(Debug, Clone)]
+struct ParentCapabilities {
+    allowed_tools: Vec<ToolName>,
+    workspace_scope: ChildWorkspaceScope,
+}
+
 /// Object-safe factory for constructing bounded child runtimes.
 pub trait ChildRuntimeFactory: Send + Sync {
     /// Builds a child runtime from runtime-owned delegation input.
     fn build_child(&self, input: ChildRuntimeInput) -> Result<Runtime, RuntimeError>;
+}
+
+/// Runtime-owned bridge for updating a Plan link without exposing the Plan
+/// controller or its persistence protocol to a subagent runtime.
+pub trait PlanLinkRuntime: Send + Sync {
+    /// Binds a newly allocated subagent to a Plan node identified by client key.
+    fn bind_subagent<'a>(
+        &'a self,
+        client_key: String,
+        agent_id: SubagentId,
+        task_id: SubagentTaskId,
+        now_ms: u64,
+    ) -> BoxFuture<'a, Result<PlanLinkSnapshot, String>>;
+
+    /// Updates the runtime-derived terminal state for an existing link.
+    fn update_subagent_link<'a>(
+        &'a self,
+        binding_id: PlanBindingId,
+        status: PlanLinkStatus,
+        now_ms: u64,
+    ) -> BoxFuture<'a, Result<(), String>>;
+}
+
+struct PlanControllerLinkRuntime(PlanController);
+
+impl PlanLinkRuntime for PlanControllerLinkRuntime {
+    fn bind_subagent<'a>(
+        &'a self,
+        client_key: String,
+        agent_id: SubagentId,
+        task_id: SubagentTaskId,
+        now_ms: u64,
+    ) -> BoxFuture<'a, Result<PlanLinkSnapshot, String>> {
+        Box::pin(async move {
+            self.0
+                .bind_subagent(client_key, agent_id, task_id, now_ms)
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn update_subagent_link<'a>(
+        &'a self,
+        binding_id: PlanBindingId,
+        status: PlanLinkStatus,
+        now_ms: u64,
+    ) -> BoxFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            self.0
+                .update_subagent_link(binding_id, status, now_ms)
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+    }
+}
+
+pub(crate) fn plan_link_runtime_for_controller(
+    controller: PlanController,
+) -> Arc<dyn PlanLinkRuntime> {
+    Arc::new(PlanControllerLinkRuntime(controller))
 }
 
 /// Runtime-owned manager for bounded child agent execution.
@@ -123,6 +205,10 @@ pub struct SubagentManager {
     notify: Arc<Notify>,
     next_id: Arc<AtomicU64>,
     next_batch_id: Arc<AtomicU64>,
+    depth: u8,
+    max_depth: u8,
+    plan_link_runtime: Arc<StdMutex<Option<Arc<dyn PlanLinkRuntime>>>>,
+    parent_capabilities: Arc<StdMutex<Option<ParentCapabilities>>>,
 }
 
 #[derive(Debug, Default)]
@@ -142,6 +228,7 @@ struct ReservedChildStart {
     task: SubagentTaskSpec,
     task_anchor: TaskAnchor,
     cancellation_token: CancellationToken,
+    plan_link: Option<PlanLinkSnapshot>,
 }
 
 #[derive(Clone)]
@@ -151,6 +238,8 @@ struct ChildScheduler {
     notify: Arc<Notify>,
     enabled: Arc<AtomicBool>,
     max_threads: Arc<AtomicUsize>,
+    depth: u8,
+    plan_link_runtime: Arc<StdMutex<Option<Arc<dyn PlanLinkRuntime>>>>,
 }
 
 impl ChildScheduler {
@@ -185,6 +274,7 @@ struct ManagedSubagent {
     changed_paths: Vec<String>,
     diagnostics: Option<ErrorInfo>,
     cancellation_token: CancellationToken,
+    plan_link: Option<PlanLinkSnapshot>,
 }
 
 impl SubagentManager {
@@ -201,10 +291,22 @@ impl SubagentManager {
     /// Creates a manager whose spawn policy can be changed by interactive runtime control.
     #[must_use]
     pub fn runtime_controlled(
+        parent_session_id: merry_core::SessionId,
+        config: SubagentConfig,
+        factory: Arc<dyn ChildRuntimeFactory>,
+        enabled: bool,
+    ) -> Self {
+        Self::runtime_controlled_at_depth(parent_session_id, config, factory, enabled, 0)
+    }
+
+    /// Creates a manager for a child runtime at a known delegation depth.
+    #[must_use]
+    pub fn runtime_controlled_at_depth(
         _parent_session_id: merry_core::SessionId,
         config: SubagentConfig,
         factory: Arc<dyn ChildRuntimeFactory>,
         enabled: bool,
+        depth: u8,
     ) -> Self {
         Self {
             enabled: Arc::new(AtomicBool::new(enabled)),
@@ -215,7 +317,100 @@ impl SubagentManager {
             notify: Arc::new(Notify::new()),
             next_id: Arc::new(AtomicU64::new(1)),
             next_batch_id: Arc::new(AtomicU64::new(1)),
+            depth,
+            max_depth: config.max_depth(),
+            plan_link_runtime: Arc::new(StdMutex::new(None)),
+            parent_capabilities: Arc::new(StdMutex::new(None)),
         }
+    }
+
+    pub(crate) fn attach_parent_capabilities(
+        &self,
+        allowed_tools: Vec<ToolName>,
+        workspace_scope: ChildWorkspaceScope,
+    ) {
+        *self
+            .parent_capabilities
+            .lock()
+            .expect("subagent parent capabilities mutex is not poisoned") =
+            Some(ParentCapabilities {
+                allowed_tools,
+                workspace_scope,
+            });
+    }
+
+    pub(crate) fn attach_plan_link_runtime(&self, runtime: Arc<dyn PlanLinkRuntime>) {
+        *self
+            .plan_link_runtime
+            .lock()
+            .expect("subagent plan link runtime mutex is not poisoned") = Some(runtime);
+    }
+
+    fn attached_plan_link_runtime(&self) -> Option<Arc<dyn PlanLinkRuntime>> {
+        self.plan_link_runtime
+            .lock()
+            .expect("subagent plan link runtime mutex is not poisoned")
+            .clone()
+    }
+
+    fn apply_parent_capabilities(
+        &self,
+        mut task: SubagentTaskSpec,
+    ) -> Result<SubagentTaskSpec, SubagentError> {
+        let capabilities = self
+            .parent_capabilities
+            .lock()
+            .expect("subagent parent capabilities mutex is not poisoned")
+            .clone();
+        let Some(capabilities) = capabilities else {
+            return Ok(task);
+        };
+
+        if task.allowed_tools_are_explicit() {
+            for tool in task.allowed_tools() {
+                if !capabilities.allowed_tools.contains(tool) {
+                    return Err(SubagentError::CapabilityExpansion {
+                        field: "allowed_tools",
+                        value: tool.to_string(),
+                    });
+                }
+            }
+        } else {
+            task = task.with_allowed_tools(capabilities.allowed_tools);
+        }
+
+        if task.read_scope_is_explicit() {
+            ensure_scope_within_parent(
+                "read_scope",
+                task.read_scope(),
+                capabilities.workspace_scope.read_scope(),
+            )?;
+        } else {
+            task = task.with_read_scope(capabilities.workspace_scope.read_scope().to_vec())?;
+        }
+
+        if task.write_scope_is_explicit() {
+            ensure_scope_within_parent(
+                "write_scope",
+                task.write_scope(),
+                capabilities.workspace_scope.write_scope(),
+            )?;
+        } else {
+            task = task.with_write_scope(capabilities.workspace_scope.write_scope().to_vec())?;
+        }
+
+        let inherited_forbidden = capabilities.workspace_scope.forbidden_paths();
+        if task.forbidden_paths_are_explicit() {
+            let mut forbidden = inherited_forbidden.to_vec();
+            forbidden.extend(task.forbidden_paths().iter().cloned());
+            forbidden.sort();
+            forbidden.dedup();
+            task = task.with_forbidden_paths(forbidden)?;
+        } else {
+            task = task.with_forbidden_paths(inherited_forbidden.to_vec())?;
+        }
+
+        Ok(task)
     }
 
     pub(crate) fn is_tool_visible(&self, tool_name: &ToolName) -> bool {
@@ -270,6 +465,17 @@ impl SubagentManager {
         max_concurrency: Option<usize>,
         parent_token: CancellationToken,
     ) -> Result<SpawnSubagentsOutput, RuntimeError> {
+        if self.depth >= self.max_depth {
+            return Ok(SpawnSubagentsOutput {
+                spawned: Vec::new(),
+                rejected: (0..tasks.len())
+                    .map(|task_index| RejectedSubagentView {
+                        task_index,
+                        reason: "maximum subagent delegation depth reached".to_owned(),
+                    })
+                    .collect(),
+            });
+        }
         if !self.enabled.load(Ordering::Acquire) {
             return Ok(SpawnSubagentsOutput {
                 spawned: Vec::new(),
@@ -281,35 +487,95 @@ impl SubagentManager {
                     .collect(),
             });
         }
-        if let Err(error) = validate_no_write_scope_conflicts(&tasks) {
+        let mut inherited_tasks = Vec::with_capacity(tasks.len());
+        let mut rejected = Vec::new();
+        for (task_index, task) in tasks.into_iter().enumerate() {
+            match self.apply_parent_capabilities(task) {
+                Ok(task) => inherited_tasks.push((task_index, task)),
+                Err(error) => rejected.push(RejectedSubagentView {
+                    task_index,
+                    reason: error.to_string(),
+                }),
+            }
+        }
+        let conflict_tasks = inherited_tasks
+            .iter()
+            .map(|(_, task)| task.clone())
+            .collect::<Vec<_>>();
+        if let Err(error) = validate_no_write_scope_conflicts(&conflict_tasks) {
+            let reason = error.to_string();
+            rejected.extend(
+                inherited_tasks
+                    .iter()
+                    .map(|(task_index, _)| RejectedSubagentView {
+                        task_index: *task_index,
+                        reason: reason.clone(),
+                    }),
+            );
             return Ok(SpawnSubagentsOutput {
                 spawned: Vec::new(),
-                rejected: (0..tasks.len())
-                    .map(|task_index| RejectedSubagentView {
-                        task_index,
-                        reason: error.to_string(),
-                    })
-                    .collect(),
+                rejected,
             });
         }
 
-        let task_inputs = tasks
+        let task_inputs = inherited_tasks
             .into_iter()
-            .map(|task| {
+            .map(|(task_index, task)| {
                 TaskAnchor::new(task.task())
-                    .map(|task_anchor| (task, task_anchor))
+                    .map(|task_anchor| (task_index, task, task_anchor))
                     .map_err(RuntimeError::from)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let mut spawned = Vec::with_capacity(task_inputs.len());
-        let mut to_start = Vec::new();
-        if !task_inputs.is_empty() {
-            self.has_agents.store(true, Ordering::Release);
-        }
+        let mut accepted_tasks = Vec::with_capacity(task_inputs.len());
         let batch_id = self.next_batch_id.fetch_add(1, Ordering::SeqCst);
+        for (task_index, task, task_anchor) in task_inputs {
+            let number = self.next_id.fetch_add(1, Ordering::SeqCst);
+            let agent_id = SubagentId::new(&format!("agent-{number}"))?;
+            let task_id = SubagentTaskId::new(&format!("task-{number}"))?;
+            let plan_link = match (task.plan_task(), self.attached_plan_link_runtime()) {
+                (Some(client_key), Some(runtime)) => match runtime
+                    .bind_subagent(
+                        client_key.to_owned(),
+                        agent_id.clone(),
+                        task_id.clone(),
+                        crate::plan::unix_time_ms(),
+                    )
+                    .await
+                {
+                    Ok(link) => Some(link),
+                    Err(error) => {
+                        rejected.push(RejectedSubagentView {
+                            task_index,
+                            reason: format!("Plan task binding failed: {error}"),
+                        });
+                        continue;
+                    }
+                },
+                (Some(_), None) => {
+                    rejected.push(RejectedSubagentView {
+                        task_index,
+                        reason: "Plan task binding is unavailable for this runtime".to_owned(),
+                    });
+                    continue;
+                }
+                (None, _) => None,
+            };
+            accepted_tasks.push((agent_id, task_id, task, task_anchor, plan_link));
+        }
+
+        if accepted_tasks.is_empty() {
+            return Ok(SpawnSubagentsOutput {
+                spawned: Vec::new(),
+                rejected,
+            });
+        }
+
+        self.has_agents.store(true, Ordering::Release);
         let batch_max_concurrency = max_concurrency
-            .unwrap_or(task_inputs.len())
-            .min(task_inputs.len());
+            .unwrap_or(accepted_tasks.len())
+            .min(accepted_tasks.len());
+        let mut spawned = Vec::with_capacity(accepted_tasks.len());
+        let mut to_start = Vec::new();
         let mut state = self.state.lock().await;
         state.batches.insert(
             batch_id,
@@ -318,10 +584,7 @@ impl SubagentManager {
             },
         );
 
-        for (task, task_anchor) in task_inputs {
-            let number = self.next_id.fetch_add(1, Ordering::SeqCst);
-            let agent_id = SubagentId::new(&format!("agent-{number}"))?;
-            let task_id = SubagentTaskId::new(&format!("task-{number}"))?;
+        for (agent_id, task_id, task, task_anchor, plan_link) in accepted_tasks {
             let child_token = parent_token.child_token();
             let starts_now = running_child_count(&state) < self.effective_max_threads()
                 && batch_running_child_count(&state, batch_id) < batch_max_concurrency;
@@ -344,6 +607,7 @@ impl SubagentManager {
                 changed_paths: Vec::new(),
                 diagnostics: None,
                 cancellation_token: child_token.clone(),
+                plan_link: plan_link.clone(),
             };
             state.agents.insert(agent_id.clone(), managed);
 
@@ -362,13 +626,13 @@ impl SubagentManager {
             });
 
             if starts_now {
-                to_start.push((agent_id, task, task_anchor, child_token));
+                to_start.push((agent_id, task, task_anchor, child_token, plan_link));
             }
         }
         drop(state);
 
-        for (agent_id, task, task_anchor, child_token) in to_start {
-            self.start_child(agent_id, task, task_anchor, child_token)
+        for (agent_id, task, task_anchor, child_token, plan_link) in to_start {
+            self.start_child(agent_id, task, task_anchor, child_token, plan_link)
                 .await;
         }
 
@@ -390,25 +654,23 @@ impl SubagentManager {
             let notified = self.notify.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            let output = self.status_for(agent_ids).await;
-            let ready = match mode {
-                WaitMode::Any => output.agents.iter().any(SubagentStatusView::is_terminal),
-                WaitMode::All => output.agents.iter().all(SubagentStatusView::is_terminal),
-            };
+            let agents = self.status_for(agent_ids).await;
+            let ready = wait_mode_satisfied(mode, &agents);
             if ready {
-                return Ok(output);
+                return Ok(WaitSubagentsOutput::with_wait_state(agents, true, false));
             }
 
             match deadline {
                 Some(deadline) => {
                     if tokio::time::Instant::now() >= deadline {
-                        return Ok(output);
+                        return Ok(WaitSubagentsOutput::with_wait_state(agents, false, true));
                     }
                     if tokio::time::timeout_at(deadline, notified.as_mut())
                         .await
                         .is_err()
                     {
-                        return Ok(self.status_for(agent_ids).await);
+                        let agents = self.status_for(agent_ids).await;
+                        return Ok(WaitSubagentsOutput::with_wait_state(agents, false, true));
                     }
                 }
                 None => notified.as_mut().await,
@@ -422,6 +684,7 @@ impl SubagentManager {
         agent_ids: &[SubagentId],
     ) -> Result<WaitSubagentsOutput, RuntimeError> {
         let mut state = self.state.lock().await;
+        let mut links_to_update = Vec::new();
         for agent_id in agent_ids {
             if let Some(agent) = state.agents.get_mut(agent_id) {
                 if agent.status.is_terminal() {
@@ -434,14 +697,19 @@ impl SubagentManager {
                     "subagent_cancelled",
                     "child cancellation requested by parent",
                 ));
+                if let Some(link) = agent.plan_link.clone() {
+                    links_to_update.push(link);
+                }
             }
         }
         let agents = selected_statuses(&state, agent_ids);
         let to_start = self.reserve_queued_starts_locked(&mut state);
         drop(state);
+        self.update_plan_links(links_to_update, PlanLinkStatus::Cancelled)
+            .await;
         self.notify.notify_waiters();
         self.start_reserved_children(to_start).await?;
-        Ok(WaitSubagentsOutput { agents })
+        Ok(WaitSubagentsOutput::new(agents))
     }
 
     async fn start_child(
@@ -450,6 +718,7 @@ impl SubagentManager {
         task: SubagentTaskSpec,
         task_anchor: TaskAnchor,
         token: CancellationToken,
+        plan_link: Option<PlanLinkSnapshot>,
     ) {
         let child_session_id = child_session_id();
         let generation_config = generation_config_for_child_task(&task);
@@ -459,9 +728,11 @@ impl SubagentManager {
             task: task.clone(),
             allowed_tools: task.allowed_tools().to_vec(),
             workspace_scope: ChildWorkspaceScope::from_task(&task),
-            depth: 1,
+            depth: self.depth.saturating_add(1),
             generation_config: generation_config.clone(),
             plan_subagent_control: None,
+            plan_link: plan_link.clone(),
+            plan_link_runtime: self.attached_plan_link_runtime(),
         }) {
             Ok(runtime) => runtime,
             Err(error) => {
@@ -494,6 +765,7 @@ impl SubagentManager {
         diagnostics: ErrorInfo,
     ) {
         let mut state = self.state.lock().await;
+        let mut link = None;
         if let Some(agent) = state.agents.get_mut(agent_id) {
             if agent.status.is_terminal() {
                 return;
@@ -501,9 +773,12 @@ impl SubagentManager {
             agent.status = SubagentStatusLabel::Failed;
             agent.summary = summary.to_owned();
             agent.diagnostics = Some(diagnostics);
+            link = agent.plan_link.clone();
         }
         let to_start = self.reserve_queued_starts_locked(&mut state);
         drop(state);
+        self.update_plan_links(link.into_iter().collect(), PlanLinkStatus::Failed)
+            .await;
         self.notify.notify_waiters();
         let _ = self.start_reserved_children(to_start).await;
     }
@@ -522,6 +797,8 @@ impl SubagentManager {
             notify: Arc::clone(&self.notify),
             enabled: Arc::clone(&self.enabled),
             max_threads: Arc::clone(&self.max_threads),
+            depth: self.depth,
+            plan_link_runtime: Arc::clone(&self.plan_link_runtime),
         }
     }
 
@@ -533,10 +810,28 @@ impl SubagentManager {
         Ok(())
     }
 
-    async fn status_for(&self, agent_ids: &[SubagentId]) -> WaitSubagentsOutput {
+    async fn status_for(&self, agent_ids: &[SubagentId]) -> Vec<SubagentStatusView> {
         let state = self.state.lock().await;
-        WaitSubagentsOutput {
-            agents: selected_statuses(&state, agent_ids),
+        selected_statuses(&state, agent_ids)
+    }
+
+    async fn update_plan_links(&self, links: Vec<PlanLinkSnapshot>, status: PlanLinkStatus) {
+        let Some(runtime) = self.attached_plan_link_runtime() else {
+            return;
+        };
+        for link in links {
+            let binding_id = link.binding_id.clone();
+            if let Err(error) = runtime
+                .update_subagent_link(binding_id.clone(), status, crate::plan::unix_time_ms())
+                .await
+            {
+                tracing::warn!(
+                    binding_id = %binding_id,
+                    ?status,
+                    %error,
+                    "failed to persist subagent Plan link state"
+                );
+            }
         }
     }
 
@@ -550,6 +845,13 @@ impl SubagentManager {
             .agents
             .get(agent_id)
             .map(|agent| agent.cancellation_token.clone())
+    }
+}
+
+fn wait_mode_satisfied(mode: WaitMode, agents: &[SubagentStatusView]) -> bool {
+    match mode {
+        WaitMode::Any => agents.iter().any(SubagentStatusView::is_terminal),
+        WaitMode::All => agents.iter().all(SubagentStatusView::is_terminal),
     }
 }
 
@@ -631,6 +933,7 @@ fn reserve_queued_starts_locked(
             task: agent.task.clone(),
             task_anchor: agent.task_anchor.clone(),
             cancellation_token: agent.cancellation_token.clone(),
+            plan_link: agent.plan_link.clone(),
         });
         global_available -= 1;
     }
@@ -671,11 +974,16 @@ async fn start_reserved_children_iteratively(
                     agent.summary = "child runtime start failed".to_owned();
                     agent.diagnostics = Some(error_info("subagent_start_error", error.to_string()));
                 }
+                let link = state_guard
+                    .agents
+                    .get(&start.agent_id)
+                    .and_then(|agent| agent.plan_link.clone());
                 pending.extend(reserve_queued_starts_locked(
                     &mut state_guard,
                     scheduler.effective_max_threads(),
                 ));
                 drop(state_guard);
+                update_plan_link_with_scheduler(&scheduler, link, PlanLinkStatus::Failed).await;
                 scheduler.notify.notify_waiters();
             }
         }
@@ -694,9 +1002,15 @@ fn spawn_reserved_child(
         task: start.task.clone(),
         allowed_tools: start.task.allowed_tools().to_vec(),
         workspace_scope: ChildWorkspaceScope::from_task(&start.task),
-        depth: 1,
+        depth: scheduler.depth.saturating_add(1),
         generation_config: generation_config.clone(),
         plan_subagent_control: None,
+        plan_link: start.plan_link.clone(),
+        plan_link_runtime: scheduler
+            .plan_link_runtime
+            .lock()
+            .expect("subagent plan link runtime mutex is not poisoned")
+            .clone(),
     })?;
 
     spawn_child_loop(
@@ -726,6 +1040,8 @@ fn spawn_child_loop(scheduler: ChildScheduler, launch: ChildLoopLaunch) {
                     scheduler.effective_max_threads(),
                 )
                 .await;
+                let link = plan_link_for_agent(&scheduler.state, &launch.agent_id).await;
+                update_plan_link_with_scheduler(&scheduler, link, PlanLinkStatus::Failed).await;
                 scheduler.notify.notify_waiters();
                 start_reserved_children_iteratively(scheduler, to_start).await;
                 return;
@@ -742,6 +1058,8 @@ fn spawn_child_loop(scheduler: ChildScheduler, launch: ChildLoopLaunch) {
                     scheduler.effective_max_threads(),
                 )
                 .await;
+                let link = plan_link_for_agent(&scheduler.state, &launch.agent_id).await;
+                update_plan_link_with_scheduler(&scheduler, link, PlanLinkStatus::Failed).await;
                 scheduler.notify.notify_waiters();
                 start_reserved_children_iteratively(scheduler, to_start).await;
                 return;
@@ -784,12 +1102,72 @@ fn spawn_child_loop(scheduler: ChildScheduler, launch: ChildLoopLaunch) {
                 }
             }
         }
+        let terminal_link = state_guard
+            .agents
+            .get(&launch.agent_id)
+            .and_then(|agent| agent.plan_link.clone());
+        let terminal_status =
+            state_guard
+                .agents
+                .get(&launch.agent_id)
+                .map(|agent| match agent.status {
+                    SubagentStatusLabel::Completed => PlanLinkStatus::Completed,
+                    SubagentStatusLabel::Cancelled => PlanLinkStatus::Cancelled,
+                    SubagentStatusLabel::Failed => PlanLinkStatus::Failed,
+                    SubagentStatusLabel::Queued | SubagentStatusLabel::Running => {
+                        PlanLinkStatus::Failed
+                    }
+                });
         let to_start =
             reserve_queued_starts_locked(&mut state_guard, scheduler.effective_max_threads());
         drop(state_guard);
+        if let (Some(link), Some(status)) = (terminal_link, terminal_status) {
+            update_plan_link_with_scheduler(&scheduler, Some(link), status).await;
+        }
         scheduler.notify.notify_waiters();
         start_reserved_children_iteratively(scheduler, to_start).await;
     });
+}
+
+async fn plan_link_for_agent(
+    state: &Mutex<SubagentManagerState>,
+    agent_id: &SubagentId,
+) -> Option<PlanLinkSnapshot> {
+    state
+        .lock()
+        .await
+        .agents
+        .get(agent_id)
+        .and_then(|agent| agent.plan_link.clone())
+}
+
+async fn update_plan_link_with_scheduler(
+    scheduler: &ChildScheduler,
+    link: Option<PlanLinkSnapshot>,
+    status: PlanLinkStatus,
+) {
+    let Some(link) = link else {
+        return;
+    };
+    let runtime = scheduler
+        .plan_link_runtime
+        .lock()
+        .expect("subagent plan link runtime mutex is not poisoned")
+        .clone();
+    let Some(runtime) = runtime else {
+        return;
+    };
+    if let Err(error) = runtime
+        .update_subagent_link(link.binding_id.clone(), status, crate::plan::unix_time_ms())
+        .await
+    {
+        tracing::warn!(
+            binding_id = %link.binding_id,
+            ?status,
+            %error,
+            "failed to persist subagent Plan link state"
+        );
+    }
 }
 
 fn generation_config_for_child_task(task: &SubagentTaskSpec) -> GenerationConfig {
@@ -801,6 +1179,25 @@ fn paths_to_strings(paths: &[PathBuf]) -> Vec<String> {
         .iter()
         .map(|path| path.display().to_string())
         .collect()
+}
+
+fn ensure_scope_within_parent(
+    field: &'static str,
+    requested: &[PathBuf],
+    parent: &[PathBuf],
+) -> Result<(), SubagentError> {
+    for path in requested {
+        if !parent
+            .iter()
+            .any(|root| root == Path::new(".") || path == root || path.starts_with(root))
+        {
+            return Err(SubagentError::CapabilityExpansion {
+                field,
+                value: path.display().to_string(),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn child_session_id() -> merry_core::SessionId {
@@ -1162,7 +1559,10 @@ mod tests {
                     "output_paths": ["shared/subagents/agent-1/result.md"],
                     "changed_paths": [],
                     "diagnostics": null
-                }]
+                }],
+                "timed_out": false,
+                "terminal": true,
+                "pending_agent_ids": []
             })
         );
     }
@@ -1177,6 +1577,73 @@ mod tests {
             task.allowed_tools(),
             &[ToolName::new("workspace_read_file").expect("valid tool name")]
         );
+    }
+
+    #[test]
+    fn task_capability_fields_record_whether_the_parent_authored_them() {
+        let omitted = SubagentTaskSpec::new("Inspect the runtime.", 2).expect("valid task");
+        assert!(!omitted.allowed_tools_are_explicit());
+        assert!(!omitted.read_scope_is_explicit());
+        assert!(!omitted.write_scope_is_explicit());
+        assert!(!omitted.forbidden_paths_are_explicit());
+
+        let explicit = omitted
+            .with_allowed_tools([ToolName::new("workspace_read_file").expect("valid tool")])
+            .with_read_scope([PathBuf::from("crates")])
+            .expect("valid read scope")
+            .with_write_scope([PathBuf::from("tmp")])
+            .expect("valid write scope")
+            .with_forbidden_paths([PathBuf::from(".git")])
+            .expect("valid forbidden scope");
+        assert!(explicit.allowed_tools_are_explicit());
+        assert!(explicit.read_scope_is_explicit());
+        assert!(explicit.write_scope_is_explicit());
+        assert!(explicit.forbidden_paths_are_explicit());
+    }
+
+    #[test]
+    fn omitted_child_capabilities_inherit_and_explicit_values_cannot_expand() {
+        struct CapabilityFactory;
+        impl ChildRuntimeFactory for CapabilityFactory {
+            fn build_child(&self, input: ChildRuntimeInput) -> Result<Runtime, RuntimeError> {
+                Runtime::builder(input.session_id).build()
+            }
+        }
+
+        let manager = SubagentManager::runtime_controlled(
+            merry_core::SessionId::new("capability-inheritance").expect("valid session"),
+            SubagentConfig::default(),
+            Arc::new(CapabilityFactory),
+            true,
+        );
+        manager.attach_parent_capabilities(
+            vec![ToolName::new("workspace_read_file").expect("valid tool")],
+            ChildWorkspaceScope {
+                read_scope: vec![PathBuf::from("crates")],
+                write_scope: vec![PathBuf::from("tmp")],
+                forbidden_paths: vec![PathBuf::from(".git")],
+            },
+        );
+        let omitted = SubagentTaskSpec::new("Inspect inherited scope.", 2).expect("valid task");
+        let inherited = manager
+            .apply_parent_capabilities(omitted)
+            .expect("omitted capabilities should inherit");
+        assert_eq!(inherited.allowed_tools().len(), 1);
+        assert_eq!(inherited.read_scope(), &[PathBuf::from("crates")]);
+        assert_eq!(inherited.write_scope(), &[PathBuf::from("tmp")]);
+        assert_eq!(inherited.forbidden_paths(), &[PathBuf::from(".git")]);
+
+        let expanded = SubagentTaskSpec::new("Expand scope.", 2)
+            .expect("valid task")
+            .with_read_scope([PathBuf::from(".")])
+            .expect("valid scope");
+        assert!(matches!(
+            manager.apply_parent_capabilities(expanded),
+            Err(SubagentError::CapabilityExpansion {
+                field: "read_scope",
+                ..
+            })
+        ));
     }
 }
 
@@ -1494,6 +1961,353 @@ mod manager_tests {
                 )
                 .build()
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn linked_spawn_updates_plan_from_active_to_completed() {
+        let session_id = SessionId::new("subagent-plan-link").expect("valid session id");
+        let session = Arc::new(tokio::sync::Mutex::new(crate::session::SessionState::new(
+            session_id.clone(),
+        )));
+        let (controller, _events) = PlanController::start(
+            Arc::clone(&session),
+            None,
+            std::num::NonZeroUsize::new(16).expect("non-zero event buffer"),
+        );
+        controller
+            .begin(crate::plan::BeginPlanInput {
+                reason: "link child lifecycle".to_owned(),
+                governing_skill_id: None,
+            })
+            .await
+            .expect("plan activation succeeds");
+        controller
+            .update(crate::plan::UpdatePlanInput {
+                reason: "define linked task".to_owned(),
+                execution_intent: crate::plan::PlanExecutionIntent::ContinuePlanning,
+                coordinator_node_id: None,
+                max_concurrency_hint: None,
+                change: crate::plan::PlanChangeInput::DefinePlan {
+                    expected_plan_revision: 0,
+                    root: crate::plan::PlanNodeInput {
+                        id: None,
+                        client_key: Some("root".to_owned()),
+                        objective: "Complete the linked task".to_owned(),
+                        acceptance: vec!["child completes".to_owned()],
+                        executor_policy: merry_core::PlanExecutorPolicy::Delegate,
+                        harness: merry_core::PlanHarnessSnapshot::default(),
+                        recovery_policy: merry_core::PlanRecoveryPolicySnapshot::default(),
+                        depends_on: Vec::new(),
+                        children: Vec::new(),
+                    },
+                },
+            })
+            .await
+            .expect("plan definition succeeds");
+
+        let manager = SubagentManager::new(
+            session_id,
+            SubagentConfig::new(1, 1).expect("valid subagent config"),
+            Arc::new(RecordingModelChildFactory::new()),
+        );
+        manager.attach_plan_link_runtime(plan_link_runtime_for_controller(controller.clone()));
+        let output = manager
+            .spawn(
+                vec![
+                    SubagentTaskSpec::new("Complete the linked task.", 2)
+                        .expect("valid task")
+                        .with_plan_task(Some("root".to_owned())),
+                ],
+                None,
+                CancellationToken::new(),
+            )
+            .await
+            .expect("linked spawn succeeds");
+        assert_eq!(output.spawned.len(), 1);
+
+        manager
+            .wait(
+                &[output.spawned[0].agent_id.clone()],
+                WaitMode::All,
+                Some(Duration::from_secs(2)),
+            )
+            .await
+            .expect("child wait succeeds");
+        let snapshot = controller
+            .snapshot()
+            .await
+            .expect("plan snapshot reads")
+            .expect("active plan exists");
+        let node = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.client_key.as_deref() == Some("root"))
+            .expect("linked node exists");
+        assert_eq!(node.execution_summary.active, 0);
+        assert_eq!(node.execution_summary.completed, 1);
+        assert_eq!(node.links.len(), 1);
+        assert_eq!(node.links[0].status, merry_core::PlanLinkStatus::Completed);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn linked_children_complete_each_plan_node_before_follow_up_update() {
+        let session_id = SessionId::new("subagent-plan-links").expect("valid session id");
+        let session = Arc::new(tokio::sync::Mutex::new(crate::session::SessionState::new(
+            session_id.clone(),
+        )));
+        let (controller, _events) = PlanController::start(
+            Arc::clone(&session),
+            None,
+            std::num::NonZeroUsize::new(16).expect("non-zero event buffer"),
+        );
+        controller
+            .begin(crate::plan::BeginPlanInput {
+                reason: "link parallel child lifecycles".to_owned(),
+                governing_skill_id: None,
+            })
+            .await
+            .expect("plan activation succeeds");
+        controller
+            .update(crate::plan::UpdatePlanInput {
+                reason: "define parallel linked tasks".to_owned(),
+                execution_intent: crate::plan::PlanExecutionIntent::ContinuePlanning,
+                coordinator_node_id: None,
+                max_concurrency_hint: Some(2),
+                change: crate::plan::PlanChangeInput::DefinePlan {
+                    expected_plan_revision: 0,
+                    root: crate::plan::PlanNodeInput {
+                        id: None,
+                        client_key: Some("root".to_owned()),
+                        objective: "Complete both linked tasks".to_owned(),
+                        acceptance: vec!["both children complete".to_owned()],
+                        executor_policy: merry_core::PlanExecutorPolicy::Local,
+                        harness: merry_core::PlanHarnessSnapshot::default(),
+                        recovery_policy: merry_core::PlanRecoveryPolicySnapshot::default(),
+                        depends_on: Vec::new(),
+                        children: vec![
+                            crate::plan::PlanNodeInput {
+                                id: None,
+                                client_key: Some("left".to_owned()),
+                                objective: "Complete the left task".to_owned(),
+                                acceptance: vec!["left child completes".to_owned()],
+                                executor_policy: merry_core::PlanExecutorPolicy::Delegate,
+                                harness: merry_core::PlanHarnessSnapshot::default(),
+                                recovery_policy: merry_core::PlanRecoveryPolicySnapshot::default(),
+                                depends_on: Vec::new(),
+                                children: Vec::new(),
+                            },
+                            crate::plan::PlanNodeInput {
+                                id: None,
+                                client_key: Some("right".to_owned()),
+                                objective: "Complete the right task".to_owned(),
+                                acceptance: vec!["right child completes".to_owned()],
+                                executor_policy: merry_core::PlanExecutorPolicy::Delegate,
+                                harness: merry_core::PlanHarnessSnapshot::default(),
+                                recovery_policy: merry_core::PlanRecoveryPolicySnapshot::default(),
+                                depends_on: Vec::new(),
+                                children: Vec::new(),
+                            },
+                        ],
+                    },
+                },
+            })
+            .await
+            .expect("plan definition succeeds");
+
+        let manager = SubagentManager::new(
+            session_id,
+            SubagentConfig::new(2, 1).expect("valid subagent config"),
+            Arc::new(RecordingModelChildFactory::new()),
+        );
+        manager.attach_plan_link_runtime(plan_link_runtime_for_controller(controller.clone()));
+        let output = manager
+            .spawn(
+                vec![
+                    SubagentTaskSpec::new("Complete the left task.", 2)
+                        .expect("valid left task")
+                        .with_plan_task(Some("left".to_owned())),
+                    SubagentTaskSpec::new("Complete the right task.", 2)
+                        .expect("valid right task")
+                        .with_plan_task(Some("right".to_owned())),
+                ],
+                Some(2),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("linked spawn succeeds");
+        let agent_ids = output
+            .spawned
+            .iter()
+            .map(|agent| agent.agent_id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(agent_ids.len(), 2);
+
+        manager
+            .wait(&agent_ids, WaitMode::All, Some(Duration::from_secs(2)))
+            .await
+            .expect("child wait succeeds");
+
+        let snapshot = controller
+            .snapshot()
+            .await
+            .expect("plan snapshot reads")
+            .expect("active plan exists");
+        let linked_nodes = snapshot
+            .nodes
+            .iter()
+            .filter(|node| matches!(node.client_key.as_deref(), Some("left" | "right")))
+            .collect::<Vec<_>>();
+        assert_eq!(linked_nodes.len(), 2);
+        assert!(linked_nodes.iter().all(|node| {
+            node.execution_summary.active == 0
+                && node.execution_summary.completed == 1
+                && node.links.len() == 1
+                && node.links[0].status == merry_core::PlanLinkStatus::Completed
+        }));
+        assert_ne!(
+            linked_nodes[0].links[0].binding_id,
+            linked_nodes[1].links[0].binding_id
+        );
+
+        let revision = snapshot.revision;
+        controller
+            .update(crate::plan::UpdatePlanInput {
+                reason: "continue after parallel linked children completed".to_owned(),
+                execution_intent: crate::plan::PlanExecutionIntent::ContinuePlanning,
+                coordinator_node_id: None,
+                max_concurrency_hint: None,
+                change: crate::plan::PlanChangeInput::UseCurrentPlan {
+                    expected_plan_revision: revision,
+                },
+            })
+            .await
+            .expect("follow-up plan update succeeds after both children complete");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn nested_subagent_keeps_parent_plan_link_runtime() {
+        let session_id = SessionId::new("nested-subagent-plan-link").expect("valid session id");
+        let session = Arc::new(tokio::sync::Mutex::new(crate::session::SessionState::new(
+            session_id.clone(),
+        )));
+        let (controller, _events) = PlanController::start(
+            Arc::clone(&session),
+            None,
+            std::num::NonZeroUsize::new(16).expect("non-zero event buffer"),
+        );
+        controller
+            .begin(crate::plan::BeginPlanInput {
+                reason: "link nested children".to_owned(),
+                governing_skill_id: None,
+            })
+            .await
+            .expect("plan activation succeeds");
+        controller
+            .update(crate::plan::UpdatePlanInput {
+                reason: "define nested linked task".to_owned(),
+                execution_intent: crate::plan::PlanExecutionIntent::ContinuePlanning,
+                coordinator_node_id: None,
+                max_concurrency_hint: None,
+                change: crate::plan::PlanChangeInput::DefinePlan {
+                    expected_plan_revision: 0,
+                    root: crate::plan::PlanNodeInput {
+                        id: None,
+                        client_key: Some("root".to_owned()),
+                        objective: "Complete nested linked work".to_owned(),
+                        acceptance: vec!["nested child completes".to_owned()],
+                        executor_policy: merry_core::PlanExecutorPolicy::Delegate,
+                        harness: merry_core::PlanHarnessSnapshot::default(),
+                        recovery_policy: merry_core::PlanRecoveryPolicySnapshot::default(),
+                        depends_on: Vec::new(),
+                        children: Vec::new(),
+                    },
+                },
+            })
+            .await
+            .expect("plan definition succeeds");
+
+        #[derive(Clone)]
+        struct CapturingFactory {
+            input: Arc<StdMutex<Option<ChildRuntimeInput>>>,
+        }
+
+        impl ChildRuntimeFactory for CapturingFactory {
+            fn build_child(&self, input: ChildRuntimeInput) -> Result<Runtime, RuntimeError> {
+                *self
+                    .input
+                    .lock()
+                    .expect("child input mutex is not poisoned") = Some(input.clone());
+                Runtime::builder(input.session_id)
+                    .task_anchor(input.task_anchor)
+                    .build()
+            }
+        }
+
+        let captured = Arc::new(StdMutex::new(None));
+        let root_manager = SubagentManager::runtime_controlled(
+            session_id.clone(),
+            SubagentConfig::new(1, 2).expect("valid root config"),
+            Arc::new(CapturingFactory {
+                input: Arc::clone(&captured),
+            }),
+            true,
+        );
+        root_manager.attach_plan_link_runtime(plan_link_runtime_for_controller(controller.clone()));
+        let root = root_manager
+            .spawn(
+                vec![
+                    SubagentTaskSpec::new("Complete root-linked work.", 1)
+                        .expect("valid root task")
+                        .with_plan_task(Some("root".to_owned())),
+                ],
+                None,
+                CancellationToken::new(),
+            )
+            .await
+            .expect("root spawn succeeds");
+        assert_eq!(root.spawned.len(), 1);
+
+        let nested_link_runtime = captured
+            .lock()
+            .expect("child input mutex is not poisoned")
+            .as_ref()
+            .and_then(|input| input.plan_link_runtime.clone())
+            .expect("child receives the parent Plan link runtime");
+        let nested_manager = SubagentManager::runtime_controlled_at_depth(
+            SessionId::new("nested-parent").expect("valid nested session id"),
+            SubagentConfig::new(1, 2).expect("valid nested config"),
+            Arc::new(CapturingFactory {
+                input: Arc::new(StdMutex::new(None)),
+            }),
+            true,
+            1,
+        );
+        nested_manager.attach_plan_link_runtime(nested_link_runtime);
+        let nested = nested_manager
+            .spawn(
+                vec![
+                    SubagentTaskSpec::new("Complete nested linked work.", 1)
+                        .expect("valid nested task")
+                        .with_plan_task(Some("root".to_owned())),
+                ],
+                None,
+                CancellationToken::new(),
+            )
+            .await
+            .expect("nested spawn succeeds");
+        assert_eq!(nested.spawned.len(), 1);
+
+        let snapshot = controller
+            .snapshot()
+            .await
+            .expect("plan snapshot reads")
+            .expect("active plan exists");
+        let node = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.client_key.as_deref() == Some("root"))
+            .expect("linked node exists");
+        assert_eq!(node.links.len(), 2);
     }
 
     struct ReportingChildFactory;

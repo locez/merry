@@ -222,6 +222,7 @@ fn sample_plan_snapshot() -> PlanSnapshot {
         approval_requirements: Vec::new(),
         nodes: vec![PlanNodeSnapshot {
             id: root_node_id,
+            client_key: None,
             parent_id: None,
             sibling_order: 0,
             objective: "Complete the recursive plan acceptance".to_owned(),
@@ -238,6 +239,9 @@ fn sample_plan_snapshot() -> PlanSnapshot {
             result: None,
             created_revision: 1,
             updated_revision: 2,
+            declared_status: PlanNodeStatus::InProgress,
+            execution_summary: Default::default(),
+            links: Vec::new(),
         }],
         attempts: Vec::new(),
         leases: Vec::new(),

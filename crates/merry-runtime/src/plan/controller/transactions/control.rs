@@ -5,7 +5,6 @@ pub(crate) async fn recover_attempts(
     store: Option<&FileSessionStore>,
     events: &broadcast::Sender<RuntimeJournalEvent>,
     now_ms: u64,
-    after_resume: bool,
 ) -> Result<PlanCommandResult<PlanRecoveryOutput>, PlanControllerError> {
     let prepared = {
         let session = session.lock().await;
@@ -13,11 +12,7 @@ pub(crate) async fn recover_attempts(
             .active_plan()
             .ok_or(PlanControllerError::NoActivePlan)?
             .clone();
-        let output = if after_resume {
-            candidate.interrupt_unresolved_attempts_after_resume(now_ms)?
-        } else {
-            candidate.interrupt_expired_leases(now_ms)?
-        };
+        let output = candidate.interrupt_expired_leases(now_ms)?;
         if output.interrupted_attempts.is_empty() {
             return Ok(PlanCommandResult {
                 output,

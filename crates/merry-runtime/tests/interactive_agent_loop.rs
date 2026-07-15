@@ -461,6 +461,23 @@ impl ToolExecutor for BlockingToolExecutor {
 }
 
 #[derive(Clone)]
+struct InfrastructureFailingToolExecutor;
+
+impl ToolExecutor for InfrastructureFailingToolExecutor {
+    fn execute<'a>(
+        &'a self,
+        _call: PendingToolCall,
+        _context: ToolExecutionContext,
+    ) -> ToolExecutorFuture<'a> {
+        Box::pin(async {
+            Err(ToolExecutionError::infrastructure(
+                "test executor backend is unavailable\nretry later",
+            ))
+        })
+    }
+}
+
+#[derive(Clone)]
 struct CancelFirstThenSucceedToolExecutor {
     first_started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
     calls_started: Arc<Mutex<usize>>,
@@ -632,6 +649,7 @@ async fn interactive_plan_controls_reject_while_the_main_model_phase_is_running(
 }
 
 #[tokio::test]
+#[ignore = "legacy local Plan attempt scheduler was removed; use explicit subagent PlanLink lifecycle"]
 async fn interactive_run_automatically_executes_a_local_plan_node_without_a_lease() {
     let provider = LocalPlanProvider::default();
     let runtime = Runtime::builder(session_id("interactive-local-plan-lane"))
@@ -710,6 +728,7 @@ async fn interactive_run_automatically_executes_a_local_plan_node_without_a_leas
 }
 
 #[tokio::test]
+#[ignore = "legacy Plan attempt replay protocol was removed"]
 async fn interactive_run_recovers_a_missing_local_attempt_report_without_hanging() {
     let provider = MissingLocalPlanReportProvider::default();
     let runtime = Runtime::builder(session_id("interactive-missing-local-plan-report"))
@@ -782,6 +801,7 @@ async fn interactive_run_recovers_a_missing_local_attempt_report_without_hanging
 }
 
 #[tokio::test]
+#[ignore = "legacy automatic delegated Plan scheduler was removed"]
 async fn delegated_plan_completion_wakes_the_idle_coordinator() {
     let coordinator = RecordingProvider::new();
     let attempts_started = Arc::new(AtomicUsize::new(0));
@@ -841,6 +861,7 @@ async fn delegated_plan_completion_wakes_the_idle_coordinator() {
 }
 
 #[tokio::test]
+#[ignore = "legacy automatic delegated Plan scheduler was removed"]
 async fn exhausted_delegated_attempts_wake_the_idle_coordinator() {
     let coordinator = RecordingProvider::new();
     let attempts_started = Arc::new(AtomicUsize::new(0));
@@ -912,6 +933,7 @@ async fn exhausted_delegated_attempts_wake_the_idle_coordinator() {
 }
 
 #[tokio::test]
+#[ignore = "legacy local Plan attempt reporting protocol was removed"]
 async fn interactive_run_closes_failed_local_attempts_without_hanging() {
     let provider = RecordingProvider::new_with_steps(vec![
         vec![Err(ModelError::invalid_request(
@@ -979,6 +1001,7 @@ async fn interactive_run_closes_failed_local_attempts_without_hanging() {
 }
 
 #[tokio::test]
+#[ignore = "legacy local Plan attempt scheduler was removed"]
 async fn interactive_run_retries_a_local_stream_eof_without_hanging() {
     let provider = RecordingProvider::new_with_steps(vec![Vec::new(), Vec::new()]);
     let runtime = Runtime::builder(session_id("interactive-blocked-local-plan-attempt"))
@@ -1044,6 +1067,7 @@ async fn interactive_run_retries_a_local_stream_eof_without_hanging() {
 }
 
 #[tokio::test]
+#[ignore = "legacy local Plan attempt reporting protocol was removed"]
 async fn interactive_run_closes_cancelled_local_attempts_without_hanging() {
     let provider = RecordingProvider::new_with_steps(vec![
         vec![Err(ModelError::Cancelled)],
@@ -1096,6 +1120,7 @@ async fn interactive_run_closes_cancelled_local_attempts_without_hanging() {
 }
 
 #[tokio::test]
+#[ignore = "legacy Plan attempt wakeup protocol was removed"]
 async fn plan_wakeup_received_during_a_user_turn_runs_at_the_next_safe_boundary() {
     let (started_tx, started_rx) = oneshot::channel();
     let (release_tx, release_rx) = oneshot::channel();
@@ -1266,6 +1291,7 @@ async fn interactive_run_stops_before_another_model_turn_for_a_non_empty_plannin
 }
 
 #[tokio::test]
+#[ignore = "legacy local Plan attempt reporting protocol was removed"]
 async fn structured_plan_approval_resumes_execution_without_chat_confirmation() {
     let mut review_plan = local_plan_input();
     review_plan.execution_intent = PlanExecutionIntent::RequestUserReview;
@@ -1359,6 +1385,77 @@ async fn structured_plan_approval_resumes_execution_without_chat_confirmation() 
             .phase,
         PlanPhase::Completed
     );
+}
+
+#[tokio::test]
+async fn plan_approval_triggers_a_model_continuation_with_explicit_approval() {
+    let mut review_plan = local_plan_input();
+    review_plan.execution_intent = PlanExecutionIntent::RequestUserReview;
+    let provider = RecordingProvider::new_with_steps(vec![
+        vec![Ok(completed_tool_call_event(ModelToolCall::new(
+            ModelToolCallId::new("call-plan-approval-continuation").expect("valid call id"),
+            ToolName::new("update_plan").expect("valid tool name"),
+            ToolArguments::try_from(
+                serde_json::to_value(review_plan).expect("review plan serializes"),
+            )
+            .expect("review plan arguments are an object"),
+        )))],
+        vec![Ok(completed_text_event("The approved plan can proceed."))],
+    ]);
+    let runtime = Runtime::builder(session_id("interactive-plan-approval-continuation"))
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .coordinator_plan_tools()
+        .automatic_compaction(AutomaticCompactionConfig::disabled())
+        .build()
+        .expect("runtime builds");
+    let run = runtime
+        .start_interactive_agent_run(
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default(),
+        )
+        .expect("interactive run starts");
+    let (mut stream, input, control) = run.split();
+    let _ = stream.next().await.expect("waiting state");
+    input
+        .submit_next("Create the plan and wait for approval")
+        .await
+        .expect("input queued");
+    wait_for_interactive_waiting(&mut stream).await;
+
+    let snapshot = runtime
+        .plan_snapshot()
+        .await
+        .expect("plan snapshot reads")
+        .expect("plan exists");
+    control
+        .approve_plan(PlanApprovalInput {
+            plan_id: snapshot.plan_id,
+            expected_plan_revision: snapshot.revision,
+            review_resolution_ref: "user approved through the Plan UI".to_owned(),
+            capability_envelope: Some(PlanCapabilityEnvelopeSnapshot::default()),
+            authorization_refs: vec!["interactive Plan approval".to_owned()],
+            requirement_resolution_refs: BTreeMap::new(),
+        })
+        .await
+        .expect("structured plan approval succeeds");
+
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        wait_for_interactive_waiting(&mut stream),
+    )
+    .await
+    .expect("approval should trigger a continuation model turn");
+
+    let requests = provider.recorded_requests();
+    assert_eq!(requests.len(), 2);
+    let approval_text = requests[1]
+        .messages()
+        .iter()
+        .filter(|message| message.role() == ModelMessageRole::User)
+        .map(|message| message.content().as_text())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(approval_text.contains("approved"));
 }
 
 #[tokio::test]
@@ -2388,4 +2485,72 @@ async fn new_input_after_interrupt_still_executes_runtime_tool_calls() {
     }
     assert!(saw_second_tool_result);
     assert!(runtime.pending_tool_calls().await.is_empty());
+}
+
+#[tokio::test]
+async fn interactive_tool_infrastructure_failure_returns_to_waiting() {
+    let provider = RecordingProvider::new_with_steps(vec![
+        vec![Ok(completed_tool_call_event(model_tool_call(
+            "call-infrastructure-failure",
+            "search_notes",
+        )))],
+        vec![Ok(completed_text_event("continued after tool failure"))],
+    ]);
+    let runtime = Runtime::builder(session_id("interactive-tool-infrastructure-failure"))
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .register_tool(merry_runtime::RegisteredTool::read_only(
+            tool_spec("search_notes"),
+            Arc::new(InfrastructureFailingToolExecutor),
+        ))
+        .build()
+        .expect("runtime builds");
+
+    let run = runtime
+        .start_interactive_agent_run(
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default(),
+        )
+        .expect("interactive run starts");
+    let (mut stream, input, _control) = run.split();
+    let _ = stream.next().await.expect("waiting state");
+
+    input.submit_next("start").await.expect("input queued");
+    wait_for_interactive_waiting(&mut stream).await;
+
+    assert!(runtime.pending_tool_calls().await.is_empty());
+    assert_eq!(provider.recorded_requests().len(), 2);
+}
+
+#[tokio::test]
+async fn interactive_tool_batch_infrastructure_failure_resolves_all_pending_calls() {
+    let provider = RecordingProvider::new_with_steps(vec![
+        vec![Ok(completed_tool_call_batch_event(vec![
+            model_tool_call("call-batch-infrastructure-1", "search_notes"),
+            model_tool_call("call-batch-infrastructure-2", "search_notes"),
+        ]))],
+        vec![Ok(completed_text_event("continued after batch failure"))],
+    ]);
+    let runtime = Runtime::builder(session_id("interactive-tool-batch-infrastructure-failure"))
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .register_tool(merry_runtime::RegisteredTool::read_only(
+            tool_spec("search_notes"),
+            Arc::new(InfrastructureFailingToolExecutor),
+        ))
+        .build()
+        .expect("runtime builds");
+
+    let run = runtime
+        .start_interactive_agent_run(
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default(),
+        )
+        .expect("interactive run starts");
+    let (mut stream, input, _control) = run.split();
+    let _ = stream.next().await.expect("waiting state");
+
+    input.submit_next("start").await.expect("input queued");
+    wait_for_interactive_waiting(&mut stream).await;
+
+    assert!(runtime.pending_tool_calls().await.is_empty());
+    assert_eq!(provider.recorded_requests().len(), 2);
 }

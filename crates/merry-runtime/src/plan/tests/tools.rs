@@ -1,10 +1,6 @@
 use crate::plan::{
     PlanChangeInput, PlanExecutionIntent, PlanNodeInput, UpdatePlanInput,
-    tools::{
-        CONTROL_PLAN_ATTEMPT_TOOL_NAME, COORDINATOR_PLAN_TOOL_NAMES, READ_PLAN_TOOL_NAME,
-        REPORT_PLAN_ATTEMPT_TOOL_NAME, REPORT_PLAN_PROGRESS_TOOL_NAME, UPDATE_PLAN_TOOL_NAME,
-        coordinator_plan_registered_tools,
-    },
+    tools::{READ_PLAN_TOOL_NAME, UPDATE_PLAN_TOOL_NAME, coordinator_plan_registered_tools},
 };
 use merry_core::{PlanExecutorPolicy, PlanHarnessSnapshot, PlanRecoveryPolicySnapshot, ToolSpec};
 use serde_json::{Value, json};
@@ -16,7 +12,7 @@ fn coordinator_plan_tools_have_stable_names_schemas_and_runtime_control_policy()
         .iter()
         .map(|tool| tool.spec().name().as_str())
         .collect::<Vec<_>>();
-    assert_eq!(names, COORDINATOR_PLAN_TOOL_NAMES);
+    assert_eq!(names, [READ_PLAN_TOOL_NAME, UPDATE_PLAN_TOOL_NAME]);
     assert!(tools.iter().all(|tool| {
         tool.action_kind() == crate::ToolActionKind::RuntimeControl
             && tool.spec().input_schema().as_schema().as_object().is_some()
@@ -50,86 +46,97 @@ fn update_plan_schema_rejects_missing_or_conflicting_node_identity() {
 }
 
 #[test]
+fn update_plan_schema_keeps_execution_policy_runtime_owned() {
+    let schema = serde_json::to_value(update_plan_tool().input_schema())
+        .expect("update_plan schema serializes");
+    for field in ["executor_policy", "harness", "recovery_policy"] {
+        assert!(
+            !schema.to_string().contains(&format!("\"{field}\"")),
+            "{field} must not be provider-authored"
+        );
+    }
+}
+
+#[test]
 fn update_plan_schema_accepts_workspace_root_and_rejects_parent_traversal() {
     let tool = update_plan_tool();
     let validator = jsonschema::validator_for(tool.input_schema().as_schema().as_value())
         .expect("update_plan schema compiles");
     assert!(validator.is_valid(&valid_update_arguments()));
-    let mut arguments = valid_update_arguments();
-    arguments["change"]["root"]["harness"]["write_scope"] = json!(["."]);
-
+    assert!(validator.is_valid(&valid_update_arguments()));
     assert!(
-        validator.is_valid(&arguments),
-        "the provider-visible schema must accept the workspace root scope"
+        !validator.is_valid(&json!({
+            "reason": "attempt to author runtime policy",
+            "execution_intent": "continue_planning",
+            "coordinator_node_id": null,
+            "max_concurrency_hint": null,
+            "change": {
+                "type": "define_plan",
+                "expected_plan_revision": 0,
+                "root": {
+                    "client_key": "root",
+                    "objective": "bad",
+                    "acceptance": [],
+                    "depends_on": [],
+                    "children": [],
+                    "harness": {"write_scope": ["."]}
+                }
+            }
+        })),
+        "runtime-owned harness must not be provider-authored"
     );
-    arguments["change"]["root"]["harness"]["write_scope"] = json!(["../outside"]);
-    assert!(!validator.is_valid(&arguments));
 }
 
 #[test]
-fn read_plan_schema_supports_explicit_lease_selection() {
+fn read_plan_schema_does_not_expose_legacy_attempt_selection() {
     let tool = plan_tool(READ_PLAN_TOOL_NAME);
     let validator = jsonschema::validator_for(tool.input_schema().as_schema().as_value())
         .expect("read_plan schema compiles");
 
-    assert!(validator.is_valid(&json!({
-        "include_attempts": true,
-        "include_leases": true,
-        "include_progress": true
-    })));
+    assert!(validator.is_valid(&json!({"max_depth": 4})));
+    assert!(!validator.is_valid(&json!({"include_attempts": true})));
+    assert!(tool.description().contains("Historical attempt"));
 }
 
 #[test]
-fn attempt_reporting_schema_does_not_expose_runtime_owned_identity() {
+fn attempt_reporting_and_control_tools_are_not_provider_visible() {
+    let names = coordinator_plan_registered_tools()
+        .expect("plan tools build")
+        .into_iter()
+        .map(|tool| tool.spec().name().as_str().to_owned())
+        .collect::<Vec<_>>();
     for name in [
-        REPORT_PLAN_PROGRESS_TOOL_NAME,
-        REPORT_PLAN_ATTEMPT_TOOL_NAME,
+        "begin_plan",
+        "control_plan_attempt",
+        "report_plan_progress",
+        "report_plan_attempt",
     ] {
-        let schema = serde_json::to_value(plan_tool(name).input_schema())
-            .expect("plan report schema serializes");
-        let properties = schema
-            .pointer("/properties")
-            .and_then(Value::as_object)
-            .expect("report schema has properties");
         assert!(
-            !properties.contains_key("lease_id"),
-            "{name} leaked lease_id"
-        );
-        assert!(
-            !properties.contains_key("expected_node_revision"),
-            "{name} leaked expected_node_revision"
+            !names.iter().any(|visible| visible == name),
+            "{name} leaked into the provider schema"
         );
     }
-
-    let schema = serde_json::to_value(plan_tool(CONTROL_PLAN_ATTEMPT_TOOL_NAME).input_schema())
-        .expect("control schema serializes");
-    let properties = schema
-        .pointer("/properties")
-        .and_then(Value::as_object)
-        .expect("control schema has properties");
-    assert!(!properties.contains_key("expected_lease_id"));
-    assert!(!properties.contains_key("expected_node_revision"));
 }
 
 #[test]
 fn update_plan_contract_explains_lifecycle_and_runtime_owned_state() {
     let tool = update_plan_tool();
     let description = tool.description();
-    assert!(description.contains("begin_plan"));
+    assert!(!description.contains("begin_plan"));
     assert!(description.contains("client_key"));
     assert!(description.contains("runtime-owned"));
     assert!(description.contains("execute_if_authorized"));
+    assert!(description.contains("actual activity"));
+    assert!(description.contains("already executing"));
     assert!(description.contains("use_current_plan"));
-    assert!(description.contains("do not replace or recreate the tree"));
 
     let schema = serde_json::to_string(tool.input_schema()).expect("schema serializes");
-    assert!(schema.contains("Call begin_plan before update_plan"));
+    assert!(schema.contains("first valid update creates the Plan"));
     assert!(schema.contains("New nodes use client_key"));
-    assert!(schema.contains("crates/merry-runtime"));
+    assert!(!schema.contains("crates/merry-runtime"));
     assert!(schema.contains("already requested execution"));
     assert!(schema.contains("execute_if_authorized"));
     assert!(schema.contains("request_user_review"));
-    assert!(schema.contains("use_current_plan"));
 }
 
 fn update_plan_tool() -> ToolSpec {

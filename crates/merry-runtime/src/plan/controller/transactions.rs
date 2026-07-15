@@ -21,8 +21,9 @@ use crate::{
     session::{PreparedPlanToolCommit, SessionState},
 };
 use merry_core::{
-    PlanActivationSource, PlanCapabilityEnvelopeSnapshot, PlanId, PlanLeaseId, PlanNodeId,
-    PlanPhase, PlanRevisionSummary, PlanSnapshot, RuntimeJournalEvent, RuntimeJournalPayload,
+    PlanActivationSource, PlanBindingId, PlanCapabilityEnvelopeSnapshot, PlanId, PlanLeaseId,
+    PlanLinkSnapshot, PlanLinkStatus, PlanNodeId, PlanNodeStatus, PlanPhase, PlanRevisionSummary,
+    PlanSnapshot, RuntimeJournalEvent, RuntimeJournalPayload, SubagentId, SubagentTaskId,
     ToolCallId, ToolCallResultStatus,
 };
 use std::sync::Arc;
@@ -208,15 +209,32 @@ pub(super) async fn update_plan(
     events: &broadcast::Sender<RuntimeJournalEvent>,
     input: UpdatePlanInput,
     tool_call_id: Option<ToolCallId>,
+    next_plan_sequence: Option<&mut u64>,
 ) -> Result<PlanCommandResult<PlanUpdateOutput>, PlanControllerError> {
     let (base, output, prepared) = {
         let session = session.lock().await;
-        let previous_phase = session
-            .active_plan()
-            .ok_or(PlanControllerError::NoActivePlan)?
-            .snapshot()
-            .phase;
-        let mut candidate = session.active_plan().expect("checked active plan").clone();
+        let (previous_phase, mut candidate) = if let Some(active) = session.active_plan() {
+            (active.snapshot().phase, active.clone())
+        } else {
+            let Some(next_plan_sequence) = next_plan_sequence else {
+                return Err(PlanControllerError::NoActivePlan);
+            };
+            let plan_id = PlanId::new(&format!("plan-{}", *next_plan_sequence))
+                .expect("runtime-generated plan id is valid");
+            *next_plan_sequence = next_plan_sequence.saturating_add(1);
+            let reason = input.reason.clone();
+            (
+                PlanPhase::Planning,
+                PlanState::empty(
+                    plan_id,
+                    PlanActivationSource::Coordinator {
+                        reason,
+                        governing_skill_id: None,
+                    },
+                    Default::default(),
+                ),
+            )
+        };
         let output = candidate.update(input)?;
         let summary = output
             .snapshot
@@ -258,6 +276,179 @@ pub(super) async fn update_plan(
         output,
         events: committed_events,
     })
+}
+
+pub(super) async fn bind_subagent(
+    session: &Arc<Mutex<SessionState>>,
+    store: Option<&FileSessionStore>,
+    events: &broadcast::Sender<RuntimeJournalEvent>,
+    client_key: String,
+    agent_id: SubagentId,
+    task_id: SubagentTaskId,
+    now_ms: u64,
+) -> Result<PlanCommandResult<PlanLinkSnapshot>, PlanControllerError> {
+    let (base, link, prepared) = {
+        let session = session.lock().await;
+        let mut candidate = session
+            .active_plan()
+            .ok_or(PlanControllerError::NoActivePlan)?
+            .clone();
+        let revision = candidate.advance_revision("runtime linked a subagent to this Plan task")?;
+        let plan_id = candidate.snapshot.plan_id.clone();
+        let node = candidate
+            .snapshot
+            .nodes
+            .iter_mut()
+            .find(|node| node.client_key.as_deref() == Some(client_key.as_str()))
+            .ok_or(PlanControllerError::Plan {
+                source: PlanError::UnknownClientKey { client_key },
+            })?;
+        // The plan revision is monotonic across the whole plan, unlike the
+        // per-node link count. Use it to keep binding identities unique when
+        // several nodes each receive their first delegated child.
+        let binding_id = PlanBindingId::new(&format!("plan-binding-{revision}"))
+            .expect("runtime-generated plan binding id is valid");
+        let link = PlanLinkSnapshot {
+            plan_id,
+            node_id: node.id.clone(),
+            binding_id,
+            subagent_id: agent_id,
+            task_id,
+            status: PlanLinkStatus::Active,
+            linked_at_ms: now_ms,
+            terminal_at_ms: None,
+            superseded_by: None,
+        };
+        node.links.push(link.clone());
+        node.updated_revision = revision;
+        recompute_link_projection(node);
+        let summary =
+            PlanRevisionSummary::new(revision, "runtime linked a subagent to this Plan task")
+                .map_err(|_| PlanControllerError::Plan {
+                    source: PlanError::InvalidText {
+                        field: "summary",
+                        reason: "is invalid",
+                    },
+                })?;
+        let payloads = vec![RuntimeJournalPayload::PlanUpdated {
+            snapshot: candidate.snapshot.clone(),
+            summary,
+        }];
+        let base = SessionBase::capture(&session);
+        let prepared = prepare_plan_commit(
+            &session,
+            candidate,
+            session.terminal_plans().to_vec(),
+            payloads,
+            None,
+        )?;
+        (base, link, prepared)
+    };
+    let committed_events = persist_and_install(session, store, events, base, prepared).await?;
+    Ok(PlanCommandResult {
+        output: link,
+        events: committed_events,
+    })
+}
+
+pub(super) async fn update_subagent_link(
+    session: &Arc<Mutex<SessionState>>,
+    store: Option<&FileSessionStore>,
+    events: &broadcast::Sender<RuntimeJournalEvent>,
+    binding_id: PlanBindingId,
+    status: PlanLinkStatus,
+    now_ms: u64,
+) -> Result<PlanCommandResult<PlanSnapshot>, PlanControllerError> {
+    let (base, snapshot, prepared) = {
+        let session = session.lock().await;
+        let mut candidate = session
+            .active_plan()
+            .ok_or(PlanControllerError::NoActivePlan)?
+            .clone();
+        let revision = candidate.advance_revision("runtime updated linked subagent state")?;
+        let node = candidate
+            .snapshot
+            .nodes
+            .iter_mut()
+            .find(|node| node.links.iter().any(|link| link.binding_id == binding_id))
+            .ok_or_else(|| PlanControllerError::Plan {
+                source: PlanError::UnknownNode {
+                    node_id: PlanNodeId::new("linked-node-not-found")
+                        .expect("valid diagnostic node id"),
+                },
+            })?;
+        let link = node
+            .links
+            .iter_mut()
+            .find(|link| link.binding_id == binding_id)
+            .expect("link lookup above succeeded");
+        link.status = status;
+        link.terminal_at_ms = matches!(
+            status,
+            PlanLinkStatus::Completed
+                | PlanLinkStatus::Failed
+                | PlanLinkStatus::Cancelled
+                | PlanLinkStatus::Superseded
+        )
+        .then_some(now_ms);
+        node.updated_revision = revision;
+        recompute_link_projection(node);
+        candidate.refresh_parent_states(revision);
+        candidate.refresh_terminal_phase();
+        let summary = PlanRevisionSummary::new(revision, "runtime updated linked subagent state")
+            .map_err(|_| PlanControllerError::Plan {
+            source: PlanError::InvalidText {
+                field: "summary",
+                reason: "is invalid",
+            },
+        })?;
+        let payloads = vec![RuntimeJournalPayload::PlanUpdated {
+            snapshot: candidate.snapshot.clone(),
+            summary,
+        }];
+        let snapshot = candidate.snapshot.clone();
+        let base = SessionBase::capture(&session);
+        let prepared = prepare_plan_commit(
+            &session,
+            candidate,
+            session.terminal_plans().to_vec(),
+            payloads,
+            None,
+        )?;
+        (base, snapshot, prepared)
+    };
+    let committed_events = persist_and_install(session, store, events, base, prepared).await?;
+    Ok(PlanCommandResult {
+        output: snapshot,
+        events: committed_events,
+    })
+}
+
+fn recompute_link_projection(node: &mut merry_core::PlanNodeSnapshot) {
+    let mut summary = merry_core::PlanExecutionSummary::default();
+    for link in node
+        .links
+        .iter()
+        .filter(|link| link.status != PlanLinkStatus::Superseded && link.superseded_by.is_none())
+    {
+        match link.status {
+            PlanLinkStatus::Active => summary.active += 1,
+            PlanLinkStatus::Completed => summary.completed += 1,
+            PlanLinkStatus::Failed => summary.failed += 1,
+            PlanLinkStatus::Cancelled => summary.cancelled += 1,
+            PlanLinkStatus::Superseded => {}
+        }
+    }
+    node.execution_summary = summary.clone();
+    node.status = if summary.active > 0 {
+        PlanNodeStatus::InProgress
+    } else if summary.failed > 0 || summary.cancelled > 0 {
+        PlanNodeStatus::Failed
+    } else if summary.completed > 0 {
+        PlanNodeStatus::Completed
+    } else {
+        node.declared_status
+    };
 }
 
 pub(super) async fn start_attempt(

@@ -6,7 +6,8 @@ use super::profile::{
 use merry_llm::{ModelName, ModelProvider};
 use merry_runtime::{
     AcceptedLocalWorkspaceProcessAdmission, ChildRuntimeFactory, ChildRuntimeInput,
-    PermissionedProcessRunnerFactory, ProcessRunner, ProjectRules, Runtime,
+    PermissionedProcessRunnerFactory, ProcessRunner, ProjectRules, Runtime, SubagentConfig,
+    SubagentManager, subagent_registered_tools,
 };
 use merry_tool_workspace::{
     CODING_LOOP_PROCESS_TOOL, WORKSPACE_PATCH_TOOL, WorkspaceCodingLoopProfile,
@@ -27,6 +28,7 @@ pub(crate) struct CodingLoopChildRuntimeFactory {
     project_rules: Option<ProjectRules>,
     skill_roots: Vec<PathBuf>,
     allow_hidden_workspace_paths: bool,
+    subagent_config: SubagentConfig,
 }
 
 impl CodingLoopChildRuntimeFactory {
@@ -43,6 +45,7 @@ impl CodingLoopChildRuntimeFactory {
         project_rules: Option<ProjectRules>,
         skill_roots: Vec<PathBuf>,
         allow_hidden_workspace_paths: bool,
+        subagent_config: SubagentConfig,
     ) -> Self {
         Self {
             root: root.to_path_buf(),
@@ -54,6 +57,7 @@ impl CodingLoopChildRuntimeFactory {
             project_rules,
             skill_roots,
             allow_hidden_workspace_paths,
+            subagent_config,
         }
     }
 }
@@ -71,10 +75,33 @@ impl ChildRuntimeFactory for CodingLoopChildRuntimeFactory {
             .allowed_tools
             .iter()
             .any(|tool| tool.as_str() == CODING_LOOP_PROCESS_TOOL);
-        let mut builder = Runtime::builder(input.session_id)
+        let mut builder = Runtime::builder(input.session_id.clone())
             .task_anchor(input.task_anchor)
             .model_provider(Arc::clone(&self.provider), self.model.clone())
             .registered_tool_allowlist(input.allowed_tools.clone());
+        let parent_plan_link_runtime = input.plan_link_runtime.clone();
+        let child_factory: Arc<dyn ChildRuntimeFactory> = Arc::new(self.clone());
+        let child_manager = SubagentManager::runtime_controlled_at_depth(
+            input.session_id.clone(),
+            self.subagent_config,
+            child_factory,
+            input
+                .allowed_tools
+                .iter()
+                .any(|tool| tool.as_str() == "spawn_subagents"),
+            input.depth,
+        );
+        let [spawn_tool, wait_tool, cancel_tool] = subagent_registered_tools(child_manager.clone())
+            .map_err(merry_runtime::RuntimeError::from)?;
+        builder = builder
+            .subagent_parent_scope(input.workspace_scope.clone())
+            .subagent_manager(child_manager)
+            .register_tool(spawn_tool)
+            .register_tool(wait_tool)
+            .register_tool(cancel_tool);
+        if let Some(runtime) = parent_plan_link_runtime {
+            builder = builder.subagent_parent_plan_link_runtime(runtime);
+        }
         if let Some(control) = input.plan_subagent_control {
             builder = builder.plan_subagent_control(control);
         }

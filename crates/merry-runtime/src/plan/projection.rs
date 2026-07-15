@@ -7,12 +7,7 @@ struct CoordinatorPlanProjection<'a> {
     revision: u64,
     phase: PlanPhase,
     root_node_id: Option<&'a merry_core::PlanNodeId>,
-    scheduler_status: merry_core::PlanSchedulerStatus,
     nodes: Vec<CoordinatorNodeProjection<'a>>,
-    live_attempts: Vec<&'a merry_core::PlanAttemptSnapshot>,
-    live_leases: Vec<&'a merry_core::PlanLeaseSnapshot>,
-    live_progress: Vec<&'a merry_core::PlanAttemptProgressSnapshot>,
-    unresolved_directives: Vec<&'a merry_core::CoordinatorDirectiveSnapshot>,
     approval_requirements: &'a [merry_core::PlanApprovalRequirementSnapshot],
     coordinator_guidance: CoordinatorPlanGuidance,
 }
@@ -21,7 +16,6 @@ struct CoordinatorPlanProjection<'a> {
 struct CoordinatorPlanGuidance {
     phase_action: &'static str,
     instruction: &'static str,
-    allowed_plan_tools: &'static [&'static str],
     rules: &'static [&'static str],
 }
 
@@ -36,6 +30,8 @@ struct CoordinatorNodeProjection<'a> {
     executor_policy: merry_core::PlanExecutorPolicy,
     depends_on: &'a [merry_core::PlanNodeId],
     updated_revision: u64,
+    execution_summary: &'a merry_core::PlanExecutionSummary,
+    links: &'a [merry_core::PlanLinkSnapshot],
 }
 
 pub(crate) fn coordinator_plan_control_message(snapshot: &PlanSnapshot) -> String {
@@ -44,7 +40,6 @@ pub(crate) fn coordinator_plan_control_message(snapshot: &PlanSnapshot) -> Strin
         revision: snapshot.revision,
         phase: snapshot.phase,
         root_node_id: snapshot.root_node_id.as_ref(),
-        scheduler_status: snapshot.scheduler_status,
         nodes: snapshot
             .nodes
             .iter()
@@ -59,37 +54,8 @@ pub(crate) fn coordinator_plan_control_message(snapshot: &PlanSnapshot) -> Strin
                 executor_policy: node.executor_policy,
                 depends_on: &node.depends_on,
                 updated_revision: node.updated_revision,
-            })
-            .collect(),
-        live_attempts: snapshot
-            .attempts
-            .iter()
-            .filter(|attempt| attempt.outcome.is_none())
-            .collect(),
-        live_leases: snapshot
-            .leases
-            .iter()
-            .filter(|lease| lease.status == merry_core::PlanLeaseStatus::Live)
-            .collect(),
-        live_progress: snapshot
-            .attempt_progress
-            .iter()
-            .filter(|progress| {
-                snapshot.attempts.iter().any(|attempt| {
-                    attempt.attempt_id == progress.attempt_id && attempt.outcome.is_none()
-                })
-            })
-            .collect(),
-        unresolved_directives: snapshot
-            .directives
-            .iter()
-            .filter(|directive| {
-                !matches!(
-                    directive.status,
-                    merry_core::PlanDirectiveStatus::Applied
-                        | merry_core::PlanDirectiveStatus::Superseded
-                        | merry_core::PlanDirectiveStatus::Expired
-                )
+                execution_summary: &node.execution_summary,
+                links: &node.links,
             })
             .collect(),
         approval_requirements: &snapshot.approval_requirements,
@@ -101,47 +67,60 @@ pub(crate) fn coordinator_plan_control_message(snapshot: &PlanSnapshot) -> Strin
     )
 }
 
+pub(crate) fn coordinator_plan_inactive_control_message() -> String {
+    format!(
+        "<plan_context>\n{}\n</plan_context>",
+        serde_json::json!({
+            "phase": "inactive",
+            "plan_id": null,
+            "revision": 0,
+            "root_node_id": null,
+            "nodes": [],
+            "approval_requirements": [],
+            "coordinator_guidance": {
+                "phase_action": "choose_whether_to_plan",
+                "instruction": "No active Plan exists. Do not call read_plan again. If the task benefits from a durable plan, call update_plan directly; otherwise continue with ordinary registered tools.",
+                "rules": [
+                    "Plan is an auxiliary projection: it does not grant or restrict ordinary tools and it is not the execution result.",
+                    "When delegating work, bind the child explicitly with plan_task; omitted plan_task keeps the child unbound."
+                ]
+            }
+        })
+    )
+}
+
 fn coordinator_guidance(phase: PlanPhase) -> CoordinatorPlanGuidance {
     const RULES: &[&str] = &[
-        "update_plan authors objectives, acceptance, dependencies, executor policy, harnesses, and mutable future structure. Node status, attempts, leases, progress, and results are runtime-owned; finish the current local attempt with report_plan_attempt.",
-        "Do not execute plan work outside a runtime-issued local attempt or delegated subagent lease.",
-        "User approval is an interactive Plan UI control. Do not substitute update_plan, request_permissions, or ordinary chat confirmation for plan approval.",
+        "update_plan authors objectives, acceptance, dependencies, and future structure. Linked execution summaries and statuses are runtime-owned.",
+        "Plan is an auxiliary projection: it does not grant or restrict ordinary tools and it is not the execution result.",
+        "When delegating work, bind the child explicitly with plan_task; omitted plan_task keeps the child unbound.",
+        "After a successful read_plan, use the returned snapshot; do not repeat read_plan unless runtime state has changed.",
+        "Use ordinary run_process for a read-only check that fits the active process profile; request_permissions is only for an exact action rejected for a missing capability.",
     ];
     match phase {
         PlanPhase::Planning => CoordinatorPlanGuidance {
             phase_action: "define_or_refine_plan",
-            instruction: "Use read_plan for exact current state and update_plan to define or refine the plan. If a complete tree already exists and the user says to proceed, use use_current_plan with execute_if_authorized; do not replace or recreate the tree. Choose request_user_review only when the user asked to inspect or approve the plan first. Call begin_plan only when no active plan exists.",
-            allowed_plan_tools: &["read_plan", "update_plan"],
+            instruction: "Use read_plan for exact current state and update_plan to define or refine authored intent. The first valid update creates the plan; ordinary work remains available throughout.",
             rules: RULES,
         },
         PlanPhase::AwaitingApproval => CoordinatorPlanGuidance {
             phase_action: "wait_for_user_approval",
-            instruction: "Explain the pending approval and wait for the user to approve or request revision through the Plan approval UI. Do not execute plan work and do not call update_plan while approval is pending.",
-            allowed_plan_tools: &["read_plan"],
+            instruction: "Explain the pending approval requirement and wait for user resolution when one exists. This phase does not disable ordinary tools; update_plan remains available for an explicit revision.",
             rules: RULES,
         },
         PlanPhase::Executing => CoordinatorPlanGuidance {
             phase_action: "coordinate_active_execution",
-            instruction: "Execute only a runtime-issued local attempt, inspect exact state with read_plan, steer anomalous live attempts, and revise only mutable future subtrees.",
-            allowed_plan_tools: &[
-                "read_plan",
-                "update_plan",
-                "control_plan_attempt",
-                "report_plan_progress",
-                "report_plan_attempt",
-            ],
+            instruction: "Inspect linked child lifecycle with read_plan, revise future authored structure with update_plan, and use spawn_subagents for actual delegated work. Runtime derives completion from child lifecycle; no model report is required.",
             rules: RULES,
         },
         PlanPhase::Blocked => CoordinatorPlanGuidance {
             phase_action: "explain_blocker_or_request_revision",
-            instruction: "Inspect the exact blocker with read_plan and wait for user control or an explicit revision request before changing plan work.",
-            allowed_plan_tools: &["read_plan"],
+            instruction: "Inspect the linked execution summary with read_plan and explain the blocker. Revise authored future work with update_plan or delegate a replacement child explicitly.",
             rules: RULES,
         },
         PlanPhase::Completed | PlanPhase::Cancelled => CoordinatorPlanGuidance {
             phase_action: "summarize_terminal_plan",
-            instruction: "The active plan is terminal. Read exact state if needed; begin_plan may create a new plan only for new requested work.",
-            allowed_plan_tools: &["read_plan", "begin_plan"],
+            instruction: "The plan projection is terminal. Read exact state if needed; a later update can define new authored work without replaying old attempts.",
             rules: RULES,
         },
     }

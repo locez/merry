@@ -1,30 +1,23 @@
 use crate::{
     ArtifactContent, PlanControllerError, PlanError, RuntimeError,
     plan::{
-        BeginPlanInput, ControlPlanAttemptInput, PlanArtifactPromotion, PlanAttemptToolOutput,
-        PlanProgressToolOutput, PlanSubagentControl, ReadPlanInput, ReportPlanAttemptInput,
-        ReportPlanProgressInput, UpdatePlanInput,
-        execution::PlanAttemptActor,
-        tools::{
-            BEGIN_PLAN_TOOL_NAME, CONTROL_PLAN_ATTEMPT_TOOL_NAME, READ_PLAN_TOOL_NAME,
-            REPORT_PLAN_ATTEMPT_TOOL_NAME, REPORT_PLAN_PROGRESS_TOOL_NAME, UPDATE_PLAN_TOOL_NAME,
-        },
-        unix_time_ms,
+        ReadPlanInput, UpdatePlanInput,
+        tools::{READ_PLAN_TOOL_NAME, UPDATE_PLAN_TOOL_NAME},
     },
     tool::ToolExecutionContext,
 };
 use merry_core::{
-    ArtifactId, ArtifactRef, ErrorInfo, PendingToolCall, PlanNodeId, PlanPhase, PlanSnapshot,
+    ErrorInfo, PendingToolCall, PlanActivationSource, PlanApprovalRequirementSnapshot,
+    PlanCapabilityEnvelopeSnapshot, PlanExecutionSummary, PlanId, PlanLinkSnapshot, PlanNodeId,
+    PlanNodeResult, PlanNodeStatus, PlanPhase, PlanRevisionSummary, PlanSnapshot,
     RuntimeJournalEvent, ToolCallResultStatus,
 };
 use serde::{Serialize, de::DeserializeOwned};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use super::{RuntimeInner, persist_resume_safe_savepoint_if_configured};
 
 const PLAN_READ_MAX_DEPTH: u8 = 16;
-const PLAN_READ_ATTEMPT_PAGE_SIZE: usize = 32;
-const PLAN_READ_AUXILIARY_LIMIT: usize = 32;
 
 pub(super) async fn execute_plan_tool_call(
     inner: &RuntimeInner,
@@ -32,20 +25,6 @@ pub(super) async fn execute_plan_tool_call(
     _context: ToolExecutionContext,
 ) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
     match pending.name().as_str() {
-        BEGIN_PLAN_TOOL_NAME => {
-            let input = input_from_call::<BeginPlanInput>(inner, pending)?;
-            match inner
-                .plan_controller
-                .begin_from_tool(input, pending.id().clone())
-                .await
-            {
-                Ok(events) => {
-                    inner.ensure_plan_scheduler_started();
-                    Ok(events)
-                }
-                Err(error) => submit_controller_error(inner, pending, error).await,
-            }
-        }
         READ_PLAN_TOOL_NAME => {
             let input = input_from_call::<ReadPlanInput>(inner, pending)?;
             match read_plan(inner, input).await {
@@ -60,104 +39,7 @@ pub(super) async fn execute_plan_tool_call(
                 .update_from_tool(input, pending.id().clone())
                 .await
             {
-                Ok(events) => {
-                    inner.ensure_plan_scheduler_started();
-                    Ok(events)
-                }
-                Err(error) => submit_controller_error(inner, pending, error).await,
-            }
-        }
-        CONTROL_PLAN_ATTEMPT_TOOL_NAME => {
-            let input = input_from_call::<ControlPlanAttemptInput>(inner, pending)?;
-            match inner
-                .plan_controller
-                .directive_from_tool(input, pending.id().clone(), unix_time_ms())
-                .await
-            {
-                Ok(events) => {
-                    inner.ensure_plan_scheduler_started();
-                    Ok(events)
-                }
-                Err(error) => submit_controller_error(inner, pending, error).await,
-            }
-        }
-        REPORT_PLAN_PROGRESS_TOOL_NAME => {
-            let input = input_from_call::<ReportPlanProgressInput>(inner, pending)?;
-            if let Some(control) = inner.plan_subagent_control.as_ref() {
-                let (input, promotions) =
-                    match prepare_subagent_progress_report(inner, control, input).await {
-                        Ok(prepared) => prepared,
-                        Err(error) => return submit_controller_error(inner, pending, error).await,
-                    };
-                return match control
-                    .report_progress(input, promotions, unix_time_ms())
-                    .await
-                {
-                    Ok(committed) => {
-                        let output = PlanProgressToolOutput {
-                            plan_id: committed.output.snapshot.plan_id.clone(),
-                            revision: committed.output.snapshot.revision,
-                            progress: committed.output.progress,
-                            updated_directives: committed.output.updated_directives,
-                        };
-                        submit_succeeded(inner, pending, output, Vec::new()).await
-                    }
-                    Err(error) => submit_controller_error(inner, pending, error).await,
-                };
-            }
-            let actor = PlanAttemptActor {
-                executor_session_id: inner.session_id.clone(),
-            };
-            match inner
-                .plan_controller
-                .progress_from_tool(actor, input, pending.id().clone(), unix_time_ms())
-                .await
-            {
-                Ok(events) => {
-                    inner.ensure_plan_scheduler_started();
-                    Ok(events)
-                }
-                Err(error) => submit_controller_error(inner, pending, error).await,
-            }
-        }
-        REPORT_PLAN_ATTEMPT_TOOL_NAME => {
-            let input = input_from_call::<ReportPlanAttemptInput>(inner, pending)?;
-            if let Some(control) = inner.plan_subagent_control.as_ref() {
-                let (input, promotions) =
-                    match prepare_subagent_attempt_report(inner, control, input).await {
-                        Ok(prepared) => prepared,
-                        Err(error) => return submit_controller_error(inner, pending, error).await,
-                    };
-                return match control
-                    .report_attempt(input, promotions, unix_time_ms())
-                    .await
-                {
-                    Ok(committed) => {
-                        let output = PlanAttemptToolOutput {
-                            plan_id: committed.output.snapshot.plan_id.clone(),
-                            revision: committed.output.snapshot.revision,
-                            phase: committed.output.snapshot.phase,
-                            attempt: committed.output.attempt,
-                            ready_node_ids: committed.output.ready_node_ids,
-                            client_key_ids: committed.output.client_key_ids,
-                        };
-                        submit_succeeded(inner, pending, output, Vec::new()).await
-                    }
-                    Err(error) => submit_controller_error(inner, pending, error).await,
-                };
-            }
-            let actor = PlanAttemptActor {
-                executor_session_id: inner.session_id.clone(),
-            };
-            match inner
-                .plan_controller
-                .attempt_report_from_tool(actor, input, pending.id().clone(), unix_time_ms())
-                .await
-            {
-                Ok(events) => {
-                    inner.ensure_plan_scheduler_started();
-                    Ok(events)
-                }
+                Ok(events) => Ok(events),
                 Err(error) => submit_controller_error(inner, pending, error).await,
             }
         }
@@ -172,99 +54,90 @@ pub(super) async fn execute_plan_tool_call(
     }
 }
 
-async fn prepare_subagent_progress_report(
-    inner: &RuntimeInner,
-    control: &PlanSubagentControl,
-    mut input: ReportPlanProgressInput,
-) -> Result<(ReportPlanProgressInput, Vec<PlanArtifactPromotion>), PlanControllerError> {
-    let records = {
-        let session = inner.session.lock().await;
-        session.collect_plan_artifact_records(&input.evidence_refs, &input.artifact_refs)?
-    };
-    let (mapping, promotions) = subagent_artifact_promotions(control, records)?;
-    rewrite_plan_refs(&mapping, &mut input.evidence_refs, &mut input.artifact_refs);
-    Ok((input, promotions))
-}
-
-async fn prepare_subagent_attempt_report(
-    inner: &RuntimeInner,
-    control: &PlanSubagentControl,
-    mut input: ReportPlanAttemptInput,
-) -> Result<(ReportPlanAttemptInput, Vec<PlanArtifactPromotion>), PlanControllerError> {
-    let Some(result) = input.result.as_mut() else {
-        return Ok((input, Vec::new()));
-    };
-    let records = {
-        let session = inner.session.lock().await;
-        session.collect_plan_artifact_records(&result.evidence_refs, &result.artifact_refs)?
-    };
-    let (mapping, promotions) = subagent_artifact_promotions(control, records)?;
-    rewrite_plan_refs(
-        &mapping,
-        &mut result.evidence_refs,
-        &mut result.artifact_refs,
-    );
-    Ok((input, promotions))
-}
-
-fn subagent_artifact_promotions(
-    control: &PlanSubagentControl,
-    records: Vec<(ArtifactRef, ArtifactContent)>,
-) -> Result<
-    (
-        BTreeMap<ArtifactId, ArtifactRef>,
-        Vec<PlanArtifactPromotion>,
-    ),
-    PlanControllerError,
-> {
-    let mut mapping = BTreeMap::new();
-    let mut targets = BTreeMap::<ArtifactId, ArtifactId>::new();
-    let mut promotions = Vec::with_capacity(records.len());
-    for (source, content) in records {
-        let promoted = control.promoted_artifact_ref(&source);
-        if let Some(existing_source) = targets.insert(promoted.id().clone(), source.id().clone())
-            && existing_source != *source.id()
-        {
-            return Err(PlanControllerError::Plan {
-                source: PlanError::ArtifactPromotionConflict {
-                    artifact_id: promoted.id().clone(),
-                },
-            });
-        }
-        mapping.insert(source.id().clone(), promoted.clone());
-        promotions.push(PlanArtifactPromotion {
-            artifact: promoted,
-            content,
-        });
-    }
-    Ok((mapping, promotions))
-}
-
-fn rewrite_plan_refs(
-    mapping: &BTreeMap<ArtifactId, ArtifactRef>,
-    evidence_refs: &mut [merry_core::EvidenceRef],
-    artifact_refs: &mut [ArtifactRef],
-) {
-    for evidence in evidence_refs {
-        evidence.artifact_id = mapping
-            .get(&evidence.artifact_id)
-            .expect("every validated subagent evidence artifact was promoted")
-            .id()
-            .clone();
-    }
-    for artifact in artifact_refs {
-        *artifact = mapping
-            .get(artifact.id())
-            .expect("every validated subagent artifact was promoted")
-            .clone();
-    }
+#[derive(Serialize)]
+struct ReadPlanOutput {
+    snapshot: ReadPlanSnapshot,
+    selected_node_id: Option<PlanNodeId>,
+    next_cursor: Option<String>,
+    guidance: ReadPlanGuidance,
 }
 
 #[derive(Serialize)]
-struct ReadPlanOutput {
-    snapshot: PlanSnapshot,
-    selected_node_id: Option<PlanNodeId>,
-    next_cursor: Option<String>,
+struct ReadPlanGuidance {
+    do_not_repeat_until_state_change: bool,
+    instruction: &'static str,
+}
+
+#[derive(Serialize)]
+struct ReadPlanSnapshot {
+    plan_id: PlanId,
+    revision: u64,
+    phase: PlanPhase,
+    activation_source: PlanActivationSource,
+    root_node_id: Option<PlanNodeId>,
+    coordinator_node_id: Option<PlanNodeId>,
+    execution_contract_fingerprint: Option<String>,
+    execution_authorization_refs: Vec<String>,
+    authorized_capability_envelope: Option<PlanCapabilityEnvelopeSnapshot>,
+    approval_requirements: Vec<PlanApprovalRequirementSnapshot>,
+    nodes: Vec<ReadPlanNode>,
+    max_concurrency_hint: Option<usize>,
+    revision_summaries: Vec<PlanRevisionSummary>,
+}
+
+#[derive(Serialize)]
+struct ReadPlanNode {
+    id: PlanNodeId,
+    client_key: Option<String>,
+    parent_id: Option<PlanNodeId>,
+    sibling_order: u16,
+    objective: String,
+    acceptance: Vec<String>,
+    status: PlanNodeStatus,
+    depends_on: Vec<PlanNodeId>,
+    result: Option<PlanNodeResult>,
+    created_revision: u64,
+    updated_revision: u64,
+    execution_summary: PlanExecutionSummary,
+    links: Vec<PlanLinkSnapshot>,
+}
+
+impl From<&PlanSnapshot> for ReadPlanSnapshot {
+    fn from(snapshot: &PlanSnapshot) -> Self {
+        Self {
+            plan_id: snapshot.plan_id.clone(),
+            revision: snapshot.revision,
+            phase: snapshot.phase,
+            activation_source: snapshot.activation_source.clone(),
+            root_node_id: snapshot.root_node_id.clone(),
+            coordinator_node_id: snapshot.coordinator_node_id.clone(),
+            execution_contract_fingerprint: snapshot.execution_contract_fingerprint.clone(),
+            execution_authorization_refs: snapshot.execution_authorization_refs.clone(),
+            authorized_capability_envelope: snapshot.authorized_capability_envelope.clone(),
+            approval_requirements: snapshot.approval_requirements.clone(),
+            nodes: snapshot
+                .nodes
+                .iter()
+                .map(|node| ReadPlanNode {
+                    id: node.id.clone(),
+                    client_key: node.client_key.clone(),
+                    parent_id: node.parent_id.clone(),
+                    sibling_order: node.sibling_order,
+                    objective: node.objective.clone(),
+                    acceptance: node.acceptance.clone(),
+                    status: node.status,
+                    depends_on: node.depends_on.clone(),
+                    result: node.result.clone(),
+                    created_revision: node.created_revision,
+                    updated_revision: node.updated_revision,
+                    execution_summary: node.execution_summary.clone(),
+                    links: node.links.clone(),
+                })
+                .collect(),
+            max_concurrency_hint: snapshot.max_concurrency_hint,
+            revision_summaries: snapshot.revision_summaries.clone(),
+        }
+    }
 }
 
 async fn read_plan(
@@ -316,93 +189,22 @@ async fn read_plan(
             .retain(|node| selected_ids.contains(&node.id));
     }
 
-    let history_node_ids =
-        selected_ids.unwrap_or_else(|| snapshot.nodes.iter().map(|node| node.id.clone()).collect());
-    let attempt_offset = parse_attempt_cursor(input.cursor.as_deref())?;
-    let mut next_cursor = None;
-    let include_attempts = input.include_attempts.unwrap_or(false);
-    let include_leases = input.include_leases.unwrap_or(include_attempts);
-    if include_leases && !include_attempts {
-        return Err(PlanToolRejection::new(
-            "plan_read_leases_require_attempts",
-            "include_leases=true requires include_attempts=true",
-        ));
-    }
-    if include_attempts {
-        snapshot
-            .attempts
-            .retain(|attempt| history_node_ids.contains(&attempt.node_id));
-        snapshot.attempts.sort_by(|left, right| {
-            left.started_at_ms
-                .cmp(&right.started_at_ms)
-                .then_with(|| left.attempt_id.cmp(&right.attempt_id))
-        });
-        if attempt_offset > snapshot.attempts.len() {
-            return Err(PlanToolRejection::new(
-                "plan_read_cursor_invalid",
-                "attempt cursor is beyond the available history",
-            ));
-        }
-        let attempt_count = snapshot.attempts.len();
-        let end = attempt_offset
-            .saturating_add(PLAN_READ_ATTEMPT_PAGE_SIZE)
-            .min(attempt_count);
-        let page = snapshot.attempts[attempt_offset..end].to_vec();
-        let page_attempt_ids = page
-            .iter()
-            .map(|attempt| attempt.attempt_id.clone())
-            .collect::<BTreeSet<_>>();
-        snapshot.attempts = page;
-        if include_leases {
-            snapshot
-                .leases
-                .retain(|lease| page_attempt_ids.contains(&lease.attempt_id));
-        } else {
-            snapshot.leases.clear();
-        }
-        if end < attempt_count {
-            next_cursor = Some(format!("attempts:{end}"));
-        }
-    } else {
-        if attempt_offset != 0 {
-            return Err(PlanToolRejection::new(
-                "plan_read_cursor_invalid",
-                "attempt cursor requires include_attempts=true",
-            ));
-        }
-        snapshot.attempts.clear();
-        snapshot.leases.clear();
-    }
-
-    if input.include_progress.unwrap_or(false) {
-        snapshot
-            .attempt_progress
-            .retain(|progress| history_node_ids.contains(&progress.node_id));
-        keep_latest(
-            &mut snapshot.attempt_progress,
-            PLAN_READ_AUXILIARY_LIMIT,
-            |progress| progress.last_runtime_activity_at_ms,
-        );
-    } else {
-        snapshot.attempt_progress.clear();
-    }
-    if input.include_directives.unwrap_or(false) {
-        snapshot
-            .directives
-            .retain(|directive| history_node_ids.contains(&directive.node_id));
-        keep_latest(
-            &mut snapshot.directives,
-            PLAN_READ_AUXILIARY_LIMIT,
-            |directive| directive.sequence,
-        );
-    } else {
-        snapshot.directives.clear();
-    }
+    // Attempts, leases, progress, and directives belong to the removed model
+    // reporting protocol. Keep them in durable history for migration/debugging,
+    // but never put them back into the provider-visible Plan projection.
+    snapshot.attempts.clear();
+    snapshot.leases.clear();
+    snapshot.attempt_progress.clear();
+    snapshot.directives.clear();
 
     Ok(ReadPlanOutput {
-        snapshot,
+        snapshot: ReadPlanSnapshot::from(&snapshot),
         selected_node_id: input.node_id,
-        next_cursor,
+        next_cursor: None,
+        guidance: ReadPlanGuidance {
+            do_not_repeat_until_state_change: true,
+            instruction: "Use this exact snapshot for the next decision. Do not call read_plan again unless a runtime event changed the Plan; continue ordinary work or use update_plan for an actual authored revision.",
+        },
     })
 }
 
@@ -437,28 +239,6 @@ fn subtree_ids(
         frontier = next;
     }
     Ok(selected_ids)
-}
-
-fn parse_attempt_cursor(cursor: Option<&str>) -> Result<usize, PlanToolRejection> {
-    match cursor {
-        None => Ok(0),
-        Some(cursor) => cursor
-            .strip_prefix("attempts:")
-            .and_then(|offset| offset.parse::<usize>().ok())
-            .ok_or_else(|| {
-                PlanToolRejection::new(
-                    "plan_read_cursor_invalid",
-                    "cursor must use the attempts:<offset> format returned by read_plan",
-                )
-            }),
-    }
-}
-
-fn keep_latest<T>(items: &mut Vec<T>, limit: usize, key: impl Fn(&T) -> u64) {
-    items.sort_by_key(&key);
-    if items.len() > limit {
-        items.drain(..items.len() - limit);
-    }
 }
 
 fn input_from_call<T>(inner: &RuntimeInner, pending: &PendingToolCall) -> Result<T, RuntimeError>
@@ -586,11 +366,22 @@ impl PlanToolRejection {
 fn no_active_plan_rejection() -> PlanToolRejection {
     PlanToolRejection::new("no_active_plan", "no active plan exists").with_recovery(
         serde_json::json!({
-            "next_tool": "begin_plan",
-            "instruction": "Call begin_plan to create the empty planning state before retrying update_plan or read_plan.",
+            "next_tool": "update_plan",
+            "instruction": "Do not call read_plan again. If a durable plan is useful, use update_plan with expected_plan_revision 0 to define the first plan tree; the first valid update creates the active Plan. Otherwise continue with ordinary registered tools.",
             "example": {
                 "reason": "Coordinate the requested multi-step work",
-                "governing_skill_id": null
+                "execution_intent": "continue_planning",
+                "change": {
+                    "type": "define_plan",
+                    "expected_plan_revision": 0,
+                    "root": {
+                        "client_key": "root",
+                        "objective": "Complete the requested work",
+                        "acceptance": ["Focused checks pass"],
+                        "depends_on": [],
+                        "children": []
+                    }
+                }
             }
         }),
     )
@@ -604,7 +395,14 @@ fn plan_error_rejection(error: &PlanError) -> PlanToolRejection {
         } => serde_json::json!({
             "actor": "user",
             "next_action": "approve_or_request_revision_in_plan_ui",
-            "instruction": "Wait for the user to approve the plan or request revision through the Plan UI. Do not call update_plan, request_permissions, or execute plan work while approval is pending."
+            "instruction": "Explain the pending approval requirement and let the user approve or revise it. Plan approval does not disable ordinary tools; use update_plan only for an explicit plan revision and keep runtime permission checks for any action."
+        }),
+        PlanError::WrongPhase {
+            actual: PlanPhase::Executing,
+            ..
+        } => serde_json::json!({
+            "next_action": "continue_current_plan",
+            "instruction": "The Plan is already executing. Do not use update_plan with use_current_plan again. Continue ordinary work or inspect the current snapshot once with read_plan; revise only a mutable future subtree when the authored objective actually changed."
         }),
         PlanError::InvalidNewNodeIdentity | PlanError::InvalidExistingNodeIdentity => {
             serde_json::json!({
@@ -621,8 +419,8 @@ fn plan_error_rejection(error: &PlanError) -> PlanToolRejection {
         }),
         PlanError::CapabilityEnvelopeExceeded { .. } => serde_json::json!({
             "actor": "coordinator_or_user",
-            "next_action": "narrow_plan_or_request_plan_approval",
-            "instruction": "Narrow the node harness to the authorized envelope, or wait for the user to approve the exact expanded capability through the Plan UI."
+            "next_action": "request_runtime_capability_or_plan_approval",
+            "instruction": "The requested runtime capability is outside the current Plan authorization. Ask for the required permission or revise the authored plan; node harness fields are runtime-owned and cannot be widened by the model."
         }),
         PlanError::StalePlanRevision { .. } | PlanError::StaleNodeRevision { .. } => {
             read_plan_recovery()
@@ -698,5 +496,26 @@ fn plan_error_code(error: &PlanError) -> &'static str {
         PlanError::MissingArtifactRef { .. } => "plan_artifact_ref_missing",
         PlanError::InvalidEvidenceRef { .. } => "plan_evidence_ref_invalid",
         PlanError::ArtifactPromotionConflict { .. } => "plan_artifact_promotion_conflict",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn executing_plan_recovery_does_not_send_use_current_plan_back_to_model() {
+        let rejection = plan_error_rejection(&PlanError::WrongPhase {
+            actual: PlanPhase::Executing,
+            operation: "use current plan",
+        });
+        assert_eq!(rejection.code, "plan_wrong_phase");
+        assert_eq!(rejection.recovery["next_action"], "continue_current_plan");
+        assert!(
+            rejection.recovery["instruction"]
+                .as_str()
+                .expect("recovery instruction should be text")
+                .contains("Do not use update_plan with use_current_plan")
+        );
     }
 }

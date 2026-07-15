@@ -228,11 +228,8 @@ fn configure_coding_loop_runtime_builder(
         project_rules.clone(),
         options.skill_roots.clone(),
         options.allow_hidden_workspace_paths,
+        options.subagents.limits(),
     ));
-    builder = builder.plan_subagent_factory(
-        Arc::clone(&child_factory),
-        options.subagents.limits().max_threads(),
-    );
 
     if options.subagents.is_installed() {
         let manager = SubagentManager::runtime_controlled(

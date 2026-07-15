@@ -38,16 +38,25 @@ pub(super) fn plan_timeline_item(
         });
     }
 
-    if previous.scheduler_status != snapshot.scheduler_status {
+    if previous.approval_requirements != snapshot.approval_requirements {
         return Some(TimelineItem::Muted {
-            title: format!("Plan scheduling {:?}", snapshot.scheduler_status).to_ascii_lowercase(),
+            title: "Plan approval updated".to_owned(),
             detail: summary.to_owned(),
         });
     }
 
-    if previous.approval_requirements != snapshot.approval_requirements {
+    if snapshot.nodes.iter().any(|node| {
+        previous
+            .nodes
+            .iter()
+            .find(|candidate| candidate.id == node.id)
+            .is_some_and(|candidate| {
+                candidate.execution_summary != node.execution_summary
+                    || candidate.links != node.links
+            })
+    }) {
         return Some(TimelineItem::Muted {
-            title: "Plan approval updated".to_owned(),
+            title: "Plan linked execution updated".to_owned(),
             detail: summary.to_owned(),
         });
     }

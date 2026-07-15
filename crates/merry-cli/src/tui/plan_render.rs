@@ -5,8 +5,8 @@ use super::{
 };
 use merry_core::{
     CoordinatorDirectiveSnapshot, PlanApprovalRequirementKind, PlanAttemptProgressSnapshot,
-    PlanAttemptSnapshot, PlanExecutorPolicy, PlanLeaseSnapshot, PlanNodeSnapshot, PlanNodeStatus,
-    PlanPhase, PlanSnapshot,
+    PlanAttemptSnapshot, PlanExecutorPolicy, PlanLeaseSnapshot, PlanLinkSnapshot, PlanLinkStatus,
+    PlanNodeSnapshot, PlanNodeStatus, PlanPhase, PlanSnapshot,
 };
 use ratatui::{
     Frame,
@@ -250,12 +250,27 @@ fn inspector_lines(
         node.harness.forbidden_paths.iter().map(String::as_str),
     );
 
+    section(&mut lines, state, "LINKED SUBAGENTS");
+    if node.links.is_empty() {
+        muted(&mut lines, state, "No subagent is linked to this Plan task");
+    } else {
+        for link in &node.links {
+            linked_subagent_lines(&mut lines, state, link);
+        }
+        key_value(
+            &mut lines,
+            state,
+            "runtime summary",
+            &format_execution_summary(&node.execution_summary),
+        );
+    }
+
     let leases = snapshot
         .leases
         .iter()
         .filter(|lease| lease.node_id == node.id)
         .collect::<Vec<_>>();
-    section(&mut lines, state, "LEASES");
+    section(&mut lines, state, "LEGACY LEASE EVIDENCE");
     if leases.is_empty() {
         muted(&mut lines, state, "No leases");
     } else {
@@ -269,7 +284,7 @@ fn inspector_lines(
         .iter()
         .filter(|attempt| attempt.node_id == node.id)
         .collect::<Vec<_>>();
-    section(&mut lines, state, "ATTEMPTS");
+    section(&mut lines, state, "LEGACY ATTEMPTS");
     if attempts.is_empty() {
         muted(&mut lines, state, "No attempts");
     } else {
@@ -283,7 +298,7 @@ fn inspector_lines(
         .iter()
         .filter(|progress| progress.node_id == node.id)
         .collect::<Vec<_>>();
-    section(&mut lines, state, "PROGRESS");
+    section(&mut lines, state, "LEGACY PROGRESS");
     if progress.is_empty() {
         muted(&mut lines, state, "No progress report");
     } else {
@@ -297,7 +312,7 @@ fn inspector_lines(
         .iter()
         .filter(|directive| directive.node_id == node.id)
         .collect::<Vec<_>>();
-    section(&mut lines, state, "DIRECTIVES");
+    section(&mut lines, state, "LEGACY DIRECTIVES");
     if directives.is_empty() {
         muted(&mut lines, state, "None");
     } else {
@@ -363,6 +378,47 @@ fn inspector_lines(
         );
     }
     lines
+}
+
+fn linked_subagent_lines(
+    lines: &mut Vec<Line<'static>>,
+    state: &TuiState,
+    link: &PlanLinkSnapshot,
+) {
+    let status = match link.status {
+        PlanLinkStatus::Active => "active",
+        PlanLinkStatus::Completed => "completed",
+        PlanLinkStatus::Failed => "failed",
+        PlanLinkStatus::Cancelled => "cancelled",
+        PlanLinkStatus::Superseded => "superseded",
+    };
+    text(
+        lines,
+        state,
+        &format!(
+            "- {status}  agent {}  task {}",
+            link.subagent_id.as_str(),
+            link.task_id.as_str()
+        ),
+    );
+    muted(
+        lines,
+        state,
+        &format!(
+            "  binding {}  linked @ {} ms{}",
+            link.binding_id.as_str(),
+            link.linked_at_ms,
+            link.terminal_at_ms
+                .map_or_else(String::new, |at| format!("  terminal @ {at} ms"))
+        ),
+    );
+}
+
+fn format_execution_summary(summary: &merry_core::PlanExecutionSummary) -> String {
+    format!(
+        "active {}  completed {}  failed {}  cancelled {}",
+        summary.active, summary.completed, summary.failed, summary.cancelled
+    )
 }
 
 fn lease_lines(lines: &mut Vec<Line<'static>>, state: &TuiState, lease: &PlanLeaseSnapshot) {

@@ -123,47 +123,6 @@ fn approval_rejects_a_different_plan_with_the_same_revision() {
 }
 
 #[test]
-fn explicit_retry_of_interrupted_node_creates_a_fresh_attempt() {
-    let mut plan = plan_with_recovery_limit(1);
-    let approval = approval_input(&plan, 1);
-    plan.approve(approval).expect("review approval succeeds");
-    let root_id = plan.snapshot().root_node_id.clone().expect("root exists");
-    let first_actor = PlanAttemptActor {
-        executor_session_id: SessionId::new("interrupted-subagent").expect("valid session id"),
-    };
-    let first = plan
-        .start_attempt(&root_id, first_actor, 1_000)
-        .expect("first attempt starts");
-    let interrupted = plan
-        .interrupt_unresolved_attempts_after_resume(2_000)
-        .expect("resume interruption commits");
-    assert_eq!(interrupted.snapshot.phase, PlanPhase::Blocked);
-
-    let retried = plan
-        .retry_interrupted_node(&root_id, "user explicitly retried interrupted work")
-        .expect("explicit retry reopens the node");
-    assert_eq!(retried.snapshot.phase, PlanPhase::Executing);
-    assert_eq!(
-        retried.snapshot.scheduler_status,
-        PlanSchedulerStatus::Active
-    );
-    assert_eq!(plan.ready_node_ids(), vec![root_id.clone()]);
-
-    let second = plan
-        .start_attempt(
-            &root_id,
-            PlanAttemptActor {
-                executor_session_id: SessionId::new("retry-subagent").expect("valid session id"),
-            },
-            3_000,
-        )
-        .expect("fresh attempt starts");
-    assert_ne!(second.attempt.attempt_id, first.attempt.attempt_id);
-    assert_ne!(second.lease.lease_id, first.lease.lease_id);
-    assert_eq!(plan.snapshot().attempts.len(), 2);
-}
-
-#[test]
 fn review_only_approval_enters_execution_without_expanding_permissions() {
     let mut plan = plan_with_review_requirement();
     let approval = approval_input(&plan, 1);

@@ -87,8 +87,6 @@ pub(crate) enum ControllerEffect {
     EnterPlanMode,
     ApprovePlan(merry_runtime::PlanApprovalInput),
     RevisePlan,
-    PausePlan,
-    ResumePlan,
     RetryPlanNode(merry_core::PlanNodeId),
     CancelPlan,
     Quit,
@@ -411,8 +409,6 @@ fn run_palette_command(command: PaletteCommand, state: &mut TuiState) -> Control
         | PaletteCommand::OpenPlan
         | PaletteCommand::FocusPlan
         | PaletteCommand::ClosePlan
-        | PaletteCommand::PausePlan
-        | PaletteCommand::ResumePlan
         | PaletteCommand::RetryPlanNode
         | PaletteCommand::CancelPlan => unreachable!("plan command handled above"),
         PaletteCommand::Quit => {
@@ -1015,8 +1011,6 @@ async fn dispatch_effect(
         ControllerEffect::EnterPlanMode
         | ControllerEffect::ApprovePlan(_)
         | ControllerEffect::RevisePlan
-        | ControllerEffect::PausePlan
-        | ControllerEffect::ResumePlan
         | ControllerEffect::RetryPlanNode(_)
         | ControllerEffect::CancelPlan => unreachable!("plan effect handled above"),
         ControllerEffect::Quit => {

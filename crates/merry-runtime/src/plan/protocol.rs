@@ -3,7 +3,7 @@ use merry_core::{
     PlanApprovalRequirementSnapshot, PlanAttemptId, PlanAttemptOutcome,
     PlanCapabilityEnvelopeSnapshot, PlanDirectiveConstraints, PlanDirectiveId, PlanDirectiveKind,
     PlanExecutorPolicy, PlanHarnessSnapshot, PlanId, PlanNodeId, PlanNodeResult, PlanPhase,
-    PlanRecoveryPolicySnapshot, PlanSchedulerStatus, PlanSnapshot, SkillId,
+    PlanRecoveryPolicySnapshot, PlanSnapshot, SkillId,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -45,13 +45,6 @@ pub struct ReadPlanInput {
     pub plan_id: Option<merry_core::PlanId>,
     pub node_id: Option<PlanNodeId>,
     pub max_depth: Option<u8>,
-    pub include_attempts: Option<bool>,
-    /// Include subagent lease records for the selected attempt page. This
-    /// requires `include_attempts=true`; attempts include leases by default.
-    pub include_leases: Option<bool>,
-    pub include_progress: Option<bool>,
-    pub include_directives: Option<bool>,
-    pub cursor: Option<String>,
 }
 
 /// Provider-visible steering request for one live attempt.
@@ -159,18 +152,23 @@ pub struct PlanNodeInput {
     pub objective: String,
     /// Observable checks that determine whether this node is complete.
     pub acceptance: Vec<String>,
-    /// Whether the node should run locally, in a delegated subagent, or be chosen
-    /// automatically by the scheduler.
+    /// Runtime-owned execution preference retained for internal snapshots. It
+    /// is not provider-authored and is omitted from the generated schema.
+    #[serde(default, skip_serializing)]
+    #[schemars(skip)]
     pub executor_policy: PlanExecutorPolicy,
-    /// Tools, workspace scopes, and per-call limits available to this node.
+    /// Runtime-owned capability data retained for internal snapshots.
+    #[serde(default, skip_serializing)]
+    #[schemars(skip)]
     pub harness: PlanHarnessSnapshot,
-    /// Typed transient retry policy for this node revision.
+    /// Runtime-owned retry policy retained for internal snapshots.
+    #[serde(default, skip_serializing)]
+    #[schemars(skip)]
     pub recovery_policy: PlanRecoveryPolicySnapshot,
     /// Dependencies expressed as existing runtime ids or client keys declared in
     /// the same update request.
     pub depends_on: Vec<PlanNodeReferenceInput>,
-    /// Recursive direct children. Lazy subagent decomposition reports only direct
-    /// children through `report_plan_attempt` instead of calling `update_plan`.
+    /// Recursive direct children authored as part of the Plan tree.
     pub children: Vec<PlanNodeInput>,
 }
 
@@ -196,7 +194,7 @@ pub enum PlanChangeInput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[schemars(
-    description = "Call begin_plan before update_plan. Define a complete tree while planning, or replace one mutable future subtree while planning or executing. New nodes use client_key and omit id; existing nodes use id and omit client_key. update_plan never marks nodes completed and never authors status, attempts, leases, progress, or results because those are runtime-owned.",
+    description = "Create or update the authored Plan tree. The first valid update creates the Plan. New nodes use client_key and omit id; existing nodes use id and omit client_key. Runtime-owned execution state, capabilities, attempts, leases, progress, and results are not authored here.",
     example = update_plan_define_example()
 )]
 pub struct UpdatePlanInput {
@@ -208,7 +206,8 @@ pub struct UpdatePlanInput {
     pub execution_intent: PlanExecutionIntent,
     /// Optional node currently receiving the coordinator's attention.
     pub coordinator_node_id: Option<PlanNodeId>,
-    /// Optional scheduler concurrency preference within the runtime ceiling.
+    /// Optional hint for how much linked delegation the coordinator expects.
+    /// Runtime admission remains owned by the subagent manager.
     pub max_concurrency_hint: Option<usize>,
     /// Tagged JSON object with `type: define_plan`, `type: replace_subtree`, or
     /// `type: use_current_plan`. Never pass this field as a string.
@@ -228,23 +227,6 @@ fn update_plan_define_example() -> serde_json::Value {
                 "client_key": "root",
                 "objective": "Implement the requested change",
                 "acceptance": ["Focused tests pass"],
-                "executor_policy": "auto",
-                "harness": {
-                    "model_role": null,
-                    "reasoning_effort": null,
-                    "checkpoint_turn_interval": null,
-                    "provider_request_timeout_ms": null,
-                    "tool_timeout_ms": null,
-                    "allowed_tools": ["run_process"],
-                    "read_scope": ["crates/merry-runtime"],
-                    "write_scope": ["crates/merry-runtime"],
-                    "forbidden_paths": [".git"]
-                },
-                "recovery_policy": {
-                    "max_transient_attempts": 2,
-                    "retry_backoff_ms": 0,
-                    "retry_only_before_observable_side_effects": true
-                },
                 "depends_on": [],
                 "children": []
             }
@@ -264,7 +246,6 @@ pub(crate) struct PlanUpdateToolOutput {
     pub(crate) revision: u64,
     pub(crate) phase: PlanPhase,
     pub(crate) client_key_ids: BTreeMap<String, PlanNodeId>,
-    pub(crate) scheduler_status: PlanSchedulerStatus,
     pub(crate) approval_requirements: Vec<PlanApprovalRequirementSnapshot>,
 }
 
@@ -275,7 +256,6 @@ impl From<&PlanUpdateOutput> for PlanUpdateToolOutput {
             revision: output.snapshot.revision,
             phase: output.snapshot.phase,
             client_key_ids: output.client_key_ids.clone(),
-            scheduler_status: output.snapshot.scheduler_status,
             approval_requirements: output.snapshot.approval_requirements.clone(),
         }
     }
