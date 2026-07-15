@@ -1,3 +1,9 @@
+use crate::plan::projection::{
+    CHILD_LINKED_SCOPE_GUIDANCE, CHILD_SCOPED_UPDATE_GUIDANCE,
+    COORDINATOR_LINKED_SUMMARIES_GUIDANCE, COORDINATOR_ROOT_SCOPE_GUIDANCE,
+    LINKED_CHILD_DECOMPOSITION_GUIDANCE, PLAN_SEMANTIC_CHECKPOINT_GUIDANCE,
+    RUNTIME_OWNED_EXECUTION_GUIDANCE,
+};
 use crate::plan::{
     PlanChangeInput, PlanExecutionIntent, PlanNodeInput, PlanState, UpdatePlanInput,
     execution::PlanAttemptActor,
@@ -79,24 +85,23 @@ fn subagent_context_projects_ancestor_path_without_unrelated_siblings() {
     assert!(!message.contains("Unrelated sibling secret"));
 
     let child_guidance = &projection["child_guidance"];
-    assert!(
-        child_guidance["instruction"].as_str().is_some_and(
-            |instruction| instruction.contains("only within your linked plan node and subtree")
-        )
+    assert_eq!(
+        child_guidance["instruction"], CHILD_LINKED_SCOPE_GUIDANCE,
+        "child scope guidance must use the shared contract"
     );
     let rules = child_guidance["rules"]
         .as_array()
         .expect("child guidance rules are an array");
-    for phrase in [
-        "Scoped update_plan automatically attaches authored children below the linked binding",
-        "Runtime owns execution statuses and summaries",
-        "Plan updates are semantic checkpoints, not heartbeats",
+    for rule in [
+        CHILD_SCOPED_UPDATE_GUIDANCE,
+        RUNTIME_OWNED_EXECUTION_GUIDANCE,
+        PLAN_SEMANTIC_CHECKPOINT_GUIDANCE,
     ] {
         assert!(
             rules
                 .iter()
-                .any(|rule| rule.as_str().is_some_and(|rule| rule.contains(phrase))),
-            "child guidance must contain {phrase:?}"
+                .any(|candidate| candidate.as_str() == Some(rule)),
+            "child guidance must contain the shared rule {rule:?}"
         );
     }
 
@@ -160,6 +165,40 @@ fn coordinator_context_explains_planning_actions_and_runtime_owned_completion() 
             .is_some_and(|rule| rule.contains("auxiliary projection"))
     }));
     assert_coordinator_rules(&projection);
+}
+
+#[test]
+fn coordinator_context_excludes_activity_and_wait_transport_guidance() {
+    let mut plan = empty_plan("plan-coordinator-transport-boundary");
+    plan.update(UpdatePlanInput {
+        reason: "define transport-neutral coordinator guidance".to_owned(),
+        execution_intent: PlanExecutionIntent::ContinuePlanning,
+        coordinator_node_id: None,
+        max_concurrency_hint: None,
+        change: PlanChangeInput::DefinePlan {
+            expected_plan_revision: 0,
+            root: node(
+                "root",
+                "Transport-neutral root contract",
+                PlanExecutorPolicy::Local,
+                Vec::new(),
+            ),
+        },
+    })
+    .expect("plan definition succeeds");
+
+    let messages = [
+        coordinator_plan_control_message(plan.snapshot()),
+        crate::plan::projection::coordinator_plan_inactive_control_message(),
+    ];
+    for message in messages {
+        for forbidden in ["activity", "Activity", "wait_subagents", "polling", "UI"] {
+            assert!(
+                !message.contains(forbidden),
+                "coordinator projection must not contain {forbidden:?}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -250,22 +289,16 @@ fn subagent_projection(message: String) -> serde_json::Value {
 }
 
 fn assert_coordinator_rules(projection: &serde_json::Value) {
-    let rules = projection["coordinator_guidance"]["rules"]
-        .as_array()
-        .expect("coordinator guidance rules are an array");
-    for phrase in [
-        "Coordinator authors the root and direct work items for the request",
-        "do not pre-create descendants under a delegated linked node",
-        "Once a node is linked, its child owns decomposition below that binding",
-        "Observe linked child summaries via read_plan; do not mirror the child subtree",
-        "Activity is a separate UI latest-value projection",
-        "wait_subagents for semantic or terminal checkpoints, not high-frequency progress polling",
+    let rendered = projection.to_string();
+    for fragment in [
+        COORDINATOR_ROOT_SCOPE_GUIDANCE,
+        LINKED_CHILD_DECOMPOSITION_GUIDANCE,
+        COORDINATOR_LINKED_SUMMARIES_GUIDANCE,
+        RUNTIME_OWNED_EXECUTION_GUIDANCE,
     ] {
         assert!(
-            rules
-                .iter()
-                .any(|rule| rule.as_str().is_some_and(|rule| rule.contains(phrase))),
-            "coordinator guidance must contain {phrase:?}"
+            rendered.contains(fragment),
+            "coordinator guidance must contain the shared fragment {fragment:?}"
         );
     }
 }

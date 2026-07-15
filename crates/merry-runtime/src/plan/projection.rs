@@ -19,12 +19,19 @@ struct CoordinatorPlanGuidance {
     rules: &'static [&'static str],
 }
 
+pub(crate) const COORDINATOR_ROOT_SCOPE_GUIDANCE: &str = "The coordinator authors the root and direct work items for the request; do not pre-create descendants under a delegated linked node.";
+pub(crate) const LINKED_CHILD_DECOMPOSITION_GUIDANCE: &str =
+    "Once a node is linked, its child owns decomposition below that binding.";
+pub(crate) const COORDINATOR_LINKED_SUMMARIES_GUIDANCE: &str = "The coordinator observes linked child summaries via read_plan and does not mirror the child subtree.";
+pub(crate) const CHILD_LINKED_SCOPE_GUIDANCE: &str = "Work only within the linked node and its subtree; do not author or inspect the coordinator or sibling work.";
+pub(crate) const CHILD_SCOPED_UPDATE_GUIDANCE: &str = "Scoped update_plan automatically attaches authored children below the linked binding; do not create a separate root or parent binding.";
+pub(crate) const RUNTIME_OWNED_EXECUTION_GUIDANCE: &str = "Runtime owns execution statuses and summaries, including attempts, leases, and progress; do not author or mirror those fields.";
+pub(crate) const PLAN_SEMANTIC_CHECKPOINT_GUIDANCE: &str = "Plan updates are semantic checkpoints, not heartbeats; do not emit high-frequency progress updates.";
 const COORDINATOR_RULES: &[&str] = &[
-    "Coordinator authors the root and direct work items for the request; do not pre-create descendants under a delegated linked node.",
-    "Once a node is linked, its child owns decomposition below that binding.",
-    "Observe linked child summaries via read_plan; do not mirror the child subtree in coordinator-authored plan nodes.",
-    "Activity is a separate UI latest-value projection; it is not plan state and does not belong in provider prompts.",
-    "Use wait_subagents for semantic or terminal checkpoints, not high-frequency progress polling; live progress belongs to the separate UI activity stream.",
+    COORDINATOR_ROOT_SCOPE_GUIDANCE,
+    LINKED_CHILD_DECOMPOSITION_GUIDANCE,
+    COORDINATOR_LINKED_SUMMARIES_GUIDANCE,
+    RUNTIME_OWNED_EXECUTION_GUIDANCE,
     "update_plan authors objectives, acceptance, dependencies, and future structure. Linked execution summaries and statuses are runtime-owned.",
     "Plan is an auxiliary projection: it does not grant or restrict ordinary tools and it is not the execution result.",
     "When delegating work, bind the child explicitly with plan_task; omitted plan_task keeps the child unbound.",
@@ -151,14 +158,14 @@ struct SubagentPlanGuidance {
 }
 
 const CHILD_GUIDANCE_RULES: &[&str] = &[
-    "Scoped update_plan automatically attaches authored children below the linked binding; do not create a separate root or parent binding.",
-    "Runtime owns execution statuses and summaries, including attempts, leases, and progress; do not author or mirror those fields.",
-    "Plan updates are semantic checkpoints, not heartbeats; do not emit high-frequency progress updates.",
+    CHILD_SCOPED_UPDATE_GUIDANCE,
+    RUNTIME_OWNED_EXECUTION_GUIDANCE,
+    PLAN_SEMANTIC_CHECKPOINT_GUIDANCE,
 ];
 
 fn child_guidance() -> SubagentPlanGuidance {
     SubagentPlanGuidance {
-        instruction: "Work only within your linked plan node and subtree; do not author or inspect the coordinator or sibling work.",
+        instruction: CHILD_LINKED_SCOPE_GUIDANCE,
         rules: CHILD_GUIDANCE_RULES,
     }
 }

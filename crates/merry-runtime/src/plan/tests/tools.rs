@@ -1,5 +1,10 @@
 use crate::plan::{
     PlanChangeInput, PlanExecutionIntent, PlanNodeInput, UpdatePlanInput,
+    projection::{
+        CHILD_LINKED_SCOPE_GUIDANCE, CHILD_SCOPED_UPDATE_GUIDANCE,
+        COORDINATOR_LINKED_SUMMARIES_GUIDANCE, COORDINATOR_ROOT_SCOPE_GUIDANCE,
+        LINKED_CHILD_DECOMPOSITION_GUIDANCE, RUNTIME_OWNED_EXECUTION_GUIDANCE,
+    },
     tools::{
         READ_PLAN_TOOL_NAME, UPDATE_PLAN_TOOL_NAME, coordinator_plan_registered_tools,
         scoped_child_plan_registered_tools, unbound_child_plan_registered_tools,
@@ -189,31 +194,28 @@ fn plan_tool_descriptions_explain_one_level_coordinator_and_child_contract() {
     let coordinator_read = coordinator_tools[0].spec().description();
     let coordinator_update = coordinator_tools[1].spec().description();
     for description in [coordinator_read, coordinator_update] {
-        for phrase in [
-            "root and direct work items",
-            "do not pre-create descendants under a delegated linked node",
-            "child owns decomposition below that binding",
+        for fragment in [
+            COORDINATOR_ROOT_SCOPE_GUIDANCE,
+            LINKED_CHILD_DECOMPOSITION_GUIDANCE,
+            COORDINATOR_LINKED_SUMMARIES_GUIDANCE,
         ] {
             assert!(
-                description.contains(phrase),
-                "coordinator tool description must contain {phrase:?}"
+                description.contains(fragment),
+                "coordinator tool description must contain the shared fragment {fragment:?}"
             );
         }
     }
-    assert!(coordinator_read.contains("linked child summaries via read_plan"));
-    assert!(coordinator_read.contains("does not mirror the child subtree"));
-
     let child_tools = scoped_child_plan_registered_tools().expect("child tools build");
     for tool in child_tools {
         let description = tool.spec().description();
-        for phrase in [
-            "only within the linked node and its subtree",
-            "authored children below the linked binding",
-            "Runtime owns execution statuses and summaries",
+        for fragment in [
+            CHILD_LINKED_SCOPE_GUIDANCE,
+            CHILD_SCOPED_UPDATE_GUIDANCE,
+            RUNTIME_OWNED_EXECUTION_GUIDANCE,
         ] {
             assert!(
-                description.contains(phrase),
-                "child tool description must contain {phrase:?}"
+                description.contains(fragment),
+                "child tool description must contain the shared fragment {fragment:?}"
             );
         }
     }
