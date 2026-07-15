@@ -196,6 +196,14 @@ impl TuiProjector {
                             focus_body,
                         },
                     );
+                } else if let Some(tool) = tool.as_ref() {
+                    state.replace_timeline_item(
+                        tool.timeline_index,
+                        TimelineItem::Expanded {
+                            title: completed_tool_title(tool, "succeeded"),
+                            body: compact_tool_output(&text),
+                        },
+                    );
                 }
             }
             RuntimeEvent::SubagentCompleted {
@@ -395,6 +403,10 @@ fn expanded_tool_title(tool: &StartedToolView) -> String {
     format!("{} {}", tool.title, tool.detail)
 }
 
+fn completed_tool_title(tool: &StartedToolView, status: &str) -> String {
+    format!("{} -> {status}", expanded_tool_title(tool))
+}
+
 fn tool_output_text(output: Option<ToolOutput>) -> String {
     match output {
         Some(ToolOutput::Text { text }) => text,
@@ -441,67 +453,10 @@ fn tui_tool_detail(name: &str, arguments: &serde_json::Map<String, Value>) -> St
         };
     }
 
-    match name {
-        "workspace_read_file" | "workspace_list_dir" => arguments
-            .get("path")
-            .and_then(Value::as_str)
-            .unwrap_or(".")
-            .to_owned(),
-        "merry_read_checkpoint_ref" => named_string_argument(arguments, "ref"),
-        "spawn_subagents" => format_spawn_subagents_detail(arguments),
-        "wait_subagents" => format_wait_subagents_detail(arguments),
-        "cancel_subagents" => format_agent_count_detail(arguments),
-        "run_process" | "workspace_search_text" | "request_permissions" | WORKSPACE_PATCH_TOOL => {
-            format_tool_call_detail(name, arguments).unwrap_or_else(|| name.to_owned())
-        }
-        _ => format_tool_call_detail(name, arguments)
-            .map_or_else(|| name.to_owned(), |detail| format!("{name} {detail}")),
+    match format_tool_call_detail(name, arguments) {
+        Some(detail) if !detail.is_empty() => format!("{name} {detail}"),
+        _ => name.to_owned(),
     }
-}
-
-fn named_string_argument(arguments: &serde_json::Map<String, Value>, name: &str) -> String {
-    arguments
-        .get(name)
-        .and_then(Value::as_str)
-        .map_or_else(|| name.to_owned(), |value| format!("{name}={value}"))
-}
-
-fn format_spawn_subagents_detail(arguments: &serde_json::Map<String, Value>) -> String {
-    let task_count = arguments
-        .get("tasks")
-        .and_then(Value::as_array)
-        .map_or(0, Vec::len);
-    match arguments.get("max_concurrency").and_then(Value::as_u64) {
-        Some(max_concurrency) => format!("tasks={task_count} max={max_concurrency}"),
-        None => format!("tasks={task_count}"),
-    }
-}
-
-fn format_wait_subagents_detail(arguments: &serde_json::Map<String, Value>) -> String {
-    let mut detail = format_agent_count_detail(arguments);
-    if let Some(mode) = arguments.get("mode").and_then(Value::as_str) {
-        detail.push_str(" mode=");
-        detail.push_str(mode);
-    }
-    if let Some(timeout_ms) = arguments.get("timeout_ms").and_then(Value::as_u64) {
-        detail.push_str(" timeout=");
-        if timeout_ms.is_multiple_of(1_000) {
-            detail.push_str(&(timeout_ms / 1_000).to_string());
-            detail.push('s');
-        } else {
-            detail.push_str(&timeout_ms.to_string());
-            detail.push_str("ms");
-        }
-    }
-    detail
-}
-
-fn format_agent_count_detail(arguments: &serde_json::Map<String, Value>) -> String {
-    let agent_count = arguments
-        .get("agent_ids")
-        .and_then(Value::as_array)
-        .map_or(0, Vec::len);
-    format!("agents={agent_count}")
 }
 
 fn parse_mcp_tool_name(name: &str) -> Option<(&str, &str)> {
