@@ -388,6 +388,104 @@ async fn active_plan_does_not_restrict_main_registered_tools() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn define_plan_update_starts_a_fresh_run_without_a_node_id() {
+    let runtime = Runtime::builder(session_id("plan-define-rerun-tool"))
+        .coordinator_plan_tools()
+        .build()
+        .expect("runtime builds");
+    runtime
+        .begin_plan(crate::plan::BeginPlanInput {
+            reason: "establish the run that will be replaced".to_owned(),
+            governing_skill_id: None,
+        })
+        .await
+        .expect("plan activates");
+    runtime
+        .update_plan(UpdatePlanInput {
+            reason: "define the run that will be replaced".to_owned(),
+            execution_intent: PlanExecutionIntent::ExecuteIfAuthorized,
+            coordinator_node_id: None,
+            max_concurrency_hint: None,
+            change: PlanChangeInput::DefinePlan {
+                expected_plan_revision: 0,
+                root: PlanNodeInput {
+                    id: None,
+                    client_key: Some("initial-root".to_owned()),
+                    objective: "Initial run".to_owned(),
+                    acceptance: vec!["Initial run is defined".to_owned()],
+                    status: None,
+                    executor_policy: PlanExecutorPolicy::default(),
+                    harness: PlanHarnessSnapshot::default(),
+                    recovery_policy: PlanRecoveryPolicySnapshot::default(),
+                    depends_on: Vec::new(),
+                    children: Vec::new(),
+                },
+            },
+        })
+        .await
+        .expect("initial plan definition succeeds");
+    let before = runtime
+        .plan_snapshot()
+        .await
+        .expect("plan snapshot reads")
+        .expect("active plan exists");
+
+    let call = pending_call(
+        "call-define-rerun-plan",
+        "update_plan",
+        json!({
+            "reason": "the user requested a clean rerun",
+            "execution_intent": "continue_planning",
+            "coordinator_node_id": null,
+            "max_concurrency_hint": null,
+            "change": {
+                "type": "define_plan",
+                "expected_plan_revision": before.revision,
+                "root": {
+                    "id": null,
+                    "client_key": "rerun-root",
+                    "objective": "Run the requested work again",
+                    "acceptance": ["Focused checks pass"],
+                    "depends_on": [],
+                    "children": []
+                }
+            }
+        }),
+    );
+    record_pending(&runtime, call.clone()).await;
+    let events = runtime
+        .execute_tool_call(call.id(), ToolExecutionContext::default())
+        .await
+        .expect("update_plan rerun executes");
+    let result = events
+        .iter()
+        .find_map(|event| match &event.payload {
+            RuntimeJournalPayload::ToolCallResolved { result } => Some(result),
+            _ => None,
+        })
+        .expect("update_plan rerun resolves");
+    assert_eq!(result.status(), ToolCallResultStatus::Succeeded);
+
+    let after = runtime
+        .plan_snapshot()
+        .await
+        .expect("new plan snapshot reads")
+        .expect("new active plan exists");
+    assert_ne!(after.plan_id, before.plan_id);
+    assert_eq!(after.phase, merry_core::PlanPhase::Planning);
+    assert!(
+        after
+            .nodes
+            .iter()
+            .any(|node| node.client_key.as_deref() == Some("rerun-root"))
+    );
+    let session = runtime.inner.session.lock().await;
+    assert!(session.terminal_plans().iter().any(
+        |plan| plan.plan_id == before.plan_id && plan.phase == merry_core::PlanPhase::Cancelled
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn first_update_defines_a_plan_without_a_separate_activation_call() {
     let runtime = Runtime::builder(session_id("plan-first-update"))
         .coordinator_plan_tools()

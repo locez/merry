@@ -10,8 +10,8 @@ use crate::context::stable_content_hash;
 use merry_core::{
     CoordinatorDirectiveSnapshot, PlanAttemptId, PlanAttemptOutcome, PlanAttemptProgressSnapshot,
     PlanAttemptSnapshot, PlanCapabilityEnvelopeSnapshot, PlanDirectiveId, PlanDirectiveStatus,
-    PlanLeaseId, PlanLeaseSnapshot, PlanLeaseStatus, PlanNodeId, PlanNodeStatus, PlanPhase,
-    PlanRevisionSummary, PlanSchedulerStatus, PlanSnapshot, SessionId,
+    PlanLeaseId, PlanLeaseSnapshot, PlanLeaseStatus, PlanNodeId, PlanNodeResult, PlanNodeStatus,
+    PlanPhase, PlanRevisionSummary, PlanSchedulerStatus, PlanSnapshot, SessionId,
 };
 use report_validation::validate_attempt_report_contract;
 use std::collections::{BTreeMap, BTreeSet};
@@ -861,7 +861,7 @@ impl PlanState {
             for node in &self.snapshot.nodes {
                 if !matches!(
                     node.status,
-                    PlanNodeStatus::Pending | PlanNodeStatus::Expanded
+                    PlanNodeStatus::Pending | PlanNodeStatus::Expanded | PlanNodeStatus::Verifying
                 ) {
                     continue;
                 }
@@ -890,11 +890,24 @@ impl PlanState {
                     .iter()
                     .all(|child| child.status == PlanNodeStatus::Completed)
                 {
-                    PlanNodeStatus::Verifying
+                    let is_root = self.snapshot.root_node_id.as_ref() == Some(&node.id);
+                    let can_auto_complete_root = is_root
+                        && self.snapshot.phase == PlanPhase::Executing
+                        && self.snapshot.scheduler_status == PlanSchedulerStatus::Active
+                        && !self.node_has_live_execution(&node.id);
+                    if can_auto_complete_root {
+                        PlanNodeStatus::Completed
+                    } else {
+                        PlanNodeStatus::Verifying
+                    }
                 } else {
                     PlanNodeStatus::Blocked
                 };
-                updates.push((node.id.clone(), status));
+                if node.status != status
+                    || (status == PlanNodeStatus::Completed && node.result.is_none())
+                {
+                    updates.push((node.id.clone(), status));
+                }
             }
             if updates.is_empty() {
                 break;
@@ -908,8 +921,40 @@ impl PlanState {
                     .expect("parent update node exists");
                 node.status = status;
                 node.updated_revision = revision;
+                if status == PlanNodeStatus::Completed && node.result.is_none() {
+                    node.result = Some(PlanNodeResult {
+                        conclusion: "All declared child work completed.".to_owned(),
+                        evidence_refs: Vec::new(),
+                        artifact_refs: Vec::new(),
+                        changed_paths: Vec::new(),
+                        verification: vec![
+                            "Every declared child node reached completed status.".to_owned(),
+                        ],
+                        open_questions: Vec::new(),
+                    });
+                }
             }
         }
+        self.refresh_terminal_phase();
+    }
+
+    fn node_has_live_execution(&self, node_id: &PlanNodeId) -> bool {
+        self.snapshot
+            .attempts
+            .iter()
+            .any(|attempt| &attempt.node_id == node_id && attempt.outcome.is_none())
+            || self
+                .snapshot
+                .leases
+                .iter()
+                .any(|lease| &lease.node_id == node_id && lease.status == PlanLeaseStatus::Live)
+            || self.snapshot.nodes.iter().any(|node| {
+                &node.id == node_id
+                    && node
+                        .links
+                        .iter()
+                        .any(|link| link.status == merry_core::PlanLinkStatus::Active)
+            })
     }
 
     pub(super) fn refresh_terminal_phase(&mut self) {

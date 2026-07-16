@@ -399,14 +399,19 @@ impl PlanState {
                 && persisted.snapshot.nodes.is_empty() => {}
             None => return Err(PlanError::RootMissing),
         }
-        Ok(Self {
+        let mut state = Self {
             snapshot: persisted.snapshot,
             next_node_sequence: persisted.next_node_sequence,
             next_approval_sequence: persisted.next_approval_sequence,
             next_attempt_sequence: persisted.next_attempt_sequence,
             next_lease_sequence: persisted.next_lease_sequence,
             next_directive_sequence: persisted.next_directive_sequence,
-        })
+        };
+        // Older persisted plans could remain in `Verifying` after every direct
+        // child had completed. Recompute this derived root state on resume.
+        let revision = state.snapshot.revision;
+        state.refresh_parent_states(revision);
+        Ok(state)
     }
 
     pub(crate) fn update(&mut self, input: UpdatePlanInput) -> Result<PlanUpdateOutput, PlanError> {

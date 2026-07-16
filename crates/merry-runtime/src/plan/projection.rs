@@ -37,6 +37,8 @@ const COORDINATOR_RULES: &[&str] = &[
     "update_plan authors objectives, acceptance, dependencies, and future structure. Linked execution summaries and statuses are runtime-owned.",
     "Plan is an auxiliary projection: it does not grant or restrict ordinary tools and it is not the execution result.",
     "When delegating work, bind the child explicitly with plan_task; omitted plan_task keeps the child unbound.",
+    "If acceptance needs an explicit check, author that check as a direct verification child; runtime closes the root after every declared child completes.",
+    "When the user asks to start over, use update_plan with define_plan and a fresh root plus direct children; do not provide target_node_id or other old runtime identities.",
     "After a successful read_plan, use the returned snapshot; do not repeat read_plan unless runtime state has changed.",
     "Use ordinary run_process for a read-only check that fits the active process profile; request_permissions is only for an exact action rejected for a missing capability.",
 ];
@@ -122,7 +124,7 @@ fn coordinator_guidance(phase: PlanPhase) -> CoordinatorPlanGuidance {
         },
         PlanPhase::Executing => CoordinatorPlanGuidance {
             phase_action: "coordinate_active_execution",
-            instruction: "Inspect linked child lifecycle with read_plan, revise future authored structure with update_plan, and use spawn_subagents for actual delegated work. Runtime derives completion from child lifecycle; no model report is required.",
+            instruction: "Inspect linked child lifecycle with read_plan, revise future authored structure with update_plan, and use spawn_subagents for actual delegated work. If acceptance needs verification, author a verification child. Runtime closes the root when every declared child completes; no coordinator report or target node id is required.",
             rules: COORDINATOR_RULES,
         },
         PlanPhase::Blocked => CoordinatorPlanGuidance {
@@ -132,7 +134,7 @@ fn coordinator_guidance(phase: PlanPhase) -> CoordinatorPlanGuidance {
         },
         PlanPhase::Completed | PlanPhase::Cancelled => CoordinatorPlanGuidance {
             phase_action: "summarize_terminal_plan",
-            instruction: "The plan projection is terminal. Read exact state if needed; a later update can define new authored work without replaying old attempts.",
+            instruction: "The plan projection is terminal. Read exact state if needed; use update_plan with define_plan and a fresh root plus direct children when the user asks for a fresh run. Do not rewrite the old run with a target node id.",
             rules: COORDINATOR_RULES,
         },
     }

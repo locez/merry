@@ -129,6 +129,205 @@ async fn linked_subagent_lifecycle_updates_plan_execution_summary() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn completing_all_declared_children_completes_the_root_plan() {
+    let (controller, _events) = controller(None);
+    controller
+        .begin(input("complete the declared plan"))
+        .await
+        .expect("begin succeeds");
+    controller
+        .update(UpdatePlanInput {
+            reason: "define parallel work and its acceptance".to_owned(),
+            execution_intent: PlanExecutionIntent::ContinuePlanning,
+            coordinator_node_id: None,
+            max_concurrency_hint: Some(2),
+            change: PlanChangeInput::DefinePlan {
+                expected_plan_revision: 0,
+                root: plan_root(vec![plan_leaf("left"), plan_leaf("right")]),
+            },
+        })
+        .await
+        .expect("plan update succeeds");
+    controller
+        .authorize_execution(
+            PlanCapabilityEnvelopeSnapshot::default(),
+            vec!["test authorization".to_owned()],
+        )
+        .await
+        .expect("execution authorization succeeds");
+
+    let left = controller
+        .bind_subagent(
+            "left".to_owned(),
+            SubagentId::new("agent-left").expect("valid agent id"),
+            SubagentTaskId::new("task-left").expect("valid task id"),
+            10,
+        )
+        .await
+        .expect("left link binds");
+    let right = controller
+        .bind_subagent(
+            "right".to_owned(),
+            SubagentId::new("agent-right").expect("valid agent id"),
+            SubagentTaskId::new("task-right").expect("valid task id"),
+            11,
+        )
+        .await
+        .expect("right link binds");
+
+    controller
+        .update_subagent_link(left.binding_id, PlanLinkStatus::Completed, 20)
+        .await
+        .expect("left completion commits");
+    controller
+        .update_subagent_link(right.binding_id, PlanLinkStatus::Completed, 21)
+        .await
+        .expect("right completion commits");
+
+    let snapshot = controller
+        .snapshot()
+        .await
+        .expect("snapshot reads")
+        .expect("active plan exists");
+    assert_eq!(snapshot.phase, PlanPhase::Completed);
+    let root = snapshot
+        .nodes
+        .iter()
+        .find(|node| node.client_key.as_deref() == Some("root"))
+        .expect("root node exists");
+    assert_eq!(root.status, PlanNodeStatus::Completed);
+    assert!(
+        root.result.is_some(),
+        "runtime should record root completion"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn define_plan_update_creates_a_new_plan_without_targeting_a_node() {
+    let (controller, _events) = controller(None);
+    controller
+        .begin(input("complete before rerun"))
+        .await
+        .expect("begin succeeds");
+    controller
+        .update(UpdatePlanInput {
+            reason: "define one completed task".to_owned(),
+            execution_intent: PlanExecutionIntent::ContinuePlanning,
+            coordinator_node_id: None,
+            max_concurrency_hint: None,
+            change: PlanChangeInput::DefinePlan {
+                expected_plan_revision: 0,
+                root: plan_leaf("root"),
+            },
+        })
+        .await
+        .expect("plan update succeeds");
+    controller
+        .authorize_execution(
+            PlanCapabilityEnvelopeSnapshot::default(),
+            vec!["test authorization".to_owned()],
+        )
+        .await
+        .expect("execution authorization succeeds");
+    let link = controller
+        .bind_subagent(
+            "root".to_owned(),
+            SubagentId::new("agent").expect("valid agent id"),
+            SubagentTaskId::new("task").expect("valid task id"),
+            10,
+        )
+        .await
+        .expect("link binds");
+    let completed = controller
+        .update_subagent_link(link.binding_id, PlanLinkStatus::Completed, 20)
+        .await
+        .expect("completion commits");
+
+    let restarted = controller
+        .update(UpdatePlanInput {
+            reason: "run the request again from the beginning".to_owned(),
+            execution_intent: PlanExecutionIntent::ContinuePlanning,
+            coordinator_node_id: None,
+            max_concurrency_hint: None,
+            change: PlanChangeInput::DefinePlan {
+                expected_plan_revision: completed.revision,
+                root: plan_leaf("rerun-root"),
+            },
+        })
+        .await
+        .expect("define_plan restart succeeds");
+    assert_ne!(restarted.snapshot.plan_id, completed.plan_id);
+    assert_eq!(restarted.snapshot.phase, PlanPhase::Planning);
+    assert!(
+        restarted
+            .snapshot
+            .nodes
+            .iter()
+            .any(|node| node.client_key.as_deref() == Some("rerun-root"))
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn define_plan_update_does_not_discard_live_linked_work() {
+    let (controller, _events) = controller(None);
+    controller
+        .begin(input("protect active work during rerun"))
+        .await
+        .expect("begin succeeds");
+    controller
+        .update(UpdatePlanInput {
+            reason: "define active work".to_owned(),
+            execution_intent: PlanExecutionIntent::ContinuePlanning,
+            coordinator_node_id: None,
+            max_concurrency_hint: None,
+            change: PlanChangeInput::DefinePlan {
+                expected_plan_revision: 0,
+                root: plan_leaf("root"),
+            },
+        })
+        .await
+        .expect("plan update succeeds");
+    controller
+        .authorize_execution(
+            PlanCapabilityEnvelopeSnapshot::default(),
+            vec!["test authorization".to_owned()],
+        )
+        .await
+        .expect("execution authorization succeeds");
+    controller
+        .bind_subagent(
+            "root".to_owned(),
+            SubagentId::new("active-agent").expect("valid agent id"),
+            SubagentTaskId::new("active-task").expect("valid task id"),
+            10,
+        )
+        .await
+        .expect("link binds");
+
+    let error = controller
+        .update(UpdatePlanInput {
+            reason: "do not interrupt active work".to_owned(),
+            execution_intent: PlanExecutionIntent::ContinuePlanning,
+            coordinator_node_id: None,
+            max_concurrency_hint: None,
+            change: PlanChangeInput::DefinePlan {
+                expected_plan_revision: 999,
+                root: plan_leaf("replacement"),
+            },
+        })
+        .await
+        .expect_err("define_plan replacement must wait for live work");
+    assert!(matches!(
+        error,
+        PlanControllerError::Plan {
+            source: PlanError::ActiveAttemptsPreventControl {
+                operation: "replace active plan"
+            }
+        }
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn rebinding_a_terminal_link_supersedes_stale_failure_and_reopens_plan() {
     let (controller, _events) = controller(None);
     controller
@@ -397,6 +596,13 @@ async fn linked_subagent_bindings_are_unique_across_plan_nodes() {
         })
         .await
         .expect("plan update succeeds");
+    controller
+        .authorize_execution(
+            PlanCapabilityEnvelopeSnapshot::default(),
+            vec!["test authorization".to_owned()],
+        )
+        .await
+        .expect("execution authorization succeeds");
 
     let left = controller
         .bind_subagent(
@@ -453,21 +659,7 @@ async fn linked_subagent_bindings_are_unique_across_plan_nodes() {
         assert_eq!(node.links[0].status, PlanLinkStatus::Completed);
         assert!(node.links[0].terminal_at_ms.is_some());
     }
-
-    let revision = snapshot.revision;
-    let updated = controller
-        .update(UpdatePlanInput {
-            reason: "continue after linked children completed".to_owned(),
-            execution_intent: PlanExecutionIntent::ContinuePlanning,
-            coordinator_node_id: None,
-            max_concurrency_hint: None,
-            change: PlanChangeInput::UseCurrentPlan {
-                expected_plan_revision: revision,
-            },
-        })
-        .await
-        .expect("follow-up plan update succeeds after linked children complete");
-    assert_eq!(updated.snapshot.revision, revision + 1);
+    assert_eq!(snapshot.phase, PlanPhase::Completed);
 }
 
 #[tokio::test(flavor = "current_thread")]
