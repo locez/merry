@@ -878,7 +878,7 @@ fn key(code: KeyCode) -> KeyEvent {
 }
 
 fn key_ctrl(code: char) -> KeyEvent {
-    KeyEvent::new(code.into(), KeyModifiers::CONTROL)
+    KeyEvent::new(KeyCode::Char(code), KeyModifiers::CONTROL)
 }
 
 fn tui_state() -> TuiState {
