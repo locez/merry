@@ -9,6 +9,7 @@ use crate::{
     provider_management::ProviderDraft,
 };
 use crossterm::event::KeyCode;
+use input_history_store::InputHistoryStore;
 use keymap::Keymap;
 use preferences::{TuiPreferences, TuiPreferencesStore, TuiSettingsDefaults};
 use projector::TuiProjector;
@@ -26,10 +27,13 @@ use tokio_util::sync::CancellationToken;
 
 #[cfg(target_os = "linux")]
 mod clipboard_image;
+mod command;
+mod command_controller;
 mod completion;
 mod controller;
 mod highlight;
 mod input;
+mod input_history_store;
 pub(crate) mod keymap;
 mod layout;
 mod markdown;
@@ -55,7 +59,11 @@ pub(crate) mod theme;
 mod tool_error;
 
 #[cfg(test)]
+mod history_tests;
+#[cfg(test)]
 mod plan_tests;
+#[cfg(test)]
+mod slash_tests;
 #[cfg(test)]
 mod tests;
 
@@ -146,6 +154,9 @@ pub(crate) async fn run(
         keymap,
         theme,
     );
+    let input_history_store =
+        InputHistoryStore::for_workspace(paths.state_dir(), &session.workspace_root);
+    state.set_input_history(input_history_store.load().await);
     state.set_reasoning_effort_label(session.reasoning_effort_label.clone());
     state.set_completion_skills(session.skills.clone());
     state.configure_preferences(preferences, settings_defaults);
@@ -171,6 +182,7 @@ pub(crate) async fn run(
         session,
         state,
         preferences_store,
+        input_history_store,
         provider_management,
     )
     .await

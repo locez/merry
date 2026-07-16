@@ -315,9 +315,17 @@ impl TuiRuntimeSession {
             .save_session_to(self.session_store.session_state_store())
             .await
             .map_err(unexpected)?;
-        self.session_store
-            .write_metadata(&self.metadata)
+        write_session_metadata(&self.session_store, &self.metadata).await?;
+        Ok(())
+    }
+
+    pub(crate) async fn save_now(&mut self) -> Result<(), CliError> {
+        self.metadata.mark_active(now_unix_ms());
+        self.control
+            .save_session_to(self.session_store.session_state_store())
+            .await
             .map_err(unexpected)?;
+        write_session_metadata(&self.session_store, &self.metadata).await?;
         Ok(())
     }
 
@@ -328,6 +336,18 @@ impl TuiRuntimeSession {
     pub(crate) async fn plan_snapshot(&self) -> Result<Option<merry_core::PlanSnapshot>, CliError> {
         self.runtime.plan_snapshot().await.map_err(unexpected)
     }
+}
+
+async fn write_session_metadata(
+    store: &TuiSessionStore,
+    metadata: &TuiSessionMetadata,
+) -> Result<(), CliError> {
+    let store = store.clone();
+    let metadata = metadata.clone();
+    tokio::task::spawn_blocking(move || store.write_metadata(&metadata))
+        .await
+        .map_err(unexpected)?
+        .map_err(unexpected)
 }
 
 fn permission_review_view(request: &PermissionReviewRequest) -> (String, String) {

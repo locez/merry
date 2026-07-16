@@ -3,7 +3,7 @@ use super::{
     queue::AcceptedQueuedInput,
     types::{InputReceipt, InputRecords, QueuedInputId},
 };
-use crate::{PlanApprovalInput, UserMessageInput};
+use crate::{FileSessionStore, PlanApprovalInput, UserMessageInput};
 use merry_core::{PlanNodeId, QueuedInputLane};
 use tokio::sync::oneshot;
 
@@ -45,6 +45,10 @@ pub(super) enum InteractiveCommand {
     },
     Interrupt {
         reason: InterruptReason,
+        ack_sender: oneshot::Sender<Result<(), InteractiveError>>,
+    },
+    SaveSession {
+        store: FileSessionStore,
         ack_sender: oneshot::Sender<Result<(), InteractiveError>>,
     },
     EnterPlanMode {

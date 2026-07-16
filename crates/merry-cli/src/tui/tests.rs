@@ -5,7 +5,7 @@ use super::controller::{
 };
 use super::input::{DraftImage, TextInput, TuiSubmission};
 use super::keymap::{KeyAction, KeyBinding, Keymap};
-use super::overlay::Overlay;
+use super::overlay::{Overlay, PaletteCommand};
 use super::panels::{FocusPanelBody, FocusPanelTone, focus_panel_view};
 use super::preferences::CodeTheme;
 use super::projector::TuiProjector;
@@ -535,6 +535,7 @@ fn controller_submit_carries_images_and_records_text_only_history() {
     assert_eq!(submission.images[0].label(), "[Image #1]");
     assert_eq!(submission.images[0].png_bytes()[8], 7);
     assert!(state.input_text().is_empty());
+    state.record_input_history(&submission.history_text);
 
     assert_eq!(
         handle_key_action(KeyAction::HistoryPrevious, &mut state),
@@ -557,11 +558,13 @@ fn controller_submit_records_shell_like_input_history() {
         handle_key_action(KeyAction::SubmitNext, &mut state),
         ControllerEffect::SubmitNext(text_submission("first"))
     );
+    state.record_input_history("first");
     state.input_mut().insert_str("second");
     assert_eq!(
         handle_key_action(KeyAction::SubmitNext, &mut state),
         ControllerEffect::SubmitNext(text_submission("second"))
     );
+    state.record_input_history("second");
 
     assert_eq!(
         handle_key_action(KeyAction::HistoryPrevious, &mut state),
@@ -599,6 +602,7 @@ fn controller_history_restores_unsent_draft() {
         handle_key_action(KeyAction::SubmitNext, &mut state),
         ControllerEffect::SubmitNext(text_submission("sent"))
     );
+    state.record_input_history("sent");
     state.input_mut().insert_str("draft");
 
     assert_eq!(
@@ -1355,9 +1359,25 @@ fn command_palette_keeps_the_selected_command_visible_in_a_short_terminal() {
         KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
         &mut state,
     );
-    for _ in 0..10 {
+    let mut selected_quit = false;
+    for _ in 0..32 {
+        selected_quit = matches!(
+            state.overlay(),
+            Some(Overlay::CommandPalette(palette))
+                if palette
+                    .visible_commands()
+                    .get(palette.selected())
+                    .is_some_and(|command| command.command == PaletteCommand::Quit)
+        );
+        if selected_quit {
+            break;
+        }
         handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut state);
     }
+    assert!(
+        selected_quit,
+        "Quit should remain reachable in the command palette"
+    );
 
     let palette = render_to_text(&state, 40, 12);
 

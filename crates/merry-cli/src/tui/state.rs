@@ -200,6 +200,7 @@ pub(crate) struct TuiState {
     timeline_review_user_index: Option<usize>,
     artifact_review_timeline_index: Option<usize>,
     pending_local_echoes: Vec<PendingLocalEcho>,
+    pending_local_run_start: bool,
     run_state: InteractiveRunState,
     active_run_started_at: Option<Instant>,
     last_completed_run_elapsed: Option<Duration>,
@@ -224,6 +225,7 @@ enum ProviderOverlayBack {
 struct PendingLocalEcho {
     text: String,
     lane: QueuedInputLane,
+    timeline_index: usize,
 }
 
 #[allow(dead_code)]
@@ -251,6 +253,7 @@ impl TuiState {
             timeline_review_user_index: None,
             artifact_review_timeline_index: None,
             pending_local_echoes: Vec::new(),
+            pending_local_run_start: false,
             run_state: InteractiveRunState::WaitingForInput,
             active_run_started_at: None,
             last_completed_run_elapsed: None,
@@ -287,6 +290,16 @@ impl TuiState {
         self.input.text()
     }
 
+    pub(crate) fn plain_input_text(&self) -> Option<&str> {
+        self.input.plain_text()
+    }
+
+    pub(crate) fn clear_input(&mut self) {
+        self.input.clear();
+        self.completion_menu = None;
+        self.pending_empty_input_quit = false;
+    }
+
     pub(crate) fn input_viewport(&self, max_width: usize) -> super::input::TextInputViewport {
         self.input.viewport(max_width)
     }
@@ -311,18 +324,16 @@ impl TuiState {
     pub(crate) fn take_input_for_submit(&mut self) -> Option<TuiSubmission> {
         self.completion_menu = None;
         self.pending_empty_input_quit = false;
-        let submission = match self.input.take_submission() {
-            Ok(submission) => submission?,
+        match self.input.take_submission() {
+            Ok(submission) => submission,
             Err(error) => {
                 self.push_timeline_item(TimelineItem::Diagnostic {
                     title: "user_input".to_owned(),
                     body: error.to_string(),
                 });
-                return None;
+                None
             }
-        };
-        self.input_history.record(&submission.history_text);
-        Some(submission)
+        }
     }
 
     pub(crate) fn previous_input_history(&mut self) {
@@ -335,6 +346,18 @@ impl TuiState {
         self.pending_empty_input_quit = false;
         self.input_history.next(&mut self.input);
         self.refresh_completion_menu();
+    }
+
+    pub(crate) fn set_input_history(&mut self, entries: Vec<String>) {
+        self.input_history.replace_entries(entries);
+    }
+
+    pub(crate) fn record_input_history(&mut self, text: &str) {
+        self.input_history.record(text);
+    }
+
+    pub(crate) fn input_history_entries(&self) -> &[String] {
+        self.input_history.entries()
     }
 
     pub(crate) fn handle_input_key(&mut self, key: crossterm::event::KeyEvent) {
@@ -405,16 +428,20 @@ impl TuiState {
         self.pending_empty_input_quit = false;
         self.input
             .replace_range(menu.replacement_range(), &replacement);
-        self.refresh_completion_menu();
+        if !menu.is_slash() {
+            self.refresh_completion_menu();
+        }
         true
     }
 
     fn refresh_completion_menu(&mut self) {
-        self.completion_menu = self.completion_sources.menu_for_input(
+        let menu = self.completion_sources.menu_for_input(
             self.input.text(),
             self.input.cursor_byte_index(),
             self.completion_menu.as_ref(),
         );
+        self.completion_menu =
+            menu.filter(|menu| !menu.is_slash() || self.input.plain_text().is_some());
     }
 
     pub(crate) fn keymap(&self) -> &Keymap {
@@ -763,20 +790,35 @@ impl TuiState {
     }
 
     pub(crate) fn push_local_user_echo(&mut self, text: String, lane: QueuedInputLane) {
+        let timeline_index = self.timeline.len();
         self.pending_local_echoes.push(PendingLocalEcho {
             text: text.clone(),
             lane,
+            timeline_index,
         });
         self.push_user_timeline_item(text, lane);
     }
 
     pub(crate) fn confirm_or_push_user_input(&mut self, text: String, lane: QueuedInputLane) {
-        if let Some(index) = self
+        let exact = self
             .pending_local_echoes
             .iter()
-            .position(|echo| echo.text == text && echo.lane == lane)
-        {
-            self.pending_local_echoes.remove(index);
+            .position(|echo| echo.text == text && echo.lane == lane);
+        let moved_to_suspended = (lane == QueuedInputLane::Suspended).then(|| {
+            self.pending_local_echoes
+                .iter()
+                .position(|echo| echo.text == text && echo.lane == QueuedInputLane::Next)
+        });
+        if let Some(index) = exact.or_else(|| moved_to_suspended.flatten()) {
+            let echo = self.pending_local_echoes.remove(index);
+            if echo.lane != lane
+                && let Some(TimelineItem::User {
+                    lane: timeline_lane,
+                    ..
+                }) = self.timeline.get_mut(echo.timeline_index)
+            {
+                *timeline_lane = lane;
+            }
             return;
         }
 
@@ -933,6 +975,26 @@ impl TuiState {
         self.set_run_state_at(state, Instant::now());
     }
 
+    pub(crate) fn project_local_run_start(&mut self) {
+        if self.run_state == InteractiveRunState::WaitingForInput {
+            self.pending_local_run_start = true;
+            self.set_run_state(InteractiveRunState::RunningModel);
+        }
+    }
+
+    pub(crate) fn confirm_local_run_start(&mut self) {
+        self.pending_local_run_start = false;
+    }
+
+    pub(crate) fn apply_runtime_run_state(&mut self, state: InteractiveRunState) {
+        // The producer's initial or previous Waiting event can race a locally submitted input.
+        if state == InteractiveRunState::WaitingForInput && self.pending_local_run_start {
+            return;
+        }
+        self.pending_local_run_start = false;
+        self.set_run_state(state);
+    }
+
     pub(crate) fn set_run_state_at(&mut self, state: InteractiveRunState, now: Instant) {
         let was_active = is_active_run_state(self.run_state);
         let is_active = is_active_run_state(state);
@@ -964,6 +1026,17 @@ impl TuiState {
         is_active_run_state(self.run_state)
     }
 
+    pub(crate) fn can_interrupt_run(&self) -> bool {
+        matches!(
+            self.run_state,
+            InteractiveRunState::RunningModel | InteractiveRunState::RunningTool
+        )
+    }
+
+    pub(crate) fn is_interrupting(&self) -> bool {
+        self.run_state == InteractiveRunState::Interrupting
+    }
+
     pub(crate) fn cancel_input_or_mark_quit(&mut self) -> bool {
         if !self.input.text().is_empty() {
             self.input.replace_text(String::new());
@@ -983,6 +1056,30 @@ impl TuiState {
 
     pub(crate) fn status_text(&self) -> String {
         self.status_parts().join("  ")
+    }
+
+    pub(crate) fn command_status_body(&self) -> String {
+        let [workspace, model, usage] = self.status_parts();
+        let plan = self
+            .plan
+            .snapshot()
+            .map(|snapshot| match snapshot.phase {
+                merry_core::PlanPhase::Planning => "planning",
+                merry_core::PlanPhase::AwaitingApproval => "awaiting approval",
+                merry_core::PlanPhase::Executing => "executing",
+                merry_core::PlanPhase::Completed => "completed",
+                merry_core::PlanPhase::Blocked => "blocked",
+                merry_core::PlanPhase::Cancelled => "cancelled",
+            })
+            .unwrap_or("none");
+        let run = match self.run_state {
+            InteractiveRunState::WaitingForInput => "ready",
+            InteractiveRunState::RunningModel => "running model",
+            InteractiveRunState::RunningTool => "running tool",
+            InteractiveRunState::Interrupting => "interrupting",
+            InteractiveRunState::Closed => "closed",
+        };
+        format!("Run: {run}\nModel: {model}\nUsage: {usage}\nPlan: {plan}\nWorkspace: {workspace}")
     }
 
     pub(crate) fn status_parts(&self) -> [String; 3] {

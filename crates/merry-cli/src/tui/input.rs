@@ -5,7 +5,7 @@ use merry_runtime::{
 use std::{ops::Range, sync::Arc};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-const MAX_INPUT_HISTORY: usize = 200;
+pub(crate) const MAX_INPUT_HISTORY: usize = 200;
 const PASTE_PLACEHOLDER_THRESHOLD_CHARS: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,8 +84,16 @@ pub(crate) struct TuiSubmission {
 }
 
 impl TuiSubmission {
-    pub(crate) fn into_user_message(self) -> Result<UserMessageInput, RuntimeError> {
-        UserMessageInput::new(&self.text, self.images)
+    pub(crate) fn into_user_message_and_history(
+        self,
+    ) -> Result<(UserMessageInput, String), RuntimeError> {
+        let Self {
+            text,
+            history_text,
+            images,
+        } = self;
+        let message = UserMessageInput::new(&text, images)?;
+        Ok((message, history_text))
     }
 }
 
@@ -93,6 +101,10 @@ impl TuiSubmission {
 impl TextInput {
     pub(crate) fn text(&self) -> &str {
         &self.text
+    }
+
+    pub(crate) fn plain_text(&self) -> Option<&str> {
+        self.elements.is_empty().then_some(&self.text)
     }
 
     pub(crate) fn cursor_byte_index(&self) -> usize {
@@ -566,16 +578,19 @@ pub(crate) struct InputHistory {
 #[allow(dead_code)]
 impl InputHistory {
     pub(crate) fn record(&mut self, text: &str) {
-        if text.trim().is_empty() {
-            return;
-        }
-
-        self.entries.push(text.to_owned());
-        if self.entries.len() > MAX_INPUT_HISTORY {
-            self.entries.remove(0);
-        }
+        push_input_history_entry(&mut self.entries, text);
         self.navigation = None;
         self.draft.clear();
+    }
+
+    pub(crate) fn replace_entries(&mut self, entries: Vec<String>) {
+        self.entries = normalize_input_history(entries);
+        self.navigation = None;
+        self.draft.clear();
+    }
+
+    pub(crate) fn entries(&self) -> &[String] {
+        &self.entries
     }
 
     pub(crate) fn previous(&mut self, input: &mut TextInput) {
@@ -608,6 +623,25 @@ impl InputHistory {
 
         self.navigation = None;
         *input = std::mem::take(&mut self.draft);
+    }
+}
+
+pub(crate) fn normalize_input_history(entries: Vec<String>) -> Vec<String> {
+    let mut normalized = Vec::with_capacity(entries.len().min(MAX_INPUT_HISTORY));
+    for entry in entries {
+        push_input_history_entry(&mut normalized, &entry);
+    }
+    normalized
+}
+
+pub(crate) fn push_input_history_entry(entries: &mut Vec<String>, text: &str) {
+    if text.trim().is_empty() || entries.last().is_some_and(|entry| entry == text) {
+        return;
+    }
+    entries.push(text.to_owned());
+    let excess = entries.len().saturating_sub(MAX_INPUT_HISTORY);
+    if excess > 0 {
+        entries.drain(..excess);
     }
 }
 

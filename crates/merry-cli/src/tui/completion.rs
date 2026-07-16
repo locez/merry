@@ -1,3 +1,4 @@
+use super::command;
 use merry_runtime::SkillMetadata;
 use std::{
     fs,
@@ -12,6 +13,7 @@ const MAX_WORKSPACE_SCAN_ENTRIES: usize = 2_000;
 pub(crate) enum CompletionKind {
     Path,
     Skill,
+    Slash,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +38,14 @@ impl CompletionItem {
             value,
             detail: Some(detail),
             kind: CompletionKind::Skill,
+        }
+    }
+
+    fn slash(value: String, detail: String) -> Self {
+        Self {
+            value,
+            detail: Some(detail),
+            kind: CompletionKind::Slash,
         }
     }
 
@@ -100,7 +110,12 @@ impl CompletionMenu {
         Some(match item.kind() {
             CompletionKind::Path => format!("@{} ", item.value()),
             CompletionKind::Skill => format!("${} ", item.value()),
+            CompletionKind::Slash => item.value().to_owned(),
         })
+    }
+
+    pub(crate) fn is_slash(&self) -> bool {
+        self.trigger == '/'
     }
 
     fn matches(&self, token_start: usize, token_end: usize, query: &str) -> bool {
@@ -164,19 +179,29 @@ impl CompletionSources {
         let items = match token.trigger {
             '@' => self.path_items(token.query),
             '$' => self.skill_items(token.query),
+            '/' => self.slash_items(token.query),
             _ => Vec::new(),
         };
         if items.is_empty() {
             return None;
         }
 
+        let selected = if token.trigger == '/' {
+            let full_token = &text[token.start..token.end];
+            items
+                .iter()
+                .position(|item| item.value() == full_token)
+                .unwrap_or(0)
+        } else {
+            0
+        };
         Some(CompletionMenu {
             trigger: token.trigger,
             token_start: token.start,
             token_end: token.end,
             query: token.query.to_owned(),
             items,
-            selected: 0,
+            selected,
         })
     }
 
@@ -200,6 +225,18 @@ impl CompletionSources {
             .filter(|skill| skill.name.starts_with(query))
             .take(MAX_COMPLETION_ITEMS)
             .map(|skill| CompletionItem::skill(skill.name.clone(), skill.description.clone()))
+            .collect()
+    }
+
+    fn slash_items(&self, query: &str) -> Vec<CompletionItem> {
+        command::find_slash_prefix(query)
+            .into_iter()
+            .filter_map(|command| {
+                Some(CompletionItem::slash(
+                    format!("/{}", command.slash_name()?),
+                    command.slash_description()?.to_owned(),
+                ))
+            })
             .collect()
     }
 }
@@ -231,15 +268,26 @@ fn active_completion_token(text: &str, cursor: usize) -> Option<CompletionToken<
         start = index;
     }
 
-    let token = &text[start..cursor];
+    let end = text[cursor..]
+        .find(char::is_whitespace)
+        .map(|offset| cursor + offset)
+        .unwrap_or(text.len());
+    let token = &text[start..end];
     let mut chars = token.char_indices();
     let (_, trigger) = chars.next()?;
-    if !matches!(trigger, '@' | '$') {
+    if !matches!(trigger, '@' | '$' | '/') {
+        return None;
+    }
+    let query_start = start + trigger.len_utf8();
+    if cursor < query_start {
+        return None;
+    }
+    if trigger == '/' && (start != 0 || text.contains(['\n', '\r'])) {
         return None;
     }
     if token[trigger.len_utf8()..]
         .chars()
-        .any(|value| matches!(value, '@' | '$'))
+        .any(|value| matches!(value, '@' | '$' | '/'))
     {
         return None;
     }
@@ -247,8 +295,8 @@ fn active_completion_token(text: &str, cursor: usize) -> Option<CompletionToken<
     Some(CompletionToken {
         trigger,
         start,
-        end: cursor,
-        query: &token[trigger.len_utf8()..],
+        end,
+        query: &text[query_start..cursor],
     })
 }
 

@@ -1,6 +1,6 @@
 use super::{
+    command::all_commands,
     input::{TextInput, TextInputViewport},
-    keymap::KeyAction,
     provider_overlay::{
         ModelPickerOverlay, ProviderFormOverlay, ProviderManagerOverlay, ProviderOverlayAction,
     },
@@ -8,153 +8,7 @@ use super::{
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use merry_core::{PlanAttemptOutcome, PlanNodeId, PlanPhase, PlanSnapshot};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PaletteCommand {
-    OpenSettings,
-    OpenProviders,
-    ShowShortcuts,
-    FollowLatest,
-    ReviewPreviousArtifact,
-    ReviewNextArtifact,
-    ReviewPreviousUserInput,
-    Interrupt,
-    ResumeSuspended,
-    DiscardSuspended,
-    Quit,
-    EnterPlanMode,
-    ApprovePlan,
-    RevisePlan,
-    OpenPlan,
-    FocusPlan,
-    ClosePlan,
-    RetryPlanNode,
-    CancelPlan,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct CommandSpec {
-    pub(crate) command: PaletteCommand,
-    pub(crate) category: &'static str,
-    pub(crate) label: &'static str,
-    pub(crate) key_action: Option<KeyAction>,
-}
-
-const COMMANDS: [CommandSpec; 19] = [
-    CommandSpec {
-        command: PaletteCommand::OpenSettings,
-        category: "Merry",
-        label: "Settings",
-        key_action: None,
-    },
-    CommandSpec {
-        command: PaletteCommand::OpenProviders,
-        category: "Merry",
-        label: "Providers & models",
-        key_action: None,
-    },
-    CommandSpec {
-        command: PaletteCommand::ShowShortcuts,
-        category: "Merry",
-        label: "Keyboard shortcuts",
-        key_action: None,
-    },
-    CommandSpec {
-        command: PaletteCommand::FollowLatest,
-        category: "Navigation",
-        label: "Follow latest",
-        key_action: Some(KeyAction::FollowLatestArtifact),
-    },
-    CommandSpec {
-        command: PaletteCommand::ReviewPreviousArtifact,
-        category: "Navigation",
-        label: "Previous artifact",
-        key_action: Some(KeyAction::ReviewPreviousArtifact),
-    },
-    CommandSpec {
-        command: PaletteCommand::ReviewNextArtifact,
-        category: "Navigation",
-        label: "Next artifact",
-        key_action: Some(KeyAction::ReviewNextArtifact),
-    },
-    CommandSpec {
-        command: PaletteCommand::ReviewPreviousUserInput,
-        category: "Navigation",
-        label: "Previous user input",
-        key_action: Some(KeyAction::ReviewPreviousUserInput),
-    },
-    CommandSpec {
-        command: PaletteCommand::Interrupt,
-        category: "Runtime",
-        label: "Interrupt current run",
-        key_action: Some(KeyAction::Interrupt),
-    },
-    CommandSpec {
-        command: PaletteCommand::ResumeSuspended,
-        category: "Runtime",
-        label: "Resume suspended input",
-        key_action: Some(KeyAction::ResumeSuspended),
-    },
-    CommandSpec {
-        command: PaletteCommand::DiscardSuspended,
-        category: "Runtime",
-        label: "Discard suspended input",
-        key_action: Some(KeyAction::DiscardSuspended),
-    },
-    CommandSpec {
-        command: PaletteCommand::Quit,
-        category: "Session",
-        label: "Quit Merry",
-        key_action: Some(KeyAction::Quit),
-    },
-    CommandSpec {
-        command: PaletteCommand::EnterPlanMode,
-        category: "Plan",
-        label: "Enter Plan Mode",
-        key_action: None,
-    },
-    CommandSpec {
-        command: PaletteCommand::ApprovePlan,
-        category: "Plan",
-        label: "Approve plan and execute",
-        key_action: None,
-    },
-    CommandSpec {
-        command: PaletteCommand::RevisePlan,
-        category: "Plan",
-        label: "Revise plan",
-        key_action: None,
-    },
-    CommandSpec {
-        command: PaletteCommand::OpenPlan,
-        category: "Plan",
-        label: "Open plan",
-        key_action: None,
-    },
-    CommandSpec {
-        command: PaletteCommand::FocusPlan,
-        category: "Plan",
-        label: "Focus plan tree",
-        key_action: None,
-    },
-    CommandSpec {
-        command: PaletteCommand::ClosePlan,
-        category: "Plan",
-        label: "Close plan",
-        key_action: None,
-    },
-    CommandSpec {
-        command: PaletteCommand::RetryPlanNode,
-        category: "Plan",
-        label: "Retry selected interrupted node",
-        key_action: None,
-    },
-    CommandSpec {
-        command: PaletteCommand::CancelPlan,
-        category: "Plan",
-        label: "Cancel plan",
-        key_action: None,
-    },
-];
+pub(crate) use super::command::{CommandSpec, PaletteCommand};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct PlanPaletteContext {
@@ -378,13 +232,17 @@ impl CommandPalette {
 
     pub(crate) fn visible_commands(&self) -> Vec<&'static CommandSpec> {
         let query = self.query.text().trim().to_ascii_lowercase();
-        COMMANDS
+        let slash_query = query.strip_prefix('/').unwrap_or(&query);
+        all_commands()
             .iter()
             .filter(|command| plan_command_is_available(command.command, self.plan))
             .filter(|command| {
                 query.is_empty()
                     || fuzzy_matches(command.label, &query)
                     || fuzzy_matches(command.category, &query)
+                    || command
+                        .slash_name()
+                        .is_some_and(|name| fuzzy_matches(name, slash_query))
             })
             .collect()
     }
