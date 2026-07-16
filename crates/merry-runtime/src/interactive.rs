@@ -891,6 +891,18 @@ impl InteractiveProducer {
                     Some(CommandDecision::Continue)
                 }
             }
+            InteractiveCommand::SaveSession { store, ack_sender } => {
+                let result = if mode == CommandHandlingMode::Waiting {
+                    self.runtime
+                        .save_session_to_with_active_permit(store, &self.loop_permit)
+                        .await
+                        .map_err(InteractiveError::from)
+                } else {
+                    Err(InteractiveError::SessionSaveRequiresIdle)
+                };
+                let _ = ack_sender.send(result);
+                Some(CommandDecision::Continue)
+            }
             InteractiveCommand::EnterPlanMode { reason, ack_sender } => {
                 let result = if mode == CommandHandlingMode::Waiting {
                     self.runtime.enter_plan_mode(&reason).await.map(|_| ())

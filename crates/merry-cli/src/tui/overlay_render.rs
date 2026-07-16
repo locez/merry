@@ -74,10 +74,20 @@ pub(crate) fn render_overlay(frame: &mut Frame<'_>, state: &TuiState) {
                 .map(|row| match row {
                     CommandPaletteRow::Category(category) => command_category_line(state, category),
                     CommandPaletteRow::Command { index, spec } => {
-                        let shortcut = spec
+                        let key_binding = spec
                             .key_action
                             .and_then(|action| state.keymap().binding_label_for(action))
                             .unwrap_or_default();
+                        let slash_alias = spec
+                            .slash_name()
+                            .map(|name| format!("/{name}"))
+                            .unwrap_or_default();
+                        let shortcut = match (key_binding.is_empty(), slash_alias.is_empty()) {
+                            (false, false) => format!("{key_binding}  {slash_alias}"),
+                            (false, true) => key_binding,
+                            (true, false) => slash_alias,
+                            (true, true) => String::new(),
+                        };
                         command_line(
                             state,
                             spec.label,

@@ -1,15 +1,22 @@
 use merry_core::SessionId;
 use serde::{Deserialize, Serialize};
 use std::{
-    fs, io,
+    fs::{self, OpenOptions},
+    io::{self, Write as _},
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 use thiserror::Error;
 
+#[cfg(unix)]
+use std::{fs::File, os::unix::fs::OpenOptionsExt};
+
 const META_FILE: &str = "meta.json";
 const SESSION_STATE_FILE: &str = "state.json";
 const PLAN_STATE_FILE: &str = "plan-state.json";
+const METADATA_TEMP_PREFIX: &str = ".meta.json.tmp-";
+static METADATA_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Error)]
 pub(crate) enum TuiSessionListError {
@@ -84,10 +91,39 @@ impl TuiSessionStore {
             .parent()
             .expect("metadata path should always have a parent")
             .to_path_buf();
-        fs::create_dir_all(&dir).map_err(|source| io_error(dir, source))?;
-        let bytes =
+        fs::create_dir_all(&dir).map_err(|source| io_error(dir.clone(), source))?;
+        let mut bytes =
             serde_json::to_vec_pretty(metadata).map_err(|source| json_error(&path, source))?;
-        fs::write(&path, bytes).map_err(|source| io_error(path, source))
+        bytes.push(b'\n');
+        let temp_path = path.with_file_name(format!(
+            "{METADATA_TEMP_PREFIX}{}-{}",
+            std::process::id(),
+            METADATA_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let result = (|| {
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            options.mode(0o600);
+            let mut file = options
+                .open(&temp_path)
+                .map_err(|source| io_error(temp_path.clone(), source))?;
+            file.write_all(&bytes)
+                .map_err(|source| io_error(temp_path.clone(), source))?;
+            file.sync_all()
+                .map_err(|source| io_error(temp_path.clone(), source))?;
+            drop(file);
+            fs::rename(&temp_path, &path).map_err(|source| io_error(path.clone(), source))?;
+            #[cfg(unix)]
+            File::open(&dir)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|source| io_error(dir.clone(), source))?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(temp_path);
+        }
+        result
     }
 
     pub(crate) fn sessions_for_workspace(
@@ -255,5 +291,38 @@ mod tests {
 
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].session_id, session_id);
+    }
+
+    #[test]
+    fn session_store_atomically_replaces_metadata_without_temp_files() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = TuiSessionStore::new(temp.path().to_path_buf());
+        let session_id = session_id("replace-metadata");
+        write_state_placeholder(&store, &session_id);
+        let mut metadata = TuiSessionMetadata::new(session_id.clone(), "/repo".into(), 10);
+        store
+            .write_metadata(&metadata)
+            .expect("initial metadata writes");
+        metadata.title = Some("updated title".to_owned());
+        metadata.mark_active(20);
+        store
+            .write_metadata(&metadata)
+            .expect("metadata replacement writes");
+
+        let path = store.metadata_path(&session_id);
+        let loaded = serde_json::from_slice::<TuiSessionMetadata>(
+            &fs::read(&path).expect("metadata reads after replacement"),
+        )
+        .expect("replacement remains valid JSON");
+        assert_eq!(loaded, metadata);
+        assert!(
+            fs::read_dir(path.parent().expect("metadata parent"))
+                .expect("metadata directory reads")
+                .filter_map(Result::ok)
+                .all(|entry| !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(METADATA_TEMP_PREFIX))
+        );
     }
 }
