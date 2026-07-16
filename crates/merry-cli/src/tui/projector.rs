@@ -140,32 +140,25 @@ impl TuiProjector {
             RuntimeEvent::ToolCallFinished { result, output, .. } => {
                 let text = tool_output_text(output);
                 let tool = self.started_tools.remove(result.call_id());
-                if result.status() == ToolCallResultStatus::Failed {
-                    if let Some(tool) = tool.as_ref()
-                        && let Some((preview, focus_body)) =
-                            success_tool_bodies(tool.name.as_str(), &text)
-                    {
-                        state.replace_timeline_item(
-                            tool.timeline_index,
-                            TimelineItem::ExpandedDetail {
-                                title: expanded_tool_title(tool),
-                                body: preview,
-                                focus_body,
-                            },
-                        );
-                        return;
-                    }
-                    let body = result
-                        .diagnostic()
-                        .map(|diagnostic| {
-                            compact_failed_tool_body(diagnostic.code(), diagnostic.message(), &text)
-                        })
-                        .unwrap_or_else(|| compact_tool_output(&text));
-                    let title = tool.as_ref().map_or_else(
-                        || "tool failed".to_owned(),
-                        |tool| format!("tool failed: {}", tool.name.as_str()),
+                let failed = result.status() == ToolCallResultStatus::Failed;
+                if failed {
+                    let body = failed_tool_body(
+                        result.diagnostic(),
+                        tool.as_ref().map(|tool| tool.name.as_str()),
+                        &text,
                     );
-                    state.push_timeline_item(TimelineItem::Diagnostic { title, body });
+                    let item = TimelineItem::Diagnostic {
+                        title: tool.as_ref().map_or_else(
+                            || "tool failed".to_owned(),
+                            |tool| completed_tool_title(tool, "failed"),
+                        ),
+                        body,
+                    };
+                    if let Some(tool) = tool.as_ref() {
+                        state.replace_timeline_item(tool.timeline_index, item);
+                    } else {
+                        state.push_timeline_item(item);
+                    }
                 } else if tool
                     .as_ref()
                     .is_some_and(|tool| tool.name.as_str() == WORKSPACE_PATCH_TOOL)
@@ -405,6 +398,27 @@ fn expanded_tool_title(tool: &StartedToolView) -> String {
 
 fn completed_tool_title(tool: &StartedToolView, status: &str) -> String {
     format!("{} -> {status}", expanded_tool_title(tool))
+}
+
+fn failed_tool_body(
+    diagnostic: Option<&merry_core::ErrorInfo>,
+    tool_name: Option<&str>,
+    text: &str,
+) -> String {
+    let mut body = diagnostic
+        .map(|diagnostic| compact_failed_tool_body(diagnostic.code(), diagnostic.message(), text))
+        .unwrap_or_else(|| compact_tool_output(text));
+    // Keep exact process output available when the diagnostic is opened in Focus.
+    if tool_name == Some("run_process")
+        && let Some((_, focus_body)) = process_output_bodies(text)
+        && !focus_body.is_empty()
+    {
+        if !body.is_empty() {
+            body.push('\n');
+        }
+        body.push_str(&focus_body);
+    }
+    body
 }
 
 fn tool_output_text(output: Option<ToolOutput>) -> String {

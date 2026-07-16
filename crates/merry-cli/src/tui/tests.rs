@@ -6,6 +6,7 @@ use super::controller::{
 use super::input::{DraftImage, TextInput, TuiSubmission};
 use super::keymap::{KeyAction, KeyBinding, Keymap};
 use super::overlay::Overlay;
+use super::panels::{FocusPanelBody, FocusPanelTone, focus_panel_view};
 use super::preferences::CodeTheme;
 use super::projector::TuiProjector;
 use super::provider_overlay::{ModelListItem, ProviderListItem};
@@ -2552,10 +2553,12 @@ fn projector_shows_the_specific_schema_violation_for_failed_tool_input() {
         &mut state,
     );
 
-    let TimelineItem::Diagnostic { body, .. } = state.timeline().last().expect("diagnostic exists")
+    let TimelineItem::Diagnostic { title, body } =
+        state.timeline().last().expect("failed tool exists")
     else {
-        panic!("schema failure should render as a diagnostic");
+        panic!("schema failure should replace the pending row with a diagnostic");
     };
+    assert_eq!(title, "Tool read_plan -> failed");
     assert!(body.contains("include_leases"));
     assert!(body.contains("Remove unsupported fields"));
 }
@@ -3150,25 +3153,18 @@ fn projector_renders_failed_process_calls_as_ran_with_error_preview() {
     );
 
     assert_eq!(state.timeline().len(), 1);
-    let TimelineItem::ExpandedDetail {
-        title,
-        body,
-        focus_body,
-    } = &state.timeline()[0]
-    else {
-        panic!("failed process call should expand with output preview");
+    let TimelineItem::Diagnostic { title, body } = &state.timeline()[0] else {
+        panic!("failed process call should replace the pending row with a diagnostic");
     };
     assert_eq!(
         title,
-        "Ran run_process argv=[\"cargo\",\"test\",\"-p\",\"merry-cli\"] cwd=."
+        "Ran run_process argv=[\"cargo\",\"test\",\"-p\",\"merry-cli\"] cwd=. -> failed"
     );
     assert!(!body.contains("cargo test -p merry-cli (cwd: .)"));
+    assert!(body.contains("process_action_failed"));
     assert!(body.contains("  exit 101"));
     assert!(body.contains("  stderr: error: test failed"));
     assert!(body.contains("    rerun with --exact"));
-    assert!(focus_body.contains("  exit 101"));
-    assert!(focus_body.contains("  stderr: error: test failed"));
-    assert!(focus_body.contains("    rerun with --exact"));
 }
 
 #[test]
@@ -3478,16 +3474,150 @@ fn projector_compacts_failed_tool_result_without_raw_artifact_json() {
         &mut state,
     );
 
-    assert_eq!(state.timeline().len(), 2);
-    let TimelineItem::Diagnostic { title, body } = &state.timeline()[1] else {
-        panic!("failed tool should render as a compact diagnostic");
+    assert_eq!(state.timeline().len(), 1);
+    let TimelineItem::Diagnostic { title, body } = &state.timeline()[0] else {
+        panic!("failed tool should replace its pending row with a compact diagnostic");
     };
-    assert_eq!(title, "tool failed: request_permissions");
+    assert!(title.contains("-> failed"));
     assert!(body.contains("permission_review_failed"));
     assert!(body.contains("The approval reviewer could not establish a trustworthy decision."));
     assert!(body.contains("Do not assume the requested capability was granted."));
     assert!(!body.contains("\"tool_call_id\""));
     assert!(!body.contains("call-permission"));
+}
+
+#[test]
+fn projector_replaces_pending_row_with_failed_result_instead_of_leaving_stale_row() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    let mut projector = TuiProjector::default();
+
+    projector.apply(
+        RuntimeEvent::ToolCallStarted {
+            call: pending_call_with_args(
+                "call-custom",
+                "custom_lookup",
+                json!({"source": "docs", "limit": 2}),
+            ),
+            source: source(),
+        },
+        &mut state,
+    );
+    projector.apply(
+        RuntimeEvent::ToolCallFinished {
+            result: ToolCallResult::failed(
+                ToolCallId::new("call-custom").unwrap(),
+                text_artifact("custom-failure"),
+                ErrorInfo::new("custom_lookup_failed", "no matching documents found").unwrap(),
+            ),
+            output: Some(ToolOutput::Text {
+                text: "no matching documents found".to_owned(),
+            }),
+            source: source(),
+        },
+        &mut state,
+    );
+
+    assert_eq!(
+        state.timeline().len(),
+        1,
+        "failed generic tool should replace its pending row, not leave a stale row"
+    );
+    let TimelineItem::Diagnostic { title, body } = &state.timeline()[0] else {
+        panic!("failed generic tool should replace the pending row with a diagnostic");
+    };
+    assert_eq!(title, "Tool custom_lookup limit=2 source=docs -> failed");
+    assert!(body.contains("custom_lookup_failed"));
+    assert!(body.contains("no matching documents found"));
+
+    let buffer = render_to_buffer(&state, 120, 24);
+    assert_eq!(find_cell_color(&buffer, "Error"), Some(Color::LightRed));
+
+    state.select_previous_artifact();
+    let focus = focus_panel_view(&state);
+    assert_eq!(focus.tone, FocusPanelTone::Error);
+    assert!(matches!(focus.body, FocusPanelBody::Text { .. }));
+}
+
+#[test]
+fn projector_replaces_failed_patch_row_without_leaving_stale_pending_row() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    let mut projector = TuiProjector::default();
+    let patch = "\
+*** Begin Patch
+*** Update File: crates/merry-cli/src/tui/render.rs
+-    lines.push(old);
++    lines.push(new);
+*** End Patch";
+
+    projector.apply(
+        RuntimeEvent::ToolCallStarted {
+            call: pending_call_with_args(
+                "call-patch-fail",
+                WORKSPACE_PATCH_TOOL,
+                json!({ "patch": patch }),
+            ),
+            source: source(),
+        },
+        &mut state,
+    );
+    projector.apply(
+        RuntimeEvent::ToolCallFinished {
+            result: ToolCallResult::failed(
+                ToolCallId::new("call-patch-fail").unwrap(),
+                text_artifact("patch-failure"),
+                ErrorInfo::new(
+                    "workspace_patch_preimage_mismatch",
+                    "preimage text was not found in the target file",
+                )
+                .unwrap(),
+            ),
+            output: Some(ToolOutput::Json {
+                json: json!({
+                    "ok": false,
+                    "tool": "workspace_patch",
+                    "error": {
+                        "code": "workspace_patch_preimage_mismatch",
+                        "message": "preimage text was not found in the target file"
+                    },
+                    "recovery": {
+                        "instruction": "Read the current file content and retry with a matching preimage."
+                    }
+                })
+                .to_string(),
+            }),
+            source: source(),
+        },
+        &mut state,
+    );
+
+    assert_eq!(
+        state.timeline().len(),
+        1,
+        "failed patch tool should replace its pending row, not leave a stale row"
+    );
+    let TimelineItem::Diagnostic { title, body } = &state.timeline()[0] else {
+        panic!("failed patch tool should replace the pending row with a diagnostic");
+    };
+    assert!(title.starts_with("Patch workspace_patch"));
+    assert!(title.contains("crates/merry-cli/src/tui/render.rs"));
+    assert!(title.ends_with("-> failed"));
+    assert!(body.contains("workspace_patch_preimage_mismatch"));
+    assert!(body.contains("preimage text was not found"));
+    assert!(body.contains("Read the current file content and retry"));
+    assert!(
+        !body.contains("*** Begin Patch"),
+        "failed patch body must not leak the full patch payload"
+    );
 }
 
 #[test]
