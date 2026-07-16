@@ -3,7 +3,7 @@ use super::{
     InterruptReason,
     types::{InputReceipt, InputRecord, InputRecords},
 };
-use crate::{PlanApprovalInput, UserMessageInput};
+use crate::{FileSessionStore, PlanApprovalInput, UserMessageInput};
 use futures_core::Stream;
 use merry_core::{PlanNodeId, QueuedInputLane, RuntimeEvent};
 use std::{
@@ -421,6 +421,25 @@ impl AgentLoopControl {
         let (ack_sender, ack_receiver) = oneshot::channel();
         self.command_sender
             .send(InteractiveCommand::Interrupt { reason, ack_sender })
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?;
+        ack_receiver
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?
+    }
+
+    /// Saves the session only while the interactive producer is at an idle boundary.
+    ///
+    /// Returns [`InteractiveError::SessionSaveRequiresIdle`] immediately when a model, tool, or
+    /// interrupt phase is active.
+    pub async fn save_session_to(&self, store: FileSessionStore) -> Result<(), InteractiveError> {
+        let (ack_sender, ack_receiver) = oneshot::channel();
+        self.command_sender
+            .send(InteractiveCommand::SaveSession { store, ack_sender })
             .await
             .map_err(|_| InteractiveError::CommandChannelClosed {
                 run_id: self.run_id,

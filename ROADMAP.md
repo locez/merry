@@ -79,6 +79,9 @@ cargo test --all
 - Structured final-output tools and typed completed, blocked, failed, and
   cancelled outcomes.
 - Ordered non-empty tool-call batches admitted atomically.
+- Idle-boundary interactive session save through `AgentLoopControl::save_session_to`
+  with `SessionSaveRequiresIdle` rejection while a model, tool, or interrupt phase
+  is active.
 - Explicit `ParallelSafe` and `Exclusive` tool execution contracts.
 - Bounded parallel-safe waves, exclusive barriers, ordered continuation
   results, bridge-call matching, and cancellation handling.
@@ -105,7 +108,9 @@ cargo test --all
   an explicit `--no-sandbox` host-mode choice that keeps tool commands on the
   inner bubblewrap process runner.
 - One chronological TUI timeline, real streaming deltas, compact tool rows,
-  on-demand detail, responsive layouts, queues, completion, and resume picker.
+  on-demand detail, responsive layouts, queues, completion, resume picker,
+  slash commands (`/help`, `/status`, `/save`, `/stop`) shared with the command
+  palette, and workspace-scoped persisted text input history.
 - A responsive Plan cockpit with recursive navigation, node inspection,
   approval preview, steering and scheduler controls, and preserved selection
   across live updates at 50x20, 80x24, and 140x40.
@@ -122,13 +127,20 @@ cargo test --all
 Make the TUI comfortable for repeated coding sessions rather than merely
 feature-complete:
 
-- Add shared text-only input history across sessions, including resumed and
-  newly created sessions. Do not persist image attachments in this history.
-- Add slash commands with one command registry shared by slash completion and
-  the existing command palette.
-- Make common tools render meaningful summaries: operation, target, status,
+- ~~Add shared text-only input history across sessions, including resumed and
+  newly created sessions. Do not persist image attachments in this history.~~
+  Delivered: workspace-scoped JSONL history with SHA256-hashed filenames,
+  atomic temp+rename writes, in-memory normalization, and cross-session reuse.
+- ~~Add slash commands with one command registry shared by slash completion and
+  the existing command palette.~~ Delivered: unified `CommandSpec` registry
+  drives both the command palette and `/`-triggered completion; `/help`,
+  `/status`, `/save`, `/stop` execute locally without sending model messages.
+- ~~Make common tools render meaningful summaries: operation, target, status,
   result, and failure reason. Generic fallback rendering must not reduce useful
-  information to output such as `args=3`.
+  information to output such as `args=3`.~~ Delivered: failed tool rows replace
+  their pending timeline row with a `-> failed` status and bounded diagnostic
+  body; process, patch, read, list, and permission tools render dedicated
+  previews.
 - Keep plan, permission, save, interrupt, resume, retry, and discard states
   visible and actionable from the same control surface.
 
@@ -244,8 +256,9 @@ named coding workflow or acceptance test.
   outside the default deterministic suite.
 - TUI session persistence is still primarily exit-time full snapshot saving;
   incremental SQLite durability is not implemented.
-- TUI has no slash-command control plane, shared cross-session text input
-  history, or consistently useful generic tool rendering yet.
+- TUI slash-command control plane, shared cross-session text input history,
+  and consistently useful generic tool rendering have been delivered; the
+  remaining TUI Daily Coding Flow work is unified state visibility.
 - Coding-tool descriptions and initial runtime context still need a deliberate
   harness-driven audit.
 - Python sessions are ephemeral by default and Python event surfaces still need

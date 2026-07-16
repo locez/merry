@@ -1,8 +1,9 @@
 use super::{
     input::{DraftImage, TuiSubmission},
+    input_history_store::InputHistoryStore,
     keymap::KeyAction,
     layout::{BottomPaneHeights, cockpit_layout},
-    overlay::{OverlayKeyResult, PaletteCommand},
+    overlay::OverlayKeyResult,
     preferences::{TuiPreferences, TuiPreferencesStore, TuiSettingsDefaults},
     projector::TuiProjector,
     provider_overlay::{
@@ -11,7 +12,7 @@ use super::{
     },
     render,
     runtime::TuiRuntimeSession,
-    state::TuiState,
+    state::{TimelineItem, TuiState},
     terminal::{TerminalEvent, TerminalSession},
 };
 use crate::{
@@ -23,7 +24,7 @@ use crate::{
 };
 use crossterm::event::{KeyCode, KeyEvent};
 use futures_util::StreamExt;
-use merry_core::QueuedInputLane;
+use merry_core::{InteractiveRunState, QueuedInputLane};
 use merry_runtime::InterruptReason;
 use ratatui::layout::{Position, Rect, Size};
 use std::{collections::BTreeSet, time::Duration};
@@ -49,6 +50,11 @@ struct ProviderController<'a> {
     discovery_tx: &'a mpsc::Sender<ModelDiscoveryCompletion>,
     discovery_generation: &'a mut u64,
     discovery_token: &'a mut Option<CancellationToken>,
+}
+
+struct InputHistoryController<'a> {
+    store: &'a InputHistoryStore,
+    warning_shown: &'a mut bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,6 +97,7 @@ pub(crate) enum ControllerEffect {
     RevisePlan,
     RetryPlanNode(merry_core::PlanNodeId),
     CancelPlan,
+    SaveSession,
     Quit,
 }
 
@@ -100,17 +107,13 @@ pub(crate) fn handle_key_action(action: KeyAction, state: &mut TuiState) -> Cont
             if exit_review_if_active(state) {
                 return ControllerEffect::None;
             }
-            state
-                .take_input_for_submit()
-                .map_or(ControllerEffect::None, ControllerEffect::SubmitNext)
+            submit_input(state, ControllerEffect::SubmitNext)
         }
         KeyAction::SubmitBacklog => {
             if exit_review_if_active(state) {
                 return ControllerEffect::None;
             }
-            state
-                .take_input_for_submit()
-                .map_or(ControllerEffect::None, ControllerEffect::SubmitBacklog)
+            submit_input(state, ControllerEffect::SubmitBacklog)
         }
         KeyAction::CancelInputOrQuit => {
             if state.cancel_input_or_mark_quit() {
@@ -184,6 +187,18 @@ pub(crate) fn handle_key_action(action: KeyAction, state: &mut TuiState) -> Cont
     }
 }
 
+fn submit_input(
+    state: &mut TuiState,
+    submit: impl FnOnce(TuiSubmission) -> ControllerEffect,
+) -> ControllerEffect {
+    if let Some(effect) = super::command_controller::slash_input_effect(state) {
+        return effect;
+    }
+    state
+        .take_input_for_submit()
+        .map_or(ControllerEffect::None, submit)
+}
+
 fn exit_review_if_active(state: &mut TuiState) -> bool {
     let was_reviewing = state.is_timeline_reviewing() || state.is_artifact_reviewing();
     if state.is_timeline_reviewing() {
@@ -211,7 +226,9 @@ pub(crate) fn handle_key_event(key: KeyEvent, state: &mut TuiState) -> Controlle
                 state.back_overlay();
                 ControllerEffect::None
             }
-            OverlayKeyResult::Run(command) => run_palette_command(command, state),
+            OverlayKeyResult::Run(command) => {
+                super::command_controller::run_palette_command(command, state)
+            }
             OverlayKeyResult::AdjustSetting(item, direction) => {
                 if state.adjust_setting(item, direction) {
                     preferences_effect(item, state.preferences().clone())
@@ -273,7 +290,17 @@ pub(crate) fn handle_key_event(key: KeyEvent, state: &mut TuiState) -> Controlle
     }
 
     if state.completion_menu().is_some() {
+        let slash_completion = state
+            .completion_menu()
+            .is_some_and(super::completion::CompletionMenu::is_slash);
         match key.code {
+            KeyCode::Enter if slash_completion => {
+                state.accept_completion();
+                if input_is_known_slash(state) {
+                    return handle_key_action(KeyAction::SubmitNext, state);
+                }
+                return ControllerEffect::None;
+            }
             KeyCode::Enter | KeyCode::Tab => {
                 state.accept_completion();
                 return ControllerEffect::None;
@@ -371,67 +398,18 @@ fn preferences_effect(
     }
 }
 
+fn input_is_known_slash(state: &TuiState) -> bool {
+    state.plain_input_text().is_some_and(|text| {
+        matches!(
+            super::command::match_slash_input(text),
+            super::command::SlashCommandMatch::Known(_)
+        )
+    })
+}
+
 pub(crate) fn handle_paste_event(text: &str, state: &mut TuiState) {
     if !state.insert_overlay_paste(text) {
         state.insert_input_paste(text);
-    }
-}
-
-fn run_palette_command(command: PaletteCommand, state: &mut TuiState) -> ControllerEffect {
-    if let Some(effect) = super::plan_controller::palette_effect(command, state) {
-        return effect;
-    }
-    match command {
-        PaletteCommand::OpenSettings => {
-            state.close_overlay();
-            state.open_settings();
-            ControllerEffect::None
-        }
-        PaletteCommand::OpenProviders => ControllerEffect::OpenProviderManager,
-        PaletteCommand::ShowShortcuts => {
-            state.open_shortcuts();
-            ControllerEffect::None
-        }
-        PaletteCommand::FollowLatest => {
-            state.close_overlay();
-            handle_key_action(KeyAction::FollowLatestArtifact, state)
-        }
-        PaletteCommand::ReviewPreviousArtifact => {
-            state.close_overlay();
-            handle_key_action(KeyAction::ReviewPreviousArtifact, state)
-        }
-        PaletteCommand::ReviewNextArtifact => {
-            state.close_overlay();
-            handle_key_action(KeyAction::ReviewNextArtifact, state)
-        }
-        PaletteCommand::ReviewPreviousUserInput => {
-            state.close_overlay();
-            handle_key_action(KeyAction::ReviewPreviousUserInput, state)
-        }
-        PaletteCommand::Interrupt => {
-            state.close_overlay();
-            handle_key_action(KeyAction::Interrupt, state)
-        }
-        PaletteCommand::ResumeSuspended => {
-            state.close_overlay();
-            handle_key_action(KeyAction::ResumeSuspended, state)
-        }
-        PaletteCommand::DiscardSuspended => {
-            state.close_overlay();
-            handle_key_action(KeyAction::DiscardSuspended, state)
-        }
-        PaletteCommand::EnterPlanMode
-        | PaletteCommand::ApprovePlan
-        | PaletteCommand::RevisePlan
-        | PaletteCommand::OpenPlan
-        | PaletteCommand::FocusPlan
-        | PaletteCommand::ClosePlan
-        | PaletteCommand::RetryPlanNode
-        | PaletteCommand::CancelPlan => unreachable!("plan command handled above"),
-        PaletteCommand::Quit => {
-            state.close_overlay();
-            ControllerEffect::Quit
-        }
     }
 }
 
@@ -511,6 +489,7 @@ pub(crate) async fn run_controller(
     mut session: TuiRuntimeSession,
     mut state: TuiState,
     preferences_store: TuiPreferencesStore,
+    input_history_store: InputHistoryStore,
     mut provider_management: ProviderManagementService,
 ) -> Result<(), CliError> {
     let mut projector = TuiProjector::default();
@@ -519,6 +498,7 @@ pub(crate) async fn run_controller(
     let mut model_discovery_generation = 0_u64;
     let mut model_discovery_token: Option<CancellationToken> = None;
     let mut subagent_activity_open = true;
+    let mut input_history_warning_shown = false;
     state
         .plan_mut()
         .update_subagent_activity(session.subagent_activity.borrow().clone());
@@ -551,11 +531,16 @@ pub(crate) async fn run_controller(
                             discovery_generation: &mut model_discovery_generation,
                             discovery_token: &mut model_discovery_token,
                         };
+                        let mut input_history = InputHistoryController {
+                            store: &input_history_store,
+                            warning_shown: &mut input_history_warning_shown,
+                        };
                         let should_quit = dispatch_effect(
                             effect,
                             &mut session,
                             &mut state,
                             &preferences_store,
+                            &mut input_history,
                             &mut providers,
                             &clipboard_image_tx,
                         )
@@ -640,6 +625,7 @@ async fn dispatch_effect(
     session: &mut TuiRuntimeSession,
     state: &mut TuiState,
     preferences_store: &TuiPreferencesStore,
+    input_history: &mut InputHistoryController<'_>,
     providers: &mut ProviderController<'_>,
     clipboard_image_tx: &mpsc::Sender<ClipboardImageCompletion>,
 ) -> Result<bool, CliError> {
@@ -651,21 +637,39 @@ async fn dispatch_effect(
     match effect {
         ControllerEffect::None => Ok(false),
         ControllerEffect::SubmitNext(submission) => {
-            let message = submission.into_user_message().map_err(unexpected)?;
+            let (message, history_text) = submission
+                .into_user_message_and_history()
+                .map_err(unexpected)?;
             session
                 .input
                 .submit_next_message(message)
                 .await
                 .map_err(unexpected)?;
+            persist_submitted_input_history(
+                input_history.store,
+                state,
+                &history_text,
+                input_history.warning_shown,
+            )
+            .await;
             Ok(false)
         }
         ControllerEffect::SubmitBacklog(submission) => {
-            let message = submission.into_user_message().map_err(unexpected)?;
+            let (message, history_text) = submission
+                .into_user_message_and_history()
+                .map_err(unexpected)?;
             session
                 .input
                 .enqueue_message(message)
                 .await
                 .map_err(unexpected)?;
+            persist_submitted_input_history(
+                input_history.store,
+                state,
+                &history_text,
+                input_history.warning_shown,
+            )
+            .await;
             Ok(false)
         }
         ControllerEffect::PasteImage => {
@@ -685,11 +689,12 @@ async fn dispatch_effect(
             Ok(false)
         }
         ControllerEffect::Interrupt => {
-            session
-                .control
-                .interrupt(InterruptReason::User)
-                .await
-                .map_err(unexpected)?;
+            let control = session.control.clone();
+            let _interrupt_task = tokio::spawn(async move {
+                if let Err(error) = control.interrupt(InterruptReason::User).await {
+                    tracing::warn!(error = %error, "interactive interrupt request failed");
+                }
+            });
             Ok(false)
         }
         ControllerEffect::ResumeSuspended => {
@@ -706,6 +711,24 @@ async fn dispatch_effect(
                 .discard_suspended()
                 .await
                 .map_err(unexpected)?;
+            Ok(false)
+        }
+        ControllerEffect::SaveSession => {
+            session.set_title(state.latest_user_input_title());
+            match session.save_now().await {
+                Ok(()) => state.push_timeline_item(TimelineItem::Muted {
+                    title: "Session saved".to_owned(),
+                    detail: session.metadata.session_id.as_str().to_owned(),
+                }),
+                Err(error) => {
+                    tracing::warn!(error = ?error, "explicit TUI session save failed");
+                    state.push_timeline_item(TimelineItem::Diagnostic {
+                        title: "Session save failed".to_owned(),
+                        body: "Session state could not be written. The TUI is still open; check the logs and retry at an idle boundary."
+                            .to_owned(),
+                    });
+                }
+            }
             Ok(false)
         }
         ControllerEffect::PersistPreferences(preferences) => {
@@ -1084,6 +1107,32 @@ async fn dispatch_effect(
     }
 }
 
+pub(super) async fn persist_submitted_input_history(
+    store: &InputHistoryStore,
+    state: &mut TuiState,
+    text: &str,
+    warning_shown: &mut bool,
+) {
+    if text.trim().is_empty() {
+        return;
+    }
+    state.record_input_history(text);
+    match store.record(text).await {
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(error = %error, "could not persist accepted TUI input history");
+            if !*warning_shown {
+                state.push_timeline_item(TimelineItem::Diagnostic {
+                    title: "Input history not saved".to_owned(),
+                    body: "The message was accepted, but shared input history could not be written. In-memory history remains available for this session."
+                        .to_owned(),
+                });
+                *warning_shown = true;
+            }
+        }
+    }
+}
+
 fn provider_list_items(
     provider_management: &ProviderManagementService,
     state: &TuiState,
@@ -1233,14 +1282,17 @@ fn model_list_items(catalog: merry_llm::ModelCatalog) -> Vec<ModelListItem> {
         .collect()
 }
 
-fn project_local_effect(effect: &ControllerEffect, state: &mut TuiState) {
+pub(super) fn project_local_effect(effect: &ControllerEffect, state: &mut TuiState) {
     match effect {
         ControllerEffect::SubmitNext(submission) => {
             state.push_local_user_echo(submission.text.clone(), QueuedInputLane::Next);
+            state.project_local_run_start();
         }
         ControllerEffect::SubmitBacklog(submission) => {
             state.push_local_user_echo(submission.text.clone(), QueuedInputLane::Backlog);
+            state.project_local_run_start();
         }
+        ControllerEffect::Interrupt => state.set_run_state(InteractiveRunState::Interrupting),
         ControllerEffect::PersistPreferences(_)
         | ControllerEffect::ApplyRuntimePreferences(_)
         | ControllerEffect::OpenProviderManager

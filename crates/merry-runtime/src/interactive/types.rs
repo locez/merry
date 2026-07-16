@@ -97,4 +97,6 @@ pub enum InteractiveError {
     },
     #[error("plan controls require an idle interactive boundary")]
     PlanControlRequiresIdle,
+    #[error("session save requires an idle interactive boundary")]
+    SessionSaveRequiresIdle,
 }

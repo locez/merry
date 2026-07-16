@@ -215,7 +215,16 @@ impl Runtime {
 
     /// Saves the current resume-safe session state to the provided store.
     pub async fn save_session_to(&self, store: FileSessionStore) -> Result<(), RuntimeError> {
-        let _active_permit = self.acquire_active_step_permit()?;
+        let active_permit = self.acquire_active_step_permit()?;
+        self.save_session_to_with_active_permit(store, &active_permit)
+            .await
+    }
+
+    pub(crate) async fn save_session_to_with_active_permit(
+        &self,
+        store: FileSessionStore,
+        _active_permit: &ActiveStepPermit,
+    ) -> Result<(), RuntimeError> {
         let bundle = {
             let session = self.inner.session.lock().await;
             session.persistable_bundle()?

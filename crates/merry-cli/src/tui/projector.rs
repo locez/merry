@@ -90,7 +90,7 @@ impl TuiProjector {
             }
             RuntimeEvent::AssistantMessageDelta { .. } => {}
             RuntimeEvent::InteractiveRunStateChanged { state: run_state } => {
-                state.set_run_state(run_state);
+                state.apply_runtime_run_state(run_state);
             }
             RuntimeEvent::QueuedInputsChanged { inputs } => {
                 state.update_queue_preview(QueuePreview {
@@ -100,6 +100,7 @@ impl TuiProjector {
                 });
             }
             RuntimeEvent::QueuedInputAccepted { lane, inputs } => {
+                state.confirm_local_run_start();
                 for input in inputs {
                     state.confirm_or_push_user_input(input.text, lane);
                 }
