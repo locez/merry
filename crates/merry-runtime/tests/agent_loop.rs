@@ -2042,7 +2042,7 @@ async fn task_anchor_is_dynamic_control_segment_before_transcript_body() {
     );
     assert_eq!(
         dynamic[0].content().as_text(),
-        "task-anchor:\nFix the status text fixture."
+        "<merry_task_anchor>\ntask-anchor:\nFix the status text fixture.\n</merry_task_anchor>"
     );
     assert_eq!(dynamic[1].content().as_text(), "Start work.");
     assert_eq!(dynamic[2].content().as_text(), "first final answer");
@@ -2081,7 +2081,7 @@ async fn task_anchor_does_not_join_project_rules_stable_prefix() {
     assert_eq!(dynamic[0].role(), ModelMessageRole::System);
     assert_eq!(
         dynamic[0].content().as_text(),
-        "task-anchor:\nKeep this task pinned."
+        "<merry_task_anchor>\ntask-anchor:\nKeep this task pinned.\n</merry_task_anchor>"
     );
     assert_eq!(dynamic[1].role(), ModelMessageRole::User);
     assert_eq!(dynamic[1].content().as_text(), "Work on the pinned task.");

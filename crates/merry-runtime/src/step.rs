@@ -17,7 +17,8 @@ use merry_llm::{
 };
 use tokio_util::sync::CancellationToken;
 
-pub(crate) const DEFAULT_RUNTIME_BASE_INSTRUCTIONS: &str = r#"You are Merry, a software engineering agent working through a runtime on the user's behalf.
+pub(crate) const DEFAULT_RUNTIME_BASE_INSTRUCTIONS: &str = r#"<merry_runtime_instructions>
+You are Merry, a software engineering agent working through a runtime on the user's behalf.
 
 Your goal is to genuinely handle the user's request, not merely to produce a plausible answer or complete one convenient tool call. The user's current instruction, applicable project rules, and runtime-provided context define success.
 
@@ -42,9 +43,27 @@ When editing, preserve changes you did not make and keep modifications focused. 
 
 Verify claims in proportion to risk. Run the most relevant available checks after changes, inspect their actual results, and do not claim success from an unrun or failed check. If verification is blocked, state exactly what was verified, what remains unverified, and why.
 
-Finish with the outcome that matters to the user: the answer or change, the evidence or verification supporting it, and any genuine remaining blocker. Keep the response concise relative to the task, but do not omit material risks or unfinished work."#;
+Finish with the outcome that matters to the user: the answer or change, the evidence or verification supporting it, and any genuine remaining blocker. Keep the response concise relative to the task, but do not omit material risks or unfinished work.
+</merry_runtime_instructions>"#;
 
-pub(crate) const PROGRESS_COMMENTARY_INSTRUCTIONS: &str = r#"Prefer efficient tool execution. Do not add a progress note before routine or consecutive tool calls; call the tools directly. Emit a short progress update only when a turn begins a non-obvious plan, changes direction, waits on something slow, requests elevated capability, or is about to produce the final summary. Keep any progress updates concise and use the user's current input language. Do not include progress notes in final structured output."#;
+pub(crate) const PROGRESS_COMMENTARY_INSTRUCTIONS: &str = r#"<merry_progress_commentary>
+Prefer efficient tool execution. Do not add a progress note before routine or consecutive tool calls; call the tools directly. Emit a short progress update only when a turn begins a non-obvious plan, changes direction, waits on something slow, requests elevated capability, or is about to produce the final summary. Keep any progress updates concise and use the user's current input language. Do not include progress notes in final structured output.
+</merry_progress_commentary>"#;
+
+fn prompt_block(tag: &str, content: &str) -> String {
+    let mut block = String::with_capacity(tag.len() * 2 + content.len() + 7);
+    block.push('<');
+    block.push_str(tag);
+    block.push_str(">\n");
+    block.push_str(content);
+    if !content.ends_with('\n') {
+        block.push('\n');
+    }
+    block.push_str("</");
+    block.push_str(tag);
+    block.push('>');
+    block
+}
 
 /// Context shared with runtime step producers.
 ///
@@ -158,7 +177,9 @@ pub(crate) fn compile_step_model_request(
 
     let checkpoint_snapshot = context.checkpoint_snapshot();
     let context_body_snapshot = context.body_snapshot();
-    let skill_metadata_text = skill_catalog.and_then(SkillCatalog::to_stable_prefix_message_text);
+    let skill_metadata_text = skill_catalog
+        .and_then(SkillCatalog::to_stable_prefix_message_text)
+        .map(|text| prompt_block("merry_skill_catalog", &text));
     let stable_prefix_message_count = 1
         + usize::from(progress_commentary)
         + usize::from(skill_metadata_text.is_some())
@@ -197,23 +218,28 @@ pub(crate) fn compile_step_model_request(
     }
 
     if let Some(project_rules) = project_rules {
+        let project_rules_text = project_rules.to_stable_prefix_message_text();
+        let project_rules_text = prompt_block("merry_project_rules", &project_rules_text);
         messages.push(ModelInputItem::Message(ModelMessage::new(
             ModelMessageRole::System,
-            ModelContent::text(&project_rules.to_stable_prefix_message_text())?,
+            ModelContent::text(&project_rules_text)?,
         )?));
     }
 
     if !checkpoint_snapshot.is_empty() {
+        let checkpoint_text = prompt_block("merry_checkpoint", &checkpoint_snapshot);
         messages.push(ModelInputItem::Message(ModelMessage::new(
             ModelMessageRole::System,
-            ModelContent::text(&checkpoint_snapshot)?,
+            ModelContent::text(&checkpoint_text)?,
         )?));
     }
 
     if let Some(task_anchor) = task_anchor {
+        let task_anchor_text = task_anchor.to_dynamic_control_message_text();
+        let task_anchor_text = prompt_block("merry_task_anchor", &task_anchor_text);
         messages.push(ModelInputItem::Message(ModelMessage::new(
             ModelMessageRole::System,
-            ModelContent::text(&task_anchor.to_dynamic_control_message_text())?,
+            ModelContent::text(&task_anchor_text)?,
         )?));
     }
 
@@ -225,9 +251,10 @@ pub(crate) fn compile_step_model_request(
     }
 
     if !context_body_snapshot.is_empty() {
+        let context_text = prompt_block("merry_compiled_context", &context_body_snapshot);
         messages.push(ModelInputItem::Message(ModelMessage::new(
             ModelMessageRole::System,
-            ModelContent::text(&context_body_snapshot)?,
+            ModelContent::text(&context_text)?,
         )?));
     }
 

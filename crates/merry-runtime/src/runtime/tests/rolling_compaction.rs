@@ -438,7 +438,10 @@ fn checkpoint_item(request: &ModelRequest) -> ModelInputItem {
             item,
             ModelInputItem::Message(message)
                 if message.role() == ModelMessageRole::System
-                    && message.content().as_text().starts_with("compacted-checkpoint:\n")
+                    && message
+                        .content()
+                        .as_text()
+                        .starts_with("<merry_checkpoint>\ncompacted-checkpoint:\n")
         )
     });
     let checkpoint = items
