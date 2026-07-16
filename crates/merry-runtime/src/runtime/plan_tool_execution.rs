@@ -47,7 +47,7 @@ pub(super) async fn execute_plan_tool_call(
             };
             match inner
                 .plan_controller
-                .update_from_tool(input, pending.id().clone())
+                .update_from_tool(input, pending.id().clone(), !inner.tool_batch_active())
                 .await
             {
                 Ok(events) => Ok(events),

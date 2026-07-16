@@ -835,6 +835,7 @@ impl RuntimeBuilder {
                 plan_subagent_control: self.plan_subagent_control,
                 plan_subagent_scope: self.plan_subagent_scope,
                 session_store: self.session_store,
+                tool_batch_active: AtomicBool::new(false),
                 activity_hub,
             }),
         })
