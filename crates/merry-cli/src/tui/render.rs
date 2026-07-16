@@ -531,8 +531,9 @@ fn timeline_lines_compact(state: &TuiState, region: Rect) -> Vec<Line<'static>> 
             TimelineItem::User { text, lane } => user_lines(state, text, *lane),
             TimelineItem::Assistant { text } => assistant_lines(state, text, region.width),
             TimelineItem::Muted { title, detail } => muted_lines(state, title, detail),
-            TimelineItem::Expanded { title, .. } | TimelineItem::ExpandedDetail { title, .. } => {
-                vec![expanded_title_line(state, title)]
+            TimelineItem::Expanded { title, body }
+            | TimelineItem::ExpandedDetail { title, body, .. } => {
+                expanded_timeline_lines(state, title, body, region.width)
             }
             TimelineItem::Diagnostic { title, body } => {
                 diagnostic_lines(state, title, body, region.width)
@@ -655,6 +656,35 @@ fn expanded_title_line(state: &TuiState, title: &str) -> Line<'static> {
         title.to_owned(),
         semantic_style(state, SemanticColor::Focus),
     ))
+}
+
+fn expanded_timeline_lines(
+    state: &TuiState,
+    title: &str,
+    body: &str,
+    region_width: u16,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![expanded_title_line(state, title)];
+    if state.is_artifact_reviewing() || tool_title_line(state, title).is_none() {
+        return lines;
+    }
+
+    let body_width = usize::from(region_width).saturating_sub(2).max(4);
+    for line in body.lines().filter(|line| !line.trim().is_empty()).take(2) {
+        let clean = line
+            .chars()
+            .filter(|character| !character.is_control())
+            .collect::<String>();
+        let clean = clean.trim();
+        if clean.is_empty() {
+            continue;
+        }
+        lines.push(Line::from(Span::styled(
+            format!("  {}", truncate_chars(clean, body_width)),
+            semantic_style(state, SemanticColor::Muted),
+        )));
+    }
+    lines
 }
 
 fn diagnostic_lines(

@@ -110,6 +110,9 @@ fn focus_title_for_text_item(title: &str) -> String {
         .strip_prefix("Ran ")
         .or_else(|| title.strip_prefix("Ran: "))
     {
+        if let Some(command) = process_command_from_tool_detail(command) {
+            return format!("FOCUS command {command}");
+        }
         let command = command
             .split_once(" (cwd: ")
             .map_or(command, |(command, _)| command);
@@ -119,6 +122,13 @@ fn focus_title_for_text_item(title: &str) -> String {
         return format!("FOCUS MCP {detail}");
     }
     format!("FOCUS {title}")
+}
+
+fn process_command_from_tool_detail(detail: &str) -> Option<String> {
+    let argv = detail.strip_prefix("run_process argv=")?;
+    let argv = argv.split_once(" cwd=").map_or(argv, |(argv, _)| argv);
+    let argv = serde_json::from_str::<Vec<String>>(argv).ok()?;
+    (!argv.is_empty()).then(|| argv.join(" "))
 }
 
 fn focus_body_for_expanded_item(title: &str, body: &str) -> FocusPanelBody {
