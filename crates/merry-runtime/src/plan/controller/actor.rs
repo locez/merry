@@ -61,6 +61,7 @@ pub(super) enum PlanCommand {
     UpdateTool {
         input: UpdatePlanInput,
         call_id: ToolCallId,
+        persist_tool_resolution: bool,
         reply: oneshot::Sender<Result<Vec<RuntimeJournalEvent>, PlanControllerError>>,
     },
     BindSubagent {
@@ -257,7 +258,7 @@ pub(super) async fn run_controller(
             }
             PlanCommand::Update { input, reply } => {
                 let result =
-                    update_plan(&session, store.as_ref(), &events, input, None, None).await;
+                    update_plan(&session, store.as_ref(), &events, input, None, None, true).await;
                 let _ = reply.send(result);
             }
             PlanCommand::UpdateSubagent {
@@ -282,6 +283,7 @@ pub(super) async fn run_controller(
             PlanCommand::UpdateTool {
                 input,
                 call_id,
+                persist_tool_resolution,
                 reply,
             } => {
                 let result = update_plan(
@@ -291,6 +293,7 @@ pub(super) async fn run_controller(
                     input,
                     Some(call_id),
                     Some(&mut next_plan_sequence),
+                    persist_tool_resolution,
                 )
                 .await
                 .map(|committed| committed.events);

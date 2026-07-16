@@ -36,7 +36,7 @@ use std::{
     num::{NonZeroU64, NonZeroUsize},
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU64},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 use tokio::sync::{Mutex, Notify, RwLock, mpsc};
@@ -650,6 +650,9 @@ impl Runtime {
 }
 
 async fn persist_resume_safe_savepoint_if_configured(inner: &RuntimeInner) {
+    if inner.tool_batch_active.load(Ordering::Acquire) {
+        return;
+    }
     let Some(store) = inner.session_store.clone() else {
         return;
     };
@@ -707,10 +710,20 @@ struct RuntimeInner {
     plan_subagent_control: Option<PlanSubagentControl>,
     plan_subagent_scope: Option<PlanSubagentScope>,
     session_store: Option<FileSessionStore>,
+    tool_batch_active: AtomicBool,
     activity_hub: Arc<SubagentActivityHub>,
 }
 
 impl RuntimeInner {
+    fn begin_tool_batch(&self) -> ToolBatchScope<'_> {
+        debug_assert!(!self.tool_batch_active.swap(true, Ordering::AcqRel));
+        ToolBatchScope { inner: self }
+    }
+
+    fn tool_batch_active(&self) -> bool {
+        self.tool_batch_active.load(Ordering::Acquire)
+    }
+
     async fn active_subagent_plan_harness(
         &self,
     ) -> Result<PlanHarnessSnapshot, PlanControllerError> {
@@ -772,6 +785,16 @@ impl RuntimeInner {
             specs.retain(|spec| manager.is_tool_visible(spec.name()));
         }
         specs
+    }
+}
+
+struct ToolBatchScope<'a> {
+    inner: &'a RuntimeInner,
+}
+
+impl Drop for ToolBatchScope<'_> {
+    fn drop(&mut self) {
+        debug_assert!(self.inner.tool_batch_active.swap(false, Ordering::AcqRel));
     }
 }
 

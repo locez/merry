@@ -211,6 +211,7 @@ pub(super) async fn update_plan(
     input: UpdatePlanInput,
     tool_call_id: Option<ToolCallId>,
     next_plan_sequence: Option<&mut u64>,
+    persist_tool_resolution: bool,
 ) -> Result<PlanCommandResult<PlanUpdateOutput>, PlanControllerError> {
     let (base, output, prepared) = {
         let session = session.lock().await;
@@ -262,12 +263,13 @@ pub(super) async fn update_plan(
             );
             (call_id, content)
         });
-        let prepared = prepare_plan_commit(
+        let prepared = prepare_plan_commit_with_tool_persistence(
             &session,
             candidate,
             terminal_plans,
             payloads,
             tool_resolution,
+            persist_tool_resolution,
         )?;
         (base, output, prepared)
     };
@@ -739,6 +741,7 @@ pub(super) async fn report_progress(
             payloads,
             artifact_promotions,
             tool_resolution,
+            true,
         )?;
         (base, output, prepared)
     };
@@ -831,6 +834,7 @@ pub(super) async fn report_attempt(
             payloads,
             artifact_promotions,
             tool_resolution,
+            true,
         )?;
         (base, output, prepared)
     };
@@ -1009,7 +1013,7 @@ enum PreparedPlanInstall {
     },
     Tool {
         prepared: Box<PreparedPlanToolCommit>,
-        bundle: crate::session::PersistableSessionBundle,
+        bundle: Option<crate::session::PersistableSessionBundle>,
     },
 }
 
@@ -1020,6 +1024,25 @@ pub(super) fn prepare_plan_commit(
     payloads: Vec<RuntimeJournalPayload>,
     tool_resolution: Option<(ToolCallId, ArtifactContent)>,
 ) -> Result<PreparedPlanCommit, PlanControllerError> {
+    prepare_plan_commit_with_tool_persistence(
+        session,
+        candidate,
+        terminal_plans,
+        payloads,
+        tool_resolution,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_plan_commit_with_tool_persistence(
+    session: &SessionState,
+    candidate: PlanState,
+    terminal_plans: Vec<PlanSnapshot>,
+    payloads: Vec<RuntimeJournalPayload>,
+    tool_resolution: Option<(ToolCallId, ArtifactContent)>,
+    persist_tool_resolution: bool,
+) -> Result<PreparedPlanCommit, PlanControllerError> {
     prepare_plan_commit_with_artifact_promotions(
         session,
         candidate,
@@ -1027,6 +1050,7 @@ pub(super) fn prepare_plan_commit(
         payloads,
         Vec::new(),
         tool_resolution,
+        persist_tool_resolution,
     )
 }
 
@@ -1037,6 +1061,7 @@ fn prepare_plan_commit_with_artifact_promotions(
     payloads: Vec<RuntimeJournalPayload>,
     artifact_promotions: Vec<PlanArtifactPromotion>,
     tool_resolution: Option<(ToolCallId, ArtifactContent)>,
+    persist_tool_resolution: bool,
 ) -> Result<PreparedPlanCommit, PlanControllerError> {
     if let Some((call_id, content)) = tool_resolution {
         debug_assert!(artifact_promotions.is_empty());
@@ -1049,7 +1074,9 @@ fn prepare_plan_commit_with_artifact_promotions(
             content,
             None,
         )?;
-        let bundle = session.persistable_bundle_with_plan_tool_commit(&prepared)?;
+        let bundle = persist_tool_resolution
+            .then(|| session.persistable_bundle_with_plan_tool_commit(&prepared))
+            .transpose()?;
         return Ok(PreparedPlanCommit {
             install: PreparedPlanInstall::Tool {
                 prepared: Box::new(prepared),
@@ -1094,7 +1121,7 @@ pub(super) async fn persist_and_install(
             .await?
         }
         PreparedPlanInstall::Tool { prepared, bundle } => {
-            if let Some(store) = store {
+            if let (Some(store), Some(bundle)) = (store, bundle) {
                 let staged = store.stage_bundle(bundle).await?;
                 let is_current = {
                     let session = session.lock().await;

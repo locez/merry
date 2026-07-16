@@ -7,10 +7,10 @@ use crate::{
     },
 };
 use merry_core::{
-    PendingToolCall, PlanExecutorPolicy, PlanHarnessSnapshot, PlanId, PlanNodeId,
-    PlanRecoveryPolicySnapshot, SessionId, SubagentActivityPhase, SubagentActivitySnapshot,
-    SubagentId, SubagentTaskId, ToolCallArguments, ToolCallId, ToolCallResultStatus,
-    ToolInputSchema, ToolName, ToolSpec,
+    PendingToolCall, PendingToolCallBatch, PlanExecutorPolicy, PlanHarnessSnapshot, PlanId,
+    PlanNodeId, PlanRecoveryPolicySnapshot, SessionId, SubagentActivityPhase,
+    SubagentActivitySnapshot, SubagentId, SubagentTaskId, ToolCallArguments, ToolCallBatchId,
+    ToolCallId, ToolCallResultStatus, ToolInputSchema, ToolName, ToolSpec,
 };
 use schemars::Schema;
 use serde_json::json;
@@ -464,6 +464,105 @@ async fn first_update_defines_a_plan_without_a_separate_activation_call() {
     assert_eq!(
         payload["guidance"]["do_not_repeat_until_state_change"],
         true
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn mixed_plan_and_runtime_tool_batch_commits_at_batch_boundary() {
+    let temp = tempfile::tempdir().expect("session store tempdir");
+    let store = crate::FileSessionStore::new(temp.path());
+    let session = SessionId::new("plan-mixed-tool-batch").expect("valid session id");
+    let runtime = Runtime::builder(session.clone())
+        .coordinator_plan_tools()
+        .register_tool(noop_tool())
+        .session_store(store.clone())
+        .build()
+        .expect("runtime builds");
+
+    let update = UpdatePlanInput {
+        reason: "define the mixed batch plan".to_owned(),
+        execution_intent: PlanExecutionIntent::ContinuePlanning,
+        coordinator_node_id: None,
+        max_concurrency_hint: None,
+        change: PlanChangeInput::DefinePlan {
+            expected_plan_revision: 0,
+            root: PlanNodeInput {
+                id: None,
+                client_key: Some("root".to_owned()),
+                objective: "Complete the mixed tool batch".to_owned(),
+                acceptance: vec!["both tool results are durable".to_owned()],
+                status: None,
+                executor_policy: PlanExecutorPolicy::Delegate,
+                harness: PlanHarnessSnapshot::default(),
+                recovery_policy: PlanRecoveryPolicySnapshot::default(),
+                depends_on: Vec::new(),
+                children: Vec::new(),
+            },
+        },
+    };
+    let update_call = pending_call(
+        "call-mixed-plan-update",
+        "update_plan",
+        serde_json::to_value(update).expect("plan update serializes"),
+    );
+    let ordinary_call = pending_call("call-mixed-ordinary", "registered_tool", json!({}));
+    {
+        let mut session_state = runtime.inner.session.lock().await;
+        let turn_id = session_state
+            .begin_model_turn()
+            .expect("batch model turn begins");
+        session_state
+            .record_tool_call_batch_pending(
+                turn_id,
+                PendingToolCallBatch::new(
+                    ToolCallBatchId::new("mixed-tool-batch").expect("valid batch id"),
+                    vec![update_call.clone(), ordinary_call.clone()],
+                )
+                .expect("batch is valid"),
+            )
+            .expect("batch tool calls are pending");
+        session_state
+            .close_model_response(turn_id, true)
+            .expect("batch model turn closes");
+    }
+
+    let permit = runtime
+        .acquire_active_step_permit()
+        .expect("batch acquires active step permit");
+    let execution = runtime
+        .execute_tool_call_batch_with_active_permit(
+            vec![update_call, ordinary_call],
+            ToolExecutionContext::default(),
+            &permit,
+        )
+        .await;
+    let (events, error) = execution.into_parts();
+    assert!(error.is_none(), "mixed tool batch failed: {error:?}");
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event.payload,
+                merry_core::RuntimeJournalPayload::ToolCallResolved { .. }
+            ))
+            .count(),
+        2
+    );
+    assert!(runtime.pending_tool_calls().await.is_empty());
+    drop(permit);
+
+    let resumed = Runtime::builder(session)
+        .coordinator_plan_tools()
+        .resume_from_store(store)
+        .await
+        .expect("batch savepoint should resume");
+    assert!(resumed.pending_tool_calls().await.is_empty());
+    assert!(
+        resumed
+            .plan_snapshot()
+            .await
+            .expect("resumed plan snapshot reads")
+            .is_some()
     );
 }
 

@@ -42,6 +42,7 @@
                 plan_subagent_control: None,
                 plan_subagent_scope: None,
                 session_store: None,
+                tool_batch_active: AtomicBool::new(false),
                 activity_hub: Arc::new(crate::SubagentActivityHub::new()),
             }),
         }
@@ -83,6 +84,7 @@
                 plan_subagent_control: None,
                 plan_subagent_scope: None,
                 session_store: None,
+                tool_batch_active: AtomicBool::new(false),
                 activity_hub: Arc::new(crate::SubagentActivityHub::new()),
             }),
         }
@@ -128,6 +130,7 @@
                 plan_subagent_control: None,
                 plan_subagent_scope: None,
                 session_store: None,
+                tool_batch_active: AtomicBool::new(false),
                 activity_hub: Arc::new(crate::SubagentActivityHub::new()),
             }),
         }

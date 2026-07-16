@@ -208,6 +208,7 @@ impl PlanController {
         &self,
         input: UpdatePlanInput,
         call_id: ToolCallId,
+        persist_tool_resolution: bool,
     ) -> Result<Vec<RuntimeJournalEvent>, PlanControllerError> {
         self.ensure_started()?;
         let (reply, response) = oneshot::channel();
@@ -215,6 +216,7 @@ impl PlanController {
             .send(PlanCommand::UpdateTool {
                 input,
                 call_id,
+                persist_tool_resolution,
                 reply,
             })
             .await
