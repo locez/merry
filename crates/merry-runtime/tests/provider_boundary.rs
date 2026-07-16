@@ -1505,7 +1505,10 @@ async fn runtime_step_with_provider_includes_compiled_context_as_system_message(
             .contains("You are Merry, a software engineering agent")
     );
     assert_eq!(request.messages()[1].role(), ModelMessageRole::System);
-    assert_eq!(request.messages()[1].content().as_text(), expected_snapshot);
+    assert_eq!(
+        request.messages()[1].content().as_text(),
+        format!("<merry_compiled_context>\n{expected_snapshot}\n</merry_compiled_context>")
+    );
     assert_eq!(request.messages()[2].role(), ModelMessageRole::User);
     assert_eq!(
         request.messages()[2].content().as_text(),
@@ -1898,6 +1901,80 @@ async fn compiled_provider_request_stable_prefix_hash_tracks_base_instructions_a
     assert_ne!(
         first_request.stable_prefix_hash(),
         changed_tools_provider.recorded_requests()[0].stable_prefix_hash()
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn provider_request_uses_xml_boundaries_for_prompt_context_blocks() {
+    let provider = FakeModelProvider::new(vec![Ok(completed_event())]);
+    let runtime = Runtime::builder(session_id("provider-prompt-xml-boundaries"))
+        .project_rules(
+            ProjectRules::new("AGENTS.md", "Stable project rule sentinel.")
+                .expect("valid project rules"),
+        )
+        .task_anchor(TaskAnchor::new("Keep the current task scoped.").expect("valid task anchor"))
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .build()
+        .expect("runtime should build");
+
+    collect_step(&runtime, "Current user input sentinel.").await;
+    let request = provider.recorded_requests()[0].clone();
+    let stable_messages = request.stable_prefix_messages();
+
+    assert!(
+        stable_messages[0]
+            .content()
+            .as_text()
+            .starts_with("<merry_runtime_instructions>\n")
+    );
+    assert!(
+        stable_messages[0]
+            .content()
+            .as_text()
+            .ends_with("\n</merry_runtime_instructions>")
+    );
+    assert!(
+        stable_messages[1]
+            .content()
+            .as_text()
+            .starts_with("<merry_project_rules>\n")
+    );
+    assert!(
+        stable_messages[1]
+            .content()
+            .as_text()
+            .ends_with("\n</merry_project_rules>")
+    );
+
+    let dynamic_messages = request.dynamic_messages();
+    let task_anchor = dynamic_messages
+        .iter()
+        .find(|message| {
+            message
+                .content()
+                .as_text()
+                .contains("Keep the current task scoped.")
+        })
+        .expect("task anchor should be present in dynamic context");
+    assert!(
+        task_anchor
+            .content()
+            .as_text()
+            .starts_with("<merry_task_anchor>\n")
+    );
+    assert!(
+        task_anchor
+            .content()
+            .as_text()
+            .ends_with("\n</merry_task_anchor>")
+    );
+    assert_eq!(
+        dynamic_messages
+            .last()
+            .expect("current input should be present")
+            .content()
+            .as_text(),
+        "Current user input sentinel."
     );
 }
 
