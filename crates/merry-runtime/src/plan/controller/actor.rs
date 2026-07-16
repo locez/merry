@@ -257,8 +257,16 @@ pub(super) async fn run_controller(
                 let _ = reply.send(result);
             }
             PlanCommand::Update { input, reply } => {
-                let result =
-                    update_plan(&session, store.as_ref(), &events, input, None, None, true).await;
+                let result = update_plan(
+                    &session,
+                    store.as_ref(),
+                    &events,
+                    input,
+                    None,
+                    Some(&mut next_plan_sequence),
+                    true,
+                )
+                .await;
                 let _ = reply.send(result);
             }
             PlanCommand::UpdateSubagent {

@@ -561,7 +561,21 @@ fn plan_error_rejection(error: &PlanError) -> PlanToolRejection {
             ..
         } => serde_json::json!({
             "next_action": "continue_current_plan",
-            "instruction": "The Plan is already executing. Do not use update_plan with use_current_plan again. Continue ordinary work or inspect the current snapshot once with read_plan; revise only a mutable future subtree when the authored objective actually changed."
+            "instruction": "The Plan is already executing. Do not use update_plan with use_current_plan again. Continue ordinary work or inspect the current snapshot once with read_plan; revise only a mutable future subtree when the authored objective actually changed. If the user explicitly asked to start over, call update_plan with define_plan, a fresh root, and direct children; do not provide target_node_id."
+        }),
+        PlanError::WrongPhase {
+            actual: PlanPhase::Completed | PlanPhase::Cancelled,
+            ..
+        } => serde_json::json!({
+            "next_tool": "update_plan",
+            "instruction": "The previous Plan is terminal. If the user wants another run, call update_plan with define_plan, expected_plan_revision 0, a fresh root, and direct children. Do not provide target_node_id or reuse old node ids."
+        }),
+        PlanError::NodeNotMutable {
+            status: PlanNodeStatus::Verifying | PlanNodeStatus::Completed,
+            ..
+        } => serde_json::json!({
+            "next_tool": "update_plan",
+            "instruction": "This runtime-owned node is already verifying or complete. Do not retry update_plan with its target_node_id. If the user wants a fresh run, call update_plan with define_plan, a fresh root, and direct children; if a check is needed, author it as a verification child."
         }),
         PlanError::InvalidNewNodeIdentity | PlanError::InvalidExistingNodeIdentity => {
             serde_json::json!({
@@ -588,6 +602,10 @@ fn plan_error_rejection(error: &PlanError) -> PlanToolRejection {
             "actor": "coordinator",
             "next_action": "wait_or_cancel_and_create_new_assignment",
             "instruction": "This node or subtree is owned by an active linked child. Do not retry the replacement. Continue unrelated work, wait for the child to reach a terminal result, or cancel the child and create a new assignment; do not rewrite this node after cancellation because terminal link history is preserved.",
+        }),
+        PlanError::ActiveAttemptsPreventControl { .. } => serde_json::json!({
+            "next_action": "wait_for_active_work",
+            "instruction": "The runtime will not discard active attempts, leases, or linked work. Wait for the active work to reach a terminal result, then call update_plan with define_plan and a fresh root if the user still wants a fresh run.",
         }),
         PlanError::NestedPlanInput => serde_json::json!({
             "next_tool": "update_plan",
@@ -729,5 +747,22 @@ mod tests {
         assert!(instruction.contains("wait"));
         assert!(instruction.contains("cancel"));
         assert!(instruction.contains("new assignment"));
+    }
+
+    #[test]
+    fn completed_node_recovery_uses_update_plan_without_exposing_runtime_identity() {
+        let node_id = merry_core::PlanNodeId::new("plan-node-complete").expect("valid node id");
+        let rejection = plan_error_rejection(&PlanError::NodeNotMutable {
+            node_id,
+            status: PlanNodeStatus::Verifying,
+        });
+
+        assert_eq!(rejection.code, "plan_node_not_mutable");
+        assert_eq!(rejection.recovery["next_tool"], "update_plan");
+        let instruction = rejection.recovery["instruction"]
+            .as_str()
+            .expect("recovery instruction should be text");
+        assert!(instruction.contains("fresh root"));
+        assert!(instruction.contains("verification child"));
     }
 }

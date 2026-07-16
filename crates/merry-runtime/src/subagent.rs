@@ -3567,7 +3567,6 @@ mod manager_tests {
             })
             .await
             .expect("plan definition succeeds");
-
         let manager = SubagentManager::new(
             session_id,
             SubagentConfig::new(1, 1).expect("valid subagent config"),
@@ -3613,7 +3612,7 @@ mod manager_tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn linked_children_complete_each_plan_node_before_follow_up_update() {
+    async fn linked_children_complete_the_plan_without_follow_up_update() {
         let session_id = SessionId::new("subagent-plan-links").expect("valid session id");
         let session = Arc::new(tokio::sync::Mutex::new(crate::session::SessionState::new(
             session_id.clone(),
@@ -3680,6 +3679,14 @@ mod manager_tests {
             .await
             .expect("plan definition succeeds");
 
+        controller
+            .authorize_execution(
+                merry_core::PlanCapabilityEnvelopeSnapshot::default(),
+                vec!["test authorization".to_owned()],
+            )
+            .await
+            .expect("execution authorization succeeds");
+
         let manager = SubagentManager::new(
             session_id,
             SubagentConfig::new(2, 1).expect("valid subagent config"),
@@ -3734,20 +3741,7 @@ mod manager_tests {
             linked_nodes[0].links[0].binding_id,
             linked_nodes[1].links[0].binding_id
         );
-
-        let revision = snapshot.revision;
-        controller
-            .update(crate::plan::UpdatePlanInput {
-                reason: "continue after parallel linked children completed".to_owned(),
-                execution_intent: crate::plan::PlanExecutionIntent::ContinuePlanning,
-                coordinator_node_id: None,
-                max_concurrency_hint: None,
-                change: crate::plan::PlanChangeInput::UseCurrentPlan {
-                    expected_plan_revision: revision,
-                },
-            })
-            .await
-            .expect("follow-up plan update succeeds after both children complete");
+        assert_eq!(snapshot.phase, merry_core::PlanPhase::Completed);
     }
 
     #[tokio::test(flavor = "current_thread")]

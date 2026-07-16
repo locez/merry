@@ -12,7 +12,7 @@ use crate::{
         },
         protocol::{
             BeginPlanInput, BeginPlanOutput, ControlPlanAttemptInput, PlanAttemptToolOutput,
-            PlanDirectiveToolOutput, PlanProgressToolOutput, PlanUpdateOutput,
+            PlanChangeInput, PlanDirectiveToolOutput, PlanProgressToolOutput, PlanUpdateOutput,
             PlanUpdateToolOutput, ReportPlanAttemptInput, ReportPlanProgressInput,
             SubagentPlanUpdateInput, UpdatePlanInput,
         },
@@ -23,9 +23,9 @@ use crate::{
 };
 use merry_core::{
     PlanActivationSource, PlanBindingId, PlanCapabilityEnvelopeSnapshot, PlanId, PlanLeaseId,
-    PlanLinkSnapshot, PlanLinkStatus, PlanNodeId, PlanNodeStatus, PlanPhase, PlanRevisionSummary,
-    PlanSchedulerStatus, PlanSnapshot, RuntimeJournalEvent, RuntimeJournalPayload, SubagentId,
-    SubagentTaskId, ToolCallId, ToolCallResultStatus,
+    PlanLeaseStatus, PlanLinkSnapshot, PlanLinkStatus, PlanNodeId, PlanNodeStatus, PlanPhase,
+    PlanRevisionSummary, PlanSchedulerStatus, PlanSnapshot, RuntimeJournalEvent,
+    RuntimeJournalPayload, SubagentId, SubagentTaskId, ToolCallId, ToolCallResultStatus,
 };
 use std::sync::Arc;
 use tokio::sync::{Mutex, broadcast};
@@ -213,30 +213,98 @@ pub(super) async fn update_plan(
     next_plan_sequence: Option<&mut u64>,
     persist_tool_resolution: bool,
 ) -> Result<PlanCommandResult<PlanUpdateOutput>, PlanControllerError> {
-    let (base, output, prepared) = {
+    let mut next_plan_sequence = next_plan_sequence;
+    let (base, output, prepared, created_new_plan) = {
         let session = session.lock().await;
-        let (previous_phase, mut candidate) = if let Some(active) = session.active_plan() {
-            (active.snapshot().phase, active.clone())
-        } else {
-            let Some(next_plan_sequence) = next_plan_sequence else {
-                return Err(PlanControllerError::NoActivePlan);
-            };
-            let plan_id = PlanId::new(&format!("plan-{}", *next_plan_sequence))
-                .expect("runtime-generated plan id is valid");
-            *next_plan_sequence = next_plan_sequence.saturating_add(1);
-            let reason = input.reason.clone();
-            (
-                PlanPhase::Planning,
-                PlanState::empty(
+        let replacing_active = session.active_plan().is_some_and(|active| {
+            active.snapshot().root_node_id.is_some()
+                && active.snapshot().phase != PlanPhase::Planning
+        }) && matches!(&input.change, PlanChangeInput::DefinePlan { .. });
+        let (previous_phase, mut candidate, terminal_plans, mut payloads, input, created_new_plan) =
+            if replacing_active {
+                let active = session
+                    .active_plan()
+                    .expect("active plan exists when replacing it");
+                if active_plan_has_live_work(active.snapshot()) {
+                    return Err(PlanControllerError::Plan {
+                        source: PlanError::ActiveAttemptsPreventControl {
+                            operation: "replace active plan",
+                        },
+                    });
+                }
+                let resource_policy_snapshot = active.snapshot().resource_policy_snapshot.clone();
+                let mut terminal_plans = session.terminal_plans().to_vec();
+                let mut archived = active.clone();
+                let mut payloads = Vec::new();
+                if !is_terminal(archived.snapshot().phase) {
+                    let previous_phase = archived.snapshot().phase;
+                    archived.snapshot.scheduler_status = PlanSchedulerStatus::Draining;
+                    archived.advance_revision("plan archived for a new definition")?;
+                    archived.snapshot.phase = PlanPhase::Cancelled;
+                    payloads.push(plan_updated_payload(archived.snapshot()));
+                    if archived.snapshot().phase != previous_phase {
+                        payloads.push(RuntimeJournalPayload::PlanPhaseChanged {
+                            plan_id: archived.snapshot().plan_id.clone(),
+                            phase: archived.snapshot().phase,
+                        });
+                    }
+                }
+                push_bounded_terminal(&mut terminal_plans, archived.snapshot().clone());
+                let Some(sequence) = next_plan_sequence.as_deref_mut() else {
+                    return Err(PlanControllerError::NoActivePlan);
+                };
+                let plan_id = PlanId::new(&format!("plan-{}", *sequence))
+                    .expect("runtime-generated plan id is valid");
+                let candidate = PlanState::empty(
                     plan_id,
                     PlanActivationSource::Coordinator {
-                        reason,
+                        reason: input.reason.clone(),
                         governing_skill_id: None,
                     },
-                    Default::default(),
-                ),
-            )
-        };
+                    resource_policy_snapshot,
+                );
+                // The new Plan starts at revision zero. The caller's old
+                // revision is not an internal identity of the new run.
+                (
+                    PlanPhase::Planning,
+                    candidate,
+                    terminal_plans,
+                    payloads,
+                    reset_define_revision(input),
+                    true,
+                )
+            } else if let Some(active) = session.active_plan() {
+                (
+                    active.snapshot().phase,
+                    active.clone(),
+                    session.terminal_plans().to_vec(),
+                    Vec::new(),
+                    input,
+                    false,
+                )
+            } else {
+                let Some(sequence) = next_plan_sequence.as_deref_mut() else {
+                    return Err(PlanControllerError::NoActivePlan);
+                };
+                let plan_id = PlanId::new(&format!("plan-{}", *sequence))
+                    .expect("runtime-generated plan id is valid");
+                let reason = input.reason.clone();
+                (
+                    PlanPhase::Planning,
+                    PlanState::empty(
+                        plan_id,
+                        PlanActivationSource::Coordinator {
+                            reason,
+                            governing_skill_id: None,
+                        },
+                        Default::default(),
+                    ),
+                    session.terminal_plans().to_vec(),
+                    Vec::new(),
+                    input,
+                    true,
+                )
+            };
         let output = candidate.update(input)?;
         let summary = output
             .snapshot
@@ -244,17 +312,16 @@ pub(super) async fn update_plan(
             .last()
             .cloned()
             .expect("successful update records a revision summary");
-        let mut payloads = vec![RuntimeJournalPayload::PlanUpdated {
+        payloads.push(RuntimeJournalPayload::PlanUpdated {
             snapshot: output.snapshot.clone(),
             summary,
-        }];
+        });
         if output.snapshot.phase != previous_phase {
             payloads.push(RuntimeJournalPayload::PlanPhaseChanged {
                 plan_id: output.snapshot.plan_id.clone(),
                 phase: output.snapshot.phase,
             });
         }
-        let terminal_plans = session.terminal_plans().to_vec();
         let base = SessionBase::capture(&session);
         let tool_resolution = tool_call_id.map(|call_id| {
             let tool_output = PlanUpdateToolOutput::from(&output);
@@ -271,14 +338,44 @@ pub(super) async fn update_plan(
             tool_resolution,
             persist_tool_resolution,
         )?;
-        (base, output, prepared)
+        (base, output, prepared, created_new_plan)
     };
 
     let committed_events = persist_and_install(session, store, events, base, prepared).await?;
+    if created_new_plan && let Some(sequence) = next_plan_sequence {
+        *sequence = (*sequence).saturating_add(1);
+    }
     Ok(PlanCommandResult {
         output,
         events: committed_events,
     })
+}
+
+fn reset_define_revision(input: UpdatePlanInput) -> UpdatePlanInput {
+    let UpdatePlanInput {
+        reason,
+        execution_intent,
+        coordinator_node_id,
+        max_concurrency_hint,
+        change:
+            PlanChangeInput::DefinePlan {
+                root,
+                expected_plan_revision: _,
+            },
+    } = input
+    else {
+        unreachable!("only define_plan updates can create a new active plan")
+    };
+    UpdatePlanInput {
+        reason,
+        execution_intent,
+        coordinator_node_id,
+        max_concurrency_hint,
+        change: PlanChangeInput::DefinePlan {
+            expected_plan_revision: 0,
+            root,
+        },
+    }
 }
 
 pub(super) async fn update_subagent(
@@ -1299,6 +1396,22 @@ fn is_terminal(phase: PlanPhase) -> bool {
         phase,
         PlanPhase::Completed | PlanPhase::Blocked | PlanPhase::Cancelled
     )
+}
+
+fn active_plan_has_live_work(snapshot: &PlanSnapshot) -> bool {
+    snapshot
+        .attempts
+        .iter()
+        .any(|attempt| attempt.outcome.is_none())
+        || snapshot
+            .leases
+            .iter()
+            .any(|lease| lease.status == PlanLeaseStatus::Live)
+        || snapshot.nodes.iter().any(|node| {
+            node.links
+                .iter()
+                .any(|link| link.status == PlanLinkStatus::Active)
+        })
 }
 
 fn push_bounded_terminal(terminal: &mut Vec<PlanSnapshot>, snapshot: PlanSnapshot) {
