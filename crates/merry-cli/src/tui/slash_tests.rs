@@ -1,5 +1,6 @@
 use super::{
     command::PaletteCommand,
+    command_controller::run_palette_command,
     completion::{CompletionKind, CompletionSources},
     controller::{ControllerEffect, handle_key_action, handle_key_event, project_local_effect},
     input::{DraftImage, TuiSubmission},
@@ -11,7 +12,10 @@ use super::{
     theme::TuiTheme,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use merry_core::{InteractiveRunState, QueuedInputLane, QueuedInputView, RuntimeEvent};
+use merry_core::{
+    ErrorInfo, InteractiveRunState, QueuedInputLane, QueuedInputView, RuntimeEvent,
+    RuntimeEventSource, SessionId,
+};
 use ratatui::{Terminal, backend::TestBackend};
 use std::sync::Arc;
 
@@ -39,6 +43,54 @@ fn draft_image() -> DraftImage {
         3,
     )
     .expect("valid draft image")
+}
+
+fn plan_snapshot() -> merry_core::PlanSnapshot {
+    merry_core::PlanSnapshot {
+        plan_id: merry_core::PlanId::new("slash-test-plan").expect("plan id"),
+        revision: 1,
+        phase: merry_core::PlanPhase::Executing,
+        activation_source: merry_core::PlanActivationSource::User,
+        root_node_id: None,
+        coordinator_node_id: None,
+        execution_contract_fingerprint: None,
+        execution_authorization_refs: Vec::new(),
+        authorized_capability_envelope: None,
+        approval_requirements: Vec::new(),
+        nodes: Vec::new(),
+        attempts: Vec::new(),
+        leases: Vec::new(),
+        attempt_progress: Vec::new(),
+        directives: Vec::new(),
+        resource_policy_snapshot: merry_core::PlanResourcePolicySnapshot::default(),
+        max_concurrency_hint: None,
+        scheduler_status: merry_core::PlanSchedulerStatus::Active,
+        revision_summaries: Vec::new(),
+    }
+}
+
+fn assert_timeline_feedback(state: &TuiState, expected: &[&str]) {
+    for (width, height) in [(50, 20), (80, 16), (120, 24)] {
+        let rendered = render::render_to_text(state, width, height);
+        for value in expected {
+            assert!(
+                rendered.contains(value),
+                "{value:?} should render at {width}x{height}:\n{rendered}"
+            );
+        }
+    }
+}
+
+fn run_cancelled_event() -> RuntimeEvent {
+    RuntimeEvent::RunCancelled {
+        diagnostic: ErrorInfo::new("cancelled", "runtime step cancelled")
+            .expect("valid diagnostic"),
+        source: runtime_source(),
+    }
+}
+
+fn runtime_source() -> RuntimeEventSource {
+    RuntimeEventSource::new(SessionId::new("slash-stop-test").expect("session id"), 1)
 }
 
 #[test]
@@ -161,9 +213,10 @@ fn local_slash_commands_do_not_enter_user_history_or_either_runtime_lane() {
     );
     assert_eq!(help.input_text(), "");
     assert!(help.input_history_entries().is_empty());
+    assert!(help.artifact_timeline_indexes().is_empty());
     assert!(matches!(
         help.timeline().last(),
-        Some(TimelineItem::Expanded { title, body })
+        Some(TimelineItem::LocalCommand { title, body })
             if title == "Command help" && body.contains("/status")
     ));
 
@@ -175,18 +228,317 @@ fn local_slash_commands_do_not_enter_user_history_or_either_runtime_lane() {
     );
     assert!(matches!(
         status.timeline().last(),
-        Some(TimelineItem::Expanded { title, body })
+        Some(TimelineItem::LocalCommand { title, body })
             if title == "Session status"
                 && body.contains("Run: ready")
                 && body.contains("Plan: none")
                 && body.contains("Workspace: /repo")
     ));
+    assert!(status.artifact_timeline_indexes().is_empty());
     assert!(
         status
             .timeline()
             .iter()
             .all(|item| !matches!(item, TimelineItem::User { .. }))
     );
+}
+
+#[test]
+fn help_and_status_render_complete_bodies_at_supported_terminal_sizes() {
+    for (width, height) in [(50, 20), (80, 16), (80, 24), (120, 24), (120, 36)] {
+        let mut help = state();
+        help.insert_input_str("/help");
+        assert_eq!(
+            handle_key_action(KeyAction::SubmitNext, &mut help),
+            ControllerEffect::None
+        );
+        let help_text = render::render_to_text(&help, width, height);
+        for expected in [
+            "Command help",
+            "/help",
+            "/save",
+            "/status",
+            "/stop",
+            "List slash commands",
+            "Submit",
+            "Backlog",
+            "Commands",
+        ] {
+            assert!(
+                help_text.contains(expected),
+                "{expected:?} should render at {width}x{height}:\n{help_text}"
+            );
+        }
+
+        let mut status = state();
+        status.insert_input_str("/status");
+        assert_eq!(
+            handle_key_action(KeyAction::SubmitNext, &mut status),
+            ControllerEffect::None
+        );
+        let status_text = render::render_to_text(&status, width, height);
+        for expected in [
+            "Session status",
+            "Run: ready",
+            "Model: gpt-test",
+            "Usage:",
+            "Plan: none",
+            "Workspace: /repo",
+        ] {
+            assert!(
+                status_text.contains(expected),
+                "{expected:?} should render at {width}x{height}:\n{status_text}"
+            );
+        }
+    }
+}
+
+#[test]
+fn status_reports_every_runtime_state_and_the_current_plan_phase() {
+    for (run_state, expected) in [
+        (InteractiveRunState::WaitingForInput, "Run: ready"),
+        (InteractiveRunState::RunningModel, "Run: running model"),
+        (InteractiveRunState::RunningTool, "Run: running tool"),
+        (InteractiveRunState::Interrupting, "Run: interrupting"),
+        (InteractiveRunState::Closed, "Run: closed"),
+    ] {
+        let mut state = state();
+        state.plan_mut().update_snapshot(plan_snapshot());
+        state.set_run_state(run_state);
+
+        assert_eq!(
+            run_palette_command(PaletteCommand::ShowStatus, &mut state),
+            ControllerEffect::None
+        );
+        assert!(matches!(
+            state.timeline().last(),
+            Some(TimelineItem::LocalCommand { body, .. })
+                if body.contains(expected) && body.contains("Plan: executing")
+        ));
+    }
+}
+
+#[test]
+fn palette_slash_commands_reveal_feedback_from_detail_and_plan_focus() {
+    for (width, height) in [(50, 20), (80, 16), (120, 24)] {
+        for (command, run_state, effect, expected) in [
+            (
+                PaletteCommand::ShowHelp,
+                InteractiveRunState::WaitingForInput,
+                ControllerEffect::None,
+                "Commands",
+            ),
+            (
+                PaletteCommand::ShowStatus,
+                InteractiveRunState::WaitingForInput,
+                ControllerEffect::None,
+                "Workspace: /repo",
+            ),
+            (
+                PaletteCommand::Interrupt,
+                InteractiveRunState::RunningModel,
+                ControllerEffect::Interrupt,
+                "Interrupt requested",
+            ),
+            (
+                PaletteCommand::SaveSession,
+                InteractiveRunState::RunningTool,
+                ControllerEffect::None,
+                "Stop the active run",
+            ),
+        ] {
+            let mut state = state();
+            state.push_timeline_item(TimelineItem::Expanded {
+                title: "Previous artifact".to_owned(),
+                body: "old output".to_owned(),
+            });
+            state.select_previous_artifact();
+            state.plan_mut().update_snapshot(plan_snapshot());
+            assert!(state.plan_mut().open_and_focus());
+            state.set_run_state(run_state);
+
+            assert!(state.is_artifact_reviewing());
+            assert!(state.plan().is_focused());
+            assert_eq!(run_palette_command(command, &mut state), effect);
+            assert!(!state.is_artifact_reviewing());
+            assert!(state.plan().is_open());
+            assert!(!state.plan().is_focused());
+
+            let rendered = render::render_to_text(&state, width, height);
+            assert!(
+                rendered.contains(expected),
+                "{expected:?} should render for {command:?} at {width}x{height}:\n{rendered}"
+            );
+        }
+    }
+}
+
+#[test]
+fn invalid_slash_feedback_is_visible_from_plan_focus_and_remains_correctable() {
+    for (input, expected) in [
+        ("/unknown", "Unknown command"),
+        ("/help now", "Command not run"),
+    ] {
+        let mut state = state();
+        state.plan_mut().update_snapshot(plan_snapshot());
+        assert!(state.plan_mut().open_and_focus());
+        state.insert_input_str(input);
+
+        assert_eq!(
+            handle_key_action(KeyAction::SubmitNext, &mut state),
+            ControllerEffect::None
+        );
+        assert!(state.plan().is_open());
+        assert!(!state.plan().is_focused());
+        assert_eq!(state.input_text(), input);
+        assert!(render::render_to_text(&state, 80, 16).contains(expected));
+    }
+}
+
+#[test]
+fn help_remains_complete_with_the_plan_open_at_80_by_16() {
+    let mut state = state();
+    state.plan_mut().update_snapshot(plan_snapshot());
+    assert!(state.plan_mut().open_and_focus());
+
+    assert_eq!(
+        run_palette_command(PaletteCommand::ShowHelp, &mut state),
+        ControllerEffect::None
+    );
+
+    let rendered = render::render_to_text(&state, 80, 16);
+    for expected in [
+        "Command help",
+        "/help",
+        "/save",
+        "/status",
+        "/stop",
+        "Submit",
+        "Backlog",
+        "Commands",
+        "Stop",
+    ] {
+        assert!(
+            rendered.contains(expected),
+            "{expected:?} should render with Plan open at 80x16:\n{rendered}"
+        );
+    }
+    assert!(state.plan().is_open());
+    assert!(!state.plan().is_focused());
+}
+
+#[test]
+fn local_slash_input_bypasses_review_confirmation_but_provider_input_does_not() {
+    let mut timeline_review = state();
+    timeline_review.push_timeline_item(TimelineItem::User {
+        text: "earlier request".to_owned(),
+        lane: QueuedInputLane::Next,
+    });
+    timeline_review.jump_to_previous_user_input();
+    timeline_review.insert_input_str("/help");
+
+    assert_eq!(
+        handle_key_action(KeyAction::SubmitNext, &mut timeline_review),
+        ControllerEffect::None
+    );
+    assert!(!timeline_review.is_timeline_reviewing());
+    assert_eq!(timeline_review.input_text(), "");
+    assert!(matches!(
+        timeline_review.timeline().last(),
+        Some(TimelineItem::LocalCommand { title, .. }) if title == "Command help"
+    ));
+
+    let mut artifact_review = state();
+    artifact_review.push_timeline_item(TimelineItem::Expanded {
+        title: "Previous artifact".to_owned(),
+        body: "old output".to_owned(),
+    });
+    artifact_review.select_previous_artifact();
+    artifact_review.insert_input_str("/sa");
+
+    assert_eq!(
+        handle_key_event(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut artifact_review,
+        ),
+        ControllerEffect::SaveSession
+    );
+    assert!(!artifact_review.is_artifact_reviewing());
+    assert_eq!(artifact_review.input_text(), "");
+
+    let mut invalid_review = state();
+    invalid_review.push_timeline_item(TimelineItem::Expanded {
+        title: "Previous artifact".to_owned(),
+        body: "old output".to_owned(),
+    });
+    invalid_review.select_previous_artifact();
+    invalid_review.insert_input_str("/unknown");
+
+    assert_eq!(
+        handle_key_action(KeyAction::SubmitNext, &mut invalid_review),
+        ControllerEffect::None
+    );
+    assert!(!invalid_review.is_artifact_reviewing());
+    assert_eq!(invalid_review.input_text(), "/unknown");
+    assert!(matches!(
+        invalid_review.timeline().last(),
+        Some(TimelineItem::Muted { title, .. }) if title == "Unknown command"
+    ));
+
+    let mut provider_review = state();
+    provider_review.push_timeline_item(TimelineItem::Expanded {
+        title: "Previous artifact".to_owned(),
+        body: "old output".to_owned(),
+    });
+    provider_review.select_previous_artifact();
+    provider_review.insert_input_str("/tmp/file");
+
+    assert_eq!(
+        handle_key_action(KeyAction::SubmitBacklog, &mut provider_review),
+        ControllerEffect::None
+    );
+    assert!(!provider_review.is_artifact_reviewing());
+    assert_eq!(provider_review.input_text(), "/tmp/file");
+    assert_eq!(
+        handle_key_action(KeyAction::SubmitBacklog, &mut provider_review),
+        ControllerEffect::SubmitBacklog(text_submission("/tmp/file"))
+    );
+}
+
+#[test]
+fn keyboard_stop_reveals_the_same_feedback_as_slash_stop() {
+    let mut state = state();
+    state.push_timeline_item(TimelineItem::Expanded {
+        title: "Previous artifact".to_owned(),
+        body: "old output".to_owned(),
+    });
+    state.select_previous_artifact();
+    state.plan_mut().update_snapshot(plan_snapshot());
+    assert!(state.plan_mut().open_and_focus());
+    state.set_run_state(InteractiveRunState::RunningModel);
+
+    let effect = handle_key_action(KeyAction::Interrupt, &mut state);
+    assert_eq!(effect, ControllerEffect::Interrupt);
+    project_local_effect(&effect, &mut state);
+
+    assert!(!state.is_artifact_reviewing());
+    assert!(state.plan().is_open());
+    assert!(!state.plan().is_focused());
+    assert!(matches!(
+        state.timeline().last(),
+        Some(TimelineItem::LocalCommand { title, body })
+            if title == "Stopping" && body.contains("Interrupt requested")
+    ));
+
+    assert_eq!(
+        handle_key_action(KeyAction::Interrupt, &mut state),
+        ControllerEffect::None
+    );
+    assert!(matches!(
+        state.timeline().last(),
+        Some(TimelineItem::LocalCommand { title, body })
+            if title == "Stop already requested" && body.contains("cancellation boundary")
+    ));
 }
 
 #[test]
@@ -199,8 +551,9 @@ fn stop_and_save_respect_the_current_run_state() {
     );
     assert!(matches!(
         idle_stop.timeline().last(),
-        Some(TimelineItem::Muted { title, .. }) if title == "Nothing to stop"
+        Some(TimelineItem::LocalCommand { title, .. }) if title == "Nothing to stop"
     ));
+    assert_timeline_feedback(&idle_stop, &["Nothing to stop", "No model or tool run"]);
 
     let mut running_stop = state();
     running_stop.set_run_state(InteractiveRunState::RunningModel);
@@ -209,6 +562,43 @@ fn stop_and_save_respect_the_current_run_state() {
         handle_key_action(KeyAction::SubmitNext, &mut running_stop),
         ControllerEffect::Interrupt
     );
+    assert_timeline_feedback(
+        &running_stop,
+        &["Stopping", "Interrupt requested for the active run"],
+    );
+
+    let mut cancelled_stop = state();
+    cancelled_stop.set_run_state(InteractiveRunState::RunningModel);
+    cancelled_stop.insert_input_str("/stop");
+    assert_eq!(
+        handle_key_action(KeyAction::SubmitNext, &mut cancelled_stop),
+        ControllerEffect::Interrupt
+    );
+    TuiProjector::default().apply(run_cancelled_event(), &mut cancelled_stop);
+    assert!(matches!(
+        cancelled_stop.timeline().last(),
+        Some(TimelineItem::LocalCommand { title, body })
+            if title == "Run stopped" && body.contains("cancellation boundary")
+    ));
+    assert!(
+        cancelled_stop
+            .timeline()
+            .iter()
+            .all(|item| !matches!(item, TimelineItem::Diagnostic { .. }))
+    );
+    assert_timeline_feedback(
+        &cancelled_stop,
+        &["Run stopped", "The active run reached", "boundary."],
+    );
+
+    let mut unexpected_cancel = state();
+    TuiProjector::default().apply(run_cancelled_event(), &mut unexpected_cancel);
+    assert!(matches!(
+        unexpected_cancel.timeline().last(),
+        Some(TimelineItem::Diagnostic { title, body })
+            if title == "cancelled" && body == "runtime step cancelled"
+    ));
+
     running_stop.insert_input_str("/stop");
     assert_eq!(
         handle_key_action(KeyAction::SubmitNext, &mut running_stop),
@@ -216,7 +606,22 @@ fn stop_and_save_respect_the_current_run_state() {
     );
     assert!(matches!(
         running_stop.timeline().last(),
-        Some(TimelineItem::Muted { title, .. }) if title == "Stop already requested"
+        Some(TimelineItem::LocalCommand { title, .. }) if title == "Stop already requested"
+    ));
+    assert_eq!(running_stop.timeline().len(), 1);
+    assert_timeline_feedback(
+        &running_stop,
+        &[
+            "Stop already requested",
+            "Waiting for the active run",
+            "boundary.",
+        ],
+    );
+    TuiProjector::default().apply(run_cancelled_event(), &mut running_stop);
+    assert_eq!(running_stop.timeline().len(), 1);
+    assert!(matches!(
+        running_stop.timeline().last(),
+        Some(TimelineItem::LocalCommand { title, .. }) if title == "Run stopped"
     ));
 
     let mut interrupting = state();
@@ -236,8 +641,53 @@ fn stop_and_save_respect_the_current_run_state() {
     );
     assert!(matches!(
         running_save.timeline().last(),
-        Some(TimelineItem::Muted { title, .. }) if title == "Save unavailable"
+        Some(TimelineItem::LocalCommand { title, .. }) if title == "Save unavailable"
     ));
+    assert_timeline_feedback(
+        &running_save,
+        &["Save unavailable", "Stop the active run", "before saving"],
+    );
+}
+
+#[test]
+fn wrapped_command_feedback_stays_visible_at_the_bottom_of_a_full_timeline() {
+    for (command, run_state, expected) in [
+        (
+            "/stop",
+            InteractiveRunState::Interrupting,
+            "cancellation boundary.",
+        ),
+        (
+            "/save",
+            InteractiveRunState::RunningTool,
+            "before saving the session.",
+        ),
+    ] {
+        let mut state = state();
+        for index in 0..12 {
+            state.push_timeline_item(TimelineItem::User {
+                text: format!(
+                    "Earlier user message {index}: {}",
+                    "long history content ".repeat(14)
+                ),
+                lane: QueuedInputLane::Next,
+            });
+        }
+        state.set_run_state(run_state);
+        state.insert_input_str(command);
+        assert_eq!(
+            handle_key_action(KeyAction::SubmitNext, &mut state),
+            ControllerEffect::None
+        );
+
+        for (width, height) in [(50, 20), (80, 16), (120, 24)] {
+            let rendered = render::render_to_text(&state, width, height);
+            assert!(
+                rendered.contains(expected),
+                "{expected:?} should remain visible at {width}x{height}:\n{rendered}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -265,7 +715,7 @@ fn locally_accepted_input_closes_the_idle_save_window() {
     );
     assert!(matches!(
         state.timeline().last(),
-        Some(TimelineItem::Muted { title, .. }) if title == "Save unavailable"
+        Some(TimelineItem::LocalCommand { title, .. }) if title == "Save unavailable"
     ));
 
     projector.apply(

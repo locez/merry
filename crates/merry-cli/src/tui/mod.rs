@@ -63,6 +63,8 @@ mod history_tests;
 #[cfg(test)]
 mod plan_tests;
 #[cfg(test)]
+mod slash_stop_tests;
+#[cfg(test)]
 mod slash_tests;
 #[cfg(test)]
 mod tests;

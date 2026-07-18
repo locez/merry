@@ -24,7 +24,7 @@ use crate::{
 };
 use crossterm::event::{KeyCode, KeyEvent};
 use futures_util::StreamExt;
-use merry_core::{InteractiveRunState, QueuedInputLane};
+use merry_core::QueuedInputLane;
 use merry_runtime::InterruptReason;
 use ratatui::layout::{Position, Rect, Size};
 use std::{collections::BTreeSet, time::Duration};
@@ -103,18 +103,8 @@ pub(crate) enum ControllerEffect {
 
 pub(crate) fn handle_key_action(action: KeyAction, state: &mut TuiState) -> ControllerEffect {
     match action {
-        KeyAction::SubmitNext => {
-            if exit_review_if_active(state) {
-                return ControllerEffect::None;
-            }
-            submit_input(state, ControllerEffect::SubmitNext)
-        }
-        KeyAction::SubmitBacklog => {
-            if exit_review_if_active(state) {
-                return ControllerEffect::None;
-            }
-            submit_input(state, ControllerEffect::SubmitBacklog)
-        }
+        KeyAction::SubmitNext => submit_input(state, ControllerEffect::SubmitNext),
+        KeyAction::SubmitBacklog => submit_input(state, ControllerEffect::SubmitBacklog),
         KeyAction::CancelInputOrQuit => {
             if state.cancel_input_or_mark_quit() {
                 ControllerEffect::Quit
@@ -136,8 +126,13 @@ pub(crate) fn handle_key_action(action: KeyAction, state: &mut TuiState) -> Cont
             ControllerEffect::None
         }
         KeyAction::Interrupt => {
-            if state.is_active_run() {
+            if state.can_interrupt_run() {
                 ControllerEffect::Interrupt
+            } else if state.is_interrupting() {
+                state.follow_latest();
+                state.plan_mut().leave_focus();
+                state.repeat_stop_feedback();
+                ControllerEffect::None
             } else if state.is_artifact_reviewing() {
                 state.exit_artifact_review();
                 ControllerEffect::None
@@ -192,7 +187,11 @@ fn submit_input(
     submit: impl FnOnce(TuiSubmission) -> ControllerEffect,
 ) -> ControllerEffect {
     if let Some(effect) = super::command_controller::slash_input_effect(state) {
+        exit_review_if_active(state);
         return effect;
+    }
+    if exit_review_if_active(state) {
+        return ControllerEffect::None;
     }
     state
         .take_input_for_submit()
@@ -716,9 +715,9 @@ async fn dispatch_effect(
         ControllerEffect::SaveSession => {
             session.set_title(state.latest_user_input_title());
             match session.save_now().await {
-                Ok(()) => state.push_timeline_item(TimelineItem::Muted {
+                Ok(()) => state.push_timeline_item(TimelineItem::LocalCommand {
                     title: "Session saved".to_owned(),
-                    detail: session.metadata.session_id.as_str().to_owned(),
+                    body: session.metadata.session_id.as_str().to_owned(),
                 }),
                 Err(error) => {
                     tracing::warn!(error = ?error, "explicit TUI session save failed");
@@ -1292,7 +1291,11 @@ pub(super) fn project_local_effect(effect: &ControllerEffect, state: &mut TuiSta
             state.push_local_user_echo(submission.text.clone(), QueuedInputLane::Backlog);
             state.project_local_run_start();
         }
-        ControllerEffect::Interrupt => state.set_run_state(InteractiveRunState::Interrupting),
+        ControllerEffect::Interrupt => {
+            state.follow_latest();
+            state.plan_mut().leave_focus();
+            state.begin_stop_feedback();
+        }
         ControllerEffect::PersistPreferences(_)
         | ControllerEffect::ApplyRuntimePreferences(_)
         | ControllerEffect::OpenProviderManager

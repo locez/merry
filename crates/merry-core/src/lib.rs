@@ -40,8 +40,8 @@ pub use runtime_event::{
 pub use schema::ToolInputSchema;
 pub use subagent_activity::{SubagentActivityPhase, SubagentActivitySnapshot};
 pub use tool::{
-    PendingToolCall, PendingToolCallBatch, ToolCallArguments, ToolCallResult, ToolCallResultStatus,
-    ToolSpec,
+    PendingToolCall, PendingToolCallBatch, TOOL_CANCELLED_BY_USER_CODE, ToolCallArguments,
+    ToolCallResult, ToolCallResultStatus, ToolSpec,
 };
 pub use usage::{
     CompactionUsageWindow, ContextWindowSource, ModelUsage, SessionUsage, UsageContextWindow,

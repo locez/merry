@@ -6,8 +6,8 @@ use super::{
 };
 use crate::tool_display::format_tool_call_detail;
 use merry_core::{
-    PlanAttemptOutcome, PlanDirectiveStatus, PlanPhase, RuntimeEvent, ToolCallId,
-    ToolCallResultStatus, ToolName, ToolOutput,
+    PlanAttemptOutcome, PlanDirectiveStatus, PlanPhase, RuntimeEvent, TOOL_CANCELLED_BY_USER_CODE,
+    ToolCallId, ToolCallResultStatus, ToolName, ToolOutput,
 };
 use merry_runtime::SessionTranscriptItem;
 use merry_tool_workspace::WORKSPACE_PATCH_TOOL;
@@ -141,8 +141,24 @@ impl TuiProjector {
             RuntimeEvent::ToolCallFinished { result, output, .. } => {
                 let text = tool_output_text(output);
                 let tool = self.started_tools.remove(result.call_id());
+                let cancelled_by_user = result
+                    .diagnostic()
+                    .is_some_and(|diagnostic| diagnostic.code() == TOOL_CANCELLED_BY_USER_CODE);
                 let failed = result.status() == ToolCallResultStatus::Failed;
-                if failed {
+                if cancelled_by_user {
+                    let item = TimelineItem::Muted {
+                        title: tool.as_ref().map_or_else(
+                            || "Tool -> cancelled".to_owned(),
+                            |tool| completed_tool_title(tool, "cancelled"),
+                        ),
+                        detail: "cancelled by user".to_owned(),
+                    };
+                    if let Some(tool) = tool.as_ref() {
+                        state.replace_timeline_item(tool.timeline_index, item);
+                    } else {
+                        state.push_timeline_item(item);
+                    }
+                } else if failed {
                     let body = failed_tool_body(
                         result.diagnostic(),
                         tool.as_ref().map(|tool| tool.name.as_str()),
@@ -325,21 +341,24 @@ impl TuiProjector {
             }
             RuntimeEvent::RunCancelled { diagnostic, .. } => {
                 self.streaming_assistant_index = None;
-                let item = if self.compaction_timeline_index.is_some() {
-                    TimelineItem::Muted {
-                        title: "Compaction cancelled".to_owned(),
-                        detail: diagnostic.message().to_owned(),
-                    }
+                let had_compaction = if let Some(index) = self.compaction_timeline_index.take() {
+                    state.replace_timeline_item(
+                        index,
+                        TimelineItem::Muted {
+                            title: "Compaction cancelled".to_owned(),
+                            detail: diagnostic.message().to_owned(),
+                        },
+                    );
+                    true
                 } else {
-                    TimelineItem::Diagnostic {
+                    false
+                };
+                let completed_stop = state.complete_stop_feedback();
+                if !had_compaction && !completed_stop {
+                    state.push_timeline_item(TimelineItem::Diagnostic {
                         title: diagnostic.code().to_owned(),
                         body: diagnostic.message().to_owned(),
-                    }
-                };
-                if let Some(index) = self.compaction_timeline_index.take() {
-                    state.replace_timeline_item(index, item);
-                } else {
-                    state.push_timeline_item(item);
+                    });
                 }
             }
             RuntimeEvent::Closed => {
