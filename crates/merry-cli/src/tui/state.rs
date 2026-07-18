@@ -163,6 +163,10 @@ pub(crate) enum TimelineItem {
         title: String,
         detail: String,
     },
+    LocalCommand {
+        title: String,
+        body: String,
+    },
     Expanded {
         title: String,
         body: String,
@@ -201,6 +205,7 @@ pub(crate) struct TuiState {
     artifact_review_timeline_index: Option<usize>,
     pending_local_echoes: Vec<PendingLocalEcho>,
     pending_local_run_start: bool,
+    stop_feedback: StopFeedbackState,
     run_state: InteractiveRunState,
     active_run_started_at: Option<Instant>,
     last_completed_run_elapsed: Option<Duration>,
@@ -226,6 +231,16 @@ struct PendingLocalEcho {
     text: String,
     lane: QueuedInputLane,
     timeline_index: usize,
+}
+
+/// A stop request moves from idle to pending, then completes at a cancellation boundary.
+/// A new active run resets the state only when entered from an inactive boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum StopFeedbackState {
+    #[default]
+    Idle,
+    Pending(usize),
+    Completed,
 }
 
 #[allow(dead_code)]
@@ -254,6 +269,7 @@ impl TuiState {
             artifact_review_timeline_index: None,
             pending_local_echoes: Vec::new(),
             pending_local_run_start: false,
+            stop_feedback: StopFeedbackState::Idle,
             run_state: InteractiveRunState::WaitingForInput,
             active_run_started_at: None,
             last_completed_run_elapsed: None,
@@ -834,6 +850,75 @@ impl TuiState {
         }
     }
 
+    pub(crate) fn begin_stop_feedback(&mut self) {
+        self.set_run_state(InteractiveRunState::Interrupting);
+        if self.stop_feedback == StopFeedbackState::Idle {
+            self.push_pending_stop_feedback("Stopping", "Interrupt requested for the active run.");
+        }
+    }
+
+    pub(crate) fn repeat_stop_feedback(&mut self) {
+        match self.stop_feedback {
+            StopFeedbackState::Idle => self.push_pending_stop_feedback(
+                "Stop already requested",
+                "Waiting for the active run to reach a cancellation boundary.",
+            ),
+            StopFeedbackState::Pending(index) => self.replace_or_append_stop_feedback(
+                index,
+                "Stop already requested",
+                "Waiting for the active run to reach a cancellation boundary.",
+            ),
+            StopFeedbackState::Completed => {}
+        }
+    }
+
+    pub(crate) fn complete_stop_feedback(&mut self) -> bool {
+        match self.stop_feedback {
+            StopFeedbackState::Idle if !self.is_interrupting() => false,
+            StopFeedbackState::Idle => {
+                self.push_timeline_item(run_stopped_item());
+                self.stop_feedback = StopFeedbackState::Completed;
+                true
+            }
+            StopFeedbackState::Pending(index) => {
+                if index.saturating_add(1) == self.timeline.len() {
+                    self.replace_timeline_item(index, run_stopped_item());
+                } else {
+                    self.replace_timeline_item(index, stop_requested_item());
+                    self.push_timeline_item(run_stopped_item());
+                }
+                self.stop_feedback = StopFeedbackState::Completed;
+                true
+            }
+            StopFeedbackState::Completed => true,
+        }
+    }
+
+    fn push_pending_stop_feedback(&mut self, title: &str, body: &str) {
+        let index = self.timeline.len();
+        self.push_timeline_item(TimelineItem::LocalCommand {
+            title: title.to_owned(),
+            body: body.to_owned(),
+        });
+        self.stop_feedback = StopFeedbackState::Pending(index);
+    }
+
+    fn replace_or_append_stop_feedback(&mut self, index: usize, title: &str, body: &str) {
+        if index.saturating_add(1) == self.timeline.len() {
+            self.replace_timeline_item(
+                index,
+                TimelineItem::LocalCommand {
+                    title: title.to_owned(),
+                    body: body.to_owned(),
+                },
+            );
+            return;
+        }
+
+        self.replace_timeline_item(index, stop_requested_item());
+        self.push_pending_stop_feedback(title, body);
+    }
+
     pub(crate) fn timeline_scroll_offset(&self) -> usize {
         self.timeline_scroll_offset
     }
@@ -991,6 +1076,9 @@ impl TuiState {
         if state == InteractiveRunState::WaitingForInput && self.pending_local_run_start {
             return;
         }
+        if state == InteractiveRunState::WaitingForInput && self.is_interrupting() {
+            self.complete_stop_feedback();
+        }
         self.pending_local_run_start = false;
         self.set_run_state(state);
     }
@@ -999,6 +1087,7 @@ impl TuiState {
         let was_active = is_active_run_state(self.run_state);
         let is_active = is_active_run_state(state);
         if is_active && !was_active {
+            self.stop_feedback = StopFeedbackState::Idle;
             self.active_run_started_at = Some(now);
         } else if !is_active {
             if was_active && let Some(started_at) = self.active_run_started_at.take() {
@@ -1147,6 +1236,20 @@ fn is_active_run_state(state: InteractiveRunState) -> bool {
             | InteractiveRunState::RunningTool
             | InteractiveRunState::Interrupting
     )
+}
+
+fn stop_requested_item() -> TimelineItem {
+    TimelineItem::LocalCommand {
+        title: "Stop requested".to_owned(),
+        body: "The interrupt request remains active.".to_owned(),
+    }
+}
+
+fn run_stopped_item() -> TimelineItem {
+    TimelineItem::LocalCommand {
+        title: "Run stopped".to_owned(),
+        body: "The active run reached a cancellation boundary.".to_owned(),
+    }
 }
 
 fn compact_title(text: &str) -> String {

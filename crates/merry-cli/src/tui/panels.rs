@@ -97,7 +97,9 @@ fn focus_view_for_item(item: &TimelineItem) -> FocusPanelView {
             },
             tone: FocusPanelTone::Default,
         },
-        TimelineItem::User { .. } | TimelineItem::Assistant { .. } => FocusPanelView {
+        TimelineItem::LocalCommand { .. }
+        | TimelineItem::User { .. }
+        | TimelineItem::Assistant { .. } => FocusPanelView {
             title: "FOCUS".to_owned(),
             body: FocusPanelBody::Empty,
             tone: FocusPanelTone::Default,

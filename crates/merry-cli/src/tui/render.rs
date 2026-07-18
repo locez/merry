@@ -23,6 +23,8 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const QUEUE_PREVIEW_HEIGHT: u16 = 5;
 const MAX_COMPLETION_PREVIEW_HEIGHT: u16 = 6;
+// Keep prefix eviction below the viewport start when Paragraph scroll exceeds u16.
+const MAX_TIMELINE_LOGICAL_LINE_GRAPHEMES: usize = 32_768;
 const MAX_INPUT_VISIBLE_ROWS: usize = 5;
 pub(crate) const STATUS_HEIGHT: u16 = 1;
 const HEADER_HEIGHT: u16 = 1;
@@ -173,9 +175,12 @@ fn header_background_style(state: &TuiState) -> Style {
 }
 
 fn render_timeline_pane(frame: &mut Frame<'_>, state: &TuiState, region: Rect) {
+    let timeline = timeline_lines_compact(state, region);
+    let viewport = timeline_viewport(state, timeline, region);
     frame.render_widget(
-        Paragraph::new(timeline_lines_compact(state, region))
+        Paragraph::new(viewport.lines)
             .wrap(Wrap { trim: false })
+            .scroll((viewport.scroll, 0))
             .block(
                 Block::default()
                     .borders(Borders::BOTTOM)
@@ -520,17 +525,30 @@ fn desired_input_region_height(state: &TuiState, max_rows: usize) -> u16 {
         .saturating_add(2)
 }
 
-fn timeline_lines_compact(state: &TuiState, region: Rect) -> Vec<Line<'static>> {
-    let mut user_line_indexes = Vec::new();
+struct TimelineLines {
+    lines: Vec<Line<'static>>,
+    review_logical_start: Option<usize>,
+}
+
+struct TimelineViewport {
+    lines: Vec<Line<'static>>,
+    scroll: u16,
+}
+
+fn timeline_lines_compact(state: &TuiState, region: Rect) -> TimelineLines {
     let mut lines = Vec::new();
+    let mut review_logical_start = None;
     for (index, item) in state.timeline().iter().enumerate() {
-        if matches!(item, TimelineItem::User { .. }) {
-            user_line_indexes.push((index, lines.len()));
+        if state.timeline_review_user_index() == Some(index) {
+            review_logical_start = Some(lines.len());
         }
         let item_lines = match item {
             TimelineItem::User { text, lane } => user_lines(state, text, *lane),
             TimelineItem::Assistant { text } => assistant_lines(state, text, region.width),
             TimelineItem::Muted { title, detail } => muted_lines(state, title, detail),
+            TimelineItem::LocalCommand { title, body } => {
+                local_command_lines(state, title, body, region.width)
+            }
             TimelineItem::Expanded { title, body }
             | TimelineItem::ExpandedDetail { title, body, .. } => {
                 expanded_timeline_lines(state, title, body, region.width)
@@ -540,39 +558,114 @@ fn timeline_lines_compact(state: &TuiState, region: Rect) -> Vec<Line<'static>> 
             }
             TimelineItem::Patch { changes } => compact_patch_lines(state, changes),
         };
+        let item_lines = item_lines
+            .into_iter()
+            .flat_map(split_oversized_timeline_line)
+            .collect();
         lines.extend(spaced_timeline_item(
             item_lines,
             index + 1 < state.timeline().len(),
         ));
     }
-    let visible_height = usize::from(region.height).saturating_sub(1).max(1);
-    let (start, take) = timeline_viewport(state, &lines, &user_line_indexes, visible_height);
-    lines.into_iter().skip(start).take(take).collect()
+    TimelineLines {
+        lines,
+        review_logical_start,
+    }
 }
 
-fn timeline_viewport(
-    state: &TuiState,
-    lines: &[Line<'static>],
-    user_line_indexes: &[(usize, usize)],
-    visible_height: usize,
-) -> (usize, usize) {
-    if let Some(target_index) = state.timeline_review_user_index()
-        && let Some((_, start)) = user_line_indexes
-            .iter()
-            .find(|(item_index, _)| *item_index == target_index)
-    {
-        let start = (*start).min(lines.len());
-        let end = start.saturating_add(visible_height).min(lines.len());
-        return (start, end.saturating_sub(start));
+fn timeline_viewport(state: &TuiState, timeline: TimelineLines, region: Rect) -> TimelineViewport {
+    let mut scroll = timeline_scroll_start(state, &timeline, region);
+    let mut lines = timeline.lines;
+    let max_scroll = usize::from(u16::MAX);
+    if scroll > max_scroll {
+        // Paragraph scroll is u16; remove complete prefix lines in one linear pass.
+        let rows_to_drop = scroll - max_scroll;
+        let mut dropped_lines = 0;
+        let mut dropped_rows = 0;
+        for line in &lines {
+            if dropped_rows >= rows_to_drop {
+                break;
+            }
+            dropped_rows += wrapped_line_count(std::slice::from_ref(line), region.width).max(1);
+            dropped_lines += 1;
+        }
+        if dropped_lines > 0 {
+            lines.drain(..dropped_lines);
+            scroll = scroll.saturating_sub(dropped_rows);
+        }
     }
 
-    let end = lines
-        .len()
-        .saturating_sub(state.timeline_scroll_offset())
-        .max(visible_height)
-        .min(lines.len());
-    let start = end.saturating_sub(visible_height);
-    (start, end.saturating_sub(start))
+    TimelineViewport {
+        lines,
+        scroll: u16::try_from(scroll).unwrap_or(u16::MAX),
+    }
+}
+
+fn timeline_scroll_start(state: &TuiState, timeline: &TimelineLines, region: Rect) -> usize {
+    if let Some(logical_start) = timeline.review_logical_start {
+        wrapped_line_count(&timeline.lines[..logical_start], region.width)
+    } else {
+        let total = wrapped_line_count(&timeline.lines, region.width);
+        let visible = usize::from(region.height.saturating_sub(1));
+        total
+            .saturating_sub(visible)
+            .saturating_sub(state.timeline_scroll_offset())
+    }
+}
+
+fn wrapped_line_count(lines: &[Line<'static>], width: u16) -> usize {
+    Paragraph::new(lines.to_vec())
+        .wrap(Wrap { trim: false })
+        .line_count(width)
+}
+
+fn split_oversized_timeline_line(line: Line<'static>) -> Vec<Line<'static>> {
+    let byte_len = line.spans.iter().fold(0_usize, |total, span| {
+        total.saturating_add(span.content.len())
+    });
+    if byte_len <= MAX_TIMELINE_LOGICAL_LINE_GRAPHEMES {
+        return vec![line];
+    }
+
+    let Line {
+        style,
+        alignment,
+        spans,
+    } = line;
+    let mut lines = Vec::new();
+    let mut current_spans = Vec::new();
+    let mut current_graphemes = 0;
+
+    for span in spans {
+        let mut chunk = String::new();
+        for grapheme in span.styled_graphemes(Style::default()) {
+            if current_graphemes == MAX_TIMELINE_LOGICAL_LINE_GRAPHEMES {
+                if !chunk.is_empty() {
+                    current_spans.push(Span::styled(std::mem::take(&mut chunk), span.style));
+                }
+                lines.push(Line {
+                    style,
+                    alignment,
+                    spans: std::mem::take(&mut current_spans),
+                });
+                current_graphemes = 0;
+            }
+            chunk.push_str(grapheme.symbol);
+            current_graphemes += 1;
+        }
+        if !chunk.is_empty() {
+            current_spans.push(Span::styled(chunk, span.style));
+        }
+    }
+
+    if !current_spans.is_empty() || lines.is_empty() {
+        lines.push(Line {
+            style,
+            alignment,
+            spans: current_spans,
+        });
+    }
+    lines
 }
 
 fn spaced_timeline_item(mut lines: Vec<Line<'static>>, has_next_item: bool) -> Vec<Line<'static>> {
@@ -656,6 +749,29 @@ fn expanded_title_line(state: &TuiState, title: &str) -> Line<'static> {
         title.to_owned(),
         semantic_style(state, SemanticColor::Focus),
     ))
+}
+
+fn local_command_lines(
+    state: &TuiState,
+    title: &str,
+    body: &str,
+    region_width: u16,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(Span::styled(
+        title.to_owned(),
+        semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD),
+    ))];
+    let body_width = region_width.saturating_sub(2).max(1);
+    lines.extend(
+        markdown_lines(state, body, body_width)
+            .into_iter()
+            .map(|line| {
+                let mut spans = vec![Span::raw("  ")];
+                spans.extend(line.spans);
+                Line::from(spans)
+            }),
+    );
+    lines
 }
 
 fn expanded_timeline_lines(

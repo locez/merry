@@ -16,7 +16,8 @@ merry-provider-openai = { path = "../merry-provider-openai" }
 merry-runtime = { path = "../merry-runtime" }
 merry-tool-workspace = { path = "../merry-tool-workspace" }
 pulldown-cmark.workspace = true
-ratatui.workspace = true
+# Paragraph::line_count keeps wrapped timeline viewport offsets exact.
+ratatui = { workspace = true, features = ["unstable-rendered-line-info"] }
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true

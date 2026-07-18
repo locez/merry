@@ -25,6 +25,7 @@ pub(crate) fn slash_input_effect(state: &mut TuiState) -> Option<ControllerEffec
                     "/{name} is not available. Type /help, or prefix the text with a space to send it."
                 )
             };
+            prepare_timeline_feedback(state);
             state.close_completion_menu();
             state.push_timeline_item(TimelineItem::Muted {
                 title: "Unknown command".to_owned(),
@@ -34,6 +35,7 @@ pub(crate) fn slash_input_effect(state: &mut TuiState) -> Option<ControllerEffec
         }
         SlashCommandMatch::ArgumentsNotSupported(name) => {
             let detail = format!("/{name} does not accept arguments.");
+            prepare_timeline_feedback(state);
             state.close_completion_menu();
             state.push_timeline_item(TimelineItem::Muted {
                 title: "Command not run".to_owned(),
@@ -63,18 +65,18 @@ pub(crate) fn run_palette_command(
             ControllerEffect::None
         }
         PaletteCommand::ShowHelp => {
+            prepare_timeline_feedback(state);
             let body = command::slash_help_body(state.keymap());
-            state.close_overlay();
-            state.push_timeline_item(TimelineItem::Expanded {
+            state.push_timeline_item(TimelineItem::LocalCommand {
                 title: "Command help".to_owned(),
                 body,
             });
             ControllerEffect::None
         }
         PaletteCommand::ShowStatus => {
+            prepare_timeline_feedback(state);
             let body = state.command_status_body();
-            state.close_overlay();
-            state.push_timeline_item(TimelineItem::Expanded {
+            state.push_timeline_item(TimelineItem::LocalCommand {
                 title: "Session status".to_owned(),
                 body,
             });
@@ -97,25 +99,17 @@ pub(crate) fn run_palette_command(
             handle_key_action(KeyAction::ReviewPreviousUserInput, state)
         }
         PaletteCommand::Interrupt => {
-            state.close_overlay();
+            prepare_timeline_feedback(state);
             if state.can_interrupt_run() {
-                state.set_run_state(merry_core::InteractiveRunState::Interrupting);
-                state.push_timeline_item(TimelineItem::Muted {
-                    title: "Stopping".to_owned(),
-                    detail: "Interrupt requested for the active run.".to_owned(),
-                });
+                state.begin_stop_feedback();
                 ControllerEffect::Interrupt
             } else if state.is_interrupting() {
-                state.push_timeline_item(TimelineItem::Muted {
-                    title: "Stop already requested".to_owned(),
-                    detail: "Waiting for the active run to reach a cancellation boundary."
-                        .to_owned(),
-                });
+                state.repeat_stop_feedback();
                 ControllerEffect::None
             } else {
-                state.push_timeline_item(TimelineItem::Muted {
+                state.push_timeline_item(TimelineItem::LocalCommand {
                     title: "Nothing to stop".to_owned(),
-                    detail: "No model or tool run is active.".to_owned(),
+                    body: "No model or tool run is active.".to_owned(),
                 });
                 ControllerEffect::None
             }
@@ -129,11 +123,11 @@ pub(crate) fn run_palette_command(
             handle_key_action(KeyAction::DiscardSuspended, state)
         }
         PaletteCommand::SaveSession => {
-            state.close_overlay();
+            prepare_timeline_feedback(state);
             if state.is_active_run() {
-                state.push_timeline_item(TimelineItem::Muted {
+                state.push_timeline_item(TimelineItem::LocalCommand {
                     title: "Save unavailable".to_owned(),
-                    detail: "Stop the active run before saving the session.".to_owned(),
+                    body: "Stop the active run before saving the session.".to_owned(),
                 });
                 ControllerEffect::None
             } else {
@@ -153,4 +147,10 @@ pub(crate) fn run_palette_command(
             ControllerEffect::Quit
         }
     }
+}
+
+fn prepare_timeline_feedback(state: &mut TuiState) {
+    state.close_overlay();
+    state.follow_latest();
+    state.plan_mut().leave_focus();
 }

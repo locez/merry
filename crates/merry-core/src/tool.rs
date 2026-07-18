@@ -10,6 +10,9 @@ use std::collections::BTreeSet;
 
 const MAX_TOOL_DESCRIPTION_LEN: usize = 4096;
 
+/// Stable diagnostic code for a tool call cancelled by an interactive user interrupt.
+pub const TOOL_CANCELLED_BY_USER_CODE: &str = "tool_cancelled_by_user";
+
 /// JSON object arguments supplied with a pending tool call.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(transparent)]

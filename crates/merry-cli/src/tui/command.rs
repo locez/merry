@@ -233,7 +233,7 @@ pub(crate) fn slash_help_body(keymap: &Keymap) -> String {
         .into_iter()
         .filter_map(|command| {
             Some(format!(
-                "/{:<8} {}",
+                "/{}  {}",
                 command.slash_name()?,
                 command.slash_description()?
             ))

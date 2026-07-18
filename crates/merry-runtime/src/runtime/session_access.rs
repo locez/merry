@@ -8,7 +8,8 @@ use crate::{
 };
 use merry_core::{
     ArtifactId, ArtifactRef, ErrorInfo, EvidenceLocator, EvidenceRef, PendingToolCall,
-    RuntimeJournalEvent, ToolCallId, ToolCallResult, ToolCallResultStatus,
+    RuntimeJournalEvent, TOOL_CANCELLED_BY_USER_CODE, ToolCallId, ToolCallResult,
+    ToolCallResultStatus,
 };
 use std::sync::Arc;
 
@@ -137,7 +138,7 @@ impl Runtime {
         _active_permit: &ActiveStepPermit,
     ) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
         let diagnostic = ErrorInfo::new(
-            "tool_cancelled_by_user",
+            TOOL_CANCELLED_BY_USER_CODE,
             &format!("tool call {call_id} was cancelled by user interrupt"),
         )
         .expect("static diagnostic code and runtime-owned call id are valid");
