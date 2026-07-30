@@ -1,7 +1,7 @@
 use super::{PlanError, protocol::PlanNodeReferenceInput};
 use merry_core::{
     PlanCapabilityEnvelopeSnapshot, PlanHarnessSnapshot, PlanNodeId, PlanNodeSnapshot,
-    PlanNodeStatus,
+    PlanNodeStatus, PlanRecoveryPolicySnapshot, PlanSnapshot,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -17,9 +17,60 @@ pub(crate) const MAX_OBJECTIVE_BYTES: usize = 2 * 1024;
 pub(crate) const MAX_ACCEPTANCE_BYTES: usize = 1024;
 pub(crate) const MAX_REASON_BYTES: usize = 2 * 1024;
 pub(crate) const MAX_CLIENT_KEY_BYTES: usize = 128;
+pub(crate) const MAX_TRANSIENT_ATTEMPTS: u8 = 8;
+pub(crate) const MAX_DIRECTIVES_PER_ATTEMPT: usize = 32;
+pub(crate) const MAX_PAYLOAD_ITEMS: usize = 16;
+pub(crate) const MAX_PAYLOAD_TEXT_BYTES: usize = 1024;
+pub(crate) const MAX_PLAN_SNAPSHOT_BYTES: usize = 256 * 1024;
 
 pub(super) fn validate_reason(reason: &str) -> Result<(), PlanError> {
     validate_text("reason", reason, MAX_REASON_BYTES)
+}
+
+pub(super) fn validate_payload_text(field: &'static str, value: &str) -> Result<(), PlanError> {
+    validate_text(field, value, MAX_PAYLOAD_TEXT_BYTES)
+}
+
+pub(super) fn validate_payload_items(field: &'static str, actual: usize) -> Result<(), PlanError> {
+    if actual > MAX_PAYLOAD_ITEMS {
+        return Err(PlanError::TooManyPayloadItems {
+            field,
+            actual,
+            maximum: MAX_PAYLOAD_ITEMS,
+        });
+    }
+    Ok(())
+}
+
+pub(super) fn validate_recovery_policy(
+    policy: &PlanRecoveryPolicySnapshot,
+) -> Result<(), PlanError> {
+    if policy.max_transient_attempts > MAX_TRANSIENT_ATTEMPTS {
+        return Err(PlanError::TooManyTransientAttempts {
+            actual: policy.max_transient_attempts,
+            maximum: MAX_TRANSIENT_ATTEMPTS,
+        });
+    }
+    Ok(())
+}
+
+pub(super) fn validate_snapshot_limits(snapshot: &PlanSnapshot) -> Result<(), PlanError> {
+    for node in &snapshot.nodes {
+        validate_recovery_policy(&node.recovery_policy)?;
+    }
+    let actual = serde_json::to_vec(snapshot)
+        .map_err(|_| PlanError::InvalidText {
+            field: "plan_snapshot",
+            reason: "cannot be serialized",
+        })?
+        .len();
+    if actual > MAX_PLAN_SNAPSHOT_BYTES {
+        return Err(PlanError::SnapshotTooLarge {
+            actual,
+            maximum: MAX_PLAN_SNAPSHOT_BYTES,
+        });
+    }
+    Ok(())
 }
 
 pub(super) fn validate_node_text(objective: &str, acceptance: &[String]) -> Result<(), PlanError> {

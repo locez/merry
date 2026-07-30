@@ -281,7 +281,11 @@ impl Runtime {
         self.inner.plan_controller.snapshot().await
     }
 
-    /// Activates Plan Mode through the same runtime transition used by the coordinator tool.
+    /// Activates Plan Mode through the runtime PlanController API.
+    ///
+    /// The provider-facing coordinator surface is `update_plan`; this Rust
+    /// method is an internal runtime control entry point, not a registered
+    /// provider tool.
     pub async fn begin_plan(
         &self,
         input: BeginPlanInput,
@@ -313,6 +317,7 @@ impl Runtime {
     }
 
     /// Persists an attempt-scoped coordinator directive for one live subagent.
+    /// This is a runtime control API and is not provider-visible.
     pub async fn control_plan_attempt(
         &self,
         input: crate::ControlPlanAttemptInput,

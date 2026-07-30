@@ -4,7 +4,8 @@ use crate::plan::{
     UpdatePlanInput, domain::PlanState, execution::PlanAttemptActor,
 };
 use merry_core::{
-    ErrorInfo, PlanActivationSource, PlanAttemptOutcome, PlanCapabilityEnvelopeSnapshot,
+    ArtifactId, ArtifactKind, ArtifactRef, ErrorInfo, EvidenceLocator, EvidenceRef,
+    PlanActivationSource, PlanAttemptOutcome, PlanCapabilityEnvelopeSnapshot,
     PlanDirectiveConstraints, PlanDirectiveKind, PlanDirectiveStatus, PlanExecutorPolicy,
     PlanHarnessSnapshot, PlanId, PlanNodeResult, PlanNodeStatus, PlanRecoveryPolicySnapshot,
     PlanResourcePolicySnapshot, SessionId,
@@ -126,6 +127,197 @@ fn ready_set_is_deterministic_and_dependency_completion_releases_next_leaf() {
 
     assert!(report.ready_node_ids.contains(&ids["second"]));
     assert!(report.ready_node_ids.contains(&ids["third"]));
+}
+
+#[test]
+fn executor_cannot_start_multiple_active_attempts() {
+    let (mut plan, ids) =
+        executing_plan(root(vec![leaf("first", "First"), leaf("second", "Second")]));
+    let executor = actor("single-executor");
+    plan.start_attempt(&ids["first"], executor.clone(), 1_000)
+        .expect("first attempt starts");
+    let before = plan.snapshot().clone();
+
+    let error = plan
+        .start_attempt(&ids["second"], executor, 1_001)
+        .expect_err("one executor cannot own two active attempts");
+
+    assert!(matches!(
+        error,
+        crate::plan::PlanError::ActiveAttemptExistsForExecutor { .. }
+    ));
+    assert_eq!(plan.snapshot(), &before);
+    assert_eq!(plan.ready_node_ids(), vec![ids["second"].clone()]);
+}
+
+#[test]
+fn directive_payloads_enforce_text_and_active_count_bounds() {
+    let (mut plan, ids) = executing_plan(root(vec![leaf("work", "Bounded work")]));
+    let executor = actor("bounded-directive-executor");
+    let started = plan
+        .start_attempt(&ids["work"], executor, 1_000)
+        .expect("attempt starts");
+
+    let error = plan
+        .issue_directive(
+            ControlPlanAttemptInput {
+                attempt_id: started.attempt.attempt_id.clone(),
+                kind: PlanDirectiveKind::Steer,
+                reason: "bounded directive".to_owned(),
+                instruction: None,
+                constraints: None,
+                requested_output: vec![
+                    "x".repeat(crate::plan::validation::MAX_PAYLOAD_TEXT_BYTES + 1),
+                ],
+            },
+            1_001,
+        )
+        .expect_err("requested output text above 1 KiB must be rejected");
+    assert!(matches!(
+        error,
+        crate::plan::PlanError::InvalidText {
+            field: "requested_output",
+            ..
+        }
+    ));
+
+    for sequence in 0..crate::plan::validation::MAX_DIRECTIVES_PER_ATTEMPT {
+        plan.issue_directive(
+            ControlPlanAttemptInput {
+                attempt_id: started.attempt.attempt_id.clone(),
+                kind: PlanDirectiveKind::RequestStatus,
+                reason: format!("status request {sequence}"),
+                instruction: None,
+                constraints: None,
+                requested_output: Vec::new(),
+            },
+            1_002 + sequence as u64,
+        )
+        .expect("32 non-terminal directives are allowed");
+    }
+    let before = plan.snapshot().clone();
+    let error = plan
+        .issue_directive(
+            ControlPlanAttemptInput {
+                attempt_id: started.attempt.attempt_id,
+                kind: PlanDirectiveKind::RequestStatus,
+                reason: "one directive too many".to_owned(),
+                instruction: None,
+                constraints: None,
+                requested_output: Vec::new(),
+            },
+            2_000,
+        )
+        .expect_err("the 33rd non-terminal directive must be rejected");
+    assert!(matches!(
+        error,
+        crate::plan::PlanError::TooManyActiveDirectives {
+            actual: 33,
+            maximum: 32,
+            ..
+        }
+    ));
+    assert_eq!(plan.snapshot(), &before);
+}
+
+#[test]
+fn progress_payload_references_are_bounded() {
+    let (mut plan, ids) = executing_plan(root(vec![leaf("work", "Bounded evidence")]));
+    let executor = actor("bounded-progress-executor");
+    plan.start_attempt(&ids["work"], executor.clone(), 1_000)
+        .expect("attempt starts");
+    let artifact_id = ArtifactId::new("artifact-progress-bound").expect("valid artifact id");
+    let evidence = EvidenceRef::new(artifact_id.clone(), EvidenceLocator::whole_artifact());
+    let artifact = ArtifactRef::new(artifact_id, ArtifactKind::Text);
+
+    let error = plan
+        .report_progress(
+            &executor,
+            ReportPlanProgressInput {
+                summary: "too many evidence refs".to_owned(),
+                evidence_refs: vec![evidence; crate::plan::validation::MAX_PAYLOAD_ITEMS + 1],
+                artifact_refs: Vec::new(),
+                next_action: None,
+                checkpoint_ref: None,
+                acknowledged_directive_ids: Vec::new(),
+                applied_directive_ids: Vec::new(),
+                request_coordinator_review: None,
+            },
+            1_001,
+        )
+        .expect_err("progress evidence refs must be bounded");
+    assert!(matches!(
+        error,
+        crate::plan::PlanError::TooManyPayloadItems {
+            field: "evidence_refs",
+            actual: 17,
+            maximum: 16
+        }
+    ));
+
+    let error = plan
+        .report_progress(
+            &executor,
+            ReportPlanProgressInput {
+                summary: "too many artifact refs".to_owned(),
+                evidence_refs: Vec::new(),
+                artifact_refs: vec![artifact; crate::plan::validation::MAX_PAYLOAD_ITEMS + 1],
+                next_action: None,
+                checkpoint_ref: None,
+                acknowledged_directive_ids: Vec::new(),
+                applied_directive_ids: Vec::new(),
+                request_coordinator_review: None,
+            },
+            1_002,
+        )
+        .expect_err("progress artifact refs must be bounded");
+    assert!(matches!(
+        error,
+        crate::plan::PlanError::TooManyPayloadItems {
+            field: "artifact_refs",
+            actual: 17,
+            maximum: 16
+        }
+    ));
+}
+
+#[test]
+fn serialized_plan_snapshot_size_is_bounded_before_attempt_install() {
+    let (mut plan, ids) = executing_plan(root(vec![leaf("work", "Oversized result")]));
+    let executor = actor("oversized-result-executor");
+    plan.start_attempt(&ids["work"], executor.clone(), 1_000)
+        .expect("attempt starts");
+    let before = plan.snapshot().clone();
+
+    let error = plan
+        .report_attempt(
+            &executor,
+            ReportPlanAttemptInput {
+                outcome: PlanAttemptOutcome::Completed,
+                result: Some(PlanNodeResult {
+                    conclusion: "x".repeat(crate::plan::validation::MAX_PLAN_SNAPSHOT_BYTES),
+                    evidence_refs: Vec::new(),
+                    artifact_refs: Vec::new(),
+                    changed_paths: Vec::new(),
+                    verification: Vec::new(),
+                    open_questions: Vec::new(),
+                }),
+                diagnostic: None,
+                decomposition: None,
+                acknowledged_directive_ids: Vec::new(),
+                applied_directive_ids: Vec::new(),
+            },
+            1_001,
+        )
+        .expect_err("oversized snapshots must not be installed");
+    assert!(matches!(
+        error,
+        crate::plan::PlanError::SnapshotTooLarge {
+            maximum: crate::plan::validation::MAX_PLAN_SNAPSHOT_BYTES,
+            ..
+        }
+    ));
+    assert_eq!(plan.snapshot(), &before);
 }
 
 #[test]

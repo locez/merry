@@ -293,9 +293,13 @@ impl SessionState {
         )
         .map_err(runtime_error_to_invalid_document)?;
         if let Some(active_plan) = view.active_plan {
+            crate::plan::validate_snapshot_limits(active_plan.snapshot())
+                .map_err(|_| invalid_document("active plan snapshot exceeds runtime limits"))?;
             validate_plan_snapshot_refs(view.artifacts, active_plan.snapshot())?;
         }
         for terminal in view.terminal_plans {
+            crate::plan::validate_snapshot_limits(terminal)
+                .map_err(|_| invalid_document("terminal plan snapshot exceeds runtime limits"))?;
             validate_plan_snapshot_refs(view.artifacts, terminal)?;
         }
 
@@ -477,6 +481,8 @@ impl SessionState {
             validate_plan_snapshot_refs(&session.artifacts, active_plan.snapshot())?;
         }
         for terminal in &session.terminal_plans {
+            crate::plan::validate_snapshot_limits(terminal)
+                .map_err(|_| invalid_document("terminal plan snapshot exceeds runtime limits"))?;
             validate_plan_snapshot_refs(&session.artifacts, terminal)?;
         }
         Ok(session)

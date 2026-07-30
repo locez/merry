@@ -3,12 +3,16 @@ use crate::{
     ContextCompiler, ContextEntry, ContextEvidence, ContextSummary, FileSessionStore, ProjectRules,
     SkillCatalog, TaskAnchor, UserImageInput, UserMessageInput,
     artifact::ArtifactContent,
-    plan::{PlanChangeInput, PlanExecutionIntent, PlanNodeInput, PlanState, UpdatePlanInput},
+    plan::{
+        ControlPlanAttemptInput, PlanChangeInput, PlanExecutionIntent, PlanNodeInput, PlanState,
+        ReportPlanProgressInput, UpdatePlanInput, execution::PlanAttemptActor,
+    },
     session::PromptHistoryProjection,
 };
 use merry_core::{
     ArtifactKind, ArtifactRef, EvidenceLocator, EvidenceRef, PlanActivationSource,
-    PlanExecutorPolicy, PlanHarnessSnapshot, PlanId, PlanRecoveryPolicySnapshot,
+    PlanAttemptOutcome, PlanDirectiveConstraints, PlanDirectiveKind, PlanExecutorPolicy,
+    PlanHarnessSnapshot, PlanId, PlanNodeStatus, PlanRecoveryPolicySnapshot,
     PlanResourcePolicySnapshot, ToolCallResult, ToolCallResultStatus,
 };
 use std::sync::Arc;
@@ -1242,4 +1246,206 @@ async fn session_state_round_trip_preserves_active_plan_snapshot() {
         &expected
     );
     assert!(loaded.terminal_plans().is_empty());
+}
+
+#[tokio::test]
+async fn session_state_round_trip_preserves_plan_attempt_lease_directive_recovery_and_history() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = FileSessionStore::new(temp.path());
+    let mut plan = PlanState::empty(
+        PlanId::new("complex-persisted-plan").expect("valid plan id"),
+        PlanActivationSource::Coordinator {
+            reason: "persist execution state".to_owned(),
+            governing_skill_id: None,
+        },
+        PlanResourcePolicySnapshot::default(),
+    );
+    let update = plan
+        .update(UpdatePlanInput {
+            reason: "define a plan with live and recoverable work".to_owned(),
+            execution_intent: PlanExecutionIntent::ContinuePlanning,
+            coordinator_node_id: None,
+            max_concurrency_hint: Some(2),
+            change: PlanChangeInput::DefinePlan {
+                expected_plan_revision: 0,
+                root: PlanNodeInput {
+                    id: None,
+                    client_key: Some("root".to_owned()),
+                    objective: "Persist all execution records".to_owned(),
+                    acceptance: vec!["records survive reload".to_owned()],
+                    status: None,
+                    executor_policy: PlanExecutorPolicy::Local,
+                    harness: PlanHarnessSnapshot::default(),
+                    recovery_policy: PlanRecoveryPolicySnapshot::default(),
+                    depends_on: Vec::new(),
+                    children: vec![
+                        persisted_plan_leaf("live-initial", "Keep live work"),
+                        persisted_plan_leaf("expired-initial", "Recover expired work"),
+                        persisted_plan_leaf("obsolete", "Obsolete work"),
+                    ],
+                },
+            },
+        })
+        .expect("complex plan definition succeeds");
+    let _initial_update = update;
+    plan.update(UpdatePlanInput {
+        reason: "supersede the obsolete authored history".to_owned(),
+        execution_intent: PlanExecutionIntent::ContinuePlanning,
+        coordinator_node_id: None,
+        max_concurrency_hint: Some(2),
+        change: PlanChangeInput::DefinePlan {
+            expected_plan_revision: plan.snapshot().revision,
+            root: PlanNodeInput {
+                id: None,
+                client_key: Some("root-current".to_owned()),
+                objective: "Persist all current execution records".to_owned(),
+                acceptance: vec!["current records survive reload".to_owned()],
+                status: None,
+                executor_policy: PlanExecutorPolicy::Local,
+                harness: PlanHarnessSnapshot::default(),
+                recovery_policy: PlanRecoveryPolicySnapshot::default(),
+                depends_on: Vec::new(),
+                children: vec![
+                    persisted_plan_leaf("live-current", "Keep live work"),
+                    persisted_plan_leaf("expired-current", "Recover expired work"),
+                ],
+            },
+        },
+    })
+    .expect("subtree replacement succeeds");
+    plan.enter_execution(
+        Default::default(),
+        vec!["persist test authorization".to_owned()],
+    )
+    .expect("execution starts");
+
+    let live_node_id = persisted_plan_node_id(&plan, "live-current");
+    let expired_node_id = persisted_plan_node_id(&plan, "expired-current");
+    let live_actor = PlanAttemptActor {
+        executor_session_id: session_id_with_suffix("persist-live-executor"),
+    };
+    let live = plan
+        .start_attempt(&live_node_id, live_actor.clone(), 10_000)
+        .expect("live attempt starts");
+    let live_directive = plan
+        .issue_directive(
+            ControlPlanAttemptInput {
+                attempt_id: live.attempt.attempt_id.clone(),
+                kind: PlanDirectiveKind::Steer,
+                reason: "persist this live directive".to_owned(),
+                instruction: Some("keep the current verification path".to_owned()),
+                constraints: Some(PlanDirectiveConstraints::default()),
+                requested_output: vec!["current checkpoint".to_owned()],
+            },
+            10_100,
+        )
+        .expect("live directive queues");
+    plan.report_progress(
+        &live_actor,
+        ReportPlanProgressInput {
+            summary: "live progress is durable".to_owned(),
+            evidence_refs: Vec::new(),
+            artifact_refs: Vec::new(),
+            next_action: Some("continue verification".to_owned()),
+            checkpoint_ref: Some("persisted-checkpoint".to_owned()),
+            acknowledged_directive_ids: vec![live_directive.directive.directive_id],
+            applied_directive_ids: Vec::new(),
+            request_coordinator_review: Some(true),
+        },
+        10_200,
+    )
+    .expect("live progress records");
+
+    let expired_actor = PlanAttemptActor {
+        executor_session_id: session_id_with_suffix("persist-expired-executor"),
+    };
+    let expired = plan
+        .start_attempt(&expired_node_id, expired_actor, 2_000)
+        .expect("recoverable attempt starts");
+    plan.issue_directive(
+        ControlPlanAttemptInput {
+            attempt_id: expired.attempt.attempt_id,
+            kind: PlanDirectiveKind::RequestStatus,
+            reason: "persist this expiring directive".to_owned(),
+            instruction: None,
+            constraints: None,
+            requested_output: Vec::new(),
+        },
+        2_100,
+    )
+    .expect("expiring directive queues");
+    plan.interrupt_expired_leases(expired.lease.lease_expires_at_ms)
+        .expect("expired lease is interrupted");
+
+    let expected = plan.snapshot().clone();
+    assert!(
+        expected
+            .attempts
+            .iter()
+            .any(|attempt| attempt.outcome.is_none())
+    );
+    assert!(
+        expected
+            .attempts
+            .iter()
+            .any(|attempt| attempt.outcome == Some(PlanAttemptOutcome::Interrupted))
+    );
+    assert!(
+        expected
+            .nodes
+            .iter()
+            .any(|node| node.status == PlanNodeStatus::Superseded)
+    );
+    assert!(
+        expected
+            .directives
+            .iter()
+            .any(|directive| directive.status == merry_core::PlanDirectiveStatus::Acknowledged)
+    );
+    assert!(
+        expected
+            .directives
+            .iter()
+            .any(|directive| directive.status == merry_core::PlanDirectiveStatus::Expired)
+    );
+
+    let mut session = SessionState::new(session_id());
+    session.set_active_plan(plan);
+    session.save_to(&store).await.expect("complex plan saves");
+    let loaded = SessionState::load_from(&store, &session_id())
+        .await
+        .expect("complex plan loads");
+
+    assert_eq!(
+        loaded.active_plan().expect("active plan").snapshot(),
+        &expected
+    );
+}
+
+fn persisted_plan_leaf(client_key: &str, objective: &str) -> PlanNodeInput {
+    PlanNodeInput {
+        id: None,
+        client_key: Some(client_key.to_owned()),
+        objective: objective.to_owned(),
+        acceptance: vec![format!("{objective} is verified")],
+        status: None,
+        executor_policy: PlanExecutorPolicy::Delegate,
+        harness: PlanHarnessSnapshot::default(),
+        recovery_policy: PlanRecoveryPolicySnapshot::default(),
+        depends_on: Vec::new(),
+        children: Vec::new(),
+    }
+}
+
+fn session_id_with_suffix(value: &str) -> merry_core::SessionId {
+    merry_core::SessionId::new(value).expect("valid executor session id")
+}
+
+fn persisted_plan_node_id(plan: &PlanState, client_key: &str) -> merry_core::PlanNodeId {
+    plan.snapshot()
+        .nodes
+        .iter()
+        .find(|node| node.client_key.as_deref() == Some(client_key))
+        .map(|node| node.id.clone())
+        .expect("client key remains in snapshot")
 }

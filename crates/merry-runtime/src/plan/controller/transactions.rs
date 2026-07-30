@@ -1160,6 +1160,10 @@ fn prepare_plan_commit_with_artifact_promotions(
     tool_resolution: Option<(ToolCallId, ArtifactContent)>,
     persist_tool_resolution: bool,
 ) -> Result<PreparedPlanCommit, PlanControllerError> {
+    validation::validate_snapshot_limits(candidate.snapshot())?;
+    for terminal in &terminal_plans {
+        validation::validate_snapshot_limits(terminal)?;
+    }
     if let Some((call_id, content)) = tool_resolution {
         debug_assert!(artifact_promotions.is_empty());
         let prepared = session.prepare_plan_tool_commit(
