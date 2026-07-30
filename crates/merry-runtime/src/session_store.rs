@@ -2,12 +2,35 @@ use merry_core::{ArtifactId, SessionId};
 use std::{
     env,
     ffi::OsStr,
+    fmt,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 use thiserror::Error;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
+
+/// Identifies which persisted Plan snapshot failed document validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanPersistenceLocation {
+    Active,
+    Terminal { index: usize },
+    OverlayActive,
+    OverlayTerminal { index: usize },
+}
+
+impl fmt::Display for PlanPersistenceLocation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Active => formatter.write_str("active plan"),
+            Self::Terminal { index } => write!(formatter, "terminal plan {index}"),
+            Self::OverlayActive => formatter.write_str("plan overlay active plan"),
+            Self::OverlayTerminal { index } => {
+                write!(formatter, "plan overlay terminal plan {index}")
+            }
+        }
+    }
+}
 
 const TEMP_FILE_CREATE_ATTEMPTS: u32 = 1_024;
 const TEMP_FILE_PREFIX: &str = ".state.json.tmp-";
@@ -61,6 +84,26 @@ pub enum SessionStoreError {
     },
     #[error("session document is invalid: {reason}")]
     InvalidDocument { reason: &'static str },
+    #[error("persisted plan at {location} is invalid: {source}")]
+    InvalidPlan {
+        location: PlanPersistenceLocation,
+        #[source]
+        source: crate::PlanError,
+    },
+}
+
+pub(crate) fn invalid_plan(
+    location: PlanPersistenceLocation,
+    source: crate::PlanError,
+) -> SessionStoreError {
+    SessionStoreError::InvalidPlan { location, source }
+}
+
+pub(crate) fn validate_plan_snapshot(
+    snapshot: &merry_core::PlanSnapshot,
+    location: PlanPersistenceLocation,
+) -> Result<(), SessionStoreError> {
+    crate::plan::validate_snapshot_limits(snapshot).map_err(|source| invalid_plan(location, source))
 }
 
 /// File-backed session state storage with atomic replacement per write.

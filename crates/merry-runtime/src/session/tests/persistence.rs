@@ -1,7 +1,8 @@
 use super::*;
 use crate::{
-    ContextCompiler, ContextEntry, ContextEvidence, ContextSummary, FileSessionStore, ProjectRules,
-    SkillCatalog, TaskAnchor, UserImageInput, UserMessageInput,
+    ContextCompiler, ContextEntry, ContextEvidence, ContextSummary, FileSessionStore, PlanError,
+    PlanPersistenceLocation, ProjectRules, SkillCatalog, TaskAnchor, UserImageInput,
+    UserMessageInput,
     artifact::ArtifactContent,
     plan::{
         ControlPlanAttemptInput, PlanChangeInput, PlanExecutionIntent, PlanNodeInput, PlanState,
@@ -1246,6 +1247,89 @@ async fn session_state_round_trip_preserves_active_plan_snapshot() {
         &expected
     );
     assert!(loaded.terminal_plans().is_empty());
+}
+
+#[tokio::test]
+async fn session_load_preserves_typed_plan_validation_error_context() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = FileSessionStore::new(temp.path());
+    let mut session = SessionState::new(session_id());
+    session.set_active_plan(persisted_test_plan());
+    session.save_to(&store).await.expect("plan session saves");
+
+    let mut document: serde_json::Value = serde_json::from_slice(
+        &store
+            .read_state_bytes(&session_id())
+            .await
+            .expect("state reads"),
+    )
+    .expect("state is JSON");
+    document["active_plan"]["snapshot"]["nodes"][0]["recovery_policy"]["max_transient_attempts"] =
+        serde_json::json!(9);
+    store
+        .write_state_bytes(
+            &session_id(),
+            &serde_json::to_vec_pretty(&document).expect("corrupt state serializes"),
+        )
+        .await
+        .expect("corrupt state writes");
+
+    let error = SessionState::load_from(&store, &session_id())
+        .await
+        .expect_err("invalid persisted retry policy must reject load");
+    let message = error.to_string();
+    assert!(matches!(
+        error,
+        crate::SessionStoreError::InvalidPlan {
+            location: PlanPersistenceLocation::Active,
+            source: PlanError::TooManyTransientAttempts {
+                actual: 9,
+                maximum: 8
+            }
+        }
+    ));
+    assert!(message.contains("active plan"));
+    assert!(message.contains("9"));
+}
+
+#[tokio::test]
+async fn session_load_preserves_oversized_plan_snapshot_error_context() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = FileSessionStore::new(temp.path());
+    let mut session = SessionState::new(session_id());
+    session.set_active_plan(persisted_test_plan());
+    session.save_to(&store).await.expect("plan session saves");
+
+    let mut document: serde_json::Value = serde_json::from_slice(
+        &store
+            .read_state_bytes(&session_id())
+            .await
+            .expect("state reads"),
+    )
+    .expect("state is JSON");
+    document["active_plan"]["snapshot"]["execution_authorization_refs"] =
+        serde_json::to_value(vec!["x".repeat(1024); 300]).expect("refs serialize");
+    store
+        .write_state_bytes(
+            &session_id(),
+            &serde_json::to_vec_pretty(&document).expect("corrupt state serializes"),
+        )
+        .await
+        .expect("corrupt state writes");
+
+    let error = SessionState::load_from(&store, &session_id())
+        .await
+        .expect_err("oversized persisted snapshot must reject load");
+    match error {
+        crate::SessionStoreError::InvalidPlan {
+            location: PlanPersistenceLocation::Active,
+            source: PlanError::SnapshotTooLarge { actual, maximum },
+        } => {
+            assert!(actual > maximum);
+            assert_eq!(maximum, 256 * 1024);
+        }
+        other => panic!("unexpected persisted plan error: {other:?}"),
+    }
 }
 
 #[tokio::test]

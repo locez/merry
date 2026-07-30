@@ -144,7 +144,7 @@ pub use profile::{
 };
 pub use runtime::{AutomaticCompactionConfig, Runtime, RuntimeBuilder};
 pub use session_projection::SessionTranscriptItem;
-pub use session_store::{FileSessionStore, SessionStoreError};
+pub use session_store::{FileSessionStore, PlanPersistenceLocation, SessionStoreError};
 pub use skill::{SkillCatalog, SkillError, SkillLoadWarning, SkillMetadata};
 pub use step::StepContext;
 pub use subagent::{

@@ -9,7 +9,8 @@ use super::{
     },
 };
 use crate::{
-    FileSessionStore, RuntimeError, SessionStoreError, UserImageInput, UserMessageInput,
+    FileSessionStore, PlanPersistenceLocation, RuntimeError, SessionStoreError, UserImageInput,
+    UserMessageInput,
     action_audit::{ActionAuditRegistry, PersistedActionAuditRegistry},
     artifact::{ArtifactContent, ArtifactRegistry, PersistedArtifactRecord},
     checkpoint::{CheckpointRef, CheckpointRefId, CheckpointSequenceRange, CheckpointSourceKind},
@@ -293,13 +294,17 @@ impl SessionState {
         )
         .map_err(runtime_error_to_invalid_document)?;
         if let Some(active_plan) = view.active_plan {
-            crate::plan::validate_snapshot_limits(active_plan.snapshot())
-                .map_err(|_| invalid_document("active plan snapshot exceeds runtime limits"))?;
+            crate::session_store::validate_plan_snapshot(
+                active_plan.snapshot(),
+                PlanPersistenceLocation::Active,
+            )?;
             validate_plan_snapshot_refs(view.artifacts, active_plan.snapshot())?;
         }
-        for terminal in view.terminal_plans {
-            crate::plan::validate_snapshot_limits(terminal)
-                .map_err(|_| invalid_document("terminal plan snapshot exceeds runtime limits"))?;
+        for (index, terminal) in view.terminal_plans.iter().enumerate() {
+            crate::session_store::validate_plan_snapshot(
+                terminal,
+                PlanPersistenceLocation::Terminal { index },
+            )?;
             validate_plan_snapshot_refs(view.artifacts, terminal)?;
         }
 
@@ -407,9 +412,12 @@ impl SessionState {
 
         let active_plan = document
             .active_plan
-            .map(PlanState::from_persisted)
-            .transpose()
-            .map_err(|_| invalid_document("stored active plan is invalid"))?;
+            .map(|persisted| {
+                PlanState::from_persisted(persisted).map_err(|source| {
+                    crate::session_store::invalid_plan(PlanPersistenceLocation::Active, source)
+                })
+            })
+            .transpose()?;
         let artifacts = document
             .artifacts
             .into_iter()
@@ -480,9 +488,11 @@ impl SessionState {
         if let Some(active_plan) = session.active_plan.as_ref() {
             validate_plan_snapshot_refs(&session.artifacts, active_plan.snapshot())?;
         }
-        for terminal in &session.terminal_plans {
-            crate::plan::validate_snapshot_limits(terminal)
-                .map_err(|_| invalid_document("terminal plan snapshot exceeds runtime limits"))?;
+        for (index, terminal) in session.terminal_plans.iter().enumerate() {
+            crate::session_store::validate_plan_snapshot(
+                terminal,
+                PlanPersistenceLocation::Terminal { index },
+            )?;
             validate_plan_snapshot_refs(&session.artifacts, terminal)?;
         }
         Ok(session)
