@@ -94,6 +94,22 @@ pub enum PlanError {
     TooManyDependencies { actual: usize, maximum: usize },
     #[error("node has {actual} acceptance items, maximum is {maximum}")]
     TooManyAcceptanceItems { actual: usize, maximum: usize },
+    #[error("{field} has {actual} items, maximum is {maximum}")]
+    TooManyPayloadItems {
+        field: &'static str,
+        actual: usize,
+        maximum: usize,
+    },
+    #[error("node recovery policy allows {actual} transient attempts, maximum is {maximum}")]
+    TooManyTransientAttempts { actual: u8, maximum: u8 },
+    #[error("attempt {attempt_id} has {actual} non-terminal directives, maximum is {maximum}")]
+    TooManyActiveDirectives {
+        attempt_id: merry_core::PlanAttemptId,
+        actual: usize,
+        maximum: usize,
+    },
+    #[error("serialized plan snapshot is {actual} bytes, maximum is {maximum}")]
+    SnapshotTooLarge { actual: usize, maximum: usize },
     #[error("duplicate sibling order {sibling_order} below parent {parent_id:?}")]
     DuplicateSiblingOrder {
         parent_id: Option<PlanNodeId>,
@@ -144,6 +160,10 @@ pub enum PlanError {
     },
     #[error("executor session {executor_session_id} has no active plan attempt")]
     NoActiveAttemptForExecutor {
+        executor_session_id: merry_core::SessionId,
+    },
+    #[error("executor session {executor_session_id} already has an active plan attempt")]
+    ActiveAttemptExistsForExecutor {
         executor_session_id: merry_core::SessionId,
     },
     #[error("executor session {executor_session_id} has multiple active plan attempts")]
@@ -377,6 +397,7 @@ impl PlanState {
         {
             return Err(PlanError::InvalidPersistedCounters);
         }
+        validation::validate_snapshot_limits(&persisted.snapshot)?;
         match persisted.snapshot.root_node_id.as_ref() {
             Some(root_id) => {
                 let nodes = persisted
@@ -463,6 +484,7 @@ impl PlanState {
         if candidate.snapshot.revision_summaries.len() > 32 {
             candidate.snapshot.revision_summaries.remove(0);
         }
+        validation::validate_snapshot_limits(&candidate.snapshot)?;
         *self = candidate;
         Ok(PlanUpdateOutput {
             snapshot: self.snapshot.clone(),
@@ -509,6 +531,7 @@ impl PlanState {
         if candidate.snapshot.revision_summaries.len() > 32 {
             candidate.snapshot.revision_summaries.remove(0);
         }
+        validation::validate_snapshot_limits(&candidate.snapshot)?;
         *self = candidate;
         Ok(PlanUpdateOutput {
             snapshot: self.snapshot.clone(),
@@ -1213,6 +1236,7 @@ impl<'a> TreeBuilder<'a> {
                 maximum: validation::MAX_DIRECT_CHILDREN,
             });
         }
+        validation::validate_recovery_policy(&input.recovery_policy)?;
         if input
             .children
             .iter()

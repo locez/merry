@@ -2,16 +2,17 @@ use crate::{
     FileSessionStore,
     plan::{
         BeginPlanInput, PlanChangeInput, PlanController, PlanControllerError, PlanError,
-        PlanExecutionIntent, PlanNodeInput, ReportPlanAttemptInput, UpdatePlanInput,
+        PlanExecutionIntent, PlanNodeInput, PlanState, ReportPlanAttemptInput, UpdatePlanInput,
         controller::PlanControllerEventReceiver, execution::PlanAttemptActor,
     },
     session::SessionState,
     session_store::{SessionStoreCommitPause, SessionStoreStagePause},
 };
 use merry_core::{
-    PlanAttemptOutcome, PlanCapabilityEnvelopeSnapshot, PlanExecutorPolicy, PlanHarnessSnapshot,
-    PlanLinkStatus, PlanNodeResult, PlanNodeStatus, PlanPhase, PlanRecoveryPolicySnapshot,
-    RuntimeJournalPayload, SessionId, SubagentId, SubagentTaskId,
+    PlanActivationSource, PlanAttemptOutcome, PlanCapabilityEnvelopeSnapshot, PlanExecutorPolicy,
+    PlanHarnessSnapshot, PlanId, PlanLinkStatus, PlanNodeId, PlanNodeResult, PlanNodeStatus,
+    PlanPhase, PlanRecoveryPolicySnapshot, PlanResourcePolicySnapshot, RuntimeJournalPayload,
+    SessionId, SubagentId, SubagentTaskId,
 };
 use std::{num::NonZeroUsize, sync::Arc};
 use tokio::sync::Mutex;
@@ -703,6 +704,40 @@ async fn plan_event_waits_for_directory_durability() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn attempt_event_waits_for_plan_overlay_durability() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let pause = SessionStoreCommitPause::new();
+    let store = FileSessionStore::new(temp.path()).with_commit_pause_for_tests(pause.clone());
+    let session = Arc::new(Mutex::new(SessionState::new(session_id())));
+    let (plan, node_id) = executing_plan_for_durability();
+    session.lock().await.set_active_plan(plan);
+    let (controller, mut events) = PlanController::start(
+        Arc::clone(&session),
+        Some(store),
+        NonZeroUsize::new(16).expect("non-zero buffer"),
+    );
+    let actor = PlanAttemptActor {
+        executor_session_id: SessionId::new("durability-executor").expect("valid session id"),
+    };
+    let task = tokio::spawn({
+        let controller = controller.clone();
+        async move { controller.start_attempt(node_id, actor, 1_000).await }
+    });
+
+    pause.wait_until_committed().await;
+    assert!(events.try_recv().is_err());
+    pause.resume();
+    task.await
+        .expect("attempt task joins")
+        .expect("attempt commit succeeds");
+
+    assert!(matches!(
+        events.recv().await.expect("durable attempt event").payload,
+        RuntimeJournalPayload::PlanUpdated { .. }
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn plan_commit_rebases_its_sequence_frontier_when_session_activity_arrives_during_staging() {
     let temp = tempfile::tempdir().expect("tempdir");
     let pause = SessionStoreStagePause::new();
@@ -861,6 +896,36 @@ fn plan_root(children: Vec<PlanNodeInput>) -> PlanNodeInput {
         depends_on: Vec::new(),
         children,
     }
+}
+
+fn executing_plan_for_durability() -> (PlanState, PlanNodeId) {
+    let mut plan = PlanState::empty(
+        PlanId::new("durable-attempt-plan").expect("valid plan id"),
+        PlanActivationSource::Coordinator {
+            reason: "durability test".to_owned(),
+            governing_skill_id: None,
+        },
+        PlanResourcePolicySnapshot::default(),
+    );
+    let output = plan
+        .update(UpdatePlanInput {
+            reason: "define durable attempt work".to_owned(),
+            execution_intent: PlanExecutionIntent::ContinuePlanning,
+            coordinator_node_id: None,
+            max_concurrency_hint: Some(1),
+            change: PlanChangeInput::DefinePlan {
+                expected_plan_revision: 0,
+                root: plan_root(vec![plan_leaf("work")]),
+            },
+        })
+        .expect("durability plan defines");
+    let node_id = output.client_key_to_runtime_node_id["work"].clone();
+    plan.enter_execution(
+        Default::default(),
+        vec!["durability authorization".to_owned()],
+    )
+    .expect("durability plan enters execution");
+    (plan, node_id)
 }
 
 fn replacement_for(node: &merry_core::PlanNodeSnapshot, objective: &str) -> PlanNodeInput {

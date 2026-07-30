@@ -654,7 +654,11 @@ fn plan_error_code(error: &PlanError) -> &'static str {
         | PlanError::TooManyChildren { .. }
         | PlanError::PlanTooDeep { .. }
         | PlanError::TooManyDependencies { .. }
-        | PlanError::TooManyAcceptanceItems { .. } => "plan_limit_exceeded",
+        | PlanError::TooManyAcceptanceItems { .. }
+        | PlanError::TooManyPayloadItems { .. }
+        | PlanError::TooManyTransientAttempts { .. }
+        | PlanError::TooManyActiveDirectives { .. }
+        | PlanError::SnapshotTooLarge { .. } => "plan_limit_exceeded",
         PlanError::DuplicateSiblingOrder { .. } => "plan_duplicate_sibling_order",
         PlanError::InvalidScopePath { .. } => "plan_invalid_scope_path",
         PlanError::CapabilityEnvelopeExceeded { .. } => "plan_capability_envelope_exceeded",
@@ -673,6 +677,7 @@ fn plan_error_code(error: &PlanError) -> &'static str {
         PlanError::LeaseNotLive { .. } => "plan_lease_not_live",
         PlanError::UnknownAttempt { .. } => "plan_attempt_not_found",
         PlanError::NoActiveAttemptForExecutor { .. } => "plan_active_attempt_not_found",
+        PlanError::ActiveAttemptExistsForExecutor { .. } => "plan_active_attempt_exists",
         PlanError::MultipleActiveAttemptsForExecutor { .. } => "plan_active_attempt_ambiguous",
         PlanError::AttemptOwnershipMismatch { .. } => "plan_attempt_owner_mismatch",
         PlanError::AttemptAlreadyResolved { .. } => "plan_attempt_already_resolved",

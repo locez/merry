@@ -14,7 +14,8 @@ use super::{
     PLAN_READ_MAX_DEPTH,
     validation::{
         MAX_ACCEPTANCE_BYTES, MAX_ACCEPTANCE_ITEMS, MAX_CLIENT_KEY_BYTES, MAX_DEPENDENCIES,
-        MAX_DIRECT_CHILDREN, MAX_OBJECTIVE_BYTES, MAX_REASON_BYTES,
+        MAX_DIRECT_CHILDREN, MAX_OBJECTIVE_BYTES, MAX_PAYLOAD_ITEMS, MAX_PAYLOAD_TEXT_BYTES,
+        MAX_REASON_BYTES,
     },
 };
 
@@ -64,7 +65,7 @@ pub struct ReadPlanInput {
     pub max_depth: Option<u8>,
 }
 
-/// Provider-visible steering request for one live attempt.
+/// Runtime-owned steering request for one live attempt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ControlPlanAttemptInput {
@@ -73,6 +74,11 @@ pub struct ControlPlanAttemptInput {
     pub reason: String,
     pub instruction: Option<String>,
     pub constraints: Option<PlanDirectiveConstraints>,
+    #[schemars(
+        description = "Requested output items. Each item is at most 1024 UTF-8 bytes.",
+        length(max = MAX_PAYLOAD_ITEMS),
+        inner(length(min = 1, max = MAX_PAYLOAD_TEXT_BYTES))
+    )]
     pub requested_output: Vec<String>,
 }
 
@@ -81,7 +87,9 @@ pub struct ControlPlanAttemptInput {
 #[serde(deny_unknown_fields)]
 pub struct ReportPlanProgressInput {
     pub summary: String,
+    #[schemars(length(max = MAX_PAYLOAD_ITEMS))]
     pub evidence_refs: Vec<EvidenceRef>,
+    #[schemars(length(max = MAX_PAYLOAD_ITEMS))]
     pub artifact_refs: Vec<ArtifactRef>,
     pub next_action: Option<String>,
     pub checkpoint_ref: Option<String>,

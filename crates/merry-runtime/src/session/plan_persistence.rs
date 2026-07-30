@@ -53,6 +53,8 @@ impl SessionState {
     ) -> Result<PersistablePlanOverlayBundle, SessionStoreError> {
         validate_plan_snapshot_refs(artifacts, active_plan.snapshot())?;
         for terminal in terminal_plans {
+            crate::plan::validate_snapshot_limits(terminal)
+                .map_err(|_| invalid_document("terminal plan snapshot exceeds runtime limits"))?;
             validate_plan_snapshot_refs(artifacts, terminal)?;
         }
         let artifact_ids = plan_artifact_ids(active_plan.snapshot())
@@ -164,6 +166,8 @@ impl SessionState {
         }
         validate_plan_snapshot_refs(&artifacts, active_plan.snapshot())?;
         for terminal in &document.terminal_plans {
+            crate::plan::validate_snapshot_limits(terminal)
+                .map_err(|_| invalid_document("terminal plan snapshot exceeds runtime limits"))?;
             validate_plan_snapshot_refs(&artifacts, terminal)?;
         }
 

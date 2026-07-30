@@ -90,6 +90,35 @@ fn define_plan_resolves_client_key_dependencies_and_assigns_runtime_ids() {
 }
 
 #[test]
+fn authored_recovery_policy_cannot_exceed_runtime_retry_bound() {
+    let mut plan = empty_plan();
+    let mut root = leaf("root", "Retry bounded work");
+    root.recovery_policy.max_transient_attempts = 9;
+
+    let error = plan
+        .update(UpdatePlanInput {
+            reason: "reject an unbounded retry policy".to_owned(),
+            execution_intent: PlanExecutionIntent::ContinuePlanning,
+            coordinator_node_id: None,
+            max_concurrency_hint: None,
+            change: PlanChangeInput::DefinePlan {
+                expected_plan_revision: 0,
+                root,
+            },
+        })
+        .expect_err("retry policy above the runtime bound must be rejected");
+
+    assert!(matches!(
+        error,
+        PlanError::TooManyTransientAttempts {
+            actual: 9,
+            maximum: 8
+        }
+    ));
+    assert!(plan.snapshot().nodes.is_empty());
+}
+
+#[test]
 fn authored_plan_rejects_nested_children_and_keeps_the_input_shallow() {
     let mut plan = empty_plan();
     let mut delegated = leaf("delegated", "Delegated work");

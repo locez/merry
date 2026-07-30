@@ -18,6 +18,11 @@ pub use controller::PlanControllerError;
 pub(crate) use controller::{PlanController, PlanControllerEventReceiver};
 pub use domain::PlanError;
 pub(crate) use domain::{PersistedPlanState, PlanState};
+pub(crate) fn validate_snapshot_limits(
+    snapshot: &merry_core::PlanSnapshot,
+) -> Result<(), PlanError> {
+    validation::validate_snapshot_limits(snapshot)
+}
 pub use protocol::PlanUpdateOutput;
 pub(crate) use protocol::update_plan_define_example;
 #[allow(unused_imports)]

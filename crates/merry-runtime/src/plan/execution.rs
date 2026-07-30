@@ -180,6 +180,13 @@ impl PlanState {
                 node_id: node_id.clone(),
             });
         }
+        if candidate.snapshot.attempts.iter().any(|attempt| {
+            attempt.outcome.is_none() && attempt.executor_session_id == actor.executor_session_id
+        }) {
+            return Err(PlanError::ActiveAttemptExistsForExecutor {
+                executor_session_id: actor.executor_session_id,
+            });
+        }
 
         let revision = candidate.advance_revision("plan attempt started")?;
         let node = candidate
@@ -281,14 +288,9 @@ impl PlanState {
         if let Some(instruction) = input.instruction.as_deref() {
             validation::validate_reason(instruction)?;
         }
-        if input.requested_output.len() > validation::MAX_ACCEPTANCE_ITEMS {
-            return Err(PlanError::TooManyAcceptanceItems {
-                actual: input.requested_output.len(),
-                maximum: validation::MAX_ACCEPTANCE_ITEMS,
-            });
-        }
+        validation::validate_payload_items("requested_output", input.requested_output.len())?;
         for requested in &input.requested_output {
-            validation::validate_reason(requested)?;
+            validation::validate_payload_text("requested_output", requested)?;
         }
 
         let mut candidate = self.clone();
@@ -320,6 +322,27 @@ impl PlanState {
             || lease.node_revision != attempt.node_revision
         {
             return Err(PlanError::StaleDirectiveTarget);
+        }
+        let active_directive_count = candidate
+            .snapshot
+            .directives
+            .iter()
+            .filter(|directive| {
+                directive.attempt_id == attempt.attempt_id
+                    && !matches!(
+                        directive.status,
+                        PlanDirectiveStatus::Applied
+                            | PlanDirectiveStatus::Superseded
+                            | PlanDirectiveStatus::Expired
+                    )
+            })
+            .count();
+        if active_directive_count >= validation::MAX_DIRECTIVES_PER_ATTEMPT {
+            return Err(PlanError::TooManyActiveDirectives {
+                attempt_id: attempt.attempt_id.clone(),
+                actual: active_directive_count + 1,
+                maximum: validation::MAX_DIRECTIVES_PER_ATTEMPT,
+            });
         }
 
         let directive_id = PlanDirectiveId::new(&format!(
@@ -419,6 +442,8 @@ impl PlanState {
         if let Some(checkpoint_ref) = input.checkpoint_ref.as_deref() {
             validation::validate_reason(checkpoint_ref)?;
         }
+        validation::validate_payload_items("evidence_refs", input.evidence_refs.len())?;
+        validation::validate_payload_items("artifact_refs", input.artifact_refs.len())?;
         let mut candidate = self.clone();
         let (attempt_index, _) = candidate.validate_current_attempt(actor)?;
         let attempt_id = candidate.snapshot.attempts[attempt_index]
@@ -579,7 +604,7 @@ impl PlanState {
             None => BTreeMap::new(),
         };
         candidate.snapshot.revision = revision;
-        candidate.push_revision_summary("plan attempt finished")?;
+        Self::append_revision_summary(&mut candidate.snapshot, "plan attempt finished")?;
 
         let result = input.result;
         let diagnostic = input.diagnostic;
@@ -625,6 +650,7 @@ impl PlanState {
         candidate.refresh_terminal_phase();
         candidate.settle_draining_phase();
         let ready_node_ids = candidate.ready_node_ids_at(now_ms);
+        validation::validate_snapshot_limits(&candidate.snapshot)?;
         let attempt = candidate.snapshot.attempts[attempt_index].clone();
         let snapshot = candidate.snapshot.clone();
         *self = candidate;
@@ -1008,22 +1034,29 @@ impl PlanState {
     }
 
     pub(super) fn advance_revision(&mut self, summary: &str) -> Result<u64, PlanError> {
-        self.snapshot.revision = self.snapshot.revision.saturating_add(1);
-        self.push_revision_summary(summary)?;
-        Ok(self.snapshot.revision)
+        let mut snapshot = self.snapshot.clone();
+        snapshot.revision = snapshot.revision.saturating_add(1);
+        Self::append_revision_summary(&mut snapshot, summary)?;
+        validation::validate_snapshot_limits(&snapshot)?;
+        let revision = snapshot.revision;
+        self.snapshot = snapshot;
+        Ok(revision)
     }
 
-    fn push_revision_summary(&mut self, summary: &str) -> Result<(), PlanError> {
+    fn append_revision_summary(
+        snapshot: &mut PlanSnapshot,
+        summary: &str,
+    ) -> Result<(), PlanError> {
         let revision_summary =
-            PlanRevisionSummary::new(self.snapshot.revision, summary).map_err(|_| {
+            PlanRevisionSummary::new(snapshot.revision, summary).map_err(|_| {
                 PlanError::InvalidText {
                     field: "revision_summary",
                     reason: "is invalid",
                 }
             })?;
-        self.snapshot.revision_summaries.push(revision_summary);
-        if self.snapshot.revision_summaries.len() > 32 {
-            self.snapshot.revision_summaries.remove(0);
+        snapshot.revision_summaries.push(revision_summary);
+        if snapshot.revision_summaries.len() > 32 {
+            snapshot.revision_summaries.remove(0);
         }
         Ok(())
     }
