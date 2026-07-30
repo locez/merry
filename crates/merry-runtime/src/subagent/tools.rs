@@ -39,7 +39,7 @@ fn subagent_tool_specs_with_default(
         tool_spec_from_schema(
             SPAWN_SUBAGENTS_TOOL_NAME,
             &format!(
-                "Spawn bounded child agents for parallel delegated tasks. A terminal child result is delivered to the parent as a runtime update on the next model turn; it does not interrupt the current turn. Review that update before claiming the parent task is complete, and call wait_subagents when the compact result, diagnostics, or changed paths are needed. Omit max_model_turns to use the configured runtime default ({default_max_model_turns} unless changed by runtime policy). When binding a child to an authored Plan node, set plan_client_key to one of the authored strings in update_plan.bindable_plan_client_keys, such as `agent1_task`; never pass a runtime node id such as `plan-node-2`. When plan_client_key binds a child: {CHILD_LINKED_SCOPE_GUIDANCE} {LINKED_CHILD_DECOMPOSITION_GUIDANCE} In tasks[].allowed_tools, copy exact registered Merry tool names without provider namespace prefixes: use run_process, never functions.run_process."
+                "Spawn bounded child agents for parallel delegated tasks. A terminal child result is delivered to the parent as a runtime update on the next model turn; it does not interrupt the current turn. Review that update before claiming the parent task is complete, and call wait_subagents when the compact result, diagnostics, or changed paths are needed. Omit max_model_turns to use the configured runtime default ({default_max_model_turns} unless changed by runtime policy). Scope fields are part of each child task contract: omitted read_scope, write_scope, or forbidden_paths inherit the parent effective scope; write_scope: [] is read-only; parallel children must set disjoint write_scope values or [] because overlapping inherited write scopes are rejected. Do not use forbidden_paths as a substitute for write_scope. When binding a child to an authored Plan node, set plan_client_key to one of the authored strings in update_plan.bindable_plan_client_keys, such as `agent1_task`; never pass a runtime node id such as `plan-node-2`. When plan_client_key binds a child: {CHILD_LINKED_SCOPE_GUIDANCE} {LINKED_CHILD_DECOMPOSITION_GUIDANCE} In tasks[].allowed_tools, copy exact registered Merry tool names without provider namespace prefixes: use run_process, never functions.run_process."
             ),
             spawn_schema,
         )?,
@@ -622,6 +622,18 @@ mod tests {
                 .description()
                 .contains("does not interrupt the current turn")
         );
+        assert!(
+            specs[0]
+                .description()
+                .contains("write_scope: [] is read-only")
+        );
+        assert!(
+            specs[0]
+                .description()
+                .contains("overlapping inherited write scopes are rejected")
+        );
+        let schema = serde_json::to_string(specs[0].input_schema()).expect("schema serializes");
+        assert!(schema.contains("An empty array makes the child read-only"));
     }
 
     #[tokio::test(flavor = "current_thread")]

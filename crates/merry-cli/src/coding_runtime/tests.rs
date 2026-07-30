@@ -882,6 +882,16 @@ async fn subagent_with_narrow_tools_keeps_read_only_profile() {
                 .any(|message| message.content().as_text().contains("Inspect the fixture."))
         })
         .expect("child request should be recorded");
+    let child_dynamic_text = child_request
+        .dynamic_messages()
+        .iter()
+        .map(|message| message.content().as_text())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(child_dynamic_text.contains("<merry_subagent_workspace_scope>"));
+    assert!(child_dynamic_text.contains("read_scope: [\".\"]"));
+    assert!(child_dynamic_text.contains("write_scope: [\".\"]"));
+    assert!(child_dynamic_text.contains("forbidden_paths: []"));
     let child_tool_names = child_request
         .tools()
         .iter()
