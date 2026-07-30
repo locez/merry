@@ -18,11 +18,6 @@ pub use controller::PlanControllerError;
 pub(crate) use controller::{PlanController, PlanControllerEventReceiver};
 pub use domain::PlanError;
 pub(crate) use domain::{PersistedPlanState, PlanState};
-pub(crate) fn validate_snapshot_limits(
-    snapshot: &merry_core::PlanSnapshot,
-) -> Result<(), PlanError> {
-    validation::validate_snapshot_limits(snapshot)
-}
 pub use protocol::PlanUpdateOutput;
 pub(crate) use protocol::update_plan_define_example;
 #[allow(unused_imports)]
@@ -35,6 +30,7 @@ pub use protocol::{
 pub(crate) use subagent::PlanArtifactPromotion;
 pub use subagent::PlanSubagentControl;
 pub(crate) use subagent_scope::PlanSubagentScope;
+pub(crate) use validation::validate_snapshot_limits;
 
 pub(crate) fn unix_time_ms() -> u64 {
     std::time::SystemTime::now()

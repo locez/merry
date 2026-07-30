@@ -54,7 +54,7 @@ pub(super) fn validate_recovery_policy(
     Ok(())
 }
 
-pub(super) fn validate_snapshot_limits(snapshot: &PlanSnapshot) -> Result<(), PlanError> {
+pub(crate) fn validate_snapshot_limits(snapshot: &PlanSnapshot) -> Result<(), PlanError> {
     for node in &snapshot.nodes {
         validate_recovery_policy(&node.recovery_policy)?;
     }
