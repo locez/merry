@@ -1,6 +1,6 @@
 use super::SessionState;
 use crate::{
-    FileSessionStore, SessionStoreError,
+    FileSessionStore, PlanPersistenceLocation, SessionStoreError,
     artifact::{ArtifactContent, ArtifactError, ArtifactRegistry},
     plan::{PersistedPlanState, PlanState},
 };
@@ -51,10 +51,16 @@ impl SessionState {
         next_sequence: u64,
         artifacts: &ArtifactRegistry,
     ) -> Result<PersistablePlanOverlayBundle, SessionStoreError> {
+        crate::session_store::validate_plan_snapshot(
+            active_plan.snapshot(),
+            PlanPersistenceLocation::OverlayActive,
+        )?;
         validate_plan_snapshot_refs(artifacts, active_plan.snapshot())?;
-        for terminal in terminal_plans {
-            crate::plan::validate_snapshot_limits(terminal)
-                .map_err(|_| invalid_document("terminal plan snapshot exceeds runtime limits"))?;
+        for (index, terminal) in terminal_plans.iter().enumerate() {
+            crate::session_store::validate_plan_snapshot(
+                terminal,
+                PlanPersistenceLocation::OverlayTerminal { index },
+            )?;
             validate_plan_snapshot_refs(artifacts, terminal)?;
         }
         let artifact_ids = plan_artifact_ids(active_plan.snapshot())
@@ -116,8 +122,9 @@ impl SessionState {
                 "plan overlay contains too many terminal plans",
             ));
         }
-        let active_plan = PlanState::from_persisted(document.active_plan)
-            .map_err(|_| invalid_document("stored plan overlay is invalid"))?;
+        let active_plan = PlanState::from_persisted(document.active_plan).map_err(|source| {
+            crate::session_store::invalid_plan(PlanPersistenceLocation::OverlayActive, source)
+        })?;
         let current_version = self.active_plan.as_ref().map(|plan| StoredPlanVersion {
             plan_id: plan.snapshot().plan_id.clone(),
             revision: plan.snapshot().revision,
@@ -164,10 +171,16 @@ impl SessionState {
                 }
             }
         }
+        crate::session_store::validate_plan_snapshot(
+            active_plan.snapshot(),
+            PlanPersistenceLocation::OverlayActive,
+        )?;
         validate_plan_snapshot_refs(&artifacts, active_plan.snapshot())?;
-        for terminal in &document.terminal_plans {
-            crate::plan::validate_snapshot_limits(terminal)
-                .map_err(|_| invalid_document("terminal plan snapshot exceeds runtime limits"))?;
+        for (index, terminal) in document.terminal_plans.iter().enumerate() {
+            crate::session_store::validate_plan_snapshot(
+                terminal,
+                PlanPersistenceLocation::OverlayTerminal { index },
+            )?;
             validate_plan_snapshot_refs(&artifacts, terminal)?;
         }
 
