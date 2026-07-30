@@ -1,5 +1,6 @@
 # Private product/design notes. Keep local only unless explicitly sanitized.
 docs/
+local_docs/
 merry-raw-docs/
 
 # Local runtime/test state and credentials. Never commit API keys.

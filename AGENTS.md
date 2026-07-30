@@ -7,6 +7,7 @@ This repository is a Rust-first agent runtime project. Treat this file as the wo
 - Keep implementation changes scoped to the requested module or task.
 - Do not commit private planning material, product strategy, market notes, or design drafts unless explicitly asked.
 - `docs/` is intentionally ignored by git and may contain private local notes.
+- Design documents, specs, and plans belong in `local_docs/` by default and must remain local unless explicitly requested otherwise.
 - `merry-raw-docs/` is ignored original source material; use it as local evidence only and do not commit it.
 - Do not move private notes into tracked files.
 - Prefer small, reviewable changes over broad rewrites.
