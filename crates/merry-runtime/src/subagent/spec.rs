@@ -198,7 +198,10 @@ impl SubagentTaskSpec {
         self.read_scope_explicit
     }
 
-    pub(crate) fn write_scope_is_explicit(&self) -> bool {
+    /// Returns whether the parent explicitly supplied the write scope,
+    /// including an explicit empty scope for a read-only child.
+    #[must_use]
+    pub fn write_scope_is_explicit(&self) -> bool {
         self.write_scope_explicit
     }
 

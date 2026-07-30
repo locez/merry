@@ -182,6 +182,36 @@ impl ChildWorkspaceScope {
     pub fn forbidden_paths(&self) -> &[PathBuf] {
         &self.forbidden_paths
     }
+
+    /// Renders the effective scope as an authoritative child prompt contract.
+    pub(crate) fn prompt_declaration(&self) -> String {
+        format!(
+            "<merry_subagent_workspace_scope>\n\
+The following is the effective runtime scope for this child agent. Treat it as authoritative over the task text and any inferred parent capability.\n\
+read_scope: {}\n\
+write_scope: {}\n\
+forbidden_paths: {}\n\
+Scope rules:\n\
+- Read only within read_scope. An empty read_scope authorizes no workspace reads.\n\
+- Write only within write_scope. An empty write_scope authorizes no workspace writes.\n\
+- Never access forbidden_paths. They add denials and never grant write access.\n\
+- Keep command working directories and filesystem effects within these boundaries. Do not use absolute paths or parent traversal.\n\
+</merry_subagent_workspace_scope>",
+            prompt_scope_paths(&self.read_scope),
+            prompt_scope_paths(&self.write_scope),
+            prompt_scope_paths(&self.forbidden_paths),
+        )
+    }
+}
+
+fn prompt_scope_paths(paths: &[PathBuf]) -> String {
+    serde_json::to_string(
+        &paths
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>(),
+    )
+    .expect("workspace scope paths are serializable")
 }
 
 #[derive(Debug, Clone)]
@@ -1546,7 +1576,14 @@ fn spawn_child_loop(scheduler: ChildScheduler, launch: ChildLoopLaunch) {
             hub.publish(activity_reducer.starting(crate::plan::unix_time_ms()));
         }
 
-        let input = match StepInput::user_text(launch.task.task()) {
+        // Scope varies per child; keep it in the dynamic task prompt so the
+        // stable provider request prefix remains reusable.
+        let child_prompt = format!(
+            "{}\n\n{}",
+            launch.task.task(),
+            ChildWorkspaceScope::from_task(&launch.task).prompt_declaration()
+        );
+        let input = match StepInput::user_text(&child_prompt) {
             Ok(input) => input,
             Err(error) => {
                 let cancelled = launch.token.is_cancelled();
@@ -2170,6 +2207,22 @@ mod tests {
                 "{invalid:?} should produce an invalid scope path error"
             );
         }
+    }
+
+    #[test]
+    fn child_scope_prompt_declares_effective_boundaries() {
+        let scope = ChildWorkspaceScope {
+            read_scope: vec![PathBuf::from("crates/merry-runtime")],
+            write_scope: Vec::new(),
+            forbidden_paths: vec![PathBuf::from("target")],
+        };
+        let prompt = scope.prompt_declaration();
+
+        assert!(prompt.contains("read_scope: [\"crates/merry-runtime\"]"));
+        assert!(prompt.contains("write_scope: []"));
+        assert!(prompt.contains("forbidden_paths: [\"target\"]"));
+        assert!(prompt.contains("An empty write_scope authorizes no workspace writes."));
+        assert!(prompt.contains("Treat it as authoritative"));
     }
 
     #[test]

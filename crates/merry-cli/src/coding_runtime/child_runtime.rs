@@ -5,8 +5,9 @@ use super::profile::{
 };
 use merry_llm::{ModelName, ModelProvider};
 use merry_runtime::{
-    AcceptedLocalWorkspaceProcessAdmission, ChildRuntimeFactory, ChildRuntimeInput, ProjectRules,
-    Runtime, SubagentConfig, SubagentManager, subagent_registered_tools,
+    AcceptedLocalWorkspaceProcessAdmission, ChildRuntimeFactory, ChildRuntimeInput,
+    ChildWorkspaceScope, ProjectRules, Runtime, SubagentConfig, SubagentManager,
+    subagent_registered_tools,
 };
 use merry_tool_workspace::{
     CODING_LOOP_PROCESS_TOOL, WORKSPACE_PATCH_TOOL, WorkspaceCodingLoopProfile,
@@ -114,9 +115,10 @@ impl ChildRuntimeFactory for CodingLoopChildRuntimeFactory {
         if let Some(project_rules) = self.project_rules.clone() {
             builder = builder.project_rules(project_rules);
         }
+        let write_scope_is_explicit = input.task.write_scope_is_explicit();
         let workspace_scope = input.workspace_scope;
-        let has_child_workspace_boundary = !workspace_scope.write_scope().is_empty()
-            || !workspace_scope.forbidden_paths().is_empty();
+        let has_child_workspace_boundary =
+            child_has_workspace_boundary(&workspace_scope, write_scope_is_explicit);
         let mut profile = WorkspaceCodingLoopProfile::new(
             workspace_tools_config(
                 coding_loop_workspace_roots(&self.root, &self.skill_roots),
@@ -148,5 +150,47 @@ impl ChildRuntimeFactory for CodingLoopChildRuntimeFactory {
             profile.with_read_only_process_runner(runner)
         };
         with_workspace_coding_loop_profile_for_child(builder, profile)?.build()
+    }
+}
+
+fn child_has_workspace_boundary(
+    workspace_scope: &ChildWorkspaceScope,
+    write_scope_is_explicit: bool,
+) -> bool {
+    // An explicit empty write scope is read-only; an omitted empty scope
+    // retains the existing unrestricted child behavior.
+    write_scope_is_explicit
+        || !workspace_scope.write_scope().is_empty()
+        || !workspace_scope.forbidden_paths().is_empty()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use merry_runtime::SubagentTaskSpec;
+
+    #[test]
+    fn explicit_empty_write_scope_is_a_child_workspace_boundary() {
+        let task = SubagentTaskSpec::new("Read the assigned files.", 1)
+            .expect("valid task")
+            .with_write_scope(Vec::<&str>::new())
+            .expect("empty write scope is valid");
+        let scope = ChildWorkspaceScope::from_task(&task);
+
+        assert!(child_has_workspace_boundary(
+            &scope,
+            task.write_scope_is_explicit()
+        ));
+    }
+
+    #[test]
+    fn omitted_empty_write_scope_is_not_treated_as_a_boundary() {
+        let task = SubagentTaskSpec::new("Read the assigned files.", 1).expect("valid task");
+        let scope = ChildWorkspaceScope::from_task(&task);
+
+        assert!(!child_has_workspace_boundary(
+            &scope,
+            task.write_scope_is_explicit()
+        ));
     }
 }

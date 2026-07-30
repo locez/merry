@@ -45,19 +45,19 @@ pub struct SpawnSubagentTaskInput {
     pub allowed_tools: Option<Vec<ToolName>>,
     #[schemars(
         schema_with = "optional_scope_paths_schema",
-        description = "Optional normalized workspace-relative paths the child may read. Use `.` for the workspace root; do not use parent traversal, absolute paths, dot segments, empty segments, or backslashes."
+        description = "Optional normalized workspace-relative paths the child may read. Omit to inherit the parent scope. An empty array authorizes no workspace reads. Use `.` for the workspace root; do not use parent traversal, absolute paths, dot segments, empty segments, or backslashes."
     )]
     #[serde(default)]
     pub read_scope: Option<Vec<String>>,
     #[schemars(
         schema_with = "optional_scope_paths_schema",
-        description = "Optional normalized workspace-relative paths the child may write. Use `.` for the workspace root; do not use parent traversal, absolute paths, dot segments, empty segments, or backslashes."
+        description = "Optional normalized workspace-relative paths the child may write. Omit to inherit the parent scope. An empty array makes the child read-only. For parallel children, set disjoint write scopes or `[]`; overlapping inherited scopes are rejected. Use `.` for the workspace root; do not use parent traversal, absolute paths, dot segments, empty segments, or backslashes."
     )]
     #[serde(default)]
     pub write_scope: Option<Vec<String>>,
     #[schemars(
         schema_with = "optional_scope_paths_schema",
-        description = "Optional normalized workspace-relative paths the child must not access. Use `.` for the workspace root; do not use parent traversal, absolute paths, dot segments, empty segments, or backslashes."
+        description = "Optional normalized workspace-relative paths the child must not access. Omit to inherit parent denials. These paths further restrict read_scope and write_scope; they do not replace or grant write_scope. Use `.` for the workspace root; do not use parent traversal, absolute paths, dot segments, empty segments, or backslashes."
     )]
     #[serde(default)]
     pub forbidden_paths: Option<Vec<String>>,
