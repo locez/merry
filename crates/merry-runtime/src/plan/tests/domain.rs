@@ -74,9 +74,9 @@ fn define_plan_resolves_client_key_dependencies_and_assigns_runtime_ids() {
 
     assert_eq!(output.snapshot.phase, PlanPhase::Planning);
     assert_eq!(output.snapshot.revision, 1);
-    assert_eq!(output.client_key_ids.len(), 3);
-    let first_id = output.client_key_ids["first"].clone();
-    let second_id = output.client_key_ids["second"].clone();
+    assert_eq!(output.client_key_to_runtime_node_id.len(), 3);
+    let first_id = output.client_key_to_runtime_node_id["first"].clone();
+    let second_id = output.client_key_to_runtime_node_id["second"].clone();
     assert_eq!(
         output
             .snapshot
@@ -312,7 +312,7 @@ fn replace_subtree_allows_unrelated_global_revision_advance() {
             },
         })
         .expect("valid initial plan");
-    let target = initial.client_key_ids["left"].clone();
+    let target = initial.client_key_to_runtime_node_id["left"].clone();
     let target_revision = plan.node(&target).expect("left node").updated_revision;
     plan.advance_unrelated_revision_for_test();
 
@@ -361,8 +361,8 @@ fn replacement_rejects_dangling_incoming_dependency() {
             },
         })
         .expect("valid initial plan");
-    let target_id = initial.client_key_ids["target"].clone();
-    let endpoint_id = initial.client_key_ids["endpoint"].clone();
+    let target_id = initial.client_key_to_runtime_node_id["target"].clone();
+    let endpoint_id = initial.client_key_to_runtime_node_id["endpoint"].clone();
     let revision = plan.node(&target_id).expect("target").updated_revision;
     let mut target_with_endpoint = leaf("unused", "Replaceable branch");
     target_with_endpoint.id = Some(target_id.clone());
@@ -449,7 +449,7 @@ fn replace_subtree_requires_current_target_node_revision() {
             },
         })
         .expect("valid plan");
-    let target_id = initial.client_key_ids["target"].clone();
+    let target_id = initial.client_key_to_runtime_node_id["target"].clone();
     let mut replacement = leaf("replacement", "Replacement");
     replacement.id = Some(target_id.clone());
     replacement.client_key = None;
@@ -490,7 +490,7 @@ fn replace_subtree_can_revise_the_same_live_target_more_than_once() {
             },
         })
         .expect("initial plan succeeds");
-    let target_id = initial.client_key_ids["target"].clone();
+    let target_id = initial.client_key_to_runtime_node_id["target"].clone();
 
     let mut first_replacement = leaf("unused", "First replacement");
     first_replacement.id = Some(target_id.clone());

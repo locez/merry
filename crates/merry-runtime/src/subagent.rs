@@ -378,9 +378,38 @@ impl ChildScheduler {
     }
 
     async fn enqueue_completion_notification(&self, status: SubagentStatusView) {
-        self.completion_notifications.lock().await.push_back(status);
-        self.completion_notify.notify_one();
+        enqueue_completion_notification_if_needed(
+            &self.state,
+            &self.completion_notifications,
+            &self.completion_notify,
+            status,
+        )
+        .await;
     }
+}
+
+async fn enqueue_completion_notification_if_needed(
+    state: &Arc<Mutex<SubagentManagerState>>,
+    completion_notifications: &Arc<Mutex<VecDeque<SubagentStatusView>>>,
+    completion_notify: &Arc<Notify>,
+    status: SubagentStatusView,
+) {
+    // Queue and acknowledgement paths all take these locks in this order. The
+    // state check closes the race where wait() observes a terminal child just
+    // before its completion notification is enqueued.
+    let mut notifications = completion_notifications.lock().await;
+    let state_guard = state.lock().await;
+    if state_guard
+        .agents
+        .get(&status.agent_id)
+        .is_some_and(|agent| agent.completion_notification_acknowledged)
+    {
+        return;
+    }
+    notifications.push_back(status);
+    drop(state_guard);
+    drop(notifications);
+    completion_notify.notify_one();
 }
 
 struct ChildLoopLaunch {
@@ -440,6 +469,7 @@ struct ManagedSubagent {
     diagnostics: Option<ErrorInfo>,
     cancellation_token: CancellationToken,
     plan_link: Option<PlanLinkSnapshot>,
+    completion_notification_acknowledged: bool,
 }
 
 impl SubagentManager {
@@ -658,7 +688,18 @@ impl SubagentManager {
     /// Drains terminal child notifications for delivery to the parent model.
     pub(crate) async fn take_completion_notifications(&self) -> Vec<SubagentStatusView> {
         let mut notifications = self.completion_notifications.lock().await;
-        notifications.drain(..).collect()
+        let statuses = notifications.drain(..).collect::<Vec<_>>();
+        if statuses.is_empty() {
+            return statuses;
+        }
+
+        let mut state = self.state.lock().await;
+        for status in &statuses {
+            if let Some(agent) = state.agents.get_mut(&status.agent_id) {
+                agent.completion_notification_acknowledged = true;
+            }
+        }
+        statuses
     }
 
     pub(crate) async fn has_completion_notifications(&self) -> bool {
@@ -666,13 +707,25 @@ impl SubagentManager {
     }
 
     async fn enqueue_completion_notification(&self, status: SubagentStatusView) {
-        self.completion_notifications.lock().await.push_back(status);
-        self.completion_notify.notify_one();
+        enqueue_completion_notification_if_needed(
+            &self.state,
+            &self.completion_notifications,
+            &self.completion_notify,
+            status,
+        )
+        .await;
     }
 
-    async fn discard_completion_notifications(&self, agent_ids: &[SubagentId]) {
+    async fn acknowledge_completion_notifications(&self, agent_ids: &[SubagentId]) {
         let mut notifications = self.completion_notifications.lock().await;
         notifications.retain(|status| !agent_ids.contains(&status.agent_id));
+
+        let mut state = self.state.lock().await;
+        for agent_id in agent_ids {
+            if let Some(agent) = state.agents.get_mut(agent_id) {
+                agent.completion_notification_acknowledged = true;
+            }
+        }
     }
 
     /// Accepts a batch of child tasks, starting only the initial bounded slice.
@@ -749,7 +802,7 @@ impl SubagentManager {
             let number = self.next_id.fetch_add(1, Ordering::SeqCst);
             let agent_id = SubagentId::new(&format!("agent-{number}"))?;
             let task_id = SubagentTaskId::new(&format!("task-{number}"))?;
-            let plan_link = match (task.plan_task(), self.attached_plan_link_runtime()) {
+            let plan_link = match (task.plan_client_key(), self.attached_plan_link_runtime()) {
                 (Some(client_key), Some(runtime)) => match runtime
                     .bind_subagent(
                         client_key.to_owned(),
@@ -825,6 +878,7 @@ impl SubagentManager {
                 diagnostics: None,
                 cancellation_token: child_token.clone(),
                 plan_link: plan_link.clone(),
+                completion_notification_acknowledged: false,
             };
             state.agents.insert(agent_id.clone(), managed);
 
@@ -1162,7 +1216,7 @@ impl SubagentManager {
             .filter(|agent| agent.is_terminal())
             .map(|agent| agent.agent_id.clone())
             .collect::<Vec<_>>();
-        self.discard_completion_notifications(&agent_ids).await;
+        self.acknowledge_completion_notifications(&agent_ids).await;
     }
 
     async fn update_plan_links(&self, links: Vec<PlanLinkSnapshot>, status: PlanLinkStatus) {
@@ -2996,7 +3050,7 @@ mod manager_tests {
                 vec![
                     SubagentTaskSpec::new("Complete the ordered child task.", 1)
                         .expect("valid task")
-                        .with_plan_task(Some("synthetic".to_owned())),
+                        .with_plan_client_key(Some("synthetic".to_owned())),
                 ],
                 None,
                 CancellationToken::new(),
@@ -3206,6 +3260,46 @@ mod manager_tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn waiting_before_late_completion_enqueue_suppresses_notification() {
+        let manager = SubagentManager::new(
+            SessionId::new("completion-notification-race").expect("valid session id"),
+            SubagentConfig::default(),
+            Arc::new(FakeChildFactory::new()),
+        );
+        let output = manager
+            .spawn(
+                vec![SubagentTaskSpec::new("Complete after waiting.", 1).expect("valid task")],
+                Some(0),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("queued child spawn succeeds");
+        let agent_id = output.spawned[0].agent_id.clone();
+
+        {
+            let mut state = manager.state.lock().await;
+            let agent = state
+                .agents
+                .get_mut(&agent_id)
+                .expect("spawned child is tracked");
+            agent.status = SubagentStatusLabel::Completed;
+            agent.summary = "child completed before notification delivery".to_owned();
+        }
+
+        let wait = manager
+            .wait(std::slice::from_ref(&agent_id), WaitMode::All, None)
+            .await
+            .expect("terminal child wait succeeds");
+        assert!(wait.terminal);
+
+        manager
+            .child_scheduler()
+            .enqueue_completion_notification(wait.agents[0].clone())
+            .await;
+        assert!(manager.take_completion_notifications().await.is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn missing_stream_result_follows_cancellation_without_claiming_completed() {
         let hub = Arc::new(SubagentActivityHub::new());
         let manager = SubagentManager::new(
@@ -3267,7 +3361,7 @@ mod manager_tests {
                 vec![
                     SubagentTaskSpec::new("Fail during scope lookup.", 1)
                         .expect("valid task")
-                        .with_plan_task(Some("synthetic".to_owned())),
+                        .with_plan_client_key(Some("synthetic".to_owned())),
                 ],
                 Some(1),
                 CancellationToken::new(),
@@ -3323,10 +3417,10 @@ mod manager_tests {
                     vec![
                         SubagentTaskSpec::new("Fail first start.", 1)
                             .expect("valid task")
-                            .with_plan_task(Some("synthetic".to_owned())),
+                            .with_plan_client_key(Some("synthetic".to_owned())),
                         SubagentTaskSpec::new("Cancel during lookup.", 1)
                             .expect("valid task")
-                            .with_plan_task(Some("synthetic".to_owned())),
+                            .with_plan_client_key(Some("synthetic".to_owned())),
                     ],
                     Some(1),
                     CancellationToken::new(),
@@ -3578,7 +3672,7 @@ mod manager_tests {
                 vec![
                     SubagentTaskSpec::new("Complete the linked task.", 2)
                         .expect("valid task")
-                        .with_plan_task(Some("root".to_owned())),
+                        .with_plan_client_key(Some("root".to_owned())),
                 ],
                 None,
                 CancellationToken::new(),
@@ -3698,10 +3792,10 @@ mod manager_tests {
                 vec![
                     SubagentTaskSpec::new("Complete the left task.", 2)
                         .expect("valid left task")
-                        .with_plan_task(Some("left".to_owned())),
+                        .with_plan_client_key(Some("left".to_owned())),
                     SubagentTaskSpec::new("Complete the right task.", 2)
                         .expect("valid right task")
-                        .with_plan_task(Some("right".to_owned())),
+                        .with_plan_client_key(Some("right".to_owned())),
                 ],
                 Some(2),
                 CancellationToken::new(),
@@ -3823,7 +3917,7 @@ mod manager_tests {
                 vec![
                     SubagentTaskSpec::new("Complete root-linked work.", 1)
                         .expect("valid root task")
-                        .with_plan_task(Some("root".to_owned())),
+                        .with_plan_client_key(Some("root".to_owned())),
                 ],
                 None,
                 CancellationToken::new(),
@@ -3871,7 +3965,7 @@ mod manager_tests {
                 vec![
                     SubagentTaskSpec::new("Complete nested linked work.", 1)
                         .expect("valid nested task")
-                        .with_plan_task(Some("root".to_owned())),
+                        .with_plan_client_key(Some("root".to_owned())),
                 ],
                 None,
                 CancellationToken::new(),
@@ -4798,6 +4892,7 @@ mod manager_tests {
                     diagnostics: None,
                     cancellation_token: cancellation_token.clone(),
                     plan_link: None,
+                    completion_notification_acknowledged: false,
                 },
             );
         }

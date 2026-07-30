@@ -17,8 +17,9 @@ use merry_runtime::{
     InteractivePrimaryModel, InteractiveSettingsUpdate, InteractiveSubagentSettings,
     InterruptReason, PlanApprovalInput, PlanChangeInput, PlanExecutionIntent, PlanNodeInput,
     ReportPlanAttemptInput, Runtime, SessionTranscriptItem, StepContext, SubagentConfig,
-    SubagentManager, ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome, ToolExecutor,
-    ToolExecutorFuture, UpdatePlanInput, subagent_registered_tools,
+    SubagentManager, SubagentTaskSpec, ToolExecutionContext, ToolExecutionError,
+    ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture, UpdatePlanInput, WaitMode,
+    subagent_registered_tools,
 };
 use schemars::Schema;
 use serde_json::json;
@@ -1984,6 +1985,65 @@ async fn interactive_subagent_setting_changes_the_next_request_tool_profile() {
             .iter()
             .any(|tool| tool.name().as_str() == "spawn_subagents")
     );
+}
+
+#[tokio::test]
+async fn interactive_ignores_stale_subagent_wakeup_after_wait_acknowledges_completion() {
+    let provider = RecordingProvider::new_with_steps(Vec::new());
+    let manager = SubagentManager::new(
+        session_id("interactive-stale-subagent-wakeup"),
+        SubagentConfig::default(),
+        Arc::new(NoopChildFactory),
+    );
+    let spawned = manager
+        .spawn(
+            vec![
+                SubagentTaskSpec::new("Complete before the interactive run.", 1)
+                    .expect("valid child task"),
+            ],
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("child spawn succeeds");
+    let agent_id = spawned.spawned[0].agent_id.clone();
+    let wait = manager
+        .wait(
+            std::slice::from_ref(&agent_id),
+            WaitMode::All,
+            Some(Duration::from_secs(1)),
+        )
+        .await
+        .expect("terminal child wait succeeds");
+    assert!(wait.terminal);
+
+    let runtime = Runtime::builder(session_id("interactive-stale-subagent-wakeup"))
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .subagent_manager(manager)
+        .build()
+        .expect("runtime builds");
+    let run = runtime
+        .start_interactive_agent_run(
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default(),
+        )
+        .expect("interactive run starts");
+    let (mut events, _input, control) = run.split();
+    assert!(matches!(
+        events.next().await,
+        Some(RuntimeEvent::InteractiveRunStateChanged {
+            state: InteractiveRunState::WaitingForInput
+        })
+    ));
+
+    let unexpected_event = timeout(Duration::from_millis(100), events.next()).await;
+    assert!(
+        unexpected_event.is_err(),
+        "an acknowledged completion must not start another model turn: {unexpected_event:?}"
+    );
+    assert!(provider.recorded_requests().is_empty());
+
+    control.close().await.expect("interactive run closes");
 }
 
 async fn wait_for_interactive_waiting(stream: &mut merry_runtime::InteractiveRunEventStream) {

@@ -42,7 +42,7 @@ pub(super) fn validate_client_key(client_key: &str) -> Result<(), PlanError> {
 
 pub(super) fn resolve_dependencies(
     refs: &[PlanNodeReferenceInput],
-    client_key_ids: &BTreeMap<String, PlanNodeId>,
+    client_key_to_runtime_node_id: &BTreeMap<String, PlanNodeId>,
     live_ids: &BTreeSet<PlanNodeId>,
 ) -> Result<Vec<PlanNodeId>, PlanError> {
     if refs.len() > MAX_DEPENDENCIES {
@@ -55,7 +55,7 @@ pub(super) fn resolve_dependencies(
     for reference in refs {
         let id = match reference {
             PlanNodeReferenceInput::Id { id } => id.clone(),
-            PlanNodeReferenceInput::ClientKey { client_key } => client_key_ids
+            PlanNodeReferenceInput::ClientKey { client_key } => client_key_to_runtime_node_id
                 .get(client_key)
                 .cloned()
                 .ok_or_else(|| PlanError::UnknownClientKey {

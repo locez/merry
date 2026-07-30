@@ -913,7 +913,7 @@ pub(super) async fn report_attempt(
                 phase: output.snapshot.phase,
                 attempt: output.attempt.clone(),
                 ready_node_ids: output.ready_node_ids.clone(),
-                client_key_ids: output.client_key_ids.clone(),
+                client_key_to_runtime_node_id: output.client_key_to_runtime_node_id.clone(),
             };
             (
                 call_id,

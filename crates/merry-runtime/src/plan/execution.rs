@@ -68,7 +68,7 @@ pub(crate) struct PlanAttemptReportOutput {
     pub(crate) attempt: PlanAttemptSnapshot,
     pub(crate) updated_directives: Vec<CoordinatorDirectiveSnapshot>,
     pub(crate) ready_node_ids: Vec<PlanNodeId>,
-    pub(crate) client_key_ids: BTreeMap<String, PlanNodeId>,
+    pub(crate) client_key_to_runtime_node_id: BTreeMap<String, PlanNodeId>,
     pub(crate) previous_phase: PlanPhase,
 }
 
@@ -572,7 +572,7 @@ impl PlanState {
         }
 
         let revision = candidate.snapshot.revision.saturating_add(1);
-        let client_key_ids = match input.decomposition {
+        let client_key_to_runtime_node_id = match input.decomposition {
             Some(decomposition) => {
                 candidate.add_decomposition_children(&node_id, decomposition.children, revision)?
             }
@@ -633,7 +633,7 @@ impl PlanState {
             attempt,
             updated_directives: all_directives,
             ready_node_ids,
-            client_key_ids,
+            client_key_to_runtime_node_id,
             previous_phase,
         })
     }

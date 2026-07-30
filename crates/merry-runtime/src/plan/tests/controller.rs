@@ -432,7 +432,7 @@ async fn coordinator_cannot_replace_an_active_linked_node_or_its_ancestor() {
         })
         .await
         .expect("initial plan succeeds");
-    let delegated_id = initial.client_key_ids["delegated"].clone();
+    let delegated_id = initial.client_key_to_runtime_node_id["delegated"].clone();
     let root_id = initial.snapshot.root_node_id.clone().expect("root id");
     let binding_id = controller
         .bind_subagent(
@@ -543,7 +543,7 @@ async fn coordinator_can_revise_an_unrelated_sibling_while_linked_child_is_activ
         .await
         .expect("binding succeeds");
 
-    let local_id = initial.client_key_ids["local"].clone();
+    let local_id = initial.client_key_to_runtime_node_id["local"].clone();
     let local = initial
         .snapshot
         .nodes
@@ -779,7 +779,7 @@ async fn concurrent_attempt_reports_are_serialized_without_lost_updates() {
     };
     let left = controller
         .start_attempt(
-            update.client_key_ids["left"].clone(),
+            update.client_key_to_runtime_node_id["left"].clone(),
             left_actor.clone(),
             10,
         )
@@ -788,7 +788,7 @@ async fn concurrent_attempt_reports_are_serialized_without_lost_updates() {
         .output;
     let right = controller
         .start_attempt(
-            update.client_key_ids["right"].clone(),
+            update.client_key_to_runtime_node_id["right"].clone(),
             right_actor.clone(),
             10,
         )
@@ -817,7 +817,7 @@ async fn concurrent_attempt_reports_are_serialized_without_lost_updates() {
             snapshot
                 .nodes
                 .iter()
-                .find(|node| node.id == update.client_key_ids[key])
+                .find(|node| node.id == update.client_key_to_runtime_node_id[key])
                 .expect("parallel node exists")
                 .status,
             PlanNodeStatus::Completed

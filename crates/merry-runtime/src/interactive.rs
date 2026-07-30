@@ -132,6 +132,12 @@ impl InteractiveProducer {
                     continue;
                 }
                 _ = wait_for_subagent_completion => {
+                    // A completion can be acknowledged by wait_subagents while
+                    // this Notify permit is still pending. Only start a
+                    // continuation when the queue still contains a notification.
+                    if !self.runtime.has_subagent_completion_notifications().await {
+                        continue;
+                    }
                     if !self.run_coordinator_continuation().await {
                         return;
                     }

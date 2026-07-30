@@ -913,8 +913,8 @@ async fn linked_plan_scope(
         })
         .await
         .expect("coordinator plan definition succeeds");
-    let owned_id = output.client_key_ids["owned"].clone();
-    let sibling_id = output.client_key_ids["sibling"].clone();
+    let owned_id = output.client_key_to_runtime_node_id["owned"].clone();
+    let sibling_id = output.client_key_to_runtime_node_id["sibling"].clone();
     let link = coordinator
         .inner
         .plan_controller

@@ -39,7 +39,7 @@ fn subagent_tool_specs_with_default(
         tool_spec_from_schema(
             SPAWN_SUBAGENTS_TOOL_NAME,
             &format!(
-                "Spawn bounded child agents for parallel delegated tasks. A terminal child result is delivered to the parent as a runtime update on the next model turn; it does not interrupt the current turn. Review that update before claiming the parent task is complete, and call wait_subagents when the compact result, diagnostics, or changed paths are needed. Omit max_model_turns to use the configured runtime default ({default_max_model_turns} unless changed by runtime policy). When plan_task binds a child: {CHILD_LINKED_SCOPE_GUIDANCE} {LINKED_CHILD_DECOMPOSITION_GUIDANCE} In tasks[].allowed_tools, copy exact registered Merry tool names without provider namespace prefixes: use run_process, never functions.run_process."
+                "Spawn bounded child agents for parallel delegated tasks. A terminal child result is delivered to the parent as a runtime update on the next model turn; it does not interrupt the current turn. Review that update before claiming the parent task is complete, and call wait_subagents when the compact result, diagnostics, or changed paths are needed. Omit max_model_turns to use the configured runtime default ({default_max_model_turns} unless changed by runtime policy). When binding a child to an authored Plan node, set plan_client_key to one of the authored strings in update_plan.bindable_plan_client_keys, such as `agent1_task`; never pass a runtime node id such as `plan-node-2`. When plan_client_key binds a child: {CHILD_LINKED_SCOPE_GUIDANCE} {LINKED_CHILD_DECOMPOSITION_GUIDANCE} In tasks[].allowed_tools, copy exact registered Merry tool names without provider namespace prefixes: use run_process, never functions.run_process."
             ),
             spawn_schema,
         )?,
@@ -134,7 +134,7 @@ impl ToolExecutor for SpawnSubagentsExecutor {
                 .await
                 .map_err(infrastructure_error)?;
 
-            succeeded_json_output(SPAWN_SUBAGENTS_TOOL_NAME, &output)
+            spawn_json_output(&output)
         })
     }
 }
@@ -331,7 +331,7 @@ fn task_spec_from_input(
         forbidden_paths,
         expected_output,
         reasoning_effort,
-        plan_task,
+        plan_client_key,
     } = input;
     let reasoning_effort = reasoning_effort
         .map(|value| merry_llm::ReasoningEffort::new(&value))
@@ -362,7 +362,7 @@ fn task_spec_from_input(
     Ok(task
         .with_expected_output(expected_output)
         .with_reasoning_effort(reasoning_effort)
-        .with_plan_task(plan_task))
+        .with_plan_client_key(plan_client_key))
 }
 
 fn succeeded_json_output<T>(tool_name: &str, output: &T) -> ToolExecutionResult
@@ -374,6 +374,27 @@ where
             "failed to serialize {tool_name} output: {error}"
         ))
     })?;
+    Ok(ToolExecutionOutcome::succeeded_json(content))
+}
+
+fn spawn_json_output(output: &super::super::SpawnSubagentsOutput) -> ToolExecutionResult {
+    let content = serde_json::to_string(output).map_err(|error| {
+        ToolExecutionError::infrastructure(format!(
+            "failed to serialize {SPAWN_SUBAGENTS_TOOL_NAME} output: {error}"
+        ))
+    })?;
+
+    if output.spawned.is_empty() && !output.rejected.is_empty() {
+        return Ok(ToolExecutionOutcome::failed_json(
+            content,
+            ErrorInfo::new(
+                SUBAGENT_SPAWN_REJECTED_CODE,
+                "all requested child agents were rejected",
+            )
+            .expect("static subagent diagnostic code is valid"),
+        ));
+    }
+
     Ok(ToolExecutionOutcome::succeeded_json(content))
 }
 
@@ -405,6 +426,7 @@ impl From<SubagentError> for InvalidSubagentToolArguments {
 }
 
 const SUBAGENT_INVALID_ARGUMENTS_CODE: &str = "subagent_invalid_arguments";
+const SUBAGENT_SPAWN_REJECTED_CODE: &str = "subagent_spawn_rejected";
 
 fn invalid_subagent_arguments_outcome(
     tool_name: &str,
@@ -500,11 +522,17 @@ mod tests {
     }
 
     #[test]
-    fn spawn_schema_accepts_an_optional_plan_task_reference() {
+    fn spawn_schema_accepts_an_optional_plan_client_key_reference() {
         let specs = subagent_tool_specs().expect("subagent tools build");
         let schema =
             serde_json::to_value(specs[0].input_schema()).expect("spawn schema serializes");
-        assert!(schema.to_string().contains("plan_task"));
+        assert!(schema.to_string().contains("plan_client_key"));
+        assert!(!schema.to_string().contains("plan_task"));
+        assert!(
+            specs[0]
+                .description()
+                .contains("never pass a runtime node id")
+        );
     }
 
     #[test]
@@ -686,6 +714,45 @@ mod tests {
                 .map(|effort| effort.as_str()),
             Some("low")
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn spawn_tool_returns_failed_outcome_when_all_tasks_are_rejected() {
+        let factory = Arc::new(CapturingChildFactory::default());
+        let manager = SubagentManager::runtime_controlled(
+            SessionId::new("spawn-all-rejected").expect("valid session id"),
+            SubagentConfig::default(),
+            factory.clone(),
+            false,
+        );
+        let executor = SpawnSubagentsExecutor::new(manager);
+        let call = pending_call(
+            SPAWN_SUBAGENTS_TOOL_NAME,
+            json!({"tasks": [{"task": "This must not start."}]}),
+        );
+
+        let outcome = executor
+            .execute(call, ToolExecutionContext::default())
+            .await
+            .expect("rejected spawn should resolve as a failed tool outcome");
+
+        assert_eq!(outcome.status(), ToolCallResultStatus::Failed);
+        assert_eq!(
+            outcome
+                .diagnostic()
+                .expect("rejected spawn should include a diagnostic")
+                .code(),
+            SUBAGENT_SPAWN_REJECTED_CODE
+        );
+        let payload = outcome_json(&outcome);
+        assert!(
+            payload["spawned"]
+                .as_array()
+                .expect("spawned array")
+                .is_empty()
+        );
+        assert_eq!(payload["rejected"].as_array().map(Vec::len), Some(1));
+        assert!(factory.inputs().is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]

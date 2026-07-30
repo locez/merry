@@ -68,9 +68,9 @@ pub struct SpawnSubagentTaskInput {
     )]
     pub reasoning_effort: Option<String>,
     #[schemars(
-        description = "Optional Plan node client key that binds this child execution to an authored plan node."
+        description = "Optional authored Plan client key used to bind this child execution to a Plan node. Use a value from update_plan.bindable_plan_client_keys, such as `agent1_task`; never use a runtime node id such as `plan-node-2`."
     )]
-    pub plan_task: Option<String>,
+    pub plan_client_key: Option<String>,
 }
 
 /// Provider-visible output for `spawn_subagents`.

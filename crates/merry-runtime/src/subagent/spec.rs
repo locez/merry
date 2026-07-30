@@ -143,7 +143,7 @@ pub struct SubagentTaskSpec {
     forbidden_paths_explicit: bool,
     expected_output: Option<String>,
     reasoning_effort: Option<ReasoningEffort>,
-    plan_task: Option<String>,
+    plan_client_key: Option<String>,
 }
 
 impl SubagentTaskSpec {
@@ -168,7 +168,7 @@ impl SubagentTaskSpec {
             forbidden_paths_explicit: false,
             expected_output: None,
             reasoning_effort: None,
-            plan_task: None,
+            plan_client_key: None,
         })
     }
 
@@ -244,8 +244,8 @@ impl SubagentTaskSpec {
 
     /// Returns the optional authored Plan node client key.
     #[must_use]
-    pub fn plan_task(&self) -> Option<&str> {
-        self.plan_task.as_deref()
+    pub fn plan_client_key(&self) -> Option<&str> {
+        self.plan_client_key.as_deref()
     }
 
     /// Replaces the child's allowed tool list.
@@ -315,8 +315,8 @@ impl SubagentTaskSpec {
 
     /// Associates the child with an authored Plan node client key.
     #[must_use]
-    pub fn with_plan_task(mut self, plan_task: Option<String>) -> Self {
-        self.plan_task = plan_task.filter(|value| !value.trim().is_empty());
+    pub fn with_plan_client_key(mut self, plan_client_key: Option<String>) -> Self {
+        self.plan_client_key = plan_client_key.filter(|value| !value.trim().is_empty());
         self
     }
 }

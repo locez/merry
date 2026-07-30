@@ -71,7 +71,7 @@ fn executing_plan(
         vec!["test".to_owned()],
     )
     .expect("execution authorization succeeds");
-    (plan, output.client_key_ids)
+    (plan, output.client_key_to_runtime_node_id)
 }
 
 fn actor(name: &str) -> PlanAttemptActor {
@@ -515,7 +515,7 @@ fn subagent_decomposition_adds_only_direct_children_and_releases_them() {
         )
         .expect("decomposition succeeds");
 
-    assert_eq!(report.client_key_ids.len(), 2);
+    assert_eq!(report.client_key_to_runtime_node_id.len(), 2);
     assert_eq!(
         report
             .snapshot

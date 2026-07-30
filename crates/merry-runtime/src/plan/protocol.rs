@@ -199,7 +199,9 @@ pub struct PlanNodeInput {
     /// retaining an existing mutable node; otherwise omit it or use null.
     pub id: Option<PlanNodeId>,
     /// Unique request-local key for a new node. Set this for every new node and
-    /// omit `id`; the update result maps this key to its runtime-owned id.
+    /// omit `id`; a successful update may include this value in
+    /// `bindable_plan_client_keys` for subagent binding. It is not a runtime
+    /// node id.
     pub client_key: Option<String>,
     /// Concrete task objective for this node.
     pub objective: String,
@@ -242,7 +244,7 @@ struct PlanNodeInputSchema {
     )]
     id: Option<PlanNodeId>,
     #[schemars(
-        description = "Stable request-local key for a new node. Omit it when retaining an existing node by id; provide exactly one of id or client_key.",
+        description = "Stable authored client key for a new node. A successful update may return it in bindable_plan_client_keys for use as spawn_subagents.tasks[].plan_client_key. Omit it when retaining an existing node by id; never put a runtime node id here.",
         length(min = 1, max = MAX_CLIENT_KEY_BYTES)
     )]
     client_key: Option<String>,
@@ -289,7 +291,7 @@ struct PlanNodeShallowSchema {
     )]
     id: Option<PlanNodeId>,
     #[schemars(
-        description = "Stable request-local key for a new node. Omit it when retaining an existing node by id; provide exactly one of id or client_key.",
+        description = "Stable authored client key for a new node. A successful update may return it in bindable_plan_client_keys for use as spawn_subagents.tasks[].plan_client_key. Omit it when retaining an existing node by id; never put a runtime node id here.",
         length(min = 1, max = MAX_CLIENT_KEY_BYTES)
     )]
     client_key: Option<String>,
@@ -464,7 +466,10 @@ fn update_plan_define_change_example() -> serde_json::Value {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PlanUpdateOutput {
     pub snapshot: PlanSnapshot,
-    pub client_key_ids: BTreeMap<String, PlanNodeId>,
+    /// Runtime-owned ids allocated for the authored client keys in this update.
+    /// This mapping is for internal Plan control and is intentionally not
+    /// returned in the provider-visible `update_plan` result.
+    pub client_key_to_runtime_node_id: BTreeMap<String, PlanNodeId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -472,7 +477,10 @@ pub(crate) struct PlanUpdateToolOutput {
     pub(crate) plan_id: PlanId,
     pub(crate) revision: u64,
     pub(crate) phase: PlanPhase,
-    pub(crate) client_key_ids: BTreeMap<String, PlanNodeId>,
+    /// Authored keys accepted by `spawn_subagents.plan_client_key`.
+    /// Runtime node ids are intentionally omitted from this provider-visible
+    /// result; `read_plan` supplies them when an exact Plan target is needed.
+    pub(crate) bindable_plan_client_keys: Vec<String>,
     pub(crate) approval_requirements: Vec<PlanApprovalRequirementSnapshot>,
 }
 
@@ -482,7 +490,11 @@ impl From<&PlanUpdateOutput> for PlanUpdateToolOutput {
             plan_id: output.snapshot.plan_id.clone(),
             revision: output.snapshot.revision,
             phase: output.snapshot.phase,
-            client_key_ids: output.client_key_ids.clone(),
+            bindable_plan_client_keys: output
+                .client_key_to_runtime_node_id
+                .keys()
+                .cloned()
+                .collect(),
             approval_requirements: output.snapshot.approval_requirements.clone(),
         }
     }
@@ -510,5 +522,54 @@ pub(crate) struct PlanAttemptToolOutput {
     pub(crate) phase: PlanPhase,
     pub(crate) attempt: merry_core::PlanAttemptSnapshot,
     pub(crate) ready_node_ids: Vec<PlanNodeId>,
-    pub(crate) client_key_ids: BTreeMap<String, PlanNodeId>,
+    pub(crate) client_key_to_runtime_node_id: BTreeMap<String, PlanNodeId>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PlanUpdateOutput, PlanUpdateToolOutput};
+    use merry_core::{
+        PlanActivationSource, PlanId, PlanNodeId, PlanPhase, PlanResourcePolicySnapshot,
+        PlanSchedulerStatus, PlanSnapshot,
+    };
+    use serde_json::json;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn provider_update_output_exposes_bindable_keys_without_runtime_node_ids() {
+        let runtime_node_id = PlanNodeId::new("plan-node-2").expect("valid runtime node id");
+        let output = PlanUpdateOutput {
+            snapshot: PlanSnapshot {
+                plan_id: PlanId::new("plan-output").expect("valid plan id"),
+                revision: 1,
+                phase: PlanPhase::Planning,
+                activation_source: PlanActivationSource::User,
+                root_node_id: None,
+                coordinator_node_id: None,
+                execution_contract_fingerprint: None,
+                execution_authorization_refs: Vec::new(),
+                authorized_capability_envelope: None,
+                approval_requirements: Vec::new(),
+                nodes: Vec::new(),
+                attempts: Vec::new(),
+                leases: Vec::new(),
+                attempt_progress: Vec::new(),
+                directives: Vec::new(),
+                resource_policy_snapshot: PlanResourcePolicySnapshot::default(),
+                max_concurrency_hint: None,
+                scheduler_status: PlanSchedulerStatus::Active,
+                revision_summaries: Vec::new(),
+            },
+            client_key_to_runtime_node_id: BTreeMap::from([(
+                "agent1_task".to_owned(),
+                runtime_node_id,
+            )]),
+        };
+
+        let json = serde_json::to_value(PlanUpdateToolOutput::from(&output))
+            .expect("provider output serializes");
+        assert_eq!(json["bindable_plan_client_keys"], json!(["agent1_task"]));
+        assert!(json.get("client_key_to_runtime_node_id").is_none());
+        assert!(!json.to_string().contains("plan-node-2"));
+    }
 }

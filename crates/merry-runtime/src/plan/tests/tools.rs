@@ -235,6 +235,9 @@ fn update_plan_contract_explains_lifecycle_and_runtime_owned_state() {
     let description = tool.description();
     assert!(!description.contains("begin_plan"));
     assert!(description.contains("client_key"));
+    assert!(description.contains("bindable_plan_client_keys"));
+    assert!(description.contains("spawn_subagents.tasks[].plan_client_key"));
+    assert!(description.contains("intentionally omits runtime node ids"));
     assert!(description.contains("runtime-owned"));
     assert!(description.contains("execute_if_authorized"));
     assert!(description.contains("actual activity"));

@@ -58,7 +58,7 @@ fn subagent_context_projects_ancestor_path_without_unrelated_siblings() {
     .expect("plan enters execution");
     let started = plan
         .start_attempt(
-            &update.client_key_ids["target"],
+            &update.client_key_to_runtime_node_id["target"],
             PlanAttemptActor {
                 executor_session_id: SessionId::new("projection-subagent").unwrap(),
             },
@@ -68,7 +68,7 @@ fn subagent_context_projects_ancestor_path_without_unrelated_siblings() {
 
     let message = plan_subagent_control_message(
         plan.snapshot(),
-        &update.client_key_ids["target"],
+        &update.client_key_to_runtime_node_id["target"],
         &started.attempt.attempt_id,
         &started.lease.lease_id,
     )
@@ -111,7 +111,7 @@ fn subagent_context_projects_ancestor_path_without_unrelated_siblings() {
     let changed_projection = subagent_projection(
         plan_subagent_control_message(
             &changed_snapshot,
-            &update.client_key_ids["target"],
+            &update.client_key_to_runtime_node_id["target"],
             &started.attempt.attempt_id,
             &started.lease.lease_id,
         )
@@ -301,6 +301,8 @@ fn assert_coordinator_rules(projection: &serde_json::Value) {
             "coordinator guidance must contain the shared fragment {fragment:?}"
         );
     }
+    assert!(rendered.contains("bindable_plan_client_keys"));
+    assert!(rendered.contains("never pass a runtime node id"));
 }
 
 fn node(

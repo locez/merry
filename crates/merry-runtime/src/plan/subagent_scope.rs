@@ -67,7 +67,7 @@ impl PlanSubagentScope {
                 &self.root_node_id,
                 &self.binding_id,
             )?,
-            client_key_ids: output.client_key_ids,
+            client_key_to_runtime_node_id: output.client_key_to_runtime_node_id,
         })
     }
 
@@ -261,8 +261,8 @@ mod tests {
             })
             .await
             .expect("coordinator update succeeds");
-        let owned_id = plan.client_key_ids["owned"].clone();
-        let sibling_id = plan.client_key_ids["sibling"].clone();
+        let owned_id = plan.client_key_to_runtime_node_id["owned"].clone();
+        let sibling_id = plan.client_key_to_runtime_node_id["sibling"].clone();
         let link = controller
             .bind_subagent(
                 "owned".to_owned(),
@@ -390,7 +390,7 @@ mod tests {
             })
             .await
             .expect("descendant definition succeeds");
-        let descendant_id = defined.client_key_ids["descendant"].clone();
+        let descendant_id = defined.client_key_to_runtime_node_id["descendant"].clone();
         let other_link = controller
             .bind_subagent(
                 "descendant".to_owned(),
@@ -472,7 +472,7 @@ mod tests {
             .await
             .expect("target definition succeeds");
         while events.try_recv().is_ok() {}
-        let target_id = defined.client_key_ids["stale-node-target"].clone();
+        let target_id = defined.client_key_to_runtime_node_id["stale-node-target"].clone();
         let target = defined
             .snapshot
             .nodes
@@ -624,7 +624,7 @@ mod tests {
             })
             .await
             .expect("child definition succeeds");
-        let target_id = defined.client_key_ids["target"].clone();
+        let target_id = defined.client_key_to_runtime_node_id["target"].clone();
         let mut first = replacement_for(
             defined
                 .snapshot
@@ -696,7 +696,7 @@ mod tests {
             })
             .await
             .expect("child definition succeeds");
-        let target_id = defined.client_key_ids["runtime-target"].clone();
+        let target_id = defined.client_key_to_runtime_node_id["runtime-target"].clone();
         let runtime_result = PlanNodeResult {
             conclusion: "The previous runtime result remains authoritative".to_owned(),
             evidence_refs: Vec::new(),

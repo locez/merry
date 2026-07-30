@@ -324,7 +324,7 @@ impl PlanState {
         }
         let TreeBuilderOutput {
             nodes: new_nodes,
-            client_key_ids,
+            client_key_to_runtime_node_id,
             next_node_sequence,
             unresolved,
         } = builder.finish();
@@ -335,7 +335,12 @@ impl PlanState {
             .filter(|node| node.status != PlanNodeStatus::Superseded)
             .map(|node| node.id.clone())
             .collect::<BTreeSet<_>>();
-        resolve_all_dependencies(&mut combined, unresolved, &client_key_ids, &live_ids)?;
+        resolve_all_dependencies(
+            &mut combined,
+            unresolved,
+            &client_key_to_runtime_node_id,
+            &live_ids,
+        )?;
         let root_id = self
             .snapshot
             .root_node_id
@@ -349,7 +354,7 @@ impl PlanState {
         )?;
         self.snapshot.nodes = ordered_nodes(combined);
         self.next_node_sequence = next_node_sequence;
-        Ok(client_key_ids)
+        Ok(client_key_to_runtime_node_id)
     }
 
     pub(crate) fn persisted(&self) -> PersistedPlanState {
@@ -429,7 +434,7 @@ impl PlanState {
             .as_ref()
             .and_then(|_| self.root_contract());
         let mut candidate = self.clone();
-        let client_key_ids = match input.change {
+        let client_key_to_runtime_node_id = match input.change {
             PlanChangeInput::DefinePlan {
                 expected_plan_revision,
                 root,
@@ -461,7 +466,7 @@ impl PlanState {
         *self = candidate;
         Ok(PlanUpdateOutput {
             snapshot: self.snapshot.clone(),
-            client_key_ids,
+            client_key_to_runtime_node_id,
         })
     }
 
@@ -475,7 +480,7 @@ impl PlanState {
         validation::validate_reason(&input.reason)?;
         let mut candidate = self.clone();
         candidate.validate_subagent_scope(&plan_id, &root_node_id, &binding_id)?;
-        let client_key_ids = match input.change {
+        let client_key_to_runtime_node_id = match input.change {
             SubagentPlanChangeInput::DefineChildren {
                 expected_plan_revision,
                 children,
@@ -507,7 +512,7 @@ impl PlanState {
         *self = candidate;
         Ok(PlanUpdateOutput {
             snapshot: self.snapshot.clone(),
-            client_key_ids,
+            client_key_to_runtime_node_id,
         })
     }
 
@@ -565,7 +570,7 @@ impl PlanState {
         }
         let TreeBuilderOutput {
             nodes: new_nodes,
-            client_key_ids,
+            client_key_to_runtime_node_id,
             next_node_sequence,
             unresolved,
         } = builder.finish();
@@ -577,7 +582,7 @@ impl PlanState {
             .map(|node| node.id.clone())
             .collect::<BTreeSet<_>>();
         let mut dependency_client_keys = existing_client_keys(&combined);
-        dependency_client_keys.extend(client_key_ids.clone());
+        dependency_client_keys.extend(client_key_to_runtime_node_id.clone());
         resolve_all_dependencies(
             &mut combined,
             unresolved,
@@ -598,7 +603,7 @@ impl PlanState {
         self.snapshot.revision = revision;
         self.snapshot.nodes = ordered_nodes(combined);
         self.next_node_sequence = next_node_sequence;
-        Ok(client_key_ids)
+        Ok(client_key_to_runtime_node_id)
     }
 
     pub(crate) fn replace_scoped_subtree(
@@ -676,7 +681,7 @@ impl PlanState {
         debug_assert_eq!(&replacement_root, target_node_id);
         let TreeBuilderOutput {
             nodes: mut replacement,
-            client_key_ids,
+            client_key_to_runtime_node_id,
             next_node_sequence,
             unresolved,
         } = builder.finish();
@@ -734,7 +739,7 @@ impl PlanState {
             .map(|node| node.id.clone())
             .collect::<BTreeSet<_>>();
         let mut dependency_client_keys = existing_client_keys(&combined);
-        dependency_client_keys.extend(client_key_ids.clone());
+        dependency_client_keys.extend(client_key_to_runtime_node_id.clone());
         resolve_all_dependencies(
             &mut combined,
             unresolved,
@@ -750,7 +755,7 @@ impl PlanState {
         self.snapshot.revision = revision;
         self.snapshot.nodes = ordered_nodes(combined);
         self.next_node_sequence = next_node_sequence;
-        Ok(client_key_ids)
+        Ok(client_key_to_runtime_node_id)
     }
 
     fn node_map(&self) -> BTreeMap<PlanNodeId, PlanNodeSnapshot> {
@@ -819,12 +824,17 @@ impl PlanState {
         let root_id = builder.flatten(root, None, 0, 1)?;
         let TreeBuilderOutput {
             mut nodes,
-            client_key_ids,
+            client_key_to_runtime_node_id,
             next_node_sequence,
             unresolved,
         } = builder.finish();
         let live_ids = nodes.keys().cloned().collect::<BTreeSet<_>>();
-        resolve_all_dependencies(&mut nodes, unresolved, &client_key_ids, &live_ids)?;
+        resolve_all_dependencies(
+            &mut nodes,
+            unresolved,
+            &client_key_to_runtime_node_id,
+            &live_ids,
+        )?;
         for old in existing.values() {
             if !nodes.contains_key(&old.id) && old.status != PlanNodeStatus::Superseded {
                 ensure_mutable(old)?;
@@ -844,7 +854,7 @@ impl PlanState {
         self.snapshot.root_node_id = Some(root_id);
         self.snapshot.nodes = ordered_nodes(nodes);
         self.next_node_sequence = next_node_sequence;
-        Ok(client_key_ids)
+        Ok(client_key_to_runtime_node_id)
     }
 
     fn replace_subtree(
@@ -911,7 +921,7 @@ impl PlanState {
         debug_assert_eq!(&replacement_root, target_node_id);
         let TreeBuilderOutput {
             nodes: replacement,
-            client_key_ids,
+            client_key_to_runtime_node_id,
             next_node_sequence,
             unresolved,
         } = builder.finish();
@@ -950,7 +960,12 @@ impl PlanState {
             .filter(|node| node.status != PlanNodeStatus::Superseded)
             .map(|node| node.id.clone())
             .collect::<BTreeSet<_>>();
-        resolve_all_dependencies(&mut combined, unresolved, &client_key_ids, &live_ids)?;
+        resolve_all_dependencies(
+            &mut combined,
+            unresolved,
+            &client_key_to_runtime_node_id,
+            &live_ids,
+        )?;
         let root_id = self
             .snapshot
             .root_node_id
@@ -960,7 +975,7 @@ impl PlanState {
         self.snapshot.revision = revision;
         self.snapshot.nodes = ordered_nodes(combined);
         self.next_node_sequence = next_node_sequence;
-        Ok(client_key_ids)
+        Ok(client_key_to_runtime_node_id)
     }
 
     fn use_current_plan(
@@ -1140,14 +1155,14 @@ struct TreeBuilder<'a> {
     revision: u64,
     existing: &'a BTreeMap<PlanNodeId, PlanNodeSnapshot>,
     nodes: BTreeMap<PlanNodeId, PlanNodeSnapshot>,
-    client_key_ids: BTreeMap<String, PlanNodeId>,
+    client_key_to_runtime_node_id: BTreeMap<String, PlanNodeId>,
     unresolved: BTreeMap<PlanNodeId, Vec<super::protocol::PlanNodeReferenceInput>>,
     allow_existing_node: Option<PlanNodeId>,
 }
 
 struct TreeBuilderOutput {
     nodes: BTreeMap<PlanNodeId, PlanNodeSnapshot>,
-    client_key_ids: BTreeMap<String, PlanNodeId>,
+    client_key_to_runtime_node_id: BTreeMap<String, PlanNodeId>,
     next_node_sequence: u64,
     unresolved: BTreeMap<PlanNodeId, Vec<super::protocol::PlanNodeReferenceInput>>,
 }
@@ -1163,7 +1178,7 @@ impl<'a> TreeBuilder<'a> {
             revision,
             existing,
             nodes: BTreeMap::new(),
-            client_key_ids: BTreeMap::new(),
+            client_key_to_runtime_node_id: BTreeMap::new(),
             unresolved: BTreeMap::new(),
             allow_existing_node: None,
         }
@@ -1219,13 +1234,14 @@ impl<'a> TreeBuilder<'a> {
         ) = match (input.id, input.client_key) {
             (None, Some(client_key)) => {
                 validation::validate_client_key(&client_key)?;
-                if self.client_key_ids.contains_key(&client_key) {
+                if self.client_key_to_runtime_node_id.contains_key(&client_key) {
                     return Err(PlanError::DuplicateClientKey { client_key });
                 }
                 let id = PlanNodeId::new(&format!("plan-node-{}", self.next_node_sequence))
                     .expect("runtime-generated node id is valid");
                 self.next_node_sequence += 1;
-                self.client_key_ids.insert(client_key.clone(), id.clone());
+                self.client_key_to_runtime_node_id
+                    .insert(client_key.clone(), id.clone());
                 (
                     id,
                     self.revision,
@@ -1295,7 +1311,7 @@ impl<'a> TreeBuilder<'a> {
     fn finish(self) -> TreeBuilderOutput {
         TreeBuilderOutput {
             nodes: self.nodes,
-            client_key_ids: self.client_key_ids,
+            client_key_to_runtime_node_id: self.client_key_to_runtime_node_id,
             next_node_sequence: self.next_node_sequence,
             unresolved: self.unresolved,
         }
@@ -1559,11 +1575,12 @@ fn preserve_scoped_runtime_state(
 fn resolve_all_dependencies(
     nodes: &mut BTreeMap<PlanNodeId, PlanNodeSnapshot>,
     unresolved: BTreeMap<PlanNodeId, Vec<super::protocol::PlanNodeReferenceInput>>,
-    client_key_ids: &BTreeMap<String, PlanNodeId>,
+    client_key_to_runtime_node_id: &BTreeMap<String, PlanNodeId>,
     live_ids: &BTreeSet<PlanNodeId>,
 ) -> Result<(), PlanError> {
     for (id, references) in unresolved {
-        let resolved = validation::resolve_dependencies(&references, client_key_ids, live_ids)?;
+        let resolved =
+            validation::resolve_dependencies(&references, client_key_to_runtime_node_id, live_ids)?;
         nodes
             .get_mut(&id)
             .expect("unresolved entries belong to candidate nodes")

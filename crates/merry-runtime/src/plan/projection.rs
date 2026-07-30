@@ -28,6 +28,7 @@ pub(crate) const CHILD_LINKED_SCOPE_GUIDANCE: &str = "Work only within the linke
 pub(crate) const CHILD_SCOPED_UPDATE_GUIDANCE: &str = "Scoped update_plan automatically attaches authored children below the linked binding; do not create a separate root or parent binding.";
 pub(crate) const RUNTIME_OWNED_EXECUTION_GUIDANCE: &str = "Runtime owns execution statuses and summaries, including attempts, leases, and progress; do not author or mirror those fields.";
 pub(crate) const PLAN_SEMANTIC_CHECKPOINT_GUIDANCE: &str = "Plan updates are semantic checkpoints, not heartbeats; do not emit high-frequency progress updates.";
+pub(crate) const PLAN_CLIENT_KEY_BINDING_GUIDANCE: &str = "For delegated Plan work, set plan_client_key to an authored key from update_plan.bindable_plan_client_keys, such as agent1_task; never pass a runtime node id such as plan-node-2.";
 const COORDINATOR_RULES: &[&str] = &[
     COORDINATOR_ROOT_SCOPE_GUIDANCE,
     LINKED_CHILD_DECOMPOSITION_GUIDANCE,
@@ -36,7 +37,8 @@ const COORDINATOR_RULES: &[&str] = &[
     RUNTIME_OWNED_EXECUTION_GUIDANCE,
     "update_plan authors objectives, acceptance, dependencies, and future structure. Linked execution summaries and statuses are runtime-owned.",
     "Plan is an auxiliary projection: it does not grant or restrict ordinary tools and it is not the execution result.",
-    "When delegating work, bind the child explicitly with plan_task; omitted plan_task keeps the child unbound.",
+    PLAN_CLIENT_KEY_BINDING_GUIDANCE,
+    "When delegating work, omit plan_client_key for an unbound child.",
     "If acceptance needs an explicit check, author that check as a direct verification child; runtime closes the root after every declared child completes.",
     "When the user asks to start over, use update_plan with define_plan and a fresh root plus direct children; do not provide target_node_id or other old runtime identities.",
     "After a successful read_plan, use the returned snapshot; do not repeat read_plan unless runtime state has changed.",

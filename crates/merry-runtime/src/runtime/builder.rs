@@ -314,7 +314,7 @@ impl RuntimeBuilder {
 
     /// Retained as a source-compatible no-op for callers that used the removed
     /// automatic Plan scheduler. Plan execution now starts only through the
-    /// normal subagent manager and optional `plan_task` binding.
+    /// normal subagent manager and optional `plan_client_key` binding.
     #[must_use]
     pub fn plan_subagent_factory(
         self,
@@ -803,7 +803,7 @@ impl RuntimeBuilder {
             manager.attach_activity_hub(Arc::clone(&activity_hub));
         }
         // Plan is an advisory projection. Execution is started only by an
-        // explicit subagent spawn and optional `plan_task` binding.
+        // explicit subagent spawn and optional `plan_client_key` binding.
         Ok(Runtime {
             inner: Arc::new(RuntimeInner {
                 session_id: self.session_id.clone(),
