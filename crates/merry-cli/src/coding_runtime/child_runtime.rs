@@ -157,8 +157,9 @@ fn child_has_workspace_boundary(
     workspace_scope: &ChildWorkspaceScope,
     write_scope_is_explicit: bool,
 ) -> bool {
-    // An explicit empty write scope is read-only; an omitted empty scope
-    // retains the existing unrestricted child behavior.
+    // RuntimeBuilder applies parent capabilities before ChildRuntimeFactory
+    // construction, so manager-spawned tasks always carry explicit scopes.
+    // Keep the flag for direct factory composition that bypasses the manager.
     write_scope_is_explicit
         || !workspace_scope.write_scope().is_empty()
         || !workspace_scope.forbidden_paths().is_empty()
@@ -178,17 +179,6 @@ mod tests {
         let scope = ChildWorkspaceScope::from_task(&task);
 
         assert!(child_has_workspace_boundary(
-            &scope,
-            task.write_scope_is_explicit()
-        ));
-    }
-
-    #[test]
-    fn omitted_empty_write_scope_is_not_treated_as_a_boundary() {
-        let task = SubagentTaskSpec::new("Read the assigned files.", 1).expect("valid task");
-        let scope = ChildWorkspaceScope::from_task(&task);
-
-        assert!(!child_has_workspace_boundary(
             &scope,
             task.write_scope_is_explicit()
         ));

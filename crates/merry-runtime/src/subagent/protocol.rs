@@ -25,7 +25,7 @@ pub struct SpawnSubagentsInput {
 #[serde(deny_unknown_fields)]
 pub struct SpawnSubagentTaskInput {
     #[schemars(
-        description = "Non-blank delegated task prompt. Keep it within the runtime byte limit.",
+        description = "Non-blank delegated task description. Describe the work only; scope belongs in the structured scope fields. Keep it within the runtime byte limit.",
         length(min = 1, max = MAX_TASK_BYTES)
     )]
     pub task: String,

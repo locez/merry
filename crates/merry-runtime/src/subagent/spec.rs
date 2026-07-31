@@ -172,7 +172,10 @@ impl SubagentTaskSpec {
         })
     }
 
-    /// Returns the child task prompt.
+    /// Returns the child work description.
+    ///
+    /// Workspace capability belongs to the structured scope fields and the
+    /// runtime-derived scope context, not this task text.
     #[must_use]
     pub fn task(&self) -> &str {
         &self.task
