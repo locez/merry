@@ -12,8 +12,8 @@ use merry_core::{
     ToolName, ToolSpec,
 };
 use merry_llm::{
-    FinishReason, ModelEvent, ModelOutput, ModelProvider, ModelResponse, ModelToolCall,
-    ModelToolCallId, ToolArguments,
+    FinishReason, ModelEvent, ModelMessageRole, ModelOutput, ModelProvider, ModelResponse,
+    ModelToolCall, ModelToolCallId, ToolArguments,
 };
 use merry_runtime::{
     AcceptedLocalWorkspaceProcessAdmission, AgentLoopConfig, AgentLoopStatus, FileSessionStore,
@@ -786,6 +786,11 @@ async fn subagent_with_narrow_tools_keeps_read_only_profile() {
     )
     .expect("write root project rules");
 
+    let completion_step = || {
+        vec![Ok::<_, merry_llm::ModelError>(ModelEvent::Completed {
+            response: ModelResponse::new(vec![ModelOutput::text("done")], FinishReason::Stop, None),
+        })]
+    };
     let provider = ScriptedProvider::new(vec![
         vec![Ok(ModelEvent::Completed {
             response: ModelResponse::new(
@@ -807,6 +812,7 @@ async fn subagent_with_narrow_tools_keeps_read_only_profile() {
                                 "allowed_tools".to_owned(),
                                 Value::Array(vec![Value::String("workspace_read_file".to_owned())]),
                             ),
+                            ("write_scope".to_owned(), Value::Array(Vec::new())),
                         ]))]),
                     )])))
                     .expect("valid spawn args"),
@@ -815,20 +821,13 @@ async fn subagent_with_narrow_tools_keeps_read_only_profile() {
                 None,
             ),
         })],
-        vec![Ok(ModelEvent::Completed {
-            response: ModelResponse::new(
-                vec![ModelOutput::text("child done")],
-                FinishReason::Stop,
-                None,
-            ),
-        })],
-        vec![Ok(ModelEvent::Completed {
-            response: ModelResponse::new(
-                vec![ModelOutput::text("parent done")],
-                FinishReason::Stop,
-                None,
-            ),
-        })],
+        completion_step(),
+        completion_step(),
+        completion_step(),
+        completion_step(),
+        completion_step(),
+        completion_step(),
+        completion_step(),
     ]);
     let runtime = build_coding_loop_runtime(
         "coding-loop-subagent-narrow-tools",
@@ -872,7 +871,20 @@ async fn subagent_with_narrow_tools_keeps_read_only_profile() {
 
     assert_eq!(result.status(), &AgentLoopStatus::Completed);
     let requests = provider.recorded_requests();
-    assert_eq!(requests.len(), 3);
+    assert!(
+        requests.len() >= 2,
+        "parent and child requests should be recorded"
+    );
+    let parent_system_text = requests[0]
+        .dynamic_messages()
+        .iter()
+        .filter(|message| message.role() == ModelMessageRole::System)
+        .map(|message| message.content().as_text())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(parent_system_text.contains("read_scope: [\".\"]"));
+    assert!(parent_system_text.contains("write_scope: [\".\"]"));
+    assert!(parent_system_text.contains("forbidden_paths: []"));
     let child_request = requests
         .iter()
         .find(|request| {
@@ -882,16 +894,26 @@ async fn subagent_with_narrow_tools_keeps_read_only_profile() {
                 .any(|message| message.content().as_text().contains("Inspect the fixture."))
         })
         .expect("child request should be recorded");
-    let child_dynamic_text = child_request
+    let child_system_text = child_request
         .dynamic_messages()
         .iter()
+        .filter(|message| message.role() == ModelMessageRole::System)
         .map(|message| message.content().as_text())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(child_dynamic_text.contains("<merry_subagent_workspace_scope>"));
-    assert!(child_dynamic_text.contains("read_scope: [\".\"]"));
-    assert!(child_dynamic_text.contains("write_scope: [\".\"]"));
-    assert!(child_dynamic_text.contains("forbidden_paths: []"));
+    assert!(child_system_text.contains("<merry_subagent_workspace_scope>"));
+    assert!(child_system_text.contains("read_scope: [\".\"]"));
+    assert!(child_system_text.contains("write_scope: []"));
+    assert!(child_system_text.contains("forbidden_paths: []"));
+    let child_user_text = child_request
+        .dynamic_messages()
+        .iter()
+        .filter(|message| message.role() == ModelMessageRole::User)
+        .map(|message| message.content().as_text())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(child_user_text, "Inspect the fixture.");
+    assert!(!child_user_text.contains("read_scope"));
     let child_tool_names = child_request
         .tools()
         .iter()

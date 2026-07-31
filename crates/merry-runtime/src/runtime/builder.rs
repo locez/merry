@@ -20,7 +20,8 @@ use crate::{
     session::SessionState,
     subagent::{
         ChildRuntimeFactory, ChildWorkspaceScope, PlanLinkRuntime, PlanSubagentScope,
-        SubagentActivityHub, SubagentManager, plan_link_runtime_for_controller,
+        SUBAGENT_WORKSPACE_SCOPE_CONTEXT_ID, SubagentActivityHub, SubagentManager,
+        plan_link_runtime_for_controller,
     },
     tool::{RegisteredTool, ToolRegistry, ToolRegistryError},
 };
@@ -711,6 +712,12 @@ impl RuntimeBuilder {
             return Err(RuntimeError::BridgeToolsNotAllowed { name: name.clone() });
         }
 
+        let effective_subagent_scope = self.subagent_manager.as_ref().map(|_| {
+            self.subagent_parent_scope
+                .clone()
+                .unwrap_or_else(ChildWorkspaceScope::workspace_root)
+        });
+
         let loaded_from_store = self.loaded_session.is_some();
         let mut session = match self.loaded_session {
             Some(session) => session,
@@ -764,6 +771,15 @@ impl RuntimeBuilder {
                 },
             });
         }
+        // Scope is runtime/session-specific dynamic context; keep it out of
+        // the stable provider prefix and out of the user task text.
+        if let Some(scope) = effective_subagent_scope.as_ref() {
+            let scope_text = scope.prompt_declaration();
+            session.reconcile_construction_context_seed(
+                SUBAGENT_WORKSPACE_SCOPE_CONTEXT_ID,
+                &scope_text,
+            )?;
+        }
         for (id, text) in self.initial_context_summaries {
             session.reconcile_construction_context_seed(&id, &text)?;
         }
@@ -795,11 +811,11 @@ impl RuntimeBuilder {
                 .into_iter()
                 .map(|spec| spec.name().clone())
                 .collect::<Vec<ToolName>>();
-            manager.attach_parent_capabilities(
-                allowed_tools,
-                self.subagent_parent_scope
-                    .unwrap_or_else(ChildWorkspaceScope::workspace_root),
-            );
+            let parent_scope = effective_subagent_scope
+                .as_ref()
+                .expect("effective scope exists when a subagent manager is present")
+                .clone();
+            manager.attach_parent_capabilities(allowed_tools, parent_scope);
             manager.attach_activity_hub(Arc::clone(&activity_hub));
         }
         // Plan is an advisory projection. Execution is started only by an
