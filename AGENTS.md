@@ -91,16 +91,87 @@ When a roadmap change affects priority or milestone ordering:
 
 ## Architecture Boundaries
 
-Merry is runtime-first. Keep these ownership boundaries clear:
+Merry is runtime-first. The layer map below is the long-lived ownership
+contract for future changes. It describes where new responsibility belongs; it
+does not require a mechanical move of every existing module in one change.
 
-- `core` owns shared types, errors, schemas, and event contracts.
-- `runtime` owns sessions, task ledger, artifact references, memory activation, context compilation, validation, and checkpoints.
-- `llm` owns provider traits and normalized model events.
-- provider crates adapt external APIs into Merry-owned traits.
-- macro crates generate boilerplate only; they must not hide runtime control flow.
-- Python bindings expose the Rust runtime; they must not reimplement the runtime in Python.
+### Layer Ownership And Directory Classification
 
-Do not leak provider-specific response formats into runtime, memory, artifact, skill, or compiler code.
+- `crates/merry-core` is the contract layer. It owns shared IDs, errors,
+  schemas, artifacts, journal/event contracts, and other provider-neutral data
+  that must cross more than one boundary.
+- `crates/merry-llm` is the model boundary. It owns provider traits, normalized
+  model requests/responses/events, model capabilities, and provider-neutral
+  tool continuations.
+- `crates/merry-runtime` is the runtime layer. It owns sessions, task ledger,
+  artifacts, context compilation, memory activation, checkpoints, permission
+  admission, tool execution, cancellation, and lifecycle state. Runtime state
+  is the source of truth for these concerns.
+- `crates/merry-provider-openai` and `crates/merry-provider-anthropic` are
+  provider adapter layers. They translate external requests and responses at
+  the `merry-llm` boundary; external wire structs and protocol details remain
+  inside these crates.
+- `crates/merry-tool-workspace` and `crates/merry-mcp` are resource/tool
+  adapter layers. They connect workspace or MCP capabilities to runtime tool
+  contracts, but do not own session, ledger, artifact, or policy state.
+- The coding composition layer owns coding prompts, project rules, tool
+  catalog, permission policy, validation policy, retry/recovery policy, and
+  final-report policy. A dedicated `merry-coding` crate is a proposed future
+  workspace member, not a current crate; until that boundary exists, new code
+  must not add another parallel coding composition path.
+- `crates/merry` is the Rust facade layer. It provides the application-facing
+  construction and event surface without exposing provider wire types or CLI
+  implementation details. Its eventual publishability is a product decision,
+  not a reason to move runtime state into the facade.
+- `crates/merry-cli` is the product surface. It owns CLI/TUI interaction,
+  configuration, presentation, debug fixtures, and host process/sandbox
+  adaptation. It may select providers and pass runtime inputs, but it must not
+  own a second runtime state model or a second coding policy.
+- `crates/merry-py` and `sdks/python` are binding surfaces. They convert and
+  expose Rust-owned behavior; runtime state, ledger, artifact, permission,
+  retry, and policy ownership stays in Rust. Detailed PyO3, GIL, and Python
+  API rules are in `Python Binding Standards` below.
+- Evaluation protocols, harnesses, and benchmark adapters are an upper-layer
+  concern. They may consume public runtime/facade contracts and normalize
+  external task formats, but evaluation models must not become runtime state or
+  provider wire types.
+
+### Dependency Direction And Evolution Rules
+
+- Normal production dependencies point from surfaces and adapters toward
+  provider-neutral contracts and runtime services. Lower layers must not import
+  CLI, PyO3, Python SDK, evaluation, or product-specific composition code.
+- Among Merry workspace crates, `merry-core` must remain independent of
+  `merry-llm`, runtime, providers, composition, CLI, and bindings.
+  `merry-llm` may depend on `merry-core`, but not on runtime or a concrete
+  provider.
+- `merry-runtime` may depend on `merry-core` and `merry-llm`. It must not take
+  a production dependency on a provider crate, CLI, facade, PyO3, or a provider
+  wire type. Test-only provider fixtures are allowed as `dev-dependencies`
+  when they do not enter production targets.
+- Provider crates may depend on `merry-core` and `merry-llm`, but not on
+  runtime, CLI, facade, bindings, or another provider's wire protocol.
+- Tool/resource adapters, the coding composition layer, the facade, CLI, and
+  bindings may depend on runtime contracts as appropriate; the reverse
+  direction is forbidden. A binding may call runtime APIs to bridge them, but
+  may not reimplement their ownership or policy.
+- Provider-specific request/response formats must not cross the provider
+  adapter boundary into `merry-core`, `merry-llm`, runtime, coding composition,
+  facade, CLI, evaluation records, or Python public types. The detailed
+  visibility and rendering rules remain in `Provider Integration Rules` below.
+- When a change touches more than one layer, keep the cross-layer contract in
+  the lower owning layer and put translation, presentation, or orchestration in
+  the higher layer. Do not duplicate a domain type or bypass the owner through
+  raw JSON, provider structs, PyO3 objects, or string dispatch.
+- When multiple current entry points assemble the same coding behavior, treat
+  them as a migration boundary. Extend the shared composition owner or record a
+  deliberate exception; do not introduce another independent prompt, tool
+  policy, or runtime builder path.
+- Add a new crate only when an ownership boundary, dependency direction, or
+  public compatibility boundary is genuinely different. Record the reason and
+  the intended dependency direction before adding it to `Cargo.toml`.
+
+Macro crates generate boilerplate only; they must not hide runtime control flow.
 
 ## Workspace And Crate Boundaries
 
@@ -112,6 +183,9 @@ Do not leak provider-specific response formats into runtime, memory, artifact, s
   `merry-cli`, and `merry-py`; do not assume this list is permanent.
 - Keep features additive. Do not use mutually exclusive feature sets unless there is no practical alternative.
 - Provider integrations belong in provider crates, not runtime feature flags.
+- A proposed layer or crate is not an implementation boundary until it exists
+  in the workspace manifest. Architecture notes may describe future ownership,
+  but code and dependency decisions must use the current `Cargo.toml`.
 - Forbid unsafe at the workspace lint level.
 
 ## Context And Evidence Rules
