@@ -4,6 +4,9 @@ This repository is a Rust-first agent runtime project. Treat this file as the wo
 
 ## Repository Rules
 
+- Keep this file limited to long-lived, repeatable engineering rules. Do not put
+  issue lists, temporary migration plans, or current technical-debt inventories
+  here; track those in issues, `ROADMAP.md`, or local design documents.
 - Keep implementation changes scoped to the requested module or task.
 - Do not commit private planning material, product strategy, market notes, or design drafts unless explicitly asked.
 - `docs/` is intentionally ignored by git and may contain private local notes.
@@ -12,6 +15,9 @@ This repository is a Rust-first agent runtime project. Treat this file as the wo
 - Do not move private notes into tracked files.
 - Prefer small, reviewable changes over broad rewrites.
 - If the worktree contains changes you did not make, preserve them and adapt around them.
+- Workers must not develop directly on the default branch. Use a dedicated
+  branch/worktree; the coordinator may use the default branch only for reviewed
+  integration.
 - Treat `Cargo.toml`, the current source and tests, and `ROADMAP.md` as the
   source of truth when this file points to a path, crate, or capability that
   may have changed. Verify stale-looking instructions before relying on them,
@@ -287,9 +293,12 @@ the worker.
 - Inspect the worker's commit and path scope before integrating:
   `git diff --stat <base>...<branch>`, `git diff --check <base>...<branch>`,
   and the handoff report.
-- Integrate through Git history, normally `git cherry-pick` or a reviewed
-  merge. Do not copy files or manually recreate a worker's patch in another
-  worktree.
+- Integrate locally with fast-forward-only history by default. Fetch the target
+  branch when needed, then use `git merge --ff-only <source>`; do not copy files
+  or manually recreate a worker's patch in another worktree.
+- Do not use `--no-ff`, merge commits, squash merges, or rebase-and-merge. If a
+  fast-forward is impossible, stop and report the diverged commits; serialize
+  the work or obtain explicit approval for a different integration method.
 - Resolve conflicts in the coordinator worktree, preserving the ownership
   contract and recording any changed integration decision. If a conflict
   reveals overlapping ownership, stop and reassign or serialize the work.
@@ -310,6 +319,33 @@ the worker.
 - Avoid global mutable state.
 - Avoid hidden registration side effects in macros.
 
+## Explicit Contracts And Dynamic Access
+
+- Initialize every field of a public or cross-layer struct through its
+  constructor or an explicit builder. Optional state must be represented as
+  `Option` and checked explicitly; do not use a missing value as an implicit
+  default when `false`, `0`, or an empty value has different meaning.
+- Normalize external JSON, provider payloads, configuration, and PyO3 values
+  at the boundary. Do not let `serde_json::Value`, `HashMap<String, Value>`,
+  `Box<dyn Any>`, raw Python objects, or provider wire structs become domain
+  state.
+- Do not use reflection, string-based dispatch, `Any` downcasts, dynamic
+  imports, or global registries for ordinary control flow. Use typed enums,
+  explicit maps, protocols, registries, or adapters with a documented plugin
+  boundary instead.
+- Dependencies and ownership must be explicit constructor or function inputs.
+  Do not locate services through global mutable state, hidden factories, or
+  cross-layer parent traversal.
+- Use `TryFrom`, validated constructors, and typed errors for external values.
+  Do not use unchecked casts, `unwrap`, `expect`, or assertions to hide a
+  missing validation contract in library or runtime code.
+- Assertions are appropriate for internal invariants that cannot be supplied
+  by external input and for tests. External input failures must return an
+  actionable error or a typed failure result.
+- Search for an existing capability before adding a helper. Extend the owner
+  contract when responsibility is the same; add a new abstraction only when
+  ownership, coupling, or testability is genuinely different.
+
 ## Async Runtime Rules
 
 - Use Tokio for the MVP runtime surface. Do not introduce a runtime-agnostic executor abstraction yet.
@@ -322,6 +358,20 @@ the worker.
 - No observable `RuntimeEvent` may claim an artifact, ledger update, or checkpoint before that state is durably written.
 - Use cooperative cancellation with cancellation tokens and `tokio::select!` where appropriate.
 - `spawn_blocking` is only for bounded blocking work; do not use it as a general escape hatch.
+- Every spawned task must have a clear creator and owner. Retain its handle,
+  provide cancellation and await paths, and inspect its result at the owner
+  lifecycle boundary.
+- Treat `spawn_blocking`, subprocesses, file handles, network sessions, and
+  streams as owned resources. Cancelling a wrapper must not be mistaken for
+  cancelling the underlying operation; define timeout, cleanup, and shutdown
+  behavior explicitly.
+- Handle cancellation as control flow: release owned resources, preserve the
+  cancellation signal, and re-propagate it unless the caller explicitly owns
+  cancellation recovery.
+- Start, stop, retry, and shutdown operations should be predictable and
+  idempotent where practical. Do not rely on object destruction or process exit
+  to release critical resources.
+- Test cancellation, timeout, repeated calls, and exceptional shutdown paths.
 
 ## Rust Code Quality Rules
 
@@ -378,6 +428,10 @@ These rules are intentionally concrete. Passing the compiler is not enough; code
 - Preserve source errors with `#[source]` or transparent variants when useful.
 - Error messages should include actionable context, not vague labels like "failed" or "invalid".
 - Do not silently collapse provider, validation, IO, and protocol errors into one generic error.
+- Do not use `unwrap`, `expect`, or `panic!` in core, runtime, provider, or
+  binding production paths. A narrowly scoped internal invariant may use an
+  assertion only when external input cannot supply the invariant and the
+  reason is documented.
 
 ### Async And Concurrency
 
@@ -396,6 +450,8 @@ These rules are intentionally concrete. Passing the compiler is not enough; code
 - Use `dyn Trait` for plugin/provider/tool boundaries when runtime polymorphism is needed.
 - Keep object-safe traits small and focused.
 - Avoid trait objects that hide important capability differences. Use capability structs or enums where behavior affects runtime policy.
+- Do not use `dyn Any`, unchecked downcasts, or stringly typed handler names to
+  recover a type that should be represented by a trait, enum, or typed adapter.
 
 ### Public API Design
 
@@ -406,6 +462,26 @@ These rules are intentionally concrete. Passing the compiler is not enough; code
 - Avoid exposing internal storage layout through public APIs.
 - Make invalid states unrepresentable when doing so does not overcomplicate the design.
 - Keep module visibility narrow. Start with `pub(crate)` unless external use is intended.
+
+## Documentation And Compatibility
+
+- Public modules, types, traits, functions, and methods must have concise
+  Rustdoc describing responsibility, relevant inputs/outputs, side effects,
+  ownership, and failure behavior.
+- Document fields whose role, default, sensitivity, lifecycle, or ownership is
+  not obvious from the type alone, especially configuration, sessions, tasks,
+  credentials, and injected services.
+- Private helpers need a short comment when they enforce an invariant,
+  normalize external data, handle security-sensitive values, or coordinate
+  cancellation and cleanup.
+- Comments explain intent and constraints rather than repeating the code. Keep
+  them synchronized with the behavior they describe.
+- Compatibility shims must include a `TODO` naming their removal condition and
+  tracking issue. Do not add a fallback without an explicit owner and removal
+  path.
+- Before rewriting existing documentation, preserve non-obvious protocol
+  mappings, return-code meanings, invariants, lifecycle constraints, security
+  requirements, and operational guidance.
 
 ### Serde And Schemas
 
@@ -425,11 +501,54 @@ These rules are intentionally concrete. Passing the compiler is not enough; code
 
 ### Tests
 
-- Unit tests should cover invariants, parsing, scoring, validation, and reducers.
-- Integration tests should cover runtime event flow and artifact/ledger interactions.
-- Provider-dependent tests must be isolated behind features, mocks, or explicit opt-in environment variables.
-- Prefer deterministic tests over tests that depend on live model behavior.
-- If behavior is important enough to encode in `AGENTS.md`, it is a candidate for a future test or lint.
+- Tests are executable evidence for behavior, contracts, invariants, and failure
+  paths. They are not a way to count changed lines or restate the
+  implementation.
+- Before writing a test, name the observable behavior or contract it protects
+  and the regression that would make it fail. If that cannot be stated
+  clearly, do not add the test.
+- Prefer behavior, interface, integration, and failure-path tests that survive
+  internal refactoring and fail when an externally observable contract breaks.
+- Do not add tests only to increase coverage, mirror every branch mechanically,
+  or confirm that an edited file contains an expected line.
+- Do not use raw source reads, substring checks, import order, private fields,
+  private call ordering, or implementation details as primary assertions. Exact
+  literals are appropriate when they are part of a stable user-visible,
+  protocol, or serialized-data contract.
+- Test structural rules at the correct level: use dependency-graph checks,
+  parsers, `cargo check`, package/build validation, or CI checks for structure.
+  Do not replace those checks with hand-written literal searches through files.
+- For metadata-, lockfile-, formatting-, configuration-, or workflow-only
+  changes, prefer the real consumer (`cargo metadata`, `cargo package`, the
+  configured formatter, or CI validation) over a unit test that repeats text.
+- Exercise behavior through public constructors, builders, and interfaces. Do
+  not bypass initialization by constructing invalid structs, populating private
+  fields, or using test-only escape hatches for ordinary behavior. A focused
+  lifecycle harness may isolate unavailable platform resources only when it
+  initializes the tested contract explicitly.
+- Use fakes, stubs, fixtures, or adapters for external services. Cover normal,
+  failure, cancellation, timeout, repeated-call, and exceptional-shutdown
+  paths.
+- Synchronize asynchronous tests with events, futures, cancellation tokens,
+  paused Tokio time, or task handles. Do not rely on arbitrary sleeps or
+  wall-clock timing except when testing an explicit timeout contract.
+- Run the full suite when changing public behavior, lifecycle management, or
+  cross-module contracts. Run relevant build, packaging, schema, and CI checks
+  when changing dependencies or build configuration.
+- Never solve a failing test by deleting coverage, weakening assertions,
+  expanding exclusions, or converting failure into success without documenting
+  the reason and remaining risk.
+- Record environment limitations and remaining risk whenever a check cannot
+  run. Distinguish pre-existing failures from regressions introduced by the
+  current change.
+- Unit tests should cover invariants, parsing, scoring, validation, reducers,
+  and typed error mapping. Integration tests should cover runtime event flow,
+  artifact/ledger durability, provider boundaries, and public stream behavior.
+- Provider-dependent tests must be isolated behind mocks, fixtures, features,
+  or explicit opt-in environment variables. Live model behavior must never be
+  the only evidence for a deterministic runtime contract.
+- If behavior is important enough to encode in `AGENTS.md`, it is a candidate
+  for a future test or lint.
 
 ## Rust Review Checklist
 
@@ -464,6 +583,90 @@ Use this checklist before reporting a Rust change as complete:
 - Python should expose async event iteration as the primary API, such as `async for event in runtime.step(...)`.
 - Rust code must not hold the GIL while awaiting, blocking, or locking Rust mutexes.
 
+### Python SDK Quality
+
+- Public Python functions, methods, attributes, and cross-module interfaces
+  must have complete annotations. Do not introduce unexplained `Any` into SDK,
+  application, or domain contracts. `PyAny` is allowed only at the PyO3
+  boundary and must be normalized immediately.
+- Do not use unbounded dictionaries to represent runtime state, events,
+  configuration, or errors. Use typed dataclasses, enums, Pydantic models,
+  `TypedDict`, or explicit type aliases when they express the contract.
+- Initialize every instance attribute in `__init__` or an explicit factory.
+  Optional state starts as `None` and callers use explicit `is None` checks.
+- Do not use `getattr`, `hasattr`, `setattr`, `__dict__`, `globals`, `locals`,
+  reflection-style field lookup, or generic `get(name)` APIs to model runtime
+  state. Dynamic access is allowed only in a small typed compatibility adapter
+  for a third-party boundary, with validation and tests for available and
+  unavailable cases.
+- Do not use `value or default` when `False`, `0`, an empty value, or an
+  explicitly missing value have different meanings. Do not use `cast`,
+  `# type: ignore`, or `assert` to conceal a missing contract.
+- Constructors may create in-memory configuration, but must not perform
+  network IO, spawn background tasks or subprocesses, or register process-wide
+  hooks. Expose explicit start/initialize and stop/close/shutdown operations
+  for owned resources and workflows.
+- Catch only failures that can be handled at that boundary. Do not use blanket
+  `except Exception`, `except Exception: pass`, or convert an unknown failure
+  into success. Preserve context and make cleanup failures observable.
+- Do not use blocking IO or `time.sleep` on an event-loop or UI thread. Use an
+  async API or an explicitly owned worker with timeout and cleanup behavior.
+- Treat `asyncio.CancelledError` as control flow: release owned resources and
+  re-raise unless the caller explicitly owns cancellation recovery. Keep task
+  handles for callbacks, timers, `asyncio.create_task`, threads, and
+  subprocesses, and provide cancellation, timeout, await, and shutdown paths.
+- Use the repository logging mechanism instead of `print()` for production
+  diagnostics. Represent failures with explicit errors or result values.
+- Keep PyO3 wrappers responsible for conversion and lifecycle bridging only.
+  Runtime state, ledger, artifact, permission, retry, and policy behavior stay
+  in Rust.
+- New or modified Python source files should normally stay within 500 lines.
+  Files over 800 lines should be split by responsibility, or the change should
+  document why that is not practical. Generated and third-party code is
+  exempt. Do not split mechanically just to reduce line count.
+
+## Cross-Language Anti-Patterns
+
+The following Python patterns have Rust equivalents that are also prohibited:
+
+- Python `Any` or an unbounded `dict` maps to Rust `serde_json::Value`,
+  `HashMap<String, Value>`, `Box<dyn Any>`, or raw provider payloads. Keep these
+  at an explicit boundary and normalize into typed structs/enums/newtypes.
+- Python reflection or string-based dispatch maps to Rust `Any` downcasts,
+  string handler names, dynamic imports, or hidden registries. Prefer explicit
+  enums, maps, traits, and adapters.
+- Python global mutable state maps to Rust global mutable registries or
+  `Arc<Mutex<Everything>>`. Keep ownership in an explicit runtime/session or
+  supervisor.
+- Python fire-and-forget tasks map to unowned `tokio::spawn` tasks. Retain the
+  handle, define cancellation and await behavior, and inspect the result.
+- Python blanket exception handling maps to catch-all Rust errors that erase
+  provider, validation, IO, protocol, or cancellation meaning. Preserve typed
+  failure categories and source context.
+- Python mutable default arguments map to shared mutable Rust defaults or
+  reused buffers whose ownership is unclear. Construct per-call state unless
+  shared ownership is explicit and tested.
+
+## Security And External Input
+
+- Never expose passwords, tokens, sessions, private keys, API keys, or other
+  secrets in logs, tests, issues, pull requests, commits, artifacts, or error
+  messages.
+- Do not store sensitive data in ordinary configuration files, temporary files,
+  or build artifacts.
+- Do not bypass authentication, TLS, validation, sandbox, or permission checks
+  for convenience.
+- Validate every external input at its owning boundary. Treat URLs, file paths,
+  redirects, image/content types, environment variables, and subprocess
+  arguments as security boundaries.
+- Pass subprocess arguments as explicit argument lists. Do not build shell
+  strings or enable a shell unless the boundary is deliberate, validated,
+  minimum-scoped, and documented.
+- Apply timeouts, response-size limits, path scopes, and cancellation to
+  network, file, process, and tool operations.
+- Security behavior must be covered by automated positive and negative tests;
+  callers must not be required to remember the safe calling convention.
+
 ## Provider Integration Rules
 
 - Merry-owned provider traits and normalized event/request/response types live in `merry-llm`.
@@ -479,6 +682,12 @@ Use this checklist before reporting a Rust change as complete:
 
 Before claiming completion, run the relevant checks for the touched area.
 
+- Treat `Cargo.toml`, `sdks/python/pyproject.toml`, CI workflows, and project
+  documentation as the source of truth for supported runtimes and commands.
+- Run the smallest relevant check set during development, then the required
+  full checks before submission. A check that was not actually run is
+  unverified, not passed.
+
 For every change, also run `git diff --check` and inspect
 `git status --short`. Treat a check that could not run as unverified and state
 the command, failure, and remaining risk. Separate failures present at the
@@ -492,9 +701,59 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all
 ```
 
-For Python bindings or SDK code, expected checks should be added once the Python package exists.
+For Python bindings or SDK code, run the repository's actual package checks:
+
+```bash
+(cd sdks/python && uv sync)
+(cd sdks/python && uv run --with pytest python -m pytest tests -q)
+(cd sdks/python && uv build)
+```
+
+When changing dependencies, schemas, package metadata, or build configuration,
+also run the relevant `cargo metadata`, `cargo package`, maturin, or CI check.
+
+When changing public behavior, lifecycle management, or cross-module contracts,
+run the full Rust and Python suites. When a live provider, local listener,
+display server, sandbox, or other environment resource is unavailable, record
+the exact limitation and remaining risk instead of weakening the test or
+claiming success.
 
 If a check cannot be run, state exactly why and what remains unverified.
+
+## Git Workflow And Merge Policy
+
+- Do not develop implementation work directly on `main` or another default
+  branch. Use a dedicated branch and worktree. The coordinator may update the
+  default branch only through reviewed fast-forward-only integration.
+- Use branch names in the form `<type>/<short-description>`. When a task has
+  an Issue, an optional `issue-<number>-` prefix may be included, for example
+  `feat/add-runtime-stream` or `refactor/issue-124-split-subagent-lifecycle`.
+  Keep one logical task on a branch and keep the branch based on the target
+  commit recorded in the task contract.
+- Before editing or integrating, inspect `git status --short --branch`,
+  `git worktree list --porcelain`, the current branch, and the base commit.
+- The preferred local integration is:
+
+  ```bash
+  git fetch origin
+  git merge --ff-only origin/main
+  git merge --ff-only <source-branch>
+  ```
+
+- Do not use `--no-ff`, merge commits, squash merges, rebase-and-merge, or
+  force-pushes. If `--ff-only` cannot proceed, stop and report the divergence;
+  do not automatically rewrite history or invent a merge commit.
+- Do not reset, restore, clean, amend, rebase, or otherwise rewrite commits
+  authored or signed by another person without explicit approval.
+- Preserve existing GPG, SSH, or other commit signatures. Do not disable the
+  repository's signing configuration, replace a signing key, or silently turn
+  a signed integration into an unsigned rewritten commit. When signature
+  verification matters, use `git log --show-signature` or `git verify-commit`
+  and record the result.
+- If a new commit cannot be signed according to the repository configuration,
+  report that condition instead of silently changing the signing policy.
+- Review the staged diff before committing. Do not commit caches, credentials,
+  build artifacts, generated output, or temporary files.
 
 ## Commit Hygiene
 
@@ -503,6 +762,10 @@ If a check cannot be run, state exactly why and what remains unverified.
   as `feat(runtime): add checkpoint compaction`, `fix(cli): reject invalid
   config`, `docs(plan): record validation notes`, or `refactor(runtime): name
   checkpoint context explicitly`.
+- Use the commit body to explain why the change is needed, how behavior
+  changed, and how it was verified. Use `Refs: #<number>` for ongoing work and
+  `Closes #<number>` only when the commit or pull request actually completes
+  the issue.
 - Do not commit ignored private docs.
 - Do not commit generated build artifacts.
 - Do not include secrets, API keys, local machine paths, or unpublished product strategy in tracked files.
