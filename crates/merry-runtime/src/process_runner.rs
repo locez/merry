@@ -11,9 +11,9 @@ use crate::{
 };
 use std::{
     env,
-    ffi::OsString,
-    io,
-    path::{Path, PathBuf},
+    ffi::{OsStr, OsString},
+    fs, io,
+    path::{Component, Path, PathBuf},
     process::Stdio,
     sync::{Arc, RwLock},
 };
@@ -112,16 +112,9 @@ impl BwrapProcessEnvironment {
                 "sandbox process PATH must not be empty",
             ));
         }
-        if !home.is_absolute() {
-            return Err(ProcessRunnerError::infrastructure(
-                "sandbox process HOME must be absolute",
-            ));
-        }
-        if !tmp_source.is_absolute() {
-            return Err(ProcessRunnerError::infrastructure(
-                "sandbox process temporary directory must be absolute",
-            ));
-        }
+        validate_os_string(&path, "sandbox process PATH")?;
+        validate_clean_absolute_path(&home, "sandbox process HOME")?;
+        validate_clean_absolute_path(&tmp_source, "sandbox process temporary directory")?;
         Ok(Self {
             path,
             home,
@@ -130,15 +123,189 @@ impl BwrapProcessEnvironment {
         })
     }
 
-    /// Adds trusted environment assignments after the sandbox defaults.
-    #[must_use]
+    /// Validates and adds environment assignments after the sandbox defaults.
     pub fn with_overrides(
         mut self,
         overrides: impl IntoIterator<Item = (OsString, OsString)>,
-    ) -> Self {
-        self.overrides = overrides.into_iter().collect();
-        self
+    ) -> Result<Self, ProcessRunnerError> {
+        let mut names = std::collections::BTreeSet::new();
+        let mut validated = Vec::new();
+        for (name, value) in overrides {
+            validate_environment_name(&name)?;
+            validate_os_string(&value, "sandbox process environment value")?;
+            if !names.insert(name.clone()) {
+                return Err(ProcessRunnerError::infrastructure(
+                    "sandbox process environment contains a duplicate variable",
+                ));
+            }
+            validated.push((name, value));
+        }
+        self.overrides = validated;
+        Ok(self)
     }
+
+    /// Validates the host paths before constructing one action namespace.
+    ///
+    /// The temporary source remains the caller-selected host `TMPDIR` in
+    /// `--no-sandbox` mode, but it must resolve to a real temporary directory.
+    /// The returned environment uses its resolved path so a symlink cannot
+    /// change the source after validation into a non-temporary tree.
+    pub fn validate_for_workspace(
+        &self,
+        workspace_root: &Path,
+    ) -> Result<Self, ProcessRunnerError> {
+        validate_clean_absolute_path(workspace_root, "action workspace root")?;
+        if workspace_root == Path::new("/") {
+            return Err(ProcessRunnerError::infrastructure(
+                "action workspace root must not be the filesystem root",
+            ));
+        }
+
+        validate_clean_absolute_path(&self.home, "sandbox process HOME")?;
+        if self.home == Path::new("/") || self.home == Path::new("/home") {
+            return Err(ProcessRunnerError::infrastructure(
+                "sandbox process HOME must identify a user directory",
+            ));
+        }
+        if self.home == workspace_root || self.home.starts_with(workspace_root) {
+            return Err(ProcessRunnerError::infrastructure(
+                "action workspace root must not be HOME or contain HOME",
+            ));
+        }
+
+        validate_clean_absolute_path(&self.tmp_source, "sandbox process temporary directory")?;
+        if self.tmp_source == Path::new("/") {
+            return Err(ProcessRunnerError::infrastructure(
+                "sandbox process temporary directory must not be the filesystem root",
+            ));
+        }
+        let tmp_source = fs::canonicalize(&self.tmp_source).map_err(|source| {
+            ProcessRunnerError::infrastructure(format!(
+                "failed to resolve sandbox process temporary directory: {source}"
+            ))
+        })?;
+        if !tmp_source.is_dir() {
+            return Err(ProcessRunnerError::infrastructure(
+                "sandbox process temporary directory must be a directory",
+            ));
+        }
+        if !is_supported_temp_path(&tmp_source) {
+            return Err(ProcessRunnerError::infrastructure(
+                "sandbox process TMPDIR must resolve under /tmp, /var/tmp, /dev/shm, or a runtime temporary subdirectory",
+            ));
+        }
+
+        let canonical_workspace =
+            fs::canonicalize(workspace_root).unwrap_or_else(|_| workspace_root.to_path_buf());
+        if canonical_workspace == tmp_source
+            || (canonical_workspace.starts_with(&tmp_source) && !is_standard_temp_root(&tmp_source))
+        {
+            return Err(ProcessRunnerError::infrastructure(
+                "action workspace root must not be the selected temporary directory or its descendant",
+            ));
+        }
+        if self.home == tmp_source || self.home.starts_with(&tmp_source) {
+            return Err(ProcessRunnerError::infrastructure(
+                "sandbox process HOME must not be inside the selected temporary directory",
+            ));
+        }
+
+        let mut validated = self.clone();
+        validated.tmp_source = tmp_source;
+        Ok(validated)
+    }
+}
+
+fn validate_os_string(value: &OsStr, label: &str) -> Result<(), ProcessRunnerError> {
+    let Some(value) = value.to_str() else {
+        return Err(ProcessRunnerError::infrastructure(format!(
+            "{label} must be valid UTF-8"
+        )));
+    };
+    if value.contains('\0') {
+        return Err(ProcessRunnerError::infrastructure(format!(
+            "{label} must not contain NUL"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_environment_name(name: &OsStr) -> Result<(), ProcessRunnerError> {
+    validate_os_string(name, "sandbox process environment name")?;
+    let name = name.to_str().ok_or_else(|| {
+        ProcessRunnerError::infrastructure("sandbox process environment name must be valid UTF-8")
+    })?;
+    let mut characters = name.chars();
+    let Some(first) = characters.next() else {
+        return Err(ProcessRunnerError::infrastructure(
+            "sandbox process environment name must not be empty",
+        ));
+    };
+    if !(first == '_' || first.is_ascii_alphabetic())
+        || !characters.all(|character| character == '_' || character.is_ascii_alphanumeric())
+    {
+        return Err(ProcessRunnerError::infrastructure(
+            "sandbox process environment names must use ASCII letters, digits, and underscores",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_clean_absolute_path(path: &Path, label: &str) -> Result<(), ProcessRunnerError> {
+    let Some(value) = path.to_str() else {
+        return Err(ProcessRunnerError::infrastructure(format!(
+            "{label} must be valid UTF-8"
+        )));
+    };
+    if value.contains('\0') {
+        return Err(ProcessRunnerError::infrastructure(format!(
+            "{label} must not contain NUL"
+        )));
+    }
+    if !path.is_absolute()
+        || !path
+            .components()
+            .all(|component| matches!(component, Component::RootDir | Component::Normal(_)))
+    {
+        return Err(ProcessRunnerError::infrastructure(format!(
+            "{label} must be a clean absolute path"
+        )));
+    }
+    Ok(())
+}
+
+fn is_supported_temp_path(path: &Path) -> bool {
+    is_standard_temp_path(path)
+        || env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .filter(|root| {
+                root != path
+                    && root.is_absolute()
+                    && root.components().all(|component| {
+                        matches!(component, Component::RootDir | Component::Normal(_))
+                    })
+            })
+            .is_some_and(|root| path.starts_with(root))
+}
+
+fn is_standard_temp_path(path: &Path) -> bool {
+    [
+        Path::new("/tmp"),
+        Path::new("/var/tmp"),
+        Path::new("/dev/shm"),
+    ]
+    .into_iter()
+    .any(|root| path == root || path.starts_with(root))
+}
+
+fn is_standard_temp_root(path: &Path) -> bool {
+    [
+        Path::new("/tmp"),
+        Path::new("/var/tmp"),
+        Path::new("/dev/shm"),
+    ]
+    .into_iter()
+    .any(|root| path == root)
 }
 
 fn absolute_env_path(name: &str, fallback: &str) -> PathBuf {
@@ -221,6 +388,7 @@ impl BwrapProcessRunner {
         if let Some(message) = self.configuration_error.clone() {
             return Err(ProcessRunnerError::infrastructure(message));
         }
+        let environment = self.environment.validate_for_workspace(&self.cwd_root)?;
         let session_snapshot = self
             .session_permissions
             .as_ref()
@@ -236,7 +404,7 @@ impl BwrapProcessRunner {
         Ok(bwrap_process_plan_with_environment(
             intent,
             &self.cwd_root,
-            &self.environment,
+            &environment,
             network_allowed,
             &path_rules,
             &self.bwrap_program,
@@ -446,6 +614,9 @@ impl BwrapPermissionedProcessRunnerFactory {
 
 impl PermissionedProcessRunnerFactory for BwrapPermissionedProcessRunnerFactory {
     fn validate_request(&self, request: &PermissionRequest) -> Result<(), ProcessRunnerError> {
+        self.environment
+            .validate_for_workspace(&self.cwd_root)
+            .map(|_| ())?;
         self.path_rules_for_request(request).map(|_| ())
     }
 
@@ -654,13 +825,14 @@ fn bwrap_process_plan_with_environment(
         os(ACTION_SANDBOX_TMPDIR),
         os("--tmpfs"),
         os("/home"),
-        os("--perms"),
-        os("0700"),
     ];
     if !environment.home.starts_with(Path::new("/home")) {
         append_bwrap_mount_parent_args(&mut args, &environment.home);
+        args.extend([os("--tmpfs"), environment.home.as_os_str().to_owned()]);
     }
     args.extend([
+        os("--perms"),
+        os("0700"),
         os("--dir"),
         environment.home.as_os_str().to_owned(),
         os("--ro-bind"),
@@ -1101,7 +1273,8 @@ mod tests {
             "/run/merry/session-tmp",
         )
         .expect("environment layout should validate")
-        .with_overrides([(OsString::from("RUSTUP_TOOLCHAIN"), OsString::from("stable"))]);
+        .with_overrides([(OsString::from("RUSTUP_TOOLCHAIN"), OsString::from("stable"))])
+        .expect("environment override should validate");
         let plan = bwrap_process_plan_with_environment(
             &intent(None),
             Path::new("/workspace/merry"),
@@ -1127,6 +1300,89 @@ mod tests {
         assert!(contains_sequence(
             &args,
             &["--setenv", "RUSTUP_TOOLCHAIN", "stable"]
+        ));
+    }
+
+    #[test]
+    fn bwrap_process_environment_validates_mount_boundaries_and_overrides() {
+        let environment =
+            BwrapProcessEnvironment::new("/custom/bin:/usr/bin", "/home/alice", "/tmp")
+                .expect("environment layout should validate");
+        let validated = environment
+            .validate_for_workspace(Path::new("/workspace/merry"))
+            .expect("standard temporary directory should be accepted");
+        assert_eq!(validated.tmp_source, PathBuf::from("/tmp"));
+
+        for (workspace, expected) in [
+            ("/home", "must not be HOME or contain HOME"),
+            ("/home/alice", "must not be HOME or contain HOME"),
+            ("/tmp", "selected temporary directory"),
+        ] {
+            let error = environment
+                .validate_for_workspace(Path::new(workspace))
+                .expect_err("overlapping action paths must be rejected");
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+
+        let error = BwrapProcessEnvironment::new("/custom/bin:/usr/bin", "/home/alice", "/etc")
+            .expect("environment path shape should validate")
+            .validate_for_workspace(Path::new("/workspace/merry"))
+            .expect_err("non-temporary TMPDIR must be rejected");
+        assert!(error.to_string().contains("TMPDIR"));
+
+        let overridden = environment
+            .clone()
+            .with_overrides([
+                (OsString::from("PATH"), OsString::from("/override/bin")),
+                (OsString::from("HOME"), OsString::from("/override/home")),
+                (OsString::from("TMPDIR"), OsString::from("/override/tmp")),
+            ])
+            .expect("supported environment names should override defaults");
+        assert_eq!(overridden.overrides.len(), 3);
+
+        for name in ["", "1INVALID", "INVALID-NAME", "INVALID=NAME"] {
+            let error = environment
+                .clone()
+                .with_overrides([(OsString::from(name), OsString::from("value"))])
+                .expect_err("invalid environment names must be rejected");
+            assert!(error.to_string().contains("environment"), "{error}");
+        }
+        let error = environment
+            .with_overrides([
+                (OsString::from("DUPLICATE"), OsString::from("one")),
+                (OsString::from("DUPLICATE"), OsString::from("two")),
+            ])
+            .expect_err("duplicate environment names must be rejected");
+        assert!(error.to_string().contains("duplicate"));
+    }
+
+    #[test]
+    fn bwrap_process_plan_places_custom_home_permissions_on_home_directory() {
+        let environment =
+            BwrapProcessEnvironment::new("/custom/bin:/usr/bin", "/srv/alice", "/tmp")
+                .expect("environment layout should validate");
+        let plan = bwrap_process_plan_with_environment(
+            &intent(None),
+            Path::new("/workspace/merry"),
+            &environment,
+            true,
+            &[],
+            Path::new("/custom/bin/bwrap"),
+        );
+        let args = os_args(&plan.args);
+
+        assert!(contains_sequence(
+            &args,
+            &[
+                "--dir",
+                "/srv",
+                "--tmpfs",
+                "/srv/alice",
+                "--perms",
+                "0700",
+                "--dir",
+                "/srv/alice"
+            ]
         ));
     }
 

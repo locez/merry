@@ -127,7 +127,14 @@ target/release/merry cmd "find the largest Rust files"
 TUI and `run` enter an outer bubblewrap sandbox automatically. `--no-sandbox`
 disables only that outer process sandbox when the user explicitly chooses host
 execution; shell/process tools still run through Merry's inner bubblewrap
-runner. Debug commands remain unsandboxed unless `--with-sandbox` is supplied.
+runner. In the normal mode, the outer `/tmp` is a session-scoped in-memory
+tmpfs reused by action sandboxes. With `--no-sandbox`, action `/tmp` maps to the
+current process's validated `TMPDIR` directly, which is an explicit host-temp
+choice. Debug commands remain unsandboxed unless `--with-sandbox` is supplied.
+
+`[permissions].environment` applies only inside Merry-managed action processes.
+Assignments are injected after the sandbox defaults and may intentionally
+override them; they do not change the outer bootstrap or provider environment.
 
 ## Multi-Tool Execution
 

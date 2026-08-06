@@ -15,10 +15,8 @@ pub(crate) fn permission_network_smoke_process_runner(
     // This smoke must prove that the first attempt is denied by the default
     // inner profile even when the user enables network access globally.
     options.network_allowed = false;
-    Ok(ActionProcessBackend::from_bwrap_options(
-        workspace_root.to_path_buf(),
-        options,
-    ))
+    ActionProcessBackend::from_bwrap_options(workspace_root.to_path_buf(), options)
+        .map_err(Into::into)
 }
 
 pub(crate) fn permission_network_live_smoke_task() -> String {

@@ -285,6 +285,8 @@ pub(crate) fn plan_bootstrap_with_probe(
         return Ok(Bootstrap::AlreadyInside);
     }
 
+    validate_outer_mount_layout(host)?;
+
     let path = sandbox_path(host);
     let bwrap = find_bwrap_in_path(&path, |candidate| probe.file_exists(candidate))
         .ok_or(Error::MissingBubblewrap)?;
@@ -480,6 +482,27 @@ fn is_clean_absolute_path(path: &Path) -> bool {
             .all(|component| matches!(component, Component::RootDir | Component::Normal(_)))
 }
 
+fn validate_outer_mount_layout(host: &Host) -> Result<(), Error> {
+    if !is_clean_absolute_path(&host.cwd) || host.cwd == Path::new("/") {
+        return Err(Error::InvalidMountLayout(
+            "workspace root must be a clean absolute path other than /",
+        ));
+    }
+
+    let home = host.xdg_paths.home();
+    if !is_valid_runtime_home_path(home) {
+        return Err(Error::InvalidMountLayout(
+            "HOME must be a clean user path outside /tmp",
+        ));
+    }
+    if home == host.cwd || home.starts_with(&host.cwd) {
+        return Err(Error::InvalidMountLayout(
+            "workspace root must not be HOME or contain HOME",
+        ));
+    }
+    Ok(())
+}
+
 fn build_plan(
     host: &Host,
     path: OsString,
@@ -518,13 +541,12 @@ fn build_plan(
         os(SANDBOX_TMPDIR),
         os("--tmpfs"),
         os(SANDBOX_HOME_ROOT),
-        os("--perms"),
-        os("0700"),
     ];
     if !Path::new(&home).starts_with(Path::new(SANDBOX_HOME_ROOT)) {
         append_mount_parent_args(&mut args, home.as_os_str());
+        args.extend([os("--tmpfs"), home.clone()]);
     }
-    args.extend([os("--dir"), home.clone()]);
+    args.extend([os("--perms"), os("0700"), os("--dir"), home.clone()]);
     append_bind_dir_try_args(&mut args, &config_dir, &config_dir);
     append_bind_dir_rw_args(&mut args, &managed_config_dir, &managed_config_dir);
     args.extend([
@@ -799,9 +821,18 @@ pub(crate) fn runtime_profile_from_evidence(
     tmpdir: Option<&OsStr>,
     mountinfo: Option<&str>,
 ) -> Option<RuntimeProfile> {
-    if home.is_some_and(|path| is_clean_absolute_path(Path::new(path)))
-        && tmpdir == Some(OsStr::new(SANDBOX_TMPDIR))
-        && mountinfo_has_tmpfs_mounts(mountinfo?, [SANDBOX_HOME_ROOT, SANDBOX_TMPDIR])
+    let home = home.map(Path::new)?;
+    if !is_valid_runtime_home_path(home) || tmpdir != Some(OsStr::new(SANDBOX_TMPDIR)) {
+        return None;
+    }
+    let home_mount = if home.starts_with(Path::new(SANDBOX_HOME_ROOT)) {
+        SANDBOX_HOME_ROOT.to_owned()
+    } else {
+        home.to_str()?.to_owned()
+    };
+    let mountinfo = mountinfo?;
+    if mountinfo_has_tmpfs_mount(mountinfo, &home_mount)
+        && mountinfo_has_tmpfs_mount(mountinfo, SANDBOX_TMPDIR)
     {
         Some(RuntimeProfile::CliBwrapV1)
     } else {
@@ -809,10 +840,11 @@ pub(crate) fn runtime_profile_from_evidence(
     }
 }
 
-fn mountinfo_has_tmpfs_mounts(mountinfo: &str, mount_points: [&str; 2]) -> bool {
-    mount_points
-        .into_iter()
-        .all(|mount_point| mountinfo_has_tmpfs_mount(mountinfo, mount_point))
+fn is_valid_runtime_home_path(path: &Path) -> bool {
+    is_clean_absolute_path(path)
+        && path != Path::new("/")
+        && path != Path::new(SANDBOX_HOME_ROOT)
+        && !path.starts_with(Path::new(SANDBOX_TMPDIR))
 }
 
 fn mountinfo_has_tmpfs_mount(mountinfo: &str, mount_point: &str) -> bool {
@@ -893,6 +925,7 @@ pub(crate) enum Error {
     #[cfg(not(target_os = "linux"))]
     UnsupportedPlatform,
     MissingBubblewrap,
+    InvalidMountLayout(&'static str),
     Exec(io::Error),
 }
 
@@ -939,6 +972,9 @@ impl fmt::Display for Error {
                 formatter,
                 "bubblewrap executable `bwrap` was not found in PATH; install bubblewrap to use TUI/run, or omit --with-sandbox for debug commands"
             ),
+            Error::InvalidMountLayout(reason) => {
+                write!(formatter, "sandbox mount layout is invalid: {reason}")
+            }
             Error::Exec(error) => {
                 write!(
                     formatter,

@@ -1,6 +1,7 @@
 use merry_core::CoreError;
 use merry_runtime::{
-    AgentLoopConfigError, ContextError, RuntimeError, RuntimeProfileError, SkillError,
+    AgentLoopConfigError, ContextError, ProcessRunnerError, RuntimeError, RuntimeProfileError,
+    SkillError,
 };
 use merry_tool_workspace::{WorkspaceCodingLoopProfileError, WorkspaceToolConfigError};
 use std::{io, path::PathBuf};
@@ -18,6 +19,12 @@ pub(crate) enum CodingRuntimeError {
     Core {
         #[from]
         source: CoreError,
+    },
+
+    #[error("invalid action process sandbox: {source}")]
+    ProcessRunner {
+        #[from]
+        source: ProcessRunnerError,
     },
 
     #[error("failed to read project rules at {path}: {source}")]

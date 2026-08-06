@@ -1047,6 +1047,30 @@ environment = [
                 "{invalid:?} should be rejected"
             );
         }
+
+        let duplicate = MerryConfig::load_optional_from_text(
+            Some(
+                r#"
+[permissions]
+environment = [
+  { name = "DUPLICATE", value = "one" },
+  { name = "DUPLICATE", value = "two" },
+]
+"#,
+            ),
+            &paths,
+        )
+        .expect("duplicate environment config should parse")
+        .expect("duplicate environment config should be present");
+        assert!(duplicate.process_environment_overrides().is_err());
+
+        let nul_value = MerryConfig::load_optional_from_text(
+            Some("[permissions]\nenvironment = [{ name = \"NUL_VALUE\", value = \"\\u0000\" } ]"),
+            &paths,
+        )
+        .expect("NUL environment config should parse")
+        .expect("NUL environment config should be present");
+        assert!(nul_value.process_environment_overrides().is_err());
     }
 
     #[test]
