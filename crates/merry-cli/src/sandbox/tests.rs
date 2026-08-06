@@ -395,12 +395,31 @@ fn plan_isolates_custom_home_before_applying_home_permissions() {
 }
 
 #[test]
-fn planning_rejects_workspace_that_contains_home() {
-    let mut host = sandbox_host();
-    host.cwd = PathBuf::from("/home");
+fn planning_binds_explicit_workspace_path_without_home_relationship_rules() {
+    for workspace in ["/home", "/etc", "/"] {
+        let mut host = sandbox_host();
+        host.cwd = PathBuf::from(workspace);
+        let Bootstrap::Reexec(plan) =
+            plan_sandbox(true, &host).expect("explicit workspace path should be accepted")
+        else {
+            panic!("expected sandbox reexec plan");
+        };
+        let args = plan_args(&plan);
+        assert!(contains_sequence(&args, &["--bind", workspace, workspace]));
+    }
+}
 
-    let error = plan_sandbox(true, &host).expect_err("HOME overlap must fail closed");
-    assert!(matches!(error, Error::InvalidMountLayout(reason) if reason.contains("HOME")));
+#[test]
+fn planning_rejects_unclean_workspace_path() {
+    for workspace in ["relative", "/home/../etc"] {
+        let mut host = sandbox_host();
+        host.cwd = PathBuf::from(workspace);
+
+        let error = plan_sandbox(true, &host).expect_err("unclean workspace path must fail");
+        assert!(
+            matches!(error, Error::InvalidWorkspacePath(reason) if reason.contains("clean absolute"))
+        );
+    }
 }
 
 #[test]

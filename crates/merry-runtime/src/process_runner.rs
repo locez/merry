@@ -155,24 +155,12 @@ impl BwrapProcessEnvironment {
         workspace_root: &Path,
     ) -> Result<Self, ProcessRunnerError> {
         validate_clean_absolute_path(workspace_root, "action workspace root")?;
-        if workspace_root == Path::new("/") {
-            return Err(ProcessRunnerError::infrastructure(
-                "action workspace root must not be the filesystem root",
-            ));
-        }
-
         validate_clean_absolute_path(&self.home, "sandbox process HOME")?;
         if self.home == Path::new("/") || self.home == Path::new("/home") {
             return Err(ProcessRunnerError::infrastructure(
                 "sandbox process HOME must identify a user directory",
             ));
         }
-        if self.home == workspace_root || self.home.starts_with(workspace_root) {
-            return Err(ProcessRunnerError::infrastructure(
-                "action workspace root must not be HOME or contain HOME",
-            ));
-        }
-
         validate_clean_absolute_path(&self.tmp_source, "sandbox process temporary directory")?;
         if self.tmp_source == Path::new("/") {
             return Err(ProcessRunnerError::infrastructure(
@@ -192,21 +180,6 @@ impl BwrapProcessEnvironment {
         if !is_supported_temp_path(&tmp_source) {
             return Err(ProcessRunnerError::infrastructure(
                 "sandbox process TMPDIR must resolve under /tmp, /var/tmp, /dev/shm, or a runtime temporary subdirectory",
-            ));
-        }
-
-        let canonical_workspace =
-            fs::canonicalize(workspace_root).unwrap_or_else(|_| workspace_root.to_path_buf());
-        if canonical_workspace == tmp_source
-            || (canonical_workspace.starts_with(&tmp_source) && !is_standard_temp_root(&tmp_source))
-        {
-            return Err(ProcessRunnerError::infrastructure(
-                "action workspace root must not be the selected temporary directory or its descendant",
-            ));
-        }
-        if self.home == tmp_source || self.home.starts_with(&tmp_source) {
-            return Err(ProcessRunnerError::infrastructure(
-                "sandbox process HOME must not be inside the selected temporary directory",
             ));
         }
 
@@ -296,16 +269,6 @@ fn is_standard_temp_path(path: &Path) -> bool {
     ]
     .into_iter()
     .any(|root| path == root || path.starts_with(root))
-}
-
-fn is_standard_temp_root(path: &Path) -> bool {
-    [
-        Path::new("/tmp"),
-        Path::new("/var/tmp"),
-        Path::new("/dev/shm"),
-    ]
-    .into_iter()
-    .any(|root| path == root)
 }
 
 fn absolute_env_path(name: &str, fallback: &str) -> PathBuf {
@@ -1304,7 +1267,7 @@ mod tests {
     }
 
     #[test]
-    fn bwrap_process_environment_validates_mount_boundaries_and_overrides() {
+    fn bwrap_process_environment_validates_temporary_boundary_and_overrides() {
         let environment =
             BwrapProcessEnvironment::new("/custom/bin:/usr/bin", "/home/alice", "/tmp")
                 .expect("environment layout should validate");
@@ -1313,15 +1276,10 @@ mod tests {
             .expect("standard temporary directory should be accepted");
         assert_eq!(validated.tmp_source, PathBuf::from("/tmp"));
 
-        for (workspace, expected) in [
-            ("/home", "must not be HOME or contain HOME"),
-            ("/home/alice", "must not be HOME or contain HOME"),
-            ("/tmp", "selected temporary directory"),
-        ] {
-            let error = environment
+        for workspace in ["/", "/home", "/home/alice", "/etc", "/tmp"] {
+            environment
                 .validate_for_workspace(Path::new(workspace))
-                .expect_err("overlapping action paths must be rejected");
-            assert!(error.to_string().contains(expected), "{error}");
+                .expect("the explicit workspace path should be accepted");
         }
 
         let error = BwrapProcessEnvironment::new("/custom/bin:/usr/bin", "/home/alice", "/etc")

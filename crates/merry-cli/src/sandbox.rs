@@ -285,7 +285,7 @@ pub(crate) fn plan_bootstrap_with_probe(
         return Ok(Bootstrap::AlreadyInside);
     }
 
-    validate_outer_mount_layout(host)?;
+    validate_outer_paths(host)?;
 
     let path = sandbox_path(host);
     let bwrap = find_bwrap_in_path(&path, |candidate| probe.file_exists(candidate))
@@ -482,22 +482,17 @@ fn is_clean_absolute_path(path: &Path) -> bool {
             .all(|component| matches!(component, Component::RootDir | Component::Normal(_)))
 }
 
-fn validate_outer_mount_layout(host: &Host) -> Result<(), Error> {
-    if !is_clean_absolute_path(&host.cwd) || host.cwd == Path::new("/") {
-        return Err(Error::InvalidMountLayout(
-            "workspace root must be a clean absolute path other than /",
+fn validate_outer_paths(host: &Host) -> Result<(), Error> {
+    if !is_clean_absolute_path(&host.cwd) {
+        return Err(Error::InvalidWorkspacePath(
+            "workspace root must be a clean absolute path",
         ));
     }
 
     let home = host.xdg_paths.home();
     if !is_valid_runtime_home_path(home) {
-        return Err(Error::InvalidMountLayout(
+        return Err(Error::InvalidHomeLayout(
             "HOME must be a clean user path outside /tmp",
-        ));
-    }
-    if home == host.cwd || home.starts_with(&host.cwd) {
-        return Err(Error::InvalidMountLayout(
-            "workspace root must not be HOME or contain HOME",
         ));
     }
     Ok(())
@@ -925,7 +920,8 @@ pub(crate) enum Error {
     #[cfg(not(target_os = "linux"))]
     UnsupportedPlatform,
     MissingBubblewrap,
-    InvalidMountLayout(&'static str),
+    InvalidWorkspacePath(&'static str),
+    InvalidHomeLayout(&'static str),
     Exec(io::Error),
 }
 
@@ -972,8 +968,11 @@ impl fmt::Display for Error {
                 formatter,
                 "bubblewrap executable `bwrap` was not found in PATH; install bubblewrap to use TUI/run, or omit --with-sandbox for debug commands"
             ),
-            Error::InvalidMountLayout(reason) => {
-                write!(formatter, "sandbox mount layout is invalid: {reason}")
+            Error::InvalidWorkspacePath(reason) => {
+                write!(formatter, "sandbox workspace path is invalid: {reason}")
+            }
+            Error::InvalidHomeLayout(reason) => {
+                write!(formatter, "sandbox HOME layout is invalid: {reason}")
             }
             Error::Exec(error) => {
                 write!(
