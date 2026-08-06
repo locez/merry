@@ -41,6 +41,8 @@ impl PathAccess {
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum PathAccessRuleSource {
+    /// Rule supplied by Merry's built-in development process baseline.
+    DefaultDevelopmentBaseline,
     /// Rule came from the user's global Merry config.
     ///
     /// This is intentionally higher trust than project-local configuration,

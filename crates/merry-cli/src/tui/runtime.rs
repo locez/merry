@@ -1,6 +1,6 @@
 use crate::cli_error::{CliError, debug_openai_usage_error, unexpected};
 use crate::coding_runtime::{
-    HeadlessCodingRuntimeInput, action_process_runner,
+    HeadlessCodingRuntimeInput, ProcessExecutionMode, action_process_runner_for_mode,
     build_headless_coding_runtime_with_permission_source, coding_agent_loop_config,
     coding_agent_process_admission, resume_headless_coding_runtime_with_permission_source,
 };
@@ -53,11 +53,11 @@ pub(crate) async fn start_tui_runtime_session(
     merry_config: Option<&MerryConfig>,
     session_store: TuiSessionStore,
     selection: SessionPickerSelection,
-    no_outer_sandbox: bool,
+    process_execution_mode: ProcessExecutionMode,
     preferences: &TuiPreferences,
 ) -> Result<TuiRuntimeSession, CliError> {
     let Some(admission) =
-        coding_agent_process_admission(sandbox_child_handoff, no_outer_sandbox).await
+        coding_agent_process_admission(sandbox_child_handoff, process_execution_mode).await
     else {
         return Err(CliError::DebugUsage(
             "merry TUI requires the automatic bubblewrap sandbox".to_owned(),
@@ -89,9 +89,10 @@ pub(crate) async fn start_tui_runtime_session(
     let (session_id, mut metadata, should_resume) = session_start(selection, &workspace_root);
     metadata.model = Some(model_label.clone());
     metadata.reasoning_effort = reasoning_effort_label.clone();
-    let backend = action_process_runner(
+    let backend = action_process_runner_for_mode(
         &workspace_root,
         action_process_backend_options(merry_config).map_err(unexpected)?,
+        process_execution_mode,
     )?;
     let (permission_source, permission_requests) = ChannelPermissionAdmissionSource::channel(8);
     let permission_source = Arc::new(permission_source);
@@ -131,19 +132,25 @@ pub(crate) async fn start_tui_runtime_session(
             subagents.limits(),
         ),
     };
+    let permission_review_mode =
+        if matches!(process_execution_mode, ProcessExecutionMode::Unrestricted) {
+            PermissionReviewMode::NonInteractiveTrusted
+        } else {
+            PermissionReviewMode::ModelThenHostFallback
+        };
     let runtime = if should_resume {
         resume_headless_coding_runtime_with_permission_source(
             runtime_input,
             session_store.session_state_store(),
             permission_source,
-            PermissionReviewMode::ModelThenHostFallback,
+            permission_review_mode,
         )
         .await?
     } else {
         build_headless_coding_runtime_with_permission_source(
             runtime_input,
             permission_source,
-            PermissionReviewMode::ModelThenHostFallback,
+            permission_review_mode,
         )?
     };
     let loop_config = coding_agent_loop_config()?;
@@ -372,6 +379,9 @@ fn permission_review_view(request: &PermissionReviewRequest) -> (String, String)
                     path.path(),
                     path.access().as_str()
                 ));
+            }
+            merry_runtime::RequestedCapability::HostIntegration(integration) => {
+                lines.push(format!("  - host integration {}", integration.as_str()));
             }
         }
     }

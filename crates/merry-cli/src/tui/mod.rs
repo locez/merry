@@ -1,4 +1,5 @@
 use crate::cli_error::CliError;
+use crate::coding_runtime::ProcessExecutionMode;
 use crate::config::{MerryConfig, XdgPaths};
 use crate::provider_management::{
     ProviderDiscoveryDraft, ProviderManagementError, ProviderManagementService,
@@ -79,7 +80,7 @@ pub(crate) async fn run(
     sandbox_child_handoff: Option<SandboxChildHandoff>,
     merry_config: Option<&MerryConfig>,
     launch_mode: LaunchMode,
-    no_outer_sandbox: bool,
+    process_execution_mode: ProcessExecutionMode,
 ) -> Result<(), CliError> {
     let tui_config = merry_config
         .map(MerryConfig::tui_config)
@@ -146,7 +147,7 @@ pub(crate) async fn run(
         active_config.as_ref(),
         session_store,
         selection,
-        no_outer_sandbox,
+        process_execution_mode,
         &preferences,
     )
     .await?;

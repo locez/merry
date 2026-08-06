@@ -1,7 +1,7 @@
 use super::*;
 use crate::config::{EffectiveLogSettings, LogFormat, LogLevel, XdgPaths};
 use crate::provider_config::MERRY_OPENAI_DEBUG_ENV;
-use merry_runtime::{PathAccess, PathAccessRule, PathAccessRuleSource};
+use merry_runtime::{HostIntegration, PathAccess, PathAccessRule, PathAccessRuleSource};
 use std::{
     collections::BTreeMap,
     ffi::{OsStr, OsString},
@@ -70,6 +70,9 @@ fn sandbox_host() -> Host {
         log_settings: None,
         trusted_path_rules: Vec::new(),
         graphical_environment: GraphicalEnvironment::default(),
+        host_integrations: Vec::new(),
+        host_integration_environment: HostIntegrationEnvironment::default(),
+        development_environment: Vec::new(),
         current_uid: 1_000,
     }
 }
@@ -664,6 +667,48 @@ fn non_tui_sandbox_ignores_valid_graphical_endpoints() {
             "leaked {forbidden}"
         );
     }
+}
+
+#[test]
+fn sandbox_exposes_configured_host_integrations_as_outer_ceiling() {
+    let mut host = sandbox_host();
+    host.host_integrations = vec![HostIntegration::SshAgent, HostIntegration::SessionBus];
+    host.host_integration_environment = HostIntegrationEnvironment {
+        ssh_agent_socket: Some(PathBuf::from("/run/user/1000/ssh-agent.sock")),
+        session_bus_address: Some(os("unix:path=/run/user/1000/bus")),
+    };
+    let probe = FakeHostProbe::default()
+        .socket("/run/user/1000/ssh-agent.sock", 1_000)
+        .socket("/run/user/1000/bus", 1_000);
+
+    let Bootstrap::Reexec(plan) =
+        plan_bootstrap_with_probe(true, ClipboardAccess::Disabled, &host, &probe)
+            .expect("sandbox planning should succeed")
+    else {
+        panic!("expected sandbox reexec plan");
+    };
+    let args = plan_args(&plan);
+
+    assert!(contains_sequence(
+        &args,
+        &[
+            "--ro-bind",
+            "/run/user/1000/ssh-agent.sock",
+            "/run/user/1000/ssh-agent.sock"
+        ]
+    ));
+    assert!(contains_sequence(
+        &args,
+        &["--ro-bind", "/run/user/1000/bus", "/run/user/1000/bus"]
+    ));
+    assert!(contains_sequence(
+        &args,
+        &[
+            "--setenv",
+            "DBUS_SESSION_BUS_ADDRESS",
+            "unix:path=/run/user/1000/bus"
+        ]
+    ));
 }
 
 #[test]

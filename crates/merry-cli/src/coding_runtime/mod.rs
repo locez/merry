@@ -12,12 +12,14 @@ pub(crate) use builder::resume_headless_coding_runtime;
 pub(crate) use builder::{
     CodingLoopRuntimeOptions, CodingSubagentsConfig, HeadlessCodingRuntimeInput,
     build_coding_loop_runtime, build_headless_coding_runtime,
+    build_headless_coding_runtime_with_permission_review_mode,
     build_headless_coding_runtime_with_permission_source, coding_agent_loop_config,
     resume_headless_coding_runtime_with_permission_source,
 };
 pub(crate) use error::CodingRuntimeError;
 pub(crate) use process::{
-    ActionProcessBackend, ActionProcessBackendOptions, action_process_runner,
+    ActionProcessBackend, ActionProcessBackendOptions, ProcessExecutionMode, action_process_runner,
+    action_process_runner_for_mode,
 };
 pub(crate) use profile::{
     coding_loop_workspace_roots, with_workspace_coding_loop_profile, workspace_tools_config,

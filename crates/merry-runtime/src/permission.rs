@@ -77,6 +77,32 @@ pub enum RequestedCapability {
     Network,
     /// Allow filesystem access to one path in the selected backend/profile.
     Path(RequestedPathCapability),
+    /// Allow one explicitly configured host integration in the selected
+    /// permissioned backend/profile.
+    HostIntegration(HostIntegration),
+}
+
+/// Host-provided IPC integration that may be exposed to inner process actions.
+/// The outer sandbox remains the capability ceiling; an enabled integration can
+/// be forwarded to the inner action sandbox, while an explicit request can add
+/// one for a permissioned action when the backend supports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum HostIntegration {
+    /// The user's SSH authentication agent socket.
+    SshAgent,
+    /// The user's D-Bus session bus socket, commonly used by keyring clients.
+    SessionBus,
+}
+
+impl HostIntegration {
+    /// Returns the stable model/configuration name for this integration.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SshAgent => "ssh-agent",
+            Self::SessionBus => "dbus",
+        }
+    }
 }
 
 /// Requested filesystem capability for one path.
@@ -819,7 +845,7 @@ impl PermissionAdmissionSource for ModelBackedPermissionAdmissionSource {
 pub fn request_permissions_tool() -> Result<RegisteredTool, PermissionAdmissionError> {
     let spec = ToolSpec::new(
         ToolName::new(REQUEST_PERMISSIONS_TOOL_NAME).expect("static tool name is valid"),
-        "Request additional filesystem or network capability for one exact planned action. The configured session-aware process backend materializes approved capabilities for later actions in the current runtime session; request a new path separately when needed.",
+        "Request additional filesystem, network, or explicitly configured host-integration capability for one exact planned action. Network access applies only to that action; a configured session-aware process backend may retain approved paths and host integrations for later actions in the current runtime session. When one command needs multiple capabilities, request them together.",
         request_permissions_input_schema()?,
     )?;
     Ok(RegisteredTool::new(
@@ -1046,7 +1072,7 @@ fn request_permissions_input_schema() -> Result<ToolInputSchema, PermissionAdmis
             "requested": {
                 "type": "object",
                 "additionalProperties": false,
-                "description": "Capabilities to add after this exact action is approved. Use network for network access or paths for one or more filesystem paths; a session-aware process backend keeps approved capabilities active for later actions in this runtime session.",
+                "description": "Capabilities to add after this exact action is approved. Use network for this action's network access, paths for filesystem paths, or host_integrations for explicitly configured SSH agent/D-Bus session access. Network is one-action only; paths and host integrations may remain available for later actions in a session-aware backend. Include every capability the same command needs in one request.",
                 "properties": {
                     "network": {
                         "type": "boolean",
@@ -1072,6 +1098,15 @@ fn request_permissions_input_schema() -> Result<ToolInputSchema, PermissionAdmis
                             },
                             "required": ["path", "access"]
                         }
+                    },
+                    "host_integrations": {
+                        "type": "array",
+                        "description": "Explicitly configured host IPC integrations. Supported values are ssh-agent and dbus; dbus means the D-Bus session bus commonly used by Secret Service/keyring clients.",
+                        "items": {
+                            "type": "string",
+                            "enum": ["ssh-agent", "dbus"]
+                        },
+                        "minItems": 1
                     }
                 },
                 "anyOf": [
@@ -1090,6 +1125,15 @@ fn request_permissions_input_schema() -> Result<ToolInputSchema, PermissionAdmis
                             "paths": {
                                 "minItems": 1,
                                 "description": "Provide at least one filesystem path when network capability is not requested."
+                            }
+                        }
+                    },
+                    {
+                        "required": ["host_integrations"],
+                        "properties": {
+                            "host_integrations": {
+                                "minItems": 1,
+                                "description": "Provide at least one configured host integration when network and paths are not requested."
                             }
                         }
                     }
@@ -1152,7 +1196,7 @@ pub(crate) fn permission_invalid_arguments_outcome(
         },
         "guidance": {
             "kind": "permission_request_invalid_arguments",
-            "message": "Fix the request_permissions arguments before retrying. Include requested and for_action, set for_action.kind to \"process\", provide the exact argv array, omit cwd or use a workspace-relative cwd such as \".\", and request only minimum network/path capability.",
+            "message": "Fix the request_permissions arguments before retrying. Include requested and for_action, set for_action.kind to \"process\", provide the exact argv array, omit cwd or use a workspace-relative cwd such as \".\", and request only minimum network/path/host-integration capability. An unmodeled Linux Unix socket may be requested as its exact filesystem path.",
         }
     });
     ToolExecutionOutcome::failed_json(
@@ -1215,7 +1259,7 @@ fn requested_capabilities(
         });
     };
     for key in object.keys() {
-        if key != "network" && key != "paths" {
+        if key != "network" && key != "paths" && key != "host_integrations" {
             return Err(PermissionAdmissionError::InvalidArguments {
                 message: format!("unsupported requested field {key:?}"),
             });
@@ -1270,13 +1314,41 @@ fn requested_capabilities(
         }
     }
 
+    if let Some(integrations) = object.get("host_integrations") {
+        let Value::Array(integrations) = integrations else {
+            return Err(PermissionAdmissionError::InvalidArguments {
+                message: "requested.host_integrations must be an array".to_owned(),
+            });
+        };
+        for (index, integration) in integrations.iter().enumerate() {
+            let Some(integration) = integration.as_str() else {
+                return Err(PermissionAdmissionError::InvalidArguments {
+                    message: format!("requested.host_integrations[{index}] must be a string"),
+                });
+            };
+            requested.push(RequestedCapability::HostIntegration(
+                parse_host_integration(integration)?,
+            ));
+        }
+    }
+
     if requested.is_empty() {
         return Err(PermissionAdmissionError::InvalidArguments {
-            message: "requested must include network=true or at least one path".to_owned(),
+            message: "requested must include network=true, at least one path, or at least one host integration".to_owned(),
         });
     }
 
     Ok(requested)
+}
+
+fn parse_host_integration(value: &str) -> Result<HostIntegration, PermissionAdmissionError> {
+    match value {
+        "ssh-agent" => Ok(HostIntegration::SshAgent),
+        "dbus" => Ok(HostIntegration::SessionBus),
+        actual => Err(PermissionAdmissionError::InvalidArguments {
+            message: format!("host integration must be ssh-agent|dbus, got {actual:?}"),
+        }),
+    }
 }
 
 fn parse_path_access(value: &str) -> Result<PathAccess, PermissionAdmissionError> {
@@ -1370,6 +1442,7 @@ fn normalize_requested_capabilities(
 ) -> Result<Vec<RequestedCapability>, PermissionAdmissionError> {
     let mut network = false;
     let mut paths = BTreeMap::new();
+    let mut integrations = std::collections::BTreeSet::new();
     for capability in requested {
         match capability {
             RequestedCapability::Network => network = true,
@@ -1385,10 +1458,14 @@ fn normalize_requested_capabilities(
                     });
                 }
             }
+            RequestedCapability::HostIntegration(integration) => {
+                integrations.insert(integration);
+            }
         }
     }
 
-    let mut normalized = Vec::with_capacity(paths.len() + usize::from(network));
+    let mut normalized =
+        Vec::with_capacity(paths.len() + integrations.len() + usize::from(network));
     if network {
         normalized.push(RequestedCapability::Network);
     }
@@ -1396,6 +1473,11 @@ fn normalize_requested_capabilities(
         paths.into_iter().map(|(path, access)| {
             RequestedCapability::Path(RequestedPathCapability { path, access })
         }),
+    );
+    normalized.extend(
+        integrations
+            .into_iter()
+            .map(RequestedCapability::HostIntegration),
     );
     Ok(normalized)
 }
@@ -1531,6 +1613,7 @@ fn push_review_block(prompt: &mut String, label: &str, value: &str) {
 fn requested_capabilities_json(requested: &[RequestedCapability]) -> Value {
     let mut network = false;
     let mut paths = Vec::new();
+    let mut integrations = Vec::new();
     for capability in requested {
         match capability {
             RequestedCapability::Network => network = true,
@@ -1540,6 +1623,9 @@ fn requested_capabilities_json(requested: &[RequestedCapability]) -> Value {
                     "access": path.access().as_str(),
                 }));
             }
+            RequestedCapability::HostIntegration(integration) => {
+                integrations.push(integration.as_str());
+            }
         }
     }
     let mut payload = json!({});
@@ -1548,6 +1634,9 @@ fn requested_capabilities_json(requested: &[RequestedCapability]) -> Value {
     }
     if !paths.is_empty() {
         payload["paths"] = Value::Array(paths);
+    }
+    if !integrations.is_empty() {
+        payload["host_integrations"] = json!(integrations);
     }
     payload
 }
@@ -1722,6 +1811,61 @@ mod tests {
     }
 
     #[test]
+    fn permission_request_parses_named_host_integrations() {
+        let request = permission_request_from_call(
+            &call(json!({
+                "requested": {
+                    "host_integrations": ["dbus", "ssh-agent"]
+                },
+                "for_action": { "kind": "process", "argv": ["gh", "auth", "status"] }
+            })),
+            Vec::new(),
+        )
+        .expect("host integration request should parse");
+
+        assert_eq!(
+            request.requested(),
+            &[
+                RequestedCapability::HostIntegration(HostIntegration::SshAgent),
+                RequestedCapability::HostIntegration(HostIntegration::SessionBus),
+            ]
+        );
+        let serialized = requested_capabilities_json(request.requested());
+        assert_eq!(
+            serialized,
+            json!({ "host_integrations": ["ssh-agent", "dbus"] })
+        );
+    }
+
+    #[test]
+    fn permission_request_accepts_combined_capabilities_for_one_command() {
+        let request = permission_request_from_call(
+            &call(json!({
+                "requested": {
+                    "network": true,
+                    "paths": [{ "path": ".config/gh", "access": "ro" }],
+                    "host_integrations": ["dbus"]
+                },
+                "for_action": { "kind": "process", "argv": ["gh", "issue", "list"] }
+            })),
+            Vec::new(),
+        )
+        .expect("combined capability request should parse");
+
+        assert_eq!(
+            request.requested(),
+            &[
+                RequestedCapability::Network,
+                RequestedCapability::Path(
+                    RequestedPathCapability::new(".config/gh".to_owned(), PathAccess::ReadOnly)
+                        .expect("test path should normalize"),
+                ),
+                RequestedCapability::HostIntegration(HostIntegration::SessionBus),
+            ]
+        );
+    }
+
+    #[test]
     fn request_permissions_schema_rejects_empty_process_cwd() {
         let tool = request_permissions_tool().expect("permission tool should build");
         let schema = serde_json::to_value(tool.spec().input_schema().as_schema())
@@ -1795,6 +1939,15 @@ mod tests {
             }
         });
         assert!(validator.is_valid(&valid));
+
+        let host_integration_request = json!({
+            "requested": { "host_integrations": ["dbus"] },
+            "for_action": {
+                "kind": "process",
+                "argv": ["gh", "auth", "status"]
+            }
+        });
+        assert!(validator.is_valid(&host_integration_request));
 
         let mut nullable_optional_fields = valid.clone();
         nullable_optional_fields["reason"] = Value::Null;

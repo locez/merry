@@ -371,13 +371,25 @@ fn process_output_artifact_content(
         });
     }
 
-    if output.stdout_truncated() || output.stderr_truncated() {
+    if !output.ok() {
         payload["guidance"] = serde_json::json!({
+            "kind": "process_action_recovery",
+            "message": "The process action ran inside the sandbox and failed. If the failure is caused by unavailable network, filesystem path, or host integration access (including its required environment), call request_permissions for the exact same action before retrying it. Request every capability that command needs together, such as network plus dbus or ssh-agent; an unmodeled Linux Unix socket may be requested as its exact filesystem path.",
+        });
+    }
+
+    if output.stdout_truncated() || output.stderr_truncated() {
+        let truncated_guidance = serde_json::json!({
             "kind": "process_output_truncated",
             "message": "The captured process output was truncated. Do not assume omitted output is absent; rerun with a narrower command, filter, range, or targeted file inspection before drawing conclusions from the output.",
             "stdout_truncated": output.stdout_truncated(),
             "stderr_truncated": output.stderr_truncated(),
         });
+        if output.ok() {
+            payload["guidance"] = truncated_guidance;
+        } else {
+            payload["output_guidance"] = truncated_guidance;
+        }
     }
 
     if let Some(input_artifact) = input_artifact {

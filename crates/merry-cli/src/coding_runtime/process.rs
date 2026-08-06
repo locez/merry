@@ -1,13 +1,31 @@
 use super::CodingRuntimeError;
 use merry_runtime::{
     BwrapPermissionedProcessRunnerFactory, BwrapProcessEnvironment, BwrapProcessRunner,
-    BwrapSessionPermissions, PathAccessRule, PermissionedProcessRunnerFactory, ProcessRunner,
+    BwrapSessionPermissions, HostIntegration, PathAccessRule, PermissionedProcessRunnerFactory,
+    ProcessRunner, TokioProcessRunner, UnrestrictedPermissionedProcessRunnerFactory,
 };
 use std::{
     ffi::OsString,
     path::{Path, PathBuf},
     sync::Arc,
 };
+
+/// Selects the process and outer-sandbox boundary for the coding product.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProcessExecutionMode {
+    /// Run validated actions directly in the host process environment.
+    Unrestricted,
+    /// Keep the per-action bubblewrap boundary without Merry's outer re-exec.
+    InnerOnly,
+    /// Run the per-action bubblewrap boundary inside Merry's outer sandbox.
+    OuterAndInner,
+}
+
+impl ProcessExecutionMode {
+    pub(crate) const fn uses_inner_sandbox(self) -> bool {
+        !matches!(self, Self::Unrestricted)
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct ActionProcessBackend {
@@ -20,6 +38,7 @@ pub(crate) struct ActionProcessBackend {
 pub(crate) struct ActionProcessBackendOptions {
     pub(crate) path_rules: Vec<PathAccessRule>,
     pub(crate) network_allowed: bool,
+    pub(crate) host_integrations: Vec<HostIntegration>,
     pub(crate) environment_overrides: Vec<(OsString, OsString)>,
 }
 
@@ -59,6 +78,7 @@ impl ActionProcessBackend {
         options: ActionProcessBackendOptions,
     ) -> Result<Self, CodingRuntimeError> {
         let environment = BwrapProcessEnvironment::from_current_process()
+            .with_host_integrations(options.host_integrations.clone())
             .with_overrides(options.environment_overrides.clone())?
             .validate_for_workspace(&workspace_root)?;
         Ok(Self::from_bwrap_options_with_environment(
@@ -110,11 +130,40 @@ impl ActionProcessBackend {
             }),
         }
     }
+
+    pub(crate) fn from_unrestricted_options(
+        workspace_root: PathBuf,
+        options: ActionProcessBackendOptions,
+    ) -> Result<Self, CodingRuntimeError> {
+        let runner = Arc::new(
+            TokioProcessRunner::new_at_workspace_root(workspace_root)
+                .with_environment_overrides(options.environment_overrides)?,
+        );
+        let permissioned_factory = Arc::new(UnrestrictedPermissionedProcessRunnerFactory::new(
+            Arc::clone(&runner) as Arc<dyn ProcessRunner>,
+        ));
+        Ok(Self::from_parts(runner, permissioned_factory))
+    }
 }
 
 pub(crate) fn action_process_runner(
     workspace_root: &Path,
     options: ActionProcessBackendOptions,
 ) -> Result<ActionProcessBackend, CodingRuntimeError> {
-    ActionProcessBackend::from_bwrap_options(workspace_root.to_path_buf(), options)
+    action_process_runner_for_mode(workspace_root, options, ProcessExecutionMode::InnerOnly)
+}
+
+pub(crate) fn action_process_runner_for_mode(
+    workspace_root: &Path,
+    options: ActionProcessBackendOptions,
+    mode: ProcessExecutionMode,
+) -> Result<ActionProcessBackend, CodingRuntimeError> {
+    match mode {
+        ProcessExecutionMode::Unrestricted => {
+            ActionProcessBackend::from_unrestricted_options(workspace_root.to_path_buf(), options)
+        }
+        ProcessExecutionMode::InnerOnly | ProcessExecutionMode::OuterAndInner => {
+            ActionProcessBackend::from_bwrap_options(workspace_root.to_path_buf(), options)
+        }
+    }
 }

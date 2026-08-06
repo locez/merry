@@ -112,6 +112,15 @@
             })
         }
 
+        fn failing() -> Self {
+            Self::with_response(FakeProcessRunnerResponse::Failure {
+                stdout_text: String::new(),
+                stdout_truncated: false,
+                stderr_text: "permission denied\n".to_owned(),
+                stderr_truncated: false,
+            })
+        }
+
         fn cancelling() -> Self {
             Self::with_response(FakeProcessRunnerResponse::Error(
                 ProcessRunnerError::Cancelled,
@@ -161,6 +170,12 @@
             stderr_truncated: bool,
         },
         SuccessThenCancel {
+            stdout_text: String,
+            stdout_truncated: bool,
+            stderr_text: String,
+            stderr_truncated: bool,
+        },
+        Failure {
             stdout_text: String,
             stdout_truncated: bool,
             stderr_text: String,
@@ -224,6 +239,20 @@
                         context.cancellation_token().cancel();
                         Ok(output)
                     }
+                    FakeProcessRunnerResponse::Failure {
+                        stdout_text,
+                        stdout_truncated,
+                        stderr_text,
+                        stderr_truncated,
+                    } => ProcessRunnerOutput::new(
+                        &intent,
+                        ProcessExitStatus::Exited(1),
+                        stdout_text,
+                        stdout_truncated,
+                        stderr_text,
+                        stderr_truncated,
+                    )
+                    .map_err(|source| ProcessRunnerError::infrastructure(source.to_string())),
                     FakeProcessRunnerResponse::Error(error) => Err(error),
                 }
             })

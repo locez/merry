@@ -1,4 +1,4 @@
-use merry_runtime::{PathAccess, PathAccessRule, PathAccessRuleSource};
+use merry_runtime::{HostIntegration, PathAccess, PathAccessRule, PathAccessRuleSource};
 use serde::Deserialize;
 use std::{
     collections::BTreeSet,
@@ -156,6 +156,11 @@ pub struct MerryConfig {
 }
 
 impl MerryConfig {
+    /// Returns the absolute host home used to resolve user configuration.
+    pub fn home(&self) -> &Path {
+        &self.home
+    }
+
     pub fn load_optional(paths: &XdgPaths) -> Result<Option<Self>, ConfigError> {
         let user_text = read_optional_config_text(paths.config_file())?;
         let managed_path = paths.managed_providers_file();
@@ -239,6 +244,11 @@ impl MerryConfig {
         self.raw.global.profile.as_deref()
     }
 
+    /// Returns user-configured path rules for the outer sandbox ceiling.
+    ///
+    /// These rules do not become inner action grants automatically; an inner
+    /// process still needs an approved request for a path outside its default
+    /// development baseline.
     pub fn trusted_global_path_rules(&self) -> Result<Vec<PathAccessRule>, ConfigError> {
         let Some(permissions) = self.raw.permissions.as_ref() else {
             return Ok(Vec::new());
@@ -285,6 +295,23 @@ impl MerryConfig {
             .as_ref()
             .and_then(|permissions| permissions.network)
             .unwrap_or(false)
+    }
+
+    /// Returns host IPC integrations explicitly enabled by trusted global
+    /// configuration. These form the outer sandbox capability ceiling and are
+    /// forwarded to inner process sandboxes when their endpoints are present.
+    pub fn host_integrations(&self) -> Vec<HostIntegration> {
+        let Some(permissions) = self.raw.permissions.as_ref() else {
+            return Vec::new();
+        };
+        let mut integrations = Vec::new();
+        if permissions.ssh_agent.unwrap_or(false) {
+            integrations.push(HostIntegration::SshAgent);
+        }
+        if permissions.dbus.unwrap_or(false) {
+            integrations.push(HostIntegration::SessionBus);
+        }
+        integrations
     }
 
     pub fn process_environment_overrides(&self) -> Result<Vec<(String, String)>, ConfigError> {
@@ -500,6 +527,8 @@ struct GlobalToml {
 #[serde(deny_unknown_fields)]
 struct PermissionsToml {
     network: Option<bool>,
+    ssh_agent: Option<bool>,
+    dbus: Option<bool>,
     #[serde(default)]
     readonly_paths: Vec<String>,
     #[serde(default)]
@@ -1006,6 +1035,47 @@ access = "ro"
                 .iter()
                 .all(|rule| rule.source() == PathAccessRuleSource::TrustedGlobalConfig)
         );
+    }
+
+    #[test]
+    fn parses_host_integrations_for_outer_sandbox_ceiling() {
+        let paths = XdgPaths::from_parts(home(), None, None);
+        let config = MerryConfig::load_optional_from_text(
+            Some(
+                r#"
+[permissions]
+ssh_agent = true
+dbus = true
+"#,
+            ),
+            &paths,
+        )
+        .expect("config should parse")
+        .expect("config should be present");
+
+        assert_eq!(
+            config.host_integrations(),
+            vec![
+                merry_runtime::HostIntegration::SshAgent,
+                merry_runtime::HostIntegration::SessionBus
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_legacy_session_bus_configuration_name() {
+        let paths = XdgPaths::from_parts(home(), None, None);
+        let error = MerryConfig::load_optional_from_text(
+            Some(
+                r#"
+[permissions]
+session_bus = true
+"#,
+            ),
+            &paths,
+        )
+        .expect_err("unpublished legacy configuration name must be rejected");
+        assert!(error.to_string().contains("unknown field `session_bus`"));
     }
 
     #[test]

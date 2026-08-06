@@ -1,7 +1,7 @@
 use super::{
     CodingLoopRuntimeOptions, CodingSubagentsConfig, HeadlessCodingRuntimeInput,
-    build_coding_loop_runtime, build_headless_coding_runtime, coding_agent_process_admission,
-    resume_headless_coding_runtime,
+    ProcessExecutionMode, build_coding_loop_runtime, build_headless_coding_runtime,
+    coding_agent_process_admission, resume_headless_coding_runtime,
 };
 
 use crate::debug::coding_loop::coding_loop_workspace_call;
@@ -26,10 +26,22 @@ use serde_json::{Map, Value};
 use std::{path::Path, sync::Arc};
 
 #[tokio::test(flavor = "current_thread")]
-async fn no_outer_sandbox_still_admits_the_inner_bwrap_process_profile() {
-    let admission = coding_agent_process_admission(None, true)
+async fn unrestricted_mode_admits_the_host_process_profile() {
+    let admission = coding_agent_process_admission(None, ProcessExecutionMode::Unrestricted)
         .await
-        .expect("explicit host mode should retain inner process admission");
+        .expect("unrestricted mode should admit the host process profile");
+
+    assert_eq!(
+        admission.sandbox_profile(),
+        merry_runtime::LocalWorkspaceProcessSandboxProfile::HostV1
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn inner_only_mode_admits_the_inner_bwrap_process_profile() {
+    let admission = coding_agent_process_admission(None, ProcessExecutionMode::InnerOnly)
+        .await
+        .expect("inner-only mode should admit the inner process profile");
 
     assert_eq!(
         admission.sandbox_profile(),

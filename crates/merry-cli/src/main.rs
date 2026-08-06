@@ -52,7 +52,7 @@ fn main() -> CliExit {
         Err(error) => return CliExit::Unexpected(error.to_string()),
     };
 
-    if cli.no_sandbox
+    if cli.process_execution_mode().uses_inner_sandbox()
         && cli.is_product_surface()
         && let Err(error) = sandbox::ensure_bubblewrap_available()
     {

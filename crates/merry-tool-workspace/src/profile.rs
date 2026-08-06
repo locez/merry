@@ -187,7 +187,7 @@ impl WorkspaceCodingLoopProfile {
             builder = builder
                 .register_tool(process_command_tool(
                     ToolName::new(CODING_LOOP_PROCESS_TOOL).expect("static tool name is valid"),
-                    "Run exact argv through Merry process policy for workspace inspection and verification. Provide argv as the executable and arguments array, not a shell command string; cwd is an optional workspace-relative directory. The runtime validates non-empty argv items, argv count and item byte limits, cwd normalization, and the active process permission profile.",
+                    "Run exact argv through Merry process policy for workspace inspection and verification. Provide argv as the executable and arguments array, not a shell command string; cwd is an optional workspace-relative directory. The runtime validates non-empty argv items, argv count and item byte limits, cwd normalization, and the active process permission profile. A failed action may indicate unavailable network, filesystem, or host-integration access (including its required environment); after observing the failure, request the corresponding minimum capability for the exact same action before retrying. Linux Unix sockets can be requested as exact filesystem paths when no named integration applies.",
                 )?)
                 .register_tool(request_permissions_tool()?);
         }

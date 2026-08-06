@@ -1,3 +1,4 @@
+use crate::coding_runtime::ProcessExecutionMode;
 use crate::debug::{
     Args as DebugArgs, CodingLoopLiveSmokeArgs as DebugCodingLoopLiveSmokeArgs,
     CodingLoopSubagentLiveSmokeArgs as DebugCodingLoopSubagentLiveSmokeArgs,
@@ -27,17 +28,24 @@ For sandboxed live smokes, prefer config-relative `api_key_file =
 pub(crate) struct Cli {
     #[arg(
         long,
-        conflicts_with = "no_sandbox",
-        help = "Run the command inside Merry's outer bubblewrap sandbox"
+        conflicts_with_all = ["no_sandbox", "inner_sandbox"],
+        help = "Run TUI/run inside Merry's outer and inner bubblewrap sandboxes"
     )]
     pub(crate) with_sandbox: bool,
 
     #[arg(
         long,
-        conflicts_with = "with_sandbox",
-        help = "Disable the outer sandbox for TUI/run; tool commands remain sandboxed"
+        conflicts_with_all = ["with_sandbox", "inner_sandbox"],
+        help = "Run TUI/run directly with the host filesystem, environment, and permissions"
     )]
     pub(crate) no_sandbox: bool,
+
+    #[arg(
+        long,
+        conflicts_with_all = ["with_sandbox", "no_sandbox"],
+        help = "Run TUI/run with the inner action sandbox and without Merry's outer sandbox"
+    )]
+    pub(crate) inner_sandbox: bool,
 
     #[arg(
         long = "merry-sandbox-child-handoff",
@@ -60,10 +68,20 @@ impl Cli {
     }
 
     pub(crate) fn should_bootstrap_sandbox(&self) -> bool {
+        matches!(
+            self.process_execution_mode(),
+            ProcessExecutionMode::OuterAndInner
+        ) && (self.with_sandbox || self.is_product_surface())
+    }
+
+    pub(crate) fn process_execution_mode(&self) -> ProcessExecutionMode {
         if self.no_sandbox {
-            return false;
+            ProcessExecutionMode::Unrestricted
+        } else if self.inner_sandbox {
+            ProcessExecutionMode::InnerOnly
+        } else {
+            ProcessExecutionMode::OuterAndInner
         }
-        self.with_sandbox || self.is_product_surface()
     }
 
     pub(crate) fn clipboard_access(&self) -> crate::sandbox::ClipboardAccess {
@@ -197,7 +215,7 @@ fn command_usage(command: &mut clap::Command) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Cli, CliCommand, cmd_usage, debug_coding_loop_live_smoke_usage,
+        Cli, CliCommand, ProcessExecutionMode, cmd_usage, debug_coding_loop_live_smoke_usage,
         debug_coding_loop_subagent_live_smoke_usage, debug_coding_loop_task_live_smoke_usage,
         debug_openai_usage, shell_usage,
     };
@@ -232,13 +250,33 @@ mod tests {
     }
 
     #[test]
-    fn no_sandbox_disables_only_default_outer_product_sandbox() {
+    fn no_sandbox_selects_unrestricted_host_mode() {
         let tui = Cli::try_parse_from(["merry", "--no-sandbox"]).expect("root args parse");
         let run =
             Cli::try_parse_from(["merry", "--no-sandbox", "run", "task"]).expect("run parses");
 
         assert!(!tui.should_bootstrap_sandbox());
         assert!(!run.should_bootstrap_sandbox());
+        assert_eq!(
+            tui.process_execution_mode(),
+            ProcessExecutionMode::Unrestricted
+        );
+        assert_eq!(
+            run.process_execution_mode(),
+            ProcessExecutionMode::Unrestricted
+        );
+    }
+
+    #[test]
+    fn inner_sandbox_selects_codex_compatible_single_sandbox_mode() {
+        let cli =
+            Cli::try_parse_from(["merry", "--inner-sandbox"]).expect("inner sandbox args parse");
+
+        assert!(!cli.should_bootstrap_sandbox());
+        assert_eq!(
+            cli.process_execution_mode(),
+            ProcessExecutionMode::InnerOnly
+        );
     }
 
     #[test]

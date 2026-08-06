@@ -251,6 +251,56 @@ async fn process_action_artifact_guides_model_when_output_is_truncated() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn failed_process_action_artifact_explains_capability_recovery() {
+    let executor = ProcessProposingToolExecutor::new();
+    let runner = FakeProcessRunner::failing();
+    let tool = RegisteredTool::new(
+        policy_tool_spec("policy_command_failed_recovery"),
+        Arc::new(executor),
+        ToolActionKind::CommandExec,
+    )
+    .with_action_proposal();
+    let (runtime, pending) = register_policy_pending_registered_tool_with_builder(
+        "runtime-policy-command-failed-recovery",
+        "policy_command_failed_recovery",
+        "call-command-failed-recovery",
+        tool,
+        |builder| {
+            builder
+                .allow_low_risk_process_actions(Arc::new(runner.clone()))
+                .build()
+        },
+    )
+    .await;
+
+    let events = runtime
+        .execute_tool_call(pending.id(), ToolExecutionContext::default())
+        .await
+        .expect("failed process action should still produce a durable result");
+    let result = resolved_tool_result(&events);
+    assert_eq!(result.status(), merry_core::ToolCallResultStatus::Failed);
+
+    let content = runtime
+        .read_artifact_content(result.artifact().id())
+        .await
+        .expect("failed process result artifact should be readable");
+    let payload: serde_json::Value = serde_json::from_str(
+        content
+            .as_text()
+            .expect("process result artifact should be textual JSON"),
+    )
+    .expect("process result artifact should parse as JSON");
+    assert_eq!(payload["guidance"]["kind"], "process_action_recovery");
+    let message = payload["guidance"]["message"]
+        .as_str()
+        .expect("recovery guidance should be text");
+    assert!(message.contains("unavailable network"));
+    assert!(message.contains("host integration"));
+    assert!(message.contains("exact filesystem path"));
+    assert!(!message.contains("stderr"));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn opt_in_process_action_denies_dangerous_argv_without_runner_call() {
     let executor = ProcessProposingToolExecutor::with_argv(["sh", "-c", "rm -rf target"]);
     let runner = FakeProcessRunner::succeeding();

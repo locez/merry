@@ -1,4 +1,5 @@
 use crate::cli_error::CliError;
+use crate::coding_runtime::ProcessExecutionMode;
 use crate::debug;
 use crate::sandbox::{
     ChildHandoff as SandboxChildHandoff, MERRY_SANDBOX_ENV, MERRY_SANDBOX_VERSION_ENV,
@@ -31,9 +32,12 @@ pub(crate) async fn coding_loop_smoke_admission_from_current_process(
 
 pub(crate) async fn coding_agent_process_admission(
     sandbox_child_handoff: Option<SandboxChildHandoff>,
-    no_outer_sandbox: bool,
+    mode: ProcessExecutionMode,
 ) -> Option<AcceptedLocalWorkspaceProcessAdmission> {
-    if no_outer_sandbox {
+    if matches!(mode, ProcessExecutionMode::Unrestricted) {
+        return Some(AcceptedLocalWorkspaceProcessAdmission::accept_host_v1());
+    }
+    if matches!(mode, ProcessExecutionMode::InnerOnly) {
         return Some(AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1());
     }
     coding_loop_smoke_admission_from_current_process(sandbox_child_handoff).await

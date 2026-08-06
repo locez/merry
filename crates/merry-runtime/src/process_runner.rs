@@ -5,9 +5,9 @@
 //! admitted; callers must still opt in through runtime permission profiles.
 
 use crate::{
-    PathAccess, PathAccessRule, PermissionRequest, PermissionedProcessRunnerFactory,
-    ProcessActionIntent, ProcessExitStatus, ProcessRunner, ProcessRunnerContext,
-    ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput,
+    HostIntegration, PathAccess, PathAccessRule, PermissionRequest,
+    PermissionedProcessRunnerFactory, ProcessActionIntent, ProcessExitStatus, ProcessRunner,
+    ProcessRunnerContext, ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput,
 };
 use std::{
     env,
@@ -48,13 +48,17 @@ const ACTION_SANDBOX_ETC_READ_ONLY_DIR_PATHS: &[&str] = &[
 #[derive(Debug, Default, Clone)]
 pub struct TokioProcessRunner {
     cwd_root: Option<PathBuf>,
+    environment_overrides: Vec<(OsString, OsString)>,
 }
 
 impl TokioProcessRunner {
     /// Creates a Tokio-backed process runner.
     #[must_use]
     pub const fn new() -> Self {
-        Self { cwd_root: None }
+        Self {
+            cwd_root: None,
+            environment_overrides: Vec::new(),
+        }
     }
 
     /// Creates a Tokio-backed process runner whose process cwd values are
@@ -63,26 +67,59 @@ impl TokioProcessRunner {
     pub fn new_at_workspace_root(root: impl Into<PathBuf>) -> Self {
         Self {
             cwd_root: Some(root.into()),
+            environment_overrides: Vec::new(),
         }
+    }
+
+    /// Validates and applies environment assignments while preserving all
+    /// other variables inherited from the Merry process.
+    pub fn with_environment_overrides(
+        mut self,
+        overrides: impl IntoIterator<Item = (OsString, OsString)>,
+    ) -> Result<Self, ProcessRunnerError> {
+        let mut names = std::collections::BTreeSet::new();
+        let mut validated = Vec::new();
+        for (name, value) in overrides {
+            validate_environment_name(&name)?;
+            validate_os_string(&value, "host process environment value")?;
+            if !names.insert(name.clone()) {
+                return Err(ProcessRunnerError::infrastructure(
+                    "host process environment contains a duplicate variable",
+                ));
+            }
+            validated.push((name, value));
+        }
+        self.environment_overrides = validated;
+        Ok(self)
     }
 }
 
 /// Host-derived paths used to construct one action sandbox.
 ///
-/// The HOME and PATH values preserve the caller's path namespace. The source
-/// temporary directory is mounted at `/tmp` for every action, so an outer
-/// session tmpfs remains shared while per-action bubblewrap namespaces stay
-/// isolated.
+/// The HOME, PATH, and non-policy environment variables preserve the caller's
+/// process environment. The action namespace starts from a read-only view of
+/// its parent filesystem; workspace, approved path, and host-integration mounts
+/// then overlay the specific writable or temporarily exposed locations. The
+/// source temporary directory is mounted at `/tmp` for every action, so an
+/// outer session tmpfs remains shared while per-action bubblewrap namespaces
+/// stay isolated.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BwrapProcessEnvironment {
     path: OsString,
     home: PathBuf,
     tmp_source: PathBuf,
     overrides: Vec<(OsString, OsString)>,
+    host_integrations: Vec<HostIntegration>,
+    ssh_agent_socket: Option<PathBuf>,
+    session_bus_address: Option<OsString>,
 }
 
 impl BwrapProcessEnvironment {
     /// Builds an environment layout from the current process environment.
+    ///
+    /// The resulting action plan intentionally does not use `--clearenv`; the
+    /// caller's environment reaches the child and Merry overrides only the
+    /// validated process defaults and configured assignments.
     #[must_use]
     pub fn from_current_process() -> Self {
         let path = env::var_os("PATH")
@@ -95,6 +132,9 @@ impl BwrapProcessEnvironment {
             home,
             tmp_source,
             overrides: Vec::new(),
+            host_integrations: Vec::new(),
+            ssh_agent_socket: env::var_os("SSH_AUTH_SOCK").map(PathBuf::from),
+            session_bus_address: env::var_os("DBUS_SESSION_BUS_ADDRESS"),
         }
     }
 
@@ -120,6 +160,9 @@ impl BwrapProcessEnvironment {
             home,
             tmp_source,
             overrides: Vec::new(),
+            host_integrations: Vec::new(),
+            ssh_agent_socket: env::var_os("SSH_AUTH_SOCK").map(PathBuf::from),
+            session_bus_address: env::var_os("DBUS_SESSION_BUS_ADDRESS"),
         })
     }
 
@@ -142,6 +185,18 @@ impl BwrapProcessEnvironment {
         }
         self.overrides = validated;
         Ok(self)
+    }
+
+    /// Enables selected host IPC integrations for child process actions.
+    #[must_use]
+    pub fn with_host_integrations(
+        mut self,
+        integrations: impl IntoIterator<Item = HostIntegration>,
+    ) -> Self {
+        self.host_integrations.extend(integrations);
+        self.host_integrations.sort_unstable();
+        self.host_integrations.dedup();
+        self
     }
 
     /// Validates the host paths before constructing one action namespace.
@@ -186,6 +241,74 @@ impl BwrapProcessEnvironment {
         let mut validated = self.clone();
         validated.tmp_source = tmp_source;
         Ok(validated)
+    }
+
+    fn validate_requested_host_integrations(
+        &self,
+        integrations: &[HostIntegration],
+    ) -> Result<(), ProcessRunnerError> {
+        for integration in integrations {
+            let available = match integration {
+                HostIntegration::SshAgent => self
+                    .ssh_agent_socket
+                    .as_ref()
+                    .is_some_and(|path| is_clean_absolute_path(path)),
+                HostIntegration::SessionBus => self
+                    .session_bus_address
+                    .as_ref()
+                    .and_then(|address| session_bus_socket_path(address))
+                    .is_some_and(|path| is_clean_absolute_path(&path)),
+            };
+            if !available {
+                return Err(ProcessRunnerError::infrastructure(format!(
+                    "host integration `{}` is not available in the current sandbox environment",
+                    integration.as_str()
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn host_integration_candidates(&self) -> Vec<(HostIntegration, PathBuf, Option<OsString>)> {
+        let mut candidates = Vec::new();
+        if let Some(path) = self
+            .ssh_agent_socket
+            .as_ref()
+            .filter(|path| is_clean_absolute_path(path))
+        {
+            candidates.push((HostIntegration::SshAgent, path.clone(), None));
+        }
+        if let Some((socket, address)) = self
+            .session_bus_address
+            .as_ref()
+            .and_then(|address| session_bus_socket_path(address).map(|socket| (socket, address)))
+            .filter(|(socket, _)| is_clean_absolute_path(socket))
+        {
+            candidates.push((HostIntegration::SessionBus, socket, Some(address.clone())));
+        }
+        candidates
+    }
+
+    fn host_integration_hidden_paths(&self) -> Vec<PathBuf> {
+        let mut hidden = Vec::new();
+        for (_, socket, _) in self.host_integration_candidates() {
+            let Some(parent) = socket.parent() else {
+                continue;
+            };
+            if hidden.iter().any(|path: &PathBuf| parent.starts_with(path)) {
+                continue;
+            }
+            hidden.retain(|path| !path.starts_with(parent));
+            hidden.push(parent.to_path_buf());
+        }
+        hidden
+    }
+
+    fn host_integration_bindings(&self) -> Vec<(HostIntegration, PathBuf, Option<OsString>)> {
+        self.host_integration_candidates()
+            .into_iter()
+            .filter(|(integration, _, _)| self.host_integrations.contains(integration))
+            .collect()
     }
 }
 
@@ -245,6 +368,24 @@ fn validate_clean_absolute_path(path: &Path, label: &str) -> Result<(), ProcessR
         )));
     }
     Ok(())
+}
+
+fn is_clean_absolute_path(path: &Path) -> bool {
+    path.is_absolute()
+        && path
+            .components()
+            .all(|component| matches!(component, Component::RootDir | Component::Normal(_)))
+}
+
+fn session_bus_socket_path(address: &OsStr) -> Option<PathBuf> {
+    let address = address.to_str()?;
+    address.split(';').find_map(|candidate| {
+        let options = candidate.strip_prefix("unix:")?;
+        options.split(',').find_map(|option| {
+            let (name, value) = option.split_once('=')?;
+            (name == "path").then(|| PathBuf::from(value))
+        })
+    })
 }
 
 fn is_supported_temp_path(path: &Path) -> bool {
@@ -357,25 +498,26 @@ impl BwrapProcessRunner {
             .as_ref()
             .map(BwrapSessionPermissions::snapshot)
             .transpose()?;
+        let mut environment = environment;
         let mut path_rules = self.path_rules.clone();
-        let mut network_allowed = self.network_allowed;
         if let Some(snapshot) = session_snapshot {
             path_rules.extend(snapshot.path_rules);
-            network_allowed |= snapshot.network_allowed;
+            environment = environment.with_host_integrations(snapshot.host_integrations);
         }
         path_rules = normalize_path_rules(path_rules);
         Ok(bwrap_process_plan_with_environment(
             intent,
             &self.cwd_root,
             &environment,
-            network_allowed,
+            self.network_allowed,
             &path_rules,
             &self.bwrap_program,
         ))
     }
 }
 
-/// Capabilities approved for the lifetime of one runtime session.
+/// Filesystem and host-integration capabilities approved for the lifetime of
+/// one runtime session.
 ///
 /// Each process action still starts a fresh bubblewrap instance, but every
 /// instance receives a snapshot of these approved capabilities. The store is
@@ -388,14 +530,14 @@ pub struct BwrapSessionPermissions {
 
 #[derive(Debug, Default)]
 struct BwrapSessionPermissionState {
-    network_allowed: bool,
     path_rules: Vec<PathAccessRule>,
+    host_integrations: Vec<HostIntegration>,
 }
 
 #[derive(Debug, Clone)]
 struct BwrapSessionPermissionSnapshot {
-    network_allowed: bool,
     path_rules: Vec<PathAccessRule>,
+    host_integrations: Vec<HostIntegration>,
 }
 
 impl BwrapSessionPermissions {
@@ -412,15 +554,15 @@ impl BwrapSessionPermissions {
             )
         })?;
         Ok(BwrapSessionPermissionSnapshot {
-            network_allowed: state.network_allowed,
             path_rules: state.path_rules.clone(),
+            host_integrations: state.host_integrations.clone(),
         })
     }
 
     fn grant(
         &self,
         path_rules: Vec<PathAccessRule>,
-        network_allowed: bool,
+        host_integrations: Vec<HostIntegration>,
     ) -> Result<(), ProcessRunnerError> {
         let mut state = self.state.write().map_err(|_| {
             ProcessRunnerError::infrastructure(
@@ -430,7 +572,9 @@ impl BwrapSessionPermissions {
         let mut combined = state.path_rules.clone();
         combined.extend(path_rules);
         state.path_rules = normalize_session_path_rules(combined);
-        state.network_allowed |= network_allowed;
+        state.host_integrations.extend(host_integrations);
+        state.host_integrations.sort_unstable();
+        state.host_integrations.dedup();
         Ok(())
     }
 }
@@ -439,8 +583,9 @@ impl BwrapSessionPermissions {
 ///
 /// Filesystem access stays governed by the configured workspace/root path
 /// rules and the session-scoped capabilities already approved by the runtime.
-/// Approved `network=true` requests also remain active for later actions in
-/// the same session; other sessions receive a fresh empty capability store.
+/// Approved `network=true` requests are applied only to the returned runner;
+/// other sessions receive a fresh empty capability store. Paths and host
+/// integrations may remain active for later actions in the same session.
 #[derive(Debug, Clone)]
 pub struct BwrapPermissionedProcessRunnerFactory {
     cwd_root: PathBuf,
@@ -537,6 +682,20 @@ impl BwrapPermissionedProcessRunnerFactory {
             .collect()
     }
 
+    fn requested_host_integrations_for_request(
+        &self,
+        request: &PermissionRequest,
+    ) -> Vec<HostIntegration> {
+        request
+            .requested()
+            .iter()
+            .filter_map(|capability| match capability {
+                crate::RequestedCapability::HostIntegration(integration) => Some(*integration),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn grant_approved_request(
         &self,
         request: &PermissionRequest,
@@ -546,7 +705,7 @@ impl BwrapPermissionedProcessRunnerFactory {
         };
         permissions.grant(
             self.requested_path_rules_for_request(request)?,
-            request.requests_network(),
+            self.requested_host_integrations_for_request(request),
         )
     }
 
@@ -555,15 +714,18 @@ impl BwrapPermissionedProcessRunnerFactory {
             Ok(path_rules) => (path_rules, None),
             Err(error) => (self.path_rules.clone(), Some(error.to_string())),
         };
+        let mut environment = self.environment.clone();
+        environment = environment
+            .with_host_integrations(self.requested_host_integrations_for_request(request));
+        if let Some(permissions) = &self.session_permissions
+            && let Ok(snapshot) = permissions.snapshot()
+        {
+            environment = environment.with_host_integrations(snapshot.host_integrations);
+        }
         let mut runner = BwrapProcessRunner::new_at_workspace_root(self.cwd_root.clone())
-            .with_environment(self.environment.clone())
+            .with_environment(environment)
             .with_path_rules(path_rules);
-        let session_network_allowed = self
-            .session_permissions
-            .as_ref()
-            .and_then(|permissions| permissions.snapshot().ok())
-            .is_some_and(|snapshot| snapshot.network_allowed);
-        if self.base_network_allowed || request.requests_network() || session_network_allowed {
+        if self.base_network_allowed || request.requests_network() {
             runner = runner.allow_network();
         }
         if let Some(permissions) = &self.session_permissions {
@@ -577,9 +739,10 @@ impl BwrapPermissionedProcessRunnerFactory {
 
 impl PermissionedProcessRunnerFactory for BwrapPermissionedProcessRunnerFactory {
     fn validate_request(&self, request: &PermissionRequest) -> Result<(), ProcessRunnerError> {
-        self.environment
-            .validate_for_workspace(&self.cwd_root)
-            .map(|_| ())?;
+        self.environment.validate_for_workspace(&self.cwd_root)?;
+        self.environment.validate_requested_host_integrations(
+            &self.requested_host_integrations_for_request(request),
+        )?;
         self.path_rules_for_request(request).map(|_| ())
     }
 
@@ -751,6 +914,9 @@ fn bwrap_process_plan(
         home: PathBuf::from(ACTION_SANDBOX_HOME_FALLBACK),
         tmp_source: PathBuf::from(ACTION_SANDBOX_TMPDIR),
         overrides: Vec::new(),
+        host_integrations: Vec::new(),
+        ssh_agent_socket: None,
+        session_bus_address: None,
     };
     bwrap_process_plan_with_environment(
         intent,
@@ -779,25 +945,31 @@ fn bwrap_process_plan_with_environment(
         os("--unshare-cgroup-try"),
         os("--die-with-parent"),
         os("--new-session"),
+        os("--ro-bind"),
+        os("/"),
+        os("/"),
         os("--proc"),
         os("/proc"),
         os("--dev"),
         os("/dev"),
+        os("--tmpfs"),
+        os(ACTION_SANDBOX_TMPDIR),
         os("--bind"),
         environment.tmp_source.as_os_str().to_owned(),
         os(ACTION_SANDBOX_TMPDIR),
-        os("--tmpfs"),
-        os("/home"),
     ];
-    if !environment.home.starts_with(Path::new("/home")) {
+    if !environment.home.exists() {
         append_bwrap_mount_parent_args(&mut args, &environment.home);
-        args.extend([os("--tmpfs"), environment.home.as_os_str().to_owned()]);
+        args.extend([
+            os("--tmpfs"),
+            environment.home.as_os_str().to_owned(),
+            os("--perms"),
+            os("0700"),
+            os("--dir"),
+            environment.home.as_os_str().to_owned(),
+        ]);
     }
     args.extend([
-        os("--perms"),
-        os("0700"),
-        os("--dir"),
-        environment.home.as_os_str().to_owned(),
         os("--ro-bind"),
         os("/usr"),
         os("/usr"),
@@ -829,12 +1001,21 @@ fn bwrap_process_plan_with_environment(
     }
     append_bwrap_required_path_rule(&mut args, cwd_root, PathAccess::ReadWrite);
     for rule in path_rules {
-        append_bwrap_path_rule(&mut args, rule.path(), rule.access());
+        if rule.source() == crate::PathAccessRuleSource::PermissionReview {
+            append_bwrap_required_path_rule(&mut args, rule.path(), rule.access());
+        } else {
+            append_bwrap_path_rule(&mut args, rule.path(), rule.access());
+        }
+    }
+    for path in environment.host_integration_hidden_paths() {
+        append_bwrap_hidden_host_integration_args(&mut args, &path);
+    }
+    for (_, socket, _) in environment.host_integration_bindings() {
+        append_bwrap_host_integration_mount_args(&mut args, &socket);
     }
     args.extend([
         os("--chdir"),
         cwd.as_os_str().to_owned(),
-        os("--clearenv"),
         os("--setenv"),
         os("PATH"),
         environment.path.clone(),
@@ -850,6 +1031,20 @@ fn bwrap_process_plan_with_environment(
     ]);
     for (name, value) in &environment.overrides {
         args.extend([os("--setenv"), name.clone(), value.clone()]);
+    }
+    args.extend([
+        os("--unsetenv"),
+        os("SSH_AUTH_SOCK"),
+        os("--unsetenv"),
+        os("DBUS_SESSION_BUS_ADDRESS"),
+    ]);
+    for (integration, socket, address) in environment.host_integration_bindings() {
+        append_bwrap_host_integration_environment_args(
+            &mut args,
+            integration,
+            &socket,
+            address.as_deref(),
+        );
     }
     args.push(os("--"));
     args.extend(intent.argv().iter().map(OsString::from));
@@ -868,6 +1063,39 @@ fn append_bwrap_file_bind_args(args: &mut Vec<OsString>, source: &Path, destinat
         source.as_os_str().to_owned(),
         destination.as_os_str().to_owned(),
     ]);
+}
+
+fn append_bwrap_hidden_host_integration_args(args: &mut Vec<OsString>, path: &Path) {
+    append_bwrap_mount_parent_args(args, path);
+    args.extend([os("--tmpfs"), path.as_os_str().to_owned()]);
+}
+
+fn append_bwrap_host_integration_mount_args(args: &mut Vec<OsString>, socket: &Path) {
+    append_bwrap_file_bind_args(args, socket, socket);
+}
+
+fn append_bwrap_host_integration_environment_args(
+    args: &mut Vec<OsString>,
+    integration: HostIntegration,
+    socket: &Path,
+    address: Option<&OsStr>,
+) {
+    match integration {
+        HostIntegration::SshAgent => args.extend([
+            os("--setenv"),
+            os("SSH_AUTH_SOCK"),
+            socket.as_os_str().to_owned(),
+        ]),
+        HostIntegration::SessionBus => {
+            if let Some(address) = address {
+                args.extend([
+                    os("--setenv"),
+                    os("DBUS_SESSION_BUS_ADDRESS"),
+                    address.to_owned(),
+                ]);
+            }
+        }
+    }
 }
 
 fn append_bwrap_dir_bind_args(args: &mut Vec<OsString>, source: &Path, destination: &Path) {
@@ -959,7 +1187,10 @@ impl ProcessRunner for TokioProcessRunner {
         context: ProcessRunnerContext,
     ) -> ProcessRunnerFuture<'a> {
         let cwd_root = self.cwd_root.clone();
-        Box::pin(async move { run_tokio_process(intent, context, cwd_root.as_deref()).await })
+        let environment_overrides = self.environment_overrides.clone();
+        Box::pin(async move {
+            run_tokio_process(intent, context, cwd_root.as_deref(), &environment_overrides).await
+        })
     }
 }
 
@@ -967,6 +1198,7 @@ async fn run_tokio_process(
     intent: ProcessActionIntent,
     context: ProcessRunnerContext,
     cwd_root: Option<&Path>,
+    environment_overrides: &[(OsString, OsString)],
 ) -> Result<ProcessRunnerOutput, ProcessRunnerError> {
     let Some((program, args)) = intent.argv().split_first() else {
         return Err(ProcessRunnerError::infrastructure(
@@ -985,6 +1217,11 @@ async fn run_tokio_process(
     command
         .args(&args)
         .current_dir(process_current_dir(cwd_root, &intent))
+        .envs(
+            environment_overrides
+                .iter()
+                .map(|(name, value)| (name, value)),
+        )
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1133,9 +1370,10 @@ mod tests {
         bwrap_process_plan_with_environment, process_current_dir,
     };
     use crate::{
-        PathAccess, PathAccessRule, PathAccessRuleSource, PermissionRequest, PermissionedAction,
-        PermissionedProcessRunnerFactory, ProcessActionIntent, ProcessEnvPolicy, ProcessExitStatus,
-        ProcessRunner, ProcessRunnerContext, StaticPermissionedProcessRunnerFactory,
+        HostIntegration, PathAccess, PathAccessRule, PathAccessRuleSource, PermissionRequest,
+        PermissionedAction, PermissionedProcessRunnerFactory, ProcessActionIntent,
+        ProcessEnvPolicy, ProcessExitStatus, ProcessRunner, ProcessRunnerContext,
+        StaticPermissionedProcessRunnerFactory, UnrestrictedPermissionedProcessRunnerFactory,
     };
     use merry_core::{PendingToolCall, ToolCallArguments, ToolCallId, ToolName};
     use serde_json::json;
@@ -1264,6 +1502,102 @@ mod tests {
             &args,
             &["--setenv", "RUSTUP_TOOLCHAIN", "stable"]
         ));
+        assert!(!args.iter().any(|arg| arg == "--clearenv"));
+        assert!(contains_sequence(&args, &["--ro-bind", "/", "/"]));
+        assert!(!contains_sequence(&args, &["--tmpfs", "/home"]));
+    }
+
+    #[test]
+    fn bwrap_process_plan_materializes_host_integrations_and_keeps_parent_environment() {
+        let mut environment =
+            BwrapProcessEnvironment::new("/custom/bin:/usr/bin", "/home/alice", "/tmp")
+                .expect("environment layout should validate");
+        environment.ssh_agent_socket = Some(PathBuf::from("/run/user/1000/ssh-agent.sock"));
+        environment.session_bus_address = Some(OsString::from("unix:path=/run/user/1000/bus"));
+        let environment = environment
+            .with_host_integrations([HostIntegration::SshAgent, HostIntegration::SessionBus]);
+        let plan = bwrap_process_plan_with_environment(
+            &intent(None),
+            Path::new("/workspace/merry"),
+            &environment,
+            true,
+            &[],
+            Path::new("/custom/bin/bwrap"),
+        );
+        let args = os_args(&plan.args);
+
+        assert!(!args.iter().any(|arg| arg == "--clearenv"));
+        assert!(contains_sequence(&args, &["--ro-bind", "/", "/"]));
+        assert!(contains_sequence(&args, &["--tmpfs", "/run/user/1000"]));
+        assert!(contains_sequence(
+            &args,
+            &[
+                "--unsetenv",
+                "SSH_AUTH_SOCK",
+                "--unsetenv",
+                "DBUS_SESSION_BUS_ADDRESS"
+            ]
+        ));
+        assert!(contains_sequence(
+            &args,
+            &[
+                "--ro-bind",
+                "/run/user/1000/ssh-agent.sock",
+                "/run/user/1000/ssh-agent.sock"
+            ]
+        ));
+        assert!(contains_sequence(
+            &args,
+            &["--ro-bind", "/run/user/1000/bus", "/run/user/1000/bus"]
+        ));
+        assert!(contains_sequence(
+            &args,
+            &["--setenv", "SSH_AUTH_SOCK", "/run/user/1000/ssh-agent.sock"]
+        ));
+        assert!(contains_sequence(
+            &args,
+            &[
+                "--setenv",
+                "DBUS_SESSION_BUS_ADDRESS",
+                "unix:path=/run/user/1000/bus"
+            ]
+        ));
+    }
+
+    #[test]
+    fn bwrap_process_plan_hides_unapproved_host_integrations() {
+        let mut environment =
+            BwrapProcessEnvironment::new("/custom/bin:/usr/bin", "/home/alice", "/tmp")
+                .expect("environment layout should validate");
+        environment.ssh_agent_socket = Some(PathBuf::from("/run/user/1000/gnupg/S.gpg-agent.ssh"));
+        environment.session_bus_address = Some(OsString::from("unix:path=/run/user/1000/bus"));
+        let plan = bwrap_process_plan_with_environment(
+            &intent(None),
+            Path::new("/workspace/merry"),
+            &environment,
+            true,
+            &[],
+            Path::new("/custom/bin/bwrap"),
+        );
+        let args = os_args(&plan.args);
+
+        assert!(contains_sequence(&args, &["--tmpfs", "/run/user/1000"]));
+        assert!(!contains_sequence(
+            &args,
+            &[
+                "--ro-bind",
+                "/run/user/1000/gnupg/S.gpg-agent.ssh",
+                "/run/user/1000/gnupg/S.gpg-agent.ssh"
+            ]
+        ));
+        assert!(!contains_sequence(
+            &args,
+            &[
+                "--setenv",
+                "SSH_AUTH_SOCK",
+                "/run/user/1000/gnupg/S.gpg-agent.ssh"
+            ]
+        ));
     }
 
     #[test]
@@ -1315,7 +1649,7 @@ mod tests {
     }
 
     #[test]
-    fn bwrap_process_plan_places_custom_home_permissions_on_home_directory() {
+    fn bwrap_process_plan_inherits_parent_filesystem_without_clearing_environment() {
         let environment =
             BwrapProcessEnvironment::new("/custom/bin:/usr/bin", "/srv/alice", "/tmp")
                 .expect("environment layout should validate");
@@ -1329,19 +1663,13 @@ mod tests {
         );
         let args = os_args(&plan.args);
 
+        assert!(contains_sequence(&args, &["--ro-bind", "/", "/"]));
+        assert!(!contains_sequence(&args, &["--tmpfs", "/home"]));
         assert!(contains_sequence(
             &args,
-            &[
-                "--dir",
-                "/srv",
-                "--tmpfs",
-                "/srv/alice",
-                "--perms",
-                "0700",
-                "--dir",
-                "/srv/alice"
-            ]
+            &["--setenv", "HOME", "/srv/alice"]
         ));
+        assert!(!args.iter().any(|arg| arg == "--clearenv"));
     }
 
     #[test]
@@ -1520,7 +1848,7 @@ mod tests {
         assert!(contains_sequence(
             &args,
             &[
-                "--bind-try",
+                "--bind",
                 "/workspace/merry/deps/cache",
                 "/workspace/merry/deps/cache"
             ]
@@ -1564,15 +1892,12 @@ mod tests {
             .expect("later ordinary process plan should build");
         let args = os_args(&plan.args);
 
-        assert!(contains_sequence(&args, &["--bind-try", "/tmp", "/tmp"]));
-        assert!(!contains_sequence(
-            &args,
-            &["--ro-bind-try", "/tmp", "/tmp"]
-        ));
+        assert!(contains_sequence(&args, &["--bind", "/tmp", "/tmp"]));
+        assert!(!contains_sequence(&args, &["--ro-bind", "/tmp", "/tmp"]));
         assert!(contains_sequence(
             &args,
             &[
-                "--ro-bind-try",
+                "--ro-bind",
                 "/var/lib/merry-demo.txt",
                 "/var/lib/merry-demo.txt"
             ]
@@ -1580,6 +1905,52 @@ mod tests {
         assert!(!contains_sequence(
             &args,
             &["--bind-try", "/var/tmp", "/var/tmp"]
+        ));
+        assert!(args.iter().any(|arg| arg == "--unshare-net"));
+    }
+
+    #[test]
+    fn bwrap_permissioned_factory_keeps_approved_host_integrations_for_later_actions() {
+        let mut environment =
+            BwrapProcessEnvironment::new("/custom/bin:/usr/bin", "/home/alice", "/tmp")
+                .expect("environment layout should validate");
+        environment.ssh_agent_socket = Some(PathBuf::from("/run/user/1000/ssh-agent.sock"));
+        let session_permissions = super::BwrapSessionPermissions::new();
+        let factory =
+            super::BwrapPermissionedProcessRunnerFactory::new_at_workspace_root("/workspace/merry")
+                .with_bwrap_program("/custom/bin/bwrap")
+                .with_environment(environment.clone())
+                .with_session_permissions(session_permissions.clone());
+        let request = permission_request(json!({
+            "requested": { "host_integrations": ["ssh-agent"] },
+            "for_action": { "kind": "process", "argv": ["ssh", "-T", "git@example.test"] }
+        }));
+
+        factory
+            .validate_request(&request)
+            .expect("configured host integration should be materializable");
+        let _ = factory.runner_for(&request);
+
+        let base_runner = BwrapProcessRunner::new_at_workspace_root("/workspace/merry")
+            .with_bwrap_program("/custom/bin/bwrap")
+            .with_environment(environment)
+            .with_session_permissions(session_permissions);
+        let later_request = permission_request(json!({
+            "requested": { "paths": [{ "path": ".", "access": "rw" }] },
+            "for_action": { "kind": "process", "argv": ["ssh", "-T", "git@example.test"] }
+        }));
+        let plan = base_runner
+            .plan_for(request_process_intent(&later_request))
+            .expect("later process plan should build");
+        let args = os_args(&plan.args);
+
+        assert!(contains_sequence(
+            &args,
+            &[
+                "--ro-bind",
+                "/run/user/1000/ssh-agent.sock",
+                "/run/user/1000/ssh-agent.sock"
+            ]
         ));
     }
 
@@ -1615,7 +1986,7 @@ mod tests {
         assert!(contains_sequence(
             &args,
             &[
-                "--ro-bind-try",
+                "--ro-bind",
                 "/workspace/merry/deps",
                 "/workspace/merry/deps"
             ]
@@ -1678,6 +2049,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn unrestricted_permissioned_factory_accepts_host_capabilities() {
+        let runner: Arc<dyn ProcessRunner> = Arc::new(TokioProcessRunner::new());
+        let factory = UnrestrictedPermissionedProcessRunnerFactory::new(runner);
+        let request = permission_request(json!({
+            "requested": {
+                "network": true,
+                "paths": [{ "path": "/var/lib/merry-demo.txt", "access": "rw" }],
+                "host_integrations": ["dbus"]
+            },
+            "for_action": { "kind": "process", "argv": ["gh", "auth", "status"] }
+        }));
+
+        factory
+            .validate_request(&request)
+            .expect("unrestricted host mode should not reject already-host-visible capabilities");
+    }
+
     #[tokio::test]
     async fn bwrap_permissioned_factory_runner_for_invalid_request_fails_closed() {
         let factory =
@@ -1738,6 +2127,36 @@ mod tests {
 
         assert_eq!(output.status(), ProcessExitStatus::Exited(0));
         assert_eq!(output.stdout_text(), format!("{path}\n{home}"));
+    }
+
+    #[tokio::test]
+    async fn tokio_process_runner_applies_validated_environment_overrides() {
+        let intent = ProcessActionIntent::new(
+            vec![
+                "/bin/sh".to_owned(),
+                "-c".to_owned(),
+                "printf '%s' \"${MERRY_TEST_MODE-}\"".to_owned(),
+            ],
+            None,
+            ProcessEnvPolicy::empty(),
+            None,
+            64 * 1024,
+            1024,
+        )
+        .expect("process intent should be valid");
+
+        let output = TokioProcessRunner::new()
+            .with_environment_overrides([(
+                OsString::from("MERRY_TEST_MODE"),
+                OsString::from("host"),
+            )])
+            .expect("environment override should validate")
+            .run(intent, ProcessRunnerContext::new(CancellationToken::new()))
+            .await
+            .expect("process should run");
+
+        assert_eq!(output.status(), ProcessExitStatus::Exited(0));
+        assert_eq!(output.stdout_text(), "host");
     }
 
     #[cfg(target_os = "linux")]

@@ -1,10 +1,11 @@
 use crate::cli_error::{CliError, unexpected};
 use crate::coding_runtime::ActionProcessBackendOptions;
 use crate::config::{self, EffectiveLogSettings, MerryConfig, XdgPaths};
+use crate::sandbox::default_development_path_rules;
 use merry_core::SessionId;
 use merry_llm::{GenerationConfig, ReasoningEffort};
 use merry_runtime::{AutomaticCompactionConfig, Runtime, RuntimeBuilder};
-use std::ffi::OsString;
+use std::{env, ffi::OsString, path::PathBuf};
 
 pub(crate) fn validate_loaded_config(
     config: Option<&MerryConfig>,
@@ -76,13 +77,17 @@ pub(crate) fn main_reasoning_effort(
 pub(crate) fn action_process_backend_options(
     config: Option<&MerryConfig>,
 ) -> Result<ActionProcessBackendOptions, config::ConfigError> {
-    let path_rules = config
-        .map(MerryConfig::trusted_global_path_rules)
-        .transpose()?
-        .unwrap_or_default();
+    let home = config
+        .map(|config| config.home().to_path_buf())
+        .or_else(|| env::var_os("HOME").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("/home/merry"));
+    let path_rules = default_development_path_rules(&home);
     let network_allowed = config
         .map(MerryConfig::permissions_network_allowed)
         .unwrap_or(false);
+    let host_integrations = config
+        .map(MerryConfig::host_integrations)
+        .unwrap_or_default();
     let environment_overrides = config
         .map(MerryConfig::process_environment_overrides)
         .transpose()?
@@ -93,6 +98,7 @@ pub(crate) fn action_process_backend_options(
     Ok(ActionProcessBackendOptions {
         path_rules,
         network_allowed,
+        host_integrations,
         environment_overrides,
     })
 }
@@ -107,7 +113,10 @@ pub(crate) fn configured_runtime_builder(
 
 #[cfg(test)]
 mod tests {
-    use super::{configured_runtime_builder, generation_config, validate_loaded_config};
+    use super::{
+        action_process_backend_options, configured_runtime_builder, generation_config,
+        validate_loaded_config,
+    };
     use crate::config::{MerryConfig, XdgPaths};
     use crate::runtime_events::collect_runtime_step_events;
     use crate::testing::ScriptedProvider;
@@ -115,8 +124,39 @@ mod tests {
         FinishReason, GenerationConfig, ModelCapabilities, ModelEvent, ModelName, ModelOutput,
         ModelResponse,
     };
-    use merry_runtime::{RuntimeModelRole, StepContext, StepInput};
+    use merry_runtime::{PathAccessRuleSource, RuntimeModelRole, StepContext, StepInput};
     use std::{fs, path::PathBuf, sync::Arc};
+
+    #[test]
+    fn action_backend_uses_development_baseline_without_trusted_global_grants() {
+        let paths = XdgPaths::from_parts(PathBuf::from("/home/alice"), None, None);
+        let config = MerryConfig::load_optional_from_text(
+            Some(
+                r#"
+[permissions]
+readonly_paths = ["/srv/trusted-readonly"]
+"#,
+            ),
+            &paths,
+        )
+        .expect("config should parse")
+        .expect("config should be present");
+
+        let options = action_process_backend_options(Some(&config))
+            .expect("action backend options should build");
+        assert!(
+            options
+                .path_rules
+                .iter()
+                .all(|rule| rule.source() == PathAccessRuleSource::DefaultDevelopmentBaseline)
+        );
+        assert!(
+            !options
+                .path_rules
+                .iter()
+                .any(|rule| rule.path() == std::path::Path::new("/srv/trusted-readonly"))
+        );
+    }
 
     #[test]
     fn managed_only_provider_catalog_passes_eager_config_validation() {

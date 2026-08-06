@@ -1,6 +1,6 @@
 use crate::config::{self, EffectiveLogSettings, MerryConfig, XdgPaths};
 use crate::provider_config::MERRY_OPENAI_DEBUG_ENV;
-use merry_runtime::{PathAccess, PathAccessRule};
+use merry_runtime::{HostIntegration, PathAccess, PathAccessRule, PathAccessRuleSource};
 use std::{
     env,
     ffi::{OsStr, OsString},
@@ -42,6 +42,43 @@ pub(crate) const SANDBOX_WAYLAND_DISPLAY: &str = "wayland-0";
 pub(crate) const SANDBOX_WAYLAND_SOCKET: &str = "/run/merry-wayland/wayland-0";
 pub(crate) const SANDBOX_X11_AUTHORITY: &str = "/run/merry-x11/Xauthority";
 
+/// Paths needed by ordinary local development commands. These paths are
+/// visible to the inner action sandbox by default, but remain bounded by the
+/// outer sandbox and do not include the user's home-level credentials file.
+pub(crate) fn default_development_path_rules(home: &Path) -> Vec<PathAccessRule> {
+    let cargo_home = env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| home.join(".cargo"));
+    let rustup_home = env::var_os("RUSTUP_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| home.join(".rustup"));
+    let cache_home = env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| home.join(".cache"));
+
+    [
+        (home.join(".local/bin"), PathAccess::ReadOnly),
+        (cargo_home.join("bin"), PathAccess::ReadOnly),
+        (cargo_home.join("registry"), PathAccess::ReadWrite),
+        (cargo_home.join("git"), PathAccess::ReadWrite),
+        (rustup_home.join("toolchains"), PathAccess::ReadOnly),
+        (cache_home, PathAccess::ReadWrite),
+    ]
+    .into_iter()
+    .filter(|(path, _)| is_clean_absolute_path(path))
+    .map(|(path, access)| {
+        PathAccessRule::new(
+            path,
+            access,
+            PathAccessRuleSource::DefaultDevelopmentBaseline,
+        )
+    })
+    .collect()
+}
+
 #[cfg(test)]
 pub(crate) const SANDBOX_HOME: &str = "/home/alice";
 #[cfg(test)]
@@ -70,6 +107,21 @@ pub(crate) struct GraphicalEnvironment {
     display: Option<OsString>,
     xauthority: Option<PathBuf>,
     home: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct HostIntegrationEnvironment {
+    ssh_agent_socket: Option<PathBuf>,
+    session_bus_address: Option<OsString>,
+}
+
+impl HostIntegrationEnvironment {
+    fn from_env() -> Self {
+        Self {
+            ssh_agent_socket: env::var_os("SSH_AUTH_SOCK").map(PathBuf::from),
+            session_bus_address: env::var_os("DBUS_SESSION_BUS_ADDRESS"),
+        }
+    }
 }
 
 impl GraphicalEnvironment {
@@ -151,6 +203,9 @@ pub(crate) struct Host {
     pub(crate) log_settings: Option<EffectiveLogSettings>,
     pub(crate) trusted_path_rules: Vec<PathAccessRule>,
     pub(crate) graphical_environment: GraphicalEnvironment,
+    pub(crate) host_integrations: Vec<HostIntegration>,
+    pub(crate) host_integration_environment: HostIntegrationEnvironment,
+    pub(crate) development_environment: Vec<(OsString, OsString)>,
     pub(crate) current_uid: u32,
 }
 
@@ -170,6 +225,14 @@ impl Host {
             .transpose()
             .map_err(Error::Config)?
             .unwrap_or_default();
+        let host_integrations = merry_config
+            .as_ref()
+            .map(MerryConfig::host_integrations)
+            .unwrap_or_default();
+        let development_environment = ["CARGO_HOME", "RUSTUP_HOME", "XDG_CACHE_HOME"]
+            .into_iter()
+            .filter_map(|name| env::var_os(name).map(|value| (os(name), value)))
+            .collect();
         Ok(Self {
             cwd: env::current_dir().map_err(Error::CurrentDir)?,
             current_exe: env::current_exe().map_err(Error::CurrentExe)?,
@@ -183,6 +246,9 @@ impl Host {
             log_settings,
             trusted_path_rules,
             graphical_environment: GraphicalEnvironment::from_env(),
+            host_integrations,
+            host_integration_environment: HostIntegrationEnvironment::from_env(),
+            development_environment,
             current_uid: current_process_uid()?,
         })
     }
@@ -390,6 +456,73 @@ fn graphical_access_plan(host: &Host, probe: &impl HostPathProbe) -> GraphicalAc
     plan
 }
 
+fn host_integration_access_plan(host: &Host, probe: &impl HostPathProbe) -> GraphicalAccessPlan {
+    let mut plan = GraphicalAccessPlan::default();
+
+    for integration in &host.host_integrations {
+        match integration {
+            HostIntegration::SshAgent => {
+                let Some(socket) = host
+                    .host_integration_environment
+                    .ssh_agent_socket
+                    .as_deref()
+                else {
+                    continue;
+                };
+                if !is_clean_absolute_path(socket) || !host_owned_socket(host, probe, socket) {
+                    continue;
+                }
+                plan.mounts.push(GraphicalMount {
+                    source: socket.to_path_buf(),
+                    destination: socket.to_path_buf(),
+                });
+                plan.environment
+                    .push((os("SSH_AUTH_SOCK"), socket.as_os_str().to_owned()));
+            }
+            HostIntegration::SessionBus => {
+                let Some(address) = host
+                    .host_integration_environment
+                    .session_bus_address
+                    .as_ref()
+                else {
+                    continue;
+                };
+                let Some(socket) = session_bus_socket_path(address) else {
+                    continue;
+                };
+                if !is_clean_absolute_path(&socket) || !host_owned_socket(host, probe, &socket) {
+                    continue;
+                }
+                plan.mounts.push(GraphicalMount {
+                    source: socket.clone(),
+                    destination: socket,
+                });
+                plan.environment
+                    .push((os("DBUS_SESSION_BUS_ADDRESS"), address.clone()));
+            }
+        }
+    }
+
+    plan
+}
+
+fn host_owned_socket(host: &Host, probe: &impl HostPathProbe, path: &Path) -> bool {
+    probe.metadata(path).is_some_and(|metadata| {
+        metadata.kind == HostPathKind::UnixSocket && metadata.owner_uid == host.current_uid
+    })
+}
+
+fn session_bus_socket_path(address: &OsStr) -> Option<PathBuf> {
+    let address = address.to_str()?;
+    address.split(';').find_map(|candidate| {
+        let options = candidate.strip_prefix("unix:")?;
+        options.split(',').find_map(|option| {
+            let (name, value) = option.split_once('=')?;
+            (name == "path").then(|| PathBuf::from(value))
+        })
+    })
+}
+
 fn wayland_socket_path(host: &Host, probe: &impl HostPathProbe) -> Option<PathBuf> {
     let runtime_dir = host.graphical_environment.xdg_runtime_dir.as_deref()?;
     if !is_clean_absolute_path(runtime_dir) {
@@ -517,6 +650,7 @@ fn build_plan(
         ClipboardAccess::Disabled => GraphicalAccessPlan::default(),
         ClipboardAccess::Tui => graphical_access_plan(host, probe),
     };
+    let host_integration_plan = host_integration_access_plan(host, probe);
 
     let mut args = vec![
         os("--unshare-user"),
@@ -588,10 +722,20 @@ fn build_plan(
             host_log_dir.as_os_str().to_owned(),
         ]);
     }
+    for rule in default_development_path_rules(host.xdg_paths.home()) {
+        append_path_rule_args(&mut args, &rule);
+    }
     for rule in &host.trusted_path_rules {
         append_path_rule_args(&mut args, rule);
     }
     for mount in &graphical_plan.mounts {
+        append_bind_file_args(
+            &mut args,
+            mount.source.as_os_str(),
+            mount.destination.as_os_str(),
+        );
+    }
+    for mount in &host_integration_plan.mounts {
         append_bind_file_args(
             &mut args,
             mount.source.as_os_str(),
@@ -627,6 +771,12 @@ fn build_plan(
     ]);
     for (name, value) in graphical_plan.environment {
         args.extend([os("--setenv"), name, value]);
+    }
+    for (name, value) in host_integration_plan.environment {
+        args.extend([os("--setenv"), name, value]);
+    }
+    for (name, value) in &host.development_environment {
+        args.extend([os("--setenv"), name.clone(), value.clone()]);
     }
     if host.openai_debug.as_deref() == Some(OsStr::new("1")) {
         args.extend([os("--setenv"), os(MERRY_OPENAI_DEBUG_ENV), os("1")]);

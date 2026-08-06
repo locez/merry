@@ -80,6 +80,18 @@ impl AcceptedLocalWorkspaceProcessAdmission {
         }
     }
 
+    /// Creates admission for the explicit unrestricted host process profile.
+    ///
+    /// The runtime still records and audits the process action, but the CLI
+    /// process backend does not add an operating-system sandbox in this mode.
+    #[must_use]
+    pub const fn accept_host_v1() -> Self {
+        Self {
+            sandbox_profile: LocalWorkspaceProcessSandboxProfile::HostV1,
+            permission_profile_id: ProcessPermissionProfileId::LOCAL_WORKSPACE_HOST_V1,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) const fn for_test_permission_profile_id(
         permission_profile_id: ProcessPermissionProfileId,
@@ -103,7 +115,10 @@ impl AcceptedLocalWorkspaceProcessAdmission {
     }
 
     pub(crate) fn matches_intent(self, intent: &ProcessActionIntent) -> bool {
-        required_process_permission_profile_id(intent) == Some(self.permission_profile_id)
+        let required = required_process_permission_profile_id(intent);
+        required == Some(self.permission_profile_id)
+            || (self.permission_profile_id == ProcessPermissionProfileId::LOCAL_WORKSPACE_HOST_V1
+                && required == Some(ProcessPermissionProfileId::LOCAL_WORKSPACE_BWRAP_V1))
     }
 }
 
@@ -113,6 +128,8 @@ impl AcceptedLocalWorkspaceProcessAdmission {
 pub enum LocalWorkspaceProcessSandboxProfile {
     /// Merry CLI bubblewrap profile version 1.
     CliBwrapV1,
+    /// Explicit unrestricted host process profile version 1.
+    HostV1,
 }
 
 /// Stable identifier for a runtime-owned process permission profile.
@@ -128,6 +145,8 @@ impl ProcessPermissionProfileId {
     pub const READ_ONLY_V1: Self = Self("process.read_only.v1");
     /// Local workspace process lane accepted for the CLI bubblewrap v1 sandbox.
     pub const LOCAL_WORKSPACE_BWRAP_V1: Self = Self("process.local_workspace.bwrap.v1");
+    /// Local workspace process lane accepted for the unrestricted host profile.
+    pub const LOCAL_WORKSPACE_HOST_V1: Self = Self("process.local_workspace.host.v1");
     /// Read-only shell wrapper lane for plain command sequences under a real shell runner.
     pub const SHELL_READ_ONLY_V1: Self = Self("process.shell.read_only.v1");
     /// Process lane admitted by an explicit permission request review.
@@ -158,6 +177,7 @@ impl<'de> Deserialize<'de> for ProcessPermissionProfileId {
         match value.as_str() {
             "process.read_only.v1" => Ok(Self::READ_ONLY_V1),
             "process.local_workspace.bwrap.v1" => Ok(Self::LOCAL_WORKSPACE_BWRAP_V1),
+            "process.local_workspace.host.v1" => Ok(Self::LOCAL_WORKSPACE_HOST_V1),
             "process.shell.read_only.v1" => Ok(Self::SHELL_READ_ONLY_V1),
             "process.permission_request.approved.v1" => Ok(Self::APPROVED_PERMISSION_REQUEST_V1),
             _ => Err(serde::de::Error::custom(format!(
@@ -265,9 +285,43 @@ impl PermissionedProcessRunnerFactory for StaticPermissionedProcessRunnerFactory
                 "static permissioned process runner cannot enforce requested path capabilities",
             ));
         }
+        if request
+            .requested()
+            .iter()
+            .any(|capability| matches!(capability, RequestedCapability::HostIntegration(_)))
+        {
+            return Err(ProcessRunnerError::infrastructure(
+                "static permissioned process runner cannot enforce requested host integrations",
+            ));
+        }
         Ok(())
     }
 
+    fn runner_for(&self, _request: &PermissionRequest) -> Arc<dyn ProcessRunner> {
+        Arc::clone(&self.runner)
+    }
+}
+
+/// Permissioned runner factory for the explicit unrestricted host profile.
+///
+/// The host profile already exposes the process to the caller's operating
+/// system environment, so a later capability request does not need another
+/// backend-specific materialization step. Runtime admission and action audit
+/// still remain active around the returned runner.
+#[derive(Clone)]
+pub struct UnrestrictedPermissionedProcessRunnerFactory {
+    runner: Arc<dyn ProcessRunner>,
+}
+
+impl UnrestrictedPermissionedProcessRunnerFactory {
+    /// Creates a factory that reuses the unrestricted host runner.
+    #[must_use]
+    pub fn new(runner: Arc<dyn ProcessRunner>) -> Self {
+        Self { runner }
+    }
+}
+
+impl PermissionedProcessRunnerFactory for UnrestrictedPermissionedProcessRunnerFactory {
     fn runner_for(&self, _request: &PermissionRequest) -> Arc<dyn ProcessRunner> {
         Arc::clone(&self.runner)
     }
@@ -1251,21 +1305,7 @@ fn executable_token_is(argument: &str, expected: &str) -> bool {
     argument == expected
 }
 
-const FORBIDDEN_PROCESS_EXECUTABLES: &[&str] = &[
-    "cmd",
-    "curl",
-    "nc",
-    "netcat",
-    "powershell",
-    "pwsh",
-    "rm",
-    "rsync",
-    "scp",
-    "ssh",
-    "su",
-    "sudo",
-    "wget",
-];
+const FORBIDDEN_PROCESS_EXECUTABLES: &[&str] = &["cmd", "powershell", "pwsh", "rm", "su", "sudo"];
 
 const FORBIDDEN_GIT_SUBCOMMANDS: &[&str] = &[
     "add",
@@ -1554,11 +1594,11 @@ fn summarize_intent(argv: &[String], cwd: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        AcceptedLocalWorkspaceProcessAdmission, MAX_PROCESS_OUTPUT_LIMIT_BYTES, ProcessActionError,
-        ProcessActionIntent, ProcessEnvPolicy, ProcessExecutionEvidence, ProcessExitStatus,
-        ProcessIntentClass, ProcessPermissionProfileId, classify_process_intent,
-        is_low_risk_process_action_intent, is_safe_cargo_package_token,
-        required_process_permission_profile_id,
+        AcceptedLocalWorkspaceProcessAdmission, LocalWorkspaceProcessSandboxProfile,
+        MAX_PROCESS_OUTPUT_LIMIT_BYTES, ProcessActionError, ProcessActionIntent, ProcessEnvPolicy,
+        ProcessExecutionEvidence, ProcessExitStatus, ProcessIntentClass,
+        ProcessPermissionProfileId, classify_process_intent, is_low_risk_process_action_intent,
+        is_safe_cargo_package_token, required_process_permission_profile_id,
     };
 
     fn intent() -> ProcessActionIntent {
@@ -1880,6 +1920,18 @@ mod tests {
                 ProcessPermissionProfileId::READ_ONLY_V1,
             );
         assert!(!mismatched_admission.matches_intent(&local_workspace_effect));
+
+        let host_admission = AcceptedLocalWorkspaceProcessAdmission::accept_host_v1();
+        assert_eq!(
+            host_admission.sandbox_profile(),
+            LocalWorkspaceProcessSandboxProfile::HostV1
+        );
+        assert_eq!(
+            host_admission.permission_profile_id(),
+            ProcessPermissionProfileId::LOCAL_WORKSPACE_HOST_V1
+        );
+        assert!(host_admission.matches_intent(&local_workspace_effect));
+        assert!(!host_admission.matches_intent(&informational));
     }
 
     #[test]
@@ -1973,13 +2025,6 @@ mod tests {
             vec!["cmd", "/C", "echo unsafe"],
             vec!["powershell", "-Command", "Write-Host unsafe"],
             vec!["pwsh", "-Command", "Write-Host unsafe"],
-            vec!["curl", "https://example.invalid"],
-            vec!["wget", "https://example.invalid"],
-            vec!["ssh", "example.invalid"],
-            vec!["scp", "a", "b"],
-            vec!["rsync", "a", "b"],
-            vec!["nc", "example.invalid", "443"],
-            vec!["netcat", "example.invalid", "443"],
             vec!["rm", "-rf", "target"],
             vec!["../bin/rm", "-rf", "target"],
             vec!["git", "clean", "-fd"],
@@ -2001,6 +2046,34 @@ mod tests {
             assert_eq!(
                 classify_process_intent(&intent),
                 ProcessIntentClass::Forbidden
+            );
+        }
+
+        for argv in [
+            vec!["curl", "https://example.invalid"],
+            vec!["wget", "https://example.invalid"],
+            vec!["ssh", "example.invalid"],
+            vec!["scp", "a", "b"],
+            vec!["rsync", "a", "b"],
+            vec!["nc", "example.invalid", "443"],
+            vec!["netcat", "example.invalid", "443"],
+        ] {
+            let intent = ProcessActionIntent::new(
+                argv.into_iter().map(str::to_owned).collect(),
+                None,
+                ProcessEnvPolicy::empty(),
+                None,
+                1024,
+                1024,
+            )
+            .expect("network argv is a syntactically valid process intent");
+            assert_eq!(
+                classify_process_intent(&intent),
+                ProcessIntentClass::Unknown
+            );
+            assert_eq!(
+                required_process_permission_profile_id(&intent),
+                Some(ProcessPermissionProfileId::LOCAL_WORKSPACE_BWRAP_V1)
             );
         }
 

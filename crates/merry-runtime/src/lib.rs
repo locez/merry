@@ -109,10 +109,10 @@ pub use ledger::{
 pub use merry_core::ContextWindowSource;
 pub use model_config::RuntimeModelRole;
 pub use permission::{
-    ChannelPermissionAdmissionSource, PermissionAdmissionContext, PermissionAdmissionDecision,
-    PermissionAdmissionError, PermissionAdmissionFuture, PermissionAdmissionReview,
-    PermissionAdmissionReviewSource, PermissionAdmissionSource, PermissionRequest,
-    PermissionReviewMode, PermissionReviewRequest, PermissionReviewResponse,
+    ChannelPermissionAdmissionSource, HostIntegration, PermissionAdmissionContext,
+    PermissionAdmissionDecision, PermissionAdmissionError, PermissionAdmissionFuture,
+    PermissionAdmissionReview, PermissionAdmissionReviewSource, PermissionAdmissionSource,
+    PermissionRequest, PermissionReviewMode, PermissionReviewRequest, PermissionReviewResponse,
     PermissionReviewResponseError, PermissionReviewRisk, PermissionUserAuthorization,
     PermissionedAction, RequestedCapability, RequestedPathCapability, RuntimeTrustLevel,
     request_permissions_tool,
@@ -130,8 +130,8 @@ pub use process::{
     ProcessActionError, ProcessActionIntent, ProcessEnvPolicy, ProcessExecutionEvidence,
     ProcessExitStatus, ProcessPermissionProfileId, ProcessRunner, ProcessRunnerContext,
     ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput, ProcessRunnerResult,
-    StaticPermissionedProcessRunnerFactory, is_low_risk_process_action_intent,
-    is_read_only_shell_process_action_intent,
+    StaticPermissionedProcessRunnerFactory, UnrestrictedPermissionedProcessRunnerFactory,
+    is_low_risk_process_action_intent, is_read_only_shell_process_action_intent,
 };
 pub use process_runner::{
     BwrapPermissionedProcessRunnerFactory, BwrapProcessEnvironment, BwrapProcessRunner,

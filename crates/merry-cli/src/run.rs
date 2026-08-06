@@ -1,6 +1,7 @@
 use crate::cli_error::{CliError, debug_openai_usage_error, stdout_error, unexpected};
 use crate::coding_runtime::{
-    HeadlessCodingRuntimeInput, action_process_runner, build_headless_coding_runtime,
+    HeadlessCodingRuntimeInput, ProcessExecutionMode, action_process_runner_for_mode,
+    build_headless_coding_runtime, build_headless_coding_runtime_with_permission_review_mode,
     coding_agent_loop_config, coding_agent_process_admission, coding_agent_requires_sandbox_error,
 };
 use crate::config::MerryConfig;
@@ -54,10 +55,10 @@ pub(crate) async fn run(
     args: &Args,
     sandbox_child_handoff: Option<SandboxChildHandoff>,
     merry_config: Option<&MerryConfig>,
-    no_outer_sandbox: bool,
+    process_execution_mode: ProcessExecutionMode,
 ) -> Result<RunExitStatus, CliError> {
     let Some(admission) =
-        coding_agent_process_admission(sandbox_child_handoff, no_outer_sandbox).await
+        coding_agent_process_admission(sandbox_child_handoff, process_execution_mode).await
     else {
         return Err(coding_agent_requires_sandbox_error("run"));
     };
@@ -70,13 +71,14 @@ pub(crate) async fn run(
     } = runtime_provider_bundle_from_config(merry_config, debug_openai_usage_error)?;
     let RuntimePrimaryProviderConfig { provider, model } = primary;
     let root = env::current_dir().map_err(unexpected)?;
-    let backend = action_process_runner(
+    let backend = action_process_runner_for_mode(
         &root,
         action_process_backend_options(merry_config).map_err(unexpected)?,
+        process_execution_mode,
     )?;
     let extra_tools = discover_configured_mcp_tools(merry_config).await?;
     let session_id = default_run_session_id();
-    let runtime = build_headless_coding_runtime(HeadlessCodingRuntimeInput {
+    let runtime_input = HeadlessCodingRuntimeInput {
         session_id: session_id.as_str(),
         root: &root,
         admission,
@@ -97,7 +99,15 @@ pub(crate) async fn run(
             .map_err(unexpected)?
             .unwrap_or_default(),
         subagents: subagents_config(merry_config).map_err(unexpected)?.into(),
-    })?;
+    };
+    let runtime = if matches!(process_execution_mode, ProcessExecutionMode::Unrestricted) {
+        build_headless_coding_runtime_with_permission_review_mode(
+            runtime_input,
+            merry_runtime::PermissionReviewMode::NonInteractiveTrusted,
+        )?
+    } else {
+        build_headless_coding_runtime(runtime_input)?
+    };
     let input = StepInput::user_text(&args.task).map_err(unexpected)?;
     let context = StepContext::default()
         .with_generation_config(generation_config(merry_config).map_err(unexpected)?);
