@@ -632,12 +632,12 @@ mod tests {
     }
 
     #[test]
-    fn malformed_tool_arguments_fixture_returns_protocol_error() {
+    fn malformed_tool_arguments_fixture_returns_invalid_tool_call() {
         let fixture = include_str!("../tests/fixtures/responses_bad_tool_args.json");
         let error = crate::parse::parse_responses_response(fixture)
             .expect_err("malformed tool arguments should fail");
 
-        assert_eq!(error.kind(), ProviderErrorKind::Protocol);
+        assert_eq!(error.kind(), ProviderErrorKind::InvalidToolCall);
     }
 
     #[test]
@@ -707,12 +707,12 @@ mod tests {
     }
 
     #[test]
-    fn malformed_streaming_tool_arguments_fixture_returns_protocol_error() {
+    fn malformed_streaming_tool_arguments_fixture_returns_invalid_tool_call() {
         let fixture = include_str!("../tests/fixtures/responses_stream_bad_tool_args.jsonl");
         let error = crate::parse::parse_responses_stream_events(fixture)
             .expect_err("malformed streamed tool arguments should fail");
 
-        assert_eq!(error.kind(), ProviderErrorKind::Protocol);
+        assert_eq!(error.kind(), ProviderErrorKind::InvalidToolCall);
     }
 
     #[test]

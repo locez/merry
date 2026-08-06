@@ -4,6 +4,7 @@ use crate::config::{self, EffectiveLogSettings, MerryConfig, XdgPaths};
 use merry_core::SessionId;
 use merry_llm::{GenerationConfig, ReasoningEffort};
 use merry_runtime::{AutomaticCompactionConfig, Runtime, RuntimeBuilder};
+use std::ffi::OsString;
 
 pub(crate) fn validate_loaded_config(
     config: Option<&MerryConfig>,
@@ -17,6 +18,7 @@ pub(crate) fn validate_loaded_config(
     let _ = automatic_compaction_config(Some(config))?;
     let _ = subagents_config(Some(config))?;
     let _ = config.trusted_global_path_rules()?;
+    let _ = config.process_environment_overrides()?;
     let _ = config.skill_roots()?;
     let _ = config.runtime_models()?;
     let _ = config.profile();
@@ -81,9 +83,17 @@ pub(crate) fn action_process_backend_options(
     let network_allowed = config
         .map(MerryConfig::permissions_network_allowed)
         .unwrap_or(false);
+    let environment_overrides = config
+        .map(MerryConfig::process_environment_overrides)
+        .transpose()?
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(name, value)| (OsString::from(name), OsString::from(value)))
+        .collect();
     Ok(ActionProcessBackendOptions {
         path_rules,
         network_allowed,
+        environment_overrides,
     })
 }
 

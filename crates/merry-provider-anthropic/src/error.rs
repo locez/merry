@@ -9,6 +9,8 @@ pub enum AnthropicProviderError {
     InvalidConfig { reason: String },
     #[error("invalid Anthropic provider request: {reason}")]
     InvalidRequest { reason: String },
+    #[error("invalid Anthropic tool call: {reason}")]
+    InvalidToolCall { reason: String },
     #[error("Anthropic provider protocol error: {reason}")]
     Protocol { reason: String },
     #[error("Anthropic provider request failed ({kind:?}): {message}")]
@@ -38,6 +40,12 @@ impl AnthropicProviderError {
         }
     }
 
+    pub(crate) fn invalid_tool_call(reason: impl Into<String>) -> Self {
+        Self::InvalidToolCall {
+            reason: reason.into(),
+        }
+    }
+
     pub(crate) fn provider_with_retry_after(
         kind: ProviderErrorKind,
         message: impl Into<String>,
@@ -56,6 +64,9 @@ impl From<AnthropicProviderError> for ModelError {
         match error {
             AnthropicProviderError::InvalidConfig { reason }
             | AnthropicProviderError::InvalidRequest { reason } => Self::invalid_request(reason),
+            AnthropicProviderError::InvalidToolCall { reason } => {
+                Self::provider_with_retry_after(ProviderErrorKind::InvalidToolCall, reason, None)
+            }
             AnthropicProviderError::Protocol { reason } => {
                 Self::provider(ProviderErrorKind::Protocol, reason)
             }

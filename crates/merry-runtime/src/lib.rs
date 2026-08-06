@@ -134,8 +134,8 @@ pub use process::{
     is_read_only_shell_process_action_intent,
 };
 pub use process_runner::{
-    BwrapPermissionedProcessRunnerFactory, BwrapProcessRunner, BwrapSessionPermissions,
-    TokioProcessRunner,
+    BwrapPermissionedProcessRunnerFactory, BwrapProcessEnvironment, BwrapProcessRunner,
+    BwrapSessionPermissions, TokioProcessRunner,
 };
 pub use process_tool::{ProcessCommandToolError, process_command_tool};
 pub use profile::{

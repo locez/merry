@@ -115,11 +115,6 @@ fn runtime_profile_requires_tmpfs_home_tmp_and_expected_env() {
 
     for (home, tmpdir, mountinfo) in [
         (
-            Some(OsStr::new("/home/locez")),
-            Some(OsStr::new(SANDBOX_TMPDIR)),
-            Some(mountinfo),
-        ),
-        (
             Some(OsStr::new(SANDBOX_HOME)),
             Some(OsStr::new("/var/tmp")),
             Some(mountinfo),
@@ -472,7 +467,7 @@ fn plan_mounts_log_dir_read_write_when_file_logging_is_enabled() {
 
     assert!(contains_sequence(
         &args,
-        &["--bind", &host_log_dir_string, SANDBOX_MERRY_LOG_DIR]
+        &["--bind", &host_log_dir_string, &host_log_dir_string]
     ));
     assert!(contains_sequence(
         &args,

@@ -8,6 +8,8 @@ use thiserror::Error;
 pub enum ProviderErrorKind {
     /// Request validation failed before provider work could start.
     InvalidRequest,
+    /// The provider returned a tool call whose arguments cannot be decoded.
+    InvalidToolCall,
     /// Provider work was cancelled cooperatively.
     Cancelled,
     /// Provider authentication or authorization failed.

@@ -1,9 +1,10 @@
 use super::CodingRuntimeError;
 use merry_runtime::{
-    BwrapPermissionedProcessRunnerFactory, BwrapProcessRunner, BwrapSessionPermissions,
-    PathAccessRule, PermissionedProcessRunnerFactory, ProcessRunner,
+    BwrapPermissionedProcessRunnerFactory, BwrapProcessEnvironment, BwrapProcessRunner,
+    BwrapSessionPermissions, PathAccessRule, PermissionedProcessRunnerFactory, ProcessRunner,
 };
 use std::{
+    ffi::OsString,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -19,6 +20,7 @@ pub(crate) struct ActionProcessBackend {
 pub(crate) struct ActionProcessBackendOptions {
     pub(crate) path_rules: Vec<PathAccessRule>,
     pub(crate) network_allowed: bool,
+    pub(crate) environment_overrides: Vec<(OsString, OsString)>,
 }
 
 impl ActionProcessBackend {
@@ -59,9 +61,13 @@ impl ActionProcessBackend {
         let ActionProcessBackendOptions {
             path_rules,
             network_allowed,
+            environment_overrides,
         } = options.clone();
         let session_permissions = BwrapSessionPermissions::new();
+        let environment =
+            BwrapProcessEnvironment::from_current_process().with_overrides(environment_overrides);
         let mut runner = BwrapProcessRunner::new_at_workspace_root(&workspace_root)
+            .with_environment(environment.clone())
             .with_path_rules(path_rules.clone())
             .with_session_permissions(session_permissions.clone());
         if network_allowed {
@@ -69,6 +75,7 @@ impl ActionProcessBackend {
         }
         let mut permissioned_factory =
             BwrapPermissionedProcessRunnerFactory::new_at_workspace_root(&workspace_root)
+                .with_environment(environment)
                 .with_path_rules(path_rules)
                 .with_session_permissions(session_permissions);
         if network_allowed {

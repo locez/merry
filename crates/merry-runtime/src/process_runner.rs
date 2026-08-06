@@ -10,6 +10,7 @@ use crate::{
     ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput,
 };
 use std::{
+    env,
     ffi::OsString,
     io,
     path::{Path, PathBuf},
@@ -19,8 +20,9 @@ use std::{
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 const BWRAP_PROGRAM: &str = "bwrap";
-const ACTION_SANDBOX_HOME: &str = "/home/merry";
+const ACTION_SANDBOX_HOME_FALLBACK: &str = "/home/merry";
 const ACTION_SANDBOX_TMPDIR: &str = "/tmp";
+const ACTION_SANDBOX_PATH_FALLBACK: &str = "/usr/local/bin:/usr/bin:/bin";
 const ACTION_SANDBOX_ETC_READ_ONLY_FILE_PATHS: &[&str] = &[
     "/etc/ld.so.cache",
     "/etc/ld.so.conf",
@@ -65,6 +67,87 @@ impl TokioProcessRunner {
     }
 }
 
+/// Host-derived paths used to construct one action sandbox.
+///
+/// The HOME and PATH values preserve the caller's path namespace. The source
+/// temporary directory is mounted at `/tmp` for every action, so an outer
+/// session tmpfs remains shared while per-action bubblewrap namespaces stay
+/// isolated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BwrapProcessEnvironment {
+    path: OsString,
+    home: PathBuf,
+    tmp_source: PathBuf,
+    overrides: Vec<(OsString, OsString)>,
+}
+
+impl BwrapProcessEnvironment {
+    /// Builds an environment layout from the current process environment.
+    #[must_use]
+    pub fn from_current_process() -> Self {
+        let path = env::var_os("PATH")
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| OsString::from(ACTION_SANDBOX_PATH_FALLBACK));
+        let home = absolute_env_path("HOME", ACTION_SANDBOX_HOME_FALLBACK);
+        let tmp_source = absolute_env_path("TMPDIR", ACTION_SANDBOX_TMPDIR);
+        Self {
+            path,
+            home,
+            tmp_source,
+            overrides: Vec::new(),
+        }
+    }
+
+    /// Creates a validated environment layout for an action sandbox.
+    pub fn new(
+        path: impl Into<OsString>,
+        home: impl Into<PathBuf>,
+        tmp_source: impl Into<PathBuf>,
+    ) -> Result<Self, ProcessRunnerError> {
+        let path = path.into();
+        let home = home.into();
+        let tmp_source = tmp_source.into();
+        if path.is_empty() {
+            return Err(ProcessRunnerError::infrastructure(
+                "sandbox process PATH must not be empty",
+            ));
+        }
+        if !home.is_absolute() {
+            return Err(ProcessRunnerError::infrastructure(
+                "sandbox process HOME must be absolute",
+            ));
+        }
+        if !tmp_source.is_absolute() {
+            return Err(ProcessRunnerError::infrastructure(
+                "sandbox process temporary directory must be absolute",
+            ));
+        }
+        Ok(Self {
+            path,
+            home,
+            tmp_source,
+            overrides: Vec::new(),
+        })
+    }
+
+    /// Adds trusted environment assignments after the sandbox defaults.
+    #[must_use]
+    pub fn with_overrides(
+        mut self,
+        overrides: impl IntoIterator<Item = (OsString, OsString)>,
+    ) -> Self {
+        self.overrides = overrides.into_iter().collect();
+        self
+    }
+}
+
+fn absolute_env_path(name: &str, fallback: &str) -> PathBuf {
+    env::var_os(name)
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| PathBuf::from(fallback))
+}
+
 /// Runtime-owned process runner that executes each process inside bubblewrap.
 ///
 /// This is Merry's per-action sandbox backend for Linux. It is intentionally
@@ -74,6 +157,7 @@ impl TokioProcessRunner {
 #[derive(Debug, Clone)]
 pub struct BwrapProcessRunner {
     cwd_root: PathBuf,
+    environment: BwrapProcessEnvironment,
     network_allowed: bool,
     path_rules: Vec<PathAccessRule>,
     session_permissions: Option<BwrapSessionPermissions>,
@@ -87,12 +171,20 @@ impl BwrapProcessRunner {
     pub fn new_at_workspace_root(root: impl Into<PathBuf>) -> Self {
         Self {
             cwd_root: root.into(),
+            environment: BwrapProcessEnvironment::from_current_process(),
             network_allowed: false,
             path_rules: Vec::new(),
             session_permissions: None,
             bwrap_program: PathBuf::from(BWRAP_PROGRAM),
             configuration_error: None,
         }
+    }
+
+    /// Sets the environment layout visible to child processes.
+    #[must_use]
+    pub fn with_environment(mut self, environment: BwrapProcessEnvironment) -> Self {
+        self.environment = environment;
+        self
     }
 
     /// Allows network access for child process actions.
@@ -141,9 +233,10 @@ impl BwrapProcessRunner {
             network_allowed |= snapshot.network_allowed;
         }
         path_rules = normalize_path_rules(path_rules);
-        Ok(bwrap_process_plan(
+        Ok(bwrap_process_plan_with_environment(
             intent,
             &self.cwd_root,
+            &self.environment,
             network_allowed,
             &path_rules,
             &self.bwrap_program,
@@ -220,6 +313,7 @@ impl BwrapSessionPermissions {
 #[derive(Debug, Clone)]
 pub struct BwrapPermissionedProcessRunnerFactory {
     cwd_root: PathBuf,
+    environment: BwrapProcessEnvironment,
     base_network_allowed: bool,
     path_rules: Vec<PathAccessRule>,
     session_permissions: Option<BwrapSessionPermissions>,
@@ -232,11 +326,19 @@ impl BwrapPermissionedProcessRunnerFactory {
     pub fn new_at_workspace_root(root: impl Into<PathBuf>) -> Self {
         Self {
             cwd_root: root.into(),
+            environment: BwrapProcessEnvironment::from_current_process(),
             base_network_allowed: false,
             path_rules: Vec::new(),
             session_permissions: None,
             bwrap_program: PathBuf::from(BWRAP_PROGRAM),
         }
+    }
+
+    /// Sets the environment layout used by every materialized child runner.
+    #[must_use]
+    pub fn with_environment(mut self, environment: BwrapProcessEnvironment) -> Self {
+        self.environment = environment;
+        self
     }
 
     /// Allows network capability in the base profile before per-request grants.
@@ -323,6 +425,7 @@ impl BwrapPermissionedProcessRunnerFactory {
             Err(error) => (self.path_rules.clone(), Some(error.to_string())),
         };
         let mut runner = BwrapProcessRunner::new_at_workspace_root(self.cwd_root.clone())
+            .with_environment(self.environment.clone())
             .with_path_rules(path_rules);
         let session_network_allowed = self
             .session_permissions
@@ -501,9 +604,34 @@ struct BwrapProcessPlan {
     cwd: PathBuf,
 }
 
+#[cfg(test)]
 fn bwrap_process_plan(
     intent: &ProcessActionIntent,
     cwd_root: &Path,
+    network_allowed: bool,
+    path_rules: &[PathAccessRule],
+    bwrap_program: &Path,
+) -> BwrapProcessPlan {
+    let environment = BwrapProcessEnvironment {
+        path: OsString::from(ACTION_SANDBOX_PATH_FALLBACK),
+        home: PathBuf::from(ACTION_SANDBOX_HOME_FALLBACK),
+        tmp_source: PathBuf::from(ACTION_SANDBOX_TMPDIR),
+        overrides: Vec::new(),
+    };
+    bwrap_process_plan_with_environment(
+        intent,
+        cwd_root,
+        &environment,
+        network_allowed,
+        path_rules,
+        bwrap_program,
+    )
+}
+
+fn bwrap_process_plan_with_environment(
+    intent: &ProcessActionIntent,
+    cwd_root: &Path,
+    environment: &BwrapProcessEnvironment,
     network_allowed: bool,
     path_rules: &[PathAccessRule],
     bwrap_program: &Path,
@@ -521,16 +649,20 @@ fn bwrap_process_plan(
         os("/proc"),
         os("--dev"),
         os("/dev"),
-        os("--perms"),
-        os("01777"),
-        os("--tmpfs"),
+        os("--bind"),
+        environment.tmp_source.as_os_str().to_owned(),
         os(ACTION_SANDBOX_TMPDIR),
         os("--tmpfs"),
         os("/home"),
         os("--perms"),
         os("0700"),
+    ];
+    if !environment.home.starts_with(Path::new("/home")) {
+        append_bwrap_mount_parent_args(&mut args, &environment.home);
+    }
+    args.extend([
         os("--dir"),
-        os(ACTION_SANDBOX_HOME),
+        environment.home.as_os_str().to_owned(),
         os("--ro-bind"),
         os("/usr"),
         os("/usr"),
@@ -546,7 +678,7 @@ fn bwrap_process_plan(
         os("--ro-bind-try"),
         os("/opt"),
         os("/opt"),
-    ];
+    ]);
     for path in ACTION_SANDBOX_ETC_READ_ONLY_FILE_PATHS {
         if Path::new(path).exists() {
             append_bwrap_file_bind_args(&mut args, Path::new(path), Path::new(path));
@@ -560,7 +692,7 @@ fn bwrap_process_plan(
     if !network_allowed {
         args.push(os("--unshare-net"));
     }
-    append_bwrap_path_rule(&mut args, cwd_root, PathAccess::ReadWrite);
+    append_bwrap_required_path_rule(&mut args, cwd_root, PathAccess::ReadWrite);
     for rule in path_rules {
         append_bwrap_path_rule(&mut args, rule.path(), rule.access());
     }
@@ -570,18 +702,21 @@ fn bwrap_process_plan(
         os("--clearenv"),
         os("--setenv"),
         os("PATH"),
-        os("/usr/local/bin:/usr/bin:/bin"),
+        environment.path.clone(),
         os("--setenv"),
         os("HOME"),
-        os(ACTION_SANDBOX_HOME),
+        environment.home.as_os_str().to_owned(),
         os("--setenv"),
         os("TMPDIR"),
         os(ACTION_SANDBOX_TMPDIR),
         os("--setenv"),
         os("PWD"),
         cwd.as_os_str().to_owned(),
-        os("--"),
     ]);
+    for (name, value) in &environment.overrides {
+        args.extend([os("--setenv"), name.clone(), value.clone()]);
+    }
+    args.push(os("--"));
     args.extend(intent.argv().iter().map(OsString::from));
 
     BwrapProcessPlan {
@@ -625,6 +760,23 @@ fn append_bwrap_path_rule(args: &mut Vec<OsString>, path: &Path, access: PathAcc
         PathAccess::Deny => {
             args.extend([os("--tmpfs"), path.as_os_str().to_owned()]);
         }
+    }
+}
+
+fn append_bwrap_required_path_rule(args: &mut Vec<OsString>, path: &Path, access: PathAccess) {
+    append_bwrap_mount_parent_args(args, path);
+    match access {
+        PathAccess::ReadOnly => args.extend([
+            os("--ro-bind"),
+            path.as_os_str().to_owned(),
+            path.as_os_str().to_owned(),
+        ]),
+        PathAccess::ReadWrite => args.extend([
+            os("--bind"),
+            path.as_os_str().to_owned(),
+            path.as_os_str().to_owned(),
+        ]),
+        PathAccess::Deny => args.extend([os("--tmpfs"), path.as_os_str().to_owned()]),
     }
 }
 
@@ -841,7 +993,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{BwrapProcessRunner, TokioProcessRunner, bwrap_process_plan, process_current_dir};
+    use super::{
+        BwrapProcessEnvironment, BwrapProcessRunner, TokioProcessRunner, bwrap_process_plan,
+        bwrap_process_plan_with_environment, process_current_dir,
+    };
     use crate::{
         PathAccess, PathAccessRule, PathAccessRuleSource, PermissionRequest, PermissionedAction,
         PermissionedProcessRunnerFactory, ProcessActionIntent, ProcessEnvPolicy, ProcessExitStatus,
@@ -923,7 +1078,7 @@ mod tests {
         assert!(args.iter().any(|arg| arg == "--unshare-net"));
         assert!(contains_sequence(
             &args,
-            &["--bind-try", "/workspace/merry", "/workspace/merry"]
+            &["--bind", "/workspace/merry", "/workspace/merry"]
         ));
         if Path::new("/etc/ld.so.cache").exists() {
             assert!(contains_sequence(
@@ -936,6 +1091,43 @@ mod tests {
             &["--chdir", "/workspace/merry/crates"]
         ));
         assert!(contains_sequence(&args, &["--", "pwd"]));
+    }
+
+    #[test]
+    fn bwrap_process_plan_applies_user_environment_overrides_after_defaults() {
+        let environment = BwrapProcessEnvironment::new(
+            "/custom/bin:/usr/bin",
+            "/home/alice",
+            "/run/merry/session-tmp",
+        )
+        .expect("environment layout should validate")
+        .with_overrides([(OsString::from("RUSTUP_TOOLCHAIN"), OsString::from("stable"))]);
+        let plan = bwrap_process_plan_with_environment(
+            &intent(None),
+            Path::new("/workspace/merry"),
+            &environment,
+            true,
+            &[],
+            Path::new("/custom/bin/bwrap"),
+        );
+        let args = os_args(&plan.args);
+
+        assert!(contains_sequence(
+            &args,
+            &["--bind", "/run/merry/session-tmp", "/tmp"]
+        ));
+        assert!(contains_sequence(
+            &args,
+            &["--setenv", "PATH", "/custom/bin:/usr/bin"]
+        ));
+        assert!(contains_sequence(
+            &args,
+            &["--setenv", "HOME", "/home/alice"]
+        ));
+        assert!(contains_sequence(
+            &args,
+            &["--setenv", "RUSTUP_TOOLCHAIN", "stable"]
+        ));
     }
 
     #[test]
@@ -1332,6 +1524,92 @@ mod tests {
 
         assert_eq!(output.status(), ProcessExitStatus::Exited(0));
         assert_eq!(output.stdout_text(), format!("{path}\n{home}"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn bwrap_process_runner_reuses_tmp_and_writes_workspace() {
+        let workspace = tempfile::tempdir().expect("workspace tempdir should be created");
+        let marker = format!("merry-process-runner-{}", std::process::id());
+        // This container cannot create a network namespace; filesystem and
+        // temporary-directory behavior are independent of that capability.
+        let runner = BwrapProcessRunner::new_at_workspace_root(workspace.path())
+            .allow_network()
+            .with_bwrap_program("/usr/bin/bwrap");
+
+        let write_tmp = ProcessActionIntent::new(
+            vec![
+                "/bin/sh".to_owned(),
+                "-c".to_owned(),
+                format!("printf 'tmp-ok' > /tmp/{marker}"),
+            ],
+            None,
+            ProcessEnvPolicy::empty(),
+            None,
+            1024,
+            1024,
+        )
+        .expect("temporary write intent should be valid");
+        let first = runner
+            .run(
+                write_tmp,
+                ProcessRunnerContext::new(CancellationToken::new()),
+            )
+            .await
+            .expect("first bwrap action should run");
+        assert!(first.ok(), "first bwrap action failed: {first:?}");
+
+        let read_tmp = ProcessActionIntent::new(
+            vec![
+                "/bin/sh".to_owned(),
+                "-c".to_owned(),
+                format!("cat /tmp/{marker}"),
+            ],
+            None,
+            ProcessEnvPolicy::empty(),
+            None,
+            1024,
+            1024,
+        )
+        .expect("temporary read intent should be valid");
+        let second = runner
+            .run(
+                read_tmp,
+                ProcessRunnerContext::new(CancellationToken::new()),
+            )
+            .await
+            .expect("second bwrap action should run");
+        assert!(second.ok(), "second bwrap action failed: {second:?}");
+        assert_eq!(second.stdout_text(), "tmp-ok");
+
+        let write_workspace = ProcessActionIntent::new(
+            vec![
+                "/bin/sh".to_owned(),
+                "-c".to_owned(),
+                "printf 'workspace-ok' > workspace-write.txt".to_owned(),
+            ],
+            None,
+            ProcessEnvPolicy::empty(),
+            None,
+            1024,
+            1024,
+        )
+        .expect("workspace write intent should be valid");
+        let third = runner
+            .run(
+                write_workspace,
+                ProcessRunnerContext::new(CancellationToken::new()),
+            )
+            .await
+            .expect("workspace write action should run");
+        assert!(third.ok(), "workspace write action failed: {third:?}");
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("workspace-write.txt"))
+                .expect("workspace write should persist"),
+            "workspace-ok"
+        );
+
+        let _ = std::fs::remove_file(Path::new("/tmp").join(marker));
     }
 
     fn os_args(args: &[OsString]) -> Vec<String> {

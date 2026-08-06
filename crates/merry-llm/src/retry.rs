@@ -134,7 +134,9 @@ impl ModelRetryPolicy {
         }
         matches!(
             error.kind(),
-            ProviderErrorKind::RateLimited | ProviderErrorKind::Unavailable
+            ProviderErrorKind::InvalidToolCall
+                | ProviderErrorKind::RateLimited
+                | ProviderErrorKind::Unavailable
         )
     }
 
