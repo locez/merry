@@ -501,6 +501,7 @@ fn duration_millis_u64(duration: std::time::Duration) -> u64 {
 fn provider_error_kind_label(kind: ProviderErrorKind) -> &'static str {
     match kind {
         ProviderErrorKind::InvalidRequest => "invalid_request",
+        ProviderErrorKind::InvalidToolCall => "invalid_tool_call",
         ProviderErrorKind::Cancelled => "cancelled",
         ProviderErrorKind::Authentication => "authentication",
         ProviderErrorKind::RateLimited => "rate_limited",

@@ -118,6 +118,7 @@ pub(super) fn is_cancelled_model_error(error: &ModelError) -> bool {
 pub(super) fn diagnostic_from_model_error(error: ModelError) -> ErrorInfo {
     let code = match error.kind() {
         ProviderErrorKind::InvalidRequest => "model_invalid_request",
+        ProviderErrorKind::InvalidToolCall => "model_invalid_tool_call",
         ProviderErrorKind::Cancelled => "cancelled",
         ProviderErrorKind::Authentication => "model_authentication",
         ProviderErrorKind::RateLimited => "model_rate_limited",

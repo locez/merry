@@ -112,13 +112,30 @@ fn runtime_profile_requires_tmpfs_home_tmp_and_expected_env() {
         ),
         Some(RuntimeProfile::CliBwrapV1)
     );
-
-    for (home, tmpdir, mountinfo) in [
-        (
+    assert_eq!(
+        runtime_profile_from_evidence(
             Some(OsStr::new("/home/locez")),
             Some(OsStr::new(SANDBOX_TMPDIR)),
             Some(mountinfo),
         ),
+        Some(RuntimeProfile::CliBwrapV1)
+    );
+
+    let custom_home_mountinfo = "\
+26 24 0:22 / / rw,relatime - overlay overlay rw
+27 26 0:33 / /root rw,nosuid,nodev - tmpfs tmpfs rw,size=65536k
+28 26 0:34 / /tmp rw,nosuid,nodev - tmpfs tmpfs rw,size=65536k
+";
+    assert_eq!(
+        runtime_profile_from_evidence(
+            Some(OsStr::new("/root")),
+            Some(OsStr::new(SANDBOX_TMPDIR)),
+            Some(custom_home_mountinfo),
+        ),
+        Some(RuntimeProfile::CliBwrapV1)
+    );
+
+    for (home, tmpdir, mountinfo) in [
         (
             Some(OsStr::new(SANDBOX_HOME)),
             Some(OsStr::new("/var/tmp")),
@@ -159,6 +176,31 @@ fn runtime_profile_requires_tmpfs_home_tmp_and_expected_env() {
             Some(OsStr::new(SANDBOX_HOME)),
             Some(OsStr::new(SANDBOX_TMPDIR)),
             None,
+        ),
+        (
+            Some(OsStr::new("/")),
+            Some(OsStr::new(SANDBOX_TMPDIR)),
+            Some(mountinfo),
+        ),
+        (
+            Some(OsStr::new(SANDBOX_HOME_ROOT)),
+            Some(OsStr::new(SANDBOX_TMPDIR)),
+            Some(mountinfo),
+        ),
+        (
+            Some(OsStr::new("/tmp/merry-home")),
+            Some(OsStr::new(SANDBOX_TMPDIR)),
+            Some(mountinfo),
+        ),
+        (
+            Some(OsStr::new("/home/../root")),
+            Some(OsStr::new(SANDBOX_TMPDIR)),
+            Some(mountinfo),
+        ),
+        (
+            Some(OsStr::new("home/alice")),
+            Some(OsStr::new(SANDBOX_TMPDIR)),
+            Some(mountinfo),
         ),
     ] {
         assert_eq!(runtime_profile_from_evidence(home, tmpdir, mountinfo), None);
@@ -319,6 +361,68 @@ fn plan_mounts_runtime_paths_and_workspace() {
 }
 
 #[test]
+fn plan_isolates_custom_home_before_applying_home_permissions() {
+    let mut host = sandbox_host();
+    host.xdg_paths = XdgPaths::from_parts(
+        PathBuf::from("/srv/alice"),
+        Some(PathBuf::from("/host/config")),
+        Some(PathBuf::from("/host/state")),
+    );
+    let Bootstrap::Reexec(plan) =
+        plan_sandbox(true, &host).expect("sandbox planning should succeed")
+    else {
+        panic!("expected sandbox reexec plan");
+    };
+    let args = plan_args(&plan);
+
+    assert!(contains_sequence(
+        &args,
+        &[
+            "--dir",
+            "/srv",
+            "--tmpfs",
+            "/srv/alice",
+            "--perms",
+            "0700",
+            "--dir",
+            "/srv/alice"
+        ]
+    ));
+    assert!(contains_sequence(
+        &args,
+        &["--setenv", "HOME", "/srv/alice"]
+    ));
+}
+
+#[test]
+fn planning_binds_explicit_workspace_path_without_home_relationship_rules() {
+    for workspace in ["/home", "/etc", "/"] {
+        let mut host = sandbox_host();
+        host.cwd = PathBuf::from(workspace);
+        let Bootstrap::Reexec(plan) =
+            plan_sandbox(true, &host).expect("explicit workspace path should be accepted")
+        else {
+            panic!("expected sandbox reexec plan");
+        };
+        let args = plan_args(&plan);
+        assert!(contains_sequence(&args, &["--bind", workspace, workspace]));
+    }
+}
+
+#[test]
+fn planning_rejects_unclean_workspace_path() {
+    for workspace in ["relative", "/home/../etc"] {
+        let mut host = sandbox_host();
+        host.cwd = PathBuf::from(workspace);
+
+        let error = plan_sandbox(true, &host).expect_err("unclean workspace path must fail");
+        assert!(
+            matches!(error, Error::InvalidWorkspacePath(reason) if reason.contains("clean absolute"))
+        );
+    }
+}
+
+#[test]
 fn plan_mounts_merry_config_dir_read_only_and_sets_xdg_config_home() {
     let host = sandbox_host();
     let Bootstrap::Reexec(plan) =
@@ -472,7 +576,7 @@ fn plan_mounts_log_dir_read_write_when_file_logging_is_enabled() {
 
     assert!(contains_sequence(
         &args,
-        &["--bind", &host_log_dir_string, SANDBOX_MERRY_LOG_DIR]
+        &["--bind", &host_log_dir_string, &host_log_dir_string]
     ));
     assert!(contains_sequence(
         &args,

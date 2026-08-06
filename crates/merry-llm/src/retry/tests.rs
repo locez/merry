@@ -222,6 +222,48 @@ async fn retrying_provider_retries_before_visible_output_with_one_started_event(
     assert_eq!(inner.attempts_remaining(), 0);
 }
 
+#[tokio::test]
+async fn retrying_provider_retries_invalid_tool_call_before_visible_output() {
+    let inner = AttemptScriptProvider::new(vec![
+        vec![Err(ModelError::provider(
+            ProviderErrorKind::InvalidToolCall,
+            "tool arguments were not valid JSON",
+        ))],
+        vec![
+            Ok(ModelEvent::Started),
+            Ok(ModelEvent::OutputTextDelta {
+                delta: "recovered".to_owned(),
+            }),
+            Ok(completed("recovered")),
+        ],
+    ]);
+    let retrying = RetryingModelProvider::new(
+        Arc::new(inner.clone()),
+        ModelRetryPolicy::new(
+            true,
+            3,
+            Duration::from_millis(1),
+            Duration::from_millis(1),
+            Duration::from_millis(100),
+            false,
+        )
+        .expect("valid policy"),
+    );
+
+    let events = retrying
+        .stream_model(request(), ModelStreamContext::default())
+        .await
+        .expect("retry stream setup should succeed")
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("invalid tool call retry should recover");
+
+    assert_eq!(events.len(), 3);
+    assert_eq!(inner.attempts_remaining(), 0);
+}
+
 #[derive(Clone)]
 struct GatedProvider {
     name: ProviderName,

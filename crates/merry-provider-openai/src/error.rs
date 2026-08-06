@@ -13,6 +13,9 @@ pub enum OpenAiProviderError {
     /// Provider payload could not be rendered from Merry-owned model types.
     #[error("invalid OpenAI provider request: {reason}")]
     InvalidRequest { reason: String },
+    /// The provider returned malformed or non-object tool arguments.
+    #[error("invalid OpenAI tool call: {reason}")]
+    InvalidToolCall { reason: String },
     /// Provider response did not match the expected Responses protocol.
     #[error("OpenAI provider protocol error: {reason}")]
     Protocol { reason: String },
@@ -49,6 +52,12 @@ impl OpenAiProviderError {
         }
     }
 
+    pub(crate) fn invalid_tool_call(reason: impl Into<String>) -> Self {
+        Self::InvalidToolCall {
+            reason: reason.into(),
+        }
+    }
+
     pub(crate) fn provider(kind: ProviderErrorKind, message: impl Into<String>) -> Self {
         Self::Provider {
             kind,
@@ -75,6 +84,9 @@ impl From<OpenAiProviderError> for ModelError {
         match error {
             OpenAiProviderError::InvalidConfig { reason }
             | OpenAiProviderError::InvalidRequest { reason } => Self::invalid_request(reason),
+            OpenAiProviderError::InvalidToolCall { reason } => {
+                Self::provider(ProviderErrorKind::InvalidToolCall, reason)
+            }
             OpenAiProviderError::Protocol { reason } => {
                 Self::provider(ProviderErrorKind::Protocol, reason)
             }

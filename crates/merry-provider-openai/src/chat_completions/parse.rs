@@ -210,7 +210,7 @@ impl ChatToolBuffer {
         };
         let arguments =
             serde_json::from_str::<serde_json::Value>(raw_arguments).map_err(|error| {
-                OpenAiProviderError::protocol(format!(
+                OpenAiProviderError::invalid_tool_call(format!(
                     "Chat Completions tool arguments are not valid JSON: {error}"
                 ))
             })?;
@@ -226,7 +226,7 @@ impl ChatToolBuffer {
                 ))
             })?,
             ToolArguments::try_from(arguments).map_err(|error| {
-                OpenAiProviderError::protocol(format!(
+                OpenAiProviderError::invalid_tool_call(format!(
                     "Chat Completions tool arguments are invalid: {error}"
                 ))
             })?,

@@ -1,9 +1,10 @@
 use super::CodingRuntimeError;
 use merry_runtime::{
-    BwrapPermissionedProcessRunnerFactory, BwrapProcessRunner, BwrapSessionPermissions,
-    PathAccessRule, PermissionedProcessRunnerFactory, ProcessRunner,
+    BwrapPermissionedProcessRunnerFactory, BwrapProcessEnvironment, BwrapProcessRunner,
+    BwrapSessionPermissions, PathAccessRule, PermissionedProcessRunnerFactory, ProcessRunner,
 };
 use std::{
+    ffi::OsString,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -19,6 +20,7 @@ pub(crate) struct ActionProcessBackend {
 pub(crate) struct ActionProcessBackendOptions {
     pub(crate) path_rules: Vec<PathAccessRule>,
     pub(crate) network_allowed: bool,
+    pub(crate) environment_overrides: Vec<(OsString, OsString)>,
 }
 
 impl ActionProcessBackend {
@@ -55,13 +57,30 @@ impl ActionProcessBackend {
     pub(crate) fn from_bwrap_options(
         workspace_root: PathBuf,
         options: ActionProcessBackendOptions,
+    ) -> Result<Self, CodingRuntimeError> {
+        let environment = BwrapProcessEnvironment::from_current_process()
+            .with_overrides(options.environment_overrides.clone())?
+            .validate_for_workspace(&workspace_root)?;
+        Ok(Self::from_bwrap_options_with_environment(
+            workspace_root,
+            options,
+            environment,
+        ))
+    }
+
+    fn from_bwrap_options_with_environment(
+        workspace_root: PathBuf,
+        options: ActionProcessBackendOptions,
+        environment: BwrapProcessEnvironment,
     ) -> Self {
         let ActionProcessBackendOptions {
             path_rules,
             network_allowed,
+            ..
         } = options.clone();
         let session_permissions = BwrapSessionPermissions::new();
         let mut runner = BwrapProcessRunner::new_at_workspace_root(&workspace_root)
+            .with_environment(environment.clone())
             .with_path_rules(path_rules.clone())
             .with_session_permissions(session_permissions.clone());
         if network_allowed {
@@ -69,6 +88,7 @@ impl ActionProcessBackend {
         }
         let mut permissioned_factory =
             BwrapPermissionedProcessRunnerFactory::new_at_workspace_root(&workspace_root)
+                .with_environment(environment.clone())
                 .with_path_rules(path_rules)
                 .with_session_permissions(session_permissions);
         if network_allowed {
@@ -77,11 +97,16 @@ impl ActionProcessBackend {
 
         let child_workspace_root = workspace_root.clone();
         let child_options = options;
+        let child_environment = environment;
         Self {
             runner: Arc::new(runner),
             permissioned_factory: Arc::new(permissioned_factory),
             new_session: Arc::new(move || {
-                Self::from_bwrap_options(child_workspace_root.clone(), child_options.clone())
+                Self::from_bwrap_options_with_environment(
+                    child_workspace_root.clone(),
+                    child_options.clone(),
+                    child_environment.clone(),
+                )
             }),
         }
     }
@@ -91,8 +116,5 @@ pub(crate) fn action_process_runner(
     workspace_root: &Path,
     options: ActionProcessBackendOptions,
 ) -> Result<ActionProcessBackend, CodingRuntimeError> {
-    Ok(ActionProcessBackend::from_bwrap_options(
-        workspace_root.to_path_buf(),
-        options,
-    ))
+    ActionProcessBackend::from_bwrap_options(workspace_root.to_path_buf(), options)
 }

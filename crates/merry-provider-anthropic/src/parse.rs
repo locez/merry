@@ -232,7 +232,7 @@ impl AnthropicToolBuffer {
             &self.input
         };
         let input = serde_json::from_str::<serde_json::Value>(raw_input).map_err(|error| {
-            AnthropicProviderError::protocol(format!(
+            AnthropicProviderError::invalid_tool_call(format!(
                 "Anthropic tool input is not valid JSON: {error}"
             ))
         })?;
@@ -246,7 +246,7 @@ impl AnthropicToolBuffer {
                 AnthropicProviderError::protocol(format!("Anthropic tool name is invalid: {error}"))
             })?,
             ToolArguments::try_from(input).map_err(|error| {
-                AnthropicProviderError::protocol(format!(
+                AnthropicProviderError::invalid_tool_call(format!(
                     "Anthropic tool input must be an object: {error}"
                 ))
             })?,
@@ -324,6 +324,7 @@ fn unexpected_sse_line(line: &str) -> AnthropicProviderError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use merry_llm::{ModelError, ProviderErrorKind};
 
     #[test]
     fn parses_text_tool_use_partial_json_usage_and_completion() {
@@ -375,5 +376,21 @@ mod tests {
         let call = call.expect("tool call should be emitted");
         assert!(call.arguments().as_object().is_empty());
         parser.finish().expect("stream should complete");
+    }
+
+    #[test]
+    fn malformed_tool_input_is_classified_as_invalid_tool_call() {
+        let error = AnthropicToolBuffer {
+            id: "toolu_bad".to_owned(),
+            name: "search".to_owned(),
+            input: "[".to_owned(),
+        }
+        .into_model_tool_call()
+        .expect_err("malformed tool input should fail");
+
+        assert_eq!(
+            ModelError::from(error).kind(),
+            ProviderErrorKind::InvalidToolCall
+        );
     }
 }

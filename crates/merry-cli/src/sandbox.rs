@@ -35,20 +35,27 @@ pub(crate) const MERRY_SANDBOX_VERSION_ENV: &str = "MERRY_SANDBOX_VERSION";
 pub(crate) const MERRY_SANDBOX_VERSION: &str = "1";
 pub(crate) const SANDBOX_CHILD_HANDOFF_ARG: &str = "--merry-sandbox-child-handoff";
 pub(crate) const SANDBOX_CHILD_HANDOFF_CLI_BWRAP_V1: &str = "cli-bwrap-v1";
-pub(crate) const SANDBOX_HOME: &str = "/home/merry";
+pub(crate) const SANDBOX_HOME_ROOT: &str = "/home";
 pub(crate) const SANDBOX_TMPDIR: &str = "/tmp";
-// These are sandbox-child paths. Host paths are resolved separately before
-// re-exec; inside bwrap, HOME is intentionally set to SANDBOX_HOME.
-pub(crate) const SANDBOX_XDG_CONFIG_HOME: &str = "/home/merry/.config";
-pub(crate) const SANDBOX_XDG_STATE_HOME: &str = "/home/merry/.local/state";
-pub(crate) const SANDBOX_MERRY_CONFIG_DIR: &str = "/home/merry/.config/merry";
-pub(crate) const SANDBOX_MERRY_MANAGED_CONFIG_DIR: &str = "/home/merry/.config/merry/managed";
-pub(crate) const SANDBOX_MERRY_STATE_DIR: &str = "/home/merry/.local/state/merry";
-pub(crate) const SANDBOX_MERRY_LOG_DIR: &str = "/home/merry/.local/state/merry/logs";
 pub(crate) const SANDBOX_WAYLAND_RUNTIME_DIR: &str = "/run/merry-wayland";
 pub(crate) const SANDBOX_WAYLAND_DISPLAY: &str = "wayland-0";
 pub(crate) const SANDBOX_WAYLAND_SOCKET: &str = "/run/merry-wayland/wayland-0";
 pub(crate) const SANDBOX_X11_AUTHORITY: &str = "/run/merry-x11/Xauthority";
+
+#[cfg(test)]
+pub(crate) const SANDBOX_HOME: &str = "/home/alice";
+#[cfg(test)]
+pub(crate) const SANDBOX_XDG_CONFIG_HOME: &str = "/host/config";
+#[cfg(test)]
+pub(crate) const SANDBOX_XDG_STATE_HOME: &str = "/host/state";
+#[cfg(test)]
+pub(crate) const SANDBOX_MERRY_CONFIG_DIR: &str = "/host/config/merry";
+#[cfg(test)]
+pub(crate) const SANDBOX_MERRY_MANAGED_CONFIG_DIR: &str = "/host/config/merry/managed";
+#[cfg(test)]
+pub(crate) const SANDBOX_MERRY_STATE_DIR: &str = "/host/state/merry";
+#[cfg(test)]
+pub(crate) const SANDBOX_MERRY_LOG_DIR: &str = "/host/state/merry/logs";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ClipboardAccess {
@@ -278,6 +285,8 @@ pub(crate) fn plan_bootstrap_with_probe(
         return Ok(Bootstrap::AlreadyInside);
     }
 
+    validate_outer_paths(host)?;
+
     let path = sandbox_path(host);
     let bwrap = find_bwrap_in_path(&path, |candidate| probe.file_exists(candidate))
         .ok_or(Error::MissingBubblewrap)?;
@@ -473,6 +482,22 @@ fn is_clean_absolute_path(path: &Path) -> bool {
             .all(|component| matches!(component, Component::RootDir | Component::Normal(_)))
 }
 
+fn validate_outer_paths(host: &Host) -> Result<(), Error> {
+    if !is_clean_absolute_path(&host.cwd) {
+        return Err(Error::InvalidWorkspacePath(
+            "workspace root must be a clean absolute path",
+        ));
+    }
+
+    let home = host.xdg_paths.home();
+    if !is_valid_runtime_home_path(home) {
+        return Err(Error::InvalidHomeLayout(
+            "HOME must be a clean user path outside /tmp",
+        ));
+    }
+    Ok(())
+}
+
 fn build_plan(
     host: &Host,
     path: OsString,
@@ -482,6 +507,12 @@ fn build_plan(
 ) -> Plan {
     let cwd = host.cwd.as_os_str().to_owned();
     let current_exe = host.current_exe.as_os_str().to_owned();
+    let home = host.xdg_paths.home().as_os_str().to_owned();
+    let config_base = host.xdg_paths.config_base_dir().as_os_str().to_owned();
+    let state_base = host.xdg_paths.state_base_dir().as_os_str().to_owned();
+    let config_dir = host.xdg_paths.config_dir().to_path_buf();
+    let managed_config_dir = host.xdg_paths.managed_config_dir();
+    let state_dir = host.xdg_paths.state_dir().to_path_buf();
     let graphical_plan = match clipboard_access {
         ClipboardAccess::Disabled => GraphicalAccessPlan::default(),
         ClipboardAccess::Tui => graphical_access_plan(host, probe),
@@ -504,17 +535,16 @@ fn build_plan(
         os("--tmpfs"),
         os(SANDBOX_TMPDIR),
         os("--tmpfs"),
-        os("/home"),
-        os("--perms"),
-        os("0700"),
-        os("--dir"),
-        os(SANDBOX_HOME),
-        os("--ro-bind-try"),
-        host.xdg_paths.config_dir().as_os_str().to_owned(),
-        os(SANDBOX_MERRY_CONFIG_DIR),
-        os("--bind"),
-        host.xdg_paths.managed_config_dir().as_os_str().to_owned(),
-        os(SANDBOX_MERRY_MANAGED_CONFIG_DIR),
+        os(SANDBOX_HOME_ROOT),
+    ];
+    if !Path::new(&home).starts_with(Path::new(SANDBOX_HOME_ROOT)) {
+        append_mount_parent_args(&mut args, home.as_os_str());
+        args.extend([os("--tmpfs"), home.clone()]);
+    }
+    args.extend([os("--perms"), os("0700"), os("--dir"), home.clone()]);
+    append_bind_dir_try_args(&mut args, &config_dir, &config_dir);
+    append_bind_dir_rw_args(&mut args, &managed_config_dir, &managed_config_dir);
+    args.extend([
         os("--ro-bind"),
         os("/usr"),
         os("/usr"),
@@ -530,7 +560,7 @@ fn build_plan(
         os("--ro-bind-try"),
         os("/opt"),
         os("/opt"),
-    ];
+    ]);
     for path in SANDBOX_ETC_READ_ONLY_FILE_PATHS {
         if Path::new(path).exists() {
             append_bind_file_args(&mut args, OsStr::new(path), OsStr::new(path));
@@ -548,18 +578,14 @@ fn build_plan(
         os("--chdir"),
         cwd.clone(),
     ]);
-    args.extend([
-        os("--bind"),
-        host.xdg_paths.state_dir().as_os_str().to_owned(),
-        os(SANDBOX_MERRY_STATE_DIR),
-    ]);
+    append_bind_dir_rw_args(&mut args, &state_dir, &state_dir);
     if let Some(log_settings) = host.log_settings.as_ref()
         && let Some(host_log_dir) = log_settings.path.parent()
     {
         args.extend([
             os("--bind"),
             host_log_dir.as_os_str().to_owned(),
-            os(SANDBOX_MERRY_LOG_DIR),
+            host_log_dir.as_os_str().to_owned(),
         ]);
     }
     for rule in &host.trusted_path_rules {
@@ -579,16 +605,16 @@ fn build_plan(
         path.clone(),
         os("--setenv"),
         os("HOME"),
-        os(SANDBOX_HOME),
+        home,
         os("--setenv"),
         os("TMPDIR"),
         os(SANDBOX_TMPDIR),
         os("--setenv"),
         os("XDG_CONFIG_HOME"),
-        os(SANDBOX_XDG_CONFIG_HOME),
+        config_base,
         os("--setenv"),
         os("XDG_STATE_HOME"),
-        os(SANDBOX_XDG_STATE_HOME),
+        state_base,
         os("--setenv"),
         os("PWD"),
         cwd,
@@ -636,6 +662,24 @@ fn append_bind_file_args(args: &mut Vec<OsString>, source: &OsStr, destination: 
 fn append_bind_dir_args(args: &mut Vec<OsString>, source: &OsStr, destination: &OsStr) {
     append_mount_parent_args(args, destination);
     args.extend([os("--ro-bind"), source.to_owned(), destination.to_owned()]);
+}
+
+fn append_bind_dir_try_args(args: &mut Vec<OsString>, source: &Path, destination: &Path) {
+    append_mount_parent_args(args, destination.as_os_str());
+    args.extend([
+        os("--ro-bind-try"),
+        source.as_os_str().to_owned(),
+        destination.as_os_str().to_owned(),
+    ]);
+}
+
+fn append_bind_dir_rw_args(args: &mut Vec<OsString>, source: &Path, destination: &Path) {
+    append_mount_parent_args(args, destination.as_os_str());
+    args.extend([
+        os("--bind"),
+        source.as_os_str().to_owned(),
+        destination.as_os_str().to_owned(),
+    ]);
 }
 
 fn append_path_rule_args(args: &mut Vec<OsString>, rule: &PathAccessRule) {
@@ -772,9 +816,18 @@ pub(crate) fn runtime_profile_from_evidence(
     tmpdir: Option<&OsStr>,
     mountinfo: Option<&str>,
 ) -> Option<RuntimeProfile> {
-    if home == Some(OsStr::new(SANDBOX_HOME))
-        && tmpdir == Some(OsStr::new(SANDBOX_TMPDIR))
-        && mountinfo_has_tmpfs_mounts(mountinfo?, ["/home", SANDBOX_TMPDIR])
+    let home = home.map(Path::new)?;
+    if !is_valid_runtime_home_path(home) || tmpdir != Some(OsStr::new(SANDBOX_TMPDIR)) {
+        return None;
+    }
+    let home_mount = if home.starts_with(Path::new(SANDBOX_HOME_ROOT)) {
+        SANDBOX_HOME_ROOT.to_owned()
+    } else {
+        home.to_str()?.to_owned()
+    };
+    let mountinfo = mountinfo?;
+    if mountinfo_has_tmpfs_mount(mountinfo, &home_mount)
+        && mountinfo_has_tmpfs_mount(mountinfo, SANDBOX_TMPDIR)
     {
         Some(RuntimeProfile::CliBwrapV1)
     } else {
@@ -782,10 +835,11 @@ pub(crate) fn runtime_profile_from_evidence(
     }
 }
 
-fn mountinfo_has_tmpfs_mounts(mountinfo: &str, mount_points: [&str; 2]) -> bool {
-    mount_points
-        .into_iter()
-        .all(|mount_point| mountinfo_has_tmpfs_mount(mountinfo, mount_point))
+fn is_valid_runtime_home_path(path: &Path) -> bool {
+    is_clean_absolute_path(path)
+        && path != Path::new("/")
+        && path != Path::new(SANDBOX_HOME_ROOT)
+        && !path.starts_with(Path::new(SANDBOX_TMPDIR))
 }
 
 fn mountinfo_has_tmpfs_mount(mountinfo: &str, mount_point: &str) -> bool {
@@ -866,6 +920,8 @@ pub(crate) enum Error {
     #[cfg(not(target_os = "linux"))]
     UnsupportedPlatform,
     MissingBubblewrap,
+    InvalidWorkspacePath(&'static str),
+    InvalidHomeLayout(&'static str),
     Exec(io::Error),
 }
 
@@ -912,6 +968,12 @@ impl fmt::Display for Error {
                 formatter,
                 "bubblewrap executable `bwrap` was not found in PATH; install bubblewrap to use TUI/run, or omit --with-sandbox for debug commands"
             ),
+            Error::InvalidWorkspacePath(reason) => {
+                write!(formatter, "sandbox workspace path is invalid: {reason}")
+            }
+            Error::InvalidHomeLayout(reason) => {
+                write!(formatter, "sandbox HOME layout is invalid: {reason}")
+            }
             Error::Exec(error) => {
                 write!(
                     formatter,

@@ -44,6 +44,14 @@ deny_paths = [
   "~/.ssh",
 ]
 
+# Optional environment assignments for Merry-managed process actions. Values
+# are injected after the inner action sandbox defaults, so they may override
+# PATH, HOME, TMPDIR, or PWD. They do not change the outer bootstrap or provider
+# environment; filesystem access is still governed by the path rules above.
+# environment = [
+#   { name = "RUSTUP_TOOLCHAIN", value = "stable" },
+# ]
+
 [skills]
 # Skill metadata is projected into the cacheable stable prefix. Full SKILL.md
 # bodies remain on disk and are read through workspace_read_file only when used.

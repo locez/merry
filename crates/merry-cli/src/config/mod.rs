@@ -48,8 +48,10 @@ pub enum ConfigError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct XdgPaths {
     home: PathBuf,
+    config_base: PathBuf,
     config_dir: PathBuf,
     config_file: PathBuf,
+    state_base: PathBuf,
     state_dir: PathBuf,
     default_log_file: PathBuf,
 }
@@ -80,11 +82,21 @@ impl XdgPaths {
         let default_log_file = state_dir.join("logs/merry.jsonl");
         Self {
             home,
+            config_base,
             config_dir,
             config_file,
+            state_base,
             state_dir,
             default_log_file,
         }
+    }
+
+    pub fn home(&self) -> &Path {
+        &self.home
+    }
+
+    pub fn config_base_dir(&self) -> &Path {
+        &self.config_base
     }
 
     pub fn config_dir(&self) -> &Path {
@@ -93,6 +105,10 @@ impl XdgPaths {
 
     pub fn config_file(&self) -> &Path {
         &self.config_file
+    }
+
+    pub fn state_base_dir(&self) -> &Path {
+        &self.state_base
     }
 
     pub fn state_dir(&self) -> &Path {
@@ -121,10 +137,6 @@ impl XdgPaths {
 
     pub fn model_catalog_cache_dir(&self) -> PathBuf {
         self.state_dir.join("model-catalogs")
-    }
-
-    fn home(&self) -> &Path {
-        &self.home
     }
 }
 
@@ -275,6 +287,31 @@ impl MerryConfig {
             .unwrap_or(false)
     }
 
+    pub fn process_environment_overrides(&self) -> Result<Vec<(String, String)>, ConfigError> {
+        let Some(permissions) = self.raw.permissions.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let mut names = BTreeSet::new();
+        let mut overrides = Vec::with_capacity(permissions.environment.len());
+        for entry in &permissions.environment {
+            validate_environment_name(&entry.name)?;
+            if entry.value.contains('\0') {
+                return Err(ConfigError::Invalid(format!(
+                    "permissions.environment value for {:?} must not contain NUL",
+                    entry.name
+                )));
+            }
+            if !names.insert(entry.name.clone()) {
+                return Err(ConfigError::Invalid(format!(
+                    "permissions.environment contains duplicate variable {:?}",
+                    entry.name
+                )));
+            }
+            overrides.push((entry.name.clone(), entry.value.clone()));
+        }
+        Ok(overrides)
+    }
+
     pub fn skill_roots(&self) -> Result<Vec<PathBuf>, ConfigError> {
         let Some(skills) = self.raw.skills.as_ref() else {
             return Ok(vec![self.config_dir.join("skills")]);
@@ -367,6 +404,22 @@ fn resolve_path_access_rule_path(
     Ok(normalize_path_lexically(&path))
 }
 
+fn validate_environment_name(name: &str) -> Result<(), ConfigError> {
+    if name.is_empty()
+        || name.contains('=')
+        || name.contains('\0')
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        || name.as_bytes()[0].is_ascii_digit()
+    {
+        return Err(ConfigError::Invalid(format!(
+            "permissions.environment name {name:?} is not a valid environment variable"
+        )));
+    }
+    Ok(())
+}
+
 fn normalize_path_lexically(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
     let is_absolute = path.is_absolute();
@@ -455,6 +508,15 @@ struct PermissionsToml {
     deny_paths: Vec<String>,
     #[serde(default)]
     paths: Vec<PathRuleToml>,
+    #[serde(default)]
+    environment: Vec<EnvironmentVariableToml>,
+}
+
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct EnvironmentVariableToml {
+    name: String,
+    value: String,
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
@@ -944,6 +1006,71 @@ access = "ro"
                 .iter()
                 .all(|rule| rule.source() == PathAccessRuleSource::TrustedGlobalConfig)
         );
+    }
+
+    #[test]
+    fn parses_and_validates_process_environment_overrides() {
+        let paths = XdgPaths::from_parts(home(), None, None);
+        let config = MerryConfig::load_optional_from_text(
+            Some(
+                r#"
+[permissions]
+environment = [
+  { name = "RUSTUP_TOOLCHAIN", value = "stable" },
+  { name = "CARGO_TERM_COLOR", value = "always" },
+]
+"#,
+            ),
+            &paths,
+        )
+        .expect("config should parse")
+        .expect("config should be present");
+
+        assert_eq!(
+            config
+                .process_environment_overrides()
+                .expect("environment overrides should validate"),
+            vec![
+                ("RUSTUP_TOOLCHAIN".to_owned(), "stable".to_owned()),
+                ("CARGO_TERM_COLOR".to_owned(), "always".to_owned()),
+            ]
+        );
+
+        for invalid in ["", "1INVALID", "INVALID-NAME", "INVALID=NAME"] {
+            let text =
+                format!("[permissions]\nenvironment = [{{ name = {invalid:?}, value = \"x\" }}]");
+            let config = MerryConfig::load_optional_from_text(Some(&text), &paths)
+                .expect("config should parse");
+            let config = config.expect("config should be present");
+            assert!(
+                config.process_environment_overrides().is_err(),
+                "{invalid:?} should be rejected"
+            );
+        }
+
+        let duplicate = MerryConfig::load_optional_from_text(
+            Some(
+                r#"
+[permissions]
+environment = [
+  { name = "DUPLICATE", value = "one" },
+  { name = "DUPLICATE", value = "two" },
+]
+"#,
+            ),
+            &paths,
+        )
+        .expect("duplicate environment config should parse")
+        .expect("duplicate environment config should be present");
+        assert!(duplicate.process_environment_overrides().is_err());
+
+        let nul_value = MerryConfig::load_optional_from_text(
+            Some("[permissions]\nenvironment = [{ name = \"NUL_VALUE\", value = \"\\u0000\" } ]"),
+            &paths,
+        )
+        .expect("NUL environment config should parse")
+        .expect("NUL environment config should be present");
+        assert!(nul_value.process_environment_overrides().is_err());
     }
 
     #[test]
