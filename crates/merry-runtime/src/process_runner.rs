@@ -295,6 +295,9 @@ impl BwrapProcessEnvironment {
             let Some(parent) = socket.parent() else {
                 continue;
             };
+            if parent.starts_with(&self.tmp_source) || self.tmp_source.starts_with(parent) {
+                continue;
+            }
             if hidden.iter().any(|path: &PathBuf| parent.starts_with(path)) {
                 continue;
             }
@@ -999,6 +1002,9 @@ fn bwrap_process_plan_with_environment(
     if !network_allowed {
         args.push(os("--unshare-net"));
     }
+    for path in environment.host_integration_hidden_paths() {
+        append_bwrap_hidden_host_integration_args(&mut args, &path);
+    }
     append_bwrap_required_path_rule(&mut args, cwd_root, PathAccess::ReadWrite);
     for rule in path_rules {
         if rule.source() == crate::PathAccessRuleSource::PermissionReview {
@@ -1006,9 +1012,6 @@ fn bwrap_process_plan_with_environment(
         } else {
             append_bwrap_path_rule(&mut args, rule.path(), rule.access());
         }
-    }
-    for path in environment.host_integration_hidden_paths() {
-        append_bwrap_hidden_host_integration_args(&mut args, &path);
     }
     for (_, socket, _) in environment.host_integration_bindings() {
         append_bwrap_host_integration_mount_args(&mut args, &socket);
@@ -1598,6 +1601,26 @@ mod tests {
                 "/run/user/1000/gnupg/S.gpg-agent.ssh"
             ]
         ));
+    }
+
+    #[test]
+    fn bwrap_process_plan_preserves_action_tmp_when_host_socket_is_under_it() {
+        let mut environment =
+            BwrapProcessEnvironment::new("/custom/bin:/usr/bin", "/home/alice", "/tmp")
+                .expect("environment layout should validate");
+        environment.ssh_agent_socket = Some(PathBuf::from("/tmp/ssh-agent.sock"));
+        let plan = bwrap_process_plan_with_environment(
+            &intent(None),
+            Path::new("/workspace/merry"),
+            &environment,
+            true,
+            &[],
+            Path::new("/custom/bin/bwrap"),
+        );
+        let args = os_args(&plan.args);
+
+        assert_eq!(count_sequence(&args, &["--tmpfs", "/tmp"]), 1);
+        assert_eq!(count_sequence(&args, &["--bind", "/tmp", "/tmp"]), 1);
     }
 
     #[test]
@@ -2258,5 +2281,16 @@ mod tests {
                 .map(String::as_str)
                 .eq(expected.iter().copied())
         })
+    }
+
+    fn count_sequence(args: &[String], expected: &[&str]) -> usize {
+        args.windows(expected.len())
+            .filter(|window| {
+                window
+                    .iter()
+                    .map(String::as_str)
+                    .eq(expected.iter().copied())
+            })
+            .count()
     }
 }
