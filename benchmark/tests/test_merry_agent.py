@@ -15,10 +15,13 @@ from merry_benchmark.agents.merry import MerryAgent, build_merry_run_command
 class RecordingEnvironment(BaseEnvironment):
     """Small Harbor environment double for adapter boundary tests."""
 
-    def __init__(self) -> None:
+    def __init__(self, result: ExecResult | None = None) -> None:
         self.default_user = "agent"
         self.commands: list[tuple[str, dict[str, str] | None]] = []
         self.uploads: list[tuple[Path, str]] = []
+        self.result = (
+            result if result is not None else ExecResult(return_code=0, stdout="merry", stderr="")
+        )
 
     @staticmethod
     def type() -> str:
@@ -55,7 +58,7 @@ class RecordingEnvironment(BaseEnvironment):
     ) -> ExecResult:
         del cwd, timeout_sec, user
         self.commands.append((command, env))
-        return ExecResult(return_code=0, stdout="merry", stderr="")
+        return self.result
 
 
 def test_merry_agent_exposes_stable_name_and_configured_version(tmp_path: Path) -> None:
@@ -129,3 +132,29 @@ def test_install_and_run_upload_binary_config_and_key(tmp_path: Path) -> None:
     assert any(key_permission_command in command for command, _ in environment.commands)
     assert environment.commands[-1][1] == {"XDG_CONFIG_HOME": "/installed-agent/config"}
     assert context.metadata == {"merry_status": "completed", "merry_exit_code": 0}
+
+
+def test_nonzero_exit_with_terminal_event_is_a_scored_incomplete_attempt(tmp_path: Path) -> None:
+    environment = RecordingEnvironment(
+        ExecResult(
+            return_code=1,
+            stdout='{"type":"agent_loop_result","status":"failed"}\n',
+            stderr="",
+        )
+    )
+    agent = MerryAgent(logs_dir=tmp_path)
+    context = AgentContext()
+
+    asyncio.run(agent.run("Fix the task.", environment, context))
+
+    assert context.metadata == {"merry_status": "failed", "merry_exit_code": 1}
+
+
+def test_nonzero_exit_without_terminal_event_is_an_agent_error(tmp_path: Path) -> None:
+    environment = RecordingEnvironment(
+        ExecResult(return_code=1, stdout="provider failed", stderr="connection refused")
+    )
+    agent = MerryAgent(logs_dir=tmp_path)
+
+    with pytest.raises(RuntimeError, match=r"Command failed \(exit 1\)"):
+        asyncio.run(agent.run("Fix the task.", environment, AgentContext()))

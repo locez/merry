@@ -46,8 +46,6 @@ def result_failures(result: JobResult) -> tuple[str, ...]:
             reward_count += len(trial_names)
             if not math.isfinite(float(reward)):
                 failures.append(f"Harbor evaluation {eval_name!r} has a non-finite reward")
-            elif reward <= 0:
-                failures.append(f"Harbor evaluation {eval_name!r} has non-positive reward: {reward}")
 
         if reward_count != eval_stats.n_trials:
             failures.append(

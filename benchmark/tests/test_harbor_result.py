@@ -58,10 +58,10 @@ def test_errored_trial_fails_validation(tmp_path: Path) -> None:
     assert any("errored trial" in failure for failure in result_failures(result))
 
 
-def test_non_positive_reward_fails_validation(tmp_path: Path) -> None:
+def test_zero_reward_is_valid_for_a_completed_trial(tmp_path: Path) -> None:
     result = load_result(write_result(tmp_path, reward=0.0))
 
-    assert any("non-positive reward" in failure for failure in result_failures(result))
+    assert result_failures(result) == ()
 
 
 def test_missing_reward_fails_validation(tmp_path: Path) -> None:

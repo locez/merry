@@ -55,6 +55,10 @@ directory, runs the existing `MerryAgent`, and removes those files in an
 `always()` cleanup step. It is `workflow_dispatch`-only so model credentials
 are never exposed to arbitrary pull request code.
 
+The smoke validates that Harbor can provision a task, run Merry, execute the
+verifier, and persist reward data. A zero reward is a valid benchmark result
+for an unsolved task; use a full evaluation to compare model quality.
+
 ## Run a smoke evaluation
 
 Use a small task count before a full benchmark. Harbor's registry names below

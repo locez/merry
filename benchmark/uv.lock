@@ -994,6 +994,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "harbor" },
+    { name = "pydantic" },
 ]
 
 [package.dev-dependencies]
@@ -1004,7 +1005,10 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "harbor", specifier = ">=0.20,<0.21" }]
+requires-dist = [
+    { name = "harbor", specifier = ">=0.20,<0.21" },
+    { name = "pydantic", specifier = ">=2,<3" },
+]
 
 [package.metadata.requires-dev]
 dev = [

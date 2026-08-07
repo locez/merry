@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import shlex
 from pathlib import Path
-from typing import Final, override
+from typing import Final, Literal, override
 
 from harbor.agents.installed.base import BaseInstalledAgent
-from harbor.environments.base import BaseEnvironment, ExecResult
+from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
+from pydantic import BaseModel
 
 MERRY_BINARY_PATH_ENV: Final[str] = "MERRY_BINARY_PATH"
 MERRY_COMMAND_ENV: Final[str] = "MERRY_COMMAND"
@@ -26,6 +27,28 @@ REMOTE_MERRY_BINARY: Final[str] = "/installed-agent/merry"
 REMOTE_CONFIG_HOME: Final[str] = "/installed-agent/config"
 REMOTE_CONFIG_PATH: Final[str] = f"{REMOTE_CONFIG_HOME}/merry/config.toml"
 REMOTE_API_KEY_PATH: Final[str] = f"{REMOTE_CONFIG_HOME}/merry/secrets/openai.key"
+
+
+class MerryAgentLoopResult(BaseModel):
+    """Terminal JSONL event emitted by Merry's headless run command."""
+
+    type: Literal["agent_loop_result"]
+    status: str
+
+
+def _agent_loop_status(stdout: str | None) -> str | None:
+    """Return the terminal Merry status from a JSONL stream, if present."""
+
+    if stdout is None:
+        return None
+    for line in stdout.splitlines():
+        try:
+            event = MerryAgentLoopResult.model_validate_json(line)
+        except ValueError:
+            continue
+        if event.type == "agent_loop_result":
+            return event.status
+    return None
 
 
 def build_merry_run_command(executable: str, instruction: str) -> str:
@@ -46,12 +69,6 @@ def _single_command_token(value: str, field_name: str) -> str:
     if len(tokens) != 1:
         raise ValueError(f"{field_name} must contain exactly one executable token")
     return tokens[0]
-
-
-def _exit_code(result: object) -> int | None:
-    if isinstance(result, ExecResult):
-        return result.return_code
-    return None
 
 
 class MerryAgent(BaseInstalledAgent):
@@ -121,21 +138,18 @@ class MerryAgent(BaseInstalledAgent):
         """Execute one task instruction and record a minimal Harbor context."""
 
         context.metadata = {"merry_status": "running"}
-        try:
-            result = await self.exec_as_agent(
-                environment,
-                command=build_merry_run_command(
-                    self._remote_executable(),
-                    instruction,
-                ),
-                env=self._execution_environment(),
-            )
-        except RuntimeError:
+        command = build_merry_run_command(self._remote_executable(), instruction)
+        result = await environment.exec(
+            command=f"set -o pipefail; {command}",
+            env=self._execution_environment(),
+        )
+        status = _agent_loop_status(result.stdout)
+        if result.return_code != 0 and status is None:
             context.metadata = {"merry_status": "failed"}
-            raise
+            raise self._classify_exec_error(command, result)
         context.metadata = {
-            "merry_status": "completed",
-            "merry_exit_code": _exit_code(result),
+            "merry_status": status or "completed",
+            "merry_exit_code": result.return_code,
         }
 
     def _configured_executable(self) -> str:
