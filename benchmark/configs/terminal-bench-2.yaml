@@ -1,0 +1,11 @@
+datasets:
+  - name: terminal-bench/terminal-bench-2
+
+agents:
+  - import_path: merry_benchmark.agents.merry:MerryAgent
+
+n_concurrent_trials: 1
+
+environment:
+  type: docker
+  delete: true

@@ -1,0 +1,176 @@
+name: Benchmark Smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      dataset:
+        description: Harbor dataset to smoke-test
+        required: true
+        type: choice
+        options:
+          - swe-bench/swe-bench-verified
+          - terminal-bench/terminal-bench-2
+        default: swe-bench/swe-bench-verified
+      n_tasks:
+        description: Number of tasks; keep this between 1 and 5 for smoke runs
+        required: true
+        default: "1"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: benchmark-smoke
+  cancel-in-progress: false
+
+jobs:
+  harbor-smoke:
+    name: Harbor smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: benchmark
+    env:
+      MERRY_BASE_URL: ${{ vars.MERRY_BASE_URL || 'https://api.openai.com/v1' }}
+      MERRY_MODEL: ${{ vars.MERRY_MODEL || 'gpt-4.1-mini' }}
+      MERRY_PROTOCOL: ${{ vars.MERRY_PROTOCOL || 'responses' }}
+      MERRY_HARBOR_MODEL: ${{ vars.MERRY_HARBOR_MODEL || '' }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: benchmark/uv.lock
+
+      - name: Check Docker runtime
+        run: docker version
+
+      - name: Build Merry CLI
+        run: cargo build --locked --release -p merry-cli
+
+      - name: Install benchmark dependencies
+        working-directory: benchmark
+        run: uv sync --locked
+
+      - name: Validate benchmark adapter
+        working-directory: benchmark
+        run: |
+          uv run ruff check .
+          uv run ty check
+          uv run pytest
+
+      - name: Prepare Merry provider config
+        id: merry_config
+        env:
+          MERRY_API_KEY: ${{ secrets.MERRY_API_KEY }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          def configured_value(name: str, default: str | None = None) -> str:
+              value = os.environ.get(name, default)
+              if value is None or not value.strip():
+                  raise SystemExit(f"Missing GitHub variable or secret: {name}")
+              if "\r" in value or "\n" in value:
+                  raise SystemExit(f"GitHub variable or secret must be one line: {name}")
+              return value
+
+          api_key = configured_value("MERRY_API_KEY")
+          base_url = configured_value("MERRY_BASE_URL")
+          model = configured_value("MERRY_MODEL")
+          protocol = configured_value("MERRY_PROTOCOL")
+
+          config_root = Path(os.environ["RUNNER_TEMP"]) / "merry-config"
+          secrets_root = config_root / "secrets"
+          config_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+          secrets_root.mkdir(mode=0o700, exist_ok=True)
+          config_root.chmod(0o700)
+          secrets_root.chmod(0o700)
+
+          api_key_path = secrets_root / "openai.key"
+          api_key_path.write_text(api_key, encoding="utf-8")
+          api_key_path.chmod(0o600)
+
+          config_path = config_root / "config.toml"
+          config_path.write_text(
+              "\n".join(
+                  (
+                      '[global]',
+                      'profile = "default"',
+                      '',
+                      '[permissions]',
+                      'network = false',
+                      '',
+                      '[providers.default]',
+                      'provider = "openai-compatible"',
+                      f"model = {json.dumps(model)}",
+                      '',
+                      '[providers.openai-compatible]',
+                      'type = "openai-compatible"',
+                      f"protocol = {json.dumps(protocol)}",
+                      f"base_url = {json.dumps(base_url)}",
+                      'api_key_file = "secrets/openai.key"',
+                      '',
+                  )
+              ),
+              encoding="utf-8",
+          )
+          config_path.chmod(0o600)
+          PY
+          printf 'config_path=%s\n' "$RUNNER_TEMP/merry-config/config.toml" >> "$GITHUB_OUTPUT"
+          printf 'api_key_path=%s\n' "$RUNNER_TEMP/merry-config/secrets/openai.key" >> "$GITHUB_OUTPUT"
+
+      - name: Run Harbor smoke
+        working-directory: benchmark
+        env:
+          DATASET: ${{ inputs.dataset }}
+          N_TASKS: ${{ inputs.n_tasks }}
+          MERRY_BINARY_PATH: ${{ github.workspace }}/target/release/merry
+          MERRY_CONFIG_PATH: ${{ steps.merry_config.outputs.config_path }}
+          MERRY_API_KEY_FILE_PATH: ${{ steps.merry_config.outputs.api_key_path }}
+          MERRY_AGENT_VERSION: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          case "$N_TASKS" in
+            1|2|3|4|5) ;;
+            *)
+              echo "::error::n_tasks must be an integer between 1 and 5"
+              exit 1
+              ;;
+          esac
+
+          harbor_model="${MERRY_HARBOR_MODEL:-openai/$MERRY_MODEL}"
+          uv run harbor run \
+            --dataset "$DATASET" \
+            --agent merry_benchmark.agents.merry:MerryAgent \
+            --model "$harbor_model" \
+            --n-tasks "$N_TASKS" \
+            --n-concurrent 1 \
+            --jobs-dir "$RUNNER_TEMP/harbor-jobs" \
+            --delete \
+            --yes \
+            --agent-env "MERRY_BINARY_PATH=$MERRY_BINARY_PATH" \
+            --agent-env "MERRY_CONFIG_PATH=$MERRY_CONFIG_PATH" \
+            --agent-env "MERRY_API_KEY_FILE_PATH=$MERRY_API_KEY_FILE_PATH" \
+            --agent-env "MERRY_AGENT_VERSION=$MERRY_AGENT_VERSION"
+
+      - name: Remove temporary Merry credentials
+        if: always()
+        run: |
+          set -euo pipefail
+          rm -f \
+            "$RUNNER_TEMP/merry-config/config.toml" \
+            "$RUNNER_TEMP/merry-config/secrets/openai.key"
+          rmdir \
+            "$RUNNER_TEMP/merry-config/secrets" \
+            "$RUNNER_TEMP/merry-config" 2>/dev/null || true

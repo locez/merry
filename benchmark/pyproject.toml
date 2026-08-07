@@ -1,0 +1,34 @@
+[build-system]
+requires = ["hatchling>=1.27,<2.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "merry-benchmark"
+version = "0.1.0"
+description = "Harbor integration for evaluating Merry as an independent coding agent"
+requires-python = ">=3.12"
+dependencies = [
+    "harbor>=0.20,<0.21",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8,<9",
+    "ruff>=0.11,<1",
+    "ty>=0.0.1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/merry_benchmark"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]

@@ -1,0 +1,11 @@
+datasets:
+  - name: swe-bench/swe-bench-verified
+
+agents:
+  - import_path: merry_benchmark.agents.merry:MerryAgent
+
+n_concurrent_trials: 1
+
+environment:
+  type: docker
+  delete: true
