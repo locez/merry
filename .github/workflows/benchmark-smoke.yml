@@ -35,7 +35,6 @@ jobs:
       MERRY_MODEL: ${{ vars.MERRY_MODEL || 'gpt-4.1-mini' }}
       MERRY_PROTOCOL: ${{ vars.MERRY_PROTOCOL || 'responses' }}
       MERRY_HARBOR_MODEL: ${{ vars.MERRY_HARBOR_MODEL || '' }}
-      CARGO_HOME: ${{ runner.temp }}/cargo-home
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
       CARGO_NET_RETRY: "10"
       CARGO_HTTP_TIMEOUT: "120"
@@ -63,8 +62,8 @@ jobs:
         uses: actions/cache/restore@v6
         with:
           path: |
-            ${{ runner.temp }}/cargo-home/registry
-            ${{ runner.temp }}/cargo-home/git
+            ~/.cargo/registry
+            ~/.cargo/git
           key: ${{ runner.os }}-merry-cargo-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}
           restore-keys: |
             ${{ runner.os }}-merry-cargo-
@@ -92,8 +91,8 @@ jobs:
         uses: actions/cache/save@v6
         with:
           path: |
-            ${{ runner.temp }}/cargo-home/registry
-            ${{ runner.temp }}/cargo-home/git
+            ~/.cargo/registry
+            ~/.cargo/git
           key: ${{ steps.cargo-registry-cache.outputs.cache-primary-key }}
 
       - name: Save Cargo build cache
