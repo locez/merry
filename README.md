@@ -129,8 +129,13 @@ selects the Codex-compatible single inner sandbox, while `--no-sandbox`
 selects the explicit unrestricted host mode: process actions inherit the host
 filesystem, environment, and permissions without any bubblewrap namespace.
 Both inner modes start from a read-only view of their parent filesystem, so
-ordinary commands can see host configuration and toolchains; workspace writes,
-network, and host IPC integrations remain governed by the inner action policy.
+ordinary commands can see host configuration and toolchains. The inner action
+policy controls workspace writes, network access, and modeled host integrations
+(currently the SSH agent and D-Bus session bus). It is not a general pathname-
+IPC filter: in `--inner-sandbox`, a host Unix socket that is visible through the
+inherited read-only filesystem can still be reached. In the default outer+inner
+mode, the outer sandbox limits which host paths are visible before the inner
+action starts.
 In the normal mode, the outer `/tmp` is a session-scoped in-memory tmpfs reused
 by action sandboxes. With `--no-sandbox`, action `/tmp` maps to the current
 process's validated `TMPDIR` directly. Debug commands remain unsandboxed unless
