@@ -35,25 +35,74 @@ jobs:
       MERRY_MODEL: ${{ vars.MERRY_MODEL || 'gpt-4.1-mini' }}
       MERRY_PROTOCOL: ${{ vars.MERRY_PROTOCOL || 'responses' }}
       MERRY_HARBOR_MODEL: ${{ vars.MERRY_HARBOR_MODEL || '' }}
+      CARGO_HOME: ${{ runner.temp }}/cargo-home
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      CARGO_NET_RETRY: "10"
+      CARGO_HTTP_TIMEOUT: "120"
+      CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
+      UV_HTTP_RETRIES: "10"
+      UV_HTTP_TIMEOUT: "120"
+      UV_HTTP_CONNECT_TIMEOUT: "30"
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           enable-cache: true
           cache-dependency-glob: benchmark/uv.lock
+
+      - name: Restore Cargo registry cache
+        id: cargo-registry-cache
+        continue-on-error: true
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ${{ runner.temp }}/cargo-home/registry
+            ${{ runner.temp }}/cargo-home/git
+          key: ${{ runner.os }}-merry-cargo-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-merry-cargo-
+
+      - name: Restore Cargo build cache
+        id: cargo-target-cache
+        continue-on-error: true
+        uses: actions/cache/restore@v6
+        with:
+          path: target
+          key: ${{ runner.os }}-merry-target-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-merry-target-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}-
+            ${{ runner.os }}-merry-target-
 
       - name: Check Docker runtime
         run: docker version
 
       - name: Build Merry CLI
         run: cargo build --locked --release -p merry-cli
+
+      - name: Save Cargo registry cache
+        if: ${{ !cancelled() && steps.cargo-registry-cache.outputs.cache-primary-key != '' }}
+        continue-on-error: true
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ${{ runner.temp }}/cargo-home/registry
+            ${{ runner.temp }}/cargo-home/git
+          key: ${{ steps.cargo-registry-cache.outputs.cache-primary-key }}
+
+      - name: Save Cargo build cache
+        if: ${{ !cancelled() && steps.cargo-target-cache.outputs.cache-primary-key != '' }}
+        continue-on-error: true
+        uses: actions/cache/save@v6
+        with:
+          path: target
+          key: ${{ steps.cargo-target-cache.outputs.cache-primary-key }}
 
       - name: Install benchmark dependencies
         working-directory: benchmark
@@ -131,6 +180,8 @@ jobs:
           printf 'api_key_path=%s\n' "$RUNNER_TEMP/merry-config/secrets/openai.key" >> "$GITHUB_OUTPUT"
 
       - name: Run Harbor smoke
+        id: harbor-run
+        continue-on-error: true
         working-directory: benchmark
         env:
           DATASET: ${{ inputs.dataset }}
@@ -163,6 +214,36 @@ jobs:
             --agent-env "MERRY_CONFIG_PATH=$MERRY_CONFIG_PATH" \
             --agent-env "MERRY_API_KEY_FILE_PATH=$MERRY_API_KEY_FILE_PATH" \
             --agent-env "MERRY_AGENT_VERSION=$MERRY_AGENT_VERSION"
+
+      - name: Validate Harbor result
+        if: always()
+        working-directory: benchmark
+        env:
+          HARBOR_RUN_OUTCOME: ${{ steps.harbor-run.outcome }}
+        run: |
+          set -euo pipefail
+
+          result_path="$(find "$RUNNER_TEMP/harbor-jobs" \
+            -mindepth 2 -maxdepth 2 -type f -name result.json -print -quit \
+            2>/dev/null || true)"
+          if [[ -z "$result_path" ]]; then
+            echo "::error::Harbor did not produce a job result.json"
+            exit 1
+          fi
+
+          validation_status=0
+          if uv run python -m merry_benchmark.harbor_result "$result_path"; then
+            :
+          else
+            validation_status=1
+          fi
+
+          if [[ "$HARBOR_RUN_OUTCOME" != "success" ]]; then
+            echo "::error::Harbor command finished with outcome: $HARBOR_RUN_OUTCOME"
+            validation_status=1
+          fi
+
+          exit "$validation_status"
 
       - name: Remove temporary Merry credentials
         if: always()
