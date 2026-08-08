@@ -154,9 +154,7 @@ where
     while let Some(event) = stream.next().await {
         write_human_progress_event(&event, &mut pending_commentary, &mut writer).await?;
     }
-    let result = stream.result().await.ok_or_else(|| {
-        CliError::Unexpected("agent loop stream closed before producing a result".to_owned())
-    })?;
+    let result = stream.result().await.map_err(unexpected)?;
     write_agent_loop_summary_to(&result, &mut writer).await?;
     writer.flush().await.map_err(stdout_error)?;
     Ok(RunExitStatus::from_agent_loop_result(&result))
@@ -182,9 +180,7 @@ where
         writer.flush().await.map_err(stdout_error)?;
     }
 
-    let result = stream.result().await.ok_or_else(|| {
-        CliError::Unexpected("agent loop stream closed before producing a result".to_owned())
-    })?;
+    let result = stream.result().await.map_err(unexpected)?;
     let status = RunExitStatus::from_agent_loop_result(&result);
     write_agent_loop_result(&result, &mut writer).await?;
     writer.flush().await.map_err(stdout_error)?;

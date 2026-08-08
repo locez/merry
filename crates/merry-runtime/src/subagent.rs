@@ -1697,7 +1697,7 @@ fn spawn_child_loop(scheduler: ChildScheduler, launch: ChildLoopLaunch) {
                 }
             }
         }
-        let loop_result = if let Some(call) = bridge_request.as_ref() {
+        let (loop_result, loop_error) = if let Some(call) = bridge_request.as_ref() {
             tracing::warn!(
                 subagent_id = %launch.agent_id,
                 task_id = %launch.task_id,
@@ -1705,9 +1705,12 @@ fn spawn_child_loop(scheduler: ChildScheduler, launch: ChildLoopLaunch) {
                 "child runtime has no bridge host for requested tool"
             );
             drop(stream);
-            None
+            (None, None)
         } else {
-            stream.result().await
+            match stream.result().await {
+                Ok(result) => (Some(result), None),
+                Err(error) => (None, Some(error)),
+            }
         };
         let child_projection = match loop_result.as_ref() {
             Some(result) => ChildLoopProjection::from_result(&launch.runtime, result).await,
@@ -1728,41 +1731,48 @@ fn spawn_child_loop(scheduler: ChildScheduler, launch: ChildLoopLaunch) {
             return;
         }
         if let Some(agent) = state_guard.agents.get_mut(&launch.agent_id) {
-            match loop_result {
-                Some(result) => apply_loop_result(agent, &result, child_projection),
-                None if loop_token.is_cancelled() => {
-                    agent.status = SubagentStatusLabel::Cancelled;
-                    agent.summary = "child cancelled before stream result".to_owned();
-                    agent.result = None;
-                    agent.diagnostics = Some(error_info(
-                        "subagent_cancelled",
-                        "child stream ended after cancellation without a result",
-                    ));
-                }
-                None if bridge_request.is_some() => {
-                    let call = bridge_request
-                        .as_ref()
-                        .expect("bridge request guard ensures a call is present");
-                    agent.status = SubagentStatusLabel::Failed;
-                    agent.summary =
-                        format!("child bridge tool {} has no host", call.name().as_str());
-                    agent.result = None;
-                    agent.diagnostics = Some(error_info(
-                        "subagent_bridge_unavailable",
-                        format!(
-                            "child bridge tool {} requested without a bridge host",
-                            call.name().as_str()
-                        ),
-                    ));
-                }
-                None => {
-                    agent.status = SubagentStatusLabel::Failed;
-                    agent.summary = "child runtime stream ended without result".to_owned();
-                    agent.result = None;
-                    agent.diagnostics = Some(error_info(
-                        "subagent_stream_result_missing",
-                        "child runtime stream ended without a durable result",
-                    ));
+            if let Some(error) = loop_error {
+                agent.status = SubagentStatusLabel::Failed;
+                agent.summary = "child runtime stream failed".to_owned();
+                agent.result = None;
+                agent.diagnostics = Some(error_info("subagent_stream_error", error));
+            } else {
+                match loop_result {
+                    Some(result) => apply_loop_result(agent, &result, child_projection),
+                    None if loop_token.is_cancelled() => {
+                        agent.status = SubagentStatusLabel::Cancelled;
+                        agent.summary = "child cancelled before stream result".to_owned();
+                        agent.result = None;
+                        agent.diagnostics = Some(error_info(
+                            "subagent_cancelled",
+                            "child stream ended after cancellation without a result",
+                        ));
+                    }
+                    None if bridge_request.is_some() => {
+                        let call = bridge_request
+                            .as_ref()
+                            .expect("bridge request guard ensures a call is present");
+                        agent.status = SubagentStatusLabel::Failed;
+                        agent.summary =
+                            format!("child bridge tool {} has no host", call.name().as_str());
+                        agent.result = None;
+                        agent.diagnostics = Some(error_info(
+                            "subagent_bridge_unavailable",
+                            format!(
+                                "child bridge tool {} requested without a bridge host",
+                                call.name().as_str()
+                            ),
+                        ));
+                    }
+                    None => {
+                        agent.status = SubagentStatusLabel::Failed;
+                        agent.summary = "child runtime stream ended without result".to_owned();
+                        agent.result = None;
+                        agent.diagnostics = Some(error_info(
+                            "subagent_stream_result_missing",
+                            "child runtime stream ended without a durable result",
+                        ));
+                    }
                 }
             }
         }

@@ -142,6 +142,15 @@ pub enum RuntimeError {
         message: String,
     },
 
+    /// A runtime-owned agent loop stream stopped before producing a terminal result.
+    #[error("agent loop stream closed for session {session_id}: {message}")]
+    AgentLoopStreamClosed {
+        /// Session whose stream ended unexpectedly.
+        session_id: SessionId,
+        /// Actionable stream lifecycle detail.
+        message: &'static str,
+    },
+
     /// An admitted mutating action reported success without internal execution evidence.
     #[error(
         "tool call {call_id} admitted for {action_kind:?} in session {session_id} succeeded without required execution evidence"

@@ -344,6 +344,49 @@ async fn executor_infrastructure_error_preserves_events_and_pending_call() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn agent_loop_stream_infrastructure_error_preserves_events_and_pending_call() {
+    let provider = ScriptedModelProvider::new(vec![vec![Ok(completed_tool_call_event(
+        model_tool_call("call-stream-infra-error", "search_notes"),
+    ))]]);
+    let executor = ScriptedToolExecutor::infrastructure_error("temporary stream executor outage");
+    let runtime = runtime_with_tool("agent-loop-stream-infra-error", provider, executor);
+
+    let (err, logs) = capture_traces_for("agent-loop-stream-infra-error", async {
+        let mut stream = runtime
+            .run_agent_loop_stream(
+                StepInput::user_text("Search notes.").expect("valid step input"),
+                StepContext::new(CancellationToken::new()),
+                AgentLoopConfig::default(),
+            )
+            .expect("agent loop stream should start");
+        while stream.next().await.is_some() {}
+        stream
+            .result()
+            .await
+            .expect_err("stream should preserve the executor infrastructure error")
+    })
+    .await;
+
+    assert_eq!(
+        event_kind_names(err.events()),
+        ["SessionStarted", "StepStarted", "ToolCallPending"]
+    );
+    let pending = pending_tool_call(err.events()).clone();
+    assert!(matches!(
+        err.runtime_error(),
+        RuntimeError::ToolExecutionFailed {
+            call_id,
+            message,
+            ..
+        } if call_id == pending.id() && message == "temporary stream executor outage"
+    ));
+    assert_eq!(runtime.pending_tool_calls().await, vec![pending]);
+    assert!(logs.contains("\"event\":\"runtime.loop.finish\""));
+    assert!(logs.contains("\"status\":\"error\""));
+    assert!(logs.contains("\"diagnostic_code\":\"tool_execution_failed\""));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn agent_loop_tool_execution_cancellation_returns_cancelled_and_keeps_pending() {
     let (started_tx, started_rx) = oneshot::channel();
     let (_release_tx, release_rx) = oneshot::channel();

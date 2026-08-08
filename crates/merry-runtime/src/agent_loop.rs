@@ -188,13 +188,14 @@ impl AgentLoopResult {
 /// Live event stream for one runtime-owned agent loop.
 ///
 /// Polling yields runtime events as they become observable. [`Self::result`]
-/// drains any unconsumed events before returning the collected loop result.
+/// drains any unconsumed events before returning the collected loop result or
+/// the runtime method error that stopped the loop.
 pub struct AgentLoopEventStream {
     session_id: SessionId,
     events: ReceiverStream<AgentLoopStreamMessage>,
     loop_token: tokio_util::sync::CancellationToken,
     producer_handle: Option<tokio::task::JoinHandle<()>>,
-    result_receiver: Option<oneshot::Receiver<Option<AgentLoopResult>>>,
+    result_receiver: Option<oneshot::Receiver<Result<AgentLoopResult, AgentLoopError>>>,
     bridge_sender: mpsc::Sender<BridgeToolResultCommand>,
 }
 
@@ -204,7 +205,7 @@ impl AgentLoopEventStream {
         events: ReceiverStream<AgentLoopStreamMessage>,
         loop_token: tokio_util::sync::CancellationToken,
         producer_handle: tokio::task::JoinHandle<()>,
-        result_receiver: oneshot::Receiver<Option<AgentLoopResult>>,
+        result_receiver: oneshot::Receiver<Result<AgentLoopResult, AgentLoopError>>,
         bridge_sender: mpsc::Sender<BridgeToolResultCommand>,
     ) -> Self {
         Self {
@@ -252,10 +253,24 @@ impl AgentLoopEventStream {
     /// Returns the collected loop result once the stream has completed.
     ///
     /// Any unconsumed events are drained before waiting for the result.
-    pub async fn result(&mut self) -> Option<AgentLoopResult> {
+    pub async fn result(&mut self) -> Result<AgentLoopResult, AgentLoopError> {
         while self.next().await.is_some() {}
 
-        self.result_receiver.take()?.await.ok().flatten()
+        let Some(result_receiver) = self.result_receiver.take() else {
+            return Err(agent_loop_stream_error(
+                &self.session_id,
+                Vec::new(),
+                "agent loop stream result was already consumed",
+            ));
+        };
+        match result_receiver.await {
+            Ok(result) => result,
+            Err(_) => Err(agent_loop_stream_error(
+                &self.session_id,
+                Vec::new(),
+                "agent loop stream producer stopped before returning a result",
+            )),
+        }
     }
 
     /// Returns the next internal driver message.
@@ -381,9 +396,10 @@ pub enum AgentLoopBlockedReason {
 ///
 /// Runtime failed/cancelled events are represented as [`AgentLoopStatus`].
 /// This error is reserved for facade-method failures such as step admission,
-/// unknown calls, or executor infrastructure failure. Cooperative tool
-/// cancellation is represented as [`AgentLoopStatus::Cancelled`]. The
-/// already-observed runtime events are preserved for callers.
+/// unknown calls, executor infrastructure failure, or an interrupted stream.
+/// Cooperative tool cancellation is represented as
+/// [`AgentLoopStatus::Cancelled`]. The already-observed runtime events are
+/// preserved for callers.
 #[derive(Debug, Error)]
 #[error("agent loop stopped on runtime method error: {source}")]
 pub struct AgentLoopError {
@@ -996,7 +1012,7 @@ struct AgentLoopStreamProducer {
 
 async fn run_agent_loop_stream_producer(
     producer: AgentLoopStreamProducer,
-) -> Option<AgentLoopResult> {
+) -> Result<AgentLoopResult, AgentLoopError> {
     let AgentLoopStreamProducer {
         runtime,
         input,
@@ -1029,7 +1045,16 @@ async fn run_agent_loop_stream_producer(
             break;
         };
         if loop_token.is_cancelled() {
-            return None;
+            let session_usage = runtime.usage().await;
+            return Ok(AgentLoopResult::new(
+                AgentLoopStatus::Cancelled {
+                    diagnostic: agent_loop_cancelled_diagnostic(),
+                },
+                events,
+                model_turns_run,
+                None,
+                session_usage,
+            ));
         }
 
         let mut step_context =
@@ -1037,19 +1062,22 @@ async fn run_agent_loop_stream_producer(
         if let Some(contract) = config.final_output_contract().cloned() {
             step_context = step_context.with_final_output_contract(contract);
         }
-        let Ok(stream) = runtime.step_with_active_permit(input, step_context, loop_permit.clone())
-        else {
-            return None;
-        };
+        let stream = runtime
+            .step_with_active_permit(input, step_context, loop_permit.clone())
+            .map_err(|source| {
+                agent_loop_stream_error_with_source(&runtime, model_turns_run, &events, source)
+            })?;
         model_turns_run += 1;
 
         let mut step_events = Vec::new();
         tokio::pin!(stream);
         while let Some(event) = stream.next().await {
             step_events.push(event.clone());
-            if !publish_journal_event(&runtime, &mut projector, &sender, &mut events, event).await {
-                return None;
-            }
+            publish_journal_event(&runtime, &mut projector, &sender, &mut events, event)
+                .await
+                .map_err(|source| {
+                    agent_loop_stream_error_with_source(&runtime, model_turns_run, &events, source)
+                })?;
         }
 
         let step_final_output = final_assistant_output_from_step(&runtime, &step_events).await;
@@ -1058,7 +1086,7 @@ async fn run_agent_loop_stream_producer(
                 if let Some(notification_input) = take_subagent_notification_input(&runtime).await {
                     if model_turns_run >= config.max_model_turns() {
                         let session_usage = runtime.usage().await;
-                        return Some(AgentLoopResult::new(
+                        return Ok(AgentLoopResult::new(
                             AgentLoopStatus::Blocked {
                                 reason: AgentLoopBlockedReason::MaxModelTurnsReached {
                                     max_model_turns: config.max_model_turns(),
@@ -1078,7 +1106,7 @@ async fn run_agent_loop_stream_producer(
                     continue;
                 }
                 let session_usage = runtime.usage().await;
-                return Some(AgentLoopResult::new(
+                return Ok(AgentLoopResult::new(
                     AgentLoopStatus::Completed,
                     events,
                     model_turns_run,
@@ -1088,7 +1116,7 @@ async fn run_agent_loop_stream_producer(
             }
             StepOutcome::Failed(diagnostic) => {
                 let session_usage = runtime.usage().await;
-                return Some(AgentLoopResult::new(
+                return Ok(AgentLoopResult::new(
                     AgentLoopStatus::Failed { diagnostic },
                     events,
                     model_turns_run,
@@ -1098,7 +1126,7 @@ async fn run_agent_loop_stream_producer(
             }
             StepOutcome::Cancelled(diagnostic) => {
                 let session_usage = runtime.usage().await;
-                return Some(AgentLoopResult::new(
+                return Ok(AgentLoopResult::new(
                     AgentLoopStatus::Cancelled { diagnostic },
                     events,
                     model_turns_run,
@@ -1108,7 +1136,7 @@ async fn run_agent_loop_stream_producer(
             }
             StepOutcome::Blocked(reason) => {
                 let session_usage = runtime.usage().await;
-                return Some(AgentLoopResult::new(
+                return Ok(AgentLoopResult::new(
                     AgentLoopStatus::Blocked { reason },
                     events,
                     model_turns_run,
@@ -1119,7 +1147,7 @@ async fn run_agent_loop_stream_producer(
             StepOutcome::ToolResultRecorded => {
                 if model_turns_run >= config.max_model_turns() {
                     let session_usage = runtime.usage().await;
-                    return Some(AgentLoopResult::new(
+                    return Ok(AgentLoopResult::new(
                         AgentLoopStatus::Blocked {
                             reason: AgentLoopBlockedReason::MaxModelTurnsReached {
                                 max_model_turns: config.max_model_turns(),
@@ -1137,7 +1165,7 @@ async fn run_agent_loop_stream_producer(
             StepOutcome::PendingBatch(calls) => {
                 if model_turns_run >= config.max_model_turns() {
                     let session_usage = runtime.usage().await;
-                    return Some(AgentLoopResult::new(
+                    return Ok(AgentLoopResult::new(
                         AgentLoopStatus::Blocked {
                             reason: AgentLoopBlockedReason::MaxModelTurnsReached {
                                 max_model_turns: config.max_model_turns(),
@@ -1164,12 +1192,19 @@ async fn run_agent_loop_stream_producer(
                                 &sender,
                                 &mut events,
                             )
-                            .await?
-                            {
+                            .await
+                            .map_err(|source| {
+                                agent_loop_stream_error_with_source(
+                                    &runtime,
+                                    model_turns_run,
+                                    &events,
+                                    source,
+                                )
+                            })? {
                                 if let RuntimeError::ToolExecutionCancelled { call_id, .. } = error
                                 {
                                     let session_usage = runtime.usage().await;
-                                    return Some(AgentLoopResult::new(
+                                    return Ok(AgentLoopResult::new(
                                         AgentLoopStatus::Cancelled {
                                             diagnostic: tool_execution_cancelled_diagnostic(
                                                 &call_id,
@@ -1181,9 +1216,14 @@ async fn run_agent_loop_stream_producer(
                                         session_usage,
                                     ));
                                 }
-                                return None;
+                                return Err(agent_loop_stream_error_with_source(
+                                    &runtime,
+                                    model_turns_run,
+                                    &events,
+                                    error,
+                                ));
                             }
-                            receive_and_publish_bridge_tool_result(
+                            match receive_and_publish_bridge_tool_result(
                                 &runtime,
                                 call,
                                 &loop_token,
@@ -1193,7 +1233,32 @@ async fn run_agent_loop_stream_producer(
                                 &sender,
                                 &mut events,
                             )
-                            .await?;
+                            .await
+                            {
+                                Ok(()) => {}
+                                Err(RuntimeError::ToolExecutionCancelled { call_id, .. }) => {
+                                    let session_usage = runtime.usage().await;
+                                    return Ok(AgentLoopResult::new(
+                                        AgentLoopStatus::Cancelled {
+                                            diagnostic: tool_execution_cancelled_diagnostic(
+                                                &call_id,
+                                            ),
+                                        },
+                                        events,
+                                        model_turns_run,
+                                        None,
+                                        session_usage,
+                                    ));
+                                }
+                                Err(source) => {
+                                    return Err(agent_loop_stream_error_with_source(
+                                        &runtime,
+                                        model_turns_run,
+                                        &events,
+                                        source,
+                                    ));
+                                }
+                            }
                         }
                         PendingLoopToolCall::FinalOutput(_) => {
                             unreachable!("mixed final-output batches are rejected by provider step")
@@ -1210,11 +1275,13 @@ async fn run_agent_loop_stream_producer(
                     &sender,
                     &mut events,
                 )
-                .await?
-                {
+                .await
+                .map_err(|source| {
+                    agent_loop_stream_error_with_source(&runtime, model_turns_run, &events, source)
+                })? {
                     if let RuntimeError::ToolExecutionCancelled { call_id, .. } = error {
                         let session_usage = runtime.usage().await;
-                        return Some(AgentLoopResult::new(
+                        return Ok(AgentLoopResult::new(
                             AgentLoopStatus::Cancelled {
                                 diagnostic: tool_execution_cancelled_diagnostic(&call_id),
                             },
@@ -1224,7 +1291,12 @@ async fn run_agent_loop_stream_producer(
                             session_usage,
                         ));
                     }
-                    return None;
+                    return Err(agent_loop_stream_error_with_source(
+                        &runtime,
+                        model_turns_run,
+                        &events,
+                        error,
+                    ));
                 }
 
                 next_input = Some(continuation_step_input());
@@ -1241,9 +1313,16 @@ async fn run_agent_loop_stream_producer(
                                 &loop_permit,
                             )
                             .await
-                            .ok()?;
+                            .map_err(|source| {
+                                agent_loop_stream_error_with_source(
+                                    &runtime,
+                                    model_turns_run,
+                                    &events,
+                                    source,
+                                )
+                            })?;
                         for event in failure_events {
-                            if !publish_journal_event(
+                            publish_journal_event(
                                 &runtime,
                                 &mut projector,
                                 &sender,
@@ -1251,13 +1330,18 @@ async fn run_agent_loop_stream_producer(
                                 event,
                             )
                             .await
-                            {
-                                return None;
-                            }
+                            .map_err(|source| {
+                                agent_loop_stream_error_with_source(
+                                    &runtime,
+                                    model_turns_run,
+                                    &events,
+                                    source,
+                                )
+                            })?;
                         }
                         if model_turns_run >= config.max_model_turns() {
                             let session_usage = runtime.usage().await;
-                            return Some(AgentLoopResult::new(
+                            return Ok(AgentLoopResult::new(
                                 AgentLoopStatus::Blocked {
                                     reason: AgentLoopBlockedReason::MaxModelTurnsReached {
                                         max_model_turns: config.max_model_turns(),
@@ -1283,10 +1367,17 @@ async fn run_agent_loop_stream_producer(
                                 &loop_permit,
                             )
                             .await
-                            .ok()?;
+                            .map_err(|source| {
+                                agent_loop_stream_error_with_source(
+                                    &runtime,
+                                    model_turns_run,
+                                    &events,
+                                    source,
+                                )
+                            })?;
 
                         for event in failure_events {
-                            if !publish_journal_event(
+                            publish_journal_event(
                                 &runtime,
                                 &mut projector,
                                 &sender,
@@ -1294,14 +1385,19 @@ async fn run_agent_loop_stream_producer(
                                 event,
                             )
                             .await
-                            {
-                                return None;
-                            }
+                            .map_err(|source| {
+                                agent_loop_stream_error_with_source(
+                                    &runtime,
+                                    model_turns_run,
+                                    &events,
+                                    source,
+                                )
+                            })?;
                         }
 
                         if model_turns_run >= config.max_model_turns() {
                             let session_usage = runtime.usage().await;
-                            return Some(AgentLoopResult::new(
+                            return Ok(AgentLoopResult::new(
                                 AgentLoopStatus::Blocked {
                                     reason: AgentLoopBlockedReason::MaxModelTurnsReached {
                                         max_model_turns: config.max_model_turns(),
@@ -1319,9 +1415,18 @@ async fn run_agent_loop_stream_producer(
                     }
 
                     let (final_output, events_for_final_output) =
-                        record_final_output_tool_call(&runtime, call).await.ok()?;
+                        record_final_output_tool_call(&runtime, call)
+                            .await
+                            .map_err(|source| {
+                                agent_loop_stream_error_with_source(
+                                    &runtime,
+                                    model_turns_run,
+                                    &events,
+                                    source,
+                                )
+                            })?;
                     for event in events_for_final_output {
-                        if !publish_journal_event(
+                        publish_journal_event(
                             &runtime,
                             &mut projector,
                             &sender,
@@ -1329,12 +1434,17 @@ async fn run_agent_loop_stream_producer(
                             event,
                         )
                         .await
-                        {
-                            return None;
-                        }
+                        .map_err(|source| {
+                            agent_loop_stream_error_with_source(
+                                &runtime,
+                                model_turns_run,
+                                &events,
+                                source,
+                            )
+                        })?;
                     }
                     let session_usage = runtime.usage().await;
-                    return Some(AgentLoopResult::new_with_final_output_json(
+                    return Ok(AgentLoopResult::new_with_final_output_json(
                         AgentLoopStatus::Completed,
                         events,
                         model_turns_run,
@@ -1346,7 +1456,7 @@ async fn run_agent_loop_stream_producer(
                 call => {
                     if model_turns_run >= config.max_model_turns() {
                         let session_usage = runtime.usage().await;
-                        return Some(AgentLoopResult::new(
+                        return Ok(AgentLoopResult::new(
                             AgentLoopStatus::Blocked {
                                 reason: AgentLoopBlockedReason::MaxModelTurnsReached {
                                     max_model_turns: config.max_model_turns(),
@@ -1372,7 +1482,7 @@ async fn run_agent_loop_stream_producer(
                                 Ok(events) => events,
                                 Err(RuntimeError::ToolExecutionCancelled { call_id, .. }) => {
                                     let session_usage = runtime.usage().await;
-                                    return Some(AgentLoopResult::new(
+                                    return Ok(AgentLoopResult::new(
                                         AgentLoopStatus::Cancelled {
                                             diagnostic: tool_execution_cancelled_diagnostic(
                                                 &call_id,
@@ -1384,13 +1494,44 @@ async fn run_agent_loop_stream_producer(
                                         session_usage,
                                     ));
                                 }
-                                Err(_) => return None,
+                                Err(error) => {
+                                    return Err(agent_loop_stream_error_with_source(
+                                        &runtime,
+                                        model_turns_run,
+                                        &events,
+                                        error,
+                                    ));
+                                }
                             }
                         }
                         PendingLoopToolCall::Bridge(call) => {
-                            let command =
-                                receive_bridge_tool_result(&mut bridge_receiver, &loop_token)
-                                    .await?;
+                            let command = match receive_bridge_tool_result(
+                                &mut bridge_receiver,
+                                &loop_token,
+                            )
+                            .await
+                            {
+                                Some(command) => command,
+                                None if loop_token.is_cancelled() => {
+                                    let session_usage = runtime.usage().await;
+                                    return Ok(AgentLoopResult::new(
+                                        AgentLoopStatus::Cancelled {
+                                            diagnostic: agent_loop_cancelled_diagnostic(),
+                                        },
+                                        events,
+                                        model_turns_run,
+                                        None,
+                                        session_usage,
+                                    ));
+                                }
+                                None => {
+                                    return Err(agent_loop_stream_error(
+                                        runtime.session_id(),
+                                        events,
+                                        "bridge tool result channel closed before the call was resolved",
+                                    ));
+                                }
+                            };
 
                             let call_id = command.result.call_id().clone();
                             let result = if call_id == *call.id() {
@@ -1415,7 +1556,11 @@ async fn run_agent_loop_stream_producer(
                                 }
                                 Err(error) => {
                                     let _ = command.ack_sender.send(Err(error));
-                                    return None;
+                                    return Err(agent_loop_stream_error(
+                                        runtime.session_id(),
+                                        events,
+                                        "bridge tool result could not be recorded",
+                                    ));
                                 }
                             }
                         }
@@ -1425,7 +1570,7 @@ async fn run_agent_loop_stream_producer(
                     };
 
                     for event in execution_events {
-                        if !publish_journal_event(
+                        publish_journal_event(
                             &runtime,
                             &mut projector,
                             &sender,
@@ -1433,9 +1578,14 @@ async fn run_agent_loop_stream_producer(
                             event,
                         )
                         .await
-                        {
-                            return None;
-                        }
+                        .map_err(|source| {
+                            agent_loop_stream_error_with_source(
+                                &runtime,
+                                model_turns_run,
+                                &events,
+                                source,
+                            )
+                        })?;
                     }
 
                     next_input = Some(continuation_step_input());
@@ -1444,7 +1594,11 @@ async fn run_agent_loop_stream_producer(
         }
     }
 
-    None
+    Err(agent_loop_stream_error(
+        runtime.session_id(),
+        events,
+        "agent loop producer ended without a terminal result",
+    ))
 }
 
 fn trace_loop_finish(
@@ -1511,16 +1665,12 @@ async fn publish_journal_event(
     sender: &mpsc::Sender<AgentLoopStreamMessage>,
     events: &mut Vec<RuntimeJournalEvent>,
     event: RuntimeJournalEvent,
-) -> bool {
+) -> Result<(), RuntimeError> {
     let bridge_call = match &event.payload {
         RuntimeJournalPayload::BridgeToolCallRequested { call } => Some(call.clone()),
         _ => None,
     };
-    let projected = projector
-        .project(event.clone(), runtime)
-        .await
-        .ok()
-        .flatten();
+    let projected = projector.project(event.clone(), runtime).await?;
 
     events.push(event);
 
@@ -1530,7 +1680,10 @@ async fn publish_journal_event(
             .await
             .is_err()
     {
-        return false;
+        return Err(RuntimeError::AgentLoopStreamClosed {
+            session_id: runtime.session_id().clone(),
+            message: "public event receiver closed before the event was delivered",
+        });
     }
 
     if let Some(call) = bridge_call
@@ -1539,10 +1692,13 @@ async fn publish_journal_event(
             .await
             .is_err()
     {
-        return false;
+        return Err(RuntimeError::AgentLoopStreamClosed {
+            session_id: runtime.session_id().clone(),
+            message: "bridge event receiver closed before the request was delivered",
+        });
     }
 
-    true
+    Ok(())
 }
 
 fn continuation_step_input() -> StepInput {
@@ -1569,6 +1725,38 @@ async fn take_subagent_notification_input(runtime: &Runtime) -> Option<StepInput
     take_subagent_notification(runtime)
         .await
         .map(|(input, _)| input)
+}
+
+fn agent_loop_cancelled_diagnostic() -> ErrorInfo {
+    ErrorInfo::new(
+        "agent_loop_cancelled",
+        "agent loop cancellation was requested",
+    )
+    .expect("static agent loop cancellation diagnostic must be valid")
+}
+
+fn agent_loop_stream_error(
+    session_id: &SessionId,
+    events: Vec<RuntimeJournalEvent>,
+    message: &'static str,
+) -> AgentLoopError {
+    AgentLoopError::new(
+        events,
+        RuntimeError::AgentLoopStreamClosed {
+            session_id: session_id.clone(),
+            message,
+        },
+    )
+}
+
+fn agent_loop_stream_error_with_source(
+    runtime: &Runtime,
+    model_turns_run: usize,
+    events: &[RuntimeJournalEvent],
+    source: RuntimeError,
+) -> AgentLoopError {
+    trace_loop_error(runtime.session_id().as_str(), model_turns_run, &source);
+    AgentLoopError::new(events.to_vec(), source)
 }
 
 fn tool_execution_cancelled_diagnostic(call_id: &merry_core::ToolCallId) -> ErrorInfo {
@@ -1610,6 +1798,7 @@ fn runtime_error_code(error: &RuntimeError) -> &'static str {
         RuntimeError::BridgeToolsNotAllowed { .. } => "bridge_tools_not_allowed",
         RuntimeError::ToolExecutionCancelled { .. } => "tool_execution_cancelled",
         RuntimeError::ToolExecutionFailed { .. } => "tool_execution_failed",
+        RuntimeError::AgentLoopStreamClosed { .. } => "agent_loop_stream_closed",
         RuntimeError::MissingActionExecutionEvidence { .. } => "missing_action_execution_evidence",
         RuntimeError::MutatingActionCommitLifecycleRequired { .. } => {
             "mutating_action_commit_lifecycle_required"
@@ -1814,9 +2003,9 @@ async fn execute_stream_runtime_batch(
     projector: &mut RuntimeEventProjector,
     sender: &mpsc::Sender<AgentLoopStreamMessage>,
     events: &mut Vec<RuntimeJournalEvent>,
-) -> Option<Option<RuntimeError>> {
+) -> Result<Option<RuntimeError>, RuntimeError> {
     if calls.is_empty() {
-        return Some(None);
+        return Ok(None);
     }
 
     let execution = runtime
@@ -1828,11 +2017,9 @@ async fn execute_stream_runtime_batch(
         .await;
     let (execution_events, error) = execution.into_parts();
     for event in execution_events {
-        if !publish_journal_event(runtime, projector, sender, events, event).await {
-            return None;
-        }
+        publish_journal_event(runtime, projector, sender, events, event).await?;
     }
-    Some(error)
+    Ok(error)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1845,8 +2032,22 @@ async fn receive_and_publish_bridge_tool_result(
     projector: &mut RuntimeEventProjector,
     sender: &mpsc::Sender<AgentLoopStreamMessage>,
     events: &mut Vec<RuntimeJournalEvent>,
-) -> Option<()> {
-    let command = receive_bridge_tool_result(receiver, token).await?;
+) -> Result<(), RuntimeError> {
+    let command = match receive_bridge_tool_result(receiver, token).await {
+        Some(command) => command,
+        None if token.is_cancelled() => {
+            return Err(RuntimeError::ToolExecutionCancelled {
+                session_id: runtime.session_id().clone(),
+                call_id: call.id().clone(),
+            });
+        }
+        None => {
+            return Err(RuntimeError::AgentLoopStreamClosed {
+                session_id: runtime.session_id().clone(),
+                message: "bridge tool result channel closed before the call was resolved",
+            });
+        }
+    };
     let call_id = command.result.call_id().clone();
     let result = if call_id == *call.id() {
         runtime
@@ -1863,15 +2064,16 @@ async fn receive_and_publish_bridge_tool_result(
         Ok(result_events) => {
             let _ = command.ack_sender.send(Ok(()));
             for event in result_events {
-                if !publish_journal_event(runtime, projector, sender, events, event).await {
-                    return None;
-                }
+                publish_journal_event(runtime, projector, sender, events, event).await?;
             }
-            Some(())
+            Ok(())
         }
         Err(error) => {
             let _ = command.ack_sender.send(Err(error));
-            None
+            Err(RuntimeError::AgentLoopStreamClosed {
+                session_id: runtime.session_id().clone(),
+                message: "bridge tool result could not be recorded",
+            })
         }
     }
 }

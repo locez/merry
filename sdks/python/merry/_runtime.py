@@ -66,7 +66,10 @@ class RuntimeStream:
         )
 
         while True:
-            message = await _run_in_worker(native_stream.next_blocking)
+            try:
+                message = await _run_in_worker(native_stream.next_blocking)
+            except NativeMerryError as error:
+                raise _decode_native_error(error) from error
             if message is None:
                 await self._finish_from_native_result(native_stream)
                 return
@@ -96,7 +99,10 @@ class RuntimeStream:
         return self._result
 
     async def _finish_from_native_result(self, native_stream: Any) -> None:
-        raw = await _run_in_worker(native_stream.result_blocking)
+        try:
+            raw = await _run_in_worker(native_stream.result_blocking)
+        except NativeMerryError as error:
+            raise _decode_native_error(error) from error
         result = _run_result_from_native(
             raw,
             final_output_model=self._final_output_model,

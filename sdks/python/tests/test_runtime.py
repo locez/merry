@@ -91,6 +91,42 @@ def test_runtime_stream_returns_result_after_events():
     asyncio.run(_assert_runtime_stream_returns_result_after_events())
 
 
+async def _assert_runtime_stream_decodes_native_agent_loop_error():
+    runtime = merry.Runtime.__new__(merry.Runtime)
+
+    class FailingNativeStream:
+        def next_blocking(self):
+            raise merry.NativeMerryError(
+                '{"code":"runtime.agent_loop_error","domain":"runtime",'
+                '"message":"agent loop stopped on runtime method error",'
+                '"hint":"Inspect runtime input, provider output, and tool configuration.",'
+                '"retryability":"user_action_required","context":{}}'
+            )
+
+    class FailingNativeRuntime:
+        def run_stream_blocking(
+            self,
+            _task,
+            _final_output_schema_json=None,
+            _max_model_turns=None,
+        ):
+            return FailingNativeStream()
+
+    runtime._native = FailingNativeRuntime()
+    runtime._tools = {}
+
+    stream = runtime.stream("Trigger a stream failure.")
+    with pytest.raises(merry.MerryRuntimeError) as caught:
+        async for _event in stream:
+            pass
+
+    assert caught.value.code == "runtime.agent_loop_error"
+
+
+def test_runtime_stream_decodes_native_agent_loop_error():
+    asyncio.run(_assert_runtime_stream_decodes_native_agent_loop_error())
+
+
 async def _assert_runtime_run_stream_yields_before_stream_finishes():
     runtime = merry.Runtime.__new__(merry.Runtime)
 

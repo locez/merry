@@ -1716,8 +1716,20 @@ async fn run_agent_loop_event_stream(
         }
     }
 
-    let result = stream.result().await;
-    let _ = sender.send(StreamRunnerMessage::Finished { result });
+    match stream.result().await {
+        Ok(result) => {
+            let _ = sender.send(StreamRunnerMessage::Finished {
+                result: Some(result),
+            });
+        }
+        Err(error) => {
+            let _ = sender.send(StreamRunnerMessage::Error {
+                code: "runtime.agent_loop_error",
+                message: error.to_string(),
+                hint: Some("Inspect runtime input, provider output, and tool configuration."),
+            });
+        }
+    }
     Ok(())
 }
 
