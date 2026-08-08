@@ -207,6 +207,8 @@ jobs:
             --n-tasks "$N_TASKS" \
             --n-concurrent 1 \
             --jobs-dir "$RUNNER_TEMP/harbor-jobs" \
+            --debug \
+            --agent-include-logs "*" \
             --delete \
             --yes \
             --agent-env "MERRY_BINARY_PATH=$MERRY_BINARY_PATH" \
@@ -243,6 +245,117 @@ jobs:
           fi
 
           exit "$validation_status"
+
+      - name: Report Harbor diagnostics
+        if: always()
+        env:
+          MERRY_API_KEY: ${{ secrets.MERRY_API_KEY }}
+        run: |
+          set -euo pipefail
+
+          exception_count=0
+          while IFS= read -r exception_path; do
+            exception_count=$((exception_count + 1))
+            relative_path="${exception_path#"$RUNNER_TEMP/harbor-jobs/"}"
+            echo "::group::Harbor exception: $relative_path"
+            MERRY_API_KEY="$MERRY_API_KEY" python3 - "$exception_path" <<'PY'
+          import os
+          import sys
+          from pathlib import Path
+
+          exception_path = Path(sys.argv[1])
+          text = exception_path.read_text(encoding="utf-8", errors="replace")
+          secret = os.environ.get("MERRY_API_KEY")
+          if secret:
+              text = text.replace(secret, "[REDACTED]")
+          lines = text.splitlines()
+          for line in lines[:200]:
+              print(f"Harbor diagnostic: {line}")
+          if len(lines) > 200:
+              print("Harbor diagnostic: [output truncated after 200 lines]")
+          PY
+            echo "::endgroup::"
+          done < <(
+            find "$RUNNER_TEMP/harbor-jobs" \
+              -type f \
+              -name exception.txt \
+              -print \
+              2>/dev/null \
+              | sort
+          )
+
+          if [[ "$exception_count" == 0 ]]; then
+            echo "No Harbor exception.txt files were produced."
+          fi
+
+          echo "Harbor diagnostic file inventory:"
+          find "$RUNNER_TEMP/harbor-jobs" \
+            -type f \
+            -printf '  %P\n' \
+            2>/dev/null \
+            | sort \
+            || true
+
+      - name: Collect Harbor diagnostics
+        if: always()
+        env:
+          MERRY_API_KEY: ${{ secrets.MERRY_API_KEY }}
+        run: |
+          set -euo pipefail
+
+          jobs_dir="$RUNNER_TEMP/harbor-jobs"
+          diagnostics_dir="$RUNNER_TEMP/harbor-diagnostics"
+          mkdir -p "$diagnostics_dir/jobs"
+
+          if [[ -d "$jobs_dir" ]]; then
+            cp -a "$jobs_dir/." "$diagnostics_dir/jobs/"
+          else
+            printf '%s\n' "Harbor did not create a jobs directory." > "$diagnostics_dir/README.txt"
+          fi
+
+          find "$diagnostics_dir" \
+            -type f \
+            \( -name '*.key' -o -name '*.pem' \) \
+            -print \
+            -delete
+
+          MERRY_API_KEY="$MERRY_API_KEY" python3 - "$diagnostics_dir" <<'PY'
+          import os
+          import sys
+          from pathlib import Path
+
+          root = Path(sys.argv[1])
+          secret = os.environ.get("MERRY_API_KEY")
+          if secret:
+              for path in root.rglob("*"):
+                  if not path.is_file():
+                      continue
+                  try:
+                      raw = path.read_bytes()
+                      if b"\0" in raw[:8192]:
+                          continue
+                      text = raw.decode("utf-8")
+                  except (OSError, UnicodeDecodeError):
+                      continue
+                  scrubbed = text.replace(secret, "[REDACTED]")
+                  if scrubbed != text:
+                      path.write_text(scrubbed, encoding="utf-8")
+          PY
+
+          find "$diagnostics_dir" \
+            -type f \
+            -printf '%P\n' \
+            | sort > "$diagnostics_dir/file-list.txt"
+
+      - name: Upload Harbor diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: harbor-smoke-diagnostics-${{ github.run_id }}
+          path: ${{ runner.temp }}/harbor-diagnostics
+          if-no-files-found: warn
+          retention-days: 7
+          compression-level: 6
 
       - name: Remove temporary Merry credentials
         if: always()
