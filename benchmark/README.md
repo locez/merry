@@ -28,6 +28,18 @@ does not already contain Merry:
 cargo build --release -p merry-cli
 ```
 
+The uploaded binary must be compatible with the task image's libc. For Linux
+task images with an older glibc, build the portable static variant used by CI:
+
+```bash
+rustup target add x86_64-unknown-linux-musl
+sudo apt-get install --yes --no-install-recommends musl-tools
+cargo build --locked --release -p merry-cli --target x86_64-unknown-linux-musl
+```
+
+Set `MERRY_BINARY_PATH` to
+`target/x86_64-unknown-linux-musl/release/merry` for that build.
+
 `MERRY_BINARY_PATH` is a host-side path. The adapter uploads it to the task
 container for each trial. `MERRY_CONFIG_PATH` is an optional host-side Merry
 config file; it is uploaded privately and exposed through

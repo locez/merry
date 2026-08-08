@@ -128,6 +128,10 @@ def test_install_and_run_upload_binary_config_and_key(tmp_path: Path) -> None:
         (api_key, "/installed-agent/config/merry/secrets/openai.key"),
     ]
     assert any("chmod 755 /installed-agent/merry" in command for command, _ in environment.commands)
+    assert any(
+        "mkdir -p /installed-agent/config/merry /installed-agent/config/merry/secrets" in command
+        for command, _ in environment.commands
+    )
     key_permission_command = "chmod 600 /installed-agent/config/merry/secrets/openai.key"
     assert any(key_permission_command in command for command, _ in environment.commands)
     assert environment.commands[-1][1] == {"XDG_CONFIG_HOME": "/installed-agent/config"}

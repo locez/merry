@@ -36,6 +36,7 @@ jobs:
       MERRY_PROTOCOL: ${{ vars.MERRY_PROTOCOL || 'responses' }}
       MERRY_HARBOR_MODEL: ${{ vars.MERRY_HARBOR_MODEL || '' }}
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
       CARGO_NET_RETRY: "10"
       CARGO_HTTP_TIMEOUT: "120"
       CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
@@ -49,6 +50,13 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install musl linker
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends musl-tools
 
       - name: Install uv
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
@@ -74,16 +82,28 @@ jobs:
         uses: actions/cache/restore@v6
         with:
           path: target
-          key: ${{ runner.os }}-merry-target-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}-${{ github.sha }}
+          key: ${{ runner.os }}-merry-target-musl-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}-${{ github.sha }}
           restore-keys: |
-            ${{ runner.os }}-merry-target-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}-
-            ${{ runner.os }}-merry-target-
+            ${{ runner.os }}-merry-target-musl-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}-
+            ${{ runner.os }}-merry-target-musl-
 
       - name: Check Docker runtime
         run: docker version
 
       - name: Build Merry CLI
-        run: cargo build --locked --release -p merry-cli
+        run: cargo build --locked --release -p merry-cli --target x86_64-unknown-linux-musl
+
+      - name: Verify portable Merry CLI
+        env:
+          MERRY_BINARY_PATH: ${{ github.workspace }}/target/x86_64-unknown-linux-musl/release/merry
+        run: |
+          set -euo pipefail
+          file "$MERRY_BINARY_PATH"
+          program_headers="$(readelf -l "$MERRY_BINARY_PATH")"
+          if [[ "$program_headers" == *INTERP* ]]; then
+            echo "::error::Merry CLI must not depend on a dynamic libc loader"
+            exit 1
+          fi
 
       - name: Save Cargo registry cache
         if: ${{ !cancelled() && steps.cargo-registry-cache.outputs.cache-primary-key != '' }}
@@ -185,7 +205,7 @@ jobs:
         env:
           DATASET: ${{ inputs.dataset }}
           N_TASKS: ${{ inputs.n_tasks }}
-          MERRY_BINARY_PATH: ${{ github.workspace }}/target/release/merry
+          MERRY_BINARY_PATH: ${{ github.workspace }}/target/x86_64-unknown-linux-musl/release/merry
           MERRY_CONFIG_PATH: ${{ steps.merry_config.outputs.config_path }}
           MERRY_API_KEY_FILE_PATH: ${{ steps.merry_config.outputs.api_key_path }}
           MERRY_AGENT_VERSION: ${{ github.sha }}

@@ -181,10 +181,11 @@ class MerryAgent(BaseInstalledAgent):
             if not api_key_path.is_file():
                 raise FileNotFoundError(f"MERRY_API_KEY_FILE_PATH does not point to a file: {api_key_path}")
 
-        await self.exec_as_root(
-            environment,
-            command=f"mkdir -p {shlex.quote(str(Path(REMOTE_CONFIG_PATH).parent))}",
-        )
+        remote_directories = [Path(REMOTE_CONFIG_PATH).parent]
+        if api_key_path is not None:
+            remote_directories.append(Path(REMOTE_API_KEY_PATH).parent)
+        quoted_directories = " ".join(shlex.quote(str(path)) for path in remote_directories)
+        await self.exec_as_root(environment, command=f"mkdir -p {quoted_directories}")
         await environment.upload_file(source_path, REMOTE_CONFIG_PATH)
 
         remote_private_paths = [REMOTE_CONFIG_PATH]
