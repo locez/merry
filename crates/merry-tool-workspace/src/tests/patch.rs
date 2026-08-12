@@ -76,17 +76,19 @@ fn workspace_patch_executor_replaces_one_hunk_in_existing_utf8_file() {
 #[test]
 fn workspace_patch_executor_adds_new_utf8_file() {
     let temp = TempWorkspace::new("patch-add-success");
-    fs::create_dir_all(temp.path().join("dir")).expect("parent directory should be created");
     let tools = tools_for(temp.path());
 
-    let outcome = patch_text_outcome(&tools, &add_patch("dir/new.txt", &["alpha", "beta"]));
+    let outcome = patch_text_outcome(&tools, &add_patch("dir/nested/new.txt", &["alpha", "beta"]));
 
     assert_eq!(outcome.status(), ToolCallResultStatus::Succeeded);
-    assert_eq!(read_text(&temp.path().join("dir/new.txt")), "alpha\nbeta\n");
+    assert_eq!(
+        read_text(&temp.path().join("dir/nested/new.txt")),
+        "alpha\nbeta\n"
+    );
     assert_eq!(
         json_content(&outcome)["changes"][0],
         json!({
-            "path": "dir/new.txt",
+            "path": "dir/nested/new.txt",
             "hunks": 1,
             "bytes_before": 0,
             "bytes_after": "alpha\nbeta\n".len(),
@@ -209,6 +211,79 @@ fn workspace_patch_add_file_requires_plus_lines() {
         &outcome,
         WORKSPACE_PATCH_TOOL,
         ERROR_INVALID_ARGUMENTS,
+        Some("new.txt"),
+        temp.path(),
+    );
+    assert!(!temp.path().join("new.txt").exists());
+}
+
+#[test]
+fn workspace_patch_add_file_tolerates_structural_blank_lines() {
+    let temp = TempWorkspace::new("patch-add-blank-lines");
+    let tools = tools_for(temp.path());
+    let patch =
+        "*** Begin Workspace Patch\n*** Add File: new.txt\n\n+created\n\n*** End Workspace Patch";
+
+    let outcome = patch_text_outcome(&tools, patch);
+
+    assert_eq!(outcome.status(), ToolCallResultStatus::Succeeded);
+    assert_eq!(read_text(&temp.path().join("new.txt")), "created\n");
+}
+
+#[test]
+fn workspace_patch_add_file_rejects_non_directory_parent() {
+    let temp = TempWorkspace::new("patch-add-parent-file");
+    temp.write_text("parent", "not a directory\n");
+    let tools = tools_for(temp.path());
+
+    let outcome = patch_text_outcome(&tools, &add_patch("parent/new.txt", &["new"]));
+
+    assert_failed_json_for_tool(
+        &outcome,
+        WORKSPACE_PATCH_TOOL,
+        ERROR_NOT_DIRECTORY,
+        Some("parent/new.txt"),
+        temp.path(),
+    );
+    assert_eq!(read_text(&temp.path().join("parent")), "not a directory\n");
+}
+
+#[test]
+fn workspace_patch_add_file_rejects_existing_directory() {
+    let temp = TempWorkspace::new("patch-add-directory");
+    fs::create_dir(temp.path().join("dir")).expect("directory should be created");
+    let tools = tools_for(temp.path());
+
+    let outcome = patch_text_outcome(&tools, &add_patch("dir", &["new"]));
+
+    assert_failed_json_for_tool(
+        &outcome,
+        WORKSPACE_PATCH_TOOL,
+        ERROR_FILE_ALREADY_EXISTS,
+        Some("dir"),
+        temp.path(),
+    );
+}
+
+#[test]
+fn workspace_patch_add_file_rejects_write_limit_without_creating_file() {
+    let temp = TempWorkspace::new("patch-add-write-limit");
+    let tools = ReadOnlyWorkspaceTools::new(
+        WorkspaceToolsConfig::new(vec![temp.path().to_path_buf()]).with_limits(
+            WorkspaceToolLimits {
+                max_write_bytes: 4,
+                ..WorkspaceToolLimits::default()
+            },
+        ),
+    )
+    .expect("workspace tools should construct");
+
+    let outcome = patch_text_outcome(&tools, &add_patch("new.txt", &["too large"]));
+
+    assert_failed_json_for_tool(
+        &outcome,
+        WORKSPACE_PATCH_TOOL,
+        ERROR_FILE_TOO_LARGE,
         Some("new.txt"),
         temp.path(),
     );
@@ -729,6 +804,48 @@ fn workspace_patch_rejects_symlink_path_without_following_it() {
         temp.path(),
     );
     assert_eq!(read_text(&temp.path().join("target.txt")), "old\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn workspace_patch_add_rejects_leaf_symlink_without_following_it() {
+    let temp = TempWorkspace::new("patch-add-leaf-symlink");
+    temp.write_text("target.txt", "old\n");
+    symlink(temp.path().join("target.txt"), temp.path().join("link.txt"))
+        .expect("symlink should be created");
+    let tools = tools_for(temp.path());
+
+    let outcome = patch_text_outcome(&tools, &add_patch("link.txt", &["new"]));
+
+    assert_failed_json_for_tool(
+        &outcome,
+        WORKSPACE_PATCH_TOOL,
+        ERROR_PATH_DENIED,
+        Some("link.txt"),
+        temp.path(),
+    );
+    assert_eq!(read_text(&temp.path().join("target.txt")), "old\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn workspace_patch_add_rejects_intermediate_symlink_without_following_it() {
+    let temp = TempWorkspace::new("patch-add-intermediate-symlink");
+    fs::create_dir(temp.path().join("real")).expect("real directory should be created");
+    symlink(temp.path().join("real"), temp.path().join("link-dir"))
+        .expect("symlink should be created");
+    let tools = tools_for(temp.path());
+
+    let outcome = patch_text_outcome(&tools, &add_patch("link-dir/new.txt", &["new"]));
+
+    assert_failed_json_for_tool(
+        &outcome,
+        WORKSPACE_PATCH_TOOL,
+        ERROR_PATH_DENIED,
+        Some("link-dir/new.txt"),
+        temp.path(),
+    );
+    assert!(!temp.path().join("real/new.txt").exists());
 }
 
 #[test]

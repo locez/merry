@@ -182,6 +182,13 @@ fn parse_workspace_patch_add_lines(
             break;
         }
 
+        // Tolerate model formatting whitespace; an intentional empty file line
+        // still uses a `+` prefix and is preserved in `contents`.
+        if line.trim().is_empty() {
+            *index += 1;
+            continue;
+        }
+
         let Some((prefix, text)) = line.split_at_checked(1) else {
             return Err(WorkspacePatchParseError::new(
                 "workspace patch add lines must start with +",

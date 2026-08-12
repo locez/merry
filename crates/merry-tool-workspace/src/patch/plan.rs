@@ -308,6 +308,11 @@ fn plan_workspace_patch_file(
                 }
             })?;
 
+            // Match Update's first-root-wins rule: Add creates at the first
+            // root reporting Missing and refuses an existing target immediately.
+            // If every root is missing the parent, fall back to the first root;
+            // execution will create those parents after the same path checks.
+            let mut first_parent_missing = None;
             for root in &state.roots {
                 if is_cancelled() {
                     return Err(WorkspacePatchFilePlanError::Cancelled);
@@ -326,7 +331,7 @@ fn plan_workspace_patch_file(
                             BlockingToolError::Domain(error) => {
                                 WorkspacePatchFilePlanError::Domain {
                                     error,
-                                    path: file_patch.path,
+                                    path: file_patch.path.clone(),
                                 }
                             }
                             BlockingToolError::Cancelled => WorkspacePatchFilePlanError::Cancelled,
@@ -341,7 +346,17 @@ fn plan_workspace_patch_file(
                             path: relative.display,
                         });
                     }
-                    Ok(NewWorkspacePath::ParentMissing) => {}
+                    Ok(NewWorkspacePath::ParentMissing) => {
+                        first_parent_missing.get_or_insert_with(|| {
+                            relative.components.iter().fold(
+                                root.to_path_buf(),
+                                |mut path, component| {
+                                    path.push(component);
+                                    path
+                                },
+                            )
+                        });
+                    }
                     Err(error) => {
                         return Err(WorkspacePatchFilePlanError::Domain {
                             error,
@@ -349,6 +364,17 @@ fn plan_workspace_patch_file(
                         });
                     }
                 }
+            }
+
+            if let Some(path) = first_parent_missing {
+                return plan_new_workspace_patch_file(relative, path, lines, state, is_cancelled)
+                    .map_err(|error| match error {
+                        BlockingToolError::Domain(error) => WorkspacePatchFilePlanError::Domain {
+                            error,
+                            path: file_patch.path,
+                        },
+                        BlockingToolError::Cancelled => WorkspacePatchFilePlanError::Cancelled,
+                    });
             }
 
             Err(WorkspacePatchFilePlanError::Domain {

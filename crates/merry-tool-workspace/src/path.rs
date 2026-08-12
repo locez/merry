@@ -176,6 +176,7 @@ pub(crate) fn open_file_for_patch(path: &Path) -> Result<fs::File, DomainError> 
 }
 
 pub(crate) fn open_file_for_patch_create_new(path: &Path) -> Result<fs::File, DomainError> {
+    create_patch_parent_directories(path)?;
     open_file_for_patch_create_new_impl(path).map_err(|error| {
         if is_symlink_open_error(&error) {
             DomainError::new(ERROR_PATH_DENIED, "workspace path uses a symlink")
@@ -185,6 +186,67 @@ pub(crate) fn open_file_for_patch_create_new(path: &Path) -> Result<fs::File, Do
             DomainError::new(ERROR_WRITE_FAILED, "could not create workspace file")
         }
     })
+}
+
+fn create_patch_parent_directories(path: &Path) -> Result<(), DomainError> {
+    let parent = path.parent().ok_or_else(|| {
+        DomainError::new(
+            ERROR_WRITE_FAILED,
+            "could not determine workspace file parent directory",
+        )
+    })?;
+    let mut current = PathBuf::new();
+
+    for component in parent.components() {
+        current.push(component);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) => validate_patch_parent_metadata(&metadata)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                match fs::create_dir(&current) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                        let metadata = fs::symlink_metadata(&current).map_err(|_| {
+                            DomainError::new(
+                                ERROR_WRITE_FAILED,
+                                "could not inspect workspace file parent directory",
+                            )
+                        })?;
+                        validate_patch_parent_metadata(&metadata)?;
+                    }
+                    Err(_) => {
+                        return Err(DomainError::new(
+                            ERROR_WRITE_FAILED,
+                            "could not create workspace file parent directories",
+                        ));
+                    }
+                }
+            }
+            Err(_) => {
+                return Err(DomainError::new(
+                    ERROR_WRITE_FAILED,
+                    "could not inspect workspace file parent directory",
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_patch_parent_metadata(metadata: &fs::Metadata) -> Result<(), DomainError> {
+    if metadata.file_type().is_symlink() {
+        return Err(DomainError::new(
+            ERROR_PATH_DENIED,
+            "workspace path uses a symlink",
+        ));
+    }
+    if !metadata.is_dir() {
+        return Err(DomainError::new(
+            ERROR_NOT_DIRECTORY,
+            "workspace file parent is not a directory",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
