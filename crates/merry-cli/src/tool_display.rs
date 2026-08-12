@@ -46,7 +46,11 @@ fn format_workspace_patch_call_detail(arguments: &Map<String, Value>) -> Option<
 fn workspace_patch_paths(patch: &str) -> Vec<&str> {
     patch
         .lines()
-        .filter_map(|line| line.strip_prefix("*** Update File: ").map(str::trim))
+        .filter_map(|line| {
+            line.strip_prefix("*** Add File: ")
+                .or_else(|| line.strip_prefix("*** Update File: "))
+                .map(str::trim)
+        })
         .filter(|path| !path.is_empty())
         .collect()
 }
@@ -133,6 +137,18 @@ mod tests {
 
         assert!(detail.starts_with("patch=crates/merry-cli/src/tui/render.rs"));
         assert!(!detail.contains("args=1"));
+    }
+
+    #[test]
+    fn workspace_patch_detail_names_add_file_path() {
+        let arguments = json!({
+            "patch": "*** Begin Patch\n*** Add File: notes/new.txt\n+hello\n*** End Patch"
+        });
+
+        let detail =
+            format_tool_call_detail("workspace_patch", arguments.as_object().unwrap()).unwrap();
+
+        assert!(detail.starts_with("patch=notes/new.txt"));
     }
 
     #[test]

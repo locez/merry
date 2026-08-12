@@ -74,6 +74,148 @@ fn workspace_patch_executor_replaces_one_hunk_in_existing_utf8_file() {
 }
 
 #[test]
+fn workspace_patch_executor_adds_new_utf8_file() {
+    let temp = TempWorkspace::new("patch-add-success");
+    fs::create_dir_all(temp.path().join("dir")).expect("parent directory should be created");
+    let tools = tools_for(temp.path());
+
+    let outcome = patch_text_outcome(&tools, &add_patch("dir/new.txt", &["alpha", "beta"]));
+
+    assert_eq!(outcome.status(), ToolCallResultStatus::Succeeded);
+    assert_eq!(read_text(&temp.path().join("dir/new.txt")), "alpha\nbeta\n");
+    assert_eq!(
+        json_content(&outcome)["changes"][0],
+        json!({
+            "path": "dir/new.txt",
+            "hunks": 1,
+            "bytes_before": 0,
+            "bytes_after": "alpha\nbeta\n".len(),
+            "lines": [
+                { "kind": "add", "new_line": 1, "text": "alpha" },
+                { "kind": "add", "new_line": 2, "text": "beta" }
+            ]
+        })
+    );
+
+    let evidence = match outcome
+        .execution_evidence()
+        .expect("successful add should include execution evidence")
+    {
+        ActionExecutionEvidence::WorkspacePatch(evidence) => evidence,
+        ActionExecutionEvidence::ProcessAction(_) => {
+            panic!("workspace patch execution must not produce process action evidence")
+        }
+    };
+    assert_eq!(evidence.preimage_bytes(), 0);
+    assert_eq!(evidence.replacement_bytes(), "alpha\nbeta\n".len());
+    assert_eq!(evidence.file_bytes_before(), 0);
+    assert_eq!(evidence.file_bytes_after(), "alpha\nbeta\n".len());
+    assert_eq!(
+        evidence.file_fingerprint_before(),
+        &stable_content_fingerprint(b"")
+    );
+    assert_eq!(
+        evidence.file_fingerprint_after(),
+        &stable_content_fingerprint(b"alpha\nbeta\n")
+    );
+}
+
+#[test]
+fn workspace_patch_add_file_proposal_and_execution_match() {
+    let temp = TempWorkspace::new("patch-add-proposal");
+    fs::create_dir_all(temp.path().join("dir")).expect("parent directory should be created");
+    let tools = tools_for(temp.path());
+    let patch = add_patch("dir/new.txt", &["alpha"]);
+    let proposal = match add_patch_preflight(&tools, "dir/new.txt", &["alpha"]) {
+        ToolActionPreflight::Proposal(proposal) => proposal,
+        ToolActionPreflight::NoProposal | ToolActionPreflight::Outcome(_) => {
+            panic!("new file patch should produce a proposal")
+        }
+    };
+    let proposed_patch = match proposal.evidence() {
+        ActionProposalEvidence::WorkspacePatch(patch) => patch,
+        ActionProposalEvidence::ProcessAction(_) => {
+            panic!("workspace patch proposal must not produce process action evidence")
+        }
+    };
+    assert_eq!(proposed_patch.preimage_bytes(), 0);
+    assert_eq!(proposed_patch.file_bytes_before(), 0);
+    assert_eq!(proposed_patch.file_bytes_after(), "alpha\n".len());
+
+    let outcome = workspace_patch_blocking_checked(
+        &tools.state,
+        WorkspacePatchArgs { patch },
+        Some(proposed_patch),
+        &|| false,
+    )
+    .expect("uncancelled workspace patch should not return cancellation");
+
+    assert_eq!(outcome.status(), ToolCallResultStatus::Succeeded);
+    assert_eq!(read_text(&temp.path().join("dir/new.txt")), "alpha\n");
+}
+
+#[test]
+fn workspace_patch_executor_combines_add_and_update_operations() {
+    let temp = TempWorkspace::new("patch-add-update");
+    temp.write_text("existing.txt", "old\n");
+    let tools = tools_for(temp.path());
+    let patch = r#"*** Begin Workspace Patch
+*** Add File: new.txt
++created
+*** Update File: existing.txt
+-old
++updated
+*** End Workspace Patch"#;
+
+    let outcome = patch_text_outcome(&tools, patch);
+
+    assert_eq!(outcome.status(), ToolCallResultStatus::Succeeded);
+    assert_eq!(read_text(&temp.path().join("new.txt")), "created\n");
+    assert_eq!(read_text(&temp.path().join("existing.txt")), "updated\n");
+    assert_eq!(
+        json_content(&outcome)["changes"].as_array().map(Vec::len),
+        Some(2)
+    );
+}
+
+#[test]
+fn workspace_patch_add_file_does_not_overwrite_existing_file() {
+    let temp = TempWorkspace::new("patch-add-existing");
+    temp.write_text("note.txt", "old\n");
+    let tools = tools_for(temp.path());
+
+    let outcome = patch_text_outcome(&tools, &add_patch("note.txt", &["new"]));
+
+    assert_failed_json_for_tool(
+        &outcome,
+        WORKSPACE_PATCH_TOOL,
+        ERROR_FILE_ALREADY_EXISTS,
+        Some("note.txt"),
+        temp.path(),
+    );
+    assert_eq!(read_text(&temp.path().join("note.txt")), "old\n");
+}
+
+#[test]
+fn workspace_patch_add_file_requires_plus_lines() {
+    let temp = TempWorkspace::new("patch-add-invalid");
+    let tools = tools_for(temp.path());
+    let patch =
+        "*** Begin Workspace Patch\n*** Add File: new.txt\ncontent\n*** End Workspace Patch";
+
+    let outcome = patch_text_outcome(&tools, patch);
+
+    assert_failed_json_for_tool(
+        &outcome,
+        WORKSPACE_PATCH_TOOL,
+        ERROR_INVALID_ARGUMENTS,
+        Some("new.txt"),
+        temp.path(),
+    );
+    assert!(!temp.path().join("new.txt").exists());
+}
+
+#[test]
 fn workspace_patch_respects_configured_write_scope() {
     let temp = TempWorkspace::new("patch-write-scope");
     temp.write_text("allowed/note.txt", "alpha\nold\nomega\n");

@@ -3396,6 +3396,53 @@ fn projector_projects_workspace_patch_using_patch_tool_format() {
 }
 
 #[test]
+fn projector_projects_workspace_patch_add_file_line_numbers() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    let mut projector = TuiProjector::default();
+    let patch = "*** Begin Workspace Patch\n*** Add File: hello.txt\n+hello\n+world\n*** End Workspace Patch";
+    projector.apply(
+        RuntimeEvent::ToolCallStarted {
+            call: pending_call_with_args(
+                "call-add-file",
+                WORKSPACE_PATCH_TOOL,
+                json!({ "patch": patch }),
+            ),
+            source: source(),
+        },
+        &mut state,
+    );
+    projector.apply(
+        RuntimeEvent::ToolCallFinished {
+            result: ToolCallResult::succeeded(
+                ToolCallId::new("call-add-file").unwrap(),
+                text_artifact("patch-output"),
+            ),
+            output: Some(ToolOutput::Json {
+                json: r#"{"ok":true,"tool":"workspace_patch","changes":[{"path":"hello.txt","hunks":1,"bytes_before":0,"bytes_after":12}]}"#.to_owned(),
+            }),
+            source: source(),
+        },
+        &mut state,
+    );
+
+    let TimelineItem::Patch { changes } = &state.timeline()[0] else {
+        panic!("workspace add patch should render as a patch view");
+    };
+    assert_eq!(
+        changes[0].lines,
+        vec![
+            PatchLineView::add("hello", Some(1)),
+            PatchLineView::add("world", Some(2)),
+        ]
+    );
+}
+
+#[test]
 fn projector_derives_patch_line_numbers_from_hunk_headers() {
     let mut state = TuiState::new(
         "/repo".into(),

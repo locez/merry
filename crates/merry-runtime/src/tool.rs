@@ -739,7 +739,8 @@ pub struct WorkspacePatchProposal {
 }
 
 impl WorkspacePatchProposal {
-    /// Creates validated metadata for a single-preimage workspace patch.
+    /// Creates validated metadata for a workspace patch file change. New-file
+    /// changes use an empty preimage and a zero-byte file state before writing.
     pub fn new(
         relative_path: impl Into<String>,
         preimage_bytes: usize,
@@ -841,10 +842,10 @@ fn validate_workspace_patch_counts(
     file_bytes_before: usize,
     file_bytes_after: usize,
 ) -> Result<(), ActionProposalError> {
-    if preimage_bytes == 0 {
+    if preimage_bytes == 0 && file_bytes_before != 0 {
         return Err(ActionProposalError::InvalidWorkspacePatch {
             field: "preimage_bytes",
-            reason: "must be greater than zero",
+            reason: "must be greater than zero unless the file is new",
         });
     }
 
@@ -1418,6 +1419,20 @@ mod tests {
             proposal.file_fingerprint_after(),
             "fnv1a64:fedcba9876543210"
         );
+
+        let new_file = WorkspacePatchProposal::new(
+            "new.txt",
+            0,
+            5,
+            0,
+            5,
+            "fnv1a64:0123456789abcdef",
+            "fnv1a64:fedcba9876543210",
+        )
+        .expect("new-file workspace patch proposal should allow an empty preimage");
+        assert_eq!(new_file.preimage_bytes(), 0);
+        assert_eq!(new_file.file_bytes_before(), 0);
+        assert_eq!(new_file.file_bytes_after(), 5);
 
         let absolute = WorkspacePatchProposal::new(
             "/tmp/note.txt",

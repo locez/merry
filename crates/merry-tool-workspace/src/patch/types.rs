@@ -52,6 +52,7 @@ pub(super) struct WorkspacePatchFile {
 
 #[derive(Debug)]
 pub(super) enum WorkspacePatchOperation {
+    Add { lines: Vec<String> },
     Update { hunks: Vec<WorkspacePatchHunk> },
 }
 
@@ -142,6 +143,28 @@ pub(super) fn build_patch_replacement(
         replacement_bytes,
         lines,
     })
+}
+
+pub(super) fn build_new_file_replacement(lines: &[String]) -> WorkspacePatchReplacement {
+    let mut text = String::new();
+    let mut success_lines = Vec::with_capacity(lines.len());
+    for (index, line) in lines.iter().enumerate() {
+        text.push_str(line);
+        text.push('\n');
+        success_lines.push(WorkspacePatchSuccessLine {
+            kind: WorkspacePatchSuccessLineKind::Add,
+            old_line: None,
+            new_line: Some(index + 1),
+            text: line.clone(),
+        });
+    }
+
+    WorkspacePatchReplacement {
+        preimage_bytes: 0,
+        replacement_bytes: text.len(),
+        text,
+        lines: success_lines,
+    }
 }
 
 fn collect_patch_hunk_text<'a>(

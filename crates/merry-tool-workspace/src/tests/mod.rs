@@ -1,10 +1,11 @@
 use super::*;
 use crate::{
     errors::{
-        ERROR_FILE_NOT_FOUND, ERROR_FILE_TOO_LARGE, ERROR_INVALID_ARGUMENTS, ERROR_NOT_DIRECTORY,
-        ERROR_NOT_FILE, ERROR_NOT_SEARCHABLE, ERROR_NOT_UTF8, ERROR_PATH_DENIED,
-        ERROR_PATH_NOT_FOUND, ERROR_PREIMAGE_ABSENT, ERROR_PREIMAGE_AMBIGUOUS,
-        ERROR_PROPOSAL_MISMATCH, WORKSPACE_PATCH_PLAN_CHANGED_MESSAGE, WORKSPACE_PATH_CONTRACT,
+        ERROR_FILE_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_FILE_TOO_LARGE,
+        ERROR_INVALID_ARGUMENTS, ERROR_NOT_DIRECTORY, ERROR_NOT_FILE, ERROR_NOT_SEARCHABLE,
+        ERROR_NOT_UTF8, ERROR_PATH_DENIED, ERROR_PATH_NOT_FOUND, ERROR_PREIMAGE_ABSENT,
+        ERROR_PREIMAGE_AMBIGUOUS, ERROR_PROPOSAL_MISMATCH, WORKSPACE_PATCH_PLAN_CHANGED_MESSAGE,
+        WORKSPACE_PATH_CONTRACT,
     },
     list::{ListDirExecutor, list_dir_blocking},
     patch::{
@@ -343,6 +344,36 @@ fn update_patch(path: &str, old_text: &str, new_text: &str) -> String {
     )
 }
 
+fn add_patch(path: &str, lines: &[&str]) -> String {
+    let additions = lines
+        .iter()
+        .map(|line| format!("+{line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("*** Begin Workspace Patch\n*** Add File: {path}\n{additions}\n*** End Workspace Patch")
+}
+
+fn add_patch_preflight(
+    tools: &ReadOnlyWorkspaceTools,
+    path: &str,
+    lines: &[&str],
+) -> ToolActionPreflight {
+    let patch = add_patch(path, lines);
+    let call = pending_call_for(
+        WORKSPACE_PATCH_TOOL,
+        json!({
+            "patch": patch
+        }),
+    );
+    propose_workspace_patch_blocking_checked(
+        &tools.state,
+        WorkspacePatchArgs { patch },
+        &call,
+        &|| false,
+    )
+    .expect("uncancelled workspace patch proposal should not return cancellation")
+}
+
 fn json_content(outcome: &ToolExecutionOutcome) -> Value {
     serde_json::from_str(
         outcome
@@ -419,8 +450,13 @@ fn assert_failed_json_for_tool(
 fn expected_guidance_kind_for_code(code: &str) -> Option<&'static str> {
     match code {
         ERROR_INVALID_ARGUMENTS => Some("workspace_invalid_arguments"),
-        ERROR_PATH_DENIED | ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND | ERROR_NOT_FILE
-        | ERROR_NOT_DIRECTORY | ERROR_NOT_SEARCHABLE => Some("workspace_path_recovery"),
+        ERROR_PATH_DENIED
+        | ERROR_FILE_NOT_FOUND
+        | ERROR_FILE_ALREADY_EXISTS
+        | ERROR_PATH_NOT_FOUND
+        | ERROR_NOT_FILE
+        | ERROR_NOT_DIRECTORY
+        | ERROR_NOT_SEARCHABLE => Some("workspace_path_recovery"),
         ERROR_FILE_TOO_LARGE => Some("workspace_file_too_large"),
         ERROR_PREIMAGE_ABSENT | ERROR_PREIMAGE_AMBIGUOUS => {
             Some("workspace_patch_preimage_mismatch")

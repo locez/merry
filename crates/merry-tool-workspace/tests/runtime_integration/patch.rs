@@ -133,6 +133,35 @@ async fn opt_in_workspace_patch_tool_applies_patch_and_records_artifact_before_r
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn opt_in_workspace_patch_tool_adds_new_file_through_runtime() {
+    let temp = TempWorkspace::new("patch-opt-in-add-success");
+    fs::create_dir_all(temp.path().join("notes")).expect("parent directory should be created");
+    let runtime = runtime_with_opt_in_workspace_patch_tools(
+        temp.path(),
+        pending_add_patch_call("notes/new.txt", &["alpha", "beta"]),
+    );
+
+    let execution_events = execute_first_pending_call(&runtime, "add a new note").await;
+
+    assert_eq!(
+        fs::read_to_string(temp.path().join("notes/new.txt"))
+            .expect("new workspace file should read"),
+        "alpha\nbeta\n"
+    );
+    assert_succeeded_json_result(&execution_events);
+    let lifecycle = lifecycle_kinds(&runtime.ledger_projection().await);
+    let artifact_index = lifecycle
+        .iter()
+        .position(|kind| *kind == LedgerFactKind::ArtifactRecorded)
+        .expect("artifact lifecycle should exist");
+    let resolved_index = lifecycle
+        .iter()
+        .position(|kind| *kind == LedgerFactKind::ToolCallResolved)
+        .expect("resolution lifecycle should exist");
+    assert!(artifact_index < resolved_index);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn opt_in_workspace_patch_preflight_failure_resolves_with_patch_diagnostic() {
     let temp = TempWorkspace::new("patch-opt-in-preflight-failure");
     temp.write_text("note.txt", "alpha\nold\nomega\n");

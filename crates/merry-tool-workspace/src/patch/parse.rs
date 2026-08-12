@@ -24,6 +24,7 @@ pub(super) fn parse_workspace_patch(
     const END_WORKSPACE: &str = "*** End Workspace Patch";
     const BEGIN_STANDARD: &str = "*** Begin Patch";
     const END_STANDARD: &str = "*** End Patch";
+    const ADD_PREFIX: &str = "*** Add File: ";
     const UPDATE_PREFIX: &str = "*** Update File: ";
 
     let raw_patch = raw_patch.strip_prefix('\u{feff}').unwrap_or(raw_patch);
@@ -65,37 +66,46 @@ pub(super) fn parse_workspace_patch(
             break;
         }
 
-        let Some(path) = line.strip_prefix(UPDATE_PREFIX).map(str::trim) else {
+        let (is_add, path) = if let Some(path) = line.strip_prefix(ADD_PREFIX) {
+            (true, path.trim())
+        } else if let Some(path) = line.strip_prefix(UPDATE_PREFIX) {
+            (false, path.trim())
+        } else {
             return Err(WorkspacePatchParseError::new(
-                "workspace patch expected *** Update File: <path>",
+                "workspace patch expected *** Add File: <path> or *** Update File: <path>",
                 None,
             ));
         };
         if path.is_empty() {
             return Err(WorkspacePatchParseError::new(
-                "workspace patch update path must not be empty",
+                "workspace patch file path must not be empty",
                 None,
             ));
         }
         let path = path.to_owned();
         if !seen_paths.insert(path.clone()) {
             return Err(WorkspacePatchParseError::new(
-                "workspace patch must not update the same file more than once",
+                "workspace patch must not operate on the same file more than once",
                 Some(path),
             ));
         }
         index += 1;
 
-        let hunks = parse_workspace_patch_update_hunks(&lines, &mut index, &path, end)?;
-        files.push(WorkspacePatchFile {
-            path,
-            operation: WorkspacePatchOperation::Update { hunks },
-        });
+        let operation = if is_add {
+            WorkspacePatchOperation::Add {
+                lines: parse_workspace_patch_add_lines(&lines, &mut index, &path, end)?,
+            }
+        } else {
+            WorkspacePatchOperation::Update {
+                hunks: parse_workspace_patch_update_hunks(&lines, &mut index, &path, end)?,
+            }
+        };
+        files.push(WorkspacePatchFile { path, operation });
     }
 
     if files.is_empty() {
         return Err(WorkspacePatchParseError::new(
-            "workspace patch must contain at least one file update",
+            "workspace patch must contain at least one file operation",
             None,
         ));
     }
@@ -109,12 +119,13 @@ pub(super) fn parse_workspace_patch_update_hunks(
     path: &str,
     end: &str,
 ) -> Result<Vec<WorkspacePatchHunk>, WorkspacePatchParseError> {
+    const ADD_PREFIX: &str = "*** Add File: ";
     const UPDATE_PREFIX: &str = "*** Update File: ";
 
     let mut hunks = Vec::new();
     let mut current = Vec::new();
     while let Some(line) = patch_line(lines.get(*index).copied()) {
-        if line == end || line.starts_with(UPDATE_PREFIX) {
+        if line == end || line.starts_with(ADD_PREFIX) || line.starts_with(UPDATE_PREFIX) {
             break;
         }
         if line.trim().is_empty() && current.is_empty() {
@@ -154,6 +165,47 @@ pub(super) fn parse_workspace_patch_update_hunks(
         ));
     }
     Ok(hunks)
+}
+
+fn parse_workspace_patch_add_lines(
+    lines: &[&str],
+    index: &mut usize,
+    path: &str,
+    end: &str,
+) -> Result<Vec<String>, WorkspacePatchParseError> {
+    const ADD_PREFIX: &str = "*** Add File: ";
+    const UPDATE_PREFIX: &str = "*** Update File: ";
+
+    let mut contents = Vec::new();
+    while let Some(line) = patch_line(lines.get(*index).copied()) {
+        if line == end || line.starts_with(ADD_PREFIX) || line.starts_with(UPDATE_PREFIX) {
+            break;
+        }
+
+        let Some((prefix, text)) = line.split_at_checked(1) else {
+            return Err(WorkspacePatchParseError::new(
+                "workspace patch add lines must start with +",
+                Some(path.to_owned()),
+            ));
+        };
+        if prefix != "+" {
+            return Err(WorkspacePatchParseError::new(
+                "workspace patch add lines must start with +",
+                Some(path.to_owned()),
+            ));
+        }
+        contents.push(text.to_owned());
+        *index += 1;
+    }
+
+    if contents.is_empty() {
+        return Err(WorkspacePatchParseError::new(
+            "workspace patch add must contain at least one + line",
+            Some(path.to_owned()),
+        ));
+    }
+
+    Ok(contents)
 }
 
 fn push_workspace_patch_hunk(

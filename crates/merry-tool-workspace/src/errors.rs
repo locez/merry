@@ -5,6 +5,7 @@ use serde::Serialize;
 pub(crate) const ERROR_INVALID_ARGUMENTS: &str = "workspace_invalid_arguments";
 pub(crate) const ERROR_PATH_DENIED: &str = "workspace_path_denied";
 pub(crate) const ERROR_FILE_NOT_FOUND: &str = "workspace_file_not_found";
+pub(crate) const ERROR_FILE_ALREADY_EXISTS: &str = "workspace_file_already_exists";
 pub(crate) const ERROR_PATH_NOT_FOUND: &str = "workspace_path_not_found";
 pub(crate) const ERROR_NOT_FILE: &str = "workspace_path_not_file";
 pub(crate) const ERROR_NOT_DIRECTORY: &str = "workspace_path_not_directory";
@@ -138,8 +139,13 @@ fn workspace_failure_guidance(code: &str) -> Option<WorkspaceGuidance> {
             kind: "workspace_invalid_arguments",
             message: GUIDANCE_INVALID_ARGUMENTS,
         }),
-        ERROR_PATH_DENIED | ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND | ERROR_NOT_FILE
-        | ERROR_NOT_DIRECTORY | ERROR_NOT_SEARCHABLE => Some(WorkspaceGuidance {
+        ERROR_PATH_DENIED
+        | ERROR_FILE_NOT_FOUND
+        | ERROR_FILE_ALREADY_EXISTS
+        | ERROR_PATH_NOT_FOUND
+        | ERROR_NOT_FILE
+        | ERROR_NOT_DIRECTORY
+        | ERROR_NOT_SEARCHABLE => Some(WorkspaceGuidance {
             kind: "workspace_path_recovery",
             message: GUIDANCE_PATH_RECOVERY,
         }),

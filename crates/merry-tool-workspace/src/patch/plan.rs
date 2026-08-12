@@ -14,13 +14,14 @@ use merry_runtime::{
 use crate::{
     WORKSPACE_PATCH_TOOL,
     errors::{
-        BlockingToolError, DomainError, ERROR_FILE_NOT_FOUND, ERROR_FILE_TOO_LARGE,
-        ERROR_INVALID_ARGUMENTS, ERROR_NOT_FILE, ERROR_NOT_UTF8, ERROR_PATH_DENIED,
-        ERROR_PROPOSAL_MISMATCH, ERROR_READ_FAILED, PathValidationError,
+        BlockingToolError, DomainError, ERROR_FILE_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND,
+        ERROR_FILE_TOO_LARGE, ERROR_INVALID_ARGUMENTS, ERROR_NOT_FILE, ERROR_NOT_UTF8,
+        ERROR_PATH_DENIED, ERROR_PROPOSAL_MISMATCH, ERROR_READ_FAILED, PathValidationError,
         WORKSPACE_PATCH_PLAN_CHANGED_MESSAGE, failed_outcome,
     },
     path::{
-        ValidatedRelativePath, open_file_for_read, resolve_existing_path, validate_relative_path,
+        NewWorkspacePath, ValidatedRelativePath, open_file_for_read, resolve_existing_path,
+        resolve_new_file_path, validate_relative_path,
     },
     schema::WorkspacePatchArgs,
     state::{WorkspaceToolState, matches_any_scope_path},
@@ -31,7 +32,7 @@ use super::{
     parse::parse_workspace_patch,
     types::{
         WorkspacePatchFile, WorkspacePatchHunk, WorkspacePatchOperation, WorkspacePatchSuccessLine,
-        build_patch_replacement, stable_content_fingerprint,
+        build_new_file_replacement, build_patch_replacement, stable_content_fingerprint,
     },
 };
 
@@ -223,6 +224,12 @@ impl WorkspacePatchPlan {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum WorkspacePatchFileMode {
+    CreateNew,
+    UpdateExisting,
+}
+
 #[derive(Debug)]
 pub(super) struct WorkspacePatchFilePlan {
     pub(super) relative: ValidatedRelativePath,
@@ -236,6 +243,7 @@ pub(super) struct WorkspacePatchFilePlan {
     pub(super) hunks: usize,
     pub(super) lines: Vec<WorkspacePatchSuccessLine>,
     pub(super) max_read_bytes: usize,
+    pub(super) mode: WorkspacePatchFileMode,
 }
 
 impl WorkspacePatchFilePlan {
@@ -290,6 +298,67 @@ fn plan_workspace_patch_file(
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<WorkspacePatchFilePlan, WorkspacePatchFilePlanError> {
     match file_patch.operation {
+        WorkspacePatchOperation::Add { lines } => {
+            let relative = validate_relative_path(&file_patch.path, state.allow_hidden)
+                .map_err(WorkspacePatchFilePlanError::Path)?;
+            validate_patch_write_boundary(state, &relative).map_err(|error| {
+                WorkspacePatchFilePlanError::Domain {
+                    error,
+                    path: file_patch.path.clone(),
+                }
+            })?;
+
+            for root in &state.roots {
+                if is_cancelled() {
+                    return Err(WorkspacePatchFilePlanError::Cancelled);
+                }
+
+                match resolve_new_file_path(root, &relative) {
+                    Ok(NewWorkspacePath::Missing(path)) => {
+                        return plan_new_workspace_patch_file(
+                            relative,
+                            path,
+                            lines,
+                            state,
+                            is_cancelled,
+                        )
+                        .map_err(|error| match error {
+                            BlockingToolError::Domain(error) => {
+                                WorkspacePatchFilePlanError::Domain {
+                                    error,
+                                    path: file_patch.path,
+                                }
+                            }
+                            BlockingToolError::Cancelled => WorkspacePatchFilePlanError::Cancelled,
+                        });
+                    }
+                    Ok(NewWorkspacePath::Existing) => {
+                        return Err(WorkspacePatchFilePlanError::Domain {
+                            error: DomainError::new(
+                                ERROR_FILE_ALREADY_EXISTS,
+                                "workspace file already exists",
+                            ),
+                            path: relative.display,
+                        });
+                    }
+                    Ok(NewWorkspacePath::ParentMissing) => {}
+                    Err(error) => {
+                        return Err(WorkspacePatchFilePlanError::Domain {
+                            error,
+                            path: relative.display,
+                        });
+                    }
+                }
+            }
+
+            Err(WorkspacePatchFilePlanError::Domain {
+                error: DomainError::new(
+                    ERROR_FILE_NOT_FOUND,
+                    "workspace file parent was not found",
+                ),
+                path: relative.display,
+            })
+        }
         WorkspacePatchOperation::Update { hunks } => {
             let relative = validate_relative_path(&file_patch.path, state.allow_hidden)
                 .map_err(WorkspacePatchFilePlanError::Path)?;
@@ -407,6 +476,43 @@ fn plan_resolved_workspace_patch_file(
         content_before: content,
         replacement: replacement.text,
         max_read_bytes: state.limits.max_read_bytes,
+        mode: WorkspacePatchFileMode::UpdateExisting,
+    })
+}
+
+fn plan_new_workspace_patch_file(
+    relative: ValidatedRelativePath,
+    path: PathBuf,
+    lines: Vec<String>,
+    state: &WorkspaceToolState,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<WorkspacePatchFilePlan, BlockingToolError> {
+    if is_cancelled() {
+        return Err(BlockingToolError::Cancelled);
+    }
+
+    let replacement = build_new_file_replacement(&lines);
+    if replacement.text.len() > state.limits.max_write_bytes {
+        return Err(DomainError::new(
+            ERROR_FILE_TOO_LARGE,
+            "workspace patch result exceeds the configured write limit",
+        )
+        .into());
+    }
+
+    Ok(WorkspacePatchFilePlan {
+        relative,
+        path,
+        bytes_before: 0,
+        bytes_after: replacement.text.len(),
+        preimage_bytes: replacement.preimage_bytes,
+        replacement_bytes: replacement.replacement_bytes,
+        hunks: 1,
+        lines: replacement.lines,
+        content_before: String::new(),
+        replacement: replacement.text,
+        max_read_bytes: state.limits.max_read_bytes,
+        mode: WorkspacePatchFileMode::CreateNew,
     })
 }
 

@@ -125,7 +125,7 @@ pub(crate) fn workspace_patch_spec_with_limits(limits: &WorkspaceToolLimits) -> 
     );
     ToolSpec::new(
         ToolName::new(WORKSPACE_PATCH_TOOL).expect("static workspace tool name is valid"),
-        "Apply one Merry workspace patch set to existing UTF-8 files under configured stable workspace roots. The patch payload and resulting file writes are bounded by configured byte limits. The patch string must start with *** Begin Patch or *** Begin Workspace Patch, contain one or more *** Update File: <workspace-relative-path> sections, use hunk lines prefixed with space, +, or -, and end with the matching *** End Patch or *** End Workspace Patch. Prefer the smallest unique hunk context needed for a localized edit; do not submit whole-file content for small edits.",
+        "Apply one Merry workspace patch set to UTF-8 files under configured stable workspace roots. Use *** Add File: <workspace-relative-path> followed by one or more + lines to create a new file, or *** Update File: <workspace-relative-path> with hunk lines prefixed with space, +, or - to edit an existing file. Add File does not overwrite an existing path. The patch payload and resulting file writes are bounded by configured byte limits. The patch string must start with *** Begin Patch or *** Begin Workspace Patch and end with the matching *** End Patch or *** End Workspace Patch. Prefer the smallest unique hunk context needed for a localized edit; do not submit whole-file content for small edits.",
         input_schema(schema),
     )
     .expect("static workspace_patch spec is valid")

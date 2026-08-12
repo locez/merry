@@ -16,11 +16,14 @@ use crate::{
         BlockingToolError, DomainError, ERROR_FILE_TOO_LARGE, ERROR_NOT_FILE, ERROR_READ_FAILED,
         ERROR_WRITE_FAILED, failed_outcome,
     },
-    path::open_file_for_patch,
+    path::{open_file_for_patch, open_file_for_patch_create_new},
 };
 
 use super::{
-    plan::{WorkspacePatchFilePlan, WorkspacePatchPlan, read_patch_preimage_for_path},
+    plan::{
+        WorkspacePatchFileMode, WorkspacePatchFilePlan, WorkspacePatchPlan,
+        read_patch_preimage_for_path,
+    },
     types::{WorkspacePatchSuccess, WorkspacePatchSuccessChange, stable_content_fingerprint},
 };
 
@@ -97,7 +100,14 @@ fn execute_workspace_patch_file_plan(
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<String, PatchFileWriteError> {
     let relative_display = plan.relative.display.clone();
-    let mut file = match open_file_for_patch(&plan.path) {
+    if is_cancelled() {
+        return Err(PatchFileWriteError::Cancelled);
+    }
+    let mut file = match if plan.mode == WorkspacePatchFileMode::CreateNew {
+        open_file_for_patch_create_new(&plan.path)
+    } else {
+        open_file_for_patch(&plan.path)
+    } {
         Ok(file) => file,
         Err(error) => {
             return Err(PatchFileWriteError::Outcome(Box::new(failed_outcome(
@@ -108,25 +118,27 @@ fn execute_workspace_patch_file_plan(
             ))));
         }
     };
-    match read_open_patch_file_before_write(&mut file, plan.max_read_bytes, is_cancelled) {
-        Ok(bytes) if bytes == plan.content_before.as_bytes() => {}
-        Ok(_) => {
-            return Err(PatchFileWriteError::Outcome(Box::new(failed_outcome(
-                WORKSPACE_PATCH_TOOL,
-                ERROR_WRITE_FAILED,
-                "workspace file changed before patch write",
-                Some(relative_display),
-            ))));
+    if plan.mode == WorkspacePatchFileMode::UpdateExisting {
+        match read_open_patch_file_before_write(&mut file, plan.max_read_bytes, is_cancelled) {
+            Ok(bytes) if bytes == plan.content_before.as_bytes() => {}
+            Ok(_) => {
+                return Err(PatchFileWriteError::Outcome(Box::new(failed_outcome(
+                    WORKSPACE_PATCH_TOOL,
+                    ERROR_WRITE_FAILED,
+                    "workspace file changed before patch write",
+                    Some(relative_display),
+                ))));
+            }
+            Err(BlockingToolError::Domain(error)) => {
+                return Err(PatchFileWriteError::Outcome(Box::new(failed_outcome(
+                    WORKSPACE_PATCH_TOOL,
+                    error.code,
+                    error.message,
+                    Some(relative_display),
+                ))));
+            }
+            Err(BlockingToolError::Cancelled) => return Err(PatchFileWriteError::Cancelled),
         }
-        Err(BlockingToolError::Domain(error)) => {
-            return Err(PatchFileWriteError::Outcome(Box::new(failed_outcome(
-                WORKSPACE_PATCH_TOOL,
-                error.code,
-                error.message,
-                Some(relative_display),
-            ))));
-        }
-        Err(BlockingToolError::Cancelled) => return Err(PatchFileWriteError::Cancelled),
     }
     if file.seek(SeekFrom::Start(0)).is_err() {
         return Err(PatchFileWriteError::Outcome(Box::new(failed_outcome(

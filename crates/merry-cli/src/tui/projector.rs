@@ -816,6 +816,15 @@ fn parse_workspace_patch_argument(patch: &str) -> ParsedPatchArgument {
     let mut line_numbers = PatchLineNumbers::default();
 
     for line in patch.lines() {
+        if let Some(path) = line.strip_prefix("*** Add File: ").map(str::trim) {
+            flush_patch_change(&mut parsed, &mut current_path, &mut current_lines);
+            current_path = Some(path.to_owned());
+            line_numbers = PatchLineNumbers {
+                old_next: None,
+                new_next: Some(1),
+            };
+            continue;
+        }
         if let Some(path) = line.strip_prefix("*** Update File: ").map(str::trim) {
             flush_patch_change(&mut parsed, &mut current_path, &mut current_lines);
             current_path = Some(path.to_owned());
