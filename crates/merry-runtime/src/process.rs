@@ -54,13 +54,14 @@ impl ProcessEnvPolicy {
     }
 }
 
-/// Explicit admission for the accepted local workspace process lane.
+/// Explicit admission for the process runner used by the local workspace lane.
 ///
 /// This value is intentionally small and declarative. It records that the
 /// caller has selected Merry's current CLI bubblewrap profile and accepted the
 /// local workspace process risk for that profile; it is not proof that any
-/// process is actually confined. Runtime code treats it only as construction-
-/// time admission for the narrow local workspace process predicate.
+/// process is actually confined. Runtime code treats it as construction-time
+/// admission for the configured process runner boundary; argv classification
+/// remains a risk signal rather than an executable allowlist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AcceptedLocalWorkspaceProcessAdmission {
     sandbox_profile: LocalWorkspaceProcessSandboxProfile,
@@ -70,8 +71,9 @@ pub struct AcceptedLocalWorkspaceProcessAdmission {
 impl AcceptedLocalWorkspaceProcessAdmission {
     /// Creates admission for the Merry CLI bubblewrap v1 sandbox profile.
     ///
-    /// Calling this explicitly accepts the local workspace process risk for the
-    /// declared profile.
+    /// Calling this explicitly accepts validated process intents for the
+    /// declared profile. The selected runner still enforces filesystem,
+    /// network, and host-integration capabilities.
     #[must_use]
     pub const fn accept_cli_bwrap_v1() -> Self {
         Self {
@@ -434,15 +436,19 @@ impl ProcessActionIntent {
 
 /// Bounded output returned by a process runner.
 ///
-/// The payload strings are intended for the result artifact only. Internal
-/// execution audit evidence stores byte counts and truncation flags, not these
-/// payloads.
+/// Process output is an opaque byte stream. The runner keeps the exact bounded
+/// bytes and a loss-tolerant UTF-8 view separately so binary tools cannot turn a
+/// successful process into an infrastructure error merely by writing invalid
+/// UTF-8. Internal execution audit evidence stores byte counts and truncation
+/// flags, not these payloads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessRunnerOutput {
     status: ProcessExitStatus,
+    stdout_data: Vec<u8>,
     stdout_text: String,
     stdout_bytes: usize,
     stdout_truncated: bool,
+    stderr_data: Vec<u8>,
     stderr_text: String,
     stderr_bytes: usize,
     stderr_truncated: bool,
@@ -458,26 +464,45 @@ impl ProcessRunnerOutput {
         stderr_text: impl Into<String>,
         stderr_truncated: bool,
     ) -> Result<Self, ProcessActionError> {
-        let stdout_text = stdout_text.into();
-        let stderr_text = stderr_text.into();
+        Self::from_bytes(
+            intent,
+            status,
+            stdout_text.into().into_bytes(),
+            stdout_truncated,
+            stderr_text.into().into_bytes(),
+            stderr_truncated,
+        )
+    }
+
+    /// Creates output from exact bounded process bytes.
+    pub fn from_bytes(
+        intent: &ProcessActionIntent,
+        status: ProcessExitStatus,
+        stdout_data: Vec<u8>,
+        stdout_truncated: bool,
+        stderr_data: Vec<u8>,
+        stderr_truncated: bool,
+    ) -> Result<Self, ProcessActionError> {
         validate_captured_bytes(
             "stdout_bytes",
-            stdout_text.len(),
+            stdout_data.len(),
             intent.stdout_limit_bytes(),
         )?;
         validate_captured_bytes(
             "stderr_bytes",
-            stderr_text.len(),
+            stderr_data.len(),
             intent.stderr_limit_bytes(),
         )?;
 
         Ok(Self {
             status,
-            stdout_bytes: stdout_text.len(),
-            stdout_text,
+            stdout_text: String::from_utf8_lossy(&stdout_data).into_owned(),
+            stdout_bytes: stdout_data.len(),
+            stdout_data,
             stdout_truncated,
-            stderr_bytes: stderr_text.len(),
-            stderr_text,
+            stderr_text: String::from_utf8_lossy(&stderr_data).into_owned(),
+            stderr_bytes: stderr_data.len(),
+            stderr_data,
             stderr_truncated,
         })
     }
@@ -492,6 +517,18 @@ impl ProcessRunnerOutput {
     #[must_use]
     pub fn stdout_text(&self) -> &str {
         &self.stdout_text
+    }
+
+    /// Returns the exact bounded stdout bytes.
+    #[must_use]
+    pub fn stdout_data(&self) -> &[u8] {
+        &self.stdout_data
+    }
+
+    /// Returns whether stdout was valid UTF-8 without replacement.
+    #[must_use]
+    pub fn stdout_is_utf8(&self) -> bool {
+        std::str::from_utf8(&self.stdout_data).is_ok()
     }
 
     /// Returns captured stdout byte count.
@@ -510,6 +547,18 @@ impl ProcessRunnerOutput {
     #[must_use]
     pub fn stderr_text(&self) -> &str {
         &self.stderr_text
+    }
+
+    /// Returns the exact bounded stderr bytes.
+    #[must_use]
+    pub fn stderr_data(&self) -> &[u8] {
+        &self.stderr_data
+    }
+
+    /// Returns whether stderr was valid UTF-8 without replacement.
+    #[must_use]
+    pub fn stderr_is_utf8(&self) -> bool {
+        std::str::from_utf8(&self.stderr_data).is_ok()
     }
 
     /// Returns captured stderr byte count.
@@ -1455,7 +1504,6 @@ const FORBIDDEN_PROCESS_EXECUTABLES: &[&str] = &[
 const FORBIDDEN_GIT_SUBCOMMANDS: &[&str] = &[
     "add",
     "apply",
-    "checkout",
     "cherry-pick",
     "clean",
     "commit",
@@ -1502,7 +1550,7 @@ pub(crate) fn required_process_permission_profile_id(
     intent: &ProcessActionIntent,
 ) -> Option<ProcessPermissionProfileId> {
     if intent.env_policy() != ProcessEnvPolicy::Empty || intent.stdin_text().is_some() {
-        return None;
+        return Some(ProcessPermissionProfileId::LOCAL_WORKSPACE_BWRAP_V1);
     }
 
     if is_read_only_plain_shell_process_argv(intent.argv()) {
@@ -1515,8 +1563,23 @@ pub(crate) fn required_process_permission_profile_id(
             Some(ProcessPermissionProfileId::LOCAL_WORKSPACE_BWRAP_V1)
         }
         ProcessIntentClass::Unknown => Some(ProcessPermissionProfileId::LOCAL_WORKSPACE_BWRAP_V1),
-        ProcessIntentClass::Forbidden => None,
+        // Classification is a risk signal, not a command allowlist. The
+        // selected runner remains the authority for capability enforcement.
+        ProcessIntentClass::Forbidden => Some(ProcessPermissionProfileId::LOCAL_WORKSPACE_BWRAP_V1),
     }
+}
+
+/// Returns whether the process classifier requires an independent action
+/// review before execution.
+///
+/// Unknown commands are still admitted by the configured sandbox runner;
+/// only the explicit high-risk classification triggers this second gate.
+#[must_use]
+pub(crate) fn requires_process_action_review(intent: &ProcessActionIntent) -> bool {
+    matches!(
+        classify_process_intent(intent),
+        ProcessIntentClass::Forbidden
+    )
 }
 
 /// Validation errors for provider-neutral process action values.
@@ -1987,7 +2050,10 @@ mod tests {
             1024,
         )
         .expect("stdin intent is syntactically valid");
-        assert_eq!(required_process_permission_profile_id(&with_stdin), None);
+        assert_eq!(
+            required_process_permission_profile_id(&with_stdin),
+            Some(ProcessPermissionProfileId::LOCAL_WORKSPACE_BWRAP_V1)
+        );
 
         let shell_read_only = ProcessActionIntent::new(
             vec![
@@ -2174,7 +2240,6 @@ mod tests {
             vec!["../bin/rm", "-rf", "target"],
             vec!["git", "clean", "-fd"],
             vec!["git", "reset", "--hard"],
-            vec!["git", "checkout", "--", "README.md"],
             vec!["bash", "-lc", "rg ProcessRunner | rm -rf target"],
             vec!["bash", "-lc", "echo $(rm -rf target)"],
             vec!["/bin/bash", "-lc", "rm -rf target"],
@@ -2193,6 +2258,25 @@ mod tests {
                 ProcessIntentClass::Forbidden
             );
         }
+
+        let git_checkout = ProcessActionIntent::new(
+            vec![
+                "git".to_owned(),
+                "checkout".to_owned(),
+                "--".to_owned(),
+                "README.md".to_owned(),
+            ],
+            None,
+            ProcessEnvPolicy::empty(),
+            None,
+            1024,
+            1024,
+        )
+        .expect("git checkout is a syntactically valid process intent");
+        assert_eq!(
+            classify_process_intent(&git_checkout),
+            ProcessIntentClass::Unknown
+        );
 
         for argv in [
             vec!["curl", "https://example.invalid"],

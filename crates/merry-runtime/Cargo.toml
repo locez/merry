@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+base64.workspace = true
 futures-core.workspace = true
 futures-util.workspace = true
 jsonschema.workspace = true

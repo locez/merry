@@ -1,10 +1,13 @@
 use crate::cli_error::{CliError, unexpected};
 use crate::coding_runtime::ActionProcessBackendOptions;
 use crate::config::{self, EffectiveLogSettings, MerryConfig, XdgPaths};
-use crate::sandbox::default_development_path_rules;
+use crate::sandbox::default_inner_development_path_rules;
 use merry_core::SessionId;
 use merry_llm::{GenerationConfig, ReasoningEffort};
-use merry_runtime::{AutomaticCompactionConfig, Runtime, RuntimeBuilder};
+use merry_runtime::{
+    AutomaticCompactionConfig, PathAccess, PathAccessRule, PathAccessRuleSource, Runtime,
+    RuntimeBuilder,
+};
 use std::{env, ffi::OsString, path::PathBuf};
 
 pub(crate) fn validate_loaded_config(
@@ -81,10 +84,25 @@ pub(crate) fn action_process_backend_options(
         .map(|config| config.home().to_path_buf())
         .or_else(|| env::var_os("HOME").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("/home/merry"));
-    let path_rules = default_development_path_rules(&home);
-    let network_allowed = config
-        .map(MerryConfig::permissions_network_allowed)
-        .unwrap_or(false);
+    let mut path_rules = default_inner_development_path_rules(&home);
+    if let Some(config) = config {
+        for rule in config.trusted_global_path_rules()? {
+            let (access, source) = match rule.access() {
+                PathAccess::ReadWrite => (
+                    PathAccess::ReadOnly,
+                    PathAccessRuleSource::TrustedGlobalConfigWritableCeiling,
+                ),
+                PathAccess::ReadOnly | PathAccess::Deny => {
+                    (rule.access(), PathAccessRuleSource::TrustedGlobalConfig)
+                }
+            };
+            path_rules.push(PathAccessRule::new(
+                rule.path().to_path_buf(),
+                access,
+                source,
+            ));
+        }
+    }
     let host_integrations = config
         .map(MerryConfig::host_integrations)
         .unwrap_or_default();
@@ -97,7 +115,9 @@ pub(crate) fn action_process_backend_options(
         .collect();
     Ok(ActionProcessBackendOptions {
         path_rules,
-        network_allowed,
+        // Network is never part of the inner baseline. A reviewed request
+        // records it in the session capability store instead.
+        network_allowed: false,
         host_integrations,
         environment_overrides,
     })
@@ -128,13 +148,14 @@ mod tests {
     use std::{fs, path::PathBuf, sync::Arc};
 
     #[test]
-    fn action_backend_uses_development_baseline_without_trusted_global_grants() {
+    fn action_backend_keeps_outer_path_grants_as_inner_reviewable_read_only() {
         let paths = XdgPaths::from_parts(PathBuf::from("/home/alice"), None, None);
         let config = MerryConfig::load_optional_from_text(
             Some(
                 r#"
 [permissions]
 readonly_paths = ["/srv/trusted-readonly"]
+readwrite_paths = ["/srv/trusted-writable"]
 "#,
             ),
             &paths,
@@ -144,18 +165,29 @@ readonly_paths = ["/srv/trusted-readonly"]
 
         let options = action_process_backend_options(Some(&config))
             .expect("action backend options should build");
-        assert!(
-            options
-                .path_rules
-                .iter()
-                .all(|rule| rule.source() == PathAccessRuleSource::DefaultDevelopmentBaseline)
+        let readonly = options
+            .path_rules
+            .iter()
+            .find(|rule| rule.path() == std::path::Path::new("/srv/trusted-readonly"))
+            .expect("configured read-only path should remain visible to the inner runner");
+        assert_eq!(readonly.access(), merry_runtime::PathAccess::ReadOnly);
+        assert_eq!(readonly.source(), PathAccessRuleSource::TrustedGlobalConfig);
+
+        let writable = options
+            .path_rules
+            .iter()
+            .find(|rule| rule.path() == std::path::Path::new("/srv/trusted-writable"))
+            .expect("configured writable ceiling should remain visible to the inner runner");
+        assert_eq!(writable.access(), merry_runtime::PathAccess::ReadOnly);
+        assert_eq!(
+            writable.source(),
+            PathAccessRuleSource::TrustedGlobalConfigWritableCeiling
         );
-        assert!(
-            !options
-                .path_rules
-                .iter()
-                .any(|rule| rule.path() == std::path::Path::new("/srv/trusted-readonly"))
-        );
+        assert!(options.path_rules.iter().any(|rule| {
+            rule.source() == PathAccessRuleSource::DefaultDevelopmentBaseline
+                && rule.access() == merry_runtime::PathAccess::ReadOnly
+        }));
+        assert!(!options.network_allowed);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use super::process::ActionProcessBackend;
 use super::profile::{
     coding_loop_workspace_roots, with_workspace_coding_loop_profile_for_child,
-    workspace_tools_config,
+    workspace_tools_config_with_resources,
 };
 use merry_llm::{ModelName, ModelProvider};
 use merry_runtime::{
@@ -120,8 +120,9 @@ impl ChildRuntimeFactory for CodingLoopChildRuntimeFactory {
         let has_child_workspace_boundary =
             child_has_workspace_boundary(&workspace_scope, write_scope_is_explicit);
         let mut profile = WorkspaceCodingLoopProfile::new(
-            workspace_tools_config(
+            workspace_tools_config_with_resources(
                 coding_loop_workspace_roots(&self.root, &self.skill_roots),
+                self.skill_roots.clone(),
                 self.allow_hidden_workspace_paths,
                 None,
             )

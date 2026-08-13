@@ -5,10 +5,10 @@ use crate::{
     action_policy::ActionPolicyDecision,
     permission::{
         ModelBackedPermissionAdmissionSource, PermissionAdmissionContext,
-        PermissionAdmissionResult, PermissionAdmissionSource, PermissionedAction,
-        permission_blocked_outcome, permission_denied_outcome,
-        permission_invalid_arguments_outcome, permission_request_from_call,
-        permission_review_error_outcome,
+        PermissionAdmissionResult, PermissionAdmissionReview, PermissionAdmissionSource,
+        PermissionRequest, PermissionedAction, permission_blocked_outcome,
+        permission_denied_outcome, permission_invalid_arguments_outcome,
+        permission_request_from_call, permission_review_error_outcome,
     },
     tool::{ActionProposalEvidence, ToolExecutionContext},
 };
@@ -175,7 +175,125 @@ async fn persist_tool_events(
     Ok(events)
 }
 
-async fn review_permission_request(
+/// Result of reviewing a high-risk action without changing session grants.
+pub(super) enum HighRiskActionReview {
+    /// The action may continue through its already-selected process runner.
+    Approved(PermissionAdmissionReview),
+    /// The original tool call was durably resolved as denied or review-failed.
+    Resolved(Vec<RuntimeJournalEvent>),
+}
+
+/// Reviews one high-risk process action through the normal permission source.
+///
+/// This is separate from `request_permissions`: an action review has no
+/// requested capability and therefore cannot grant or retain a path, network,
+/// or host-integration capability as a side effect.
+pub(super) async fn review_high_risk_process_action(
+    inner: &Arc<RuntimeInner>,
+    pending: &PendingToolCall,
+    proposal: &ActionProposal,
+    context: &ToolExecutionContext,
+) -> Result<HighRiskActionReview, RuntimeError> {
+    if context.cancellation_token().is_cancelled() {
+        return Err(RuntimeError::ToolExecutionCancelled {
+            session_id: inner.session_id.clone(),
+            call_id: pending.id().clone(),
+        });
+    }
+
+    let crate::tool::ActionProposalEvidence::ProcessAction(intent) = proposal.evidence() else {
+        return Err(RuntimeError::ToolExecutionFailed {
+            session_id: inner.session_id.clone(),
+            call_id: pending.id().clone(),
+            message: "high-risk process review received a non-process proposal".to_owned(),
+        });
+    };
+    let review_context = {
+        let session = inner.session.lock().await;
+        session.permission_review_context_snapshot()?
+    };
+    let request = PermissionRequest::for_action_review(
+        pending,
+        "high-risk process action requires an independent action review",
+        PermissionedAction::Process(intent.clone()),
+        review_context,
+    );
+    let admission = review_permission_request(inner, request.clone(), context).await;
+    let decision = match admission {
+        Ok(decision) => decision,
+        Err(error) => {
+            if matches!(error, crate::PermissionAdmissionError::Cancelled)
+                || context.cancellation_token().is_cancelled()
+            {
+                return Err(RuntimeError::ToolExecutionCancelled {
+                    session_id: inner.session_id.clone(),
+                    call_id: pending.id().clone(),
+                });
+            }
+            let outcome = permission_review_error_outcome(pending, &request, &error);
+            let (_status, content, diagnostic, execution_evidence) = outcome.into_parts();
+            debug_assert!(execution_evidence.is_none());
+            let diagnostic = diagnostic.ok_or(RuntimeError::Core {
+                source: merry_core::CoreError::InvalidToolCallResult {
+                    reason: "permission review failure must include a diagnostic",
+                },
+            })?;
+            let events = {
+                let mut session = inner.session.lock().await;
+                session.submit_denied_tool_action(
+                    pending,
+                    &crate::action_policy::ActionPolicyDecision::deny_high_risk_process_action(),
+                    Some(proposal.clone()),
+                    content,
+                    diagnostic,
+                )?
+            };
+            super::tool_execution::trace_review_denied_tool_execution(
+                inner.session_id.as_str(),
+                pending,
+                &events,
+                "review_failed",
+            );
+            return Ok(HighRiskActionReview::Resolved(
+                persist_tool_events(inner, events).await?,
+            ));
+        }
+    };
+
+    if !decision.is_approved() {
+        let outcome = permission_denied_outcome(pending, &request, Some(decision.review()));
+        let (_status, content, diagnostic, execution_evidence) = outcome.into_parts();
+        debug_assert!(execution_evidence.is_none());
+        let diagnostic = diagnostic.ok_or(RuntimeError::Core {
+            source: merry_core::CoreError::InvalidToolCallResult {
+                reason: "permission denial must include a diagnostic",
+            },
+        })?;
+        let events = {
+            let mut session = inner.session.lock().await;
+            session.submit_denied_tool_action(
+                pending,
+                &crate::action_policy::ActionPolicyDecision::deny_high_risk_process_action(),
+                Some(proposal.clone()),
+                content,
+                diagnostic,
+            )?
+        };
+        super::tool_execution::trace_review_denied_tool_execution(
+            inner.session_id.as_str(),
+            pending,
+            &events,
+            "denied",
+        );
+        return Ok(HighRiskActionReview::Resolved(
+            persist_tool_events(inner, events).await?,
+        ));
+    }
+
+    Ok(HighRiskActionReview::Approved(decision.review().clone()))
+}
+
+pub(super) async fn review_permission_request(
     inner: &RuntimeInner,
     request: crate::PermissionRequest,
     context: &ToolExecutionContext,

@@ -37,9 +37,8 @@ pub(super) fn with_workspace_coding_loop_profile_for_child(
 }
 
 pub(crate) fn coding_loop_workspace_roots(root: &Path, skill_roots: &[PathBuf]) -> Vec<PathBuf> {
-    let mut roots = vec![root.to_path_buf()];
-    roots.extend(skill_roots.iter().filter(|root| root.is_dir()).cloned());
-    roots
+    let _ = skill_roots;
+    vec![root.to_path_buf()]
 }
 
 pub(crate) fn workspace_tools_config(
@@ -51,4 +50,16 @@ pub(crate) fn workspace_tools_config(
     Ok(WorkspaceToolsConfig::new(roots)
         .with_allow_hidden(allow_hidden_workspace_paths)
         .with_limits(limits))
+}
+
+pub(crate) fn workspace_tools_config_with_resources(
+    roots: Vec<PathBuf>,
+    readonly_resource_roots: Vec<PathBuf>,
+    allow_hidden_workspace_paths: bool,
+    limits_override: Option<WorkspaceToolLimits>,
+) -> Result<WorkspaceToolsConfig, CodingRuntimeError> {
+    Ok(WorkspaceToolsConfig::new(roots)
+        .with_readonly_resource_roots(readonly_resource_roots)
+        .with_allow_hidden(allow_hidden_workspace_paths)
+        .with_limits(limits_override.unwrap_or_default()))
 }

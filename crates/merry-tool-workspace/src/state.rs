@@ -7,11 +7,12 @@ use std::{
 use crate::config::{WorkspaceToolConfigError, WorkspaceToolLimits, WorkspaceToolsConfig};
 
 const CODING_PROFILE_CAPABILITY_SUMMARY: &str = "\
-Workspace coding profile:\n- Workspace file tool paths are relative to configured workspace roots, not host-absolute paths.\n- Process execution runs through Merry runtime policy and the configured sandbox/profile, so filesystem and network access may be intentionally restricted; environment and host IPC access may also be intentionally restricted.\n- For run_process, provide one shell command string and set cwd to null or cwd=\".\" for the workspace root; do not pass a bash field, argv array, or empty cwd string.\n- The default process profile may block network access and paths outside the configured workspace or trusted path rules.\n- Use run_process directly for read-only checks such as cargo fmt --all --check; do not call request_permissions for an action that already fits the active process profile.\n- A failed process action is the signal to recover. If the failure appears caused by unavailable network, filesystem, or host-integration access (including its required environment), call request_permissions for that exact action and request only the corresponding minimum capability before retrying it.\n- Linux Unix sockets are filesystem paths. If a host resource is not represented by a named integration, request its exact socket/file path through requested.paths; the outer sandbox must already expose that path.\n- request_permissions is not a reusable grant. It must name the exact planned action, request only the minimum needed capability, and the runtime may approve, deny, or fail the request.";
+Workspace coding profile:\n- Workspace file tool paths are relative to the single configured workspace root, not host-absolute paths. Read-only skill and other resource roots are separate from workspace writes.\n- Process execution runs through Merry runtime policy and the configured sandbox/profile, so filesystem and network access may be intentionally restricted; environment and host IPC access may also be intentionally restricted.\n- For run_process, provide one shell command string and set cwd to null or cwd=\".\" for the workspace root; do not pass a bash field, argv array, or empty cwd string.\n- The default process profile may block network access and paths outside the configured workspace or trusted path rules. Ordinary valid commands may still create directories and write workspace files.\n- A failed process action is the signal to recover. If the failure appears caused by unavailable network, filesystem, or host-integration access (including its required environment), call request_permissions for that exact action and request only the corresponding minimum capability before retrying it. Approved capabilities remain available for later actions in this runtime session.\n- Linux Unix sockets are filesystem paths. If a host resource is not represented by a named integration, request its exact socket/file path through requested.paths; the outer sandbox must already expose that path.\n- request_permissions must name the exact planned action and request only the minimum needed capability; the runtime may approve, deny, or fail the request.";
 
 #[derive(Debug)]
 pub(crate) struct WorkspaceToolState {
     pub(crate) roots: Vec<PathBuf>,
+    pub(crate) readonly_resource_roots: Vec<PathBuf>,
     pub(crate) allow_hidden: bool,
     pub(crate) limits: WorkspaceToolLimits,
     pub(crate) patch_write_scope: Option<Vec<String>>,
@@ -46,14 +47,34 @@ impl WorkspaceToolState {
             roots.push(canonical);
         }
 
+        let mut readonly_resource_roots = Vec::with_capacity(config.readonly_resource_roots.len());
+        for root in config.readonly_resource_roots {
+            if !root.exists() {
+                continue;
+            }
+            let canonical = fs::canonicalize(&root).map_err(|source| {
+                WorkspaceToolConfigError::RootCanonicalize {
+                    root: root.clone(),
+                    source,
+                }
+            })?;
+            if canonical.is_dir() && !roots.iter().any(|workspace| workspace == &canonical) {
+                readonly_resource_roots.push(canonical);
+            }
+        }
+
         let patch_write_scope = match config.patch_write_scope {
             Some(paths) => Some(normalize_scope_paths(paths)?),
             None => None,
         };
-        let forbidden_paths = normalize_scope_paths(config.forbidden_paths)?;
+        let mut forbidden_paths = normalize_scope_paths(config.forbidden_paths)?;
+        if !forbidden_paths.iter().any(|path| path == ".git") {
+            forbidden_paths.push(".git".to_owned());
+        }
 
         Ok(Self {
             roots,
+            readonly_resource_roots,
             allow_hidden: config.allow_hidden,
             limits: config.limits,
             patch_write_scope,
@@ -72,6 +93,10 @@ impl WorkspaceToolState {
             }
             None => CODING_PROFILE_CAPABILITY_SUMMARY.to_owned(),
         }
+    }
+
+    pub(crate) fn read_roots(&self) -> impl Iterator<Item = &PathBuf> {
+        self.roots.iter().chain(self.readonly_resource_roots.iter())
     }
 }
 

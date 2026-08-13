@@ -77,11 +77,15 @@ async fn opt_in_process_action_uses_runner_and_records_execution_audit() {
                 "text": "runtime tests passed\n",
                 "bytes": "runtime tests passed\n".len(),
                 "truncated": false,
+                "utf8": true,
+                "bytes_base64": "cnVudGltZSB0ZXN0cyBwYXNzZWQK",
             },
             "stderr": {
                 "text": "",
                 "bytes": 0,
                 "truncated": false,
+                "utf8": true,
+                "bytes_base64": "",
             }
         })
     );
@@ -322,6 +326,7 @@ async fn opt_in_process_action_denies_dangerous_argv_without_runner_call() {
                     accepted_local_workspace_process_admission(),
                     Arc::new(runner.clone()),
                 )
+                .permission_admission_source(Arc::new(StaticPermissionAdmissionSource::denying()))
                 .build()
         },
     )
@@ -360,8 +365,60 @@ async fn opt_in_process_action_denies_dangerous_argv_without_runner_call() {
     let policy = audits[1]
         .policy()
         .expect("denied audit should include policy");
-    assert_eq!(policy.risk_tier(), ActionRiskTier::Forbidden);
+    assert_eq!(policy.risk_tier(), ActionRiskTier::ProcessHigh);
     assert_eq!(policy.disposition(), ActionPolicyDisposition::Deny);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn noninteractive_trusted_host_process_allows_high_risk_argv_without_review() {
+    let executor = ProcessProposingToolExecutor::with_argv(["sudo", "su"]);
+    let runner = FakeProcessRunner::succeeding();
+    let admission = StaticPermissionAdmissionSource::denying();
+    let tool = RegisteredTool::new(
+        policy_tool_spec("policy_command_trusted_host_high_risk"),
+        Arc::new(executor.clone()),
+        ToolActionKind::CommandExec,
+    )
+    .with_action_proposal();
+    let (runtime, pending) = register_policy_pending_registered_tool_with_builder(
+        "runtime-policy-command-trusted-host-high-risk",
+        "policy_command_trusted_host_high_risk",
+        "call-command-trusted-host-high-risk",
+        tool,
+        |builder| {
+            builder
+                .permission_review_mode(PermissionReviewMode::NonInteractiveTrusted)
+                .permission_admission_source(Arc::new(admission.clone()))
+                .allow_accepted_local_workspace_process_actions(
+                    AcceptedLocalWorkspaceProcessAdmission::accept_host_v1(),
+                    Arc::new(runner.clone()),
+                )
+                .build()
+        },
+    )
+    .await;
+
+    let events = runtime
+        .execute_tool_call(pending.id(), ToolExecutionContext::default())
+        .await
+        .expect("trusted host process should execute without a permission review");
+
+    assert_eq!(executor.propose_count(), 1);
+    assert_eq!(executor.execute_count(), 0);
+    assert_eq!(runner.call_count(), 1);
+    assert_eq!(admission.call_count(), 0);
+    assert_eq!(
+        resolved_tool_result(&events).status(),
+        ToolCallResultStatus::Succeeded
+    );
+    let audits = action_audit_records(&runtime).await;
+    assert_eq!(audits.len(), 2);
+    assert_eq!(audits[1].status(), ActionAuditStatus::Executed);
+    let policy = audits[1]
+        .policy()
+        .expect("trusted host execution should keep an action policy audit");
+    assert_eq!(policy.risk_tier(), ActionRiskTier::ProcessHigh);
+    assert_eq!(policy.disposition(), ActionPolicyDisposition::Allow);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -404,8 +461,8 @@ async fn denied_process_action_traces_denied_tool_finish_without_process_executi
     );
     assert_eq!(runner.call_count(), 0);
     assert!(logs.contains("\"event\":\"runtime.tool.execute.finish\""));
-    assert!(logs.contains("\"status\":\"denied\""));
-    assert!(logs.contains("\"diagnostic_code\":\"action_policy_denied\""));
+    assert!(logs.contains("\"status\":\"review_failed\""));
+    assert!(logs.contains("\"diagnostic_code\":\"permission_review_failed\""));
     assert!(logs.contains("\"tool_name\":\"policy_command_dangerous_trace\""));
     assert!(logs.contains("\"tool_call_id\":\"call-command-exec-dangerous-trace\""));
     assert!(!logs.contains("runtime.process.execute.start"));
@@ -545,11 +602,15 @@ async fn opt_in_accepted_local_workspace_process_action_executes_local_workspace
                 "text": "runtime tests passed\n",
                 "bytes": "runtime tests passed\n".len(),
                 "truncated": false,
+                "utf8": true,
+                "bytes_base64": "cnVudGltZSB0ZXN0cyBwYXNzZWQK",
             },
             "stderr": {
                 "text": "",
                 "bytes": 0,
                 "truncated": false,
+                "utf8": true,
+                "bytes_base64": "",
             }
         })
     );

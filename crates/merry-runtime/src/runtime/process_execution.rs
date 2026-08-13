@@ -8,6 +8,7 @@ use crate::{
     session::ProposedToolExecutionOutcome, session::ToolResultLedgerObservation,
     tool::ActionProposalEvidence, tool::ToolExecutionContext,
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use merry_core::{
     ArtifactKind, ArtifactRef, PendingToolCall, RuntimeJournalEvent, SessionId,
     ToolCallResultStatus,
@@ -355,11 +356,15 @@ fn process_output_artifact_content(
             "text": output.stdout_text(),
             "bytes": output.stdout_bytes(),
             "truncated": output.stdout_truncated(),
+            "utf8": output.stdout_is_utf8(),
+            "bytes_base64": BASE64.encode(output.stdout_data()),
         },
         "stderr": {
             "text": output.stderr_text(),
             "bytes": output.stderr_bytes(),
             "truncated": output.stderr_truncated(),
+            "utf8": output.stderr_is_utf8(),
+            "bytes_base64": BASE64.encode(output.stderr_data()),
         }
     });
 

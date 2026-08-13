@@ -312,6 +312,13 @@
             }
         }
 
+        fn denying() -> Self {
+            Self {
+                decision: crate::PermissionAdmissionDecision::denied("host denied"),
+                calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
         fn call_count(&self) -> usize {
             self.calls.load(Ordering::SeqCst)
         }

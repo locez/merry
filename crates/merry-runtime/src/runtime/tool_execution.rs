@@ -20,7 +20,9 @@ use std::{path::Path, sync::Arc};
 use super::checkpoint_ref_tool::{
     execute_merry_read_checkpoint_ref_tool_call, is_merry_read_checkpoint_ref_tool,
 };
-use super::permission_execution::execute_permission_request_tool_call;
+use super::permission_execution::{
+    HighRiskActionReview, execute_permission_request_tool_call, review_high_risk_process_action,
+};
 use super::plan_tool_execution::execute_plan_tool_call;
 use super::process_execution::{ProcessExecutionAdmission, execute_admitted_process_action};
 use super::{
@@ -345,6 +347,48 @@ pub(super) async fn execute_tool_call_with_active_permit(
                         active_plan_harness.is_some(),
                     ),
                     context,
+                )
+                .await;
+            } else if let Some(accepted) = inner.accepted_local_workspace_process_runner.clone()
+                && registered_tool.action_kind() == crate::ToolActionKind::CommandExec
+                && proposal.action_kind() == crate::ToolActionKind::CommandExec
+                && let ActionProposalEvidence::ProcessAction(intent) = proposal.evidence()
+                && accepted.admission.matches_intent(intent)
+            {
+                // The classifier is an audit/risk signal. The configured
+                // runner boundary, rather than a command allowlist, decides
+                // which capabilities the process actually receives.
+                let risk_tier =
+                    classify_tool_action_risk(registered_tool.action_kind(), Some(&proposal));
+                policy_decision = if noninteractive_trusted {
+                    ActionPolicyDecision::allow_noninteractive_trusted_action(
+                        registered_tool.action_kind(),
+                    )
+                    .with_risk_tier(risk_tier)
+                } else {
+                    ActionPolicyDecision::allow_configured_process_action()
+                        .with_risk_tier(risk_tier)
+                };
+                let permission_profile_id = accepted.admission.permission_profile_id();
+                let mut admission = ProcessExecutionAdmission::new(
+                    policy_decision,
+                    permission_profile_id,
+                    accepted.runner,
+                    active_plan_harness.is_some(),
+                );
+                if !noninteractive_trusted && crate::process::requires_process_action_review(intent)
+                {
+                    match review_high_risk_process_action(inner, &pending, &proposal, &context)
+                        .await?
+                    {
+                        HighRiskActionReview::Approved(review) => {
+                            admission = admission.with_permission_review(review);
+                        }
+                        HighRiskActionReview::Resolved(events) => return Ok(events),
+                    }
+                }
+                return execute_admitted_process_action(
+                    inner, &pending, proposal, admission, context,
                 )
                 .await;
             } else if noninteractive_trusted {
@@ -757,6 +801,28 @@ pub(super) fn trace_denied_tool_execution(
         artifact_id = tool_resolution_artifact_id(events),
         diagnostic_code = DIAGNOSTIC_TOOL_ACTION_POLICY_DENIED,
         "runtime tool execution denied"
+    );
+}
+
+pub(super) fn trace_review_denied_tool_execution(
+    session_id: &str,
+    pending: &PendingToolCall,
+    events: &[RuntimeJournalEvent],
+    status: &'static str,
+) {
+    tracing::info!(
+        event = "runtime.tool.execute.finish",
+        session_id,
+        tool_call_id = pending.id().as_str(),
+        tool_name = pending.name().as_str(),
+        status,
+        artifact_id = tool_resolution_artifact_id(events),
+        diagnostic_code = if status == "review_failed" {
+            "permission_review_failed"
+        } else {
+            "permission_request_denied"
+        },
+        "runtime tool execution stopped by high-risk action review"
     );
 }
 

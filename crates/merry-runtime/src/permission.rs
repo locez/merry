@@ -160,6 +160,7 @@ pub struct PermissionRequest {
     requested: Vec<RequestedCapability>,
     action: PermissionedAction,
     review_context: Vec<PermissionReviewContextEntry>,
+    review_only: bool,
 }
 
 impl PermissionRequest {
@@ -189,7 +190,30 @@ impl PermissionRequest {
             requested,
             action,
             review_context,
+            review_only: false,
         })
+    }
+
+    /// Creates a review-only request for a high-risk action.
+    ///
+    /// Unlike a capability request, this does not grant or retain any
+    /// capability. It reuses the same admission source to review the exact
+    /// action before a separately configured runner executes it.
+    pub(crate) fn for_action_review(
+        call: &PendingToolCall,
+        reason: impl Into<String>,
+        action: PermissionedAction,
+        review_context: Vec<PermissionReviewContextEntry>,
+    ) -> Self {
+        Self {
+            tool_call_id: call.id().clone(),
+            tool_name: call.name().clone(),
+            reason: Some(reason.into()),
+            requested: Vec::new(),
+            action,
+            review_context,
+            review_only: true,
+        }
     }
 
     #[must_use]
@@ -218,6 +242,13 @@ impl PermissionRequest {
         self.requested
             .iter()
             .any(|capability| matches!(capability, RequestedCapability::Network))
+    }
+
+    /// Returns whether this request reviews an action without granting a
+    /// capability.
+    #[must_use]
+    pub fn is_action_review(&self) -> bool {
+        self.review_only
     }
 
     #[must_use]
@@ -844,7 +875,7 @@ impl PermissionAdmissionSource for ModelBackedPermissionAdmissionSource {
 pub fn request_permissions_tool() -> Result<RegisteredTool, PermissionAdmissionError> {
     let spec = ToolSpec::new(
         ToolName::new(REQUEST_PERMISSIONS_TOOL_NAME).expect("static tool name is valid"),
-        "Request additional filesystem, network, or explicitly configured host-integration capability for one exact planned action. Network access applies only to that action; a configured session-aware process backend may retain approved paths and host integrations for later actions in the current runtime session. When one command needs multiple capabilities, request them together.",
+        "Request additional filesystem, network, or explicitly configured host-integration capability for one exact planned action. A configured session-aware process backend retains approved paths, network, and host integrations for later actions in the current runtime session. When one command needs multiple capabilities, request them together.",
         request_permissions_input_schema()?,
     )?;
     Ok(RegisteredTool::new(
@@ -1024,6 +1055,7 @@ fn permission_request_summary(request: &PermissionRequest) -> Value {
         "tool_call_id": request.tool_call_id().as_str(),
         "tool_name": request.tool_name().as_str(),
         "reason": request.reason(),
+        "review_only": request.is_action_review(),
         "requested": requested_capabilities_json(request.requested()),
         "action": permissioned_action_json(request.action()),
     })
@@ -1071,7 +1103,7 @@ fn request_permissions_input_schema() -> Result<ToolInputSchema, PermissionAdmis
             "requested": {
                 "type": "object",
                 "additionalProperties": false,
-                "description": "Capabilities to add after this exact action is approved. Use network for this action's network access, paths for filesystem paths, or host_integrations for explicitly configured SSH agent/D-Bus session access. Network is one-action only; paths and host integrations may remain available for later actions in a session-aware backend. Include every capability the same command needs in one request.",
+                "description": "Capabilities to add after this exact action is approved. Use network for network access, paths for filesystem paths, or host_integrations for explicitly configured SSH agent/D-Bus session access. A session-aware backend retains approved capabilities for later actions in this runtime session. Include every capability the same command needs in one request.",
                 "properties": {
                     "network": {
                         "type": "boolean",
@@ -1510,6 +1542,7 @@ fn permission_request_fingerprint_json(request: &PermissionRequest) -> Value {
         "tool_call_id": request.tool_call_id().as_str(),
         "tool_name": request.tool_name().as_str(),
         "reason": request.reason(),
+        "review_only": request.is_action_review(),
         "requested": requested_capabilities_json(request.requested()),
         "action": permissioned_action_json(request.action()),
     })
@@ -1560,6 +1593,12 @@ fn permission_review_user_prompt(request: &PermissionRequest) -> String {
     if let Some(reason) = request.reason() {
         push_review_block(&mut prompt, "reason", reason);
     }
+    prompt.push_str("review_only=");
+    prompt.push_str(if request.is_action_review() {
+        "true\n"
+    } else {
+        "false\n"
+    });
     push_review_block(
         &mut prompt,
         "requested_capabilities_json",

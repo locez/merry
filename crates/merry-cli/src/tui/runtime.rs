@@ -366,6 +366,9 @@ fn permission_review_view(request: &PermissionReviewRequest) -> (String, String)
     if let Some(reason) = permission_request.reason() {
         lines.push(format!("reason: {reason}"));
     }
+    if permission_request.is_action_review() {
+        lines.push("review: high-risk process action".to_owned());
+    }
     lines.push(format!("action: {}", permission_request.action().summary()));
     lines.push("requested capabilities:".to_owned());
     for capability in permission_request.requested() {

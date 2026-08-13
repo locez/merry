@@ -289,6 +289,7 @@ impl MerryConfig {
         Ok(rules)
     }
 
+    #[allow(dead_code)]
     pub fn permissions_network_allowed(&self) -> bool {
         self.raw
             .permissions

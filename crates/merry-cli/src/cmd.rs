@@ -1,7 +1,7 @@
 use crate::cli_error::{CliError, debug_openai_usage_error, stdout_error, unexpected};
 use crate::coding_runtime::{
     RuntimeRoleProviderConfig, coding_loop_workspace_roots, with_workspace_coding_loop_profile,
-    workspace_tools_config,
+    workspace_tools_config_with_resources,
 };
 use crate::config::MerryConfig;
 use crate::provider_config::{
@@ -257,8 +257,9 @@ pub(crate) fn build_runtime(input: RuntimeInput<'_>) -> Result<Runtime, CliError
             role_provider.model,
         );
     }
-    let profile = WorkspaceCodingLoopProfile::new(workspace_tools_config(
+    let profile = WorkspaceCodingLoopProfile::new(workspace_tools_config_with_resources(
         coding_loop_workspace_roots(input.root, &input.skill_roots),
+        input.skill_roots.clone(),
         input.allow_hidden_workspace_paths,
         None,
     )?)
