@@ -22,7 +22,7 @@ use merry_llm::{
 use merry_runtime::{
     AcceptedLocalWorkspaceProcessAdmission, ArtifactContent, MAX_PROCESS_OUTPUT_LIMIT_BYTES,
     ProcessActionIntent, ProcessEnvPolicy, ProcessRunner, Runtime, StepContext, StepInput,
-    TokioProcessRunner, ToolExecutionContext, process_command_tool,
+    TokioProcessRunner, ToolExecutionContext, process_command_tool, shell_command_for_argv,
 };
 use std::{env, ffi::OsStr, sync::Arc};
 use tokio::io::{AsyncWrite, AsyncWriteExt, BufWriter};
@@ -136,13 +136,14 @@ fn build_runtime(
 ) -> Result<Runtime, CliError> {
     let shell_tool = process_command_tool(
         ToolName::new(TOOL_NAME).map_err(unexpected)?,
-        "Run the exact CLI argv as a Merry process action.",
+        "Run the exact CLI command as a Merry process action.",
     )
     .map_err(unexpected)?;
     let provider = ShellToolCallProvider::new(&intent)?;
     let mut builder = Runtime::builder(session_id)
         .register_tool(shell_tool)
         .allow_low_risk_process_actions(Arc::clone(&runner))
+        .allow_read_only_shell_process_actions(Arc::clone(&runner))
         .model_provider(
             Arc::new(provider),
             ModelName::new("merry-shell-debug").map_err(unexpected)?,
@@ -243,10 +244,16 @@ struct ShellToolCallProvider {
 impl ShellToolCallProvider {
     fn new(intent: &ProcessActionIntent) -> Result<Self, CliError> {
         let mut arguments = serde_json::Map::new();
-        arguments.insert("argv".to_owned(), serde_json::json!(intent.argv()));
-        if let Some(cwd) = intent.cwd() {
-            arguments.insert("cwd".to_owned(), serde_json::Value::String(cwd.to_owned()));
-        }
+        arguments.insert(
+            "command".to_owned(),
+            serde_json::Value::String(shell_command_for_argv(intent.argv())),
+        );
+        arguments.insert(
+            "cwd".to_owned(),
+            intent.cwd().map_or(serde_json::Value::Null, |cwd| {
+                serde_json::Value::String(cwd.to_owned())
+            }),
+        );
 
         Ok(Self {
             name: ProviderName::new("merry-shell-cli-provider").map_err(unexpected)?,

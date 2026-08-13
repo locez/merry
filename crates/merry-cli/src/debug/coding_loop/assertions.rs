@@ -78,7 +78,7 @@ pub(crate) async fn assert_permission_network_smoke_result(
                     continue;
                 };
                 if !text.contains("\"kind\":\"process_action\"")
-                    || !process_artifact_has_argv(text, super::PERMISSION_NETWORK_SMOKE_ARGV)
+                    || !process_artifact_has_command(text, super::PERMISSION_NETWORK_SMOKE_ARGV)
                 {
                     continue;
                 }
@@ -600,10 +600,10 @@ pub(crate) async fn assert_coding_loop_live_smoke_tool_sequence(
         }
     }
     let inspected = process_artifact_texts.iter().any(|text| {
-        process_artifact_has_argv(text, ["rg", "--files"]) && text.contains("src/lib.rs")
+        process_artifact_has_command(text, ["rg", "--files"]) && text.contains("src/lib.rs")
     });
     let verified = process_artifact_texts.iter().any(|text| {
-        process_artifact_has_argv(text, ["rg", CODING_LOOP_LIVE_SMOKE_TARGET_VALUE])
+        process_artifact_has_command(text, ["rg", CODING_LOOP_LIVE_SMOKE_TARGET_VALUE])
             && text.contains(CODING_LOOP_LIVE_SMOKE_TARGET_VALUE)
     });
     if !inspected {
@@ -686,9 +686,9 @@ pub(crate) async fn assert_coding_loop_task_live_smoke_tool_sequence(
             continue;
         }
         saw_cargo_check |=
-            process_artifact_has_cargo_package_argv(text, "check", fixture.package_name());
+            process_artifact_has_cargo_package_command(text, "check", fixture.package_name());
         saw_cargo_test |=
-            process_artifact_has_cargo_package_argv(text, "test", fixture.package_name());
+            process_artifact_has_cargo_package_command(text, "test", fixture.package_name());
     }
     if !saw_cargo_check {
         return Err(CliError::Unexpected(
@@ -716,38 +716,52 @@ fn require_live_smoke_tool_name(names: &[String], required: &str) -> Result<(), 
     }
 }
 
-fn process_artifact_has_argv<const N: usize>(text: &str, expected: [&str; N]) -> bool {
+fn process_artifact_has_command<const N: usize>(text: &str, expected: [&str; N]) -> bool {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
         return false;
     };
+    let argv = value
+        .get("intent")
+        .and_then(|intent| intent.get("argv"))
+        .and_then(serde_json::Value::as_array);
+    let expected_command = expected.join(" ");
+    if let Some(argv) = argv {
+        return matches!(
+            argv.as_slice(),
+            [shell, flag, command]
+                if shell.as_str() == Some("bash")
+                    && flag.as_str() == Some("-lc")
+                    && command.as_str() == Some(expected_command.as_str())
+        );
+    }
     value
         .get("intent")
-        .and_then(|intent| intent.get("argv"))
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|argv| {
-            argv.iter()
-                .filter_map(serde_json::Value::as_str)
-                .eq(expected)
-        })
+        .and_then(|intent| intent.get("command"))
+        .and_then(serde_json::Value::as_str)
+        == Some(expected_command.as_str())
 }
 
-fn process_artifact_has_cargo_package_argv(text: &str, command: &str, package: &str) -> bool {
+fn process_artifact_has_cargo_package_command(text: &str, command: &str, package: &str) -> bool {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
         return false;
     };
-    let Some(argv) = value
+    let argv = value
         .get("intent")
         .and_then(|intent| intent.get("argv"))
-        .and_then(serde_json::Value::as_array)
-    else {
-        return false;
-    };
-    matches!(
-        argv.as_slice(),
-        [cargo, actual_command, package_flag, actual_package]
-            if cargo.as_str() == Some("cargo")
-                && actual_command.as_str() == Some(command)
-                && matches!(package_flag.as_str(), Some("-p" | "--package"))
-                && actual_package.as_str() == Some(package)
-    )
+        .and_then(serde_json::Value::as_array);
+    let expected_command = format!("cargo {command} -p {package}");
+    if let Some(argv) = argv {
+        return matches!(
+            argv.as_slice(),
+            [shell, flag, actual_command]
+                if shell.as_str() == Some("bash")
+                    && flag.as_str() == Some("-lc")
+                    && actual_command.as_str() == Some(expected_command.as_str())
+        );
+    }
+    value
+        .get("intent")
+        .and_then(|intent| intent.get("command"))
+        .and_then(serde_json::Value::as_str)
+        == Some(expected_command.as_str())
 }

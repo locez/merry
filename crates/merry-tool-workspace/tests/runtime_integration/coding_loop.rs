@@ -10,7 +10,7 @@ async fn coding_loop_harness_inspects_patches_verifies_and_completes() {
     let provider = ScriptedModelProvider::new(vec![
         vec![Ok(pending_process_call(
             "coding-loop-rg-files",
-            &["rg", "--files"],
+            "rg --files",
         ))],
         vec![Ok(pending_read_file_call("src/lib.rs"))],
         vec![Ok(pending_patch_call(
@@ -20,7 +20,7 @@ async fn coding_loop_harness_inspects_patches_verifies_and_completes() {
         ))],
         vec![Ok(pending_process_call(
             "coding-loop-cargo-test",
-            &["cargo", "test", "-p", "merry-runtime"],
+            "cargo test -p merry-runtime",
         ))],
         vec![Ok(ModelEvent::Completed {
             response: ModelResponse::new(
@@ -65,12 +65,11 @@ async fn coding_loop_harness_inspects_patches_verifies_and_completes() {
     assert_eq!(
         observed_argv,
         vec![
-            vec!["rg".to_owned(), "--files".to_owned()],
+            vec!["bash".to_owned(), "-lc".to_owned(), "rg --files".to_owned()],
             vec![
-                "cargo".to_owned(),
-                "test".to_owned(),
-                "-p".to_owned(),
-                "merry-runtime".to_owned()
+                "bash".to_owned(),
+                "-lc".to_owned(),
+                "cargo test -p merry-runtime".to_owned()
             ],
         ]
     );
@@ -111,7 +110,7 @@ async fn coding_loop_harness_inspects_patches_verifies_and_completes() {
         .enumerate()
         .filter_map(|(index, kind)| (*kind == LedgerFactKind::ToolCallResolved).then_some(index))
         .collect::<Vec<_>>();
-    assert_eq!(artifact_indexes.len(), 5);
+    assert_eq!(artifact_indexes.len(), 7);
     assert_eq!(resolved_indexes.len(), 4);
     for (artifact_index, resolved_index) in artifact_indexes
         .iter()

@@ -209,7 +209,7 @@ impl ChatToolBuffer {
             &self.arguments
         };
         let arguments =
-            serde_json::from_str::<serde_json::Value>(raw_arguments).map_err(|error| {
+            crate::tool_arguments::parse_tool_arguments(raw_arguments).map_err(|error| {
                 OpenAiProviderError::invalid_tool_call(format!(
                     "Chat Completions tool arguments are not valid JSON: {error}"
                 ))
@@ -280,6 +280,7 @@ fn unexpected_sse_line(line: &str) -> OpenAiProviderError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
 
     #[test]
     fn parses_interleaved_tool_calls_and_usage_in_call_order() {
@@ -313,6 +314,40 @@ mod tests {
             .expect("completion should be emitted");
         assert_eq!(completed.finish_reason(), FinishReason::ToolCalls);
         assert_eq!(completed.usage().expect("usage").total_tokens, 15);
+    }
+
+    #[test]
+    fn recovers_literal_controls_in_nested_tool_arguments() {
+        let mut parser = ChatStreamParser::new();
+        let lines = [
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-control-chars\",\"function\":{\"name\":\"run_process\",\"arguments\":\"{\\\"command\\\":\\\"printf 'line one\\nline two\\tvalue'\\\"}\"}}]},\"finish_reason\":null}],\"usage\":null}",
+            r#"data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":null}"#,
+            "data: [DONE]",
+        ];
+
+        let mut events = Vec::new();
+        for line in lines {
+            events.extend(
+                parser
+                    .parse_sse_line(line)
+                    .expect("nested controls should recover"),
+            );
+        }
+        parser.finish().expect("stream should finish");
+
+        let call = events
+            .iter()
+            .find_map(|event| match event {
+                ModelEvent::ToolCallRequested { call } => Some(call),
+                _ => None,
+            })
+            .expect("expected a tool call event");
+        assert_eq!(
+            call.arguments().as_object().get("command"),
+            Some(&Value::String(
+                "printf 'line one\nline two\tvalue'".to_owned()
+            ))
+        );
     }
 
     #[test]

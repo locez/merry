@@ -15,8 +15,8 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
 
-const PROCESS_PREVIEW_MAX_LINES: usize = 3;
-const PROCESS_PREVIEW_MAX_CHARS: usize = 120;
+const PROCESS_PREVIEW_MAX_LINES: usize = 5;
+// This bounds the timeline preview only; the workspace tool and Focus retain the full file.
 const READ_FILE_PREVIEW_MAX_LINES: usize = 120;
 const READ_FILE_PREVIEW_MAX_CHARS: usize = 180;
 const LIST_DIR_PREVIEW_MAX_ENTRIES: usize = 80;
@@ -145,6 +145,11 @@ impl TuiProjector {
                     .diagnostic()
                     .is_some_and(|diagnostic| diagnostic.code() == TOOL_CANCELLED_BY_USER_CODE);
                 let failed = result.status() == ToolCallResultStatus::Failed;
+                let process_exit_code = tool
+                    .as_ref()
+                    .filter(|tool| tool.name.as_str() == "run_process")
+                    .and_then(|_| process_exit_code(&text))
+                    .filter(|exit_code| failed && *exit_code != 0);
                 if cancelled_by_user {
                     let item = TimelineItem::Muted {
                         title: tool.as_ref().map_or_else(
@@ -158,6 +163,21 @@ impl TuiProjector {
                     } else {
                         state.push_timeline_item(item);
                     }
+                } else if let Some(exit_code) = process_exit_code
+                    && let Some(tool) = tool.as_ref()
+                {
+                    let (body, focus_body) = process_output_bodies(&text).unwrap_or_else(|| {
+                        let body = compact_tool_output(&text);
+                        (body.clone(), body)
+                    });
+                    state.replace_timeline_item(
+                        tool.timeline_index,
+                        TimelineItem::ExpandedDetail {
+                            title: completed_tool_title(tool, &format!("exit {exit_code}")),
+                            body,
+                            focus_body,
+                        },
+                    );
                 } else if failed {
                     let body = failed_tool_body(
                         result.diagnostic(),
@@ -487,7 +507,14 @@ fn tui_tool_detail(name: &str, arguments: &serde_json::Map<String, Value>) -> St
         };
     }
 
-    match format_tool_call_detail(name, arguments) {
+    let detail = format_tool_call_detail(name, arguments);
+    if name == "run_process" {
+        return detail
+            .filter(|detail| !detail.is_empty())
+            .unwrap_or_else(|| name.to_owned());
+    }
+
+    match detail {
         Some(detail) if !detail.is_empty() => format!("{name} {detail}"),
         _ => name.to_owned(),
     }
@@ -629,56 +656,60 @@ fn process_output_bodies(output: &str) -> Option<(String, String)> {
         .pointer("/stderr/text")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let status = value
-        .get("status")
-        .and_then(Value::as_i64)
-        .or_else(|| value.pointer("/status/code").and_then(Value::as_i64));
+    let status = process_exit_code_from_value(&value);
 
     let mut lines = Vec::new();
-    if let Some(status) = status
+    append_stream_preview(&mut lines, stdout);
+    append_stream_preview(&mut lines, stderr);
+    if lines.is_empty()
+        && let Some(status) = status
         && status != 0
     {
         lines.push(format!("  exit {status}"));
     }
-    append_stream_preview(&mut lines, "stdout", stdout);
-    append_stream_preview(&mut lines, "stderr", stderr);
 
     let mut focus_lines = Vec::new();
-    if let Some(status) = status
+    append_stream_full(&mut focus_lines, stdout);
+    append_stream_full(&mut focus_lines, stderr);
+    if focus_lines.is_empty()
+        && let Some(status) = status
         && status != 0
     {
         focus_lines.push(format!("  exit {status}"));
     }
-    append_stream_full(&mut focus_lines, "stdout", stdout);
-    append_stream_full(&mut focus_lines, "stderr", stderr);
 
     (!lines.is_empty()).then(|| (lines.join("\n"), focus_lines.join("\n")))
 }
 
-fn append_stream_preview(lines: &mut Vec<String>, label: &str, text: &str) {
-    let mut stream_lines = text
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .take(PROCESS_PREVIEW_MAX_LINES);
-    let Some(first) = stream_lines.next() else {
-        return;
-    };
-    lines.push(format!(
-        "  {label}: {}",
-        truncate_chars(first, PROCESS_PREVIEW_MAX_CHARS)
-    ));
-    lines.extend(
-        stream_lines.map(|line| format!("    {}", truncate_chars(line, PROCESS_PREVIEW_MAX_CHARS))),
-    );
+fn process_exit_code(output: &str) -> Option<i64> {
+    let value = serde_json::from_str::<Value>(output).ok()?;
+    process_exit_code_from_value(&value)
 }
 
-fn append_stream_full(lines: &mut Vec<String>, label: &str, text: &str) {
-    let mut stream_lines = text.lines().filter(|line| !line.trim().is_empty());
-    let Some(first) = stream_lines.next() else {
-        return;
-    };
-    lines.push(format!("  {label}: {first}"));
-    lines.extend(stream_lines.map(|line| format!("    {line}")));
+fn process_exit_code_from_value(value: &Value) -> Option<i64> {
+    if value.get("kind").and_then(Value::as_str) != Some("process_action") {
+        return None;
+    }
+    value.get("status").and_then(Value::as_i64).or_else(|| {
+        value
+            .pointer("/status/kind")
+            .and_then(Value::as_str)
+            .filter(|kind| *kind == "exited")
+            .and_then(|_| value.pointer("/status/code").and_then(Value::as_i64))
+    })
+}
+
+fn append_stream_preview(lines: &mut Vec<String>, text: &str) {
+    let stream_lines = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .take(PROCESS_PREVIEW_MAX_LINES.saturating_sub(lines.len()));
+    lines.extend(stream_lines.map(|line| format!("  {line}")));
+}
+
+fn append_stream_full(lines: &mut Vec<String>, text: &str) {
+    let stream_lines = text.lines().filter(|line| !line.trim().is_empty());
+    lines.extend(stream_lines.map(|line| format!("  {line}")));
 }
 
 fn truncate_chars(text: &str, max_chars: usize) -> String {

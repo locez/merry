@@ -93,8 +93,8 @@ fn shell_events_jsonl_records_exact_argv_and_resolves_success() {
         .find(|event| event["payload"]["type"] == "tool_call_pending")
         .expect("shell tool call should be pending before execution");
     assert_eq!(
-        pending["payload"]["call"]["arguments"]["argv"],
-        serde_json::json!(["rg", "--files"])
+        pending["payload"]["call"]["arguments"]["command"],
+        "rg --files"
     );
     assert_eq!(pending["payload"]["call"]["arguments"]["cwd"], ".");
 

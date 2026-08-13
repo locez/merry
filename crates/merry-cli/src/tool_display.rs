@@ -16,8 +16,19 @@ pub(crate) fn format_tool_call_detail(
 ) -> Option<String> {
     match name {
         "workspace_patch" => format_workspace_patch_call_detail(arguments),
+        "run_process" => format_process_call_detail(arguments),
         _ => format_generic_tool_call_detail(arguments),
     }
+}
+
+fn format_process_call_detail(arguments: &Map<String, Value>) -> Option<String> {
+    let command = arguments.get("command").and_then(Value::as_str)?;
+    let cwd = arguments.get("cwd").and_then(Value::as_str).unwrap_or(".");
+    Some(format!(
+        "{} ({})",
+        compact_shell_command(command),
+        compact_inline(cwd, 80)
+    ))
 }
 
 fn join_progress_parts(prefix: &str, detail: Option<&str>) -> String {
@@ -92,6 +103,29 @@ fn compact_shell_word(value: &str) -> String {
         value
     } else {
         format!("{value:?}")
+    }
+}
+
+fn compact_shell_command(value: &str) -> String {
+    let mut output = value
+        .chars()
+        .take(120)
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    if value.chars().count() > 120 {
+        output.push_str("...");
+    }
+    let output = output.trim();
+    if output.is_empty() {
+        "\"\"".to_owned()
+    } else {
+        output.to_owned()
     }
 }
 
@@ -194,5 +228,20 @@ mod tests {
             detail.as_deref(),
             Some("max_matches=50 path=crates/merry-cli query=tool_call")
         );
+    }
+
+    #[test]
+    fn process_detail_shows_command_and_cwd_without_field_labels() {
+        let arguments = json!({
+            "command": "rg -n 'select!' crates/merry-runtime",
+            "cwd": "."
+        });
+
+        let detail =
+            format_tool_call_detail("run_process", arguments.as_object().unwrap()).unwrap();
+
+        assert_eq!(detail, "rg -n 'select!' crates/merry-runtime (.)");
+        assert!(!detail.contains("command="));
+        assert!(!detail.contains("cwd="));
     }
 }

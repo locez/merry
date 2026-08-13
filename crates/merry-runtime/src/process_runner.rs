@@ -1788,11 +1788,11 @@ mod tests {
             "requested": {
                 "paths": [{ "path": "/workspace/merry", "access": "rw" }]
             },
-            "for_action": { "kind": "process", "argv": ["cargo", "test"], "cwd": "." }
+            "for_action": { "kind": "process", "command": "cargo test", "cwd": "." }
         }));
         let request_with_network = permission_request(json!({
             "requested": { "network": true },
-            "for_action": { "kind": "process", "argv": ["cargo", "test"], "cwd": "." }
+            "for_action": { "kind": "process", "command": "cargo test", "cwd": "." }
         }));
 
         let runner_without_network = factory.build_runner(&request_without_network);
@@ -1827,7 +1827,7 @@ mod tests {
                 )]);
         let request = permission_request(json!({
             "requested": { "network": true },
-            "for_action": { "kind": "process", "argv": ["cargo", "test"], "cwd": "." }
+            "for_action": { "kind": "process", "command": "cargo test", "cwd": "." }
         }));
 
         let runner = factory.build_runner(&request);
@@ -1855,7 +1855,7 @@ mod tests {
             "requested": {
                 "paths": [{ "path": "deps/cache", "access": "rw" }]
             },
-            "for_action": { "kind": "process", "argv": ["cargo", "test"], "cwd": "." }
+            "for_action": { "kind": "process", "command": "cargo test", "cwd": "." }
         }));
 
         let runner = factory.build_runner(&request);
@@ -1895,17 +1895,17 @@ mod tests {
                     { "path": "/var/lib/merry-demo.txt", "access": "ro" }
                 ]
             },
-            "for_action": { "kind": "process", "argv": ["touch", "/var/lib/merry-demo.txt"] }
+            "for_action": { "kind": "process", "command": "touch /var/lib/merry-demo.txt", "cwd": null }
         }));
         let later_request = permission_request(json!({
             "requested": { "network": true },
-            "for_action": { "kind": "process", "argv": ["cat", "/var/lib/merry-demo.txt"] }
+            "for_action": { "kind": "process", "command": "cat /var/lib/merry-demo.txt", "cwd": null }
         }));
         let narrower_request = permission_request(json!({
             "requested": {
                 "paths": [{ "path": "/tmp", "access": "ro" }]
             },
-            "for_action": { "kind": "process", "argv": ["ls", "/tmp"] }
+            "for_action": { "kind": "process", "command": "ls /tmp", "cwd": null }
         }));
 
         let _ = factory.runner_for(&first_request);
@@ -1946,7 +1946,7 @@ mod tests {
                 .with_session_permissions(session_permissions.clone());
         let request = permission_request(json!({
             "requested": { "host_integrations": ["ssh-agent"] },
-            "for_action": { "kind": "process", "argv": ["ssh", "-T", "git@example.test"] }
+            "for_action": { "kind": "process", "command": "ssh -T git@example.test", "cwd": null }
         }));
 
         factory
@@ -1960,7 +1960,7 @@ mod tests {
             .with_session_permissions(session_permissions);
         let later_request = permission_request(json!({
             "requested": { "paths": [{ "path": ".", "access": "rw" }] },
-            "for_action": { "kind": "process", "argv": ["ssh", "-T", "git@example.test"] }
+            "for_action": { "kind": "process", "command": "ssh -T git@example.test", "cwd": null }
         }));
         let plan = base_runner
             .plan_for(request_process_intent(&later_request))
@@ -1990,7 +1990,7 @@ mod tests {
             "requested": {
                 "paths": [{ "path": "deps", "access": "rw" }]
             },
-            "for_action": { "kind": "process", "argv": ["cargo", "test"], "cwd": "." }
+            "for_action": { "kind": "process", "command": "cargo test", "cwd": "." }
         }));
 
         factory
@@ -2037,7 +2037,7 @@ mod tests {
             "requested": {
                 "paths": [{ "path": "secrets/token", "access": "ro" }]
             },
-            "for_action": { "kind": "process", "argv": ["cat", "secrets/token"] }
+            "for_action": { "kind": "process", "command": "cat secrets/token", "cwd": null }
         }));
 
         let error = factory
@@ -2059,7 +2059,7 @@ mod tests {
             "requested": {
                 "paths": [{ "path": "deps/cache", "access": "rw" }]
             },
-            "for_action": { "kind": "process", "argv": ["cargo", "test"] }
+            "for_action": { "kind": "process", "command": "cargo test", "cwd": null }
         }));
 
         let error = factory
@@ -2082,7 +2082,7 @@ mod tests {
                 "paths": [{ "path": "/var/lib/merry-demo.txt", "access": "rw" }],
                 "host_integrations": ["dbus"]
             },
-            "for_action": { "kind": "process", "argv": ["gh", "auth", "status"] }
+            "for_action": { "kind": "process", "command": "gh auth status", "cwd": null }
         }));
 
         factory
@@ -2103,7 +2103,7 @@ mod tests {
             "requested": {
                 "paths": [{ "path": "secrets/token", "access": "ro" }]
             },
-            "for_action": { "kind": "process", "argv": ["cat", "secrets/token"] }
+            "for_action": { "kind": "process", "command": "cat secrets/token", "cwd": null }
         }));
 
         let runner = factory.runner_for(&request);

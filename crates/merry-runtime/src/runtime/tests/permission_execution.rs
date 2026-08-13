@@ -103,12 +103,15 @@ async fn request_permissions_approved_by_review_executes_exact_process_action() 
 
     assert_eq!(
         event_kind_names_for_tool_execution(&events),
-        ["ArtifactRecorded", "ToolCallResolved"]
+        ["ArtifactRecorded", "ArtifactRecorded", "ToolCallResolved"]
     );
     assert_eq!(runner_factory.call_count(), 1);
     assert_eq!(runner_factory.observed_network_requests(), [true]);
     assert_eq!(runner.call_count(), 1);
-    assert_eq!(runner.observed_intents()[0].argv(), ["cargo", "test"]);
+    assert_eq!(
+        runner.observed_intents()[0].argv(),
+        ["bash", "-lc", "cargo test"]
+    );
     assert_eq!(
         resolved_tool_result(&events).status(),
         ToolCallResultStatus::Succeeded
@@ -249,7 +252,7 @@ async fn request_permissions_review_uses_approval_role_and_runtime_context() {
     assert!(user_prompt.contains("Please run cargo test"));
     assert!(user_prompt.contains("Could not resolve host: crates.io"));
     assert!(user_prompt.contains("\"network\":true"));
-    assert!(user_prompt.contains("\"argv\":[\"cargo\",\"test\"]"));
+    assert!(user_prompt.contains("\"command\":\"cargo test\""));
 }
 
 #[tokio::test(flavor = "current_thread")]

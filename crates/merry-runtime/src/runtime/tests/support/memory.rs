@@ -77,7 +77,7 @@
             ToolCallId::new("call-prior-process").expect("valid tool call id"),
             ToolName::new("process_command").expect("valid tool name"),
             ToolCallArguments::try_from(serde_json::json!({
-                "argv": ["cargo", "test"],
+                "command": "cargo test",
                 "cwd": "."
             }))
             .expect("valid arguments"),

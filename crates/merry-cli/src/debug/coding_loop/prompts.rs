@@ -16,7 +16,7 @@ You are driving Merry's minimal live coding-loop smoke.
 Use the available tools, one tool call per step. Do not answer from memory.
 
 Required sequence:
-1. Call `{process_tool}` with argv `[\"rg\", \"--files\"]` and cwd `{cwd}` to inspect the fixture.
+1. Call `{process_tool}` with command `rg --files` and cwd `{cwd}` to inspect the fixture.
 2. Call `{read_tool}` with path `src/lib.rs` to read exact source.
 3. Call `{patch_tool}` with one `patch` string:
    *** Begin Workspace Patch
@@ -24,11 +24,11 @@ Required sequence:
    -    \"{initial}\"
    +    \"{target}\"
    *** End Workspace Patch
-4. Call `{process_tool}` with argv `[\"rg\", \"{target}\"]` and cwd `{cwd}` to verify.
+4. Call `{process_tool}` with command `rg {target}` and cwd `{cwd}` to verify.
 5. After verification succeeds, return a concise final answer.
 
 Constraints:
-- Do not use shell strings, scripts, pipelines, env, stdin, git, cargo, or any command except the two exact rg argv values above.
+- Do not use scripts, pipelines, env, stdin, git, cargo, or any command except the two exact rg command values above.
 - Do not modify any file except `src/lib.rs` through `{patch_tool}`.
 - The final file must equal:
 

@@ -764,6 +764,89 @@ pub(crate) fn shell_process_input(intent: &ProcessActionIntent) -> Option<ShellP
     shell_process_input_from_argv(intent.argv())
 }
 
+/// Converts one model-facing shell command into the platform process argv
+/// consumed by runtime policy and process runners.
+pub(crate) fn shell_command_argv(command: &str) -> Vec<String> {
+    #[cfg(windows)]
+    {
+        vec![
+            "powershell".to_owned(),
+            "-NoProfile".to_owned(),
+            "-Command".to_owned(),
+            command.to_owned(),
+        ]
+    }
+
+    #[cfg(not(windows))]
+    {
+        vec!["bash".to_owned(), "-lc".to_owned(), command.to_owned()]
+    }
+}
+
+/// Returns the command script represented by a platform shell argv wrapper.
+pub(crate) fn shell_command_from_argv(argv: &[String]) -> Option<&str> {
+    #[cfg(windows)]
+    {
+        match argv {
+            [shell, no_profile, flag, command]
+                if shell == "powershell" && no_profile == "-NoProfile" && flag == "-Command" =>
+            {
+                Some(command)
+            }
+            _ => None,
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        match argv {
+            [shell, flag, command] if shell == "bash" && matches!(flag.as_str(), "-c" | "-lc") => {
+                Some(command)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Converts an argv vector into one shell command string for a model-facing
+/// command field. Existing platform shell wrappers are unwrapped so their
+/// script is preserved; direct argv items are quoted for the host shell.
+#[must_use]
+pub fn shell_command_for_argv(argv: &[String]) -> String {
+    if let Some(command) = shell_command_from_argv(argv) {
+        return command.to_owned();
+    }
+
+    argv.iter()
+        .map(|argument| shell_quote_argument(argument))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[cfg(not(windows))]
+fn shell_quote_argument(argument: &str) -> String {
+    if !argument.is_empty() && argument.bytes().all(is_safe_shell_word_byte) {
+        return argument.to_owned();
+    }
+    format!("'{}'", argument.replace('\'', "'\\''"))
+}
+
+#[cfg(windows)]
+fn shell_quote_argument(argument: &str) -> String {
+    if !argument.is_empty() && argument.bytes().all(is_safe_shell_word_byte) {
+        return argument.to_owned();
+    }
+    format!("'{}'", argument.replace('\'', "''"))
+}
+
+fn is_safe_shell_word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'_' | b'-' | b'.' | b'/' | b':' | b'=' | b'@' | b'%' | b'+'
+        )
+}
+
 /// Classifies a process intent using validated argv only.
 #[must_use]
 pub fn classify_process_intent(intent: &ProcessActionIntent) -> ProcessIntentClass {
@@ -872,21 +955,47 @@ fn is_read_only_plain_shell_process_argv(argv: &[String]) -> bool {
 }
 
 fn shell_process_input_from_argv(argv: &[String]) -> Option<ShellProcessInput<'_>> {
-    let [shell, flag, script] = argv else {
-        return None;
-    };
-    if !is_supported_plain_shell_token(shell) || !matches!(flag.as_str(), "-c" | "-lc") {
-        return None;
+    #[cfg(windows)]
+    {
+        let [shell, no_profile, flag, script] = argv else {
+            return None;
+        };
+        if !is_supported_plain_shell_token(shell)
+            || no_profile != "-NoProfile"
+            || flag != "-Command"
+        {
+            return None;
+        }
+        Some(ShellProcessInput {
+            shell,
+            flag,
+            script,
+        })
     }
 
-    Some(ShellProcessInput {
-        shell,
-        flag,
-        script,
-    })
+    #[cfg(not(windows))]
+    {
+        let [shell, flag, script] = argv else {
+            return None;
+        };
+        if !is_supported_plain_shell_token(shell) || !matches!(flag.as_str(), "-c" | "-lc") {
+            return None;
+        }
+        Some(ShellProcessInput {
+            shell,
+            flag,
+            script,
+        })
+    }
 }
 
 fn is_supported_plain_shell_token(shell: &str) -> bool {
+    #[cfg(windows)]
+    {
+        matches!(executable_name(shell).as_str(), "powershell" | "pwsh")
+    }
+
+    #[cfg(not(windows))]
     matches!(shell, "bash" | "sh" | "zsh")
 }
 
@@ -1230,21 +1339,47 @@ fn shell_script_contains_forbidden_process(script: &str) -> bool {
 }
 
 fn shell_like_process_input_from_argv(argv: &[String]) -> Option<ShellProcessInput<'_>> {
-    let [shell, flag, script] = argv else {
-        return None;
-    };
-    if !is_supported_shell_executable_name(shell) || !matches!(flag.as_str(), "-c" | "-lc") {
-        return None;
+    #[cfg(windows)]
+    {
+        let [shell, no_profile, flag, script] = argv else {
+            return None;
+        };
+        if !is_supported_shell_executable_name(shell)
+            || no_profile != "-NoProfile"
+            || flag != "-Command"
+        {
+            return None;
+        }
+        Some(ShellProcessInput {
+            shell,
+            flag,
+            script,
+        })
     }
 
-    Some(ShellProcessInput {
-        shell,
-        flag,
-        script,
-    })
+    #[cfg(not(windows))]
+    {
+        let [shell, flag, script] = argv else {
+            return None;
+        };
+        if !is_supported_shell_executable_name(shell) || !matches!(flag.as_str(), "-c" | "-lc") {
+            return None;
+        }
+        Some(ShellProcessInput {
+            shell,
+            flag,
+            script,
+        })
+    }
 }
 
 fn is_supported_shell_executable_name(shell: &str) -> bool {
+    #[cfg(windows)]
+    {
+        matches!(executable_name(shell).as_str(), "powershell" | "pwsh")
+    }
+
+    #[cfg(not(windows))]
     matches!(executable_name(shell).as_str(), "bash" | "sh" | "zsh")
 }
 
@@ -1305,7 +1440,17 @@ fn executable_token_is(argument: &str, expected: &str) -> bool {
     argument == expected
 }
 
-const FORBIDDEN_PROCESS_EXECUTABLES: &[&str] = &["cmd", "powershell", "pwsh", "rm", "su", "sudo"];
+const FORBIDDEN_PROCESS_EXECUTABLES: &[&str] = &[
+    "bash",
+    "cmd",
+    "powershell",
+    "pwsh",
+    "rm",
+    "sh",
+    "su",
+    "sudo",
+    "zsh",
+];
 
 const FORBIDDEN_GIT_SUBCOMMANDS: &[&str] = &[
     "add",

@@ -92,8 +92,8 @@ impl WorkspaceCodingLoopProfile {
 
     /// Includes read-only process execution lanes.
     ///
-    /// This registers the process tool for direct read-only argv and validated
-    /// read-only shell wrappers only. It does not admit local workspace effects.
+    /// This registers the process tool for shell commands that fit the
+    /// read-only process policy. It does not admit local workspace effects.
     #[must_use]
     pub fn with_read_only_process_runner(mut self, runner: Arc<dyn ProcessRunner>) -> Self {
         self.process_runner = Some(WorkspaceProcessRunner::ReadOnly(runner));
@@ -102,8 +102,8 @@ impl WorkspaceCodingLoopProfile {
 
     /// Includes process execution lanes for the declared CLI bubblewrap profile.
     ///
-    /// This covers direct read-only argv, validated read-only shell wrappers,
-    /// and accepted local workspace effects under the injected runner.
+    /// This covers read-only shell commands, and accepted local workspace
+    /// effects under the injected runner.
     #[must_use]
     pub fn with_cli_bwrap_process_runner(
         mut self,
@@ -187,7 +187,7 @@ impl WorkspaceCodingLoopProfile {
             builder = builder
                 .register_tool(process_command_tool(
                     ToolName::new(CODING_LOOP_PROCESS_TOOL).expect("static tool name is valid"),
-                    "Run exact argv through Merry process policy for workspace inspection and verification. Provide argv as the executable and arguments array, not a shell command string; cwd is an optional workspace-relative directory. The runtime validates non-empty argv items, argv count and item byte limits, cwd normalization, and the active process permission profile. A failed action may indicate unavailable network, filesystem, or host-integration access (including its required environment); after observing the failure, request the corresponding minimum capability for the exact same action before retrying. Linux Unix sockets can be requested as exact filesystem paths when no named integration applies.",
+                    "Run one shell command through Merry process policy for workspace inspection and verification. Provide command as one JSON string, with cwd set to null or a workspace-relative directory such as \".\"; do not add a bash field or pass argv. The runtime validates command and cwd byte/control-character limits and the active process permission profile. A failed action may indicate unavailable network, filesystem, or host-integration access (including its required environment); after observing the failure, request the corresponding minimum capability for the exact same action before retrying. Linux Unix sockets can be requested as exact filesystem paths when no named integration applies.",
                 )?)
                 .register_tool(request_permissions_tool()?);
         }

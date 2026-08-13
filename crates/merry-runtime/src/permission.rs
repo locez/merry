@@ -6,10 +6,9 @@
 //! first process consumer, executes the exact action after approval.
 
 use crate::{
-    MAX_PROCESS_ARG_BYTES, MAX_PROCESS_ARGV_ITEMS, MAX_PROCESS_CWD_BYTES, PathAccess,
-    ProcessActionIntent, ProcessEnvPolicy, RegisteredTool, ToolActionKind, ToolExecutionContext,
-    ToolExecutionError, ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture,
-    model_config::ModelProviderConfig,
+    MAX_PROCESS_ARG_BYTES, MAX_PROCESS_CWD_BYTES, PathAccess, ProcessActionIntent,
+    ProcessEnvPolicy, RegisteredTool, ToolActionKind, ToolExecutionContext, ToolExecutionError,
+    ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture, model_config::ModelProviderConfig,
 };
 use futures_util::StreamExt;
 use merry_core::{CoreError, ErrorInfo, PendingToolCall, ToolInputSchema, ToolName, ToolSpec};
@@ -1149,20 +1148,14 @@ fn request_permissions_input_schema() -> Result<ToolInputSchema, PermissionAdmis
                         "enum": ["process"],
                         "description": "Kind of exact action to run if the request is approved."
                     },
-                    "argv": {
-                        "type": "array",
-                        "items": {
-                            "type": "string",
-                            "minLength": 1,
-                            "maxLength": MAX_PROCESS_ARG_BYTES,
-                            "description": "One non-empty executable or argument string. Newline and tab are allowed; other control characters are rejected."
-                        },
-                        "minItems": 1,
-                        "maxItems": MAX_PROCESS_ARGV_ITEMS,
-                        "description": "Exact argv to run if approved."
+                    "command": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": MAX_PROCESS_ARG_BYTES,
+                        "description": "Exact shell command to run if approved. Newline and tab are allowed; other control characters are rejected. JSON strings must escape embedded control characters."
                     },
                     "cwd": {
-                        "description": "Optional workspace-relative working directory for process actions. For the workspace root, omit cwd or use \".\"; null is also treated as omitted, and an empty string is rejected by the provider contract.",
+                        "description": "Workspace-relative working directory for process actions. Use \".\" or null for the workspace root; an empty string is rejected by the provider contract.",
                         "anyOf": [
                             { "type": "null" },
                             {
@@ -1173,7 +1166,7 @@ fn request_permissions_input_schema() -> Result<ToolInputSchema, PermissionAdmis
                         ]
                     }
                 },
-                "required": ["kind", "argv"]
+                "required": ["kind", "command", "cwd"]
             }
         },
         "required": ["requested", "for_action"]
@@ -1196,7 +1189,7 @@ pub(crate) fn permission_invalid_arguments_outcome(
         },
         "guidance": {
             "kind": "permission_request_invalid_arguments",
-            "message": "Fix the request_permissions arguments before retrying. Include requested and for_action, set for_action.kind to \"process\", provide the exact argv array, omit cwd or use a workspace-relative cwd such as \".\", and request only minimum network/path/host-integration capability. An unmodeled Linux Unix socket may be requested as its exact filesystem path.",
+            "message": "Fix the request_permissions arguments before retrying. Include requested and for_action, set for_action.kind to \"process\", provide the exact command string and cwd, and request only minimum network/path/host-integration capability. An unmodeled Linux Unix socket may be requested as its exact filesystem path.",
         }
     });
     ToolExecutionOutcome::failed_json(
@@ -1215,7 +1208,7 @@ fn permissioned_action(
         });
     };
     for key in object.keys() {
-        if key != "kind" && key != "argv" && key != "cwd" {
+        if key != "kind" && key != "command" && key != "cwd" {
             return Err(PermissionAdmissionError::InvalidArguments {
                 message: format!("unsupported for_action field {key:?}"),
             });
@@ -1229,7 +1222,8 @@ fn permissioned_action(
     };
     match kind.as_str() {
         "process" => {
-            let argv = argv_from_arguments(object.get("argv"))?;
+            let command = command_from_arguments(object.get("command"))?;
+            let argv = crate::process::shell_command_argv(&command);
             let cwd = cwd_from_arguments(object.get("cwd"))?;
             let intent = ProcessActionIntent::new(
                 argv,
@@ -1362,24 +1356,18 @@ fn parse_path_access(value: &str) -> Result<PathAccess, PermissionAdmissionError
     }
 }
 
-fn argv_from_arguments(value: Option<&Value>) -> Result<Vec<String>, PermissionAdmissionError> {
-    let Some(Value::Array(values)) = value else {
+fn command_from_arguments(value: Option<&Value>) -> Result<String, PermissionAdmissionError> {
+    let Some(Value::String(command)) = value else {
         return Err(PermissionAdmissionError::InvalidArguments {
-            message: "argv must be an array of strings".to_owned(),
+            message: "command must be a non-empty string".to_owned(),
         });
     };
-
-    values
-        .iter()
-        .enumerate()
-        .map(|(index, value)| {
-            value.as_str().map(str::to_owned).ok_or_else(|| {
-                PermissionAdmissionError::InvalidArguments {
-                    message: format!("argv[{index}] must be a string"),
-                }
-            })
-        })
-        .collect()
+    if command.is_empty() {
+        return Err(PermissionAdmissionError::InvalidArguments {
+            message: "command must not be empty".to_owned(),
+        });
+    }
+    Ok(command.clone())
 }
 
 fn cwd_from_arguments(value: Option<&Value>) -> Result<Option<String>, PermissionAdmissionError> {
@@ -1645,7 +1633,7 @@ fn permissioned_action_json(action: &PermissionedAction) -> Value {
     match action {
         PermissionedAction::Process(intent) => json!({
             "kind": "process",
-            "argv": intent.argv(),
+            "command": crate::shell_command_for_argv(intent.argv()),
             "cwd": intent.cwd(),
             "summary": intent.summary(),
         }),
@@ -1794,7 +1782,7 @@ mod tests {
             &call(json!({
                 "reason": "Need to fetch dependency metadata",
                 "requested": { "network": true },
-                "for_action": { "kind": "process", "argv": ["cargo", "test"], "cwd": "." }
+                "for_action": { "kind": "process", "command": "cargo test", "cwd": "." }
             })),
             Vec::new(),
         )
@@ -1806,7 +1794,7 @@ mod tests {
             [RequestedCapability::Network]
         ));
         let PermissionedAction::Process(intent) = request.action();
-        assert_eq!(intent.argv(), ["cargo", "test"]);
+        assert_eq!(intent.argv(), ["bash", "-lc", "cargo test"]);
         assert_eq!(intent.cwd(), Some("."));
     }
 
@@ -1817,7 +1805,7 @@ mod tests {
                 "requested": {
                     "host_integrations": ["dbus", "ssh-agent"]
                 },
-                "for_action": { "kind": "process", "argv": ["gh", "auth", "status"] }
+                "for_action": { "kind": "process", "command": "gh auth status", "cwd": null }
             })),
             Vec::new(),
         )
@@ -1846,7 +1834,7 @@ mod tests {
                     "paths": [{ "path": ".config/gh", "access": "ro" }],
                     "host_integrations": ["dbus"]
                 },
-                "for_action": { "kind": "process", "argv": ["gh", "issue", "list"] }
+                "for_action": { "kind": "process", "command": "gh issue list", "cwd": null }
             })),
             Vec::new(),
         )
@@ -1875,7 +1863,7 @@ mod tests {
             schema["properties"]["for_action"]["properties"]["cwd"]["description"]
                 .as_str()
                 .expect("cwd description should be text")
-                .contains("null is also treated as omitted")
+                .contains("Use \".\" or null")
         );
         let cwd_string_schema = schema["properties"]["for_action"]["properties"]["cwd"]["anyOf"]
             .as_array()
@@ -1908,7 +1896,7 @@ mod tests {
                 "properties",
                 "for_action",
                 "properties",
-                "argv",
+                "command",
                 "description",
             ]
             .as_slice(),
@@ -1932,20 +1920,21 @@ mod tests {
         let valid = json!({
             "reason": "Need dependency metadata",
             "requested": { "paths": [{ "path": "/tmp/cache", "access": "ro" }] },
-            "for_action": {
-                "kind": "process",
-                "argv": ["cargo", "metadata"],
-                "cwd": "."
-            }
+                "for_action": {
+                    "kind": "process",
+                    "command": "cargo metadata",
+                    "cwd": "."
+                }
         });
         assert!(validator.is_valid(&valid));
 
         let host_integration_request = json!({
             "requested": { "host_integrations": ["dbus"] },
-            "for_action": {
-                "kind": "process",
-                "argv": ["gh", "auth", "status"]
-            }
+                "for_action": {
+                    "kind": "process",
+                    "command": "gh auth status",
+                    "cwd": null
+                }
         });
         assert!(validator.is_valid(&host_integration_request));
 
@@ -1962,18 +1951,10 @@ mod tests {
         oversized_reason["reason"] = json!("x".repeat(MAX_PERMISSION_REASON_BYTES + 1));
         assert!(!validator.is_valid(&oversized_reason));
 
-        let mut oversized_argv = valid.clone();
-        oversized_argv["for_action"]["argv"] = json!(
-            (0..=crate::MAX_PROCESS_ARGV_ITEMS)
-                .map(|_| "x")
-                .collect::<Vec<_>>()
-        );
-        assert!(!validator.is_valid(&oversized_argv));
-
-        let mut oversized_argument = valid.clone();
-        oversized_argument["for_action"]["argv"] =
-            json!(["x".repeat(crate::MAX_PROCESS_ARG_BYTES + 1)]);
-        assert!(!validator.is_valid(&oversized_argument));
+        let mut oversized_command = valid.clone();
+        oversized_command["for_action"]["command"] =
+            json!("x".repeat(crate::MAX_PROCESS_ARG_BYTES + 1));
+        assert!(!validator.is_valid(&oversized_command));
     }
 
     #[test]
@@ -1982,14 +1963,14 @@ mod tests {
             &call(json!({
                 "reason": "Need DNS lookup",
                 "requested": { "network": true },
-                "for_action": { "kind": "process", "argv": ["ping", "-c", "1", "baidu.com"], "cwd": "" }
+                "for_action": { "kind": "process", "command": "ping -c 1 baidu.com", "cwd": "" }
             })),
             Vec::new(),
         )
         .expect("request should parse");
 
         let PermissionedAction::Process(intent) = request.action();
-        assert_eq!(intent.argv(), ["ping", "-c", "1", "baidu.com"]);
+        assert_eq!(intent.argv(), ["bash", "-lc", "ping -c 1 baidu.com"]);
         assert_eq!(intent.cwd(), None);
     }
 
@@ -1998,7 +1979,7 @@ mod tests {
         let error = permission_request_from_call(
             &call(json!({
                 "requested": {},
-                "for_action": { "kind": "process", "argv": ["cargo", "test"] }
+                "for_action": { "kind": "process", "command": "cargo test", "cwd": null }
             })),
             Vec::new(),
         )
@@ -2017,7 +1998,7 @@ mod tests {
                         { "path": "deps/./", "access": "ro" }
                     ]
                 },
-                "for_action": { "kind": "process", "argv": ["cargo", "metadata"] }
+                "for_action": { "kind": "process", "command": "cargo metadata", "cwd": null }
             })),
             Vec::new(),
         )
@@ -2035,7 +2016,7 @@ mod tests {
         let traversal = permission_request_from_call(
             &call(json!({
                 "requested": { "paths": [{ "path": "../secrets", "access": "ro" }] },
-                "for_action": { "kind": "process", "argv": ["cat", "secrets"] }
+                "for_action": { "kind": "process", "command": "cat secrets", "cwd": null }
             })),
             Vec::new(),
         )
@@ -2050,7 +2031,7 @@ mod tests {
                         { "path": "./deps", "access": "rw" }
                     ]
                 },
-                "for_action": { "kind": "process", "argv": ["cargo", "metadata"] }
+                "for_action": { "kind": "process", "command": "cargo metadata", "cwd": null }
             })),
             Vec::new(),
         )
@@ -2096,7 +2077,7 @@ mod tests {
         let request = permission_request_from_call(
             &call(json!({
                 "requested": { "network": true },
-                "for_action": { "kind": "process", "argv": ["cargo", "test"] }
+                "for_action": { "kind": "process", "command": "cargo test", "cwd": null }
             })),
             Vec::new(),
         )
@@ -2151,7 +2132,7 @@ mod tests {
         let request = permission_request_from_call(
             &call(json!({
                 "requested": { "network": true },
-                "for_action": { "kind": "process", "argv": ["cargo", "test"] }
+                "for_action": { "kind": "process", "command": "cargo test", "cwd": null }
             })),
             Vec::new(),
         )
@@ -2192,7 +2173,7 @@ mod tests {
         let request = permission_request_from_call(
             &call(json!({
                 "requested": { "network": true },
-                "for_action": { "kind": "process", "argv": ["cargo", "test"] }
+                "for_action": { "kind": "process", "command": "cargo test", "cwd": null }
             })),
             Vec::new(),
         )

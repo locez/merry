@@ -1,15 +1,15 @@
 //! Runtime-owned process command tool registration helper.
 //!
-//! This module exposes a small provider-neutral tool that turns model supplied
-//! `argv` into [`crate::ProcessActionIntent`] proposal evidence. It never
-//! spawns a process itself; execution remains owned by the runtime process
-//! policy and injected [`crate::ProcessRunner`] lanes.
+//! This module exposes a small provider-neutral tool that turns a model
+//! supplied shell command into [`crate::ProcessActionIntent`] proposal
+//! evidence. It never spawns a process itself; execution remains owned by the
+//! runtime process policy and injected [`crate::ProcessRunner`] lanes.
 
 use crate::{
-    ActionProposal, ActionProposalEvidence, MAX_PROCESS_ARG_BYTES, MAX_PROCESS_ARGV_ITEMS,
-    MAX_PROCESS_CWD_BYTES, ProcessActionIntent, ProcessEnvPolicy, RegisteredTool, ToolActionKind,
-    ToolActionPreflight, ToolActionProposalFuture, ToolExecutionContext, ToolExecutionError,
-    ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture,
+    ActionProposal, ActionProposalEvidence, MAX_PROCESS_ARG_BYTES, MAX_PROCESS_CWD_BYTES,
+    ProcessActionIntent, ProcessEnvPolicy, RegisteredTool, ToolActionKind, ToolActionPreflight,
+    ToolActionProposalFuture, ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome,
+    ToolExecutor, ToolExecutorFuture, process::shell_command_argv,
 };
 use merry_core::{CoreError, ErrorInfo, PendingToolCall, ToolInputSchema, ToolName, ToolSpec};
 use serde_json::{Value, json};
@@ -41,8 +41,8 @@ pub enum ProcessCommandToolError {
 
 /// Creates a registered process command tool for runtime agent loops.
 ///
-/// The provider-visible tool accepts a JSON object with an `argv` string array
-/// and optional workspace-relative `cwd`. The returned registered tool is a
+/// The provider-visible tool accepts a JSON object with a shell `command` and
+/// nullable workspace-relative `cwd`. The returned registered tool is a
 /// `CommandExec` action with proposal evidence enabled, so admitted execution
 /// goes through runtime process policy and an injected [`crate::ProcessRunner`].
 pub fn process_command_tool(
@@ -64,20 +64,14 @@ fn process_command_tool_input_schema() -> Result<ToolInputSchema, ProcessCommand
         "type": "object",
         "additionalProperties": false,
         "properties": {
-            "argv": {
-                "type": "array",
-                "items": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": MAX_PROCESS_ARG_BYTES,
-                    "description": "One non-empty executable or argument string. Newline and tab are allowed; other control characters are rejected."
-                },
-                "minItems": 1,
-                "maxItems": MAX_PROCESS_ARGV_ITEMS,
-                "description": "Exact executable and argument strings to run in order. Do not pass a shell command string unless the first argv item is an explicitly requested shell."
+            "command": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": MAX_PROCESS_ARG_BYTES,
+                "description": "Shell command to execute. Newline and tab are allowed; other control characters are rejected. JSON strings must escape embedded control characters."
             },
             "cwd": {
-                "description": "Optional workspace-relative working directory. For the workspace root, omit cwd or use \".\"; null is also treated as omitted, and an empty string is rejected by the provider contract.",
+                "description": "Workspace-relative working directory. Use \".\" or null for the workspace root; an empty string is rejected by the provider contract.",
                 "anyOf": [
                     { "type": "null" },
                     {
@@ -88,7 +82,7 @@ fn process_command_tool_input_schema() -> Result<ToolInputSchema, ProcessCommand
                 ]
             }
         },
-        "required": ["argv"]
+        "required": ["command", "cwd"]
     }))
     .map_err(|source| ProcessCommandToolError::InputSchema { source })
 }
@@ -128,10 +122,7 @@ impl ToolExecutor for ProcessCommandToolExecutor {
                 ToolActionKind::CommandExec,
                 "process command",
                 cwd_label,
-                format!(
-                    "Run process with {} argv item(s) using an empty environment",
-                    intent.argv().len()
-                ),
+                "Run the validated shell command through the platform process wrapper using an empty environment".to_owned(),
                 ActionProposalEvidence::ProcessAction(intent),
             )
             .map_err(|error| ToolExecutionError::infrastructure(error.to_string()))?;
@@ -161,14 +152,15 @@ fn process_intent_from_call(
 ) -> Result<ProcessActionIntent, InvalidProcessCommandArguments> {
     let arguments = call.arguments().as_object();
     for key in arguments.keys() {
-        if key != "argv" && key != "cwd" {
+        if key != "command" && key != "cwd" {
             return Err(InvalidProcessCommandArguments::new(format!(
                 "unsupported argument field {key:?}"
             )));
         }
     }
 
-    let argv = argv_from_arguments(arguments.get("argv"))?;
+    let command = command_from_arguments(arguments.get("command"))?;
+    let argv = shell_command_argv(&command);
     let cwd = cwd_from_arguments(arguments.get("cwd"))?;
 
     ProcessActionIntent::new(
@@ -182,24 +174,18 @@ fn process_intent_from_call(
     .map_err(|error| InvalidProcessCommandArguments::new(error.to_string()))
 }
 
-fn argv_from_arguments(
-    value: Option<&Value>,
-) -> Result<Vec<String>, InvalidProcessCommandArguments> {
-    let Some(Value::Array(values)) = value else {
+fn command_from_arguments(value: Option<&Value>) -> Result<String, InvalidProcessCommandArguments> {
+    let Some(Value::String(command)) = value else {
         return Err(InvalidProcessCommandArguments::new(
-            "argv must be an array of strings",
+            "command must be a non-empty string",
         ));
     };
-
-    values
-        .iter()
-        .enumerate()
-        .map(|(index, value)| {
-            value.as_str().map(str::to_owned).ok_or_else(|| {
-                InvalidProcessCommandArguments::new(format!("argv[{index}] must be a string"))
-            })
-        })
-        .collect()
+    if command.is_empty() {
+        return Err(InvalidProcessCommandArguments::new(
+            "command must not be empty",
+        ));
+    }
+    Ok(command.clone())
 }
 
 fn cwd_from_arguments(
@@ -246,12 +232,12 @@ fn invalid_arguments_outcome(
             "message": error.message(),
         },
         "recovery": {
-            "argv_contract": "Provide argv as a JSON array of non-empty strings. Newline and tab are allowed inside argv items; other control characters are rejected.",
+            "command_contract": "Provide command as one non-empty shell command string. Newline and tab are allowed; other control characters are rejected. Escape control characters for the surrounding JSON string.",
             "cwd_contract": "cwd, when provided, must be non-empty, workspace-relative, and must not contain control characters. For the workspace root, omit cwd or use \".\".",
         },
         "guidance": {
             "kind": "invalid_process_arguments",
-            "message": "Fix the process tool arguments before retrying. Use argv as an exact JSON string array, omit cwd or use a workspace-relative cwd such as \".\", and do not pass an empty cwd string.",
+            "message": "Fix the process tool arguments before retrying. Use command as one JSON string, and set cwd to null or a workspace-relative directory such as \".\".",
         }
     });
     ToolExecutionOutcome::failed_json(
@@ -267,7 +253,10 @@ mod tests {
         PROCESS_COMMAND_INVALID_ARGUMENTS_CODE, ProcessCommandToolExecutor,
         process_intent_from_call,
     };
-    use crate::{ActionProposalEvidence, ToolActionPreflight, ToolExecutionContext, ToolExecutor};
+    use crate::{
+        ActionProposalEvidence, ToolActionPreflight, ToolExecutionContext, ToolExecutor,
+        process::shell_command_argv,
+    };
     use merry_core::{PendingToolCall, ToolCallArguments, ToolCallId, ToolName};
     use serde_json::{Value, json};
 
@@ -280,21 +269,21 @@ mod tests {
     }
 
     #[test]
-    fn process_intent_from_call_parses_argv_and_cwd() {
+    fn process_intent_from_call_parses_command_and_cwd() {
         let call = pending_call(json!({
-            "argv": ["rustc", "--version"],
+            "command": "rustc --version",
             "cwd": "crates/merry-runtime"
         }));
 
         let intent = process_intent_from_call(&call).expect("process intent should parse");
 
-        assert_eq!(intent.argv(), ["rustc", "--version"]);
+        assert_eq!(intent.argv(), shell_command_argv("rustc --version"));
         assert_eq!(intent.cwd(), Some("crates/merry-runtime"));
         assert!(intent.stdin_text().is_none());
     }
 
     #[test]
-    fn process_command_tool_schema_rejects_empty_cwd() {
+    fn process_command_tool_schema_is_provider_compatible() {
         let tool = super::process_command_tool(
             ToolName::new("run_process").expect("valid tool name"),
             "Run a process.",
@@ -308,7 +297,7 @@ mod tests {
             schema["properties"]["cwd"]["description"]
                 .as_str()
                 .expect("cwd description should be text")
-                .contains("null is also treated as omitted")
+                .contains("Use \".\" or null")
         );
         let cwd_string_schema = schema["properties"]["cwd"]["anyOf"]
             .as_array()
@@ -319,39 +308,35 @@ mod tests {
         assert_eq!(cwd_string_schema["minLength"], 1);
         assert_eq!(cwd_string_schema["maxLength"], crate::MAX_PROCESS_CWD_BYTES);
         assert!(
-            !schema["properties"]["argv"]["description"]
+            !schema["properties"]["command"]["description"]
                 .as_str()
                 .unwrap_or_default()
                 .is_empty()
         );
-        assert_eq!(schema["properties"]["argv"]["minItems"], 1);
+        assert_eq!(schema["properties"]["command"]["minLength"], 1);
         assert_eq!(
-            schema["properties"]["argv"]["maxItems"],
-            crate::MAX_PROCESS_ARGV_ITEMS
-        );
-        assert_eq!(schema["properties"]["argv"]["items"]["minLength"], 1);
-        assert_eq!(
-            schema["properties"]["argv"]["items"]["maxLength"],
+            schema["properties"]["command"]["maxLength"],
             crate::MAX_PROCESS_ARG_BYTES
         );
+        assert_eq!(schema["required"], json!(["command", "cwd"]));
     }
 
     #[test]
     fn process_intent_from_call_treats_empty_cwd_as_workspace_root() {
         let call = pending_call(json!({
-            "argv": ["ping", "-c", "1", "baidu.com"],
+            "command": "ping -c 1 baidu.com",
             "cwd": ""
         }));
 
         let intent = process_intent_from_call(&call).expect("process intent should parse");
 
-        assert_eq!(intent.argv(), ["ping", "-c", "1", "baidu.com"]);
+        assert_eq!(intent.argv(), shell_command_argv("ping -c 1 baidu.com"));
         assert_eq!(intent.cwd(), None);
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn malformed_arguments_fail_before_execution() {
-        let call = pending_call(json!({ "argv": "rustc --version" }));
+        let call = pending_call(json!({ "command": 42, "cwd": null }));
         let proposal = ProcessCommandToolExecutor
             .propose(call.clone(), ToolExecutionContext::default())
             .await
@@ -378,20 +363,20 @@ mod tests {
         .expect("failed process argument outcome should parse as JSON");
         assert_eq!(
             payload["error"]["message"],
-            "argv must be an array of strings"
+            "command must be a non-empty string"
         );
         assert_eq!(payload["guidance"]["kind"], "invalid_process_arguments");
         assert!(
             payload["guidance"]["message"]
                 .as_str()
                 .expect("guidance should be text")
-                .contains("omit cwd or use a workspace-relative cwd")
+                .contains("set cwd to null or a workspace-relative directory")
         );
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn proposal_carries_process_action_evidence() {
-        let call = pending_call(json!({ "argv": ["rustc", "--version"] }));
+        let call = pending_call(json!({ "command": "rustc --version", "cwd": null }));
         let preflight = ProcessCommandToolExecutor
             .propose(call, ToolExecutionContext::default())
             .await
@@ -403,13 +388,13 @@ mod tests {
         let ActionProposalEvidence::ProcessAction(intent) = proposal.evidence() else {
             panic!("proposal should carry process action evidence");
         };
-        assert_eq!(intent.argv(), ["rustc", "--version"]);
+        assert_eq!(intent.argv(), shell_command_argv("rustc --version"));
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn proposal_accepts_multiline_shell_argv_for_policy_classification() {
+    async fn proposal_accepts_multiline_command_for_policy_classification() {
         let call = pending_call(json!({
-            "argv": ["bash", "-lc", "cargo check -p merry-runtime\ncargo test -p merry-runtime"],
+            "command": "cargo check -p merry-runtime\ncargo test -p merry-runtime",
             "cwd": "."
         }));
         let preflight = ProcessCommandToolExecutor
@@ -424,8 +409,8 @@ mod tests {
             panic!("proposal should carry process action evidence");
         };
         assert_eq!(
-            intent.argv()[2],
-            "cargo check -p merry-runtime\ncargo test -p merry-runtime"
+            intent.argv(),
+            shell_command_argv("cargo check -p merry-runtime\ncargo test -p merry-runtime")
         );
     }
 }

@@ -327,16 +327,15 @@ pub(crate) fn coding_loop_process_call(
 ) -> Result<ModelEvent, CliError> {
     let mut arguments = serde_json::Map::new();
     arguments.insert(
-        "argv".to_owned(),
-        serde_json::Value::Array(
-            argv.iter()
-                .map(|argument| serde_json::Value::String((*argument).to_owned()))
-                .collect(),
-        ),
+        "command".to_owned(),
+        serde_json::Value::String(argv.join(" ")),
     );
-    if let Some(cwd) = cwd {
-        arguments.insert("cwd".to_owned(), serde_json::Value::String(cwd.to_owned()));
-    }
+    arguments.insert(
+        "cwd".to_owned(),
+        cwd.map_or(serde_json::Value::Null, |cwd| {
+            serde_json::Value::String(cwd.to_owned())
+        }),
+    );
     coding_loop_tool_call(call_id, CODING_LOOP_PROCESS_TOOL, arguments)
 }
 
@@ -351,14 +350,10 @@ pub(crate) fn permission_network_smoke_request_call() -> Result<ModelEvent, CliE
         serde_json::Value::String("process".to_owned()),
     );
     for_action.insert(
-        "argv".to_owned(),
-        serde_json::Value::Array(
-            PERMISSION_NETWORK_SMOKE_ARGV
-                .iter()
-                .map(|argument| serde_json::Value::String((*argument).to_owned()))
-                .collect(),
-        ),
+        "command".to_owned(),
+        serde_json::Value::String(PERMISSION_NETWORK_SMOKE_ARGV.join(" ")),
     );
+    for_action.insert("cwd".to_owned(), serde_json::Value::Null);
 
     let mut arguments = serde_json::Map::new();
     arguments.insert(

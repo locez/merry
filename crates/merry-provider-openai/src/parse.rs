@@ -365,11 +365,12 @@ fn parse_tool_call(
     let call_id = required_field(call_id, "function call id")?;
     let name = required_field(name, "function call name")?;
     let arguments = required_field(arguments, "function call arguments")?;
-    let arguments: Value = serde_json::from_str(&arguments).map_err(|error| {
-        OpenAiProviderError::invalid_tool_call(format!(
-            "function call arguments must be valid JSON: {error}"
-        ))
-    })?;
+    let arguments: Value =
+        crate::tool_arguments::parse_tool_arguments(&arguments).map_err(|error| {
+            OpenAiProviderError::invalid_tool_call(format!(
+                "function call arguments must be valid JSON: {error}"
+            ))
+        })?;
     let arguments = ToolArguments::try_from(arguments).map_err(|error| {
         OpenAiProviderError::invalid_tool_call(format!(
             "function call arguments must be a JSON object: {error}"

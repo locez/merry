@@ -146,16 +146,10 @@ pub(super) fn add_patch(path: &str, lines: &[&str]) -> String {
     format!("*** Begin Workspace Patch\n*** Add File: {path}\n{additions}\n*** End Workspace Patch")
 }
 
-pub(super) fn pending_process_call(call_id: &str, argv: &[&str]) -> ModelEvent {
+pub(super) fn pending_process_call(call_id: &str, command: &str) -> ModelEvent {
     let mut arguments = Map::new();
-    arguments.insert(
-        "argv".to_owned(),
-        Value::Array(
-            argv.iter()
-                .map(|argument| Value::String((*argument).to_owned()))
-                .collect(),
-        ),
-    );
+    arguments.insert("command".to_owned(), Value::String(command.to_owned()));
+    arguments.insert("cwd".to_owned(), Value::Null);
     pending_workspace_call(call_id, "run_process", arguments)
 }
 

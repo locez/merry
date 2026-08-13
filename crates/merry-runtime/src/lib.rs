@@ -132,6 +132,7 @@ pub use process::{
     ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput, ProcessRunnerResult,
     StaticPermissionedProcessRunnerFactory, UnrestrictedPermissionedProcessRunnerFactory,
     is_low_risk_process_action_intent, is_read_only_shell_process_action_intent,
+    shell_command_for_argv,
 };
 pub use process_runner::{
     BwrapPermissionedProcessRunnerFactory, BwrapProcessEnvironment, BwrapProcessRunner,

@@ -75,7 +75,7 @@ async fn workspace_coding_loop_profile_executes_read_only_shell_lane() {
     let temp = TempWorkspace::new("coding-loop-profile-read-only-shell");
     let provider = ScriptedModelProvider::new(vec![vec![Ok(pending_process_call(
         "call-read-only-shell",
-        &["bash", "-lc", "rg --files"],
+        "rg --files",
     ))]]);
     let runner = Arc::new(ScriptedProcessRunner::new(vec![
         ScriptedProcessResponse::success("src/lib.rs\n"),
@@ -116,7 +116,7 @@ async fn workspace_coding_loop_profile_read_only_process_runner_denies_local_wor
     let temp = TempWorkspace::new("coding-loop-profile-read-only-process-runner");
     let provider = ScriptedModelProvider::new(vec![vec![Ok(pending_process_call(
         "call-local-effect",
-        &["cargo", "test"],
+        "cargo test",
     ))]]);
     let runner = Arc::new(ScriptedProcessRunner::new(Vec::new()));
     let profile =

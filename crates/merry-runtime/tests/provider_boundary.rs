@@ -134,10 +134,7 @@ fn shell_process_tool_call() -> ModelToolCall {
         "call-real-shell",
         "run_process",
         Map::from_iter([
-            (
-                "argv".to_owned(),
-                json!(["bash", "-lc", "echo ProcessRunner | wc -l"]),
-            ),
+            ("command".to_owned(), json!("echo ProcessRunner | wc -l")),
             ("cwd".to_owned(), json!(".")),
         ]),
     )
@@ -2966,7 +2963,7 @@ async fn tokio_process_runner_executes_read_only_shell_wrapper_with_input_artifa
         .register_tool(
             process_command_tool(
                 ToolName::new("run_process").expect("valid tool name"),
-                "Run a local process from argv through runtime policy",
+                "Run a shell command through runtime policy",
             )
             .expect("process command tool should build"),
         )

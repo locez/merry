@@ -127,10 +127,30 @@ fn focus_title_for_text_item(title: &str) -> String {
 }
 
 fn process_command_from_tool_detail(detail: &str) -> Option<String> {
-    let argv = detail.strip_prefix("run_process argv=")?;
-    let argv = argv.split_once(" cwd=").map_or(argv, |(argv, _)| argv);
-    let argv = serde_json::from_str::<Vec<String>>(argv).ok()?;
-    (!argv.is_empty()).then(|| argv.join(" "))
+    if let Some(command) = detail.strip_prefix("run_process command=") {
+        let command = command
+            .split_once(" cwd=")
+            .map_or(command, |(command, _)| command);
+        if let Ok(command) = serde_json::from_str::<String>(command) {
+            return (!command.is_empty()).then_some(command);
+        }
+        return (!command.is_empty()).then(|| command.to_owned());
+    }
+
+    let detail = detail
+        .rsplit_once(" -> ")
+        .filter(|(_, status)| {
+            *status == "failed"
+                || *status == "succeeded"
+                || *status == "cancelled"
+                || status.strip_prefix("exit ").is_some()
+        })
+        .map_or(detail, |(command, _)| command);
+    let (command, cwd) = detail.rsplit_once(" (")?;
+    if !cwd.ends_with(')') {
+        return None;
+    }
+    (!command.is_empty()).then(|| command.to_owned())
 }
 
 fn focus_body_for_expanded_item(title: &str, body: &str) -> FocusPanelBody {
@@ -189,7 +209,7 @@ mod tests {
         let mut state = state();
         state.push_timeline_item(TimelineItem::Expanded {
             title: "Ran cargo test".to_owned(),
-            body: "  stdout: ok".to_owned(),
+            body: "  ok".to_owned(),
         });
         state.push_timeline_item(TimelineItem::Patch {
             changes: vec![PatchChangeView {
@@ -216,8 +236,8 @@ mod tests {
     fn focus_panel_uses_command_output_when_no_patch_exists() {
         let mut state = state();
         state.push_timeline_item(TimelineItem::Expanded {
-            title: "Ran python3 hello_world.py (cwd: .)".to_owned(),
-            body: "  stdout: hello world".to_owned(),
+            title: "Ran python3 hello_world.py (.)".to_owned(),
+            body: "  hello world".to_owned(),
         });
 
         let view = focus_panel_view(&state);
@@ -226,7 +246,7 @@ mod tests {
         assert_eq!(
             view.body,
             FocusPanelBody::CommandOutput {
-                lines: vec!["  stdout: hello world".to_owned()]
+                lines: vec!["  hello world".to_owned()]
             }
         );
     }

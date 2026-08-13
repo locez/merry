@@ -331,9 +331,10 @@ fn process_output_artifact_content(
     permission_review: Option<&PermissionAdmissionReview>,
 ) -> ArtifactContent {
     let shell_input = shell_process_input(intent);
-    let intent_payload = if shell_input.is_some() {
+    let intent_payload = if let Some(shell_input) = shell_input {
         serde_json::json!({
             "summary": intent.summary(),
+            "command": shell_input.script(),
             "cwd": intent.cwd(),
         })
     } else {

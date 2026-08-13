@@ -5,28 +5,28 @@ async fn agent_loop_process_command_invalid_arguments_resolve_failed_and_continu
     let provider = ScriptedModelProvider::new(vec![
         vec![Ok(completed_tool_call_event(
             model_tool_call_with_arguments(
-                "call-bad-process-argv",
+                "call-bad-process-bash-field",
                 "run_process",
-                json!({ "argv": "cargo test -p merry-runtime" }),
+                json!({ "bash": "echo should not be a separate field", "cwd": null }),
             ),
         ))],
-        vec![Ok(completed_text_event("final after bad process argv"))],
+        vec![Ok(completed_text_event("final after bad process field"))],
     ]);
     let runner = RecordingProcessRunner::succeeding("must not run\n");
     let runtime = Runtime::builder(session_id("agent-loop-process-command-invalid-args"))
         .register_tool(
             process_command_tool(
                 ToolName::new("run_process").expect("valid tool name"),
-                "Run a local process from argv through runtime policy",
+                "Run a shell command through runtime policy",
             )
             .expect("process command tool should build"),
         )
         .model_provider(Arc::new(provider.clone()), model_name())
-        .allow_low_risk_process_actions(Arc::new(runner.clone()))
+        .allow_read_only_shell_process_actions(Arc::new(runner.clone()))
         .build()
         .expect("runtime should build");
 
-    let result = run_default_loop(&runtime, "Run process with malformed argv.").await;
+    let result = run_default_loop(&runtime, "Run process with a malformed shell field.").await;
 
     assert_eq!(result.status(), &AgentLoopStatus::Completed);
     assert_eq!(runner.observed_intents(), Vec::<ProcessActionIntent>::new());
@@ -36,13 +36,16 @@ async fn agent_loop_process_command_invalid_arguments_resolve_failed_and_continu
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[1].continuations().len(), 1);
     let continuation = &requests[1].continuations()[0];
-    assert_eq!(continuation.call().id().as_str(), "call-bad-process-argv");
+    assert_eq!(
+        continuation.call().id().as_str(),
+        "call-bad-process-bash-field"
+    );
     assert_eq!(continuation.result().status(), ToolCallResultStatus::Failed);
     assert_eq!(
         continuation
             .result()
             .diagnostic()
-            .expect("invalid argv should include diagnostic")
+            .expect("invalid command should include diagnostic")
             .code(),
         "tool_input_schema_invalid"
     );
@@ -50,9 +53,10 @@ async fn agent_loop_process_command_invalid_arguments_resolve_failed_and_continu
         .result()
         .content()
         .as_json()
-        .expect("invalid argv result should be JSON");
-    let value: Value = serde_json::from_str(content).expect("invalid argv JSON should parse");
+        .expect("invalid command result should be JSON");
+    let value: Value = serde_json::from_str(content).expect("invalid command JSON should parse");
     assert_eq!(value["error"]["code"], "tool_input_schema_invalid");
+    assert!(content.contains("bash"));
     assert!(
         !value["error"]["violations"]
             .as_array()

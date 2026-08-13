@@ -2230,7 +2230,7 @@ async fn agent_loop_process_command_tool_executes_and_continues() {
             model_tool_call_with_arguments(
                 "call-rustc-version",
                 "run_process",
-                json!({ "argv": ["rustc", "--version"] }),
+                json!({ "command": "rustc --version", "cwd": null }),
             ),
         ))],
         vec![Ok(completed_text_event("final after process"))],
@@ -2240,12 +2240,12 @@ async fn agent_loop_process_command_tool_executes_and_continues() {
         .register_tool(
             process_command_tool(
                 ToolName::new("run_process").expect("valid tool name"),
-                "Run a local process from argv through runtime policy",
+                "Run a shell command through runtime policy",
             )
             .expect("process command tool should build"),
         )
         .model_provider(Arc::new(provider.clone()), model_name())
-        .allow_low_risk_process_actions(Arc::new(runner.clone()))
+        .allow_read_only_shell_process_actions(Arc::new(runner.clone()))
         .build()
         .expect("runtime should build");
 
@@ -2271,7 +2271,7 @@ async fn agent_loop_process_command_tool_executes_and_continues() {
     let observed_intents = runner.observed_intents();
     assert_eq!(observed_intents.len(), 1);
     let intent = &observed_intents[0];
-    assert_eq!(intent.argv(), ["rustc", "--version"]);
+    assert_eq!(intent.argv(), ["bash", "-lc", "rustc --version"]);
     assert_eq!(intent.cwd(), None);
     assert_eq!(intent.env_policy(), ProcessEnvPolicy::Empty);
     assert!(intent.stdin_text().is_none());
@@ -2304,7 +2304,10 @@ async fn agent_loop_process_command_tool_executes_and_continues() {
     assert_eq!(value["ok"], true);
     assert_eq!(value["kind"], "process_action");
     assert_eq!(value["status"], json!({ "kind": "exited", "code": 0 }));
-    assert_eq!(value["intent"]["argv"], json!(["rustc", "--version"]));
+    assert_eq!(
+        value["intent"]["argv"],
+        json!(["bash", "-lc", "rustc --version"])
+    );
     assert_eq!(value["intent"]["cwd"], Value::Null);
     assert_eq!(value["stdout"]["text"], "rustc 1.85.0\n");
     assert_eq!(value["stderr"]["text"], "");
@@ -2323,7 +2326,7 @@ async fn agent_loop_traces_loop_steps_tool_process_and_terminal_status() {
             model_tool_call_with_arguments(
                 "call-rustc-version",
                 "run_process",
-                json!({ "argv": ["rustc", "--version"] }),
+                json!({ "command": "rustc --version", "cwd": null }),
             ),
         ))],
         vec![Ok(completed_text_event("final after process"))],
@@ -2333,12 +2336,12 @@ async fn agent_loop_traces_loop_steps_tool_process_and_terminal_status() {
         .register_tool(
             process_command_tool(
                 ToolName::new("run_process").expect("valid tool name"),
-                "Run a local process from argv through runtime policy",
+                "Run a shell command through runtime policy",
             )
             .expect("process command tool should build"),
         )
         .model_provider(Arc::new(provider), model_name())
-        .allow_low_risk_process_actions(Arc::new(runner))
+        .allow_read_only_shell_process_actions(Arc::new(runner))
         .build()
         .expect("runtime should build");
 
@@ -2972,7 +2975,7 @@ async fn agent_loop_process_command_tool_executes_rg_files_and_continues() {
             model_tool_call_with_arguments(
                 "call-rg-files",
                 "run_process",
-                json!({ "argv": ["rg", "--files"] }),
+                json!({ "command": "rg --files", "cwd": null }),
             ),
         ))],
         vec![Ok(completed_text_event("final after rg files"))],
@@ -2983,12 +2986,12 @@ async fn agent_loop_process_command_tool_executes_rg_files_and_continues() {
         .register_tool(
             process_command_tool(
                 ToolName::new("run_process").expect("valid tool name"),
-                "Run a local process from argv through runtime policy",
+                "Run a shell command through runtime policy",
             )
             .expect("process command tool should build"),
         )
         .model_provider(Arc::new(provider.clone()), model_name())
-        .allow_low_risk_process_actions(Arc::new(runner.clone()))
+        .allow_read_only_shell_process_actions(Arc::new(runner.clone()))
         .build()
         .expect("runtime should build");
 
@@ -3001,7 +3004,7 @@ async fn agent_loop_process_command_tool_executes_rg_files_and_continues() {
     let observed_intents = runner.observed_intents();
     assert_eq!(observed_intents.len(), 1);
     let intent = &observed_intents[0];
-    assert_eq!(intent.argv(), ["rg", "--files"]);
+    assert_eq!(intent.argv(), ["bash", "-lc", "rg --files"]);
     assert_eq!(intent.cwd(), None);
     assert_eq!(intent.env_policy(), ProcessEnvPolicy::Empty);
     assert!(intent.stdin_text().is_none());
@@ -3026,7 +3029,10 @@ async fn agent_loop_process_command_tool_executes_rg_files_and_continues() {
     let value: Value = serde_json::from_str(content).expect("process result JSON should parse");
     assert_eq!(value["ok"], true);
     assert_eq!(value["kind"], "process_action");
-    assert_eq!(value["intent"]["argv"], json!(["rg", "--files"]));
+    assert_eq!(
+        value["intent"]["argv"],
+        json!(["bash", "-lc", "rg --files"])
+    );
     assert_eq!(
         value["stdout"]["text"],
         "Cargo.toml\ncrates/merry-runtime/src/lib.rs\n"

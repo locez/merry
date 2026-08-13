@@ -8,6 +8,7 @@ mod models;
 mod parse;
 mod provider;
 mod render;
+mod tool_arguments;
 mod wire;
 
 pub use config::{OpenAiProtocol, OpenAiProviderConfig};
@@ -599,6 +600,32 @@ mod tests {
             }
             output => panic!("expected tool call output, got {output:?}"),
         }
+    }
+
+    #[test]
+    fn responses_tool_arguments_recover_literal_controls_after_outer_json_decode() {
+        let response = crate::parse::parse_responses_response(
+            "{\n\
+                \"status\": \"completed\",\n\
+                \"output\": [{\n\
+                    \"type\": \"function_call\",\n\
+                    \"call_id\": \"call_control_chars\",\n\
+                    \"name\": \"run_process\",\n\
+                    \"arguments\": \"{\\\"command\\\":\\\"printf 'line one\\nline two\\tvalue'\\\"}\"\n\
+                }]\n\
+            }",
+        )
+        .expect("literal controls in nested arguments should recover");
+
+        let ModelOutput::ToolCall { call } = &response.outputs()[0] else {
+            panic!("expected a tool call output");
+        };
+        assert_eq!(
+            call.arguments().as_object().get("command"),
+            Some(&Value::String(
+                "printf 'line one\nline two\tvalue'".to_owned()
+            ))
+        );
     }
 
     #[test]

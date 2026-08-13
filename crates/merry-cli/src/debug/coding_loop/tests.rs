@@ -111,9 +111,17 @@ async fn coding_loop_task_smoke_patches_fixture_and_verifies_with_fake_runner() 
     assert_eq!(
         runner.observed_argv(),
         [
-            vec!["rg".to_owned(), "--files".to_owned()],
-            vec!["rg".to_owned(), "done".to_owned(), "src/lib.rs".to_owned()],
-            vec!["rg".to_owned(), "done".to_owned(), "src/lib.rs".to_owned()],
+            vec!["bash".to_owned(), "-lc".to_owned(), "rg --files".to_owned()],
+            vec![
+                "bash".to_owned(),
+                "-lc".to_owned(),
+                "rg done src/lib.rs".to_owned(),
+            ],
+            vec![
+                "bash".to_owned(),
+                "-lc".to_owned(),
+                "rg done src/lib.rs".to_owned(),
+            ],
         ]
     );
     assert_eq!(runner.observed_cwd(), [None, None, None]);

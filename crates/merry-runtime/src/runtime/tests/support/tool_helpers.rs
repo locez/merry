@@ -45,7 +45,7 @@
         )
     }
 
-    fn permission_pending_tool_call(id: &str, reason: &str, argv: &[&str]) -> PendingToolCall {
+    fn permission_pending_tool_call(id: &str, reason: &str, command: &str) -> PendingToolCall {
         PendingToolCall::new(
             ToolCallId::new(id).expect("valid tool call id"),
             ToolName::new("request_permissions").expect("valid tool name"),
@@ -54,7 +54,7 @@
                 "requested": { "network": true },
                 "for_action": {
                     "kind": "process",
-                    "argv": argv,
+                    "command": command,
                     "cwd": ".",
                 }
             }))
@@ -75,7 +75,7 @@
                 },
                 "for_action": {
                     "kind": "process",
-                    "argv": ["cargo", "test"],
+                    "command": "cargo test",
                     "cwd": ".",
                 }
             }))
@@ -154,7 +154,7 @@
         let pending = permission_pending_tool_call(
             call_id,
             "Need network for this exact command.",
-            &["cargo", "test"],
+            "cargo test",
         );
         let runtime = configure(
             Runtime::builder(session_id(session_id_value))

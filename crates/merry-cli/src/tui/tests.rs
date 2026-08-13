@@ -2908,7 +2908,7 @@ fn renderer_shows_tool_result_preview_below_tool_call() {
 }
 
 #[test]
-fn renderer_limits_tool_result_preview_to_two_lines() {
+fn renderer_limits_tool_result_preview_to_five_lines() {
     let mut state = TuiState::new(
         "/repo".into(),
         "gpt-test".to_owned(),
@@ -2917,14 +2917,19 @@ fn renderer_limits_tool_result_preview_to_two_lines() {
     );
     state.push_timeline_item(TimelineItem::Expanded {
         title: "Tool custom_lookup source=docs -> succeeded".to_owned(),
-        body: "first result\nsecond result\nthird result".to_owned(),
+        body:
+            "first result\nsecond result\nthird result\nfourth result\nfifth result\nsixth result"
+                .to_owned(),
     });
 
     let rendered = render_to_text(&state, 120, 24);
 
     assert!(rendered.contains("first result"));
     assert!(rendered.contains("second result"));
-    assert!(!rendered.contains("third result"));
+    assert!(rendered.contains("third result"));
+    assert!(rendered.contains("fourth result"));
+    assert!(rendered.contains("fifth result"));
+    assert!(!rendered.contains("sixth result"));
 }
 
 #[test]
@@ -3097,7 +3102,7 @@ fn projector_renders_process_calls_as_ran_with_preview() {
             call: pending_call_with_args(
                 "call-process",
                 "run_process",
-                json!({ "argv": ["python3", "hello_world.py"], "cwd": "." }),
+                json!({ "command": "python3 hello_world.py", "cwd": "." }),
             ),
             source: source(),
         },
@@ -3126,17 +3131,13 @@ fn projector_renders_process_calls_as_ran_with_preview() {
     else {
         panic!("process call should expand with output preview");
     };
-    assert_eq!(
-        title,
-        "Ran run_process argv=[\"python3\",\"hello_world.py\"] cwd=."
-    );
-    assert!(!body.contains("python3 hello_world.py (cwd: .)"));
-    assert!(body.contains("  stdout: hello world"));
-    assert!(focus_body.contains("  stdout: hello world"));
+    assert_eq!(title, "Ran python3 hello_world.py (.)");
+    assert_eq!(body, "  hello world");
+    assert_eq!(focus_body, "  hello world");
 }
 
 #[test]
-fn projector_renders_failed_process_calls_as_ran_with_error_preview() {
+fn projector_renders_nonzero_process_exit_as_command_result() {
     let mut state = TuiState::new(
         "/repo".into(),
         "gpt-test".to_owned(),
@@ -3150,7 +3151,7 @@ fn projector_renders_failed_process_calls_as_ran_with_error_preview() {
             call: pending_call_with_args(
                 "call-process",
                 "run_process",
-                json!({ "argv": ["cargo", "test", "-p", "merry-cli"], "cwd": "." }),
+                json!({ "command": "cargo test -p merry-cli", "cwd": "." }),
             ),
             source: source(),
         },
@@ -3173,18 +3174,62 @@ fn projector_renders_failed_process_calls_as_ran_with_error_preview() {
     );
 
     assert_eq!(state.timeline().len(), 1);
-    let TimelineItem::Diagnostic { title, body } = &state.timeline()[0] else {
-        panic!("failed process call should replace the pending row with a diagnostic");
-    };
-    assert_eq!(
+    let TimelineItem::ExpandedDetail {
         title,
-        "Ran run_process argv=[\"cargo\",\"test\",\"-p\",\"merry-cli\"] cwd=. -> failed"
+        body,
+        focus_body,
+    } = &state.timeline()[0]
+    else {
+        panic!("nonzero process exit should remain a command result");
+    };
+    assert_eq!(title, "Ran cargo test -p merry-cli (.) -> exit 101");
+    assert_eq!(body, "  error: test failed\n  rerun with --exact");
+    assert_eq!(focus_body, "  error: test failed\n  rerun with --exact");
+    assert!(!body.contains("process_action_failed"));
+}
+
+#[test]
+fn projector_keeps_process_start_failure_as_diagnostic() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
     );
-    assert!(!body.contains("cargo test -p merry-cli (cwd: .)"));
+    let mut projector = TuiProjector::default();
+
+    projector.apply(
+        RuntimeEvent::ToolCallStarted {
+            call: pending_call_with_args(
+                "call-process-start-failure",
+                "run_process",
+                json!({ "command": "missing-command", "cwd": "." }),
+            ),
+            source: source(),
+        },
+        &mut state,
+    );
+    projector.apply(
+        RuntimeEvent::ToolCallFinished {
+            result: ToolCallResult::failed(
+                ToolCallId::new("call-process-start-failure").unwrap(),
+                text_artifact("process-start-failure-output"),
+                ErrorInfo::new("process_action_failed", "failed to start process").unwrap(),
+            ),
+            output: Some(ToolOutput::Json {
+                json: r#"{"kind":"process_action","status":{"kind":"failed_to_start"},"stdout":{"text":"","bytes":0,"truncated":false},"stderr":{"text":"","bytes":0,"truncated":false}}"#.to_owned(),
+            }),
+            source: source(),
+        },
+        &mut state,
+    );
+
+    let TimelineItem::Diagnostic { title, body } = &state.timeline()[0] else {
+        panic!("process start failure should remain a diagnostic");
+    };
+    assert_eq!(title, "Ran missing-command (.) -> failed");
     assert!(body.contains("process_action_failed"));
-    assert!(body.contains("  exit 101"));
-    assert!(body.contains("  stderr: error: test failed"));
-    assert!(body.contains("    rerun with --exact"));
+    assert!(body.contains("failed to start process"));
 }
 
 #[test]
@@ -3204,7 +3249,7 @@ fn projector_shows_permission_allow_rationale_on_success() {
                 "request_permissions",
                 json!({
                     "requested": { "network": true },
-                    "for_action": { "kind": "process", "argv": ["cargo", "test"] }
+                    "for_action": { "kind": "process", "command": "cargo test", "cwd": null }
                 }),
             ),
             source: source(),
@@ -3237,7 +3282,7 @@ fn projector_shows_permission_allow_rationale_on_success() {
 }
 
 #[test]
-fn projector_truncates_process_preview_lines() {
+fn projector_keeps_process_preview_lines_intact() {
     let mut state = TuiState::new(
         "/repo".into(),
         "gpt-test".to_owned(),
@@ -3251,7 +3296,7 @@ fn projector_truncates_process_preview_lines() {
             call: pending_call_with_args(
                 "call-process",
                 "run_process",
-                json!({ "argv": ["cargo", "test"], "cwd": "." }),
+                json!({ "command": "cargo test", "cwd": "." }),
             ),
             source: source(),
         },
@@ -3277,9 +3322,54 @@ fn projector_truncates_process_preview_lines() {
     let TimelineItem::ExpandedDetail { body, .. } = &state.timeline()[0] else {
         panic!("process call should expand with output preview");
     };
-    assert!(body.contains("  stdout: "));
-    assert!(body.contains("..."));
-    assert!(!body.contains(&"x".repeat(150)));
+    assert!(!body.contains("stdout:"));
+    assert!(body.contains(&format!("  {}", "x".repeat(150))));
+}
+
+#[test]
+fn projector_limits_process_preview_to_five_output_lines() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    let mut projector = TuiProjector::default();
+
+    projector.apply(
+        RuntimeEvent::ToolCallStarted {
+            call: pending_call_with_args(
+                "call-process-five-lines",
+                "run_process",
+                json!({ "command": "printf output", "cwd": "." }),
+            ),
+            source: source(),
+        },
+        &mut state,
+    );
+    projector.apply(
+        RuntimeEvent::ToolCallFinished {
+            result: ToolCallResult::succeeded(
+                ToolCallId::new("call-process-five-lines").unwrap(),
+                text_artifact("process-five-lines-output"),
+            ),
+            output: Some(ToolOutput::Json {
+                json: r#"{"kind":"process_action","status":0,"stdout":{"text":"one\ntwo\nthree\nfour\nfive\nsix\n","bytes":28,"truncated":false},"stderr":{"text":"stderr should not be previewed\n","bytes":28,"truncated":false}}"#.to_owned(),
+            }),
+            source: source(),
+        },
+        &mut state,
+    );
+
+    let TimelineItem::ExpandedDetail {
+        body, focus_body, ..
+    } = &state.timeline()[0]
+    else {
+        panic!("process call should expand with output preview");
+    };
+    assert_eq!(body, "  one\n  two\n  three\n  four\n  five");
+    assert!(focus_body.contains("  six"));
+    assert!(focus_body.contains("  stderr should not be previewed"));
 }
 
 #[test]
@@ -3297,7 +3387,7 @@ fn focus_panel_shows_full_process_output_when_preview_is_compact() {
             call: pending_call_with_args(
                 "call-process",
                 "run_process",
-                json!({ "argv": ["ls"], "cwd": "." }),
+                json!({ "command": "ls", "cwd": "." }),
             ),
             source: source(),
         },
@@ -3310,7 +3400,7 @@ fn focus_panel_shows_full_process_output_when_preview_is_compact() {
                 text_artifact("process-output"),
             ),
             output: Some(ToolOutput::Json {
-                json: r#"{"kind":"process_action","status":0,"stdout":{"text":"AGENTS.md\nCargo.lock\nCargo.toml\nREADME.md\ncrates\n","bytes":49,"truncated":false},"stderr":{"text":"","bytes":0,"truncated":false}}"#.to_owned(),
+                json: r#"{"kind":"process_action","status":0,"stdout":{"text":"AGENTS.md\nCargo.lock\nCargo.toml\nREADME.md\ncrates\ntarget\n","bytes":56,"truncated":false},"stderr":{"text":"","bytes":0,"truncated":false}}"#.to_owned(),
             }),
             source: source(),
         },
@@ -3322,17 +3412,20 @@ fn focus_panel_shows_full_process_output_when_preview_is_compact() {
     };
     assert!(body.contains("AGENTS.md"));
     assert!(body.contains("Cargo.toml"));
-    assert!(!body.contains("README.md"));
+    assert!(body.contains("README.md"));
+    assert!(body.contains("crates"));
+    assert!(!body.contains("target"));
 
     state.select_previous_artifact();
     let text = render_to_text(&state, 180, 24);
 
     assert!(text.contains("command ls"));
-    assert!(text.contains("stdout: AGENTS.md"));
+    assert!(text.contains("AGENTS.md"));
     assert!(text.contains("Cargo.lock"));
     assert!(text.contains("Cargo.toml"));
     assert!(text.contains("README.md"));
     assert!(text.contains("crates"));
+    assert!(text.contains("target"));
 }
 
 #[test]
@@ -3515,7 +3608,7 @@ fn projector_compacts_failed_tool_result_without_raw_artifact_json() {
                 "request_permissions",
                 json!({
                     "requested": { "network": true },
-                    "for_action": { "argv": ["cargo", "test"] }
+                    "for_action": { "command": "cargo test", "cwd": null }
                 }),
             ),
             source: source(),
@@ -4136,7 +4229,7 @@ fn renderer_uses_one_timeline_without_permanent_side_rails() {
     });
     state.push_timeline_item(TimelineItem::Expanded {
         title: "Ran cargo test -p merry-cli".to_owned(),
-        body: "  stdout: ok".to_owned(),
+        body: "ok".to_owned(),
     });
     state.update_queue_preview(QueuePreview {
         next: vec![QueuedInputView {
@@ -4199,11 +4292,11 @@ fn renderer_keeps_reviewed_artifact_visible_while_index_shows_newer_items() {
     );
     state.push_timeline_item(TimelineItem::Expanded {
         title: "Ran first command".to_owned(),
-        body: "stdout: first output".to_owned(),
+        body: "first output".to_owned(),
     });
     state.push_timeline_item(TimelineItem::Expanded {
         title: "Ran second command".to_owned(),
-        body: "stdout: second output".to_owned(),
+        body: "second output".to_owned(),
     });
     state.select_previous_artifact();
     state.select_previous_artifact();
@@ -4211,8 +4304,8 @@ fn renderer_keeps_reviewed_artifact_visible_while_index_shows_newer_items() {
     let text = render_to_text(&state, 180, 28);
 
     assert!(text.contains("command first command"));
-    assert!(text.contains("stdout"));
     assert!(text.contains("first output"));
+    assert!(!text.contains("stdout"));
     assert!(text.contains("Ran second command"));
     assert!(!text.contains("RUN"));
 }
@@ -4650,6 +4743,8 @@ fn renderer_applies_configured_semantic_theme_colors() {
         assistant: Some("white".to_owned()),
         tool_keyword: Some("cyan".to_owned()),
         command: Some("light_blue".to_owned()),
+        warning: Some("yellow".to_owned()),
+        success: Some("green".to_owned()),
         diff_add: Some("green".to_owned()),
         diff_delete: Some("yellow".to_owned()),
         ..crate::config::TuiThemeToml::default()
@@ -4666,8 +4761,8 @@ fn renderer_applies_configured_semantic_theme_colors() {
         detail: "read".to_owned(),
     });
     state.push_timeline_item(TimelineItem::Expanded {
-        title: "Ran cargo test (cwd: .)".to_owned(),
-        body: "  stdout: ok".to_owned(),
+        title: "Ran cargo test --package 'hello world' && printf $HOME (.)".to_owned(),
+        body: "ok".to_owned(),
     });
     state.push_timeline_item(TimelineItem::Patch {
         changes: vec![PatchChangeView {
@@ -4702,6 +4797,13 @@ fn renderer_applies_configured_semantic_theme_colors() {
     assert_eq!(find_cell_color(&buffer, "tool"), Some(Color::Blue));
     assert_eq!(find_cell_color(&buffer, "Ran"), Some(Color::Cyan));
     assert_eq!(find_cell_color(&buffer, "cargo"), Some(Color::LightBlue));
+    assert_eq!(find_cell_color(&buffer, "--package"), Some(Color::Magenta));
+    assert_eq!(
+        find_cell_color(&buffer, "'hello world'"),
+        Some(Color::LightBlue)
+    );
+    assert_eq!(find_cell_color(&buffer, "&&"), Some(Color::Cyan));
+    assert_eq!(find_cell_color(&buffer, "$HOME"), Some(Color::Green));
     assert_eq!(find_cell_color(&buffer, "patch"), Some(Color::Cyan));
     assert_eq!(find_cell_color(&buffer, "+added"), Some(Color::Green));
     assert_eq!(find_cell_color(&buffer, "-removed"), Some(Color::Yellow));
@@ -5096,17 +5198,41 @@ fn renderer_colors_ran_title_and_shows_process_preview() {
         TuiTheme::default(),
     );
     state.push_timeline_item(TimelineItem::Expanded {
-        title: "Ran python3 hello_world.py (cwd: .)".to_owned(),
-        body: "  stdout: hello world".to_owned(),
+        title: "Ran python3 hello_world.py (.)".to_owned(),
+        body: "hello world".to_owned(),
     });
 
     let text = render_to_text(&state, 79, 16);
-    assert!(text.contains("Ran python3 hello_world.py (cwd: .)"));
-    assert!(text.contains("  stdout: hello world"));
+    assert!(text.contains("Ran python3 hello_world.py (.)"));
+    assert!(text.contains("hello world"));
 
     let buffer = render_to_buffer(&state, 79, 16);
     assert_eq!(find_cell_color(&buffer, "Ran"), Some(Color::LightCyan));
     assert_eq!(find_cell_color(&buffer, "python3"), Some(Color::LightBlue));
+}
+
+#[test]
+fn renderer_highlights_shell_syntax_in_ran_titles() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.push_timeline_item(TimelineItem::Expanded {
+        title: "Ran git status --short --branch && git diff --check (.)".to_owned(),
+        body: "  clean".to_owned(),
+    });
+
+    let buffer = render_to_buffer(&state, 120, 16);
+    let executable = find_cell_color(&buffer, "git").expect("shell executable should render");
+    let option = find_cell_color(&buffer, "--short").expect("shell option should render");
+    let operator = find_cell_color(&buffer, "&&").expect("shell operator should render");
+
+    assert_eq!(executable, Color::LightBlue);
+    assert_eq!(option, Color::LightMagenta);
+    assert_eq!(operator, Color::LightCyan);
+    assert_eq!(find_cell_color(&buffer, "."), Some(Color::DarkGray));
 }
 
 #[test]
@@ -5271,7 +5397,7 @@ fn focus_panel_clips_long_command_output_with_ellipsis() {
     state.push_timeline_item(TimelineItem::Expanded {
         title: "Ran cargo test".to_owned(),
         body: (0..40)
-            .map(|index| format!("  stdout: line {index}"))
+            .map(|index| format!("line {index}"))
             .collect::<Vec<_>>()
             .join("\n"),
     });
@@ -5281,7 +5407,7 @@ fn focus_panel_clips_long_command_output_with_ellipsis() {
 
     assert!(text.contains("command cargo test"));
     assert!(text.contains("..."));
-    assert!(!text.contains("stdout: line 39"));
+    assert!(!text.contains("line 39"));
 }
 
 #[test]

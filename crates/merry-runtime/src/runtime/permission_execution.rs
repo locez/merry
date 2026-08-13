@@ -143,10 +143,7 @@ pub(super) async fn execute_permission_request_tool_call(
         crate::ToolActionKind::CommandExec,
         "permissioned process",
         "approved permission request",
-        format!(
-            "Run process with {} argv item(s) after permission admission review",
-            intent.argv().len()
-        ),
+        "Run the exact shell command after permission admission review",
         ActionProposalEvidence::ProcessAction(intent),
     )
     .map_err(|error| RuntimeError::ToolExecutionFailed {
