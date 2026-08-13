@@ -86,6 +86,8 @@ impl AcceptedLocalWorkspaceProcessAdmission {
     ///
     /// The runtime still records and audits the process action, but the CLI
     /// process backend does not add an operating-system sandbox in this mode.
+    /// Review policy remains a separate runtime setting; host admission does
+    /// not imply fully trusted execution.
     #[must_use]
     pub const fn accept_host_v1() -> Self {
         Self {
@@ -118,7 +120,8 @@ impl AcceptedLocalWorkspaceProcessAdmission {
 
     pub(crate) fn matches_intent(self, intent: &ProcessActionIntent) -> bool {
         let required = required_process_permission_profile_id(intent);
-        required == Some(self.permission_profile_id)
+        (self.sandbox_profile == LocalWorkspaceProcessSandboxProfile::HostV1 && required.is_some())
+            || required == Some(self.permission_profile_id)
             || (self.permission_profile_id == ProcessPermissionProfileId::LOCAL_WORKSPACE_HOST_V1
                 && required == Some(ProcessPermissionProfileId::LOCAL_WORKSPACE_BWRAP_V1))
     }
@@ -944,6 +947,11 @@ fn is_read_only_direct_process_argv(argv: &[String]) -> bool {
         [executable, subcommand, args @ ..] if executable_token_is(executable, "git") => {
             is_read_only_git_command(subcommand, args)
         }
+        [executable, version]
+            if executable_token_is(executable, "git") && version.as_str() == "--version" =>
+        {
+            true
+        }
         [executable] if executable_token_is(executable, "pwd") => true,
         [executable] if executable_token_is(executable, "true") => true,
         [executable] if executable_token_is(executable, "false") => true,
@@ -1582,6 +1590,61 @@ pub(crate) fn requires_process_action_review(intent: &ProcessActionIntent) -> bo
     )
 }
 
+/// Returns whether an unrestricted host process explicitly names a filesystem
+/// path that is outside the validated workspace-relative command shape.
+///
+/// This is a review signal only. The host runner has no mount boundary, so an
+/// approval here cannot be treated as an operating-system capability grant.
+pub(crate) fn requires_host_process_path_review(intent: &ProcessActionIntent) -> bool {
+    if let Some(shell_input) = shell_like_process_input_from_argv(intent.argv()) {
+        return shell_script_contains_git_metadata_write(shell_input.script())
+            || shell_input
+                .script()
+                .split_whitespace()
+                .any(is_explicit_host_path_token);
+    }
+
+    is_git_metadata_write_argv(intent.argv())
+        || intent
+            .argv()
+            .iter()
+            .skip(1)
+            .any(|argument| is_explicit_host_path_token(argument))
+}
+
+fn shell_script_contains_git_metadata_write(script: &str) -> bool {
+    if let Some(commands) = parse_plain_shell_command_sequence(script) {
+        return commands
+            .iter()
+            .map(Vec::as_slice)
+            .map(shell_command_without_assignment_prefix)
+            .any(is_git_metadata_write_argv);
+    }
+
+    rough_shell_words(script)
+        .iter()
+        .any(|word| executable_name(word) == "git")
+}
+
+fn is_git_metadata_write_argv(argv: &[String]) -> bool {
+    let Some(executable) = argv.first() else {
+        return false;
+    };
+    executable_name(executable) == "git" && !is_read_only_direct_process_argv(argv)
+}
+
+fn is_explicit_host_path_token(argument: &str) -> bool {
+    let argument = argument.trim_matches(|character| matches!(character, '\'' | '"'));
+    argument == ".."
+        || argument.starts_with("../")
+        || argument.contains("/../")
+        || argument.starts_with('/')
+        || argument.starts_with("~/")
+        || argument
+            .split_once('=')
+            .is_some_and(|(_, value)| is_explicit_host_path_token(value))
+}
+
 /// Validation errors for provider-neutral process action values.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ProcessActionError {
@@ -1807,6 +1870,7 @@ mod tests {
         ProcessExecutionEvidence, ProcessExitStatus, ProcessIntentClass,
         ProcessPermissionProfileId, classify_process_intent, is_low_risk_process_action_intent,
         is_safe_cargo_package_token, required_process_permission_profile_id,
+        requires_host_process_path_review,
     };
 
     fn intent() -> ProcessActionIntent {
@@ -2142,7 +2206,85 @@ mod tests {
             ProcessPermissionProfileId::LOCAL_WORKSPACE_HOST_V1
         );
         assert!(host_admission.matches_intent(&local_workspace_effect));
-        assert!(!host_admission.matches_intent(&informational));
+        assert!(host_admission.matches_intent(&informational));
+    }
+
+    #[test]
+    fn host_process_path_review_detects_external_paths_and_git_metadata_writes() {
+        let read_only_workspace_git = ProcessActionIntent::new(
+            vec!["git".to_owned(), "status".to_owned(), "--short".to_owned()],
+            None,
+            ProcessEnvPolicy::empty(),
+            None,
+            1024,
+            1024,
+        )
+        .expect("read-only workspace git intent is valid");
+        assert!(!requires_host_process_path_review(&read_only_workspace_git));
+
+        let workspace_git_write = ProcessActionIntent::new(
+            vec![
+                "git".to_owned(),
+                "checkout".to_owned(),
+                "--".to_owned(),
+                "README.md".to_owned(),
+            ],
+            None,
+            ProcessEnvPolicy::empty(),
+            None,
+            1024,
+            1024,
+        )
+        .expect("workspace git write intent is valid");
+        assert!(requires_host_process_path_review(&workspace_git_write));
+
+        let read_only_git_branch = ProcessActionIntent::new(
+            vec![
+                "git".to_owned(),
+                "branch".to_owned(),
+                "--show-current".to_owned(),
+            ],
+            None,
+            ProcessEnvPolicy::empty(),
+            None,
+            1024,
+            1024,
+        )
+        .expect("read-only git branch intent is valid");
+        assert!(!requires_host_process_path_review(&read_only_git_branch));
+
+        let git_branch_write = ProcessActionIntent::new(
+            vec![
+                "git".to_owned(),
+                "branch".to_owned(),
+                "new-topic".to_owned(),
+            ],
+            None,
+            ProcessEnvPolicy::empty(),
+            None,
+            1024,
+            1024,
+        )
+        .expect("git branch write intent is valid");
+        assert!(requires_host_process_path_review(&git_branch_write));
+
+        for argv in [
+            vec!["cat", "/tmp/output"],
+            vec!["cp", "a", "../outside"],
+            vec!["git", "--git-dir=/pathA/.git", "status"],
+            vec!["bash", "-lc", "cat /pathA/.git/HEAD"],
+        ] {
+            let intent = ProcessActionIntent::new(
+                argv.into_iter().map(str::to_owned).collect(),
+                None,
+                ProcessEnvPolicy::empty(),
+                None,
+                1024,
+                1024,
+            )
+            .expect("external path intent is valid");
+            assert!(requires_host_process_path_review(&intent));
+        }
     }
 
     #[test]

@@ -54,17 +54,22 @@ pub enum PermissionReviewMode {
     ModelThenHostFallback,
     /// Explicit SDK/host mode that admits configured registered tools without
     /// an AI or human approval round.
-    NonInteractiveTrusted,
+    FullyTrusted,
 }
 
 impl PermissionReviewMode {
+    /// Returns whether the caller explicitly disabled permission review.
+    pub(crate) const fn is_fully_trusted(self) -> bool {
+        matches!(self, Self::FullyTrusted)
+    }
+
     pub(crate) fn requires_model_review(self, trust_level: RuntimeTrustLevel) -> bool {
         match self {
             Self::DefaultForTrust => trust_level == RuntimeTrustLevel::Agent,
             Self::Required => true,
             Self::HostDecisionOnly => false,
             Self::ModelThenHostFallback => true,
-            Self::NonInteractiveTrusted => false,
+            Self::FullyTrusted => false,
         }
     }
 }

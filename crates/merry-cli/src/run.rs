@@ -56,6 +56,7 @@ pub(crate) async fn run(
     sandbox_child_handoff: Option<SandboxChildHandoff>,
     merry_config: Option<&MerryConfig>,
     process_execution_mode: ProcessExecutionMode,
+    fully_trusted: bool,
 ) -> Result<RunExitStatus, CliError> {
     let Some(admission) =
         coding_agent_process_admission(sandbox_child_handoff, process_execution_mode).await
@@ -100,10 +101,10 @@ pub(crate) async fn run(
             .unwrap_or_default(),
         subagents: subagents_config(merry_config).map_err(unexpected)?.into(),
     };
-    let runtime = if matches!(process_execution_mode, ProcessExecutionMode::Unrestricted) {
+    let runtime = if fully_trusted {
         build_headless_coding_runtime_with_permission_review_mode(
             runtime_input,
-            merry_runtime::PermissionReviewMode::NonInteractiveTrusted,
+            merry_runtime::PermissionReviewMode::FullyTrusted,
         )?
     } else {
         build_headless_coding_runtime(runtime_input)?

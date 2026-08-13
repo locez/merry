@@ -54,6 +54,7 @@ pub(crate) async fn start_tui_runtime_session(
     session_store: TuiSessionStore,
     selection: SessionPickerSelection,
     process_execution_mode: ProcessExecutionMode,
+    fully_trusted: bool,
     preferences: &TuiPreferences,
 ) -> Result<TuiRuntimeSession, CliError> {
     let Some(admission) =
@@ -132,12 +133,11 @@ pub(crate) async fn start_tui_runtime_session(
             subagents.limits(),
         ),
     };
-    let permission_review_mode =
-        if matches!(process_execution_mode, ProcessExecutionMode::Unrestricted) {
-            PermissionReviewMode::NonInteractiveTrusted
-        } else {
-            PermissionReviewMode::ModelThenHostFallback
-        };
+    let permission_review_mode = if fully_trusted {
+        PermissionReviewMode::FullyTrusted
+    } else {
+        PermissionReviewMode::ModelThenHostFallback
+    };
     let runtime = if should_resume {
         resume_headless_coding_runtime_with_permission_source(
             runtime_input,

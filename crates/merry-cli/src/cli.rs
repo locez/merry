@@ -48,6 +48,12 @@ pub(crate) struct Cli {
     pub(crate) inner_sandbox: bool,
 
     #[arg(
+        long,
+        help = "Explicitly trust all configured actions and skip model/host permission review"
+    )]
+    pub(crate) fully_trusted: bool,
+
+    #[arg(
         long = "merry-sandbox-child-handoff",
         hide = true,
         value_enum,
@@ -82,6 +88,10 @@ impl Cli {
         } else {
             ProcessExecutionMode::OuterAndInner
         }
+    }
+
+    pub(crate) const fn fully_trusted(&self) -> bool {
+        self.fully_trusted
     }
 
     pub(crate) fn clipboard_access(&self) -> crate::sandbox::ClipboardAccess {
@@ -265,6 +275,20 @@ mod tests {
             run.process_execution_mode(),
             ProcessExecutionMode::Unrestricted
         );
+        assert!(!tui.fully_trusted());
+        assert!(!run.fully_trusted());
+    }
+
+    #[test]
+    fn fully_trusted_is_explicit_and_independent_from_host_execution_mode() {
+        let cli = Cli::try_parse_from(["merry", "--fully-trusted", "--no-sandbox", "run", "task"])
+            .expect("fully trusted run parses");
+
+        assert_eq!(
+            cli.process_execution_mode(),
+            ProcessExecutionMode::Unrestricted
+        );
+        assert!(cli.fully_trusted());
     }
 
     #[test]

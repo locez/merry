@@ -183,16 +183,17 @@ pub(super) enum HighRiskActionReview {
     Resolved(Vec<RuntimeJournalEvent>),
 }
 
-/// Reviews one high-risk process action through the normal permission source.
+/// Reviews one process action through the normal permission source.
 ///
 /// This is separate from `request_permissions`: an action review has no
 /// requested capability and therefore cannot grant or retain a path, network,
 /// or host-integration capability as a side effect.
-pub(super) async fn review_high_risk_process_action(
+pub(super) async fn review_process_action(
     inner: &Arc<RuntimeInner>,
     pending: &PendingToolCall,
     proposal: &ActionProposal,
     context: &ToolExecutionContext,
+    reason: &'static str,
 ) -> Result<HighRiskActionReview, RuntimeError> {
     if context.cancellation_token().is_cancelled() {
         return Err(RuntimeError::ToolExecutionCancelled {
@@ -214,7 +215,7 @@ pub(super) async fn review_high_risk_process_action(
     };
     let request = PermissionRequest::for_action_review(
         pending,
-        "high-risk process action requires an independent action review",
+        reason,
         PermissionedAction::Process(intent.clone()),
         review_context,
     );
@@ -299,9 +300,9 @@ pub(super) async fn review_permission_request(
     context: &ToolExecutionContext,
 ) -> PermissionAdmissionResult {
     let mode = inner.permission_review_mode;
-    if matches!(mode, crate::PermissionReviewMode::NonInteractiveTrusted) {
+    if mode.is_fully_trusted() {
         return Ok(crate::PermissionAdmissionDecision::approved(
-            "explicit non-interactive trusted mode admitted this configured action",
+            "explicit fully trusted mode admitted this configured action",
         ));
     }
 
