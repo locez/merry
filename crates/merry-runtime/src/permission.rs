@@ -880,7 +880,7 @@ impl PermissionAdmissionSource for ModelBackedPermissionAdmissionSource {
 pub fn request_permissions_tool() -> Result<RegisteredTool, PermissionAdmissionError> {
     let spec = ToolSpec::new(
         ToolName::new(REQUEST_PERMISSIONS_TOOL_NAME).expect("static tool name is valid"),
-        "Request additional filesystem, network, or explicitly configured host-integration capability for one exact planned action. A configured session-aware process backend retains approved paths, network, and host integrations for later actions in the current runtime session. When one command needs multiple capabilities, request them together.",
+        "Request additional filesystem, network, or explicitly configured host-integration capability for one exact planned action. A configured session-aware process backend retains approved paths and host integrations for later actions in the current runtime session, but network access must be requested again for every action. When one command needs multiple capabilities, request them together.",
         request_permissions_input_schema()?,
     )?;
     Ok(RegisteredTool::new(
@@ -1108,7 +1108,7 @@ fn request_permissions_input_schema() -> Result<ToolInputSchema, PermissionAdmis
             "requested": {
                 "type": "object",
                 "additionalProperties": false,
-                "description": "Capabilities to add after this exact action is approved. Use network for network access, paths for filesystem paths, or host_integrations for explicitly configured SSH agent/D-Bus session access. A session-aware backend retains approved capabilities for later actions in this runtime session. Include every capability the same command needs in one request.",
+                "description": "Capabilities to add for this exact action after approval. Use network for this action's network access, paths for filesystem paths, or host_integrations for explicitly configured SSH agent/D-Bus session access. A session-aware backend retains approved paths and host integrations for later actions, but network must be requested again for every action. Include every capability the same command needs in one request.",
                 "properties": {
                     "network": {
                         "type": "boolean",

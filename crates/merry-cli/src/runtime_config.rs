@@ -115,9 +115,6 @@ pub(crate) fn action_process_backend_options(
         .collect();
     Ok(ActionProcessBackendOptions {
         path_rules,
-        // Network is never part of the inner baseline. A reviewed request
-        // records it in the session capability store instead.
-        network_allowed: false,
         host_integrations,
         environment_overrides,
     })
@@ -187,7 +184,6 @@ readwrite_paths = ["/srv/trusted-writable"]
             rule.source() == PathAccessRuleSource::DefaultDevelopmentBaseline
                 && rule.access() == merry_runtime::PathAccess::ReadOnly
         }));
-        assert!(!options.network_allowed);
     }
 
     #[test]

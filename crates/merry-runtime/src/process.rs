@@ -244,10 +244,11 @@ pub trait ProcessRunner: Send + Sync {
 /// Factory for runners created from approved permission requests.
 ///
 /// Implementations translate a runtime-approved request into the concrete
-/// process backend/profile for that exact action. Backends may retain the
-/// approved capabilities in a session-scoped store so later actions in the
-/// same session can use the same paths; they must not grant authority beyond
-/// the capabilities approved by the runtime.
+/// process backend/profile for that exact action. Backends may retain approved
+/// paths and host integrations in a session-scoped store so later actions in
+/// the same session can reuse them. Network access is action-scoped and must
+/// not be retained; backends must not grant authority beyond the capabilities
+/// approved by the runtime.
 pub trait PermissionedProcessRunnerFactory: Send + Sync {
     /// Validates the request against the backend's hard capability policy.
     ///
@@ -261,7 +262,7 @@ pub trait PermissionedProcessRunnerFactory: Send + Sync {
     }
 
     /// Creates the process runner for one approved permission request and
-    /// records any session-scoped capabilities supported by the backend.
+    /// records only the session-scoped capabilities supported by the backend.
     fn runner_for(&self, request: &PermissionRequest) -> Arc<dyn ProcessRunner>;
 }
 

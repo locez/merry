@@ -37,7 +37,6 @@ pub(crate) struct ActionProcessBackend {
 #[derive(Clone, Default)]
 pub(crate) struct ActionProcessBackendOptions {
     pub(crate) path_rules: Vec<PathAccessRule>,
-    pub(crate) network_allowed: bool,
     pub(crate) host_integrations: Vec<HostIntegration>,
     pub(crate) environment_overrides: Vec<(OsString, OsString)>,
 }
@@ -93,28 +92,17 @@ impl ActionProcessBackend {
         options: ActionProcessBackendOptions,
         environment: BwrapProcessEnvironment,
     ) -> Self {
-        let ActionProcessBackendOptions {
-            path_rules,
-            network_allowed,
-            ..
-        } = options.clone();
+        let ActionProcessBackendOptions { path_rules, .. } = options.clone();
         let session_permissions = BwrapSessionPermissions::new();
-        let mut runner = BwrapProcessRunner::new_at_workspace_root(&workspace_root)
+        let runner = BwrapProcessRunner::new_at_workspace_root(&workspace_root)
             .with_environment(environment.clone())
             .with_path_rules(path_rules.clone())
             .with_session_permissions(session_permissions.clone());
-        if network_allowed {
-            runner = runner.allow_network();
-        }
-        let mut permissioned_factory =
+        let permissioned_factory =
             BwrapPermissionedProcessRunnerFactory::new_at_workspace_root(&workspace_root)
                 .with_environment(environment.clone())
                 .with_path_rules(path_rules)
                 .with_session_permissions(session_permissions);
-        if network_allowed {
-            permissioned_factory = permissioned_factory.allow_base_network();
-        }
-
         let child_workspace_root = workspace_root.clone();
         let child_options = options;
         let child_environment = environment;

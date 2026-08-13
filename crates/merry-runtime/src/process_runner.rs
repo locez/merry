@@ -503,11 +503,9 @@ impl BwrapProcessRunner {
             .transpose()?;
         let mut environment = environment;
         let mut path_rules = self.path_rules.clone();
-        let mut network_allowed = self.network_allowed;
         if let Some(snapshot) = session_snapshot {
             path_rules.extend(snapshot.path_rules);
             environment = environment.with_host_integrations(snapshot.host_integrations);
-            network_allowed |= snapshot.network_allowed;
         }
         add_git_metadata_baseline_rules(&mut path_rules, &self.cwd_root);
         path_rules = normalize_path_rules(path_rules);
@@ -515,20 +513,22 @@ impl BwrapProcessRunner {
             intent,
             &self.cwd_root,
             &environment,
-            network_allowed,
+            self.network_allowed,
             &path_rules,
             &self.bwrap_program,
         ))
     }
 }
 
-/// Filesystem, network, and host-integration capabilities approved for the lifetime of
+/// Filesystem and host-integration capabilities approved for the lifetime of
 /// one runtime session.
 ///
 /// Each process action still starts a fresh bubblewrap instance, but every
-/// instance receives a snapshot of these approved capabilities. The store is
-/// deliberately constructed and shared by one runtime backend; it is not
-/// global and must not be reused across sessions.
+/// instance receives a snapshot of the retained path and host-integration
+/// capabilities. Network access is intentionally absent from this store:
+/// every network action must receive an independent reviewed runner.
+/// The store is deliberately constructed and shared by one runtime backend;
+/// it is not global and must not be reused across sessions.
 #[derive(Debug, Clone, Default)]
 pub struct BwrapSessionPermissions {
     state: Arc<RwLock<BwrapSessionPermissionState>>,
@@ -538,14 +538,12 @@ pub struct BwrapSessionPermissions {
 struct BwrapSessionPermissionState {
     path_rules: Vec<PathAccessRule>,
     host_integrations: Vec<HostIntegration>,
-    network_allowed: bool,
 }
 
 #[derive(Debug, Clone)]
 struct BwrapSessionPermissionSnapshot {
     path_rules: Vec<PathAccessRule>,
     host_integrations: Vec<HostIntegration>,
-    network_allowed: bool,
 }
 
 impl BwrapSessionPermissions {
@@ -564,7 +562,6 @@ impl BwrapSessionPermissions {
         Ok(BwrapSessionPermissionSnapshot {
             path_rules: state.path_rules.clone(),
             host_integrations: state.host_integrations.clone(),
-            network_allowed: state.network_allowed,
         })
     }
 
@@ -572,7 +569,6 @@ impl BwrapSessionPermissions {
         &self,
         path_rules: Vec<PathAccessRule>,
         host_integrations: Vec<HostIntegration>,
-        network_allowed: bool,
     ) -> Result<(), ProcessRunnerError> {
         let mut state = self.state.write().map_err(|_| {
             ProcessRunnerError::infrastructure(
@@ -589,7 +585,6 @@ impl BwrapSessionPermissions {
         state.host_integrations.extend(host_integrations);
         state.host_integrations.sort_unstable();
         state.host_integrations.dedup();
-        state.network_allowed |= network_allowed;
         Ok(())
     }
 }
@@ -598,15 +593,15 @@ impl BwrapSessionPermissions {
 ///
 /// Filesystem access stays governed by the configured workspace/root path
 /// rules and the session-scoped capabilities already approved by the runtime.
-/// Approved ordinary path, network, and host-integration requests are retained
-/// by the session store and applied to later actions in the same session.
-/// Git metadata paths are deliberately excluded from retention and must be
-/// reviewed again for every action.
+/// Approved ordinary path and host-integration requests are retained by the
+/// session store and applied to later actions in the same session. Network
+/// requests are action-scoped and are never retained. Git metadata paths are
+/// deliberately excluded from retention and must be reviewed again for every
+/// action.
 #[derive(Debug, Clone)]
 pub struct BwrapPermissionedProcessRunnerFactory {
     cwd_root: PathBuf,
     environment: BwrapProcessEnvironment,
-    base_network_allowed: bool,
     path_rules: Vec<PathAccessRule>,
     session_permissions: Option<BwrapSessionPermissions>,
     bwrap_program: PathBuf,
@@ -619,7 +614,6 @@ impl BwrapPermissionedProcessRunnerFactory {
         Self {
             cwd_root: root.into(),
             environment: BwrapProcessEnvironment::from_current_process(),
-            base_network_allowed: false,
             path_rules: Vec::new(),
             session_permissions: None,
             bwrap_program: PathBuf::from(BWRAP_PROGRAM),
@@ -630,13 +624,6 @@ impl BwrapPermissionedProcessRunnerFactory {
     #[must_use]
     pub fn with_environment(mut self, environment: BwrapProcessEnvironment) -> Self {
         self.environment = environment;
-        self
-    }
-
-    /// Allows network capability in the base profile before per-request grants.
-    #[must_use]
-    pub fn allow_base_network(mut self) -> Self {
-        self.base_network_allowed = true;
         self
     }
 
@@ -723,7 +710,6 @@ impl BwrapPermissionedProcessRunnerFactory {
         permissions.grant(
             self.requested_path_rules_for_request(request)?,
             self.requested_host_integrations_for_request(request),
-            request.requests_network(),
         )
     }
 
@@ -743,12 +729,7 @@ impl BwrapPermissionedProcessRunnerFactory {
         let mut runner = BwrapProcessRunner::new_at_workspace_root(self.cwd_root.clone())
             .with_environment(environment)
             .with_path_rules(path_rules);
-        let session_network_allowed = self
-            .session_permissions
-            .as_ref()
-            .and_then(|permissions| permissions.snapshot().ok())
-            .is_some_and(|snapshot| snapshot.network_allowed);
-        if self.base_network_allowed || session_network_allowed || request.requests_network() {
+        if request.requests_network() {
             runner = runner.allow_network();
         }
         if let Some(permissions) = &self.session_permissions {
@@ -2053,7 +2034,7 @@ mod tests {
     }
 
     #[test]
-    fn bwrap_permissioned_factory_keeps_approved_network_for_later_actions() {
+    fn bwrap_permissioned_factory_keeps_network_scoped_to_current_action() {
         let session_permissions = super::BwrapSessionPermissions::new();
         let factory =
             super::BwrapPermissionedProcessRunnerFactory::new_at_workspace_root("/workspace/merry")
@@ -2068,12 +2049,19 @@ mod tests {
         }));
 
         let _ = factory.runner_for(&network_request);
+        let approved_runner = factory.build_runner(&network_request);
+        let approved_plan = approved_runner
+            .plan_for(request_process_intent(&network_request))
+            .expect("approved network process plan should build");
+        let approved_args = os_args(&approved_plan.args);
+        assert!(!approved_args.iter().any(|arg| arg == "--unshare-net"));
+
         let plan = base_runner
             .plan_for(&intent(None))
             .expect("later process plan should build");
         let args = os_args(&plan.args);
 
-        assert!(!args.iter().any(|arg| arg == "--unshare-net"));
+        assert!(args.iter().any(|arg| arg == "--unshare-net"));
     }
 
     #[test]
