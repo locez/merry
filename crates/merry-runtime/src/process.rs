@@ -1599,18 +1599,35 @@ pub(crate) fn requires_process_action_review(intent: &ProcessActionIntent) -> bo
 pub(crate) fn requires_host_process_path_review(intent: &ProcessActionIntent) -> bool {
     if let Some(shell_input) = shell_like_process_input_from_argv(intent.argv()) {
         return shell_script_contains_git_metadata_write(shell_input.script())
-            || shell_input
-                .script()
-                .split_whitespace()
-                .any(is_explicit_host_path_token);
+            || shell_script_contains_host_path(shell_input.script())
+            || intent
+                .argv()
+                .first()
+                .is_some_and(|argument| is_explicit_host_path_token(argument));
     }
 
     is_git_metadata_write_argv(intent.argv())
         || intent
             .argv()
             .iter()
-            .skip(1)
             .any(|argument| is_explicit_host_path_token(argument))
+}
+
+fn shell_script_contains_host_path(script: &str) -> bool {
+    script.contains("$(")
+        || script.contains('`')
+        || script.split_whitespace().any(is_explicit_host_path_token)
+        || contains_embedded_absolute_path(script)
+}
+
+fn contains_embedded_absolute_path(value: &str) -> bool {
+    value.char_indices().any(|(index, character)| {
+        character == '/'
+            && (index == 0
+                || value[..index].chars().next_back().is_some_and(|previous| {
+                    matches!(previous, '"' | '\'' | '(' | '[' | '{' | '=' | ':' | ',')
+                }))
+    })
 }
 
 fn shell_script_contains_git_metadata_write(script: &str) -> bool {
@@ -1636,11 +1653,17 @@ fn is_git_metadata_write_argv(argv: &[String]) -> bool {
 
 fn is_explicit_host_path_token(argument: &str) -> bool {
     let argument = argument.trim_matches(|character| matches!(character, '\'' | '"'));
+    let argument = argument
+        .find(['>', '<'])
+        .map_or(argument, |index| &argument[index + 1..]);
     argument == ".."
         || argument.starts_with("../")
         || argument.contains("/../")
         || argument.starts_with('/')
+        || argument == "~"
         || argument.starts_with("~/")
+        || argument.starts_with("$HOME/")
+        || argument.starts_with("${HOME}/")
         || argument
             .split_once('=')
             .is_some_and(|(_, value)| is_explicit_host_path_token(value))
@@ -2274,6 +2297,7 @@ mod tests {
             vec!["cp", "a", "../outside"],
             vec!["git", "--git-dir=/pathA/.git", "status"],
             vec!["bash", "-lc", "cat /pathA/.git/HEAD"],
+            vec!["/usr/bin/python", "-c", "print('ok')"],
         ] {
             let intent = ProcessActionIntent::new(
                 argv.into_iter().map(str::to_owned).collect(),
@@ -2284,6 +2308,24 @@ mod tests {
                 1024,
             )
             .expect("external path intent is valid");
+            assert!(requires_host_process_path_review(&intent));
+        }
+
+        for argv in [
+            vec!["bash", "-lc", "cat $HOME/output"],
+            vec!["bash", "-lc", "printf ok >~/output"],
+            vec!["bash", "-lc", "python -c 'open(\"/tmp/output\", \"w\")'"],
+            vec!["bash", "-lc", "printf '%s' \"$(pwd)\""],
+        ] {
+            let intent = ProcessActionIntent::new(
+                argv.into_iter().map(str::to_owned).collect(),
+                None,
+                ProcessEnvPolicy::empty(),
+                None,
+                1024,
+                1024,
+            )
+            .expect("shell path intent is valid");
             assert!(requires_host_process_path_review(&intent));
         }
     }

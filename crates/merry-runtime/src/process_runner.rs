@@ -10,6 +10,7 @@ use crate::{
     ProcessRunnerContext, ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput,
 };
 use std::{
+    collections::{BTreeSet, VecDeque},
     env,
     ffi::{OsStr, OsString},
     fs, io,
@@ -507,7 +508,7 @@ impl BwrapProcessRunner {
             path_rules.extend(snapshot.path_rules);
             environment = environment.with_host_integrations(snapshot.host_integrations);
         }
-        add_git_metadata_baseline_rules(&mut path_rules, &self.cwd_root);
+        add_git_metadata_baseline_rules(&mut path_rules, &self.cwd_root)?;
         path_rules = normalize_path_rules(path_rules);
         Ok(bwrap_process_plan_with_environment(
             intent,
@@ -656,7 +657,7 @@ impl BwrapPermissionedProcessRunnerFactory {
             rules.extend(permissions.snapshot()?.path_rules);
         }
         rules.extend(self.requested_path_rules_for_request(request)?);
-        add_git_metadata_baseline_rules(&mut rules, &self.cwd_root);
+        add_git_metadata_baseline_rules(&mut rules, &self.cwd_root)?;
         Ok(normalize_path_rules(rules))
     }
 
@@ -894,18 +895,6 @@ fn merged_path_rule(
         && left_source == crate::PathAccessRuleSource::TrustedGlobalConfig;
     let right_is_hard_read_only = right_access == PathAccess::ReadOnly
         && right_source == crate::PathAccessRuleSource::TrustedGlobalConfig;
-    if left_is_hard_read_only
-        && right_source == crate::PathAccessRuleSource::PermissionReview
-        && right_access == PathAccess::ReadOnly
-    {
-        return (right_access, right_source);
-    }
-    if right_is_hard_read_only
-        && left_source == crate::PathAccessRuleSource::PermissionReview
-        && left_access == PathAccess::ReadOnly
-    {
-        return (left_access, left_source);
-    }
     if left_is_hard_read_only {
         return (left_access, left_source);
     }
@@ -967,23 +956,131 @@ fn git_metadata_baseline_rule(path: impl Into<PathBuf>) -> PathAccessRule {
     )
 }
 
-fn add_git_metadata_baseline_rules(rules: &mut Vec<PathAccessRule>, workspace_root: &Path) {
-    let mut git_metadata_paths = vec![workspace_root.join(".git")];
-    git_metadata_paths.extend(
+fn add_git_metadata_baseline_rules(
+    rules: &mut Vec<PathAccessRule>,
+    workspace_root: &Path,
+) -> Result<(), ProcessRunnerError> {
+    let reviewed_git_write_paths = rules
+        .iter()
+        .filter(|rule| {
+            rule.source() == crate::PathAccessRuleSource::PermissionReview
+                && rule.access() == PathAccess::ReadWrite
+                && is_git_metadata_path(rule.path())
+        })
+        .map(|rule| rule.path().to_path_buf())
+        .collect::<BTreeSet<_>>();
+    let mut writable_roots = BTreeSet::from([workspace_root.to_path_buf()]);
+    writable_roots.extend(
         rules
             .iter()
             .filter(|rule| {
                 rule.access() == PathAccess::ReadWrite && !is_git_metadata_path(rule.path())
             })
-            .map(|rule| rule.path())
-            .filter(|root| *root != workspace_root && !root.starts_with(workspace_root))
-            .map(|root| root.join(".git")),
+            .map(|rule| rule.path().to_path_buf()),
     );
+
+    let mut git_metadata_paths = BTreeSet::new();
+    for root in writable_roots {
+        collect_git_metadata_paths(&root, &mut git_metadata_paths)?;
+    }
+
     rules.extend(
         git_metadata_paths
             .into_iter()
+            .filter(|path| !reviewed_git_write_paths.contains(path))
             .map(git_metadata_baseline_rule),
     );
+    Ok(())
+}
+
+fn collect_git_metadata_paths(
+    writable_root: &Path,
+    git_metadata_paths: &mut BTreeSet<PathBuf>,
+) -> Result<(), ProcessRunnerError> {
+    match fs::symlink_metadata(writable_root) {
+        Ok(metadata) if !metadata.is_dir() => return Ok(()),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => {
+            if source.kind() == io::ErrorKind::PermissionDenied {
+                return Ok(());
+            }
+            return Err(ProcessRunnerError::infrastructure(format!(
+                "failed to inspect writable process path `{}` for Git metadata: {source}",
+                writable_root.display()
+            )));
+        }
+        Ok(_) => {}
+    }
+
+    // The direct child is protected even when it does not exist yet. Nested
+    // paths are added when they already exist; a complete recursive set of
+    // empty placeholders would make large writable roots prohibitively costly
+    // to materialize in every action namespace.
+    git_metadata_paths.insert(writable_root.join(".git"));
+    let mut directories = VecDeque::from([writable_root.to_path_buf()]);
+    while let Some(directory) = directories.pop_front() {
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(source)
+                if matches!(
+                    source.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+                ) =>
+            {
+                continue;
+            }
+            Err(source) => {
+                return Err(ProcessRunnerError::infrastructure(format!(
+                    "failed to inspect writable process directory `{}` for Git metadata: {source}",
+                    directory.display()
+                )));
+            }
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(source)
+                    if matches!(
+                        source.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+                    ) =>
+                {
+                    continue;
+                }
+                Err(source) => {
+                    return Err(ProcessRunnerError::infrastructure(format!(
+                        "failed to inspect an entry under writable process directory `{}` for Git metadata: {source}",
+                        directory.display()
+                    )));
+                }
+            };
+            if entry.file_name() == OsStr::new(".git") {
+                git_metadata_paths.insert(entry.path());
+                continue;
+            }
+            let is_directory = match entry.file_type() {
+                Ok(file_type) => file_type.is_dir(),
+                Err(source)
+                    if matches!(
+                        source.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+                    ) =>
+                {
+                    false
+                }
+                Err(source) => {
+                    return Err(ProcessRunnerError::infrastructure(format!(
+                        "failed to inspect writable process path `{}` for Git metadata: {source}",
+                        entry.path().display()
+                    )));
+                }
+            };
+            if is_directory {
+                directories.push_back(entry.path());
+            }
+        }
+    }
+    Ok(())
 }
 
 fn path_depth(path: &Path) -> usize {
@@ -1009,6 +1106,7 @@ struct BwrapProcessPlan {
     program: OsString,
     args: Vec<OsString>,
     cwd: PathBuf,
+    temporary_mountpoints: Vec<PathBuf>,
 }
 
 #[cfg(test)]
@@ -1068,6 +1166,7 @@ fn bwrap_process_plan_with_environment(
         environment.tmp_source.as_os_str().to_owned(),
         os(ACTION_SANDBOX_TMPDIR),
     ];
+    let mut temporary_mountpoints = Vec::new();
     if !environment.home.exists() {
         append_bwrap_mount_parent_args(&mut args, &environment.home);
         args.extend([
@@ -1114,7 +1213,22 @@ fn bwrap_process_plan_with_environment(
     }
     append_bwrap_required_path_rule(&mut args, cwd_root, PathAccess::ReadWrite);
     for rule in path_rules {
-        if rule.source() == crate::PathAccessRuleSource::PermissionReview {
+        if rule.source() == crate::PathAccessRuleSource::GitMetadataBaseline {
+            append_bwrap_git_metadata_baseline_rule(
+                &mut args,
+                rule.path(),
+                &mut temporary_mountpoints,
+            );
+        } else if rule.source() == crate::PathAccessRuleSource::PermissionReview
+            && rule.access() == PathAccess::ReadWrite
+            && is_git_metadata_path(rule.path())
+            && !rule.path().exists()
+        {
+            // The workspace or an already approved parent supplies the writable
+            // mount for a newly-created .git directory. A required bind would
+            // fail before git init gets a chance to create the directory.
+            continue;
+        } else if rule.source() == crate::PathAccessRuleSource::PermissionReview {
             append_bwrap_required_path_rule(&mut args, rule.path(), rule.access());
         } else {
             append_bwrap_path_rule(&mut args, rule.path(), rule.access());
@@ -1163,6 +1277,7 @@ fn bwrap_process_plan_with_environment(
         program: bwrap_program.as_os_str().to_owned(),
         args,
         cwd,
+        temporary_mountpoints,
     }
 }
 
@@ -1253,6 +1368,32 @@ fn append_bwrap_required_path_rule(args: &mut Vec<OsString>, path: &Path, access
     }
 }
 
+fn append_bwrap_git_metadata_baseline_rule(
+    args: &mut Vec<OsString>,
+    path: &Path,
+    temporary_mountpoints: &mut Vec<PathBuf>,
+) {
+    append_bwrap_mount_parent_args(args, path);
+    if path.exists() {
+        args.extend([
+            os("--ro-bind"),
+            path.as_os_str().to_owned(),
+            path.as_os_str().to_owned(),
+        ]);
+    } else {
+        // --ro-bind-try would silently disappear when git init creates this
+        // path after the plan is built. A read-only tmpfs placeholder keeps
+        // the path unavailable for writes without mutating the host tree.
+        args.extend([
+            os("--tmpfs"),
+            path.as_os_str().to_owned(),
+            os("--remount-ro"),
+            path.as_os_str().to_owned(),
+        ]);
+        temporary_mountpoints.push(path.to_path_buf());
+    }
+}
+
 fn append_bwrap_mount_parent_args(args: &mut Vec<OsString>, destination: &Path) {
     let Some(parent) = destination.parent() else {
         return;
@@ -1277,6 +1418,7 @@ async fn run_process_plan(
         return Err(ProcessRunnerError::Cancelled);
     }
 
+    let temporary_mountpoints = plan.temporary_mountpoints.clone();
     let mut command = tokio::process::Command::new(&plan.program);
     command
         .args(&plan.args)
@@ -1287,7 +1429,26 @@ async fn run_process_plan(
         .kill_on_drop(true);
 
     let backend_program = plan.program.to_string_lossy().into_owned();
-    run_spawned_process(command, intent, context, backend_program).await
+    let result = run_spawned_process(command, intent, context, backend_program).await;
+    cleanup_bwrap_temporary_mountpoints(&temporary_mountpoints);
+    result
+}
+
+fn cleanup_bwrap_temporary_mountpoints(paths: &[PathBuf]) {
+    let mut paths = paths.to_vec();
+    paths.sort_by_key(|path| std::cmp::Reverse(path_depth(path)));
+    for path in paths {
+        match fs::remove_dir(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) if error.kind() == io::ErrorKind::DirectoryNotEmpty => {}
+            Err(error) => tracing::warn!(
+                path = %path.display(),
+                error = %error,
+                "failed to clean up a temporary bwrap mountpoint"
+            ),
+        }
+    }
 }
 
 impl ProcessRunner for TokioProcessRunner {
@@ -1470,7 +1631,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        BwrapProcessEnvironment, BwrapProcessRunner, TokioProcessRunner, bwrap_process_plan,
+        BwrapPermissionedProcessRunnerFactory, BwrapProcessEnvironment, BwrapProcessRunner,
+        BwrapSessionPermissions, TokioProcessRunner, bwrap_process_plan,
         bwrap_process_plan_with_environment, process_current_dir,
     };
     use crate::{
@@ -2066,6 +2228,18 @@ mod tests {
 
     #[test]
     fn bwrap_permissioned_factory_requires_git_write_per_action() {
+        let external_root = tempfile::tempdir().expect("external root should be created");
+        let external_git = external_root.path().join(".git");
+        std::fs::create_dir(&external_git).expect("external git directory should be created");
+        let external_root_path = external_root
+            .path()
+            .to_str()
+            .expect("root path should be utf-8")
+            .to_owned();
+        let external_git_path = external_git
+            .to_str()
+            .expect("git path should be utf-8")
+            .to_owned();
         let session_permissions = super::BwrapSessionPermissions::new();
         let factory =
             super::BwrapPermissionedProcessRunnerFactory::new_at_workspace_root("/workspace/merry")
@@ -2076,13 +2250,13 @@ mod tests {
             .with_session_permissions(session_permissions);
         let parent_request = permission_request(json!({
             "requested": {
-                "paths": [{ "path": "/pathA", "access": "rw" }]
+                "paths": [{ "path": external_root_path.clone(), "access": "rw" }]
             },
-            "for_action": { "kind": "process", "command": "cp a /pathA/out", "cwd": null }
+            "for_action": { "kind": "process", "command": "cp a external/out", "cwd": null }
         }));
         let git_request = permission_request(json!({
             "requested": {
-                "paths": [{ "path": "/pathA/.git", "access": "rw" }]
+                "paths": [{ "path": external_git_path.clone(), "access": "rw" }]
             },
             "for_action": { "kind": "process", "command": "git checkout -- README.md", "cwd": null }
         }));
@@ -2097,11 +2271,19 @@ mod tests {
         let current_git_args = os_args(&current_git_plan.args);
         assert!(contains_sequence(
             &current_git_args,
-            &["--bind", "/pathA/.git", "/pathA/.git"]
+            &[
+                "--bind",
+                external_git_path.as_str(),
+                external_git_path.as_str()
+            ]
         ));
         assert!(!contains_sequence(
             &current_git_args,
-            &["--ro-bind-try", "/pathA/.git", "/pathA/.git"]
+            &[
+                "--ro-bind",
+                external_git_path.as_str(),
+                external_git_path.as_str()
+            ]
         ));
 
         let later_plan = base_runner
@@ -2110,15 +2292,27 @@ mod tests {
         let later_args = os_args(&later_plan.args);
         assert!(contains_sequence(
             &later_args,
-            &["--bind", "/pathA", "/pathA"]
+            &[
+                "--bind",
+                external_root_path.as_str(),
+                external_root_path.as_str()
+            ]
         ));
         assert!(contains_sequence(
             &later_args,
-            &["--ro-bind-try", "/pathA/.git", "/pathA/.git"]
+            &[
+                "--ro-bind",
+                external_git_path.as_str(),
+                external_git_path.as_str()
+            ]
         ));
         assert!(!contains_sequence(
             &later_args,
-            &["--bind-try", "/pathA/.git", "/pathA/.git"]
+            &[
+                "--bind",
+                external_git_path.as_str(),
+                external_git_path.as_str()
+            ]
         ));
     }
 
@@ -2143,6 +2337,45 @@ mod tests {
         assert!(!contains_sequence(
             &args,
             &["--bind-try", "/pathA/.git", "/pathA/.git"]
+        ));
+    }
+
+    #[test]
+    fn bwrap_git_baseline_covers_missing_workspace_and_nested_git_paths() {
+        let workspace = tempfile::tempdir().expect("workspace should be created");
+        let nested_git = workspace.path().join("nested-repo/.git");
+        std::fs::create_dir_all(&nested_git).expect("nested git directory should be created");
+        let workspace_git = workspace.path().join(".git");
+        let workspace_git_path = workspace_git
+            .to_str()
+            .expect("workspace git path should be utf-8");
+        let nested_git_path = nested_git
+            .to_str()
+            .expect("nested git path should be utf-8");
+
+        let runner = BwrapProcessRunner::new_at_workspace_root(workspace.path())
+            .with_bwrap_program("/custom/bin/bwrap");
+        let plan = runner
+            .plan_for(&intent(None))
+            .expect("git metadata plan should build");
+        let args = os_args(&plan.args);
+
+        assert!(contains_sequence(
+            &args,
+            &[
+                "--tmpfs",
+                workspace_git_path,
+                "--remount-ro",
+                workspace_git_path
+            ]
+        ));
+        assert!(contains_sequence(
+            &args,
+            &["--ro-bind", nested_git_path, nested_git_path]
+        ));
+        assert!(!contains_sequence(
+            &args,
+            &["--bind", nested_git_path, nested_git_path]
         ));
     }
 
@@ -2223,7 +2456,7 @@ mod tests {
         assert!(contains_sequence(
             &args,
             &[
-                "--ro-bind",
+                "--ro-bind-try",
                 "/workspace/merry/deps",
                 "/workspace/merry/deps"
             ]
@@ -2396,6 +2629,7 @@ mod tests {
         assert_eq!(output.stdout_text(), "host");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn tokio_process_runner_preserves_non_utf8_output() {
         let intent = ProcessActionIntent::new(
@@ -2510,6 +2744,84 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(Path::new("/tmp").join(marker));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn bwrap_git_init_requires_an_action_scoped_git_write_grant() {
+        let workspace = tempfile::tempdir().expect("workspace tempdir should be created");
+        let runner = BwrapProcessRunner::new_at_workspace_root(workspace.path())
+            .allow_network()
+            .with_bwrap_program("/usr/bin/bwrap");
+        let init_intent = ProcessActionIntent::new(
+            vec!["git".to_owned(), "init".to_owned(), ".".to_owned()],
+            None,
+            ProcessEnvPolicy::empty(),
+            None,
+            4096,
+            4096,
+        )
+        .expect("git init intent should be valid");
+
+        let denied = runner
+            .run(
+                init_intent.clone(),
+                ProcessRunnerContext::new(CancellationToken::new()),
+            )
+            .await
+            .expect("blocked git init should still return process output");
+        assert!(
+            !denied.ok(),
+            "unreviewed git init should not succeed: {denied:?}"
+        );
+        assert!(
+            !workspace.path().join(".git").exists(),
+            "unreviewed git init must not create host metadata"
+        );
+
+        let session_permissions = BwrapSessionPermissions::new();
+        let factory =
+            BwrapPermissionedProcessRunnerFactory::new_at_workspace_root(workspace.path())
+                .with_bwrap_program("/usr/bin/bwrap")
+                .with_session_permissions(session_permissions.clone());
+        let request = permission_request(json!({
+            "requested": {
+                "network": true,
+                "paths": [{ "path": ".git", "access": "rw" }]
+            },
+            "for_action": { "kind": "process", "command": "git init .", "cwd": null }
+        }));
+        factory
+            .validate_request(&request)
+            .expect("reviewed git init request should validate");
+        let reviewed = factory.runner_for(&request);
+        let approved = reviewed
+            .run(
+                request_process_intent(&request).clone(),
+                ProcessRunnerContext::new(CancellationToken::new()),
+            )
+            .await
+            .expect("reviewed git init should return process output");
+        assert!(approved.ok(), "reviewed git init failed: {approved:?}");
+        assert!(
+            workspace.path().join(".git").is_dir(),
+            "reviewed git init should persist host metadata"
+        );
+
+        let later = BwrapProcessRunner::new_at_workspace_root(workspace.path())
+            .allow_network()
+            .with_bwrap_program("/usr/bin/bwrap")
+            .with_session_permissions(session_permissions);
+        let later_plan = later
+            .plan_for(&intent(None))
+            .expect("later process plan should build");
+        let later_args = os_args(&later_plan.args);
+        let git_path = workspace.path().join(".git");
+        let git_path = git_path.to_str().expect("git path should be utf-8");
+        assert!(contains_sequence(
+            &later_args,
+            &["--ro-bind", git_path, git_path]
+        ));
     }
 
     fn os_args(args: &[OsString]) -> Vec<String> {
