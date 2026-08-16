@@ -78,14 +78,12 @@ async fn opt_in_process_action_uses_runner_and_records_execution_audit() {
                 "bytes": "runtime tests passed\n".len(),
                 "truncated": false,
                 "utf8": true,
-                "bytes_base64": "cnVudGltZSB0ZXN0cyBwYXNzZWQK",
             },
             "stderr": {
                 "text": "",
                 "bytes": 0,
                 "truncated": false,
                 "utf8": true,
-                "bytes_base64": "",
             }
         })
     );
@@ -199,6 +197,54 @@ async fn opt_in_process_action_uses_runner_and_records_execution_audit() {
     assert!(observation_text.contains("stderr_bytes=0"));
     assert!(observation_text.contains(&format!("artifact={}", result.artifact().id().as_str())));
     assert!(!observation_text.contains("runtime tests passed"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn process_action_artifact_preserves_non_utf8_output_as_base64() {
+    let executor = ProcessProposingToolExecutor::new();
+    let runner = FakeProcessRunner::succeeding_with_non_utf8_output();
+    let tool = RegisteredTool::new(
+        policy_tool_spec("policy_command_non_utf8_output"),
+        Arc::new(executor),
+        ToolActionKind::CommandExec,
+    )
+    .with_action_proposal();
+    let (runtime, pending) = register_policy_pending_registered_tool_with_builder(
+        "runtime-policy-command-non-utf8-output",
+        "policy_command_non_utf8_output",
+        "call-command-non-utf8-output",
+        tool,
+        |builder| {
+            builder
+                .allow_low_risk_process_actions(Arc::new(runner.clone()))
+                .build()
+        },
+    )
+    .await;
+
+    let events = runtime
+        .execute_tool_call(pending.id(), ToolExecutionContext::default())
+        .await
+        .expect("non-UTF-8 process output should still produce a result");
+
+    let result = resolved_tool_result(&events);
+    let content = runtime
+        .read_artifact_content(result.artifact().id())
+        .await
+        .expect("process result artifact should be readable");
+    let payload: serde_json::Value = serde_json::from_str(
+        content
+            .as_text()
+            .expect("process result artifact should be textual JSON"),
+    )
+    .expect("process result artifact should parse as JSON");
+
+    assert_eq!(payload["stdout"]["utf8"], false);
+    assert_eq!(payload["stdout"]["bytes"], 3);
+    assert_eq!(payload["stdout"]["bytes_base64"], "/wBh");
+    assert_eq!(payload["stderr"]["utf8"], false);
+    assert_eq!(payload["stderr"]["bytes"], 2);
+    assert_eq!(payload["stderr"]["bytes_base64"], "b/4=");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -812,14 +858,12 @@ async fn opt_in_accepted_local_workspace_process_action_executes_local_workspace
                 "bytes": "runtime tests passed\n".len(),
                 "truncated": false,
                 "utf8": true,
-                "bytes_base64": "cnVudGltZSB0ZXN0cyBwYXNzZWQK",
             },
             "stderr": {
                 "text": "",
                 "bytes": 0,
                 "truncated": false,
                 "utf8": true,
-                "bytes_base64": "",
             }
         })
     );
