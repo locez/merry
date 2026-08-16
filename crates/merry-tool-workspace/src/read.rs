@@ -133,7 +133,7 @@ pub(crate) fn read_file_blocking(state: &WorkspaceToolState, path: String) -> To
         }
     };
 
-    for root in &state.roots {
+    for root in state.read_roots() {
         match resolve_existing_path(root, &relative) {
             Ok(Some(resolved)) => {
                 return match read_resolved_file(&relative, &resolved.path, &state.limits) {

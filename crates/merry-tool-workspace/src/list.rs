@@ -177,7 +177,7 @@ pub(crate) fn list_dir_blocking_checked(
         }
     };
 
-    for root in &state.roots {
+    for root in state.read_roots() {
         if is_cancelled() {
             return Err(ToolExecutionError::Cancelled);
         }

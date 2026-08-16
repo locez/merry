@@ -548,13 +548,13 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Explicitly enables SDK/host non-interactive execution for registered
+    /// Explicitly enables fully trusted SDK/host execution for registered
     /// tools. Runtime schema validation, tool executor boundaries, sandboxing,
     /// and cancellation remain active. Proposal-based commit lifecycle checks
     /// are intentionally bypassed at this explicit trust boundary.
     #[must_use]
-    pub fn non_interactive_trusted_tools(self) -> Self {
-        self.permission_review_mode(PermissionReviewMode::NonInteractiveTrusted)
+    pub fn fully_trusted_tools(self) -> Self {
+        self.permission_review_mode(PermissionReviewMode::FullyTrusted)
     }
 
     /// Installs a host-owned permission admission source.

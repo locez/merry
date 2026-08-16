@@ -79,6 +79,22 @@ pub(crate) fn default_development_path_rules(home: &Path) -> Vec<PathAccessRule>
     .collect()
 }
 
+/// Inner action baseline for common development paths. The outer sandbox may
+/// expose these paths read-write as a capability ceiling, but each action starts
+/// with them read-only until a session grant upgrades the exact path.
+pub(crate) fn default_inner_development_path_rules(home: &Path) -> Vec<PathAccessRule> {
+    default_development_path_rules(home)
+        .into_iter()
+        .map(|rule| {
+            PathAccessRule::new(
+                rule.path().to_path_buf(),
+                PathAccess::ReadOnly,
+                rule.source(),
+            )
+        })
+        .collect()
+}
+
 #[cfg(test)]
 pub(crate) const SANDBOX_HOME: &str = "/home/alice";
 #[cfg(test)]

@@ -8,6 +8,7 @@ use crate::{
     session::ProposedToolExecutionOutcome, session::ToolResultLedgerObservation,
     tool::ActionProposalEvidence, tool::ToolExecutionContext,
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use merry_core::{
     ArtifactKind, ArtifactRef, PendingToolCall, RuntimeJournalEvent, SessionId,
     ToolCallResultStatus,
@@ -345,22 +346,34 @@ fn process_output_artifact_content(
         })
     };
 
+    let mut stdout_payload = serde_json::json!({
+        "text": output.stdout_text(),
+        "bytes": output.stdout_bytes(),
+        "truncated": output.stdout_truncated(),
+        "utf8": output.stdout_is_utf8(),
+    });
+    if !output.stdout_is_utf8() {
+        stdout_payload["bytes_base64"] = serde_json::json!(BASE64.encode(output.stdout_data()));
+    }
+
+    let mut stderr_payload = serde_json::json!({
+        "text": output.stderr_text(),
+        "bytes": output.stderr_bytes(),
+        "truncated": output.stderr_truncated(),
+        "utf8": output.stderr_is_utf8(),
+    });
+    if !output.stderr_is_utf8() {
+        stderr_payload["bytes_base64"] = serde_json::json!(BASE64.encode(output.stderr_data()));
+    }
+
     let mut payload = serde_json::json!({
         "ok": output.ok(),
         "kind": "process_action",
         "permission_profile_id": permission_profile_id.as_str(),
         "status": process_status_json(output.status()),
         "intent": intent_payload,
-        "stdout": {
-            "text": output.stdout_text(),
-            "bytes": output.stdout_bytes(),
-            "truncated": output.stdout_truncated(),
-        },
-        "stderr": {
-            "text": output.stderr_text(),
-            "bytes": output.stderr_bytes(),
-            "truncated": output.stderr_truncated(),
-        }
+        "stdout": stdout_payload,
+        "stderr": stderr_payload,
     });
 
     if let Some(review) = permission_review {

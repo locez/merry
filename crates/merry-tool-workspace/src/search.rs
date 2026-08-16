@@ -270,7 +270,7 @@ pub(crate) fn search_text_blocking_checked(
         };
 
         let display = relative.display.clone();
-        for root in &state.roots {
+        for root in state.read_roots() {
             if is_cancelled() {
                 return Err(ToolExecutionError::Cancelled);
             }
@@ -313,7 +313,7 @@ pub(crate) fn search_text_blocking_checked(
         ));
     }
 
-    for root in &state.roots {
+    for root in state.read_roots() {
         if search.is_done() {
             break;
         }

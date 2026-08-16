@@ -11,10 +11,7 @@ pub(crate) fn permission_network_smoke_process_runner(
     workspace_root: &Path,
     merry_config: Option<&MerryConfig>,
 ) -> Result<ActionProcessBackend, CliError> {
-    let mut options = action_process_backend_options(merry_config).map_err(unexpected)?;
-    // This smoke must prove that the first attempt is denied by the default
-    // inner profile even when the user enables network access globally.
-    options.network_allowed = false;
+    let options = action_process_backend_options(merry_config).map_err(unexpected)?;
     ActionProcessBackend::from_bwrap_options(workspace_root.to_path_buf(), options)
         .map_err(Into::into)
 }

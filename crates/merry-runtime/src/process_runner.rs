@@ -10,6 +10,7 @@ use crate::{
     ProcessRunnerContext, ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput,
 };
 use std::{
+    collections::BTreeSet,
     env,
     ffi::{OsStr, OsString},
     fs, io,
@@ -507,6 +508,7 @@ impl BwrapProcessRunner {
             path_rules.extend(snapshot.path_rules);
             environment = environment.with_host_integrations(snapshot.host_integrations);
         }
+        add_git_metadata_baseline_rules(&mut path_rules, &self.cwd_root)?;
         path_rules = normalize_path_rules(path_rules);
         Ok(bwrap_process_plan_with_environment(
             intent,
@@ -523,9 +525,11 @@ impl BwrapProcessRunner {
 /// one runtime session.
 ///
 /// Each process action still starts a fresh bubblewrap instance, but every
-/// instance receives a snapshot of these approved capabilities. The store is
-/// deliberately constructed and shared by one runtime backend; it is not
-/// global and must not be reused across sessions.
+/// instance receives a snapshot of the retained path and host-integration
+/// capabilities. Network access is intentionally absent from this store:
+/// every network action must receive an independent reviewed runner.
+/// The store is deliberately constructed and shared by one runtime backend;
+/// it is not global and must not be reused across sessions.
 #[derive(Debug, Clone, Default)]
 pub struct BwrapSessionPermissions {
     state: Arc<RwLock<BwrapSessionPermissionState>>,
@@ -573,7 +577,11 @@ impl BwrapSessionPermissions {
             )
         })?;
         let mut combined = state.path_rules.clone();
-        combined.extend(path_rules);
+        combined.extend(
+            path_rules
+                .into_iter()
+                .filter(|rule| !is_git_metadata_path(rule.path())),
+        );
         state.path_rules = normalize_session_path_rules(combined);
         state.host_integrations.extend(host_integrations);
         state.host_integrations.sort_unstable();
@@ -586,14 +594,15 @@ impl BwrapSessionPermissions {
 ///
 /// Filesystem access stays governed by the configured workspace/root path
 /// rules and the session-scoped capabilities already approved by the runtime.
-/// Approved `network=true` requests are applied only to the returned runner;
-/// other sessions receive a fresh empty capability store. Paths and host
-/// integrations may remain active for later actions in the same session.
+/// Approved ordinary path and host-integration requests are retained by the
+/// session store and applied to later actions in the same session. Network
+/// requests are action-scoped and are never retained. Git metadata paths are
+/// deliberately excluded from retention and must be reviewed again for every
+/// action.
 #[derive(Debug, Clone)]
 pub struct BwrapPermissionedProcessRunnerFactory {
     cwd_root: PathBuf,
     environment: BwrapProcessEnvironment,
-    base_network_allowed: bool,
     path_rules: Vec<PathAccessRule>,
     session_permissions: Option<BwrapSessionPermissions>,
     bwrap_program: PathBuf,
@@ -606,7 +615,6 @@ impl BwrapPermissionedProcessRunnerFactory {
         Self {
             cwd_root: root.into(),
             environment: BwrapProcessEnvironment::from_current_process(),
-            base_network_allowed: false,
             path_rules: Vec::new(),
             session_permissions: None,
             bwrap_program: PathBuf::from(BWRAP_PROGRAM),
@@ -617,13 +625,6 @@ impl BwrapPermissionedProcessRunnerFactory {
     #[must_use]
     pub fn with_environment(mut self, environment: BwrapProcessEnvironment) -> Self {
         self.environment = environment;
-        self
-    }
-
-    /// Allows network capability in the base profile before per-request grants.
-    #[must_use]
-    pub fn allow_base_network(mut self) -> Self {
-        self.base_network_allowed = true;
         self
     }
 
@@ -656,6 +657,7 @@ impl BwrapPermissionedProcessRunnerFactory {
             rules.extend(permissions.snapshot()?.path_rules);
         }
         rules.extend(self.requested_path_rules_for_request(request)?);
+        add_git_metadata_baseline_rules(&mut rules, &self.cwd_root)?;
         Ok(normalize_path_rules(rules))
     }
 
@@ -728,7 +730,7 @@ impl BwrapPermissionedProcessRunnerFactory {
         let mut runner = BwrapProcessRunner::new_at_workspace_root(self.cwd_root.clone())
             .with_environment(environment)
             .with_path_rules(path_rules);
-        if self.base_network_allowed || request.requests_network() {
+        if request.requests_network() {
             runner = runner.allow_network();
         }
         if let Some(permissions) = &self.session_permissions {
@@ -773,29 +775,29 @@ fn effective_requested_path_access(
     requested_access: PathAccess,
     configured_rules: &[PathAccessRule],
 ) -> Result<PathAccess, ProcessRunnerError> {
-    let mut nearest = None;
-    for rule in configured_rules {
-        if requested_path.starts_with(rule.path())
-            && nearest.is_none_or(|current: &PathAccessRule| {
-                path_depth(rule.path()) > path_depth(current.path())
-            })
-        {
-            nearest = Some(rule);
-        }
+    if let Some(rule) = configured_rules
+        .iter()
+        .filter(|rule| requested_path.starts_with(rule.path()) && rule.access() == PathAccess::Deny)
+        .max_by_key(|rule| path_depth(rule.path()))
+    {
+        return Err(ProcessRunnerError::infrastructure(format!(
+            "requested path `{}` is denied by configured path policy `{}`",
+            requested_path.display(),
+            rule.path().display()
+        )));
     }
 
-    if let Some(rule) = nearest {
-        if rule.access() == PathAccess::Deny {
-            return Err(ProcessRunnerError::infrastructure(format!(
-                "requested path `{}` is denied by configured path policy `{}`",
-                requested_path.display(),
-                rule.path().display()
-            )));
-        }
-        if rule.access() == PathAccess::ReadOnly {
-            return Ok(PathAccess::ReadOnly);
-        }
+    if configured_rules.iter().any(|rule| {
+        requested_path.starts_with(rule.path())
+            && rule.access() == PathAccess::ReadOnly
+            && rule.source() == crate::PathAccessRuleSource::TrustedGlobalConfig
+    }) {
+        // Explicit global read-only rules are a hard ceiling. Git metadata
+        // baselines are intentionally different: a reviewed action may
+        // temporarily overlay them, but the grant is never session-persistent.
+        return Ok(PathAccess::ReadOnly);
     }
+
     Ok(requested_access)
 }
 
@@ -803,13 +805,18 @@ fn normalize_path_rules(rules: Vec<PathAccessRule>) -> Vec<PathAccessRule> {
     let mut merged =
         std::collections::BTreeMap::<PathBuf, (PathAccess, crate::PathAccessRuleSource)>::new();
     for rule in rules {
+        let access = if rule.source()
+            == crate::PathAccessRuleSource::TrustedGlobalConfigWritableCeiling
+            && rule.access() == PathAccess::ReadWrite
+        {
+            PathAccess::ReadOnly
+        } else {
+            rule.access()
+        };
         let entry = merged
             .entry(rule.path().to_path_buf())
-            .or_insert((rule.access(), rule.source()));
-        entry.0 = restrictive_path_access(entry.0, rule.access());
-        if rule.access() == entry.0 {
-            entry.1 = rule.source();
-        }
+            .or_insert((access, rule.source()));
+        (entry.0, entry.1) = merged_path_rule(entry.0, entry.1, access, rule.source());
     }
     let mut rules = merged
         .into_iter()
@@ -871,11 +878,136 @@ fn session_path_access(left: PathAccess, right: PathAccess) -> PathAccess {
     }
 }
 
-fn restrictive_path_access(left: PathAccess, right: PathAccess) -> PathAccess {
-    match (left, right) {
-        (PathAccess::Deny, _) | (_, PathAccess::Deny) => PathAccess::Deny,
-        (PathAccess::ReadOnly, _) | (_, PathAccess::ReadOnly) => PathAccess::ReadOnly,
-        (PathAccess::ReadWrite, PathAccess::ReadWrite) => PathAccess::ReadWrite,
+fn merged_path_rule(
+    left_access: PathAccess,
+    left_source: crate::PathAccessRuleSource,
+    right_access: PathAccess,
+    right_source: crate::PathAccessRuleSource,
+) -> (PathAccess, crate::PathAccessRuleSource) {
+    if left_access == PathAccess::Deny {
+        return (left_access, left_source);
+    }
+    if right_access == PathAccess::Deny {
+        return (right_access, right_source);
+    }
+
+    let left_is_hard_read_only = left_access == PathAccess::ReadOnly
+        && left_source == crate::PathAccessRuleSource::TrustedGlobalConfig;
+    let right_is_hard_read_only = right_access == PathAccess::ReadOnly
+        && right_source == crate::PathAccessRuleSource::TrustedGlobalConfig;
+    if left_is_hard_read_only {
+        return (left_access, left_source);
+    }
+    if right_is_hard_read_only {
+        return (right_access, right_source);
+    }
+
+    let left_is_git_metadata_baseline = left_access == PathAccess::ReadOnly
+        && left_source == crate::PathAccessRuleSource::GitMetadataBaseline;
+    let right_is_git_metadata_baseline = right_access == PathAccess::ReadOnly
+        && right_source == crate::PathAccessRuleSource::GitMetadataBaseline;
+    if left_is_git_metadata_baseline
+        && right_source == crate::PathAccessRuleSource::PermissionReview
+        && right_access == PathAccess::ReadWrite
+    {
+        return (right_access, right_source);
+    }
+    if right_is_git_metadata_baseline
+        && left_source == crate::PathAccessRuleSource::PermissionReview
+        && left_access == PathAccess::ReadWrite
+    {
+        return (left_access, left_source);
+    }
+    if left_is_git_metadata_baseline {
+        return (left_access, left_source);
+    }
+    if right_is_git_metadata_baseline {
+        return (right_access, right_source);
+    }
+
+    let left_is_reviewed_write = left_access == PathAccess::ReadWrite
+        && left_source == crate::PathAccessRuleSource::PermissionReview;
+    let right_is_reviewed_write = right_access == PathAccess::ReadWrite
+        && right_source == crate::PathAccessRuleSource::PermissionReview;
+    if left_is_reviewed_write {
+        return (left_access, left_source);
+    }
+    if right_is_reviewed_write {
+        return (right_access, right_source);
+    }
+
+    match (left_access, right_access) {
+        (PathAccess::ReadWrite, _) => (left_access, left_source),
+        (_, PathAccess::ReadWrite) => (right_access, right_source),
+        _ => (PathAccess::ReadOnly, left_source),
+    }
+}
+
+fn is_git_metadata_path(path: &Path) -> bool {
+    path.components()
+        .any(|component| matches!(component, Component::Normal(name) if name == OsStr::new(".git")))
+}
+
+fn git_metadata_baseline_rule(path: impl Into<PathBuf>) -> PathAccessRule {
+    PathAccessRule::new(
+        path,
+        PathAccess::ReadOnly,
+        crate::PathAccessRuleSource::GitMetadataBaseline,
+    )
+}
+
+fn add_git_metadata_baseline_rules(
+    rules: &mut Vec<PathAccessRule>,
+    workspace_root: &Path,
+) -> Result<(), ProcessRunnerError> {
+    let reviewed_git_write_paths = rules
+        .iter()
+        .filter(|rule| {
+            rule.source() == crate::PathAccessRuleSource::PermissionReview
+                && rule.access() == PathAccess::ReadWrite
+                && is_git_metadata_path(rule.path())
+        })
+        .map(|rule| rule.path().to_path_buf())
+        .collect::<BTreeSet<_>>();
+    let mut git_metadata_roots = BTreeSet::from([workspace_root.to_path_buf()]);
+    git_metadata_roots.extend(
+        rules
+            .iter()
+            .filter(|rule| rule.access() == PathAccess::ReadWrite)
+            .map(|rule| rule.path().to_path_buf()),
+    );
+
+    for root in git_metadata_roots {
+        let metadata_path = if is_git_metadata_path(&root) {
+            root
+        } else {
+            root.join(".git")
+        };
+        if !git_metadata_path_exists(&metadata_path)?
+            || reviewed_git_write_paths.contains(&metadata_path)
+        {
+            continue;
+        }
+        rules.push(git_metadata_baseline_rule(metadata_path));
+    }
+    Ok(())
+}
+
+fn git_metadata_path_exists(path: &Path) -> Result<bool, ProcessRunnerError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(source)
+            if matches!(
+                source.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(source) => Err(ProcessRunnerError::infrastructure(format!(
+            "failed to inspect Git metadata path `{}`: {source}",
+            path.display()
+        ))),
     }
 }
 
@@ -1007,7 +1139,18 @@ fn bwrap_process_plan_with_environment(
     }
     append_bwrap_required_path_rule(&mut args, cwd_root, PathAccess::ReadWrite);
     for rule in path_rules {
-        if rule.source() == crate::PathAccessRuleSource::PermissionReview {
+        if rule.source() == crate::PathAccessRuleSource::GitMetadataBaseline {
+            append_bwrap_git_metadata_baseline_rule(&mut args, rule.path());
+        } else if rule.source() == crate::PathAccessRuleSource::PermissionReview
+            && rule.access() == PathAccess::ReadWrite
+            && is_git_metadata_path(rule.path())
+            && !rule.path().exists()
+        {
+            // The workspace or an already approved parent supplies the writable
+            // mount for a newly-created .git directory. A required bind would
+            // fail before git init gets a chance to create the directory.
+            continue;
+        } else if rule.source() == crate::PathAccessRuleSource::PermissionReview {
             append_bwrap_required_path_rule(&mut args, rule.path(), rule.access());
         } else {
             append_bwrap_path_rule(&mut args, rule.path(), rule.access());
@@ -1146,6 +1289,21 @@ fn append_bwrap_required_path_rule(args: &mut Vec<OsString>, path: &Path, access
     }
 }
 
+fn append_bwrap_git_metadata_baseline_rule(args: &mut Vec<OsString>, path: &Path) {
+    if !path.exists() {
+        // A missing `.git` is the initialization case. Leaving it under the
+        // writable workspace lets `git init` persist metadata; a later plan
+        // sees the path and mounts it read-only.
+        return;
+    }
+    append_bwrap_mount_parent_args(args, path);
+    args.extend([
+        os("--ro-bind"),
+        path.as_os_str().to_owned(),
+        path.as_os_str().to_owned(),
+    ]);
+}
+
 fn append_bwrap_mount_parent_args(args: &mut Vec<OsString>, destination: &Path) {
     let Some(parent) = destination.parent() else {
         return;
@@ -1280,23 +1438,17 @@ async fn run_spawned_process(
     })?;
     let stdout = join_bounded_output(stdout_task, "stdout").await?;
     let stderr = join_bounded_output(stderr_task, "stderr").await?;
-    let stdout_text = String::from_utf8(stdout.bytes).map_err(|source| {
-        ProcessRunnerError::infrastructure(format!("process stdout was not UTF-8: {source}"))
-    })?;
-    let stderr_text = String::from_utf8(stderr.bytes).map_err(|source| {
-        ProcessRunnerError::infrastructure(format!("process stderr was not UTF-8: {source}"))
-    })?;
     let status = status
         .code()
         .map(ProcessExitStatus::Exited)
         .unwrap_or(ProcessExitStatus::DomainFailed);
 
-    ProcessRunnerOutput::new(
+    ProcessRunnerOutput::from_bytes(
         &intent,
         status,
-        stdout_text,
+        stdout.bytes,
         stdout.truncated,
-        stderr_text,
+        stderr.bytes,
         stderr.truncated,
     )
     .map_err(|source| ProcessRunnerError::infrastructure(source.to_string()))
@@ -1369,7 +1521,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        BwrapProcessEnvironment, BwrapProcessRunner, TokioProcessRunner, bwrap_process_plan,
+        BwrapPermissionedProcessRunnerFactory, BwrapProcessEnvironment, BwrapProcessRunner,
+        BwrapSessionPermissions, TokioProcessRunner, bwrap_process_plan,
         bwrap_process_plan_with_environment, process_current_dir,
     };
     use crate::{
@@ -1933,6 +2086,224 @@ mod tests {
     }
 
     #[test]
+    fn bwrap_permissioned_factory_keeps_network_scoped_to_current_action() {
+        let session_permissions = super::BwrapSessionPermissions::new();
+        let factory =
+            super::BwrapPermissionedProcessRunnerFactory::new_at_workspace_root("/workspace/merry")
+                .with_bwrap_program("/custom/bin/bwrap")
+                .with_session_permissions(session_permissions.clone());
+        let base_runner = BwrapProcessRunner::new_at_workspace_root("/workspace/merry")
+            .with_bwrap_program("/custom/bin/bwrap")
+            .with_session_permissions(session_permissions);
+        let network_request = permission_request(json!({
+            "requested": { "network": true },
+            "for_action": { "kind": "process", "command": "curl https://example.invalid", "cwd": null }
+        }));
+
+        let _ = factory.runner_for(&network_request);
+        let approved_runner = factory.build_runner(&network_request);
+        let approved_plan = approved_runner
+            .plan_for(request_process_intent(&network_request))
+            .expect("approved network process plan should build");
+        let approved_args = os_args(&approved_plan.args);
+        assert!(!approved_args.iter().any(|arg| arg == "--unshare-net"));
+
+        let plan = base_runner
+            .plan_for(&intent(None))
+            .expect("later process plan should build");
+        let args = os_args(&plan.args);
+
+        assert!(args.iter().any(|arg| arg == "--unshare-net"));
+    }
+
+    #[test]
+    fn bwrap_permissioned_factory_requires_git_write_per_action() {
+        let external_root = tempfile::tempdir().expect("external root should be created");
+        let external_git = external_root.path().join(".git");
+        std::fs::create_dir(&external_git).expect("external git directory should be created");
+        let external_root_path = external_root
+            .path()
+            .to_str()
+            .expect("root path should be utf-8")
+            .to_owned();
+        let external_git_path = external_git
+            .to_str()
+            .expect("git path should be utf-8")
+            .to_owned();
+        let session_permissions = super::BwrapSessionPermissions::new();
+        let factory =
+            super::BwrapPermissionedProcessRunnerFactory::new_at_workspace_root("/workspace/merry")
+                .with_bwrap_program("/custom/bin/bwrap")
+                .with_session_permissions(session_permissions.clone());
+        let base_runner = BwrapProcessRunner::new_at_workspace_root("/workspace/merry")
+            .with_bwrap_program("/custom/bin/bwrap")
+            .with_session_permissions(session_permissions);
+        let parent_request = permission_request(json!({
+            "requested": {
+                "paths": [{ "path": external_root_path.clone(), "access": "rw" }]
+            },
+            "for_action": { "kind": "process", "command": "cp a external/out", "cwd": null }
+        }));
+        let git_request = permission_request(json!({
+            "requested": {
+                "paths": [{ "path": external_git_path.clone(), "access": "rw" }]
+            },
+            "for_action": { "kind": "process", "command": "git checkout -- README.md", "cwd": null }
+        }));
+
+        let _ = factory.runner_for(&parent_request);
+        let _ = factory.runner_for(&git_request);
+
+        let current_git_runner = factory.build_runner(&git_request);
+        let current_git_plan = current_git_runner
+            .plan_for(request_process_intent(&git_request))
+            .expect("the reviewed git action should build");
+        let current_git_args = os_args(&current_git_plan.args);
+        assert!(contains_sequence(
+            &current_git_args,
+            &[
+                "--bind",
+                external_git_path.as_str(),
+                external_git_path.as_str()
+            ]
+        ));
+        assert!(!contains_sequence(
+            &current_git_args,
+            &[
+                "--ro-bind",
+                external_git_path.as_str(),
+                external_git_path.as_str()
+            ]
+        ));
+
+        let later_plan = base_runner
+            .plan_for(request_process_intent(&parent_request))
+            .expect("later ordinary action should build");
+        let later_args = os_args(&later_plan.args);
+        assert!(contains_sequence(
+            &later_args,
+            &[
+                "--bind",
+                external_root_path.as_str(),
+                external_root_path.as_str()
+            ]
+        ));
+        assert!(contains_sequence(
+            &later_args,
+            &[
+                "--ro-bind",
+                external_git_path.as_str(),
+                external_git_path.as_str()
+            ]
+        ));
+        assert!(!contains_sequence(
+            &later_args,
+            &[
+                "--bind",
+                external_git_path.as_str(),
+                external_git_path.as_str()
+            ]
+        ));
+    }
+
+    #[test]
+    fn bwrap_git_baseline_cannot_be_upgraded_by_unreviewed_configured_write() {
+        let runner = BwrapProcessRunner::new_at_workspace_root("/workspace/merry")
+            .with_bwrap_program("/custom/bin/bwrap")
+            .with_path_rules([PathAccessRule::new(
+                PathBuf::from("/pathA/.git"),
+                PathAccess::ReadWrite,
+                PathAccessRuleSource::TrustedGlobalConfigWritableCeiling,
+            )]);
+        let plan = runner
+            .plan_for(&intent(None))
+            .expect("configured path rules should build");
+        let args = os_args(&plan.args);
+
+        assert!(contains_sequence(
+            &args,
+            &["--ro-bind-try", "/pathA/.git", "/pathA/.git"]
+        ));
+        assert!(!contains_sequence(
+            &args,
+            &["--bind-try", "/pathA/.git", "/pathA/.git"]
+        ));
+    }
+
+    #[test]
+    fn bwrap_git_baseline_checks_only_workspace_and_requested_git_paths() {
+        let workspace = tempfile::tempdir().expect("workspace should be created");
+        let workspace_git = workspace.path().join(".git");
+        std::fs::create_dir_all(&workspace_git).expect("workspace git directory should be created");
+        let nested_git = workspace.path().join("nested-repo/.git");
+        std::fs::create_dir_all(&nested_git).expect("nested git directory should be created");
+        let nested_missing_git = workspace.path().join("nested-worktree/.git");
+        std::fs::create_dir_all(
+            nested_missing_git
+                .parent()
+                .expect("nested missing git parent should exist"),
+        )
+        .expect("nested missing git parent should be created");
+        let unrequested_git = workspace.path().join("unrequested-repo/.git");
+        std::fs::create_dir_all(&unrequested_git)
+            .expect("unrequested git directory should be created");
+        let requested_repo = workspace.path().join("nested-repo");
+        let workspace_git_path = workspace_git
+            .to_str()
+            .expect("workspace git path should be utf-8");
+        let nested_git_path = nested_git
+            .to_str()
+            .expect("nested git path should be utf-8");
+        let nested_missing_git_path = nested_missing_git
+            .to_str()
+            .expect("nested missing git path should be utf-8");
+        let unrequested_git_path = unrequested_git
+            .to_str()
+            .expect("unrequested git path should be utf-8");
+
+        let runner = BwrapProcessRunner::new_at_workspace_root(workspace.path())
+            .with_bwrap_program("/custom/bin/bwrap")
+            .with_path_rules([PathAccessRule::new(
+                requested_repo,
+                PathAccess::ReadWrite,
+                PathAccessRuleSource::PermissionReview,
+            )]);
+        let plan = runner
+            .plan_for(&intent(None))
+            .expect("git metadata plan should build");
+        let args = os_args(&plan.args);
+
+        assert!(contains_sequence(
+            &args,
+            &["--ro-bind", workspace_git_path, workspace_git_path]
+        ));
+        assert!(contains_sequence(
+            &args,
+            &["--ro-bind", nested_git_path, nested_git_path]
+        ));
+        assert!(!contains_sequence(
+            &args,
+            &["--bind", nested_git_path, nested_git_path]
+        ));
+        assert!(!contains_sequence(
+            &args,
+            &["--tmpfs", nested_missing_git_path]
+        ));
+        assert!(!contains_sequence(
+            &args,
+            &[
+                "--ro-bind",
+                nested_missing_git_path,
+                nested_missing_git_path
+            ]
+        ));
+        assert!(!contains_sequence(
+            &args,
+            &["--ro-bind", unrequested_git_path, unrequested_git_path]
+        ));
+    }
+
+    #[test]
     fn bwrap_permissioned_factory_keeps_approved_host_integrations_for_later_actions() {
         let mut environment =
             BwrapProcessEnvironment::new("/custom/bin:/usr/bin", "/home/alice", "/tmp")
@@ -2009,7 +2380,7 @@ mod tests {
         assert!(contains_sequence(
             &args,
             &[
-                "--ro-bind",
+                "--ro-bind-try",
                 "/workspace/merry/deps",
                 "/workspace/merry/deps"
             ]
@@ -2182,6 +2553,37 @@ mod tests {
         assert_eq!(output.stdout_text(), "host");
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn tokio_process_runner_preserves_non_utf8_output() {
+        let intent = ProcessActionIntent::new(
+            vec![
+                "/bin/sh".to_owned(),
+                "-c".to_owned(),
+                "printf '\\377\\000'; printf '\\376\\001' >&2".to_owned(),
+            ],
+            None,
+            ProcessEnvPolicy::empty(),
+            None,
+            1024,
+            1024,
+        )
+        .expect("process intent should be valid");
+
+        let output = TokioProcessRunner::new()
+            .run(intent, ProcessRunnerContext::new(CancellationToken::new()))
+            .await
+            .expect("binary process output must not fail the runner");
+
+        assert_eq!(output.status(), ProcessExitStatus::Exited(0));
+        assert_eq!(output.stdout_data(), &[0xff, 0]);
+        assert_eq!(output.stderr_data(), &[0xfe, 1]);
+        assert!(!output.stdout_is_utf8());
+        assert!(!output.stderr_is_utf8());
+        assert!(output.stdout_text().contains('\u{fffd}'));
+        assert!(output.stderr_text().contains('\u{fffd}'));
+    }
+
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn bwrap_process_runner_reuses_tmp_and_writes_workspace() {
@@ -2266,6 +2668,133 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(Path::new("/tmp").join(marker));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn bwrap_git_init_allows_unreviewed_initialization_and_requires_later_git_write_grant() {
+        let workspace = tempfile::tempdir().expect("workspace tempdir should be created");
+        let runner = BwrapProcessRunner::new_at_workspace_root(workspace.path())
+            .allow_network()
+            .with_bwrap_program("/usr/bin/bwrap");
+        let init_intent = ProcessActionIntent::new(
+            vec!["git".to_owned(), "init".to_owned(), ".".to_owned()],
+            None,
+            ProcessEnvPolicy::empty(),
+            None,
+            4096,
+            4096,
+        )
+        .expect("git init intent should be valid");
+
+        let initialized = runner
+            .run(
+                init_intent,
+                ProcessRunnerContext::new(CancellationToken::new()),
+            )
+            .await
+            .expect("git init should return process output");
+        assert!(
+            initialized.ok(),
+            "unreviewed git init should succeed: {initialized:?}"
+        );
+        assert!(
+            workspace.path().join(".git").is_dir(),
+            "unreviewed git init should persist host metadata"
+        );
+
+        let modify_intent = ProcessActionIntent::new(
+            vec![
+                "git".to_owned(),
+                "config".to_owned(),
+                "--local".to_owned(),
+                "user.name".to_owned(),
+                "Merry".to_owned(),
+            ],
+            None,
+            ProcessEnvPolicy::empty(),
+            None,
+            4096,
+            4096,
+        )
+        .expect("git config intent should be valid");
+        let denied_plan = runner
+            .plan_for(&modify_intent)
+            .expect("later git plan should build");
+        let git_path = workspace.path().join(".git");
+        let git_path = git_path.to_str().expect("git path should be utf-8");
+        let denied_args = os_args(&denied_plan.args);
+        assert!(contains_sequence(
+            &denied_args,
+            &["--ro-bind", git_path, git_path]
+        ));
+        let denied = runner
+            .run(
+                modify_intent.clone(),
+                ProcessRunnerContext::new(CancellationToken::new()),
+            )
+            .await
+            .expect("blocked git modification should still return process output");
+        assert!(
+            !denied.ok(),
+            "unreviewed git modification should fail: {denied:?}"
+        );
+
+        let session_permissions = BwrapSessionPermissions::new();
+        let factory =
+            BwrapPermissionedProcessRunnerFactory::new_at_workspace_root(workspace.path())
+                .with_bwrap_program("/usr/bin/bwrap")
+                .with_session_permissions(session_permissions.clone());
+        let request = permission_request(json!({
+            "requested": {
+                "network": true,
+                "paths": [{ "path": ".git", "access": "rw" }]
+            },
+            "for_action": {
+                "kind": "process",
+                "command": "git config --local user.name Merry",
+                "cwd": null
+            }
+        }));
+        factory
+            .validate_request(&request)
+            .expect("reviewed git modification request should validate");
+        let reviewed = factory.runner_for(&request);
+        let approved = reviewed
+            .run(
+                request_process_intent(&request).clone(),
+                ProcessRunnerContext::new(CancellationToken::new()),
+            )
+            .await
+            .expect("reviewed git modification should return process output");
+        assert!(
+            approved.ok(),
+            "reviewed git modification failed: {approved:?}"
+        );
+
+        let later = BwrapProcessRunner::new_at_workspace_root(workspace.path())
+            .allow_network()
+            .with_bwrap_program("/usr/bin/bwrap")
+            .with_session_permissions(session_permissions);
+        let later_plan = later
+            .plan_for(&modify_intent)
+            .expect("later process plan should build");
+        let later_args = os_args(&later_plan.args);
+        assert!(contains_sequence(
+            &later_args,
+            &["--ro-bind", git_path, git_path]
+        ));
+        let later_denied = later
+            .run(
+                modify_intent,
+                ProcessRunnerContext::new(CancellationToken::new()),
+            )
+            .await
+            .expect("later unreviewed git modification should return process output");
+        assert!(
+            !later_denied.ok(),
+            "later git modification should require another review: {later_denied:?}"
+        );
     }
 
     fn os_args(args: &[OsString]) -> Vec<String> {

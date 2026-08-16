@@ -48,6 +48,14 @@ pub enum PathAccessRuleSource {
     /// This is intentionally higher trust than project-local configuration,
     /// because normal coding-agent runs may edit files inside the project.
     TrustedGlobalConfig,
+    /// Rule exposed by trusted global configuration as an outer writable
+    /// ceiling while the inner action baseline remains read-only.
+    TrustedGlobalConfigWritableCeiling,
+    /// Automatically applied read-only protection for Git metadata paths.
+    ///
+    /// A reviewed action may temporarily overlay this rule for one process
+    /// action, but the path is never retained as a session grant.
+    GitMetadataBaseline,
     /// Rule materialized from the current permission admission result.
     PermissionReview,
 }

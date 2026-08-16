@@ -289,14 +289,6 @@ impl MerryConfig {
         Ok(rules)
     }
 
-    pub fn permissions_network_allowed(&self) -> bool {
-        self.raw
-            .permissions
-            .as_ref()
-            .and_then(|permissions| permissions.network)
-            .unwrap_or(false)
-    }
-
     /// Returns host IPC integrations explicitly enabled by trusted global
     /// configuration. These form the outer sandbox capability ceiling and are
     /// forwarded to inner process sandboxes when their endpoints are present.
@@ -526,7 +518,6 @@ struct GlobalToml {
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct PermissionsToml {
-    network: Option<bool>,
     ssh_agent: Option<bool>,
     dbus: Option<bool>,
     #[serde(default)]
@@ -997,7 +988,6 @@ discard_suspended = "ctrl+d"
             Some(
                 r#"
 [permissions]
-network = true
 readonly_paths = ["/etc", "~/logs", "shared-readonly"]
 readwrite_paths = ["../foo"]
 deny_paths = ["~/.ssh"]
@@ -1015,7 +1005,6 @@ access = "ro"
         let rules = config
             .trusted_global_path_rules()
             .expect("trusted path rules should resolve");
-        assert!(config.permissions_network_allowed());
         assert_eq!(rules.len(), 6);
         assert_eq!(rules[0].path(), Path::new("/etc"));
         assert_eq!(rules[0].access(), PathAccess::ReadOnly);
@@ -1141,21 +1130,6 @@ environment = [
         .expect("NUL environment config should parse")
         .expect("NUL environment config should be present");
         assert!(nul_value.process_environment_overrides().is_err());
-    }
-
-    #[test]
-    fn permissions_network_defaults_to_false() {
-        let paths = XdgPaths::from_parts(home(), None, None);
-        let missing = MerryConfig::load_optional_from_text(Some(""), &paths)
-            .expect("config should parse")
-            .expect("config should be present");
-        let permissions_without_network =
-            MerryConfig::load_optional_from_text(Some("[permissions]\n"), &paths)
-                .expect("config should parse")
-                .expect("config should be present");
-
-        assert!(!missing.permissions_network_allowed());
-        assert!(!permissions_without_network.permissions_network_allowed());
     }
 
     #[test]
@@ -1317,7 +1291,6 @@ roots = ["skills", "~/shared-skills", "/opt/company/skills"]
         let trusted_path_rules = config
             .trusted_global_path_rules()
             .expect("example trusted path rules should validate");
-        assert!(!config.permissions_network_allowed());
         assert_eq!(trusted_path_rules.len(), 5);
         assert_eq!(trusted_path_rules[0].path(), Path::new("/etc"));
         assert_eq!(trusted_path_rules[0].access(), PathAccess::ReadOnly);

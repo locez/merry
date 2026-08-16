@@ -112,6 +112,15 @@
             })
         }
 
+        fn succeeding_with_non_utf8_output() -> Self {
+            Self::with_response(FakeProcessRunnerResponse::SuccessBytes {
+                stdout_data: vec![0xff, 0x00, b'a'],
+                stdout_truncated: false,
+                stderr_data: vec![b'o', 0xfe],
+                stderr_truncated: false,
+            })
+        }
+
         fn failing() -> Self {
             Self::with_response(FakeProcessRunnerResponse::Failure {
                 stdout_text: String::new(),
@@ -173,6 +182,12 @@
             stdout_text: String,
             stdout_truncated: bool,
             stderr_text: String,
+            stderr_truncated: bool,
+        },
+        SuccessBytes {
+            stdout_data: Vec<u8>,
+            stdout_truncated: bool,
+            stderr_data: Vec<u8>,
             stderr_truncated: bool,
         },
         Failure {
@@ -239,6 +254,20 @@
                         context.cancellation_token().cancel();
                         Ok(output)
                     }
+                    FakeProcessRunnerResponse::SuccessBytes {
+                        stdout_data,
+                        stdout_truncated,
+                        stderr_data,
+                        stderr_truncated,
+                    } => ProcessRunnerOutput::from_bytes(
+                        &intent,
+                        ProcessExitStatus::Exited(0),
+                        stdout_data,
+                        stdout_truncated,
+                        stderr_data,
+                        stderr_truncated,
+                    )
+                    .map_err(|source| ProcessRunnerError::infrastructure(source.to_string())),
                     FakeProcessRunnerResponse::Failure {
                         stdout_text,
                         stdout_truncated,
@@ -308,6 +337,13 @@
         fn approving() -> Self {
             Self {
                 decision: crate::PermissionAdmissionDecision::approved("host approved"),
+                calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn denying() -> Self {
+            Self {
+                decision: crate::PermissionAdmissionDecision::denied("host denied"),
                 calls: Arc::new(AtomicUsize::new(0)),
             }
         }

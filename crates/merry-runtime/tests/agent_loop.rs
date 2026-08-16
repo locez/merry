@@ -2260,6 +2260,7 @@ async fn agent_loop_process_command_tool_executes_and_continues() {
             "StepStarted",
             "ToolCallPending",
             "ArtifactRecorded",
+            "ArtifactRecorded",
             "ToolCallResolved",
             "StepStarted",
             "AssistantOutputRecorded",
@@ -2304,10 +2305,7 @@ async fn agent_loop_process_command_tool_executes_and_continues() {
     assert_eq!(value["ok"], true);
     assert_eq!(value["kind"], "process_action");
     assert_eq!(value["status"], json!({ "kind": "exited", "code": 0 }));
-    assert_eq!(
-        value["intent"]["argv"],
-        json!(["bash", "-lc", "rustc --version"])
-    );
+    assert_eq!(value["intent"]["command"], "rustc --version");
     assert_eq!(value["intent"]["cwd"], Value::Null);
     assert_eq!(value["stdout"]["text"], "rustc 1.85.0\n");
     assert_eq!(value["stderr"]["text"], "");
@@ -2370,8 +2368,11 @@ async fn agent_loop_traces_loop_steps_tool_process_and_terminal_status() {
     assert!(logs.contains("\"status\":\"completed\""));
     assert!(logs.contains("\"tool_name\":\"run_process\""));
     assert!(logs.contains("\"tool_call_id\":\"call-rustc-version\""));
-    assert!(logs.contains("\"permission_profile_id\":\"process.read_only.v1\""));
-    assert!(logs.contains("\"argv\":\"[\\\"rustc\\\", \\\"--version\\\"]\""));
+    assert!(logs.contains("\"permission_profile_id\":\"process.shell.read_only.v1\""));
+    assert!(logs.contains("\"shell\":\"bash\""));
+    assert!(logs.contains("\"shell_flag\":\"-lc\""));
+    assert!(logs.contains("\"shell_script_bytes\":15"));
+    assert!(!logs.contains("\"argv\""));
     assert!(logs.contains("\"stdout_bytes\":13"));
     assert!(logs.contains("\"stderr_bytes\":0"));
     assert!(!logs.contains("rustc 1.85.0"));
@@ -3029,10 +3030,8 @@ async fn agent_loop_process_command_tool_executes_rg_files_and_continues() {
     let value: Value = serde_json::from_str(content).expect("process result JSON should parse");
     assert_eq!(value["ok"], true);
     assert_eq!(value["kind"], "process_action");
-    assert_eq!(
-        value["intent"]["argv"],
-        json!(["bash", "-lc", "rg --files"])
-    );
+    assert_eq!(value["intent"]["command"], "rg --files");
+    assert_eq!(value["intent"]["cwd"], Value::Null);
     assert_eq!(
         value["stdout"]["text"],
         "Cargo.toml\ncrates/merry-runtime/src/lib.rs\n"

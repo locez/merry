@@ -114,8 +114,8 @@ impl ActionPolicyDecision {
         matches!(self.disposition, ActionPolicyDisposition::Allow)
     }
 
-    pub(crate) fn is_noninteractive_trusted(&self) -> bool {
-        self.reason == "registered tool action is allowed by explicit non-interactive trusted mode"
+    pub(crate) fn is_fully_trusted(&self) -> bool {
+        self.reason == "registered tool action is allowed by explicit fully trusted mode"
     }
 
     /// Returns the same policy disposition with a proposal-aware risk tier.
@@ -162,6 +162,30 @@ impl ActionPolicyDecision {
         )
     }
 
+    /// Allows a validated process intent through the configured sandbox or
+    /// explicit unrestricted host runner.
+    #[must_use]
+    pub(crate) const fn allow_configured_process_action() -> Self {
+        Self::new(
+            ToolActionKind::CommandExec,
+            ActionRiskTier::ProcessHigh,
+            ActionPolicyDisposition::Allow,
+            "validated process actions are allowed by the configured process runner boundary",
+        )
+    }
+
+    /// Denies a high-risk process after its independent action review failed
+    /// or returned a denial.
+    #[must_use]
+    pub(crate) const fn deny_high_risk_process_action() -> Self {
+        Self::new(
+            ToolActionKind::CommandExec,
+            ActionRiskTier::ProcessHigh,
+            ActionPolicyDisposition::Deny,
+            "high-risk process actions require explicit action review approval",
+        )
+    }
+
     /// Allows an otherwise denied read-only shell wrapper after explicit shell opt-in.
     #[must_use]
     pub(crate) const fn allow_read_only_shell_process_action() -> Self {
@@ -184,8 +208,8 @@ impl ActionPolicyDecision {
         )
     }
 
-    /// Allows a registered tool in explicit non-interactive trusted mode.
-    pub(crate) fn allow_noninteractive_trusted_action(action_kind: ToolActionKind) -> Self {
+    /// Allows a registered tool in explicit fully trusted mode.
+    pub(crate) fn allow_fully_trusted_action(action_kind: ToolActionKind) -> Self {
         let risk_tier = if action_kind == ToolActionKind::Network {
             ActionRiskTier::Network
         } else {
@@ -195,7 +219,7 @@ impl ActionPolicyDecision {
             action_kind,
             risk_tier,
             ActionPolicyDisposition::Allow,
-            "registered tool action is allowed by explicit non-interactive trusted mode",
+            "registered tool action is allowed by explicit fully trusted mode",
         )
     }
 }
@@ -230,7 +254,7 @@ pub(crate) fn classify_tool_action_risk(
                         ActionRiskTier::ProcessLocalWorkspaceEffect
                     }
                     ProcessIntentClass::Unknown => ActionRiskTier::ProcessLocalWorkspaceEffect,
-                    ProcessIntentClass::Forbidden => ActionRiskTier::Forbidden,
+                    ProcessIntentClass::Forbidden => ActionRiskTier::ProcessHigh,
                 }
             }
             _ => ActionRiskTier::ProcessHigh,
@@ -296,8 +320,12 @@ pub(crate) fn is_local_workspace_effect_process_action_proposal(
         && matches!(
             proposal.evidence(),
             ActionProposalEvidence::ProcessAction(intent)
-                if required_process_permission_profile_id(intent)
-                    == Some(ProcessPermissionProfileId::LOCAL_WORKSPACE_BWRAP_V1)
+                if intent.env_policy() == crate::ProcessEnvPolicy::Empty
+                    && intent.stdin_text().is_none()
+                    && classify_process_intent(intent)
+                        == ProcessIntentClass::LocalWorkspaceEffect
+                    && required_process_permission_profile_id(intent)
+                        == Some(ProcessPermissionProfileId::LOCAL_WORKSPACE_BWRAP_V1)
                     && admission.matches_intent(intent)
         )
 }
@@ -483,7 +511,7 @@ mod tests {
         let forbidden = process_proposal(&call, &["sh", "-c", "rm -rf target"]);
         assert_eq!(
             classify_tool_action_risk(ToolActionKind::CommandExec, Some(&forbidden)),
-            ActionRiskTier::Forbidden
+            ActionRiskTier::ProcessHigh
         );
 
         let unknown = process_proposal(&call, &["unknown-readonly-ish", "--version"]);
@@ -572,7 +600,7 @@ mod tests {
             ToolActionKind::CommandExec,
             &unknown_workspace_effect
         ));
-        assert!(is_local_workspace_effect_process_action_proposal(
+        assert!(!is_local_workspace_effect_process_action_proposal(
             ToolActionKind::CommandExec,
             &unknown_workspace_effect,
             admission
@@ -590,7 +618,7 @@ mod tests {
             ToolActionKind::CommandExec,
             &shell_workspace_effect
         ));
-        assert!(is_local_workspace_effect_process_action_proposal(
+        assert!(!is_local_workspace_effect_process_action_proposal(
             ToolActionKind::CommandExec,
             &shell_workspace_effect,
             admission

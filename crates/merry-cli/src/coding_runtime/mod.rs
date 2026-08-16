@@ -23,6 +23,7 @@ pub(crate) use process::{
 };
 pub(crate) use profile::{
     coding_loop_workspace_roots, with_workspace_coding_loop_profile, workspace_tools_config,
+    workspace_tools_config_with_resources,
 };
 pub(crate) use roles::RuntimeRoleProviderConfig;
 pub(crate) use sandbox::{

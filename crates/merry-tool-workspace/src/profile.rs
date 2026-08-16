@@ -102,8 +102,7 @@ impl WorkspaceCodingLoopProfile {
 
     /// Includes process execution lanes for the declared CLI bubblewrap profile.
     ///
-    /// This covers read-only shell commands, and accepted local workspace
-    /// effects under the injected runner.
+    /// This covers all validated process commands under the injected runner.
     #[must_use]
     pub fn with_cli_bwrap_process_runner(
         mut self,
@@ -187,7 +186,7 @@ impl WorkspaceCodingLoopProfile {
             builder = builder
                 .register_tool(process_command_tool(
                     ToolName::new(CODING_LOOP_PROCESS_TOOL).expect("static tool name is valid"),
-                    "Run one shell command through Merry process policy for workspace inspection and verification. Provide command as one JSON string, with cwd set to null or a workspace-relative directory such as \".\"; do not add a bash field or pass argv. The runtime validates command and cwd byte/control-character limits and the active process permission profile. A failed action may indicate unavailable network, filesystem, or host-integration access (including its required environment); after observing the failure, request the corresponding minimum capability for the exact same action before retrying. Linux Unix sockets can be requested as exact filesystem paths when no named integration applies.",
+                    "Run one shell command through Merry's configured process runner. Provide command as one JSON string, with cwd set to null or a workspace-relative directory such as \".\"; do not add a bash field or pass argv. The runtime validates command and cwd byte/control-character limits. Workspace files and directories are writable in the sandbox; .git, external paths, network, and host integrations begin restricted and may require a reviewed capability. A failed action may indicate unavailable access; after observing the failure, request the corresponding minimum capability for the exact same action before retrying it. Network access must be requested again for each action that needs it. Linux Unix sockets can be requested as exact filesystem paths when no named integration applies.",
                 )?)
                 .register_tool(request_permissions_tool()?);
         }

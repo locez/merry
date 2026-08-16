@@ -27,10 +27,6 @@ profile = "default"
 # path for its action. Project-local config should not be used for silent
 # host-wide grants because coding agents may edit the project tree.
 #
-# This controls Merry-managed action backends such as per-command sandboxed
-# process tools. It does not disable model provider HTTP calls.
-network = false
-
 # Optional host IPC integrations. These are explicit outer-sandbox ceilings and
 # enabled integrations are forwarded to inner process sandboxes when available.
 # dbus is the D-Bus session bus, including Secret Service/keyring access.

@@ -77,11 +77,13 @@ async fn opt_in_process_action_uses_runner_and_records_execution_audit() {
                 "text": "runtime tests passed\n",
                 "bytes": "runtime tests passed\n".len(),
                 "truncated": false,
+                "utf8": true,
             },
             "stderr": {
                 "text": "",
                 "bytes": 0,
                 "truncated": false,
+                "utf8": true,
             }
         })
     );
@@ -195,6 +197,54 @@ async fn opt_in_process_action_uses_runner_and_records_execution_audit() {
     assert!(observation_text.contains("stderr_bytes=0"));
     assert!(observation_text.contains(&format!("artifact={}", result.artifact().id().as_str())));
     assert!(!observation_text.contains("runtime tests passed"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn process_action_artifact_preserves_non_utf8_output_as_base64() {
+    let executor = ProcessProposingToolExecutor::new();
+    let runner = FakeProcessRunner::succeeding_with_non_utf8_output();
+    let tool = RegisteredTool::new(
+        policy_tool_spec("policy_command_non_utf8_output"),
+        Arc::new(executor),
+        ToolActionKind::CommandExec,
+    )
+    .with_action_proposal();
+    let (runtime, pending) = register_policy_pending_registered_tool_with_builder(
+        "runtime-policy-command-non-utf8-output",
+        "policy_command_non_utf8_output",
+        "call-command-non-utf8-output",
+        tool,
+        |builder| {
+            builder
+                .allow_low_risk_process_actions(Arc::new(runner.clone()))
+                .build()
+        },
+    )
+    .await;
+
+    let events = runtime
+        .execute_tool_call(pending.id(), ToolExecutionContext::default())
+        .await
+        .expect("non-UTF-8 process output should still produce a result");
+
+    let result = resolved_tool_result(&events);
+    let content = runtime
+        .read_artifact_content(result.artifact().id())
+        .await
+        .expect("process result artifact should be readable");
+    let payload: serde_json::Value = serde_json::from_str(
+        content
+            .as_text()
+            .expect("process result artifact should be textual JSON"),
+    )
+    .expect("process result artifact should parse as JSON");
+
+    assert_eq!(payload["stdout"]["utf8"], false);
+    assert_eq!(payload["stdout"]["bytes"], 3);
+    assert_eq!(payload["stdout"]["bytes_base64"], "/wBh");
+    assert_eq!(payload["stderr"]["utf8"], false);
+    assert_eq!(payload["stderr"]["bytes"], 2);
+    assert_eq!(payload["stderr"]["bytes_base64"], "b/4=");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -322,6 +372,7 @@ async fn opt_in_process_action_denies_dangerous_argv_without_runner_call() {
                     accepted_local_workspace_process_admission(),
                     Arc::new(runner.clone()),
                 )
+                .permission_admission_source(Arc::new(StaticPermissionAdmissionSource::denying()))
                 .build()
         },
     )
@@ -360,8 +411,269 @@ async fn opt_in_process_action_denies_dangerous_argv_without_runner_call() {
     let policy = audits[1]
         .policy()
         .expect("denied audit should include policy");
-    assert_eq!(policy.risk_tier(), ActionRiskTier::Forbidden);
+    assert_eq!(policy.risk_tier(), ActionRiskTier::ProcessHigh);
     assert_eq!(policy.disposition(), ActionPolicyDisposition::Deny);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn fully_trusted_host_process_allows_high_risk_argv_without_review() {
+    let executor = ProcessProposingToolExecutor::with_argv(["sudo", "su"]);
+    let runner = FakeProcessRunner::succeeding();
+    let admission = StaticPermissionAdmissionSource::denying();
+    let tool = RegisteredTool::new(
+        policy_tool_spec("policy_command_trusted_host_high_risk"),
+        Arc::new(executor.clone()),
+        ToolActionKind::CommandExec,
+    )
+    .with_action_proposal();
+    let (runtime, pending) = register_policy_pending_registered_tool_with_builder(
+        "runtime-policy-command-fully-trusted-high-risk",
+        "policy_command_trusted_host_high_risk",
+        "call-command-fully-trusted-high-risk",
+        tool,
+        |builder| {
+            builder
+                .permission_review_mode(PermissionReviewMode::FullyTrusted)
+                .permission_admission_source(Arc::new(admission.clone()))
+                .allow_accepted_local_workspace_process_actions(
+                    AcceptedLocalWorkspaceProcessAdmission::accept_host_v1(),
+                    Arc::new(runner.clone()),
+                )
+                .build()
+        },
+    )
+    .await;
+
+    let events = runtime
+        .execute_tool_call(pending.id(), ToolExecutionContext::default())
+        .await
+        .expect("trusted host process should execute without a permission review");
+
+    assert_eq!(executor.propose_count(), 1);
+    assert_eq!(executor.execute_count(), 0);
+    assert_eq!(runner.call_count(), 1);
+    assert_eq!(admission.call_count(), 0);
+    assert_eq!(
+        resolved_tool_result(&events).status(),
+        ToolCallResultStatus::Succeeded
+    );
+    let audits = action_audit_records(&runtime).await;
+    assert_eq!(audits.len(), 2);
+    assert_eq!(audits[1].status(), ActionAuditStatus::Executed);
+    let policy = audits[1]
+        .policy()
+        .expect("trusted host execution should keep an action policy audit");
+    assert_eq!(policy.risk_tier(), ActionRiskTier::ProcessHigh);
+    assert_eq!(policy.disposition(), ActionPolicyDisposition::Allow);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn host_process_requires_review_without_fully_trusted_mode() {
+    let executor = ProcessProposingToolExecutor::with_argv(["sudo", "su"]);
+    let runner = FakeProcessRunner::succeeding();
+    let review_provider =
+        RecordingModelProvider::with_script(vec![ScriptedModelProviderResponse::Stream(vec![Ok(
+            permission_review_completed_event(
+                "approve",
+                "The explicit test task authorizes this host action.",
+            ),
+        )])]);
+    let tool = RegisteredTool::new(
+        policy_tool_spec("policy_command_host_reviewed"),
+        Arc::new(executor.clone()),
+        ToolActionKind::CommandExec,
+    )
+    .with_action_proposal();
+    let (runtime, pending) = register_policy_pending_registered_tool_with_builder(
+        "runtime-policy-command-host-review-required",
+        "policy_command_host_reviewed",
+        "call-command-host-review-required",
+        tool,
+        |builder| {
+            builder
+                .model_provider_for_role(
+                    RuntimeModelRole::ApprovalReview,
+                    Arc::new(review_provider.clone()),
+                    named_model("fake/approval-review"),
+                )
+                .allow_accepted_local_workspace_process_actions(
+                    AcceptedLocalWorkspaceProcessAdmission::accept_host_v1(),
+                    Arc::new(runner.clone()),
+                )
+                .build()
+        },
+    )
+    .await;
+
+    let events = runtime
+        .execute_tool_call(pending.id(), ToolExecutionContext::default())
+        .await
+        .expect("reviewed host process should execute after approval");
+
+    assert_eq!(executor.propose_count(), 1);
+    assert_eq!(executor.execute_count(), 0);
+    assert_eq!(runner.call_count(), 1);
+    assert_eq!(review_provider.recorded_requests().len(), 1);
+    assert_eq!(
+        resolved_tool_result(&events).status(),
+        ToolCallResultStatus::Succeeded
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn ordinary_host_process_does_not_require_review_without_external_path() {
+    let executor = ProcessProposingToolExecutor::with_argv(["git", "status", "--short"]);
+    let runner = FakeProcessRunner::succeeding();
+    let review_provider =
+        RecordingModelProvider::with_script(vec![ScriptedModelProviderResponse::Stream(vec![Ok(
+            permission_review_completed_event(
+                "deny",
+                "This ordinary workspace action should not reach review.",
+            ),
+        )])]);
+    let tool = RegisteredTool::new(
+        policy_tool_spec("policy_command_host_workspace_git"),
+        Arc::new(executor.clone()),
+        ToolActionKind::CommandExec,
+    )
+    .with_action_proposal();
+    let (runtime, pending) = register_policy_pending_registered_tool_with_builder(
+        "runtime-policy-command-host-workspace-git",
+        "policy_command_host_workspace_git",
+        "call-command-host-workspace-git",
+        tool,
+        |builder| {
+            builder
+                .model_provider_for_role(
+                    RuntimeModelRole::ApprovalReview,
+                    Arc::new(review_provider.clone()),
+                    named_model("fake/approval-review"),
+                )
+                .allow_accepted_local_workspace_process_actions(
+                    AcceptedLocalWorkspaceProcessAdmission::accept_host_v1(),
+                    Arc::new(runner.clone()),
+                )
+                .build()
+        },
+    )
+    .await;
+
+    let events = runtime
+        .execute_tool_call(pending.id(), ToolExecutionContext::default())
+        .await
+        .expect("ordinary host workspace process should execute without review");
+
+    assert_eq!(executor.propose_count(), 1);
+    assert_eq!(runner.call_count(), 1);
+    assert!(review_provider.recorded_requests().is_empty());
+    assert_eq!(
+        resolved_tool_result(&events).status(),
+        ToolCallResultStatus::Succeeded
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn host_git_metadata_write_requires_path_review_without_fully_trusted_mode() {
+    let executor = ProcessProposingToolExecutor::with_argv(["git", "checkout", "--", "README.md"]);
+    let runner = FakeProcessRunner::succeeding();
+    let review_provider =
+        RecordingModelProvider::with_script(vec![ScriptedModelProviderResponse::Stream(vec![Ok(
+            permission_review_completed_event(
+                "approve",
+                "The task authorizes the one-action .git metadata write.",
+            ),
+        )])]);
+    let tool = RegisteredTool::new(
+        policy_tool_spec("policy_command_host_git_metadata"),
+        Arc::new(executor.clone()),
+        ToolActionKind::CommandExec,
+    )
+    .with_action_proposal();
+    let (runtime, pending) = register_policy_pending_registered_tool_with_builder(
+        "runtime-policy-command-host-git-metadata",
+        "policy_command_host_git_metadata",
+        "call-command-host-git-metadata",
+        tool,
+        |builder| {
+            builder
+                .model_provider_for_role(
+                    RuntimeModelRole::ApprovalReview,
+                    Arc::new(review_provider.clone()),
+                    named_model("fake/approval-review"),
+                )
+                .allow_accepted_local_workspace_process_actions(
+                    AcceptedLocalWorkspaceProcessAdmission::accept_host_v1(),
+                    Arc::new(runner.clone()),
+                )
+                .build()
+        },
+    )
+    .await;
+
+    let events = runtime
+        .execute_tool_call(pending.id(), ToolExecutionContext::default())
+        .await
+        .expect("approved host git metadata action should execute");
+
+    assert_eq!(executor.propose_count(), 1);
+    assert_eq!(runner.call_count(), 1);
+    assert_eq!(review_provider.recorded_requests().len(), 1);
+    assert_eq!(
+        resolved_tool_result(&events).status(),
+        ToolCallResultStatus::Succeeded
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn host_process_with_external_path_requires_review_without_fully_trusted_mode() {
+    let executor = ProcessProposingToolExecutor::with_argv(["cat", "/tmp/output"]);
+    let runner = FakeProcessRunner::succeeding();
+    let review_provider =
+        RecordingModelProvider::with_script(vec![ScriptedModelProviderResponse::Stream(vec![Ok(
+            permission_review_completed_event(
+                "approve",
+                "The task authorizes the explicit external path.",
+            ),
+        )])]);
+    let tool = RegisteredTool::new(
+        policy_tool_spec("policy_command_host_external_path"),
+        Arc::new(executor.clone()),
+        ToolActionKind::CommandExec,
+    )
+    .with_action_proposal();
+    let (runtime, pending) = register_policy_pending_registered_tool_with_builder(
+        "runtime-policy-command-host-external-path",
+        "policy_command_host_external_path",
+        "call-command-host-external-path",
+        tool,
+        |builder| {
+            builder
+                .model_provider_for_role(
+                    RuntimeModelRole::ApprovalReview,
+                    Arc::new(review_provider.clone()),
+                    named_model("fake/approval-review"),
+                )
+                .allow_accepted_local_workspace_process_actions(
+                    AcceptedLocalWorkspaceProcessAdmission::accept_host_v1(),
+                    Arc::new(runner.clone()),
+                )
+                .build()
+        },
+    )
+    .await;
+
+    let events = runtime
+        .execute_tool_call(pending.id(), ToolExecutionContext::default())
+        .await
+        .expect("approved host external path process should execute");
+
+    assert_eq!(executor.propose_count(), 1);
+    assert_eq!(runner.call_count(), 1);
+    assert_eq!(review_provider.recorded_requests().len(), 1);
+    assert_eq!(
+        resolved_tool_result(&events).status(),
+        ToolCallResultStatus::Succeeded
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -404,8 +716,8 @@ async fn denied_process_action_traces_denied_tool_finish_without_process_executi
     );
     assert_eq!(runner.call_count(), 0);
     assert!(logs.contains("\"event\":\"runtime.tool.execute.finish\""));
-    assert!(logs.contains("\"status\":\"denied\""));
-    assert!(logs.contains("\"diagnostic_code\":\"action_policy_denied\""));
+    assert!(logs.contains("\"status\":\"review_failed\""));
+    assert!(logs.contains("\"diagnostic_code\":\"permission_review_failed\""));
     assert!(logs.contains("\"tool_name\":\"policy_command_dangerous_trace\""));
     assert!(logs.contains("\"tool_call_id\":\"call-command-exec-dangerous-trace\""));
     assert!(!logs.contains("runtime.process.execute.start"));
@@ -545,11 +857,13 @@ async fn opt_in_accepted_local_workspace_process_action_executes_local_workspace
                 "text": "runtime tests passed\n",
                 "bytes": "runtime tests passed\n".len(),
                 "truncated": false,
+                "utf8": true,
             },
             "stderr": {
                 "text": "",
                 "bytes": 0,
                 "truncated": false,
+                "utf8": true,
             }
         })
     );

@@ -283,7 +283,7 @@ fn generic_executor_admission_allows_read_only_and_rejects_mutating_actions() {
     ));
 
     let trusted_decision =
-        ActionPolicyDecision::allow_noninteractive_trusted_action(ToolActionKind::CommandExec);
+        ActionPolicyDecision::allow_fully_trusted_action(ToolActionKind::CommandExec);
     admit_action_to_generic_executor(
         &pending,
         ToolActionKind::CommandExec,
@@ -322,7 +322,7 @@ async fn trusted_external_tools_are_allowed_without_commit_lifecycle() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn noninteractive_trusted_mode_executes_configured_mutating_tools_without_proposals() {
+async fn fully_trusted_mode_executes_configured_mutating_tools_without_proposals() {
     for (index, action_kind) in [
         ToolActionKind::WorkspaceWrite,
         ToolActionKind::CommandExec,
@@ -345,7 +345,7 @@ async fn noninteractive_trusted_mode_executes_configured_mutating_tools_without_
             tool,
             |builder| {
                 builder
-                    .permission_review_mode(PermissionReviewMode::NonInteractiveTrusted)
+                    .permission_review_mode(PermissionReviewMode::FullyTrusted)
                     .build()
             },
         )

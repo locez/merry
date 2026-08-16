@@ -393,15 +393,15 @@ async fn request_permissions_trusted_sdk_host_decision_can_skip_model_review() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn request_permissions_noninteractive_trusted_mode_skips_review_sources() {
+async fn request_permissions_fully_trusted_mode_skips_review_sources() {
     let admission = StaticPermissionAdmissionSource::approving();
     let runner = FakeProcessRunner::succeeding();
     let (runtime, pending) = register_permission_pending_tool_with_builder(
-        "runtime-permission-noninteractive-trusted",
-        "call-permission-noninteractive-trusted",
+        "runtime-permission-fully-trusted",
+        "call-permission-fully-trusted",
         |builder| {
             builder
-                .permission_review_mode(PermissionReviewMode::NonInteractiveTrusted)
+                .permission_review_mode(PermissionReviewMode::FullyTrusted)
                 .permission_admission_source(Arc::new(admission.clone()))
                 .allow_permissioned_process_actions(Arc::new(runner.clone()))
                 .build()
@@ -412,7 +412,7 @@ async fn request_permissions_noninteractive_trusted_mode_skips_review_sources() 
     let events = runtime
         .execute_tool_call(pending.id(), ToolExecutionContext::default())
         .await
-        .expect("trusted non-interactive permission request should execute");
+        .expect("fully trusted permission request should execute");
 
     assert_eq!(admission.call_count(), 0);
     assert_eq!(runner.call_count(), 1);

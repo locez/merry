@@ -54,6 +54,7 @@ pub(crate) async fn start_tui_runtime_session(
     session_store: TuiSessionStore,
     selection: SessionPickerSelection,
     process_execution_mode: ProcessExecutionMode,
+    fully_trusted: bool,
     preferences: &TuiPreferences,
 ) -> Result<TuiRuntimeSession, CliError> {
     let Some(admission) =
@@ -132,12 +133,11 @@ pub(crate) async fn start_tui_runtime_session(
             subagents.limits(),
         ),
     };
-    let permission_review_mode =
-        if matches!(process_execution_mode, ProcessExecutionMode::Unrestricted) {
-            PermissionReviewMode::NonInteractiveTrusted
-        } else {
-            PermissionReviewMode::ModelThenHostFallback
-        };
+    let permission_review_mode = if fully_trusted {
+        PermissionReviewMode::FullyTrusted
+    } else {
+        PermissionReviewMode::ModelThenHostFallback
+    };
     let runtime = if should_resume {
         resume_headless_coding_runtime_with_permission_source(
             runtime_input,
@@ -365,6 +365,9 @@ fn permission_review_view(request: &PermissionReviewRequest) -> (String, String)
     }
     if let Some(reason) = permission_request.reason() {
         lines.push(format!("reason: {reason}"));
+    }
+    if permission_request.is_action_review() {
+        lines.push("review: high-risk process action".to_owned());
     }
     lines.push(format!("action: {}", permission_request.action().summary()));
     lines.push("requested capabilities:".to_owned());

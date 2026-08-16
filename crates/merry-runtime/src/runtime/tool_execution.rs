@@ -20,7 +20,9 @@ use std::{path::Path, sync::Arc};
 use super::checkpoint_ref_tool::{
     execute_merry_read_checkpoint_ref_tool_call, is_merry_read_checkpoint_ref_tool,
 };
-use super::permission_execution::execute_permission_request_tool_call;
+use super::permission_execution::{
+    HighRiskActionReview, execute_permission_request_tool_call, review_process_action,
+};
 use super::plan_tool_execution::execute_plan_tool_call;
 use super::process_execution::{ProcessExecutionAdmission, execute_admitted_process_action};
 use super::{
@@ -165,19 +167,15 @@ pub(super) async fn execute_tool_call_with_active_permit(
         .await;
     }
 
-    let noninteractive_trusted = matches!(
-        inner.permission_review_mode,
-        crate::PermissionReviewMode::NonInteractiveTrusted
-    );
+    let fully_trusted = inner.permission_review_mode.is_fully_trusted();
     let mut policy_decision = DefaultActionPolicy.decide(registered_tool.action_kind());
-    if noninteractive_trusted {
-        policy_decision = ActionPolicyDecision::allow_noninteractive_trusted_action(
-            registered_tool.action_kind(),
-        );
+    if fully_trusted {
+        policy_decision =
+            ActionPolicyDecision::allow_fully_trusted_action(registered_tool.action_kind());
     }
     let mut allowed_proposal = None;
     if !policy_decision.is_allowed()
-        || (noninteractive_trusted
+        || (fully_trusted
             && registered_tool.action_kind().is_mutating()
             && registered_tool.action_kind() != crate::ToolActionKind::Network
             && registered_tool.proposals_enabled())
@@ -282,6 +280,18 @@ pub(super) async fn execute_tool_call_with_active_permit(
             {
                 return resolve_plan_harness_denial(inner, &pending, diagnostic).await;
             }
+            let host_process_path_review = inner
+                .accepted_local_workspace_process_runner
+                .as_ref()
+                .is_some_and(|accepted| {
+                    accepted.admission.sandbox_profile()
+                        == crate::LocalWorkspaceProcessSandboxProfile::HostV1
+                        && matches!(
+                            proposal.evidence(),
+                            ActionProposalEvidence::ProcessAction(intent)
+                                if crate::process::requires_host_process_path_review(intent)
+                        )
+                });
             if inner.allow_low_risk_workspace_patches
                 && pending.name().as_str() == WORKSPACE_PATCH_TOOL_NAME
                 && is_low_risk_workspace_patch_proposal(registered_tool.action_kind(), &proposal)
@@ -289,6 +299,7 @@ pub(super) async fn execute_tool_call_with_active_permit(
                 policy_decision = ActionPolicyDecision::allow_low_risk_workspace_patch();
                 allowed_proposal = Some(proposal);
             } else if let Some(runner) = inner.low_risk_process_runner.clone()
+                && !host_process_path_review
                 && is_low_risk_process_action_proposal(registered_tool.action_kind(), &proposal)
             {
                 policy_decision = ActionPolicyDecision::allow_low_risk_process_action();
@@ -306,6 +317,7 @@ pub(super) async fn execute_tool_call_with_active_permit(
                 )
                 .await;
             } else if let Some(runner) = inner.read_only_shell_process_runner.clone()
+                && !host_process_path_review
                 && is_read_only_shell_process_action_proposal(
                     registered_tool.action_kind(),
                     &proposal,
@@ -326,6 +338,7 @@ pub(super) async fn execute_tool_call_with_active_permit(
                 )
                 .await;
             } else if let Some(accepted) = inner.accepted_local_workspace_process_runner.clone()
+                && !host_process_path_review
                 && is_local_workspace_effect_process_action_proposal(
                     registered_tool.action_kind(),
                     &proposal,
@@ -347,14 +360,62 @@ pub(super) async fn execute_tool_call_with_active_permit(
                     context,
                 )
                 .await;
-            } else if noninteractive_trusted {
-                policy_decision = ActionPolicyDecision::allow_noninteractive_trusted_action(
-                    registered_tool.action_kind(),
+            } else if let Some(accepted) = inner.accepted_local_workspace_process_runner.clone()
+                && registered_tool.action_kind() == crate::ToolActionKind::CommandExec
+                && proposal.action_kind() == crate::ToolActionKind::CommandExec
+                && let ActionProposalEvidence::ProcessAction(intent) = proposal.evidence()
+                && accepted.admission.matches_intent(intent)
+            {
+                // The classifier is an audit/risk signal. The configured
+                // runner boundary, rather than a command allowlist, decides
+                // which capabilities the process actually receives.
+                let risk_tier =
+                    classify_tool_action_risk(registered_tool.action_kind(), Some(&proposal));
+                policy_decision = if fully_trusted {
+                    ActionPolicyDecision::allow_fully_trusted_action(registered_tool.action_kind())
+                        .with_risk_tier(risk_tier)
+                } else {
+                    ActionPolicyDecision::allow_configured_process_action()
+                        .with_risk_tier(risk_tier)
+                };
+                let permission_profile_id = accepted.admission.permission_profile_id();
+                let mut admission = ProcessExecutionAdmission::new(
+                    policy_decision,
+                    permission_profile_id,
+                    accepted.runner,
+                    active_plan_harness.is_some(),
+                );
+                let requires_high_risk_review =
+                    crate::process::requires_process_action_review(intent);
+                let requires_host_path_review = accepted.admission.sandbox_profile()
+                    == crate::LocalWorkspaceProcessSandboxProfile::HostV1
+                    && crate::process::requires_host_process_path_review(intent);
+                if !fully_trusted && (requires_high_risk_review || requires_host_path_review) {
+                    let reason = if requires_high_risk_review {
+                        "high-risk process action requires an independent action review"
+                    } else {
+                        "host process action names an external filesystem path and requires action review"
+                    };
+                    match review_process_action(inner, &pending, &proposal, &context, reason)
+                        .await?
+                    {
+                        HighRiskActionReview::Approved(review) => {
+                            admission = admission.with_permission_review(review);
+                        }
+                        HighRiskActionReview::Resolved(events) => return Ok(events),
+                    }
+                }
+                return execute_admitted_process_action(
+                    inner, &pending, proposal, admission, context,
                 )
-                .with_risk_tier(classify_tool_action_risk(
-                    registered_tool.action_kind(),
-                    Some(&proposal),
-                ));
+                .await;
+            } else if fully_trusted {
+                policy_decision =
+                    ActionPolicyDecision::allow_fully_trusted_action(registered_tool.action_kind())
+                        .with_risk_tier(classify_tool_action_risk(
+                            registered_tool.action_kind(),
+                            Some(&proposal),
+                        ));
                 allowed_proposal = Some(proposal);
             } else {
                 let outcome = denied_tool_action_outcome(&pending);
@@ -388,7 +449,7 @@ pub(super) async fn execute_tool_call_with_active_permit(
                 trace_denied_tool_execution(inner.session_id.as_str(), &pending, &events);
                 return persist_tool_events(inner, events).await;
             }
-        } else if noninteractive_trusted {
+        } else if fully_trusted {
             // Explicit trusted mode authorizes configured mutating tools even
             // when their executor does not expose proposal evidence.
         } else {
@@ -760,6 +821,28 @@ pub(super) fn trace_denied_tool_execution(
     );
 }
 
+pub(super) fn trace_review_denied_tool_execution(
+    session_id: &str,
+    pending: &PendingToolCall,
+    events: &[RuntimeJournalEvent],
+    status: &'static str,
+) {
+    tracing::info!(
+        event = "runtime.tool.execute.finish",
+        session_id,
+        tool_call_id = pending.id().as_str(),
+        tool_name = pending.name().as_str(),
+        status,
+        artifact_id = tool_resolution_artifact_id(events),
+        diagnostic_code = if status == "review_failed" {
+            "permission_review_failed"
+        } else {
+            "permission_request_denied"
+        },
+        "runtime tool execution stopped by high-risk action review"
+    );
+}
+
 fn tool_resolution_artifact_id(events: &[RuntimeJournalEvent]) -> String {
     events
         .iter()
@@ -827,7 +910,7 @@ pub(super) fn admit_action_to_generic_executor(
         return Ok(());
     }
 
-    if decision.is_noninteractive_trusted() {
+    if decision.is_fully_trusted() {
         return Ok(());
     }
 

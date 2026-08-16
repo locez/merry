@@ -164,7 +164,7 @@ async fn helper_simulated_sandbox_runs_local_workspace_effect_with_fake_runner()
 }
 
 #[tokio::test]
-async fn helper_simulated_sandbox_marker_still_denies_forbidden_command() {
+async fn helper_simulated_sandbox_marker_reviews_forbidden_command() {
     let intent = process_action_intent(vec![
         "sh".to_owned(),
         "-c".to_owned(),
@@ -189,7 +189,7 @@ async fn helper_simulated_sandbox_marker_still_denies_forbidden_command() {
         &mut output,
     )
     .await
-    .unwrap_or_else(|_| panic!("forbidden command should resolve as a policy denial"));
+    .unwrap_or_else(|_| panic!("forbidden command should resolve as a review failure"));
 
     assert_eq!(runner.call_count(), 0);
     let text = String::from_utf8(output).expect("output should be utf-8");
@@ -201,7 +201,7 @@ async fn helper_simulated_sandbox_marker_still_denies_forbidden_command() {
             .diagnostic()
             .expect("denied result should include a diagnostic")
             .code(),
-        "action_policy_denied"
+        "permission_review_failed"
     );
 }
 

@@ -2,7 +2,8 @@ use super::CodingRuntimeError;
 use super::child_runtime::CodingLoopChildRuntimeFactory;
 use super::process::ActionProcessBackend;
 use super::profile::{
-    coding_loop_workspace_roots, with_workspace_coding_loop_profile, workspace_tools_config,
+    coding_loop_workspace_roots, with_workspace_coding_loop_profile,
+    workspace_tools_config_with_resources,
 };
 use super::project_rules::load_root_project_rules;
 use super::roles::RuntimeRoleProviderConfig;
@@ -306,8 +307,9 @@ fn configure_coding_loop_runtime_builder(
         );
     }
 
-    let profile = WorkspaceCodingLoopProfile::new(workspace_tools_config(
+    let profile = WorkspaceCodingLoopProfile::new(workspace_tools_config_with_resources(
         coding_loop_workspace_roots(root, &options.skill_roots),
+        options.skill_roots.clone(),
         options.allow_hidden_workspace_paths,
         options.workspace_tool_limits,
     )?)

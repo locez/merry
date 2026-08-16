@@ -81,6 +81,7 @@ pub(crate) async fn run(
     merry_config: Option<&MerryConfig>,
     launch_mode: LaunchMode,
     process_execution_mode: ProcessExecutionMode,
+    fully_trusted: bool,
 ) -> Result<(), CliError> {
     let tui_config = merry_config
         .map(MerryConfig::tui_config)
@@ -148,6 +149,7 @@ pub(crate) async fn run(
         session_store,
         selection,
         process_execution_mode,
+        fully_trusted,
         &preferences,
     )
     .await?;
