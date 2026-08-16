@@ -10,7 +10,7 @@ use crate::{
     ProcessRunnerContext, ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput,
 };
 use std::{
-    collections::{BTreeSet, VecDeque},
+    collections::BTreeSet,
     env,
     ffi::{OsStr, OsString},
     fs, io,
@@ -969,117 +969,46 @@ fn add_git_metadata_baseline_rules(
         })
         .map(|rule| rule.path().to_path_buf())
         .collect::<BTreeSet<_>>();
-    let mut writable_roots = BTreeSet::from([workspace_root.to_path_buf()]);
-    writable_roots.extend(
+    let mut git_metadata_roots = BTreeSet::from([workspace_root.to_path_buf()]);
+    git_metadata_roots.extend(
         rules
             .iter()
-            .filter(|rule| {
-                rule.access() == PathAccess::ReadWrite && !is_git_metadata_path(rule.path())
-            })
+            .filter(|rule| rule.access() == PathAccess::ReadWrite)
             .map(|rule| rule.path().to_path_buf()),
     );
 
-    let mut git_metadata_paths = BTreeSet::new();
-    for root in writable_roots {
-        collect_git_metadata_paths(&root, &mut git_metadata_paths)?;
+    for root in git_metadata_roots {
+        let metadata_path = if is_git_metadata_path(&root) {
+            root
+        } else {
+            root.join(".git")
+        };
+        if !git_metadata_path_exists(&metadata_path)?
+            || reviewed_git_write_paths.contains(&metadata_path)
+        {
+            continue;
+        }
+        rules.push(git_metadata_baseline_rule(metadata_path));
     }
-
-    rules.extend(
-        git_metadata_paths
-            .into_iter()
-            .filter(|path| !reviewed_git_write_paths.contains(path))
-            .map(git_metadata_baseline_rule),
-    );
     Ok(())
 }
 
-fn collect_git_metadata_paths(
-    writable_root: &Path,
-    git_metadata_paths: &mut BTreeSet<PathBuf>,
-) -> Result<(), ProcessRunnerError> {
-    match fs::symlink_metadata(writable_root) {
-        Ok(metadata) if !metadata.is_dir() => return Ok(()),
-        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(source) => {
-            if source.kind() == io::ErrorKind::PermissionDenied {
-                return Ok(());
-            }
-            return Err(ProcessRunnerError::infrastructure(format!(
-                "failed to inspect writable process path `{}` for Git metadata: {source}",
-                writable_root.display()
-            )));
+fn git_metadata_path_exists(path: &Path) -> Result<bool, ProcessRunnerError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(source)
+            if matches!(
+                source.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+            ) =>
+        {
+            Ok(false)
         }
-        Ok(_) => {}
+        Err(source) => Err(ProcessRunnerError::infrastructure(format!(
+            "failed to inspect Git metadata path `{}`: {source}",
+            path.display()
+        ))),
     }
-
-    // Only existing metadata is protected. A missing `.git` is intentionally
-    // left under the writable root so the first `git init` can initialize the
-    // repository. The next action rebuilds this baseline after the directory
-    // exists.
-    let mut directories = VecDeque::from([writable_root.to_path_buf()]);
-    while let Some(directory) = directories.pop_front() {
-        let entries = match fs::read_dir(&directory) {
-            Ok(entries) => entries,
-            Err(source)
-                if matches!(
-                    source.kind(),
-                    io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
-                ) =>
-            {
-                continue;
-            }
-            Err(source) => {
-                return Err(ProcessRunnerError::infrastructure(format!(
-                    "failed to inspect writable process directory `{}` for Git metadata: {source}",
-                    directory.display()
-                )));
-            }
-        };
-        for entry in entries {
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(source)
-                    if matches!(
-                        source.kind(),
-                        io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
-                    ) =>
-                {
-                    continue;
-                }
-                Err(source) => {
-                    return Err(ProcessRunnerError::infrastructure(format!(
-                        "failed to inspect an entry under writable process directory `{}` for Git metadata: {source}",
-                        directory.display()
-                    )));
-                }
-            };
-            if entry.file_name() == OsStr::new(".git") {
-                git_metadata_paths.insert(entry.path());
-                continue;
-            }
-            let is_directory = match entry.file_type() {
-                Ok(file_type) => file_type.is_dir(),
-                Err(source)
-                    if matches!(
-                        source.kind(),
-                        io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
-                    ) =>
-                {
-                    false
-                }
-                Err(source) => {
-                    return Err(ProcessRunnerError::infrastructure(format!(
-                        "failed to inspect writable process path `{}` for Git metadata: {source}",
-                        entry.path().display()
-                    )));
-                }
-            };
-            if is_directory {
-                directories.push_back(entry.path());
-            }
-        }
-    }
-    Ok(())
 }
 
 fn path_depth(path: &Path) -> usize {
@@ -2302,8 +2231,10 @@ mod tests {
     }
 
     #[test]
-    fn bwrap_git_baseline_covers_existing_nested_git_paths_without_precreating_missing_metadata() {
+    fn bwrap_git_baseline_checks_only_workspace_and_requested_git_paths() {
         let workspace = tempfile::tempdir().expect("workspace should be created");
+        let workspace_git = workspace.path().join(".git");
+        std::fs::create_dir_all(&workspace_git).expect("workspace git directory should be created");
         let nested_git = workspace.path().join("nested-repo/.git");
         std::fs::create_dir_all(&nested_git).expect("nested git directory should be created");
         let nested_missing_git = workspace.path().join("nested-worktree/.git");
@@ -2313,7 +2244,10 @@ mod tests {
                 .expect("nested missing git parent should exist"),
         )
         .expect("nested missing git parent should be created");
-        let workspace_git = workspace.path().join(".git");
+        let unrequested_git = workspace.path().join("unrequested-repo/.git");
+        std::fs::create_dir_all(&unrequested_git)
+            .expect("unrequested git directory should be created");
+        let requested_repo = workspace.path().join("nested-repo");
         let workspace_git_path = workspace_git
             .to_str()
             .expect("workspace git path should be utf-8");
@@ -2323,16 +2257,23 @@ mod tests {
         let nested_missing_git_path = nested_missing_git
             .to_str()
             .expect("nested missing git path should be utf-8");
+        let unrequested_git_path = unrequested_git
+            .to_str()
+            .expect("unrequested git path should be utf-8");
 
         let runner = BwrapProcessRunner::new_at_workspace_root(workspace.path())
-            .with_bwrap_program("/custom/bin/bwrap");
+            .with_bwrap_program("/custom/bin/bwrap")
+            .with_path_rules([PathAccessRule::new(
+                requested_repo,
+                PathAccess::ReadWrite,
+                PathAccessRuleSource::PermissionReview,
+            )]);
         let plan = runner
             .plan_for(&intent(None))
             .expect("git metadata plan should build");
         let args = os_args(&plan.args);
 
-        assert!(!contains_sequence(&args, &["--tmpfs", workspace_git_path]));
-        assert!(!contains_sequence(
+        assert!(contains_sequence(
             &args,
             &["--ro-bind", workspace_git_path, workspace_git_path]
         ));
@@ -2355,6 +2296,10 @@ mod tests {
                 nested_missing_git_path,
                 nested_missing_git_path
             ]
+        ));
+        assert!(!contains_sequence(
+            &args,
+            &["--ro-bind", unrequested_git_path, unrequested_git_path]
         ));
     }
 
