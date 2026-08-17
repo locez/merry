@@ -17,11 +17,14 @@ from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 from pydantic import BaseModel
 
+from merry_benchmark.task_spec import load_task_spec
+
 MERRY_BINARY_PATH_ENV: Final[str] = "MERRY_BINARY_PATH"
 MERRY_COMMAND_ENV: Final[str] = "MERRY_COMMAND"
 MERRY_CONFIG_PATH_ENV: Final[str] = "MERRY_CONFIG_PATH"
 MERRY_API_KEY_FILE_PATH_ENV: Final[str] = "MERRY_API_KEY_FILE_PATH"
 MERRY_AGENT_VERSION_ENV: Final[str] = "MERRY_AGENT_VERSION"
+MERRY_TASK_SPEC_PATH_ENV: Final[str] = "MERRY_TASK_SPEC_PATH"
 DEFAULT_MERRY_COMMAND: Final[str] = "merry"
 REMOTE_MERRY_BINARY: Final[str] = "/installed-agent/merry"
 REMOTE_CONFIG_HOME: Final[str] = "/installed-agent/config"
@@ -78,6 +81,8 @@ class MerryAgent(BaseInstalledAgent):
     into each task container, or set ``MERRY_COMMAND`` when the task image
     already contains the exact Merry executable. ``MERRY_CONFIG_PATH`` is an
     optional host-side Merry config file uploaded with private permissions.
+    Set ``MERRY_TASK_SPEC_PATH`` to consume the shared TaskSpec TOML and
+    translate it into Harbor's instruction boundary for a trial.
     When that config references ``secrets/openai.key``, set
     ``MERRY_API_KEY_FILE_PATH`` to upload the key file separately with private
     permissions.
@@ -138,6 +143,18 @@ class MerryAgent(BaseInstalledAgent):
         """Execute one task instruction and record a minimal Harbor context."""
 
         context.metadata = {"merry_status": "running"}
+        task_spec_path = self._get_env(MERRY_TASK_SPEC_PATH_ENV)
+        if task_spec_path is not None:
+            try:
+                source_path = Path(task_spec_path).expanduser()
+                if not source_path.is_file():
+                    raise FileNotFoundError(
+                        f"{MERRY_TASK_SPEC_PATH_ENV} does not point to a file: {source_path}"
+                    )
+                instruction = load_task_spec(source_path).to_harbor_instruction()
+            except (OSError, ValueError):
+                context.metadata = {"merry_status": "failed"}
+                raise
         command = build_merry_run_command(self._remote_executable(), instruction)
         result = await environment.exec(
             command=f"set -o pipefail; {command}",

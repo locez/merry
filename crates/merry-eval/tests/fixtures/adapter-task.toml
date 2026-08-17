@@ -1,0 +1,37 @@
+schema_version = 1
+task_id = "adapter-fixture"
+task_version = "v1"
+description = "Fix the adapter fixture."
+repository = { path = "fixtures/adapter" }
+write_scope = ["src/**"]
+timeout_seconds = 120
+
+[[setup]]
+program = "cargo"
+args = ["fmt", "--check"]
+timeout_seconds = 30
+
+[[tests]]
+program = "cargo"
+args = ["test"]
+timeout_seconds = 60
+
+[resource_limits]
+max_output_bytes = 65536
+max_file_changes = 8
+max_processes = 1
+
+[[success_criteria]]
+kind = "file_exists"
+path = "src/lib.rs"
+
+[[success_criteria]]
+kind = "command_passes"
+program = "cargo"
+args = ["test"]
+working_dir = "fixtures/adapter"
+timeout_seconds = 90
+
+[[expected_artifacts]]
+path = "target/evaluation.json"
+kind = "json"

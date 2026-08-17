@@ -11,7 +11,7 @@ issues. This file keeps only the major delivery sequence and its dependencies.
 
 - [ ] [Parent: Establish an evaluable, reusable, production-grade Rust coding agent boundary](https://github.com/locez/merry/issues/9)
 - [x] [T0: Establish delivery baseline, roadmap, and architecture guard](https://github.com/locez/merry/issues/10)
-- [x] [T1: Establish independent Harbor benchmark integration](https://github.com/locez/merry/issues/8)
+- [x] [T1: Establish evaluation protocol and TaskSpec](https://github.com/locez/merry/issues/8)
 - [ ] [T2: Establish deterministic Offline Harness](https://github.com/locez/merry/issues/11)
 - [ ] [T3: Establish the unique CodingAgentProfile](https://github.com/locez/merry/issues/12)
 - [ ] [T4: Establish the internal Coding Eval Suite](https://github.com/locez/merry/issues/13)
