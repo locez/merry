@@ -47,6 +47,15 @@ config file; it is uploaded privately and exposed through
 `MERRY_API_KEY_FILE_PATH` uploads that key separately with private permissions.
 Do not put credentials in this repository.
 
+## TaskSpec adapter
+
+Set `MERRY_TASK_SPEC_PATH` to a host-side TaskSpec TOML manifest when a Harbor
+trial should consume the provider-neutral evaluation protocol. The adapter
+strictly parses the manifest and translates it into Harbor's instruction
+boundary before invoking Merry. The Rust local-suite test and this adapter
+share `crates/merry-eval/tests/fixtures/adapter-task.toml` as the canonical
+contract fixture.
+
 ## GitHub Actions smoke
 
 `.github/workflows/benchmark-smoke.yml` is a manual, small-task smoke workflow.
@@ -117,6 +126,7 @@ fails clearly instead of silently evaluating another agent.
 Harbor's benchmark adapter converts an upstream benchmark into Harbor task
 directories (`task.toml`, instruction, environment, solution, and tests). That
 work belongs in Harbor's adapter and dataset repositories when a benchmark is
-not already registered. Merry owns the agent adapter here. A future
-Merry-specific internal suite may add a Harbor benchmark adapter without
-introducing a second evaluation protocol in the runtime.
+not already registered. Merry owns the agent adapter here. For protocol-backed
+trials, `MERRY_TASK_SPEC_PATH` lets this adapter consume the same TaskSpec TOML
+that the Rust local suite parses, without introducing Harbor or provider wire
+types into the runtime.

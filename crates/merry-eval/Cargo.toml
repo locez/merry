@@ -1,0 +1,18 @@
+[package]
+name = "merry-eval"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+schemars.workspace = true
+serde.workspace = true
+serde_json = { workspace = true, features = ["arbitrary_precision"] }
+thiserror.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+jsonschema.workspace = true
+
+[lints]
+workspace = true

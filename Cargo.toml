@@ -11,6 +11,7 @@ members = [
     "crates/merry",
     "crates/merry-cli",
     "crates/merry-py",
+    "crates/merry-eval",
 ]
 default-members = [
     "crates/merry-core",
@@ -23,6 +24,7 @@ default-members = [
     "crates/merry",
     "crates/merry-cli",
     "crates/merry-py",
+    "crates/merry-eval",
 ]
 
 [workspace.package]

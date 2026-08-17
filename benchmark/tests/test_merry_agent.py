@@ -9,7 +9,11 @@ import pytest
 from harbor.environments.base import BaseEnvironment, ExecResult
 from harbor.models.agent.context import AgentContext
 
-from merry_benchmark.agents.merry import MerryAgent, build_merry_run_command
+from merry_benchmark.agents.merry import (
+    MERRY_TASK_SPEC_PATH_ENV,
+    MerryAgent,
+    build_merry_run_command,
+)
 
 
 class RecordingEnvironment(BaseEnvironment):
@@ -83,6 +87,36 @@ def test_run_command_quotes_instruction_and_disables_nested_sandbox() -> None:
 def test_run_command_rejects_empty_executable() -> None:
     with pytest.raises(ValueError, match="must not be empty"):
         build_merry_run_command("   ", "task")
+
+
+def test_run_consumes_shared_task_spec_fixture(tmp_path: Path) -> None:
+    fixture = Path(__file__).parents[2] / "crates/merry-eval/tests/fixtures/adapter-task.toml"
+    environment = RecordingEnvironment()
+    agent = MerryAgent(
+        logs_dir=tmp_path,
+        extra_env={MERRY_TASK_SPEC_PATH_ENV: str(fixture)},
+    )
+
+    asyncio.run(agent.run("ignored dataset instruction", environment, AgentContext()))
+
+    command = environment.commands[-1][0]
+    assert "Task adapter-fixture (v1)" in command
+    assert "Fix the adapter fixture." in command
+    assert "Writable scope: src/**" in command
+    assert "Expected artifacts: target/evaluation.json (json)" in command
+
+
+def test_task_spec_path_must_point_to_a_file(tmp_path: Path) -> None:
+    agent = MerryAgent(
+        logs_dir=tmp_path,
+        extra_env={MERRY_TASK_SPEC_PATH_ENV: str(tmp_path / "missing.toml")},
+    )
+
+    context = AgentContext()
+    with pytest.raises(FileNotFoundError, match=MERRY_TASK_SPEC_PATH_ENV):
+        asyncio.run(agent.run("ignored dataset instruction", RecordingEnvironment(), context))
+
+    assert context.metadata == {"merry_status": "failed"}
 
 
 def test_api_key_file_requires_config(tmp_path: Path) -> None:
